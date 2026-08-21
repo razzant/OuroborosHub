@@ -848,6 +848,101 @@
       "type": "extension",
       "version": "0.3.2",
       "when_to_use": "User asks about weather, temperature, forecast, current conditions, wind, humidity, sunrise/sunset, or a weather dashboard for a city."
+    },
+    {
+      "slug": "slack-bridge",
+      "name": "slack-bridge",
+      "version": "1.0.0",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "12c7617fbba2beac908664adba82087af1c8d455a191db0eb0ba4b43ff961ae8",
+          "size": 3562
+        },
+        {
+          "path": "lib/__init__.py",
+          "sha256": "95757c652f0f319e24740726c9e9373be69b4a60e4c935ef905523b5c9718ba2",
+          "size": 70
+        },
+        {
+          "path": "lib/events.py",
+          "sha256": "543c43946c0c3c60d890033569c0b858c1aa0867a46449fe74775975fce43f4f",
+          "size": 5013
+        },
+        {
+          "path": "lib/host_adapter.py",
+          "sha256": "e09da7292b30ba57d51b3d84da4c640bff6d3e4efe60ce8e4e6297e8391a7df9",
+          "size": 13193
+        },
+        {
+          "path": "lib/runtime.py",
+          "sha256": "b067119c77d71bbc95a876cb1be80901689e7810405c59600d88232577eeb3cf",
+          "size": 9752
+        },
+        {
+          "path": "lib/slack_api.py",
+          "sha256": "e61e197932a29f7d9d54e3f9ea22e841d0e1301ec545902dc133ce7a568d76a1",
+          "size": 9610
+        },
+        {
+          "path": "lib/socket_mode.py",
+          "sha256": "b2e7a7e37d5187244c562f16d056f5ad78544a67101b92e2b785a3737ea99cc9",
+          "size": 5220
+        },
+        {
+          "path": "lib/store.py",
+          "sha256": "9da6f4746973a714ce9bd3cdc554be515ebb153e85f78db1c45881c0e1df67cf",
+          "size": 22900
+        },
+        {
+          "path": "manifest.json",
+          "sha256": "86eee8ec8839bc454ec420c2ee29b86a4f76be513edfaf6aef1fa8ef7ebd3cd3",
+          "size": 820
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "db07a867f8ccaa8d33b20ca11258dbf477c58ff4d2f2f93d95e8cdbee0c84bea",
+          "size": 11838
+        },
+        {
+          "path": "scripts/slack_daemon.py",
+          "sha256": "d31e7d77b2202b58baf2c066f77252c73c4d9aab706ec555576cb870f11f3d32",
+          "size": 4099
+        },
+        {
+          "path": "tests/conftest.py",
+          "sha256": "91819639c2342bc9cc84fc7b8045863d3c61128999333d27922b3501b2d040f0",
+          "size": 198
+        },
+        {
+          "path": "tests/test_events_store.py",
+          "sha256": "54549a03bc70c140087ed3d68524e7a87015c8167c57a350b6ec3080661696ae",
+          "size": 7342
+        },
+        {
+          "path": "tests/test_host_adapter.py",
+          "sha256": "59d52539db0cec5f84641703796ff8b0ba2b2f9e6f50ab9fe408bdcb72db43ef",
+          "size": 7831
+        },
+        {
+          "path": "tests/test_slack_api.py",
+          "sha256": "0c9517a8443cc04b4c5ccf980581f4aa382bd910bba837fa6c1dde91e9997e60",
+          "size": 2145
+        },
+        {
+          "path": "tests/test_socket_mode.py",
+          "sha256": "f2bd398507ec7f4d4b28acd01590e34b5524d4c7cdfd120074f0cee15b582b5d",
+          "size": 2150
+        },
+        {
+          "path": "tests/test_workers_plugin.py",
+          "sha256": "d1ae87e64229ec3aadd32a859a8a5c581e362eba859906f75176535724dcec5c",
+          "size": 9532
+        }
+      ],
+      "description": "Bidirectional Slack presence transport for Ouroboros using Socket Mode, durable delivery queues, threaded replies, proactive text messages, and inbound file staging.",
+      "when_to_use": "User wants Ouroboros to receive Slack messages or files, reply in Slack threads, or send proactive Slack text messages."
     }
   ]
 }
