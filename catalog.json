@@ -913,6 +913,86 @@
       "type": "extension",
       "version": "0.3.2",
       "when_to_use": "User asks about weather, temperature, forecast, current conditions, wind, humidity, sunrise/sunset, or a weather dashboard for a city."
+    },
+    {
+      "slug": "telegram-bot",
+      "name": "telegram-bot",
+      "version": "0.2.0",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "a491a2d304677fd552ea7694280d8c5ff0b47315d181563b2b327fe6aa82b863",
+          "size": 3854
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "522d3581b7c3b77be155fc6bfd474a810ce2f8e860bd87f64c6fa311296c8668",
+          "size": 11614
+        },
+        {
+          "path": "telegram_bot/__init__.py",
+          "sha256": "9fc56903a2bc6198e49b95d019175d2739f08c82f28d4465fcfc6e5ca7e57f99",
+          "size": 205
+        },
+        {
+          "path": "telegram_bot/api.py",
+          "sha256": "a4f7b7b8319431022bb95cbdd6610becf820363ef21fa348c436c238e90eab36",
+          "size": 13120
+        },
+        {
+          "path": "telegram_bot/custody.py",
+          "sha256": "fa2792dd89b2748f873c958abf7bcb3f117a1ad7633a20062da9db5556cfe302",
+          "size": 21697
+        },
+        {
+          "path": "telegram_bot/events.py",
+          "sha256": "64b55551fd3f605da1ca4dedc23842baeb8b1883c04b76da7b25e9563710a576",
+          "size": 5143
+        },
+        {
+          "path": "telegram_bot/host.py",
+          "sha256": "8995a34de5b4edcdf1ab76217fb54bf290fb116687da96de0501e5b0066bb2a0",
+          "size": 8798
+        },
+        {
+          "path": "telegram_bot/runtime.py",
+          "sha256": "34953a41c355ffd9cb45992a3a3a6c087ccccf9af4572e52450360d22d5639c0",
+          "size": 14561
+        },
+        {
+          "path": "tests/test_api.py",
+          "sha256": "38713ae68ee4bb4d9de3b57b619604d88ad8f7fde580c15850356ec56bb6ac70",
+          "size": 2628
+        },
+        {
+          "path": "tests/test_custody.py",
+          "sha256": "a008c593b1e833edc6bb1b975ce78ed84977752033a1d376112bebaa60f56745",
+          "size": 6582
+        },
+        {
+          "path": "tests/test_events.py",
+          "sha256": "9c23135bb20851078cc1a0e54808027a7033a9cc4442e50883527f6265674626",
+          "size": 2951
+        },
+        {
+          "path": "tests/test_host.py",
+          "sha256": "b3c39e4071d1af222fd2ce4ee72175207189f0321a2e4c90f226fbf665371ebd",
+          "size": 4880
+        },
+        {
+          "path": "tests/test_plugin.py",
+          "sha256": "3c7e8e9f11269ce2c7265bb9cc70ee48d3ea641101402a0b6ce527c99b000c30",
+          "size": 5511
+        },
+        {
+          "path": "tests/test_runtime.py",
+          "sha256": "aebd56dd119cb9f4959a167b1af00fdd45ada6d7e3a0ed20750375cf83f423eb",
+          "size": 9806
+        }
+      ],
+      "description": "Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation provenance, media staging, and provider receipts.",
+      "when_to_use": "The owner wants a reviewed Telegram bot transport for one or more external presence bindings, separate from the native owner-control Telegram bridge."
     }
   ]
 }
