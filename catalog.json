@@ -1,8 +1,8 @@
 {
-  "schema_version": 1,
-  "name": "OuroborosHub",
   "description": "Official Ouroboros skills catalog.",
+  "name": "OuroborosHub",
   "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
+  "schema_version": 1,
   "skills": [
     {
       "description": "Agent-to-Agent protocol bridge for Ouroboros. Provides a local A2A-compatible server plus client tools for discovering and messaging other A2A agents.",
@@ -484,6 +484,85 @@
       "when_to_use": "The user wants web search or page extraction through Keenable, especially for fresh pages, site-scoped or date-filtered retrieval, or an LLM-extracted summary of one page."
     },
     {
+      "description": "Read-only atlas, document reader, authentic history browser, literal search, and evidence graph for allowlisted Ouroboros core memory, consolidated dialogue chronicles, and project knowledge. Opens on global memory; every link it draws is proven from stored bytes, with no model calls at runtime. Use to inspect memory provenance without modifying serving-process data.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "c66de8a04f701d5d4097fe3bfb358f4b457311100c3da44a57692937b065b2dd",
+          "size": 6200
+        },
+        {
+          "path": "docs/api-contract.md",
+          "sha256": "a524caaaa3d47643677ec449232b451eac408cea2511c212a1e002aae7673c8b",
+          "size": 26940
+        },
+        {
+          "path": "docs/architecture.md",
+          "sha256": "3217c05b8f8cec4841c742ae37902511270bf2db86ef63c9ae758227b18e516b",
+          "size": 1569
+        },
+        {
+          "path": "docs/coordination.md",
+          "sha256": "91a2e144c83818d2b8d8455d99a0ca3bdcac27b98f90c5abf3f7b79dfe2a5e57",
+          "size": 5312
+        },
+        {
+          "path": "docs/skill-api-reference.md",
+          "sha256": "01f441a7f7a6c68d015facaf824fdd20acd032187dccf7fe9dcde3b505f0b36e",
+          "size": 3417
+        },
+        {
+          "path": "docs/source-policy.md",
+          "sha256": "acabee0949b6f7b950eec732b8077b9922a5a57e7e2b19ba2caf7843671cda1a",
+          "size": 11843
+        },
+        {
+          "path": "docs/visual-plan.md",
+          "sha256": "25129087579c16feee7f30896eaba3635bfddbd5b799252010bf4b01d965943b",
+          "size": 3769
+        },
+        {
+          "path": "memory_reader.py",
+          "sha256": "e2d2ee1108916aaf21090d80e2a2663c9e7460cf532f93ded6f41c160d3308d6",
+          "size": 94501
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "ef62d180596fd89fbc81b44412cfdfc7f44e769477aa0009643985f8612cca31",
+          "size": 4562
+        },
+        {
+          "path": "tests/test_reader.py",
+          "sha256": "36ec1e8a65253bd246b6883cf3ac41c4328eff86752785c962e367d3fa041077",
+          "size": 101472
+        },
+        {
+          "path": "tests/test_widget_ui.py",
+          "sha256": "0073a0fbaa98980a94e83c599b039f3f7866d94912910e34e5e7c4e789a6a65e",
+          "size": 66238
+        },
+        {
+          "path": "tests/ui_fixtures.py",
+          "sha256": "18c2f64df9858d885abf179f8c98f05b88a43e44e8d0939d45fcfe94ce78754b",
+          "size": 33292
+        },
+        {
+          "path": "tests/ui_harness.html",
+          "sha256": "8dcc64ac1a0a3c80685f646dc767607cd79989e2924b8a6019e1abe14a35f849",
+          "size": 4107
+        },
+        {
+          "path": "widget.js",
+          "sha256": "955cab80ae9e0d0d08fe9a92d65d3a054d61e3a2d6b44489471f34dbb5b9a19a",
+          "size": 130620
+        }
+      ],
+      "name": "memory-atlas",
+      "slug": "memory-atlas",
+      "type": "extension",
+      "version": "0.2.11"
+    },
+    {
       "description": "Generate a music clip from a text prompt via OpenRouter's Google Lyria model and play it directly inside the widget. Files are persisted to the skill's private state directory and streamed through an extension route for both inline playback and download.",
       "files": [
         {
@@ -521,6 +600,51 @@
       "type": "extension",
       "version": "0.2.4",
       "when_to_use": "User wants to generate or render an image from a text description, right now, inside the web UI. Also saves the image to disk so it can be downloaded."
+    },
+    {
+      "description": "Read PDF documents page by page and build new PDF files from text or structured answers with Unicode-capable fonts.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "87420096cade4caf0646c117c79898b78e3b745b4a580839134e4135363871c1",
+          "size": 3098
+        },
+        {
+          "path": "scripts/make_pdf.py",
+          "sha256": "83c88d221ba828788ad0779e01daf06112f613c1a8c6fa923611a5a997e9200a",
+          "size": 7328
+        },
+        {
+          "path": "scripts/pdf_common.py",
+          "sha256": "fdf8ff8d47dfff8a8806e86d9bd07ed7b51c9f7a0bd143eb66f47ca9c6900c59",
+          "size": 7911
+        },
+        {
+          "path": "scripts/read_pdf.py",
+          "sha256": "aed4ed8000b35dc01b45926f1afe7411982e429fa3e73ef039d1c22d6bd77d9a",
+          "size": 5354
+        },
+        {
+          "path": "tests/test_pdf_tools.py",
+          "sha256": "d512988795de553e22114403eb312bea0e294e8d815926ce372074acd1604683",
+          "size": 4427
+        }
+      ],
+      "install_specs": [
+        {
+          "kind": "pip",
+          "package": "pypdf"
+        },
+        {
+          "kind": "pip",
+          "package": "reportlab"
+        }
+      ],
+      "name": "pdf_tools",
+      "slug": "pdf_tools",
+      "type": "script",
+      "version": "0.1.0",
+      "when_to_use": "The user attached a PDF and asks to read, summarize, search, or compare it, or asks to produce or export a PDF."
     },
     {
       "description": "Deep web research via OpenRouter web_search server tool. Uses any model + grounded search with citations. Requires OPENROUTER_API_KEY in Settings.",
@@ -607,6 +731,28 @@
       "version": "1.0.0"
     },
     {
+      "author": "kuznetsoffandrey",
+      "description": "Health data from Sber Smart Ring (Life Balance): HR, HRV, SpO2, sleep, steps, stress, temperature.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "ec2d106c14f201e47244184fa70411d3c74159d7da2bbe984dae0d06c78601e7"
+        },
+        {
+          "path": "client.py",
+          "sha256": "8947d974fbf8593112a8756b3621133ff2609b16f3450f39476b227816218feb"
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "d024df9638941702758d37ae95c45579ed4b444c44cfc2694ac5161b2824a56c"
+        }
+      ],
+      "name": "sber-ring",
+      "slug": "sber-ring",
+      "type": "extension",
+      "version": "1.0.0"
+    },
+    {
       "description": "Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 30 tools; answers carry provenance and say what the data cannot support. Not a medical device.",
       "files": [
         {
@@ -631,6 +777,47 @@
       "type": "extension",
       "version": "0.4.7",
       "when_to_use": "The owner asks about their own medical data — check a new prescription as a second opinion (pharmacogenetics, interactions with the current regimen, monitoring labs), review laboratory results and trends, look up a locus or clinically significant ClinVar findings in their VCF, polygenic scores, longevity findings, sleep and lifestyle metrics, movement toward a health goal, which tests to take next, or a pre-visit summary."
+    },
+    {
+      "description": "Inspect, filter, sort, group, and aggregate CSV and XLSX tables while reporting truncation and non-numeric values honestly.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "1a867118e28e4ef91b47bcbe5dab49d9cc2f7f413f5e0119d5e146d9eb9f64e3",
+          "size": 3386
+        },
+        {
+          "path": "scripts/query_table.py",
+          "sha256": "c964908cf9441eb0e218bc54ba7a2589db268eea5e925ddf7812ac5c43e66d59",
+          "size": 10827
+        },
+        {
+          "path": "scripts/read_table.py",
+          "sha256": "25e4b80ed21b34b7bd22156206ac1834d4e1d03b26c12e95a0eb2b0804dddf8c",
+          "size": 3695
+        },
+        {
+          "path": "scripts/table_common.py",
+          "sha256": "7e3f612f0271d17b1d6a2f5ed7fd36828f04f51f73439fef860acc4e0c7f9b1e",
+          "size": 16809
+        },
+        {
+          "path": "tests/test_table_tools.py",
+          "sha256": "128389ea22227f24098ee7e279bfcf1bb0b3aca5ad8b41a3fe2db2816639c6d3",
+          "size": 4622
+        }
+      ],
+      "install_specs": [
+        {
+          "kind": "pip",
+          "package": "openpyxl"
+        }
+      ],
+      "name": "table_tools",
+      "slug": "table_tools",
+      "type": "script",
+      "version": "0.1.0",
+      "when_to_use": "The user attached a CSV or XLSX file and asks to inspect, summarize, filter, compare, group, sort, or calculate from its data."
     },
     {
       "description": "Bidirectional Telegram bot bridge for Ouroboros with configurable command modes, inline keyboard control panel, file/document delivery, and optional silent (edit-in-place) mirror.",
@@ -920,96 +1107,7 @@
       "when_to_use": "User asks about weather, temperature, forecast, current conditions, wind, humidity, sunrise/sunset, or a weather dashboard for a city."
     },
     {
-      "slug": "pdf_tools",
-      "name": "pdf_tools",
-      "version": "0.1.0",
-      "type": "script",
-      "files": [
-        {
-          "path": "SKILL.md",
-          "sha256": "87420096cade4caf0646c117c79898b78e3b745b4a580839134e4135363871c1",
-          "size": 3098
-        },
-        {
-          "path": "scripts/make_pdf.py",
-          "sha256": "83c88d221ba828788ad0779e01daf06112f613c1a8c6fa923611a5a997e9200a",
-          "size": 7328
-        },
-        {
-          "path": "scripts/pdf_common.py",
-          "sha256": "fdf8ff8d47dfff8a8806e86d9bd07ed7b51c9f7a0bd143eb66f47ca9c6900c59",
-          "size": 7911
-        },
-        {
-          "path": "scripts/read_pdf.py",
-          "sha256": "aed4ed8000b35dc01b45926f1afe7411982e429fa3e73ef039d1c22d6bd77d9a",
-          "size": 5354
-        },
-        {
-          "path": "tests/test_pdf_tools.py",
-          "sha256": "d512988795de553e22114403eb312bea0e294e8d815926ce372074acd1604683",
-          "size": 4427
-        }
-      ],
-      "description": "Read PDF documents page by page and build new PDF files from text or structured answers with Unicode-capable fonts.",
-      "when_to_use": "The user attached a PDF and asks to read, summarize, search, or compare it, or asks to produce or export a PDF.",
-      "install_specs": [
-        {
-          "kind": "pip",
-          "package": "pypdf"
-        },
-        {
-          "kind": "pip",
-          "package": "reportlab"
-        }
-      ]
-    },
-    {
-      "slug": "table_tools",
-      "name": "table_tools",
-      "version": "0.1.0",
-      "type": "script",
-      "files": [
-        {
-          "path": "SKILL.md",
-          "sha256": "1a867118e28e4ef91b47bcbe5dab49d9cc2f7f413f5e0119d5e146d9eb9f64e3",
-          "size": 3386
-        },
-        {
-          "path": "scripts/query_table.py",
-          "sha256": "c964908cf9441eb0e218bc54ba7a2589db268eea5e925ddf7812ac5c43e66d59",
-          "size": 10827
-        },
-        {
-          "path": "scripts/read_table.py",
-          "sha256": "25e4b80ed21b34b7bd22156206ac1834d4e1d03b26c12e95a0eb2b0804dddf8c",
-          "size": 3695
-        },
-        {
-          "path": "scripts/table_common.py",
-          "sha256": "7e3f612f0271d17b1d6a2f5ed7fd36828f04f51f73439fef860acc4e0c7f9b1e",
-          "size": 16809
-        },
-        {
-          "path": "tests/test_table_tools.py",
-          "sha256": "128389ea22227f24098ee7e279bfcf1bb0b3aca5ad8b41a3fe2db2816639c6d3",
-          "size": 4622
-        }
-      ],
-      "description": "Inspect, filter, sort, group, and aggregate CSV and XLSX tables while reporting truncation and non-numeric values honestly.",
-      "when_to_use": "The user attached a CSV or XLSX file and asks to inspect, summarize, filter, compare, group, sort, or calculate from its data.",
-      "install_specs": [
-        {
-          "kind": "pip",
-          "package": "openpyxl"
-        }
-      ]
-    },
-    {
-      "slug": "word_tools",
-      "name": "word_tools",
-      "version": "0.1.0",
-      "type": "script",
+      "description": "Read structured DOCX documents and build new Word documents from lightly structured text.",
       "files": [
         {
           "path": "SKILL.md",
@@ -1037,36 +1135,17 @@
           "size": 4326
         }
       ],
-      "description": "Read structured DOCX documents and build new Word documents from lightly structured text.",
-      "when_to_use": "The user attached a Word document and asks to read, summarize, search, compare, or revise its contents, or asks to create a Word or DOCX file.",
       "install_specs": [
         {
           "kind": "pip",
           "package": "python-docx"
         }
-      ]
-    },
-    {
-      "author": "kuznetsoffandrey",
-      "description": "Health data from Sber Smart Ring (Life Balance): HR, HRV, SpO2, sleep, steps, stress, temperature.",
-      "files": [
-        {
-          "path": "SKILL.md",
-          "sha256": "ec2d106c14f201e47244184fa70411d3c74159d7da2bbe984dae0d06c78601e7"
-        },
-        {
-          "path": "client.py",
-          "sha256": "8947d974fbf8593112a8756b3621133ff2609b16f3450f39476b227816218feb"
-        },
-        {
-          "path": "plugin.py",
-          "sha256": "d024df9638941702758d37ae95c45579ed4b444c44cfc2694ac5161b2824a56c"
-        }
       ],
-      "name": "sber-ring",
-      "type": "extension",
-      "version": "1.0.0",
-      "slug": "sber-ring"
+      "name": "word_tools",
+      "slug": "word_tools",
+      "type": "script",
+      "version": "0.1.0",
+      "when_to_use": "The user attached a Word document and asks to read, summarize, search, compare, or revise its contents, or asks to create a Word or DOCX file."
     }
   ]
 }
