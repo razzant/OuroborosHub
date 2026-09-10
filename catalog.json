@@ -1,8 +1,8 @@
 {
-  "schema_version": 1,
-  "name": "OuroborosHub",
   "description": "Official Ouroboros skills catalog.",
+  "name": "OuroborosHub",
   "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
+  "schema_version": 1,
   "skills": [
     {
       "description": "Agent-to-Agent protocol bridge for Ouroboros. Provides a local A2A-compatible server plus client tools for discovering and messaging other A2A agents.",
@@ -306,6 +306,56 @@
       "when_to_use": "The owner wants to see, at a glance, the quota windows, limits and reset times of every authorized Claudexor account, including which facets could not be read."
     },
     {
+      "description": "Read-only context-size charts for model requests over a chosen horizon, with honest telemetry coverage.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "066b35fa1d32cc22c024032e4e861f34c922a7f2737d7d484e7440cdab92a8dc",
+          "size": 30885
+        },
+        {
+          "path": "lens_core.py",
+          "sha256": "dfc8404adf65f3dbc12caefac9171cca5e9f17017ea3ee4176b530f0ec736351",
+          "size": 48669
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "881ea7f283785060af25a8e7fe61937e6fbb4bdfb8b17009fc54db1eb3c3beb5",
+          "size": 8002
+        },
+        {
+          "path": "tests/test_lens_core.py",
+          "sha256": "2dc346d2901d8bd0facf978c5579518b0218304e5b1adc88524a513e3064f732",
+          "size": 79402
+        },
+        {
+          "path": "tests/test_plugin_routes.py",
+          "sha256": "7b5ba7b2290686d068cffb3b490526404a3330392fc2037e3c730412c75b7163",
+          "size": 24657
+        },
+        {
+          "path": "tests/test_widget_contract.py",
+          "sha256": "12333ff7ae77a9608781c0dd08cbce0a0beea0769875445cc7565134a80e4158",
+          "size": 10200
+        },
+        {
+          "path": "tests/widget_smoke.cjs",
+          "sha256": "f3c3b08adcdf86efb83b2d04010a81b0190aab61f4a7091c86f20a98d5a48411",
+          "size": 24084
+        },
+        {
+          "path": "widget.js",
+          "sha256": "d833a223d425adc9e105d31e40015737057d7ea9f8fdb98bf2700ccdb586cabd",
+          "size": 73641
+        }
+      ],
+      "name": "context-lens",
+      "slug": "context-lens",
+      "type": "extension",
+      "version": "1.1.2",
+      "when_to_use": "The owner wants to understand reported input sizes, their spread and growth within tasks."
+    },
+    {
       "description": "Web search via DuckDuckGo — free, no API key required. Returns titles, URLs, and snippets.",
       "files": [
         {
@@ -523,6 +573,51 @@
       "when_to_use": "User wants to generate or render an image from a text description, right now, inside the web UI. Also saves the image to disk so it can be downloaded."
     },
     {
+      "description": "Read PDF documents page by page and build new PDF files from text or structured answers with Unicode-capable fonts.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "87420096cade4caf0646c117c79898b78e3b745b4a580839134e4135363871c1",
+          "size": 3098
+        },
+        {
+          "path": "scripts/make_pdf.py",
+          "sha256": "83c88d221ba828788ad0779e01daf06112f613c1a8c6fa923611a5a997e9200a",
+          "size": 7328
+        },
+        {
+          "path": "scripts/pdf_common.py",
+          "sha256": "fdf8ff8d47dfff8a8806e86d9bd07ed7b51c9f7a0bd143eb66f47ca9c6900c59",
+          "size": 7911
+        },
+        {
+          "path": "scripts/read_pdf.py",
+          "sha256": "aed4ed8000b35dc01b45926f1afe7411982e429fa3e73ef039d1c22d6bd77d9a",
+          "size": 5354
+        },
+        {
+          "path": "tests/test_pdf_tools.py",
+          "sha256": "d512988795de553e22114403eb312bea0e294e8d815926ce372074acd1604683",
+          "size": 4427
+        }
+      ],
+      "install_specs": [
+        {
+          "kind": "pip",
+          "package": "pypdf"
+        },
+        {
+          "kind": "pip",
+          "package": "reportlab"
+        }
+      ],
+      "name": "pdf_tools",
+      "slug": "pdf_tools",
+      "type": "script",
+      "version": "0.1.0",
+      "when_to_use": "The user attached a PDF and asks to read, summarize, search, or compare it, or asks to produce or export a PDF."
+    },
+    {
       "description": "Deep web research via OpenRouter web_search server tool. Uses any model + grounded search with citations. Requires OPENROUTER_API_KEY in Settings.",
       "files": [
         {
@@ -607,6 +702,28 @@
       "version": "1.0.0"
     },
     {
+      "author": "kuznetsoffandrey",
+      "description": "Health data from Sber Smart Ring (Life Balance): HR, HRV, SpO2, sleep, steps, stress, temperature.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "ec2d106c14f201e47244184fa70411d3c74159d7da2bbe984dae0d06c78601e7"
+        },
+        {
+          "path": "client.py",
+          "sha256": "8947d974fbf8593112a8756b3621133ff2609b16f3450f39476b227816218feb"
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "d024df9638941702758d37ae95c45579ed4b444c44cfc2694ac5161b2824a56c"
+        }
+      ],
+      "name": "sber-ring",
+      "slug": "sber-ring",
+      "type": "extension",
+      "version": "1.0.0"
+    },
+    {
       "description": "Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 30 tools; answers carry provenance and say what the data cannot support. Not a medical device.",
       "files": [
         {
@@ -631,6 +748,47 @@
       "type": "extension",
       "version": "0.4.7",
       "when_to_use": "The owner asks about their own medical data — check a new prescription as a second opinion (pharmacogenetics, interactions with the current regimen, monitoring labs), review laboratory results and trends, look up a locus or clinically significant ClinVar findings in their VCF, polygenic scores, longevity findings, sleep and lifestyle metrics, movement toward a health goal, which tests to take next, or a pre-visit summary."
+    },
+    {
+      "description": "Inspect, filter, sort, group, and aggregate CSV and XLSX tables while reporting truncation and non-numeric values honestly.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "1a867118e28e4ef91b47bcbe5dab49d9cc2f7f413f5e0119d5e146d9eb9f64e3",
+          "size": 3386
+        },
+        {
+          "path": "scripts/query_table.py",
+          "sha256": "c964908cf9441eb0e218bc54ba7a2589db268eea5e925ddf7812ac5c43e66d59",
+          "size": 10827
+        },
+        {
+          "path": "scripts/read_table.py",
+          "sha256": "25e4b80ed21b34b7bd22156206ac1834d4e1d03b26c12e95a0eb2b0804dddf8c",
+          "size": 3695
+        },
+        {
+          "path": "scripts/table_common.py",
+          "sha256": "7e3f612f0271d17b1d6a2f5ed7fd36828f04f51f73439fef860acc4e0c7f9b1e",
+          "size": 16809
+        },
+        {
+          "path": "tests/test_table_tools.py",
+          "sha256": "128389ea22227f24098ee7e279bfcf1bb0b3aca5ad8b41a3fe2db2816639c6d3",
+          "size": 4622
+        }
+      ],
+      "install_specs": [
+        {
+          "kind": "pip",
+          "package": "openpyxl"
+        }
+      ],
+      "name": "table_tools",
+      "slug": "table_tools",
+      "type": "script",
+      "version": "0.1.0",
+      "when_to_use": "The user attached a CSV or XLSX file and asks to inspect, summarize, filter, compare, group, sort, or calculate from its data."
     },
     {
       "description": "Bidirectional Telegram bot bridge for Ouroboros with configurable command modes, inline keyboard control panel, file/document delivery, and optional silent (edit-in-place) mirror.",
@@ -920,96 +1078,7 @@
       "when_to_use": "User asks about weather, temperature, forecast, current conditions, wind, humidity, sunrise/sunset, or a weather dashboard for a city."
     },
     {
-      "slug": "pdf_tools",
-      "name": "pdf_tools",
-      "version": "0.1.0",
-      "type": "script",
-      "files": [
-        {
-          "path": "SKILL.md",
-          "sha256": "87420096cade4caf0646c117c79898b78e3b745b4a580839134e4135363871c1",
-          "size": 3098
-        },
-        {
-          "path": "scripts/make_pdf.py",
-          "sha256": "83c88d221ba828788ad0779e01daf06112f613c1a8c6fa923611a5a997e9200a",
-          "size": 7328
-        },
-        {
-          "path": "scripts/pdf_common.py",
-          "sha256": "fdf8ff8d47dfff8a8806e86d9bd07ed7b51c9f7a0bd143eb66f47ca9c6900c59",
-          "size": 7911
-        },
-        {
-          "path": "scripts/read_pdf.py",
-          "sha256": "aed4ed8000b35dc01b45926f1afe7411982e429fa3e73ef039d1c22d6bd77d9a",
-          "size": 5354
-        },
-        {
-          "path": "tests/test_pdf_tools.py",
-          "sha256": "d512988795de553e22114403eb312bea0e294e8d815926ce372074acd1604683",
-          "size": 4427
-        }
-      ],
-      "description": "Read PDF documents page by page and build new PDF files from text or structured answers with Unicode-capable fonts.",
-      "when_to_use": "The user attached a PDF and asks to read, summarize, search, or compare it, or asks to produce or export a PDF.",
-      "install_specs": [
-        {
-          "kind": "pip",
-          "package": "pypdf"
-        },
-        {
-          "kind": "pip",
-          "package": "reportlab"
-        }
-      ]
-    },
-    {
-      "slug": "table_tools",
-      "name": "table_tools",
-      "version": "0.1.0",
-      "type": "script",
-      "files": [
-        {
-          "path": "SKILL.md",
-          "sha256": "1a867118e28e4ef91b47bcbe5dab49d9cc2f7f413f5e0119d5e146d9eb9f64e3",
-          "size": 3386
-        },
-        {
-          "path": "scripts/query_table.py",
-          "sha256": "c964908cf9441eb0e218bc54ba7a2589db268eea5e925ddf7812ac5c43e66d59",
-          "size": 10827
-        },
-        {
-          "path": "scripts/read_table.py",
-          "sha256": "25e4b80ed21b34b7bd22156206ac1834d4e1d03b26c12e95a0eb2b0804dddf8c",
-          "size": 3695
-        },
-        {
-          "path": "scripts/table_common.py",
-          "sha256": "7e3f612f0271d17b1d6a2f5ed7fd36828f04f51f73439fef860acc4e0c7f9b1e",
-          "size": 16809
-        },
-        {
-          "path": "tests/test_table_tools.py",
-          "sha256": "128389ea22227f24098ee7e279bfcf1bb0b3aca5ad8b41a3fe2db2816639c6d3",
-          "size": 4622
-        }
-      ],
-      "description": "Inspect, filter, sort, group, and aggregate CSV and XLSX tables while reporting truncation and non-numeric values honestly.",
-      "when_to_use": "The user attached a CSV or XLSX file and asks to inspect, summarize, filter, compare, group, sort, or calculate from its data.",
-      "install_specs": [
-        {
-          "kind": "pip",
-          "package": "openpyxl"
-        }
-      ]
-    },
-    {
-      "slug": "word_tools",
-      "name": "word_tools",
-      "version": "0.1.0",
-      "type": "script",
+      "description": "Read structured DOCX documents and build new Word documents from lightly structured text.",
       "files": [
         {
           "path": "SKILL.md",
@@ -1037,36 +1106,17 @@
           "size": 4326
         }
       ],
-      "description": "Read structured DOCX documents and build new Word documents from lightly structured text.",
-      "when_to_use": "The user attached a Word document and asks to read, summarize, search, compare, or revise its contents, or asks to create a Word or DOCX file.",
       "install_specs": [
         {
           "kind": "pip",
           "package": "python-docx"
         }
-      ]
-    },
-    {
-      "author": "kuznetsoffandrey",
-      "description": "Health data from Sber Smart Ring (Life Balance): HR, HRV, SpO2, sleep, steps, stress, temperature.",
-      "files": [
-        {
-          "path": "SKILL.md",
-          "sha256": "ec2d106c14f201e47244184fa70411d3c74159d7da2bbe984dae0d06c78601e7"
-        },
-        {
-          "path": "client.py",
-          "sha256": "8947d974fbf8593112a8756b3621133ff2609b16f3450f39476b227816218feb"
-        },
-        {
-          "path": "plugin.py",
-          "sha256": "d024df9638941702758d37ae95c45579ed4b444c44cfc2694ac5161b2824a56c"
-        }
       ],
-      "name": "sber-ring",
-      "type": "extension",
-      "version": "1.0.0",
-      "slug": "sber-ring"
+      "name": "word_tools",
+      "slug": "word_tools",
+      "type": "script",
+      "version": "0.1.0",
+      "when_to_use": "The user attached a Word document and asks to read, summarize, search, compare, or revise its contents, or asks to create a Word or DOCX file."
     }
   ]
 }
