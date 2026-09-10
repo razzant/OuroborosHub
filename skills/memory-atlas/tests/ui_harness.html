@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Memory Atlas widget harness</title>
+<!--
+  Test-only stand-in for the opaque-origin module host. It provides exactly the
+  two surfaces the widget is allowed to use: OuroborosWidget.fetch on the skill's
+  own prefix, and the __ouroWidgetOnDispose registration hook. Responses come
+  from tests/ui_fixtures.py, injected as window.__FIXTURES before this page runs.
+-->
+<script>
+(function () {
+  'use strict';
+  var PREFIX = '/api/extensions/memory-atlas';
+  window.__requests = [];
+  window.__unmatched = [];
+  window.__abortCount = 0;
+  window.__disposeHooks = [];
+  window.__delayMs = 0;
+  // Optional per-request pacing for race tests: __delayFor(url, seq) -> ms.
+  window.__delayFor = null;
+
+  function delayFor(url, seq) {
+    if (typeof window.__delayFor === 'function') {
+      return Number(window.__delayFor(String(url), seq)) || 0;
+    }
+    return window.__delayMs;
+  }
+
+  window.__ouroWidgetOnDispose = function (fn) { window.__disposeHooks.push(fn); };
+  window.__disposeAll = function () {
+    window.__disposeHooks.splice(0).forEach(function (fn) { fn(); });
+  };
+
+  function parse(url) {
+    var text = String(url);
+    if (text.indexOf(PREFIX) !== 0) { return null; }
+    var rest = text.slice(PREFIX.length);
+    var mark = rest.indexOf('?');
+    var path = mark < 0 ? rest : rest.slice(0, mark);
+    var params = {};
+    if (mark >= 0) {
+      rest.slice(mark + 1).split('&').forEach(function (pair) {
+        if (!pair) { return; }
+        var bits = pair.split('=');
+        params[decodeURIComponent(bits[0])] = decodeURIComponent((bits[1] || '').replace(/\+/g, ' '));
+      });
+    }
+    return { path: path, params: params };
+  }
+
+  function sameParams(expected, actual) {
+    var wanted = Object.keys(expected);
+    var got = Object.keys(actual);
+    if (wanted.length !== got.length) { return false; }
+    for (var i = 0; i < wanted.length; i++) {
+      if (String(expected[wanted[i]]) !== String(actual[wanted[i]])) { return false; }
+    }
+    return true;
+  }
+
+  function respond(body, status) {
+    return new Response(JSON.stringify(body), {
+      status: status,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  window.OuroborosWidget = {
+    fetch: function (url, init) {
+      init = init || {};
+      var parsed = parse(url);
+      var seq = window.__requests.length;
+      window.__requests.push(String(url));
+      if (!parsed) {
+        window.__unmatched.push({ url: String(url), reason: 'off_prefix' });
+        return Promise.resolve(respond({ ok: false, error: {
+          code: 'off_prefix', message: 'request left the skill prefix' } }, 400));
+      }
+      var fixtures = window.__FIXTURES || [];
+      var match = null;
+      for (var i = 0; i < fixtures.length; i++) {
+        if (fixtures[i].path === parsed.path
+          && sameParams(fixtures[i].query, parsed.params)) { match = fixtures[i]; break; }
+      }
+      if (!match) {
+        window.__unmatched.push({ path: parsed.path, params: parsed.params });
+        return Promise.resolve(respond({ ok: false, error: {
+          code: 'fixture_missing',
+          message: 'no fixture for ' + parsed.path + ' ' + JSON.stringify(parsed.params)
+        } }, 404));
+      }
+      return new Promise(function (resolve, reject) {
+        var signal = init.signal;
+        var handle = setTimeout(function () {
+          resolve(respond(match.body, match.status));
+        }, delayFor(url, seq));
+        if (signal) {
+          if (signal.aborted) {
+            clearTimeout(handle);
+            window.__abortCount++;
+            var early = new Error('aborted');
+            early.name = 'AbortError';
+            reject(early);
+            return;
+          }
+          signal.addEventListener('abort', function () {
+            clearTimeout(handle);
+            window.__abortCount++;
+            var err = new Error('aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        }
+      });
+    }
+  };
+}());
+</script>
+</head>
+<body>
+<script src="../widget.js"></script>
+</body>
+</html>
