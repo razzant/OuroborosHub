@@ -1067,6 +1067,65 @@
       "type": "extension",
       "version": "1.0.0",
       "slug": "sber-ring"
+    },
+    {
+      "slug": "sber_operational_director",
+      "name": "sber_operational_director",
+      "version": "0.2.10",
+      "type": "extension",
+      "files": [
+        {
+          "path": "certs/README.md",
+          "sha256": "fc9d58d3035cfcfff3a6598dce0127da1f9e40263be81bd5507a728c8c4ee0fb",
+          "size": 785
+        },
+        {
+          "path": "certs/SberCA_Root_Ext.crt",
+          "sha256": "7b02a6b72358264b3652c40b69ace9fef7a68d88c60d95ca826c2af5ed186e30",
+          "size": 2057
+        },
+        {
+          "path": "lib/__init__.py",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0
+        },
+        {
+          "path": "lib/mcp_client.py",
+          "sha256": "c89b14ed6308813409d1ae1c91f108e0586f0bdb10c56c987f89927cc3b58714",
+          "size": 14718
+        },
+        {
+          "path": "lib/tls_store.py",
+          "sha256": "44a465fb05751033252eb6b62f515ce58ef63a34690d584da03126ca74dc1266",
+          "size": 6922
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "5c908e773d2ab4924b9591c916cbd181b59cf805d909090aae1b70f37513574b",
+          "size": 37414
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "8c9cd8cba645741e2765d8ec29aca97320d41de37525eccdf42669ea3db0ab0a",
+          "size": 16483
+        }
+      ],
+      "description": "ИИ-агент «Операционный директор» Сбербанка через MCP — сбор клиентских данных и ответы на бизнес-вопросы (ограничения, задолженность, справки, карты, профиль и т.п.).",
+      "when_to_use": "Пользователь просит у «Операционного директора» Сбера бизнес-сведения — есть ли ограничения на счетах, задолженность, готовые справки, бизнес-карты, профиль организации, доверенности, операции, балансы, обороты, сводку по банку и т.п. (без технических кодов разделов).",
+      "install_specs": [
+        {
+          "kind": "pip",
+          "package": "httpx"
+        },
+        {
+          "kind": "pip",
+          "package": "cryptography"
+        },
+        {
+          "kind": "pip",
+          "package": "starlette"
+        }
+      ]
     }
   ]
 }
