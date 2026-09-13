@@ -1,8 +1,8 @@
 {
-  "description": "Official Ouroboros skills catalog.",
-  "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
+  "name": "OuroborosHub",
+  "description": "Official Ouroboros skills catalog.",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "skills": [
     {
       "description": "Agent-to-Agent protocol bridge for Ouroboros. Provides a local A2A-compatible server plus client tools for discovering and messaging other A2A agents.",
@@ -1177,6 +1177,20 @@
         }
       ],
       "description": "Структурирует OCR-текст лабораторных анализов и объясняет отклонения; не заменяет врача или экстренную помощь."
+    },
+    {
+      "slug": "yylo-tasks",
+      "name": "yylo-tasks",
+      "version": "0.1.0",
+      "type": "instruction",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "ce2aabb80bb7c885ebb39df9ccc8978437308634f4e163645bdd50bc17fc07ba",
+          "size": 5234
+        }
+      ],
+      "description": "Read-only observer for a YYLO-orchestrated coding workspace. Explains the typed task and merge lifecycle and how to answer status questions with the yylo CLI's read-only commands (info, task doctor, task status, merge status, wiki). Never mutates task, merge, Kanban, or Git state."
     }
   ]
 }
