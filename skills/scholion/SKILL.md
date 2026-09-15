@@ -1,7 +1,7 @@
 ---
 name: scholion
-description: Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 30 tools; answers carry provenance and say what the data cannot support. Not a medical device.
-version: 0.4.7
+description: Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 34 tools; answers carry provenance and say what the data cannot support. Not a medical device.
+version: 0.5.2
 type: extension
 runtime: python3
 entry: plugin.py
@@ -29,20 +29,30 @@ owner's own study and for a conversation with a physician.
 
 ## What the agent gets
 
-30 tools over one local engine, among them:
+34 tools over one local engine, among them:
 
 - `check_prescription` — a new drug as a second opinion: pharmacogenetics,
   interactions with the current regimen, monitoring labs, open questions for
-  the physician
+  the physician; its gene list comes through the body system the drug acts on
 - `check_drug_gene` / `analyze_labs` / `suggest_tests` — the classic trio
+- `system` — one body system as one card: laboratory now and its movement,
+  the genetic half and how much of it was read, prescriptions acting on it,
+  the clinician's target, what to test, what to ask; `screen` — a class of
+  disease gene by gene, never «clear» where a gene was not read
 - `genome_lookup`, `clinvar_findings`, `acmg`, `prs`, `longevity`,
-  `lipid_genetics` — the genome layer, always with read-vs-assumed status
+  `lipid_genetics`, `array` — the genome layer, always with read-vs-assumed
+  status
 - `overview`, `second_opinion`, `limits`, `radar`, `brief`, `focus`,
   `phenoage`, `lifestyle`, `health_metrics`, `goal`, `goal_suggest`,
-  `provenance` — the living picture and its honest boundaries
-- `ingest_labs` — the one writing tool: transcribes the owner's own
-  laboratory PDFs into the profile. It moves the person's documents and
-  invents nothing; every other tool is read-only.
+  `provenance`, `flag_rate`, `sources` — the living picture and its honest
+  boundaries
+- Four tools write, and each records something the person handed over rather
+  than anything a model concluded: `ingest_labs` transcribes the owner's own
+  laboratory PDFs from a folder they named (never the current directory);
+  `focus_log` records what the person said happened on a day; `lab_draw`
+  records why one day holds two draws; `marker_propose` files a marker name as
+  a proposal a person still has to confirm. Every other tool is read-only, and
+  no tool sets a value, a sex, or a therapy.
 
 - `rules` — the safety canon this product is operated under, in full. A model
   reaching Scholion through the tool interface is handed a list of tools and no
