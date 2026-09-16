@@ -20,7 +20,6 @@ from .models import (
     LabTestValue,
     PatientInfo,
     Reference,
-    SexAgeResponse,
     TestNamesResponse,
 )
 
@@ -75,42 +74,32 @@ def _ask_llm(prompt: str) -> str:
 # ── Pipeline steps ────────────────────────────────────────
 
 
-def classify_text(raw_text: str) -> str:
-    """Classify OCR text: 'lab', 'instrumental', or 'other'."""
-    prompt = _render_prompt("text_classification.jinja2", raw_text=raw_text)
+def extract_report_info(raw_text: str) -> tuple[str, PatientInfo, List[str]]:
+    """Classify text and extract patient info and test names in one LLM call."""
+    prompt = _render_prompt("report_info.jinja2", raw_text=raw_text)
     resp = _ask_llm(prompt)
     try:
         data = _extract_json(resp)
+        if not isinstance(data, dict):
+            return "other", PatientInfo(), []
         result = int(data.get("result", 3))
     except (json.JSONDecodeError, ValueError, TypeError):
-        result = 3
-    return {1: "lab", 2: "instrumental", 3: "other"}.get(result, "other")
+        return "other", PatientInfo(), []
 
+    text_type = {1: "lab", 2: "instrumental", 3: "other"}.get(result, "other")
+    if text_type != "lab":
+        return text_type, PatientInfo(), []
 
-def extract_patient_info(raw_text: str) -> PatientInfo:
-    """Extract sex, age, date of birth from OCR text."""
-    prompt = _render_prompt("extract_sex_age.jinja2", raw_text=raw_text)
-    resp = _ask_llm(prompt)
+    # Validate independently so malformed demographics do not discard tests.
     try:
-        data = _extract_json(resp)
-        info = SexAgeResponse.model_validate(data)
-        return PatientInfo(
-            sex=info.sex, age=info.age, date_of_birth=info.date_of_birth
-        )
-    except Exception:
-        return PatientInfo()
-
-
-def extract_test_names(raw_text: str) -> List[str]:
-    """Extract list of lab test names from OCR text."""
-    prompt = _render_prompt("lab_tests_name_extraction.jinja2", raw_text=raw_text)
-    resp = _ask_llm(prompt)
+        patient = PatientInfo.model_validate(data)
+    except ValueError:
+        patient = PatientInfo()
     try:
-        data = _extract_json(resp)
-        parsed = TestNamesResponse.model_validate(data)
-        return parsed.tests
-    except Exception:
-        return []
+        test_names = TestNamesResponse.model_validate(data).tests
+    except ValueError:
+        test_names = []
+    return text_type, patient, test_names
 
 
 def extract_test_values(raw_text: str, test_name: str) -> Optional[LabTestValue]:
@@ -319,17 +308,15 @@ def analyze(raw_text: str, max_tests: int = 40) -> LabAnalysis:
     Run the full analysis pipeline on OCR text.
 
     Steps:
-    1. Classify text type
-    2. Extract patient info (sex, age)
-    3. Extract test names
-    4. Extract values for each test
-    5. Interpret each abnormal test
-    6. Build summary
+    1. Classify text and extract patient info and test names in one call
+    2. Extract all test values in one batch call
+    3. Interpret all tests in one batch call
+    4. Build summary locally
     """
     result = LabAnalysis(raw_text=raw_text)
 
-    # Step 1: Classify
-    text_type = classify_text(raw_text)
+    # Step 1: Extract report info in a single call
+    text_type, patient, test_names = extract_report_info(raw_text)
     result.text_type = text_type
     if text_type != "lab":
         result.interpretation = (
@@ -338,8 +325,6 @@ def analyze(raw_text: str, max_tests: int = 40) -> LabAnalysis:
         )
         return result
 
-    # Step 2: Patient info
-    patient = extract_patient_info(raw_text)
     result.patient = patient
 
     sex_str = "мужчина" if patient.sex is True else (
@@ -348,8 +333,7 @@ def analyze(raw_text: str, max_tests: int = 40) -> LabAnalysis:
     age_str = f"{patient.age} лет" if patient.age else "не указан"
     sex_age_str = f"Пол: {sex_str}, возраст: {age_str}"
 
-    # Step 3: Extract test names (capped to max_tests)
-    test_names = extract_test_names(raw_text)
+    # Cap test names to max_tests
     if not test_names:
         result.interpretation = "Не удалось извлечь названия тестов из текста."
         return result
@@ -358,7 +342,7 @@ def analyze(raw_text: str, max_tests: int = 40) -> LabAnalysis:
     if capped:
         test_names = test_names[:max_tests]
 
-    # Step 4: Extract values for all tests in a single batch call
+    # Step 2: Extract values for all tests in a single batch call
     tests = extract_all_test_values(raw_text, test_names)
     result.tests = tests
 
@@ -366,10 +350,10 @@ def analyze(raw_text: str, max_tests: int = 40) -> LabAnalysis:
         result.interpretation = "Не удалось извлечь значения тестов."
         return result
 
-    # Step 5: Interpret all tests in a single batch call
+    # Step 3: Interpret all tests in a single batch call
     interpretations = interpret_tests_batch(tests, sex_age_str)
 
-    # Step 6: Build summary
+    # Step 4: Build summary
     summary_parts = []
     normal_count = sum(
         1 for t in tests if (t.status or "").lower() == "норма"

@@ -1,6 +1,6 @@
 ---
 name: medical-lab-analyzer
-version: 0.2.1
+version: 0.2.2
 description: "Структурирует OCR-текст лабораторных анализов и объясняет отклонения; не заменяет врача или экстренную помощь."
 type: extension
 plugin_api: "2.0"

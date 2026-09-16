@@ -655,13 +655,13 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "488e2fdcb41bf6cf24017c2dae02bada7ceaf9228b5f9485b4a3f7fbc50091e4",
+          "sha256": "05838d76198720a4854a8ab202a95c533725c463050fd3c4e548d4ed4590d6f3",
           "size": 3405
         },
         {
           "path": "analyzer.py",
-          "sha256": "4fcc72c52a58f09eca94fed6410a62136961ac809f0563149a6b195fe8d3613c",
-          "size": 13093
+          "sha256": "2442ae8d5b0ca05d20cbdc7c98809c899236d91df9021fc07f30441b04bc8cba",
+          "size": 12727
         },
         {
           "path": "models.py",
@@ -674,11 +674,6 @@
           "size": 9098
         },
         {
-          "path": "prompts/extract_sex_age.jinja2",
-          "sha256": "cb94ba314ecd76dfeab5450b8fccbc193800904a0ff37dc1e4ff8badef4699fb",
-          "size": 1984
-        },
-        {
           "path": "prompts/lab_test_single_interpretation.jinja2",
           "sha256": "fb0d0169a462a00d607bde53d3c75edf300622112f2ab0cb52c8675839ded4e9",
           "size": 5333
@@ -687,11 +682,6 @@
           "path": "prompts/lab_tests_batch_interpretation.jinja2",
           "sha256": "10df51e119f1469172524e88c0efdf04577df8f11a22cd9ffab2d85bd06ee9cd",
           "size": 2173
-        },
-        {
-          "path": "prompts/lab_tests_name_extraction.jinja2",
-          "sha256": "ae8b6e1de4cd779e69a6c98630fbe47f4e7bc559cad2651adab90a03d2180eb1",
-          "size": 1752
         },
         {
           "path": "prompts/lab_tests_values_batch.jinja2",
@@ -704,15 +694,15 @@
           "size": 7845
         },
         {
-          "path": "prompts/text_classification.jinja2",
-          "sha256": "540b2fec3750008da317669aa498f492519d65f1859e0f1a01765d6f0933592c",
-          "size": 2176
+          "path": "prompts/report_info.jinja2",
+          "sha256": "1738b0b3e1092f81bdeebebb85557aea1b4d661a8dc5e8dcd6204dc2fd7bfb7e",
+          "size": 3263
         }
       ],
       "name": "medical-lab-analyzer",
       "slug": "medical-lab-analyzer",
       "type": "extension",
-      "version": "0.2.1"
+      "version": "0.2.2"
     },
     {
       "description": "Read-only atlas, document reader, authentic history browser, literal search, and evidence graph for allowlisted Ouroboros core memory, consolidated dialogue chronicles, and project knowledge. Opens on global memory; every link it draws is proven from stored bytes, with no model calls at runtime. Use to inspect memory provenance without modifying serving-process data.",
