@@ -1779,6 +1779,72 @@
           "size": 20504
         }
       ]
+    },
+    {
+      "description": "Одностраничное резюме PDF-отчёта для руководителя (A4, ключевые выводы и вопросы для обсуждения) и перевод PDF на русский с сохранением исходной вёрстки и графиков. Числа сверяются с источником автоматически.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "d527e62d216b57801a3c9e77c1ae35f672a8582dd982d0d91d9e4d90ccb3ceb2",
+          "size": 25567
+        },
+        {
+          "path": "assets/summary_template.html",
+          "sha256": "2bc26733a6c5775b51ab45db7cc348704179f461c1767f8cdc30052f1aa9f98d",
+          "size": 5187
+        },
+        {
+          "path": "references/summary_canon.md",
+          "sha256": "4927d60e5d775d57ff0234fad406b3d76369fc1f5c56b3ab39cbdde6de851293",
+          "size": 16571
+        },
+        {
+          "path": "references/translation_rules.md",
+          "sha256": "122220f648f0f57331b5075d237551fae9cec385f18de0bd8441601ff63c97f5",
+          "size": 12687
+        },
+        {
+          "path": "scripts/_core.py",
+          "sha256": "92ace5edf5bd2db0369348a7f125433ab14bbe146df4dd9c16a027ae4b7bbb03",
+          "size": 23529
+        },
+        {
+          "path": "scripts/facts.py",
+          "sha256": "f5df549a3db29dba46db8e2828a6ee5ee87aefbeeffa5ad193af5224bc301ace",
+          "size": 12548
+        },
+        {
+          "path": "scripts/guide.py",
+          "sha256": "8379748aee34b2ca3a79cbdd97622ab5839f7fece0b1b9ce138dff06aa7c9d76",
+          "size": 2093
+        },
+        {
+          "path": "scripts/pdf.py",
+          "sha256": "317569b8fa4291d1ef85b8a627df0fa5525bb82ddaccbe12696f4efe0d5ebb6b",
+          "size": 10199
+        },
+        {
+          "path": "scripts/summary.py",
+          "sha256": "3aa3ce38074800347844f7f0edf5c265f5ad4799d5c86425481946c0dfbea8da",
+          "size": 52042
+        },
+        {
+          "path": "scripts/translate.py",
+          "sha256": "cfa4f32d252d3655dc0872015e0cd6ab9ad7945540d1b4b27ba2737f1cf2ee67",
+          "size": 79544
+        }
+      ],
+      "install_specs": [
+        {
+          "kind": "pip",
+          "package": "pymupdf>=1.24.2"
+        }
+      ],
+      "name": "pdf_rezume_perevod",
+      "slug": "pdf_rezume_perevod",
+      "type": "script",
+      "version": "1.2.0",
+      "when_to_use": "Пользователь прислал или назвал PDF (отчёт, исследование, обзор консультантов, стратегия, презентация) и просит резюме, саммари, выжимку, executive summary, «главное на одну страницу», «резюме для руководства / CEO / правления», вопросы для обсуждения по отчёту — или просит перевести PDF на русский, «перевод с сохранением вёрстки / дизайна / графиков», «переведи отчёт». Также когда просят и резюме, и перевод одного документа. Не для коротких ответов на вопрос по документу и не для файлов других форматов."
     }
   ]
 }
