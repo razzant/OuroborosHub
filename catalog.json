@@ -1894,6 +1894,25 @@
       "slug": "yylo-tasks",
       "type": "instruction",
       "version": "0.1.0"
+    },
+    {
+      "slug": "calendar",
+      "name": "calendar",
+      "version": "0.2.0",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "fbd192235f58918076f36b9d502773b24525a11c2d27ff21a06bdeede6293e77",
+          "size": 9869
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "49bdae4d7bf8376ac29a3e55a8008e14f1c0562849609ac2c69b0d5e2ad03fb9",
+          "size": 76953
+        }
+      ],
+      "description": "Единый календарь Уробороса — свой календарь «Личное» плюс Яндекс Календарь (CalDAV); события, свободные окна, напоминания и виджет День/Неделя с перетаскиванием."
     }
   ]
 }
