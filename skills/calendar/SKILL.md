@@ -1,177 +1,89 @@
 ---
 name: calendar
-description: Единый календарь Уробороса — свой календарь «Личное» плюс Яндекс Календарь (CalDAV); события, свободные окна, напоминания и виджет День/Неделя с перетаскиванием.
-version: 0.2.0
+description: Единый календарь владельца — свои локальные календари, Яндекс (CalDAV) и Google (личный OAuth-клиент); события, повторения, свободные окна, служебные события-распорядок, напоминания без модели, виджет День/Неделя.
+version: 1.0.0
 type: extension
 runtime: python3
 entry: plugin.py
 plugin_api: "2.0"
-permissions: [tool, route, widget, net, read_settings]
-env_from_settings: [YANDEX_CALDAV_USER, YANDEX_CALDAV_APP_PASSWORD]
-timeout_sec: 30
+permissions: [tool, route, widget, net, read_settings, companion_process]
+env_from_settings: [YANDEX_CALDAV_ACCOUNTS, GOOGLE_CALENDAR_CLIENT_ID, GOOGLE_CALENDAR_CLIENT_SECRET, CALENDAR_TOKEN_KEY]
+dependencies: [icalendar, cryptography]
+companion_processes:
+  - name: calendar_worker
+    command: [python3, scripts/worker.py]
+    runtime: python3
+    restart_policy: on_failure
+    max_restarts: 5
+timeout_sec: 60
 when_to_use: >
-  Владелец говорит «что у меня сегодня / завтра / на неделе», «поставь / создай / забей встречу, обед,
-  тренировку на 16», «найди окно на час», «перенеси … на 17», «отмени …», «напомни о …», «брифинг на день».
+  Владелец говорит «что у меня сегодня / завтра / на неделе», «поставь / создай / забей встречу, обед, тренировку на 16»,
+  «найди окно на час», «перенеси … на 17», «отмени …», «напомни о …», «покажи мою занятость в рабочем календаре»,
+  «обычно я завтракаю в 6:30» (служебное событие-распорядок), «подключи Яндекс / Google».
 model_experience:
   what_model_sees: >
-    7 tools cal_*: cal_status, cal_events, cal_create, cal_move, cal_delete, cal_free, cal_brief.
-    Все возвращают JSON {status, ...}; времена ISO 8601 с offset; now_local, today, календари Личное+Яндекс
-    и статус подключения Яндекса (с next_step) — в cal_status. calendar='yandex'|'local'|'all' у cal_create.
-  token_effect: 7 небольших схем; ответы ограничены 50 событиями и 6 окнами.
+    8 tools cal_*: cal_status, cal_events, cal_create, cal_update, cal_delete, cal_free, cal_reminders, cal_settings.
+    JSON {status,...}; времена ISO 8601 с offset владельца; now_local/today/timezone — в cal_status.
+  token_effect: 8 компактных схем; ответы ≤50 событий / ≤10 окон, ≤15 000 символов.
 ui_tab:
-  tab_id: agenda
+  tab_id: calendar
   title: Календарь
   icon: "📅"
   render:
-    kind: declarative
+    kind: module
+    entry: widget.js
     start: auto
-    schema_version: 1
-    span: 2
-    components:
-      - type: poll
-        route: agenda
-        method: GET
-        target: result
-        interval_ms: 30000
-        max_ticks: 100
-        auto_start: true
-      - type: callout
-        target: result
-        path: notice
-        tone: info
-      - type: group
-        layout: cluster
-        components:
-          - type: metric
-            label: Событий сегодня
-            target: result
-            path: metrics.today_count
-          - type: metric
-            label: Свободно часов сегодня
-            target: result
-            path: metrics.free_hours
-            precision: 1
-          - type: metric
-            label: На неделе
-            target: result
-            path: metrics.week_count
-          - type: metric
-            label: Пересечений
-            target: result
-            path: metrics.conflicts
-            tone: warning
-      - type: tabs
-        target: result
-        tabs:
-          - label: Сегодня
-            components:
-              - type: calendar
-                target: result
-                path: items_today
-          - label: Неделя
-            components:
-              - type: kanban
-                target: result
-                path: cards
-                on_move:
-                  route: move_card
-                  method: POST
-                columns:
-                  - { id: d0, label: Пн }
-                  - { id: d1, label: Вт }
-                  - { id: d2, label: Ср }
-                  - { id: d3, label: Чт }
-                  - { id: d4, label: Пт }
-                  - { id: d5, label: Сб }
-                  - { id: d6, label: Вс }
-          - label: Список недели
-            components:
-              - type: calendar
-                target: result
-                path: items_week
-          - label: Свободные окна
-            components:
-              - type: table
-                target: result
-                path: free_slots
-                columns:
-                  - { label: Начало, path: start }
-                  - { label: Конец, path: end }
-                  - { label: Минут, path: minutes, presentation: number }
-      - type: form
-        route: create
-        method: POST
-        target: create_result
-        submit_label: Создать
-        columns: 4
-        fields:
-          - { name: title, label: Название, type: text, required: true, span: 2 }
-          - { name: date, label: Дата, type: text, placeholder: "2026-09-22 (пусто = сегодня)" }
-          - { name: time, label: Время, type: text, placeholder: "16:00" }
-          - name: calendar
-            label: Календарь
-            type: select
-            default: local
-            options:
-              - { value: local, label: Личное }
-              - { value: yandex, label: Яндекс }
-              - { value: all, label: Все }
-          - { name: duration_min, label: Длительность, type: number, default: 60, min: 5, max: 1440, step: 5 }
-          - { name: remind_min, label: Напомнить за (мин), type: number, default: 0, min: 0, max: 1440, step: 5 }
-      - type: kv
-        target: create_result
-        fields:
-          - { label: Результат, path: message }
+    appearance: host
 ---
 
-# Календарь Уробороса (v0.2: Личное + Яндекс)
+# Календарь Уробороса
 
-Два источника в одной базе: локальный календарь «Личное» (SQLite в state dir, без сети)
-и Яндекс Календарь по CalDAV (`caldav.yandex.ru`, пароль приложения). Google — следующая версия.
+Один календарь **пользователя**: локальные календари Уробороса, аккаунты Яндекса (CalDAV) и Google (личный Cloud-проект владельца).
+Собственные действия агента в календарь не попадают — для них есть Activity. Композиция с другими скиллами — только через агента:
+другой сценарий просит тебя добавить или прочитать событие, ты вызываешь эти tools.
 
-## Подключение Яндекса (делает владелец)
+## Онбординг (делает владелец в Settings → Secrets, не в чате)
 
-1. `id.yandex.ru/security/app-passwords` → создать пароль приложения типа «Календарь»
-   (показывается один раз; может заработать через 2–3 часа).
-2. Ouroboros → Settings → Secrets: `YANDEX_CALDAV_USER` = полный e-mail (`login@yandex.ru`),
-   `YANDEX_CALDAV_APP_PASSWORD` = пароль приложения. Выдать скиллу грант на оба ключа.
-3. В чате: «подключи яндекс» → агент вызывает `cal_status(sync=true)` и показывает календари.
-   Пока Яндекс не подключён, `cal_status` отдаёт `next_step` — повтори его владельцу.
+1. **Яндекс.** Создать пароль приложения «Календарь» (id.yandex.ru → Безопасность → Пароли приложений; новый пароль может активироваться до 2–3 часов).
+   Положить один секрет `YANDEX_CALDAV_ACCOUNTS` — JSON-список аккаунтов:
+   `[{"login": "you@yandex.ru", "app_password": "…", "alias": "личный"}]`. Несколько аккаунтов — несколько элементов списка.
+   Затем: `cal_settings(action="reload_yandex", confirm=true)`.
+2. **Google** (этап Google). В своём Google Cloud: включить Calendar API, экран согласия External (для личного постоянного использования — In production;
+   в режиме Testing токен живёт 7 дней), OAuth-клиент типа Desktop app. Положить `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_SECRET`
+   и `CALENDAR_TOKEN_KEY` (любая длинная парольная фраза — ею шифруются токены в данных скилла). Затем `cal_settings(action="connect_google", confirm=true)`
+   → ссылка для входа; владелец открывает её в системном браузере (виджет открыть окно не может).
+3. Грант на секреты выдаётся хостом после появления ключей; пока их нет — `cal_status` покажет `next_step`.
 
-## Как агенту работать с календарём
+## Правила работы
 
-1. Любой сценарий начинай с `cal_status`: там `now_local`, `today` и таймзона —
-   считай «сегодня», «завтра», «в четверг», «через час» от `now_local`, а не от UTC.
-2. Времена передавай в ISO 8601. Без offset — трактуется как местное время владельца.
-3. Записи (`cal_create`, `cal_move`, `cal_delete`) делай только по явной команде
-   владельца или после его выбора в карточке `escalate`; из автоматических задач — никогда.
-   Перед созданием посмотри пересечения в ответе (`overlaps`) и назови их.
-4. «Найди окно» → `cal_free` → предложи 2–4 варианта через `escalate` с рекомендуемым →
-   после выбора `cal_create`.
-5. «Напомни о …» → `remind_before_min` в `cal_create`, а затем поставь одноразовое
-   `schedule_followup(run_at = start − N минут, objective = «Напомни владельцу: <название> в <время>»)`.
-6. После записи коротко подтверди: что, когда, в каком календаре. Событие сразу
-   появится в виджете «Календарь» на странице Widgets (вкладки Сегодня / Неделя).
-7. «Брифинг» → `cal_brief` и верни текст как есть. Чтобы включить утренний брифинг,
-   поставь повторяющееся `schedule_followup(cron="30 7 * * 1-5", timezone=<tz владельца>,
-   objective="Утренний брифинг: вызови cal_brief(date='today') и отправь текст владельцу без записей")`.
-
-## Виджет
-
-Страница Widgets → карточка «Календарь»: метрики дня, вкладки Сегодня / Неделя (доска
-по дням недели, карточку можно перетащить на другой день — это перенос события) /
-Список недели / Свободные окна, форма быстрого создания. Данные обновляются сами
-каждые 30 секунд и после каждого действия.
-
-## Правила размещения
-
-- Без указания календаря событие идёт в «Личное».
-- «в яндекс», «в яндекс-календарь» → `calendar="yandex"` (основной календарь Яндекса).
-- «во все календари», «везде» → `calendar="all"` (одно событие копией во всех; в повестке показывается один раз с «также в: …»).
-- Название календаря Яндекса тоже работает: `calendar="Работа"`.
+- **Сначала `cal_status`.** Оттуда `now_local`, `today`, `timezone` — «сегодня/завтра/в четверг» считай от них, времена передавай ISO 8601
+  (без offset = местное время владельца).
+- **Любая запись — только по явной команде владельца или после его выбора (escalate) — `confirm: true`.** Из автоматических задач события не создаются.
+  Уроборос может составлять внутренний план дня, но внешние записи появляются по команде или после принятия плана владельцем.
+- **Куда писать.** `calendars` пустой → календарь по умолчанию; `'all'` → все доступные для записи; `'busy_set'` → набор публикации занятости;
+  список имён/алиасов/id → конкретные. Первый календарь получает полное содержание, остальные — копии по правилу календаря
+  (`publish_mode`: `busy` = «Занят», только интервал; `full` = всё). Пожелания владельца («мою занятость показывай в рабочем Google и личном Яндексе»,
+  «в рабочем — только “Занят”») сохраняй через `cal_settings(action="set_calendar", publish_busy=…, publish_mode=…)` и `preferences`, а перед записью читай их из `cal_status`.
+  Смена набора не переписывает уже созданные события и серии — только по отдельной просьбе.
+- **Служебные события** (`hidden=true`) — распорядок и заметки планировщика о жизни владельца: «обычно завтракаю в 6:30 по будням»
+  (`availability="soft"`, `rrule="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR"`), «дорога на встречу» (`availability="busy"`). В виджете они показываются
+  по переключателю, скрытая занятость остаётся штриховкой. `soft` — предпочтение, не бронь: окно на это время предлагать можно, но скажи о нём.
+  Другие сценарии (здоровье, еда, транспорт) добавляют и читают такие события через тебя; их логики в календаре нет.
+- **Повторения.** Слова владельца определяют охват: «отмени в эту среду» → id вхождения (`…@дата`) и `scope=this`; «все эти встречи по средам» → `scope=all`;
+  «со следующей недели пусть в 19» → id вхождения и `scope=following`. Если непонятно — спроси: одну дату или всё расписание.
+- **Свободные окна.** `cal_free` по календарям-источникам занятости и рабочим часам из настроек; рамки выбирай по смыслу просьбы (созвон ≠ тренировка),
+  при недостатке контекста уточни. Предложи 2–4 варианта через escalate, потом `cal_create`.
+- **Участники.** Приглашения и ответы (`cal_update(response=…)`) — только по явной просьбе или подтверждению; `send_invites`/`send_updates` без команды не включай.
+- **Напоминания** доставляет сам Уроборос без запуска модели, по правилам `cal_reminders` и полю `reminders` события. Если `cal_status → reminders.channel`
+  не `ready`, напоминания хранятся и видны в виджете, а доставка появится после доработки ядра — скажи об этом честно, не подменяй её агентными задачами.
+  Режим «напоминает Уроборос» для внешнего календаря включает владелец явно; при включении прежние времена провайдера переносятся в правила, дубли провайдера снимаются.
+- **Синхронизация.** Внешние записи сначала сохраняются локально, потом отправляются; при отсутствии сети событие остаётся «ожидает синхронизации»
+  (`pending`) и уйдёт позже; `conflict` — событие изменилось с другой стороны: покажи владельцу обе версии и спроси. Недоступный календарь не считается пустым.
+- **Ответы.** После записи перечитай событие и коротко подтверди: что, когда, в каких календарях, что ожидает.
 
 ## Ограничения версии
 
-Один аккаунт Яндекса. Повторяющиеся события Яндекса показываются одним мастером с пометкой ↻
-(без разворота серии). Участники и приглашения не поддерживаются. Перенос через доску сохраняет
-время и меняет только день. Синхронизация с Яндексом — при обращении, не чаще раза в 2 минуты.
+- Google подключается на этапе Google после появления параметров клиента; до этого `connect_google` отвечает `not_implemented`.
+- Ответы на приглашения в Яндексе появятся после проверки поведения сервера (адаптер отвечает `unsupported`).
+- Системных уведомлений компьютера нет; каналы напоминаний — чат Уробороса и подключённый Telegram (если включено зеркало).
+- Виджет: `start: auto` оправдан — это лёгкий прибор (сетка без анимационного демона, опрос данных раз в 30 с), не программа, требующая `retain`.
