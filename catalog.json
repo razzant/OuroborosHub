@@ -1898,13 +1898,13 @@
     {
       "slug": "calendar",
       "name": "calendar",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "type": "extension",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "31d16740d49d90334e18e63e99df861549c0a5c8a93224f62290a5e444098038",
-          "size": 10700
+          "sha256": "70917eb1651cec5c3632c5e335f50239e0b793b8a4dbad7922e6fe6b18cd8c7c",
+          "size": 11994
         },
         {
           "path": "model.py",
@@ -1913,43 +1913,53 @@
         },
         {
           "path": "ops.py",
-          "sha256": "f2e327e8c6ceff9d156ecb12a825e00d1c4f322151f246b6beca9285b23dec18",
-          "size": 27566
+          "sha256": "66b1f39b0ad398fd2264b29032ed9742427530c32c2ca1d877ffb65baca6dff9",
+          "size": 28013
         },
         {
           "path": "plugin.py",
-          "sha256": "0482c54299b18b15d37a16ee340c9d09ce8676f69bad7c59861c5e373901024e",
-          "size": 10255
+          "sha256": "39bef88856f9157a0f8687fb3228b883a052bfa29ea1aa18936758c089b28e10",
+          "size": 10604
         },
         {
           "path": "providers.py",
-          "sha256": "ab72fbc929b0eb10b125a66bb64475aabbedb5fd7affc21a10090f275b856a49",
-          "size": 24600
+          "sha256": "8423e2f455946adac8dcc941c260dd47374179fd544edd8c44ea6d28e95f4df9",
+          "size": 26725
+        },
+        {
+          "path": "providers_google.py",
+          "sha256": "1a87e9cb42113d6dd42303b47ec4460207cd3be7cc598bed730d5cab360e6d73",
+          "size": 29918
         },
         {
           "path": "reminders.py",
-          "sha256": "f433912c9a1625c94162c1f6294858e3639484baf502459dc1f99941eb7f5a8e",
-          "size": 12899
+          "sha256": "29e2b2077dfc05671cc73f54adab5169d793bfe16d2262273484be1420ec4d58",
+          "size": 13922
         },
         {
           "path": "routes.py",
-          "sha256": "9a6130c3059b61a845aeaa0cdfb11217657f005658d7ab4ec5459f40e20ada92",
-          "size": 9786
+          "sha256": "0d3b0b3121f5da88c3340af7c581b9c4460618369bfcfa0065fcbfed77dee3e1",
+          "size": 11279
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "bf3ec988f7df4d541fca4b9679d2c9bab1ba4f0e8e1c06f79715b470898ab545",
-          "size": 10942
+          "sha256": "c828004045927b725014aac5ab712cfd14ea730703d37b1d257489caad79ff6f",
+          "size": 14036
         },
         {
           "path": "store.py",
-          "sha256": "0471cae3f36df1e2f34370fa3d6758a98f97a5d85391936c69448f049a6d12d7",
-          "size": 32027
+          "sha256": "8ffadf49a9dcc0acba9c48d407145621330a76c2bf686d9d573abbfa0b5892c7",
+          "size": 32198
+        },
+        {
+          "path": "tests/test_calendar.py",
+          "sha256": "9e48490f6b113eb9df48510c53925062db28b99f2c6ae3520620b446b0c18a5c",
+          "size": 19779
         },
         {
           "path": "tools.py",
-          "sha256": "50d6752bb398f02a6d1fd2af121c23bcb662df70e76a7ead942d76b89faaec31",
-          "size": 37277
+          "sha256": "1ccdb92a43e75ff1b2f5fd6e18dd370778e02bf943431245d513ac1e00b5b742",
+          "size": 44962
         },
         {
           "path": "widget.js",

@@ -72,14 +72,11 @@ def deps_ok() -> Dict[str, Any]:
 def sync_account(store: Store, providers: Providers, account: Dict[str, Any], tz) -> Dict[str, Any]:
     adapter = providers.adapter_for(account["id"])
     if adapter is None:
-        store.set_account_status(account["id"], "not_connected", "нет секрета или гранта для этого аккаунта")
-        return {"account": account["id"], "status": "not_connected"}
+        # The companion only sees the secrets it was spawned with; a fresh key needs a skill restart, so do not
+        # overwrite a status the child may have just set — report and move on.
+        return {"account": account["id"], "status": "skipped", "reason": "секрет недоступен фоновому процессу (перезапусти скилл после добавления ключа)"}
     report: Dict[str, Any] = {"account": account["id"], "calendars": 0, "events": 0, "deleted": 0, "propagated": 0, "resynced": 0}
     try:
-        caps = store.get_setting(f"capabilities:{account['id']}") or {}
-        if not caps:
-            caps = adapter.probe()
-            store.set_setting(f"capabilities:{account['id']}", caps)
         cals = adapter.list_calendars()
         for cal in cals:
             existing = store.get_calendar(cal["id"])
@@ -233,13 +230,14 @@ def main() -> int:
     providers = Providers(secrets, state_dir)
     channel = rem.NotifyChannel()
     deps = deps_ok()
-    _log("companion started", state_dir=state_dir, deps=deps, host_service=bool(os.environ.get("HOST_SERVICE_URL")))
+    secrets_present = {k: bool(v) for k, v in secrets.items()}
+    _log("companion started", state_dir=state_dir, deps=deps, secrets_present=secrets_present, host_service=bool(os.environ.get("HOST_SERVICE_URL")))
     last_sync: Dict[str, float] = {}
     tick = 0
     while not _stop:
         tick += 1
         tz = get_tz(store.get_setting("timezone") or "")
-        health: Dict[str, Any] = {"deps": deps, "tick": tick, "sync": [], "intents": None, "reminders": None, "channel": None}
+        health: Dict[str, Any] = {"deps": deps, "secrets_present": secrets_present, "tick": tick, "sync": [], "intents": None, "reminders": None, "channel": None}
         try:
             requested = parse_stored(store.get_setting("sync_requested_at") or "")
             for account in [*store.list_accounts(provider=PROVIDER_YANDEX), *store.list_accounts(provider=PROVIDER_GOOGLE)]:

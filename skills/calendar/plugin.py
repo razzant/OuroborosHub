@@ -30,8 +30,8 @@ TOOL_DESCRIPTIONS = {
         "include_hidden=true (по умолчанию) показывает и служебные события-распорядок. id — одно событие целиком с назначениями."
     ),
     "cal_create": (
-        "Создать событие владельца. calendars: '' — календарь по умолчанию; 'all' — во все доступные для записи; 'busy_set' — набор "
-        "публикации занятости; список id/имён — конкретные (первый получает полное содержание, остальные — копии по правилу календаря, "
+        "Создать событие владельца. calendars: '' — календарь по умолчанию; 'all'/'busy_set' — календарь по умолчанию плюс сохранённый набор "
+        "публикации занятости (не все календари подряд); список id/имён — конкретные (первый получает полное содержание, остальные — копии по правилу календаря, "
         "обычно «Занят»). hidden=true — служебное событие (распорядок/заметка планировщика, в виджете по переключателю); "
         "availability: busy | free | soft (soft = «обычно», гибкое предпочтение). reminders — минуты до начала. rrule — RFC 5545 "
         "(FREQ=WEEKLY;BYDAY=MO). Только по явной команде владельца или после его выбора — confirm=true. Приглашения участникам — send_invites."
@@ -51,7 +51,8 @@ TOOL_DESCRIPTIONS = {
         "Возвращает slots и soft_overlaps (пересечения с «обычно», это предпочтение, не бронь). Потом предложи владельцу варианты."
     ),
     "cal_reminders": (
-        "Правила напоминаний Уробороса (без модели): list; set_default/set_hidden/set_calendar/clear_calendar с offsets (минуты). "
+        "Правила напоминаний Уробороса (без модели): list; set_default/set_hidden/set_calendar/clear_calendar с offsets (минуты); "
+        "enable_calendar/disable_calendar — режим «напоминает Уроборос» для внешнего календаря (переносит времена провайдера, глушит его дубли). "
         "Изменения — confirm=true. Напоминания конкретного события — через cal_update(reminders=…)."
     ),
     "cal_settings": (
@@ -89,7 +90,7 @@ SCHEMAS = {
         "start": {"type": "string"}, "end": {"type": "string"}, "duration_min": {"type": "integer", "default": 60},
         "sources": {"type": "string"}, "working_hours": {"type": "string"}, "max_slots": {"type": "integer", "default": 6}}},
     "cal_reminders": {"type": "object", "properties": {
-        "action": {"type": "string", "enum": ["list", "set_default", "set_hidden", "set_calendar", "clear_calendar"], "default": "list"},
+        "action": {"type": "string", "enum": ["list", "set_default", "set_hidden", "set_calendar", "clear_calendar", "enable_calendar", "disable_calendar"], "default": "list"},
         "offsets": {"type": "array", "items": {"type": "integer"}}, "calendar_id": {"type": "string"},
         "confirm": {"type": "boolean", "default": False}}},
     "cal_settings": {"type": "object", "properties": {

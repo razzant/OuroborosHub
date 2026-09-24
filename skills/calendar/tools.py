@@ -57,7 +57,9 @@ class Context:
             key = str(item).strip()
             low = key.lower()
             if low == "all":
-                out.extend(c["id"] for c in cals if c["writable"])
+                # 5 A: «во все календари» = календарь по умолчанию + набор публикации занятости, не все с правом записи
+                out.append(self.store.default_calendar()["id"])
+                out.extend(c["id"] for c in cals if c["role_publish"] and c["writable"])
                 continue
             if low in ("busy_set", "занятость", "publish"):
                 out.extend(c["id"] for c in cals if c["role_publish"] and c["writable"])
@@ -193,9 +195,19 @@ def cal_status(ctx: Context, **kwargs) -> str:
         "settings": {"working_hours": st.get_setting("working_hours") or "09:00-19:00", "preferences": st.get_setting("preferences") or "",
                      "busy_publish_set": [c["id"] for c in cals if c["role_publish"]]},
         "companion": ctx.companion_health(),
-        "next_step": next_steps,
+        "next_step": next_steps + _companion_secret_gap(ctx),
         "hint": "Времена — ISO 8601 с offset владельца; «сегодня/завтра» считай от now_local. Скрытые (служебные) события — распорядок владельца, их видно тебе, а в виджете по переключателю.",
     })
+
+
+def _companion_secret_gap(ctx: Context) -> List[str]:
+    """The companion inherits granted secrets at spawn; a newly added key needs a skill restart (toggle off/on)."""
+    health = ctx.companion_health()
+    seen = health.get("secrets_present") or {}
+    missing = [k for k in SECRET_KEYS if ctx.secrets.get(k) and seen and not seen.get(k)]
+    if missing:
+        return [f"Фоновый процесс ещё не видит секреты {', '.join(missing)}: выключи и включи скилл calendar в Skills (toggle), чтобы он перезапустился"]
+    return []
 
 
 def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = None, query: str = "", id: str = "",
@@ -289,8 +301,6 @@ def cal_create(ctx: Context, title: str = "", start: str = "", end: str = "", du
                  "availability": avail, "description": str(description or ""), "location": str(location or ""),
                  "attendees": [{"email": str(a).strip()} if not isinstance(a, dict) else a for a in _list(attendees)],
                  "send_invites": _bool(send_invites), "reminders": [_int(x, 0) for x in _list(reminders)], "rrule": str(rrule or "").strip()})
-    if spec["attendees"] and spec["send_invites"] and not _bool(confirm):
-        return json_dumps({"status": "needs_confirm", "message": "Отправка приглашений участникам — только по явной команде владельца"})
     result = ops.create_event(ctx.store, ctx.providers, spec)
     ev = result["event"]
     s, e = parse_stored(ev["start_utc"]), parse_stored(ev["end_utc"])
@@ -446,9 +456,11 @@ def cal_reminders(ctx: Context, action: str = "list", offsets: Any = None, calen
     st = ctx.store
     action = str(action or "list").lower()
     if action == "list":
-        return bounded_result({"status": "ok", "rules": rem.get_rules(st), "channel": st.get_setting("notify_channel_state") or {"state": "unknown"},
+        return bounded_result({"status": "ok", "rules": rem.get_rules(st), "modes": st.get_setting(rem.MODE_KEY) or {},
+                               "channel": st.get_setting("notify_channel_state") or {"state": "unknown"},
                                "upcoming": rem.upcoming(st, ctx.tz, limit=20),
-                               "hint": "Напоминания конкретного события меняются через cal_update(reminders=[…]); 0 = в момент начала"})
+                               "hint": "Внешний календарь получает напоминания Уробороса только после enable_calendar (20 A). "
+                                       "Напоминания конкретного события — cal_update(reminders=[…]); 0 = в момент начала"})
     if not _bool(confirm):
         return json_dumps({"status": "needs_confirm", "message": "Изменение правил напоминаний — по команде владельца: повтори с confirm=true"})
     mins = [_int(x, 0) for x in _list(offsets)] if offsets is not None else None
@@ -466,11 +478,48 @@ def cal_reminders(ctx: Context, action: str = "list", offsets: Any = None, calen
         if err or not cal_ids:
             return json_dumps({"status": "error", "message": err or "нужен calendar_id"})
         rules = rem.set_rules(st, calendar_id=cal_ids[0], calendar_offsets=None)
+    elif action in ("enable_calendar", "disable_calendar"):
+        cal_ids, err = ctx.resolve_calendars(calendar_id)
+        if err or not cal_ids:
+            return json_dumps({"status": "error", "message": err or "нужен calendar_id"})
+        report = set_reminder_mode(ctx, cal_ids[0], action == "enable_calendar")
+        _plan_reminders(ctx, replan=True)
+        return bounded_result({"status": "updated", **report, "rules": rem.get_rules(st), "upcoming": rem.upcoming(st, ctx.tz, limit=10)})
     else:
-        return json_dumps({"status": "error", "message": "action: list | set_default | set_hidden | set_calendar | clear_calendar"})
-    st.drop_reminders_for_all = None  # no-op marker for readability
+        return json_dumps({"status": "error", "message": "action: list | set_default | set_hidden | set_calendar | clear_calendar | enable_calendar | disable_calendar"})
     _plan_reminders(ctx, replan=True)
     return bounded_result({"status": "updated", "rules": rules, "upcoming": rem.upcoming(st, ctx.tz, limit=10)})
+
+
+def set_reminder_mode(ctx: Context, calendar_id: str, on: bool) -> Dict[str, Any]:
+    """20 A for one external calendar: import the provider's default reminders as the calendar rule, keep per-event
+    alerts as Ouroboros reminders, then silence the provider (calendar defaults now, per-event overrides on next write)."""
+    st = ctx.store
+    cal = st.get_calendar(calendar_id)
+    if cal is None:
+        return {"error": "календарь не найден"}
+    if cal["provider"] == PROVIDER_LOCAL:
+        return {"calendar_id": calendar_id, "note": "локальный календарь и так напоминает через Уроборос"}
+    modes = rem.set_mode(st, calendar_id, on)
+    report: Dict[str, Any] = {"calendar_id": calendar_id, "mode": "on" if on else "off", "provider_muted": False, "manual_steps": []}
+    if not on:
+        return report
+    defaults = st.get_setting(f"google_default_reminders:{calendar_id}") or []
+    minutes = sorted({int(d.get("minutes")) for d in defaults if isinstance(d, dict) and d.get("minutes") is not None})
+    if minutes:
+        rem.set_rules(st, calendar_id=calendar_id, calendar_offsets=minutes)
+        report["imported_default"] = minutes
+    adapter = ctx.providers.adapter_for(cal["account_id"])
+    if adapter is not None and hasattr(adapter, "set_default_reminders"):
+        try:
+            adapter.set_default_reminders(cal, [])
+            report["provider_muted"] = True
+        except ops.ProviderError as exc:
+            report["manual_steps"].append(f"не удалось отключить напоминания по умолчанию у провайдера: {exc.message}")
+    else:
+        report["manual_steps"].append("Яндекс: напоминания по умолчанию календаря отключаются в настройках Яндекс.Календаря вручную; напоминания событий снимутся при следующей записи")
+    report["manual_steps"].append("Apple Calendar / другие приложения на устройствах имеют свои настройки уведомлений — их Уроборос не меняет")
+    return report
 
 
 def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visible: Any = None, busy_source: Any = None, publish_busy: Any = None,
@@ -637,6 +686,8 @@ def reload_google(ctx: Context) -> Dict[str, Any]:
 
 def _plan_reminders(ctx: Context, replan: bool = False) -> None:
     try:
+        if replan:
+            ctx.store.drop_scheduled_reminders()
         rem.plan(ctx.store, lambda s, e: ctx.occurrences(s, e))
     except Exception:
         pass

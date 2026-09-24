@@ -199,8 +199,11 @@ def _listify(value: Any) -> List[Any]:
     return value if isinstance(value, list) else [value]
 
 
-def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU") -> str:
-    """Build VCALENDAR from a row; when the row carries the provider's original text, edit it in place."""
+def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU", mute_alarms: bool = False) -> str:
+    """Build VCALENDAR from a row; when the row carries the provider's original text, edit it in place.
+
+    ``mute_alarms`` = the owner switched «напоминает Уроборос» on for this calendar: no VALARM goes to the provider.
+    """
     icalendar = _ical()
     start = parse_stored(event.get("start_utc"))
     end = parse_stored(event.get("end_utc"))
@@ -266,7 +269,7 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         if alarm is not vevent:
             vevent.subcomponents.remove(alarm)
     try:
-        offsets = json.loads(event.get("reminders_json") or "[]")
+        offsets = [] if mute_alarms else json.loads(event.get("reminders_json") or "[]")
     except ValueError:
         offsets = []
     for minutes in offsets:
@@ -340,25 +343,6 @@ class YandexAdapter:
         except ET.ParseError:
             raise ProviderError("parse", f"не удалось разобрать ответ {what} от Яндекса")
 
-    # capabilities
-    def probe(self) -> Dict[str, Any]:
-        """Facts the sync loop adapts to: sync-collection / ctag support, write privileges."""
-        body = ('<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">'
-                '<d:prop><d:supported-report-set/><d:sync-token/><cs:getctag/><d:current-user-privilege-set/></d:prop></d:propfind>')
-        _, _, text = self._request("PROPFIND", self.home, body, {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
-        root = self._xml(text, "PROPFIND")
-        facts = {"sync_collection": False, "ctag": False, "checked_at": iso_utc(now_utc())}
-        for resp in root.findall("d:response", NS):
-            for prop in resp.findall("d:propstat/d:prop", NS):
-                if prop.find("d:sync-token", NS) is not None and (prop.findtext("d:sync-token", default="", namespaces=NS) or "").strip():
-                    facts["sync_collection"] = True
-                if prop.find("cs:getctag", NS) is not None and (prop.findtext("cs:getctag", default="", namespaces=NS) or "").strip():
-                    facts["ctag"] = True
-                reports = prop.find("d:supported-report-set", NS)
-                if reports is not None and any(r.find("d:report/d:sync-collection", NS) is not None for r in reports.findall("d:supported-report", NS)):
-                    facts["sync_collection"] = True
-        return facts
-
     # calendars
     def list_calendars(self) -> List[Dict[str, Any]]:
         body = ('<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/">'
@@ -373,9 +357,7 @@ class YandexAdapter:
             props = resp.findall("d:propstat/d:prop", NS)
             if not any(p.find("d:resourcetype/c:calendar", NS) is not None for p in props):
                 continue
-            collection = href.rstrip("/").rsplit("/", 1)[-1]
-            if not collection.startswith("events-"):
-                continue
+            collection = href.rstrip("/").rsplit("/", 1)[-1] or href
             display, writable, ctag, sync_token = "", False, "", ""
             for p in props:
                 display = (p.findtext("d:displayname", default="", namespaces=NS) or display).strip()
@@ -435,12 +417,12 @@ class YandexAdapter:
                 return False
             raise
 
-    def create(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _create(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         uid = str(event.get("uid") or "")
         if not uid:
             raise ProviderError("parse", "у события нет uid")
         href = calendar["href"].rstrip("/") + "/" + urllib.parse.quote(uid, safe="") + ".ics"
-        ics = row_to_ics({**event, "raw_payload": ""})
+        ics = row_to_ics({**event, "raw_payload": ""}, mute_alarms=bool(payload.get("mute_provider_reminders")))
         try:
             _, headers, _ = self._request("PUT", href, ics, {"Content-Type": "text/calendar; charset=utf-8", "If-None-Match": "*"})
         except ProviderError as exc:
@@ -457,14 +439,19 @@ class YandexAdapter:
                 etag = ""
         return {"external_id": uid, "href": href, "etag": etag}
 
+    def create(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:  # noqa: F811
+        return self._create(calendar, event, payload)
+
     def update(self, calendar: Dict[str, Any], event: Dict[str, Any], expected_etag: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if event.get("master_id"):
+            return self._write_exception(event, payload)
         href = str(event.get("href") or "")
         if not href:
             return self.create(calendar, event, payload)
         headers = {"Content-Type": "text/calendar; charset=utf-8"}
         if expected_etag:
             headers["If-Match"] = expected_etag
-        _, resp_headers, _ = self._request("PUT", href, row_to_ics(event), headers)
+        _, resp_headers, _ = self._request("PUT", href, row_to_ics(event, mute_alarms=bool(payload.get("mute_provider_reminders"))), headers)
         etag = resp_headers.get("etag", "")
         if not etag:
             try:
@@ -481,3 +468,52 @@ class YandexAdapter:
 
     def respond(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ProviderError("unsupported", "ответ на приглашение в Яндексе будет включён после проверки поведения сервера (этап 1)")
+
+    def _write_exception(self, event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+        """One changed/cancelled date of a series lives INSIDE the master's .ics: cancelled → EXDATE on the master,
+        changed → a VEVENT with RECURRENCE-ID next to it. The whole resource is PUT back under If-Match."""
+        href = str(event.get("master_href") or event.get("href") or "")
+        if not href:
+            raise ProviderError("parse", "у серии нет адреса ресурса на сервере")
+        text, etag = self.get(href)
+        icalendar = _ical()
+        try:
+            cal = icalendar.Calendar.from_ical(text)
+        except Exception as exc:
+            raise ProviderError("parse", f"не удалось разобрать серию с сервера: {exc}")
+        master = next((c for c in cal.walk("VEVENT") if c.get("RECURRENCE-ID") is None), None)
+        if master is None:
+            raise ProviderError("parse", "в ресурсе нет мастер-события серии")
+        rec = parse_stored(event.get("recurrence_id"))
+        if rec is None:
+            raise ProviderError("parse", "у исключения нет даты вхождения")
+        tz = get_tz(event.get("tz") or "")
+        rec_local = rec.astimezone(tz)
+        for comp in list(cal.walk("VEVENT")):
+            rid = comp.decoded("RECURRENCE-ID", None)
+            if rid is not None and iso_utc(rid if getattr(rid, "tzinfo", None) else datetime.combine(rid, datetime.min.time(), tzinfo=tz)) == iso_utc(rec):
+                cal.subcomponents.remove(comp)
+        if str(event.get("status") or "") == "cancelled":
+            existing = master.get("EXDATE")
+            dates = _dt_list(existing) if existing is not None else []
+            if "EXDATE" in master:
+                del master["EXDATE"]
+            all_dates = sorted(set(dates + [iso_utc(rec)]))
+            master.add("EXDATE", [parse_stored(d).astimezone(tz) for d in all_dates])
+        else:
+            exc_cal = icalendar.Calendar.from_ical(row_to_ics({**event, "raw_payload": "", "rrule": "", "exdates": "", "uid": str(master.get("UID") or event.get("uid") or "")},
+                                                              mute_alarms=bool(payload.get("mute_provider_reminders"))))
+            vevent = next(c for c in exc_cal.walk("VEVENT"))
+            vevent.add("RECURRENCE-ID", rec_local if not event.get("all_day") else rec_local.date())
+            cal.add_component(vevent)
+        if hasattr(cal, "add_missing_timezones"):
+            try:
+                cal.add_missing_timezones()
+            except Exception:
+                pass
+        headers = {"Content-Type": "text/calendar; charset=utf-8"}
+        if etag:
+            headers["If-Match"] = etag
+        _, resp_headers, _ = self._request("PUT", href, cal.to_ical().decode("utf-8"), headers)
+        new_etag = resp_headers.get("etag", "")
+        return {"etag": new_etag, "external_id": str(event.get("uid") or ""), "href": href, "master_etag": new_etag}

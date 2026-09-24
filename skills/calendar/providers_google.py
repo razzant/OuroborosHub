@@ -261,9 +261,6 @@ class GoogleAdapter:
         items = data.get("items", [])
         return str(items[0].get("id") or "") if items else ""
 
-    def probe(self) -> Dict[str, Any]:
-        return {"sync_token": True, "checked_at": iso_utc(now_utc())}
-
     def list_calendars(self) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         token = None
@@ -313,7 +310,7 @@ class GoogleAdapter:
         return rows, next_sync, "google_sync_token", cancelled
 
     def create(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
-        body = row_to_gevent(event)
+        body = row_to_gevent(event, mute=bool(payload.get("mute_provider_reminders")))
         body["id"] = _google_id(event)
         attendees = json.loads(event.get("attendees_json") or "[]")
         params = {"sendUpdates": "all" if (payload.get("send_updates") and attendees) else "none"}
@@ -333,7 +330,7 @@ class GoogleAdapter:
             external_id = self._instance_id(calendar, event)
         if not external_id:
             return self.create(calendar, event, payload)
-        body = row_to_gevent(event)
+        body = row_to_gevent(event, mute=bool(payload.get("mute_provider_reminders")))
         attendees = json.loads(event.get("attendees_json") or "[]")
         params = {"sendUpdates": "all" if (payload.get("send_updates") and attendees) else "none"}
         headers = {"If-Match": expected_etag} if expected_etag else {}
@@ -472,7 +469,8 @@ def _ical_dates(line: str, tz) -> str:
     return ",".join(out)
 
 
-def row_to_gevent(event: Dict[str, Any]) -> Dict[str, Any]:
+def row_to_gevent(event: Dict[str, Any], mute: bool = False) -> Dict[str, Any]:
+    """``mute`` = «напоминает Уроборос» is on for this calendar: the provider keeps no alerts of its own."""
     start = parse_stored(event.get("start_utc"))
     end = parse_stored(event.get("end_utc"))
     if start is None or end is None:
@@ -503,7 +501,12 @@ def row_to_gevent(event: Dict[str, Any]) -> Dict[str, Any]:
         offsets = json.loads(event.get("reminders_json") or "[]")
     except ValueError:
         offsets = []
-    body["reminders"] = {"useDefault": False, "overrides": [{"method": "popup", "minutes": int(m)} for m in offsets][:5]}
+    if mute:
+        body["reminders"] = {"useDefault": False, "overrides": []}
+    elif offsets:
+        body["reminders"] = {"useDefault": False, "overrides": [{"method": "popup", "minutes": int(m)} for m in offsets][:5]}
+    else:
+        body["reminders"] = {"useDefault": True}
     try:
         attendees = json.loads(event.get("attendees_json") or "[]")
     except ValueError:

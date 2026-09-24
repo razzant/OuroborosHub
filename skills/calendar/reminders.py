@@ -22,7 +22,8 @@ from model import get_tz, iso_local, iso_utc, now_utc, parse_stored
 PLAN_HORIZON = timedelta(hours=24)
 CATCHUP_GRACE = timedelta(minutes=10)      # a reminder older than this after downtime is batched, not sent alone
 NOTICE_MAX = 128
-DEFAULT_RULES = {"default": [15], "by_calendar": {}, "hidden": []}   # minutes before start; hidden events silent by default
+DEFAULT_RULES = {"default": [], "by_calendar": {}, "hidden": []}   # 19 A: reminders only by request or saved rule
+MODE_KEY = "reminder_mode"                                          # 20 A: «напоминает Уроборос» is explicit per external calendar
 
 
 # ── rules ───────────────────────────────────────────────────────────
@@ -69,8 +70,30 @@ def _offsets(value: Any) -> List[int]:
     return sorted(out)
 
 
-def offsets_for(event: Dict[str, Any], rules: Dict[str, Any]) -> List[int]:
-    """Per-event offsets win; otherwise the calendar rule; otherwise the default (hidden events: the hidden rule)."""
+def mode_on(store, calendar_id: str) -> bool:
+    modes = store.get_setting(MODE_KEY) or {}
+    return bool(modes.get(str(calendar_id)))
+
+
+def set_mode(store, calendar_id: str, on: bool) -> Dict[str, bool]:
+    modes = store.get_setting(MODE_KEY) or {}
+    if on:
+        modes[str(calendar_id)] = True
+    else:
+        modes.pop(str(calendar_id), None)
+    store.set_setting(MODE_KEY, modes)
+    return modes
+
+
+def offsets_for(event: Dict[str, Any], rules: Dict[str, Any], modes: Optional[Dict[str, bool]] = None) -> List[int]:
+    """Per-event offsets win; otherwise the calendar rule; otherwise the default (hidden events: the hidden rule).
+
+    An external calendar (Yandex/Google) gets Ouroboros reminders only when the owner switched
+    «напоминает Уроборос» on for it; until then the provider's own alerts stay in charge (20 A).
+    """
+    provider = str(event.get("provider") or "local")
+    if provider != "local" and not (modes or {}).get(str(event.get("calendar_id"))):
+        return []
     try:
         own = json.loads(event.get("reminders_json") or "[]")
     except ValueError:
@@ -102,6 +125,7 @@ def plan(store, occurrences_in: Any, now: Optional[datetime] = None) -> int:
     """Schedule reminder rows for occurrences starting within the horizon. Idempotent by notice_id."""
     now = now or now_utc()
     rules = get_rules(store)
+    modes = store.get_setting(MODE_KEY) or {}
     horizon_end = now + PLAN_HORIZON + timedelta(days=7)   # offsets up to 7 days look further ahead
     scheduled = 0
     for occ in occurrences_in(now - timedelta(hours=1), horizon_end):
@@ -112,7 +136,7 @@ def plan(store, occurrences_in: Any, now: Optional[datetime] = None) -> int:
             continue
         event_id = occ.get("series_id") or occ.get("id")
         occ_start = occ.get("occurrence_start_utc") or occ.get("start_utc")
-        for offset in offsets_for(occ, rules):
+        for offset in offsets_for(occ, rules, modes):
             fire_at = start - timedelta(minutes=offset)
             if fire_at < now - CATCHUP_GRACE * 6 or fire_at > now + PLAN_HORIZON:
                 continue

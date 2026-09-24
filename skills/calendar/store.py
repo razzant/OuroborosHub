@@ -524,6 +524,10 @@ class Store:
             c.execute("UPDATE reminders SET state=?, detail=?, sent_at=CASE WHEN ?='sent' THEN ? ELSE sent_at END, updated_at=? WHERE id=?",
                       (state, detail[:500], state, ts, ts, reminder_id))
 
+    def drop_scheduled_reminders(self) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM reminders WHERE state IN ('scheduled', 'no_channel')")
+
     def drop_reminders_for(self, event_id: str, only_future: bool = True) -> None:
         with self._conn() as c:
             if only_future:

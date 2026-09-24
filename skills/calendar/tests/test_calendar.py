@@ -280,3 +280,58 @@ class GoogleConversionTests(unittest.TestCase):
         self.assertEqual(load_tokens(d, "фраза-владельца")["me@x.com"]["refresh_token"], "r")
         with self.assertRaises(ops.ProviderError):
             load_tokens(d, "другая")
+
+
+class DecisionSemanticsTests(unittest.TestCase):
+    """Owner decisions that the audit found violated: 5 A ('all'), 19 A/20 A (reminders opt-in per external calendar)."""
+
+    def test_all_means_default_plus_publish_set_not_every_writable(self):
+        ctx = make_ctx()
+        busy_cal = add_external_calendar(ctx.store, name="Рабочий")           # role_publish=True
+        ctx.store.upsert_calendar({"id": "yandex:u@ya.ru:events-2", "account_id": "yandex:u@ya.ru", "provider": "yandex", "external_id": "events-2",
+                                   "href": "https://caldav.yandex.ru/x/", "name": "Хобби", "writable": True, "role_publish": False})
+        ids, err = ctx.resolve_calendars("all")
+        self.assertEqual(err, "")
+        self.assertEqual(ids, [DEFAULT_LOCAL_CALENDAR_ID, busy_cal])
+
+    def test_external_calendar_reminders_only_after_enable(self):
+        ctx = make_ctx()
+        cal_id = add_external_calendar(ctx.store)
+        from model import now_utc
+        start = now_utc() + timedelta(minutes=20)
+        row = ctx.store.insert_event({"calendar_id": cal_id, "title": "Внешнее", "start_utc": iso_utc(start), "end_utc": iso_utc(start + timedelta(hours=1)),
+                                      "reminders_json": "[15]", "origin": "external", "external_id": "x1", "href": "https://caldav.yandex.ru/x/x1.ics"})
+        rem.plan(ctx.store, lambda s, e: ctx.occurrences(s, e))
+        self.assertEqual(ctx.store.upcoming_reminders(now_utc()), [])          # provider reminds; Ouroboros silent (20 A)
+        rem.set_mode(ctx.store, cal_id, True)
+        rem.plan(ctx.store, lambda s, e: ctx.occurrences(s, e))
+        self.assertEqual(len(ctx.store.upcoming_reminders(now_utc())), 1)      # mode on: Ouroboros takes over
+        local = ctx.store.insert_event({"calendar_id": DEFAULT_LOCAL_CALENDAR_ID, "title": "Локальное без правил", "start_utc": iso_utc(start), "end_utc": iso_utc(start + timedelta(hours=1))})
+        rem.plan(ctx.store, lambda s, e: ctx.occurrences(s, e))
+        self.assertEqual(len([r for r in ctx.store.upcoming_reminders(now_utc()) if r["event_id"] == local["id"]]), 0)   # 19 A: no default rule → nothing
+
+
+class YandexExceptionWriteTests(unittest.TestCase):
+    def test_exception_is_written_inside_master_resource(self):
+        from providers import YandexAdapter
+        master_ics = ("BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:x\nBEGIN:VEVENT\nUID:ser1\nSUMMARY:Серия\n"
+                      "DTSTART;TZID=Europe/Moscow:20260928T190000\nDTEND;TZID=Europe/Moscow:20260928T200000\nRRULE:FREQ=DAILY\nEND:VEVENT\nEND:VCALENDAR\n")
+        adapter = YandexAdapter("u@ya.ru", "pwd")
+        puts = []
+        adapter.get = lambda href: (master_ics, '"m1"')
+        adapter._request = lambda method, url, body=None, headers=None: (puts.append((method, url, body, headers)) or (201, {"etag": '"m2"'}, ""))
+        rec = "2026-09-30T16:00:00+00:00"
+        moved = {"master_id": "evt_m", "master_href": "https://caldav.yandex.ru/c/ser1.ics", "recurrence_id": rec, "uid": "ser1", "title": "Серия (перенос)",
+                 "start_utc": "2026-09-30T17:00:00+00:00", "end_utc": "2026-09-30T18:00:00+00:00", "tz": "Europe/Moscow", "all_day": 0, "status": "confirmed",
+                 "reminders_json": "[]", "attendees_json": "[]"}
+        res = adapter.update({}, moved, '"m1"', {})
+        method, url, body, headers = puts[-1]
+        self.assertEqual((method, headers.get("If-Match"), res["etag"]), ("PUT", '"m1"', '"m2"'))
+        self.assertIn("RRULE:FREQ=DAILY", body)                     # master kept
+        self.assertIn("RECURRENCE-ID;TZID=Europe/Moscow:20260930T190000", body)
+        self.assertIn("SUMMARY:Серия (перенос)", body)
+        cancelled = {**moved, "status": "cancelled"}
+        adapter.update({}, cancelled, '"m2"', {})
+        body2 = puts[-1][2]
+        self.assertIn("EXDATE;TZID=Europe/Moscow:20260930T190000", body2)
+        self.assertNotIn("RECURRENCE-ID", body2)
