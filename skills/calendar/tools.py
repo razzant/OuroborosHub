@@ -485,7 +485,7 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
                                               "busy_source": bool(c["role_busy"]), "publish_busy": bool(c["role_publish"]), "publish_mode": c["publish_mode"],
                                               "default": bool(c["is_default"]), "writable": bool(c["writable"])} for c in st.list_calendars()],
                                "accounts": st.list_accounts(), "secrets_present": {k: bool(ctx.secrets.get(k)) for k in SECRET_KEYS},
-                               "actions": ["set", "set_calendar", "new_local_calendar", "reload_yandex", "connect_google", "disconnect", "sync_now"]})
+                               "actions": ["set", "set_calendar", "new_local_calendar", "reload_yandex", "connect_google", "reload_google", "disconnect", "sync_now"]})
     if not _bool(confirm):
         return json_dumps({"status": "needs_confirm", "message": "Изменение настроек календаря — по команде владельца: повтори с confirm=true", "action": action})
     if action == "set":
@@ -530,7 +530,9 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
     if action == "reload_yandex":
         return bounded_result(reload_yandex(ctx))
     if action == "connect_google":
-        return json_dumps({"status": "not_implemented", "message": "Подключение Google появится на этапе Google (после появления параметров клиента в Secrets)"})
+        return bounded_result(connect_google(ctx))
+    if action == "reload_google":
+        return bounded_result(reload_google(ctx))
     if action == "disconnect":
         accounts = [a for a in st.list_accounts() if a["id"] == calendar_id or a["alias"] == calendar_id]
         if not accounts:
@@ -571,6 +573,66 @@ def reload_yandex(ctx: Context) -> Dict[str, Any]:
         report.append({"account": account_id, "status": "ok", "calendars": [{"id": c["id"], "name": c["name"], "writable": c["writable"]} for c in cals]})
     st.set_setting("sync_requested_at", iso_utc(now_utc()))
     return {"status": "ok", "accounts": report, "next_step": "Роли календарей (показывать / источник занятости / публикация «Занят») — cal_settings(action='set_calendar', …)"}
+
+
+def connect_google(ctx: Context) -> Dict[str, Any]:
+    """Start the BYO OAuth flow: the owner opens the URL in the system browser; the host route finishes it."""
+    import providers_google as gp
+    if not ctx.secrets.get("GOOGLE_CALENDAR_CLIENT_ID"):
+        return {"status": "not_connected", "message": "Нет GOOGLE_CALENDAR_CLIENT_ID в Settings → Secrets (грант выдаётся после появления ключей)"}
+    if not ctx.secrets.get("CALENDAR_TOKEN_KEY"):
+        return {"status": "not_connected", "message": "Нет CALENDAR_TOKEN_KEY в Settings → Secrets — им шифруются токены Google"}
+    try:
+        port = int((ctx.api.get_runtime_info() or {}).get("server_port") or 8765)
+    except Exception:
+        port = 8765
+    redirect_uri = f"http://127.0.0.1:{port}/api/extensions/calendar/oauth/callback"
+    try:
+        started = gp.start_auth(ctx.store, ctx.secrets, redirect_uri)
+    except ops.ProviderError as exc:
+        return {"status": "error", "message": exc.message}
+    return {"status": "ok", "auth_url": started["auth_url"], "redirect_uri": redirect_uri,
+            "message": "Открой ссылку в системном браузере под нужным аккаунтом Google и разреши доступ; после возврата на 127.0.0.1 аккаунт появится в cal_status. "
+                       "Если Google откажет из-за redirect_uri — сообщи, есть запасной путь через фоновый процесс.",
+            "next_step": "После входа: cal_settings(action='reload_google', confirm=true) при необходимости; роли календарей — set_calendar"}
+
+
+def reload_google(ctx: Context) -> Dict[str, Any]:
+    """Discover calendars of every Google account whose tokens are stored; keep owner roles."""
+    import providers_google as gp
+    st = ctx.store
+    try:
+        tokens = gp.load_tokens(ctx.state_dir, str(ctx.secrets.get("CALENDAR_TOKEN_KEY") or ""))
+    except ops.ProviderError as exc:
+        return {"status": "error", "message": exc.message}
+    if not tokens:
+        return {"status": "not_connected", "message": "Ни один аккаунт Google ещё не подключён: cal_settings(action='connect_google')"}
+    report = []
+    for email in tokens:
+        account_id = f"{PROVIDER_GOOGLE}:{email}"
+        st.upsert_account({"id": account_id, "provider": PROVIDER_GOOGLE, "alias": st.get_account(account_id)["alias"] if st.get_account(account_id) else email.split("@")[0],
+                           "login": email, "status": "ok"})
+        adapter = ctx.providers.adapter_for(account_id)
+        if adapter is None:
+            report.append({"account": account_id, "status": "not_connected"})
+            continue
+        try:
+            cals = adapter.list_calendars()
+        except ops.ProviderError as exc:
+            st.set_account_status(account_id, "auth_failed" if exc.kind == "auth" else "error", exc.message)
+            report.append({"account": account_id, "status": exc.kind, "message": exc.message})
+            continue
+        for cal in cals:
+            existing = st.get_calendar(cal["id"])
+            st.upsert_calendar({**cal, "role_visible": existing["role_visible"] if existing else True,
+                                "role_busy": existing["role_busy"] if existing else True,
+                                "role_publish": existing["role_publish"] if existing else False,
+                                "publish_mode": existing["publish_mode"] if existing else "busy"})
+            st.set_setting(f"google_default_reminders:{cal['id']}", cal.get("default_reminders") or [])
+        st.set_account_status(account_id, "ok", "", synced=False)
+        report.append({"account": account_id, "status": "ok", "calendars": [{"id": c["id"], "name": c["name"], "writable": c["writable"], "primary": c.get("is_primary", False)} for c in cals]})
+    st.set_setting("sync_requested_at", iso_utc(now_utc()))
+    return {"status": "ok", "accounts": report}
 
 
 def _plan_reminders(ctx: Context, replan: bool = False) -> None:

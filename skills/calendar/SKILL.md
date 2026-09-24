@@ -34,6 +34,7 @@ ui_tab:
     entry: widget.js
     start: auto
     appearance: host
+    span: 2
 ---
 
 # Календарь Уробороса

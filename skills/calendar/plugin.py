@@ -100,7 +100,7 @@ SCHEMAS = {
         "confirm": {"type": "boolean", "default": False}}},
 }
 
-WIDGET_RENDER = {"kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host"}
+WIDGET_RENDER = {"kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host", "span": 2}
 
 
 def register(api):

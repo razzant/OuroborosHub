@@ -180,6 +180,24 @@ def register_routes(api, make_ctx) -> None:
         body["confirm"] = True
         return JSONResponse(json.loads(tools.cal_reminders(ctx, **body)))
 
+    async def oauth_callback(request):
+        """Google redirects the owner's browser here (loopback passes without a session)."""
+        from starlette.responses import HTMLResponse
+        import providers_google as gp
+        ctx = make_ctx()
+        q = request.query_params
+        code, state, error = str(q.get("code") or ""), str(q.get("state") or ""), str(q.get("error") or "")
+        if error or not code or not state:
+            return HTMLResponse(f"<h3>Google не завершил вход</h3><p>{error or 'нет кода авторизации'}. Закрой вкладку и попробуй снова из чата.</p>", status_code=400)
+        try:
+            done = gp.finish_auth(ctx.store, ctx.secrets, ctx.state_dir, code, state)
+            ctx.providers = tools.Providers(ctx.secrets, ctx.state_dir)
+            report = tools.reload_google(ctx)
+        except ops.ProviderError as exc:
+            return HTMLResponse(f"<h3>Ошибка подключения Google</h3><p>{exc.message}</p>", status_code=502)
+        cals = [c["name"] for a in report.get("accounts", []) if a.get("account") == done["account_id"] for c in a.get("calendars", [])]
+        return HTMLResponse("<h3>Google подключён: " + done["email"] + "</h3><p>Календари: " + ", ".join(cals) + "</p><p>Вкладку можно закрыть; вернись в чат Уробороса.</p>")
+
     async def sync_now(request):
         ctx = make_ctx()
         ctx.store.set_setting("sync_requested_at", iso_utc(ctx.now()))
@@ -195,3 +213,4 @@ def register_routes(api, make_ctx) -> None:
     api.register_route("reminders", reminders_get, methods=("GET",))
     api.register_route("reminders/save", reminders_save, methods=("POST",))
     api.register_route("sync", sync_now, methods=("POST",))
+    api.register_route("oauth/callback", oauth_callback, methods=("GET",))

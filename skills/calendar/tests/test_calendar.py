@@ -246,3 +246,37 @@ class ProviderRoundTripTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GoogleConversionTests(unittest.TestCase):
+    def test_gevent_round_trip_and_stable_id(self):
+        from providers_google import gevent_to_row, row_to_gevent, _google_id
+        item = {"id": "abc123", "iCalUID": "abc123@google.com", "etag": '"e1"', "summary": "Standup",
+                "start": {"dateTime": "2026-09-28T10:00:00+03:00", "timeZone": "Europe/Moscow"},
+                "end": {"dateTime": "2026-09-28T10:30:00+03:00", "timeZone": "Europe/Moscow"},
+                "recurrence": ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE", "EXDATE;TZID=Europe/Moscow:20261005T100000"],
+                "attendees": [{"email": "me@x.com", "self": True, "responseStatus": "accepted"}],
+                "reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": 10}]}, "status": "confirmed"}
+        row = gevent_to_row(item, "google:me@x.com:primary", get_tz("UTC"))
+        self.assertEqual(row["start_utc"], "2026-09-28T07:00:00+00:00")
+        self.assertEqual(row["exdates"], "2026-10-05T07:00:00+00:00")
+        self.assertEqual(row["my_response"], "accepted")
+        body = row_to_gevent({**row, "title": "Standup 2"})
+        self.assertEqual(body["start"], {"dateTime": "2026-09-28T10:00:00+03:00", "timeZone": "Europe/Moscow"})
+        self.assertIn("EXDATE:20261005T070000Z", body["recurrence"])
+        self.assertEqual(body["reminders"], {"useDefault": False, "overrides": [{"method": "popup", "minutes": 10}]})
+        gid = _google_id({"uid": "u-1"})
+        self.assertEqual(gid, _google_id({"uid": "u-1"}))
+        self.assertTrue(all(ch in "abcdefghijklmnopqrstuv0123456789" for ch in gid) and 5 <= len(gid) <= 1024)
+        cancelled = gevent_to_row({"id": "abc123_20260930T070000Z", "recurringEventId": "abc123", "status": "cancelled",
+                                   "originalStartTime": {"dateTime": "2026-09-30T10:00:00+03:00"},
+                                   "start": {"dateTime": "2026-09-30T10:00:00+03:00"}, "end": {"dateTime": "2026-09-30T10:30:00+03:00"}}, "c", get_tz("UTC"))
+        self.assertEqual((cancelled["recurrence_id"], cancelled["status"], cancelled["master_external_id"]), ("2026-09-30T07:00:00+00:00", "cancelled", "abc123"))
+
+    def test_token_vault_roundtrip_and_wrong_key(self):
+        from providers_google import load_tokens, save_tokens
+        d = tempfile.mkdtemp()
+        save_tokens(d, "фраза-владельца", {"me@x.com": {"refresh_token": "r", "access_token": "a", "expires_at": "2026-09-25T00:00:00+00:00"}})
+        self.assertEqual(load_tokens(d, "фраза-владельца")["me@x.com"]["refresh_token"], "r")
+        with self.assertRaises(ops.ProviderError):
+            load_tokens(d, "другая")

@@ -443,6 +443,9 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
         payload = json.loads(intent.get("payload_json") or "{}")
     except ValueError:
         payload = {}
+    if event.get("master_id") and not event.get("external_id"):
+        master = store.get_event(event["master_id"])
+        event = {**event, "master_external_id": (master or {}).get("external_id") or ""}
     try:
         if intent["kind"] == "create":
             res = adapter.create(cal, event, payload)
