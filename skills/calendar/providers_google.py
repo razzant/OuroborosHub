@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from model import AVAIL_BUSY, PROVIDER_GOOGLE, account_id as make_account_id, calendar_id as make_calendar_id, get_tz, iso_utc, now_utc, parse_stored
+from model import tz_name as zone_name
 from ops import ProviderError
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -441,6 +442,8 @@ def gevent_to_row(item: Dict[str, Any], calendar_id: str, default_tz) -> Optiona
     all_day = "date" in start
     tz_name = str(start.get("timeZone") or "")
     tz = get_tz(tz_name) if tz_name else default_tz
+    if not tz_name:
+        tz_name = zone_name(tz)   # all-day rows remember the zone their dates were read in, so EXDATE/UNTIL round-trip
     try:
         if all_day:
             s = datetime.fromisoformat(start["date"]).replace(tzinfo=tz)

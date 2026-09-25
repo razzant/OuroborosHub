@@ -185,8 +185,8 @@
     function renderColumn(d, day) {
         var col = el('div', { class: 'col', 'data-date': day.date });
         for (var h = DAY_START_H; h < 24; h++) col.appendChild(el('div', { class: 'hline' }));
-        d.hidden_busy.forEach(function (b) { if (b.all_day) return; place(col, day.date, b.start, b.end, el('div', { class: 'hatch', title: 'занято (служебное)' })); });
-        d.usual.forEach(function (u) { place(col, day.date, u.start, u.end, el('div', { class: 'usual', text: 'обычно · ' + u.title })); });
+        d.hidden_busy.forEach(function (b) { if (b.all_day || !overlapsDay(b, day.date)) return; place(col, day.date, b.start, b.end, el('div', { class: 'hatch', title: 'занято (служебное)' })); });
+        d.usual.forEach(function (u) { if (!overlapsDay(u, day.date)) return; place(col, day.date, u.start, u.end, el('div', { class: 'usual', text: 'обычно · ' + u.title })); });
         var timed = d.events.filter(function (e) { return !e.all_day; });
         var laid = layout(timed.filter(function (e) { return overlapsDay(e, day.date); }), day.date);
         laid.forEach(function (item) {
@@ -270,7 +270,8 @@
 
     /* ---------- drag / resize ---------- */
     function attachDrag(node, e, col) {
-        if (!window.PointerEvent) return;
+        var coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+        if (!window.PointerEvent || coarse) { node.addEventListener('click', function () { openCard(e); }); return; }   // touch: fields, not drag (24 A)
         node.addEventListener('pointerdown', function (ev) {
             if (ev.button !== 0) return;
             var resizing = ev.target.classList.contains('rs');
@@ -463,7 +464,8 @@
         var p = state.panel, box = el('div', { class: 'status', style: 'border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px;color:var(--fg)' });
         if (p.loading) { box.appendChild(el('span', { text: 'Загружаю…' })); return box; }
         var rules = (p.data && p.data.rules) || {}, ch = (p.data && p.data.channel) || {};
-        var def = el('input', { value: (rules.default || []).join(', '), placeholder: 'напоминать за N минут, через запятую (пусто — не напоминать)', style: 'width:min(320px,100%)' });
+        var def = el('input', { value: (rules.default || []).join(', '), placeholder: 'напоминать за N минут, через запятую (пусто — не напоминать)',
+            style: 'width:min(320px,100%);padding:4px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit' });
         var msg = el('span', { style: 'margin-left:8px', text: p.msg || '' });
         var saveBtn = el('button', { text: 'Сохранить правило', onclick: function () {
             var mins = def.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean).map(Number).filter(function (n) { return !isNaN(n); });

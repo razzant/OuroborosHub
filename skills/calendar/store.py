@@ -396,15 +396,6 @@ class Store:
             rows = c.execute("SELECT * FROM events WHERE master_id=? AND deleted_at IS NULL ORDER BY recurrence_id", (master_id,)).fetchall()
         return [dict(r) for r in rows]
 
-    def search(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
-        needle = f"%{query.lower()}%"
-        with self._conn() as c:
-            rows = c.execute(
-                "SELECT e.*, c.name AS calendar_name, c.provider AS provider FROM events e JOIN calendars c ON c.id=e.calendar_id"
-                " WHERE e.deleted_at IS NULL AND (lower(e.title) LIKE ? OR lower(e.description) LIKE ?) ORDER BY e.start_utc DESC LIMIT ?",
-                (needle, needle, limit)).fetchall()
-        return [dict(r) for r in rows]
-
     def find_by_external(self, calendar_id: str, external_id: str = "", href: str = "", uid: str = "") -> Optional[Dict[str, Any]]:
         with self._conn() as c:
             if external_id:
@@ -444,7 +435,7 @@ class Store:
 
     def add_intent(self, kind: str, account_id: str, calendar_id: str, event_id: str, payload: Dict[str, Any],
                    scope: str = "this", expected_etag: str = "") -> Dict[str, Any]:
-        ts = _ts()
+        ts = now_utc().isoformat(timespec="microseconds")   # intents of one call must order strictly (dependents wait for earlier writes)
         row = {"id": new_id("int"), "kind": kind, "account_id": account_id, "calendar_id": calendar_id, "event_id": event_id,
                "scope": scope, "payload_json": json.dumps(payload, ensure_ascii=False, default=str), "expected_etag": expected_etag or "",
                "state": INTENT_PENDING, "attempts": 0, "next_attempt_at": ts, "lease_until": None, "lease_owner": "",
@@ -494,6 +485,11 @@ class Store:
     def intents_for_event(self, event_id: str) -> List[Dict[str, Any]]:
         with self._conn() as c:
             rows = c.execute("SELECT * FROM intents WHERE event_id=? ORDER BY created_at", (event_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def open_intents_for_event(self, event_id: str) -> List[Dict[str, Any]]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM intents WHERE event_id=? AND state=? ORDER BY created_at", (event_id, INTENT_PENDING)).fetchall()
         return [dict(r) for r in rows]
 
     def open_intents(self, limit: int = 50) -> List[Dict[str, Any]]:

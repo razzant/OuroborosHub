@@ -10,7 +10,6 @@ from typing import Any, Dict
 from starlette.responses import JSONResponse
 
 import ops
-import reminders as rem
 import tools
 from model import (
     AVAIL_BUSY, AVAIL_SOFT, VISIBILITY_HIDDEN, VISIBILITY_SHOWN, WEEKDAY_LABELS, day_bounds, event_public, iso_local, iso_utc,
@@ -53,8 +52,8 @@ def agenda_payload(ctx: tools.Context, view: str, anchor: str, calendar_ids: Any
     cals = ctx.store.list_calendars()
     visible_ids = [c["id"] for c in cals if c["role_visible"]]
     if calendar_ids:
-        visible_ids = [c for c in visible_ids if c in calendar_ids]
-    occs = ctx.occurrences(start, end, visible_ids or None, include_hidden=True)
+        visible_ids = [c for c in visible_ids if c in calendar_ids]   # ["-"] (every chip unticked) leaves nothing
+    occs = ctx.occurrences(start, end, visible_ids, include_hidden=True) if visible_ids else []
     events, hatches, usual = [], [], []
     for occ in occs:
         if str(occ.get("status") or "") == "cancelled":

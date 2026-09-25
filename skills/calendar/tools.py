@@ -11,14 +11,13 @@ import ops
 import reminders as rem
 from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, DEFAULT_LOCAL_CALENDAR_ID, MAX_EVENTS, MAX_WINDOW_DAYS, PROVIDER_GOOGLE,
-    PROVIDER_LOCAL, PROVIDER_YANDEX, SCOPES, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_HIDDEN, VISIBILITY_SHOWN, WEEKDAY_LABELS,
+    PROVIDER_LOCAL, PROVIDER_YANDEX, SCOPES, SECRET_KEYS, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_HIDDEN, VISIBILITY_SHOWN, WEEKDAY_LABELS,
     bounded_result, day_bounds, event_public, get_tz, iso_local, iso_utc, json_dumps, label, now_utc, parse_input,
     parse_stored, parse_working_hours, tz_name,
 )
 from providers import Providers
 from store import Store
 
-SECRET_KEYS = ("YANDEX_CALDAV_ACCOUNTS", "GOOGLE_CALENDAR_CLIENT_ID", "GOOGLE_CALENDAR_CLIENT_SECRET", "CALENDAR_TOKEN_KEY")
 CONFIRM_MESSAGE = "Запись делается только по явной команде владельца или после его выбора: повтори вызов с confirm=true"
 
 
@@ -187,6 +186,8 @@ def cal_status(ctx: Context, **kwargs) -> str:
         next_steps.append("Доставка напоминаний без модели ждёт маршрут /chat/notify в ядре: напоминания хранятся и видны в виджете")
     elif channel.get("state") == "no_grant":
         next_steps.append("Маршрут /chat/notify есть, но гранта нет: владелец выдаёт разрешение inject_chat скиллу calendar в Skills")
+    elif channel.get("state") == "token_rejected":
+        next_steps.append("Хост отверг токен скилла для фонового процесса: выключи и включи скилл (toggle), при устаревшем ревью — обнови аттестацию")
     return bounded_result({
         "status": "ok",
         "timezone": tz_name(ctx.tz), "now_local": now.replace(microsecond=0).isoformat(), "today": now.date().isoformat(),
@@ -237,7 +238,7 @@ def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = No
                 out["series_id"] = row["id"]
             out["occurrence_start"] = iso_local(live[0]["start_utc"], ctx.tz) if live else iso_local(occ, ctx.tz)
         out["assignments"] = [{"calendar_id": m["calendar_id"], "calendar_name": m.get("calendar_name"), "event_id": m["id"],
-                               "sync_state": m.get("sync_state")} for m in st.group_members(row.get("link_group_id") or "")] if row.get("link_group_id") else []
+                               "sync_state": m.get("sync_state")} for m in st.group_masters(row.get("link_group_id") or "")] if row.get("link_group_id") else []
         out["intents"] = [{"kind": i["kind"], "state": i["state"], "attempts": i["attempts"], "result": i.get("result_json")} for i in st.intents_for_event(base)[-5:]]
         return bounded_result({"status": "ok", "event": out})
     s, e = ctx.parse_range(start, end)

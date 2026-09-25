@@ -249,8 +249,6 @@ class ProviderRoundTripTests(unittest.TestCase):
         self.assertIn("BEGIN:VTIMEZONE", out)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class GoogleConversionTests(unittest.TestCase):
@@ -340,3 +338,7 @@ class YandexExceptionWriteTests(unittest.TestCase):
         body2 = puts[-1][2]
         self.assertIn("EXDATE;TZID=Europe/Moscow:20260930T190000", body2)
         self.assertNotIn("RECURRENCE-ID", body2)
+
+
+if __name__ == "__main__":
+    unittest.main()

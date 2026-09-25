@@ -145,3 +145,83 @@ class ReminderAndWidgetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Round3FixTests(unittest.TestCase):
+    """Regressions for the round-3 delta findings (batch 4)."""
+
+    def test_exception_id_keeps_the_requested_scope(self):
+        ctx = make_context()
+        created = json.loads(tools.cal_create(ctx, title="Серия", start="2026-10-01T09:00+00:00", duration_min=60, rrule="FREQ=DAILY", confirm=True))
+        master_id = created["event"]["id"]
+        key = iso_utc(datetime(2026, 10, 5, 9, 0, tzinfo=timezone.utc))
+        json.loads(tools.cal_update(ctx, id=f"{master_id}@{key}", title="Особая", scope="this", confirm=True))
+        exc = [e for e in ctx.store.exceptions_for(master_id) if e["recurrence_id"] == key][0]
+        # the widget/agent now hold the exception's own id; «all» said about it must still move the whole series
+        u = json.loads(tools.cal_update(ctx, id=exc["id"], start="2026-10-05T11:00+00:00", scope="all", confirm=True))
+        self.assertEqual(u["status"], "updated")
+        master = ctx.store.get_event(master_id)
+        self.assertEqual(master["start_utc"], iso_utc(datetime(2026, 10, 1, 11, 0, tzinfo=timezone.utc)))
+
+    def test_retry_kind_defers_instead_of_failing(self):
+        ctx = make_context()
+        external = add_external_calendar(ctx.store)
+
+        class RetryAdapter(RecordingAdapter):
+            def update(self, calendar, event, expected_etag, payload):
+                raise ops.ProviderError("retry", "экземпляр ещё не найден")
+        ctx.providers = OneAdapterProviders(RetryAdapter())
+        created = json.loads(tools.cal_create(ctx, title="Серия", start="2026-10-01T09:00+00:00", rrule="FREQ=DAILY", calendars=[external], confirm=True))
+        key = iso_utc(datetime(2026, 10, 3, 9, 0, tzinfo=timezone.utc))
+        u = json.loads(tools.cal_update(ctx, id=f"{created['event']['id']}@{key}", title="Позже", scope="this", confirm=True))
+        self.assertEqual(u["status"], "pending")
+        self.assertEqual([i["state"] for i in ctx.store.open_intents()], ["pending"])
+
+    def test_rsvp_waits_for_a_pending_write(self):
+        ctx = make_context()
+        external = add_external_calendar(ctx.store)
+        ctx.providers = OneAdapterProviders(FailingCreateAdapter())
+        created = json.loads(tools.cal_create(ctx, title="Встреча", start="2026-10-01T09:00+00:00", calendars=[external],
+                                              attendees=["owner@example.test"], confirm=True))
+        u = json.loads(tools.cal_update(ctx, id=created["event"]["id"], title="Встреча 2", response="accepted", confirm=True))
+        self.assertEqual(u["status"], "pending")
+        kinds = sorted(i["kind"] for i in ctx.store.open_intents())
+        self.assertIn("rsvp", kinds)   # recorded, waiting for the write — not dropped
+
+    def test_unticking_every_calendar_shows_nothing(self):
+        ctx = make_context()
+        json.loads(tools.cal_create(ctx, title="Видимое", start="2026-10-01T09:00+00:00", confirm=True))
+        everything = routes.agenda_payload(ctx, "day", "2026-10-01", None, False)
+        nothing = routes.agenda_payload(ctx, "day", "2026-10-01", ["-"], False)
+        self.assertEqual(len(everything["events"]), 1)
+        self.assertEqual(nothing["events"], [])
+
+    def test_yandex_all_day_cancellation_writes_a_date_exdate_and_waits_for_the_master(self):
+        from providers import YandexAdapter
+        master_ics = ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:x\r\nBEGIN:VEVENT\r\nUID:s1\r\nSUMMARY:Отпуск\r\n"
+                      "DTSTART;VALUE=DATE:20261001\r\nDTEND;VALUE=DATE:20261002\r\nRRULE:FREQ=WEEKLY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+        adapter = YandexAdapter("owner@yandex.test", "password")
+        puts = []
+        adapter.get = lambda href: (master_ics, '"m1"')
+        adapter._request = lambda method, url, body=None, headers=None: (puts.append((method, url, body, headers)) or (204, {"etag": '"m2"'}, ""))
+        event = {"master_id": "m", "master_href": "https://caldav.yandex.ru/calendars/owner/s1.ics", "recurrence_id": "2026-10-08T00:00:00+00:00",
+                 "uid": "s1", "title": "Отпуск", "start_utc": "2026-10-08T00:00:00+00:00", "end_utc": "2026-10-09T00:00:00+00:00", "tz": "UTC",
+                 "all_day": 1, "status": "cancelled", "attendees_json": "[]", "reminders_json": "[]"}
+        adapter.update({}, event, "", {})
+        written = puts[-1][2]
+        self.assertIn("EXDATE;VALUE=DATE:20261008", written)
+        with self.assertRaises(ops.ProviderError) as ctx_err:
+            adapter.update({}, {**event, "master_href": ""}, "", {})
+        self.assertEqual(ctx_err.exception.kind, "retry")
+
+    def test_truncated_master_drops_exceptions_beyond_until(self):
+        from providers import row_to_ics
+        raw = ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:x\r\nBEGIN:VEVENT\r\nUID:s1\r\nSUMMARY:Серия\r\nDTSTART:20261001T090000Z\r\n"
+               "DTEND:20261001T100000Z\r\nRRULE:FREQ=DAILY\r\nEND:VEVENT\r\n"
+               "BEGIN:VEVENT\r\nUID:s1\r\nRECURRENCE-ID:20261003T090000Z\r\nSUMMARY:Ранняя\r\nDTSTART:20261003T110000Z\r\nDTEND:20261003T120000Z\r\nEND:VEVENT\r\n"
+               "BEGIN:VEVENT\r\nUID:s1\r\nRECURRENCE-ID:20261010T090000Z\r\nSUMMARY:Поздняя\r\nDTSTART:20261010T110000Z\r\nDTEND:20261010T120000Z\r\nEND:VEVENT\r\n"
+               "END:VCALENDAR\r\n")
+        out = row_to_ics({"uid": "s1", "title": "Серия", "start_utc": "2026-10-01T09:00:00+00:00", "end_utc": "2026-10-01T10:00:00+00:00", "tz": "UTC",
+                          "all_day": 0, "rrule": "FREQ=DAILY;UNTIL=20261005T085959Z", "raw_payload": raw, "attendees_json": "[]", "reminders_json": "[]"})
+        self.assertIn("Ранняя", out)
+        self.assertNotIn("Поздняя", out)

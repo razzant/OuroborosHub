@@ -27,13 +27,12 @@ if PAYLOAD not in sys.path:
 
 import ops  # noqa: E402
 import reminders as rem  # noqa: E402
-from model import PROVIDER_GOOGLE, PROVIDER_YANDEX, get_tz, iso_utc, now_utc, parse_stored  # noqa: E402
+from model import PROVIDER_GOOGLE, PROVIDER_YANDEX, SECRET_KEYS, get_tz, iso_utc, now_utc, parse_stored  # noqa: E402
 from providers import Providers  # noqa: E402
 from store import Store  # noqa: E402
 
 TICK_SEC = 60
 SYNC_INTERVAL_SEC = 180
-SECRET_KEYS = ("YANDEX_CALDAV_ACCOUNTS", "GOOGLE_CALENDAR_CLIENT_ID", "GOOGLE_CALENDAR_CLIENT_SECRET", "CALENDAR_TOKEN_KEY")
 _stop = False
 
 
@@ -104,11 +103,16 @@ def sync_account(store: Store, providers: Providers, account: Dict[str, Any], tz
             report["events"] += n
             report["deleted"] += d
             report["propagated"] += p
+            bad = list(getattr(adapter, "parse_errors", []) or [])
+            parse_note = f"не разобрано событий: {len(bad)} ({'; '.join(bad[:3])})"[:300] if bad else ""
+            if bad:
+                report.setdefault("parse_errors", []).extend(bad[:10])
             if kind == "google_sync_token":
-                store.set_sync_state(cal["id"], cursor=next_cursor, cursor_kind=kind, last_ok_at=iso_utc(now_utc()), last_error="")
+                store.set_sync_state(cal["id"], cursor=next_cursor, cursor_kind=kind, last_ok_at=iso_utc(now_utc()), last_error=parse_note)
             else:
-                store.set_sync_state(cal["id"], cursor=ctag, cursor_kind="ctag" if ctag else "window", last_ok_at=iso_utc(now_utc()), last_error="")
-        store.set_account_status(account["id"], "ok", "", synced=True)
+                store.set_sync_state(cal["id"], cursor=ctag, cursor_kind="ctag" if ctag else "window", last_ok_at=iso_utc(now_utc()), last_error=parse_note)
+        parse_total = len(report.get("parse_errors") or [])
+        store.set_account_status(account["id"], "ok", f"не разобрано событий: {parse_total}" if parse_total else "", synced=True)
     except ops.ProviderError as exc:
         status = "auth_failed" if exc.kind == "auth" else "error"
         store.set_account_status(account["id"], status, exc.message)

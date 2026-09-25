@@ -20,7 +20,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from model import get_tz, iso_local, iso_utc, now_utc, parse_stored
 
 PLAN_HORIZON = timedelta(hours=24)
-CATCHUP_GRACE = timedelta(minutes=10)      # a reminder older than this after downtime is batched, not sent alone
+CATCHUP_GRACE = timedelta(minutes=10)
+MAX_NOTICE_CHARS = 4000                     # spec-core-chat-notify: text ≤ 4000      # a reminder older than this after downtime is batched, not sent alone
 MAX_DELIVERY_ATTEMPTS = 5
 NOTICE_MAX = 128
 DEFAULT_RULES = {"default": [], "by_calendar": {}, "hidden": []}   # 19 A: reminders only by request or saved rule
@@ -69,11 +70,6 @@ def _offsets(value: Any) -> List[int]:
         if 0 <= minutes <= 7 * 24 * 60:
             out.add(minutes)
     return sorted(out)
-
-
-def mode_on(store, calendar_id: str) -> bool:
-    modes = store.get_setting(MODE_KEY) or {}
-    return bool(modes.get(str(calendar_id)))
 
 
 def set_mode(store, calendar_id: str, on: bool) -> Dict[str, bool]:
@@ -190,7 +186,8 @@ class NotifyChannel:
         try:
             data = self._request("GET", "/identity")
         except _HttpError as exc:
-            self._state = "no_grant" if exc.status == 403 else "unreachable"
+            # /identity needs no grant: a 403 here means the host rejected the skill token (disabled / stale review)
+            self._state = "token_rejected" if exc.status == 403 else "unreachable"
             return self._state
         except Exception:
             self._state = "unreachable"
@@ -201,7 +198,7 @@ class NotifyChannel:
     def send(self, notice_id: str, text: str) -> Tuple[str, str]:
         """→ (state, detail): sent | duplicate | no_route | no_grant | retry | failed."""
         state = self.state()
-        if state in ("no_route", "unreachable"):
+        if state in ("no_route", "unreachable", "token_rejected"):
             return ("no_route" if state == "no_route" else "retry"), state
         try:
             data = self._request("POST", "/chat/notify", {"notice_id": notice_id, "text": text, "markdown": False})
@@ -251,7 +248,7 @@ def format_text(event: Dict[str, Any], occurrence_start_utc: str, offset: int, t
     if event.get("all_day"):
         head = f"{when:%d.%m}" if when else ""
     soon = "сейчас" if offset == 0 else f"через {offset} мин"
-    parts = [f"⏰ {head} · {event.get('title') or 'Событие'} ({soon})"]
+    parts = [f"⏰ {head} · {str(event.get('title') or 'Событие')[:120]} ({soon})"]
     if event.get("calendar_name"):
         parts.append(str(event["calendar_name"]))
     if event.get("location"):
@@ -279,14 +276,14 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
             store.mark_reminder(rem["id"], "skipped", "событие отменено или удалено")
             stats["skipped"] += 1
             continue
-        verdict, live = _occurrence_state(store, event, start, now)
+        verdict, live = _occurrence_state(store, event, start, now, owner_tz=tz)
         if verdict:
             store.mark_reminder(rem["id"], "skipped", verdict)
             stats["skipped"] += 1
             continue
         (stale if fire_at and now - fire_at > CATCHUP_GRACE else fresh).append((rem, live))
     for rem, event in fresh:
-        text = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)
+        text = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)[:MAX_NOTICE_CHARS]
         state, detail = channel.send(rem["notice_id"], text)
         _record(store, rem["id"], state, detail, stats)
     if stale:
@@ -294,6 +291,7 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
         text = "⏰ Пока Уроборос не работал, подошли напоминания:\n" + "\n".join(lines[:10])
         if len(lines) > 10:
             text += f"\n… и ещё {len(lines) - 10}"
+        text = text[:MAX_NOTICE_CHARS]
         state, detail = channel.send(batch_notice_id([r["notice_id"] for r, _ in stale]), text)
         for rem, _ in stale:
             _record(store, rem["id"], state, detail, stats)
@@ -301,7 +299,7 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
     return stats
 
 
-def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], now: datetime) -> Tuple[str, Dict[str, Any]]:
+def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], now: datetime, owner_tz=None) -> Tuple[str, Dict[str, Any]]:
     """('', effective occurrence row) when the planned occurrence is still on; otherwise (reason to skip it, row).
 
     The effective row is the exception living at this slot when there is one (its own title/end), else the master."""
@@ -324,17 +322,17 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
                 return "вхождение отменено", event
             if str(exc.get("start_utc") or "") != key:
                 return "вхождение перенесено; напоминание перепланировано", event
-            live_row = {**event, **{k: exc.get(k) for k in ("title", "description", "location", "end_utc") if exc.get(k)}}
+            live_row = {**event, **{k: exc.get(k) for k in ("title", "description", "location", "end_utc") if exc.get(k) is not None}}
             end_at = parse_stored(exc.get("end_utc")) or end_at
             break
         if str(exc.get("start_utc") or "") == key:
-            live_row = {**event, **{k: exc.get(k) for k in ("title", "description", "location", "end_utc") if exc.get(k)}}
+            live_row = {**event, **{k: exc.get(k) for k in ("title", "description", "location", "end_utc") if exc.get(k) is not None}}
             end_at = parse_stored(exc.get("end_utc")) or end_at
             break  # a moved exception now living at this slot: it is the live occurrence
     else:
         try:
             import ops as _ops
-            live = _ops.expand([event], start - timedelta(minutes=1), start + timedelta(minutes=1), store.exceptions_for)
+            live = _ops.expand([event], start - timedelta(minutes=1), start + timedelta(minutes=1), store.exceptions_for, owner_tz=owner_tz)
         except Exception:
             live = [{"start_utc": key}]
         if not any(str(o.get("start_utc") or "") == key for o in live):

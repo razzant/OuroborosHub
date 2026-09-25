@@ -120,6 +120,21 @@ def _as_utc(value: Any, tz_hint) -> Tuple[str, bool]:
     raise ProviderError("parse", f"неизвестный тип даты {type(value).__name__}")
 
 
+def _rrule_until(rrule: str) -> Optional[str]:
+    """ISO-UTC string of the RRULE UNTIL (date or datetime), None when absent."""
+    for part in str(rrule or "").split(";"):
+        if part.upper().startswith("UNTIL="):
+            raw = part.split("=", 1)[1].strip()
+            try:
+                if len(raw) == 8:
+                    return raw[:4] + "-" + raw[4:6] + "-" + raw[6:8] + "T23:59:59+00:00"
+                dt = datetime.strptime(raw.rstrip("Z"), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+                return iso_utc(dt)
+            except ValueError:
+                return None
+    return None
+
+
 def _dt_list(prop: Any) -> List[str]:
     """EXDATE/RDATE (single or list of vDDDLists) → sorted ISO-UTC strings."""
     items = prop if isinstance(prop, list) else [prop]
@@ -236,6 +251,17 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         cal.add("VERSION", "2.0")
         vevent = icalendar.Event()
         cal.add_component(vevent)
+    else:
+        until = _rrule_until(str(event.get("rrule") or ""))
+        if until is not None:   # the series was cut: exceptions past the cut moved to the new series locally
+            for comp in list(cal.walk("VEVENT")):
+                rid = comp.get("RECURRENCE-ID")
+                if rid is None:
+                    continue
+                rid_dt = comp.decoded("RECURRENCE-ID")
+                rid_utc = _as_utc(rid_dt, tz)[0] if rid_dt is not None else ""
+                if rid_utc and rid_utc > until:
+                    cal.subcomponents.remove(comp)
     try:
         seq = int(vevent.get("SEQUENCE", 0)) + 1
     except (TypeError, ValueError):
@@ -389,14 +415,17 @@ class YandexAdapter:
             if not any(p.find("d:resourcetype/c:calendar", NS) is not None for p in props):
                 continue
             collection = href.rstrip("/").rsplit("/", 1)[-1] or href
-            display, writable, ctag = "", False, ""
+            display, ctag, privs_seen, can_write = "", "", False, False
             for p in props:
                 display = (p.findtext("d:displayname", default="", namespaces=NS) or display).strip()
                 ctag = (p.findtext("cs:getctag", default="", namespaces=NS) or ctag).strip()
                 privs = p.find("d:current-user-privilege-set", NS)
-                if privs is not None:
-                    writable = writable or any(pr.find("d:write", NS) is not None or pr.find("d:write-content", NS) is not None
-                                               for pr in privs.findall("d:privilege", NS))
+                if privs is not None and len(list(privs)):
+                    privs_seen = True
+                    can_write = can_write or any(pr.find("d:write", NS) is not None or pr.find("d:write-content", NS) is not None
+                                                 for pr in privs.findall("d:privilege", NS))
+            # no privilege set from the server = rights unknown: treat as writable and let the server answer 403 honestly
+            writable = can_write if privs_seen else True
             full = href if href.startswith("http") else YANDEX_BASE + href
             out.append({"id": make_calendar_id(PROVIDER_YANDEX, self.login, collection), "account_id": self.account_id,
                         "provider": PROVIDER_YANDEX, "external_id": collection, "href": full, "name": display or collection,
@@ -417,6 +446,7 @@ class YandexAdapter:
         root = self._xml(text, "REPORT")
         rows: List[Dict[str, Any]] = []
         hrefs: List[str] = []
+        self.parse_errors = []
         for resp in root.findall("d:response", NS):
             href = (resp.findtext("d:href", default="", namespaces=NS) or "").strip()
             etag, data = "", ""
@@ -484,8 +514,9 @@ class YandexAdapter:
             try:
                 live_text, live_etag = self.get(href)
                 event = {**event, "raw_payload": live_text}
-                if not expected_etag:
-                    expected_etag = live_etag
+                if expected_etag and live_etag and expected_etag != live_etag:
+                    raise ProviderError("conflict", "серия изменилась на сервере с момента последней синхронизации")
+                expected_etag = live_etag or expected_etag
             except ProviderError as exc:
                 if exc.kind != "not_found":
                     raise
@@ -533,7 +564,7 @@ class YandexAdapter:
         changed → a VEVENT with RECURRENCE-ID next to it. The whole resource is PUT back under If-Match."""
         href = str(event.get("master_href") or event.get("href") or "")
         if not href:
-            raise ProviderError("parse", "у серии нет адреса ресурса на сервере")
+            raise ProviderError("retry", "серия ещё не записана на сервер — исключение подождёт её")
         text, etag = self.get(href)
         icalendar = _ical()
         try:
@@ -558,7 +589,10 @@ class YandexAdapter:
             if "EXDATE" in master:
                 del master["EXDATE"]
             all_dates = sorted(set(dates + [iso_utc(rec)]))
-            master.add("EXDATE", [parse_stored(d).astimezone(tz) for d in all_dates])
+            if event.get("all_day"):
+                master.add("EXDATE", [parse_stored(d).astimezone(tz).date() for d in all_dates])
+            else:
+                master.add("EXDATE", [parse_stored(d).astimezone(tz) for d in all_dates])
         else:
             exc_cal = icalendar.Calendar.from_ical(row_to_ics({**event, "raw_payload": "", "rrule": "", "exdates": "", "uid": str(master.get("UID") or event.get("uid") or "")},
                                                               mute_alarms=bool(payload.get("mute_provider_reminders"))))

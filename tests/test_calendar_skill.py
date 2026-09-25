@@ -32,8 +32,10 @@ def load_tests(loader, standard_tests, pattern):
     import test_calendar_review  # noqa: E402  (review-round regression tests)
     import test_calendar_round2  # noqa: E402
     import test_calendar_batch3  # noqa: E402
+    import test_calendar_round3  # noqa: E402
     standard_tests.addTests(loader.loadTestsFromModule(test_calendar))
     standard_tests.addTests(loader.loadTestsFromModule(test_calendar_review))
     standard_tests.addTests(loader.loadTestsFromModule(test_calendar_round2))
     standard_tests.addTests(loader.loadTestsFromModule(test_calendar_batch3))
+    standard_tests.addTests(loader.loadTestsFromModule(test_calendar_round3))
     return standard_tests
