@@ -4,7 +4,7 @@ Each adapter knows ONE calendar per call and exposes exactly:
 ``list_calendars() -> [calendar dict]``, ``fetch(calendar, cursor) -> (events, cursor, kind)``,
 ``create(calendar, event, payload) -> {external_id, href, etag}``,
 ``update(calendar, event, expected_etag, payload) -> {etag}``,
-``delete(calendar, event, expected_etag)``, ``respond(calendar, event, payload) -> {etag}``.
+``delete(calendar, event, expected_etag, payload)``, ``respond(calendar, event, payload) -> {etag}``.
 Recurrence scopes, linked copies and leases are ``ops.py``'s job, never the adapter's.
 """
 
@@ -266,7 +266,7 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         vevent.add("RRULE", icalendar.vRecur.from_ical(str(event["rrule"])))
     if event.get("exdates"):
         ex = [parse_stored(x) for x in str(event["exdates"]).split(",") if x]
-        ex = [x.astimezone(tz) for x in ex if x]
+        ex = [x.astimezone(tz).date() if all_day else x.astimezone(tz) for x in ex if x]
         if ex:
             vevent.add("EXDATE", ex)
     vevent.add("STATUS", "CANCELLED" if str(event.get("status") or "") == "cancelled" else "CONFIRMED")
@@ -325,6 +325,7 @@ class YandexAdapter:
 
     def __init__(self, login: str, app_password: str):
         self.login = login.strip()
+        self.parse_errors: List[str] = []   # resources the last fetch could not parse (surfaced in sync status)
         self.account_id = make_account_id(PROVIDER_YANDEX, self.login)
         self.home = f"{YANDEX_BASE}/calendars/{urllib.parse.quote(self.login, safe='')}/"
         token = base64.b64encode(f"{self.login}:{app_password}".encode("utf-8")).decode("ascii")
@@ -428,7 +429,8 @@ class YandexAdapter:
             hrefs.append(full)
             try:
                 rows.extend(ics_to_rows(data, calendar["id"], full, etag, tz))
-            except ProviderError:
+            except ProviderError as exc:
+                self.parse_errors.append(f"{full.rsplit('/', 1)[-1]}: {exc.message}")
                 continue
         # cursor = ctag when the server exposes it; the window itself is the fallback cursor kind.
         return rows, "", "window", hrefs
@@ -477,6 +479,16 @@ class YandexAdapter:
         href = str(event.get("href") or "")
         if not href:
             return self.create(calendar, event, payload)
+        if event.get("rrule"):
+            # a series master shares its resource with the exception VEVENTs written earlier: rewrite the live copy, not our cached one
+            try:
+                live_text, live_etag = self.get(href)
+                event = {**event, "raw_payload": live_text}
+                if not expected_etag:
+                    expected_etag = live_etag
+            except ProviderError as exc:
+                if exc.kind != "not_found":
+                    raise
         headers = {"Content-Type": "text/calendar; charset=utf-8"}
         if expected_etag:
             headers["If-Match"] = expected_etag

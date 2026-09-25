@@ -27,6 +27,12 @@
     function parseISO(s) { return s ? new Date(s) : null; }
     function fmtHM(d) { return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
     function fmtLocalInput(d) { return localDate(d) + 'T' + fmtHM(d); }
+    function withOffset(local) {   // 'YYYY-MM-DDTHH:MM' typed/dragged in the browser zone → ISO with that zone's offset
+        if (!local) return local;
+        var d = new Date(local); if (isNaN(d.getTime())) return local;
+        var off = -d.getTimezoneOffset(), sign = off >= 0 ? '+' : '-', a = Math.abs(off);
+        return local.slice(0, 16) + sign + pad(Math.floor(a / 60)) + ':' + pad(a % 60);
+    }
     function addDays(dateStr, n) { var d = new Date(dateStr + 'T00:00:00'); d.setDate(d.getDate() + n); return localDate(d); }
     function minutesOf(d) { return d.getHours() * 60 + d.getMinutes(); }
     function el(tag, attrs, children) {
@@ -100,7 +106,7 @@
         if (state.disposed) return Promise.resolve();
         state.loading = true;
         var q = 'agenda?view=' + state.view + '&date=' + (state.date || '') + (state.showHidden ? '&show_hidden=1' : '') +
-            (state.selectedCals ? '&calendars=' + encodeURIComponent(state.selectedCals.join(',')) : '');
+            (state.selectedCals ? '&calendars=' + encodeURIComponent(state.selectedCals.length ? state.selectedCals.join(',') : '-') : '');
         return api(q).then(function (d) {
             state.data = d; state.error = ''; if (!state.date) state.date = d.anchor;
         }).catch(function (e) { state.error = e.message || String(e); }).then(function () { state.loading = false; render(); });
@@ -118,9 +124,11 @@
             el('button', { text: 'День', class: state.view === 'day' ? 'on' : '', onclick: function () { state.view = 'day'; load(); } }),
             el('button', { text: 'Неделя', class: state.view === 'week' ? 'on' : '', onclick: function () { state.view = 'week'; load(); } }),
             el('button', { text: 'Служебные', class: state.showHidden ? 'on' : '', title: 'Показать служебные события и «обычно»', onclick: function () { state.showHidden = !state.showHidden; load(); } }),
+            el('button', { text: '⚙', title: 'Напоминания и синхронизация', class: state.panel ? 'on' : '', onclick: function () { togglePanel(); } }),
             el('button', { text: '+ Событие', class: 'primary', onclick: function () { openCard(null, defaultStart()); } })
         ]);
         root.appendChild(bar);
+        if (state.panel) root.appendChild(renderPanel());
         if (state.error) root.appendChild(el('div', { class: 'status err', text: 'Ошибка: ' + state.error }));
         if (state.notice) root.appendChild(el('div', { class: 'status', text: state.notice }));
         if (!d) { root.appendChild(el('div', { class: 'status', text: state.loading ? 'Загрузка…' : 'Нет данных' })); return; }
@@ -183,10 +191,10 @@
         var laid = layout(timed.filter(function (e) { return overlapsDay(e, day.date); }), day.date);
         laid.forEach(function (item) {
             var e = item.ev;
-            var cls = 'ev' + (e.visibility === 'hidden' ? ' hidden' : '') + (e.sync_state === 'pending' ? ' pending' : '') + (e.sync_state === 'conflict' ? ' conflict' : '');
+            var cls = 'ev' + (e.visibility === 'hidden' ? ' hidden' : '') + ((e.sync_state || '').indexOf('pending') === 0 ? ' pending' : '') + (e.sync_state === 'conflict' ? ' conflict' : '');
             var node = el('div', { class: cls, title: e.title }, [
                 el('div', { class: 't', text: e.title }),
-                el('div', { class: 'm', text: fmtHM(parseISO(e.start)) + '–' + fmtHM(parseISO(e.end)) + (e.calendar_name ? ' · ' + e.calendar_name : '') + (e.sync_state === 'pending' ? ' · ожидает' : e.sync_state === 'conflict' ? ' · конфликт' : '') }),
+                el('div', { class: 'm', text: fmtHM(parseISO(e.start)) + '–' + fmtHM(parseISO(e.end)) + (e.calendar_name ? ' · ' + e.calendar_name : '') + (e.sync_state === 'pending' ? ' · ожидает' : e.sync_state === 'pending_delete' ? ' · удаляется' : e.sync_state === 'conflict' ? ' · конфликт' : '') }),
                 el('div', { class: 'rs' })
             ]);
             node.style.left = 'calc(' + (item.left * 100) + '% + 3px)';
@@ -281,12 +289,12 @@
                 if (resizing) {
                     var newDur = Math.max(SNAP_MIN, Math.round((parseFloat(node.style.height) + 2) / HOUR_PX * 60 / SNAP_MIN) * SNAP_MIN);
                     var ne = new Date(s.getTime() + newDur * 60000);
-                    save(e, { start: fmtLocalInput(s), end: fmtLocalInput(ne) });
+                    save(e, { start: withOffset(fmtLocalInput(s)), end: withOffset(fmtLocalInput(ne)) });
                 } else {
                     var mins = Math.round(parseFloat(node.style.top) / HOUR_PX * 60 / SNAP_MIN) * SNAP_MIN;
                     var ns = new Date(col.getAttribute('data-date') + 'T00:00:00'); ns.setMinutes(mins);
                     var ne2 = new Date(ns.getTime() + dur * 60000);
-                    save(e, { start: fmtLocalInput(ns), end: fmtLocalInput(ne2) });
+                    save(e, { start: withOffset(fmtLocalInput(ns)), end: withOffset(fmtLocalInput(ne2)) });
                 }
             }
             node.addEventListener('pointermove', onMove); node.addEventListener('pointerup', onUp);
@@ -397,7 +405,8 @@
             ev.preventDefault();
             var cals = chosenCals();
             if (!cals.length) { status.textContent = 'Выбери хотя бы один календарь'; status.className = 'status err'; return; }
-            var body = { title: title.value.trim(), start: start.value, end: end.value, all_day: allDay.checked, hidden: hidden.checked, availability: avail.value,
+            var body = { title: title.value.trim(), start: allDay.checked ? start.value.slice(0, 10) : withOffset(start.value), end: allDay.checked ? end.value.slice(0, 10) : withOffset(end.value),
+                all_day: allDay.checked, hidden: hidden.checked, availability: avail.value,
                 location: loc.value, description: desc.value, rrule: rrule.value.trim(), send_updates: notify.checked };
             var remList = rem.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean).map(Number).filter(function (n) { return !isNaN(n); });
             var attList = att.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
@@ -440,6 +449,38 @@
     }
 
     function shift(n) { state.date = addDays(state.date || localDate(new Date()), state.view === 'week' ? 7 * n : n); load(); }
+
+    /* ---------- settings panel: reminder rule (19 A) + sync now ---------- */
+    function togglePanel() {
+        if (state.panel) { state.panel = null; render(); return; }
+        state.panel = { loading: true };
+        render();
+        api('reminders').then(function (r) { state.panel = { data: r, msg: '' }; render(); })
+            .catch(function (e) { state.panel = { data: null, msg: e.message }; render(); });
+    }
+
+    function renderPanel() {
+        var p = state.panel, box = el('div', { class: 'status', style: 'border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px;color:var(--fg)' });
+        if (p.loading) { box.appendChild(el('span', { text: 'Загружаю…' })); return box; }
+        var rules = (p.data && p.data.rules) || {}, ch = (p.data && p.data.channel) || {};
+        var def = el('input', { value: (rules.default || []).join(', '), placeholder: 'напоминать за N минут, через запятую (пусто — не напоминать)', style: 'width:min(320px,100%)' });
+        var msg = el('span', { style: 'margin-left:8px', text: p.msg || '' });
+        var saveBtn = el('button', { text: 'Сохранить правило', onclick: function () {
+            var mins = def.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean).map(Number).filter(function (n) { return !isNaN(n); });
+            post('reminders/save', { action: 'set_default', offsets: mins }).then(function (r) { msg.textContent = (r.status === 'ok' || r.status === 'updated') ? 'сохранено' : (r.message || r.status); })
+                .catch(function (e) { msg.textContent = e.message; });
+        } });
+        var syncBtn = el('button', { text: 'Синхронизировать сейчас', onclick: function () {
+            post('sync', {}).then(function (r) { msg.textContent = r.message || 'запрошено'; }).catch(function (e) { msg.textContent = e.message; });
+        } });
+        box.appendChild(el('div', { style: 'font-weight:600;margin-bottom:6px', text: 'Напоминания Уробороса' }));
+        box.appendChild(el('div', {}, ['Правило по умолчанию: ', def]));
+        box.appendChild(el('div', { style: 'margin-top:6px', text: 'Канал доставки: ' + (ch.state === 'ready' ? 'готов' : ch.state === 'no_route' ? 'ждёт маршрут ядра (напоминания хранятся)' : (ch.state || 'неизвестно')) }));
+        var upcoming = (p.data && p.data.upcoming) || [];
+        if (upcoming.length) box.appendChild(el('div', { style: 'margin-top:6px', text: 'Ближайшие: ' + upcoming.slice(0, 5).map(function (u) { return u.fire_at.slice(11, 16) + ' ' + u.title + (u.state !== 'scheduled' ? ' (' + u.state + ')' : ''); }).join(' · ') }));
+        box.appendChild(el('div', { class: 'actions', style: 'margin-top:8px' }, [saveBtn, syncBtn, msg]));
+        return box;
+    }
 
     /* ---------- lifecycle ---------- */
     if (typeof window.__ouroWidgetOnDispose === 'function') {

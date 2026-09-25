@@ -238,14 +238,22 @@ def bounded_result(obj: Dict[str, Any], limit: int = TOOL_RESULT_LIMIT, list_key
         text = json_dumps(trimmed)
         if len(text) <= limit:
             return text
-    # Last resort: drop bulky free-text fields rather than cut the JSON.
-    for key in ("message", "text", "description"):
-        if key in trimmed and isinstance(trimmed[key], str):
-            trimmed[key] = trimmed[key][:500] + "…"
+    # Next: shorten bulky nested values (long lists inside `changes`/`event`, long strings) rather than cut the JSON.
+    def _shrink(value: Any, depth: int = 0) -> Any:
+        if isinstance(value, str) and len(value) > 500:
+            return value[:500] + "…"
+        if isinstance(value, list) and len(value) > 20:
+            return [_shrink(v, depth + 1) for v in value[:20]] + [f"… ещё {len(value) - 20}"]
+        if isinstance(value, dict) and depth < 3:
+            return {k: _shrink(v, depth + 1) for k, v in value.items()}
+        return value
+    trimmed = {k: _shrink(v) for k, v in trimmed.items()}
+    trimmed["truncated"] = True
     text = json_dumps(trimmed)
     if len(text) <= limit:
         return text
-    return json_dumps({"status": "error", "message": "result too large even after trimming", "truncated": True})
+    # Last resort: keep the status (the caller's decision depends on it) and say what happened.
+    return json_dumps({"status": trimmed.get("status") or "error", "message": "ответ слишком большой даже после сокращения", "truncated": True})
 
 
 def event_public(row: Dict[str, Any], tz, compact: bool = True) -> Dict[str, Any]:

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from model import (
-    DEFAULT_LOCAL_CALENDAR_ID, DEFAULT_LOCAL_CALENDAR_NAME, INTENT_PENDING, LOCAL_ACCOUNT_ID, iso_utc, new_id, now_utc,
+    DEFAULT_LOCAL_CALENDAR_ID, DEFAULT_LOCAL_CALENDAR_NAME, INTENT_FAILED, INTENT_PENDING, LOCAL_ACCOUNT_ID, iso_utc, new_id, now_utc,
 )
 
 SCHEMA_VERSION = 1
@@ -195,6 +195,10 @@ class Store:
             return json.loads(row["value_json"])
         except ValueError:
             return default
+
+    def delete_setting(self, key: str) -> None:
+        with self._conn() as c:
+            c.execute("DELETE FROM settings WHERE key = ?", (key,))
 
     def set_setting(self, key: str, value: Any) -> None:
         with self._conn() as c:
@@ -426,10 +430,15 @@ class Store:
                              (link_group_id,)).fetchall()
         return [dict(r) for r in rows]
 
-    def calendar_event_ids(self, calendar_id: str) -> List[str]:
+    def group_masters(self, link_group_id: str) -> List[Dict[str, Any]]:
+        """Group members that are events in their own right (no exception rows): the targets of propagation and reassignment."""
+        return [m for m in self.group_members(link_group_id) if not m.get("master_id")]
+
+    def cancel_intents_for_account(self, account_id: str, reason: str = "account disconnected") -> int:
         with self._conn() as c:
-            rows = c.execute("SELECT id FROM events WHERE calendar_id=? AND deleted_at IS NULL", (calendar_id,)).fetchall()
-        return [r["id"] for r in rows]
+            cur = c.execute("UPDATE intents SET state=?, result_json=?, updated_at=? WHERE account_id=? AND state IN (?, 'conflict')",
+                            (INTENT_FAILED, json.dumps({"error": reason}), _ts(), account_id, INTENT_PENDING))
+        return cur.rowcount
 
     # ── intents (durable external operations) ───────────────────────
 
@@ -539,6 +548,13 @@ class Store:
     def drop_scheduled_reminders(self) -> None:
         with self._conn() as c:
             c.execute("DELETE FROM reminders WHERE state IN ('scheduled', 'no_channel')")
+
+    def drop_reminders_for_occurrence(self, event_id: str, occurrence_start_utc: str) -> None:
+        if not occurrence_start_utc:
+            return
+        with self._conn() as c:
+            c.execute("DELETE FROM reminders WHERE event_id=? AND occurrence_start_utc=? AND state IN ('scheduled', 'no_channel')",
+                      (event_id, occurrence_start_utc))
 
     def drop_reminders_for(self, event_id: str, only_future: bool = True) -> None:
         with self._conn() as c:

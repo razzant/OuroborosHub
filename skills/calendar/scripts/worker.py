@@ -74,7 +74,8 @@ def sync_account(store: Store, providers: Providers, account: Dict[str, Any], tz
     if adapter is None:
         # The companion only sees the secrets it was spawned with; a fresh key needs a skill restart, so do not
         # overwrite a status the child may have just set — report and move on.
-        return {"account": account["id"], "status": "skipped", "reason": "секрет недоступен фоновому процессу (перезапусти скилл после добавления ключа)"}
+        reason = (getattr(providers, "errors", {}) or {}).get(account["id"]) or "секрет недоступен фоновому процессу (перезапусти скилл после добавления ключа)"
+        return {"account": account["id"], "status": "skipped", "reason": reason}
     report: Dict[str, Any] = {"account": account["id"], "calendars": 0, "events": 0, "deleted": 0, "propagated": 0, "resynced": 0}
     try:
         cals = adapter.list_calendars()
@@ -141,7 +142,11 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
         existing = store.find_by_external(cal["id"], external_id=row["external_id"], href=row["href"], uid=row["uid"])
         if row.get("status") == "cancelled":
             if existing is not None:
-                deleted += _confirmed_deletion(store, providers, existing)
+                if existing.get("sync_state") == "pending_delete":
+                    store.delete_event(existing["id"], hard=True)      # our own deletion, now confirmed: no group cascade
+                    deleted += 1
+                elif existing.get("sync_state") not in ("pending", "conflict"):
+                    deleted += _confirmed_deletion(store, providers, existing)
             continue
         if existing is None:
             saved = store.insert_event({k: v for k, v in row.items() if k != "master_external_id"})
@@ -151,7 +156,7 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
         masters[row["uid"]] = existing["id"]
         if existing.get("etag") == row["etag"] and existing.get("sync_state") == "synced":
             continue
-        if existing.get("sync_state") in ("pending", "conflict"):
+        if existing.get("sync_state") in ("pending", "conflict", "pending_delete"):
             continue  # our write is in flight; the intent path settles it
         changes = {k: row[k] for k in ("title", "description", "location", "start_utc", "end_utc", "tz", "all_day", "rrule", "exdates", "rdates",
                                         "status", "organizer", "attendees_json", "my_response", "etag", "raw_payload") if k in row}
@@ -162,7 +167,7 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
         upserts += 1
         if existing.get("link_group_id") and (existing.get("start_utc") != row["start_utc"] or existing.get("end_utc") != row["end_utc"]):
             moved = {"start_utc": row["start_utc"], "end_utc": row["end_utc"], "all_day": row["all_day"]}
-            for sib in store.group_members(existing["link_group_id"]):
+            for sib in store.group_masters(existing["link_group_id"]):
                 if sib["id"] == existing["id"]:
                     continue
                 ops.update_event(store, providers, sib["id"], moved, scope="all", owner="companion", propagate=False)
@@ -239,6 +244,9 @@ def main() -> int:
         tz = get_tz(store.get_setting("timezone") or "")
         health: Dict[str, Any] = {"deps": deps, "secrets_present": secrets_present, "tick": tick, "sync": [], "intents": None, "reminders": None, "channel": None}
         try:
+            # reminders first: a slow provider must not delay a due notice
+            state = channel.state(refresh=(tick % 10 == 1 or channel.state() != "ready"))
+            stats = rem.deliver_due(store, channel, tz)
             requested = parse_stored(store.get_setting("sync_requested_at") or "")
             for account in [*store.list_accounts(provider=PROVIDER_YANDEX), *store.list_accounts(provider=PROVIDER_GOOGLE)]:
                 due = time.time() - last_sync.get(account["id"], 0) >= SYNC_INTERVAL_SEC
@@ -247,10 +255,8 @@ def main() -> int:
                     health["sync"].append(sync_account(store, providers, account, tz))
                     last_sync[account["id"]] = time.time()
             health["intents"] = ops.retry_due_intents(store, providers, owner="companion")
-            planned = rem.plan(store, lambda s, e: ops.expand(store.window(s, e, include_hidden=True), s, e, store.exceptions_for))
-            stats = rem.deliver_due(store, channel, tz)
+            planned = rem.plan(store, lambda s, e: ops.expand(store.window(s, e, include_hidden=True), s, e, store.exceptions_for, owner_tz=tz))
             health["reminders"] = {"planned": planned, **stats}
-            state = channel.state(refresh=(tick % 10 == 1))
             health["channel"] = state
             store.set_setting("notify_channel_state", {"state": state, "checked_at": iso_utc(now_utc())})
         except Exception as exc:

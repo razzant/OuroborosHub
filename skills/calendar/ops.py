@@ -246,7 +246,7 @@ def create_event(store, providers, spec: Dict[str, Any], owner: str = "") -> Dic
         if cal["provider"] != PROVIDER_LOCAL and not cal.get("writable", True):
             assignments.append({"calendar_id": cal_id, "calendar_name": cal["name"], "status": "failed", "message": "календарь только для чтения"})
             continue
-        is_copy = index > 0
+        is_copy = primary_row is not None   # the first calendar that actually accepts the event is the primary
         mode = PUBLISH_FULL if not is_copy else (cal.get("publish_mode") or PUBLISH_BUSY)
         row = {
             "calendar_id": cal_id, "uid": uid, "is_primary": 0 if is_copy else 1,
@@ -284,21 +284,33 @@ def update_event(store, providers, event_id: str, changes: Dict[str, Any], scope
     row = store.get_event(base_id)
     if row is None or row.get("deleted_at"):
         return {"status": "not_found", "assignments": []}
+    if row.get("master_id") and not occ_key:
+        # a stored exception addressed by its own id: the same thing as «this occurrence» of its master
+        master = store.get_event(row["master_id"])
+        if master is not None and not master.get("deleted_at"):
+            occ_key, row, scope = str(row.get("recurrence_id") or ""), master, SCOPE_THIS
+    changes = _shift_for_scope_all(row, occ_key, scope, changes)
+    members = [row] + [m for m in _group_masters(store, row) if m["id"] != row["id"]]
+    assignments: List[Dict[str, Any]] = []
+    blocked = _read_only_preflight(store, members, assignments)   # refuse read-only targets BEFORE touching local rows
+    if row["id"] in blocked:
+        return {"status": "failed", "event": row, "assignments": assignments}
     targets: List[Dict[str, Any]] = []
     if occ_key and scope == SCOPE_THIS:
         exc_id = _ensure_exception(store, row, occ_key, changes)
         targets.append(store.get_event(exc_id))
     elif occ_key and scope == SCOPE_FOLLOWING:
         new_group = new_id("lg") if row.get("link_group_id") else ""
-        targets.extend(_split_series(store, row, occ_key, changes, new_group))
+        split_uid = new_uid()
+        targets.extend(_split_series(store, row, occ_key, changes, new_group, split_uid))
     else:
         _apply_changes(store, row, changes)
         targets.append(store.get_event(row["id"]))
     # Linked copies: only time moves to busy copies; full copies get everything but attendees/reminders.
     if propagate and row.get("link_group_id"):
         sibling_changes = _sibling_changes(changes)
-        for sib in store.group_members(row["link_group_id"]):
-            if sib["id"] == row["id"] or not sibling_changes:
+        for sib in members[1:]:
+            if sib["id"] in blocked or not sibling_changes:
                 continue
             if sib.get("title") == BUSY_COPY_TITLE or sib.get("publish_mode") == PUBLISH_BUSY:
                 allowed = {k: v for k, v in sibling_changes.items() if k in ("start_utc", "end_utc", "all_day", "tz", "rrule")}
@@ -308,11 +320,10 @@ def update_event(store, providers, event_id: str, changes: Dict[str, Any], scope
                 exc_id = _ensure_exception(store, sib, occ_key, allowed)
                 targets.append(store.get_event(exc_id))
             elif occ_key and scope == SCOPE_FOLLOWING:
-                targets.extend(_split_series(store, sib, occ_key, allowed, new_group))
+                targets.extend(_split_series(store, sib, occ_key, allowed, new_group, split_uid))
             else:
                 _apply_changes(store, sib, allowed)
                 targets.append(store.get_event(sib["id"]))
-    assignments = []
     rsvp_only = set(changes.keys()) == {"my_response"}
     for target in targets:
         if target is None:
@@ -321,38 +332,51 @@ def update_event(store, providers, event_id: str, changes: Dict[str, Any], scope
         if cal is None or cal["provider"] == PROVIDER_LOCAL:
             assignments.append({"calendar_id": target["calendar_id"], "event_id": target["id"], "status": INTENT_DONE})
             continue
-        if not cal.get("writable", True):
-            assignments.append({"calendar_id": target["calendar_id"], "calendar_name": cal["name"], "event_id": target["id"], "status": INTENT_FAILED,
-                                "message": "календарь только для чтения"})
-            continue
         store.update_event(target["id"], {"sync_state": "pending"})
-        if rsvp_only or ("my_response" in changes and target["id"] == row["id"]):
-            kind = "rsvp"
-        elif not target.get("external_id") and not target.get("href") and not target.get("master_id"):
-            kind = "create"
+        write_kind = "create" if (not target.get("external_id") and not target.get("href") and not target.get("master_id")) else "update"
+        kinds: List[str] = []
+        if "my_response" in changes and target["id"] == row["id"]:
+            if not rsvp_only:
+                kinds.append(write_kind)     # the other changes go out first…
+            kinds.append("rsvp")             # …then the answer, as its own provider call
         else:
-            kind = "update"
-        payload = {"scope": scope, "changes": changes, "send_updates": bool(send_updates)}
-        if kind == "rsvp":
-            payload.update({"response": changes.get("my_response"), "notify_organizer": bool(send_updates)})
-        intent = store.add_intent(kind, cal["account_id"], cal["id"], target["id"], payload, scope=scope, expected_etag=target.get("etag") or "")
-        result = execute_intent(store, providers, intent, owner)
+            kinds.append(write_kind)
+        result: Dict[str, Any] = {"status": INTENT_DONE}
+        for kind in kinds:
+            payload = {"scope": scope, "changes": {k: v for k, v in changes.items() if k != "my_response"}, "send_updates": bool(send_updates)}
+            if kind == "rsvp":
+                payload.update({"response": changes.get("my_response"), "notify_organizer": bool(send_updates)})
+            current = store.get_event(target["id"]) or target
+            intent = store.add_intent(kind, cal["account_id"], cal["id"], target["id"], payload, scope=scope, expected_etag=current.get("etag") or "")
+            result = execute_intent(store, providers, intent, owner)
+            if result.get("status") != INTENT_DONE:
+                break
         assignments.append({"calendar_id": target["calendar_id"], "calendar_name": cal["name"], "event_id": target["id"], **result})
     fresh = store.get_event(targets[0]["id"]) if targets and targets[0] else None
     return {"status": "ok", "event": fresh, "assignments": assignments}
 
 
-def delete_event(store, providers, event_id: str, scope: str = SCOPE_THIS, owner: str = "", send_updates: bool = False) -> Dict[str, Any]:
+def delete_event(store, providers, event_id: str, scope: str = SCOPE_THIS, owner: str = "", send_updates: bool = False,
+                 cascade: bool = True) -> Dict[str, Any]:
+    """Delete an event, an occurrence or a series; ``cascade`` (28 A) takes the linked copies along,
+    ``cascade=False`` removes one copy only (reassignment)."""
     owner = owner or lease_owner()
     base_id, occ_key = _series_id(event_id)
     row = store.get_event(base_id)
     if row is None or row.get("deleted_at"):
         return {"status": "not_found", "assignments": []}
-    rows = [row]
-    if row.get("link_group_id"):
-        rows.extend(s for s in store.group_members(row["link_group_id"]) if s["id"] != row["id"])
-    assignments = []
+    if row.get("master_id") and not occ_key:
+        master = store.get_event(row["master_id"])
+        if master is not None and not master.get("deleted_at"):
+            occ_key, row, scope = str(row.get("recurrence_id") or ""), master, SCOPE_THIS
+    rows = [row] + ([m for m in _group_masters(store, row) if m["id"] != row["id"]] if cascade else [])
+    assignments: List[Dict[str, Any]] = []
+    blocked = _read_only_preflight(store, rows, assignments)
+    if row["id"] in blocked:
+        return {"status": "failed", "assignments": assignments}
     for target in rows:
+        if target["id"] in blocked:
+            continue
         cal = store.get_calendar(target["calendar_id"])
         external = cal is not None and cal["provider"] != PROVIDER_LOCAL and (target.get("external_id") or target.get("href"))
         if occ_key and scope == SCOPE_THIS:
@@ -374,10 +398,6 @@ def delete_event(store, providers, event_id: str, scope: str = SCOPE_THIS, owner
         if cal is None or cal["provider"] == PROVIDER_LOCAL or victim is None or not external:
             assignments.append({"calendar_id": target["calendar_id"], "event_id": target["id"], "status": INTENT_DONE})
             continue
-        if not cal.get("writable", True):
-            assignments.append({"calendar_id": target["calendar_id"], "calendar_name": cal["name"], "event_id": victim["id"], "status": INTENT_FAILED,
-                                "message": "календарь только для чтения"})
-            continue
         kind = "update" if (occ_key and scope != SCOPE_ALL) else "delete"
         intent = store.add_intent(kind, cal["account_id"], cal["id"], victim["id"], {"scope": scope, "changes": {}, "send_updates": bool(send_updates)},
                                   scope=scope, expected_etag=victim.get("etag") or "")
@@ -397,6 +417,9 @@ def _apply_changes(store, row: Dict[str, Any], changes: Dict[str, Any]) -> None:
     if "reminders" in changes and changes["reminders"] is not None:
         fields["reminders_json"] = json.dumps([int(x) for x in changes["reminders"]])
         store.drop_reminders_for(row["id"])
+        if row.get("master_id"):
+            store.drop_reminders_for_occurrence(row["master_id"], str(row.get("recurrence_id") or ""))
+            store.drop_reminders_for_occurrence(row["master_id"], str(row.get("start_utc") or ""))
     if fields:
         store.update_event(row["id"], fields)
         if any(k in fields for k in ("start_utc", "end_utc", "status", "rrule")) and not row.get("master_id"):
@@ -406,6 +429,39 @@ def _apply_changes(store, row: Dict[str, Any], changes: Dict[str, Any]) -> None:
 
 def _sibling_changes(changes: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in changes.items() if k in ("start_utc", "end_utc", "all_day", "tz", "title", "description", "location", "rrule", "status")}
+
+
+def _group_masters(store, row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The event and its linked copies — never the stored exception rows that share the link_group_id."""
+    group = row.get("link_group_id") or ""
+    return store.group_masters(group) if group else [row]
+
+
+def _read_only_preflight(store, rows: List[Dict[str, Any]], assignments: List[Dict[str, Any]]) -> set:
+    """Read-only external calendars are refused before any local mutation; returns the ids that must be skipped."""
+    blocked = set()
+    for target in rows:
+        cal = store.get_calendar(target["calendar_id"])
+        if cal is not None and cal["provider"] != PROVIDER_LOCAL and not cal.get("writable", True):
+            blocked.add(target["id"])
+            assignments.append({"calendar_id": target["calendar_id"], "calendar_name": cal["name"], "event_id": target["id"], "status": INTENT_FAILED,
+                                "message": "календарь только для чтения"})
+    return blocked
+
+
+def _shift_for_scope_all(row: Dict[str, Any], occ_key: str, scope: str, changes: Dict[str, Any]) -> Dict[str, Any]:
+    """«All of them at 19:00», said about one occurrence: move the series by the same delta, never re-anchor DTSTART
+    to that later date (that would silently drop every earlier occurrence)."""
+    if not (occ_key and scope == SCOPE_ALL and changes.get("start_utc")):
+        return changes
+    occ_s, new_s = parse_stored(occ_key), parse_stored(changes.get("start_utc"))
+    m_s, m_e = parse_stored(row.get("start_utc")), parse_stored(row.get("end_utc"))
+    if occ_s is None or new_s is None or m_s is None:
+        return changes
+    new_e = parse_stored(changes.get("end_utc"))
+    duration = (new_e - new_s) if new_e else ((m_e - m_s) if m_e else timedelta(hours=1))
+    delta = new_s - occ_s
+    return {**changes, "start_utc": iso_utc(m_s + delta), "end_utc": iso_utc(m_s + delta + duration)}
 
 
 def _ensure_exception(store, master: Dict[str, Any], occ_key: str, changes: Dict[str, Any]) -> str:
@@ -434,7 +490,11 @@ def _truncate_series(store, master: Dict[str, Any], occ_key: str, keep_later_exc
     occ = parse_stored(occ_key)
     if occ is None:
         return []
-    until = (occ - timedelta(seconds=1)).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if master.get("all_day"):
+        from model import get_tz
+        until = (occ.astimezone(get_tz(master.get("tz") or "")).date() - timedelta(days=1)).strftime("%Y%m%d")
+    else:
+        until = (occ - timedelta(seconds=1)).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     parts = [p for p in str(master.get("rrule") or "").split(";") if p and not p.upper().startswith(("UNTIL=", "COUNT="))]
     parts.append(f"UNTIL={until}")
     store.update_event(master["id"], {"rrule": ";".join(parts)})
@@ -449,7 +509,7 @@ def _truncate_series(store, master: Dict[str, Any], occ_key: str, keep_later_exc
     return later
 
 
-def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str, Any], new_group: str = "") -> List[Dict[str, Any]]:
+def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str, Any], new_group: str = "", split_uid: str = "") -> List[Dict[str, Any]]:
     """«Starting from this date»: truncate the old series, start a new one carrying the changes.
 
     Later exceptions move to the new series (their date keeps the edit, the slot follows the new wall time);
@@ -464,21 +524,24 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     rule_parts = [p for p in str(master.get("rrule") or "").split(";") if p and not p.upper().startswith(("UNTIL=", "COUNT="))]
     row = {k: master.get(k) for k in ("calendar_id", "visibility", "availability", "is_primary", "title", "description", "location", "tz",
                                        "all_day", "organizer", "attendees_json", "reminders_json", "origin")}
-    row.update({"uid": new_uid(), "start_utc": iso_utc(new_start), "end_utc": iso_utc(new_end), "link_group_id": new_group,
-                "rrule": changes.get("rrule") or ";".join(rule_parts), "sync_state": "synced"})
+    later_exdates = [x for x in str(master.get("exdates") or "").split(",") if x and x >= occ_key]
+    row.update({"uid": split_uid or new_uid(), "start_utc": iso_utc(new_start), "end_utc": iso_utc(new_end), "link_group_id": new_group,
+                "exdates": ",".join(later_exdates), "rrule": changes.get("rrule") or ";".join(rule_parts), "sync_state": "synced"})
     saved = store.insert_event(row)
     _apply_changes(store, saved, {k: v for k, v in changes.items() if k not in ("start_utc", "end_utc", "rrule")})
-    from model import get_tz
-    tz = get_tz(master.get("tz") or "")
     shift = new_start - occ_start
+    moved: List[Dict[str, Any]] = []
     for exc in later:
         old_key = parse_stored(exc.get("recurrence_id"))
         if old_key is None:
             continue
         new_key = old_key + shift if not master.get("all_day") else old_key
         store.update_event(exc["id"], {"master_id": saved["id"], "recurrence_id": iso_utc(new_key), "uid": saved["uid"],
-                                       "link_group_id": new_group, "external_id": "", "href": "", "etag": ""})
-    return [store.get_event(master["id"]), store.get_event(saved["id"])]
+                                       "link_group_id": new_group, "external_id": "", "href": "", "etag": "",
+                                       "sync_state": "synced" if not master.get("external_id") and not master.get("href") else "pending"})
+        moved.append(store.get_event(exc["id"]))
+    # the moved exceptions are written to the provider after the new master exists (they resolve through it)
+    return [store.get_event(master["id"]), store.get_event(saved["id"]), *moved]
 
 
 # ── intents ─────────────────────────────────────────────────────────
@@ -499,7 +562,8 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
         store.settle_intent(intent["id"], INTENT_FAILED, {"error": "event or calendar vanished"})
         return {"status": INTENT_FAILED, "message": "событие или календарь исчезли"}
     if adapter is None:
-        return _defer(store, intent, "аккаунт не подключён (нет секрета или гранта)", kind="not_connected")
+        reason = (getattr(providers, "errors", {}) or {}).get(cal["account_id"]) or "нет секрета или гранта"
+        return _defer(store, intent, f"аккаунт не подключён: {reason}", kind="not_connected")
     try:
         payload = json.loads(intent.get("payload_json") or "{}")
     except ValueError:
@@ -577,8 +641,10 @@ def reassign_event(store, providers, row: Dict[str, Any], calendar_ids: List[str
     moving the primary itself is a delete + create the owner asks for explicitly.
     """
     owner = owner or lease_owner()
+    if row.get("master_id"):
+        row = store.get_event(row["master_id"]) or row   # an occurrence id means its whole series
     group = row.get("link_group_id") or ""
-    members = store.group_members(group) if group else [row]
+    members = store.group_masters(group) if group else [row]
     row = next((m for m in members if m.get("is_primary")), row)   # a clicked copy still reassigns around the primary
     current = {m["calendar_id"]: m for m in members}
     added, removed = [], []
@@ -608,14 +674,33 @@ def reassign_event(store, providers, row: Dict[str, Any], calendar_ids: List[str
                      "attendees_json": "[]", "reminders_json": "[]", "origin": "local",
                      "sync_state": "synced" if cal["provider"] == PROVIDER_LOCAL else "pending"})
         saved = store.insert_event(copy)
+        # a series copy carries the primary's exceptions (moved/cancelled dates), times only for busy copies
+        exception_rows = []
+        for exc in store.exceptions_for(row["id"]):
+            exc_copy = {k: exc.get(k) for k in ("visibility", "availability", "start_utc", "end_utc", "tz", "all_day", "recurrence_id", "status")}
+            exc_copy.update({"calendar_id": cid, "uid": saved["uid"], "master_id": saved["id"], "is_primary": 0, "link_group_id": group,
+                             "title": copy["title"] if mode == PUBLISH_BUSY else exc.get("title") or copy["title"],
+                             "description": "" if mode == PUBLISH_BUSY else exc.get("description") or "",
+                             "location": "" if mode == PUBLISH_BUSY else exc.get("location") or "",
+                             "attendees_json": "[]", "reminders_json": "[]", "origin": "local", "rrule": "",
+                             "sync_state": "synced" if cal["provider"] == PROVIDER_LOCAL else "pending"})
+            exception_rows.append(store.insert_event(exc_copy))
         if cal["provider"] == PROVIDER_LOCAL:
             added.append({"calendar_id": cid, "calendar_name": cal["name"], "event_id": saved["id"], "status": INTENT_DONE})
             continue
         intent = store.add_intent("create", cal["account_id"], cid, saved["id"], {"send_updates": False})
-        added.append({"calendar_id": cid, "calendar_name": cal["name"], "event_id": saved["id"], **execute_intent(store, providers, intent, owner)})
+        outcome = execute_intent(store, providers, intent, owner)
+        for exc_row in exception_rows:
+            if outcome.get("status") != INTENT_DONE:
+                break   # the exceptions resolve through the master: they wait for its create
+            exc_intent = store.add_intent("update", cal["account_id"], cid, exc_row["id"], {"scope": SCOPE_THIS, "changes": {}, "send_updates": False},
+                                          scope=SCOPE_THIS)
+            execute_intent(store, providers, exc_intent, owner)
+        added.append({"calendar_id": cid, "calendar_name": cal["name"], "event_id": saved["id"], **outcome})
     for cid, m in current.items():
         if cid in wanted or m["id"] == row["id"]:
             continue
-        res = delete_event(store, providers, m["id"], scope=SCOPE_ALL, owner=owner)
-        removed.append({"calendar_id": cid, "assignments": res["assignments"]})
+        res = delete_event(store, providers, m["id"], scope=SCOPE_ALL, owner=owner, cascade=False)   # this copy only, never the group
+        removed.append({"calendar_id": cid, "calendar_name": m.get("calendar_name"), "event_id": m["id"],
+                        "assignments": res.get("assignments") or [{"calendar_id": cid, "event_id": m["id"], "status": INTENT_DONE}]})
     return {"added": added, "removed": removed, "kept_primary": row["calendar_id"]}

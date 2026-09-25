@@ -11,7 +11,7 @@ import ops
 import reminders as rem
 from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, DEFAULT_LOCAL_CALENDAR_ID, MAX_EVENTS, MAX_WINDOW_DAYS, PROVIDER_GOOGLE,
-    PROVIDER_LOCAL, PROVIDER_YANDEX, SCOPES, SCOPE_THIS, VISIBILITY_HIDDEN, VISIBILITY_SHOWN, WEEKDAY_LABELS,
+    PROVIDER_LOCAL, PROVIDER_YANDEX, SCOPES, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_HIDDEN, VISIBILITY_SHOWN, WEEKDAY_LABELS,
     bounded_result, day_bounds, event_public, get_tz, iso_local, iso_utc, json_dumps, label, now_utc, parse_input,
     parse_stored, parse_working_hours, tz_name,
 )
@@ -44,7 +44,7 @@ class Context:
     def occurrences(self, start: datetime, end: datetime, calendar_ids: Optional[Sequence[str]] = None,
                     include_hidden: bool = True) -> List[Dict[str, Any]]:
         rows = self.store.window(start, end, calendar_ids, include_hidden=include_hidden)
-        return ops.expand(rows, start, end, self.store.exceptions_for)
+        return ops.expand(rows, start, end, self.store.exceptions_for, owner_tz=self.tz)
 
     def resolve_calendars(self, spec: Any) -> Tuple[List[str], str]:
         """Names, aliases, ids, provider words, 'all', 'busy_set', 'default' → ordered calendar ids."""
@@ -173,7 +173,13 @@ def cal_status(ctx: Context, **kwargs) -> str:
     if not ctx.secrets.get("GOOGLE_CALENDAR_CLIENT_ID"):
         next_steps.append("Google не подключён: нужны GOOGLE_CALENDAR_CLIENT_ID/SECRET и CALENDAR_TOKEN_KEY в Settings → Secrets (этап Google)")
     for a in accounts:
-        if a["status"] != "ok" and a["provider"] != PROVIDER_LOCAL:
+        if a["provider"] == PROVIDER_LOCAL:
+            continue
+        ctx.providers.adapter_for(a["id"])   # fills providers.errors with the concrete reason when there is none
+        reason = ctx.providers.errors.get(a["id"])
+        if reason:
+            next_steps.append(f"{a['alias'] or a['id']}: адаптер недоступен — {reason}")
+        elif a["status"] != "ok":
             next_steps.append(f"{a['alias'] or a['id']}: {a['status']} — {a.get('last_error') or ''}".strip())
     if counts.get("conflict"):
         next_steps.append(f"{counts['conflict']} операций в конфликте с внешней версией: см. cal_events(id=…) и реши, что оставить")
@@ -186,7 +192,8 @@ def cal_status(ctx: Context, **kwargs) -> str:
         "timezone": tz_name(ctx.tz), "now_local": now.replace(microsecond=0).isoformat(), "today": now.date().isoformat(),
         "weekday": WEEKDAY_LABELS[now.weekday()],
         "accounts": [{"id": a["id"], "provider": a["provider"], "alias": a["alias"], "status": a["status"], "last_sync": a.get("last_sync"),
-                      "last_error": (a.get("last_error") or "")[:160]} for a in accounts],
+                      "last_error": (a.get("last_error") or "")[:160],
+                      **({"adapter_error": ctx.providers.errors[a["id"]][:160]} if ctx.providers.errors.get(a["id"]) else {})} for a in accounts],
         "calendars": [{"id": c["id"], "name": c["name"], "account_id": c["account_id"], "provider": c["provider"], "writable": bool(c["writable"]),
                        "visible": bool(c["role_visible"]), "busy_source": bool(c["role_busy"]), "publish_busy": bool(c["role_publish"]),
                        "publish_mode": c["publish_mode"], "default": bool(c["is_default"])} for c in cals],
@@ -222,7 +229,13 @@ def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = No
             return json_dumps({"status": "not_found", "message": f"событие {id} не найдено"})
         out = event_public(row, ctx.tz, compact=False)
         if occ:
-            out["occurrence_start"] = iso_local(occ, ctx.tz)
+            occ_dt = parse_stored(occ)
+            live = [o for o in ops.expand([row], occ_dt - timedelta(minutes=1), occ_dt + timedelta(days=2), st.exceptions_for, owner_tz=ctx.tz)
+                    if str(o.get("recurrence_id") or "") == occ or str(o.get("start_utc") or "") == occ] if occ_dt else []
+            if live:
+                out.update(event_public({**row, **live[0], "id": f"{row['id']}@{occ}"}, ctx.tz, compact=False))
+                out["series_id"] = row["id"]
+            out["occurrence_start"] = iso_local(live[0]["start_utc"], ctx.tz) if live else iso_local(occ, ctx.tz)
         out["assignments"] = [{"calendar_id": m["calendar_id"], "calendar_name": m.get("calendar_name"), "event_id": m["id"],
                                "sync_state": m.get("sync_state")} for m in st.group_members(row.get("link_group_id") or "")] if row.get("link_group_id") else []
         out["intents"] = [{"kind": i["kind"], "state": i["state"], "attempts": i["attempts"], "result": i.get("result_json")} for i in st.intents_for_event(base)[-5:]]
@@ -334,6 +347,8 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
     if row.get("rrule") and not occ and scope == SCOPE_THIS:
         return json_dumps({"status": "ambiguous", "message": "это повторяющееся событие: укажи id конкретного вхождения (…@дата) для одной даты, "
                                                                 "scope='all' для всей серии или scope='following' с id вхождения — «начиная с этой даты»"})
+    if scope == SCOPE_FOLLOWING and not occ and not row.get("master_id"):
+        return json_dumps({"status": "error", "message": "scope='following' требует id вхождения (…@дата): с какой даты менять"})
     changes: Dict[str, Any] = {}
     if start or end or duration_min is not None:
         old_s, old_e = parse_stored(occ or row["start_utc"]), None
@@ -347,9 +362,11 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
         changes.update({"start_utc": iso_utc(new_s), "end_utc": iso_utc(new_e)})
         if all_day is not None or is_date:
             changes["all_day"] = _bool(all_day, is_date)
-    for key, value in (("title", title), ("description", description), ("location", location)):
-        if value not in (None, ""):
-            changes[key] = str(value)
+    if title not in (None, ""):
+        changes["title"] = str(title)
+    for key, value in (("description", description), ("location", location)):
+        if value is not None:
+            changes[key] = str(value)   # "" is an explicit «clear it»
     if hidden is not None:
         changes["visibility"] = VISIBILITY_HIDDEN if _bool(hidden) else VISIBILITY_SHOWN
     if availability:
@@ -377,7 +394,8 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
         if err:
             return json_dumps({"status": "error", "message": err})
         result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, ctx.store.get_event(base) or row, cal_ids)
-        result["assignments"] = list(result["assignments"]) + [a for a in result["reassign"]["added"]]
+        result["assignments"] = list(result["assignments"]) + list(result["reassign"]["added"]) \
+            + [{**a, "action": "removed"} for r in result["reassign"]["removed"] for a in r["assignments"]]
     warning = _plan_reminders(ctx)
     ev = result.get("event") or ctx.store.get_event(base)
     statuses = {a["status"] for a in result["assignments"]}
@@ -398,11 +416,13 @@ def cal_delete(ctx: Context, id: str = "", scope: str = SCOPE_THIS, send_updates
     if row.get("rrule") and not occ and scope == SCOPE_THIS:
         return json_dumps({"status": "ambiguous", "message": "повторяющееся событие: уточни у владельца — удалить только эту дату (id вхождения), "
                                                                 "всё расписание (scope='all') или начиная с даты (scope='following')"})
+    if scope == SCOPE_FOLLOWING and not occ and not row.get("master_id"):
+        return json_dumps({"status": "error", "message": "scope='following' требует id вхождения (…@дата): с какой даты удалять"})
     if not _bool(confirm):
         return bounded_result({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "event": event_public(row, ctx.tz), "scope": scope})
     result = ops.delete_event(ctx.store, ctx.providers, str(id), scope=scope, send_updates=_bool(send_updates))
     statuses = {a["status"] for a in result["assignments"]}
-    status = "deleted" if statuses <= {"done"} else ("pending" if "pending" in statuses else "deleted_partially")
+    status = "deleted" if statuses <= {"done"} else ("pending" if "pending" in statuses else ("conflict" if "conflict" in statuses else "deleted_partially"))
     return bounded_result({"status": status, "message": _assignment_message("Удалено", row, result["assignments"], ctx.tz), "assignments": result["assignments"]})
 
 
@@ -484,7 +504,6 @@ def set_reminder_mode(ctx: Context, calendar_id: str, on: bool) -> Dict[str, Any
         return {"error": "календарь не найден"}
     if cal["provider"] == PROVIDER_LOCAL:
         return {"calendar_id": calendar_id, "note": "локальный календарь и так напоминает через Уроборос"}
-    modes = rem.set_mode(st, calendar_id, on)
     report: Dict[str, Any] = {"calendar_id": calendar_id, "mode": "on" if on else "off", "provider_muted": False, "manual_steps": []}
     if not on:
         saved = st.get_setting(f"google_default_reminders:{calendar_id}") or []
@@ -494,10 +513,15 @@ def set_reminder_mode(ctx: Context, calendar_id: str, on: bool) -> Dict[str, Any
                 adapter.set_default_reminders(cal, saved)
                 report["provider_restored"] = saved
             except ops.ProviderError as exc:
-                report["manual_steps"].append(f"не удалось вернуть напоминания по умолчанию у провайдера: {exc.message}")
+                # neither side would remind: keep Ouroboros on and say so
+                report.update({"mode": "on", "status": "failed",
+                               "message": f"режим оставлен включённым: не удалось вернуть напоминания провайдера — {exc.message}"})
+                return report
         else:
             report["manual_steps"].append("напоминания провайдера, снятые при включении режима, восстанови в его настройках вручную")
+        rem.set_mode(st, calendar_id, False)
         return report
+    modes = rem.set_mode(st, calendar_id, True)
     defaults = st.get_setting(f"google_default_reminders:{calendar_id}") or []
     minutes = sorted({int(d.get("minutes")) for d in defaults if isinstance(d, dict) and d.get("minutes") is not None})
     if minutes:
@@ -580,8 +604,17 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
         accounts = [a for a in st.list_accounts() if a["id"] == calendar_id or a["alias"] == calendar_id]
         if not accounts:
             return json_dumps({"status": "not_found", "message": "укажи id аккаунта (см. cal_status → accounts)"})
-        st.delete_account(accounts[0]["id"])
-        return json_dumps({"status": "updated", "message": f"аккаунт {accounts[0]['id']} отключён; локальные события не тронуты, секрет удаляет владелец"})
+        acc = accounts[0]
+        cancelled = st.cancel_intents_for_account(acc["id"])
+        st.delete_account(acc["id"])
+        forgot = False
+        if acc["provider"] == PROVIDER_GOOGLE:
+            import providers_google as gp
+            forgot = gp.forget_account(ctx.state_dir, str(ctx.secrets.get("CALENDAR_TOKEN_KEY") or ""), acc.get("login") or acc["id"].split(":", 1)[-1])
+        ctx.providers = Providers(ctx.secrets, ctx.state_dir)
+        return json_dumps({"status": "updated", "cancelled_intents": cancelled, "tokens_dropped": forgot,
+                           "message": f"аккаунт {acc['id']} отключён; локальные события не тронуты, незавершённых записей отменено: {cancelled};"
+                                      + (" сохранённые токены Google удалены" if forgot else " секрет удаляет владелец")})
     if action == "sync_now":
         st.set_setting("sync_requested_at", iso_utc(now_utc()))
         return json_dumps({"status": "accepted", "message": "фоновая синхронизация запрошена; результат — в cal_status через минуту"})
@@ -657,7 +690,7 @@ def reload_google(ctx: Context) -> Dict[str, Any]:
                            "login": email, "status": "ok"})
         adapter = ctx.providers.adapter_for(account_id)
         if adapter is None:
-            report.append({"account": account_id, "status": "not_connected"})
+            report.append({"account": account_id, "status": "not_connected", "message": ctx.providers.errors.get(account_id, "")})
             continue
         try:
             cals = adapter.list_calendars()

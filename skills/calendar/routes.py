@@ -74,8 +74,9 @@ def agenda_payload(ctx: tools.Context, view: str, anchor: str, calendar_ids: Any
     return {
         "status": "ok", "view": view, "anchor": day.isoformat(), "timezone": tz_name(ctx.tz), "now": now.replace(microsecond=0).isoformat(),
         "range": {"start": iso_local(start, ctx.tz), "end": iso_local(end, ctx.tz)},
-        "days": [{"date": (start + timedelta(days=i)).astimezone(ctx.tz).date().isoformat(),
-                  "weekday": WEEKDAY_LABELS[(start + timedelta(days=i)).astimezone(ctx.tz).weekday()]} for i in range((end - start).days)],
+        "days": [{"date": (start.astimezone(ctx.tz).date() + timedelta(days=i)).isoformat(),
+                  "weekday": WEEKDAY_LABELS[(start.astimezone(ctx.tz).date() + timedelta(days=i)).weekday()]}
+                 for i in range((end.astimezone(ctx.tz).date() - start.astimezone(ctx.tz).date()).days)],
         "calendars": [{"id": c["id"], "name": c["name"], "provider": c["provider"], "writable": bool(c["writable"]), "visible": bool(c["role_visible"]),
                        "default": bool(c["is_default"])} for c in cals],
         "events": events, "hidden_busy": hatches, "usual": usual if show_hidden else [],
@@ -89,7 +90,8 @@ def register_routes(api, make_ctx) -> None:
     async def agenda(request):
         ctx = make_ctx()
         q = request.query_params
-        cal_ids = [c for c in str(q.get("calendars") or "").split(",") if c]
+        raw_cals = str(q.get("calendars") or "")
+        cal_ids = ["-"] if raw_cals == "-" else [c for c in raw_cals.split(",") if c]   # "-" = the owner unticked every calendar
         show_hidden = str(q.get("show_hidden") or "").lower() in ("1", "true")
         view = "week" if str(q.get("view") or "day") == "week" else "day"
         return JSONResponse(agenda_payload(ctx, view, str(q.get("date") or ""), cal_ids, show_hidden))
@@ -168,7 +170,8 @@ def register_routes(api, make_ctx) -> None:
             if row is None:
                 return _err("событие не найдено", 404)
             result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, row, cal_ids)
-            result["assignments"] = list(result["assignments"]) + list(result["reassign"]["added"])
+            result["assignments"] = list(result["assignments"]) + list(result["reassign"]["added"]) \
+                + [{**a, "action": "removed"} for r in result["reassign"]["removed"] for a in r["assignments"]]
         warning = tools._plan_reminders(ctx)
         base, _ = ops._series_id(event_id)
         ev = result.get("event") or ctx.store.get_event(base)
@@ -196,17 +199,6 @@ def register_routes(api, make_ctx) -> None:
             return JSONResponse(data, status_code=404)
         return JSONResponse(data)
 
-    async def settings_get(request):
-        ctx = make_ctx()
-        return JSONResponse(json.loads(tools.cal_settings(ctx, action="get")))
-
-    async def settings_save(request):
-        ctx = make_ctx()
-        body = await _body(request)
-        action = str(body.get("action") or "set")
-        body["confirm"] = True
-        return JSONResponse(json.loads(tools.cal_settings(ctx, **{k: v for k, v in body.items() if k != "action"}, action=action)))
-
     async def reminders_get(request):
         ctx = make_ctx()
         return JSONResponse(json.loads(tools.cal_reminders(ctx, action="list")))
@@ -232,6 +224,8 @@ def register_routes(api, make_ctx) -> None:
             report = tools.reload_google(ctx)
         except ops.ProviderError as exc:
             return HTMLResponse(f"<h3>Ошибка подключения Google</h3><p>{html.escape(exc.message)}</p>", status_code=502)
+        except Exception as exc:  # a malformed token response must still end as a page, not a bare 500
+            return HTMLResponse(f"<h3>Ошибка подключения Google</h3><p>{html.escape(f'{type(exc).__name__}: {exc}')}</p>", status_code=502)
         cals = [c["name"] for a in report.get("accounts", []) if a.get("account") == done["account_id"] for c in a.get("calendars", [])]
         return HTMLResponse("<h3>Google подключён: " + html.escape(done["email"]) + "</h3><p>Календари: " + html.escape(", ".join(cals))
                             + "</p><p>Вкладку можно закрыть; вернись в чат Уробороса.</p>")
@@ -247,8 +241,6 @@ def register_routes(api, make_ctx) -> None:
     api.register_route("event/get", event_get, methods=("GET",))
     api.register_route("event/update", event_update, methods=("POST",))
     api.register_route("event/delete", event_delete, methods=("POST",))
-    api.register_route("settings", settings_get, methods=("GET",))
-    api.register_route("settings/save", settings_save, methods=("POST",))
     api.register_route("reminders", reminders_get, methods=("GET",))
     api.register_route("reminders/save", reminders_save, methods=("POST",))
     api.register_route("sync", sync_now, methods=("POST",))

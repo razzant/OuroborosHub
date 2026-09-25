@@ -137,10 +137,13 @@ def plan(store, occurrences_in: Any, now: Optional[datetime] = None) -> int:
             continue
         event_id = occ.get("series_id") or occ.get("id")
         occ_start = occ.get("start_utc")   # effective start: a moved exception is a different reminder than the original slot
+        end = parse_stored(occ.get("end_utc")) or (start + timedelta(hours=1))
         for offset in offsets_for(occ, rules, modes):
             fire_at = start - timedelta(minutes=offset)
-            if fire_at < now - CATCHUP_GRACE * 6 or fire_at > now + PLAN_HORIZON:
+            if fire_at > now + PLAN_HORIZON:
                 continue
+            if fire_at < now and end < now:
+                continue   # already over: nothing to catch up (21 A: only what is still upcoming or running)
             if store.schedule_reminder(event_id, occ_start, offset, iso_utc(fire_at), notice_id_for(event_id, occ_start, offset)):
                 scheduled += 1
     return scheduled
@@ -148,18 +151,40 @@ def plan(store, occurrences_in: Any, now: Optional[datetime] = None) -> int:
 
 # ── delivery ────────────────────────────────────────────────────────
 
+try:  # the host's credential wrapper when the companion can import it; the same contract otherwise
+    from ouroboros.skill_token import SkillToken as _SkillToken  # type: ignore
+except Exception:  # pragma: no cover - companion env without the core package
+    class _SkillToken:
+        """Refuses accidental stringification; the value is revealed only at the request-construction site."""
+
+        def __init__(self, value: str):
+            token = str(value or "").strip()
+            if not token:
+                raise ValueError("SkillToken cannot be empty")
+            self._value = token
+
+        def use_in_request(self) -> str:
+            return self._value
+
+        def __repr__(self) -> str:
+            return "<SkillToken redacted>"
+
+        __str__ = __repr__
+
+
 class NotifyChannel:
     """Loopback Host Service ``POST /chat/notify``; feature-detected via ``GET /identity``."""
 
     def __init__(self, base_url: str = "", token: str = ""):
         self.base_url = (base_url or os.environ.get("HOST_SERVICE_URL") or "").rstrip("/")
-        self.token = token or os.environ.get("HOST_SERVICE_TOKEN") or ""
+        raw = token or os.environ.get("HOST_SERVICE_TOKEN") or ""
+        self._token = _SkillToken(raw) if raw else None
         self._state: Optional[str] = None   # ready | no_route | no_grant | unreachable
 
     def state(self, refresh: bool = False) -> str:
         if self._state and not refresh:
             return self._state
-        if not self.base_url or not self.token:
+        if not self.base_url or self._token is None:
             self._state = "unreachable"
             return self._state
         try:
@@ -200,7 +225,7 @@ class NotifyChannel:
     def _request(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         req = urllib.request.Request(self.base_url + path, method=method,
                                      data=json.dumps(body).encode("utf-8") if body is not None else None)
-        req.add_header("X-Skill-Token", self.token)
+        req.add_header("X-Skill-Token", self._token.use_in_request() if self._token is not None else "")
         req.add_header("Content-Type", "application/json")
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -254,12 +279,12 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
             store.mark_reminder(rem["id"], "skipped", "событие отменено или удалено")
             stats["skipped"] += 1
             continue
-        verdict = _occurrence_state(store, event, start, now)
+        verdict, live = _occurrence_state(store, event, start, now)
         if verdict:
             store.mark_reminder(rem["id"], "skipped", verdict)
             stats["skipped"] += 1
             continue
-        (stale if fire_at and now - fire_at > CATCHUP_GRACE else fresh).append((rem, event))
+        (stale if fire_at and now - fire_at > CATCHUP_GRACE else fresh).append((rem, live))
     for rem, event in fresh:
         text = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)
         state, detail = channel.send(rem["notice_id"], text)
@@ -276,27 +301,35 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
     return stats
 
 
-def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], now: datetime) -> str:
-    """'' when the planned occurrence is still on; otherwise the reason to skip it."""
+def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], now: datetime) -> Tuple[str, Dict[str, Any]]:
+    """('', effective occurrence row) when the planned occurrence is still on; otherwise (reason to skip it, row).
+
+    The effective row is the exception living at this slot when there is one (its own title/end), else the master."""
     if start is None:
-        return "нет времени вхождения"
+        return "нет времени вхождения", event
     m_start, m_end = parse_stored(event.get("start_utc")), parse_stored(event.get("end_utc"))
     duration = (m_end - m_start) if (m_start and m_end and m_end > m_start) else timedelta(hours=1)
     if not event.get("rrule"):
         if m_start and m_start != start:
-            return "событие перенесено; напоминание перепланировано"
+            return "событие перенесено; напоминание перепланировано", event
         if m_end and m_end < now:
-            return "событие уже закончилось"
-        return ""
+            return "событие уже закончилось", event
+        return "", event
     key = iso_utc(start)
+    live_row: Dict[str, Any] = event
+    end_at = start + duration
     for exc in store.exceptions_for(event["id"]):
         if str(exc.get("recurrence_id") or "") == key:
             if str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at"):
-                return "вхождение отменено"
+                return "вхождение отменено", event
             if str(exc.get("start_utc") or "") != key:
-                return "вхождение перенесено; напоминание перепланировано"
+                return "вхождение перенесено; напоминание перепланировано", event
+            live_row = {**event, **{k: exc.get(k) for k in ("title", "description", "location", "end_utc") if exc.get(k)}}
+            end_at = parse_stored(exc.get("end_utc")) or end_at
             break
         if str(exc.get("start_utc") or "") == key:
+            live_row = {**event, **{k: exc.get(k) for k in ("title", "description", "location", "end_utc") if exc.get(k)}}
+            end_at = parse_stored(exc.get("end_utc")) or end_at
             break  # a moved exception now living at this slot: it is the live occurrence
     else:
         try:
@@ -305,10 +338,10 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
         except Exception:
             live = [{"start_utc": key}]
         if not any(str(o.get("start_utc") or "") == key for o in live):
-            return "вхождения больше нет в расписании"
-    if start + duration < now:
-        return "вхождение уже закончилось"
-    return ""
+            return "вхождения больше нет в расписании", event
+    if end_at < now:
+        return "вхождение уже закончилось", live_row
+    return "", live_row
 
 
 def _record(store, reminder_id: str, state: str, detail: str, stats: Dict[str, int]) -> None:

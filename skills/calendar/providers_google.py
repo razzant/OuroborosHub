@@ -92,6 +92,11 @@ def start_auth(store, secrets: Dict[str, Any], redirect_uri: str) -> Dict[str, A
     verifier = base64.urlsafe_b64encode(os.urandom(48)).decode("ascii").rstrip("=")
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
     state = pysecrets.token_urlsafe(24)
+    for key, value in list(store.all_settings().items()):   # abandoned logins do not pile up
+        if key.startswith(PENDING_PREFIX):
+            created = parse_stored((value or {}).get("created_at")) if isinstance(value, dict) else None
+            if not isinstance(value, dict) or created is None or now_utc() - created > timedelta(minutes=30):
+                store.delete_setting(key)
     store.set_setting(PENDING_PREFIX + state, {"verifier": verifier, "redirect_uri": redirect_uri, "created_at": iso_utc(now_utc())})
     params = {"client_id": client_id, "redirect_uri": redirect_uri, "response_type": "code", "scope": " ".join(SCOPES),
               "code_challenge": challenge, "code_challenge_method": "S256", "state": state, "access_type": "offline", "prompt": "consent"}
@@ -122,8 +127,21 @@ def finish_auth(store, secrets: Dict[str, Any], state_dir: str, code: str, state
     tokens[email] = {"access_token": data["access_token"], "refresh_token": data.get("refresh_token") or prev.get("refresh_token", ""),
                      "expires_at": iso_utc(now_utc() + timedelta(seconds=int(data.get("expires_in") or 3600))), "scope": data.get("scope", "")}
     save_tokens(state_dir, str(secrets.get("CALENDAR_TOKEN_KEY") or ""), tokens)
-    store.set_setting(PENDING_PREFIX + state, None)
+    store.delete_setting(PENDING_PREFIX + state)
     return {"email": email, "account_id": make_account_id(PROVIDER_GOOGLE, email)}
+
+
+def forget_account(state_dir: str, passphrase: str, email: str) -> bool:
+    """Drop the stored tokens of one account (disconnect): reload_google must not resurrect it."""
+    try:
+        tokens = load_tokens(state_dir, passphrase)
+    except ProviderError:
+        return False
+    if email not in tokens:
+        return False
+    del tokens[email]
+    save_tokens(state_dir, passphrase, tokens)
+    return True
 
 
 def _token_request(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -318,8 +336,12 @@ class GoogleAdapter:
             _, headers, data = self._request("POST", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events", params, body)
         except ProviderError as exc:
             if exc.kind == "conflict" or (exc.kind == "http" and exc.status == 409):
-                # id already used: a retry after a lost response — read it back instead of duplicating
+                # id already used: a retry after a lost response — read it back instead of duplicating; a cancelled
+                # leftover (a copy removed earlier, same stable id) is revived with the new content
                 _, _, data = self._request("GET", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{body['id']}")
+                if str(data.get("status") or "") == "cancelled":
+                    revive = {k: v for k, v in body.items() if k != "id"}
+                    _, _, data = self._request("PUT", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{body['id']}", params, revive)
                 return {"external_id": data.get("id", body["id"]), "href": "", "etag": str(data.get("etag") or "")}
             raise
         return {"external_id": str(data.get("id") or body["id"]), "href": "", "etag": str(data.get("etag") or headers.get("etag") or "")}
@@ -328,6 +350,8 @@ class GoogleAdapter:
         external_id = str(event.get("external_id") or "")
         if not external_id and event.get("master_id"):
             external_id = self._instance_id(calendar, event)
+            if not external_id:
+                raise ProviderError("retry", "экземпляр серии у Google ещё не найден (мастер ещё не записан?) — повторим позже")
         if not external_id:
             return self.create(calendar, event, payload)
         body = row_to_gevent(event, mute=bool(payload.get("mute_provider_reminders")))
@@ -354,9 +378,13 @@ class GoogleAdapter:
         if not external_id or response not in ("accepted", "declined", "tentative"):
             raise ProviderError("unsupported", "ответить можно только на событие с участниками из Google")
         attendees = json.loads(event.get("attendees_json") or "[]")
+        hit = False
         for att in attendees:
-            if att.get("self") or att.get("email", "").lower() == self.email.lower():
+            if att.get("self") or str(att.get("email") or "").lower() == self.email.lower():
                 att["responseStatus"] = response
+                hit = True
+        if not hit:
+            raise ProviderError("unsupported", "среди участников события нет этого аккаунта — ответить нечем")
         body = {"attendees": [{"email": a.get("email"), "responseStatus": a.get("responseStatus") or a.get("status") or "needsAction"} for a in attendees if a.get("email")]}
         params = {"sendUpdates": "all" if payload.get("notify_organizer") else "none"}
         _, headers, data = self._request("PATCH", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{urllib.parse.quote(external_id, safe='')}", params, body)
@@ -372,7 +400,9 @@ class GoogleAdapter:
         occ = parse_stored(event.get("recurrence_id"))
         if not master_ext or occ is None:
             return ""
-        stamp = occ.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ") if not event.get("all_day") else occ.strftime("%Y%m%d")
+        all_day = bool(event.get("all_day"))
+        local_date = occ.astimezone(get_tz(event.get("tz") or "")).date()
+        stamp = local_date.strftime("%Y%m%d") if all_day else occ.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         candidate = f"{master_ext}_{stamp}"
         try:
             self._request("GET", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{urllib.parse.quote(candidate, safe='')}")
@@ -380,8 +410,15 @@ class GoogleAdapter:
         except ProviderError as exc:
             if exc.kind != "not_found":
                 raise
-        _, _, data = self._request("GET", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{urllib.parse.quote(master_ext, safe='')}/instances",
-                                   {"originalStart": occ.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "maxResults": 1})
+        base = f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{urllib.parse.quote(master_ext, safe='')}/instances"
+        if all_day:
+            _, _, data = self._request("GET", base, {"timeMin": f"{local_date - timedelta(days=1)}T00:00:00Z", "timeMax": f"{local_date + timedelta(days=2)}T00:00:00Z",
+                                                     "maxResults": 10})
+            for item in data.get("items", []):
+                if str((item.get("originalStartTime") or {}).get("date") or "") == local_date.isoformat():
+                    return str(item.get("id") or "")
+            return ""
+        _, _, data = self._request("GET", base, {"originalStart": occ.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "maxResults": 1})
         items = data.get("items", [])
         return str(items[0].get("id") or "") if items else ""
 
@@ -496,11 +533,16 @@ def row_to_gevent(event: Dict[str, Any], mute: bool = False) -> Dict[str, Any]:
         recurrence.append("RRULE:" + str(event["rrule"]))
     if event.get("exdates"):
         stamps = [parse_stored(x) for x in str(event["exdates"]).split(",") if x]
-        stamps = [x.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ") for x in stamps if x]
-        if stamps:
-            recurrence.append("EXDATE:" + ",".join(stamps))
-    if recurrence or event.get("rrule") == "":
-        body["recurrence"] = recurrence
+        if event.get("all_day"):
+            stamps = [x.astimezone(tz).strftime("%Y%m%d") for x in stamps if x]
+            if stamps:
+                recurrence.append("EXDATE;VALUE=DATE:" + ",".join(stamps))
+        else:
+            stamps = [x.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ") for x in stamps if x]
+            if stamps:
+                recurrence.append("EXDATE:" + ",".join(stamps))
+    if not event.get("master_id") and (recurrence or event.get("rrule") == ""):
+        body["recurrence"] = recurrence   # instances (exceptions) never carry recurrence: Google rejects it
     body["status"] = "cancelled" if str(event.get("status") or "") == "cancelled" else "confirmed"
     body["transparency"] = "transparent" if event.get("availability") == "free" else "opaque"
     try:

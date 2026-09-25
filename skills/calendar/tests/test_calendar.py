@@ -202,7 +202,7 @@ class OpsTests(unittest.TestCase):
         r = self.create(title="Обед", start="2026-09-28T13:00", calendars="local:personal, Рабочий")
         adapter.fail = "conflict"
         d = json.loads(tools.cal_delete(self.ctx, id=r["event"]["id"], confirm=True))
-        self.assertIn(d["status"], ("deleted_partially", "pending"))
+        self.assertIn(d["status"], ("conflict", "deleted_partially", "pending"))   # a provider conflict is reported as such
         self.assertEqual(self.ctx.store.intent_counts().get("conflict"), 1)
 
 
