@@ -434,8 +434,9 @@ class Store:
     # ── intents (durable external operations) ───────────────────────
 
     def add_intent(self, kind: str, account_id: str, calendar_id: str, event_id: str, payload: Dict[str, Any],
-                   scope: str = "this", expected_etag: str = "") -> Dict[str, Any]:
+                   scope: str = "this", expected_etag: str = "", op_id: str = "") -> Dict[str, Any]:
         ts = now_utc().isoformat(timespec="microseconds")   # intents of one call must order strictly (dependents wait for earlier writes)
+        payload = {**(payload or {}), **({"op_id": op_id} if op_id else {})}   # one owner command = one op: its parts share the fate
         row = {"id": new_id("int"), "kind": kind, "account_id": account_id, "calendar_id": calendar_id, "event_id": event_id,
                "scope": scope, "payload_json": json.dumps(payload, ensure_ascii=False, default=str), "expected_etag": expected_etag or "",
                "state": INTENT_PENDING, "attempts": 0, "next_attempt_at": ts, "lease_until": None, "lease_owner": "",
@@ -492,11 +493,6 @@ class Store:
     def intents_for_event(self, event_id: str) -> List[Dict[str, Any]]:
         with self._conn() as c:
             rows = c.execute("SELECT * FROM intents WHERE event_id=? ORDER BY created_at", (event_id,)).fetchall()
-        return [dict(r) for r in rows]
-
-    def open_intents_for_event(self, event_id: str) -> List[Dict[str, Any]]:
-        with self._conn() as c:
-            rows = c.execute("SELECT * FROM intents WHERE event_id=? AND state=? ORDER BY created_at", (event_id, INTENT_PENDING)).fetchall()
         return [dict(r) for r in rows]
 
     def open_intents(self, limit: int = 50) -> List[Dict[str, Any]]:

@@ -176,6 +176,15 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
                     continue
                 ops.update_event(store, providers, sib["id"], moved, scope="all", owner="companion", propagate=False)
                 propagated += 1
+        if existing.get("link_group_id") and row.get("rrule"):
+            # a date cancelled on the server as EXDATE (CalDAV style) is a cancelled occurrence for the copies too
+            new_ex = set(x for x in str(row.get("exdates") or "").split(",") if x) - set(x for x in str(existing.get("exdates") or "").split(",") if x)
+            for key in sorted(new_ex):
+                for sib in store.group_masters(existing["link_group_id"]):
+                    if sib["id"] == existing["id"]:
+                        continue
+                    ops.delete_event(store, providers, f"{sib['id']}@{key}", scope="this", owner="companion", cascade=False)
+                    propagated += 1
     for row in rows:
         if not row.get("recurrence_id"):
             continue
@@ -189,14 +198,16 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
         payload = {k: v for k, v in row.items() if k != "master_external_id"}
         payload.update({"master_id": master_id, "raw_payload": ""})
         changed = exc is None or exc.get("etag") != row["etag"]
+        materially = exc is None or any(str(exc.get(k) or "") != str(row.get(k) or "") for k in ("start_utc", "end_utc", "status"))
         if exc is None:
             store.insert_event(payload)
         elif changed:
             if exc.get("sync_state") in ("pending", "conflict", "pending_delete"):
                 continue   # our own write to this occurrence is in flight
-            store.update_event(exc["id"], {k: payload[k] for k in ("title", "description", "location", "start_utc", "end_utc", "status", "etag")})
+            store.update_event(exc["id"], {k: payload[k] for k in ("title", "description", "location", "start_utc", "end_utc", "status", "etag",
+                                                                    "attendees_json", "my_response") if k in payload})
         upserts += 1
-        if changed:
+        if changed and materially:   # a mere resource etag bump (any PUT of the series) is not a change of this occurrence
             # 6 A / 22: an unambiguous external change of one occurrence follows to the linked copies
             master_row = store.get_event(master_id)
             if master_row and master_row.get("link_group_id"):

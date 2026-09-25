@@ -165,7 +165,7 @@ def register_routes(api, make_ctx) -> None:
             if err:
                 return _err(err)
             base, _ = ops._series_id(event_id)
-            row = ctx.store.get_event(base)
+            row = ctx.store.get_event(result.get("split_master_id") or base)
             if row is None:
                 return _err("событие не найдено", 404)
             result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, row, cal_ids)

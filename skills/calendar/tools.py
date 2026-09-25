@@ -394,7 +394,8 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
         cal_ids, err = ctx.resolve_calendars(calendars)
         if err:
             return json_dumps({"status": "error", "message": err})
-        result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, ctx.store.get_event(base) or row, cal_ids)
+        target_row = ctx.store.get_event(result.get("split_master_id") or base) or row
+        result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, target_row, cal_ids)
         result["assignments"] = list(result["assignments"]) + list(result["reassign"]["added"]) \
             + [{**a, "action": "removed"} for r in result["reassign"]["removed"] for a in r["assignments"]]
     warning = _plan_reminders(ctx)

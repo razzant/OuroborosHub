@@ -350,7 +350,7 @@ class GoogleAdapter:
     def update(self, calendar: Dict[str, Any], event: Dict[str, Any], expected_etag: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         external_id = str(event.get("external_id") or "")
         if not external_id and event.get("master_id"):
-            external_id = self._instance_id(calendar, event)
+            external_id = self._instance_id(calendar, event, payload)
             if not external_id:
                 raise ProviderError("retry", "экземпляр серии у Google ещё не найден (мастер ещё не записан?) — повторим позже")
         if not external_id:
@@ -401,8 +401,14 @@ class GoogleAdapter:
         """calendarList.patch — the user's own default reminders for this calendar (20 A: silence provider duplicates)."""
         self._request("PATCH", f"/users/me/calendarList/{urllib.parse.quote(calendar['external_id'], safe='')}", None, {"defaultReminders": overrides})
 
-    def _instance_id(self, calendar: Dict[str, Any], event: Dict[str, Any]) -> str:
-        """Google instance id for a stored exception: ``<masterId>_<originalStart>``; verified via events.instances on miss."""
+    def _instance_id(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> str:
+        """Google instance id for a stored exception: ``<masterId>_<originalStart>``; verified via events.instances on miss.
+        After a series shift the instance is still filed under its previous originalStart — that slot is tried first."""
+        prev = (payload or {}).get("previous_recurrence_id")
+        if prev:
+            found = self._instance_id(calendar, {**event, "recurrence_id": prev})
+            if found:
+                return found
         master_ext = str(event.get("master_external_id") or "")
         occ = parse_stored(event.get("recurrence_id"))
         if not master_ext or occ is None:
@@ -550,6 +556,16 @@ def row_to_gevent(event: Dict[str, Any], mute: bool = False) -> Dict[str, Any]:
             stamps = [x.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ") for x in stamps if x]
             if stamps:
                 recurrence.append("EXDATE:" + ",".join(stamps))
+    if event.get("rdates"):
+        extra = [parse_stored(x) for x in str(event["rdates"]).split(",") if x]
+        if event.get("all_day"):
+            vals = [x.astimezone(tz).strftime("%Y%m%d") for x in extra if x]
+            if vals:
+                recurrence.append("RDATE;VALUE=DATE:" + ",".join(vals))
+        else:
+            vals = [x.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ") for x in extra if x]
+            if vals:
+                recurrence.append("RDATE:" + ",".join(vals))
     if not event.get("master_id") and (recurrence or event.get("rrule") == ""):
         body["recurrence"] = recurrence   # instances (exceptions) never carry recurrence: Google rejects it
     body["status"] = "cancelled" if str(event.get("status") or "") == "cancelled" else "confirmed"

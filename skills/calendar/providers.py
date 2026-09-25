@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from model import (
     AVAIL_BUSY, PROVIDER_GOOGLE, PROVIDER_LOCAL, PROVIDER_YANDEX, account_id as make_account_id, calendar_id as make_calendar_id,
-    get_tz, iso_utc, now_utc, parse_stored,
+    get_tz, tz_name as zone_name, iso_utc, now_utc, parse_stored,
 )
 from ops import ProviderError
 
@@ -197,7 +197,7 @@ def ics_to_rows(ics_text: str, calendar_id: str, href: str, etag: str, default_t
         row = {
             "calendar_id": calendar_id, "uid": uid, "external_id": uid, "href": href, "etag": etag,
             "title": str(comp.get("SUMMARY") or ""), "description": str(comp.get("DESCRIPTION") or ""),
-            "location": str(comp.get("LOCATION") or ""), "start_utc": start_utc, "end_utc": end_utc, "tz": tz_name,
+            "location": str(comp.get("LOCATION") or ""), "start_utc": start_utc, "end_utc": end_utc, "tz": tz_name or (zone_name(tz_hint) if all_day else ""),
             "all_day": all_day, "rrule": rrule_text, "exdates": ",".join(_dt_list(comp.get("EXDATE"), tz_hint)) if comp.get("EXDATE") else "",
             "rdates": ",".join(_dt_list(comp.get("RDATE"), tz_hint)) if comp.get("RDATE") else "",
             "recurrence_id": rec_key, "status": "cancelled" if status == "cancelled" else "confirmed",
@@ -266,9 +266,17 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         seq = int(vevent.get("SEQUENCE", 0)) + 1
     except (TypeError, ValueError):
         seq = 1
-    live_exdates = _dt_list(vevent.get("EXDATE"), tz) if vevent.get("EXDATE") is not None else []   # cancelled dates already on the server stay
+    live_exdates: List[str] = []
+    if vevent.get("EXDATE") is not None and event.get("rrule"):
+        try:
+            live_start = _as_utc(vevent.decoded("DTSTART"), tz)[0]
+            live_rule = vevent.get("RRULE").to_ical().decode("utf-8") if vevent.get("RRULE") is not None else ""
+        except Exception:
+            live_start, live_rule = "", ""
+        if live_start == str(event.get("start_utc") or "") and live_rule == str(event.get("rrule") or ""):
+            live_exdates = _dt_list(vevent.get("EXDATE"), tz)   # same series: cancellations that live only on the server stay
     for key in ("DTSTART", "DTEND", "DURATION", "SUMMARY", "DESCRIPTION", "LOCATION", "RRULE", "STATUS", "LAST-MODIFIED", "DTSTAMP", "SEQUENCE",
-                "EXDATE", "ATTENDEE", "ORGANIZER"):
+                "EXDATE", "RDATE", "ATTENDEE", "ORGANIZER"):
         if key in vevent:
             del vevent[key]
     uid = str(event.get("uid") or event.get("external_id") or "")
@@ -297,6 +305,11 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         ex = [x.astimezone(tz).date() if all_day else x.astimezone(tz) for x in ex if x]
         if ex:
             vevent.add("EXDATE", ex)
+    if event.get("rdates"):
+        rd = [parse_stored(x) for x in str(event["rdates"]).split(",") if x]
+        rd = [x.astimezone(tz).date() if all_day else x.astimezone(tz) for x in rd if x]
+        if rd:
+            vevent.add("RDATE", rd)
     vevent.add("STATUS", "CANCELLED" if str(event.get("status") or "") == "cancelled" else "CONFIRMED")
     vevent.add("DTSTAMP", now)
     vevent.add("LAST-MODIFIED", now)
@@ -584,9 +597,13 @@ class YandexAdapter:
             raise ProviderError("parse", "у исключения нет даты вхождения")
         tz = get_tz(event.get("tz") or "")
         rec_local = rec.astimezone(tz)
+        keys = {iso_utc(rec)}
+        prev = parse_stored((payload or {}).get("previous_recurrence_id"))
+        if prev is not None:
+            keys.add(iso_utc(prev))   # the series moved: the old slot of this occurrence goes away
         for comp in list(cal.walk("VEVENT")):
             rid = comp.decoded("RECURRENCE-ID", None)
-            if rid is not None and iso_utc(rid if getattr(rid, "tzinfo", None) else datetime.combine(rid, datetime.min.time(), tzinfo=tz)) == iso_utc(rec):
+            if rid is not None and iso_utc(rid if getattr(rid, "tzinfo", None) else datetime.combine(rid, datetime.min.time(), tzinfo=tz)) in keys:
                 cal.subcomponents.remove(comp)
         if str(event.get("status") or "") == "cancelled":
             existing = master.get("EXDATE")
@@ -614,4 +631,9 @@ class YandexAdapter:
             headers["If-Match"] = etag
         _, resp_headers, _ = self._request("PUT", href, cal.to_ical().decode("utf-8"), headers)
         new_etag = resp_headers.get("etag", "")
+        if not new_etag:   # RFC 4791 does not oblige the server to return it on PUT: read it back
+            try:
+                _, new_etag = self.get(href)
+            except ProviderError:
+                new_etag = ""
         return {"etag": new_etag, "external_id": str(event.get("uid") or ""), "href": href, "master_etag": new_etag}

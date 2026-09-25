@@ -24,15 +24,13 @@
     /* ---------- utils ---------- */
     function pad(n) { return (n < 10 ? '0' : '') + n; }
     function localDate(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
-    function parseISO(s) { return s ? new Date(s) : null; }
+    function parseISO(s) {   // wall-clock of the OWNER's zone as the server printed it; the browser zone is irrelevant here
+        if (!s) return null;
+        var m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/.exec(s);
+        return m ? new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), 0, 0) : new Date(s);
+    }
     function fmtHM(d) { return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
     function fmtLocalInput(d) { return localDate(d) + 'T' + fmtHM(d); }
-    function withOffset(local) {   // 'YYYY-MM-DDTHH:MM' typed/dragged in the browser zone → ISO with that zone's offset
-        if (!local) return local;
-        var d = new Date(local); if (isNaN(d.getTime())) return local;
-        var off = -d.getTimezoneOffset(), sign = off >= 0 ? '+' : '-', a = Math.abs(off);
-        return local.slice(0, 16) + sign + pad(Math.floor(a / 60)) + ':' + pad(a % 60);
-    }
     function addDays(dateStr, n) { var d = new Date(dateStr + 'T00:00:00'); d.setDate(d.getDate() + n); return localDate(d); }
     function minutesOf(d) { return d.getHours() * 60 + d.getMinutes(); }
     function el(tag, attrs, children) {
@@ -157,7 +155,7 @@
         var days = d.days;
         var grid = el('div', { class: 'grid' + (state.view === 'week' ? ' week' : '') });
         grid.appendChild(el('div', { class: 'corner' }));
-        var todayStr = localDate(new Date());
+        var todayStr = localDate(ownerNow());
         days.forEach(function (day) {
             grid.appendChild(el('div', { class: 'colhead' + (day.date === todayStr ? ' today' : ''), text: day.weekday + ' ' + day.date.slice(8) + '.' + day.date.slice(5, 7) }));
         });
@@ -203,7 +201,7 @@
             attachDrag(node, e, col);
             col.appendChild(node);
         });
-        var now = new Date();
+        var now = ownerNow();
         if (localDate(now) === day.date) { var nl = el('div', { class: 'now' }); nl.style.top = (minutesOf(now) * HOUR_PX / 60) + 'px'; col.appendChild(nl); }
         col.addEventListener('click', function (ev) {
             if (ev.target !== col && !ev.target.classList.contains('hline')) return;
@@ -247,7 +245,7 @@
 
     function renderList(d) {
         var box = el('div', { class: 'list' }, [el('h3', { text: 'Ближайшее' })]);
-        var now = new Date();
+        var now = ownerNow();
         var upcoming = d.events.filter(function (e) { return parseISO(e.end) >= now; }).slice(0, 8);
         if (!upcoming.length) box.appendChild(el('div', { class: 'status', text: 'Дальше сегодня ничего нет' }));
         upcoming.forEach(function (e) {
@@ -290,12 +288,12 @@
                 if (resizing) {
                     var newDur = Math.max(SNAP_MIN, Math.round((parseFloat(node.style.height) + 2) / HOUR_PX * 60 / SNAP_MIN) * SNAP_MIN);
                     var ne = new Date(s.getTime() + newDur * 60000);
-                    save(e, { start: withOffset(fmtLocalInput(s)), end: withOffset(fmtLocalInput(ne)) });
+                    save(e, { start: fmtLocalInput(s), end: fmtLocalInput(ne) });
                 } else {
                     var mins = Math.round(parseFloat(node.style.top) / HOUR_PX * 60 / SNAP_MIN) * SNAP_MIN;
                     var ns = new Date(col.getAttribute('data-date') + 'T00:00:00'); ns.setMinutes(mins);
                     var ne2 = new Date(ns.getTime() + dur * 60000);
-                    save(e, { start: withOffset(fmtLocalInput(ns)), end: withOffset(fmtLocalInput(ne2)) });
+                    save(e, { start: fmtLocalInput(ns), end: fmtLocalInput(ne2) });
                 }
             }
             node.addEventListener('pointermove', onMove); node.addEventListener('pointerup', onUp);
@@ -323,7 +321,8 @@
     }
 
     /* ---------- card ---------- */
-    function defaultStart() { var d = new Date(); d.setMinutes(Math.ceil(d.getMinutes() / 30) * 30, 0, 0); if (state.date && state.date !== localDate(d)) { d = new Date(state.date + 'T10:00:00'); } return d; }
+    function ownerNow() { return state.data && state.data.now ? parseISO(state.data.now) : new Date(); }
+    function defaultStart() { var d = ownerNow(); d.setMinutes(Math.ceil(d.getMinutes() / 30) * 30, 0, 0); if (state.date && state.date !== localDate(d)) { d = new Date(state.date + 'T10:00:00'); } return d; }
 
     function openCard(ev, start) {
         var s = ev ? parseISO(ev.start) : start;
@@ -383,6 +382,7 @@
         var attEdited = false; att.addEventListener('input', function () { attEdited = true; });
         var notify = el('input', { type: 'checkbox' });
         var rrule = el('input', { value: f.rrule, placeholder: 'Повторение RRULE, например FREQ=WEEKLY;BYDAY=MO,WE' });
+        var rruleEdited = false; rrule.addEventListener('input', function () { rruleEdited = true; });
         var scopeSel = el('select'); [['this', 'только эта дата'], ['following', 'начиная с этой даты'], ['all', 'всё расписание']].forEach(function (p) { scopeSel.appendChild(el('option', { value: p[0], text: p[1] })); });
         var status = el('div', { class: 'status', text: f.loading ? 'Загружаю событие…' : (f.loadError ? 'Не удалось загрузить детали: ' + f.loadError : '') });
         if (f.loadError) status.className = 'status err';
@@ -404,11 +404,13 @@
         actions.appendChild(el('button', { type: 'submit', class: 'primary', text: f.id ? 'Сохранить' : 'Создать' }));
         form.addEventListener('submit', function (ev) {
             ev.preventDefault();
+            if (f.loading) { status.textContent = 'Подожди: детали события ещё загружаются'; return; }
             var cals = chosenCals();
             if (!cals.length) { status.textContent = 'Выбери хотя бы один календарь'; status.className = 'status err'; return; }
-            var body = { title: title.value.trim(), start: allDay.checked ? start.value.slice(0, 10) : withOffset(start.value), end: allDay.checked ? end.value.slice(0, 10) : withOffset(end.value),
+            var body = { title: title.value.trim(), start: allDay.checked ? start.value.slice(0, 10) : start.value.slice(0, 16), end: allDay.checked ? end.value.slice(0, 10) : end.value.slice(0, 16),
                 all_day: allDay.checked, hidden: hidden.checked, availability: avail.value,
-                location: loc.value, description: desc.value, rrule: rrule.value.trim(), send_updates: notify.checked };
+                location: loc.value, description: desc.value, send_updates: notify.checked };
+            if (!f.id || rruleEdited) body.rrule = rrule.value.trim();
             var remList = rem.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean).map(Number).filter(function (n) { return !isNaN(n); });
             var attList = att.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
             var p;
@@ -449,7 +451,7 @@
         return overlay;
     }
 
-    function shift(n) { state.date = addDays(state.date || localDate(new Date()), state.view === 'week' ? 7 * n : n); load(); }
+    function shift(n) { state.date = addDays(state.date || localDate(ownerNow()), state.view === 'week' ? 7 * n : n); load(); }
 
     /* ---------- settings panel: reminder rule (19 A) + sync now ---------- */
     function togglePanel() {

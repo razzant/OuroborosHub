@@ -130,3 +130,48 @@ class ChannelTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Round5FixTests(unittest.TestCase):
+    def test_rdates_are_written_to_both_providers(self):
+        from providers_google import row_to_gevent
+        row = {"uid": "s1", "title": "Серия", "start_utc": "2026-10-01T09:00:00+00:00", "end_utc": "2026-10-01T10:00:00+00:00", "tz": "UTC",
+               "all_day": 0, "rrule": "FREQ=WEEKLY", "rdates": "2026-10-03T09:00:00+00:00", "attendees_json": "[]", "reminders_json": "[]"}
+        self.assertIn("RDATE", row_to_ics(row))
+        self.assertIn("RDATE:20261003T090000Z", row_to_gevent(row)["recurrence"])
+
+    def test_following_with_calendars_reassigns_the_new_segment(self):
+        ctx = make_context()
+        other = add_local_calendar(ctx.store, "work", "busy")
+        created = json.loads(tools.cal_create(ctx, title="Курс", start="2026-10-01T09:00+00:00", rrule="FREQ=DAILY;COUNT=6", confirm=True))
+        key = iso_utc(datetime(2026, 10, 4, 9, 0, tzinfo=timezone.utc))
+        u = json.loads(tools.cal_update(ctx, id=f"{created['event']['id']}@{key}", start="2026-10-04T11:00+00:00", scope="following",
+                                        calendars=[DEFAULT_LOCAL_CALENDAR_ID, other], confirm=True))
+        self.assertEqual(u["status"], "updated")
+        copies = [r for r in ctx.store.window(datetime(2026, 9, 1, tzinfo=timezone.utc), datetime(2026, 12, 1, tzinfo=timezone.utc))
+                  if r["calendar_id"] == other and r.get("rrule")]
+        self.assertEqual(len(copies), 1)
+        self.assertIn("COUNT=3", copies[0]["rrule"])   # the copy is of the NEW segment, not the truncated old one
+
+
+class Round5DependencyTests(unittest.TestCase):
+    def test_a_new_owner_edit_after_a_failed_write_is_not_blocked(self):
+        ctx = make_context()
+        external = add_external_calendar(ctx.store)
+
+        class FailOnce(RecordingAdapter):
+            def __init__(self):
+                super().__init__()
+                self.fail = 1
+            def update(self, calendar, event, expected_etag, payload):
+                if self.fail:
+                    self.fail -= 1
+                    raise ops.ProviderError("http", "HTTP 400")
+                return super().update(calendar, event, expected_etag, payload)
+        ctx.providers = OneAdapterProviders(FailOnce())
+        created = json.loads(tools.cal_create(ctx, title="Встреча", start="2026-10-01T09:00+00:00", calendars=[external], confirm=True))
+        first = json.loads(tools.cal_update(ctx, id=created["event"]["id"], title="Первая правка", confirm=True))
+        self.assertNotEqual(first["status"], "updated")
+        second = json.loads(tools.cal_update(ctx, id=created["event"]["id"], title="Вторая правка", confirm=True))
+        self.assertEqual(second["status"], "updated")
+        self.assertEqual(ctx.store.get_event(created["event"]["id"])["sync_state"], "synced")

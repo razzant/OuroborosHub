@@ -1898,13 +1898,13 @@
     {
       "slug": "calendar",
       "name": "calendar",
-      "version": "1.0.6",
+      "version": "1.0.7",
       "type": "extension",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "030a5edee66e0dcdee71818d7153136cdba28fc1565b9f16f623df770a0db85e",
-          "size": 13550
+          "sha256": "49403a2364b7de87da58b52b2e3693b624ae9137015f3dab4edae586d1734ded",
+          "size": 13619
         },
         {
           "path": "model.py",
@@ -1913,8 +1913,8 @@
         },
         {
           "path": "ops.py",
-          "sha256": "21a320c1bd6d8371191721c7dca73a0e8089a5871956ed5d5da0c56ecbea5651",
-          "size": 49289
+          "sha256": "d112857481cda0b09174d78e819beadd8124d233da9f54533a8a951d9a47e446",
+          "size": 51574
         },
         {
           "path": "plugin.py",
@@ -1923,33 +1923,33 @@
         },
         {
           "path": "providers.py",
-          "sha256": "9f889fa6661866fcbc7867306213c61b4385fb94c70a03be6c5299dc284d5f23",
-          "size": 32649
+          "sha256": "17a1ca6ff0aa45519bf05737f66a5ab04937089da55da8b87446baf21bd379fa",
+          "size": 33867
         },
         {
           "path": "providers_google.py",
-          "sha256": "11fcf177669e67bf257f4bf3579c4daf12c51385157a4f4519848e2f88fab662",
-          "size": 33573
+          "sha256": "e74e06bffd6ded1f9c24a32648925c647538a1ac80cb650b2c23ab3360e3a7d3",
+          "size": 34457
         },
         {
           "path": "reminders.py",
-          "sha256": "2bcd885cf18248feac1b6ecb0b14906881cb321d4ad9571a6d9ea17e39ed40b2",
+          "sha256": "df363e235d6c013d7733f9bde9170fbe83b73eca17f590f4865a4487692562e1",
           "size": 17913
         },
         {
           "path": "routes.py",
-          "sha256": "320f79b4f328d6fd6168506db693e7d1eb74f747b7d4e841c1d300de70a393b2",
-          "size": 13603
+          "sha256": "3259a95423322e75dd7f1063b0b1fe8bc8b709610b47682011a7c6aac70a0c06",
+          "size": 13636
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "58ba086ef576c7cf440ff9d1305ce21ca09beb221a9255c863a438d9e6092c68",
-          "size": 16043
+          "sha256": "53519a14e12fbf2cea6981da7d7255d309da7a55482e428b5b5e0d5b88bc7397",
+          "size": 17086
         },
         {
           "path": "store.py",
-          "sha256": "cd91ee6342b70ac1d8c209e73a1c974f1ae278d3104a4a129927d3778a1c686e",
-          "size": 34566
+          "sha256": "a130a9c69d51954834b399f5d1a78c2fbdb47af6e04dabcece42995684012f02",
+          "size": 34426
         },
         {
           "path": "tests/test_calendar.py",
@@ -1963,8 +1963,8 @@
         },
         {
           "path": "tests/test_calendar_batch5.py",
-          "sha256": "8c4c5622b9a5640dc4ba221fa870b3fdc204041851a765426bbd13bb6df3d02f",
-          "size": 7679
+          "sha256": "345c071b0188062bc9fe699c13c6004b40134476d7b45f97321364503c9a482f",
+          "size": 10545
         },
         {
           "path": "tests/test_calendar_review.py",
@@ -1987,14 +1987,19 @@
           "size": 30011
         },
         {
+          "path": "tests/test_calendar_round5.py",
+          "sha256": "903f8af4a7cad19342bbf8860a283f8d4c13bf6a0d1d877e11555b3318995d12",
+          "size": 13485
+        },
+        {
           "path": "tools.py",
-          "sha256": "8287174ec237aba25a635c45fefec24d0f9d169c2c0118f9e96019435bc6ff94",
-          "size": 48321
+          "sha256": "1ab9625e5ebe21bd420460e622decccfc05defb25023be16c34e946032cbf8e1",
+          "size": 48386
         },
         {
           "path": "widget.js",
-          "sha256": "64a323037482d6c270fe6e4aa833c799f84d1716f7b2edeceefc6864bcc57cfd",
-          "size": 36969
+          "sha256": "d071f0ccd0c4bbb976bdf7dc46c99abadd746a305e03e24d5489d1141b7dc9bf",
+          "size": 37175
         }
       ],
       "description": "Единый календарь владельца — свои локальные календари, Яндекс (CalDAV) и Google (личный OAuth-клиент); события, повторения, свободные окна, служебные события-распорядок, напоминания без модели, виджет День/Неделя."

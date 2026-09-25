@@ -20,8 +20,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from model import get_tz, iso_local, iso_utc, now_utc, parse_stored
 
 PLAN_HORIZON = timedelta(hours=24)
-CATCHUP_GRACE = timedelta(minutes=10)
-MAX_NOTICE_CHARS = 4000                     # spec-core-chat-notify: text ≤ 4000      # a reminder older than this after downtime is batched, not sent alone
+CATCHUP_GRACE = timedelta(minutes=10)      # a reminder older than this after downtime is batched, not sent alone
+MAX_NOTICE_CHARS = 4000                     # spec-core-chat-notify: text ≤ 4000
 MAX_DELIVERY_ATTEMPTS = 5
 NOTICE_MAX = 128
 DEFAULT_RULES = {"default": [], "by_calendar": {}, "hidden": []}   # 19 A: reminders only by request or saved rule
