@@ -62,6 +62,8 @@ class Context:
                 out.extend(c["id"] for c in cals if c["role_publish"] and c["writable"])
                 continue
             if low in ("busy_set", "занятость", "publish"):
+                # same meaning as 'all' (5 A): the default calendar plus the saved busy-publication set
+                out.append(self.store.default_calendar()["id"])
                 out.extend(c["id"] for c in cals if c["role_publish"] and c["writable"])
                 continue
             if low == "default":
@@ -292,8 +294,8 @@ def cal_create(ctx: Context, title: str = "", start: str = "", end: str = "", du
         return json_dumps({"status": "error", "message": err})
     names = [ctx.store.get_calendar(c)["name"] for c in cal_ids]
     if not _bool(confirm):
-        return json_dumps({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "target_calendars": names,
-                           "preview": {"title": title, "start": iso_local(spec["start_utc"], ctx.tz), "end": iso_local(spec["end_utc"], ctx.tz)}})
+        return bounded_result({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "target_calendars": names,
+                               "preview": {"title": str(title)[:300], "start": iso_local(spec["start_utc"], ctx.tz), "end": iso_local(spec["end_utc"], ctx.tz)}})
     avail = str(availability or "").lower() or (AVAIL_SOFT if _bool(hidden) and "обычно" in str(title).lower() else AVAIL_BUSY)
     if avail not in (AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT):
         avail = AVAIL_BUSY
@@ -303,14 +305,17 @@ def cal_create(ctx: Context, title: str = "", start: str = "", end: str = "", du
                  "send_invites": _bool(send_invites), "reminders": [_int(x, 0) for x in _list(reminders)], "rrule": str(rrule or "").strip()})
     result = ops.create_event(ctx.store, ctx.providers, spec)
     ev = result["event"]
+    if ev is None:
+        return bounded_result({"status": "error", "message": "ни один календарь не принял событие", "assignments": result["assignments"]})
     s, e = parse_stored(ev["start_utc"]), parse_stored(ev["end_utc"])
     overlaps = [event_public(o, ctx.tz) for o in ctx.occurrences(s, e) if o.get("id") != ev["id"] and (o.get("availability") or AVAIL_BUSY) == AVAIL_BUSY
                 and o.get("link_group_id", "") != (ev.get("link_group_id") or "x")][:5]
-    _plan_reminders(ctx)
+    warning = _plan_reminders(ctx)
     statuses = {a["status"] for a in result["assignments"]}
     status = "created" if statuses <= {"done"} else ("pending" if "pending" in statuses else ("conflict" if "conflict" in statuses else "created_partially"))
     return bounded_result({"status": status, "message": _assignment_message("Создано", ev, result["assignments"], ctx.tz),
-                           "event": event_public(ev, ctx.tz, compact=False), "assignments": result["assignments"], "overlaps": overlaps})
+                           "event": event_public(ev, ctx.tz, compact=False), "assignments": result["assignments"], "overlaps": overlaps,
+                           **({"warning": warning} if warning else {})})
 
 
 def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", duration_min: Any = None, all_day: Any = None, title: str = "",
@@ -363,44 +368,23 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
     if not changes and not calendars:
         return json_dumps({"status": "error", "message": "нечего менять"})
     if not _bool(confirm):
-        return json_dumps({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "event": event_public(row, ctx.tz), "changes": changes, "scope": scope})
-    result = ops.update_event(ctx.store, ctx.providers, str(id), changes, scope=scope)
+        return bounded_result({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "event": event_public(row, ctx.tz), "changes": changes, "scope": scope})
+    result = {"status": "ok", "event": None, "assignments": []}
+    if changes:
+        result = ops.update_event(ctx.store, ctx.providers, str(id), changes, scope=scope, send_updates=_bool(send_updates))
     if calendars:
         cal_ids, err = ctx.resolve_calendars(calendars)
         if err:
             return json_dumps({"status": "error", "message": err})
-        result["reassign"] = _reassign(ctx, row, cal_ids)
-    _plan_reminders(ctx)
+        result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, ctx.store.get_event(base) or row, cal_ids)
+        result["assignments"] = list(result["assignments"]) + [a for a in result["reassign"]["added"]]
+    warning = _plan_reminders(ctx)
     ev = result.get("event") or ctx.store.get_event(base)
     statuses = {a["status"] for a in result["assignments"]}
     status = "updated" if statuses <= {"done"} else ("pending" if "pending" in statuses else "conflict" if "conflict" in statuses else "updated_partially")
     return bounded_result({"status": status, "message": _assignment_message("Обновлено", ev, result["assignments"], ctx.tz),
                            "event": event_public(ev, ctx.tz, compact=False) if ev else None, "assignments": result["assignments"],
-                           "reassign": result.get("reassign")})
-
-
-def _reassign(ctx: Context, row: Dict[str, Any], cal_ids: List[str]) -> Dict[str, Any]:
-    """Change the set of calendars an event lives in: add missing copies, delete surplus ones (12 A: explicit command only)."""
-    members = ctx.store.group_members(row.get("link_group_id") or "") or [row]
-    current = {m["calendar_id"]: m for m in members}
-    added, removed = [], []
-    group = row.get("link_group_id") or ""
-    if not group and len(cal_ids) > 1:
-        group = ops.new_id("lg")
-        ctx.store.update_event(row["id"], {"link_group_id": group})
-    for cid in cal_ids:
-        if cid in current:
-            continue
-        spec = {k: row.get(k) for k in ("title", "description", "location", "start_utc", "end_utc", "tz", "all_day", "rrule", "visibility", "availability")}
-        spec.update({"calendar_ids": [cid], "reminders": []})
-        res = ops.create_event(ctx.store, ctx.providers, spec)
-        ctx.store.update_event(res["event"]["id"], {"link_group_id": group, "is_primary": 0, "uid": row.get("uid") or res["event"].get("uid")})
-        added.append({"calendar_id": cid, **(res["assignments"][0] if res["assignments"] else {})})
-    for cid, m in current.items():
-        if cid not in cal_ids and m["id"] != row["id"]:
-            res = ops.delete_event(ctx.store, ctx.providers, m["id"], scope="all")
-            removed.append({"calendar_id": cid, "assignments": res["assignments"]})
-    return {"added": added, "removed": removed}
+                           "reassign": result.get("reassign"), **({"warning": warning} if warning else {})})
 
 
 def cal_delete(ctx: Context, id: str = "", scope: str = SCOPE_THIS, send_updates: bool = False, confirm: bool = False, **kwargs) -> str:
@@ -415,8 +399,8 @@ def cal_delete(ctx: Context, id: str = "", scope: str = SCOPE_THIS, send_updates
         return json_dumps({"status": "ambiguous", "message": "повторяющееся событие: уточни у владельца — удалить только эту дату (id вхождения), "
                                                                 "всё расписание (scope='all') или начиная с даты (scope='following')"})
     if not _bool(confirm):
-        return json_dumps({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "event": event_public(row, ctx.tz), "scope": scope})
-    result = ops.delete_event(ctx.store, ctx.providers, str(id), scope=scope)
+        return bounded_result({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "event": event_public(row, ctx.tz), "scope": scope})
+    result = ops.delete_event(ctx.store, ctx.providers, str(id), scope=scope, send_updates=_bool(send_updates))
     statuses = {a["status"] for a in result["assignments"]}
     status = "deleted" if statuses <= {"done"} else ("pending" if "pending" in statuses else "deleted_partially")
     return bounded_result({"status": status, "message": _assignment_message("Удалено", row, result["assignments"], ctx.tz), "assignments": result["assignments"]})
@@ -503,6 +487,16 @@ def set_reminder_mode(ctx: Context, calendar_id: str, on: bool) -> Dict[str, Any
     modes = rem.set_mode(st, calendar_id, on)
     report: Dict[str, Any] = {"calendar_id": calendar_id, "mode": "on" if on else "off", "provider_muted": False, "manual_steps": []}
     if not on:
+        saved = st.get_setting(f"google_default_reminders:{calendar_id}") or []
+        adapter = ctx.providers.adapter_for(cal["account_id"])
+        if saved and adapter is not None and hasattr(adapter, "set_default_reminders"):
+            try:
+                adapter.set_default_reminders(cal, saved)
+                report["provider_restored"] = saved
+            except ops.ProviderError as exc:
+                report["manual_steps"].append(f"не удалось вернуть напоминания по умолчанию у провайдера: {exc.message}")
+        else:
+            report["manual_steps"].append("напоминания провайдера, снятые при включении режима, восстанови в его настройках вручную")
         return report
     defaults = st.get_setting(f"google_default_reminders:{calendar_id}") or []
     minutes = sorted({int(d.get("minutes")) for d in defaults if isinstance(d, dict) and d.get("minutes") is not None})
@@ -684,13 +678,15 @@ def reload_google(ctx: Context) -> Dict[str, Any]:
     return {"status": "ok", "accounts": report}
 
 
-def _plan_reminders(ctx: Context, replan: bool = False) -> None:
+def _plan_reminders(ctx: Context, replan: bool = False) -> str:
+    """Plan the reminder queue; a failure is disclosed to the caller instead of swallowed."""
     try:
         if replan:
             ctx.store.drop_scheduled_reminders()
         rem.plan(ctx.store, lambda s, e: ctx.occurrences(s, e))
-    except Exception:
-        pass
+        return ""
+    except Exception as exc:
+        return f"очередь напоминаний не обновлена: {type(exc).__name__}: {exc}"
 
 
 def _assignment_message(verb: str, ev: Dict[str, Any], assignments: List[Dict[str, Any]], tz) -> str:

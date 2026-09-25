@@ -16,7 +16,8 @@
 
     var state = {
         view: 'day', date: null, data: null, error: '', loading: false, showHidden: false,
-        selectedCals: null, editing: null, drag: null, disposed: false, theme: 'light', poll: null, dirty: false
+        selectedCals: null, editing: null, drag: null, disposed: false, theme: 'light', poll: null, dirty: false, notice: ''
+
     };
     var root = document.getElementById('root') || document.body;
 
@@ -120,6 +121,7 @@
         ]);
         root.appendChild(bar);
         if (state.error) root.appendChild(el('div', { class: 'status err', text: 'Ошибка: ' + state.error }));
+        if (state.notice) root.appendChild(el('div', { class: 'status', text: state.notice }));
         if (!d) { root.appendChild(el('div', { class: 'status', text: state.loading ? 'Загрузка…' : 'Нет данных' })); return; }
         root.appendChild(renderCalendarChips(d));
         root.appendChild(renderGrid(d));
@@ -292,12 +294,22 @@
     }
 
     function save(e, changes) {
-        if (e.rrule || e.series_id) {
-            var scope = window.confirm('Это повторяющееся событие. ОК — изменить только эту дату, Отмена — всё расписание.') ? 'this' : 'all';
-            changes.scope = scope;
-        }
+        /* The sandbox has no dialogs (window.confirm silently returns false), so a drag on a series moves only this
+         * occurrence; the whole schedule is changed from the card («Охват изменения»). */
+        var series = !!(e.rrule || e.series_id);
+        if (series) changes.scope = 'this';
         changes.id = e.id;
-        return post('event/update', changes).then(load).catch(function (err) { state.error = err.message; render(); });
+        return post('event/update', changes).then(function (r) {
+            state.notice = series ? 'Перенесено только это вхождение; всё расписание меняется в карточке события.' : '';
+            noteAssignments(r);
+            return load();
+        }).catch(function (err) { state.error = err.message; render(); });
+    }
+
+    function noteAssignments(r) {
+        var pend = (r && r.assignments || []).filter(function (a) { return a.status !== 'done'; });
+        state.error = pend.length ? 'Сохранено локально; ' + pend.map(function (a) { return (a.calendar_name || a.calendar_id) + ': ' + (a.message || a.status); }).join('; ') : '';
+        if (r && r.warning) state.error = (state.error ? state.error + '; ' : '') + r.warning;
     }
 
     /* ---------- card ---------- */
@@ -306,14 +318,30 @@
     function openCard(ev, start) {
         var s = ev ? parseISO(ev.start) : start;
         var e = ev ? parseISO(ev.end) : new Date(s.getTime() + 60 * 60000);
+        var defaultCal = (state.data && (state.data.calendars.filter(function (c) { return c.default; })[0] || state.data.calendars[0]) || {}).id;
         state.editing = {
             id: ev ? ev.id : null, title: ev ? ev.title : '', start: fmtLocalInput(s), end: fmtLocalInput(e), all_day: ev ? !!ev.all_day : false,
-            calendar_id: ev ? ev.calendar_id : (state.data && (state.data.calendars.filter(function (c) { return c.default; })[0] || state.data.calendars[0]) || {}).id,
+            calendars: ev ? [ev.calendar_id] : (defaultCal ? [defaultCal] : []), primary_calendar: ev ? ev.calendar_id : defaultCal,
             hidden: ev ? ev.visibility === 'hidden' : false, availability: ev ? ev.availability : 'busy', location: ev ? (ev.location || '') : '',
-            description: '', reminders: '', rrule: ev ? (ev.rrule || '') : '', series: ev ? !!(ev.rrule || ev.series_id) : false, orig: ev
+            description: '', reminders: [], attendees: [], rrule: ev ? (ev.rrule || '') : '', series: ev ? !!(ev.rrule || ev.series_id) : false,
+            orig: ev, loading: !!ev, armed: false
         };
-        if (ev) api('agenda?view=day&date=' + ev.start.slice(0, 10)).then(function () { return null; });
         render();
+        if (ev) {
+            var token = state.editing;
+            api('event/get?id=' + encodeURIComponent(ev.id)).then(function (r) {
+                if (state.editing !== token) return;
+                var full = r.event || {};
+                token.description = full.description || '';
+                token.reminders = full.reminders || [];
+                token.attendees = (full.attendees || []).map(function (a) { return a.email || String(a); });
+                token.location = full.location || token.location;
+                var members = (full.assignments || []).map(function (a) { return a.calendar_id; });
+                if (members.length) token.calendars = members;
+                token.loading = false;
+                render();
+            }).catch(function (err) { if (state.editing === token) { token.loading = false; token.loadError = err.message; render(); } });
+        }
     }
 
     function renderCard() {
@@ -324,49 +352,83 @@
         var start = el('input', { type: 'datetime-local', value: f.start });
         var end = el('input', { type: 'datetime-local', value: f.end });
         var allDay = el('input', { type: 'checkbox' }); allDay.checked = f.all_day;
-        var cal = el('select');
-        (state.data ? state.data.calendars : []).filter(function (c) { return c.writable; }).forEach(function (c) {
-            var o = el('option', { value: c.id, text: c.name + ' (' + c.provider + ')' }); if (c.id === f.calendar_id) o.selected = true; cal.appendChild(o);
+        /* calendars: checkboxes; the first checked one (default calendar first) gets the full content, the rest get copies per their publish rule */
+        var calBox = el('div', { class: 'cals' });
+        var calInputs = [];
+        var writable = (state.data ? state.data.calendars : []).filter(function (c) { return c.writable; })
+            .sort(function (a, b) { return (a.id === f.primary_calendar ? -1 : b.id === f.primary_calendar ? 1 : 0) || (b.default ? 1 : 0) - (a.default ? 1 : 0); });
+        writable.forEach(function (c) {
+            var cb = el('input', { type: 'checkbox', value: c.id }); cb.checked = f.calendars.indexOf(c.id) >= 0;
+            calInputs.push(cb);
+            calBox.appendChild(el('label', { style: 'display:inline-flex;align-items:center;gap:4px;margin:0 8px 4px 0;font-size:13px;color:var(--fg)' }, [cb, c.name + ' (' + c.provider + ')']));
         });
+        function chosenCals() { return calInputs.filter(function (cb) { return cb.checked; }).map(function (cb) { return cb.value; }); }
         var hidden = el('input', { type: 'checkbox' }); hidden.checked = f.hidden;
         var avail = el('select'); [['busy', 'занято'], ['free', 'не занимает время'], ['soft', 'обычно (предпочтение)']].forEach(function (p) { var o = el('option', { value: p[0], text: p[1] }); if (p[0] === f.availability) o.selected = true; avail.appendChild(o); });
         var loc = el('input', { value: f.location, placeholder: 'Место или ссылка' });
-        var rem = el('input', { value: f.reminders, placeholder: 'Напомнить за N минут (например 15, 60)' });
+        var desc = el('textarea', { rows: '2', placeholder: 'Описание' }); desc.value = f.description || '';
+        var rem = el('input', { value: (f.reminders || []).join(', '), placeholder: 'Напомнить за N минут (например 15, 60)' });
+        var remEdited = false; rem.addEventListener('input', function () { remEdited = true; });
+        var att = el('input', { value: (f.attendees || []).join(', '), placeholder: 'Участники: email через запятую' });
+        var attEdited = false; att.addEventListener('input', function () { attEdited = true; });
+        var notify = el('input', { type: 'checkbox' });
         var rrule = el('input', { value: f.rrule, placeholder: 'Повторение RRULE, например FREQ=WEEKLY;BYDAY=MO,WE' });
         var scopeSel = el('select'); [['this', 'только эта дата'], ['following', 'начиная с этой даты'], ['all', 'всё расписание']].forEach(function (p) { scopeSel.appendChild(el('option', { value: p[0], text: p[1] })); });
-        var status = el('div', { class: 'status' });
+        var status = el('div', { class: 'status', text: f.loading ? 'Загружаю событие…' : (f.loadError ? 'Не удалось загрузить детали: ' + f.loadError : '') });
+        if (f.loadError) status.className = 'status err';
         var actions = el('div', { class: 'actions' });
-        if (f.id) actions.appendChild(el('button', { type: 'button', class: 'danger', text: 'Удалить', onclick: function () {
-            if (!window.confirm('Удалить событие' + (f.series ? ' (' + scopeSel.options[scopeSel.selectedIndex].text + ')' : '') + '?')) return;
-            post('event/delete', { id: f.id, scope: f.series ? scopeSel.value : 'this' }).then(function () { state.editing = null; return load(); }).catch(function (e) { status.textContent = e.message; status.className = 'status err'; });
-        } }));
+        if (f.id) {
+            /* two-step delete: the sandbox has no confirm dialog, so the button arms itself first */
+            var del = el('button', { type: 'button', class: 'danger', text: f.armed ? 'Точно удалить' + (f.series ? ' (' + scopeSel.options[scopeSel.selectedIndex].text + ')' : '') + '?' : 'Удалить' });
+            del.addEventListener('click', function () {
+                if (!f.armed) { f.armed = true; render(); setTimeout(function () { if (state.editing === f && f.armed) { f.armed = false; render(); } }, 5000); return; }
+                del.disabled = true; status.textContent = 'Удаляю…'; status.className = 'status';
+                post('event/delete', { id: f.id, scope: f.series ? scopeSel.value : 'this', send_updates: notify.checked })
+                    .then(function (r) { state.editing = null; noteAssignments(r); return load(); })
+                    .catch(function (e) { del.disabled = false; f.armed = false; status.textContent = e.message; status.className = 'status err'; });
+            });
+            actions.appendChild(del);
+        }
         actions.appendChild(el('span', { class: 'spacer' }));
         actions.appendChild(el('button', { type: 'button', text: 'Отмена', onclick: function () { state.editing = null; render(); } }));
         actions.appendChild(el('button', { type: 'submit', class: 'primary', text: f.id ? 'Сохранить' : 'Создать' }));
         form.addEventListener('submit', function (ev) {
             ev.preventDefault();
+            var cals = chosenCals();
+            if (!cals.length) { status.textContent = 'Выбери хотя бы один календарь'; status.className = 'status err'; return; }
             var body = { title: title.value.trim(), start: start.value, end: end.value, all_day: allDay.checked, hidden: hidden.checked, availability: avail.value,
-                location: loc.value, rrule: rrule.value.trim(), reminders: rem.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean).map(Number).filter(function (n) { return !isNaN(n); }) };
+                location: loc.value, description: desc.value, rrule: rrule.value.trim(), send_updates: notify.checked };
+            var remList = rem.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean).map(Number).filter(function (n) { return !isNaN(n); });
+            var attList = att.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
             var p;
-            if (f.id) { body.id = f.id; body.scope = f.series ? scopeSel.value : 'this'; if (cal.value !== f.calendar_id) body.calendars = cal.value; p = post('event/update', body); }
-            else { body.calendars = cal.value; p = post('event', body); }
+            if (f.id) {
+                body.id = f.id; body.scope = f.series ? scopeSel.value : 'this';
+                if (remEdited) body.reminders = remList;
+                if (attEdited) body.attendees = attList;
+                var same = cals.length === f.calendars.length && cals.every(function (c) { return f.calendars.indexOf(c) >= 0; });
+                if (!same) body.calendars = cals;
+                p = post('event/update', body);
+            } else {
+                body.calendars = cals; body.reminders = remList; body.attendees = attList;
+                p = post('event', body);
+            }
             status.textContent = 'Сохраняю…'; status.className = 'status';
-            p.then(function (r) {
-                var pend = (r.assignments || []).filter(function (a) { return a.status !== 'done'; });
-                state.editing = null; state.error = pend.length ? 'Сохранено локально; ' + pend.map(function (a) { return (a.calendar_name || a.calendar_id) + ': ' + (a.message || a.status); }).join('; ') : '';
-                return load();
-            }).catch(function (e) { status.textContent = e.message; status.className = 'status err'; });
+            p.then(function (r) { state.editing = null; noteAssignments(r); return load(); })
+                .catch(function (e) { status.textContent = e.message; status.className = 'status err'; });
         });
         form.appendChild(el('div', { class: 'title', text: f.id ? 'Событие' : 'Новое событие', style: 'font-weight:600;font-size:15px' }));
         form.appendChild(field('Название', title));
         form.appendChild(field('Начало', start));
         form.appendChild(field('Конец', end));
         form.appendChild(el('label', {}, [allDay, ' весь день']));
-        form.appendChild(field('Календарь', cal));
+        form.appendChild(field('Календари (первый — основной, остальные получают копии по своему правилу)', calBox));
         form.appendChild(el('label', {}, [hidden, ' служебное (распорядок, видно по переключателю)']));
         form.appendChild(field('Занятость', avail));
         form.appendChild(field('Место', loc));
-        form.appendChild(field('Напоминания', rem));
+        form.appendChild(field('Описание', desc));
+        form.appendChild(field('Участники', att));
+        form.appendChild(el('label', {}, [notify, ' уведомить участников (приглашения / изменения)']));
+        form.appendChild(field('Напоминания Уробороса', rem));
         form.appendChild(field('Повторение', rrule));
         if (f.series) form.appendChild(field('Охват изменения', scopeSel));
         form.appendChild(status);

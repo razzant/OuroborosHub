@@ -21,6 +21,7 @@ from model import get_tz, iso_local, iso_utc, now_utc, parse_stored
 
 PLAN_HORIZON = timedelta(hours=24)
 CATCHUP_GRACE = timedelta(minutes=10)      # a reminder older than this after downtime is batched, not sent alone
+MAX_DELIVERY_ATTEMPTS = 5
 NOTICE_MAX = 128
 DEFAULT_RULES = {"default": [], "by_calendar": {}, "hidden": []}   # 19 A: reminders only by request or saved rule
 MODE_KEY = "reminder_mode"                                          # 20 A: «напоминает Уроборос» is explicit per external calendar
@@ -135,7 +136,7 @@ def plan(store, occurrences_in: Any, now: Optional[datetime] = None) -> int:
         if start is None:
             continue
         event_id = occ.get("series_id") or occ.get("id")
-        occ_start = occ.get("occurrence_start_utc") or occ.get("start_utc")
+        occ_start = occ.get("start_utc")   # effective start: a moved exception is a different reminder than the original slot
         for offset in offsets_for(occ, rules, modes):
             fire_at = start - timedelta(minutes=offset)
             if fire_at < now - CATCHUP_GRACE * 6 or fire_at > now + PLAN_HORIZON:
@@ -234,7 +235,12 @@ def format_text(event: Dict[str, Any], occurrence_start_utc: str, offset: int, t
 
 
 def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = None) -> Dict[str, int]:
-    """Fire what is due: fresh ones individually, a downtime backlog as one merged notice."""
+    """Fire what is due: fresh ones individually, a downtime backlog as one merged notice.
+
+    Before sending, the occurrence is re-read: a cancelled/moved/finished one is skipped (21 A); an occurrence
+    that vanished from its series (EXDATE, truncation) is skipped too. Rows left in ``no_channel`` are retried
+    on every pass so a channel that appears later still delivers what is still relevant.
+    """
     now = now or now_utc()
     due = store.due_reminders(now)
     stats = {"sent": 0, "skipped": 0, "no_channel": 0, "retry": 0, "failed": 0, "batched": 0}
@@ -248,13 +254,9 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
             store.mark_reminder(rem["id"], "skipped", "событие отменено или удалено")
             stats["skipped"] += 1
             continue
-        end = parse_stored(event.get("end_utc"))
-        if start and end and (end - start) and start + (end - start) < now and not event.get("rrule"):
-            store.mark_reminder(rem["id"], "skipped", "событие уже закончилось")
-            stats["skipped"] += 1
-            continue
-        if _moved(event, rem):
-            store.mark_reminder(rem["id"], "skipped", "событие перенесено; напоминание перепланировано")
+        verdict = _occurrence_state(store, event, start, now)
+        if verdict:
+            store.mark_reminder(rem["id"], "skipped", verdict)
             stats["skipped"] += 1
             continue
         (stale if fire_at and now - fire_at > CATCHUP_GRACE else fresh).append((rem, event))
@@ -274,11 +276,39 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
     return stats
 
 
-def _moved(event: Dict[str, Any], rem: Dict[str, Any]) -> bool:
-    """A non-recurring event whose start no longer matches the planned occurrence was moved."""
-    if event.get("rrule"):
-        return False
-    return str(event.get("start_utc") or "") != str(rem.get("occurrence_start_utc") or "")
+def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], now: datetime) -> str:
+    """'' when the planned occurrence is still on; otherwise the reason to skip it."""
+    if start is None:
+        return "нет времени вхождения"
+    m_start, m_end = parse_stored(event.get("start_utc")), parse_stored(event.get("end_utc"))
+    duration = (m_end - m_start) if (m_start and m_end and m_end > m_start) else timedelta(hours=1)
+    if not event.get("rrule"):
+        if m_start and m_start != start:
+            return "событие перенесено; напоминание перепланировано"
+        if m_end and m_end < now:
+            return "событие уже закончилось"
+        return ""
+    key = iso_utc(start)
+    for exc in store.exceptions_for(event["id"]):
+        if str(exc.get("recurrence_id") or "") == key:
+            if str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at"):
+                return "вхождение отменено"
+            if str(exc.get("start_utc") or "") != key:
+                return "вхождение перенесено; напоминание перепланировано"
+            break
+        if str(exc.get("start_utc") or "") == key:
+            break  # a moved exception now living at this slot: it is the live occurrence
+    else:
+        try:
+            import ops as _ops
+            live = _ops.expand([event], start - timedelta(minutes=1), start + timedelta(minutes=1), store.exceptions_for)
+        except Exception:
+            live = [{"start_utc": key}]
+        if not any(str(o.get("start_utc") or "") == key for o in live):
+            return "вхождения больше нет в расписании"
+    if start + duration < now:
+        return "вхождение уже закончилось"
+    return ""
 
 
 def _record(store, reminder_id: str, state: str, detail: str, stats: Dict[str, int]) -> None:
@@ -289,7 +319,12 @@ def _record(store, reminder_id: str, state: str, detail: str, stats: Dict[str, i
         store.mark_reminder(reminder_id, "no_channel", state)
         stats["no_channel"] += 1
     elif state == "retry":
-        stats["retry"] += 1          # stays scheduled; next tick retries
+        attempts = store.bump_reminder_attempt(reminder_id, detail)
+        if attempts >= MAX_DELIVERY_ATTEMPTS:
+            store.mark_reminder(reminder_id, "failed", f"доставка не удалась после {attempts} попыток: {detail}")
+            stats["failed"] += 1
+        else:
+            stats["retry"] += 1      # stays in the queue; next tick retries
     else:
         store.mark_reminder(reminder_id, "failed", detail)
         stats["failed"] += 1

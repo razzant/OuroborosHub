@@ -58,7 +58,7 @@ TOOL_DESCRIPTIONS = {
     "cal_settings": (
         "Настройки и источники: get; set (working_hours '09:00-19:00', timezone IANA, preferences — текстовые пожелания владельца); "
         "set_calendar (visible / busy_source / publish_busy / publish_mode full|busy / default / name); new_local_calendar; reload_yandex "
-        "(перечитать аккаунты из YANDEX_CALDAV_ACCOUNTS); connect_google; disconnect; sync_now. Изменения — confirm=true."
+        "(перечитать аккаунты из YANDEX_CALDAV_ACCOUNTS); connect_google (ссылка для входа в системном браузере); reload_google; disconnect; sync_now. Изменения — confirm=true."
     ),
 }
 
@@ -94,7 +94,7 @@ SCHEMAS = {
         "offsets": {"type": "array", "items": {"type": "integer"}}, "calendar_id": {"type": "string"},
         "confirm": {"type": "boolean", "default": False}}},
     "cal_settings": {"type": "object", "properties": {
-        "action": {"type": "string", "enum": ["get", "set", "set_calendar", "new_local_calendar", "reload_yandex", "connect_google", "disconnect", "sync_now"], "default": "get"},
+        "action": {"type": "string", "enum": ["get", "set", "set_calendar", "new_local_calendar", "reload_yandex", "connect_google", "reload_google", "disconnect", "sync_now"], "default": "get"},
         "calendar_id": {"type": "string"}, "visible": {"type": "boolean"}, "busy_source": {"type": "boolean"}, "publish_busy": {"type": "boolean"},
         "publish_mode": {"type": "string", "enum": ["full", "busy"]}, "default": {"type": "boolean"}, "name": {"type": "string"},
         "working_hours": {"type": "string"}, "timezone": {"type": "string"}, "preferences": {"type": "string"},

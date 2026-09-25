@@ -29,5 +29,7 @@ def load_tests(loader, standard_tests, pattern):
     if SKILL_TESTS not in sys.path:
         sys.path.insert(0, SKILL_TESTS)
     import test_calendar  # noqa: E402  (skills/calendar/tests/test_calendar.py)
+    import test_calendar_review  # noqa: E402  (review-round regression tests)
     standard_tests.addTests(loader.loadTestsFromModule(test_calendar))
+    standard_tests.addTests(loader.loadTestsFromModule(test_calendar_review))
     return standard_tests

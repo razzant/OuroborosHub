@@ -338,13 +338,15 @@ class GoogleAdapter:
                                               params, body, headers)
         return {"etag": str(data.get("etag") or resp_headers.get("etag") or ""), "external_id": str(data.get("id") or external_id)}
 
-    def delete(self, calendar: Dict[str, Any], event: Dict[str, Any], expected_etag: str) -> None:
+    def delete(self, calendar: Dict[str, Any], event: Dict[str, Any], expected_etag: str, payload: Optional[Dict[str, Any]] = None) -> None:
         external_id = str(event.get("external_id") or "")
         if not external_id:
             return
+        attendees = json.loads(event.get("attendees_json") or "[]")
+        send = "all" if ((payload or {}).get("send_updates") and attendees) else "none"
         headers = {"If-Match": expected_etag} if expected_etag else {}
         self._request("DELETE", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{urllib.parse.quote(external_id, safe='')}",
-                      {"sendUpdates": "none"}, None, headers)
+                      {"sendUpdates": send}, None, headers)
 
     def respond(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         external_id = str(event.get("external_id") or "")
@@ -395,6 +397,10 @@ def _google_id(event: Dict[str, Any]) -> str:
 def gevent_to_row(item: Dict[str, Any], calendar_id: str, default_tz) -> Optional[Dict[str, Any]]:
     start = item.get("start") or {}
     end = item.get("end") or {}
+    if not start and str(item.get("status") or "") == "cancelled" and item.get("originalStartTime"):
+        # Google returns cancelled instances with only id/status/recurringEventId/originalStartTime
+        start = dict(item.get("originalStartTime") or {})
+        end = dict(start)
     all_day = "date" in start
     tz_name = str(start.get("timeZone") or "")
     tz = get_tz(tz_name) if tz_name else default_tz

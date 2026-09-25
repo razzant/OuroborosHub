@@ -61,9 +61,14 @@ class FakeAdapter:
         self._maybe_fail()
         return {"etag": expected_etag + "+"}
 
-    def delete(self, cal, event, expected_etag):
+    def delete(self, cal, event, expected_etag, payload=None):
         self.calls.append(("delete", event["title"]))
         self._maybe_fail()
+
+    def respond(self, cal, event, payload):
+        self.calls.append(("respond", event["title"], payload.get("response")))
+        self._maybe_fail()
+        return {"etag": (event.get("etag") or "") + "+r"}
 
 
 class FakeProviders:

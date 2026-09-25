@@ -1898,13 +1898,13 @@
     {
       "slug": "calendar",
       "name": "calendar",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "type": "extension",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "70917eb1651cec5c3632c5e335f50239e0b793b8a4dbad7922e6fe6b18cd8c7c",
-          "size": 11994
+          "sha256": "1cc7d59b6dbe556be5ef74322fc852694aa3082568576e2ab0fd4cf46e768564",
+          "size": 12539
         },
         {
           "path": "model.py",
@@ -1913,33 +1913,33 @@
         },
         {
           "path": "ops.py",
-          "sha256": "66b1f39b0ad398fd2264b29032ed9742427530c32c2ca1d877ffb65baca6dff9",
-          "size": 28013
+          "sha256": "da0b170266703acd4ddfa038e84d42303a5073d93d59fdf55a31c31d106d6c01",
+          "size": 35369
         },
         {
           "path": "plugin.py",
-          "sha256": "39bef88856f9157a0f8687fb3228b883a052bfa29ea1aa18936758c089b28e10",
-          "size": 10604
+          "sha256": "b93c50b8ee4fede8a0498b34ef2653e2e50508752096edde5f26bd4d88eeb8fb",
+          "size": 10708
         },
         {
           "path": "providers.py",
-          "sha256": "8423e2f455946adac8dcc941c260dd47374179fd544edd8c44ea6d28e95f4df9",
-          "size": 26725
+          "sha256": "79a4d9f7b962b3f2f74b2be736c32278383e099ea51d62ae21578a7167b3b43e",
+          "size": 29401
         },
         {
           "path": "providers_google.py",
-          "sha256": "1a87e9cb42113d6dd42303b47ec4460207cd3be7cc598bed730d5cab360e6d73",
-          "size": 29918
+          "sha256": "333ff7be6ff7311e26c275cd4d5adbd1a397b31102b669279d26578fcb6748d4",
+          "size": 30399
         },
         {
           "path": "reminders.py",
-          "sha256": "29e2b2077dfc05671cc73f54adab5169d793bfe16d2262273484be1420ec4d58",
-          "size": 13922
+          "sha256": "f2114dd3766dbf055dc42997395779e78003141b8af305601c504ef640f4d804",
+          "size": 15865
         },
         {
           "path": "routes.py",
-          "sha256": "0d3b0b3121f5da88c3340af7c581b9c4460618369bfcfa0065fcbfed77dee3e1",
-          "size": 11279
+          "sha256": "24eecf1929a32ed730e55638878b6e80a5b7857b82f4d3e8c1cf9a48d0899a92",
+          "size": 13608
         },
         {
           "path": "scripts/worker.py",
@@ -1948,23 +1948,28 @@
         },
         {
           "path": "store.py",
-          "sha256": "8ffadf49a9dcc0acba9c48d407145621330a76c2bf686d9d573abbfa0b5892c7",
-          "size": 32198
+          "sha256": "c018a0c02563f9c2cb90a070df414594dafcd7ebd6cbe91b5af548fb1917803a",
+          "size": 33164
         },
         {
           "path": "tests/test_calendar.py",
-          "sha256": "9e48490f6b113eb9df48510c53925062db28b99f2c6ae3520620b446b0c18a5c",
-          "size": 19779
+          "sha256": "9d6c9a18a771fa35165ea8bab71620af9a1e2206fc01cded80e567c2ce21959b",
+          "size": 20003
+        },
+        {
+          "path": "tests/test_calendar_review.py",
+          "sha256": "c14d961158a145fd01946f85c1ee8d40c58edb230441cd841571e84002f2b7ec",
+          "size": 26839
         },
         {
           "path": "tools.py",
-          "sha256": "1ccdb92a43e75ff1b2f5fd6e18dd370778e02bf943431245d513ac1e00b5b742",
-          "size": 44962
+          "sha256": "909c0aecdbb03ad77b22c27593c5932434df8cd58da4b3826ead4fbf60f55da9",
+          "size": 45343
         },
         {
           "path": "widget.js",
-          "sha256": "5137b65704b3166b0d6f07ecb0e1f94f6b643a8c40a23da57781326622a5ac33",
-          "size": 27785
+          "sha256": "ce471a229f83a78a981883c93f437b4c612da83ac8a4ce4ca3a8c95757d516c8",
+          "size": 32420
         }
       ],
       "description": "Единый календарь Уробороса — свой календарь «Личное» плюс Яндекс Календарь (CalDAV); события, свободные окна, напоминания и виджет День/Неделя с перетаскиванием."

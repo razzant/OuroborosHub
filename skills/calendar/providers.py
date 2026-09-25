@@ -71,6 +71,7 @@ class Providers:
         self.state_dir = state_dir
         self.yandex_accounts, self.yandex_error = parse_yandex_accounts(self.secrets.get("YANDEX_CALDAV_ACCOUNTS"))
         self._cache: Dict[str, Any] = {}
+        self.errors: Dict[str, str] = {}   # account_id → why no adapter (wrong key, missing token…), for honest statuses
 
     def adapter_for(self, account_id: str):
         if account_id in self._cache:
@@ -84,10 +85,16 @@ class Providers:
                     break
         elif account_id.startswith(PROVIDER_GOOGLE + ":"):
             try:
-                from providers_google import GoogleAdapter  # phase 1
+                from providers_google import GoogleAdapter
                 adapter = GoogleAdapter.for_account(self.secrets, self.state_dir, account_id.split(":", 1)[1])
-            except Exception:
+                if adapter is None:
+                    self.errors[account_id] = "нет сохранённых токенов Google для этого аккаунта — подключи его заново (connect_google)"
+            except ProviderError as exc:
                 adapter = None
+                self.errors[account_id] = exc.message
+            except Exception as exc:  # defensive: an import/runtime problem is still a reason, not silence
+                adapter = None
+                self.errors[account_id] = f"{type(exc).__name__}: {exc}"
         self._cache[account_id] = adapter
         return adapter
 
@@ -229,7 +236,12 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         cal.add("VERSION", "2.0")
         vevent = icalendar.Event()
         cal.add_component(vevent)
-    for key in ("DTSTART", "DTEND", "DURATION", "SUMMARY", "DESCRIPTION", "LOCATION", "RRULE", "STATUS", "LAST-MODIFIED", "DTSTAMP", "SEQUENCE", "EXDATE"):
+    try:
+        seq = int(vevent.get("SEQUENCE", 0)) + 1
+    except (TypeError, ValueError):
+        seq = 1
+    for key in ("DTSTART", "DTEND", "DURATION", "SUMMARY", "DESCRIPTION", "LOCATION", "RRULE", "STATUS", "LAST-MODIFIED", "DTSTAMP", "SEQUENCE",
+                "EXDATE", "ATTENDEE", "ORGANIZER"):
         if key in vevent:
             del vevent[key]
     uid = str(event.get("uid") or event.get("external_id") or "")
@@ -260,11 +272,29 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
     vevent.add("STATUS", "CANCELLED" if str(event.get("status") or "") == "cancelled" else "CONFIRMED")
     vevent.add("DTSTAMP", now)
     vevent.add("LAST-MODIFIED", now)
-    try:
-        seq = int(vevent.get("SEQUENCE", 0)) + 1
-    except (TypeError, ValueError):
-        seq = 1
     vevent.add("SEQUENCE", seq)
+    if event.get("organizer"):
+        vevent.add("ORGANIZER", "mailto:" + str(event["organizer"]).replace("mailto:", ""))
+    try:
+        attendees = json.loads(event.get("attendees_json") or "[]")
+    except ValueError:
+        attendees = []
+    for att in attendees:
+        email = str(att.get("email") or "").strip()
+        if not email:
+            continue
+        addr = icalendar.vCalAddress("mailto:" + email.replace("mailto:", ""))
+        if att.get("name"):
+            addr.params["CN"] = icalendar.vText(str(att["name"]))
+        status = str(att.get("status") or att.get("responseStatus") or "").upper().replace("NEEDSACTION", "NEEDS-ACTION")
+        if status in ("ACCEPTED", "DECLINED", "TENTATIVE", "NEEDS-ACTION"):
+            addr.params["PARTSTAT"] = icalendar.vText(status)
+        role = str(att.get("role") or "").upper()
+        if role in ("OPT-PARTICIPANT", "OPTIONAL"):
+            addr.params["ROLE"] = icalendar.vText("OPT-PARTICIPANT")
+        elif role in ("CHAIR", "NON-PARTICIPANT"):
+            addr.params["ROLE"] = icalendar.vText(role)
+        vevent.add("ATTENDEE", addr, encode=0)
     for alarm in list(vevent.walk("VALARM")):
         if alarm is not vevent:
             vevent.subcomponents.remove(alarm)
@@ -346,7 +376,7 @@ class YandexAdapter:
     # calendars
     def list_calendars(self) -> List[Dict[str, Any]]:
         body = ('<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/">'
-                '<d:prop><d:displayname/><d:resourcetype/><d:current-user-privilege-set/><cs:getctag/><d:sync-token/></d:prop></d:propfind>')
+                '<d:prop><d:displayname/><d:resourcetype/><d:current-user-privilege-set/><cs:getctag/></d:prop></d:propfind>')
         _, _, text = self._request("PROPFIND", self.home, body, {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
         root = self._xml(text, "PROPFIND")
         out: List[Dict[str, Any]] = []
@@ -358,11 +388,10 @@ class YandexAdapter:
             if not any(p.find("d:resourcetype/c:calendar", NS) is not None for p in props):
                 continue
             collection = href.rstrip("/").rsplit("/", 1)[-1] or href
-            display, writable, ctag, sync_token = "", False, "", ""
+            display, writable, ctag = "", False, ""
             for p in props:
                 display = (p.findtext("d:displayname", default="", namespaces=NS) or display).strip()
                 ctag = (p.findtext("cs:getctag", default="", namespaces=NS) or ctag).strip()
-                sync_token = (p.findtext("d:sync-token", default="", namespaces=NS) or sync_token).strip()
                 privs = p.find("d:current-user-privilege-set", NS)
                 if privs is not None:
                     writable = writable or any(pr.find("d:write", NS) is not None or pr.find("d:write-content", NS) is not None
@@ -370,7 +399,7 @@ class YandexAdapter:
             full = href if href.startswith("http") else YANDEX_BASE + href
             out.append({"id": make_calendar_id(PROVIDER_YANDEX, self.login, collection), "account_id": self.account_id,
                         "provider": PROVIDER_YANDEX, "external_id": collection, "href": full, "name": display or collection,
-                        "writable": writable, "access_role": "owner" if writable else "reader", "ctag": ctag, "sync_token": sync_token})
+                        "writable": writable, "access_role": "owner" if writable else "reader", "ctag": ctag})
         return out
 
     # events
@@ -460,14 +489,32 @@ class YandexAdapter:
                 etag = ""
         return {"etag": etag}
 
-    def delete(self, calendar: Dict[str, Any], event: Dict[str, Any], expected_etag: str) -> None:
+    def delete(self, calendar: Dict[str, Any], event: Dict[str, Any], expected_etag: str, payload: Optional[Dict[str, Any]] = None) -> None:
         href = str(event.get("href") or "")
         if not href:
             return
         self._request("DELETE", href, None, {"If-Match": expected_etag} if expected_etag else {})
 
     def respond(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
-        raise ProviderError("unsupported", "ответ на приглашение в Яндексе будет включён после проверки поведения сервера (этап 1)")
+        """RSVP the CalDAV way: rewrite our own ATTENDEE PARTSTAT in the resource. Whether Yandex notifies the organizer
+        from that is the server's business (probe on a test calendar); we do not claim a sent reply."""
+        response = str(payload.get("response") or event.get("my_response") or "").lower()
+        mapping = {"accepted": "accepted", "declined": "declined", "tentative": "tentative"}
+        if response not in mapping:
+            raise ProviderError("unsupported", "response: accepted | declined | tentative")
+        try:
+            attendees = json.loads(event.get("attendees_json") or "[]")
+        except ValueError:
+            attendees = []
+        me = self.login.lower()
+        hit = False
+        for att in attendees:
+            if str(att.get("email") or "").lower() == me:
+                att["status"] = response
+                hit = True
+        if not hit:
+            raise ProviderError("unsupported", "среди участников события нет этого аккаунта — ответить нечем")
+        return self.update(calendar, {**event, "attendees_json": json.dumps(attendees, ensure_ascii=False)}, str(event.get("etag") or ""), payload)
 
     def _write_exception(self, event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         """One changed/cancelled date of a series lives INSIDE the master's .ics: cancelled → EXDATE on the master,

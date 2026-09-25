@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 from datetime import timedelta
 from typing import Any, Dict
@@ -27,6 +28,17 @@ async def _body(request) -> Dict[str, Any]:
 
 def _err(message: str, status: int = 400) -> JSONResponse:
     return JSONResponse({"status": "error", "message": message}, status_code=status)
+
+
+def _aggregate(assignments) -> str:
+    statuses = {a.get("status") for a in assignments or []}
+    if not statuses or statuses <= {"done"}:
+        return "ok"
+    if "conflict" in statuses:
+        return "conflict"
+    if "pending" in statuses:
+        return "pending"
+    return "partial" if "done" in statuses else "failed"
 
 
 def agenda_payload(ctx: tools.Context, view: str, anchor: str, calendar_ids: Any, show_hidden: bool) -> Dict[str, Any]:
@@ -100,11 +112,16 @@ def register_routes(api, make_ctx) -> None:
             return _err(err)
         spec.update({"title": title, "calendar_ids": cal_ids, "visibility": VISIBILITY_HIDDEN if body.get("hidden") else VISIBILITY_SHOWN,
                      "availability": body.get("availability") or AVAIL_BUSY, "description": str(body.get("description") or ""),
-                     "location": str(body.get("location") or ""), "attendees": [], "send_invites": False,
+                     "location": str(body.get("location") or ""),
+                     "attendees": [{"email": str(a).strip()} if not isinstance(a, dict) else a for a in (body.get("attendees") or []) if str(a).strip()],
+                     "send_invites": bool(body.get("send_updates")),
                      "reminders": [int(x) for x in (body.get("reminders") or []) if str(x).strip() != ""], "rrule": str(body.get("rrule") or "")})
         result = ops.create_event(ctx.store, ctx.providers, spec)
-        tools._plan_reminders(ctx)
-        return JSONResponse({"status": "ok", "event": event_public(result["event"], ctx.tz, compact=False), "assignments": result["assignments"]})
+        warning = tools._plan_reminders(ctx)
+        if result["event"] is None:
+            return _err("ни один календарь не принял событие: " + "; ".join(a.get("message") or a.get("status") for a in result["assignments"]))
+        return JSONResponse({"status": _aggregate(result["assignments"]), "event": event_public(result["event"], ctx.tz, compact=False),
+                             "assignments": result["assignments"], **({"warning": warning} if warning else {})})
 
     async def event_update(request):
         ctx = make_ctx()
@@ -132,21 +149,31 @@ def register_routes(api, make_ctx) -> None:
                 changes[key] = str(body[key])
         if "hidden" in body:
             changes["visibility"] = VISIBILITY_HIDDEN if body.get("hidden") else VISIBILITY_SHOWN
-        if "reminders" in body:
+        if body.get("reminders") is not None and body.get("reminders_edited", True):
             changes["reminders"] = [int(x) for x in (body.get("reminders") or []) if str(x).strip() != ""]
+        if "attendees" in body and body.get("attendees") is not None:
+            changes["attendees"] = [{"email": str(a).strip()} if not isinstance(a, dict) else a for a in body.get("attendees") or [] if str(a).strip()]
         scope = str(body.get("scope") or "this")
-        result = ops.update_event(ctx.store, ctx.providers, event_id, changes, scope=scope)
-        if result.get("status") == "not_found":
-            return _err("событие не найдено", 404)
+        result = {"status": "ok", "event": None, "assignments": []}
+        if changes:
+            result = ops.update_event(ctx.store, ctx.providers, event_id, changes, scope=scope, send_updates=bool(body.get("send_updates")))
+            if result.get("status") == "not_found":
+                return _err("событие не найдено", 404)
         if body.get("calendars"):
             cal_ids, err = ctx.resolve_calendars(body.get("calendars"))
             if err:
                 return _err(err)
             base, _ = ops._series_id(event_id)
-            result["reassign"] = tools._reassign(ctx, ctx.store.get_event(base), cal_ids)
-        tools._plan_reminders(ctx)
-        ev = result.get("event")
-        return JSONResponse({"status": "ok", "event": event_public(ev, ctx.tz, compact=False) if ev else None, "assignments": result["assignments"]})
+            row = ctx.store.get_event(base)
+            if row is None:
+                return _err("событие не найдено", 404)
+            result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, row, cal_ids)
+            result["assignments"] = list(result["assignments"]) + list(result["reassign"]["added"])
+        warning = tools._plan_reminders(ctx)
+        base, _ = ops._series_id(event_id)
+        ev = result.get("event") or ctx.store.get_event(base)
+        return JSONResponse({"status": _aggregate(result["assignments"]), "event": event_public(ev, ctx.tz, compact=False) if ev else None,
+                             "assignments": result["assignments"], "reassign": result.get("reassign"), **({"warning": warning} if warning else {})})
 
     async def event_delete(request):
         ctx = make_ctx()
@@ -154,10 +181,20 @@ def register_routes(api, make_ctx) -> None:
         event_id = str(body.get("id") or "")
         if not event_id:
             return _err("нет id")
-        result = ops.delete_event(ctx.store, ctx.providers, event_id, scope=str(body.get("scope") or "this"))
+        result = ops.delete_event(ctx.store, ctx.providers, event_id, scope=str(body.get("scope") or "this"), send_updates=bool(body.get("send_updates")))
         if result.get("status") == "not_found":
             return _err("событие не найдено", 404)
-        return JSONResponse({"status": "ok", "assignments": result["assignments"]})
+        return JSONResponse({"status": _aggregate(result["assignments"]), "assignments": result["assignments"]})
+
+    async def event_get(request):
+        ctx = make_ctx()
+        event_id = str(request.query_params.get("id") or "")
+        if not event_id:
+            return _err("нет id")
+        data = json.loads(tools.cal_events(ctx, id=event_id))
+        if data.get("status") != "ok":
+            return JSONResponse(data, status_code=404)
+        return JSONResponse(data)
 
     async def settings_get(request):
         ctx = make_ctx()
@@ -188,15 +225,16 @@ def register_routes(api, make_ctx) -> None:
         q = request.query_params
         code, state, error = str(q.get("code") or ""), str(q.get("state") or ""), str(q.get("error") or "")
         if error or not code or not state:
-            return HTMLResponse(f"<h3>Google не завершил вход</h3><p>{error or 'нет кода авторизации'}. Закрой вкладку и попробуй снова из чата.</p>", status_code=400)
+            return HTMLResponse(f"<h3>Google не завершил вход</h3><p>{html.escape(error or 'нет кода авторизации')}. Закрой вкладку и попробуй снова из чата.</p>", status_code=400)
         try:
             done = gp.finish_auth(ctx.store, ctx.secrets, ctx.state_dir, code, state)
             ctx.providers = tools.Providers(ctx.secrets, ctx.state_dir)
             report = tools.reload_google(ctx)
         except ops.ProviderError as exc:
-            return HTMLResponse(f"<h3>Ошибка подключения Google</h3><p>{exc.message}</p>", status_code=502)
+            return HTMLResponse(f"<h3>Ошибка подключения Google</h3><p>{html.escape(exc.message)}</p>", status_code=502)
         cals = [c["name"] for a in report.get("accounts", []) if a.get("account") == done["account_id"] for c in a.get("calendars", [])]
-        return HTMLResponse("<h3>Google подключён: " + done["email"] + "</h3><p>Календари: " + ", ".join(cals) + "</p><p>Вкладку можно закрыть; вернись в чат Уробороса.</p>")
+        return HTMLResponse("<h3>Google подключён: " + html.escape(done["email"]) + "</h3><p>Календари: " + html.escape(", ".join(cals))
+                            + "</p><p>Вкладку можно закрыть; вернись в чат Уробороса.</p>")
 
     async def sync_now(request):
         ctx = make_ctx()
@@ -206,6 +244,7 @@ def register_routes(api, make_ctx) -> None:
     api.register_route("agenda", agenda, methods=("GET",))
     api.register_route("status", status, methods=("GET",))
     api.register_route("event", event_create, methods=("POST",))
+    api.register_route("event/get", event_get, methods=("GET",))
     api.register_route("event/update", event_update, methods=("POST",))
     api.register_route("event/delete", event_delete, methods=("POST",))
     api.register_route("settings", settings_get, methods=("GET",))

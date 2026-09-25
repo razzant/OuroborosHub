@@ -61,7 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_intents_state ON intents(state, next_attempt_at);
 CREATE TABLE IF NOT EXISTS reminders (
     id TEXT PRIMARY KEY, event_id TEXT NOT NULL, occurrence_start_utc TEXT NOT NULL, offset_min INTEGER NOT NULL,
     fire_at_utc TEXT NOT NULL, notice_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL DEFAULT 'scheduled',
-    sent_at TEXT, detail TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
+    sent_at TEXT, detail TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_reminders_fire ON reminders(state, fire_at_utc);
 CREATE TABLE IF NOT EXISTS sync_state (
     calendar_id TEXT PRIMARY KEY, cursor TEXT NOT NULL DEFAULT '', cursor_kind TEXT NOT NULL DEFAULT '',
@@ -106,6 +106,9 @@ class Store:
             if legacy:
                 self._migrate_prototype(c)
             c.executescript(_SCHEMA)
+            cols = {r[1] for r in c.execute("PRAGMA table_info(reminders)").fetchall()}
+            if "attempts" not in cols:
+                c.execute("ALTER TABLE reminders ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
             row = c.execute("SELECT version FROM schema_version").fetchone()
             if row is None:
                 c.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
@@ -505,16 +508,25 @@ class Store:
                             (new_id("rem"), event_id, occurrence_start_utc, int(offset_min), fire_at_utc, notice_id, ts))
         return cur.rowcount > 0
 
-    def due_reminders(self, now: datetime, limit: int = 50) -> List[Dict[str, Any]]:
+    def due_reminders(self, now: datetime, limit: int = 50, include_no_channel: bool = True) -> List[Dict[str, Any]]:
+        """Due rows: scheduled ones, plus no_channel ones so a recovered channel delivers what it could not before."""
+        states = ("scheduled", "no_channel") if include_no_channel else ("scheduled",)
+        marks = ",".join("?" for _ in states)
         with self._conn() as c:
-            rows = c.execute("SELECT * FROM reminders WHERE state='scheduled' AND fire_at_utc <= ? ORDER BY fire_at_utc LIMIT ?",
-                             (iso_utc(now), limit)).fetchall()
+            rows = c.execute(f"SELECT * FROM reminders WHERE state IN ({marks}) AND fire_at_utc <= ? ORDER BY fire_at_utc LIMIT ?",
+                             (*states, iso_utc(now), limit)).fetchall()
         return [dict(r) for r in rows]
+
+    def bump_reminder_attempt(self, reminder_id: str, detail: str = "") -> int:
+        with self._conn() as c:
+            c.execute("UPDATE reminders SET attempts=attempts+1, detail=?, updated_at=? WHERE id=?", (detail[:500], _ts(), reminder_id))
+            row = c.execute("SELECT attempts FROM reminders WHERE id=?", (reminder_id,)).fetchone()
+        return int(row["attempts"]) if row else 0
 
     def upcoming_reminders(self, now: datetime, limit: int = 20) -> List[Dict[str, Any]]:
         with self._conn() as c:
             rows = c.execute("SELECT r.*, e.title FROM reminders r LEFT JOIN events e ON e.id=r.event_id"
-                             " WHERE r.state IN ('scheduled', 'no_channel') AND r.fire_at_utc >= ? ORDER BY r.fire_at_utc LIMIT ?",
+                             " WHERE r.state IN ('scheduled', 'no_channel', 'sent') AND r.fire_at_utc >= ? ORDER BY r.fire_at_utc LIMIT ?",
                              (iso_utc(now - timedelta(hours=1)), limit)).fetchall()
         return [dict(r) for r in rows]
 
