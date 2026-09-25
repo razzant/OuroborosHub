@@ -1,7 +1,7 @@
 """Provider adapters: Yandex CalDAV (live) and the resolver both processes share.
 
 Each adapter knows ONE calendar per call and exposes exactly:
-``list_calendars() -> [calendar dict]``, ``fetch(calendar, cursor) -> (events, cursor, kind)``,
+``list_calendars() -> [calendar dict]``, ``fetch(calendar, cursor, tz) -> (events, cursor, kind, extra)``,
 ``create(calendar, event, payload) -> {external_id, href, etag}``,
 ``update(calendar, event, expected_etag, payload) -> {etag}``,
 ``delete(calendar, event, expected_etag, payload)``, ``respond(calendar, event, payload) -> {etag}``.
@@ -135,8 +135,8 @@ def _rrule_until(rrule: str) -> Optional[str]:
     return None
 
 
-def _dt_list(prop: Any) -> List[str]:
-    """EXDATE/RDATE (single or list of vDDDLists) → sorted ISO-UTC strings."""
+def _dt_list(prop: Any, tz_hint=timezone.utc) -> List[str]:
+    """EXDATE/RDATE (single or list of vDDDLists) → sorted ISO-UTC strings; DATE values live in the event's zone (like DTSTART)."""
     items = prop if isinstance(prop, list) else [prop]
     out: List[str] = []
     for item in items:
@@ -146,9 +146,9 @@ def _dt_list(prop: Any) -> List[str]:
         for d in dts:
             value = getattr(d, "dt", None)
             if isinstance(value, datetime):
-                out.append(iso_utc(value if value.tzinfo else value.replace(tzinfo=timezone.utc)))
+                out.append(iso_utc(value if value.tzinfo else value.replace(tzinfo=tz_hint)))
             elif isinstance(value, date):
-                out.append(iso_utc(datetime.combine(value, datetime.min.time(), tzinfo=timezone.utc)))
+                out.append(iso_utc(datetime.combine(value, datetime.min.time(), tzinfo=tz_hint)))
     return sorted(set(out))
 
 
@@ -198,8 +198,8 @@ def ics_to_rows(ics_text: str, calendar_id: str, href: str, etag: str, default_t
             "calendar_id": calendar_id, "uid": uid, "external_id": uid, "href": href, "etag": etag,
             "title": str(comp.get("SUMMARY") or ""), "description": str(comp.get("DESCRIPTION") or ""),
             "location": str(comp.get("LOCATION") or ""), "start_utc": start_utc, "end_utc": end_utc, "tz": tz_name,
-            "all_day": all_day, "rrule": rrule_text, "exdates": ",".join(_dt_list(comp.get("EXDATE"))) if comp.get("EXDATE") else "",
-            "rdates": ",".join(_dt_list(comp.get("RDATE"))) if comp.get("RDATE") else "",
+            "all_day": all_day, "rrule": rrule_text, "exdates": ",".join(_dt_list(comp.get("EXDATE"), tz_hint)) if comp.get("EXDATE") else "",
+            "rdates": ",".join(_dt_list(comp.get("RDATE"), tz_hint)) if comp.get("RDATE") else "",
             "recurrence_id": rec_key, "status": "cancelled" if status == "cancelled" else "confirmed",
             "organizer": organizer, "attendees_json": json.dumps(attendees, ensure_ascii=False),
             "reminders_json": json.dumps(sorted(set(reminders))), "origin": "external", "availability": AVAIL_BUSY,
@@ -266,6 +266,7 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         seq = int(vevent.get("SEQUENCE", 0)) + 1
     except (TypeError, ValueError):
         seq = 1
+    live_exdates = _dt_list(vevent.get("EXDATE"), tz) if vevent.get("EXDATE") is not None else []   # cancelled dates already on the server stay
     for key in ("DTSTART", "DTEND", "DURATION", "SUMMARY", "DESCRIPTION", "LOCATION", "RRULE", "STATUS", "LAST-MODIFIED", "DTSTAMP", "SEQUENCE",
                 "EXDATE", "ATTENDEE", "ORGANIZER"):
         if key in vevent:
@@ -290,8 +291,9 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         vevent.add("LOCATION", str(event["location"]))
     if event.get("rrule"):
         vevent.add("RRULE", icalendar.vRecur.from_ical(str(event["rrule"])))
-    if event.get("exdates"):
-        ex = [parse_stored(x) for x in str(event["exdates"]).split(",") if x]
+    all_exdates = sorted(set([x for x in str(event.get("exdates") or "").split(",") if x] + (live_exdates if event.get("rrule") else [])))
+    if all_exdates:
+        ex = [parse_stored(x) for x in all_exdates]
         ex = [x.astimezone(tz).date() if all_day else x.astimezone(tz) for x in ex if x]
         if ex:
             vevent.add("EXDATE", ex)
@@ -500,7 +502,7 @@ class YandexAdapter:
                 etag = ""
         return {"external_id": uid, "href": href, "etag": etag}
 
-    def create(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:  # noqa: F811
+    def create(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._create(calendar, event, payload)
 
     def update(self, calendar: Dict[str, Any], event: Dict[str, Any], expected_etag: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -566,6 +568,9 @@ class YandexAdapter:
         if not href:
             raise ProviderError("retry", "серия ещё не записана на сервер — исключение подождёт её")
         text, etag = self.get(href)
+        cached = str(event.get("master_etag") or "")
+        if cached and etag and cached != etag:
+            raise ProviderError("conflict", "серия изменилась на сервере с момента последней синхронизации")
         icalendar = _ical()
         try:
             cal = icalendar.Calendar.from_ical(text)
@@ -585,7 +590,7 @@ class YandexAdapter:
                 cal.subcomponents.remove(comp)
         if str(event.get("status") or "") == "cancelled":
             existing = master.get("EXDATE")
-            dates = _dt_list(existing) if existing is not None else []
+            dates = _dt_list(existing, tz) if existing is not None else []
             if "EXDATE" in master:
                 del master["EXDATE"]
             all_dates = sorted(set(dates + [iso_utc(rec)]))

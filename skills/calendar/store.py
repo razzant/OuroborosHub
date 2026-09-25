@@ -475,6 +475,13 @@ class Store:
                 out.append(leased)
         return out
 
+    def park_intent(self, intent_id: str, seconds: int, note: str) -> None:
+        """Release a leased intent that only waits for another one: back to pending, the attempt is given back."""
+        ts = _ts()
+        with self._conn() as c:
+            c.execute("UPDATE intents SET state=?, attempts=MAX(attempts-1, 0), lease_until=NULL, lease_owner='', next_attempt_at=?, result_json=?, updated_at=?"
+                      " WHERE id=?", (INTENT_PENDING, iso_utc(now_utc() + timedelta(seconds=seconds)), json.dumps({"note": note}), ts, intent_id))
+
     def settle_intent(self, intent_id: str, state: str, result: Optional[Dict[str, Any]] = None, retry_in_sec: Optional[int] = None) -> None:
         ts = _ts()
         next_at = iso_utc(now_utc() + timedelta(seconds=retry_in_sec)) if retry_in_sec else None

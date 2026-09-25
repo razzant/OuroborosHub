@@ -33,9 +33,13 @@ def load_tests(loader, standard_tests, pattern):
     import test_calendar_round2  # noqa: E402
     import test_calendar_batch3  # noqa: E402
     import test_calendar_round3  # noqa: E402
+    import test_calendar_round4  # noqa: E402
+    import test_calendar_batch5  # noqa: E402
     standard_tests.addTests(loader.loadTestsFromModule(test_calendar))
     standard_tests.addTests(loader.loadTestsFromModule(test_calendar_review))
     standard_tests.addTests(loader.loadTestsFromModule(test_calendar_round2))
     standard_tests.addTests(loader.loadTestsFromModule(test_calendar_batch3))
     standard_tests.addTests(loader.loadTestsFromModule(test_calendar_round3))
+    standard_tests.addTests(loader.loadTestsFromModule(test_calendar_round4))
+    standard_tests.addTests(loader.loadTestsFromModule(test_calendar_batch5))
     return standard_tests

@@ -670,7 +670,7 @@ def connect_google(ctx: Context) -> Dict[str, Any]:
         return {"status": "error", "message": exc.message}
     return {"status": "ok", "auth_url": started["auth_url"], "redirect_uri": redirect_uri,
             "message": "Открой ссылку в системном браузере под нужным аккаунтом Google и разреши доступ; после возврата на 127.0.0.1 аккаунт появится в cal_status. "
-                       "Если Google откажет из-за redirect_uri — сообщи, есть запасной путь через фоновый процесс.",
+                       "Если Google откажет из-за redirect_uri — сообщи владельцу: понадобится другой адрес возврата (первое живое подключение — точка проверки).",
             "next_step": "После входа: cal_settings(action='reload_google', confirm=true) при необходимости; роли календарей — set_calendar"}
 
 

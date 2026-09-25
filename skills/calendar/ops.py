@@ -253,7 +253,7 @@ def create_event(store, providers, spec: Dict[str, Any], owner: str = "") -> Dic
             "description": "" if mode == PUBLISH_BUSY else spec.get("description") or "",
             "location": "" if mode == PUBLISH_BUSY else spec.get("location") or "",
             "start_utc": spec["start_utc"], "end_utc": spec["end_utc"], "tz": spec.get("tz") or "", "all_day": bool(spec.get("all_day")),
-            "rrule": spec.get("rrule") or "", "attendees_json": json.dumps([] if mode == PUBLISH_BUSY else spec.get("attendees") or [], ensure_ascii=False),
+            "rrule": spec.get("rrule") or "", "attendees_json": json.dumps([] if is_copy else spec.get("attendees") or [], ensure_ascii=False),
             "reminders_json": json.dumps([] if is_copy else [int(x) for x in spec.get("reminders") or []]),
             "origin": "local", "link_group_id": link_group,
             "sync_state": "synced" if cal["provider"] == PROVIDER_LOCAL else "pending",
@@ -302,7 +302,10 @@ def update_event(store, providers, event_id: str, changes: Dict[str, Any], scope
         split_uid = new_uid()
         targets.extend(_split_series(store, row, occ_key, changes, new_group, split_uid))
     else:
+        series_delta = _series_delta(row, changes)
         _apply_changes(store, row, changes)
+        if series_delta:
+            targets.extend(_shift_series_rows(store, row, series_delta))
         targets.append(store.get_event(row["id"]))
     # Linked copies: only time moves to busy copies; full copies get everything but attendees/reminders.
     if propagate and row.get("link_group_id"):
@@ -320,7 +323,10 @@ def update_event(store, providers, event_id: str, changes: Dict[str, Any], scope
             elif occ_key and scope == SCOPE_FOLLOWING:
                 targets.extend(_split_series(store, sib, occ_key, allowed, new_group, split_uid))
             else:
+                sib_delta = _series_delta(sib, allowed)
                 _apply_changes(store, sib, allowed)
+                if sib_delta:
+                    targets.extend(_shift_series_rows(store, sib, sib_delta))
                 targets.append(store.get_event(sib["id"]))
     rsvp_only = set(changes.keys()) == {"my_response"}
     for target in targets:
@@ -447,6 +453,47 @@ def _read_only_preflight(store, rows: List[Dict[str, Any]], assignments: List[Di
     return blocked
 
 
+def _series_delta(master: Dict[str, Any], changes: Dict[str, Any]) -> Optional[timedelta]:
+    """How far a whole series moves when its master start changes (None when the start does not change)."""
+    if not master.get("rrule") or not changes.get("start_utc"):
+        return None
+    old, new = parse_stored(master.get("start_utc")), parse_stored(changes.get("start_utc"))
+    if old is None or new is None or old == new:
+        return None
+    return new - old
+
+
+def _shift_series_rows(store, master: Dict[str, Any], delta: timedelta) -> List[Dict[str, Any]]:
+    """The series moved by ``delta``: excluded/extra dates and every stored exception move with it (their slot, not their edits)."""
+    def shifted(csv: str) -> str:
+        out = []
+        for x in str(csv or "").split(","):
+            dt = parse_stored(x) if x else None
+            out.append(iso_utc(dt + delta) if dt else x)
+        return ",".join(v for v in out if v)
+    fields = {}
+    if master.get("exdates"):
+        fields["exdates"] = shifted(master["exdates"])
+    if master.get("rdates"):
+        fields["rdates"] = shifted(master["rdates"])
+    if fields:
+        store.update_event(master["id"], fields)
+    moved: List[Dict[str, Any]] = []
+    for exc in store.exceptions_for(master["id"]):
+        rid, s, e = parse_stored(exc.get("recurrence_id")), parse_stored(exc.get("start_utc")), parse_stored(exc.get("end_utc"))
+        upd = {}
+        if rid is not None:
+            upd["recurrence_id"] = iso_utc(rid + delta)
+        if s is not None and e is not None:
+            upd.update({"start_utc": iso_utc(s + delta), "end_utc": iso_utc(e + delta)})
+        if upd:
+            store.update_event(exc["id"], upd)
+            fresh = store.get_event(exc["id"])
+            if fresh is not None and (fresh.get("external_id") or fresh.get("href") or fresh.get("master_id")):
+                moved.append(fresh)   # the provider must learn the new slot of this exception too
+    return moved
+
+
 def _shift_for_scope_all(row: Dict[str, Any], occ_key: str, scope: str, changes: Dict[str, Any]) -> Dict[str, Any]:
     """«All of them at 19:00», said about one occurrence: move the series by the same delta, never re-anchor DTSTART
     to that later date (that would silently drop every earlier occurrence)."""
@@ -483,6 +530,31 @@ def _ensure_exception(store, master: Dict[str, Any], occ_key: str, changes: Dict
     return saved["id"]
 
 
+def _count_remaining(master: Dict[str, Any], rrule: str, cut: Optional[datetime]) -> Optional[int]:
+    """For a COUNT series: how many occurrences remain from ``cut`` on (None when the rule has no COUNT)."""
+    count = None
+    for part in str(rrule or "").split(";"):
+        if part.upper().startswith("COUNT="):
+            try:
+                count = int(part.split("=", 1)[1])
+            except ValueError:
+                return None
+    if count is None or cut is None:
+        return None
+    m_start = parse_stored(master.get("start_utc"))
+    if m_start is None:
+        return None
+    try:
+        from dateutil.rrule import rrulestr
+        from model import get_tz
+        tz = get_tz(master.get("tz") or "")
+        rule = rrulestr(str(rrule), dtstart=m_start.astimezone(tz), forceset=True)
+        before = sum(1 for occ in rule if occ.astimezone(timezone.utc) < cut.astimezone(timezone.utc))
+    except Exception:
+        return None
+    return count - before
+
+
 def _truncate_series(store, master: Dict[str, Any], occ_key: str, keep_later_exceptions: bool = False) -> List[Dict[str, Any]]:
     """Series ends before ``occ_key``: UNTIL = occurrence start − 1s (RFC 5545, UTC). Returns the detached later exceptions."""
     occ = parse_stored(occ_key)
@@ -513,23 +585,37 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     Later exceptions move to the new series (their date keeps the edit, the slot follows the new wall time);
     linked copies split together under one new link group.
     """
+    original_rrule = str(master.get("rrule") or "")
     later = _truncate_series(store, master, occ_key, keep_later_exceptions=True)
     m_start, m_end = parse_stored(master["start_utc"]), parse_stored(master["end_utc"])
     occ_start = parse_stored(occ_key) or m_start
     duration = (m_end - m_start) if (m_start and m_end) else timedelta(hours=1)
     new_start = parse_stored(changes.get("start_utc")) or occ_start
     new_end = parse_stored(changes.get("end_utc")) or (new_start + duration)
-    rule_parts = [p for p in str(master.get("rrule") or "").split(";") if p and not p.upper().startswith(("UNTIL=", "COUNT="))]
+    rule_parts = [p for p in original_rrule.split(";") if p and not p.upper().startswith(("UNTIL=", "COUNT="))]
+    count_left = _count_remaining(master, original_rrule, occ_start)
+    if count_left is not None:
+        rule_parts.append(f"COUNT={max(1, count_left)}")   # a COUNT series keeps its remaining occurrences, it does not become endless
+    # EXDATE/RDATE at/after the cut belong to the new series (shifted with it); the old one keeps only the earlier ones
+    old_fields = {}
+    for field in ("exdates", "rdates"):
+        if str(master.get(field) or ""):
+            old_fields[field] = ",".join(x for x in str(master.get(field) or "").split(",") if x and x < occ_key)
+    if old_fields:
+        store.update_event(master["id"], old_fields)
     row = {k: master.get(k) for k in ("calendar_id", "visibility", "availability", "is_primary", "title", "description", "location", "tz",
                                        "all_day", "organizer", "attendees_json", "reminders_json", "origin")}
-    shift = new_start - occ_start
-    later_exdates = []
-    for x in str(master.get("exdates") or "").split(","):
-        if x and x >= occ_key:
-            dt = parse_stored(x)
-            later_exdates.append(iso_utc(dt + shift) if (dt is not None and not master.get("all_day")) else x)
+    shift = new_start - occ_start   # all-day series move by whole days as well (midnight to midnight)
+    def _shift_csv(csv: str) -> str:
+        out = []
+        for x in str(csv or "").split(","):
+            if x and x >= occ_key:
+                dt = parse_stored(x)
+                out.append(iso_utc(dt + shift) if dt is not None else x)
+        return ",".join(out)
     row.update({"uid": split_uid or new_uid(), "start_utc": iso_utc(new_start), "end_utc": iso_utc(new_end), "link_group_id": new_group,
-                "exdates": ",".join(later_exdates), "rrule": changes.get("rrule") or ";".join(rule_parts), "sync_state": "synced"})
+                "exdates": _shift_csv(master.get("exdates")), "rdates": _shift_csv(master.get("rdates")),
+                "rrule": changes.get("rrule") or ";".join(rule_parts), "sync_state": "synced"})
     saved = store.insert_event(row)
     _apply_changes(store, saved, {k: v for k, v in changes.items() if k not in ("start_utc", "end_utc", "rrule")})
     moved: List[Dict[str, Any]] = []
@@ -537,10 +623,13 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
         old_key = parse_stored(exc.get("recurrence_id"))
         if old_key is None:
             continue
-        new_key = old_key + shift if not master.get("all_day") else old_key
-        store.update_event(exc["id"], {"master_id": saved["id"], "recurrence_id": iso_utc(new_key), "uid": saved["uid"],
-                                       "link_group_id": new_group, "external_id": "", "href": "", "etag": "",
-                                       "sync_state": "synced" if not master.get("external_id") and not master.get("href") else "pending"})
+        new_key = old_key + shift
+        upd = {"master_id": saved["id"], "recurrence_id": iso_utc(new_key), "uid": saved["uid"], "link_group_id": new_group,
+               "external_id": "", "href": "", "etag": "", "sync_state": "synced" if not master.get("external_id") and not master.get("href") else "pending"}
+        if str(exc.get("recurrence_id") or "") == occ_key:
+            # the occurrence the owner pointed at takes the requested time itself (its other edits stay)
+            upd.update({"start_utc": iso_utc(new_start), "end_utc": iso_utc(new_end)})
+        store.update_event(exc["id"], upd)
         moved.append(store.get_event(exc["id"]))
     # the moved exceptions are written to the provider after the new master exists (they resolve through it)
     return [store.get_event(master["id"]), store.get_event(saved["id"]), *moved]
@@ -548,24 +637,41 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
 
 # ── intents ─────────────────────────────────────────────────────────
 
-def _blocked_by(store, intent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """An intent waits for older pending writes of the same event, and an exception waits for its master's create."""
+def _predecessor(store, intent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The newest earlier intent this one depends on: an older write of the same event, or the master's create for an exception."""
     created = str(intent.get("created_at") or "")
-    for other in store.open_intents_for_event(intent["event_id"]):
-        if other["id"] != intent["id"] and str(other.get("created_at") or "") < created:
-            return other
+    older = [i for i in store.intents_for_event(intent["event_id"]) if i["id"] != intent["id"] and str(i.get("created_at") or "") < created]
+    if older:
+        return older[-1]
     event = store.get_event(intent["event_id"])
     if event and event.get("master_id"):
-        for other in store.open_intents_for_event(event["master_id"]):
-            if other["kind"] == "create":
-                return other
+        creates = [i for i in store.intents_for_event(event["master_id"]) if i["kind"] == "create"]
+        if creates:
+            return creates[-1]
     return None
+
+
+def _blocked_by(store, intent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The predecessor when it is still pending (wait) or failed/conflict (do not run at all); None when the way is clear."""
+    pred = _predecessor(store, intent)
+    if pred is not None and pred.get("state") in (INTENT_PENDING, INTENT_FAILED, INTENT_CONFLICT):
+        return pred
+    return None
+
+
+def _fail_after_predecessor(store, intent: Dict[str, Any], pred: Dict[str, Any]) -> Dict[str, Any]:
+    message = f"предыдущая операция по событию не выполнена ({pred.get('state')}): сначала разберись с ней"
+    store.settle_intent(intent["id"], INTENT_FAILED, {"error": message, "blocked_by": pred["id"]})
+    return {"status": INTENT_FAILED, "message": message}
 
 
 def execute_intent(store, providers, intent: Dict[str, Any], owner: str) -> Dict[str, Any]:
     """Lease and run one intent now; returns the per-assignment status dict."""
-    if _blocked_by(store, intent) is not None:
-        return {"status": INTENT_PENDING, "message": "ждёт предыдущую операцию по этому событию"}
+    pred = _blocked_by(store, intent)
+    if pred is not None:
+        if pred.get("state") == INTENT_PENDING:
+            return {"status": INTENT_PENDING, "message": "ждёт предыдущую операцию по этому событию"}
+        return _fail_after_predecessor(store, intent, pred)
     leased = store.lease_intent(intent["id"], owner, LEASE_SECONDS)
     if leased is None:
         return {"status": INTENT_PENDING, "message": "операция уже выполняется"}
@@ -579,12 +685,16 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
     if event is None or cal is None:
         store.settle_intent(intent["id"], INTENT_FAILED, {"error": "event or calendar vanished"})
         return {"status": INTENT_FAILED, "message": "событие или календарь исчезли"}
-    if _blocked_by(store, intent) is not None:
-        store.settle_intent(intent["id"], INTENT_PENDING, {"note": "waiting for an earlier write"}, retry_in_sec=60)
+    pred = _blocked_by(store, intent)
+    if pred is not None:
+        if pred.get("state") != INTENT_PENDING:
+            return _fail_after_predecessor(store, intent, pred)
+        store.park_intent(intent["id"], 60, "waiting for an earlier write")   # waiting is not an attempt
         return {"status": INTENT_PENDING, "message": "ждёт предыдущую операцию по этому событию"}
     if adapter is None:
         reason = (getattr(providers, "errors", {}) or {}).get(cal["account_id"]) or "нет секрета или гранта"
-        return _defer(store, intent, f"аккаунт не подключён: {reason}", kind="not_connected")
+        store.park_intent(intent["id"], 300, f"аккаунт не подключён: {reason}")   # waiting for a secret/grant is not an attempt
+        return {"status": INTENT_PENDING, "message": f"аккаунт не подключён: {reason}"}
     try:
         payload = json.loads(intent.get("payload_json") or "{}")
     except ValueError:
@@ -668,12 +778,14 @@ def reassign_event(store, providers, row: Dict[str, Any], calendar_ids: List[str
     owner = owner or lease_owner()
     if row.get("master_id"):
         row = store.get_event(row["master_id"]) or row   # an occurrence id means its whole series
+    clicked_cal = store.get_calendar(row["calendar_id"])
     group = row.get("link_group_id") or ""
     members = store.group_masters(group) if group else [row]
     row = next((m for m in members if m.get("is_primary")), row)   # a clicked copy still reassigns around the primary
     own_cal = store.get_calendar(row["calendar_id"])
-    if own_cal is not None and own_cal["provider"] != PROVIDER_LOCAL and not own_cal.get("writable", True):
-        return {"added": [], "removed": [], "kept_primary": row["calendar_id"], "failed": "календарь события только для чтения — его копии не назначаются"}
+    for cal_ in (clicked_cal, own_cal):
+        if cal_ is not None and cal_["provider"] != PROVIDER_LOCAL and not cal_.get("writable", True):
+            return {"added": [], "removed": [], "kept_primary": row["calendar_id"], "failed": "календарь события только для чтения — его копии не назначаются"}
     current = {m["calendar_id"]: m for m in members}
     added, removed = [], []
     wanted = [c for c in calendar_ids if c]
@@ -719,10 +831,8 @@ def reassign_event(store, providers, row: Dict[str, Any], calendar_ids: List[str
         intent = store.add_intent("create", cal["account_id"], cid, saved["id"], {"send_updates": False})
         outcome = execute_intent(store, providers, intent, owner)
         for exc_row in exception_rows:
-            # the exceptions resolve through the master; while its create is pending they defer (kind=retry) instead of vanishing
-            exc_intent = store.add_intent("update", cal["account_id"], cid, exc_row["id"], {"scope": SCOPE_THIS, "changes": {}, "send_updates": False},
-                                          scope=SCOPE_THIS)
-            execute_intent(store, providers, exc_intent, owner)
+            # the exceptions resolve through the master and are written by the companion queue (one resource PUT each — not inside the tool call)
+            store.add_intent("update", cal["account_id"], cid, exc_row["id"], {"scope": SCOPE_THIS, "changes": {}, "send_updates": False}, scope=SCOPE_THIS)
         added.append({"calendar_id": cid, "calendar_name": cal["name"], "event_id": saved["id"], **outcome})
     for cid, m in current.items():
         if cid in wanted or m["id"] == row["id"]:

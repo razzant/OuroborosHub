@@ -198,8 +198,8 @@ class NotifyChannel:
     def send(self, notice_id: str, text: str) -> Tuple[str, str]:
         """→ (state, detail): sent | duplicate | no_route | no_grant | retry | failed."""
         state = self.state()
-        if state in ("no_route", "unreachable", "token_rejected"):
-            return ("no_route" if state == "no_route" else "retry"), state
+        if state in ("no_route", "token_rejected", "unreachable"):
+            return "no_route", state        # kept in the queue as no_channel until the route / the token / the host comes back
         try:
             data = self._request("POST", "/chat/notify", {"notice_id": notice_id, "text": text, "markdown": False})
         except _HttpError as exc:
@@ -347,7 +347,7 @@ def _record(store, reminder_id: str, state: str, detail: str, stats: Dict[str, i
         store.mark_reminder(reminder_id, "sent", detail)
         stats["sent"] += 1
     elif state in ("no_route", "no_grant"):
-        store.mark_reminder(reminder_id, "no_channel", state)
+        store.mark_reminder(reminder_id, "no_channel", detail or state)
         stats["no_channel"] += 1
     elif state == "retry":
         attempts = store.bump_reminder_attempt(reminder_id, detail)

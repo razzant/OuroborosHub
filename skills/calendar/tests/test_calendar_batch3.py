@@ -143,9 +143,6 @@ class ReminderAndWidgetTests(unittest.TestCase):
         self.assertEqual(payload["days"][0]["date"], "2026-03-23")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class Round3FixTests(unittest.TestCase):
     """Regressions for the round-3 delta findings (batch 4)."""
@@ -225,3 +222,7 @@ class Round3FixTests(unittest.TestCase):
                           "all_day": 0, "rrule": "FREQ=DAILY;UNTIL=20261005T085959Z", "raw_payload": raw, "attendees_json": "[]", "reminders_json": "[]"})
         self.assertIn("Ранняя", out)
         self.assertNotIn("Поздняя", out)
+
+
+if __name__ == "__main__":
+    unittest.main()

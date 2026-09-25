@@ -188,11 +188,28 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
         exc = next((e for e in store.exceptions_for(master_id) if e.get("recurrence_id") == row["recurrence_id"]), None)
         payload = {k: v for k, v in row.items() if k != "master_external_id"}
         payload.update({"master_id": master_id, "raw_payload": ""})
+        changed = exc is None or exc.get("etag") != row["etag"]
         if exc is None:
             store.insert_event(payload)
-        elif exc.get("etag") != row["etag"]:
+        elif changed:
+            if exc.get("sync_state") in ("pending", "conflict", "pending_delete"):
+                continue   # our own write to this occurrence is in flight
             store.update_event(exc["id"], {k: payload[k] for k in ("title", "description", "location", "start_utc", "end_utc", "status", "etag")})
         upserts += 1
+        if changed:
+            # 6 A / 22: an unambiguous external change of one occurrence follows to the linked copies
+            master_row = store.get_event(master_id)
+            if master_row and master_row.get("link_group_id"):
+                key = row["recurrence_id"]
+                for sib in store.group_masters(master_row["link_group_id"]):
+                    if sib["id"] == master_id:
+                        continue
+                    if str(row.get("status") or "") == "cancelled":
+                        ops.delete_event(store, providers, f"{sib['id']}@{key}", scope="this", owner="companion", cascade=False)
+                    else:
+                        moved = {"start_utc": row["start_utc"], "end_utc": row["end_utc"], "all_day": row.get("all_day")}
+                        ops.update_event(store, providers, f"{sib['id']}@{key}", moved, scope="this", owner="companion", propagate=False)
+                    propagated += 1
     if kind == "google_sync_token":
         # Google: cancelled ids in the (incremental) feed are the confirmed deletions (roast Fable F7).
         for ext_id in extra:

@@ -376,8 +376,14 @@ class GoogleAdapter:
     def respond(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         external_id = str(event.get("external_id") or "")
         response = str(payload.get("response") or event.get("my_response") or "")
-        if not external_id or response not in ("accepted", "declined", "tentative"):
-            raise ProviderError("unsupported", "ответить можно только на событие с участниками из Google")
+        if response not in ("accepted", "declined", "tentative"):
+            raise ProviderError("unsupported", "response: accepted | declined | tentative")
+        if not external_id and event.get("master_id"):
+            external_id = self._instance_id(calendar, event)
+            if not external_id:
+                raise ProviderError("retry", "экземпляр серии у Google ещё не найден — ответ подождёт")
+        if not external_id:
+            raise ProviderError("unsupported", "ответить можно только на событие, уже записанное в Google")
         attendees = json.loads(event.get("attendees_json") or "[]")
         hit = False
         for att in attendees:
