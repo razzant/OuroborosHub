@@ -77,6 +77,7 @@
         '.card{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;z-index:9}',
         '.card form{background:var(--card);color:var(--fg);border-radius:12px;padding:16px;width:min(440px,94vw);max-height:92vh;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,.3)}',
         '.card label{display:block;font-size:12px;color:var(--muted);margin:8px 0 2px}.card input,.card select,.card textarea{width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);font:inherit}',
+        '.card input[type="checkbox"]{width:auto;margin:0 6px 0 0;vertical-align:middle}.card label.inline{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--fg);margin:8px 0 2px}',
         '.card .actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}.card .actions .spacer{flex:1}',
         '.status{font-size:12px;color:var(--muted);margin-top:8px}.err{color:var(--danger)}',
         '.cals{display:flex;flex-wrap:wrap;gap:6px}.cals button{font-size:12px;padding:3px 8px}',
@@ -420,14 +421,14 @@
         form.appendChild(field('Название', title));
         form.appendChild(field('Начало', start));
         form.appendChild(field('Конец', end));
-        form.appendChild(el('label', {}, [allDay, ' весь день']));
+        form.appendChild(el('label', { class: 'inline' }, [allDay, ' весь день']));
         form.appendChild(field('Календари (первый — основной, остальные получают копии по своему правилу)', calBox));
-        form.appendChild(el('label', {}, [hidden, ' служебное (распорядок, видно по переключателю)']));
+        form.appendChild(el('label', { class: 'inline' }, [hidden, ' служебное (распорядок, видно по переключателю)']));
         form.appendChild(field('Занятость', avail));
         form.appendChild(field('Место', loc));
         form.appendChild(field('Описание', desc));
         form.appendChild(field('Участники', att));
-        form.appendChild(el('label', {}, [notify, ' уведомить участников (приглашения / изменения)']));
+        form.appendChild(el('label', { class: 'inline' }, [notify, ' уведомить участников (приглашения / изменения)']));
         form.appendChild(field('Напоминания Уробороса', rem));
         form.appendChild(field('Повторение', rrule));
         if (f.series) form.appendChild(field('Охват изменения', scopeSel));

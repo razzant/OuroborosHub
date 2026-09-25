@@ -1898,12 +1898,12 @@
     {
       "slug": "calendar",
       "name": "calendar",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "type": "extension",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "1cc7d59b6dbe556be5ef74322fc852694aa3082568576e2ab0fd4cf46e768564",
+          "sha256": "13911b389078f7470b9fbe722eefc10925c4675dcfb1d5b5153ce840f1302ccd",
           "size": 12539
         },
         {
@@ -1968,8 +1968,8 @@
         },
         {
           "path": "widget.js",
-          "sha256": "ce471a229f83a78a981883c93f437b4c612da83ac8a4ce4ca3a8c95757d516c8",
-          "size": 32420
+          "sha256": "5b954544c229fb537e38fcb8382eda1ca115fc63770d954efea2d818b5a43811",
+          "size": 32669
         }
       ],
       "description": "Единый календарь Уробороса — свой календарь «Личное» плюс Яндекс Календарь (CalDAV); события, свободные окна, напоминания и виджет День/Неделя с перетаскиванием."
