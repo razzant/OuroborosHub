@@ -75,7 +75,9 @@ def _connect():
             "CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, day TEXT NOT NULL, post_ids TEXT NOT NULL, "
             "content_sha256 TEXT NOT NULL, recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"
             "CREATE TABLE IF NOT EXISTS seen (channel TEXT PRIMARY KEY, last_id INTEGER NOT NULL);"
-            "CREATE TABLE IF NOT EXISTS observed (channel TEXT NOT NULL, id INTEGER NOT NULL, PRIMARY KEY(channel,id));"
+            "CREATE TABLE IF NOT EXISTS observed (channel TEXT NOT NULL, id INTEGER NOT NULL, "
+            "lost_reported INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(channel,id));"
+            "CREATE TABLE IF NOT EXISTS telegram_reads (channel TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0);"
             "CREATE TABLE IF NOT EXISTS gaps (channel TEXT PRIMARY KEY, lost_count INTEGER NOT NULL);"
             # Feed identities are hashes, so feeds keep a per-item attempted set
             # instead of the Telegram numeric watermark.
@@ -85,6 +87,13 @@ def _connect():
             "attempted INTEGER NOT NULL DEFAULT 0, returned INTEGER NOT NULL DEFAULT 0, "
             "lost_reported INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source,key));"
         )
+        # A previous installed revision has observed(channel,id) without this
+        # column. Migrate in a write transaction so simultaneous first reads
+        # cannot both attempt ALTER TABLE.
+        conn.execute("BEGIN IMMEDIATE")
+        if "lost_reported" not in {row[1] for row in conn.execute("PRAGMA table_info(observed)")}:
+            conn.execute("ALTER TABLE observed ADD COLUMN lost_reported INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
         with conn:
             yield conn
     finally:
@@ -272,7 +281,9 @@ def _fetch_channel(channel: str) -> tuple[list[dict[str, Any]], str]:
         return [], "preview HTML could not be parsed"
     if not parser.posts:
         return [], "no readable posts: preview may be empty, changed, or access-limited"
-    return parser.posts[-MAX_POSTS_PER_CHANNEL:], ""
+    # Keep every identity found in the bounded response. A later limit applies
+    # to the agent-facing page, never to visibility/loss accounting.
+    return parser.posts, ""
 
 
 class _FeedRefused(Exception):
@@ -428,7 +439,7 @@ def _fetch_feed(name: str) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
         truncated = True
     except _FeedRefused as exc:
         return [], {}, str(exc)
-    except xml.parsers.expat.ExpatError:
+    except (xml.parsers.expat.ExpatError, LookupError, ValueError):
         return [], {}, "feed XML could not be parsed"
     facts = {"feed_truncated": truncated, "duplicate_items": feed.duplicate, "unidentified_items": feed.unidentified}
     if not feed.items:
@@ -437,28 +448,42 @@ def _fetch_feed(name: str) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
 
 
 def _telegram_source(channel: str, per_channel: int, include_attempted: bool, watermark: int) -> dict[str, Any]:
+    with _connect() as conn:
+        conn.execute("INSERT OR IGNORE INTO telegram_reads(channel) VALUES (?)", (channel,))
+        conn.execute("UPDATE telegram_reads SET generation=generation+1 WHERE channel=?", (channel,))
+        generation = conn.execute("SELECT generation FROM telegram_reads WHERE channel=?", (channel,)).fetchone()[0]
     posts, error = _fetch_channel(channel)
     oldest = int(posts[0]["id"].split("/")[1]) if posts else 0
     lost_now = 0
-    if posts and not error:
-        with _connect() as conn:
+    with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        latest = conn.execute("SELECT generation FROM telegram_reads WHERE channel=?", (channel,)).fetchone()[0]
+        current = conn.execute("SELECT last_id FROM seen WHERE channel=?", (channel,)).fetchone()
+        watermark = current[0] if current else 0
+        if posts and not error and generation == latest:
             visible_ids = {int(post["id"].split("/")[1]) for post in posts}
+            conn.executemany("UPDATE observed SET lost_reported=0 WHERE channel=? AND id=?",
+                             ((channel, identifier) for identifier in visible_ids))
             missing = [row[0] for row in conn.execute(
-                "SELECT id FROM observed WHERE channel=? AND id>?", (channel, watermark)
+                "SELECT id FROM observed WHERE channel=? AND id>? AND lost_reported=0", (channel, watermark)
             ) if row[0] not in visible_ids]
             lost_now = len(missing)
             if lost_now:
-                # The public preview no longer exposes these observed but
-                # unattempted IDs. Keep the loss count, not an impossible
-                # requirement to acknowledge posts we can no longer read.
-                conn.executemany("DELETE FROM observed WHERE channel=? AND id=?",
+                # An absent item is a coverage gap, not revoked authority to
+                # acknowledge an ID the agent actually saw on a prior fetch.
+                conn.executemany("UPDATE observed SET lost_reported=1 WHERE channel=? AND id=?",
                                  ((channel, identifier) for identifier in missing))
                 conn.execute("INSERT INTO gaps(channel,lost_count) VALUES (?,?) ON CONFLICT(channel) "
                              "DO UPDATE SET lost_count=lost_count+excluded.lost_count", (channel, lost_now))
-            gap = conn.execute("SELECT lost_count FROM gaps WHERE channel=?", (channel,)).fetchone()
-    else:
-        with _connect() as conn:
-            gap = conn.execute("SELECT lost_count FROM gaps WHERE channel=?", (channel,)).fetchone()
+        gap = conn.execute("SELECT lost_count FROM gaps WHERE channel=?", (channel,)).fetchone()
+    # A superseded network read must not insert older IDs into the current
+    # acknowledgement ordering after a newer fetch has already returned.
+    if generation != latest:
+        return {"channel": channel, "kind": "telegram", "coverage": "unavailable",
+                "error": "stale preview; refetch this channel", "posts": [], "omitted_posts": 0,
+                "first_omitted_id": "", "possible_gap": True,
+                "lost_unattempted_now": 0, "historical_lost_unattempted": gap[0] if gap else 0,
+                "last_attempted_id": watermark, "stale_read": True, "_generation": generation}
     new_posts = [post for post in posts if include_attempted or int(post["id"].split("/")[1]) > watermark]
     if include_attempted:
         for post in new_posts:
@@ -466,10 +491,11 @@ def _telegram_source(channel: str, per_channel: int, include_attempted: bool, wa
     return {"channel": channel, "kind": "telegram", "coverage": "unavailable" if error else "recent_page_only",
             "error": error, "posts": new_posts[:per_channel], "omitted_posts": max(0, len(new_posts) - per_channel),
             "first_omitted_id": new_posts[per_channel]["id"] if len(new_posts) > per_channel else "",
-            "possible_gap": bool(lost_now or (watermark and oldest > watermark)),
+            "possible_gap": bool(generation != latest or lost_now or (watermark and oldest > watermark)),
             "lost_unattempted_now": lost_now,
             "historical_lost_unattempted": gap[0] if gap else 0,
-            "last_attempted_id": watermark}
+            "last_attempted_id": watermark, "stale_read": generation != latest,
+            "_generation": generation}
 
 
 def _feed_source(source: str, per_channel: int, include_attempted: bool) -> dict[str, Any]:
@@ -615,13 +641,27 @@ def _fetch_posts(limit: int = 10, include_attempted: bool = False, channel: str 
     result["output_limited"] = any(x["omitted_posts"] or any(
         post.get("text_truncated") for post in x["posts"]
     ) for x in results)
-    serialized = json.dumps(result, ensure_ascii=False)
-    if len(serialized) > MAX_OUTPUT_CHARS:
-        return json.dumps({"ok": False, "error": "output budget cannot represent all configured sources",
-                           "channel_count": len(results), "coverage": "unavailable"})
-    # Only returned IDs are recordable. A guessed future ID must not poison the
-    # durable watermark. This observation is NOT a delivery or cursor advance.
+    # Final response and returned-ID eligibility are one write transaction.
+    # A newer fetch can start after _telegram_source checked its generation;
+    # its write cannot interleave with this recheck and publication.
     with _connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        for item in results:
+            if item["kind"] != "telegram":
+                continue
+            generation = item.pop("_generation")
+            current = conn.execute("SELECT generation FROM telegram_reads WHERE channel=?",
+                                   (item["channel"],)).fetchone()
+            if not current or current[0] != generation:
+                item.update(coverage="unavailable", error="stale preview; refetch this channel",
+                            posts=[], omitted_posts=0, first_omitted_id="", possible_gap=True,
+                            lost_unattempted_now=0, stale_read=True)
+        result["ok"] = any(x["coverage"] in READABLE for x in results)
+        serialized = json.dumps(result, ensure_ascii=False)
+        if len(serialized) > MAX_OUTPUT_CHARS:
+            return json.dumps({"ok": False, "error": "output budget cannot represent all configured sources",
+                               "channel_count": len(results), "coverage": "unavailable"})
+        # Only IDs in this exact returned JSON become eligible to record.
         for item in results:
             if item["kind"] == "rss":
                 conn.executemany("UPDATE feed_items SET returned=1 WHERE source=? AND key=?",
@@ -657,6 +697,8 @@ def _record_attempt(day: str, post_ids: list[str], edition: str = "daily") -> st
         normalized_day = date.fromisoformat(day)
         if normalized_day.isoformat() != day:
             raise ValueError("date must be YYYY-MM-DD")
+        if edition == "":
+            edition = "daily"
         if not isinstance(edition, str) or not EDITION.fullmatch(edition):
             raise ValueError("edition must be 1–80 ASCII letters/digits/_.:-; default daily")
         if not isinstance(post_ids, list) or len(post_ids) > MAX_CHANNELS * MAX_POSTS_PER_CHANNEL or any(
@@ -669,6 +711,15 @@ def _record_attempt(day: str, post_ids: list[str], edition: str = "daily") -> st
             # Validate and publish the receipt under one write lease. A fetch
             # cannot change marker state between checking IDs and the attempt.
             conn.execute("BEGIN IMMEDIATE")
+            prior_receipt = conn.execute(
+                "SELECT key,day,post_ids,content_sha256,recorded_at FROM attempts WHERE key=?", (key,)
+            ).fetchone()
+            if prior_receipt:
+                return json.dumps({"ok": True, "key": prior_receipt[0], "day": prior_receipt[1],
+                                   "post_ids": json.loads(prior_receipt[2]), "content_sha256": prior_receipt[3],
+                                   "recorded_at": prior_receipt[4], "new_attempt": False,
+                                   "same_selection": prior_receipt[3] == digest,
+                                   "status": "already_attempted_do_not_auto_publish"})
             chosen: dict[str, set[int]] = {}
             feed_keys: list[tuple[str, str]] = []
             for post_id in unique:
@@ -689,7 +740,7 @@ def _record_attempt(day: str, post_ids: list[str], edition: str = "daily") -> st
                 watermark = conn.execute("SELECT last_id FROM seen WHERE channel=?", (channel,)).fetchone()
                 prior = watermark[0] if watermark else 0
                 unaccounted = conn.execute(
-                    "SELECT id FROM observed WHERE channel=? AND id>? AND id<=?",
+                    "SELECT id FROM observed WHERE channel=? AND id>? AND id<=? AND lost_reported=0",
                     (channel, prior, max(ids)),
                 ).fetchall()
                 if any(row[0] not in ids for row in unaccounted):

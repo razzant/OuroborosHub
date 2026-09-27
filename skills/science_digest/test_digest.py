@@ -5,6 +5,7 @@ import email.utils
 import hashlib
 import importlib.util
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -191,6 +192,92 @@ class DigestConsumerTests(ConsumerCase):
         self.assertTrue(source["possible_gap"])
         self.assertTrue(self.call("record_attempt", day="2026-09-27",
                                   post_ids=[p["id"] for p in source["posts"]])["ok"])
+
+    def test_overlapping_telegram_fetch_does_not_revoke_returned_ids(self):
+        self.call("channels", action="add", name="ai_newz")
+
+        def page(*ids):
+            return ([{"id": f"ai_newz/{n}", "url": f"https://t.me/ai_newz/{n}",
+                      "text": str(n), "date": "", "links": []} for n in ids], "")
+
+        def interleave(_channel):
+            with patch.object(plugin, "_fetch_channel", return_value=page(50, 51)):
+                newer = self.call("fetch_posts", channel="ai_newz")["channels"][0]
+            self.assertEqual([p["id"] for p in newer["posts"]], ["ai_newz/50", "ai_newz/51"])
+            return page(1, 2)
+
+        with patch.object(plugin, "_fetch_channel", side_effect=interleave):
+            stale = self.call("fetch_posts", channel="ai_newz")["channels"][0]
+        self.assertTrue(stale["stale_read"])
+        self.assertEqual(stale["lost_unattempted_now"], 0)
+        self.assertTrue(self.call("record_attempt", day="2026-09-27",
+                                  post_ids=["ai_newz/50", "ai_newz/51"])["ok"])
+
+    def test_newer_attempt_between_source_and_serialization_fences_stale_ids(self):
+        self.call("channels", action="add", name="ai_newz")
+
+        def page(n):
+            return ([{"id": f"ai_newz/{n}", "url": f"https://t.me/ai_newz/{n}",
+                      "text": str(n), "date": "", "links": []}], "")
+
+        original = plugin._telegram_source
+        def interleave(channel, limit, include_attempted, watermark):
+            old = original(channel, limit, include_attempted, watermark)
+            with patch.object(plugin, "_telegram_source", original), patch.object(
+                    plugin, "_fetch_channel", return_value=page(2)):
+                newer = self.call("fetch_posts", channel=channel)["channels"][0]
+            self.assertEqual(newer["posts"][0]["id"], "ai_newz/2")
+            self.assertTrue(self.call("record_attempt", day="2026-09-27",
+                                      post_ids=["ai_newz/2"])["ok"])
+            return old
+
+        with patch.object(plugin, "_fetch_channel", return_value=page(1)), patch.object(
+                plugin, "_telegram_source", side_effect=interleave):
+            stale = self.call("fetch_posts", channel="ai_newz")["channels"][0]
+        self.assertTrue(stale["stale_read"])
+        self.assertEqual(stale["posts"], [])
+        self.assertEqual(stale["lost_unattempted_now"], 0)
+        with plugin._connect() as conn:
+            self.assertEqual(conn.execute("SELECT id FROM observed WHERE channel='ai_newz'").fetchall()[0][0], 2)
+
+    def test_legacy_observed_rows_migrate_without_losing_ids(self):
+        path = Path(self.api.root) / "digest.sqlite3"
+        with sqlite3.connect(path) as db:
+            db.execute("CREATE TABLE observed (channel TEXT NOT NULL, id INTEGER NOT NULL, PRIMARY KEY(channel,id))")
+            db.execute("INSERT INTO observed VALUES ('ai_newz',12)")
+        self.call("channels", action="add", name="ai_newz")
+        with sqlite3.connect(path) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(observed)")}
+            self.assertIn("lost_reported", columns)
+            self.assertEqual(db.execute("SELECT id FROM observed WHERE channel='ai_newz'").fetchone()[0], 12)
+
+    def test_existing_receipt_survives_source_removal(self):
+        self.call("channels", action="add", name="ai_newz")
+        page = ([{"id": "ai_newz/12", "url": "https://t.me/ai_newz/12",
+                  "text": "post", "date": "", "links": []}], "")
+        with patch.object(plugin, "_fetch_channel", return_value=page):
+            self.call("fetch_posts")
+        first = self.call("record_attempt", day="2026-09-27", post_ids=["ai_newz/12"])
+        self.assertTrue(first["new_attempt"])
+        self.call("channels", action="remove", name="ai_newz")
+        again = self.call("record_attempt", day="2026-09-27", post_ids=["ai_newz/12"])
+        self.assertFalse(again["new_attempt"])
+        self.assertTrue(again["same_selection"])
+        self.assertEqual(again["status"], "already_attempted_do_not_auto_publish")
+
+    def test_twenty_one_parsed_posts_are_not_falsely_lost(self):
+        self.call("channels", action="add", name="ai_newz")
+        page = b"".join((f'<div class="tgme_widget_message" data-post="ai_newz/{n}">'
+                         f'<div class="tgme_widget_message_text">Post {n}</div></div>').encode()
+                        for n in range(1, 22))
+        with patch.object(plugin._OPENER, "open", return_value=FakeResponse(content=page)):
+            first = self.call("fetch_posts", limit=20)["channels"][0]
+            self.assertEqual(first["posts"][0]["id"], "ai_newz/1")
+            self.assertEqual(first["omitted_posts"], 1)
+            again = self.call("fetch_posts", limit=20)["channels"][0]
+        self.assertEqual(again["lost_unattempted_now"], 0)
+        self.assertTrue(self.call("record_attempt", day="2026-09-27",
+                                  post_ids=[p["id"] for p in first["posts"]])["ok"])
 
     def test_limited_page_keeps_oldest_unattempted_and_replays_newer_next_run(self):
         self.call("channels", action="add", name="ai_newz")
@@ -585,6 +672,16 @@ class FeedSourceTests(ConsumerCase):
         partial = self.source(self.fetch({OPENAI: feed_response(rss((article("a"), 1, "A"), (article("u"), None, "U")))})[0])
         self.assertEqual(partial["skipped_items"]["undated"], 1)
         self.assertEqual([p["id"] for p in partial["posts"]], [feed_id(article("a"))])
+
+    def test_unknown_feed_encoding_is_source_local_failure(self):
+        self.call("channels", action="add", name="rss:openai_news")
+        self.call("channels", action="add", name="rss:deepmind")
+        invalid = b'<?xml version="1.0" encoding="X-UNKNOWN"?><rss version="2.0"><channel/></rss>'
+        valid = rss(("https://deepmind.google/blog/valid/", 2, "Valid"))
+        result, _ = self.fetch({OPENAI: feed_response(invalid),
+                                DEEPMIND: feed_response(valid, url=DEEPMIND)})
+        self.assertEqual(self.source(result)["coverage"], "unavailable")
+        self.assertEqual(self.source(result, "rss:deepmind")["coverage"], "feed_window")
 
     def test_oversized_feed_keeps_complete_prefix_and_discloses_gap(self):
         self.call("channels", action="add", name="rss:openai_news")
