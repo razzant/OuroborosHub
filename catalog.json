@@ -1928,8 +1928,8 @@
         },
         {
           "path": "providers_google.py",
-          "sha256": "81407bc4e5685bb5d9a7d02e88af5e760075881075567789044d0e3ecd99537b",
-          "size": 34547
+          "sha256": "004ddf431c76613f8488ad1e68846f7f2009177fe0f1422515743ade6de5fec0",
+          "size": 34903
         },
         {
           "path": "reminders.py",
@@ -1948,8 +1948,8 @@
         },
         {
           "path": "store.py",
-          "sha256": "732e25c1deb41930af19ac3ddf1fd52bf96cc88cb3a29607323397c725429add",
-          "size": 36428
+          "sha256": "7e10c71bc0c6884096cc87457232eb08111c792cb50ade4fa25c7ed0b84ec855",
+          "size": 36923
         },
         {
           "path": "tests/test_calendar.py",
@@ -1973,8 +1973,8 @@
         },
         {
           "path": "tests/test_calendar_reminder_queue.py",
-          "sha256": "b633b2f65a18711df33f8ea0e4fb8db0fb2efa89e4f8e08882b016d492e1998d",
-          "size": 18428
+          "sha256": "f7d50105d7ab3bd085de3f1ab581760c8e31f44b9e3ffd7f5388e9c85c422b8d",
+          "size": 20926
         },
         {
           "path": "tests/test_calendar_review.py",

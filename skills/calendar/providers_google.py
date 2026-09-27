@@ -356,6 +356,10 @@ class GoogleAdapter:
         if not external_id:
             return self.create(calendar, event, payload)
         body = row_to_gevent(event, mute=bool(payload.get("mute_provider_reminders")))
+        if event.get("master_id") and "reminders" not in (payload.get("changes") or {}) and not payload.get("mute_provider_reminders"):
+            # PATCH of a title-only occurrence must not turn inherited master reminders
+            # into an explicit Google instance default (or overwrite an existing override).
+            body.pop("reminders", None)
         attendees = json.loads(event.get("attendees_json") or "[]")
         params = {"sendUpdates": "all" if (payload.get("send_updates") and attendees) else "none"}
         headers = {"If-Match": expected_etag} if expected_etag else {}

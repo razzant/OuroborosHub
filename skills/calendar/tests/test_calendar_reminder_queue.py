@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import unittest
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,7 +30,7 @@ import tools  # noqa: E402
 import worker as calendar_worker  # noqa: E402
 from model import DEFAULT_LOCAL_CALENDAR_ID, iso_utc, now_utc  # noqa: E402
 from providers import row_to_ics  # noqa: E402
-from providers_google import gevent_to_row, row_to_gevent  # noqa: E402
+from providers_google import GoogleAdapter, gevent_to_row, row_to_gevent  # noqa: E402
 
 UTC = timezone.utc
 
@@ -88,6 +88,23 @@ class ExplicitNoRemindersTests(unittest.TestCase):
         own = {**off, "reminders_json": "[15]"}
         self.assertEqual(calendar_worker._imported_reminders(own, off["reminders_json"], "google", mode_on=True), "[15]")
         self.assertEqual(calendar_worker._imported_reminders(own, "[5]", "google", mode_on=True), "[5]")
+
+    def test_title_only_google_exception_patch_does_not_change_provider_alarms(self):
+        adapter = GoogleAdapter("owner@example.test", "token", "refresh", datetime.now(UTC) + timedelta(days=1), "client", "", None)
+        adapter.requests = []
+        def fake_request(method, path, params=None, body=None, headers=None, _retry=True):
+            adapter.requests.append((method, path, params, body, headers))
+            return 200, {}, {"id": path.rsplit("/", 1)[-1]}
+        adapter._request = fake_request
+        event = {"id": "exc", "master_id": "master", "external_id": "google-instance", "uid": "series@test",
+                 "title": "Edited title", "start_utc": "2026-10-01T09:00:00+00:00",
+                 "end_utc": "2026-10-01T10:00:00+00:00", "tz": "UTC", "reminders_json": "[]",
+                 "attendees_json": "[]"}
+        calendar = {"external_id": "primary"}
+        adapter.update(calendar, event, "", {"changes": {"title": "Edited title"}})
+        self.assertNotIn("reminders", adapter.requests[-1][3])
+        adapter.update(calendar, event, "", {"changes": {"reminders": "default"}})
+        self.assertIn("reminders", adapter.requests[-1][3])
 
     def test_empty_update_silences_one_event_and_default_restores_the_rule(self):
         ctx = make_context()
@@ -187,6 +204,25 @@ class ExplicitNoRemindersTests(unittest.TestCase):
         self.assertEqual(effective["reminders_json"], json.dumps("off"))
         plan(ctx, now)
         self.assertEqual(waiting(ctx, now, master["id"]), [])
+
+    def test_exception_moved_from_outside_window_uses_master_offset(self):
+        ctx = make_context()
+        now = now_utc().replace(microsecond=0)
+        tools.cal_reminders(ctx, action="set_default", offsets=[10], confirm=True)
+        original = now + timedelta(days=10)
+        moved = now + timedelta(hours=2)
+        master = ctx.store.insert_event({"calendar_id": DEFAULT_LOCAL_CALENDAR_ID, "title": "Distant series",
+                                         "rrule": "FREQ=DAILY", "start_utc": iso_utc(original),
+                                         "end_utc": iso_utc(original + timedelta(hours=1)), "reminders_json": "[15]"})
+        ctx.store.insert_event({"calendar_id": DEFAULT_LOCAL_CALENDAR_ID, "master_id": master["id"],
+                                "recurrence_id": iso_utc(original), "title": "Moved occurrence",
+                                "start_utc": iso_utc(moved), "end_utc": iso_utc(moved + timedelta(hours=1)),
+                                "reminders_json": "[]"})
+        occurrences = ctx.occurrences(now, now + timedelta(days=1))
+        self.assertEqual(len(occurrences), 1)
+        self.assertEqual(occurrences[0]["reminders_json"], "[15]")
+        plan(ctx, now)
+        self.assertEqual([r[2] for r in waiting(ctx, now, master["id"])], [15])
 
 
 class ProviderChangeQueueTests(unittest.TestCase):

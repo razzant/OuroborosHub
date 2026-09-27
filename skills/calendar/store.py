@@ -380,8 +380,13 @@ class Store:
         time_clause = "(e.start_utc < ? AND e.end_utc > ? AND e.rrule = '')"
         targs: List[Any] = [iso_utc(end), iso_utc(start)]
         if include_masters:
-            time_clause = "(" + time_clause + " OR (e.rrule != '' AND e.start_utc < ? AND e.master_id = ''))"
-            targs.append(iso_utc(end))
+            # A moved exception can enter this window before its master's DTSTART. Include that
+            # master so expansion overlays its reminder rules rather than treating the exception
+            # as a standalone event with the wrong default offset.
+            time_clause = ("(" + time_clause + " OR (e.rrule != '' AND e.start_utc < ? AND e.master_id = '')"
+                           " OR (e.rrule != '' AND e.id IN (SELECT master_id FROM events"
+                           " WHERE master_id != '' AND deleted_at IS NULL AND start_utc < ? AND end_utc > ?)))")
+            targs.extend((iso_utc(end), iso_utc(end), iso_utc(start)))
         clauses.append(time_clause)
         args.extend(targs)
         sql = ("SELECT e.*, c.name AS calendar_name, c.provider AS provider, c.account_id AS account_id,"
