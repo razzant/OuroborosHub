@@ -620,7 +620,7 @@ class ReminderRound4Tests(unittest.TestCase):
         self.assertEqual(stats["sent"], 1)
         self.assertIn("06:30", channel.sent[0][1])
 
-    def test_delivery_caps_notice_at_4000_and_title_at_120_characters(self):
+    def test_delivery_caps_notice_at_1000_and_title_at_120_characters(self):
         ctx = make_context()
         now = datetime(2026, 10, 1, 9, 0, tzinfo=UTC)
         event = ctx.store.insert_event(
@@ -636,7 +636,7 @@ class ReminderRound4Tests(unittest.TestCase):
         channel = Channel()
         rem.deliver_due(ctx.store, channel, UTC, now=now)
         text = channel.sent[0][1]
-        self.assertLessEqual(len(text), 4000)
+        self.assertLessEqual(len(text), 1000)
         self.assertIn("T" * 120, text)
         self.assertNotIn("T" * 121, text)
 

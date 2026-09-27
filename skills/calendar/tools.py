@@ -183,11 +183,14 @@ def cal_status(ctx: Context, **kwargs) -> str:
     if counts.get("conflict"):
         next_steps.append(f"{counts['conflict']} операций в конфликте с внешней версией: см. cal_events(id=…) и реши, что оставить")
     if channel.get("state") in ("no_route", "unknown"):
-        next_steps.append("Доставка напоминаний без модели ждёт маршрут /chat/notify в ядре: напоминания хранятся и видны в виджете")
+        next_steps.append("Доставка напоминаний без модели ждёт маршрут /notify в ядре: напоминания хранятся и видны в виджете")
     elif channel.get("state") == "no_grant":
-        next_steps.append("Маршрут /chat/notify есть, но гранта нет: владелец выдаёт разрешение inject_chat скиллу calendar в Skills")
+        next_steps.append("Маршрут /notify есть, но гранта нет: владелец выдаёт разрешение notify_owner скиллу calendar в Skills")
     elif channel.get("state") == "token_rejected":
         next_steps.append("Хост отверг токен скилла для фонового процесса: выключи и включи скилл (toggle), при устаревшем ревью — обнови аттестацию")
+    unknown_reminders = st.unknown_reminder_count()
+    if unknown_reminders:
+        next_steps.append(f"У {unknown_reminders} напоминаний исход отправки неизвестен; автоматического повтора нет во избежание дублей")
     return bounded_result({
         "status": "ok",
         "timezone": tz_name(ctx.tz), "now_local": now.replace(microsecond=0).isoformat(), "today": now.date().isoformat(),
@@ -201,7 +204,8 @@ def cal_status(ctx: Context, **kwargs) -> str:
         "events_today": len([o for o in today if o.get("visibility") != VISIBILITY_HIDDEN]),
         "hidden_today": len([o for o in today if o.get("visibility") == VISIBILITY_HIDDEN]),
         "pending_writes": counts.get("pending", 0), "conflicts": counts.get("conflict", 0), "failed_writes": counts.get("failed", 0),
-        "reminders": {"rules": rem.get_rules(st), "channel": channel, "upcoming": rem.upcoming(st, ctx.tz, limit=5)},
+        "reminders": {"rules": rem.get_rules(st), "channel": channel, "upcoming": rem.upcoming(st, ctx.tz, limit=5),
+                      "unknown_count": unknown_reminders},
         "settings": {"working_hours": st.get_setting("working_hours") or "09:00-19:00", "preferences": st.get_setting("preferences") or "",
                      "busy_publish_set": [c["id"] for c in cals if c["role_publish"]]},
         "companion": ctx.companion_health(),

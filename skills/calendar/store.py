@@ -534,9 +534,14 @@ class Store:
     def upcoming_reminders(self, now: datetime, limit: int = 20) -> List[Dict[str, Any]]:
         with self._conn() as c:
             rows = c.execute("SELECT r.*, e.title FROM reminders r LEFT JOIN events e ON e.id=r.event_id"
-                             " WHERE r.state IN ('scheduled', 'no_channel', 'sent') AND r.fire_at_utc >= ? ORDER BY r.fire_at_utc LIMIT ?",
+                             " WHERE r.state IN ('scheduled', 'no_channel', 'sent', 'unknown') AND r.fire_at_utc >= ? ORDER BY r.fire_at_utc LIMIT ?",
                              (iso_utc(now - timedelta(hours=1)), limit)).fetchall()
         return [dict(r) for r in rows]
+
+    def unknown_reminder_count(self) -> int:
+        """Durable uncertain sends remain visible after they leave the upcoming window."""
+        with self._conn() as c:
+            return int(c.execute("SELECT COUNT(*) FROM reminders WHERE state='unknown'").fetchone()[0])
 
     def mark_reminder(self, reminder_id: str, state: str, detail: str = "") -> None:
         ts = _ts()

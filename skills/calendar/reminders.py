@@ -3,7 +3,7 @@
 Defaults live in ``settings['reminder_defaults']``; per-event offsets live in
 ``events.reminders_json``; the ``reminders`` table is only the delivery queue
 (``notice_id``, state). The companion plans the next 24 hours, re-reads the
-event before firing, posts to the host's ``POST /chat/notify`` when the host
+event before firing, posts to the host's ``POST /notify`` when the host
 advertises ``notify_version``, and otherwise records ``no_channel`` honestly.
 """
 
@@ -21,7 +21,7 @@ from model import get_tz, iso_local, iso_utc, now_utc, parse_stored
 
 PLAN_HORIZON = timedelta(hours=24)
 CATCHUP_GRACE = timedelta(minutes=10)      # a reminder older than this after downtime is batched, not sent alone
-MAX_NOTICE_CHARS = 4000                     # spec-core-chat-notify: text ≤ 4000
+MAX_NOTICE_CHARS = 1000                     # Host Service owner notification contract
 MAX_DELIVERY_ATTEMPTS = 5
 NOTICE_MAX = 128
 DEFAULT_RULES = {"default": [], "by_calendar": {}, "hidden": []}   # 19 A: reminders only by request or saved rule
@@ -169,7 +169,7 @@ except Exception:  # pragma: no cover - companion env without the core package
 
 
 class NotifyChannel:
-    """Loopback Host Service ``POST /chat/notify``; feature-detected via ``GET /identity``."""
+    """Loopback Host Service ``POST /notify``; feature-detected via ``GET /identity``."""
 
     def __init__(self, base_url: str = "", token: str = ""):
         self.base_url = (base_url or os.environ.get("HOST_SERVICE_URL") or "").rstrip("/")
@@ -196,12 +196,18 @@ class NotifyChannel:
         return self._state
 
     def send(self, notice_id: str, text: str) -> Tuple[str, str]:
-        """→ (state, detail): sent | duplicate | no_route | no_grant | retry | failed."""
+        """→ (state, detail): sent | no_route | no_grant | retry | unknown | failed.
+
+        A lost or malformed response is *unknown*, not a safe retry: the host
+        may have appended the notification before the connection was lost.
+        """
         state = self.state()
+        if state == "no_grant":
+            return "no_grant", "notify_owner grant missing"
         if state in ("no_route", "token_rejected", "unreachable"):
             return "no_route", state        # kept in the queue as no_channel until the route / the token / the host comes back
         try:
-            data = self._request("POST", "/chat/notify", {"notice_id": notice_id, "text": text, "markdown": False})
+            data = self._request("POST", "/notify", {"key": notice_id, "text": text})
         except _HttpError as exc:
             if exc.status == 403:
                 self._state = "no_grant"
@@ -209,15 +215,16 @@ class NotifyChannel:
             if exc.status in (404, 405):
                 self._state = "no_route"
                 return "no_route", exc.body[:200]
-            if exc.status in (429, 503, 502, 504):
+            if exc.status in (429, 503):
                 return "retry", f"HTTP {exc.status}"
-            if exc.status == 409:
-                return "failed", "notice_id conflict"
+            if exc.status in (502, 504):
+                return "unknown", f"HTTP {exc.status}: host outcome unconfirmed"
             return "failed", f"HTTP {exc.status}: {exc.body[:200]}"
         except Exception as exc:
-            return "retry", f"{type(exc).__name__}: {exc}"
-        status = str((data or {}).get("status") or "accepted")
-        return ("duplicate" if status == "duplicate" else "sent"), status
+            return "unknown", f"{type(exc).__name__}: host outcome unconfirmed"
+        if isinstance(data, dict) and data.get("ok") is True and data.get("ts") and data.get("chat_id"):
+            return "sent", "host accepted (browser/Telegram delivery unconfirmed)"
+        return "unknown", "host response did not confirm acceptance"
 
     def _request(self, method: str, path: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         req = urllib.request.Request(self.base_url + path, method=method,
@@ -232,7 +239,7 @@ class NotifyChannel:
         try:
             return json.loads(raw) if raw else {}
         except ValueError:
-            return {}
+            return {}  # malformed success response has unknown effect; send() never retries it
 
 
 class _HttpError(Exception):
@@ -250,7 +257,7 @@ def format_text(event: Dict[str, Any], occurrence_start_utc: str, offset: int, t
     soon = "сейчас" if offset == 0 else f"через {offset} мин"
     parts = [f"⏰ {head} · {str(event.get('title') or 'Событие')[:120]} ({soon})"]
     if event.get("calendar_name"):
-        parts.append(str(event["calendar_name"]))
+        parts.append(str(event["calendar_name"])[:120])
     if event.get("location"):
         parts.append(str(event["location"])[:80])
     return " · ".join(parts)
@@ -265,7 +272,7 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
     """
     now = now or now_utc()
     due = store.due_reminders(now)
-    stats = {"sent": 0, "skipped": 0, "no_channel": 0, "retry": 0, "failed": 0, "batched": 0}
+    stats = {"sent": 0, "skipped": 0, "no_channel": 0, "retry": 0, "unknown": 0, "failed": 0, "batched": 0}
     fresh: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     stale: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     for rem in due:
@@ -283,20 +290,32 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
             continue
         (stale if fire_at and now - fire_at > CATCHUP_GRACE else fresh).append((rem, live))
     for rem, event in fresh:
-        text = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)[:MAX_NOTICE_CHARS]
+        text = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)
         state, detail = channel.send(rem["notice_id"], text)
         _record(store, rem["id"], state, detail, stats)
     if stale:
-        lines = [format_text(ev, r["occurrence_start_utc"], int(r["offset_min"]), tz) for r, ev in stale]
-        text = "⏰ Пока Уроборос не работал, подошли напоминания:\n" + "\n".join(lines[:10])
-        if len(lines) > 10:
-            text += f"\n… и ещё {len(lines) - 10}"
-        text = text[:MAX_NOTICE_CHARS]
-        state, detail = channel.send(batch_notice_id([r["notice_id"] for r, _ in stale]), text)
-        for rem, _ in stale:
-            _record(store, rem["id"], state, detail, stats)
-        stats["batched"] += len(stale)
+        header = "⏰ Пока Уроборос не работал, подошли напоминания:"
+        batch: List[Tuple[Dict[str, Any], str]] = []
+        size = len(header)
+        for rem, event in stale:
+            line = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)
+            if batch and size + 1 + len(line) > MAX_NOTICE_CHARS:
+                _send_batch(store, channel, header, batch, stats)
+                batch, size = [], len(header)
+            batch.append((rem, line))
+            size += 1 + len(line)
+        if batch:
+            _send_batch(store, channel, header, batch, stats)
     return stats
+
+
+def _send_batch(store, channel: NotifyChannel, header: str, batch: List[Tuple[Dict[str, Any], str]], stats: Dict[str, int]) -> None:
+    """Fit complete reminder lines, never mark an undisclosed item as sent."""
+    text = header + "\n" + "\n".join(line for _, line in batch)
+    state, detail = channel.send(batch_notice_id([rem["notice_id"] for rem, _ in batch]), text)
+    for rem, _ in batch:
+        _record(store, rem["id"], state, detail, stats)
+    stats["batched"] += len(batch)
 
 
 def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], now: datetime, owner_tz=None) -> Tuple[str, Dict[str, Any]]:
@@ -356,6 +375,9 @@ def _record(store, reminder_id: str, state: str, detail: str, stats: Dict[str, i
             stats["failed"] += 1
         else:
             stats["retry"] += 1      # stays in the queue; next tick retries
+    elif state == "unknown":
+        store.mark_reminder(reminder_id, "unknown", detail)
+        stats["unknown"] += 1  # terminal for automation, not evidence of delivery failure
     else:
         store.mark_reminder(reminder_id, "failed", detail)
         stats["failed"] += 1

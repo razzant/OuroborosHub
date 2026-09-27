@@ -277,7 +277,7 @@ def main() -> int:
         health: Dict[str, Any] = {"deps": deps, "secrets_present": secrets_present, "tick": tick, "sync": [], "intents": None, "reminders": None, "channel": None}
         try:
             # reminders first: a slow provider must not delay a due notice
-            state = channel.state(refresh=(tick % 10 == 1 or channel.state() != "ready"))
+            channel.state(refresh=(tick % 10 == 1 or channel.state() != "ready"))
             stats = rem.deliver_due(store, channel, tz)
             requested = parse_stored(store.get_setting("sync_requested_at") or "")
             for account in [*store.list_accounts(provider=PROVIDER_YANDEX), *store.list_accounts(provider=PROVIDER_GOOGLE)]:
@@ -289,8 +289,8 @@ def main() -> int:
             health["intents"] = ops.retry_due_intents(store, providers, owner="companion")
             planned = rem.plan(store, lambda s, e: ops.expand(store.window(s, e, include_hidden=True), s, e, store.exceptions_for, owner_tz=tz))
             health["reminders"] = {"planned": planned, **stats}
-            health["channel"] = state
-            store.set_setting("notify_channel_state", {"state": state, "checked_at": iso_utc(now_utc())})
+            health["channel"] = channel.state()
+            store.set_setting("notify_channel_state", {"state": health["channel"], "checked_at": iso_utc(now_utc())})
         except Exception as exc:
             health["error"] = f"{type(exc).__name__}: {exc}"
             _log("tick error", error=health["error"], trace=traceback.format_exc()[-800:])
