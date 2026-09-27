@@ -17,7 +17,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from model import get_tz, iso_local, iso_utc, now_utc, parse_stored
+from model import get_tz, iso_local, iso_utc, now_utc, own_reminders, parse_stored
 
 PLAN_HORIZON = timedelta(hours=24)
 CATCHUP_GRACE = timedelta(minutes=10)      # a reminder older than this after downtime is batched, not sent alone
@@ -82,7 +82,8 @@ def set_mode(store, calendar_id: str, on: bool) -> Dict[str, bool]:
 
 
 def offsets_for(event: Dict[str, Any], rules: Dict[str, Any], modes: Optional[Dict[str, bool]] = None) -> List[int]:
-    """Per-event offsets win; otherwise the calendar rule; otherwise the default (hidden events: the hidden rule).
+    """Per-event offsets win (an explicit «none» included); otherwise the calendar rule; otherwise the default
+    (hidden events: the hidden rule). A stored '[]' is «not set», so existing events keep following the rules.
 
     An external calendar (Yandex/Google) gets Ouroboros reminders only when the owner switched
     «напоминает Уроборос» on for it; until then the provider's own alerts stay in charge (20 A).
@@ -90,11 +91,8 @@ def offsets_for(event: Dict[str, Any], rules: Dict[str, Any], modes: Optional[Di
     provider = str(event.get("provider") or "local")
     if provider != "local" and not (modes or {}).get(str(event.get("calendar_id"))):
         return []
-    try:
-        own = json.loads(event.get("reminders_json") or "[]")
-    except ValueError:
-        own = []
-    if own:
+    own = own_reminders(event.get("reminders_json"))
+    if own is not None:
         return _offsets(own)
     if not event.get("is_primary", 1):
         return []
@@ -118,12 +116,18 @@ def batch_notice_id(notice_ids: List[str]) -> str:
 
 
 def plan(store, occurrences_in: Any, now: Optional[datetime] = None) -> int:
-    """Schedule reminder rows for occurrences starting within the horizon. Idempotent by notice_id."""
+    """Schedule reminder rows for occurrences starting within the horizon. Idempotent by notice_id.
+
+    The future part of the queue is then made to match: a waiting row this pass would not plan (offset removed,
+    event moved/cancelled/deleted by any path, provider sync included) is withdrawn. Rows already reserved or
+    settled (unknown/sent/skipped/failed) are history and are never touched.
+    """
     now = now or now_utc()
     rules = get_rules(store)
     modes = store.get_setting(MODE_KEY) or {}
     horizon_end = now + PLAN_HORIZON + timedelta(days=7)   # offsets up to 7 days look further ahead
     scheduled = 0
+    wanted = set()
     for occ in occurrences_in(now - timedelta(hours=1), horizon_end):
         if str(occ.get("status") or "") == "cancelled":
             continue
@@ -139,8 +143,11 @@ def plan(store, occurrences_in: Any, now: Optional[datetime] = None) -> int:
                 continue
             if fire_at < now and end < now:
                 continue   # already over: nothing to catch up (21 A: only what is still upcoming or running)
-            if store.schedule_reminder(event_id, occ_start, offset, iso_utc(fire_at), notice_id_for(event_id, occ_start, offset)):
+            notice_id = notice_id_for(event_id, occ_start, offset)
+            wanted.add(notice_id)
+            if store.schedule_reminder(event_id, occ_start, offset, iso_utc(fire_at), notice_id):
                 scheduled += 1
+    store.withdraw_waiting_reminders(now, now + PLAN_HORIZON, keep=wanted)
     return scheduled
 
 
@@ -214,9 +221,10 @@ class NotifyChannel:
             if exc.status in (404, 405):
                 self._state = "no_route"
                 return "no_route", exc.body[:200]
-            if exc.status in (429, 503):
-                return "retry", f"HTTP {exc.status}"
-            if exc.status == 408 or (exc.status >= 500 and exc.status != 503):
+            if exc.status == 429:
+                return "retry", f"HTTP {exc.status}"  # rate limit: rejected before the host wrote anything
+            if exc.status == 408 or exc.status >= 500:
+                # a 5xx (503 included) can follow a partial host-side write, e.g. append then failed fsync
                 self._state = "unreachable"
                 return "unknown", f"HTTP {exc.status}: host outcome unconfirmed"
             return "failed", f"HTTP {exc.status}: {exc.body[:200]}"
@@ -269,14 +277,15 @@ def format_text(event: Dict[str, Any], occurrence_start_utc: str, offset: int, t
     return " · ".join(parts)
 
 
-def _send_notice(store, channel: NotifyChannel, reminder_ids: List[str], key: str, text: str) -> Optional[Tuple[str, str]]:
-    # A known unavailable channel cannot have accepted a POST; keep those rows
-    # retryable rather than reserving them as uncertain before the no-op send.
+def _reserve(store, channel: NotifyChannel, reminder_ids: List[str]) -> List[str]:
+    """The rows one send may carry, reserved as uncertain *before* HTTP.
+
+    A known unavailable channel cannot have accepted a POST; those rows stay retryable rather than reserved
+    before the no-op send. A row a concurrent calendar edit removed or replanned drops out of this send only.
+    """
     if isinstance(channel, NotifyChannel) and channel.state() != "ready":
-        return channel.send(key, text)
-    if not store.reserve_reminder_send(reminder_ids):
-        return None  # a concurrent calendar edit removed this pending reminder
-    return channel.send(key, text)
+        return list(reminder_ids)
+    return store.reserve_reminder_send(reminder_ids)
 
 
 def _live_reminder(store, rem: Dict[str, Any], tz, now: datetime, stats: Dict[str, int]) -> Optional[Dict[str, Any]]:
@@ -285,6 +294,8 @@ def _live_reminder(store, rem: Dict[str, Any], tz, now: datetime, stats: Dict[st
         reason, live = "событие отменено или удалено", event
     else:
         reason, live = _occurrence_state(store, event, parse_stored(rem.get("occurrence_start_utc")), now, owner_tz=tz)
+        if not reason and int(rem["offset_min"]) not in offsets_for(live, get_rules(store), store.get_setting(MODE_KEY) or {}):
+            reason = "это напоминание снято: у события сейчас другие времена напоминаний"
     if reason:
         store.mark_reminder(rem["id"], "skipped", reason)
         stats["skipped"] += 1
@@ -315,10 +326,9 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
         if event is None:
             continue
         text = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)
-        outcome = _send_notice(store, channel, [rem["id"]], rem["notice_id"], text)
-        if outcome is None:
-            continue
-        state, detail = outcome
+        if not _reserve(store, channel, [rem["id"]]):
+            continue  # a concurrent calendar edit removed this pending reminder
+        state, detail = channel.send(rem["notice_id"], text)
         _record(store, rem["id"], state, detail, stats)
     if stale:
         header = "⏰ Пока Уроборос не работал, подошли напоминания:"
@@ -355,15 +365,26 @@ def _send_batch(store, channel: NotifyChannel, header: str, batch: List[Tuple[Di
 
 
 def _emit_batch(store, channel: NotifyChannel, header: str, batch: List[Tuple[Dict[str, Any], str]], stats: Dict[str, int]) -> None:
-    text = header + "\n" + "\n".join(line for _, line in batch)
-    outcome = _send_notice(store, channel, [rem["id"] for rem, _ in batch],
-                           batch_notice_id([rem["notice_id"] for rem, _ in batch]), text)
-    if outcome is None:
+    kept = set(_reserve(store, channel, [rem["id"] for rem, _ in batch]))
+    batch = [(rem, line) for rem, line in batch if rem["id"] in kept]   # the text discloses exactly the reserved rows
+    if not batch:
         return
-    state, detail = outcome
+    text = header + "\n" + "\n".join(line for _, line in batch)
+    state, detail = channel.send(batch_notice_id([rem["notice_id"] for rem, _ in batch]), text)
     for rem, _ in batch:
         _record(store, rem["id"], state, detail, stats)
     stats["batched"] += len(batch)
+
+
+_OCCURRENCE_FIELDS = ("title", "description", "location", "end_utc", "visibility")
+
+
+def _occurrence_overlay(event: Dict[str, Any], exc: Dict[str, Any]) -> Dict[str, Any]:
+    """An exception without its own reminders follows the master, including an explicit master off."""
+    live = {**event, **{k: exc[k] for k in _OCCURRENCE_FIELDS if exc.get(k) is not None}}
+    if own_reminders(exc.get("reminders_json")) is not None:
+        live["reminders_json"] = exc["reminders_json"]
+    return live
 
 
 def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], now: datetime, owner_tz=None) -> Tuple[str, Dict[str, Any]]:
@@ -389,11 +410,11 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
                 return "вхождение отменено", event
             if str(exc.get("start_utc") or "") != key:
                 return "вхождение перенесено; напоминание перепланировано", event
-            live_row = {**event, **{k: exc.get(k) for k in ("title", "description", "location", "end_utc") if exc.get(k) is not None}}
+            live_row = _occurrence_overlay(event, exc)
             end_at = parse_stored(exc.get("end_utc")) or end_at
             break
         if str(exc.get("start_utc") or "") == key:
-            live_row = {**event, **{k: exc.get(k) for k in ("title", "description", "location", "end_utc") if exc.get(k) is not None}}
+            live_row = _occurrence_overlay(event, exc)
             end_at = parse_stored(exc.get("end_utc")) or end_at
             break  # a moved exception now living at this slot: it is the live occurrence
     else:

@@ -429,10 +429,12 @@ class ReminderReviewTests(unittest.TestCase):
                 confirm=True,
             )
         )
+        self.assertNotIn(iso_utc(now + timedelta(minutes=5)),   # the move withdrew the old slot's reminder at once
+                         [row["fire_at_utc"] for row in ctx.store.upcoming_reminders(now, limit=100)])
         channel = self.Channel()
         stats = rem.deliver_due(ctx.store, channel, ctx.tz, now=now + timedelta(minutes=10))
         self.assertEqual(channel.sent, [])
-        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(stats["sent"], 0)
 
     def test_no_channel_notice_is_delivered_when_channel_recovers(self):
         ctx = make_context()
@@ -487,10 +489,11 @@ class ReminderReviewTests(unittest.TestCase):
                 "title": "Retry bound",
                 "start_utc": iso_utc(now + timedelta(minutes=10)),
                 "end_utc": iso_utc(now + timedelta(hours=1)),
+                "reminders_json": "[15]",
             }
         )
         ctx.store.schedule_reminder(event["id"], event["start_utc"], 15, iso_utc(now - timedelta(minutes=5)), "cal:retry-bound")
-        channel = self.Channel(("retry", "HTTP 503"))
+        channel = self.Channel(("retry", "HTTP 429"))
         for _ in range(6):
             rem.deliver_due(ctx.store, channel, ctx.tz, now=now)
         self.assertEqual(ctx.store.due_reminders(now)[0]["attempts"], 6)

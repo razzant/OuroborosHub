@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, BUSY_COPY_TITLE, INTENT_CONFLICT, INTENT_DONE, INTENT_FAILED, INTENT_PENDING,
     PROVIDER_LOCAL, PUBLISH_BUSY, PUBLISH_FULL, SCOPE_ALL, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_SHOWN,
-    iso_utc, new_id, new_uid, overlaps, parse_stored,
+    iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json,
 )
 
 RETRY_BACKOFF_SEC = (30, 120, 600, 1800, 7200)
@@ -119,6 +119,8 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
                 continue
             row = dict(master)
             row.update({k: v for k, v in exc.items() if v is not None})
+            if own_reminders(exc.get("reminders_json")) is None:
+                row["reminders_json"] = master.get("reminders_json") or "[]"
             row["id"] = exc["id"]
         else:
             row = dict(master)
@@ -145,6 +147,8 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
         if s and e and overlaps(s, e, start, end):
             row = dict(master)
             row.update({k: v for k, v in exc.items() if v is not None})
+            if own_reminders(exc.get("reminders_json")) is None:
+                row["reminders_json"] = master.get("reminders_json") or "[]"
             row["id"] = exc["id"]
             row["occurrence_start_utc"] = key
             row["series_id"] = master["id"]
@@ -255,7 +259,7 @@ def create_event(store, providers, spec: Dict[str, Any], owner: str = "") -> Dic
             "location": "" if mode == PUBLISH_BUSY else spec.get("location") or "",
             "start_utc": spec["start_utc"], "end_utc": spec["end_utc"], "tz": spec.get("tz") or "", "all_day": bool(spec.get("all_day")),
             "rrule": spec.get("rrule") or "", "attendees_json": json.dumps([] if is_copy else spec.get("attendees") or [], ensure_ascii=False),
-            "reminders_json": json.dumps([] if is_copy else [int(x) for x in spec.get("reminders") or []]),
+            "reminders_json": "[]" if is_copy or spec.get("reminders") is None else reminders_to_json(spec["reminders"]),
             "origin": "local", "link_group_id": link_group,
             "sync_state": "synced" if cal["provider"] == PROVIDER_LOCAL else "pending",
         }
@@ -427,7 +431,7 @@ def _apply_changes(store, row: Dict[str, Any], changes: Dict[str, Any]) -> None:
     if "attendees" in changes and changes["attendees"] is not None:
         fields["attendees_json"] = json.dumps(changes["attendees"], ensure_ascii=False)
     if "reminders" in changes and changes["reminders"] is not None:
-        fields["reminders_json"] = json.dumps([int(x) for x in changes["reminders"]])
+        fields["reminders_json"] = reminders_to_json(changes["reminders"])   # [] = none for this event, 'default' = by the rules
         store.drop_reminders_for(row["id"])
         if row.get("master_id"):
             store.drop_reminders_for_occurrence(row["master_id"], str(row.get("recurrence_id") or ""))

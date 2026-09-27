@@ -37,7 +37,8 @@ TOOL_DESCRIPTIONS = {
         "(FREQ=WEEKLY;BYDAY=MO). Только по явной команде владельца или после его выбора — confirm=true. Приглашения участникам — send_invites."
     ),
     "cal_update": (
-        "Изменить событие: перенос (start/end/duration_min), название, описание, место, скрытость, availability, напоминания, участники, "
+        "Изменить событие: перенос (start/end/duration_min), название, описание, место, скрытость, availability, "
+        "напоминания (reminders: минуты до начала; [] — у этого события без напоминаний; 'default' — снова по общим правилам), участники, "
         "ответ на приглашение (response: accepted|declined|tentative), набор календарей (calendars — явная смена назначений). "
         "Для повторяющихся: id вхождения (…@дата) + scope=this — только эта дата; scope=all — всё расписание; scope=following — начиная "
         "с этой даты. Если владелец не уточнил охват — спроси его. confirm=true обязателен."
@@ -79,7 +80,8 @@ SCHEMAS = {
         "id": {"type": "string"}, "start": {"type": "string"}, "end": {"type": "string"}, "duration_min": {"type": "integer"},
         "all_day": {"type": "boolean"}, "title": {"type": "string"}, "description": {"type": "string"}, "location": {"type": "string"},
         "hidden": {"type": "boolean"}, "availability": {"type": "string", "enum": ["busy", "free", "soft"]}, "calendars": {"type": "string"},
-        "attendees": {"type": "array", "items": {"type": "string"}}, "reminders": {"type": "array", "items": {"type": "integer"}},
+        "attendees": {"type": "array", "items": {"type": "string"}},
+        "reminders": {"anyOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "string", "enum": ["default"]}]},
         "rrule": {"type": "string"}, "response": {"type": "string", "enum": ["accepted", "declined", "tentative"]},
         "scope": {"type": "string", "enum": ["this", "following", "all"], "default": "this"},
         "send_updates": {"type": "boolean", "default": False}, "confirm": {"type": "boolean", "default": False}}, "required": ["id", "confirm"]},

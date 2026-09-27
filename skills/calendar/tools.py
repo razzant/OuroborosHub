@@ -11,7 +11,8 @@ import ops
 import reminders as rem
 from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, DEFAULT_LOCAL_CALENDAR_ID, MAX_EVENTS, MAX_WINDOW_DAYS, PROVIDER_GOOGLE,
-    PROVIDER_LOCAL, PROVIDER_YANDEX, SCOPES, SECRET_KEYS, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_HIDDEN, VISIBILITY_SHOWN, WEEKDAY_LABELS,
+    PROVIDER_LOCAL, PROVIDER_YANDEX, REMINDERS_DEFAULT, SCOPES, SECRET_KEYS, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_HIDDEN, VISIBILITY_SHOWN,
+    WEEKDAY_LABELS,
     bounded_result, day_bounds, event_public, get_tz, iso_local, iso_utc, json_dumps, label, now_utc, parse_input,
     parse_stored, parse_working_hours, tz_name,
 )
@@ -320,7 +321,7 @@ def cal_create(ctx: Context, title: str = "", start: str = "", end: str = "", du
     spec.update({"title": str(title).strip(), "calendar_ids": cal_ids, "visibility": VISIBILITY_HIDDEN if _bool(hidden) else VISIBILITY_SHOWN,
                  "availability": avail, "description": str(description or ""), "location": str(location or ""),
                  "attendees": [{"email": str(a).strip()} if not isinstance(a, dict) else a for a in _list(attendees)],
-                 "send_invites": _bool(send_invites), "reminders": [_int(x, 0) for x in _list(reminders)], "rrule": str(rrule or "").strip()})
+                 "send_invites": _bool(send_invites), "reminders": None if reminders is None else [_int(x, 0) for x in _list(reminders)], "rrule": str(rrule or "").strip()})
     result = ops.create_event(ctx.store, ctx.providers, spec)
     ev = result["event"]
     if ev is None:
@@ -378,8 +379,10 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
         changes["availability"] = str(availability).lower()
     if attendees is not None:
         changes["attendees"] = [{"email": str(a).strip()} if not isinstance(a, dict) else a for a in _list(attendees)]
-    if reminders is not None:
-        changes["reminders"] = [_int(x, 0) for x in _list(reminders)]
+    if reminders is not None and not (isinstance(reminders, str) and not reminders.strip()):   # a blank string is «not given»
+        # [] is an explicit «no reminders for this event»; 'default' returns it to the calendar/default rule
+        is_default = isinstance(reminders, str) and reminders.strip().lower() == REMINDERS_DEFAULT
+        changes["reminders"] = REMINDERS_DEFAULT if is_default else [_int(x, 0) for x in _list(reminders)]
     if rrule is not None:
         changes["rrule"] = str(rrule)
     if response:
@@ -470,7 +473,8 @@ def cal_reminders(ctx: Context, action: str = "list", offsets: Any = None, calen
                                "channel": st.get_setting("notify_channel_state") or {"state": "unknown"},
                                "upcoming": rem.upcoming(st, ctx.tz, limit=20),
                                "hint": "Внешний календарь получает напоминания Уробороса только после enable_calendar (20 A). "
-                                       "Напоминания конкретного события — cal_update(reminders=[…]); 0 = в момент начала"})
+                                       "Напоминания конкретного события — cal_update(reminders=[…]); 0 = в момент начала, "
+                                       "[] = у этого события без напоминаний, 'default' = снова по правилам"})
     if not _bool(confirm):
         return json_dumps({"status": "needs_confirm", "message": "Изменение правил напоминаний — по команде владельца: повтори с confirm=true"})
     mins = [_int(x, 0) for x in _list(offsets)] if offsets is not None else None

@@ -46,7 +46,7 @@ class NotifyContractTests(unittest.TestCase):
         event = self.store.insert_event({
             "calendar_id": DEFAULT_LOCAL_CALENDAR_ID, "title": title,
             "start_utc": iso_utc(self.now + timedelta(minutes=minutes)),
-            "end_utc": iso_utc(self.now + timedelta(hours=1)),
+            "end_utc": iso_utc(self.now + timedelta(hours=1)), "reminders_json": "[15]",
         })
         self.store.schedule_reminder(event["id"], event["start_utc"], 15,
                                      iso_utc(self.now - timedelta(minutes=5)),
@@ -127,10 +127,25 @@ class NotifyContractTests(unittest.TestCase):
         self.assertEqual(stats["unknown"], 1)
         self.assertEqual(stats["no_channel"], 1)
 
+    def test_http_503_after_possible_host_write_is_unknown_and_never_reposted(self):
+        # Core answers 503 when its notification append fails, which can happen after the write itself (fsync).
+        self._event()
+        channel = rem.NotifyChannel("http://127.0.0.1:8767", "test-token")
+        channel._state = "ready"
+        failure = urllib.error.HTTPError("http://127.0.0.1:8767/notify", 503, "Service Unavailable", {}, None)
+        with patch("urllib.request.urlopen", side_effect=failure) as urlopen:
+            stats = rem.deliver_due(self.store, channel, self.tz, now=self.now)
+            channel._state = "ready"
+            rem.deliver_due(self.store, channel, self.tz, now=self.now + timedelta(minutes=1))
+        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual((stats["unknown"], stats["retry"]), (1, 0))
+        self.assertEqual(self.store.unknown_reminder_count(), 1)
+        self.assertEqual(self.store.due_reminders(self.now + timedelta(minutes=1)), [])
+
     def test_explicit_nonacceptance_can_retry_and_missing_grant_is_visible(self):
         channel = rem.NotifyChannel("http://127.0.0.1:8767", "test-token")
         channel._state = "ready"
-        with patch.object(channel, "_request", side_effect=rem._HttpError(503, "write failed")):
+        with patch.object(channel, "_request", side_effect=rem._HttpError(429, "rate limited")):
             self.assertEqual(channel.send("cal:a", "text")[0], "retry")
         with patch.object(channel, "_request", side_effect=rem._HttpError(403, "no grant")):
             self.assertEqual(channel.send("cal:a", "text")[0], "no_grant")

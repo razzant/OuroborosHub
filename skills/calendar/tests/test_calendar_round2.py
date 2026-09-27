@@ -303,6 +303,7 @@ class ReassignAndLinkedSeriesRound2Tests(unittest.TestCase):
 
     def test_following_split_of_linked_series_moves_late_exceptions_once(self):
         ctx = make_context()
+        ctx.tz = get_tz("Asia/Dubai")  # The expected 16:00 is 12:00 UTC in this fixed zone.
         second = add_local_calendar(ctx.store, "second", "full")
         create_linked_series(ctx, [DEFAULT_LOCAL_CALENDAR_ID, second])
         week = json.loads(
@@ -614,6 +615,7 @@ class ReminderRound2Tests(unittest.TestCase):
                     "title": f"Catchup {index}",
                     "start_utc": iso_utc(now - timedelta(minutes=5)),
                     "end_utc": iso_utc(now + timedelta(minutes=55)),
+                    "reminders_json": "[15]",
                 }
             )
             ctx.store.schedule_reminder(

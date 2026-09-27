@@ -36,6 +36,8 @@ AVAIL_SOFT = "soft"          # «обычно»: гибкое предпочте
 PUBLISH_FULL = "full"
 PUBLISH_BUSY = "busy"        # копия «Занят»: только интервал (11 A)
 BUSY_COPY_TITLE = "Занят"
+REMINDERS_OFF = "off"        # events.reminders_json = '"off"': this event explicitly has none; '[]' (the default) follows the rules
+REMINDERS_DEFAULT = "default"  # a reminders change back to the calendar/default rule
 
 SCOPE_THIS = "this"
 SCOPE_FOLLOWING = "following"
@@ -283,6 +285,7 @@ def event_public(row: Dict[str, Any], tz, compact: bool = True) -> Dict[str, Any
     if row.get("sync_state") and row.get("sync_state") != "synced":
         out["sync_state"] = row.get("sync_state")
     if not compact:
+        own = own_reminders(row.get("reminders_json"))
         out.update({
             "description": row.get("description") or "",
             "location": row.get("location") or "",
@@ -290,16 +293,43 @@ def event_public(row: Dict[str, Any], tz, compact: bool = True) -> Dict[str, Any
             "organizer": row.get("organizer") or "",
             "attendees": _loads(row.get("attendees_json"), []),
             "my_response": row.get("my_response") or "",
-            "reminders": _loads(row.get("reminders_json"), []),
+            "reminders": own or [],
             "origin": row.get("origin") or "local",
             "external_id": row.get("external_id") or "",
             "updated_at": row.get("updated_at") or "",
         })
+        if own == []:
+            out["reminders_off"] = True   # explicitly none; an empty list alone means «by the calendar/default rule»
     else:
         loc = row.get("location") or ""
         if loc:
             out["location"] = loc[:120]
     return out
+
+
+def own_reminders(reminders_json: Any) -> Optional[List[int]]:
+    """An event's own reminder minutes: None = follows the calendar/default rule (the stored default '[]'),
+    [] = explicitly none, otherwise its own offsets."""
+    data = _loads(reminders_json, [])
+    if data == REMINDERS_OFF:
+        return []
+    if not isinstance(data, list) or not data:
+        return None
+    out: List[int] = []
+    for item in data:
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def reminders_to_json(value: Any) -> str:
+    """Stored form of a reminders change: 'default' → follow the rules, [] → explicitly none, [m, …] → own minutes."""
+    if isinstance(value, str) and value.strip().lower() == REMINDERS_DEFAULT:
+        return "[]"
+    minutes = [int(x) for x in value]
+    return json.dumps(minutes if minutes else REMINDERS_OFF)
 
 
 def _loads(text: Any, default: Any) -> Any:

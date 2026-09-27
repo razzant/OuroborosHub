@@ -466,6 +466,7 @@ class ReminderRound3Tests(unittest.TestCase):
                 "start_utc": iso_utc(start),
                 "end_utc": iso_utc(start + timedelta(hours=2)),
                 "rrule": "FREQ=DAILY",
+                "reminders_json": "[0]",
             }
         )
         ctx.store.insert_event(
@@ -476,6 +477,7 @@ class ReminderRound3Tests(unittest.TestCase):
                 "recurrence_id": iso_utc(start),
                 "start_utc": iso_utc(start),
                 "end_utc": iso_utc(start + timedelta(minutes=10)),
+                "reminders_json": "[0]",
             }
         )
         ctx.store.schedule_reminder(master["id"], iso_utc(start), 0, iso_utc(start), "cal:effective")
@@ -495,6 +497,7 @@ class ReminderRound3Tests(unittest.TestCase):
                 "start_utc": iso_utc(start),
                 "end_utc": iso_utc(now + timedelta(minutes=30)),
                 "rrule": "FREQ=DAILY",
+                "reminders_json": "[15]",
             }
         )
         ctx.store.schedule_reminder(
@@ -545,6 +548,7 @@ class ReminderRound3Tests(unittest.TestCase):
                 "title": "Retry known refusal",
                 "start_utc": iso_utc(now + timedelta(minutes=10)),
                 "end_utc": iso_utc(now + timedelta(hours=1)),
+                "reminders_json": "[15]",
             }
         )
         ctx.store.schedule_reminder(
@@ -554,7 +558,7 @@ class ReminderRound3Tests(unittest.TestCase):
             iso_utc(now - timedelta(minutes=5)),
             "cal:five",
         )
-        channel = Channel(("retry", "HTTP 503"))
+        channel = Channel(("retry", "HTTP 429"))
         for _ in range(4):
             rem.deliver_due(ctx.store, channel, UTC, now=now)
         self.assertEqual(len([row for row in ctx.store.due_reminders(now) if row["notice_id"] == "cal:five"]), 1)

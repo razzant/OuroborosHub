@@ -1903,53 +1903,53 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "6262fa5995a8709eb9b2f02beb1852f98c07639f106c12f9ade2e85d1cd366ff",
-          "size": 14759
+          "sha256": "b9d558c5ace1a2dd200fb5aec82171d7a26ada512bf4b10cebb462abdef82d8e",
+          "size": 15554
         },
         {
           "path": "model.py",
-          "sha256": "023269afc1c36001c8d102669c3f989fa25d786927254299564fe2fd976c1472",
-          "size": 12103
+          "sha256": "d5c58072ebf49e0f4aaf97417a8e940d626c7e8b2178ba1b76625d2b607d1e64",
+          "size": 13410
         },
         {
           "path": "ops.py",
-          "sha256": "d112857481cda0b09174d78e819beadd8124d233da9f54533a8a951d9a47e446",
-          "size": 51574
+          "sha256": "efe7e9034d30a12131723a435939faf5185c6d0016239d4154a7b1d32741d31e",
+          "size": 51950
         },
         {
           "path": "plugin.py",
-          "sha256": "b93c50b8ee4fede8a0498b34ef2653e2e50508752096edde5f26bd4d88eeb8fb",
-          "size": 10708
+          "sha256": "66edb52caef38a31634c882053c72b7b9172a3a22e27cdd3b83a724378e17519",
+          "size": 10951
         },
         {
           "path": "providers.py",
-          "sha256": "17a1ca6ff0aa45519bf05737f66a5ab04937089da55da8b87446baf21bd379fa",
-          "size": 33867
+          "sha256": "3f57c822f7f6e625ca050eb32c30916f72e3708eb67c61892a9bcbe6aad98346",
+          "size": 33828
         },
         {
           "path": "providers_google.py",
-          "sha256": "e74e06bffd6ded1f9c24a32648925c647538a1ac80cb650b2c23ab3360e3a7d3",
-          "size": 34457
+          "sha256": "81407bc4e5685bb5d9a7d02e88af5e760075881075567789044d0e3ecd99537b",
+          "size": 34547
         },
         {
           "path": "reminders.py",
-          "sha256": "14d2e9f2243930ef59599de7d50eacbf9952442d7af842050a080ed04410b9e4",
-          "size": 21261
+          "sha256": "e25bb29bc2fb7015c5a5104bb99623eeef57603eece3f533d156216f4898ae33",
+          "size": 22653
         },
         {
           "path": "routes.py",
-          "sha256": "3259a95423322e75dd7f1063b0b1fe8bc8b709610b47682011a7c6aac70a0c06",
-          "size": 13636
+          "sha256": "c685cfc8c865a03f83b4ee8ca9d588bd1787cfcbced8b28f1d0e3e6b4d7c7960",
+          "size": 13773
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "d4574b7b449f7505bd4d908ebd2b47023be9f55a6bdfecdaf536e7aca3cffc55",
-          "size": 17100
+          "sha256": "c7ab95296ab5ff794142674350a8be706bd07f74178675d67faea58034c1f2f3",
+          "size": 18659
         },
         {
           "path": "store.py",
-          "sha256": "c17dcf0a4f3e38ebd5a1294f722b27004ddc0d1bf7532bd7c09c4149e221a315",
-          "size": 35458
+          "sha256": "732e25c1deb41930af19ac3ddf1fd52bf96cc88cb3a29607323397c725429add",
+          "size": 36428
         },
         {
           "path": "tests/test_calendar.py",
@@ -1968,28 +1968,33 @@
         },
         {
           "path": "tests/test_calendar_notify.py",
-          "sha256": "4d149cbcf92affc208578c174e3663d5f023c0f292c248c7ac78143ec7a1d8b0",
-          "size": 11139
+          "sha256": "268a2c86451b7bcd02b98a069adab07ef6d5e3d61169ab964c9cfa62a2841314",
+          "size": 12164
+        },
+        {
+          "path": "tests/test_calendar_reminder_queue.py",
+          "sha256": "5d625f0dfba09a2502f6823a133d23fbd361ca5abe804d20eae7745d3c2c88e1",
+          "size": 18366
         },
         {
           "path": "tests/test_calendar_review.py",
-          "sha256": "965d52a4fa5e53d9c33acf4636061ee5ff1b5a791e748298d80a2919c1da7e91",
-          "size": 27075
+          "sha256": "c75ee21b055a4f5f0ea2a0a549ecbb4d018b94efbbfe285b791ec54365a5fef0",
+          "size": 27333
         },
         {
           "path": "tests/test_calendar_round2.py",
-          "sha256": "3273a6298cc10600dae10c28247beb26da7a33f7210427c38c1ac44558e78351",
-          "size": 31364
+          "sha256": "3e31d094ab4a6bf77b1af0a5f92f4d1142c68f75ec3b779c0c0d073c0713abb3",
+          "size": 31503
         },
         {
           "path": "tests/test_calendar_round3.py",
-          "sha256": "1d44ae9fc011485e847b8e81889c23c99deb54830d64c5e27d298934a72289b9",
-          "size": 30556
+          "sha256": "8160ab17373a75cfd84ac52b7b852b81d818659f24f377699647d6dafa84718c",
+          "size": 30722
         },
         {
           "path": "tests/test_calendar_round4.py",
-          "sha256": "617f9d870d10ec11a20558dbd11ec87fe49d379edcbfae4d19ccf7268a85d757",
-          "size": 30011
+          "sha256": "8341782f680908aa2cf350f934a2a0b115abae345a69a65bc2d64f7629f4a2e8",
+          "size": 30052
         },
         {
           "path": "tests/test_calendar_round5.py",
@@ -1998,8 +2003,8 @@
         },
         {
           "path": "tools.py",
-          "sha256": "fce11c1a2fc151c416989dfef5a372b8b529bbab4c4b3cea5bea892eb82b41a1",
-          "size": 48729
+          "sha256": "11ea1ed114b9ca1b36065f1864b5b89678f12536d983abd2714f905b6fa5ebe4",
+          "size": 49282
         },
         {
           "path": "widget.js",

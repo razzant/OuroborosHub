@@ -13,7 +13,7 @@ import os
 import shutil
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from model import (
     DEFAULT_LOCAL_CALENDAR_ID, DEFAULT_LOCAL_CALENDAR_NAME, INTENT_FAILED, INTENT_PENDING, LOCAL_ACCOUNT_ID, iso_utc, new_id, now_utc,
@@ -527,19 +527,22 @@ class Store:
             rows = c.execute(query, (*states, iso_utc(now), *([limit] if limit is not None else []))).fetchall()
         return [dict(r) for r in rows]
 
-    def reserve_reminder_send(self, reminder_ids: Sequence[str]) -> bool:
-        """Mark a whole send uncertain *before* HTTP; refuse a changed snapshot."""
+    def reserve_reminder_send(self, reminder_ids: Sequence[str]) -> List[str]:
+        """Mark a send's rows uncertain *before* HTTP, in one transaction; returns the ids reserved.
+
+        A row a concurrent edit already removed, replanned or settled is left out, never re-sent."""
         if not reminder_ids:
-            return False
+            return []
+        reserved: List[str] = []
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             for reminder_id in reminder_ids:
                 result = c.execute("UPDATE reminders SET state='unknown', updated_at=? WHERE id=? AND state IN ('scheduled', 'no_channel')",
                                    (_ts(), reminder_id))
-                if result.rowcount != 1:
-                    c.execute("ROLLBACK")
-                    return False
-        return True
+                if result.rowcount == 1:
+                    reserved.append(reminder_id)
+            c.execute("COMMIT")
+        return reserved
 
     def bump_reminder_attempt(self, reminder_id: str, detail: str = "") -> int:
         with self._conn() as c:
@@ -564,6 +567,18 @@ class Store:
         with self._conn() as c:
             c.execute("UPDATE reminders SET state=?, detail=?, sent_at=CASE WHEN ?='sent' THEN ? ELSE sent_at END, updated_at=? WHERE id=?",
                       (state, detail[:500], state, ts, ts, reminder_id))
+
+    def withdraw_waiting_reminders(self, after: datetime, until: datetime, keep: Set[str]) -> int:
+        """Delete not-yet-attempted rows due in (after, until] whose notice the current plan no longer wants."""
+        with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            rows = c.execute("SELECT id, notice_id FROM reminders WHERE state IN ('scheduled', 'no_channel') AND fire_at_utc > ? AND fire_at_utc <= ?",
+                             (iso_utc(after), iso_utc(until))).fetchall()
+            stale = [r["id"] for r in rows if r["notice_id"] not in keep]
+            for reminder_id in stale:
+                c.execute("DELETE FROM reminders WHERE id=? AND state IN ('scheduled', 'no_channel')", (reminder_id,))
+            c.execute("COMMIT")
+        return len(stale)
 
     def drop_scheduled_reminders(self) -> None:
         with self._conn() as c:

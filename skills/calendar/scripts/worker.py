@@ -27,7 +27,7 @@ if PAYLOAD not in sys.path:
 
 import ops  # noqa: E402
 import reminders as rem  # noqa: E402
-from model import PROVIDER_GOOGLE, PROVIDER_YANDEX, SECRET_KEYS, get_tz, iso_utc, now_utc, parse_stored  # noqa: E402
+from model import PROVIDER_GOOGLE, PROVIDER_YANDEX, SECRET_KEYS, get_tz, iso_utc, now_utc, own_reminders, parse_stored  # noqa: E402
 from providers import Providers  # noqa: E402
 from store import Store  # noqa: E402
 
@@ -165,7 +165,7 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
         changes = {k: row[k] for k in ("title", "description", "location", "start_utc", "end_utc", "tz", "all_day", "rrule", "exdates", "rdates",
                                         "status", "organizer", "attendees_json", "my_response", "etag", "raw_payload") if k in row}
         if existing.get("origin") == "external":
-            changes["reminders_json"] = row["reminders_json"]
+            changes["reminders_json"] = _imported_reminders(existing, row["reminders_json"], cal["provider"], bool((store.get_setting(rem.MODE_KEY) or {}).get(cal["id"])))
             changes["availability"] = row.get("availability") or existing.get("availability")
         store.update_event(existing["id"], {**changes, "sync_state": "synced"})
         upserts += 1
@@ -204,8 +204,11 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
         elif changed:
             if exc.get("sync_state") in ("pending", "conflict", "pending_delete"):
                 continue   # our own write to this occurrence is in flight
-            store.update_event(exc["id"], {k: payload[k] for k in ("title", "description", "location", "start_utc", "end_utc", "status", "etag",
-                                                                    "attendees_json", "my_response") if k in payload})
+            fields = {k: payload[k] for k in ("title", "description", "location", "start_utc", "end_utc", "status", "etag",
+                                              "attendees_json", "my_response") if k in payload}
+            if exc.get("origin") == "external":
+                fields["reminders_json"] = _imported_reminders(exc, payload.get("reminders_json") or "[]", cal["provider"], bool((store.get_setting(rem.MODE_KEY) or {}).get(cal["id"])))
+            store.update_event(exc["id"], fields)
         upserts += 1
         if changed and materially:   # a mere resource etag bump (any PUT of the series) is not a change of this occurrence
             # 6 A / 22: an unambiguous external change of one occurrence follows to the linked copies
@@ -243,6 +246,25 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
                 continue
             deleted += _confirmed_deletion(store, providers, local)
     return upserts, deleted, propagated, next_cursor, kind
+
+
+def _imported_reminders(local: Dict[str, Any], incoming: str, provider: str, mode_on: bool = False) -> str:
+    """A provider alarm muted by calendar-owned delivery is not an instruction to silence Ouroboros.
+
+    In this mode an empty explicit Google alarm set is also indistinguishable from an owner edit
+    disabling alerts at Google; the local selected rule wins until a new positive offset arrives.
+    Outside the mode, Google useDefault remains authoritative, including a return to defaults.
+    CalDAV has no explicit default-vs-none bit, so retain local off on an alarm-free feed.
+    """
+    local_value = own_reminders(local.get("reminders_json"))
+    incoming_value = own_reminders(incoming)
+    if provider == PROVIDER_GOOGLE and mode_on and incoming_value == []:
+        return str(local.get("reminders_json") or "[]")
+    if provider == PROVIDER_YANDEX and incoming_value is None and (mode_on or local_value == []):
+        # CalDAV has no useDefault bit. In calendar-owned mode the host itself mutes VALARM;
+        # its subsequent echo must not erase a selected local offset (or an explicit off).
+        return str(local.get("reminders_json") or "[]")
+    return incoming
 
 
 def _confirmed_deletion(store: Store, providers: Providers, local: Dict[str, Any]) -> int:

@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from model import AVAIL_BUSY, PROVIDER_GOOGLE, account_id as make_account_id, calendar_id as make_calendar_id, get_tz, iso_utc, now_utc, parse_stored
+from model import AVAIL_BUSY, PROVIDER_GOOGLE, account_id as make_account_id, calendar_id as make_calendar_id, get_tz, iso_utc, now_utc, own_reminders, parse_stored
 from model import tz_name as zone_name
 from ops import ProviderError
 
@@ -497,7 +497,7 @@ def gevent_to_row(item: Dict[str, Any], calendar_id: str, default_tz) -> Optiona
         "rrule": rrule, "exdates": exdates, "rdates": rdates, "recurrence_id": rec_key, "master_external_id": str(item.get("recurringEventId") or ""),
         "status": "cancelled" if str(item.get("status") or "") == "cancelled" else "confirmed",
         "organizer": str((item.get("organizer") or {}).get("email") or ""), "attendees_json": json.dumps(attendees, ensure_ascii=False),
-        "my_response": my_response, "reminders_json": json.dumps(sorted(set(reminders))), "origin": "external",
+        "my_response": my_response, "reminders_json": json.dumps("off" if rem.get("useDefault") is False and not reminders else sorted(set(reminders))), "origin": "external",
         "availability": "free" if transparency == "transparent" else AVAIL_BUSY, "sync_state": "synced",
         "raw_payload": json.dumps(item, ensure_ascii=False) if not rec_key else "",
     }
@@ -570,11 +570,8 @@ def row_to_gevent(event: Dict[str, Any], mute: bool = False) -> Dict[str, Any]:
         body["recurrence"] = recurrence   # instances (exceptions) never carry recurrence: Google rejects it
     body["status"] = "cancelled" if str(event.get("status") or "") == "cancelled" else "confirmed"
     body["transparency"] = "transparent" if event.get("availability") == "free" else "opaque"
-    try:
-        offsets = json.loads(event.get("reminders_json") or "[]")
-    except ValueError:
-        offsets = []
-    if mute:
+    offsets = own_reminders(event.get("reminders_json"))   # None = the calendar's defaults, [] = explicitly none
+    if mute or offsets == []:
         body["reminders"] = {"useDefault": False, "overrides": []}
     elif offsets:
         body["reminders"] = {"useDefault": False, "overrides": [{"method": "popup", "minutes": int(m)} for m in offsets][:5]}

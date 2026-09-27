@@ -630,6 +630,7 @@ class ReminderRound4Tests(unittest.TestCase):
                 "location": "L" * 10_000,
                 "start_utc": iso_utc(now),
                 "end_utc": iso_utc(now + timedelta(hours=1)),
+                "reminders_json": "[0]",
             }
         )
         ctx.store.schedule_reminder(event["id"], event["start_utc"], 0, event["start_utc"], "cal:limits")

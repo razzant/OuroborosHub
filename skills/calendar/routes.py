@@ -116,7 +116,7 @@ def register_routes(api, make_ctx) -> None:
                      "location": str(body.get("location") or ""),
                      "attendees": [{"email": str(a).strip()} if not isinstance(a, dict) else a for a in (body.get("attendees") or []) if str(a).strip()],
                      "send_invites": bool(body.get("send_updates")),
-                     "reminders": [int(x) for x in (body.get("reminders") or []) if str(x).strip() != ""], "rrule": str(body.get("rrule") or "")})
+                     "reminders": [int(x) for x in (body.get("reminders") or []) if str(x).strip() != ""] or None, "rrule": str(body.get("rrule") or "")})
         result = ops.create_event(ctx.store, ctx.providers, spec)
         warning = tools._plan_reminders(ctx)
         if result["event"] is None:
@@ -151,7 +151,8 @@ def register_routes(api, make_ctx) -> None:
         if "hidden" in body:
             changes["visibility"] = VISIBILITY_HIDDEN if body.get("hidden") else VISIBILITY_SHOWN
         if body.get("reminders") is not None and body.get("reminders_edited", True):
-            changes["reminders"] = [int(x) for x in (body.get("reminders") or []) if str(x).strip() != ""]
+            # the widget field shows only an event's own minutes, so a cleared field keeps meaning «by the rules»
+            changes["reminders"] = [int(x) for x in (body.get("reminders") or []) if str(x).strip() != ""] or "default"
         if "attendees" in body and body.get("attendees") is not None:
             changes["attendees"] = [{"email": str(a).strip()} if not isinstance(a, dict) else a for a in body.get("attendees") or [] if str(a).strip()]
         scope = str(body.get("scope") or "this")

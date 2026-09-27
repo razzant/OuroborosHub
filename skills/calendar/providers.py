@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from model import (
     AVAIL_BUSY, PROVIDER_GOOGLE, PROVIDER_LOCAL, PROVIDER_YANDEX, account_id as make_account_id, calendar_id as make_calendar_id,
-    get_tz, tz_name as zone_name, iso_utc, now_utc, parse_stored,
+    get_tz, tz_name as zone_name, iso_utc, now_utc, own_reminders, parse_stored,
 )
 from ops import ProviderError
 
@@ -339,10 +339,7 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
     for alarm in list(vevent.walk("VALARM")):
         if alarm is not vevent:
             vevent.subcomponents.remove(alarm)
-    try:
-        offsets = [] if mute_alarms else json.loads(event.get("reminders_json") or "[]")
-    except ValueError:
-        offsets = []
+    offsets = [] if mute_alarms else (own_reminders(event.get("reminders_json")) or [])
     for minutes in offsets:
         alarm = icalendar.Alarm()
         alarm.add("ACTION", "DISPLAY")
