@@ -1934,6 +1934,30 @@
       "slug": "yylo-tasks",
       "type": "instruction",
       "version": "0.1.0"
+    },
+    {
+      "slug": "science_digest",
+      "name": "science_digest",
+      "version": "0.2.0",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "1aec0a39034fb791719ecab6f1be0e30f5129e71dd10176ca928acc96913e439",
+          "size": 11323
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "3233b7890a5cc299e0c69c15aa200c874bcbd50ba7932479557c79478add0d3e",
+          "size": 44766
+        },
+        {
+          "path": "test_digest.py",
+          "sha256": "3c365bc675842750f042f2548fec5f2b91442f2047fbc5139b52196f3a8bd69e",
+          "size": 46152
+        }
+      ],
+      "description": "Personalized AI research digest from owner-selected public Telegram channels and curated official feeds (OpenAI News, Google DeepMind blog); the agent judges relevance and writes the digest in its own chat."
     }
   ]
 }
