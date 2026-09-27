@@ -1938,13 +1938,13 @@
     {
       "slug": "meeting-brief",
       "name": "meeting-brief",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "type": "instruction",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "ce806bd9a9eb1a1db75c89eb5c217f56bd99016cde4ffb292d22c46b5a84b5ac",
-          "size": 11077
+          "sha256": "ea2f655e3396fc48d6632fb330172b5aae6c0606ef5c008c4e4f92cfb1b248a6",
+          "size": 11370
         }
       ],
       "description": "Prepare sourced morning work briefs, selected-meeting briefs, and post-meeting or end-of-day debriefs using existing calendar and approved information sources."
