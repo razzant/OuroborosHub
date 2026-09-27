@@ -516,14 +516,30 @@ class Store:
                             (new_id("rem"), event_id, occurrence_start_utc, int(offset_min), fire_at_utc, notice_id, ts))
         return cur.rowcount > 0
 
-    def due_reminders(self, now: datetime, limit: int = 50, include_no_channel: bool = True) -> List[Dict[str, Any]]:
-        """Due rows: scheduled ones, plus no_channel ones so a recovered channel delivers what it could not before."""
+    def due_reminders(self, now: datetime, limit: Optional[int] = None, include_no_channel: bool = True) -> List[Dict[str, Any]]:
+        """Snapshot every due row once; a fixed first page can starve a short upcoming event."""
         states = ("scheduled", "no_channel") if include_no_channel else ("scheduled",)
         marks = ",".join("?" for _ in states)
         with self._conn() as c:
-            rows = c.execute(f"SELECT * FROM reminders WHERE state IN ({marks}) AND fire_at_utc <= ? ORDER BY fire_at_utc LIMIT ?",
-                             (*states, iso_utc(now), limit)).fetchall()
+            query = f"SELECT * FROM reminders WHERE state IN ({marks}) AND fire_at_utc <= ? ORDER BY fire_at_utc"
+            if limit is not None:
+                query += " LIMIT ?"
+            rows = c.execute(query, (*states, iso_utc(now), *([limit] if limit is not None else []))).fetchall()
         return [dict(r) for r in rows]
+
+    def reserve_reminder_send(self, reminder_ids: Sequence[str]) -> bool:
+        """Mark a whole send uncertain *before* HTTP; refuse a changed snapshot."""
+        if not reminder_ids:
+            return False
+        with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            for reminder_id in reminder_ids:
+                result = c.execute("UPDATE reminders SET state='unknown', updated_at=? WHERE id=? AND state IN ('scheduled', 'no_channel')",
+                                   (_ts(), reminder_id))
+                if result.rowcount != 1:
+                    c.execute("ROLLBACK")
+                    return False
+        return True
 
     def bump_reminder_attempt(self, reminder_id: str, detail: str = "") -> int:
         with self._conn() as c:

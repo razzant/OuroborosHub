@@ -79,8 +79,33 @@ class NotifyContractTests(unittest.TestCase):
         self.assertEqual(self.store.unknown_reminder_count(), 1)
         self.assertEqual(self.store.due_reminders(self.now + timedelta(minutes=1)), [])
         self.assertEqual(self.store.upcoming_reminders(self.now)[0]["state"], "unknown")
+        channel._state = "ready"
         with patch.object(channel, "_request", return_value={"ok": False, "ts": "t", "chat_id": 1}):
             self.assertEqual(channel.send("cal:other", "Meeting")[0], "unknown")
+
+    def test_outage_only_affects_the_attempted_reminder(self):
+        self._event(title="First")
+        self._event(title="Second")
+        channel = rem.NotifyChannel("http://127.0.0.1:8767", "test-token")
+        channel._state = "ready"
+        with patch.object(channel, "_request", side_effect=TimeoutError("response lost")) as request:
+            stats = rem.deliver_due(self.store, channel, self.tz, now=self.now)
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(stats["unknown"], 1)
+        self.assertEqual(stats["no_channel"], 1)
+        self.assertEqual(len(self.store.due_reminders(self.now)), 1)
+
+    def test_connection_refused_before_send_keeps_both_reminders(self):
+        self._event(title="First")
+        self._event(title="Second")
+        channel = rem.NotifyChannel("http://127.0.0.1:8767", "test-token")
+        channel._state = "ready"
+        with patch.object(channel, "_request", side_effect=urllib.error.URLError(ConnectionRefusedError("refused"))) as request:
+            stats = rem.deliver_due(self.store, channel, self.tz, now=self.now)
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(stats["unknown"], 0)
+        self.assertEqual(stats["no_channel"], 2)
+        self.assertEqual(len(self.store.due_reminders(self.now)), 2)
 
     def test_explicit_nonacceptance_can_retry_and_missing_grant_is_visible(self):
         channel = rem.NotifyChannel("http://127.0.0.1:8767", "test-token")
@@ -110,6 +135,40 @@ class NotifyContractTests(unittest.TestCase):
         self.assertTrue(all(len(text) <= 1000 for _, text in channel.sent))
         for n in range(15):
             self.assertEqual(sum(f"Meeting {n} x" in text for _, text in channel.sent), 1)
+
+    def test_due_snapshot_does_not_hide_a_short_event_behind_fifty_rows(self):
+        for n in range(55):
+            self._event(title=f"Older {n}")
+        short = self._event(title="Short event")
+
+        class Channel:
+            def send(self, key, text):
+                return "sent", "host accepted"
+
+        stats = rem.deliver_due(self.store, Channel(), self.tz, now=self.now)
+        self.assertEqual(stats["sent"], 56)
+        self.assertFalse(any(r["event_id"] == short["id"] for r in self.store.due_reminders(self.now)))
+
+    def test_crash_after_batch_acceptance_never_reposts_a_subset(self):
+        for n in range(3):
+            self._event(title=f"Crash {n}")
+
+        class Channel:
+            def __init__(self):
+                self.calls = 0
+
+            def send(self, key, text):
+                self.calls += 1
+                return "sent", "host accepted"
+
+        channel = Channel()
+        with patch.object(rem, "_record", side_effect=RuntimeError("crash between batch row writes")):
+            with self.assertRaises(RuntimeError):
+                rem.deliver_due(self.store, channel, self.tz, now=self.now + timedelta(minutes=11))
+        self.assertEqual(channel.calls, 1)
+        self.assertEqual(self.store.unknown_reminder_count(), 3)
+        rem.deliver_due(self.store, channel, self.tz, now=self.now + timedelta(minutes=12))
+        self.assertEqual(channel.calls, 1)
 
 
 if __name__ == "__main__":
