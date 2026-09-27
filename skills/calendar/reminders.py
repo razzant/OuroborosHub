@@ -22,7 +22,6 @@ from model import get_tz, iso_local, iso_utc, now_utc, parse_stored
 PLAN_HORIZON = timedelta(hours=24)
 CATCHUP_GRACE = timedelta(minutes=10)      # a reminder older than this after downtime is batched, not sent alone
 MAX_NOTICE_CHARS = 1000                     # Host Service owner notification contract
-MAX_DELIVERY_ATTEMPTS = 5
 NOTICE_MAX = 128
 DEFAULT_RULES = {"default": [], "by_calendar": {}, "hidden": []}   # 19 A: reminders only by request or saved rule
 MODE_KEY = "reminder_mode"                                          # 20 A: «напоминает Уроборос» is explicit per external calendar
@@ -280,6 +279,19 @@ def _send_notice(store, channel: NotifyChannel, reminder_ids: List[str], key: st
     return channel.send(key, text)
 
 
+def _live_reminder(store, rem: Dict[str, Any], tz, now: datetime, stats: Dict[str, int]) -> Optional[Dict[str, Any]]:
+    event = store.get_event(rem["event_id"])
+    if event is None or event.get("deleted_at") or str(event.get("status") or "") == "cancelled":
+        reason, live = "событие отменено или удалено", event
+    else:
+        reason, live = _occurrence_state(store, event, parse_stored(rem.get("occurrence_start_utc")), now, owner_tz=tz)
+    if reason:
+        store.mark_reminder(rem["id"], "skipped", reason)
+        stats["skipped"] += 1
+        return None
+    return live
+
+
 def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = None) -> Dict[str, int]:
     """Fire what is due: fresh ones individually, a downtime backlog as one merged notice.
 
@@ -293,20 +305,15 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
     fresh: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     stale: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     for rem in due:
-        event = store.get_event(rem["event_id"])
-        start = parse_stored(rem.get("occurrence_start_utc"))
         fire_at = parse_stored(rem.get("fire_at_utc"))
-        if event is None or event.get("deleted_at") or str(event.get("status") or "") == "cancelled":
-            store.mark_reminder(rem["id"], "skipped", "событие отменено или удалено")
-            stats["skipped"] += 1
-            continue
-        verdict, live = _occurrence_state(store, event, start, now, owner_tz=tz)
-        if verdict:
-            store.mark_reminder(rem["id"], "skipped", verdict)
-            stats["skipped"] += 1
+        live = _live_reminder(store, rem, tz, now, stats)
+        if live is None:
             continue
         (stale if fire_at and now - fire_at > CATCHUP_GRACE else fresh).append((rem, live))
-    for rem, event in fresh:
+    for rem, _event in fresh:
+        event = _live_reminder(store, rem, tz, max(now, now_utc()), stats)
+        if event is None:
+            continue
         text = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)
         outcome = _send_notice(store, channel, [rem["id"]], rem["notice_id"], text)
         if outcome is None:
@@ -320,18 +327,26 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
         for rem, event in stale:
             line = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)
             if batch and size + 1 + len(line) > MAX_NOTICE_CHARS:
-                _send_batch(store, channel, header, batch, stats)
+                _send_batch(store, channel, header, batch, tz, now, stats)
                 batch, size = [], len(header)
             batch.append((rem, line))
             size += 1 + len(line)
         if batch:
-            _send_batch(store, channel, header, batch, stats)
+            _send_batch(store, channel, header, batch, tz, now, stats)
     return stats
 
 
-def _send_batch(store, channel: NotifyChannel, header: str, batch: List[Tuple[Dict[str, Any], str]], stats: Dict[str, int]) -> None:
+def _send_batch(store, channel: NotifyChannel, header: str, batch: List[Tuple[Dict[str, Any], str]], tz, now: datetime, stats: Dict[str, int]) -> None:
     """Fit complete reminder lines, never mark an undisclosed item as sent."""
-    text = header + "\n" + "\n".join(line for _, line in batch)
+    current = []
+    for rem, _line in batch:
+        event = _live_reminder(store, rem, tz, max(now, now_utc()), stats)
+        if event is None:
+            return  # a changed batch is rebuilt from the remaining rows next tick
+        current.append(format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz))
+    text = header + "\n" + "\n".join(current)
+    if len(text) > MAX_NOTICE_CHARS:
+        return  # an edited title changed the fit; rebuild bounded batches next tick
     outcome = _send_notice(store, channel, [rem["id"] for rem, _ in batch],
                            batch_notice_id([rem["notice_id"] for rem, _ in batch]), text)
     if outcome is None:
@@ -393,13 +408,9 @@ def _record(store, reminder_id: str, state: str, detail: str, stats: Dict[str, i
         store.mark_reminder(reminder_id, "no_channel", detail or state)
         stats["no_channel"] += 1
     elif state == "retry":
-        attempts = store.bump_reminder_attempt(reminder_id, detail)
-        if attempts >= MAX_DELIVERY_ATTEMPTS:
-            store.mark_reminder(reminder_id, "failed", f"доставка не удалась после {attempts} попыток: {detail}")
-            stats["failed"] += 1
-        else:
-            store.mark_reminder(reminder_id, "scheduled", detail)
-            stats["retry"] += 1      # stays in the queue; next tick retries
+        store.bump_reminder_attempt(reminder_id, detail)
+        store.mark_reminder(reminder_id, "scheduled", detail)
+        stats["retry"] += 1  # a known refusal may recover while the occurrence is still relevant
     elif state == "unknown":
         store.mark_reminder(reminder_id, "unknown", detail)
         stats["unknown"] += 1  # terminal for automation, not evidence of delivery failure

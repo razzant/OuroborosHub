@@ -478,7 +478,7 @@ class ReminderReviewTests(unittest.TestCase):
         self.assertEqual(channel.sent, [])
         self.assertEqual(stats["skipped"], 1)
 
-    def test_delivery_retries_are_bounded(self):
+    def test_known_refusals_retry_while_event_is_relevant(self):
         ctx = make_context()
         now = now_utc().replace(microsecond=0)
         event = ctx.store.insert_event(
@@ -493,6 +493,10 @@ class ReminderReviewTests(unittest.TestCase):
         channel = self.Channel(("retry", "HTTP 503"))
         for _ in range(6):
             rem.deliver_due(ctx.store, channel, ctx.tz, now=now)
+        self.assertEqual(ctx.store.due_reminders(now)[0]["attempts"], 6)
+        recovered = self.Channel()
+        rem.deliver_due(ctx.store, recovered, ctx.tz, now=now)
+        self.assertEqual(len(recovered.sent), 1)
         self.assertEqual(ctx.store.due_reminders(now), [])
 
     def test_batch_notice_id_never_exceeds_host_limit(self):

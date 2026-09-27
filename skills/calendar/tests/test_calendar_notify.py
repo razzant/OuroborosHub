@@ -190,6 +190,26 @@ class NotifyContractTests(unittest.TestCase):
         rem.deliver_due(self.store, channel, self.tz, now=self.now + timedelta(minutes=12))
         self.assertEqual(channel.calls, 1)
 
+    def test_occurrence_cancelled_during_earlier_send_is_reread(self):
+        self._event(title="First")
+        later = self._event(title="Cancel before send")
+
+        class Channel:
+            def __init__(self, store):
+                self.store, self.sent = store, []
+
+            def send(self, key, text):
+                self.sent.append(text)
+                if len(self.sent) == 1:
+                    self.store.update_event(later["id"], {"status": "cancelled"})
+                return "sent", "host accepted"
+
+        channel = Channel(self.store)
+        stats = rem.deliver_due(self.store, channel, self.tz, now=self.now)
+        self.assertEqual(stats["sent"], 1)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(len(channel.sent), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

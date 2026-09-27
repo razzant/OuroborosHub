@@ -508,7 +508,7 @@ class ReminderRound3Tests(unittest.TestCase):
         stats = rem.deliver_due(ctx.store, channel, UTC, now=now)
         self.assertEqual((stats["sent"], stats["batched"], len(channel.sent)), (1, 1, 1))
 
-    def test_exception_reminder_edit_drops_master_slot_and_delivery_stops_after_five_retries(self):
+    def test_exception_reminder_edit_drops_master_slot_and_known_refusals_stay_retryable(self):
         ctx = make_context()
         now = datetime.now(UTC).replace(microsecond=0)
         master = json.loads(
@@ -542,7 +542,7 @@ class ReminderRound3Tests(unittest.TestCase):
         retry_event = ctx.store.insert_event(
             {
                 "calendar_id": DEFAULT_LOCAL_CALENDAR_ID,
-                "title": "Retry exactly five",
+                "title": "Retry known refusal",
                 "start_utc": iso_utc(now + timedelta(minutes=10)),
                 "end_utc": iso_utc(now + timedelta(hours=1)),
             }
@@ -559,7 +559,7 @@ class ReminderRound3Tests(unittest.TestCase):
             rem.deliver_due(ctx.store, channel, UTC, now=now)
         self.assertEqual(len([row for row in ctx.store.due_reminders(now) if row["notice_id"] == "cal:five"]), 1)
         rem.deliver_due(ctx.store, channel, UTC, now=now)
-        self.assertEqual([row for row in ctx.store.due_reminders(now) if row["notice_id"] == "cal:five"], [])
+        self.assertEqual([row["attempts"] for row in ctx.store.due_reminders(now) if row["notice_id"] == "cal:five"], [5])
 
 
 class GoogleRound3Tests(unittest.TestCase):
