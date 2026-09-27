@@ -1,8 +1,8 @@
 {
-  "description": "Official Ouroboros skills catalog.",
-  "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
+  "name": "OuroborosHub",
+  "description": "Official Ouroboros skills catalog.",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "skills": [
     {
       "description": "Геоданные 2ГИС: поиск мест и организаций, геокодирование адресов и обратное геокодирование координат, построение маршрутов (авто, пешком, вело, самокат, мото, грузовик, такси), расчёт изохрон (зоны достижимости), создание статической карты PNG с маркерами, линиями и полигонами и кликабельные ссылки на интерактивную карту 2ГИС. Требует API-ключ 2ГИС.",
@@ -1934,6 +1934,45 @@
       "slug": "yylo-tasks",
       "type": "instruction",
       "version": "0.1.0"
+    },
+    {
+      "slug": "yandex-travel",
+      "name": "yandex-travel",
+      "version": "0.2.0",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "823fb22f8b1dc5bf737cac8544946a0f8a8b8d4c14e3a1886be6efa7beb7aee3",
+          "size": 7599
+        },
+        {
+          "path": "eats_driver.py",
+          "sha256": "e6b107201589697c4285514aaf0dbb47a45e6dd4489ed72f82af3eedf2611d05",
+          "size": 9514
+        },
+        {
+          "path": "eats_session.py",
+          "sha256": "93f789a7c3f48a9650a642601805c603dd623a66d724c2ef404f5194fea37bc0",
+          "size": 40995
+        },
+        {
+          "path": "observer.js",
+          "sha256": "895e1291cf457be7b11bd4e2eddc703b89e5b9986f325128a3621642c479d71d",
+          "size": 19963
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "f82caa0f4d72ae730fad2627834ae054cfc8262562cbe3ef8127cc8bc44de288",
+          "size": 6005
+        },
+        {
+          "path": "scripts/eats_browser.py",
+          "sha256": "41483f6205b9a896827d8eda87193168c511d8a51bd244a922945be3e7c14350",
+          "size": 2015
+        }
+      ],
+      "description": "Черновик: агент выбирает адрес, ресторан и блюда по свежему DOM и собирает корзину в видимом окне Яндекс Еды. Оформление заказа не реализовано; Яндекс Такси пока без инструмента. Требуется проверка установленного скилла."
     }
   ]
 }
