@@ -338,15 +338,24 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
 
 def _send_batch(store, channel: NotifyChannel, header: str, batch: List[Tuple[Dict[str, Any], str]], tz, now: datetime, stats: Dict[str, int]) -> None:
     """Fit complete reminder lines, never mark an undisclosed item as sent."""
-    current = []
+    current: List[Tuple[Dict[str, Any], str]] = []
+    size = len(header)
     for rem, _line in batch:
         event = _live_reminder(store, rem, tz, max(now, now_utc()), stats)
         if event is None:
-            return  # a changed batch is rebuilt from the remaining rows next tick
-        current.append(format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz))
-    text = header + "\n" + "\n".join(current)
-    if len(text) > MAX_NOTICE_CHARS:
-        return  # an edited title changed the fit; rebuild bounded batches next tick
+            continue
+        line = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)
+        if current and size + 1 + len(line) > MAX_NOTICE_CHARS:
+            _emit_batch(store, channel, header, current, stats)
+            current, size = [], len(header)
+        current.append((rem, line))
+        size += 1 + len(line)
+    if current:
+        _emit_batch(store, channel, header, current, stats)
+
+
+def _emit_batch(store, channel: NotifyChannel, header: str, batch: List[Tuple[Dict[str, Any], str]], stats: Dict[str, int]) -> None:
+    text = header + "\n" + "\n".join(line for _, line in batch)
     outcome = _send_notice(store, channel, [rem["id"] for rem, _ in batch],
                            batch_notice_id([rem["notice_id"] for rem, _ in batch]), text)
     if outcome is None:

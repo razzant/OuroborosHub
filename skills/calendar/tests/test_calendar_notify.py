@@ -210,6 +210,39 @@ class NotifyContractTests(unittest.TestCase):
         self.assertEqual(stats["skipped"], 1)
         self.assertEqual(len(channel.sent), 1)
 
+    def test_changed_stale_batch_sends_live_peers_without_waiting_a_tick(self):
+        fresh = self._event(title="Fresh")
+        stale = []
+        for n in range(10):
+            event = self._event(title=f"Backlog {n}")
+            self.store.drop_reminders_for(event["id"])
+            self.store.schedule_reminder(event["id"], event["start_utc"], 15,
+                                         iso_utc(self.now - timedelta(minutes=20)),
+                                         rem.notice_id_for(event["id"], event["start_utc"], 15))
+            stale.append(event)
+
+        class Channel:
+            def __init__(self, store):
+                self.store, self.sent = store, []
+
+            def send(self, key, text):
+                self.sent.append(text)
+                if len(self.sent) == 1:  # between the first send and stale batch recheck
+                    self.store.update_event(stale[0]["id"], {"status": "cancelled"})
+                    for event in stale[1:]:
+                        self.store.update_event(event["id"], {"title": "Long " + "x" * 120})
+                return "sent", "host accepted"
+
+        channel = Channel(self.store)
+        stats = rem.deliver_due(self.store, channel, self.tz, now=self.now)
+        self.assertEqual(stats["sent"], 10)
+        self.assertEqual(stats["skipped"], 1)
+        self.assertEqual(stats["batched"], 9)
+        self.assertGreater(len(channel.sent), 2)  # refitted into multiple <=1000 batches
+        self.assertTrue(all(len(text) <= 1000 for text in channel.sent))
+        self.assertNotIn("Backlog 0", "\n".join(channel.sent))
+        self.assertEqual(self.store.due_reminders(self.now), [])
+
 
 if __name__ == "__main__":
     unittest.main()
