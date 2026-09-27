@@ -107,6 +107,26 @@ class NotifyContractTests(unittest.TestCase):
         self.assertEqual(stats["no_channel"], 2)
         self.assertEqual(len(self.store.due_reminders(self.now)), 2)
 
+    def test_known_unavailable_channel_never_reserves_before_noop(self):
+        self._event()
+        channel = rem.NotifyChannel("http://127.0.0.1:8767", "test-token")
+        channel._state = "no_route"
+        with patch.object(self.store, "reserve_reminder_send", side_effect=AssertionError("must not reserve")):
+            stats = rem.deliver_due(self.store, channel, self.tz, now=self.now)
+        self.assertEqual(stats["no_channel"], 1)
+        self.assertEqual(self.store.unknown_reminder_count(), 0)
+
+    def test_http_500_is_unknown_and_stops_subsequent_attempts(self):
+        self._event(title="First")
+        self._event(title="Second")
+        channel = rem.NotifyChannel("http://127.0.0.1:8767", "test-token")
+        channel._state = "ready"
+        with patch.object(channel, "_request", side_effect=rem._HttpError(500, "server error")) as request:
+            stats = rem.deliver_due(self.store, channel, self.tz, now=self.now)
+        self.assertEqual(request.call_count, 1)
+        self.assertEqual(stats["unknown"], 1)
+        self.assertEqual(stats["no_channel"], 1)
+
     def test_explicit_nonacceptance_can_retry_and_missing_grant_is_visible(self):
         channel = rem.NotifyChannel("http://127.0.0.1:8767", "test-token")
         channel._state = "ready"

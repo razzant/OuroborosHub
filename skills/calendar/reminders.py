@@ -217,7 +217,7 @@ class NotifyChannel:
                 return "no_route", exc.body[:200]
             if exc.status in (429, 503):
                 return "retry", f"HTTP {exc.status}"
-            if exc.status in (502, 504):
+            if exc.status == 408 or (exc.status >= 500 and exc.status != 503):
                 self._state = "unreachable"
                 return "unknown", f"HTTP {exc.status}: host outcome unconfirmed"
             return "failed", f"HTTP {exc.status}: {exc.body[:200]}"
@@ -270,6 +270,16 @@ def format_text(event: Dict[str, Any], occurrence_start_utc: str, offset: int, t
     return " · ".join(parts)
 
 
+def _send_notice(store, channel: NotifyChannel, reminder_ids: List[str], key: str, text: str) -> Optional[Tuple[str, str]]:
+    # A known unavailable channel cannot have accepted a POST; keep those rows
+    # retryable rather than reserving them as uncertain before the no-op send.
+    if isinstance(channel, NotifyChannel) and channel.state() != "ready":
+        return channel.send(key, text)
+    if not store.reserve_reminder_send(reminder_ids):
+        return None  # a concurrent calendar edit removed this pending reminder
+    return channel.send(key, text)
+
+
 def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = None) -> Dict[str, int]:
     """Fire what is due: fresh ones individually, a downtime backlog as one merged notice.
 
@@ -298,9 +308,10 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
         (stale if fire_at and now - fire_at > CATCHUP_GRACE else fresh).append((rem, live))
     for rem, event in fresh:
         text = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)
-        if not store.reserve_reminder_send([rem["id"]]):
-            continue  # a concurrent calendar edit removed the pending reminder
-        state, detail = channel.send(rem["notice_id"], text)
+        outcome = _send_notice(store, channel, [rem["id"]], rem["notice_id"], text)
+        if outcome is None:
+            continue
+        state, detail = outcome
         _record(store, rem["id"], state, detail, stats)
     if stale:
         header = "⏰ Пока Уроборос не работал, подошли напоминания:"
@@ -321,9 +332,11 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
 def _send_batch(store, channel: NotifyChannel, header: str, batch: List[Tuple[Dict[str, Any], str]], stats: Dict[str, int]) -> None:
     """Fit complete reminder lines, never mark an undisclosed item as sent."""
     text = header + "\n" + "\n".join(line for _, line in batch)
-    if not store.reserve_reminder_send([rem["id"] for rem, _ in batch]):
-        return  # the batch changed under a concurrent edit; re-read it next tick
-    state, detail = channel.send(batch_notice_id([rem["notice_id"] for rem, _ in batch]), text)
+    outcome = _send_notice(store, channel, [rem["id"] for rem, _ in batch],
+                           batch_notice_id([rem["notice_id"] for rem, _ in batch]), text)
+    if outcome is None:
+        return
+    state, detail = outcome
     for rem, _ in batch:
         _record(store, rem["id"], state, detail, stats)
     stats["batched"] += len(batch)
