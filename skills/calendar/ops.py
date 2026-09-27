@@ -545,7 +545,8 @@ def _ensure_exception(store, master: Dict[str, Any], occ_key: str, changes: Dict
     occ_start = parse_stored(occ_key) or m_start
     duration = (m_end - m_start) if (m_start and m_end) else timedelta(hours=1)
     row = {k: master.get(k) for k in ("calendar_id", "uid", "visibility", "availability", "is_primary", "title", "description",
-                                       "location", "tz", "all_day", "organizer", "attendees_json", "reminders_json", "origin", "link_group_id")}
+                                       "location", "tz", "all_day", "organizer", "attendees_json", "origin", "link_group_id")}
+    row["reminders_json"] = "[]"  # no own override: later whole-series reminder edits remain effective
     # The exception has NO provider identity of its own: Google resolves the instance id from the master + recurrence key,
     # CalDAV writes it inside the master's resource (roast/triad F01).
     row.update({"start_utc": iso_utc(occ_start), "end_utc": iso_utc(occ_start + duration), "rrule": "", "master_id": master["id"],

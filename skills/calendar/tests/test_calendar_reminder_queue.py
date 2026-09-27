@@ -175,9 +175,11 @@ class ExplicitNoRemindersTests(unittest.TestCase):
         start = now + timedelta(hours=2)
         master = ctx.store.insert_event({"calendar_id": DEFAULT_LOCAL_CALENDAR_ID, "title": "Series", "rrule": "FREQ=DAILY",
                                          "start_utc": iso_utc(start), "end_utc": iso_utc(start + timedelta(hours=1)), "reminders_json": "[]"})
-        ctx.store.insert_event({"calendar_id": DEFAULT_LOCAL_CALENDAR_ID, "master_id": master["id"],
-                                "recurrence_id": iso_utc(start), "title": "Exception", "start_utc": iso_utc(start),
-                                "end_utc": iso_utc(start + timedelta(hours=1)), "reminders_json": "[]"})
+        # Editing only the title creates an exception, not a frozen reminder override.
+        json.loads(tools.cal_update(ctx, id=f'{master["id"]}@{iso_utc(start)}', title="Exception", scope="this", confirm=True))
+        exceptions = ctx.store.exceptions_for(master["id"])
+        self.assertEqual(len(exceptions), 1)
+        self.assertEqual(exceptions[0]["reminders_json"], "[]")
         json.loads(tools.cal_update(ctx, id=master["id"], reminders=[], scope="all", confirm=True))
         self.assertEqual(ctx.store.get_event(master["id"])["reminders_json"], json.dumps("off"))
         reason, effective = rem._occurrence_state(ctx.store, ctx.store.get_event(master["id"]), start, now, owner_tz=UTC)
