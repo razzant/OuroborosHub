@@ -103,8 +103,12 @@ def offsets_for(event: Dict[str, Any], rules: Dict[str, Any], modes: Optional[Di
 
 # ── planning ────────────────────────────────────────────────────────
 
-def notice_id_for(event_id: str, occurrence_start_utc: str, offset_min: int) -> str:
-    raw = f"cal:{event_id}:{occurrence_start_utc}:{offset_min}m"
+def notice_id_for(event_id: str, occurrence_start_utc: str, offset_min: int, recurrence_id: str = "") -> str:
+    # Every series occurrence carries its original slot, even an unmoved one.
+    # This separates the upgraded queue from old rows whose original identity
+    # was unknown, allowing waiting legacy rows to be withdrawn and replanned.
+    original = f":{recurrence_id}" if recurrence_id else ""
+    raw = f"cal:{event_id}:{occurrence_start_utc}{original}:{offset_min}m"
     if len(raw) <= NOTICE_MAX:
         return raw
     return "cal:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
@@ -135,7 +139,8 @@ def plan(store, occurrences_in: Any, now: Optional[datetime] = None) -> int:
         if start is None:
             continue
         event_id = occ.get("series_id") or occ.get("id")
-        occ_start = occ.get("start_utc")   # effective start: a moved exception is a different reminder than the original slot
+        occ_start = occ.get("start_utc")   # effective start, used for firing and display
+        recurrence_id = str(occ.get("occurrence_start_utc") or "") if occ.get("series_id") else ""
         end = parse_stored(occ.get("end_utc")) or (start + timedelta(hours=1))
         for offset in offsets_for(occ, rules, modes):
             fire_at = start - timedelta(minutes=offset)
@@ -143,9 +148,11 @@ def plan(store, occurrences_in: Any, now: Optional[datetime] = None) -> int:
                 continue
             if fire_at < now and end < now:
                 continue   # already over: nothing to catch up (21 A: only what is still upcoming or running)
-            notice_id = notice_id_for(event_id, occ_start, offset)
+            notice_id = notice_id_for(event_id, occ_start, offset, recurrence_id)
             wanted.add(notice_id)
-            if store.schedule_reminder(event_id, occ_start, offset, iso_utc(fire_at), notice_id):
+            if recurrence_id and store.legacy_reminder_settled(event_id, occ_start, offset):
+                continue  # no second push after an accepted/uncertain old-format send
+            if store.schedule_reminder(event_id, occ_start, offset, iso_utc(fire_at), notice_id, recurrence_id):
                 scheduled += 1
     store.withdraw_waiting_reminders(now, now + PLAN_HORIZON, keep=wanted)
     return scheduled
@@ -293,7 +300,8 @@ def _live_reminder(store, rem: Dict[str, Any], tz, now: datetime, stats: Dict[st
     if event is None or event.get("deleted_at") or str(event.get("status") or "") == "cancelled":
         reason, live = "событие отменено или удалено", event
     else:
-        reason, live = _occurrence_state(store, event, parse_stored(rem.get("occurrence_start_utc")), now, owner_tz=tz)
+        reason, live = _occurrence_state(store, event, parse_stored(rem.get("occurrence_start_utc")), now,
+                                         owner_tz=tz, recurrence_id=rem.get("recurrence_id") or "")
         if not reason and int(rem["offset_min"]) not in offsets_for(live, get_rules(store), store.get_setting(MODE_KEY) or {}):
             reason = "это напоминание снято: у события сейчас другие времена напоминаний"
     if reason:
@@ -387,7 +395,8 @@ def _occurrence_overlay(event: Dict[str, Any], exc: Dict[str, Any]) -> Dict[str,
     return live
 
 
-def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], now: datetime, owner_tz=None) -> Tuple[str, Dict[str, Any]]:
+def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], now: datetime,
+                      owner_tz=None, recurrence_id: str = "") -> Tuple[str, Dict[str, Any]]:
     """('', effective occurrence row) when the planned occurrence is still on; otherwise (reason to skip it, row).
 
     The effective row is the exception living at this slot when there is one (its own title/end), else the master."""
@@ -402,29 +411,31 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
             return "событие уже закончилось", event
         return "", event
     key = iso_utc(start)
-    live_row: Dict[str, Any] = event
-    end_at = start + duration
-    for exc in store.exceptions_for(event["id"]):
-        if str(exc.get("recurrence_id") or "") == key:
-            if str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at"):
-                return "вхождение отменено", event
-            if str(exc.get("start_utc") or "") != key:
-                return "вхождение перенесено; напоминание перепланировано", event
-            live_row = _occurrence_overlay(event, exc)
-            end_at = parse_stored(exc.get("end_utc")) or end_at
-            break
-        if str(exc.get("start_utc") or "") == key:
-            live_row = _occurrence_overlay(event, exc)
-            end_at = parse_stored(exc.get("end_utc")) or end_at
-            break  # a moved exception now living at this slot: it is the live occurrence
+    original = recurrence_id or key  # old queue rows know only the effective slot
+    exceptions = store.exceptions_for(event["id"])
+    exc = next((row for row in exceptions if str(row.get("recurrence_id") or "") == original), None)
+    if exc is not None:
+        if str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at"):
+            return "вхождение отменено", event
+        if str(exc.get("start_utc") or "") != key:
+            return "вхождение перенесено; напоминание перепланировано", event
+        live_row = _occurrence_overlay(event, exc)
+        end_at = parse_stored(exc.get("end_utc")) or start + duration
     else:
-        try:
-            import ops as _ops
-            live = _ops.expand([event], start - timedelta(minutes=1), start + timedelta(minutes=1), store.exceptions_for, owner_tz=owner_tz)
-        except Exception:
-            live = [{"start_utc": key}]
-        if not any(str(o.get("start_utc") or "") == key for o in live):
+        # A legacy row with no original-slot identity must not impersonate a
+        # different exception moved into its effective slot.
+        if not recurrence_id and any(str(row.get("start_utc") or "") == key and
+                                     str(row.get("recurrence_id") or "") != key for row in exceptions):
+            return "старое напоминание без идентификатора вхождения", event
+        import ops as _ops
+        live = _ops.expand([event], start - timedelta(minutes=1), start + timedelta(minutes=1),
+                           store.exceptions_for, owner_tz=owner_tz)
+        matches = [o for o in live if str(o.get("occurrence_start_utc") or "") == original and
+                   str(o.get("start_utc") or "") == key]
+        if not matches:
             return "вхождения больше нет в расписании", event
+        live_row = matches[0]
+        end_at = parse_stored(live_row.get("end_utc")) or start + duration
     if end_at < now:
         return "вхождение уже закончилось", live_row
     return "", live_row

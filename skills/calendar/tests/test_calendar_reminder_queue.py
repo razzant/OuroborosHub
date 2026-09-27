@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -31,6 +33,7 @@ import worker as calendar_worker  # noqa: E402
 from model import DEFAULT_LOCAL_CALENDAR_ID, iso_utc, now_utc  # noqa: E402
 from providers import row_to_ics  # noqa: E402
 from providers_google import GoogleAdapter, gevent_to_row, row_to_gevent  # noqa: E402
+from store import Store  # noqa: E402
 
 UTC = timezone.utc
 
@@ -298,6 +301,117 @@ class ProviderChangeQueueTests(unittest.TestCase):
         channel = Channel()
         rem.deliver_due(self.ctx.store, channel, UTC, now=self.now + timedelta(minutes=1))
         self.assertEqual(channel.sent, [])   # the uncertain notice is never re-sent automatically
+
+
+class RecurringOccurrenceIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.ctx = make_context()
+        self.now = now_utc().replace(microsecond=0)
+        self.first = self.now + timedelta(hours=2)
+        self.second = self.first + timedelta(days=1)
+        self.master = self.ctx.store.insert_event({
+            "calendar_id": DEFAULT_LOCAL_CALENDAR_ID, "title": "Original", "rrule": "FREQ=DAILY",
+            "start_utc": iso_utc(self.first), "end_utc": iso_utc(self.first + timedelta(hours=1)),
+            "reminders_json": "[15]",
+        })
+
+    def move(self, original, effective, title):
+        return self.ctx.store.insert_event({
+            "calendar_id": DEFAULT_LOCAL_CALENDAR_ID, "master_id": self.master["id"],
+            "recurrence_id": iso_utc(original), "title": title, "start_utc": iso_utc(effective),
+            "end_utc": iso_utc(effective + timedelta(hours=1)), "reminders_json": "[]",
+        })
+
+    def test_two_distinct_occurrences_moved_to_same_effective_time_both_deliver(self):
+        target = self.first + timedelta(days=3, hours=2)
+        self.move(self.first, target, "First move")
+        self.move(self.second, target, "Second move")
+        planning_time = target - timedelta(hours=1)
+        plan(self.ctx, planning_time)
+        rows = [r for r in self.ctx.store.upcoming_reminders(planning_time, limit=200)
+                if r["event_id"] == self.master["id"] and r["occurrence_start_utc"] == iso_utc(target)]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({r["recurrence_id"] for r in rows}, {iso_utc(self.first), iso_utc(self.second)})
+        self.assertEqual(len({r["notice_id"] for r in rows}), 2)
+        channel = Channel()
+        stats = rem.deliver_due(self.ctx.store, channel, UTC, now=target - timedelta(minutes=15))
+        self.assertEqual((stats["sent"], len(channel.sent)), (2, 2))
+        self.assertEqual({"First move", "Second move"}, {title for title in ("First move", "Second move")
+                         if any(title in text for _, text in channel.sent)})
+
+    def test_original_slot_and_moved_exception_exchange_times(self):
+        self.move(self.first, self.second, "First at second")
+        self.move(self.second, self.first, "Second at first")
+        plan(self.ctx, self.now)
+        channel = Channel()
+        stats = rem.deliver_due(self.ctx.store, channel, UTC, now=self.first - timedelta(minutes=15))
+        self.assertEqual((stats["sent"], stats["skipped"]), (1, 0))
+        self.assertIn("Second at first", channel.sent[0][1])
+        plan(self.ctx, self.second - timedelta(hours=1))
+        stats = rem.deliver_due(self.ctx.store, channel, UTC, now=self.second - timedelta(minutes=15))
+        self.assertEqual((stats["sent"], stats["skipped"]), (1, 0))
+        self.assertIn("First at second", channel.sent[1][1])
+
+    def test_upgrade_preserves_legacy_uncertain_moved_notice_without_resending(self):
+        target = self.first + timedelta(days=3)
+        self.move(self.first, target, "Moved")
+        old_id = rem.notice_id_for(self.master["id"], iso_utc(target), 15)
+        self.ctx.store.schedule_reminder(self.master["id"], iso_utc(target), 15,
+                                         iso_utc(target - timedelta(minutes=15)), old_id)
+        old_row = next(r for r in self.ctx.store.upcoming_reminders(self.now, 200) if r["notice_id"] == old_id)
+        self.ctx.store.mark_reminder(old_row["id"], "unknown")
+        planning_time = target - timedelta(hours=1)
+        plan(self.ctx, planning_time)
+        self.assertFalse(any(r["occurrence_start_utc"] == iso_utc(target)
+                             for r in self.ctx.store.due_reminders(target - timedelta(minutes=15))))
+        channel = Channel()
+        rem.deliver_due(self.ctx.store, channel, UTC, now=target - timedelta(minutes=15))
+        self.assertEqual(channel.sent, [])
+        self.assertEqual(self.ctx.store.unknown_reminder_count(), 1)
+
+    def test_upgrade_replans_waiting_legacy_slot_when_another_occurrence_moves_into_it(self):
+        old_id = rem.notice_id_for(self.master["id"], iso_utc(self.first), 15)
+        self.ctx.store.schedule_reminder(self.master["id"], iso_utc(self.first), 15,
+                                         iso_utc(self.first - timedelta(minutes=15)), old_id)
+        self.move(self.second, self.first, "Second at first")
+        plan(self.ctx, self.now)
+        rows = [r for r in self.ctx.store.upcoming_reminders(self.now, limit=200)
+                if r["event_id"] == self.master["id"] and r["occurrence_start_utc"] == iso_utc(self.first)]
+        self.assertEqual({r["recurrence_id"] for r in rows}, {iso_utc(self.first), iso_utc(self.second)})
+        self.assertNotIn(old_id, {r["notice_id"] for r in rows})
+        channel = Channel()
+        stats = rem.deliver_due(self.ctx.store, channel, UTC, now=self.first - timedelta(minutes=15))
+        self.assertEqual((stats["sent"], len(channel.sent)), (2, 2))
+        self.assertTrue(any("Second at first" in text for _, text in channel.sent))
+
+    def test_upgrade_does_not_resend_a_legacy_sent_unmoved_occurrence(self):
+        old_id = rem.notice_id_for(self.master["id"], iso_utc(self.first), 15)
+        self.ctx.store.schedule_reminder(self.master["id"], iso_utc(self.first), 15,
+                                         iso_utc(self.first - timedelta(minutes=15)), old_id)
+        row = next(r for r in self.ctx.store.upcoming_reminders(self.now, 200) if r["notice_id"] == old_id)
+        self.ctx.store.mark_reminder(row["id"], "sent")
+        plan(self.ctx, self.now)
+        channel = Channel()
+        rem.deliver_due(self.ctx.store, channel, UTC, now=self.first - timedelta(minutes=15))
+        self.assertEqual(channel.sent, [])
+
+    def test_old_database_adds_original_slot_column_without_rewriting_uncertain_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "calendar.sqlite3")
+            with sqlite3.connect(path) as conn:
+                conn.execute("CREATE TABLE reminders (id TEXT PRIMARY KEY, event_id TEXT NOT NULL,"
+                             " occurrence_start_utc TEXT NOT NULL, offset_min INTEGER NOT NULL, fire_at_utc TEXT NOT NULL,"
+                             " notice_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL DEFAULT 'scheduled',"
+                             " sent_at TEXT, detail TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0,"
+                             " updated_at TEXT NOT NULL)")
+                conn.execute("INSERT INTO reminders VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             ("old", "series", iso_utc(self.first), 15, iso_utc(self.first - timedelta(minutes=15)),
+                              "cal:old", "unknown", None, "host outcome unconfirmed", 1, iso_utc(self.now)))
+            reopened = Store(directory)
+            with reopened._conn() as conn:
+                row = dict(conn.execute("SELECT * FROM reminders WHERE id='old'").fetchone())
+            self.assertEqual((row["recurrence_id"], row["state"], row["notice_id"]), ("", "unknown", "cal:old"))
+            self.assertEqual(reopened.unknown_reminder_count(), 1)
 
 
 class CatchupBatchReservationTests(unittest.TestCase):

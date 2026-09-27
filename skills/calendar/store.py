@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS intents (
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_intents_state ON intents(state, next_attempt_at);
 CREATE TABLE IF NOT EXISTS reminders (
-    id TEXT PRIMARY KEY, event_id TEXT NOT NULL, occurrence_start_utc TEXT NOT NULL, offset_min INTEGER NOT NULL,
+    id TEXT PRIMARY KEY, event_id TEXT NOT NULL, occurrence_start_utc TEXT NOT NULL,
+    recurrence_id TEXT NOT NULL DEFAULT '', offset_min INTEGER NOT NULL,
     fire_at_utc TEXT NOT NULL, notice_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL DEFAULT 'scheduled',
     sent_at TEXT, detail TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_reminders_fire ON reminders(state, fire_at_utc);
@@ -109,6 +110,8 @@ class Store:
             cols = {r[1] for r in c.execute("PRAGMA table_info(reminders)").fetchall()}
             if "attempts" not in cols:
                 c.execute("ALTER TABLE reminders ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+            if "recurrence_id" not in cols:
+                c.execute("ALTER TABLE reminders ADD COLUMN recurrence_id TEXT NOT NULL DEFAULT ''")
             row = c.execute("SELECT version FROM schema_version").fetchone()
             if row is None:
                 c.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
@@ -513,13 +516,22 @@ class Store:
 
     # ── reminders ───────────────────────────────────────────────────
 
-    def schedule_reminder(self, event_id: str, occurrence_start_utc: str, offset_min: int, fire_at_utc: str, notice_id: str) -> bool:
+    def schedule_reminder(self, event_id: str, occurrence_start_utc: str, offset_min: int, fire_at_utc: str,
+                          notice_id: str, recurrence_id: str = "") -> bool:
         ts = _ts()
         with self._conn() as c:
-            cur = c.execute("INSERT OR IGNORE INTO reminders (id, event_id, occurrence_start_utc, offset_min, fire_at_utc, notice_id, state, updated_at)"
-                            " VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?)",
-                            (new_id("rem"), event_id, occurrence_start_utc, int(offset_min), fire_at_utc, notice_id, ts))
+            cur = c.execute("INSERT OR IGNORE INTO reminders (id, event_id, occurrence_start_utc, recurrence_id, offset_min, fire_at_utc, notice_id, state, updated_at)"
+                            " VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', ?)",
+                            (new_id("rem"), event_id, occurrence_start_utc, recurrence_id, int(offset_min), fire_at_utc, notice_id, ts))
         return cur.rowcount > 0
+
+    def legacy_reminder_settled(self, event_id: str, occurrence_start_utc: str, offset_min: int) -> bool:
+        """An old moved reminder may already have been accepted; prefer a miss over a duplicate on upgrade."""
+        with self._conn() as c:
+            row = c.execute("SELECT 1 FROM reminders WHERE event_id=? AND occurrence_start_utc=? AND offset_min=?"
+                            " AND recurrence_id='' AND state IN ('sent', 'unknown') LIMIT 1",
+                            (event_id, occurrence_start_utc, offset_min)).fetchone()
+        return row is not None
 
     def due_reminders(self, now: datetime, limit: Optional[int] = None, include_no_channel: bool = True) -> List[Dict[str, Any]]:
         """Snapshot every due row once; a fixed first page can starve a short upcoming event."""
