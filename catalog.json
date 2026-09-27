@@ -1898,26 +1898,26 @@
     {
       "slug": "science_digest",
       "name": "science_digest",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "type": "extension",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "714a525f4c9777bf99b5a45a63c69ca7c629ff1e1db46326c977d2ef55a13f48",
-          "size": 8355
+          "sha256": "561c3a1f110d119352c7f9aca517cfe9ede82ff9c738c1243adb145f0de11ebd",
+          "size": 11286
         },
         {
           "path": "plugin.py",
-          "sha256": "2466fde59b58579c696bd26e450fe5febe129495c25dfc9f7710c609b377f0ae",
-          "size": 22733
+          "sha256": "0cb993dfbfa68fdd1ebc29c483f917901095530faa4b59ed978ee1b20773f1a5",
+          "size": 40976
         },
         {
           "path": "test_digest.py",
-          "sha256": "4c0ab64a2afbc7559fe8a8915fb5976f8bc38ddffebeeda750f5625023b4bbcc",
-          "size": 15315
+          "sha256": "f40bc89a924d7b8b49fa58c5caa70b36ce63b50b9313ec74643c2933bc42430f",
+          "size": 40434
         }
       ],
-      "description": "Personalized AI research digest from owner-selected public Telegram channels; the agent judges relevance and writes the digest in its own chat."
+      "description": "Personalized AI research digest from owner-selected public Telegram channels and curated official feeds (OpenAI News, Google DeepMind blog); the agent judges relevance and writes the digest in its own chat."
     }
   ]
 }
