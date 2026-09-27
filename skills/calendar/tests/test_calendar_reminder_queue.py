@@ -256,6 +256,18 @@ class ProviderChangeQueueTests(unittest.TestCase):
         plan(self.ctx, self.now + timedelta(minutes=10))
         self.assertEqual([r[2] for r in waiting(self.ctx, self.now, saved["id"])], [5])
 
+    def test_pending_external_delete_cannot_replan_or_deliver_a_notice(self):
+        row = external_event(self.external, "deleting", self.now + timedelta(minutes=20))
+        saved = self.ctx.store.insert_event(row)
+        plan(self.ctx, self.now)
+        self.assertEqual(len(waiting(self.ctx, self.now, saved["id"])), 1)
+        self.ctx.store.update_event(saved["id"], {"sync_state": "pending_delete"})
+        channel = Channel()
+        stats = rem.deliver_due(self.ctx.store, channel, UTC, now=self.now + timedelta(minutes=5))
+        self.assertEqual((channel.sent, stats["skipped"]), ([], 1))
+        plan(self.ctx, self.now)
+        self.assertEqual(waiting(self.ctx, self.now, saved["id"]), [])
+
     def test_external_exception_reminder_change_is_imported_and_replanned(self):
         start = self.now + timedelta(hours=2)
         master_row = external_event(self.external, "series", start, rrule="FREQ=DAILY")
@@ -394,6 +406,21 @@ class RecurringOccurrenceIdentityTests(unittest.TestCase):
         channel = Channel()
         rem.deliver_due(self.ctx.store, channel, UTC, now=self.first - timedelta(minutes=15))
         self.assertEqual(channel.sent, [])
+
+    def test_upgrade_retires_due_legacy_no_channel_row_before_new_identity(self):
+        old_id = rem.notice_id_for(self.master["id"], iso_utc(self.first), 15)
+        self.ctx.store.schedule_reminder(self.master["id"], iso_utc(self.first), 15,
+                                         iso_utc(self.first - timedelta(minutes=15)), old_id)
+        row = next(r for r in self.ctx.store.upcoming_reminders(self.now, 200) if r["notice_id"] == old_id)
+        self.ctx.store.mark_reminder(row["id"], "no_channel")
+        resumed = self.first - timedelta(minutes=10)  # five minutes after the old due time
+        plan(self.ctx, resumed)
+        due = [r for r in self.ctx.store.due_reminders(resumed) if r["event_id"] == self.master["id"]]
+        self.assertEqual(len(due), 1)
+        self.assertEqual(due[0]["recurrence_id"], iso_utc(self.first))
+        channel = Channel()
+        stats = rem.deliver_due(self.ctx.store, channel, UTC, now=resumed)
+        self.assertEqual((stats["sent"], len(channel.sent)), (1, 1))
 
     def test_old_database_adds_original_slot_column_without_rewriting_uncertain_rows(self):
         with tempfile.TemporaryDirectory() as directory:

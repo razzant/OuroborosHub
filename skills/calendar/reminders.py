@@ -129,11 +129,12 @@ def plan(store, occurrences_in: Any, now: Optional[datetime] = None) -> int:
     now = now or now_utc()
     rules = get_rules(store)
     modes = store.get_setting(MODE_KEY) or {}
+    store.retire_legacy_waiting_series_reminders()
     horizon_end = now + PLAN_HORIZON + timedelta(days=7)   # offsets up to 7 days look further ahead
     scheduled = 0
     wanted = set()
     for occ in occurrences_in(now - timedelta(hours=1), horizon_end):
-        if str(occ.get("status") or "") == "cancelled":
+        if str(occ.get("status") or "") == "cancelled" or occ.get("sync_state") == "pending_delete":
             continue
         start = parse_stored(occ.get("start_utc"))
         if start is None:
@@ -297,7 +298,8 @@ def _reserve(store, channel: NotifyChannel, reminder_ids: List[str]) -> List[str
 
 def _live_reminder(store, rem: Dict[str, Any], tz, now: datetime, stats: Dict[str, int]) -> Optional[Dict[str, Any]]:
     event = store.get_event(rem["event_id"])
-    if event is None or event.get("deleted_at") or str(event.get("status") or "") == "cancelled":
+    if (event is None or event.get("deleted_at") or str(event.get("status") or "") == "cancelled"
+            or event.get("sync_state") == "pending_delete"):
         reason, live = "событие отменено или удалено", event
     else:
         reason, live = _occurrence_state(store, event, parse_stored(rem.get("occurrence_start_utc")), now,

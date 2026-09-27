@@ -533,6 +533,18 @@ class Store:
                             (event_id, occurrence_start_utc, offset_min)).fetchone()
         return row is not None
 
+    def retire_legacy_waiting_series_reminders(self) -> None:
+        """Replace identity-less recurring queue entries before planning their replacements.
+
+        A concurrent send reservation wins or loses this one SQLite write: when
+        it wins the row is `unknown` and the planner's settled guard prevents a
+        duplicate; when it loses the old row cannot be sent. Non-series rows
+        retain their unchanged notice IDs.
+        """
+        with self._conn() as c:
+            c.execute("DELETE FROM reminders WHERE recurrence_id='' AND state IN ('scheduled', 'no_channel')"
+                      " AND event_id IN (SELECT id FROM events WHERE rrule != '')")
+
     def due_reminders(self, now: datetime, limit: Optional[int] = None, include_no_channel: bool = True) -> List[Dict[str, Any]]:
         """Snapshot every due row once; a fixed first page can starve a short upcoming event."""
         states = ("scheduled", "no_channel") if include_no_channel else ("scheduled",)
