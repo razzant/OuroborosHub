@@ -1934,6 +1934,20 @@
       "slug": "yylo-tasks",
       "type": "instruction",
       "version": "0.1.0"
+    },
+    {
+      "slug": "meeting-brief",
+      "name": "meeting-brief",
+      "version": "0.1.0",
+      "type": "instruction",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "fb1b1f011c3ce732addd461abf73d501315e737e8aff8fca2a4f445123c7bfcb",
+          "size": 10344
+        }
+      ],
+      "description": "Prepare sourced morning work briefs, selected-meeting briefs, and post-meeting or end-of-day debriefs using existing calendar and approved information sources."
     }
   ]
 }
