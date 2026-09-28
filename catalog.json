@@ -1933,8 +1933,8 @@
         },
         {
           "path": "reminders.py",
-          "sha256": "0cb9bac8fefd392c9680abdc049935206e6edee50a06a2eeb50f158f90cab36f",
-          "size": 23931
+          "sha256": "1ab0ef562a7e27764ce69ac8deae1d9603a4e5fa1bf91c9540753fbbe4bd3622",
+          "size": 24049
         },
         {
           "path": "routes.py",
@@ -1973,8 +1973,8 @@
         },
         {
           "path": "tests/test_calendar_reminder_queue.py",
-          "sha256": "8caa43a10dc40323436c342cb7b5288ed63d6f77c95e584a71d7ad0509976e4c",
-          "size": 31477
+          "sha256": "7337a65cee30e24323a71bb40771c17c87a858f1378df771cd082d31f1fcda95",
+          "size": 32125
         },
         {
           "path": "tests/test_calendar_review.py",

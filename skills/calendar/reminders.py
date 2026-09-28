@@ -129,11 +129,13 @@ def plan(store, occurrences_in: Any, now: Optional[datetime] = None) -> int:
     now = now or now_utc()
     rules = get_rules(store)
     modes = store.get_setting(MODE_KEY) or {}
-    store.retire_legacy_waiting_series_reminders()
     horizon_end = now + PLAN_HORIZON + timedelta(days=7)   # offsets up to 7 days look further ahead
+    # Do not retire recoverable old waiting rows if occurrence enumeration fails.
+    occurrences = list(occurrences_in(now - timedelta(hours=1), horizon_end))
+    store.retire_legacy_waiting_series_reminders()
     scheduled = 0
     wanted = set()
-    for occ in occurrences_in(now - timedelta(hours=1), horizon_end):
+    for occ in occurrences:
         if str(occ.get("status") or "") == "cancelled" or occ.get("sync_state") == "pending_delete":
             continue
         start = parse_stored(occ.get("start_utc"))

@@ -422,6 +422,16 @@ class RecurringOccurrenceIdentityTests(unittest.TestCase):
         stats = rem.deliver_due(self.ctx.store, channel, UTC, now=resumed)
         self.assertEqual((stats["sent"], len(channel.sent)), (1, 1))
 
+    def test_failed_occurrence_enumeration_retains_old_waiting_rows(self):
+        old_id = rem.notice_id_for(self.master["id"], iso_utc(self.first), 15)
+        self.ctx.store.schedule_reminder(self.master["id"], iso_utc(self.first), 15,
+                                         iso_utc(self.first - timedelta(minutes=15)), old_id)
+        def unavailable(_start, _end):
+            raise RuntimeError("calendar read failed")
+        with self.assertRaisesRegex(RuntimeError, "calendar read failed"):
+            rem.plan(self.ctx.store, unavailable, now=self.now)
+        self.assertEqual(len(waiting(self.ctx, self.now, self.master["id"])), 1)
+
     def test_old_database_adds_original_slot_column_without_rewriting_uncertain_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "calendar.sqlite3")
