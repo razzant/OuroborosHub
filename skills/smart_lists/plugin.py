@@ -441,6 +441,8 @@ def _store_view(info: Dict[str, Any]) -> Dict[str, Any]:
     if last_export.get("at") and info.get("generation") is not None:
         since = max(0, info["generation"] - last_export["generation"])
         export_text = f"{last_export['at']} ({since} {'change' if since == 1 else 'changes'} since)"
+    elif last_export.get("at"):
+        export_text = f"{last_export['at']} (current store unavailable; cannot compare changes)"
     else:
         export_text = "Never"
     unrecorded = info.get("export_unrecorded")
@@ -541,7 +543,10 @@ def _widget_mutation(call: Callable[[Any], Dict[str, Any]]) -> Dict[str, Any]:
         result = call(_service())
     except ListError as exc:
         return {**widget_view(warning=exc.message), "error": exc.message}
-    return widget_view(notice=_describe(result))
+    view = widget_view(notice=_describe(result), warning=result.get("warning", ""))
+    if result.get("warning"):
+        view["ok"] = True  # Restore committed; the old journal is a warning, not a refusal.
+    return view
 
 
 def widget_selection(group: Any) -> Dict[str, Any]:
@@ -791,6 +796,8 @@ WIDGET_RENDER: Dict[str, Any] = {
                  ]},
                 {"type": "callout", "target": "store_result", "tone": "danger", "path": "error",
                  "condition_key": "error"},
+                {"type": "callout", "target": "store_result", "tone": "warning", "path": "warning",
+                 "condition_key": "warning"},
                 {"type": "callout", "target": "store_result", "tone": "success", "path": "notice",
                  "condition_key": "notice"},
             ]},

@@ -42,6 +42,7 @@ Lifecycle rules, so lists never vanish, reappear empty or double silently:
 from __future__ import annotations
 
 import base64
+import copy
 import errno
 import hashlib
 import json
@@ -207,9 +208,10 @@ def _missing(meta: Dict[str, Any]) -> ListError:
 def _mismatch(doc: Dict[str, Any], meta: Dict[str, Any]) -> ListError:
     return ListError(
         "store_mismatch",
-        f"The list store file is not the one this installation last saved: it holds generation "
-        f"{doc['generation']} of store {doc.get('store_id') or '(unnamed)'}, the last save was generation "
-        f"{meta['generation']} of store {meta['store_id']}. It may be an older or foreign copy; it was left "
+        f"The list store file does not match this installation's last save: it holds generation "
+        f"{doc['generation']} of store {doc.get('store_id') or '(unnamed)'}, while the last save recorded "
+        f"generation {meta.get('generation', 'unknown')} of store {meta.get('store_id', 'unknown')}. "
+        "Its bytes or counts may have changed, or it may be an older or foreign copy; it was left "
         "untouched and no change was applied. Restore the copy you want with the store tool "
         "(action=restore, replace=true); the current file is backed up first.",
     )
@@ -237,7 +239,7 @@ def empty_document() -> Dict[str, Any]:
 def clean_request_id(value: Any) -> str:
     if value is None or value == "":
         return ""
-    if not isinstance(value, str) or not _REQUEST_ID_RE.match(value):
+    if not isinstance(value, str) or not _REQUEST_ID_RE.fullmatch(value):
         raise _invalid(
             "request_id must be 1-128 characters of letters, digits, '.', '_', ':' or '-' "
             "and start with a letter or digit"
@@ -289,7 +291,7 @@ def clean_name(value: Any) -> str:
         raise _invalid("group names cannot contain '/', which separates path segments")
     if len(name) > MAX_NAME_CHARS:
         raise _invalid(f"name is longer than {MAX_NAME_CHARS} characters")
-    if _GROUP_ID_RE.match(name):
+    if _GROUP_ID_RE.fullmatch(name):
         raise _invalid("name must not look like a group id")
     return _utf8(name, "name")
 
@@ -323,7 +325,7 @@ def clean_entry_ids(value: Any) -> List[str]:
         raise _invalid(f"at most {MAX_BATCH} entry ids per call")
     ids: List[str] = []
     for item in value:
-        if not isinstance(item, str) or not _ENTRY_ID_RE.match(item.strip()):
+        if not isinstance(item, str) or not _ENTRY_ID_RE.fullmatch(item.strip()):
             raise _invalid(f"{item!r} is not an entry id (e_ followed by 10 hex characters)")
         if item.strip() not in ids:
             ids.append(item.strip())
@@ -353,7 +355,7 @@ def _optional_ref(value: Any, *, field: str) -> str:
 def _ref_key(ref: str) -> str:
     """Canonical spelling of a group reference, so a retry that writes the same
     path differently ('home/groceries' vs 'Home / Groceries') is still a replay."""
-    if not ref or _GROUP_ID_RE.match(ref):
+    if not ref or _GROUP_ID_RE.fullmatch(ref):
         return ref
     return "/".join(_norm(part) for part in ref.split("/") if part.strip())
 
@@ -485,7 +487,7 @@ def _written_by_cleaner(value: Any, cleaner: Callable[[Any], Any]) -> bool:
 
 def _check_group(group_id: Any, group: Any, groups: Dict[str, Any]) -> None:
     if (
-        not isinstance(group_id, str) or not _GROUP_ID_RE.match(group_id)
+        not isinstance(group_id, str) or not _GROUP_ID_RE.fullmatch(group_id)
         or not isinstance(group, dict) or not set(group) <= _GROUP_KEYS
         or group.get("id") != group_id
         or not _written_by_cleaner(group.get("name"), clean_name)
@@ -499,7 +501,7 @@ def _check_group(group_id: Any, group: Any, groups: Dict[str, Any]) -> None:
 def _check_entry(entry_id: Any, entry: Any, groups: Dict[str, Any], next_seq: int) -> None:
     due = entry.get("due") if isinstance(entry, dict) else None
     if (
-        not isinstance(entry_id, str) or not _ENTRY_ID_RE.match(entry_id)
+        not isinstance(entry_id, str) or not _ENTRY_ID_RE.fullmatch(entry_id)
         or not isinstance(entry, dict) or not set(entry) <= _ENTRY_KEYS
         or entry.get("id") != entry_id
         or not isinstance(entry.get("group_id"), str) or entry["group_id"] not in groups
@@ -511,7 +513,7 @@ def _check_entry(entry_id: Any, entry: Any, groups: Dict[str, Any], next_seq: in
         or not (entry.get("source") is None or (isinstance(entry["source"], str)
                                                 and len(entry["source"]) <= MAX_SOURCE_CHARS))
         or not (entry.get("request_id") is None or (isinstance(entry["request_id"], str)
-                                                    and _REQUEST_ID_RE.match(entry["request_id"])))
+                                                    and _REQUEST_ID_RE.fullmatch(entry["request_id"])))
         or not all(_stamp_ok(entry.get(key)) for key in ("created_at", "updated_at", "completed_at",
                                                           "deleted_at"))
     ):
@@ -616,10 +618,10 @@ def _journal_shape(op: str, result: Dict[str, Any]) -> bool:
 
 def _check_request(request_id: Any, record: Any) -> None:
     if (
-        not isinstance(request_id, str) or not _REQUEST_ID_RE.match(request_id)
+        not isinstance(request_id, str) or not _REQUEST_ID_RE.fullmatch(request_id)
         or not isinstance(record, dict) or set(record) != _REQUEST_KEYS
         or not isinstance(record.get("op"), str) or not 0 < len(record["op"]) <= MAX_OP_CHARS
-        or not isinstance(record.get("fingerprint"), str) or not _HEX64_RE.match(record["fingerprint"])
+        or not isinstance(record.get("fingerprint"), str) or not _HEX64_RE.fullmatch(record["fingerprint"])
         or not _stamp_ok(record.get("at"), required=True)
         or not isinstance(record.get("result"), dict) or not _depth_ok(record["result"])
         or not _journal_shape(record["op"], record["result"])
@@ -675,7 +677,7 @@ def _check_document(doc: Any) -> Dict[str, Any]:
             for request_id, record in list(legacy_requests.items()):
                 result = record.get("result") if isinstance(record, dict) else None
                 if (version == 1 and isinstance(record, dict)
-                        and isinstance(request_id, str) and _REQUEST_ID_RE.match(request_id)
+                        and isinstance(request_id, str) and _REQUEST_ID_RE.fullmatch(request_id)
                         and record.get("op") == "add" and isinstance(result, dict)
                         and set(result) == {"op", "added"} and result["op"] == "add"
                         and isinstance(result["added"], list) and len(result["added"]) <= MAX_BATCH
@@ -695,7 +697,7 @@ def _check_document(doc: Any) -> Dict[str, Any]:
     if not _is_int(next_seq) or not 1 <= next_seq < MAX_COUNTER:
         raise _Malformed("next_seq is missing or out of range")
     store_id = doc.get("store_id")
-    if store_id is not None and not (isinstance(store_id, str) and _STORE_ID_RE.match(store_id)):
+    if store_id is not None and not (isinstance(store_id, str) and _STORE_ID_RE.fullmatch(store_id)):
         raise _Malformed("store_id is malformed")
     if not _is_int(doc.get("generation")) or not 0 <= doc["generation"] < MAX_COUNTER:
         raise _Malformed("generation is missing or out of range")
@@ -751,6 +753,27 @@ def _lineage_conflict(doc: Dict[str, Any], meta: Optional[Dict[str, Any]]) -> bo
     return doc.get("store_id") != meta["store_id"] or doc["generation"] < meta["generation"]
 
 
+def _content_conflict(doc: Dict[str, Any], raw: bytes, meta: Optional[Dict[str, Any]]) -> bool:
+    """A recorded save must not be silently replaced with altered same-generation bytes.
+
+    Older sentinels lack a digest; their counts still detect truncated entries.
+    The previous file named by a pending write is checked separately below.
+    """
+    if meta is None:
+        # v0.1 stores predate the sentinel. Modern stores require their marker;
+        # otherwise deletion of the marker could launder damaged content.
+        return doc.get("store_id") is not None or doc["generation"] != 0
+    if not meta:
+        return True
+    if meta.get("_corrupt"):
+        return True
+    digest = meta.get("content_sha256")
+    if digest is not None:
+        return digest != _sha256(raw)
+    counts = meta.get("counts")
+    return isinstance(counts, dict) and counts != _counts(doc)
+
+
 def _interrupted_write(doc: Dict[str, Any], raw: bytes, meta: Optional[Dict[str, Any]]) -> bool:
     """True when store.json is byte-for-byte the file that the write the
     sentinel announced was about to replace: that write failed or was cut off
@@ -765,25 +788,41 @@ def _clean_meta(meta: Any) -> Dict[str, Any]:
     sentinel can never break status views; {} still proves a prior save."""
     if not isinstance(meta, dict):
         return {}
+    def safe_text(value: Any, limit: int) -> bool:
+        if not isinstance(value, str) or len(value) > limit:
+            return False
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
+
     clean: Dict[str, Any] = {}
-    if isinstance(meta.get("store_id"), str) and _STORE_ID_RE.match(meta["store_id"]):
+    if isinstance(meta.get("store_id"), str) and _STORE_ID_RE.fullmatch(meta["store_id"]):
         clean["store_id"] = meta["store_id"]
+    if "content_sha256" in meta:
+        digest = meta["content_sha256"]
+        clean["content_sha256"] = (digest if isinstance(digest, str) and _HEX64_RE.fullmatch(digest)
+                                   else "invalid")
     if _is_int(meta.get("generation")) and meta["generation"] >= 0:
         clean["generation"] = meta["generation"]
-    if _stamp_ok(meta.get("written_at"), required=True):
+    if _stamp_ok(meta.get("written_at"), required=True) and safe_text(meta["written_at"], MAX_STAMP_CHARS):
         clean["written_at"] = meta["written_at"]
     counts = meta.get("counts")
     if isinstance(counts, dict) and all(_is_int(counts.get(key)) for key in _COUNT_KEYS):
         clean["counts"] = {key: counts[key] for key in _COUNT_KEYS}
+    else:
+        clean["_corrupt"] = True
     last = meta.get("last_export")
-    if (isinstance(last, dict) and _stamp_ok(last.get("at"), required=True) and _is_int(last.get("generation"))
-            and isinstance(last.get("sha256"), str) and isinstance(last.get("file"), str)):
+    if (isinstance(last, dict) and _stamp_ok(last.get("at"), required=True)
+            and safe_text(last["at"], MAX_STAMP_CHARS) and _is_int(last.get("generation"))
+            and safe_text(last.get("sha256"), 64) and safe_text(last.get("file"), 255)):
         clean["last_export"] = {"at": last["at"], "generation": last["generation"],
                                 "sha256": last["sha256"][:64], "file": last["file"][:255]}
     pending = meta.get("pending")
     if (isinstance(pending, dict) and _is_int(pending.get("generation"))
             and (pending.get("store_id") is None or isinstance(pending.get("store_id"), str))
-            and isinstance(pending.get("sha256"), str) and _HEX64_RE.match(pending["sha256"])):
+            and isinstance(pending.get("sha256"), str) and _HEX64_RE.fullmatch(pending["sha256"])):
         clean["pending"] = {"store_id": pending.get("store_id"), "generation": pending["generation"],
                             "sha256": pending["sha256"]}
     return clean
@@ -847,7 +886,7 @@ def _known_paths_hint(doc: Dict[str, Any]) -> str:
 def resolve_group(doc: Dict[str, Any], ref: Any, *, field: str = "group") -> Dict[str, Any]:
     """Resolve a group id or a case-insensitive '/'-separated name path."""
     text = _ref_text(ref, field=field)
-    if _GROUP_ID_RE.match(text):
+    if _GROUP_ID_RE.fullmatch(text):
         group = doc["groups"].get(text)
         if group is None:
             raise ListError("not_found", f"unknown group id {text}. {_known_paths_hint(doc)}")
@@ -1271,7 +1310,7 @@ class ListStore:
 
     def _read_meta(self) -> Optional[Dict[str, Any]]:
         """The sentinel: None when absent; {} when its content is damaged, which
-        still proves that a store was saved here. An OS error reading it is
+        still proves that a store was saved here, but cannot certify its contents. An OS error reading it is
         raised (store_io) rather than silently skipping the lineage check."""
         raw = self._meta_bytes()
         if raw is None:
@@ -1279,7 +1318,9 @@ class ListStore:
         try:
             meta = json.loads(raw.decode("utf-8"))
         except (ValueError, RecursionError):
-            return {}
+            return {"_corrupt": True}
+        if not isinstance(meta, dict):
+            return {"_corrupt": True}
         return _clean_meta(meta)
 
     def _load_raw(self) -> Tuple[Dict[str, Any], bytes]:
@@ -1289,7 +1330,7 @@ class ListStore:
         except FileNotFoundError:
             raise (_missing(meta) if meta is not None else _not_initialized()) from None
         doc = _parse_store(raw)
-        if _lineage_conflict(doc, meta) and not _interrupted_write(doc, raw, meta):
+        if (_lineage_conflict(doc, meta) or _content_conflict(doc, raw, meta)) and not _interrupted_write(doc, raw, meta):
             raise _mismatch(doc, meta or {})
         return doc, raw
 
@@ -1313,7 +1354,7 @@ class ListStore:
             raise
         _fsync_dir(path.parent)
 
-    def _write_meta(self, doc: Dict[str, Any], *, last_export: Any = _KEEP,
+    def _write_meta(self, doc: Dict[str, Any], *, content_sha256: str, last_export: Any = _KEEP,
                     pending: Optional[Dict[str, Any]] = None) -> None:
         previous = self._read_meta() or {}
         if last_export is _KEEP:
@@ -1325,6 +1366,7 @@ class ListStore:
             "generation": doc["generation"],
             "written_at": doc.get("updated_at", ""),
             "counts": _counts(doc),
+            "content_sha256": content_sha256,
             "last_export": last_export,
             "pending": pending,
         }
@@ -1363,14 +1405,14 @@ class ListStore:
         doc["generation"] = doc["generation"] + 1
         doc["updated_at"] = _now()
         data = (json.dumps(doc, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
-        self._write_meta(doc, pending=pending)
+        self._write_meta(doc, content_sha256=_sha256(data), pending=pending)
         try:
             self._write_atomic(self.path, data)
         except BaseException:
             self._put_back_meta(previous_meta)
             raise
         try:
-            self._write_meta(doc, pending=None)
+            self._write_meta(doc, content_sha256=_sha256(data), pending=None)
         except OSError:
             pass
 
@@ -1470,7 +1512,12 @@ class ListStore:
         returned too (and kept for status views) instead of being hidden.
         """
         with self._io_guard(), self._locked():
-            doc = self._load()
+            doc, raw = self._load_raw()
+            # An older store may contain plaintext in its request results.
+            # Export a sanitized copy; reading must not rewrite live bytes.
+            exported_doc = copy.deepcopy(doc)
+            for request in exported_doc["requests"].values():
+                request["result"] = _journal_result(request["result"])
             envelope = {
                 "format": EXPORT_FORMAT,
                 "format_version": EXPORT_FORMAT_VERSION,
@@ -1478,8 +1525,8 @@ class ListStore:
                 "store_id": doc.get("store_id"),
                 "generation": doc["generation"],
                 "counts": _counts(doc),
-                "sha256": _digest(doc),
-                "document": doc,
+                "sha256": _digest(exported_doc),
+                "document": exported_doc,
             }
             path = None
             if to_file:
@@ -1488,7 +1535,7 @@ class ListStore:
             record = {"at": envelope["exported_at"], "generation": doc["generation"],
                       "sha256": envelope["sha256"], "file": path.name if path else ""}
             try:
-                self._write_meta(doc, last_export=record)
+                self._write_meta(doc, content_sha256=_sha256(raw), last_export=record)
             except OSError as exc:
                 self.export_record_failure = {"at": record["at"], "file": record["file"],
                                               "error": type(exc).__name__}
@@ -1539,19 +1586,30 @@ class ListStore:
             elif meta is not None:
                 outcome["replaced"] = f"missing store file{_meta_summary(meta)}"
             pending = None
-            if current is not None and current_raw is not None:
+            current_trusted = (current is not None and current_raw is not None
+                               and ((not _lineage_conflict(current, meta)
+                                     and not _content_conflict(current, current_raw, meta))
+                                    or _interrupted_write(current, current_raw, meta)))
+            if current_raw is not None and not current_trusted:
+                outcome["replay_history_untrusted"] = True
+                outcome["warning"] = ("The replaced store could not be verified against its last save. "
+                                      "Its request IDs were not carried into the restored store; do not blindly "
+                                      "retry old mutations. Its exact previous bytes are in the backup above.")
+            if current_trusted:
                 merged = _bloom_union(_bloom_decode(new_doc.get("retired_requests")),
                                       _bloom_decode(current.get("retired_requests")))
                 for request_id in current["requests"]:
                     if request_id not in new_doc["requests"]:
                         _bloom_add(merged, _request_digest(request_id))
                 new_doc["retired_requests"] = _bloom_encode(merged)
-                if not _lineage_conflict(current, meta) or _interrupted_write(current, current_raw, meta):
-                    pending = {"store_id": current.get("store_id"), "generation": current["generation"],
-                               "sha256": _sha256(current_raw)}
+                pending = {"store_id": current.get("store_id"), "generation": current["generation"],
+                           "sha256": _sha256(current_raw)}
             _retire_overflow(new_doc)
+            for record in new_doc["requests"].values():
+                record["result"] = _journal_result(record["result"])
             new_doc["generation"] = max(new_doc["generation"], recorded, current["generation"] if current else 0)
             self._save(new_doc, pending)
+            self.export_record_failure = None  # Old in-memory write failure describes the replaced store.
             outcome.update(store_id=new_doc["store_id"], generation=new_doc["generation"], counts=_counts(new_doc))
             return outcome
 

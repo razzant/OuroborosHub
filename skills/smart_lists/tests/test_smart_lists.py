@@ -167,6 +167,13 @@ class SkillCase(unittest.TestCase):
         self.module.register(api)
         return api
 
+    def mark_fixture_as_legacy_store(self):
+        """A hand-built document fixture represents a pre-digest installation."""
+        meta_path = self.state_dir / "store_meta.json"
+        meta = json.loads(meta_path.read_text())
+        meta.pop("content_sha256", None)
+        meta_path.write_text(json.dumps(meta))
+
     def tool(self, tool_name, /, **args):
         return self.api.call_tool(tool_name, **args)
 
@@ -403,8 +410,42 @@ class ToolFlowTests(SkillCase):
         record = next(iter(doc["requests"].values()))
         record["result"]["added"][0]["text"] = "old secret"
         path.write_text(json.dumps(doc))
+        self.mark_fixture_as_legacy_store()
         self.ok("update", entry_id=entry_id, text="new secret")
         self.assertNotIn("old secret", json.dumps(json.loads(self.store_bytes())["requests"]))
+
+    def test_install_sanitizes_legacy_journal_before_persisting_restore(self):
+        self.make_tree()
+        self.add("Home", "old secret", request_id="original")
+        doc = json.loads(self.store_bytes())
+        doc["requests"]["original"]["result"]["added"][0]["text"] = "old secret"
+        doc["schema_version"] = 2
+        doc.pop("retired_requests")
+        doc["expired_requests"] = []
+        other = pathlib.Path(self._tmp.name) / "restored"
+        self.api = self.fresh_api(other)
+        self.module._service().store.install(doc, replace=False, reason="restore")
+        restored = json.loads((other / "store.json").read_text())
+        self.assertNotIn("old secret", json.dumps(restored["requests"]))
+        self.assertEqual(self.ok("read", group="Home")["entries"][0]["text"], "old secret")
+        replay = self.ok("add", group="Home", items=[{"text": "old secret"}], request_id="original")
+        self.assertTrue(replay["replayed"])
+
+    def test_legacy_export_removes_erased_text_from_journal_without_rewriting_live_file(self):
+        self.make_tree()
+        entry_id = self.add("Home", "private erased phrase", request_id="original")[0]
+        self.ok("delete", entry_ids=[entry_id])
+        self.ok("delete", entry_ids=[entry_id], action="erase")
+        path = self.state_dir / "store.json"
+        doc = json.loads(path.read_text())
+        doc["requests"]["original"]["result"]["added"][0]["text"] = "private erased phrase"
+        path.write_text(json.dumps(doc))
+        self.mark_fixture_as_legacy_store()
+        before = path.read_bytes()
+        exported = self.ok("store", action="export")
+        envelope = json.loads(pathlib.Path(exported["file"]).read_text())
+        self.assertNotIn("private erased phrase", json.dumps(envelope))
+        self.assertEqual(path.read_bytes(), before, "export must not rewrite a live legacy store")
 
     def test_group_rename_does_not_retain_old_private_label_in_journal(self):
         first = self.ok("group", action="create", name="Old private label", request_id="group-first")
@@ -841,6 +882,73 @@ class LifecycleTests(SkillCase):
         (self.state_dir / "store.json").write_text(json.dumps(foreign))
         self.refused("read", "store_mismatch")
 
+    def test_same_generation_content_damage_cannot_be_exported_as_a_clean_backup(self):
+        import hashlib
+
+        self.build_lists()
+        original = self.store_bytes()
+        meta_path = self.state_dir / "store_meta.json"
+        meta = meta_path.read_bytes()
+        self.assertEqual(json.loads(meta)["content_sha256"], hashlib.sha256(original).hexdigest())
+        damaged = json.loads(original)
+        first = next(iter(damaged["entries"].values()))
+        first["text"] = "altered without changing counts or generation"
+        (self.state_dir / "store.json").write_text(json.dumps(damaged))
+        self.refused("read", "store_mismatch")
+        self.refused("store", "store_mismatch", action="export")
+        self.assertEqual(self.ok("store", action="status")["state"], "mismatch")
+        self.assertEqual(meta_path.read_bytes(), meta, "export must not launder the damaged bytes")
+
+        # Older sentinels had no byte digest; their saved counts still catch
+        # a disappearing entry before export or the next mutation.
+        legacy = json.loads(meta)
+        legacy.pop("content_sha256")
+        meta_path.write_text(json.dumps(legacy))
+        damaged["entries"].pop(next(iter(damaged["entries"])))
+        (self.state_dir / "store.json").write_text(json.dumps(damaged))
+        self.refused("store", "store_mismatch", action="export")
+
+    def test_new_meta_rejects_corrupt_utf8_and_malformed_digest_without_mutation(self):
+        self.build_lists()
+        path = self.state_dir / "store_meta.json"
+        original = path.read_bytes()
+        bad = json.loads(original)
+        bad["written_at"] = "\ud800"
+        bad["last_export"] = {"at": "\ud800", "generation": 1, "sha256": "x", "file": "\ud800"}
+        path.write_text(json.dumps(bad))
+        self.assertTrue(self.api.call_route("view")["ok"])
+        bad["content_sha256"] = "not-a-hash"
+        path.write_text(json.dumps(bad))
+        self.refused("read", "store_mismatch")
+        self.assertEqual(self.ok("store", action="status")["state"], "mismatch")
+        path.write_bytes(original)
+        self.assertEqual(self.ok("store", action="status")["state"], "ready")
+
+    def test_missing_commit_marker_never_certifies_a_standalone_store_file(self):
+        self.build_lists()
+        before = self.store_bytes()
+        (self.state_dir / "store_meta.json").unlink()
+        self.refused("read", "store_mismatch")
+        self.refused("store", "store_mismatch", action="export")
+        self.assertEqual(self.store_bytes(), before)
+
+    def test_restore_over_corrupt_replay_filter_does_not_import_untrusted_ids(self):
+        self.ok("store", action="init")
+        self.ok("group", action="create", name="Home")
+        export_path = self.ok("store", action="export")["file"]
+        path = self.state_dir / "store.json"
+        doc = json.loads(path.read_text())
+        core = self.module.lists_core
+        doc["retired_requests"] = {"bits": core.BLOOM_BITS, "hashes": core.BLOOM_HASHES,
+                                   "data": base64.b64encode(zlib.compress(b"\xff" * (core.BLOOM_BITS // 8))).decode()}
+        path.write_text(json.dumps(doc))
+        self.refused("read", "store_mismatch")
+        restored = self.ok("store", action="restore", file=export_path, replace=True)
+        self.assertTrue(restored["replay_history_untrusted"])
+        self.assertIn("do not blindly", restored["warning"])
+        self.assertTrue(pathlib.Path(restored["backup"]).exists())
+        self.assertTrue(self.ok("add", group="Home", items=[{"text": "fresh"}], request_id="fresh-after-repair")["added"])
+
     def test_export_and_restore_round_trip_into_a_fresh_installation(self):
         ids = self.build_lists()
         source_doc = json.loads(self.store_bytes())
@@ -1185,6 +1293,14 @@ class DuplicateReportTests(SkillCase):
 class ImportValidationTests(SkillCase):
     """Restore accepts only documents this skill could have written."""
 
+    def test_entry_id_with_trailing_newline_is_not_a_valid_persisted_id(self):
+        core = self.module.lists_core
+        doc = json.loads(self.store_bytes())
+        entry_id, entry = next(iter(doc["entries"].items()))
+        malformed = dict(entry, id=entry_id + "\n")
+        with self.assertRaises(core._Malformed):
+            core._check_entry(malformed["id"], malformed, doc["groups"], doc["next_seq"])
+
     def setUp(self):
         super().setUp()
         core = self.module.lists_core
@@ -1497,13 +1613,18 @@ class ExportRecordTests(SkillCase):
         meta_path = self.state_dir / "store_meta.json"
         meta = json.loads(meta_path.read_text())
         meta.update(last_export={"at": "2026-09-01T00:00:00+00:00", "generation": "abc", "sha256": 1, "file": None},
-                    counts={"groups": "many"}, written_at=["x"])
+                    written_at=["x"])
         meta_path.write_text(json.dumps(meta))
         view = self.api.call_route("view")
         self.assertTrue(view["ok"], view)
         self.assertEqual((view["store"]["last_export"], view["store"]["last_written"]), ("Never", "—"))
+        malformed_counts = dict(meta, counts={"groups": "many"})
+        meta_path.write_text(json.dumps(malformed_counts))
+        self.assertEqual(self.api.call_route("view")["store"]["state"], "mismatch")
         meta_path.write_text("{truncated")
-        self.assertTrue(self.api.call_route("view")["ok"])
+        self.assertEqual(self.api.call_route("view")["store"]["state"], "mismatch")
+        self.refused("read", "store_mismatch")
+        meta_path.write_text(json.dumps(meta))
         self.ok("group", action="create", name="Home")
         self.assertEqual(json.loads(meta_path.read_text())["generation"],
                          json.loads(self.store_bytes())["generation"])
@@ -1531,6 +1652,22 @@ class StoreWriteFailureTests(SkillCase):
         self.assertEqual(self.ok("store", action="status")["state"], "ready")
         self.assertFalse(self.ok("add", group="Home", items=[{"text": "milk"}], request_id="r1")["replayed"])
         self.assertIsNone(json.loads((self.state_dir / "store_meta.json").read_text())["pending"])
+
+    def test_interrupted_restore_never_certifies_a_corrupted_same_generation_source(self):
+        self.ok("group", action="create", name="Home")
+        export_path = self.ok("store", action="export")["file"]
+        path = self.state_dir / "store.json"
+        doc = json.loads(path.read_text())
+        doc["groups"][next(iter(doc["groups"]))]["name"] = "Altered"
+        path.write_text(json.dumps(doc))
+        corrupted = path.read_bytes()
+        self.refused("read", "store_mismatch")
+        store = self.module._service().store
+        with self.store_writes_fail(store), mock.patch.object(store, "_put_back_meta"):
+            self.refused("store", "store_io", action="restore", file=export_path, replace=True)
+        self.assertEqual(path.read_bytes(), corrupted)
+        self.refused("read", "store_mismatch")
+        self.assertEqual(self.ok("store", action="status")["state"], "mismatch")
 
     def test_interrupted_write_loads_the_last_committed_store_not_a_mismatch(self):
         self.ok("group", action="create", name="Home")
@@ -1574,6 +1711,29 @@ class StoreWriteFailureTests(SkillCase):
         self.assertTrue(self.ok("add", group="Home", items=[{"text": "milk"}], request_id="r1")["replayed"])
         self.ok("add", group="Home", items=[{"text": "bread"}], request_id="r2")
         self.assertIsNone(json.loads((self.state_dir / "store_meta.json").read_text())["pending"])
+
+    def test_interrupted_restore_after_a_pending_commit_keeps_valid_old_store_readable(self):
+        self.ok("group", action="create", name="Home")
+        export_path = self.ok("store", action="export")["file"]
+        store = self.module._service().store
+        original_write_meta = store._write_meta
+
+        def fail_final(doc, **kwargs):
+            if kwargs.get("pending", "absent") is None and "last_export" not in kwargs:
+                raise OSError("final marker unavailable")
+            return original_write_meta(doc, **kwargs)
+
+        with mock.patch.object(store, "_write_meta", side_effect=fail_final):
+            self.ok("add", group="Home", items=[{"text": "new"}], request_id="recent")
+        old = self.store_bytes()
+        self.assertIsNotNone(json.loads((self.state_dir / "store_meta.json").read_text())["pending"])
+        with self.store_writes_fail(store), mock.patch.object(store, "_put_back_meta"):
+            self.refused("store", "store_io", action="restore", file=export_path, replace=True)
+        self.assertEqual(self.store_bytes(), old)
+        self.assertEqual(self.ok("store", action="status")["state"], "ready")
+        restored = self.ok("store", action="restore", file=export_path, replace=True)
+        self.assertNotIn("replay_history_untrusted", restored)
+        self.refused("add", "request_expired", group="Home", items=[{"text": "new"}], request_id="recent")
 
     def test_unreadable_sentinel_is_a_typed_refusal(self):
         meta_path = self.state_dir / "store_meta.json"
@@ -1709,6 +1869,7 @@ class ReplayFilterTests(SkillCase):
         doc["retired_requests"] = {"bits": core.BLOOM_BITS, "hashes": core.BLOOM_HASHES,
                                    "data": base64.b64encode(zlib.compress(b"\xff" * (core.BLOOM_BITS // 8))).decode()}
         path.write_text(json.dumps(doc))
+        self.mark_fixture_as_legacy_store()
         before = self.store_bytes()
         message = self.refused("add", "request_expired", group="Home", items=[{"text": "bread"}],
                                request_id="fresh-id")["error"]["message"]
@@ -1729,6 +1890,7 @@ class ReplayFilterTests(SkillCase):
         doc.pop("retired_requests")
         doc.update(schema_version=2, expired_requests=[core._request_digest("old-a"), core._request_digest("old-b")])
         path.write_text(json.dumps(doc))
+        self.mark_fixture_as_legacy_store()
         self.assertEqual(self.ok("store", action="status")["state"], "ready")
         self.assertEqual(json.loads(self.store_bytes())["schema_version"], 2, "reads never rewrite the store")
         self.refused("add", "request_expired", group="Home", items=[{"text": "x"}], request_id="old-a")
@@ -1753,6 +1915,7 @@ class CounterLimitTests(SkillCase):
         doc = json.loads(path.read_text())
         doc["next_seq"] = self.module.lists_core.MAX_COUNTER - 2
         path.write_text(json.dumps(doc))
+        self.mark_fixture_as_legacy_store()
         before = self.store_bytes()
         self.refused("add", "limit", group="Home", items=[{"text": "a"}, {"text": "b"}], request_id="overflow")
         self.assertEqual(self.store_bytes(), before)
@@ -1767,6 +1930,7 @@ class CounterLimitTests(SkillCase):
         doc, meta = json.loads(path.read_text()), json.loads(meta_path.read_text())
         doc["generation"] = self.module.lists_core.MAX_COUNTER - 1
         meta["generation"] = doc["generation"]
+        meta.pop("content_sha256", None)
         path.write_text(json.dumps(doc))
         meta_path.write_text(json.dumps(meta))
         before, backups = self.store_bytes(), list((self.state_dir / "backups").glob("*.json"))

@@ -1,7 +1,7 @@
 ---
 name: smart_lists
 description: "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a compact declarative widget. No network, purchases or reminders."
-version: 0.3.0
+version: 0.3.1
 type: extension
 runtime: python3
 entry: plugin.py
@@ -194,6 +194,7 @@ ui_tab:
           - {name: export_json, label: Export, type: textarea, placeholder: Paste the whole content of a Smart Lists export file}
           - {name: replace, label: Replace the current store (it is copied to Backups first), type: checkbox}
         - {type: callout, target: store_result, tone: danger, path: error, condition_key: error}
+        - {type: callout, target: store_result, tone: warning, path: warning, condition_key: warning}
         - {type: callout, target: store_result, tone: success, path: notice, condition_key: notice}
 ---
 
@@ -234,14 +235,17 @@ multi-list labels are deliberately outside this version.
 | State (`store` → `status`) | Meaning | What every other tool does |
 | --- | --- | --- |
 | `uninitialized` | No `store.json` and no sign that one was ever saved in this state directory: a first run, or a directory that was wiped (uninstall, reinstall). The two cannot be told apart from inside the directory. | Refuses with `store_not_initialized`. The agent asks the owner whether they have an export to restore, then calls `restore` or `init`. |
-| `ready` | `store.json` is readable and matches the last save. | Works normally. |
+| `ready` | `store.json` is readable and matches the last save's byte digest (or, on older sentinels without a digest, saved counts). | Works normally. |
 | `missing` | `store.json` is gone but the sentinel shows it was saved here. | Refuses with `store_missing` (with the last known counts). No empty store is created in its place. `restore` recovers; `init` needs `replace: true`. |
-| `mismatch` | `store.json` holds an older generation or another store's id than the last save recorded, for example a copy put back by hand. | Refuses with `store_mismatch` and leaves the file untouched. `restore` with `replace: true` backs the file up and installs the chosen export (which may be that same file). |
+| `mismatch` | `store.json` holds an older generation or another store's id, or its bytes differ from the last recorded save without a matching interrupted-write record. A malformed sentinel is also insufficient to certify its contents. | Refuses with `store_mismatch` and leaves the file untouched. `restore` with `replace: true` backs the file up and installs the chosen export (which may be that same file). |
 | `unreadable` | Invalid JSON, invalid Unicode, a newer schema, or a document that fails [validation](#validation). | Refuses with `store_unreadable` and leaves the file untouched. |
 
 The sentinel is `store_meta.json` next to the store. It holds the store id,
-the generation (a counter bumped on every save), the time and counts of the
-last save and the last export, and no entry text or group names. While a
+the generation (a counter bumped on every save), the SHA-256 of the exact saved
+`store.json` bytes, the time and counts of the last save and the last export,
+and no entry text or group names. Older sentinels have no byte digest: their
+saved counts catch entry loss but cannot detect same-count content corruption
+until a verified read followed by a new save or export establishes the digest. While a
 save is in flight it also names the exact file being replaced (`pending`:
 store id, generation, SHA-256).
 
@@ -265,8 +269,9 @@ without `pending`. The replace is the commit point.
   loads as the last committed state instead of a false `mismatch`. Any
   other older copy is still a `mismatch`.
 - If only the last sentinel write fails, the change is committed and
-  reported as done; the stale `pending` record matches only the file this
-  write replaced and is cleared by the next save.
+  reported as done; the announced digest still matches the new file, while
+  the stale `pending` record matches only the file this write replaced and
+  is cleared by the next save.
 - A failed first `init` removes its sentinel again, so the store stays
   `uninitialized` rather than looking `missing`.
 
@@ -279,6 +284,9 @@ without `pending`. The replace is the commit point.
   plus `counts` and a SHA-256 checksum of the document. The widget's
   **Download full export (JSON)** button produces the same document through
   `GET export` and hands it to the host's download, which saves to Downloads.
+  An older store's request journal is sanitized in the exported copy, without
+  rewriting the live file: an erased entry's former plaintext must not travel
+  into a new backup through the journal.
 - **Restore** (`store` → `restore`) takes an absolute path or a bare file name
   from the backups folder (tools), or pasted export text (widget). It accepts
   a Smart Lists export, whose checksum and counts must match, or a bare
@@ -302,9 +310,11 @@ without `pending`. The replace is the commit point.
   `missing` store needs no flag, because nothing is overwritten.
 - After a restore the store keeps the export's store id, and its generation
   continues above every earlier save, so the sentinel accepts it. Request ids
-  that the replaced store had applied but the export does not know are kept as
-  expired ids, so a late retry of such a change is refused rather than
-  applied again.
+  from a **verified** replaced store that the export does not know are kept as
+  expired ids, so a late retry is refused rather than applied again. A
+  mismatched, unreadable or unmarked replaced store is backed up but its replay
+  filter and ids are not trusted or merged: the result warns
+  `replay_history_untrusted`, and old mutations must not be blindly retried.
 - The skill never deletes files in `backups/`. They are ordinary files the
   owner or the agent can copy elsewhere or remove.
 
@@ -373,9 +383,9 @@ never breaks the widget later. Checked:
 - After the full record is evicted, a retry is refused even if the entry
   survives: its old arguments are no longer available to check for conflict.
   Reusing the same id with changed text must never silently report success.
-- Restore adds every id the replaced store had applied or retired, and the
-  export does not know, to the filter; retired ids also travel inside
-  exports.
+- Restore adds the ids applied or retired by a **verified** replaced store,
+  but unknown to the export, to the filter; retired ids also travel inside
+  exports. It never imports a damaged store's filter into a sound backup.
 - Stores from the 0.1.0 Draft may already have discarded old ids; this
   release cannot reconstruct that lost history. The 0.2.0 candidate's list of
   evicted digests is folded into the filter without loss.
