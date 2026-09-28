@@ -428,7 +428,11 @@ def cal_delete(ctx: Context, id: str = "", scope: str = SCOPE_THIS, send_updates
     if scope == SCOPE_FOLLOWING and not occ and not row.get("master_id"):
         return json_dumps({"status": "error", "message": "scope='following' требует id вхождения (…@дата): с какой даты удалять"})
     if not _bool(confirm):
-        return bounded_result({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "event": event_public(row, ctx.tz), "scope": scope})
+        target = ctx.store.get_event(row["master_id"]) if row.get("master_id") else row
+        affected = [{"event_id": m["id"], "calendar_id": m["calendar_id"]}
+                    for m in ops.deletion_targets(ctx.store, target or row)]
+        return bounded_result({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "event": event_public(row, ctx.tz),
+                               "scope": scope, "affected": affected})
     result = ops.delete_event(ctx.store, ctx.providers, str(id), scope=scope, send_updates=_bool(send_updates))
     statuses = {a["status"] for a in result["assignments"]}
     status = "deleted" if statuses <= {"done"} else ("pending" if "pending" in statuses else ("conflict" if "conflict" in statuses else "deleted_partially"))

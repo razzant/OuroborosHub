@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from model import (
-    DEFAULT_LOCAL_CALENDAR_ID, DEFAULT_LOCAL_CALENDAR_NAME, INTENT_FAILED, INTENT_PENDING, LOCAL_ACCOUNT_ID, iso_utc, new_id, now_utc,
+    DEFAULT_LOCAL_CALENDAR_ID, DEFAULT_LOCAL_CALENDAR_NAME, INTENT_DONE, INTENT_FAILED, INTENT_PENDING, LOCAL_ACCOUNT_ID, iso_utc, new_id, now_utc,
 )
 
 SCHEMA_VERSION = 1
@@ -370,6 +370,18 @@ class Store:
                 cur = c.execute("UPDATE events SET deleted_at=?, updated_at=? WHERE id=? AND deleted_at IS NULL", (_ts(), _ts(), event_id))
         return cur.rowcount > 0
 
+    def confirm_pending_delete(self, event_id: str) -> bool:
+        """Provider absence closes only the selected row and its pending delete intent, atomically."""
+        with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            removed = c.execute("DELETE FROM events WHERE id=? AND sync_state='pending_delete'", (event_id,))
+            if not removed.rowcount:
+                return False
+            c.execute("UPDATE intents SET state=?, result_json=?, lease_until=NULL, lease_owner='', next_attempt_at=NULL, updated_at=?"
+                      " WHERE event_id=? AND kind='delete' AND state=?",
+                      (INTENT_DONE, json.dumps({"note": "provider confirmed absent"}), _ts(), event_id, INTENT_PENDING))
+        return True
+
     def window(self, start: datetime, end: datetime, calendar_ids: Optional[Sequence[str]] = None,
                include_hidden: bool = True, include_masters: bool = True) -> List[Dict[str, Any]]:
         """Rows overlapping [start, end) plus (optionally) recurrence masters that may expand into it."""
@@ -546,10 +558,10 @@ class Store:
                       " AND event_id IN (SELECT id FROM events WHERE rrule != '')")
 
     def settled_reminders_for_split(self, event_id: str, first_original: str) -> List[Dict[str, Any]]:
-        """Terminal send history for the portion of a recurring series being replaced."""
+        """Terminal history candidates; legacy rows lack the original slot, so the caller resolves them against exceptions."""
         with self._conn() as c:
             rows = c.execute("SELECT * FROM reminders WHERE event_id=? AND state IN ('sent', 'unknown')"
-                             " AND COALESCE(NULLIF(recurrence_id, ''), occurrence_start_utc) >= ?",
+                             " AND (recurrence_id='' OR recurrence_id >= ?)",
                              (event_id, first_original)).fetchall()
         return [dict(row) for row in rows]
 

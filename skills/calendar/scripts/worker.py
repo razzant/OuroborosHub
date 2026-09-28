@@ -268,6 +268,10 @@ def _imported_reminders(local: Dict[str, Any], incoming: str, provider: str, mod
 
 
 def _confirmed_deletion(store: Store, providers: Providers, local: Dict[str, Any]) -> int:
+    if local.get("sync_state") == "pending_delete":
+        # This row was selected for deletion by an earlier scoped operation.
+        # Its siblings already have their own intents if the owner requested a cascade.
+        return int(store.confirm_pending_delete(local["id"]))
     if local.get("link_group_id"):
         ops.delete_event(store, providers, local["id"], scope="all", owner="companion")
     else:

@@ -1913,8 +1913,8 @@
         },
         {
           "path": "ops.py",
-          "sha256": "57cb114863b1d772fa259204b745d04f82557d3e2cd53cf1f79d737ff728ab7b",
-          "size": 55514
+          "sha256": "a92a2c829153eed86b78db8466ac43321e5b03c2eb6b6e5f4a4caf142cb20cdd",
+          "size": 56365
         },
         {
           "path": "plugin.py",
@@ -1943,13 +1943,13 @@
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "1cc5b5b7283be2ecee110599ae4216b99868a1c150806ffa68c5730d25bf3fd3",
-          "size": 18736
+          "sha256": "c61719b939248aa8f92e073138ae7fddd89d14ac18a757274f60fb9b68a9ce16",
+          "size": 19015
         },
         {
           "path": "store.py",
-          "sha256": "a5949c654a27af3893309ee19264a1eda313ec309a988bb03aee2dded9e44b31",
-          "size": 39841
+          "sha256": "d73d6e1cd6bbf135387055bd85b1abd567d35dbbf42d6adaecf9252f672b8e85",
+          "size": 40633
         },
         {
           "path": "tests/test_calendar.py",
@@ -1973,8 +1973,8 @@
         },
         {
           "path": "tests/test_calendar_reminder_queue.py",
-          "sha256": "1771c8901c00e89b664eaaf9d0659ee67a2cd0043b6f11c7d55334221a2f7487",
-          "size": 39277
+          "sha256": "3afbd2f4c20a8d5c5a8ab1eae792be810002e5b2ccda428df5e66a13676bb733",
+          "size": 42263
         },
         {
           "path": "tests/test_calendar_review.py",
@@ -1983,8 +1983,8 @@
         },
         {
           "path": "tests/test_calendar_round2.py",
-          "sha256": "3e31d094ab4a6bf77b1af0a5f92f4d1142c68f75ec3b779c0c0d073c0713abb3",
-          "size": 31503
+          "sha256": "3c8d16db370ae0b21b796b741b87eb15fa793ab45459ce5f7cf2da18d4b328ec",
+          "size": 33678
         },
         {
           "path": "tests/test_calendar_round3.py",
@@ -2003,8 +2003,8 @@
         },
         {
           "path": "tools.py",
-          "sha256": "e51b9c8879df35795cabd80a1dfd2563bcb9981c1265c3eddf495e33938fbeb9",
-          "size": 49227
+          "sha256": "f97c79825f5f0d3689cae219d2028cc402d0f11150e887b3e490a0a7f75a5191",
+          "size": 49520
         },
         {
           "path": "widget.js",

@@ -363,6 +363,37 @@ class ReassignAndLinkedSeriesRound2Tests(unittest.TestCase):
         removed = result["reassign"]["removed"][0]["assignments"]
         self.assertIn("pending", {assignment["status"] for assignment in removed})
 
+    def test_provider_confirmation_of_removed_copy_does_not_delete_primary(self):
+        ctx = make_context()
+        external = add_external_calendar(ctx.store)
+        adapter = RecordingAdapter()
+        adapter.fail_delete = "network"
+        ctx.providers = OneAdapterProviders(adapter)
+        created = json.loads(tools.cal_create(ctx, title="Primary survives", start="2026-10-01T09:00+00:00",
+                                              calendars=[DEFAULT_LOCAL_CALENDAR_ID, external], confirm=True))
+        primary = created["event"]
+        copy = next(m for m in ctx.store.group_masters(primary["link_group_id"]) if m["id"] != primary["id"])
+        removed = ops.reassign_event(ctx.store, ctx.providers, ctx.store.get_event(primary["id"]), [DEFAULT_LOCAL_CALENDAR_ID])
+        self.assertEqual(removed["removed"][0]["assignments"][0]["status"], "pending")
+        self.assertEqual(ctx.store.get_event(copy["id"])["sync_state"], "pending_delete")
+        from scripts.worker import _confirmed_deletion
+        _confirmed_deletion(ctx.store, ctx.providers, ctx.store.get_event(copy["id"]))
+        self.assertIsNone(ctx.store.get_event(copy["id"]))
+        self.assertIsNotNone(ctx.store.get_event(primary["id"]))
+        self.assertFalse(any(i["state"] == "pending" for i in ctx.store.intents_for_event(copy["id"])))
+
+    def test_linked_copy_delete_preview_names_every_target_of_confirmation(self):
+        ctx = make_context()
+        external = add_external_calendar(ctx.store)
+        ctx.providers = OneAdapterProviders(RecordingAdapter())
+        created = json.loads(tools.cal_create(ctx, title="Linked", start="2026-10-01T09:00+00:00",
+                                              calendars=[DEFAULT_LOCAL_CALENDAR_ID, external], confirm=True))
+        primary = created["event"]
+        copy = next(m for m in ctx.store.group_masters(primary["link_group_id"]) if m["id"] != primary["id"])
+        preview = json.loads(tools.cal_delete(ctx, id=copy["id"], scope="all", confirm=False))
+        self.assertEqual({m["event_id"] for m in preview["affected"]}, {primary["id"], copy["id"]})
+        self.assertIsNotNone(ctx.store.get_event(primary["id"]))
+
 
 class ProviderIdentityRound2Tests(unittest.TestCase):
     def google_adapter(self):

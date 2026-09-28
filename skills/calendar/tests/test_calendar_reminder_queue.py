@@ -27,6 +27,7 @@ from test_calendar_round2 import Channel, Request, RouteAPI, add_external_calend
 from test_calendar_round5 import FakeFetchAdapter  # noqa: E402
 
 import reminders as rem  # noqa: E402
+import ops  # noqa: E402
 import routes  # noqa: E402
 import tools  # noqa: E402
 import worker as calendar_worker  # noqa: E402
@@ -563,7 +564,7 @@ class RecurringOccurrenceIdentityTests(unittest.TestCase):
         saved = self.ctx.store.get_event(exception["id"])
         self.assertEqual((saved["start_utc"], saved["end_utc"]),
                          (iso_utc(effective), iso_utc(effective + timedelta(hours=1))))
-        self.assertEqual(self.ctx.store.get_event(saved["master_id"])["start_utc"], iso_utc(effective))
+        self.assertEqual(self.ctx.store.get_event(saved["master_id"])["start_utc"], iso_utc(self.first))
 
     def test_title_only_following_split_does_not_repeat_sent_moved_cut(self):
         effective = self.first + timedelta(hours=2)
@@ -577,6 +578,46 @@ class RecurringOccurrenceIdentityTests(unittest.TestCase):
         plan(self.ctx, effective - timedelta(minutes=10))
         second_send = rem.deliver_due(self.ctx.store, channel, UTC, now=effective - timedelta(minutes=10))
         self.assertEqual((second_send["sent"], len(channel.sent)), (0, 1))
+
+    def test_rename_following_moved_cut_preserves_later_slots_and_renames_cut(self):
+        effective = self.first + timedelta(hours=2)
+        self.move(self.first, effective, "Old cut title")
+        result = ops.update_event(self.ctx.store, self.ctx.providers,
+                                  f'{self.master["id"]}@{iso_utc(self.first)}',
+                                  {"title": "New title"}, scope="following")
+        self.assertEqual(result["status"], "ok")
+        segment = self.ctx.store.get_event(result["split_master_id"])
+        self.assertEqual(segment["start_utc"], iso_utc(self.first))
+        cut = next(exc for exc in self.ctx.store.exceptions_for(segment["id"])
+                   if exc["recurrence_id"] == iso_utc(self.first))
+        self.assertEqual((cut["start_utc"], cut["title"]), (iso_utc(effective), "New title"))
+        later = [occ for occ in self.ctx.occurrences(self.second - timedelta(minutes=1),
+                                                      self.second + timedelta(hours=1))
+                 if occ.get("master_id") == segment["id"] or occ.get("id", "").startswith(segment["id"])]
+        self.assertTrue(any(occ["start_utc"] == iso_utc(self.second) for occ in later))
+
+    def test_split_carries_legacy_sent_moved_before_cut_from_later_original_slot(self):
+        # The later original slot was moved before the split boundary; old queue rows have no recurrence_id.
+        effective = self.first + timedelta(hours=1)
+        self.move(self.second, effective, "Earlier moved later slot")
+        legacy = rem.notice_id_for(self.master["id"], iso_utc(effective), 15)
+        self.ctx.store.schedule_reminder(self.master["id"], iso_utc(effective), 15,
+                                         iso_utc(effective - timedelta(minutes=15)), legacy)
+        row = next(r for r in self.ctx.store.upcoming_reminders(self.now, 200) if r["notice_id"] == legacy)
+        self.ctx.store.mark_reminder(row["id"], "sent")
+        result = ops.update_event(self.ctx.store, self.ctx.providers,
+                                  f'{self.master["id"]}@{iso_utc(self.second)}',
+                                  {"title": "Retitled"}, scope="following")
+        self.assertEqual(result["status"], "ok")
+        segment = self.ctx.store.get_event(result["split_master_id"])
+        with self.ctx.store._conn() as conn:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM reminders WHERE event_id=?", (segment["id"],))]
+        self.assertTrue(any(r["state"] == "sent" and r["recurrence_id"] == iso_utc(self.second) for r in rows))
+        plan(self.ctx, effective - timedelta(minutes=10))
+        channel = Channel()
+        rem.deliver_due(self.ctx.store, channel, UTC, now=effective - timedelta(minutes=10))
+        self.assertFalse(any("Earlier moved later slot" in text for _, text in channel.sent))
+        self.assertFalse(any(r["event_id"] == segment["id"] for r in self.ctx.store.due_reminders(effective)))
 
 
 class CatchupBatchReservationTests(unittest.TestCase):

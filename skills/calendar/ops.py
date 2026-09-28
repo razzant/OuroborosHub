@@ -393,7 +393,7 @@ def delete_event(store, providers, event_id: str, scope: str = SCOPE_THIS, owner
         master = store.get_event(row["master_id"])
         if master is not None and not master.get("deleted_at"):
             occ_key, row = str(row.get("recurrence_id") or ""), master
-    rows = [row] + ([m for m in _group_masters(store, row) if m["id"] != row["id"]] if cascade else [])
+    rows = deletion_targets(store, row, cascade)
     op_id = new_id("op")
     assignments: List[Dict[str, Any]] = []
     blocked = _read_only_preflight(store, rows, assignments)
@@ -429,6 +429,11 @@ def delete_event(store, providers, event_id: str, scope: str = SCOPE_THIS, owner
         result = execute_intent(store, providers, intent, owner)
         assignments.append({"calendar_id": target["calendar_id"], "calendar_name": cal["name"], "event_id": victim["id"], **result})
     return {"status": "ok", "assignments": assignments}
+
+
+def deletion_targets(store, row: Dict[str, Any], cascade: bool = True) -> List[Dict[str, Any]]:
+    """Exact linked-master set affected by delete; used by preview and execution alike."""
+    return [row] + ([m for m in _group_masters(store, row) if m["id"] != row["id"]] if cascade else [])
 
 
 def _apply_changes(store, row: Dict[str, Any], changes: Dict[str, Any]) -> None:
@@ -628,10 +633,9 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     duration = (m_end - m_start) if (m_start and m_end) else timedelta(hours=1)
     cut_exception = next((exc for exc in later if str(exc.get("recurrence_id") or "") == occ_key), None)
     cut_start = parse_stored(cut_exception.get("start_utc")) if cut_exception else None
-    cut_end = parse_stored(cut_exception.get("end_utc")) if cut_exception else None
-    if cut_start and cut_end and cut_end > cut_start:
-        duration = cut_end - cut_start
-    new_start = parse_stored(changes.get("start_utc")) or cut_start or occ_start
+    # DTSTART is the original recurrence slot unless the owner explicitly moves the
+    # entire following series. A moved cut exception is not a new series anchor.
+    new_start = parse_stored(changes.get("start_utc")) or occ_start
     new_end = parse_stored(changes.get("end_utc")) or (new_start + duration)
     rule_parts = [p for p in original_rrule.split(";") if p and not p.upper().startswith(("UNTIL=", "COUNT="))]
     count_left = _count_remaining(master, original_rrule, occ_start)
@@ -673,7 +677,10 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
         old_fire = parse_stored(previous["fire_at_utc"])
         if old_effective is None or old_original is None or old_fire is None:
             continue
-        candidates = {iso_utc(old_original)}
+        if not previous["recurrence_id"] and old_effective < occ_start and not any(
+                str(exc.get("start_utc") or "") == iso_utc(old_effective) for exc in later):
+            continue  # an identity-less earlier occurrence is not in this segment
+        candidates = {iso_utc(old_original)} if old_original >= occ_start else set()
         if not previous["recurrence_id"]:
             # Legacy rows lost original-slot identity. An exception sharing
             # the effective time may have been the one sent; conservatively
@@ -691,10 +698,10 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
                 effective = iso_utc(old_effective)
                 fire_at = iso_utc(old_fire)
             elif exception is not None:
-                # The cut exception itself takes the new master's start (which
-                # can already be its moved time on a title-only edit).
-                effective = iso_utc(new_start)
-                fire_at = iso_utc(new_start - timedelta(minutes=int(previous["offset_min"])))
+                # The cut exception keeps its explicit move on a content-only split.
+                cut_effective = new_start if changes.get("start_utc") else (cut_start or new_start)
+                effective = iso_utc(cut_effective)
+                fire_at = iso_utc(cut_effective - timedelta(minutes=int(previous["offset_min"])))
             else:
                 effective = iso_utc(_shift_instant(old_effective, shift, split_all_day, split_tz))
                 fire_at = iso_utc(_shift_instant(old_fire, shift, split_all_day, split_tz))
@@ -711,8 +718,12 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
         upd = {"master_id": saved["id"], "recurrence_id": iso_utc(new_key), "uid": saved["uid"], "link_group_id": new_group,
                "external_id": "", "href": "", "etag": "", "sync_state": "synced" if not master.get("external_id") and not master.get("href") else "pending"}
         if str(exc.get("recurrence_id") or "") == occ_key:
-            # the occurrence the owner pointed at takes the requested time itself (its other edits stay)
-            upd.update({"start_utc": iso_utc(new_start), "end_utc": iso_utc(new_end)})
+            # Preserve a previously moved cut on a content-only split; its
+            # explicitly edited content, however, must match the new segment.
+            if changes.get("start_utc") or changes.get("end_utc"):
+                upd.update({"start_utc": iso_utc(new_start), "end_utc": iso_utc(new_end)})
+            upd.update({k: v for k, v in changes.items() if k in
+                        ("title", "description", "location", "visibility", "availability") and v is not None})
         store.update_event(exc["id"], upd)
         moved.append(store.get_event(exc["id"]))
     # the moved exceptions are written to the provider after the new master exists (they resolve through it)
