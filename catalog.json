@@ -1903,8 +1903,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "b9d558c5ace1a2dd200fb5aec82171d7a26ada512bf4b10cebb462abdef82d8e",
-          "size": 15554
+          "sha256": "c62a38a546cad176757503b134160d9044319290e4738f3f99fa4c8555763ea0",
+          "size": 16743
         },
         {
           "path": "model.py",
@@ -1913,8 +1913,8 @@
         },
         {
           "path": "ops.py",
-          "sha256": "a92a2c829153eed86b78db8466ac43321e5b03c2eb6b6e5f4a4caf142cb20cdd",
-          "size": 56365
+          "sha256": "ce26b21afd46770672034f28ed230e3010bec4edae3865b52cb0553c05666455",
+          "size": 61877
         },
         {
           "path": "plugin.py",
@@ -1933,23 +1933,23 @@
         },
         {
           "path": "reminders.py",
-          "sha256": "b54a4d98f77cdabf00b797574501325f4b949731ac298a5114b0ad25cbe7f8ce",
-          "size": 24359
+          "sha256": "ffe7de7daa450d26e91fcb53cc3d81e10d3a075237456de5fef85a263b67941b",
+          "size": 24480
         },
         {
           "path": "routes.py",
-          "sha256": "c685cfc8c865a03f83b4ee8ca9d588bd1787cfcbced8b28f1d0e3e6b4d7c7960",
-          "size": 13773
+          "sha256": "11b5a16e76a7ac7eccdb030399d8ba28b13350eb42a4be7648ec411c0cd55cd5",
+          "size": 15689
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "c61719b939248aa8f92e073138ae7fddd89d14ac18a757274f60fb9b68a9ce16",
-          "size": 19015
+          "sha256": "e7b2a9bfe1cf7a88f9d35cbdf50600a5efbd3b4f74f1b87c51b09396d88039fe",
+          "size": 20223
         },
         {
           "path": "store.py",
-          "sha256": "d73d6e1cd6bbf135387055bd85b1abd567d35dbbf42d6adaecf9252f672b8e85",
-          "size": 40633
+          "sha256": "a8d6491f264de3ec7003c41bdbaf10cf33222fc29e6796a30ff1ed63c72db91d",
+          "size": 42530
         },
         {
           "path": "tests/test_calendar.py",
@@ -1967,14 +1967,19 @@
           "size": 10545
         },
         {
+          "path": "tests/test_calendar_lifecycle_invariants.py",
+          "sha256": "e22642d72dae93955b96310d2075d7d8a6d15469ccb6ec6ed2372378fdbc558a",
+          "size": 17154
+        },
+        {
           "path": "tests/test_calendar_notify.py",
           "sha256": "268a2c86451b7bcd02b98a069adab07ef6d5e3d61169ab964c9cfa62a2841314",
           "size": 12164
         },
         {
           "path": "tests/test_calendar_reminder_queue.py",
-          "sha256": "3afbd2f4c20a8d5c5a8ab1eae792be810002e5b2ccda428df5e66a13676bb733",
-          "size": 42263
+          "sha256": "0ab1fb58b86d03b3691fdabca481a1cac05efec55dd2af97cb767ea1058200c1",
+          "size": 44164
         },
         {
           "path": "tests/test_calendar_review.py",
@@ -2003,13 +2008,13 @@
         },
         {
           "path": "tools.py",
-          "sha256": "f97c79825f5f0d3689cae219d2028cc402d0f11150e887b3e490a0a7f75a5191",
-          "size": 49520
+          "sha256": "92c7104a436ef26b213dc7030e8520c0f029d0b409d0de4f00ce053f962c5842",
+          "size": 49908
         },
         {
           "path": "widget.js",
-          "sha256": "d071f0ccd0c4bbb976bdf7dc46c99abadd746a305e03e24d5489d1141b7dc9bf",
-          "size": 37175
+          "sha256": "f35444acb820720d0f117c2d7292dda4665b419442deba4573a43303a1b037cb",
+          "size": 37915
         }
       ],
       "description": "Единый календарь владельца — свои локальные календари, Яндекс (CalDAV) и Google (личный OAuth-клиент); события, повторения, свободные окна, служебные события-распорядок, напоминания без модели, виджет День/Неделя."

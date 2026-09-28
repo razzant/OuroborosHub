@@ -146,9 +146,8 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
         existing = store.find_by_external(cal["id"], external_id=row["external_id"], href=row["href"], uid=row["uid"])
         if row.get("status") == "cancelled":
             if existing is not None:
-                if existing.get("sync_state") == "pending_delete":
-                    store.delete_event(existing["id"], hard=True)      # our own deletion, now confirmed: no group cascade
-                    deleted += 1
+                if existing.get("sync_state") == "pending_delete" or store.delete_requested(existing["id"]):
+                    deleted += int(store.confirm_pending_delete(existing["id"]))  # settle only the selected copy and its intent
                 elif existing.get("sync_state") not in ("pending", "conflict"):
                     deleted += _confirmed_deletion(store, providers, existing)
             continue
@@ -176,6 +175,21 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
                     continue
                 ops.update_event(store, providers, sib["id"], moved, scope="all", owner="companion", propagate=False)
                 propagated += 1
+        if existing.get("link_group_id") and (existing.get("rrule") != row.get("rrule") or existing.get("title") != row.get("title")):
+            # A source calendar changing recurrence or title must update the
+            # linked copies even when DTSTART is unchanged. Busy copies retain
+            # their deliberately private title.
+            for sib in store.group_masters(existing["link_group_id"]):
+                if sib["id"] == existing["id"] or sib.get("sync_state") == "pending_delete":
+                    continue
+                delta = {}
+                if existing.get("rrule") != row.get("rrule"):
+                    delta["rrule"] = row.get("rrule") or ""
+                if existing.get("title") != row.get("title") and sib.get("publish_mode") != "busy":
+                    delta["title"] = row.get("title") or ""
+                if delta:
+                    result = ops.update_event(store, providers, sib["id"], delta, scope="all", owner="companion", propagate=False)
+                    propagated += int(result.get("status") == "ok")
         if existing.get("link_group_id") and row.get("rrule"):
             # a date cancelled on the server as EXDATE (CalDAV style) is a cancelled occurrence for the copies too
             new_ex = set(x for x in str(row.get("exdates") or "").split(",") if x) - set(x for x in str(existing.get("exdates") or "").split(",") if x)
@@ -228,7 +242,7 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
         # Google: cancelled ids in the (incremental) feed are the confirmed deletions (roast Fable F7).
         for ext_id in extra:
             existing = store.find_by_external(cal["id"], external_id=ext_id)
-            if existing is not None and not existing.get("deleted_at") and existing.get("sync_state") not in ("pending", "conflict"):
+            if existing is not None and not existing.get("deleted_at") and (existing.get("sync_state") not in ("pending", "conflict") or store.delete_requested(existing["id"])):
                 deleted += _confirmed_deletion(store, providers, existing)
     if not incremental and kind != "google_sync_token":
         # CalDAV window: rows inside the window whose resource is gone from the server.
@@ -236,7 +250,7 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
         for local in store.window(now_utc() - timedelta(days=30), now_utc() + timedelta(days=400), [cal["id"]], include_hidden=True, include_masters=True):
             if local.get("master_id") or not local.get("href") or local["href"] in seen_hrefs:
                 continue
-            if local.get("sync_state") in ("pending", "conflict"):
+            if local.get("sync_state") in ("pending", "conflict") and not store.delete_requested(local["id"]):
                 continue
             try:
                 still_there = adapter.exists(local["href"])
@@ -268,7 +282,7 @@ def _imported_reminders(local: Dict[str, Any], incoming: str, provider: str, mod
 
 
 def _confirmed_deletion(store: Store, providers: Providers, local: Dict[str, Any]) -> int:
-    if local.get("sync_state") == "pending_delete":
+    if local.get("sync_state") == "pending_delete" or store.delete_requested(local["id"]):
         # This row was selected for deletion by an earlier scoped operation.
         # Its siblings already have their own intents if the owner requested a cascade.
         return int(store.confirm_pending_delete(local["id"]))

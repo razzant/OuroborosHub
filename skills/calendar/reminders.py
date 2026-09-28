@@ -142,6 +142,8 @@ def plan(store, occurrences_in: Any, now: Optional[datetime] = None) -> int:
         if start is None:
             continue
         event_id = occ.get("series_id") or occ.get("id")
+        if store.delete_requested(event_id):
+            continue
         occ_start = occ.get("start_utc")   # effective start, used for firing and display
         recurrence_id = str(occ.get("occurrence_start_utc") or "") if occ.get("series_id") else ""
         end = parse_stored(occ.get("end_utc")) or (start + timedelta(hours=1))
@@ -301,7 +303,8 @@ def _reserve(store, channel: NotifyChannel, reminder_ids: List[str]) -> List[str
 def _live_reminder(store, rem: Dict[str, Any], tz, now: datetime, stats: Dict[str, int]) -> Optional[Dict[str, Any]]:
     event = store.get_event(rem["event_id"])
     if (event is None or event.get("deleted_at") or str(event.get("status") or "") == "cancelled"
-            or event.get("sync_state") == "pending_delete"):
+            or event.get("sync_state") == "pending_delete"
+            or store.delete_requested(rem["event_id"])):
         reason, live = "событие отменено или удалено", event
     else:
         try:

@@ -351,10 +351,27 @@ class Store:
         if "all_day" in data:
             data["all_day"] = 1 if data["all_day"] else 0
         data["updated_at"] = _ts()
-        sets = ", ".join(f"{k}=:{k}" for k in data)
+        sets = ", ".join(
+            "sync_state=CASE WHEN sync_state='pending_delete' OR"
+            " (SELECT kind FROM intents WHERE event_id=:id ORDER BY created_at DESC, id DESC LIMIT 1)='delete'"
+            " THEN 'pending_delete' ELSE :sync_state END"
+            if k == "sync_state" and data[k] == "synced" else f"{k}=:{k}"
+            for k in data
+        )
         data["id"] = event_id
         with self._conn() as c:
             c.execute(f"UPDATE events SET {sets} WHERE id=:id", data)
+
+    def record_created_event(self, event_id: str, result: Dict[str, Any]) -> None:
+        """Publish the provider identity without overwriting a concurrent deletion request."""
+        with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute("UPDATE events SET external_id=?, href=?, etag=?, updated_at=?,"
+                      " sync_state=CASE WHEN sync_state='pending_delete' OR"
+                      " (SELECT kind FROM intents WHERE event_id=? ORDER BY created_at DESC, id DESC LIMIT 1)='delete'"
+                      " THEN 'pending_delete' ELSE 'synced' END WHERE id=?",
+                      (result.get("external_id") or "", result.get("href") or "", result.get("etag") or "",
+                       _ts(), event_id, event_id))
 
     def get_event(self, event_id: str) -> Optional[Dict[str, Any]]:
         with self._conn() as c:
@@ -374,7 +391,11 @@ class Store:
         """Provider absence closes only the selected row and its pending delete intent, atomically."""
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
-            removed = c.execute("DELETE FROM events WHERE id=? AND sync_state='pending_delete'", (event_id,))
+            removed = c.execute("DELETE FROM events WHERE id=? AND"
+                                " (sync_state='pending_delete' OR (sync_state='conflict' AND"
+                                " (SELECT kind FROM intents WHERE event_id=? ORDER BY created_at DESC, id DESC LIMIT 1)='delete'))"
+                                " AND NOT EXISTS (SELECT 1 FROM intents WHERE event_id=? AND kind='create' AND state!=?)",
+                                (event_id, event_id, event_id, INTENT_DONE))
             if not removed.rowcount:
                 return False
             c.execute("UPDATE intents SET state=?, result_json=?, lease_until=NULL, lease_owner='', next_attempt_at=NULL, updated_at=?"
@@ -514,6 +535,13 @@ class Store:
         with self._conn() as c:
             rows = c.execute("SELECT * FROM intents WHERE event_id=? ORDER BY created_at", (event_id,)).fetchall()
         return [dict(r) for r in rows]
+
+    def delete_requested(self, event_id: str) -> bool:
+        """Only the latest command's delete survives adapter failure; a later owner edit supersedes it."""
+        with self._conn() as c:
+            row = c.execute("SELECT kind FROM intents WHERE event_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
+                            (event_id,)).fetchone()
+        return row is not None and row["kind"] == "delete"
 
     def open_intents(self, limit: int = 50) -> List[Dict[str, Any]]:
         with self._conn() as c:

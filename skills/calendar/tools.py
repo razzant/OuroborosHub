@@ -357,8 +357,10 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
         return json_dumps({"status": "error", "message": "scope='following' требует id вхождения (…@дата): с какой даты менять"})
     changes: Dict[str, Any] = {}
     if start or end or duration_min is not None:
-        old_s, old_e = parse_stored(occ or row["start_utc"]), None
-        old_dur = (parse_stored(row["end_utc"]) - parse_stored(row["start_utc"])) if row.get("start_utc") and row.get("end_utc") else timedelta(hours=1)
+        exception = next((e for e in ctx.store.exceptions_for(row["id"]) if e.get("recurrence_id") == occ), None) if occ else None
+        effective = exception or row
+        old_s = parse_stored(effective["start_utc"] if exception else (occ or row["start_utc"]))
+        old_dur = (parse_stored(effective["end_utc"]) - parse_stored(effective["start_utc"])) if effective.get("start_utc") and effective.get("end_utc") else timedelta(hours=1)
         new_s, is_date = parse_input(start, ctx.tz, old_s)
         new_e, _ = parse_input(end, ctx.tz, None)
         if duration_min is not None and new_e is None:
@@ -392,15 +394,17 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
         changes["my_response"] = resp
     if not changes and not calendars:
         return json_dumps({"status": "error", "message": "нечего менять"})
+    cal_ids = None
+    if calendars:
+        cal_ids, err = ctx.resolve_calendars(calendars)
+        if err:
+            return json_dumps({"status": "error", "message": err})
     if not _bool(confirm):
         return bounded_result({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "event": event_public(row, ctx.tz), "changes": changes, "scope": scope})
     result = {"status": "ok", "event": None, "assignments": []}
     if changes:
         result = ops.update_event(ctx.store, ctx.providers, str(id), changes, scope=scope, send_updates=_bool(send_updates))
-    if calendars:
-        cal_ids, err = ctx.resolve_calendars(calendars)
-        if err:
-            return json_dumps({"status": "error", "message": err})
+    if cal_ids is not None:
         target_row = ctx.store.get_event(result.get("split_master_id") or base) or row
         result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, target_row, cal_ids)
         result["assignments"] = list(result["assignments"]) + list(result["reassign"]["added"]) \
@@ -422,6 +426,8 @@ def cal_delete(ctx: Context, id: str = "", scope: str = SCOPE_THIS, send_updates
     if row is None or row.get("deleted_at"):
         return json_dumps({"status": "not_found", "message": f"событие {id} не найдено"})
     scope = str(scope or SCOPE_THIS).lower()
+    if scope not in SCOPES:
+        return json_dumps({"status": "error", "message": "scope: this | following | all"})
     if row.get("rrule") and not occ and scope == SCOPE_THIS:
         return json_dumps({"status": "ambiguous", "message": "повторяющееся событие: уточни у владельца — удалить только эту дату (id вхождения), "
                                                                 "всё расписание (scope='all') или начиная с даты (scope='following')"})

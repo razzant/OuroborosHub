@@ -512,6 +512,35 @@ class RecurringOccurrenceIdentityTests(unittest.TestCase):
         later = rem.deliver_due(self.ctx.store, channel, UTC, now=start - timedelta(minutes=10))
         self.assertEqual((later["sent"], len(channel.sent)), (0, 1))
 
+    def test_following_real_move_after_sent_schedules_new_time_once(self):
+        plan(self.ctx, self.now)
+        channel = Channel()
+        sent = rem.deliver_due(self.ctx.store, channel, UTC, now=self.first - timedelta(minutes=15))
+        self.assertEqual(sent["sent"], 1)
+        moved = self.first + timedelta(hours=2)
+        updated = json.loads(tools.cal_update(self.ctx, id=f'{self.master["id"]}@{iso_utc(self.first)}',
+                                              start=iso_utc(moved), scope="following", confirm=True))
+        self.assertEqual(updated["status"], "updated")
+        plan(self.ctx, moved - timedelta(minutes=20))
+        fresh = rem.deliver_due(self.ctx.store, channel, UTC, now=moved - timedelta(minutes=15))
+        self.assertEqual((fresh["sent"], len(channel.sent)), (1, 2))
+        again = rem.deliver_due(self.ctx.store, channel, UTC, now=moved - timedelta(minutes=10))
+        self.assertEqual((again["sent"], len(channel.sent)), (0, 2))
+
+    def test_following_real_move_after_unknown_uses_new_slot_not_old_retry(self):
+        plan(self.ctx, self.now)
+        old = next(r for r in self.ctx.store.upcoming_reminders(self.now, 200)
+                   if r["event_id"] == self.master["id"] and r["occurrence_start_utc"] == iso_utc(self.first))
+        self.ctx.store.mark_reminder(old["id"], "unknown")
+        moved = self.first + timedelta(hours=2)
+        json.loads(tools.cal_update(self.ctx, id=f'{self.master["id"]}@{iso_utc(self.first)}',
+                                    start=iso_utc(moved), scope="following", confirm=True))
+        plan(self.ctx, moved - timedelta(minutes=20))
+        channel = Channel()
+        delivered = rem.deliver_due(self.ctx.store, channel, UTC, now=moved - timedelta(minutes=15))
+        self.assertEqual((delivered["sent"], len(channel.sent)), (1, 1))
+        self.assertEqual(self.ctx.store.unknown_reminder_count(), 1)
+
     def test_following_split_never_retries_an_uncertain_prior_send(self):
         plan(self.ctx, self.now)
         row = next(r for r in self.ctx.store.upcoming_reminders(self.now, 200)

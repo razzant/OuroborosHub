@@ -416,6 +416,17 @@
             var p;
             if (f.id) {
                 body.id = f.id; body.scope = f.series ? scopeSel.value : 'this';
+                /* A card is a snapshot of one occurrence. Unedited times must never
+                 * become a time-change command against its master series. */
+                if (body.title === f.title) delete body.title;
+                if (body.start === f.start && body.end === f.end) {
+                    delete body.start; delete body.end;
+                }
+                if (body.all_day === f.all_day) delete body.all_day;
+                if (body.hidden === f.hidden) delete body.hidden;
+                if (body.availability === f.availability) delete body.availability;
+                if (body.location === f.location) delete body.location;
+                if (body.description === f.description) delete body.description;
                 if (remEdited) body.reminders = remList;
                 if (attEdited) body.attendees = attList;
                 var same = cals.length === f.calendars.length && cals.every(function (c) { return f.calendars.indexOf(c) >= 0; });

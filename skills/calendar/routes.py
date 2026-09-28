@@ -12,7 +12,7 @@ from starlette.responses import JSONResponse
 import ops
 import tools
 from model import (
-    AVAIL_BUSY, AVAIL_SOFT, VISIBILITY_HIDDEN, VISIBILITY_SHOWN, WEEKDAY_LABELS, day_bounds, event_public, iso_local, iso_utc,
+    AVAIL_BUSY, AVAIL_SOFT, SCOPES, VISIBILITY_HIDDEN, VISIBILITY_SHOWN, WEEKDAY_LABELS, day_bounds, event_public, iso_local, iso_utc,
     parse_input, parse_stored, tz_name, week_bounds,
 )
 
@@ -130,21 +130,38 @@ def register_routes(api, make_ctx) -> None:
         event_id = str(body.get("id") or "")
         if not event_id:
             return _err("нет id")
+        scope = str(body.get("scope") or "this").lower()
+        if scope not in SCOPES:
+            return _err("scope: this | following | all")
+        base_id, occurrence = ops._series_id(event_id)
+        current = ctx.store.get_event(base_id)
+        if current is None or current.get("deleted_at"):
+            return _err("событие не найдено", 404)
+        if current.get("rrule") and not occurrence and scope == "this":
+            return _err("для одной даты нужен id вхождения (…@дата); для серии выбери all или following")
+        if scope == "following" and not occurrence and not current.get("master_id"):
+            return _err("для following нужен id вхождения (…@дата)")
+        if body.get("calendars"):
+            _, err = ctx.resolve_calendars(body.get("calendars"))
+            if err:
+                return _err(err)
         changes: Dict[str, Any] = {}
         if body.get("start") or body.get("end"):
             base, occ = ops._series_id(event_id)
             row = ctx.store.get_event(base)
             if row is None:
                 return _err("событие не найдено", 404)
-            old_s = parse_stored(occ or row["start_utc"])
-            dur = parse_stored(row["end_utc"]) - parse_stored(row["start_utc"])
+            exception = next((e for e in ctx.store.exceptions_for(row["id"]) if e.get("recurrence_id") == occ), None) if occ else None
+            effective = exception or row
+            old_s = parse_stored(effective["start_utc"] if exception else (occ or row["start_utc"]))
+            dur = parse_stored(effective["end_utc"]) - parse_stored(effective["start_utc"])
             s, is_date = parse_input(body.get("start"), ctx.tz, old_s)
             e, _ = parse_input(body.get("end"), ctx.tz, None)
             if e is None or e <= s:
                 e = s + dur
             changes.update({"start_utc": iso_utc(s), "end_utc": iso_utc(e)})
-            if "all_day" in body:
-                changes["all_day"] = bool(body.get("all_day"))
+        if "all_day" in body and body.get("all_day") != bool(current.get("all_day")):
+            changes["all_day"] = bool(body.get("all_day"))
         for key in ("title", "description", "location", "availability", "rrule"):
             if key in body and body[key] is not None:
                 changes[key] = str(body[key])
@@ -155,7 +172,6 @@ def register_routes(api, make_ctx) -> None:
             changes["reminders"] = [int(x) for x in (body.get("reminders") or []) if str(x).strip() != ""] or "default"
         if "attendees" in body and body.get("attendees") is not None:
             changes["attendees"] = [{"email": str(a).strip()} if not isinstance(a, dict) else a for a in body.get("attendees") or [] if str(a).strip()]
-        scope = str(body.get("scope") or "this")
         result = {"status": "ok", "event": None, "assignments": []}
         if changes:
             result = ops.update_event(ctx.store, ctx.providers, event_id, changes, scope=scope, send_updates=bool(body.get("send_updates")))
@@ -184,7 +200,18 @@ def register_routes(api, make_ctx) -> None:
         event_id = str(body.get("id") or "")
         if not event_id:
             return _err("нет id")
-        result = ops.delete_event(ctx.store, ctx.providers, event_id, scope=str(body.get("scope") or "this"), send_updates=bool(body.get("send_updates")))
+        scope = str(body.get("scope") or "this").lower()
+        if scope not in SCOPES:
+            return _err("scope: this | following | all")
+        base_id, occurrence = ops._series_id(event_id)
+        current = ctx.store.get_event(base_id)
+        if current is None or current.get("deleted_at"):
+            return _err("событие не найдено", 404)
+        if current.get("rrule") and not occurrence and scope == "this":
+            return _err("для одной даты нужен id вхождения (…@дата); для серии выбери all или following")
+        if scope == "following" and not occurrence and not current.get("master_id"):
+            return _err("для following нужен id вхождения (…@дата)")
+        result = ops.delete_event(ctx.store, ctx.providers, event_id, scope=scope, send_updates=bool(body.get("send_updates")))
         if result.get("status") == "not_found":
             return _err("событие не найдено", 404)
         return JSONResponse({"status": _aggregate(result["assignments"]), "assignments": result["assignments"]})
