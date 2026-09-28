@@ -1,8 +1,8 @@
 {
-  "description": "Official Ouroboros skills catalog.",
-  "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
+  "name": "OuroborosHub",
+  "description": "Official Ouroboros skills catalog.",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "skills": [
     {
       "description": "Геоданные 2ГИС: поиск мест и организаций, геокодирование адресов и обратное геокодирование координат, построение маршрутов (авто, пешком, вело, самокат, мото, грузовик, такси), расчёт изохрон (зоны достижимости), создание статической карты PNG с маркерами, линиями и полигонами и кликабельные ссылки на интерактивную карту 2ГИС. Требует API-ключ 2ГИС.",
@@ -1934,6 +1934,35 @@
       "slug": "yylo-tasks",
       "type": "instruction",
       "version": "0.1.0"
+    },
+    {
+      "slug": "smart_lists",
+      "name": "smart_lists",
+      "version": "0.1.0",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "8b06137af166ca07eb160bf80fec63dccc6ef845ae14fc08fddd8e63a881b894",
+          "size": 12013
+        },
+        {
+          "path": "lists_core.py",
+          "sha256": "2ed9035d5fe5d73afb2301bbecaf0bcd13bf124ea605dc5ab6ddeb8b29140a76",
+          "size": 38100
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "4756aa2b12aa6c3c09928b335e609db9a1356527e45b7e219f4c53e9d32f85e4",
+          "size": 23939
+        },
+        {
+          "path": "tests/test_smart_lists.py",
+          "sha256": "4d6487cc6657f4f0c5ba72a53be0c51772e0c383c71eff7c5a33cafea056ba9f",
+          "size": 34953
+        }
+      ],
+      "description": "Provisional personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion and moves, a read-only subtree selection, and a compact declarative widget. No network, purchases or reminders."
     }
   ]
 }
