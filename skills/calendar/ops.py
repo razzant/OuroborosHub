@@ -690,6 +690,11 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
                 # moves; only their recurrence key follows the new series wall time.
                 effective = iso_utc(old_effective)
                 fire_at = iso_utc(old_fire)
+            elif exception is not None:
+                # The cut exception itself takes the new master's start (which
+                # can already be its moved time on a title-only edit).
+                effective = iso_utc(new_start)
+                fire_at = iso_utc(new_start - timedelta(minutes=int(previous["offset_min"])))
             else:
                 effective = iso_utc(_shift_instant(old_effective, shift, split_all_day, split_tz))
                 fire_at = iso_utc(_shift_instant(old_fire, shift, split_all_day, split_tz))

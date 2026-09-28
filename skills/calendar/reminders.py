@@ -304,8 +304,14 @@ def _live_reminder(store, rem: Dict[str, Any], tz, now: datetime, stats: Dict[st
             or event.get("sync_state") == "pending_delete"):
         reason, live = "событие отменено или удалено", event
     else:
-        reason, live = _occurrence_state(store, event, parse_stored(rem.get("occurrence_start_utc")), now,
-                                         owner_tz=tz, recurrence_id=rem.get("recurrence_id") or "")
+        try:
+            reason, live = _occurrence_state(store, event, parse_stored(rem.get("occurrence_start_utc")), now,
+                                             owner_tz=tz, recurrence_id=rem.get("recurrence_id") or "")
+        except (ValueError, ImportError):
+            # One malformed recurrence or missing parser cannot starve other
+            # due reminders. Keep this row waiting; a later repair can recheck it.
+            stats["deferred"] += 1
+            return None
         if not reason and int(rem["offset_min"]) not in offsets_for(live, get_rules(store), store.get_setting(MODE_KEY) or {}):
             reason = "это напоминание снято: у события сейчас другие времена напоминаний"
     if reason:
@@ -324,7 +330,7 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
     """
     now = now or now_utc()
     due = store.due_reminders(now)
-    stats = {"sent": 0, "skipped": 0, "no_channel": 0, "retry": 0, "unknown": 0, "failed": 0, "batched": 0}
+    stats = {"sent": 0, "skipped": 0, "no_channel": 0, "retry": 0, "unknown": 0, "failed": 0, "batched": 0, "deferred": 0}
     fresh: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     stale: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     for rem in due:

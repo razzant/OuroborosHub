@@ -463,6 +463,23 @@ class RecurringOccurrenceIdentityTests(unittest.TestCase):
         self.assertIn("exceeded 1000 occurrences", warning)
         self.assertEqual(len(waiting(self.ctx, self.now, self.master["id"])), 1)
 
+    def test_invalid_recurrence_does_not_starve_unrelated_due_notice(self):
+        due_at = self.first - timedelta(minutes=15)
+        self.ctx.store.update_event(self.master["id"], {"rrule": "FREQ=NOT_A_RULE"})
+        self.ctx.store.schedule_reminder(self.master["id"], iso_utc(self.first), 15, iso_utc(due_at),
+                                         rem.notice_id_for(self.master["id"], iso_utc(self.first), 15, iso_utc(self.first)),
+                                         iso_utc(self.first))
+        good = self.ctx.store.insert_event({"calendar_id": DEFAULT_LOCAL_CALENDAR_ID, "title": "Valid",
+                                            "start_utc": iso_utc(self.first),
+                                            "end_utc": iso_utc(self.first + timedelta(hours=1)), "reminders_json": "[15]"})
+        self.ctx.store.schedule_reminder(good["id"], good["start_utc"], 15, iso_utc(due_at),
+                                         rem.notice_id_for(good["id"], good["start_utc"], 15))
+        channel = Channel()
+        stats = rem.deliver_due(self.ctx.store, channel, UTC, now=due_at)
+        self.assertEqual((stats["sent"], stats["deferred"], stats["skipped"], len(channel.sent)), (1, 1, 0, 1))
+        self.assertIn("Valid", channel.sent[0][1])
+        self.assertEqual(len(self.ctx.store.due_reminders(due_at)), 1)
+
     def test_old_database_adds_original_slot_column_without_rewriting_uncertain_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "calendar.sqlite3")
@@ -547,6 +564,19 @@ class RecurringOccurrenceIdentityTests(unittest.TestCase):
         self.assertEqual((saved["start_utc"], saved["end_utc"]),
                          (iso_utc(effective), iso_utc(effective + timedelta(hours=1))))
         self.assertEqual(self.ctx.store.get_event(saved["master_id"])["start_utc"], iso_utc(effective))
+
+    def test_title_only_following_split_does_not_repeat_sent_moved_cut(self):
+        effective = self.first + timedelta(hours=2)
+        self.move(self.first, effective, "Moved cut")
+        plan(self.ctx, self.now)
+        channel = Channel()
+        first_send = rem.deliver_due(self.ctx.store, channel, UTC, now=effective - timedelta(minutes=15))
+        self.assertEqual(first_send["sent"], 1)
+        json.loads(tools.cal_update(self.ctx, id=f'{self.master["id"]}@{iso_utc(self.first)}',
+                                    title="Retitled", scope="following", confirm=True))
+        plan(self.ctx, effective - timedelta(minutes=10))
+        second_send = rem.deliver_due(self.ctx.store, channel, UTC, now=effective - timedelta(minutes=10))
+        self.assertEqual((second_send["sent"], len(channel.sent)), (0, 1))
 
 
 class CatchupBatchReservationTests(unittest.TestCase):
