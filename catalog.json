@@ -1934,6 +1934,125 @@
       "slug": "yylo-tasks",
       "type": "instruction",
       "version": "0.1.0"
+    },
+    {
+      "slug": "calendar",
+      "name": "calendar",
+      "version": "1.0.8",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "b9d558c5ace1a2dd200fb5aec82171d7a26ada512bf4b10cebb462abdef82d8e",
+          "size": 15554
+        },
+        {
+          "path": "model.py",
+          "sha256": "d5c58072ebf49e0f4aaf97417a8e940d626c7e8b2178ba1b76625d2b607d1e64",
+          "size": 13410
+        },
+        {
+          "path": "ops.py",
+          "sha256": "a92a2c829153eed86b78db8466ac43321e5b03c2eb6b6e5f4a4caf142cb20cdd",
+          "size": 56365
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "66edb52caef38a31634c882053c72b7b9172a3a22e27cdd3b83a724378e17519",
+          "size": 10951
+        },
+        {
+          "path": "providers.py",
+          "sha256": "3f57c822f7f6e625ca050eb32c30916f72e3708eb67c61892a9bcbe6aad98346",
+          "size": 33828
+        },
+        {
+          "path": "providers_google.py",
+          "sha256": "004ddf431c76613f8488ad1e68846f7f2009177fe0f1422515743ade6de5fec0",
+          "size": 34903
+        },
+        {
+          "path": "reminders.py",
+          "sha256": "b54a4d98f77cdabf00b797574501325f4b949731ac298a5114b0ad25cbe7f8ce",
+          "size": 24359
+        },
+        {
+          "path": "routes.py",
+          "sha256": "c685cfc8c865a03f83b4ee8ca9d588bd1787cfcbced8b28f1d0e3e6b4d7c7960",
+          "size": 13773
+        },
+        {
+          "path": "scripts/worker.py",
+          "sha256": "c61719b939248aa8f92e073138ae7fddd89d14ac18a757274f60fb9b68a9ce16",
+          "size": 19015
+        },
+        {
+          "path": "store.py",
+          "sha256": "d73d6e1cd6bbf135387055bd85b1abd567d35dbbf42d6adaecf9252f672b8e85",
+          "size": 40633
+        },
+        {
+          "path": "tests/test_calendar.py",
+          "sha256": "9e65f3810ca17fd5c2854ad3856ca810e9adeb6b1b6131e54d39a34eccb0d1cd",
+          "size": 20061
+        },
+        {
+          "path": "tests/test_calendar_batch3.py",
+          "sha256": "08e7bf3972703f58067432c52c626bb16d7f9c2a3166f268faa02d651d2ede3f",
+          "size": 14492
+        },
+        {
+          "path": "tests/test_calendar_batch5.py",
+          "sha256": "345c071b0188062bc9fe699c13c6004b40134476d7b45f97321364503c9a482f",
+          "size": 10545
+        },
+        {
+          "path": "tests/test_calendar_notify.py",
+          "sha256": "268a2c86451b7bcd02b98a069adab07ef6d5e3d61169ab964c9cfa62a2841314",
+          "size": 12164
+        },
+        {
+          "path": "tests/test_calendar_reminder_queue.py",
+          "sha256": "3afbd2f4c20a8d5c5a8ab1eae792be810002e5b2ccda428df5e66a13676bb733",
+          "size": 42263
+        },
+        {
+          "path": "tests/test_calendar_review.py",
+          "sha256": "c75ee21b055a4f5f0ea2a0a549ecbb4d018b94efbbfe285b791ec54365a5fef0",
+          "size": 27333
+        },
+        {
+          "path": "tests/test_calendar_round2.py",
+          "sha256": "3c8d16db370ae0b21b796b741b87eb15fa793ab45459ce5f7cf2da18d4b328ec",
+          "size": 33678
+        },
+        {
+          "path": "tests/test_calendar_round3.py",
+          "sha256": "8160ab17373a75cfd84ac52b7b852b81d818659f24f377699647d6dafa84718c",
+          "size": 30722
+        },
+        {
+          "path": "tests/test_calendar_round4.py",
+          "sha256": "8341782f680908aa2cf350f934a2a0b115abae345a69a65bc2d64f7629f4a2e8",
+          "size": 30052
+        },
+        {
+          "path": "tests/test_calendar_round5.py",
+          "sha256": "903f8af4a7cad19342bbf8860a283f8d4c13bf6a0d1d877e11555b3318995d12",
+          "size": 13485
+        },
+        {
+          "path": "tools.py",
+          "sha256": "f97c79825f5f0d3689cae219d2028cc402d0f11150e887b3e490a0a7f75a5191",
+          "size": 49520
+        },
+        {
+          "path": "widget.js",
+          "sha256": "d071f0ccd0c4bbb976bdf7dc46c99abadd746a305e03e24d5489d1141b7dc9bf",
+          "size": 37175
+        }
+      ],
+      "description": "Единый календарь владельца — свои локальные календари, Яндекс (CalDAV) и Google (личный OAuth-клиент); события, повторения, свободные окна, служебные события-распорядок, напоминания без модели, виджет День/Неделя."
     }
   ]
 }
