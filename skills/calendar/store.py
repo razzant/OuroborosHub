@@ -545,6 +545,25 @@ class Store:
             c.execute("DELETE FROM reminders WHERE recurrence_id='' AND state IN ('scheduled', 'no_channel')"
                       " AND event_id IN (SELECT id FROM events WHERE rrule != '')")
 
+    def settled_reminders_for_split(self, event_id: str, first_original: str) -> List[Dict[str, Any]]:
+        """Terminal send history for the portion of a recurring series being replaced."""
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM reminders WHERE event_id=? AND state IN ('sent', 'unknown')"
+                             " AND COALESCE(NULLIF(recurrence_id, ''), occurrence_start_utc) >= ?",
+                             (event_id, first_original)).fetchall()
+        return [dict(row) for row in rows]
+
+    def carry_settled_reminder(self, previous: Dict[str, Any], new_event_id: str, effective: str,
+                               original: str, fire_at: str, notice_id: str) -> None:
+        """One atomic terminal copy; a split must not rearm a notice already sent or uncertain."""
+        with self._conn() as c:
+            c.execute("INSERT OR IGNORE INTO reminders (id, event_id, occurrence_start_utc, recurrence_id,"
+                      " offset_min, fire_at_utc, notice_id, state, sent_at, detail, attempts, updated_at)"
+                      " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      (new_id("rem"), new_event_id, effective, original, previous["offset_min"], fire_at,
+                       notice_id, previous["state"], previous["sent_at"], previous["detail"],
+                       previous["attempts"], _ts()))
+
     def due_reminders(self, now: datetime, limit: Optional[int] = None, include_no_channel: bool = True) -> List[Dict[str, Any]]:
         """Snapshot every due row once; a fixed first page can starve a short upcoming event."""
         states = ("scheduled", "no_channel") if include_no_channel else ("scheduled",)

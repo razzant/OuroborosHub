@@ -440,6 +440,31 @@ class RecurringOccurrenceIdentityTests(unittest.TestCase):
             self.assertEqual((row["recurrence_id"], row["state"], row["notice_id"]), ("", "unknown", "cal:old"))
             self.assertEqual(reopened.unknown_reminder_count(), 1)
 
+    def test_following_split_keeps_a_sent_occurrence_terminal_under_new_series_id(self):
+        start = self.first
+        plan(self.ctx, self.now)
+        channel = Channel()
+        sent = rem.deliver_due(self.ctx.store, channel, UTC, now=start - timedelta(minutes=15))
+        self.assertEqual(sent["sent"], 1)
+        updated = json.loads(tools.cal_update(self.ctx, id=f'{self.master["id"]}@{iso_utc(start)}',
+                                              title="Retitled", scope="following", confirm=True))
+        self.assertEqual(updated["status"], "updated")
+        plan(self.ctx, start - timedelta(minutes=10))
+        later = rem.deliver_due(self.ctx.store, channel, UTC, now=start - timedelta(minutes=10))
+        self.assertEqual((later["sent"], len(channel.sent)), (0, 1))
+
+    def test_following_split_never_retries_an_uncertain_prior_send(self):
+        plan(self.ctx, self.now)
+        row = next(r for r in self.ctx.store.upcoming_reminders(self.now, 200)
+                   if r["event_id"] == self.master["id"] and r["occurrence_start_utc"] == iso_utc(self.first))
+        self.ctx.store.mark_reminder(row["id"], "unknown")
+        json.loads(tools.cal_update(self.ctx, id=f'{self.master["id"]}@{iso_utc(self.first)}',
+                                    title="Retitled", scope="following", confirm=True))
+        plan(self.ctx, self.first - timedelta(minutes=10))
+        channel = Channel()
+        later = rem.deliver_due(self.ctx.store, channel, UTC, now=self.first - timedelta(minutes=10))
+        self.assertEqual((later["sent"], channel.sent), (0, []))
+
 
 class CatchupBatchReservationTests(unittest.TestCase):
     def test_replanned_member_does_not_hold_back_its_batch_peers(self):

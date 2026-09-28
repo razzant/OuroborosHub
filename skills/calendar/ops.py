@@ -647,6 +647,22 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
                 "exdates": _shift_csv(master.get("exdates")), "rdates": _shift_csv(master.get("rdates")),
                 "rrule": changes.get("rrule") or ";".join(rule_parts), "sync_state": "synced"})
     saved = store.insert_event(row)
+    # A following edit replaces the series ID, not the occurrence's history.
+    # Carry already sent/uncertain notices into the new identity before the
+    # caller replans: an unchanged meeting must not get a second push just
+    # because its title or future segment changed.
+    from reminders import notice_id_for
+    for previous in store.settled_reminders_for_split(master["id"], occ_key):
+        old_effective = parse_stored(previous["occurrence_start_utc"])
+        old_original = parse_stored(previous["recurrence_id"] or previous["occurrence_start_utc"])
+        old_fire = parse_stored(previous["fire_at_utc"])
+        if old_effective is None or old_original is None or old_fire is None:
+            continue
+        effective = iso_utc(_shift_instant(old_effective, shift, split_all_day, split_tz))
+        original = iso_utc(_shift_instant(old_original, shift, split_all_day, split_tz))
+        fire_at = iso_utc(_shift_instant(old_fire, shift, split_all_day, split_tz))
+        store.carry_settled_reminder(previous, saved["id"], effective, original, fire_at,
+                                    notice_id_for(saved["id"], effective, previous["offset_min"], original))
     _apply_changes(store, saved, {k: v for k, v in changes.items() if k not in ("start_utc", "end_utc", "rrule")})
     moved: List[Dict[str, Any]] = []
     for exc in later:

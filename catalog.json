@@ -1913,8 +1913,8 @@
         },
         {
           "path": "ops.py",
-          "sha256": "8edc0aeb1f21be38c5da3f1f8409fd7ce3f12e172f67719419d4366aeaf93c4c",
-          "size": 52036
+          "sha256": "d6da4b1929f901476a6cdcda3a9d585becf18f425f7b8b15dedfcdcb61eb88c6",
+          "size": 53222
         },
         {
           "path": "plugin.py",
@@ -1948,8 +1948,8 @@
         },
         {
           "path": "store.py",
-          "sha256": "42d5bacde9b4818e010d1aefa0f628056db75ab81f15d92866f01860f644b5eb",
-          "size": 38446
+          "sha256": "a5949c654a27af3893309ee19264a1eda313ec309a988bb03aee2dded9e44b31",
+          "size": 39841
         },
         {
           "path": "tests/test_calendar.py",
@@ -1973,8 +1973,8 @@
         },
         {
           "path": "tests/test_calendar_reminder_queue.py",
-          "sha256": "12243cab0961fd7681684fe5db2f9dcca72f25199f4b25c56e1efc5941309252",
-          "size": 29894
+          "sha256": "8caa43a10dc40323436c342cb7b5288ed63d6f77c95e584a71d7ad0509976e4c",
+          "size": 31477
         },
         {
           "path": "tests/test_calendar_review.py",
