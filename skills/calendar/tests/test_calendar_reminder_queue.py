@@ -76,6 +76,19 @@ class ExplicitNoRemindersTests(unittest.TestCase):
         self.assertEqual(waiting(ctx, now, quiet["id"]), [])
         self.assertEqual(ctx.store.get_event(quiet["id"])["reminders_json"], json.dumps("off"))
 
+    def test_rule_replan_error_does_not_delete_waiting_reminders(self):
+        ctx = make_context()
+        now = now_utc().replace(microsecond=0)
+        saved = ctx.store.insert_event({"calendar_id": DEFAULT_LOCAL_CALENDAR_ID, "title": "Keep",
+                                        "start_utc": iso_utc(now + timedelta(hours=2)),
+                                        "end_utc": iso_utc(now + timedelta(hours=3)), "reminders_json": "[15]"})
+        plan(ctx, now)
+        self.assertEqual(len(waiting(ctx, now, saved["id"])), 1)
+        with patch.object(ctx, "occurrences", side_effect=RuntimeError("source unavailable")):
+            warning = tools._plan_reminders(ctx)
+        self.assertIn("source unavailable", warning)
+        self.assertEqual(len(waiting(ctx, now, saved["id"])), 1)
+
     def test_google_import_keeps_explicit_none_distinct_from_default(self):
         base = {"id": "g-1", "iCalUID": "g-1@example.test", "summary": "Google event",
                 "start": {"dateTime": "2026-10-01T09:00:00+00:00"},
@@ -432,6 +445,24 @@ class RecurringOccurrenceIdentityTests(unittest.TestCase):
             rem.plan(self.ctx.store, unavailable, now=self.now)
         self.assertEqual(len(waiting(self.ctx, self.now, self.master["id"])), 1)
 
+    def test_malformed_recurrence_cannot_clear_waiting_reminders(self):
+        old_id = rem.notice_id_for(self.master["id"], iso_utc(self.first), 15)
+        self.ctx.store.schedule_reminder(self.master["id"], iso_utc(self.first), 15,
+                                         iso_utc(self.first - timedelta(minutes=15)), old_id)
+        self.ctx.store.update_event(self.master["id"], {"rrule": "FREQ=NOT_A_RULE"})
+        warning = tools._plan_reminders(self.ctx)
+        self.assertIn("очередь напоминаний не обновлена", warning)
+        self.assertEqual(len(waiting(self.ctx, self.now, self.master["id"])), 1)
+
+    def test_expansion_cap_cannot_authorize_partial_queue_reconciliation(self):
+        old_id = rem.notice_id_for(self.master["id"], iso_utc(self.first), 15)
+        self.ctx.store.schedule_reminder(self.master["id"], iso_utc(self.first), 15,
+                                         iso_utc(self.first - timedelta(minutes=15)), old_id)
+        self.ctx.store.update_event(self.master["id"], {"rrule": "FREQ=MINUTELY"})
+        warning = tools._plan_reminders(self.ctx)
+        self.assertIn("exceeded 1000 occurrences", warning)
+        self.assertEqual(len(waiting(self.ctx, self.now, self.master["id"])), 1)
+
     def test_old_database_adds_original_slot_column_without_rewriting_uncertain_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "calendar.sqlite3")
@@ -474,6 +505,48 @@ class RecurringOccurrenceIdentityTests(unittest.TestCase):
         channel = Channel()
         later = rem.deliver_due(self.ctx.store, channel, UTC, now=self.first - timedelta(minutes=10))
         self.assertEqual((later["sent"], channel.sent), (0, []))
+
+    def test_following_shift_keeps_sent_moved_exception_at_its_explicit_time(self):
+        effective = self.second + timedelta(hours=2)
+        self.move(self.second, effective, "Exception keeps this time")
+        planning_time = effective - timedelta(hours=1)
+        plan(self.ctx, planning_time)
+        channel = Channel()
+        first_send = rem.deliver_due(self.ctx.store, channel, UTC, now=effective - timedelta(minutes=15))
+        self.assertEqual(first_send["sent"], 1)
+        self.assertIn("Exception keeps this time", channel.sent[0][1])
+        updated = json.loads(tools.cal_update(self.ctx, id=f'{self.master["id"]}@{iso_utc(self.first)}',
+                                              start=iso_utc(self.first + timedelta(hours=1)), scope="following", confirm=True))
+        self.assertEqual(updated["status"], "updated")
+        plan(self.ctx, effective - timedelta(minutes=10))
+        second_send = rem.deliver_due(self.ctx.store, channel, UTC, now=effective - timedelta(minutes=10))
+        self.assertEqual((second_send["sent"], len(channel.sent)), (0, 1))
+
+    def test_following_shift_keeps_legacy_sent_moved_exception_terminal(self):
+        effective = self.second + timedelta(hours=2)
+        self.move(self.second, effective, "Legacy moved")
+        legacy_id = rem.notice_id_for(self.master["id"], iso_utc(effective), 15)
+        self.ctx.store.schedule_reminder(self.master["id"], iso_utc(effective), 15,
+                                         iso_utc(effective - timedelta(minutes=15)), legacy_id)
+        row = next(r for r in self.ctx.store.upcoming_reminders(self.now, 200) if r["notice_id"] == legacy_id)
+        self.ctx.store.mark_reminder(row["id"], "sent")
+        json.loads(tools.cal_update(self.ctx, id=f'{self.master["id"]}@{iso_utc(self.first)}',
+                                    start=iso_utc(self.first + timedelta(hours=1)), scope="following", confirm=True))
+        plan(self.ctx, effective - timedelta(minutes=10))
+        channel = Channel()
+        later = rem.deliver_due(self.ctx.store, channel, UTC, now=effective - timedelta(minutes=10))
+        self.assertEqual((later["sent"], channel.sent), (0, []))
+
+    def test_title_only_following_split_preserves_moved_cut_occurrence_time(self):
+        effective = self.first + timedelta(hours=2)
+        exception = self.move(self.first, effective, "Moved cut")
+        updated = json.loads(tools.cal_update(self.ctx, id=f'{self.master["id"]}@{iso_utc(self.first)}',
+                                              title="Renamed", scope="following", confirm=True))
+        self.assertEqual(updated["status"], "updated")
+        saved = self.ctx.store.get_event(exception["id"])
+        self.assertEqual((saved["start_utc"], saved["end_utc"]),
+                         (iso_utc(effective), iso_utc(effective + timedelta(hours=1))))
+        self.assertEqual(self.ctx.store.get_event(saved["master_id"])["start_utc"], iso_utc(effective))
 
 
 class CatchupBatchReservationTests(unittest.TestCase):

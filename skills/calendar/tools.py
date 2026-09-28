@@ -42,9 +42,9 @@ class Context:
         return now_utc().astimezone(self.tz)
 
     def occurrences(self, start: datetime, end: datetime, calendar_ids: Optional[Sequence[str]] = None,
-                    include_hidden: bool = True) -> List[Dict[str, Any]]:
+                    include_hidden: bool = True, strict: bool = False) -> List[Dict[str, Any]]:
         rows = self.store.window(start, end, calendar_ids, include_hidden=include_hidden)
-        return ops.expand(rows, start, end, self.store.exceptions_for, owner_tz=self.tz)
+        return ops.expand(rows, start, end, self.store.exceptions_for, owner_tz=self.tz, strict=strict)
 
     def resolve_calendars(self, spec: Any) -> Tuple[List[str], str]:
         """Names, aliases, ids, provider words, 'all', 'busy_set', 'default' → ordered calendar ids."""
@@ -497,11 +497,11 @@ def cal_reminders(ctx: Context, action: str = "list", offsets: Any = None, calen
         if err or not cal_ids:
             return json_dumps({"status": "error", "message": err or "нужен calendar_id"})
         report = set_reminder_mode(ctx, cal_ids[0], action == "enable_calendar")
-        _plan_reminders(ctx, replan=True)
+        _plan_reminders(ctx)
         return bounded_result({"status": "updated", **report, "rules": rem.get_rules(st), "upcoming": rem.upcoming(st, ctx.tz, limit=10)})
     else:
         return json_dumps({"status": "error", "message": "action: list | set_default | set_hidden | set_calendar | clear_calendar | enable_calendar | disable_calendar"})
-    _plan_reminders(ctx, replan=True)
+    _plan_reminders(ctx)
     return bounded_result({"status": "updated", "rules": rules, "upcoming": rem.upcoming(st, ctx.tz, limit=10)})
 
 
@@ -721,12 +721,10 @@ def reload_google(ctx: Context) -> Dict[str, Any]:
     return {"status": "ok", "accounts": report}
 
 
-def _plan_reminders(ctx: Context, replan: bool = False) -> str:
-    """Plan the reminder queue; a failure is disclosed to the caller instead of swallowed."""
+def _plan_reminders(ctx: Context) -> str:
+    """Reconcile waiting reminders through the planner; do not clear them before reading occurrences."""
     try:
-        if replan:
-            ctx.store.drop_scheduled_reminders()
-        rem.plan(ctx.store, lambda s, e: ctx.occurrences(s, e))
+        rem.plan(ctx.store, lambda s, e: ctx.occurrences(s, e, strict=True))
         return ""
     except Exception as exc:
         return f"очередь напоминаний не обновлена: {type(exc).__name__}: {exc}"

@@ -433,7 +433,7 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
             return "старое напоминание без идентификатора вхождения", event
         import ops as _ops
         live = _ops.expand([event], start - timedelta(minutes=1), start + timedelta(minutes=1),
-                           store.exceptions_for, owner_tz=owner_tz)
+                           store.exceptions_for, owner_tz=owner_tz, strict=True)
         matches = [o for o in live if str(o.get("occurrence_start_utc") or "") == original and
                    str(o.get("start_utc") or "") == key]
         if not matches:

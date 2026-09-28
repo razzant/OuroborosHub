@@ -47,7 +47,7 @@ def _series_id(occurrence_id: str) -> Tuple[str, str]:
 
 
 def expand(rows: Sequence[Dict[str, Any]], start: datetime, end: datetime, exceptions_for: Callable[[str], List[Dict[str, Any]]],
-           owner_tz=None) -> List[Dict[str, Any]]:
+           owner_tz=None, strict: bool = False) -> List[Dict[str, Any]]:
     """Turn stored rows into concrete occurrences inside [start, end).
 
     A local «обычно» (soft) routine follows the owner's CURRENT zone (16 A), everything else keeps its own zone.
@@ -72,19 +72,24 @@ def expand(rows: Sequence[Dict[str, Any]], start: datetime, end: datetime, excep
                 out.append(dict(row))
             continue
         follow_owner = owner_tz is not None and row.get("availability") == AVAIL_SOFT and row.get("origin", "local") == "local"
-        out.extend(_expand_master(row, start, end, exceptions_for(row["id"]), owner_tz if follow_owner else None))
+        out.extend(_expand_master(row, start, end, exceptions_for(row["id"]), owner_tz if follow_owner else None, strict=strict))
     out.sort(key=lambda r: (r.get("start_utc") or "", r.get("title") or ""))
     return out
 
 
-def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, exceptions: List[Dict[str, Any]], force_tz=None) -> List[Dict[str, Any]]:
+def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, exceptions: List[Dict[str, Any]],
+                   force_tz=None, strict: bool = False) -> List[Dict[str, Any]]:
     m_start, m_end = parse_stored(master.get("start_utc")), parse_stored(master.get("end_utc"))
     if m_start is None or m_end is None:
+        if strict:
+            raise ValueError("recurring event has invalid start or end")
         return []
     duration = m_end - m_start
     try:
         from dateutil.rrule import rrulestr  # transitive dependency of icalendar
     except Exception:
+        if strict:
+            raise  # a partial recurrence projection must not authorize destructive queue reconciliation
         row = dict(master)
         return [row] if overlaps(m_start, m_end, start, end) else []
     try:
@@ -101,6 +106,8 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
         for rd in _split_dates(master.get("rdates")):
             rule.rdate(rd.astimezone(tz))
     except Exception:
+        if strict:
+            raise
         row = dict(master)
         return [row] if overlaps(m_start, m_end, start, end) else []
     by_recurrence = {str(ex.get("recurrence_id") or ""): ex for ex in exceptions}
@@ -138,6 +145,8 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
         if s and e and overlaps(s, e, start, end):
             out.append(row)
         if len(out) > 1000:
+            if strict:
+                raise ValueError("recurrence expansion exceeded 1000 occurrences")
             break
     # Exceptions moved INTO the window from an occurrence date outside it.
     for key, exc in by_recurrence.items():
@@ -617,7 +626,12 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     m_start, m_end = parse_stored(master["start_utc"]), parse_stored(master["end_utc"])
     occ_start = parse_stored(occ_key) or m_start
     duration = (m_end - m_start) if (m_start and m_end) else timedelta(hours=1)
-    new_start = parse_stored(changes.get("start_utc")) or occ_start
+    cut_exception = next((exc for exc in later if str(exc.get("recurrence_id") or "") == occ_key), None)
+    cut_start = parse_stored(cut_exception.get("start_utc")) if cut_exception else None
+    cut_end = parse_stored(cut_exception.get("end_utc")) if cut_exception else None
+    if cut_start and cut_end and cut_end > cut_start:
+        duration = cut_end - cut_start
+    new_start = parse_stored(changes.get("start_utc")) or cut_start or occ_start
     new_end = parse_stored(changes.get("end_utc")) or (new_start + duration)
     rule_parts = [p for p in original_rrule.split(";") if p and not p.upper().startswith(("UNTIL=", "COUNT="))]
     count_left = _count_remaining(master, original_rrule, occ_start)
@@ -652,17 +666,36 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     # caller replans: an unchanged meeting must not get a second push just
     # because its title or future segment changed.
     from reminders import notice_id_for
+    later_by_original = {str(exc.get("recurrence_id") or ""): exc for exc in later}
     for previous in store.settled_reminders_for_split(master["id"], occ_key):
         old_effective = parse_stored(previous["occurrence_start_utc"])
         old_original = parse_stored(previous["recurrence_id"] or previous["occurrence_start_utc"])
         old_fire = parse_stored(previous["fire_at_utc"])
         if old_effective is None or old_original is None or old_fire is None:
             continue
-        effective = iso_utc(_shift_instant(old_effective, shift, split_all_day, split_tz))
-        original = iso_utc(_shift_instant(old_original, shift, split_all_day, split_tz))
-        fire_at = iso_utc(_shift_instant(old_fire, shift, split_all_day, split_tz))
-        store.carry_settled_reminder(previous, saved["id"], effective, original, fire_at,
-                                    notice_id_for(saved["id"], effective, previous["offset_min"], original))
+        candidates = {iso_utc(old_original)}
+        if not previous["recurrence_id"]:
+            # Legacy rows lost original-slot identity. An exception sharing
+            # the effective time may have been the one sent; conservatively
+            # preserve both possible terminal identities, never resend either.
+            candidates.update(str(exc.get("recurrence_id") or "") for exc in later
+                              if str(exc.get("start_utc") or "") == iso_utc(old_effective))
+        for old_key in candidates:
+            original_dt = parse_stored(old_key)
+            if original_dt is None:
+                continue
+            exception = later_by_original.get(old_key)
+            if exception is not None and old_key != occ_key:
+                # Later exceptions retain their explicit start when the master
+                # moves; only their recurrence key follows the new series wall time.
+                effective = iso_utc(old_effective)
+                fire_at = iso_utc(old_fire)
+            else:
+                effective = iso_utc(_shift_instant(old_effective, shift, split_all_day, split_tz))
+                fire_at = iso_utc(_shift_instant(old_fire, shift, split_all_day, split_tz))
+            original = iso_utc(_shift_instant(original_dt, shift, split_all_day, split_tz))
+            store.carry_settled_reminder(previous, saved["id"], effective, original, fire_at,
+                                        notice_id_for(saved["id"], effective, previous["offset_min"], original))
     _apply_changes(store, saved, {k: v for k, v in changes.items() if k not in ("start_utc", "end_utc", "rrule")})
     moved: List[Dict[str, Any]] = []
     for exc in later:

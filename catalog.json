@@ -1913,8 +1913,8 @@
         },
         {
           "path": "ops.py",
-          "sha256": "d6da4b1929f901476a6cdcda3a9d585becf18f425f7b8b15dedfcdcb61eb88c6",
-          "size": 53222
+          "sha256": "b1ee66fdcbd4406dbe0f6fcb9dd608f0b0cfcf67445d35ead058dcd58e51fb02",
+          "size": 55183
         },
         {
           "path": "plugin.py",
@@ -1933,8 +1933,8 @@
         },
         {
           "path": "reminders.py",
-          "sha256": "1ab0ef562a7e27764ce69ac8deae1d9603a4e5fa1bf91c9540753fbbe4bd3622",
-          "size": 24049
+          "sha256": "f9819050e23abd18d8c1d03cdfd6a899d4fba5cb9169d7f9cc2d493d94e8cdbd",
+          "size": 24062
         },
         {
           "path": "routes.py",
@@ -1943,8 +1943,8 @@
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "c7ab95296ab5ff794142674350a8be706bd07f74178675d67faea58034c1f2f3",
-          "size": 18659
+          "sha256": "1cc5b5b7283be2ecee110599ae4216b99868a1c150806ffa68c5730d25bf3fd3",
+          "size": 18736
         },
         {
           "path": "store.py",
@@ -1973,8 +1973,8 @@
         },
         {
           "path": "tests/test_calendar_reminder_queue.py",
-          "sha256": "7337a65cee30e24323a71bb40771c17c87a858f1378df771cd082d31f1fcda95",
-          "size": 32125
+          "sha256": "f503a5e73a4c8797f460a6d41ac47cbfe6f611be078298825a3246b339ece5fa",
+          "size": 37121
         },
         {
           "path": "tests/test_calendar_review.py",
@@ -2003,8 +2003,8 @@
         },
         {
           "path": "tools.py",
-          "sha256": "11ea1ed114b9ca1b36065f1864b5b89678f12536d983abd2714f905b6fa5ebe4",
-          "size": 49282
+          "sha256": "e51b9c8879df35795cabd80a1dfd2563bcb9981c1265c3eddf495e33938fbeb9",
+          "size": 49227
         },
         {
           "path": "widget.js",

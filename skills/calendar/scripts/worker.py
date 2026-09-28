@@ -309,7 +309,8 @@ def main() -> int:
                     health["sync"].append(sync_account(store, providers, account, tz))
                     last_sync[account["id"]] = time.time()
             health["intents"] = ops.retry_due_intents(store, providers, owner="companion")
-            planned = rem.plan(store, lambda s, e: ops.expand(store.window(s, e, include_hidden=True), s, e, store.exceptions_for, owner_tz=tz))
+            planned = rem.plan(store, lambda s, e: ops.expand(store.window(s, e, include_hidden=True), s, e,
+                                                                store.exceptions_for, owner_tz=tz, strict=True))
             health["reminders"] = {"planned": planned, **stats}
             health["channel"] = channel.state()
             store.set_setting("notify_channel_state", {"state": health["channel"], "checked_at": iso_utc(now_utc())})
