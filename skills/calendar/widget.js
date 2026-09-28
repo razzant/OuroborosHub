@@ -384,6 +384,8 @@
         var rrule = el('input', { value: f.rrule, placeholder: 'Повторение RRULE, например FREQ=WEEKLY;BYDAY=MO,WE' });
         var rruleEdited = false; rrule.addEventListener('input', function () { rruleEdited = true; });
         var scopeSel = el('select'); [['this', 'только эта дата'], ['following', 'начиная с этой даты'], ['all', 'всё расписание']].forEach(function (p) { scopeSel.appendChild(el('option', { value: p[0], text: p[1] })); });
+        scopeSel.value = f.scope || 'this';
+        scopeSel.addEventListener('change', function () { f.scope = scopeSel.value; f.armed = false; });
         var status = el('div', { class: 'status', text: f.loading ? 'Загружаю событие…' : (f.loadError ? 'Не удалось загрузить детали: ' + f.loadError : '') });
         if (f.loadError) status.className = 'status err';
         var actions = el('div', { class: 'actions' });
