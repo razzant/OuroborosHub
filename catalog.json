@@ -1938,31 +1938,36 @@
     {
       "slug": "smart_lists",
       "name": "smart_lists",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "type": "extension",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "7d315d9ac61c965f3290c85216e6687705c458325d6f7ec2b047995c0587d723",
-          "size": 29771
+          "sha256": "1de4e02a327862d5a2c7a668fc3c4fed6bfdc7cb6d1fb7f318b60c51b9ff70c7",
+          "size": 22597
         },
         {
           "path": "lists_core.py",
-          "sha256": "62d7dce25c86eff98457370c977a077b8c9779eacdbe28272fffc4faba8e1410",
-          "size": 95323
+          "sha256": "55878f1f006886084d36fa8acd432ba158b8e5272baf0a8870375a5543dfbea8",
+          "size": 95636
         },
         {
           "path": "plugin.py",
-          "sha256": "7977c74a57024483d81634259858a3aadabeff9097e26e08d80420c3c7776f2d",
-          "size": 42013
+          "sha256": "dfcd9988660f28ea988139cd448853d23e1aeef73dc335a75dc6436ec61b5fe6",
+          "size": 35841
         },
         {
           "path": "tests/test_smart_lists.py",
-          "sha256": "9c7de8fc6bb75a445e04f1735f78c9fc250f0bda78b68c2888d806f4202898ea",
-          "size": 111817
+          "sha256": "3fc0803b2311662a59e8a64bc78cde49512037da56ccd8836c7019419d647a6e",
+          "size": 118210
+        },
+        {
+          "path": "widget.js",
+          "sha256": "a4554553102bd0f92780264270dce4212ee331facb1c59430b46a6b6e1af9552",
+          "size": 11012
         }
       ],
-      "description": "Provisional personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a compact declarative widget. No network, purchases or reminders."
+      "description": "Provisional personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders."
     }
   ]
 }

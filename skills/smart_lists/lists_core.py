@@ -939,8 +939,11 @@ def _entry_view(entry: Dict[str, Any], paths: Dict[str, str]) -> Dict[str, Any]:
         "group_path": paths.get(entry["group_id"], ""),
         "due": entry.get("due"),
         "source": entry.get("source", ""),
-        "created_at": entry.get("created_at", ""),
-        "updated_at": entry.get("updated_at", ""),
+        # Legacy documents may omit optional stamps. The journal validator
+        # accepts null, not an invented empty string; a mutation must not turn
+        # a readable legacy store into an unreadable one on its next load.
+        "created_at": entry.get("created_at"),
+        "updated_at": entry.get("updated_at"),
         "completed_at": entry.get("completed_at"),
         "deleted_at": entry.get("deleted_at"),
     }
@@ -1980,6 +1983,7 @@ class SmartLists:
                 reverse=True,
             )
             return {
+                "revision": {"store_id": doc["store_id"], "generation": doc["generation"]},
                 "tree": rows,
                 "open": [_entry_view(entry, paths) for entry in open_entries[:open_limit]],
                 "open_total": len(open_entries),

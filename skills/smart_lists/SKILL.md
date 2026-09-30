@@ -1,7 +1,7 @@
 ---
 name: smart_lists
-description: "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a compact declarative widget. No network, purchases or reminders."
-version: 0.3.1
+description: "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders."
+version: 0.3.2
 type: extension
 runtime: python3
 entry: plugin.py
@@ -18,191 +18,17 @@ ui_tab:
   title: Smart Lists
   icon: 📋
   render:
-    kind: declarative
-    schema_version: 1
-    span: 2
-    components:
-    - {type: poll, route: view, method: GET, target: lists, auto_start: true, interval_ms: 30000, max_ticks: 100, label: Refresh lists, busy_label: Refreshing…}
-    - {type: callout, target: lists, tone: success, path: notice, condition_key: notice}
-    - {type: callout, target: lists, tone: warning, path: warning, condition_key: warning}
-    - {type: callout, target: lists, tone: danger, path: error, condition_key: error}
-    - {type: callout, target: lists, tone: info, path: empty_hint, condition_key: empty_hint}
-    - type: group
-      layout: cluster
-      target: lists
-      components:
-      - {type: metric, target: lists, label: Groups, path: stats.groups}
-      - {type: metric, target: lists, label: Open, path: stats.open}
-      - {type: metric, target: lists, label: Done, path: stats.done}
-      - {type: metric, target: lists, label: Deleted, path: stats.deleted}
-    - type: tabs
-      target: lists
-      tabs:
-      - label: Open
-        components:
-        - type: table
-          target: lists
-          path: open_rows
-          columns:
-          - {label: Item, path: item}
-          - {label: Group, path: group}
-          - {label: Due, path: due}
-          - {label: ID, path: id}
-        - {type: callout, target: lists, tone: info, path: open_note, condition_key: open_note}
-      - label: Groups
-        components:
-        - type: table
-          target: lists
-          path: tree_rows
-          columns:
-          - {label: Group, path: group}
-          - {label: Open, path: open, presentation: number}
-          - {label: Done, path: done, presentation: number}
-          - {label: Deleted, path: deleted, presentation: number}
-          - {label: ID, path: id}
-      - label: Done
-        components:
-        - type: table
-          target: lists
-          path: done_rows
-          columns:
-          - {label: Item, path: item}
-          - {label: Group, path: group}
-          - {label: Completed (UTC), path: completed}
-          - {label: ID, path: id}
-      - label: Deleted
-        components:
-        - type: table
-          target: lists
-          path: deleted_rows
-          columns:
-          - {label: Item, path: item}
-          - {label: Group, path: group}
-          - {label: Deleted (UTC), path: deleted}
-          - {label: ID, path: id}
-    - type: tabs
-      target: lists
-      tabs:
-      - label: Edit entry
-        components:
-        - type: form
-          route: edit
-          method: POST
-          target: edit_result
-          title: Edit one entry
-          submit_label: Apply
-          busy_label: Saving…
-          columns: 2
-          fields:
-          - {name: entry_id, label: Entry ID, type: text, required: true, placeholder: e_…}
-          - name: status
-            label: Status
-            type: select
-            options:
-            - {value: '', label: Keep}
-            - {value: done, label: Mark done}
-            - {value: open, label: Reopen}
-            - {value: delete, label: Delete (can be undone)}
-            - {value: undo, label: Undo delete}
-            - {value: erase, label: Erase deleted entry for good}
-          - {name: text, label: New text, type: text, span: 2, placeholder: Leave blank to keep}
-          - {name: due, label: New due, type: text, placeholder: Leave blank to keep}
-          - {name: move_to, label: Move to group, type: text, placeholder: Leave blank to keep}
-          - {name: clear_due, label: Clear due, type: checkbox}
-        - {type: callout, target: edit_result, tone: danger, path: error, condition_key: error}
-        - {type: callout, target: edit_result, tone: success, path: notice, condition_key: notice}
-      - label: Edit groups
-        components:
-        - type: form
-          route: group
-          method: POST
-          target: group_result
-          title: Create, rename, move or delete a group
-          submit_label: Apply
-          busy_label: Saving…
-          columns: 2
-          fields:
-          - name: action
-            label: Action
-            type: select
-            options:
-            - {value: create, label: Create}
-            - {value: rename, label: Rename}
-            - {value: move, label: Move}
-            - {value: delete, label: Delete (empty only)}
-          - {name: group, label: Group, type: text, placeholder: 'Existing group (rename, move, delete)'}
-          - {name: name, label: Name, type: text, placeholder: 'New name (create, rename)'}
-          - {name: parent, label: Parent, type: text, placeholder: 'Blank = top level (create, move)'}
-        - {type: callout, target: group_result, tone: danger, path: error, condition_key: error}
-        - {type: callout, target: group_result, tone: success, path: notice, condition_key: notice}
-      - label: Subtree
-        components:
-        - type: form
-          route: select
-          method: GET
-          target: selection
-          title: Open entries in a group and its sub-groups (read-only)
-          submit_label: Show
-          busy_label: Reading…
-          fields:
-          - {name: group, label: Group, type: text, required: true, placeholder: Home}
-        - {type: callout, target: selection, tone: warning, path: warning, condition_key: warning}
-        - {type: callout, target: selection, tone: danger, path: error, condition_key: error}
-        - type: kv
-          target: selection
-          condition_key: ok
-          fields:
-          - {label: Scope, path: scope}
-          - {label: Shown open entries, path: count}
-          - {label: Total open entries, path: total}
-        - type: table
-          target: selection
-          condition_key: ok
-          path: rows
-          columns:
-          - {label: Item, path: item}
-          - {label: Group, path: group}
-          - {label: Due, path: due}
-          - {label: ID, path: id}
-      - label: Store
-        components:
-        - {type: callout, target: lists, tone: warning, path: store.export_warning, condition_key: store.export_warning}
-        - {type: callout, target: lists, tone: info, path: store.hint, condition_key: store.hint}
-        - type: kv
-          target: lists
-          fields:
-          - {label: State, path: store.state}
-          - {label: Contents, path: store.contents}
-          - {label: Last change (UTC), path: store.last_written}
-          - {label: Last export (UTC), path: store.last_export}
-          - {label: Backups, path: store.backups}
-        - {type: file, target: lists, route: export, query: {filename: smart-lists-export.json}, condition_key: store.exportable, label: Download full export (JSON), filename: smart-lists-export.json}
-        - type: form
-          route: store
-          method: POST
-          target: store_result
-          title: Restore an export or start a new store
-          submit_label: Apply
-          busy_label: Working…
-          fields:
-          - name: action
-            label: Action
-            type: select
-            options:
-            - {value: restore, label: Restore pasted export}
-            - {value: init, label: Start a new empty store}
-          - {name: export_json, label: Export, type: textarea, placeholder: Paste the whole content of a Smart Lists export file}
-          - {name: replace, label: Replace the current store (it is copied to Backups first), type: checkbox}
-        - {type: callout, target: store_result, tone: danger, path: error, condition_key: error}
-        - {type: callout, target: store_result, tone: warning, path: warning, condition_key: warning}
-        - {type: callout, target: store_result, tone: success, path: notice, condition_key: notice}
+    kind: module
+    entry: widget.js
+    start: auto
+    appearance: host
 ---
 
 # Smart Lists
 
 Smart Lists keeps personal lists — groceries, errands, packing, anything —
 in one authoritative store inside this skill's state directory. The agent adds
-entries when the owner clearly asks in chat, and a compact declarative widget
+entries when the owner clearly asks in chat, and a Today checklist widget
 shows and edits the same data.
 
 Smart Lists does not import lists from another app. Each entry belongs to
@@ -281,14 +107,13 @@ without `pending`. The replace is the commit point.
   `backups/export-<UTC time>-<random>.json` in the state directory and
   returns its path. It contains the whole store document — groups, every
   entry including the trash, due values, timestamps and the request journal —
-  plus `counts` and a SHA-256 checksum of the document. The widget's
-  **Download full export (JSON)** button produces the same document through
-  `GET export` and hands it to the host's download, which saves to Downloads.
+  plus `counts` and a SHA-256 checksum of the document. The widget's low-emphasis Download button uses the retained `GET export` route; the agent can also
+  export using the `store` tool and help save a copy outside the skill directory.
   An older store's request journal is sanitized in the exported copy, without
   rewriting the live file: an erased entry's former plaintext must not travel
   into a new backup through the journal.
 - **Restore** (`store` → `restore`) takes an absolute path or a bare file name
-  from the backups folder (tools), or pasted export text (widget). It accepts
+  from the backups folder (tools). The retained `POST store` route also accepts pasted export text. It accepts
   a Smart Lists export, whose checksum and counts must match, or a bare
   `store.json` document. It refuses (`invalid_export`) and writes nothing for
   anything else: invalid JSON (including nesting too deep to parse), text
@@ -298,8 +123,7 @@ without `pending`. The replace is the commit point.
 - **Recording an export** in the sentinel happens after the export exists.
   If only that write fails, the export is still delivered: the tool returns
   `export_recorded: false` with a `warning`, the download completes, and
-  `status` (`export_unrecorded`) and the widget (a warning on the card and in
-  the Store tab) say that the last export shown does not include it, until an
+  `status` (`export_unrecorded`) and the widget show a warning until an
   export is recorded again. The flag lives in memory, because the disk just
   refused a write.
 - **Never a silent overwrite.** If `store.json` exists — readable or not —
@@ -342,11 +166,10 @@ never breaks the widget later. Checked:
 
 ## Deletion
 
-- `delete` (tool action `delete`, or **Delete** in the widget's status field)
+- `delete` (tool action `delete`, through the chat tool)
   moves entries to the trash: they disappear from open/done reads, the
   subtree selection and duplicate reports, but keep their text, status and
-  group. `read` with `status: deleted` and the widget's **Deleted** tab show
-  them.
+  group. `read` with `status: deleted` show them.
 - `undo` brings deleted entries back with their previous status and group.
   Deleted entries cannot be edited, completed or moved until undone.
 - `erase` permanently removes entries that are already in the trash; it
@@ -379,7 +202,7 @@ never breaks the widget later. Checked:
   after 50,000 retired ids, 0.65% after 100,000, 4% after 150,000);
   `store` → `status` reports `replay.retired_ids_estimate` and
   `replay.false_refusal_rate`, and the refusal names the rate once it reaches
-  1%. Changes made without a request id (the widget) are never affected.
+  1%. The widget supplies a fresh request id for each checkbox action.
 - After the full record is evicted, a retry is refused even if the entry
   survives: its old arguments are no longer available to check for conflict.
   Reusing the same id with changed text must never silently report success.
@@ -410,33 +233,35 @@ Unknown arguments are refused rather than ignored.
 
 ## Widget
 
-A host-rendered declarative card (no custom JavaScript): a refresh poll,
-counters, tabs for **Open** entries, the **Groups** tree, recently **Done**
-entries and the **Deleted** trash, and small forms to edit one entry (text,
-due, status, group, delete/undo/erase), edit groups, view a read-only
-**Subtree** selection, and a **Store** tab with the lifecycle state, the
-export download and a form to restore a pasted export or start a new store.
-Capture new entries through the agent's idempotent `add` tool. Changes made
-in chat appear on the next automatic refresh (every 30 seconds while the card
-is visible, up to 100 times; **Refresh lists** resumes it).
+The module widget shows **Today** with a tab for all entries and one tab per
+top-level group. A tab includes that group's nested subgroups; empty groups
+still have tabs. Within a tab, section labels show where entries belong, but
+only checkboxes and a backup download are actionable. Group creation, entry
+capture and all other edits happen through ordinary chat. Every open entry appears once,
+regardless of when it was added. Tomorrow's list is the same still-open entries,
+not duplicated records or a midnight job. The date is computed by the host on each read in
+the browser-reported IANA timezone and shown beside Today; an invalid timezone refuses
+rather than guessing a date. Checking an item marks it done immediately but keeps it visibly checked in
+Today through the end of the browser's local day. On the next day it moves to
+the collapsible archive; unchecking a completed item reopens it. The archive
+preview shows 50 recent earlier-day completions; older ones
+remain accessible through chat. Today's open and checked entries page 100 at a time. A low-emphasis backup button downloads a full JSON export outside the skill data directory. A rejected or
+uncertain checkbox request keeps the current list visible and shows an error,
+never silently treats a timed-out request as undone. On uncertainty, ask in chat
+or refresh before deciding whether to act again. The widget refreshes every 30 seconds while
+visible, including across midnight; creation, editing, groups, restore, export and trash management remain
+available through the nine agent tools in ordinary chat. This UI has no editing or group-management controls.
 
 ## HTTP routes
 
-Mounted under `/api/extensions/smart_lists/`: `GET view`, `POST edit`,
-`POST group`, `GET select`, `POST store`, `GET export`. They use the same
-store as the tools. All routes except `export` answer HTTP 200 with a JSON
-object; form results use their own targets. A refused change returns `ok: false`
-with a top-level `error` beside that form, while the lists table keeps its
-last view. A successful change appears in the table on the next poll or manual
-refresh. `GET export` returns
-the export document itself; when the store is not `ready` it raises, so the
-host answers with an HTTP error and the download fails visibly instead of
-saving a file that is not an export. It also records the export time in the
-sentinel; if only that fails, the download still completes and the next view
-carries the warning described above. The download button requests
-`GET export?filename=smart-lists-export.json`: the host names widget
-downloads after the `filename` query parameter, and otherwise after the last
-path segment (`export`, without `.json`); the route ignores the parameter.
+Mounted under `/api/extensions/smart_lists/`: the widget calls `GET today`
+with the browser's IANA timezone, an optional top-level group id and a page offset, then
+`POST check` with an entry id, boolean done and unique request id. Both use
+the existing store; checkbox mutation delegates to `complete`, with its
+idempotent journal. The older `GET view`, `POST edit`, `POST group`, `GET select`,
+`POST store`, `GET export` routes remain for compatibility and exports but are
+not displayed in the new widget. Tool `store` still exports and restores with
+the same validation and warnings; use it to save an external backup.
 
 ## Storage and limits
 
@@ -479,8 +304,9 @@ path segment (`export`, without `.json`); the route ignores the parameter.
   reinstalling Ouroboros deletes `store.json`, the sentinel and `backups/`
   together. Afterwards the store is `uninitialized`, which is indistinguishable
   from a first run; the explicit `init` step is what keeps it from silently
-  appearing empty. Only an export copied outside that directory (the widget
-  download, or the agent copying the export file) survives. The skill cannot
+  appearing empty. Only an export copied outside that directory (through the
+  widget's Download button, or the agent's `store` export and a separate copy)
+  survives. The skill cannot
   write there itself and does not schedule exports.
 - Restoring after a `missing` store cannot carry over the request ids of the
   lost file. A retry of a change that only the lost file had applied is
@@ -494,13 +320,11 @@ path segment (`export`, without `.json`); the route ignores the parameter.
   previous generation put back by hand before the next save would load
   without a `mismatch`.
 - An unrecorded export is remembered in memory only; after a restart the
-  widget again shows the last recorded export.
+  status again shows the last recorded export.
 - Single group membership per entry; no tags.
-- The widget addresses groups and entries by typed path or id; there are no
-  pickers. Restoring in the widget means pasting the export text; there is no
-  upload control in declarative widgets.
-- A widget subtree selection shows at most 500 entries. Agent tools can page
-  through all 5000 entries with `offset`, subject to the per-response byte cap.
+- The widget displays entries and toggles their status only. Other changes,
+  including restore and export, are available through chat.
+- The Today widget pages 100 open entries at a time and previews 50 archived entries. Agent tools can page through all 5000 entries with `offset`, subject to the per-response byte cap.
 - On platforms with neither `fcntl` nor `msvcrt` only the in-process lock
   serializes writers. The Windows lock path is covered by tests with a
   simulated `msvcrt`, not on a Windows machine.
@@ -514,4 +338,4 @@ python -m unittest discover -s skills/smart_lists/tests -v
 ```
 
 Set `OUROBOROS_CORE_ROOT=/path/to/ouroboros` to additionally validate both
-widget declarations with the core's declarative-widget validator.
+widget declarations with the core's widget validator.

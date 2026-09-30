@@ -20,8 +20,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:  # Loaded as a package by the extension loader.
     from . import lists_core
@@ -423,15 +425,13 @@ def _entry_rows(entries: Iterable[Dict[str, Any]], stamp: Optional[Tuple[str, st
 # Owner-facing wording for the widget; the tools return the agent-facing message.
 _STATE_HINTS = {
     "uninitialized": "No list store exists here yet. If you had lists before (for example before a reinstall), "
-                     "paste your export in the Store tab and choose Restore; otherwise choose Start a new empty "
-                     "store there.",
+                     "ask in chat to restore your export; otherwise ask to start a new empty store.",
     "missing": "The list store file is missing although lists were saved here before. Nothing was replaced with "
-               "an empty list. Restore an export in the Store tab, or start over there with Replace checked.",
+               "an empty list. Ask in chat to restore an export or explicitly start over.",
     "mismatch": "The list store file is older than, or different from, the last saved version, so it was left "
-                "untouched. Restore the export you want in the Store tab with Replace checked (the current file "
-                "is backed up first).",
-    "unreadable": "The list store file could not be read and was left untouched. Restore an export in the Store "
-                  "tab with Replace checked (the damaged file is backed up first).",
+                "untouched. Ask in chat to restore the export you want (the current file is backed up first).",
+    "unreadable": "The list store file could not be read and was left untouched. Ask in chat to restore an "
+                  "export (the damaged file is backed up first).",
 }
 
 
@@ -491,10 +491,9 @@ def widget_view(*, notice: str = "", warning: str = "") -> Dict[str, Any]:
         "open_rows": _entry_rows(data["open"]),
         "done_rows": _entry_rows(data["done"], ("completed", "completed_at")),
         "deleted_rows": _entry_rows(data["deleted"], ("deleted", "deleted_at")),
-        "open_note": (f"Showing the first {shown} of {data['open_total']} open entries; use the Subtree tab "
-                      "for one group." if data["open_total"] > shown else ""),
-        "empty_hint": ("No groups yet. Create one under Edit groups (for example 'Home', then 'Groceries' with "
-                       "parent 'Home'), or ask the agent to start a list." if not data["tree"] else ""),
+        "open_note": (f"Showing the first {shown} of {data['open_total']} open entries; ask in chat "
+                      "for a paginated group view." if data["open_total"] > shown else ""),
+        "empty_hint": ("No groups yet. Ask in chat to start a list." if not data["tree"] else ""),
     }
 
 
@@ -512,7 +511,7 @@ def _describe(result: Dict[str, Any]) -> str:
                 else f"No change to {entry['id']}.")
     elif op in lists_core.ENTRY_ACTIONS:
         ids = ", ".join(entry["id"] for entry in result[lists_core._ACTION_RESULT_KEYS[op]]) or "nothing"
-        text = {"delete": f"Deleted {ids} (kept in the Deleted tab; choose Undo delete to bring it back).",
+        text = {"delete": f"Deleted {ids} (kept in the trash; ask in chat to undo).",
                 "undo": f"Brought back {ids}.",
                 "erase": f"Erased {ids} permanently."}[op]
         if result.get("unchanged"):
@@ -631,6 +630,73 @@ async def route_export(request: Any) -> Dict[str, Any]:
     return await asyncio.to_thread(lambda: _service().export_document())
 
 
+def widget_today(timezone: str, offset: int = 0, group_id: str = "") -> Dict[str, Any]:
+    """Project the owner's day and one optional top-level group, without copying entries."""
+    try:
+        zone = ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError, TypeError):
+        raise ListError("invalid_input", "A valid IANA timezone is required")
+    if type(offset) is not int or not 0 <= offset <= lists_core.MAX_ENTRIES:
+        raise ListError("invalid_input", "Invalid list offset")
+    info = _service().status()
+    if info["state"] != "ready":
+        return {"ok": False, "state": info["state"], "error": _STATE_HINTS.get(info["state"],
+                "List store unavailable; ask in chat to inspect or restore it."), "rows": []}
+    day = datetime.now(zone).date()
+    data = _service().overview(open_limit=lists_core.MAX_ENTRIES, done_limit=lists_core.MAX_ENTRIES)
+    groups = [{"id": row["id"], "name": row["path"]} for row in data["tree"] if row["depth"] == 0]
+    if group_id:
+        group = next((row for row in groups if row["id"] == group_id), None)
+        if group is None:
+            raise ListError("invalid_input", "Unknown top-level list group")
+        prefix = group["name"]
+        in_group = lambda entry: entry["group_path"] == prefix or entry["group_path"].startswith(prefix + " / ")
+        data["open"] = [entry for entry in data["open"] if in_group(entry)]
+        data["done"] = [entry for entry in data["done"] if in_group(entry)]
+    done_today, archived = [], []
+    for entry in data["done"]:
+        stamp = entry.get("completed_at")
+        try:
+            completed = datetime.fromisoformat(stamp.replace("Z", "+00:00")) if stamp else None
+            same_day = completed is not None and completed.tzinfo is not None and completed.astimezone(zone).date() == day
+        except ValueError:
+            same_day = False  # Legacy invalid stamps never authorize placement in Today.
+        (done_today if same_day else archived).append(entry)
+    # Keep each subtree together in the checklist. Within a group newly checked
+    # entries come first, so checking a row near a page boundary remains visible.
+    tree_order = {row["path"]: index for index, row in enumerate(data["tree"])}
+    entries = sorted(done_today + data["open"],
+                     key=lambda entry: (tree_order[entry["group_path"]], entry["status"] != "done"))
+    rows = entries[offset:offset + 100]
+    return {"ok": True, "date": day.isoformat(), "timezone": timezone, "groups": groups,
+            "revision": data["revision"],
+            "rows": [{**row, "done": entry["status"] == "done"}
+                     for row, entry in zip(_entry_rows(rows), rows)], "total": len(entries),
+            "next_offset": offset + len(rows),
+            "archive": _entry_rows(archived[:50], ("completed", "completed_at")) if offset == 0 else [],
+            "archive_total": len(archived), "export_warning": _store_view(info)["export_warning"]}
+
+
+async def route_today(request: Any) -> Dict[str, Any]:
+    try:
+        return await asyncio.to_thread(widget_today, _query(request, "timezone"),
+                                       int(_query(request, "offset") or "0"), _query(request, "group"))
+    except (ValueError, ListError) as exc:
+        return {"ok": False, "error": exc.message if isinstance(exc, ListError) else "Invalid list offset"}
+
+
+async def route_check(request: Any) -> Dict[str, Any]:
+    body = await _json_body(request)
+    try:
+        if type(body.get("done")) is not bool or not isinstance(body.get("request_id"), str) or not body["request_id"]:
+            raise ListError("invalid_input", "Checkbox state and request id are required")
+        result = await asyncio.to_thread(_service().complete, [body.get("entry_id")],
+                                         done=body["done"], request_id=body["request_id"])
+        return {"ok": True, "replayed": result.get("replayed", False)}
+    except ListError as exc:
+        return {"ok": False, "error": exc.message}
+
+
 ROUTES = (
     ("view", route_view, ("GET",)),
     ("edit", route_edit, ("POST",)),
@@ -638,6 +704,8 @@ ROUTES = (
     ("select", route_select, ("GET",)),
     ("store", route_store, ("POST",)),
     ("export", route_export, ("GET",)),
+    ("today", route_today, ("GET",)),
+    ("check", route_check, ("POST",)),
 )
 
 
@@ -645,169 +713,12 @@ EXPORT_FILENAME = "smart-lists-export.json"
 
 # Mirrored verbatim in SKILL.md ``ui_tab.render``; a test keeps the two equal.
 WIDGET_RENDER: Dict[str, Any] = {
-    "kind": "declarative",
-    "schema_version": 1,
-    "span": 2,
-    "components": [
-        {"type": "poll", "route": "view", "method": "GET", "target": "lists", "auto_start": True,
-         "interval_ms": 30000, "max_ticks": 100, "label": "Refresh lists", "busy_label": "Refreshing…"},
-        {"type": "callout", "target": "lists", "tone": "success", "path": "notice", "condition_key": "notice"},
-        {"type": "callout", "target": "lists", "tone": "warning", "path": "warning", "condition_key": "warning"},
-        {"type": "callout", "target": "lists", "tone": "danger", "path": "error", "condition_key": "error"},
-        {"type": "callout", "target": "lists", "tone": "info", "path": "empty_hint", "condition_key": "empty_hint"},
-        {"type": "group", "layout": "cluster", "target": "lists", "components": [
-            {"type": "metric", "target": "lists", "label": "Groups", "path": "stats.groups"},
-            {"type": "metric", "target": "lists", "label": "Open", "path": "stats.open"},
-            {"type": "metric", "target": "lists", "label": "Done", "path": "stats.done"},
-            {"type": "metric", "target": "lists", "label": "Deleted", "path": "stats.deleted"},
-        ]},
-        {"type": "tabs", "target": "lists", "tabs": [
-            {"label": "Open", "components": [
-                {"type": "table", "target": "lists", "path": "open_rows", "columns": [
-                    {"label": "Item", "path": "item"},
-                    {"label": "Group", "path": "group"},
-                    {"label": "Due", "path": "due"},
-                    {"label": "ID", "path": "id"},
-                ]},
-                {"type": "callout", "target": "lists", "tone": "info", "path": "open_note",
-                 "condition_key": "open_note"},
-            ]},
-            {"label": "Groups", "components": [
-                {"type": "table", "target": "lists", "path": "tree_rows", "columns": [
-                    {"label": "Group", "path": "group"},
-                    {"label": "Open", "path": "open", "presentation": "number"},
-                    {"label": "Done", "path": "done", "presentation": "number"},
-                    {"label": "Deleted", "path": "deleted", "presentation": "number"},
-                    {"label": "ID", "path": "id"},
-                ]},
-            ]},
-            {"label": "Done", "components": [
-                {"type": "table", "target": "lists", "path": "done_rows", "columns": [
-                    {"label": "Item", "path": "item"},
-                    {"label": "Group", "path": "group"},
-                    {"label": "Completed (UTC)", "path": "completed"},
-                    {"label": "ID", "path": "id"},
-                ]},
-            ]},
-            {"label": "Deleted", "components": [
-                {"type": "table", "target": "lists", "path": "deleted_rows", "columns": [
-                    {"label": "Item", "path": "item"},
-                    {"label": "Group", "path": "group"},
-                    {"label": "Deleted (UTC)", "path": "deleted"},
-                    {"label": "ID", "path": "id"},
-                ]},
-            ]},
-        ]},
-        {"type": "tabs", "target": "lists", "tabs": [
-            {"label": "Edit entry", "components": [
-                {"type": "form", "route": "edit", "method": "POST", "target": "edit_result", "title": "Edit one entry",
-                 "submit_label": "Apply", "busy_label": "Saving…", "columns": 2, "fields": [
-                     {"name": "entry_id", "label": "Entry ID", "type": "text", "required": True,
-                      "placeholder": "e_…"},
-                     {"name": "status", "label": "Status", "type": "select", "options": [
-                         {"value": "", "label": "Keep"},
-                         {"value": "done", "label": "Mark done"},
-                         {"value": "open", "label": "Reopen"},
-                         {"value": "delete", "label": "Delete (can be undone)"},
-                         {"value": "undo", "label": "Undo delete"},
-                         {"value": "erase", "label": "Erase deleted entry for good"},
-                     ]},
-                     {"name": "text", "label": "New text", "type": "text", "span": 2,
-                      "placeholder": "Leave blank to keep"},
-                     {"name": "due", "label": "New due", "type": "text", "placeholder": "Leave blank to keep"},
-                     {"name": "move_to", "label": "Move to group", "type": "text",
-                      "placeholder": "Leave blank to keep"},
-                     {"name": "clear_due", "label": "Clear due", "type": "checkbox"},
-                 ]},
-                {"type": "callout", "target": "edit_result", "tone": "danger", "path": "error",
-                 "condition_key": "error"},
-                {"type": "callout", "target": "edit_result", "tone": "success", "path": "notice",
-                 "condition_key": "notice"},
-            ]},
-            {"label": "Edit groups", "components": [
-                {"type": "form", "route": "group", "method": "POST", "target": "group_result",
-                 "title": "Create, rename, move or delete a group", "submit_label": "Apply",
-                 "busy_label": "Saving…", "columns": 2, "fields": [
-                     {"name": "action", "label": "Action", "type": "select", "options": [
-                         {"value": "create", "label": "Create"},
-                         {"value": "rename", "label": "Rename"},
-                         {"value": "move", "label": "Move"},
-                         {"value": "delete", "label": "Delete (empty only)"},
-                     ]},
-                     {"name": "group", "label": "Group", "type": "text",
-                      "placeholder": "Existing group (rename, move, delete)"},
-                     {"name": "name", "label": "Name", "type": "text", "placeholder": "New name (create, rename)"},
-                     {"name": "parent", "label": "Parent", "type": "text",
-                      "placeholder": "Blank = top level (create, move)"},
-                 ]},
-                {"type": "callout", "target": "group_result", "tone": "danger", "path": "error",
-                 "condition_key": "error"},
-                {"type": "callout", "target": "group_result", "tone": "success", "path": "notice",
-                 "condition_key": "notice"},
-            ]},
-            {"label": "Subtree", "components": [
-                {"type": "form", "route": "select", "method": "GET", "target": "selection",
-                 "title": "Open entries in a group and its sub-groups (read-only)", "submit_label": "Show",
-                 "busy_label": "Reading…", "fields": [
-                     {"name": "group", "label": "Group", "type": "text", "required": True, "placeholder": "Home"},
-                 ]},
-                {"type": "callout", "target": "selection", "tone": "warning", "path": "warning",
-                 "condition_key": "warning"},
-                {"type": "callout", "target": "selection", "tone": "danger", "path": "error",
-                 "condition_key": "error"},
-                {"type": "kv", "target": "selection", "condition_key": "ok", "fields": [
-                    {"label": "Scope", "path": "scope"},
-                    {"label": "Shown open entries", "path": "count"},
-                    {"label": "Total open entries", "path": "total"},
-                ]},
-                {"type": "table", "target": "selection", "condition_key": "ok", "path": "rows", "columns": [
-                    {"label": "Item", "path": "item"},
-                    {"label": "Group", "path": "group"},
-                    {"label": "Due", "path": "due"},
-                    {"label": "ID", "path": "id"},
-                ]},
-            ]},
-            {"label": "Store", "components": [
-                {"type": "callout", "target": "lists", "tone": "warning", "path": "store.export_warning",
-                 "condition_key": "store.export_warning"},
-                {"type": "callout", "target": "lists", "tone": "info", "path": "store.hint",
-                 "condition_key": "store.hint"},
-                {"type": "kv", "target": "lists", "fields": [
-                    {"label": "State", "path": "store.state"},
-                    {"label": "Contents", "path": "store.contents"},
-                    {"label": "Last change (UTC)", "path": "store.last_written"},
-                    {"label": "Last export (UTC)", "path": "store.last_export"},
-                    {"label": "Backups", "path": "store.backups"},
-                ]},
-                {"type": "file", "target": "lists", "route": "export", "query": {"filename": EXPORT_FILENAME},
-                 "condition_key": "store.exportable", "label": "Download full export (JSON)",
-                 "filename": EXPORT_FILENAME},
-                {"type": "form", "route": "store", "method": "POST", "target": "store_result",
-                 "title": "Restore an export or start a new store", "submit_label": "Apply",
-                 "busy_label": "Working…", "fields": [
-                     {"name": "action", "label": "Action", "type": "select", "options": [
-                         {"value": "restore", "label": "Restore pasted export"},
-                         {"value": "init", "label": "Start a new empty store"},
-                     ]},
-                     {"name": "export_json", "label": "Export", "type": "textarea",
-                      "placeholder": "Paste the whole content of a Smart Lists export file"},
-                     {"name": "replace", "label": "Replace the current store (it is copied to Backups first)",
-                      "type": "checkbox"},
-                 ]},
-                {"type": "callout", "target": "store_result", "tone": "danger", "path": "error",
-                 "condition_key": "error"},
-                {"type": "callout", "target": "store_result", "tone": "warning", "path": "warning",
-                 "condition_key": "warning"},
-                {"type": "callout", "target": "store_result", "tone": "success", "path": "notice",
-                 "condition_key": "notice"},
-            ]},
-        ]},
-    ],
+    "kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host",
 }
 
 
 def register(api: Any) -> None:
-    """PluginAPI entry point: one store, nine tools, six routes, one widget."""
+    """PluginAPI entry point: one store, nine tools, eight routes, one widget."""
     global _SERVICE
     _SERVICE = lists_core.SmartLists(Path(api.get_state_dir()))
     for name, handler, description, schema in TOOLS:
@@ -815,7 +726,7 @@ def register(api: Any) -> None:
     for path, handler, methods in ROUTES:
         api.register_route(path, handler, methods=methods)
     api.register_ui_tab("lists", "Smart Lists", icon="📋", render=WIDGET_RENDER)
-    api.log("info", "smart_lists registered: local store, 9 tools, 6 routes, declarative widget")
+    api.log("info", "smart_lists registered: local store, 9 tools, 8 routes, Today widget")
 
 
 __all__ = ["register"]

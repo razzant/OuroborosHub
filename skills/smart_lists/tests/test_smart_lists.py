@@ -217,41 +217,154 @@ class RegistrationTests(SkillCase):
         self.assertEqual(self.api.tools["add"]["schema"]["required"], ["group", "items", "request_id"])
         self.assertEqual({path: route["methods"] for path, route in self.api.routes.items()}, {
             "view": ("GET",), "edit": ("POST",), "group": ("POST",), "select": ("GET",), "store": ("POST",),
-            "export": ("GET",)})
+            "export": ("GET",), "today": ("GET",), "check": ("POST",)})
         self.assertIn("even without", self.api.tools["add"]["description"])
         self.assertIn("even without saying 'add'", manifest_text())
         self.assertEqual(list(self.api.tabs), ["lists"])
-        self.assertEqual(self.api.tabs["lists"]["render"]["kind"], "declarative")
+        self.assertEqual(self.api.tabs["lists"]["render"]["kind"], "module")
         self.assertEqual(manifest_permissions(), {"tool", "route", "widget"})
         self.assertNotIn("env_from_settings: [OPENROUTER", manifest_text())
 
-    def test_widget_uses_registered_routes_and_host_components(self):
+    def test_widget_uses_a_reviewed_module_and_registered_routes(self):
         render = self.api.tabs["lists"]["render"]
-        components = list(iter_components(render["components"]))
-        self.assertLessEqual(len(components), 256)
-        self.assertNotIn("add", {component.get("route") for component in components})
-        for component in components:
-            kind = component["type"]
-            self.assertIn(kind, DECLARATIVE_TYPES)
-            if kind in {"form", "action", "poll", "file"}:
-                route = self.api.routes[component["route"]]
-                self.assertIn(component.get("method", "GET"), route["methods"])
-            if kind == "form":
-                self.assertTrue(all(field.get("name") for field in component["fields"]))
-            if kind in {"table", "kv"}:
-                rows = component["columns"] if kind == "table" else component["fields"]
-                self.assertTrue(rows and all(row.get("path") for row in rows))
-            if kind == "callout":
-                self.assertIn(component.get("tone", "info"), {"info", "success", "warning", "danger"})
-            if kind == "metric":
-                self.assertTrue(component.get("label") and component.get("path"))
-        for route, target in (("edit", "edit_result"), ("group", "group_result"),
-                              ("store", "store_result"), ("select", "selection")):
-            form = next(c for c in components if c["type"] == "form" and c["route"] == route)
-            self.assertEqual(form["target"], target)
-            self.assertTrue(any(c["type"] == "callout" and c.get("target") == target
-                                and c.get("path") == "error" and c.get("tone") == "danger"
-                                for c in components))
+        self.assertEqual(render, {"kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host"})
+        code = (SKILL_DIR / render["entry"]).read_text()
+        self.assertIn("OuroborosWidget.fetch", code)
+        self.assertIn("today?timezone=", code)
+        self.assertIn("request('check'", code)
+        self.assertNotIn("innerHTML", code)
+
+    def test_today_is_a_projection_and_checkbox_uses_existing_completion(self):
+        self.ok("group", action="create", name="Home")
+        entry = self.add("Home", "oat milk")[0]
+        before = self.store_bytes()
+        first = self.api.call_route("today", query={"timezone": "Pacific/Kiritimati"})
+        self.assertTrue(first["ok"], first)
+        self.assertEqual(first["timezone"], "Pacific/Kiritimati")
+        self.assertEqual([(row["id"], row["item"]) for row in first["rows"]], [(entry, "oat milk")])
+        self.assertEqual(before, self.store_bytes(), "Today must not clone or update entries")
+        self.assertFalse(self.api.call_route("today", query={"timezone": "bad/timezone"})["ok"])
+        done = self.api.call_route("check", "POST", {"entry_id": entry, "done": True,
+                                                      "request_id": "widget-check-1"})
+        self.assertTrue(done["ok"], done)
+        self.assertTrue(self.api.call_route("check", "POST", {"entry_id": entry, "done": True,
+                                                            "request_id": "widget-check-1"})["replayed"])
+        second = self.api.call_route("today", query={"timezone": "Pacific/Kiritimati"})
+        self.assertEqual(first["revision"]["store_id"], second["revision"]["store_id"])
+        self.assertGreater(second["revision"]["generation"], first["revision"]["generation"])
+        self.assertTrue(second["rows"][0]["done"])
+        self.assertEqual(second["archive"], [])
+        import datetime as dt
+        from unittest.mock import patch
+        actual = dt.datetime
+        class Tomorrow(actual):
+            @classmethod
+            def now(cls, tz=None):
+                return actual.now(tz) + dt.timedelta(days=1)
+        with patch.object(self.module, "datetime", Tomorrow):
+            tomorrow = self.api.call_route("today", query={"timezone": "Pacific/Kiritimati"})
+        self.assertEqual(tomorrow["rows"], [])
+        self.assertEqual(tomorrow["archive"][0]["id"], entry)
+        self.assertTrue(self.api.call_route("check", "POST", {"entry_id": entry, "done": False,
+                                                              "request_id": "widget-check-2"})["ok"])
+        self.assertEqual(self.api.call_route("today", query={"timezone": "Pacific/Kiritimati"})["rows"][0]["id"], entry)
+        self.assertFalse(self.api.call_route("check", "POST", {"entry_id": entry, "done": "true",
+                                                               "request_id": "bad"})["ok"])
+
+    def test_today_pages_without_duplication_and_missing_store_refuses(self):
+        self.ok("group", action="create", name="Home")
+        for batch in range(2):
+            self.add("Home", *(f"item {batch}-{n}" for n in range(60)))
+        first = self.api.call_route("today", query={"timezone": "Pacific/Kiritimati"})
+        second = self.api.call_route("today", query={"timezone": "Pacific/Kiritimati", "offset": "100"})
+        self.assertEqual((first["total"], first["next_offset"], second["next_offset"]), (120, 100, 120))
+        self.assertEqual(len({entry["id"] for entry in first["rows"] + second["rows"]}), 120)
+        checked = second["rows"][-1]["id"]
+        self.assertTrue(self.api.call_route("check", "POST", {"entry_id": checked, "done": True,
+                                                              "request_id": "page-checked"})["ok"])
+        first_after = self.api.call_route("today", query={"timezone": "Pacific/Kiritimati"})
+        self.assertEqual(first_after["rows"][0]["id"], checked,
+                         "checking a row after page 1 must keep it visibly checked in Today")
+        self.assertTrue(first_after["rows"][0]["done"])
+        self.assertFalse(self.api.call_route("today", query={"timezone": "UTC", "offset": "bogus"})["ok"])
+        (self.state_dir / "store.json").unlink()
+        missing = self.api.call_route("today", query={"timezone": "Pacific/Kiritimati"})
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["state"], "missing")
+        self.assertIn("missing", missing["error"])
+
+    def test_today_top_level_tabs_filter_subtrees_without_rewriting_store(self):
+        parent = self.ok("group", action="create", name="Work")["group"]["id"]
+        self.ok("group", action="create", name="Project", parent="Work")
+        self.ok("group", action="create", name="Errands")
+        nested = self.add("Work / Project", "review notes")[0]
+        direct = self.add("Work", "send update")[0]
+        other = self.add("Errands", "book appointment")[0]
+        before = self.store_bytes()
+        all_rows = self.api.call_route("today", query={"timezone": "Asia/Almaty"})
+        self.assertEqual([g["name"] for g in all_rows["groups"]], ["Errands", "Work"])
+        work = self.api.call_route("today", query={"timezone": "Asia/Almaty", "group": parent})
+        self.assertEqual({r["id"] for r in work["rows"]}, {nested, direct})
+        self.assertEqual(work["total"], 2)
+        self.assertNotIn(other, {r["id"] for r in work["rows"]})
+        self.assertEqual(before, self.store_bytes())
+        self.assertFalse(self.api.call_route("today", query={"timezone": "Asia/Almaty", "group": "missing"})["ok"])
+
+    def test_checked_entries_stay_in_their_subgroup_section(self):
+        self.ok("group", action="create", name="Work")
+        self.ok("group", action="create", name="Alpha", parent="Work")
+        self.ok("group", action="create", name="Beta", parent="Work")
+        a = self.add("Work / Alpha", "alpha note")[0]
+        b = self.add("Work / Beta", "beta note")[0]
+        self.assertTrue(self.api.call_route("check", "POST", {"entry_id": b, "done": True,
+                                                               "request_id": "group-check-b"})["ok"])
+        data = self.api.call_route("today", query={"timezone": "Asia/Almaty"})
+        self.assertEqual([row["group"] for row in data["rows"]], ["Work / Alpha", "Work / Beta"])
+        self.assertEqual([row["id"] for row in data["rows"]], [a, b])
+        self.assertTrue(data["rows"][1]["done"])
+
+    def test_legacy_missing_stamps_remain_readable_after_completion(self):
+        self.ok("group", action="create", name="Home")
+        entry = self.add("Home", "old note")[0]
+        path = self.state_dir / "store.json"
+        document = json.loads(path.read_text())
+        document["entries"][entry].pop("created_at")
+        document["entries"][entry].pop("updated_at")
+        path.write_text(json.dumps(document))
+        self.mark_fixture_as_legacy_store()
+        result = self.api.call_route("check", "POST", {"entry_id": entry, "done": True,
+                                                       "request_id": "legacy-check"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.ok("read", status="done")["entries"][0]["id"], entry)
+
+    def test_utc_and_local_midnight_are_distinct_without_daily_writes(self):
+        import datetime as dt
+        from unittest.mock import patch
+        self.ok("group", action="create", name="Home")
+        original = dt.datetime
+        class Clock(original):
+            point = original(2026, 10, 1, 9, 30, tzinfo=dt.timezone.utc)
+            @classmethod
+            def now(cls, tz=None):
+                return cls.point.astimezone(tz) if tz else cls.point
+            @classmethod
+            def fromisoformat(cls, text):
+                return original.fromisoformat(text)
+        with patch.object(self.module.lists_core, "_now", lambda: "2026-10-01T09:30:00+00:00"):
+            entry = self.add("Home", "unchanged")[0]
+            self.assertTrue(self.api.call_route("check", "POST", {"entry_id": entry, "done": True,
+                                                                  "request_id": "midnight-check"})["ok"])
+        before = self.store_bytes()
+        with patch.object(self.module, "datetime", Clock):
+            today = self.api.call_route("today", query={"timezone": "Pacific/Kiritimati"})
+            self.assertEqual(today["date"], "2026-10-01")
+            self.assertTrue(today["rows"][0]["done"])
+            Clock.point = original(2026, 10, 1, 10, 1, tzinfo=dt.timezone.utc)
+            tomorrow = self.api.call_route("today", query={"timezone": "Pacific/Kiritimati"})
+        self.assertEqual(tomorrow["date"], "2026-10-02")
+        self.assertEqual(tomorrow["rows"], [])
+        self.assertEqual(tomorrow["archive"][0]["id"], entry)
+        self.assertEqual(self.store_bytes(), before, "midnight must be a read-only projection")
 
     @unittest.skipIf(yaml is None, "PyYAML not installed")
     def test_manifest_ui_tab_mirrors_registered_render(self):
@@ -273,7 +386,7 @@ class RegistrationTests(SkillCase):
             validate_ui_render(copy.deepcopy(front["ui_tab"]["render"]))
 
     def test_payload_imports_no_network_process_or_host_settings(self):
-        allowed = {"__future__", "asyncio", "copy", "json", "pathlib", "typing", "importlib", "hashlib", "os", "re",
+        allowed = {"__future__", "asyncio", "copy", "json", "pathlib", "typing", "importlib", "hashlib", "os", "re", "zoneinfo",
                    "secrets", "tempfile", "threading", "contextlib", "datetime", "fcntl", "msvcrt", "errno",
                    "time", "math", "base64", "zlib"}
         for name in ("plugin.py", "lists_core.py"):
@@ -821,7 +934,7 @@ class LifecycleTests(SkillCase):
         self.assertFalse(view["ok"])
         self.assertEqual(view["store"]["state"], "uninitialized")
         self.assertFalse(view["store"]["exportable"])
-        self.assertIn("Store tab", view["warning"])
+        self.assertIn("ask in chat", view["warning"])
         self.assertNotIn("error", view)
 
         created = self.ok("store", action="init")
@@ -1060,9 +1173,6 @@ class LifecycleTests(SkillCase):
 
     def test_widget_download_and_pasted_restore(self):
         self.build_lists()
-        render = self.api.tabs["lists"]["render"]
-        download = [c for c in iter_components(render["components"]) if c["type"] == "file"]
-        self.assertEqual([(c["route"], c["condition_key"]) for c in download], [("export", "store.exportable")])
         view = self.api.call_route("view")
         self.assertTrue(view["store"]["exportable"])
         self.assertIn("Download a full export", view["store"]["hint"])
@@ -1185,7 +1295,7 @@ class DeletionTests(SkillCase):
         self.assertFalse(combined["ok"])
         deleted = self.api.call_route("edit", "POST", {"entry_id": entry, "status": "delete"})
         self.assertTrue(deleted["ok"], deleted)
-        self.assertIn("Undo delete", deleted["notice"])
+        self.assertIn("ask in chat to undo", deleted["notice"])
         self.assertEqual([row["id"] for row in deleted["deleted_rows"]], [entry])
         undone = self.api.call_route("edit", "POST", {"entry_id": entry, "status": "undo"})
         self.assertEqual(([row["id"] for row in undone["open_rows"]], undone["deleted_rows"]), ([entry], []))
@@ -1594,19 +1704,9 @@ class ExportRecordTests(SkillCase):
         self.assertEqual((cleared["warning"], cleared["store"]["export_warning"]), ("", ""))
         self.assertIn("0 changes since", cleared["store"]["last_export"])
 
-    def test_download_button_names_the_file_as_json(self):
-        render = self.api.tabs["lists"]["render"]
-        declared = [render]
-        if yaml is not None:
-            declared.append(yaml.safe_load(manifest_text().split("---", 2)[1])["ui_tab"]["render"])
-        for source in declared:
-            files = [c for c in iter_components(source["components"]) if c["type"] == "file"]
-            self.assertEqual(len(files), 1)
-            self.assertEqual(host_download_name(files[0]), "smart-lists-export.json")
-            without_query = dict(files[0], query={})
-            self.assertEqual(host_download_name(without_query), "export", "why the query is needed")
+    def test_legacy_export_route_remains_available_to_chat(self):
         self.ok("group", action="create", name="Home")
-        body = self.api.call_route("export", query=files[0]["query"])
+        body = self.api.call_route("export")
         self.assertEqual(body["format"], "smart_lists.export")
 
     def test_damaged_sentinel_fields_never_break_status_views(self):
