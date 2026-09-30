@@ -1,7 +1,7 @@
 ---
 name: smart_lists
 description: "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders."
-version: 0.3.2
+version: 0.3.3
 type: extension
 runtime: python3
 entry: plugin.py
@@ -22,6 +22,8 @@ ui_tab:
     entry: widget.js
     start: auto
     appearance: host
+    span: 2
+    height: 560
 ---
 
 # Smart Lists
@@ -233,10 +235,15 @@ Unknown arguments are refused rather than ignored.
 
 ## Widget
 
+The module widget requests a wide (two-column) card and a fixed-height frame;
+the checklist scrolls inside it while tabs and backup stay visible. The skill
+cannot resize its own outer card; owner resizing requires the host Widgets
+layout. Text-size buttons affect this mounted frame and reset on restart.
+
 The module widget shows **Today** with a tab for all entries and one tab per
 top-level group. A tab includes that group's nested subgroups; empty groups
 still have tabs. Within a tab, section labels show where entries belong, but
-only checkboxes and a backup download are actionable. Group creation, entry
+only checkboxes, text-size controls and a backup download are actionable. Group creation, entry
 capture and all other edits happen through ordinary chat. Every open entry appears once,
 regardless of when it was added. Tomorrow's list is the same still-open entries,
 not duplicated records or a midnight job. The date is computed by the host on each read in

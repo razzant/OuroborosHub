@@ -714,6 +714,7 @@ EXPORT_FILENAME = "smart-lists-export.json"
 # Mirrored verbatim in SKILL.md ``ui_tab.render``; a test keeps the two equal.
 WIDGET_RENDER: Dict[str, Any] = {
     "kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host",
+    "span": 2, "height": 560,
 }
 
 

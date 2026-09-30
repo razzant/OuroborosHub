@@ -9,13 +9,14 @@ let timer;
 let viewRevision = 0;
 let activeRefreshes = 0;
 let selectedGroup = '';
+let fontSize = 15;
 const todayUrl = (offset = 0) => `today?timezone=${encodeURIComponent(timezone)}&group=${encodeURIComponent(selectedGroup)}&offset=${offset}`;
 const sameSnapshot = (a, b) => a.date === b.date && a.revision?.store_id === b.revision?.store_id
   && a.revision?.generation === b.revision?.generation;
 
 const style = document.createElement('style');
 style.textContent = `
-  :root { color-scheme: dark; font: 15px/1.5 system-ui, sans-serif;
+  :root { color-scheme: dark; font: var(--list-font-size, 15px)/1.5 system-ui, sans-serif;
     --fg: #e7e8ef; --muted: #aeb4c3; --error: #f3a7a7; --bg: #171b24; }
   :root[data-theme="light"] { color-scheme: light; --fg: #222832; --muted: #58616d; --error: #ae3030; --bg: #fff; }
   @media (prefers-color-scheme: light) {
@@ -23,25 +24,29 @@ style.textContent = `
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); }
-  #root { padding: 12px 16px 16px; color: var(--fg); }
-  .panel { max-width: 780px; margin: auto; }
-  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  #root { height: 100vh; padding: 12px 16px 16px; color: var(--fg); display: flex; flex-direction: column; }
+  .panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  header { display: flex; flex: none; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
   h2 { font-size: 20px; font-weight: 650; letter-spacing: -.025em; margin: 0; }
   .date { color: var(--muted); font-size: 12px; white-space: nowrap; }
-  .tabs { display: flex; gap: 5px; overflow-x: auto; padding: 2px 0 12px; margin-bottom: 6px; }
+  .tabs { display: flex; flex: none; gap: 5px; overflow-x: auto; padding: 2px 0 12px; margin-bottom: 6px; }
   .tabs button { flex: none; margin: 0; border-radius: 20px; padding: 5px 12px; }
   .tabs button[aria-pressed="true"] { background: #398b72; color: #fff; border-color: #398b72; }
   .group-title { font-size: 12px; font-weight: 600; color: var(--muted); padding: 10px 10px 2px; }
-  .list { display: grid; gap: 3px; }
+  .list { display: block; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; }
   .item { display: flex; align-items: flex-start; gap: 12px; padding: 9px 10px; border-radius: 10px; }
   .item:hover { background: rgba(127,140,160,.12); }
   .item input { width: 19px; height: 19px; flex: none; margin: 2px 0 0; accent-color: #78bda4; cursor: pointer; }
   .item span { overflow-wrap: anywhere; min-width: 0; }
-  .item small { display: block; font-size: 11px; color: var(--muted); }
+  .item small { display: block; font-size: .75em; color: var(--muted); }
   .item:has(input:checked) span { text-decoration: line-through; opacity: .75; }
   .muted, .error { padding: 10px; color: var(--muted); }
+  #root > .error { flex: none; max-height: 90px; overflow-y: auto; }
   .error { color: var(--error); white-space: pre-wrap; }
-  details { border-top: 1px solid rgba(155,165,180,.25); margin-top: 18px; padding: 12px 2px 0; }
+  details { border-top: 1px solid rgba(155,165,180,.25); margin-top: 8px; padding: 8px 2px 0; max-height: 120px; overflow-y: auto; flex: none; }
+  .size-controls { display: flex; align-items: center; gap: 4px; }
+  .size-controls button { margin: 0; padding: 1px 8px; }
+  .size-controls output { min-width: 3ch; text-align: center; color: var(--muted); }
   summary { cursor: pointer; color: var(--muted); font-size: 13px; }
   button { border: 1px solid rgba(155,165,180,.4); border-radius: 8px; background: transparent; color: inherit; padding: 7px 12px; cursor: pointer; margin: 10px 0; }
   button:disabled { cursor: wait; opacity: .6; }
@@ -103,20 +108,47 @@ function showError(error) {
 }
 function draw(data) {
   const archiveWasOpen = root.querySelector('details.archive')?.open;
+  const listScrollTop = root.querySelector('.list')?.scrollTop || 0;
+  const tabsScrollLeft = root.querySelector('.tabs')?.scrollLeft || 0;
   const focusedId = document.activeElement?.dataset?.entryId;
+  const focusedControl = document.activeElement?.dataset?.widgetFocus;
   const panel = element('section', 'panel');
   const head = element('header');
-  head.append(element('h2', '', 'Сегодня'), element('span', 'date', `${data.date} · ${data.timezone}`));
+  const sizeControls = element('div', 'size-controls');
+  const sizeOutput = element('output');
+  const buttons = [];
+  for (const [label, step] of [['−', -2], ['+', 2]]) {
+    const button = element('button', '', label);
+    button.type = 'button';
+    button.dataset.widgetFocus = step < 0 ? 'smaller' : 'larger';
+    button.setAttribute('aria-label', step < 0 ? 'Уменьшить текст списка' : 'Увеличить текст списка');
+    button.addEventListener('click', () => {
+      const scroll = root.querySelector('.list');
+      const scrollTop = scroll?.scrollTop || 0;
+      fontSize += step;
+      document.documentElement.style.setProperty('--list-font-size', `${fontSize}px`);
+      if (scroll) scroll.scrollTop = scrollTop;
+      sizeOutput.textContent = `${fontSize} px`;
+      for (const [control, delta] of buttons) control.disabled = fontSize + delta < 13 || fontSize + delta > 19;
+    });
+    buttons.push([button, step]);
+  }
+  for (const [button, step] of buttons) button.disabled = fontSize + step < 13 || fontSize + step > 19;
+  sizeOutput.textContent = `${fontSize} px`;
+  sizeControls.append(buttons[0][0], sizeOutput, buttons[1][0]);
+  head.append(element('h2', '', 'Сегодня'), sizeControls, element('span', 'date', `${data.date} · ${data.timezone}`));
   panel.append(head);
   const tabs = element('nav', 'tabs');
   tabs.setAttribute('aria-label', 'Списки');
   for (const group of [{id: '', name: 'Все'}, ...data.groups]) {
     const tab = element('button', '', group.name);
     tab.type = 'button';
+    tab.dataset.widgetFocus = `tab:${group.id}`;
     tab.setAttribute('aria-pressed', String(selectedGroup === group.id));
     tab.addEventListener('click', () => {
       if (selectedGroup === group.id || busy) return;
       selectedGroup = group.id;
+      root.querySelector('.list')?.scrollTo(0, 0);
       current = null;
       refresh();
     });
@@ -129,19 +161,23 @@ function draw(data) {
   panel.append(list);
   if (data.next_offset < data.total) {
     const more = element('button', '', `Показать ещё · ${data.total - data.next_offset}`);
+    more.dataset.widgetFocus = 'more';
     more.addEventListener('click', () => loadMore(more, list));
     panel.append(more);
   }
   if (data.archive_total) {
     const archive = element('details', 'archive');
     archive.open = !!archiveWasOpen;
-    archive.append(element('summary', '', `Архив · ${data.archive_total}`));
+    const summary = element('summary', '', `Архив · ${data.archive_total}`);
+    summary.dataset.widgetFocus = 'archive';
+    archive.append(summary);
     for (const entry of data.archive) archive.append(row(entry, true));
     if (data.archive_total > data.archive.length)
       archive.append(element('p', 'muted', 'Остальные завершённые записи доступны через чат.'));
     panel.append(archive);
   }
   const backup = element('button', 'backup', 'Скачать резервную копию');
+  backup.dataset.widgetFocus = 'backup';
   backup.addEventListener('click', async () => {
     backup.disabled = true;
     try {
@@ -153,7 +189,11 @@ function draw(data) {
   panel.append(backup);
   if (data.export_warning) panel.append(element('p', 'error', data.export_warning));
   root.replaceChildren(panel);
-  if (focusedId) [...root.querySelectorAll('input[data-entry-id]')].find(el => el.dataset.entryId === focusedId)?.focus();
+  tabs.scrollLeft = tabsScrollLeft;
+  list.scrollTop = listScrollTop;
+  if (focusedId) [...root.querySelectorAll('input[data-entry-id]')].find(el => el.dataset.entryId === focusedId)?.focus({preventScroll: true});
+  else if (focusedControl) [...root.querySelectorAll('[data-widget-focus]')]
+    .find(el => el.dataset.widgetFocus === focusedControl)?.focus({preventScroll: true});
 }
 function appendRows(list, rows) {
   const selectedName = current?.groups?.find(g => g.id === selectedGroup)?.name;

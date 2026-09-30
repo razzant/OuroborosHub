@@ -1938,13 +1938,13 @@
     {
       "slug": "smart_lists",
       "name": "smart_lists",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "type": "extension",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "1de4e02a327862d5a2c7a668fc3c4fed6bfdc7cb6d1fb7f318b60c51b9ff70c7",
-          "size": 22597
+          "sha256": "3b3a08ed8defd6210be58639762221dc0cee54744be22d757a8ab7572a9dff6a",
+          "size": 22951
         },
         {
           "path": "lists_core.py",
@@ -1953,18 +1953,18 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "dfcd9988660f28ea988139cd448853d23e1aeef73dc335a75dc6436ec61b5fe6",
-          "size": 35841
+          "sha256": "ad6f5a5043175f0a63ae12e70ce9374b9ac0ddc20cd5e9d8494ccbe89289a088",
+          "size": 35871
         },
         {
           "path": "tests/test_smart_lists.py",
-          "sha256": "3fc0803b2311662a59e8a64bc78cde49512037da56ccd8836c7019419d647a6e",
-          "size": 118210
+          "sha256": "17da79c9f1901142479e6d0a476f35f29de5499f273e37ffb6e2bc3b639cf769",
+          "size": 118236
         },
         {
           "path": "widget.js",
-          "sha256": "a4554553102bd0f92780264270dce4212ee331facb1c59430b46a6b6e1af9552",
-          "size": 11012
+          "sha256": "e41c94c44985599ce84e2e9202d2bf90645bafa3aea0f10332ccf797f152397e",
+          "size": 13528
         }
       ],
       "description": "Provisional personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders."
