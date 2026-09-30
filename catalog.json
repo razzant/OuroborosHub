@@ -1,8 +1,8 @@
 {
-  "description": "Official Ouroboros skills catalog.",
-  "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
+  "name": "OuroborosHub",
+  "description": "Official Ouroboros skills catalog.",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "skills": [
     {
       "description": "Геоданные 2ГИС: поиск мест и организаций, геокодирование адресов и обратное геокодирование координат, построение маршрутов (авто, пешком, вело, самокат, мото, грузовик, такси), расчёт изохрон (зоны достижимости), создание статической карты PNG с маркерами, линиями и полигонами и кликабельные ссылки на интерактивную карту 2ГИС. Требует API-ключ 2ГИС.",
@@ -1934,6 +1934,40 @@
       "slug": "yylo-tasks",
       "type": "instruction",
       "version": "0.1.0"
+    },
+    {
+      "slug": "smart_lists",
+      "name": "smart_lists",
+      "version": "0.3.3",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "3b3a08ed8defd6210be58639762221dc0cee54744be22d757a8ab7572a9dff6a",
+          "size": 22951
+        },
+        {
+          "path": "lists_core.py",
+          "sha256": "55878f1f006886084d36fa8acd432ba158b8e5272baf0a8870375a5543dfbea8",
+          "size": 95636
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "ad6f5a5043175f0a63ae12e70ce9374b9ac0ddc20cd5e9d8494ccbe89289a088",
+          "size": 35871
+        },
+        {
+          "path": "tests/test_smart_lists.py",
+          "sha256": "17da79c9f1901142479e6d0a476f35f29de5499f273e37ffb6e2bc3b639cf769",
+          "size": 118236
+        },
+        {
+          "path": "widget.js",
+          "sha256": "e41c94c44985599ce84e2e9202d2bf90645bafa3aea0f10332ccf797f152397e",
+          "size": 13528
+        }
+      ],
+      "description": "Provisional personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders."
     }
   ]
 }
