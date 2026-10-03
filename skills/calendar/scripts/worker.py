@@ -27,7 +27,7 @@ if PAYLOAD not in sys.path:
 
 import ops  # noqa: E402
 import reminders as rem  # noqa: E402
-from model import PROVIDER_GOOGLE, PROVIDER_YANDEX, SECRET_KEYS, get_tz, iso_utc, now_utc, own_reminders, parse_stored  # noqa: E402
+from model import INTENT_CONFLICT, INTENT_PENDING, PROVIDER_GOOGLE, PROVIDER_YANDEX, SECRET_KEYS, get_tz, iso_utc, now_utc, own_reminders, parse_stored  # noqa: E402
 from providers import Providers  # noqa: E402
 from store import Store  # noqa: E402
 
@@ -140,10 +140,19 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
     incremental = bool(cursor) and kind == "google_sync_token"
     upserts = deleted = propagated = 0
     masters: Dict[str, str] = {}
+    awaiting = _awaiting_identity(store, adapter, cal)
+    refreshed: Dict[str, str] = {}   # CalDAV master id → UID, for series whose whole resource was re-read this pass
     for row in rows:
         if row.get("recurrence_id"):
             continue
         existing = store.find_by_external(cal["id"], external_id=row["external_id"], href=row["href"], uid=row["uid"])
+        claimed = awaiting.get(row["external_id"]) or awaiting.get(row["href"])
+        if claimed is not None and (existing is None or existing["id"] == claimed["id"]):
+            # The resource a lost create wrote: it is that local row, never a second imported copy.
+            existing = claimed
+            if row.get("status") != "cancelled" and store.adopt_created_identity(
+                    claimed["id"], {"external_id": row["external_id"], "href": row["href"], "etag": row["etag"]}):
+                existing = {**claimed, "external_id": row["external_id"], "href": row["href"]}
         if row.get("status") == "cancelled":
             if existing is not None:
                 if existing.get("sync_state") == "pending_delete" or store.delete_requested(existing["id"]):
@@ -168,6 +177,8 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
             changes["availability"] = row.get("availability") or existing.get("availability")
         store.update_event(existing["id"], {**changes, "sync_state": "synced"})
         upserts += 1
+        if kind != "google_sync_token" and row.get("rrule"):
+            refreshed[existing["id"]] = row["uid"]
         if existing.get("link_group_id") and (existing.get("start_utc") != row["start_utc"] or existing.get("end_utc") != row["end_utc"]):
             moved = {"start_utc": row["start_utc"], "end_utc": row["end_utc"], "all_day": row["all_day"]}
             for sib in store.group_masters(existing["link_group_id"]):
@@ -238,6 +249,16 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
                         moved = {"start_utc": row["start_utc"], "end_utc": row["end_utc"], "all_day": row.get("all_day")}
                         ops.update_event(store, providers, f"{sib['id']}@{key}", moved, scope="this", owner="companion", propagate=False)
                     propagated += 1
+    for master_id, uid in refreshed.items():
+        # A CalDAV series is one resource read whole: an override VEVENT the server no longer holds (its date
+        # cancelled by EXDATE, or the move undone) is not a local exception any more. Our own unsent writes stay.
+        present = {r["recurrence_id"] for r in rows if r.get("recurrence_id") and r.get("uid") == uid}
+        for exc in store.exceptions_for(master_id):
+            if exc.get("recurrence_id") in present or exc.get("sync_state") != "synced":
+                continue
+            if any(i["state"] in (INTENT_PENDING, INTENT_CONFLICT) for i in store.intents_for_event(exc["id"])):
+                continue
+            store.delete_event(exc["id"])
     if kind == "google_sync_token":
         # Google: cancelled ids in the (incremental) feed are the confirmed deletions (roast Fable F7).
         for ext_id in extra:
@@ -260,6 +281,23 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
                 continue
             deleted += _confirmed_deletion(store, providers, local)
     return upserts, deleted, propagated, next_cursor, kind
+
+
+def _awaiting_identity(store: Store, adapter, cal: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """external_id/href a create of each identity-less local row would have written → that row."""
+    created_identity = getattr(adapter, "created_identity", None)
+    if not callable(created_identity):
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for local in store.events_awaiting_identity(cal["id"]):
+        try:
+            identity = created_identity(cal, local)
+        except ops.ProviderError:
+            continue
+        for key in (identity.get("external_id"), identity.get("href")):
+            if key:
+                out[key] = local
+    return out
 
 
 def _imported_reminders(local: Dict[str, Any], incoming: str, provider: str, mode_on: bool = False) -> str:

@@ -373,6 +373,32 @@ class Store:
                       (result.get("external_id") or "", result.get("href") or "", result.get("etag") or "",
                        _ts(), event_id, event_id))
 
+    def events_awaiting_identity(self, calendar_id: str) -> List[Dict[str, Any]]:
+        """Locally created rows whose provider identity was never reported (a lost create answer)."""
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM events WHERE calendar_id=? AND master_id='' AND external_id='' AND href=''"
+                             " AND origin='local' AND deleted_at IS NULL", (calendar_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def adopt_created_identity(self, event_id: str, identity: Dict[str, Any]) -> bool:
+        """Sync found what a lost create wrote: record it only while the row still has no identity.
+
+        Display state and a requested deletion are kept; a delete parked as a conflict because the identity was
+        unknown (the only conflict an identity-less delete can reach) is queued again in the same transaction.
+        """
+        with self._conn() as c:
+            c.execute("BEGIN IMMEDIATE")
+            cur = c.execute("UPDATE events SET external_id=?, href=?, etag=?, updated_at=? WHERE id=? AND external_id='' AND href=''",
+                            (identity.get("external_id") or "", identity.get("href") or "", identity.get("etag") or "", _ts(), event_id))
+            if cur.rowcount != 1:
+                return False
+            latest = c.execute("SELECT id, kind, state FROM intents WHERE event_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
+                               (event_id,)).fetchone()
+            if latest is not None and latest["kind"] == "delete" and latest["state"] == "conflict":
+                c.execute("UPDATE intents SET state=?, result_json=?, lease_until=NULL, lease_owner='', next_attempt_at=?, updated_at=? WHERE id=?",
+                          (INTENT_PENDING, json.dumps({"note": "provider identity found by sync"}), _ts(), _ts(), latest["id"]))
+        return True
+
     def get_event(self, event_id: str) -> Optional[Dict[str, Any]]:
         with self._conn() as c:
             row = c.execute("SELECT e.*, c.name AS calendar_name, c.provider AS provider, c.account_id AS account_id"

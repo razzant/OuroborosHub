@@ -1,7 +1,7 @@
 ---
 name: scholion
-description: Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 34 tools; answers carry provenance and say what the data cannot support. Not a medical device.
-version: 0.5.2
+description: Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 35 tools; answers carry provenance and say what the data cannot support. Not a medical device.
+version: 0.5.7
 type: extension
 runtime: python3
 entry: plugin.py
@@ -29,7 +29,7 @@ owner's own study and for a conversation with a physician.
 
 ## What the agent gets
 
-34 tools over one local engine, among them:
+35 tools over one local engine, among them:
 
 - `check_prescription` — a new drug as a second opinion: pharmacogenetics,
   interactions with the current regimen, monitoring labs, open questions for
@@ -51,17 +51,20 @@ owner's own study and for a conversation with a physician.
   laboratory PDFs from a folder they named (never the current directory);
   `focus_log` records what the person said happened on a day; `lab_draw`
   records why one day holds two draws; `marker_propose` files a marker name as
-  a proposal a person still has to confirm. Every other tool is read-only, and
-  no tool sets a value, a sex, or a therapy.
+  a proposal a person still has to confirm. `recompute` only reads the plan on
+  this host: the Hub runs every call in a fresh process that ends with the call,
+  so a background rebuild would die unfinished. It says so and names the command
+  the person runs in their own terminal (`scholion recompute --yes`). Every other
+  tool is read-only, and no tool sets a value, a sex, or a therapy.
+
 - `version` / `update` — the installed build and whether PyPI has a newer one
-  (asked at most once a day). `update` acts only with `confirm=true` after the
-  person said yes in the conversation, and then runs `pip install --upgrade
-  scholion` with the interpreter that runs the skill; under Ouroboros that is the
-  host's Python, not this skill's isolated environment. While a newer build is
-  out, answers end with a one-line note about it.
+  (asked at most once a day). On this host the host installs the package, so
+  `update` installs nothing: it says that the host's catalogue brings the newer
+  build, rather than running pip in the host's interpreter. While a newer build
+  is out, one answer a day ends with a one-line note about it.
 - The package starts local programs when they are installed — `bcftools` for
-  the genome, `pdftotext` / `pdftoppm` / `tesseract` for PDF forms, pip for
-  `update` — hence the `subprocess` permission.
+  the genome, `pdftotext` / `pdftoppm` / `tesseract` for PDF forms — hence the
+  `subprocess` permission.
 
 - `rules` — the safety canon this product is operated under, in full. A model
   reaching Scholion through the tool interface is handed a list of tools and no

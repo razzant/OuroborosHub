@@ -1,8 +1,8 @@
 """Hub-level entry point for the calendar skill's offline tests.
 
-The skill declares isolated dependencies (icalendar, cryptography); the hub CI
-image may not have them, so the suite is skipped there and runs wherever the
-interpreter does (e.g. a venv with the skill's dependencies installed).
+The skill declares isolated dependencies (icalendar, cryptography); an
+interpreter without them skips this entry point. CI installs them and runs the
+skill suite directly in the ``calendar-skill`` job, so a skip here hides nothing.
 """
 
 import importlib.util
@@ -28,20 +28,7 @@ def load_tests(loader, standard_tests, pattern):
         return standard_tests
     if SKILL_TESTS not in sys.path:
         sys.path.insert(0, SKILL_TESTS)
-    import test_calendar  # noqa: E402  (skills/calendar/tests/test_calendar.py)
-    import test_calendar_review  # noqa: E402  (review-round regression tests)
-    import test_calendar_round2  # noqa: E402
-    import test_calendar_batch3  # noqa: E402
-    import test_calendar_round3  # noqa: E402
-    import test_calendar_round4  # noqa: E402
-    import test_calendar_batch5  # noqa: E402
-    import test_calendar_round5  # noqa: E402
-    standard_tests.addTests(loader.loadTestsFromModule(test_calendar))
-    standard_tests.addTests(loader.loadTestsFromModule(test_calendar_review))
-    standard_tests.addTests(loader.loadTestsFromModule(test_calendar_round2))
-    standard_tests.addTests(loader.loadTestsFromModule(test_calendar_batch3))
-    standard_tests.addTests(loader.loadTestsFromModule(test_calendar_round3))
-    standard_tests.addTests(loader.loadTestsFromModule(test_calendar_round4))
-    standard_tests.addTests(loader.loadTestsFromModule(test_calendar_batch5))
-    standard_tests.addTests(loader.loadTestsFromModule(test_calendar_round5))
+    # Every module in skills/calendar/tests, so a new regression file cannot be left out of this entry point.
+    for name in sorted(n[:-3] for n in os.listdir(SKILL_TESTS) if n.startswith("test_") and n.endswith(".py")):
+        standard_tests.addTests(loader.loadTestsFromModule(importlib.import_module(name)))
     return standard_tests

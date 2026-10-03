@@ -30,10 +30,18 @@ Honesty about permissions, in one place:
   case writes nowhere else. Declared because the owner may point
   ``SCHOLION_REPO_DIR`` or a folder of laboratory forms anywhere they like,
   and then the package does write outside the skill's state directory.
-- ``net`` — two named lookups only, both opt-in by usage: resolving a drug
+- ``net`` — two named lookups, both opt-in by usage: resolving a drug
   that the local knowledge base does not carry (RxNorm/RxClass/CPIC, plus a
-  translation service for non-Latin drug names) and rsID lookups (Ensembl).
-  No key, no account, no telemetry; SCHOLION_OFFLINE=1 disables all of it.
+  translation service for non-Latin drug names) and rsID lookups (Ensembl);
+  and a third, the package's name to PyPI at most once a day, to say whether a
+  newer build is out. No key, no account, no telemetry; SCHOLION_OFFLINE=1
+  disables all of it.
+- ``subprocess`` — the package starts local programs when they are installed:
+  ``bcftools`` for the genome, ``pdftotext`` / ``pdftoppm`` / ``tesseract`` for
+  laboratory forms. It does NOT start pip here: this host installs the package,
+  so ``register()`` says so in ``SCHOLION_MANAGED_BY`` and ``update`` names the
+  host instead of installing into the host's interpreter (both found by the
+  Hub's maintainer on review of PR #74, 19.09.2026).
 
 Not a medical device: every answer is a second opinion for a conversation
 with a physician, and the package's own safety rules travel inside it
@@ -309,7 +317,14 @@ def _register_tools(api: Any) -> int:
     return count
 
 
+#: What `update` says instead of running pip. This skill runs in a child of the
+#: HOST's interpreter, so «pip in the running interpreter» would install into
+#: the host's Python rather than the skill's isolated prefix.
+_MANAGED_BY = "Ouroboros Hub"
+
+
 def register(api: Any) -> None:
+    os.environ.setdefault("SCHOLION_MANAGED_BY", _MANAGED_BY)
     root = _adopt_data_root(api)
     tools = _register_tools(api)
 

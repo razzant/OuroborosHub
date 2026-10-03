@@ -14,6 +14,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -657,7 +658,9 @@ class ReminderRound2Tests(unittest.TestCase):
                 f"cal:catchup:{index}",
             )
         channel = Channel()
-        stats = rem.deliver_due(ctx.store, channel, get_tz("UTC"), now=now)
+        # deliver_due re-reads with max(now, wall clock): pin the wall clock to this fixture's instant
+        with patch.object(rem, "now_utc", return_value=now):
+            stats = rem.deliver_due(ctx.store, channel, get_tz("UTC"), now=now)
         self.assertEqual(len(channel.sent), 1)
         self.assertTrue(channel.sent[0][0].startswith("cal:batch:"))
         self.assertEqual((stats["sent"], stats["batched"]), (2, 2))

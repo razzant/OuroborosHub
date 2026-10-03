@@ -490,11 +490,27 @@ class YandexAdapter:
                 return False
             raise
 
-    def _create(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    def created_identity(self, calendar: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, str]:
+        """The resource a create of this event writes: derived from its UID, so a lost answer stays addressable."""
         uid = str(event.get("uid") or "")
         if not uid:
             raise ProviderError("parse", "у события нет uid")
-        href = calendar["href"].rstrip("/") + "/" + urllib.parse.quote(uid, safe="") + ".ics"
+        return {"external_id": uid, "href": calendar["href"].rstrip("/") + "/" + urllib.parse.quote(uid, safe="") + ".ics"}
+
+    def lookup_created(self, calendar: Dict[str, Any], event: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        """Identity and etag of what a create of this event wrote; None when the server confirms there is none."""
+        identity = self.created_identity(calendar, event)
+        try:
+            _, etag = self.get(identity["href"])
+        except ProviderError as exc:
+            if exc.kind == "not_found":
+                return None
+            raise
+        return {**identity, "etag": etag}
+
+    def _create(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+        identity = self.created_identity(calendar, event)
+        uid, href = identity["external_id"], identity["href"]
         ics = row_to_ics({**event, "raw_payload": ""}, mute_alarms=bool(payload.get("mute_provider_reminders")))
         try:
             _, headers, _ = self._request("PUT", href, ics, {"Content-Type": "text/calendar; charset=utf-8", "If-None-Match": "*"})
@@ -502,7 +518,7 @@ class YandexAdapter:
             if exc.kind == "conflict":
                 # A retry after a lost response: the resource already exists — read it back instead of duplicating.
                 _, etag = self.get(href)
-                return {"external_id": uid, "href": href, "etag": etag}
+                return {"external_id": uid, "href": href, "etag": etag, "existed": True}
             raise
         etag = headers.get("etag", "")
         if not etag:

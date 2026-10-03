@@ -12,6 +12,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -482,7 +483,9 @@ class ReminderRound3Tests(unittest.TestCase):
         )
         ctx.store.schedule_reminder(master["id"], iso_utc(start), 0, iso_utc(start), "cal:effective")
         channel = Channel()
-        stats = rem.deliver_due(ctx.store, channel, UTC, now=start + timedelta(minutes=5))
+        # deliver_due re-reads with max(now, wall clock): pin the wall clock to this fixture's instant
+        with patch.object(rem, "now_utc", return_value=start + timedelta(minutes=5)):
+            stats = rem.deliver_due(ctx.store, channel, UTC, now=start + timedelta(minutes=5))
         self.assertEqual(stats["sent"], 1)
         self.assertIn("Renamed occurrence", channel.sent[0][1])
 
@@ -508,7 +511,9 @@ class ReminderRound3Tests(unittest.TestCase):
             "cal:running",
         )
         channel = Channel()
-        stats = rem.deliver_due(ctx.store, channel, UTC, now=now)
+        # deliver_due re-reads with max(now, wall clock): pin the wall clock to this fixture's instant
+        with patch.object(rem, "now_utc", return_value=now):
+            stats = rem.deliver_due(ctx.store, channel, UTC, now=now)
         self.assertEqual((stats["sent"], stats["batched"], len(channel.sent)), (1, 1, 1))
 
     def test_exception_reminder_edit_drops_master_slot_and_known_refusals_stay_retryable(self):

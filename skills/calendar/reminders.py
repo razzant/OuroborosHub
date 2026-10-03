@@ -21,7 +21,7 @@ from model import get_tz, iso_local, iso_utc, now_utc, own_reminders, parse_stor
 
 PLAN_HORIZON = timedelta(hours=24)
 CATCHUP_GRACE = timedelta(minutes=10)      # a reminder older than this after downtime is batched, not sent alone
-MAX_NOTICE_CHARS = 1000                     # Host Service owner notification contract
+MAX_NOTICE_CHARS = 400                      # Host Service system notice contract
 NOTICE_MAX = 128
 DEFAULT_RULES = {"default": [], "by_calendar": {}, "hidden": []}   # 19 A: reminders only by request or saved rule
 MODE_KEY = "reminder_mode"                                          # 20 A: «напоминает Уроборос» is explicit per external calendar
@@ -286,7 +286,10 @@ def format_text(event: Dict[str, Any], occurrence_start_utc: str, offset: int, t
         parts.append(str(event["calendar_name"])[:120])
     if event.get("location"):
         parts.append(str(event["location"])[:80])
-    return " · ".join(parts)
+    text = " · ".join(parts)
+    # Leave room for the catch-up header even when one event has long labels.
+    limit = MAX_NOTICE_CHARS - len("⏰ Пока Уроборос не работал, подошли напоминания:") - 1
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def _reserve(store, channel: NotifyChannel, reminder_ids: List[str]) -> List[str]:
@@ -427,8 +430,9 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
     original = recurrence_id or key  # old queue rows know only the effective slot
     exceptions = store.exceptions_for(event["id"])
     exc = next((row for row in exceptions if str(row.get("recurrence_id") or "") == original), None)
+    import ops as _ops
     if exc is not None:
-        if str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at"):
+        if str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at") or original in _ops.excluded_slots(event):
             return "вхождение отменено", event
         if str(exc.get("start_utc") or "") != key:
             return "вхождение перенесено; напоминание перепланировано", event
@@ -440,7 +444,6 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
         if not recurrence_id and any(str(row.get("start_utc") or "") == key and
                                      str(row.get("recurrence_id") or "") != key for row in exceptions):
             return "старое напоминание без идентификатора вхождения", event
-        import ops as _ops
         live = _ops.expand([event], start - timedelta(minutes=1), start + timedelta(minutes=1),
                            store.exceptions_for, owner_tz=owner_tz, strict=True)
         matches = [o for o in live if str(o.get("occurrence_start_utc") or "") == original and

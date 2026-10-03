@@ -10,13 +10,16 @@
 
     var ROOT = '/api/extensions/calendar/';
     var POLL_MS = 30000;
-    var HOUR_PX = 44;
+    var HOUR_SCALES = [32, 44, 64];
+    var GRID_VIEWPORT_PX = 400;
+    var HOUR_PX = HOUR_SCALES[1];
     var SNAP_MIN = 15;
     var DAY_START_H = 0;
 
     var state = {
         view: 'day', date: null, data: null, error: '', loading: false, showHidden: false,
-        selectedCals: null, editing: null, drag: null, disposed: false, theme: 'light', poll: null, dirty: false, notice: ''
+        selectedCals: null, editing: null, drag: null, disposed: false, theme: 'light', poll: null, dirty: false, notice: '',
+        hourScale: 1, gridScrollTop: 0, focusNow: true, zooming: false
 
     };
     var root = document.getElementById('root') || document.body;
@@ -40,7 +43,7 @@
             else if (k === 'style') node.setAttribute('style', attrs[k]);
             else if (k.indexOf('on') === 0) node.addEventListener(k.slice(2), attrs[k]);
             else if (k === 'text') node.textContent = attrs[k];
-            else node.setAttribute(k, attrs[k]);
+            else if (attrs[k] != null) node.setAttribute(k, attrs[k]);
         });
         (children || []).forEach(function (c) { if (c) node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
         return node;
@@ -62,19 +65,23 @@
         '.bar .title{font-weight:600;font-size:16px;margin-right:auto}',
         'button{background:var(--soft);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit}',
         'button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.danger{color:var(--danger)}button.on{background:var(--accent-bg);border-color:var(--accent)}',
-        '.grid{display:grid;grid-template-columns:48px 1fr;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--card)}',
-        '.grid.week{grid-template-columns:48px repeat(7,1fr)}',
-        '.hours{position:relative}.hour{height:' + HOUR_PX + 'px;border-top:1px solid var(--line);font-size:11px;color:var(--muted);padding:2px 4px;box-sizing:border-box}',
-        '.col{position:relative;border-left:1px solid var(--line);cursor:crosshair}.col .hline{height:' + HOUR_PX + 'px;border-top:1px solid var(--line);box-sizing:border-box}',
+        '.grid-scroll{height:' + GRID_VIEWPORT_PX + 'px;max-height:55vh;overflow:auto;border:1px solid var(--line);border-radius:10px;overscroll-behavior:contain;background:var(--card)}',
+        '.grid{display:grid;grid-template-columns:48px minmax(0,1fr);--hour-px:44px}',
+        '.grid.week{grid-template-columns:48px repeat(7,minmax(0,1fr))}',
+        '.hours{position:relative;padding-bottom:40px}.hour{height:var(--hour-px);border-top:1px solid var(--line);font-size:11px;color:var(--muted);padding:2px 4px;box-sizing:border-box}',
+        '.col{position:relative;padding-bottom:40px;border-left:1px solid var(--line);cursor:crosshair}.col .hline{height:var(--hour-px);border-top:1px solid var(--line);box-sizing:border-box}',
         '.colhead{font-size:12px;color:var(--muted);text-align:center;padding:6px 0;border-bottom:1px solid var(--line);border-left:1px solid var(--line);background:var(--soft)}.colhead.today{color:var(--accent);font-weight:600}',
         '.corner{border-bottom:1px solid var(--line);background:var(--soft)}',
+        '.grid > .corner:first-child,.grid > .colhead{position:sticky;top:0;z-index:3}',
+        '.scale{display:flex;align-items:center;gap:3px}.scale span{min-width:38px;text-align:center;color:var(--muted);font-size:12px}',
         '.ev{position:absolute;left:3px;right:6px;border-radius:7px;padding:3px 6px;font-size:12px;box-sizing:border-box;overflow:hidden;background:var(--accent-bg);border-left:3px solid var(--accent);cursor:grab;user-select:none}',
         '.ev.hidden{opacity:.75;border-left-style:dashed}.ev.pending{outline:1px dashed var(--muted)}.ev.conflict{outline:2px solid var(--danger)}',
         '.ev .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ev .m{color:var(--muted);font-size:11px}',
         '.ev .rs{position:absolute;left:0;right:0;bottom:0;height:7px;cursor:ns-resize}',
         '.hatch{position:absolute;left:0;right:0;background:repeating-linear-gradient(135deg,var(--busy) 0 6px,transparent 6px 12px);opacity:.9;pointer-events:none}',
         '.usual{position:absolute;left:0;right:0;border-top:2px dotted var(--accent);border-bottom:2px dotted var(--accent);opacity:.7;font-size:11px;color:var(--accent);padding:0 6px;box-sizing:border-box;pointer-events:none}',
-        '.now{position:absolute;left:0;right:0;border-top:2px solid var(--danger);pointer-events:none}',
+        '.now{position:absolute;left:0;right:0;border-top:2px solid #e5333f;pointer-events:none;z-index:2;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))}',
+        '.now::before{content:"";position:absolute;left:0;top:-5px;width:8px;height:8px;border-radius:50%;background:#e5333f}',
         '.allday{display:flex;flex-wrap:wrap;gap:6px;padding:6px 8px;border-bottom:1px solid var(--line);min-height:20px;border-left:1px solid var(--line)}',
         '.chip{background:var(--accent-bg);border-radius:6px;padding:2px 8px;font-size:12px;cursor:pointer}',
         '.list{margin-top:12px}.list h3{font-size:13px;color:var(--muted);margin:8px 0 4px;font-weight:600}.row{display:flex;gap:10px;padding:6px 8px;border-radius:8px;cursor:pointer}.row:hover{background:var(--soft)}.row .when{color:var(--muted);min-width:96px}',
@@ -106,21 +113,32 @@
         var q = 'agenda?view=' + state.view + '&date=' + (state.date || '') + (state.showHidden ? '&show_hidden=1' : '') +
             (state.selectedCals ? '&calendars=' + encodeURIComponent(state.selectedCals.length ? state.selectedCals.join(',') : '-') : '');
         return api(q).then(function (d) {
-            state.data = d; state.error = ''; if (!state.date) state.date = d.anchor;
+            if (!state.date && state.data && state.data.anchor !== d.anchor) state.focusNow = true;
+            state.data = d; state.error = '';
+            /* A null date follows the host's current day/week across midnight. Only arrows pin a date. */
         }).catch(function (e) { state.error = e.message || String(e); }).then(function () { state.loading = false; render(); });
     }
 
     /* ---------- rendering ---------- */
     function render() {
+        var previousGrid = root.querySelector('.grid-scroll');
+        if (previousGrid && !state.focusNow && !state.zooming) state.gridScrollTop = previousGrid.scrollTop;
         root.innerHTML = '';
         var d = state.data;
         var bar = el('div', { class: 'bar' }, [
             el('span', { class: 'title', text: 'Календарь' + (d ? ' · ' + (state.view === 'week' ? 'неделя' : d.days[0].weekday + ' ' + d.anchor) : '') }),
             el('button', { text: '‹', onclick: function () { shift(-1); } }),
-            el('button', { text: 'Сегодня', onclick: function () { state.date = null; load(); } }),
+            el('button', { text: 'Сегодня', onclick: function () { state.date = null; state.focusNow = true; load(); } }),
             el('button', { text: '›', onclick: function () { shift(1); } }),
-            el('button', { text: 'День', class: state.view === 'day' ? 'on' : '', onclick: function () { state.view = 'day'; load(); } }),
-            el('button', { text: 'Неделя', class: state.view === 'week' ? 'on' : '', onclick: function () { state.view = 'week'; load(); } }),
+            el('button', { text: 'День', class: state.view === 'day' ? 'on' : '', onclick: function () { state.view = 'day'; state.focusNow = true; load(); } }),
+            el('button', { text: 'Неделя', class: state.view === 'week' ? 'on' : '', onclick: function () { state.view = 'week'; state.focusNow = true; load(); } }),
+            el('div', { class: 'scale', role: 'group', 'aria-label': 'Масштаб временной сетки' }, [
+                el('button', { text: '−', title: 'Уменьшить масштаб сетки', 'aria-label': 'Уменьшить масштаб сетки', disabled: state.hourScale === 0 ? 'disabled' : null,
+                    onclick: function () { changeScale(-1); } }),
+                el('span', { text: Math.round(HOUR_SCALES[state.hourScale] / HOUR_SCALES[1] * 100) + '%' }),
+                el('button', { text: '+', title: 'Увеличить масштаб сетки', 'aria-label': 'Увеличить масштаб сетки', disabled: state.hourScale === HOUR_SCALES.length - 1 ? 'disabled' : null,
+                    onclick: function () { changeScale(1); } })
+            ]),
             el('button', { text: 'Служебные', class: state.showHidden ? 'on' : '', title: 'Показать служебные события и «обычно»', onclick: function () { state.showHidden = !state.showHidden; load(); } }),
             el('button', { text: '⚙', title: 'Напоминания и синхронизация', class: state.panel ? 'on' : '', onclick: function () { togglePanel(); } }),
             el('button', { text: '+ Событие', class: 'primary', onclick: function () { openCard(null, defaultStart()); } })
@@ -131,7 +149,18 @@
         if (state.notice) root.appendChild(el('div', { class: 'status', text: state.notice }));
         if (!d) { root.appendChild(el('div', { class: 'status', text: state.loading ? 'Загрузка…' : 'Нет данных' })); return; }
         root.appendChild(renderCalendarChips(d));
-        root.appendChild(renderGrid(d));
+        var scroller = el('div', { class: 'grid-scroll', 'aria-label': 'Временная сетка календаря', tabindex: '0' }, [renderGrid(d)]);
+        root.appendChild(scroller);
+        if (state.focusNow && scroller.querySelector('.now')) {
+            var line = scroller.querySelector('.now');
+            scroller.scrollTop += line.getBoundingClientRect().top - scroller.getBoundingClientRect().top - scroller.clientHeight * 0.45;
+            state.gridScrollTop = scroller.scrollTop;
+            state.focusNow = false;
+        } else {
+            scroller.scrollTop = state.gridScrollTop;
+            state.focusNow = false;
+        }
+        state.zooming = false;
         if (state.view === 'day') root.appendChild(renderList(d));
         root.appendChild(renderStatus(d));
         if (state.editing) root.appendChild(renderCard());
@@ -153,7 +182,7 @@
 
     function renderGrid(d) {
         var days = d.days;
-        var grid = el('div', { class: 'grid' + (state.view === 'week' ? ' week' : '') });
+        var grid = el('div', { class: 'grid' + (state.view === 'week' ? ' week' : ''), style: '--hour-px:' + HOUR_PX + 'px' });
         grid.appendChild(el('div', { class: 'corner' }));
         var todayStr = localDate(ownerNow());
         days.forEach(function (day) {
@@ -206,6 +235,7 @@
         col.addEventListener('click', function (ev) {
             if (ev.target !== col && !ev.target.classList.contains('hline')) return;
             var rect = col.getBoundingClientRect();
+            if (ev.clientY - rect.top >= 24 * HOUR_PX) return; // breathing room below 23:55 is not another day
             var mins = Math.floor(((ev.clientY - rect.top) / HOUR_PX * 60) / SNAP_MIN) * SNAP_MIN;
             var start = new Date(day.date + 'T00:00:00'); start.setMinutes(mins);
             openCard(null, start);
@@ -464,7 +494,27 @@
         return overlay;
     }
 
-    function shift(n) { state.date = addDays(state.date || localDate(ownerNow()), state.view === 'week' ? 7 * n : n); load(); }
+    function shift(n) { state.date = addDays(state.date || localDate(ownerNow()), state.view === 'week' ? 7 * n : n); state.focusNow = true; load(); }
+
+    function changeScale(direction) {
+        var next = Math.max(0, Math.min(HOUR_SCALES.length - 1, state.hourScale + direction));
+        if (next === state.hourScale) return;
+        var scroller = root.querySelector('.grid-scroll');
+        var oldHour = HOUR_PX;
+        var currentScroll = scroller ? scroller.scrollTop : state.gridScrollTop;
+        state.hourScale = next;
+        HOUR_PX = HOUR_SCALES[next];
+        state.gridScrollTop = currentScroll * HOUR_PX / oldHour;
+        state.zooming = true;
+        state.focusNow = !!(scroller && scroller.querySelector('.now'));
+        var hadKeyboardFocus = document.activeElement && document.activeElement.closest('.scale');
+        render();
+        if (hadKeyboardFocus) {
+            var buttons = root.querySelectorAll('.scale button');
+            var chosen = buttons[direction < 0 ? 0 : 1];
+            (chosen.disabled ? buttons[direction < 0 ? 1 : 0] : chosen).focus({ preventScroll: true });
+        }
+    }
 
     /* ---------- settings panel: reminder rule (19 A) + sync now ---------- */
     function togglePanel() {

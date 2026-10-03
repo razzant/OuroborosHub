@@ -343,9 +343,29 @@ class GoogleAdapter:
                 if str(data.get("status") or "") == "cancelled":
                     revive = {k: v for k, v in body.items() if k != "id"}
                     _, _, data = self._request("PUT", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{body['id']}", params, revive)
-                return {"external_id": data.get("id", body["id"]), "href": "", "etag": str(data.get("etag") or "")}
+                    return {"external_id": data.get("id", body["id"]), "href": "", "etag": str(data.get("etag") or "")}
+                return {"external_id": data.get("id", body["id"]), "href": "", "etag": str(data.get("etag") or ""), "existed": True}
             raise
         return {"external_id": str(data.get("id") or body["id"]), "href": "", "etag": str(data.get("etag") or headers.get("etag") or "")}
+
+    def created_identity(self, calendar: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, str]:
+        """The id a create of this event uses (stable from its UID), so a lost answer stays addressable."""
+        if not event.get("uid"):
+            raise ProviderError("parse", "у события нет uid")
+        return {"external_id": _google_id(event), "href": ""}
+
+    def lookup_created(self, calendar: Dict[str, Any], event: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        """Identity and etag of what a create of this event wrote; None when Google has none (or only a cancelled tombstone)."""
+        identity = self.created_identity(calendar, event)
+        try:
+            _, _, data = self._request("GET", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{identity['external_id']}")
+        except ProviderError as exc:
+            if exc.kind in ("not_found", "gone"):
+                return None
+            raise
+        if str(data.get("status") or "") == "cancelled":
+            return None
+        return {**identity, "etag": str(data.get("etag") or "")}
 
     def update(self, calendar: Dict[str, Any], event: Dict[str, Any], expected_etag: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         external_id = str(event.get("external_id") or "")

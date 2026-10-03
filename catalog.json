@@ -5,6 +5,31 @@
   "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "skills": [
     {
+      "description": "Геоданные 2ГИС: поиск мест и организаций, геокодирование адресов и обратное геокодирование координат, построение маршрутов (авто, пешком, вело, самокат, мото, грузовик, такси), расчёт изохрон (зоны достижимости), создание статической карты PNG с маркерами, линиями и полигонами и кликабельные ссылки на интерактивную карту 2ГИС. Требует API-ключ 2ГИС.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "c3822c1db3afbb5a39c68725ee6b59f6a6d308a3d02bb56c413395dbd50fca77",
+          "size": 11335
+        },
+        {
+          "path": "client.py",
+          "sha256": "5d12a992654284967ca6dd498f7dd3e3f0748063d5db7f10a348e9b8ac294de5",
+          "size": 26232
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "cfa2531f360897ee5d9518d69f9d569e0395bb1e6738a59c6cfbca8091cf72ce",
+          "size": 23718
+        }
+      ],
+      "name": "2gis",
+      "slug": "2gis",
+      "type": "extension",
+      "version": "1.1.0",
+      "when_to_use": "Геозадачи через 2ГИС: поиск организаций и мест, адрес↔координаты, маршруты, изохроны, статические карты. НЕ для: поиска готовых изображений в интернете, GPS-трекинга, бронирования, отзывов о местах (2ГИС не отдаёт отзывы через эти API). Для поиска по миру вне зоны покрытия 2ГИС используй другие инструменты."
+    },
+    {
       "description": "Agent-to-Agent protocol bridge for Ouroboros. Provides a local A2A-compatible server plus client tools for discovering and messaging other A2A agents.",
       "files": [
         {
@@ -73,6 +98,21 @@
       "type": "extension",
       "version": "1.4.0",
       "when_to_use": "User asks to communicate with another A2A-compatible agent, discover an agent card, send an A2A message, check A2A task status, or expose this Ouroboros instance as an A2A peer."
+    },
+    {
+      "description": "Evidence-qualified code review adapted to the user's decision, project and risks.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "a1c515075216a35bbf965d05b3dbc77b7dd9b1acbba0c80749a940c1de2651f0",
+          "size": 10874
+        }
+      ],
+      "name": "adaptive-code-review",
+      "slug": "adaptive-code-review",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "Review external code changes, assess a project or library for adoption, or check research and analysis code, including folders without Git."
     },
     {
       "description": "AgentRQ integration: structured HITL task board, permission gating, and real-time workspace bridge via MCP Streamable HTTP",
@@ -1249,17 +1289,17 @@
       "when_to_use": "Пользователь просит у «Операционного директора» Сбера бизнес-сведения — есть ли ограничения на счетах, задолженность, готовые справки, бизнес-карты, профиль организации, доверенности, операции, балансы, обороты, сводку по банку и т.п. (без технических кодов разделов)."
     },
     {
-      "description": "Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 34 tools; answers carry provenance and say what the data cannot support. Not a medical device.",
+      "description": "Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 35 tools; answers carry provenance and say what the data cannot support. Not a medical device.",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "c5da981e5b23c39aea7d794f5d811e87f33db3f35188516cb690ad7c76ffc930",
-          "size": 7394
+          "sha256": "86e9769888b1347ad07b4ad2d2f1d1a047206b71fe85abfbc6fe6e5215b63698",
+          "size": 7578
         },
         {
           "path": "plugin.py",
-          "sha256": "63aea4c97b1f11f5ef925eb173ca42ff44a3eff13dc8fea0698706f7d8dcc594",
-          "size": 15212
+          "sha256": "d33be0cf2b803528937614f77157664fde507e3290fc5bf1e1c5ff4fd0db6acb",
+          "size": 16073
         }
       ],
       "install_specs": [
@@ -1271,7 +1311,7 @@
       "name": "scholion",
       "slug": "scholion",
       "type": "extension",
-      "version": "0.5.2",
+      "version": "0.5.7",
       "when_to_use": "The owner asks about their own medical data — check a new prescription as a second opinion (pharmacogenetics, interactions with the current regimen, monitoring labs), review laboratory results and trends, look up a locus or clinically significant ClinVar findings in their VCF, polygenic scores, longevity findings, sleep and lifestyle metrics, movement toward a health goal, which tests to take next, or a pre-visit summary."
     },
     {
@@ -1896,15 +1936,39 @@
       "version": "0.1.0"
     },
     {
-      "slug": "calendar",
-      "name": "calendar",
-      "version": "1.0.8",
+      "slug": "gigasearch",
+      "name": "gigasearch",
+      "version": "0.1.1",
       "type": "extension",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "c62a38a546cad176757503b134160d9044319290e4738f3f99fa4c8555763ea0",
-          "size": 16743
+          "sha256": "48eed09170f3a27bbea27b16c16dbecafc3ac16935c3d9bbb459830abde22bae",
+          "size": 5578
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "ff04e5c038e83e2768c874f994cbfb06f74eefebaebd0afd02ac9747a448c2af",
+          "size": 8974
+        },
+        {
+          "path": "test_gigasearch.py",
+          "sha256": "37ca6babf5fe17a8849676ca0b7a9dbc740e3479065e6c0f4ab6dd8996b23dbe",
+          "size": 9908
+        }
+      ],
+      "description": "Основной веб-поиск этой установки. Для обычного поиска внешней информации сначала используй GigaSearch; при явном выборе пользователя или недоступности сервиса выбери подходящую альтернативу."
+    },
+    {
+      "slug": "calendar",
+      "name": "calendar",
+      "version": "1.0.9",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "9b92df9181d459febf8e0e2190c4eccba517b56c7b9f138aa3a11d68981f047a",
+          "size": 17728
         },
         {
           "path": "model.py",
@@ -1913,8 +1977,8 @@
         },
         {
           "path": "ops.py",
-          "sha256": "ce26b21afd46770672034f28ed230e3010bec4edae3865b52cb0553c05666455",
-          "size": 61877
+          "sha256": "91e0b547c7b49da3064ad3604631af6bf9b52820d6f1a9589574dba30dd23a18",
+          "size": 64181
         },
         {
           "path": "plugin.py",
@@ -1923,18 +1987,18 @@
         },
         {
           "path": "providers.py",
-          "sha256": "3f57c822f7f6e625ca050eb32c30916f72e3708eb67c61892a9bcbe6aad98346",
-          "size": 33828
+          "sha256": "b734df37cc26dff337960b4ca382742f266aa414db3444a3bbe7ccc735dbc115",
+          "size": 34719
         },
         {
           "path": "providers_google.py",
-          "sha256": "004ddf431c76613f8488ad1e68846f7f2009177fe0f1422515743ade6de5fec0",
-          "size": 34903
+          "sha256": "49d76ad629f2047455bab10b82cc57518a7bc1c2fb4647b5496702fe8b1bd219",
+          "size": 36152
         },
         {
           "path": "reminders.py",
-          "sha256": "ffe7de7daa450d26e91fcb53cc3d81e10d3a075237456de5fef85a263b67941b",
-          "size": 24480
+          "sha256": "68c41f419e85d6c7818b5fcf35aa6189647b14d27d78f70a443c765b94e1739e",
+          "size": 24791
         },
         {
           "path": "routes.py",
@@ -1943,13 +2007,13 @@
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "e7b2a9bfe1cf7a88f9d35cbdf50600a5efbd3b4f74f1b87c51b09396d88039fe",
-          "size": 20223
+          "sha256": "5ae5db7212bcb95a0650d35d0b5e5f35df706752cb75c83823a7726a73ca1a66",
+          "size": 22536
         },
         {
           "path": "store.py",
-          "sha256": "a8d6491f264de3ec7003c41bdbaf10cf33222fc29e6796a30ff1ed63c72db91d",
-          "size": 42530
+          "sha256": "5e8194b447ce14c72001331d24e4d7c9e20c010c25fa8111cb07e0958b3d9d1c",
+          "size": 44423
         },
         {
           "path": "tests/test_calendar.py",
@@ -1977,6 +2041,11 @@
           "size": 12164
         },
         {
+          "path": "tests/test_calendar_provider_divergence.py",
+          "sha256": "a11d1c9da691bd9f11329e1e9853ca5010cc40a99fc49e3d9142cb5855fb9bef",
+          "size": 23794
+        },
+        {
           "path": "tests/test_calendar_reminder_queue.py",
           "sha256": "0ab1fb58b86d03b3691fdabca481a1cac05efec55dd2af97cb767ea1058200c1",
           "size": 44164
@@ -1988,23 +2057,28 @@
         },
         {
           "path": "tests/test_calendar_round2.py",
-          "sha256": "3c8d16db370ae0b21b796b741b87eb15fa793ab45459ce5f7cf2da18d4b328ec",
-          "size": 33678
+          "sha256": "d6f5c94a4ee59ab6e2baf11203f12f8cd903eef72290e5a14cda186e00fb9660",
+          "size": 33878
         },
         {
           "path": "tests/test_calendar_round3.py",
-          "sha256": "8160ab17373a75cfd84ac52b7b852b81d818659f24f377699647d6dafa84718c",
-          "size": 30722
+          "sha256": "97af2ee8b42e85f089738064bc35d0e3984e3178c6ffa6bc636afd96198753b9",
+          "size": 31115
         },
         {
           "path": "tests/test_calendar_round4.py",
-          "sha256": "8341782f680908aa2cf350f934a2a0b115abae345a69a65bc2d64f7629f4a2e8",
-          "size": 30052
+          "sha256": "c325e1383a5eb9544f5df6bf0fc422c7ae80944d68e6092de86df4580a53ccb0",
+          "size": 30420
         },
         {
           "path": "tests/test_calendar_round5.py",
           "sha256": "903f8af4a7cad19342bbf8860a283f8d4c13bf6a0d1d877e11555b3318995d12",
           "size": 13485
+        },
+        {
+          "path": "tests/test_widget_browser.py",
+          "sha256": "cb8912f9588ff2d2c8d2db65b97ee51f2e92c7a4af4ec2afc5097cad3b21b0f7",
+          "size": 8461
         },
         {
           "path": "tools.py",
@@ -2013,8 +2087,8 @@
         },
         {
           "path": "widget.js",
-          "sha256": "8cf017debf9abd1a6cf093ad2e2bcd38348952ef83cc6fdac1cdb4355c36f9c1",
-          "size": 38064
+          "sha256": "d6a15ed0db036eef19d302e70f0fcd8f5488c0f4d4f1c1082e8879e432b3e892",
+          "size": 41845
         }
       ],
       "description": "Единый календарь владельца — свои локальные календари, Яндекс (CalDAV) и Google (личный OAuth-клиент); события, повторения, свободные окна, служебные события-распорядок, напоминания без модели, виджет День/Неделя."

@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -616,7 +617,9 @@ class ReminderRound4Tests(unittest.TestCase):
             now=now - timedelta(seconds=1),
         )
         channel = Channel()
-        stats = rem.deliver_due(ctx.store, channel, new_tz, now=now)
+        # deliver_due re-reads with max(now, wall clock): pin the wall clock to this fixture's instant
+        with patch.object(rem, "now_utc", return_value=now):
+            stats = rem.deliver_due(ctx.store, channel, new_tz, now=now)
         self.assertEqual(stats["sent"], 1)
         self.assertIn("06:30", channel.sent[0][1])
 
@@ -635,7 +638,9 @@ class ReminderRound4Tests(unittest.TestCase):
         )
         ctx.store.schedule_reminder(event["id"], event["start_utc"], 0, event["start_utc"], "cal:limits")
         channel = Channel()
-        rem.deliver_due(ctx.store, channel, UTC, now=now)
+        # deliver_due re-reads with max(now, wall clock): pin the wall clock to this fixture's instant
+        with patch.object(rem, "now_utc", return_value=now):
+            rem.deliver_due(ctx.store, channel, UTC, now=now)
         text = channel.sent[0][1]
         self.assertLessEqual(len(text), 1000)
         self.assertIn("T" * 120, text)

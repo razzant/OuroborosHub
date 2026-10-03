@@ -123,6 +123,7 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
         row = dict(master)
         return [row] if overlaps(m_start, m_end, start, end) else []
     by_recurrence = {str(ex.get("recurrence_id") or ""): ex for ex in exceptions}
+    excluded = excluded_slots(master)   # an EXDATE cancels its slot, even if a stale override still names it
     visited = set()
     out: List[Dict[str, Any]] = []
     all_day = bool(master.get("all_day"))
@@ -162,7 +163,7 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
             break
     # Exceptions moved INTO the window from an occurrence date outside it.
     for key, exc in by_recurrence.items():
-        if key in visited or str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at"):
+        if key in visited or key in excluded or str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at"):
             continue
         s, e = parse_stored(exc.get("start_utc")), parse_stored(exc.get("end_utc"))
         if s and e and overlaps(s, e, start, end):
@@ -184,6 +185,11 @@ def _split_dates(text: Any) -> List[datetime]:
         if dt:
             out.append(dt)
     return out
+
+
+def excluded_slots(master: Dict[str, Any]) -> set:
+    """Original occurrence keys the series' EXDATE cancels (same ISO-UTC form as recurrence_id)."""
+    return {iso_utc(dt) for dt in _split_dates(master.get("exdates"))}
 
 
 # ── free/busy ───────────────────────────────────────────────────────
@@ -864,6 +870,11 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
             # The provider may answer after an owner delete. CAS the new identity
             # and the tombstone in one SQLite transaction, never revive the row.
             store.record_created_event(event["id"], res)
+            if res.get("existed"):
+                # An earlier attempt landed but its answer was lost, and the owner may have edited the event since:
+                # the provider must end with the current content (that attempt already sent any invitations).
+                written = adapter.update(cal, {**event, **res}, res.get("etag") or "", {**payload, "send_updates": False})
+                store.record_created_event(event["id"], {**res, "etag": written.get("etag") or res.get("etag") or ""})
         elif intent["kind"] == "update":
             res = adapter.update(cal, event, intent.get("expected_etag") or "", payload)
             store.update_event(event["id"], {"etag": res.get("etag") or event.get("etag") or "", "sync_state": "synced",
@@ -888,8 +899,24 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
                         store.delete_event(event["id"], hard=True)
                         store.settle_intent(intent["id"], INTENT_DONE, {"note": "original create definitely rejected"})
                         return {"status": INTENT_DONE, "message": "создание было отклонено, локальная запись удалена"}
-                    store.settle_intent(intent["id"], INTENT_CONFLICT, {"error": "remote create outcome or identity unknown"})
-                    return {"status": INTENT_CONFLICT, "message": "создание у провайдера не подтверждено; удаление требует сверки"}
+                    if any(create["state"] == INTENT_PENDING for create in creates):
+                        # A create that may still be in flight is settled only by its own outcome.
+                        store.park_intent(intent["id"], 60, "waiting for the create outcome")
+                        return {"status": INTENT_PENDING, "message": "ждёт исхода создания у провайдера"}
+                    lookup = getattr(adapter, "lookup_created", None)
+                    if not callable(lookup):
+                        store.settle_intent(intent["id"], INTENT_CONFLICT, {"error": "remote create outcome or identity unknown"})
+                        return {"status": INTENT_CONFLICT, "message": "создание у провайдера не подтверждено; удаление требует сверки"}
+                    # The create wrote an identity derived from the event's UID: ask about exactly that one
+                    # instead of guessing from a lost answer (a transient error here is retried like any write).
+                    found = lookup(cal, event)
+                    if found is None:
+                        store.delete_event(event["id"], hard=True)
+                        store.settle_intent(intent["id"], INTENT_DONE, {"note": "provider confirmed the create never landed"})
+                        return {"status": INTENT_DONE, "message": "у провайдера события нет, локальная запись удалена"}
+                    store.record_created_event(event["id"], found)   # the tombstone stays: deletion is still requested
+                    event = {**event, **found}
+                    intent = {**intent, "expected_etag": found.get("etag") or ""}
             adapter.delete(cal, event, intent.get("expected_etag") or "", payload)
             store.delete_event(event["id"], hard=True)
         elif intent["kind"] == "rsvp":
