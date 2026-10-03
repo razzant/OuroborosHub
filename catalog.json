@@ -1938,36 +1938,36 @@
     {
       "slug": "smart_lists",
       "name": "smart_lists",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "type": "extension",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "3b3a08ed8defd6210be58639762221dc0cee54744be22d757a8ab7572a9dff6a",
-          "size": 22951
+          "sha256": "67415cfb7eed3ac4db825f5ef643e8cef8ec5a6551189aa763b311012f1205ca",
+          "size": 23071
         },
         {
           "path": "lists_core.py",
-          "sha256": "55878f1f006886084d36fa8acd432ba158b8e5272baf0a8870375a5543dfbea8",
-          "size": 95636
+          "sha256": "da1303e9470cad69fd7ba51bea68ff76fe108d7444a2fdd9e5ba8c00ed07b5ec",
+          "size": 95744
         },
         {
           "path": "plugin.py",
-          "sha256": "ad6f5a5043175f0a63ae12e70ce9374b9ac0ddc20cd5e9d8494ccbe89289a088",
-          "size": 35871
+          "sha256": "23ad81ee99068b6e75b1ecbe64cc1deaa544afbd7261225dbc13f412f69e0b3a",
+          "size": 35882
         },
         {
           "path": "tests/test_smart_lists.py",
-          "sha256": "17da79c9f1901142479e6d0a476f35f29de5499f273e37ffb6e2bc3b639cf769",
-          "size": 118236
+          "sha256": "759f3c5aaaa91fb412f7ea561ee885734f89564ac0d5b81086718a0e51231068",
+          "size": 119830
         },
         {
           "path": "widget.js",
-          "sha256": "e41c94c44985599ce84e2e9202d2bf90645bafa3aea0f10332ccf797f152397e",
-          "size": 13528
+          "sha256": "821b309f938a3b5abb48ae2f80e6cf762cee20638d6d0cea3742dfd1df048040",
+          "size": 14121
         }
       ],
-      "description": "Provisional personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders."
+      "description": "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders."
     }
   ]
 }

@@ -1,7 +1,7 @@
 ---
 name: smart_lists
 description: "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders."
-version: 0.3.3
+version: 0.3.4
 type: extension
 runtime: python3
 entry: plugin.py
@@ -248,8 +248,10 @@ capture and all other edits happen through ordinary chat. Every open entry appea
 regardless of when it was added. Tomorrow's list is the same still-open entries,
 not duplicated records or a midnight job. The date is computed by the host on each read in
 the browser-reported IANA timezone and shown beside Today; an invalid timezone refuses
-rather than guessing a date. Checking an item marks it done immediately but keeps it visibly checked in
-Today through the end of the browser's local day. On the next day it moves to
+rather than guessing a date. Today needs IANA timezone data on the host; Windows
+installations may need the Python `tzdata` package for named zones. Checking an item marks
+it done immediately but keeps it visibly checked in Today through the end of the browser's
+local day. On the next day it moves to
 the collapsible archive; unchecking a completed item reopens it. The archive
 preview shows 50 recent earlier-day completions; older ones
 remain accessible through chat. Today's open and checked entries page 100 at a time. A low-emphasis backup button downloads a full JSON export outside the skill data directory. A rejected or

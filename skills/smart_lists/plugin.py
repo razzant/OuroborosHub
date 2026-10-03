@@ -659,8 +659,8 @@ def widget_today(timezone: str, offset: int = 0, group_id: str = "") -> Dict[str
         try:
             completed = datetime.fromisoformat(stamp.replace("Z", "+00:00")) if stamp else None
             same_day = completed is not None and completed.tzinfo is not None and completed.astimezone(zone).date() == day
-        except ValueError:
-            same_day = False  # Legacy invalid stamps never authorize placement in Today.
+        except (ValueError, OverflowError):
+            same_day = False  # Unusable stamps never authorize placement in Today.
         (done_today if same_day else archived).append(entry)
     # Keep each subtree together in the checklist. Within a group newly checked
     # entries come first, so checking a row near a page boundary remains visible.

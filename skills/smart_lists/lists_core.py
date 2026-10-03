@@ -658,6 +658,8 @@ def _check_document(doc: Any) -> Dict[str, Any]:
     unknown = sorted(str(key) for key in set(doc) - _DOC_KEYS_BY_VERSION[version])
     if unknown:
         raise _Malformed(f"it has unknown top-level fields {unknown[:5]}")
+    if version == SCHEMA_VERSION and "store_id" not in doc:
+        raise _Malformed("store_id is missing")
     _check_unicode(doc)
     if version < SCHEMA_VERSION:
         # 0.1.0 (schema 1) had no lineage, trash or expired ids; the 0.2.0

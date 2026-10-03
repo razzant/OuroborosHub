@@ -366,6 +366,37 @@ class RegistrationTests(SkillCase):
         self.assertEqual(tomorrow["archive"][0]["id"], entry)
         self.assertEqual(self.store_bytes(), before, "midnight must be a read-only projection")
 
+    def test_extreme_aware_completion_stamp_is_archived_without_crashing_today(self):
+        self.ok("group", action="create", name="Home")
+        entry = self.add("Home", "old note")[0]
+        self.ok("complete", entry_ids=[entry], done=True)
+        path = self.state_dir / "store.json"
+        document = json.loads(path.read_text())
+        document["entries"][entry]["completed_at"] = "9999-12-31T23:00:00-12:00"
+        path.write_text(json.dumps(document))
+        self.mark_fixture_as_legacy_store()
+        before = self.store_bytes()
+        today = self.api.call_route("today", query={"timezone": "Pacific/Kiritimati"})
+        self.assertTrue(today["ok"], today)
+        self.assertEqual(today["rows"], [])
+        self.assertEqual([row["id"] for row in today["archive"]], [entry])
+        self.assertEqual(self.store_bytes(), before)
+
+    def test_schema_three_missing_store_id_is_a_typed_unreadable_store(self):
+        self.ok("group", action="create", name="Home")
+        path = self.state_dir / "store.json"
+        document = json.loads(path.read_text())
+        del document["store_id"]
+        path.write_text(json.dumps(document))
+        self.mark_fixture_as_legacy_store()
+        before = self.store_bytes()
+        self.refused("read", "store_unreadable")
+        self.assertEqual(self.ok("store", action="status")["state"], "unreadable")
+        today = self.api.call_route("today", query={"timezone": "UTC"})
+        self.assertFalse(today["ok"], today)
+        self.assertEqual(today["state"], "unreadable")
+        self.assertEqual(self.store_bytes(), before)
+
     @unittest.skipIf(yaml is None, "PyYAML not installed")
     def test_manifest_ui_tab_mirrors_registered_render(self):
         front = yaml.safe_load(manifest_text().split("---", 2)[1])

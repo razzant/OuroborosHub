@@ -250,7 +250,22 @@ async function refresh() {
       return;
     }
     throw new Error('Список менялся во время обновления; попробуй ещё раз.');
-  } catch (error) { if (!disposed && revision === viewRevision) showError(error); }
+  } catch (error) {
+    if (!disposed && revision === viewRevision && selectedGroup && error.definiteRefusal) {
+      try {
+        const missingGroup = selectedGroup;
+        const all = await request(`today?timezone=${encodeURIComponent(timezone)}&group=&offset=0`);
+        if (!disposed && revision === viewRevision && selectedGroup === missingGroup &&
+            !all.groups.some(group => group.id === missingGroup)) {
+          selectedGroup = '';
+          current = null;
+          await refresh();
+          return;
+        }
+      } catch (_) { /* Preserve the original refusal below. */ }
+    }
+    if (!disposed && revision === viewRevision) showError(error);
+  }
   finally { activeRefreshes--; }
 }
 refresh();
