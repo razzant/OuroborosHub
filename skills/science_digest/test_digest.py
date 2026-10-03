@@ -388,6 +388,18 @@ class DigestConsumerTests(ConsumerCase):
         self.assertTrue(post["media_only"])
         self.assertFalse(post["text"])
 
+    def test_changed_text_class_is_unknown_not_attemptable_media(self):
+        self.call("channels", action="add", name="sample_news")
+        page = b'<div class="tgme_widget_message" data-post="sample_news/22"><div class="message_body">News text after markup drift</div></div>'
+        with patch.object(plugin._OPENER, "open", return_value=FakeResponse(content=page)):
+            result = self.call("fetch_posts")
+        self.assertFalse(result["ok"])
+        source = result["channels"][0]
+        self.assertEqual(source["coverage"], "unavailable")
+        self.assertIn("unrecognized post content", source["error"])
+        self.assertEqual(source["posts"], [])
+        self.assertFalse(self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/22"])["ok"])
+
     def test_output_budget_names_dropped_posts(self):
         self.call("channels", action="add", name="sample_news")
         sample = [{"id": f"sample_news/{n}", "date": "", "text": "x" * 1200, "url": f"https://t.me/sample_news/{n}", "links": []}

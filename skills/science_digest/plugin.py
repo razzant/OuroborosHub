@@ -314,6 +314,12 @@ class _Posts(HTMLParser):
             # A reply header quotes ANOTHER post; never read it as this post's text.
             if tag == "a" and not self.reply_depth and "tgme_widget_message_reply" in classes:
                 self.reply_depth = self.depth + 1
+            if not self.reply_depth and any(cls in classes for cls in (
+                    "tgme_widget_message_text", "tgme_widget_message_video",
+                    "tgme_widget_message_video_player", "tgme_widget_message_photo_wrap",
+                    "tgme_widget_message_document_wrap", "tgme_widget_message_audio",
+                    "tgme_widget_message_voice")):
+                self.post["content_recognized"] = True
             if tag == "div" and "tgme_widget_message_text" in classes and not self.reply_depth:
                 self.text_depth = self.depth + 1
             if tag == "time" and self.post.get("date") == "":
@@ -387,6 +393,10 @@ def _fetch_channel(channel: str) -> tuple[list[dict[str, Any]], str]:
         return [], "preview HTML could not be parsed"
     if not parser.posts:
         return [], "no readable posts: preview may be empty, changed, or access-limited"
+    if any(not post.get("content_recognized") for post in parser.posts):
+        return [], "unrecognized post content: preview structure may have changed"
+    for post in parser.posts:
+        post.pop("content_recognized", None)
     # Keep every identity found in the bounded response. A later limit applies
     # to the agent-facing page, never to visibility/loss accounting. Oldest
     # first by ID, whatever the page order; a repeated ID keeps its first copy.

@@ -1972,13 +1972,13 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "c2b1ebebb5860d974fc310e6ed7fa085baaab96858af0a141a6d59ddffc10463",
-          "size": 54995
+          "sha256": "7f4c4d0254d191b9bec0d0ce28c61aca7f8b397d521c02224ded604b24d0c31b",
+          "size": 55657
         },
         {
           "path": "test_digest.py",
-          "sha256": "b482fb1976af0181519af82b7610a4b4c658027ff84db98df9dd351c550c0ca8",
-          "size": 67857
+          "sha256": "eb2344acf0b9cf5d7cc8b370a611e2bd11429a3b3e7c5c8e93c23103dbcc52d2",
+          "size": 68636
         }
       ],
       "description": "Personalized research digest from owner-chosen public Telegram channels and a short curated list of official feeds (OpenAI News, Google DeepMind blog, SGLang releases); the agent filters by the owner's own free-text interests and writes the digest in its chat."
