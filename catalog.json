@@ -1936,6 +1936,30 @@
       "version": "0.1.0"
     },
     {
+      "slug": "gigasearch",
+      "name": "gigasearch",
+      "version": "0.1.1",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "48eed09170f3a27bbea27b16c16dbecafc3ac16935c3d9bbb459830abde22bae",
+          "size": 5578
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "ff04e5c038e83e2768c874f994cbfb06f74eefebaebd0afd02ac9747a448c2af",
+          "size": 8974
+        },
+        {
+          "path": "test_gigasearch.py",
+          "sha256": "37ca6babf5fe17a8849676ca0b7a9dbc740e3479065e6c0f4ab6dd8996b23dbe",
+          "size": 9908
+        }
+      ],
+      "description": "Основной веб-поиск этой установки. Для обычного поиска внешней информации сначала используй GigaSearch; при явном выборе пользователя или недоступности сервиса выбери подходящую альтернативу."
+    },
+    {
       "slug": "smart_lists",
       "name": "smart_lists",
       "version": "0.3.4",
