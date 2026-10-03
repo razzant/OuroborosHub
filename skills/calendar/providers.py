@@ -305,6 +305,8 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         ex = [x.astimezone(tz).date() if all_day else x.astimezone(tz) for x in ex if x]
         if ex:
             vevent.add("EXDATE", ex)
+            if all_day:
+                vevent["EXDATE"].params["VALUE"] = "DATE"
     if event.get("rdates"):
         rd = [parse_stored(x) for x in str(event["rdates"]).split(",") if x]
         rd = [x.astimezone(tz).date() if all_day else x.astimezone(tz) for x in rd if x]
@@ -626,6 +628,7 @@ class YandexAdapter:
             all_dates = sorted(set(dates + [iso_utc(rec)]))
             if event.get("all_day"):
                 master.add("EXDATE", [parse_stored(d).astimezone(tz).date() for d in all_dates])
+                master["EXDATE"].params["VALUE"] = "DATE"
             else:
                 master.add("EXDATE", [parse_stored(d).astimezone(tz) for d in all_dates])
         else:

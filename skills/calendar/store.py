@@ -432,7 +432,8 @@ class Store:
     def window(self, start: datetime, end: datetime, calendar_ids: Optional[Sequence[str]] = None,
                include_hidden: bool = True, include_masters: bool = True) -> List[Dict[str, Any]]:
         """Rows overlapping [start, end) plus (optionally) recurrence masters that may expand into it."""
-        clauses = ["e.deleted_at IS NULL", "c.deleted_at IS NULL"]
+        clauses = ["e.deleted_at IS NULL", "c.deleted_at IS NULL",
+                   "(e.master_id='' OR EXISTS (SELECT 1 FROM events m WHERE m.id=e.master_id AND m.deleted_at IS NULL))"]
         args: List[Any] = []
         if calendar_ids:
             clauses.append("e.calendar_id IN (%s)" % ",".join("?" for _ in calendar_ids))

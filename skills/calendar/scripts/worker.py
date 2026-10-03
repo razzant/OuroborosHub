@@ -327,6 +327,8 @@ def _confirmed_deletion(store: Store, providers: Providers, local: Dict[str, Any
     if local.get("link_group_id"):
         ops.delete_event(store, providers, local["id"], scope="all", owner="companion")
     else:
+        for exc in store.exceptions_for(local["id"]):
+            store.delete_event(exc["id"])
         store.delete_event(local["id"])
     return 1
 

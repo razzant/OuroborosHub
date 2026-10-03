@@ -42,8 +42,41 @@ def _series_id(occurrence_id: str) -> Tuple[str, str]:
     """``evt_x@2026-09-25T10:00:00+00:00`` → (``evt_x``, occurrence start)."""
     if "@" in occurrence_id:
         base, occ = occurrence_id.split("@", 1)
-        return base, occ
+        parsed = _parse_occurrence_key(occ)
+        return base, iso_utc(parsed) if parsed else occ
     return occurrence_id, ""
+
+
+def _parse_occurrence_key(value: str) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None and parsed.microsecond == 0 else None
+
+
+def resolve_occurrence(store, row: Dict[str, Any], occ_key: str) -> Tuple[Dict[str, Any], str]:
+    """Resolve an addressed recurrence slot, including saved exception IDs, before a write or direct read."""
+    if row.get("master_id"):
+        master = store.get_event(row["master_id"])
+        if master is None or master.get("deleted_at"):
+            raise ValueError("occurrence has no live series")
+        occ_key, row = str(row.get("recurrence_id") or ""), master
+    if not occ_key:
+        return row, ""
+    slot = _parse_occurrence_key(occ_key)
+    if slot is None or not row.get("rrule") or not row.get("id"):
+        raise ValueError("invalid occurrence id")
+    key = iso_utc(slot)
+    if key in excluded_slots(row):
+        raise ValueError("occurrence is cancelled")
+    try:
+        projected = _expand_master(row, slot, slot + timedelta(seconds=1), [], strict=True)
+    except Exception as exc:
+        raise ValueError("invalid recurrence slot") from exc
+    if not any(o.get("occurrence_start_utc") == key for o in projected):
+        raise ValueError("occurrence is outside the series")
+    return row, key
 
 
 def expand(rows: Sequence[Dict[str, Any]], start: datetime, end: datetime, exceptions_for: Callable[[str], List[Dict[str, Any]]],
@@ -316,16 +349,12 @@ def update_event(store, providers, event_id: str, changes: Dict[str, Any], scope
     row = store.get_event(base_id)
     if row is None or row.get("deleted_at"):
         return {"status": "not_found", "assignments": []}
-    if row.get("master_id") and not occ_key:
-        # a stored exception addressed by its own id = that occurrence of its master; the requested scope stays
-        master = store.get_event(row["master_id"])
-        if master is not None and not master.get("deleted_at"):
-            occ_key, row = str(row.get("recurrence_id") or ""), master
+    row, occ_key = resolve_occurrence(store, row, occ_key)
     if row.get("rrule") and not occ_key and scope == SCOPE_THIS:
         raise ValueError("a recurring master needs an occurrence id or scope=all")
     if scope == SCOPE_FOLLOWING and not occ_key:
         raise ValueError("scope=following needs an occurrence id")
-    changes = _shift_for_scope_all(row, occ_key, scope, changes)
+    changes = _shift_for_scope_all(store, row, occ_key, scope, changes)
     op_id = new_id("op")
     members = [row] + [m for m in _group_masters(store, row) if m["id"] != row["id"]]
     assignments: List[Dict[str, Any]] = []
@@ -415,10 +444,7 @@ def delete_event(store, providers, event_id: str, scope: str = SCOPE_THIS, owner
     row = store.get_event(base_id)
     if row is None or row.get("deleted_at"):
         return {"status": "not_found", "assignments": []}
-    if row.get("master_id") and not occ_key:
-        master = store.get_event(row["master_id"])
-        if master is not None and not master.get("deleted_at"):
-            occ_key, row = str(row.get("recurrence_id") or ""), master
+    row, occ_key = resolve_occurrence(store, row, occ_key)
     if row.get("rrule") and not occ_key and scope == SCOPE_THIS:
         raise ValueError("a recurring master needs an occurrence id or scope=all")
     if scope == SCOPE_FOLLOWING and not occ_key:
@@ -563,12 +589,14 @@ def _shift_series_rows(store, master: Dict[str, Any], delta: timedelta) -> List[
     return moved
 
 
-def _shift_for_scope_all(row: Dict[str, Any], occ_key: str, scope: str, changes: Dict[str, Any]) -> Dict[str, Any]:
+def _shift_for_scope_all(store, row: Dict[str, Any], occ_key: str, scope: str, changes: Dict[str, Any]) -> Dict[str, Any]:
     """«All of them at 19:00», said about one occurrence: move the series by the same delta, never re-anchor DTSTART
     to that later date (that would silently drop every earlier occurrence)."""
     if not (occ_key and scope == SCOPE_ALL and changes.get("start_utc")):
         return changes
-    occ_s, new_s = parse_stored(occ_key), parse_stored(changes.get("start_utc"))
+    exception = next((e for e in store.exceptions_for(row["id"]) if e.get("recurrence_id") == occ_key), None)
+    effective_start = exception["start_utc"] if exception else occ_key
+    occ_s, new_s = parse_stored(effective_start), parse_stored(changes.get("start_utc"))
     m_s, m_e = parse_stored(row.get("start_utc")), parse_stored(row.get("end_utc"))
     if occ_s is None or new_s is None or m_s is None:
         return changes

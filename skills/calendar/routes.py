@@ -137,6 +137,10 @@ def register_routes(api, make_ctx) -> None:
         current = ctx.store.get_event(base_id)
         if current is None or current.get("deleted_at"):
             return _err("событие не найдено", 404)
+        try:
+            ops.resolve_occurrence(ctx.store, current, occurrence)
+        except ValueError as exc:
+            return _err(str(exc))
         if current.get("rrule") and not occurrence and scope == "this":
             return _err("для одной даты нужен id вхождения (…@дата); для серии выбери all или following")
         if scope == "following" and not occurrence and not current.get("master_id"):
@@ -207,6 +211,10 @@ def register_routes(api, make_ctx) -> None:
         current = ctx.store.get_event(base_id)
         if current is None or current.get("deleted_at"):
             return _err("событие не найдено", 404)
+        try:
+            ops.resolve_occurrence(ctx.store, current, occurrence)
+        except ValueError as exc:
+            return _err(str(exc))
         if current.get("rrule") and not occurrence and scope == "this":
             return _err("для одной даты нужен id вхождения (…@дата); для серии выбери all или following")
         if scope == "following" and not occurrence and not current.get("master_id"):

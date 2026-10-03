@@ -1977,8 +1977,8 @@
         },
         {
           "path": "ops.py",
-          "sha256": "91e0b547c7b49da3064ad3604631af6bf9b52820d6f1a9589574dba30dd23a18",
-          "size": 64181
+          "sha256": "a1b2fe06e2d0b093501c95d109c91eded8978b0283ad5193512a1c31aead5715",
+          "size": 65407
         },
         {
           "path": "plugin.py",
@@ -1987,8 +1987,8 @@
         },
         {
           "path": "providers.py",
-          "sha256": "b734df37cc26dff337960b4ca382742f266aa414db3444a3bbe7ccc735dbc115",
-          "size": 34719
+          "sha256": "4f9d13bd7626673f2c17a9ff0de223bc2b0ef2ad648db28ed57ed6cf515d4c2c",
+          "size": 34859
         },
         {
           "path": "providers_google.py",
@@ -2002,18 +2002,18 @@
         },
         {
           "path": "routes.py",
-          "sha256": "11b5a16e76a7ac7eccdb030399d8ba28b13350eb42a4be7648ec411c0cd55cd5",
-          "size": 15689
+          "sha256": "ab9e1a71d3fc9a5b3bc611c4fe47f17cb737539ab20301ac6d335aac1a8ee7a6",
+          "size": 15985
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "5ae5db7212bcb95a0650d35d0b5e5f35df706752cb75c83823a7726a73ca1a66",
-          "size": 22536
+          "sha256": "d3cb5214fb878ab413905c2118af9b9dc5b5da77e2b17876567c45eb9cd970ca",
+          "size": 22632
         },
         {
           "path": "store.py",
-          "sha256": "5e8194b447ce14c72001331d24e4d7c9e20c010c25fa8111cb07e0958b3d9d1c",
-          "size": 44423
+          "sha256": "f2c869cddafde73cce712c00365c264affe01760ad924fe7e250d01009a28f51",
+          "size": 44545
         },
         {
           "path": "tests/test_calendar.py",
@@ -2029,6 +2029,11 @@
           "path": "tests/test_calendar_batch5.py",
           "sha256": "345c071b0188062bc9fe699c13c6004b40134476d7b45f97321364503c9a482f",
           "size": 10545
+        },
+        {
+          "path": "tests/test_calendar_c3_fixes.py",
+          "sha256": "a78831860f150ef0ec3ce425cd7a407d10b2325e76fd95efc9aa14cadb74bf58",
+          "size": 8289
         },
         {
           "path": "tests/test_calendar_lifecycle_invariants.py",
@@ -2082,8 +2087,8 @@
         },
         {
           "path": "tools.py",
-          "sha256": "92c7104a436ef26b213dc7030e8520c0f029d0b409d0de4f00ce053f962c5842",
-          "size": 49908
+          "sha256": "761b00643f19a479c7e8a4cd13076df55097b1d32585bc57376a4de2f4747597",
+          "size": 50658
         },
         {
           "path": "widget.js",

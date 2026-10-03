@@ -233,14 +233,21 @@ def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = No
         row = st.get_event(base)
         if row is None or row.get("deleted_at"):
             return json_dumps({"status": "not_found", "message": f"событие {id} не найдено"})
+        try:
+            master, occ = ops.resolve_occurrence(st, row, occ)
+        except ValueError:
+            return json_dumps({"status": "not_found", "message": f"событие {id} не найдено"})
         out = event_public(row, ctx.tz, compact=False)
         if occ:
             occ_dt = parse_stored(occ)
-            live = [o for o in ops.expand([row], occ_dt - timedelta(minutes=1), occ_dt + timedelta(days=2), st.exceptions_for, owner_tz=ctx.tz)
-                    if str(o.get("recurrence_id") or "") == occ or str(o.get("start_utc") or "") == occ] if occ_dt else []
+            exception = next((e for e in st.exceptions_for(master["id"]) if e.get("recurrence_id") == occ), None)
+            effective = parse_stored(exception["start_utc"]) if exception else occ_dt
+            live = [o for o in ops.expand([master], effective - timedelta(minutes=1), effective + timedelta(days=2),
+                                          st.exceptions_for, owner_tz=ctx.tz)
+                    if o.get("occurrence_start_utc") == occ] if effective else []
             if live:
-                out.update(event_public({**row, **live[0], "id": f"{row['id']}@{occ}"}, ctx.tz, compact=False))
-                out["series_id"] = row["id"]
+                out.update(event_public({**master, **live[0], "id": f"{master['id']}@{occ}"}, ctx.tz, compact=False))
+                out["series_id"] = master["id"]
             out["occurrence_start"] = iso_local(live[0]["start_utc"], ctx.tz) if live else iso_local(occ, ctx.tz)
         out["assignments"] = [{"calendar_id": m["calendar_id"], "calendar_name": m.get("calendar_name"), "event_id": m["id"],
                                "sync_state": m.get("sync_state")} for m in st.group_masters(row.get("link_group_id") or "")] if row.get("link_group_id") else []
@@ -347,6 +354,10 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
     row = ctx.store.get_event(base)
     if row is None or row.get("deleted_at"):
         return json_dumps({"status": "not_found", "message": f"событие {id} не найдено"})
+    try:
+        ops.resolve_occurrence(ctx.store, row, occ)
+    except ValueError as exc:
+        return json_dumps({"status": "error", "message": str(exc)})
     scope = str(scope or SCOPE_THIS).lower()
     if scope not in SCOPES:
         return json_dumps({"status": "error", "message": "scope: this | following | all"})
@@ -425,6 +436,10 @@ def cal_delete(ctx: Context, id: str = "", scope: str = SCOPE_THIS, send_updates
     row = ctx.store.get_event(base)
     if row is None or row.get("deleted_at"):
         return json_dumps({"status": "not_found", "message": f"событие {id} не найдено"})
+    try:
+        ops.resolve_occurrence(ctx.store, row, occ)
+    except ValueError as exc:
+        return json_dumps({"status": "error", "message": str(exc)})
     scope = str(scope or SCOPE_THIS).lower()
     if scope not in SCOPES:
         return json_dumps({"status": "error", "message": "scope: this | following | all"})
