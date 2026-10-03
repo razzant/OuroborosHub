@@ -379,14 +379,16 @@ class DigestConsumerTests(ConsumerCase):
         self.assertEqual(second["posts"][0]["id"], "sample_news/11")
         self.assertEqual(second["posts"][-1]["id"], "sample_news/20")
 
-    def test_media_only_post_is_visible_as_an_unreadable_lead(self):
+    def test_media_without_recognized_text_is_unavailable_not_attemptable(self):
         self.call("channels", action="add", name="sample_news")
-        page = b'<div class="tgme_widget_message" data-post="sample_news/22"><div class="tgme_widget_message_video"></div></div>'
-        with patch.object(plugin._OPENER, "open", return_value=FakeResponse(content=page)):
-            post = self.call("fetch_posts")["channels"][0]["posts"][0]
-        self.assertEqual(post["id"], "sample_news/22")
-        self.assertTrue(post["media_only"])
-        self.assertFalse(post["text"])
+        for caption in ("", '<div class="message_body">Unread changed caption</div>'):
+            page = ('<div class="tgme_widget_message" data-post="sample_news/22"><div class="tgme_widget_message_video"></div>' + caption + '</div>').encode()
+            with patch.object(plugin._OPENER, "open", return_value=FakeResponse(content=page)):
+                result = self.call("fetch_posts")
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["channels"][0]["coverage"], "unavailable")
+            self.assertEqual(result["channels"][0]["posts"], [])
+            self.assertFalse(self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/22"])["ok"])
 
     def test_changed_text_class_is_unknown_not_attemptable_media(self):
         self.call("channels", action="add", name="sample_news")
