@@ -163,7 +163,9 @@ def register_routes(api, make_ctx) -> None:
             e, _ = parse_input(body.get("end"), ctx.tz, None)
             if e is None or e <= s:
                 e = s + dur
-            changes.update({"start_utc": iso_utc(s), "end_utc": iso_utc(e)})
+            if body.get("start") or scope != "following":
+                changes["start_utc"] = iso_utc(s)
+            changes["end_utc"] = iso_utc(e)
         if "all_day" in body and body.get("all_day") != bool(current.get("all_day")):
             changes["all_day"] = bool(body.get("all_day"))
         for key in ("title", "description", "location", "availability", "rrule"):

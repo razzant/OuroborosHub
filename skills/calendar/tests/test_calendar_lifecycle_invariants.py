@@ -222,6 +222,49 @@ class LifecycleInvariants(unittest.TestCase):
         exception = next(e for e in ctx.store.exceptions_for(new_master["id"]) if e["recurrence_id"] == iso_utc(datetime(2026, 10, 3, 9, tzinfo=timezone.utc)))
         self.assertEqual(exception["start_utc"], "2026-10-03T11:00:00+00:00")
 
+    def test_tool_duration_only_following_keeps_moved_cut_and_original_slots(self):
+        ctx = make_context()
+        master = json.loads(tools.cal_create(ctx, title="Series", start="2026-10-01T09:00+00:00",
+                                            rrule="FREQ=DAILY;COUNT=4", confirm=True))["event"]
+        cut_id = master["id"] + "@2026-10-02T09:00:00+00:00"
+        tools.cal_update(ctx, id=cut_id, start="2026-10-02T11:00+00:00", scope="this", confirm=True)
+        cut_id_row = ctx.store.exceptions_for(master["id"])[0]["id"]
+        result = json.loads(tools.cal_update(ctx, id=cut_id, duration_min=45, scope="following", confirm=True))
+        self.assertEqual(result["status"], "updated")
+        cut = ctx.store.get_event(cut_id_row)
+        segment = ctx.store.get_event(cut["master_id"])
+        self.assertEqual((segment["start_utc"], segment["end_utc"], segment["rrule"]),
+                         ("2026-10-02T09:00:00+00:00", "2026-10-02T09:45:00+00:00", "FREQ=DAILY;COUNT=3"))
+        self.assertEqual((cut["recurrence_id"], cut["start_utc"], cut["end_utc"]),
+                         ("2026-10-02T09:00:00+00:00", "2026-10-02T11:00:00+00:00", "2026-10-02T11:45:00+00:00"))
+        occurrences = ctx.occurrences(datetime(2026, 10, 1, tzinfo=timezone.utc),
+                                      datetime(2026, 10, 5, tzinfo=timezone.utc))
+        self.assertEqual([(e["start_utc"], e["end_utc"]) for e in occurrences], [
+            ("2026-10-01T09:00:00+00:00", "2026-10-01T10:00:00+00:00"),
+            ("2026-10-02T11:00:00+00:00", "2026-10-02T11:45:00+00:00"),
+            ("2026-10-03T09:00:00+00:00", "2026-10-03T09:45:00+00:00"),
+            ("2026-10-04T09:00:00+00:00", "2026-10-04T09:45:00+00:00"),
+        ])
+
+    def test_http_end_only_following_keeps_moved_cut_and_original_slots(self):
+        ctx = make_context()
+        master = json.loads(tools.cal_create(ctx, title="Series", start="2026-10-01T09:00+00:00",
+                                            rrule="FREQ=DAILY;COUNT=4", confirm=True))["event"]
+        cut_id = master["id"] + "@2026-10-02T09:00:00+00:00"
+        tools.cal_update(ctx, id=cut_id, start="2026-10-02T11:00+00:00", scope="this", confirm=True)
+        cut_id_row = ctx.store.exceptions_for(master["id"])[0]["id"]
+        api = RouteAPI()
+        routes.register_routes(api, lambda: ctx)
+        answer = asyncio.run(api.routes["event/update"](Request({"id": cut_id, "end": "2026-10-02T11:45+00:00",
+                                                                 "scope": "following"})))
+        self.assertEqual(answer.status_code, 200)
+        cut = ctx.store.get_event(cut_id_row)
+        segment = ctx.store.get_event(cut["master_id"])
+        self.assertEqual((segment["start_utc"], segment["end_utc"], segment["rrule"]),
+                         ("2026-10-02T09:00:00+00:00", "2026-10-02T09:45:00+00:00", "FREQ=DAILY;COUNT=3"))
+        self.assertEqual((cut["start_utc"], cut["end_utc"]),
+                         ("2026-10-02T11:00:00+00:00", "2026-10-02T11:45:00+00:00"))
+
     def test_create_answer_arriving_after_delete_keeps_delete_queued(self):
         ctx = make_context()
         external = add_external_calendar(ctx.store)

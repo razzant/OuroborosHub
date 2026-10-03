@@ -696,10 +696,19 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     duration = (m_end - m_start) if (m_start and m_end) else timedelta(hours=1)
     cut_exception = next((exc for exc in later if str(exc.get("recurrence_id") or "") == occ_key), None)
     cut_start = parse_stored(cut_exception.get("start_utc")) if cut_exception else None
-    # DTSTART is the original recurrence slot unless the owner explicitly moves the
-    # entire following series. A moved cut exception is not a new series anchor.
-    new_start = parse_stored(changes.get("start_utc")) or occ_start
-    new_end = parse_stored(changes.get("end_utc")) or (new_start + duration)
+    # A moved cut has two times: its original recurrence slot and its effective
+    # start. Even when a caller submits the displayed start with an end edit,
+    # only a change from the effective start moves the following series.
+    cut_effective = cut_start or occ_start
+    requested_start = parse_stored(changes.get("start_utc")) or cut_effective
+    shift = requested_start - cut_effective
+    new_start = occ_start + shift
+    requested_end = parse_stored(changes.get("end_utc"))
+    new_duration = (requested_end - requested_start) if requested_end else duration
+    new_end = new_start + new_duration
+    new_cut_start = cut_effective + shift
+    cut_end = parse_stored(cut_exception.get("end_utc")) if cut_exception else None
+    new_cut_end = requested_end or ((cut_end + shift) if cut_end else (new_cut_start + duration))
     rule_parts = [p for p in original_rrule.split(";") if p and not p.upper().startswith(("UNTIL=", "COUNT="))]
     count_left = _count_remaining(master, original_rrule, occ_start)
     if count_left is not None:
@@ -710,7 +719,6 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     # EXDATE/RDATE at/after the cut belong to the new series (shifted with it); the old one keeps only the earlier ones
     row = {k: master.get(k) for k in ("calendar_id", "visibility", "availability", "is_primary", "title", "description", "location", "tz",
                                        "all_day", "organizer", "attendees_json", "reminders_json", "origin")}
-    shift = new_start - occ_start
     from model import get_tz
     split_tz = get_tz(master.get("tz") or "")
     split_all_day = bool(master.get("all_day"))
@@ -771,10 +779,9 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
                 effective = iso_utc(old_effective)
                 fire_at = iso_utc(old_fire)
             elif exception is not None:
-                # The cut exception keeps its explicit move on a content-only split.
-                cut_effective = new_start if changes.get("start_utc") else (cut_start or new_start)
-                effective = iso_utc(cut_effective)
-                fire_at = iso_utc(cut_effective - timedelta(minutes=int(previous["offset_min"])))
+                # The cut exception retains its own effective time unless it moves.
+                effective = iso_utc(new_cut_start)
+                fire_at = iso_utc(new_cut_start - timedelta(minutes=int(previous["offset_min"])))
             else:
                 effective = iso_utc(_shift_instant(old_effective, shift, split_all_day, split_tz))
                 fire_at = iso_utc(_shift_instant(old_fire, shift, split_all_day, split_tz))
@@ -796,10 +803,10 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
         upd = {"master_id": saved["id"], "recurrence_id": iso_utc(new_key), "uid": saved["uid"], "link_group_id": new_group,
                "external_id": "", "href": "", "etag": "", "sync_state": "synced" if not master.get("external_id") and not master.get("href") else "pending"}
         if str(exc.get("recurrence_id") or "") == occ_key:
-            # Preserve a previously moved cut on a content-only split; its
-            # explicitly edited content, however, must match the new segment.
+            # Its recurrence key follows the segment, while its individual
+            # effective time remains separate from the series anchor.
             if changes.get("start_utc") or changes.get("end_utc"):
-                upd.update({"start_utc": iso_utc(new_start), "end_utc": iso_utc(new_end)})
+                upd.update({"start_utc": iso_utc(new_cut_start), "end_utc": iso_utc(new_cut_end)})
             upd.update({k: v for k, v in changes.items() if k in
                         ("title", "description", "location", "visibility", "availability") and v is not None})
         store.update_event(exc["id"], upd)

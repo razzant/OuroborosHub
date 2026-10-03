@@ -378,7 +378,9 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
             new_e = new_s + timedelta(minutes=max(5, _int(duration_min, 60)))
         if new_e is None or new_e <= new_s:
             new_e = new_s + old_dur
-        changes.update({"start_utc": iso_utc(new_s), "end_utc": iso_utc(new_e)})
+        if start or scope != SCOPE_FOLLOWING:
+            changes["start_utc"] = iso_utc(new_s)
+        changes["end_utc"] = iso_utc(new_e)
         if all_day is not None or is_date:
             changes["all_day"] = _bool(all_day, is_date)
     if title not in (None, ""):

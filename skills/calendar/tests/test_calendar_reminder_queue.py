@@ -608,6 +608,53 @@ class RecurringOccurrenceIdentityTests(unittest.TestCase):
         second_send = rem.deliver_due(self.ctx.store, channel, UTC, now=effective - timedelta(minutes=10))
         self.assertEqual((second_send["sent"], len(channel.sent)), (0, 1))
 
+    def test_duration_only_following_carries_sent_cut_and_unknown_later_slot(self):
+        effective = self.first + timedelta(hours=2)
+        cut_id = self.move(self.first, effective, "Moved cut")["id"]
+        plan(self.ctx, self.now)
+        self.ctx.store.schedule_reminder(self.master["id"], iso_utc(self.second), 15,
+                                         iso_utc(self.second - timedelta(minutes=15)),
+                                         rem.notice_id_for(self.master["id"], iso_utc(self.second), 15, iso_utc(self.second)),
+                                         iso_utc(self.second))
+        prior = {r["recurrence_id"]: r for r in self.ctx.store.upcoming_reminders(self.now, 200)
+                 if r["event_id"] == self.master["id"] and r["recurrence_id"] in (iso_utc(self.first), iso_utc(self.second))}
+        self.assertEqual(len(prior), 2)
+        self.ctx.store.mark_reminder(prior[iso_utc(self.first)]["id"], "sent")
+        self.ctx.store.mark_reminder(prior[iso_utc(self.second)]["id"], "unknown")
+        result = json.loads(tools.cal_update(self.ctx, id=f'{self.master["id"]}@{iso_utc(self.first)}',
+                                             duration_min=45, scope="following", confirm=True))
+        self.assertEqual(result["status"], "updated")
+        segment = self.ctx.store.get_event(self.ctx.store.get_event(cut_id)["master_id"])
+        plan(self.ctx, self.now)
+        with self.ctx.store._conn() as conn:
+            terminal = [dict(r) for r in conn.execute(
+                "SELECT recurrence_id, occurrence_start_utc, state FROM reminders WHERE event_id=? AND recurrence_id IN (?, ?)",
+                (segment["id"], iso_utc(self.first), iso_utc(self.second)))]
+        self.assertEqual({(r["recurrence_id"], r["occurrence_start_utc"], r["state"]) for r in terminal}, {
+            (iso_utc(self.first), iso_utc(effective), "sent"),
+            (iso_utc(self.second), iso_utc(self.second), "unknown"),
+        })
+
+    def test_explicit_following_move_from_moved_cut_shifts_from_effective_time(self):
+        effective = self.first + timedelta(hours=2)
+        cut_id = self.move(self.first, effective, "Moved cut")["id"]
+        plan(self.ctx, self.now)
+        sent = next(r for r in self.ctx.store.upcoming_reminders(self.now, 200)
+                    if r["event_id"] == self.master["id"] and r["recurrence_id"] == iso_utc(self.first))
+        self.ctx.store.mark_reminder(sent["id"], "sent")
+        new_effective = effective + timedelta(hours=1)
+        result = json.loads(tools.cal_update(self.ctx, id=f'{self.master["id"]}@{iso_utc(self.first)}',
+                                             start=iso_utc(new_effective), scope="following", confirm=True))
+        self.assertEqual(result["status"], "updated")
+        cut = self.ctx.store.get_event(cut_id)
+        segment = self.ctx.store.get_event(cut["master_id"])
+        self.assertEqual((segment["start_utc"], cut["start_utc"]),
+                         (iso_utc(self.first + timedelta(hours=1)), iso_utc(new_effective)))
+        plan(self.ctx, new_effective - timedelta(minutes=20))
+        channel = Channel()
+        delivered = rem.deliver_due(self.ctx.store, channel, UTC, now=new_effective - timedelta(minutes=15))
+        self.assertEqual((delivered["sent"], len(channel.sent)), (1, 1))
+
     def test_rename_following_moved_cut_preserves_later_slots_and_renames_cut(self):
         effective = self.first + timedelta(hours=2)
         self.move(self.first, effective, "Old cut title")
