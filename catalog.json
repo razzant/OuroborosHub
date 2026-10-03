@@ -1958,6 +1958,30 @@
         }
       ],
       "description": "Основной веб-поиск этой установки. Для обычного поиска внешней информации сначала используй GigaSearch; при явном выборе пользователя или недоступности сервиса выбери подходящую альтернативу."
+    },
+    {
+      "slug": "science_digest",
+      "name": "science_digest",
+      "version": "0.3.0",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "4a2716e4ad0f22bc498737c77fbe800bbd07778ba04e06eea94f18880060fd1f",
+          "size": 13679
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "07346a1799dc2270dbe182a18b0cd3b19c03d03fa07f1140434fbf2c9d53fc08",
+          "size": 53827
+        },
+        {
+          "path": "test_digest.py",
+          "sha256": "2fe6b79a5d5ec8a5981c5c2f10b6f971cbee6173626d37e6b0568104453029f8",
+          "size": 65140
+        }
+      ],
+      "description": "Personalized research digest from owner-chosen public Telegram channels and a short curated list of official feeds (OpenAI News, Google DeepMind blog, SGLang releases); the agent filters by the owner's own free-text interests and writes the digest in its chat."
     }
   ]
 }
