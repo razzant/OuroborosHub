@@ -1,7 +1,7 @@
 ---
 name: playwright_extension
 description: Use an owner-configured Playwright MCP Chrome connection with task-owned transport and current-page checks; installation alone does not connect a browser.
-version: 0.1.0
+version: 0.1.1
 type: instruction
 when_to_use: The owner asks to inspect or act in an already-authorized Chrome tab and has configured a task-owned Playwright MCP bridge.
 model_experience:
@@ -49,6 +49,24 @@ sending the action, and observes again afterwards.
   page was not verified; its result is withheld. The effect is not rolled back.
 - A timeout means the effect is unknown. Closure may be confirmed or unconfirmed;
   never infer either from a timeout alone and never blindly repeat a side effect.
+- `BROWSER_REQUEST_GUARD_UNAVAILABLE` means the upstream init-page hook did not
+  acknowledge the host guard; the requested action was not dispatched. A CLI
+  `--init-page` override can cause this; do not silently remove the host check.
+- `BROWSER_REQUEST_GUARD_BYPASS` means the tool could remove or bypass the guard.
+  Where browser policy binds, server-side code and continuing route overrides
+  are refused; page JavaScript and ordinary page actions remain available.
+- `BROWSER_REQUEST_BLOCKED` beside a result means the action ran, but the host
+  aborted listed page requests. Do not mistake it for a successful remote effect.
+
+The guard consults the host's existing request policy for requests Playwright
+routes, including frames, fetches and form posts. Verified only with the pinned
+package in an isolated non-extension headless browser, not the Chrome extension.
+Native redirect hops and WebSockets are not intercepted; a page-opened tab in
+extension mode can issue its first requests before interception attaches.
+Service-worker coverage depends on the pinned core and assumes the server env
+has not disabled it with `PLAYWRIGHT_DISABLE_SERVICE_WORKER_NETWORK=1`.
+This is not complete network containment or verified browser-policy parity in
+the extension. Keep these limits visible when proposing a real Chrome test.
 
 Tab listing is supported; switching, opening or closing tabs is refused by this
 adapter. Navigation is judged by its destination. A page can still navigate

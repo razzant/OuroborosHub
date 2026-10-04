@@ -1962,13 +1962,13 @@
     {
       "slug": "playwright_extension",
       "name": "playwright_extension",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "type": "instruction",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "b9182bac77f14759b5b52246252aab7e87d4820d0bfbbcb53e23fe994841f102",
-          "size": 4389
+          "sha256": "d6ab76381e308f21cb6a54c3b6661ac34f599d4aca3df02bb17a1b620e55af8b",
+          "size": 5718
         }
       ],
       "description": "Use an owner-configured Playwright MCP Chrome connection with task-owned transport and current-page checks; installation alone does not connect a browser."
