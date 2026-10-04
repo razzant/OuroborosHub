@@ -859,13 +859,29 @@ def _fail_after_predecessor(store, intent: Dict[str, Any], pred: Dict[str, Any])
     return {"status": INTENT_FAILED, "message": message}
 
 
+def _superseded_exception_write(store, intent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Deletion withdraws queued exception edits, not create/delete recovery."""
+    if intent["kind"] not in ("update", "rsvp"):
+        return None
+    event = store.get_event(intent["event_id"])
+    if event is None or not event.get("master_id"):
+        return None
+    master = store.get_event(event["master_id"])
+    if (event.get("deleted_at") or event.get("sync_state") == "pending_delete" or store.delete_requested(event["id"])
+            or master is None or master.get("deleted_at") or master.get("sync_state") == "pending_delete"
+            or store.delete_requested(master["id"])):
+        return event
+    return None
+
+
 def execute_intent(store, providers, intent: Dict[str, Any], owner: str) -> Dict[str, Any]:
     """Lease and run one intent now; returns the per-assignment status dict."""
-    pred = _blocked_by(store, intent)
-    if pred is not None:
-        if pred.get("state") == INTENT_PENDING:
-            return {"status": INTENT_PENDING, "message": "ждёт предыдущую операцию по этому событию"}
-        return _fail_after_predecessor(store, intent, pred)
+    if _superseded_exception_write(store, intent) is None:
+        pred = _blocked_by(store, intent)
+        if pred is not None:
+            if pred.get("state") == INTENT_PENDING:
+                return {"status": INTENT_PENDING, "message": "ждёт предыдущую операцию по этому событию"}
+            return _fail_after_predecessor(store, intent, pred)
     leased = store.lease_intent(intent["id"], owner, LEASE_SECONDS)
     if leased is None:
         return {"status": INTENT_PENDING, "message": "операция уже выполняется"}
@@ -873,6 +889,9 @@ def execute_intent(store, providers, intent: Dict[str, Any], owner: str) -> Dict
 
 
 def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any]:
+    if _superseded_exception_write(store, intent) is not None:
+        store.settle_intent(intent["id"], INTENT_DONE, {"note": "superseded by deletion"})
+        return {"status": INTENT_DONE, "message": "исключение или серия удалены"}
     event = store.get_event(intent["event_id"])
     cal = store.get_calendar(intent["calendar_id"])
     adapter = providers.adapter_for(intent["account_id"]) if providers else None

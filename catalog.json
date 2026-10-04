@@ -1962,13 +1962,13 @@
     {
       "slug": "calendar",
       "name": "calendar",
-      "version": "1.0.9",
+      "version": "1.0.10",
       "type": "extension",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "9b92df9181d459febf8e0e2190c4eccba517b56c7b9f138aa3a11d68981f047a",
-          "size": 17728
+          "sha256": "669f19a93c439737b04a8872136b747d96f645fa08129c3fa4cae1e10a4b1f61",
+          "size": 18367
         },
         {
           "path": "model.py",
@@ -1977,8 +1977,8 @@
         },
         {
           "path": "ops.py",
-          "sha256": "e4a5adcbe42cbb4c9449b2d5c4a102962437a0ffc3aae17b5b06ff414d8c4512",
-          "size": 65796
+          "sha256": "619597542e3ebee9d22c3b8508b529bc76b7bb804e58b4816bfc824f56cfadd4",
+          "size": 66864
         },
         {
           "path": "plugin.py",
@@ -2047,8 +2047,8 @@
         },
         {
           "path": "tests/test_calendar_provider_divergence.py",
-          "sha256": "a11d1c9da691bd9f11329e1e9853ca5010cc40a99fc49e3d9142cb5855fb9bef",
-          "size": 23794
+          "sha256": "dcacc72f14b1c01f8c92f9baba30adc44275853f70d0302cf52c35d190ac5721",
+          "size": 29435
         },
         {
           "path": "tests/test_calendar_reminder_queue.py",

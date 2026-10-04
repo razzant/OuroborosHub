@@ -466,6 +466,96 @@ class MovedCaldavOccurrenceCancellationTests(unittest.TestCase):
         run_open_intents(ctx)
         self.assertEqual(server.resources[href][0].count("RECURRENCE-ID"), 2)
 
+    def test_following_delete_retires_stale_exception_and_keeps_pending_move(self):
+        ctx, calendar_id, server, master_id, slot, moved_to, href = self._moved_series()
+        cut = slot + timedelta(days=1)
+        plan_now = slot - timedelta(minutes=15)
+        rem.set_mode(ctx.store, calendar_id, True)
+        rem.plan(ctx.store, lambda s, e: ctx.occurrences(s, e, strict=True), now=plan_now)
+        with ctx.store._conn() as c:
+            queued = c.execute(
+                "SELECT 1 FROM reminders WHERE event_id=? AND recurrence_id=? AND state='scheduled'",
+                (master_id, iso_utc(cut))).fetchone()
+        self.assertIsNotNone(queued)
+        server.down = True
+        kept_to = moved_to + timedelta(hours=1)
+        kept = json.loads(tools.cal_update(
+            ctx, id=f"{master_id}@{iso_utc(slot)}", start=kept_to.isoformat(),
+            title="Kept edit", scope="this", confirm=True))
+        stale = json.loads(tools.cal_update(
+            ctx, id=f"{master_id}@{iso_utc(cut)}",
+            start=(cut + timedelta(hours=1)).isoformat(), scope="this", confirm=True))
+        self.assertEqual(kept["status"], "pending")
+        self.assertEqual(stale["status"], "pending")
+        exceptions = ctx.store.exceptions_for(master_id)
+        kept_id = next(e["id"] for e in exceptions if e["recurrence_id"] == iso_utc(slot))
+        stale_id = next(e["id"] for e in exceptions if e["recurrence_id"] == iso_utc(cut))
+        server.down = False
+        deleted = json.loads(tools.cal_delete(
+            ctx, id=f"{master_id}@{iso_utc(cut)}", scope="following", confirm=True))
+        self.assertEqual(deleted["status"], "deleted")
+        self.assertFalse(ctx.store.get_event(kept_id).get("deleted_at"))
+        self.assertTrue(ctx.store.get_event(stale_id).get("deleted_at"))
+        before_retry = len(server.calls)
+        run_open_intents(ctx, rounds=4)
+        self.assertEqual([call[0] for call in server.calls[before_retry:]], ["GET", "PUT"])
+        sync(ctx, calendar_id)
+        self.assertEqual(self._visible_on(ctx, cut), [])
+        self.assertEqual([e["start"][:16] for e in self._visible_on(ctx, slot)], [kept_to.isoformat()[:16]])
+        self.assertIn("Kept edit", [e["title"] for e in self._visible_on(ctx, moved_to)])
+        self.assertIn("SUMMARY:Kept edit", server.resources[href][0])
+        self.assertEqual(server.resources[href][0].count("RECURRENCE-ID"), 1)
+        self.assertEqual(ctx.store.intents_for_event(stale_id)[-1]["state"], ops.INTENT_DONE)
+        self.assertEqual(ctx.store.intents_for_event(kept_id)[-1]["state"], ops.INTENT_DONE)
+        rem.plan(ctx.store, lambda s, e: ctx.occurrences(s, e, strict=True), now=plan_now)
+        with ctx.store._conn() as c:
+            queued = c.execute(
+                "SELECT recurrence_id FROM reminders WHERE event_id=? AND state IN ('scheduled', 'no_channel')",
+                (master_id,)).fetchall()
+        recurrence_ids = [r["recurrence_id"] for r in queued]
+        self.assertIn(iso_utc(slot), recurrence_ids)
+        self.assertFalse([rid for rid in recurrence_ids if rid >= iso_utc(cut)])
+
+    def test_all_delete_retires_parked_exception_before_provider_lookup(self):
+        ctx, calendar_id, server, master_id, slot, moved_to, href = self._moved_series()
+        server.down = True
+        changed = json.loads(tools.cal_update(ctx, id=f"{master_id}@{iso_utc(slot)}",
+                                             start=(moved_to + timedelta(hours=1)).isoformat(),
+                                             scope="this", confirm=True))
+        self.assertEqual(changed["status"], "pending")
+        exception = ctx.store.exceptions_for(master_id)[0]
+        parked = ctx.store.intents_for_event(exception["id"])[-1]
+        server.down = False
+        deleted = json.loads(tools.cal_delete(ctx, id=master_id, scope="all", confirm=True))
+        self.assertEqual(deleted["status"], "deleted")
+        self.assertIsNone(ctx.store.get_event(master_id))
+        before = len(server.calls)
+        result = ops.execute_intent(ctx.store, None, parked, "companion")
+        self.assertEqual(result["status"], ops.INTENT_DONE)
+        settled = ctx.store.intents_for_event(exception["id"])[-1]
+        self.assertEqual(json.loads(settled["result_json"])["note"], "superseded by deletion")
+        self.assertEqual(len(server.calls), before)
+        self.assertFalse(server.resources)
+        self.assertEqual(self._visible_on(ctx, slot), [])
+
+    def test_leased_exception_rsvp_rechecks_master_deletion_without_provider_call(self):
+        ctx, calendar_id, server, master_id, slot, moved_to, href = self._moved_series()
+        exception = ctx.store.exceptions_for(master_id)[0]
+        calendar = ctx.store.get_calendar(calendar_id)
+        intent = ctx.store.add_intent("rsvp", calendar["account_id"], calendar_id,
+                                      exception["id"], {"response": "declined"})
+        leased = ctx.store.lease_intent(intent["id"], "companion")
+        self.assertIsNotNone(leased)
+        # The companion already leased the operation when deletion withdrew it.
+        ctx.store.delete_event(master_id)
+        before = len(server.calls)
+        with patch.object(ctx.providers, "adapter_for", side_effect=AssertionError("no provider lookup")):
+            result = ops.run_leased_intent(ctx.store, ctx.providers, leased)
+        self.assertEqual(result["status"], ops.INTENT_DONE)
+        self.assertEqual(len(server.calls), before)
+        self.assertEqual(json.loads(ctx.store.intents_for_event(exception["id"])[-1]["result_json"])["note"],
+                         "superseded by deletion")
+
 
 if __name__ == "__main__":
     unittest.main()
