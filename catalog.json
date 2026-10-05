@@ -1,8 +1,8 @@
 {
-  "description": "Official Ouroboros skills catalog.",
-  "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
+  "name": "OuroborosHub",
+  "description": "Official Ouroboros skills catalog.",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "skills": [
     {
       "description": "Геоданные 2ГИС: поиск мест и организаций, геокодирование адресов и обратное геокодирование координат, построение маршрутов (авто, пешком, вело, самокат, мото, грузовик, такси), расчёт изохрон (зоны достижимости), создание статической карты PNG с маркерами, линиями и полигонами и кликабельные ссылки на интерактивную карту 2ГИС. Требует API-ключ 2ГИС.",
@@ -1963,6 +1963,145 @@
         }
       ],
       "description": "Основной веб-поиск этой установки. Для обычного поиска внешней информации сначала используй GigaSearch; при явном выборе пользователя или недоступности сервиса выбери подходящую альтернативу."
+    },
+    {
+      "slug": "calendar",
+      "name": "calendar",
+      "version": "1.0.10",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "669f19a93c439737b04a8872136b747d96f645fa08129c3fa4cae1e10a4b1f61",
+          "size": 18367
+        },
+        {
+          "path": "model.py",
+          "sha256": "d5c58072ebf49e0f4aaf97417a8e940d626c7e8b2178ba1b76625d2b607d1e64",
+          "size": 13410
+        },
+        {
+          "path": "ops.py",
+          "sha256": "619597542e3ebee9d22c3b8508b529bc76b7bb804e58b4816bfc824f56cfadd4",
+          "size": 66864
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "66edb52caef38a31634c882053c72b7b9172a3a22e27cdd3b83a724378e17519",
+          "size": 10951
+        },
+        {
+          "path": "providers.py",
+          "sha256": "4f9d13bd7626673f2c17a9ff0de223bc2b0ef2ad648db28ed57ed6cf515d4c2c",
+          "size": 34859
+        },
+        {
+          "path": "providers_google.py",
+          "sha256": "49d76ad629f2047455bab10b82cc57518a7bc1c2fb4647b5496702fe8b1bd219",
+          "size": 36152
+        },
+        {
+          "path": "reminders.py",
+          "sha256": "68c41f419e85d6c7818b5fcf35aa6189647b14d27d78f70a443c765b94e1739e",
+          "size": 24791
+        },
+        {
+          "path": "routes.py",
+          "sha256": "25c466f64a6868e4bcacadc5983105d064db6d8c4c915e0aa96fc35947cf433b",
+          "size": 16060
+        },
+        {
+          "path": "scripts/worker.py",
+          "sha256": "d3cb5214fb878ab413905c2118af9b9dc5b5da77e2b17876567c45eb9cd970ca",
+          "size": 22632
+        },
+        {
+          "path": "store.py",
+          "sha256": "f2c869cddafde73cce712c00365c264affe01760ad924fe7e250d01009a28f51",
+          "size": 44545
+        },
+        {
+          "path": "tests/test_calendar.py",
+          "sha256": "9e65f3810ca17fd5c2854ad3856ca810e9adeb6b1b6131e54d39a34eccb0d1cd",
+          "size": 20061
+        },
+        {
+          "path": "tests/test_calendar_batch3.py",
+          "sha256": "08e7bf3972703f58067432c52c626bb16d7f9c2a3166f268faa02d651d2ede3f",
+          "size": 14492
+        },
+        {
+          "path": "tests/test_calendar_batch5.py",
+          "sha256": "345c071b0188062bc9fe699c13c6004b40134476d7b45f97321364503c9a482f",
+          "size": 10545
+        },
+        {
+          "path": "tests/test_calendar_c3_fixes.py",
+          "sha256": "a78831860f150ef0ec3ce425cd7a407d10b2325e76fd95efc9aa14cadb74bf58",
+          "size": 8289
+        },
+        {
+          "path": "tests/test_calendar_lifecycle_invariants.py",
+          "sha256": "7a919e847a0431c591178bf5b4b797c82fa89fd8283f6b363997012aec5a9371",
+          "size": 20199
+        },
+        {
+          "path": "tests/test_calendar_notify.py",
+          "sha256": "268a2c86451b7bcd02b98a069adab07ef6d5e3d61169ab964c9cfa62a2841314",
+          "size": 12164
+        },
+        {
+          "path": "tests/test_calendar_provider_divergence.py",
+          "sha256": "dcacc72f14b1c01f8c92f9baba30adc44275853f70d0302cf52c35d190ac5721",
+          "size": 29435
+        },
+        {
+          "path": "tests/test_calendar_reminder_queue.py",
+          "sha256": "2fee11ad8393be393af040b3f1442e9f2aaaeee19091bde548beea2eabe8075e",
+          "size": 47470
+        },
+        {
+          "path": "tests/test_calendar_review.py",
+          "sha256": "c75ee21b055a4f5f0ea2a0a549ecbb4d018b94efbbfe285b791ec54365a5fef0",
+          "size": 27333
+        },
+        {
+          "path": "tests/test_calendar_round2.py",
+          "sha256": "d6f5c94a4ee59ab6e2baf11203f12f8cd903eef72290e5a14cda186e00fb9660",
+          "size": 33878
+        },
+        {
+          "path": "tests/test_calendar_round3.py",
+          "sha256": "97af2ee8b42e85f089738064bc35d0e3984e3178c6ffa6bc636afd96198753b9",
+          "size": 31115
+        },
+        {
+          "path": "tests/test_calendar_round4.py",
+          "sha256": "c325e1383a5eb9544f5df6bf0fc422c7ae80944d68e6092de86df4580a53ccb0",
+          "size": 30420
+        },
+        {
+          "path": "tests/test_calendar_round5.py",
+          "sha256": "903f8af4a7cad19342bbf8860a283f8d4c13bf6a0d1d877e11555b3318995d12",
+          "size": 13485
+        },
+        {
+          "path": "tests/test_widget_browser.py",
+          "sha256": "cb8912f9588ff2d2c8d2db65b97ee51f2e92c7a4af4ec2afc5097cad3b21b0f7",
+          "size": 8461
+        },
+        {
+          "path": "tools.py",
+          "sha256": "f0e7dd81e7b96a5ad05cd1ec92d7f52a7099817f0bfe15734b1d69ab37eb2de9",
+          "size": 50717
+        },
+        {
+          "path": "widget.js",
+          "sha256": "d6a15ed0db036eef19d302e70f0fcd8f5488c0f4d4f1c1082e8879e432b3e892",
+          "size": 41845
+        }
+      ],
+      "description": "Единый календарь владельца — свои локальные календари, Яндекс (CalDAV) и Google (личный OAuth-клиент); события, повторения, свободные окна, служебные события-распорядок, напоминания без модели, виджет День/Неделя."
     }
   ]
 }
