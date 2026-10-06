@@ -1978,6 +1978,55 @@
         }
       ],
       "description": "Основной веб-поиск этой установки. Для обычного поиска внешней информации сначала используй GigaSearch; при явном выборе пользователя или недоступности сервиса выбери подходящую альтернативу."
+    },
+    {
+      "slug": "check-in",
+      "name": "check-in",
+      "description": "Opt-in check-in agreement. If you miss a check-in you promised, Ouroboros first tells you; only if you armed it may it then write once to one consenting contact.",
+      "version": "0.1.4",
+      "type": "extension",
+      "files": [
+        {
+          "path": "ATTRIBUTION.md",
+          "size": 1780,
+          "sha256": "e314044567ba17e389a133fbdea5e1908bbb62bec55f604937d0991d38df9191"
+        },
+        {
+          "path": "SKILL.md",
+          "size": 15587,
+          "sha256": "680203b39db48c35dd590c345847432367b2c2246eb73b82661d4d4efd4c5c9a"
+        },
+        {
+          "path": "host.py",
+          "size": 3111,
+          "sha256": "f1b579b78e7c20baf4ff4b2f41c2715e36498d94b7653cd2ce94db8598dd487e"
+        },
+        {
+          "path": "lease.py",
+          "size": 8763,
+          "sha256": "adf7457c6fdfee423e2bce412a7803119836f06e5bbd962211096e4806ad03a9"
+        },
+        {
+          "path": "mailer.py",
+          "size": 15199,
+          "sha256": "0fa5c0c7e39d8d7944539646141db4b6b2d026788caeebf4c37db746e1cafdbd"
+        },
+        {
+          "path": "plugin.py",
+          "size": 48776,
+          "sha256": "31267b458f6cd65b0f9b5df0a6ba6e3216c3c7f3e7af565c85770afe829b3318"
+        },
+        {
+          "path": "store.py",
+          "size": 104700,
+          "sha256": "c7614718acba03a6285a285efe9a30e4528afcffa3cd76b864ca04bf7b379908"
+        },
+        {
+          "path": "widget.js",
+          "size": 20719,
+          "sha256": "1109872bccdcd5064442a3880cbaf8d77fbb052a09b6e2f940d1dc8f2ce02ce7"
+        }
+      ]
     }
   ]
 }
