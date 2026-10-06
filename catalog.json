@@ -1978,6 +1978,40 @@
         }
       ],
       "description": "Основной веб-поиск этой установки. Для обычного поиска внешней информации сначала используй GigaSearch; при явном выборе пользователя или недоступности сервиса выбери подходящую альтернативу."
+    },
+    {
+      "slug": "smart_lists",
+      "name": "smart_lists",
+      "version": "0.3.4",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "67415cfb7eed3ac4db825f5ef643e8cef8ec5a6551189aa763b311012f1205ca",
+          "size": 23071
+        },
+        {
+          "path": "lists_core.py",
+          "sha256": "da1303e9470cad69fd7ba51bea68ff76fe108d7444a2fdd9e5ba8c00ed07b5ec",
+          "size": 95744
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "23ad81ee99068b6e75b1ecbe64cc1deaa544afbd7261225dbc13f412f69e0b3a",
+          "size": 35882
+        },
+        {
+          "path": "tests/test_smart_lists.py",
+          "sha256": "759f3c5aaaa91fb412f7ea561ee885734f89564ac0d5b81086718a0e51231068",
+          "size": 119830
+        },
+        {
+          "path": "widget.js",
+          "sha256": "821b309f938a3b5abb48ae2f80e6cf762cee20638d6d0cea3742dfd1df048040",
+          "size": 14121
+        }
+      ],
+      "description": "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders."
     }
   ]
 }
