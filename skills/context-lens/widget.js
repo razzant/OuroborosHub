@@ -3,63 +3,80 @@
  * Runs as a classic script inside the host's opaque-origin srcdoc frame, so:
  * no import/export at top level, no storage, no scriptable network. Every
  * request goes through OuroborosWidget.fetch and stays under this skill's own
- * route prefix. Colours and type sizes mirror docs/DESIGN.md by value because
- * the frame cannot reach web/style.css.
+ * route prefix. Colours and type sizes mirror docs/DESIGN.md / web/ui.css by
+ * value, as two named palettes (dark and light), because the frame cannot reach
+ * the host stylesheet; the host's resolved theme arrives through the optional
+ * OuroborosWidget.onTheme bridge.
  *
- * Layout intent: the horizon, then the instrument. The card is one screen —
- * a fixed 760px frame that scrolls itself — with the horizon row first, four
- * figures, the chart, then list and detail. Everything that explains a number
- * is one disclosure away rather than unrolled at once.
+ * Layout intent: the chart first. One short line says where the data came from
+ * and how fresh the read is, one row holds the horizon and the filters, one
+ * line says what the selection covers, then the chart. The request list and
+ * every explanation sit behind two closed disclosures underneath.
  */
 (function () {
     'use strict';
 
     var ROOT = '/api/extensions/context-lens/';
     var POLL_MS = 60000;
+    var REQUEST_TIMEOUT_MS = 20000;
+    var POINT_LIMIT = 4000;      // the server's own ceiling: draw the whole selection
     var ROWS_COLLAPSED = 6;      // compact by default
     var ROWS_STEP = 12;          // one "Show more" press
+    var HIT_RADIUS = 16;         // nearest-point hit layer, wider than the dot
 
-    /* The horizon is cut on the server, over the retained records, BEFORE the
-     * display limit — so the points, the counters, the facets and the coverage
-     * line all describe one selection. 'available' means everything this
-     * bounded reader still holds, which is not the same as all history. */
+    /* The horizon is cut on the server. 'available' covers the enumerated
+     * category streams, newest first, up to the server's row bound. Legacy-only
+     * named categories may be absent; About states this limit. */
     var HORIZONS = [
         { key: '1h', label: '1h', full: 'the last hour' },
         { key: '6h', label: '6h', full: 'the last 6 hours' },
         { key: '24h', label: '24h', full: 'the last 24 hours' },
         { key: '7d', label: '7d', full: 'the last 7 days' },
-        { key: 'available', label: 'Available', full: 'everything still in the read window' }
+        { key: 'available', label: 'All', full: 'the available data' }
     ];
 
+    var STATE_LABELS = {
+        settled: 'finished, usage recorded',
+        dispatched: 'sent, awaiting usage',
+        unresolved: 'sent, outcome unresolved',
+        reserved: 'admitted, not sent yet',
+        released: 'released without being sent'
+    };
+
     var state = {
-        data: null,
-        error: null,
+        data: null,              // the last good answer for the current horizon
+        receivedAt: 0,
+        error: null,             // { message } of the most recent failed read
         loading: false,
-        selected: null,
-        trajectory: null,
-        trajectoryTask: '',
-        horizon: 'available',
+        horizon: '24h',
         filters: { model: 'all', kind: 'all', origin: 'all', mode: 'all' },
+        selectedId: null,
+        rows: ROWS_COLLAPSED,
+        open: { requests: false, about: false, technical: false },
+        // Derived by derive(): always from state.data and the filters together.
         points: [],
         plotted: [],
         stats: null,
         view: null,
-        rows: ROWS_COLLAPSED
+        focus: null
     };
 
     var controllers = new Set();
+    var requestTimers = new Set();
     var timers = [];
     var observers = [];
-    var chartDraws = [];
     var listeners = [];
     var scheduled = [];
+    var chartDraws = [];
     var disposed = false;
     var inFlight = null;
-    var inFlightHorizon = null;  // the horizon the in-flight overview asks about
-    var dataSeq = 0;             // generation of the current overview request
-    var dataController = null;   // so a superseded overview can be cut short
-    var trajectorySeq = 0;       // guards against a superseded trajectory answer
-    var trajectoryController = null;
+    var inFlightHorizon = null;  // the horizon the in-flight request asks about
+    var dataSeq = 0;             // generation of the current request
+    var dataController = null;
+    var pendingData = null;     // a good answer adopted only with its full render
+    var pendingRender = false;
+    var nodes = {};              // live nodes a status change updates in place
+    var chartColors = {};
 
     // ---------------------------------------------------------------- utils
 
@@ -92,62 +109,77 @@
         return node;
     }
 
+    function isNumber(value) {
+        return typeof value === 'number' && isFinite(value);
+    }
+
     function num(value) {
-        if (value === null || value === undefined || !isFinite(value)) return '—';
+        if (!isNumber(value)) return '—';
         return Math.round(value).toLocaleString('en-US');
     }
 
     function compact(value) {
-        if (value === null || value === undefined || !isFinite(value)) return '—';
+        if (!isNumber(value)) return '—';
         var n = Math.round(value);
         if (n >= 1000000) return (n / 1000000).toFixed(n >= 10000000 ? 0 : 1) + 'M';
         if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k';
         return String(n);
     }
 
-    function clockTime(ms) {
-        if (!ms) return '—';
-        var d = new Date(ms);
-        var pad = function (v) { return String(v).padStart(2, '0'); };
-        return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    function plural(count, one, many) {
+        return num(count) + ' ' + (count === 1 ? one : (many || one + 's'));
     }
 
-    function axisTime(ms, span) {
-        if (span < 86400000) return clockTime(ms);
-        return new Date(ms).toLocaleString('en-US', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
+    /* One clock everywhere: this device's local time. */
+    function pad2(value) { return String(value).padStart(2, '0'); }
+
+    function clock(ms) {
+        if (!isNumber(ms)) return '—';
+        var d = new Date(ms);
+        return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
+    }
+
+    function shortClock(ms) {
+        var d = new Date(ms);
+        return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    }
+
+    function dayTime(ms) {
+        if (!isNumber(ms)) return '—';
+        return new Date(ms).toLocaleString('en-US', {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false
+        });
     }
 
     function fullTime(ms) {
-        if (!ms) return 'No usable timestamp';
+        if (!isNumber(ms)) return 'no usable time';
         return new Date(ms).toLocaleString('en-US', { hour12: false });
     }
 
-    /* UTC on purpose: the anchor a horizon is measured back from is a fact about
-     * the record, and a local rendering of it would differ from the timestamps
-     * the ledger holds. */
-    function utcClock(ms) {
-        if (!ms) return '—';
-        return new Date(ms).toISOString().slice(11, 16) + ' UTC';
+    /* A moment near the reference reads as a clock time, an older one with its date. */
+    function when(ms, reference) {
+        if (!isNumber(ms)) return '—';
+        return Math.abs((reference || ms) - ms) < 20 * 3600000 ? clock(ms) : dayTime(ms);
     }
 
-    function utcDay(ms) {
-        if (!ms) return '—';
-        return new Date(ms).toISOString().slice(0, 10) + ' ' + new Date(ms).toISOString().slice(11, 16) + ' UTC';
-    }
-
-    function durationLabel(ms) {
-        if (!isFinite(ms) || ms < 0) return '—';
+    function duration(ms) {
+        if (!isNumber(ms) || ms < 0) return '—';
         var minutes = Math.round(ms / 60000);
         if (minutes < 1) return 'under a minute';
         if (minutes < 60) return minutes + ' min';
         var hours = Math.floor(minutes / 60);
-        if (hours < 24) {
+        if (hours < 48) {
             var rest = minutes % 60;
-            return hours + ' h' + (rest ? ' ' + rest + ' min' : '');
+            return hours + ' h' + (rest && hours < 10 ? ' ' + rest + ' min' : '');
         }
-        var days = Math.floor(hours / 24);
-        var restHours = hours % 24;
-        return days + ' d' + (restHours ? ' ' + restHours + ' h' : '');
+        return Math.floor(hours / 24) + ' d';
+    }
+
+    function axisTime(ms, span) {
+        if (span <= 26 * 3600000) return shortClock(ms);
+        var d = new Date(ms);
+        var day = d.toLocaleString('en-US', { month: 'short', day: 'numeric' });
+        return span <= 8 * 86400000 ? day + ' ' + shortClock(ms) : day;
     }
 
     function horizonSpec(key) {
@@ -157,20 +189,12 @@
         return HORIZONS[HORIZONS.length - 1];
     }
 
-    function bytesLabel(value) {
-        if (!value) return '0 B';
-        if (value >= 1048576) return (value / 1048576).toFixed(1) + ' MiB';
-        if (value >= 1024) return (value / 1024).toFixed(1) + ' KiB';
-        return value + ' B';
-    }
-
     /* Presentation only. The exact recorded token is kept as the title and is
-     * shown verbatim in the request's technical detail, so nothing the ledger
-     * actually holds is replaced by a prettier word. */
+     * shown verbatim in the request's technical detail. */
     function humanize(token) {
         var text = String(token === null || token === undefined ? '' : token);
         if (!text) return 'unknown';
-        var spaced = text.replace(/[_-]+/g, ' ').trim();
+        var spaced = text.replace(/[_.-]+/g, ' ').trim();
         if (!spaced) return text;
         return spaced.charAt(0).toUpperCase() + spaced.slice(1);
     }
@@ -178,6 +202,7 @@
     function modeLabel(mode) {
         if (mode === 'max') return 'Max';
         if (mode === 'low') return 'Low';
+        if (mode === 'nano') return 'Nano';
         return 'Unknown';
     }
 
@@ -191,95 +216,103 @@
         return sorted[low] * (1 - weight) + sorted[high] * weight;
     }
 
-    // ------------------------------------------------------------- requests
-
-    /* The caller may hand in its own controller so it can cut the request short
-     * when the answer it would produce has already been superseded. */
-    function request(path, controller) {
-        controller = controller || new AbortController();
-        controllers.add(controller);
-        var api = window.OuroborosWidget && window.OuroborosWidget.fetch
-            ? window.OuroborosWidget.fetch
-            : window.fetch;
-        return api(ROOT + path, { signal: controller.signal, timeoutMs: 20000 })
-            .then(function (response) {
-                if (!response.ok) throw new Error('Request failed with status ' + response.status);
-                return response.json();
-            })
-            .finally(function () { controllers.delete(controller); });
+    function measured(point) {
+        return point.state === 'settled' && isNumber(point.prompt_tokens) && isNumber(point.t);
     }
+
+    // ------------------------------------------------------------- requests
 
     function abort(controller) {
         if (!controller) return;
         try { controller.abort(); } catch (error) { /* already settled */ }
     }
 
-    function forgetTrajectory() {
-        // Bumping the sequence retires any answer still in flight, so a reply
-        // for the previous selection can never land on the new one; aborting the
-        // controller also stops the request itself, so pressing through a list
-        // cannot stack one live fetch per press.
-        trajectorySeq += 1;
-        abort(trajectoryController);
-        trajectoryController = null;
-        state.trajectory = null;
-        state.trajectoryTask = '';
+    /* Every request carries its own controller and a timeout; dispose aborts
+     * whatever is still open. */
+    function request(path, controller) {
+        var api = window.OuroborosWidget && typeof window.OuroborosWidget.fetch === 'function'
+            ? window.OuroborosWidget.fetch
+            : window.fetch;
+        controllers.add(controller);
+        var expired = false;
+        var timer = setTimeout(function () { expired = true; abort(controller); }, REQUEST_TIMEOUT_MS);
+        requestTimers.add(timer);
+        var started;
+        try {
+            started = Promise.resolve(api(ROOT + path, { signal: controller.signal, timeoutMs: REQUEST_TIMEOUT_MS }));
+        } catch (error) {
+            started = Promise.reject(error);
+        }
+        return started
+            .then(function (response) {
+                if (!response.ok) {
+                    var failure = new Error('status');
+                    failure.status = response.status;
+                    throw failure;
+                }
+                return response.json();
+            })
+            .catch(function (error) {
+                if (expired) {
+                    var late = new Error('timeout');
+                    late.timeout = true;
+                    throw late;
+                }
+                throw error;
+            })
+            .finally(function () {
+                clearTimeout(timer);
+                requestTimers.delete(timer);
+                controllers.delete(controller);
+            });
     }
 
-    /* Every overview request carries a generation. Only the current generation
-     * may write to state, so an older answer can never undo a newer click — and
-     * a horizon change supersedes the request in flight rather than waiting for
-     * it, because that answer describes a span the user has already left. */
-    function load(cold) {
+    function failureMessage(error) {
+        if (error && (error.timeout || /timed out/i.test(String(error.message || '')))) {
+            return 'The Context Lens route did not answer within 20 seconds.';
+        }
+        if (error && error.status) {
+            return 'The Context Lens route answered with status ' + error.status + '.';
+        }
+        return 'Could not reach the Context Lens route in this install.';
+    }
+
+    /* Every read carries a generation. Only the current generation may write to
+     * state, so an older answer can never undo a newer click — and a horizon
+     * change supersedes the read in flight rather than waiting for it. */
+    function load() {
         if (disposed) return Promise.resolve();
         var requested = state.horizon;
-        if (inFlight) {
-            if (requested === inFlightHorizon && !cold) return inFlight;
-            abort(dataController);
-        }
+        if (inFlight && requested === inFlightHorizon) return inFlight;
+        abort(dataController);
         var token = dataSeq + 1;
         dataSeq = token;
         inFlightHorizon = requested;
         var controller = new AbortController();
         dataController = controller;
         state.loading = true;
-        render();
-        inFlight = request('data?limit=1500&horizon=' + encodeURIComponent(requested)
-            + (cold ? '&refresh=1' : ''), controller)
+        paintStatus();
+        inFlight = request('data?horizon=' + encodeURIComponent(requested) + '&limit=' + POINT_LIMIT,
+            controller)
             .then(function (payload) {
-                if (disposed || token !== dataSeq) return;
-                // The user moved the horizon while this was in flight: this
-                // answer describes the span they left, so it is not adopted.
-                if (requested !== state.horizon) return;
+                if (disposed || token !== dataSeq || requested !== state.horizon) return;
                 if (payload && payload.ok) {
-                    // The answer states the horizon it actually applied. It is
-                    // adopted only when it agrees with what is selected now;
-                    // anything else would silently overwrite a live click.
+                    // The answer states the horizon it actually applied; it is
+                    // adopted only when that is still the one selected.
                     var applied = payload.horizon && payload.horizon.selected;
                     if (applied && applied !== state.horizon) return;
-                    state.data = payload;
+                    pendingData = { data: payload, receivedAt: Date.now() };
                     state.error = null;
-                    if (state.selected) {
-                        var fresh = payload.points.filter(function (p) {
-                            return p.id === state.selected.id;
-                        })[0];
-                        if (fresh) {
-                            state.selected = fresh;       // same request, current facts
-                        } else {
-                            state.selected = null;
-                            forgetTrajectory();
-                        }
-                    }
                 } else {
-                    state.data = null;
-                    state.error = (payload && payload.message) || 'Telemetry is unavailable.';
+                    // A typed refusal from the route. Any earlier answer stays on
+                    // screen, explicitly marked as no longer current.
+                    state.error = { message: (payload && payload.message) || 'Telemetry is unavailable.' };
                 }
             })
             .catch(function (error) {
                 if (disposed || token !== dataSeq) return;
-                if (error && error.name === 'AbortError') return;
-                state.data = null;
-                state.error = 'Could not reach the Context Lens route in this install.';
+                if (error && error.name === 'AbortError' && !error.timeout) return;
+                state.error = { message: failureMessage(error) };
             })
             .finally(function () {
                 // A superseded request must not clear the flags that now belong
@@ -289,149 +322,127 @@
                 inFlightHorizon = null;
                 dataController = null;
                 state.loading = false;
-                if (!disposed) render();
+                if (!disposed) renderSoon();
             });
         return inFlight;
     }
 
-    function loadTrajectory(task) {
-        if (!task) return;
-        // Defence in depth: the sequence retires a late answer, the controller
-        // stops the request that would have produced it.
-        trajectorySeq += 1;
-        abort(trajectoryController);
-        var token = trajectorySeq;
-        state.trajectoryTask = task;
-        state.trajectory = 'loading';
-        var controller = new AbortController();
-        trajectoryController = controller;
-        render();
-        request('trajectory?task=' + encodeURIComponent(task)
-            + '&horizon=' + encodeURIComponent(state.horizon), controller)
-            .then(function (payload) {
-                // A later selection — or a second press for the same task —
-                // moved the sequence on; this answer is stale by construction.
-                if (disposed || token !== trajectorySeq) return;
-                state.trajectory = payload && payload.ok ? payload : null;
-                render();
-            })
-            .catch(function (error) {
-                if (disposed || token !== trajectorySeq) return;
-                if (error && error.name === 'AbortError') return;
-                state.trajectory = null;
-                render();
-            })
-            .finally(function () {
-                if (trajectoryController === controller) trajectoryController = null;
-            });
-    }
-
-    /* Changing the horizon changes the population, so the selection, the
-     * trajectory and the paged list all start again from the new answer rather
-     * than surviving into a window they may not belong to. */
+    /* Changing the horizon changes the population, so the selection and the
+     * paged list start again from the new answer, and the old answer is not
+     * shown as if it described the new span. */
     function selectHorizon(key) {
         if (key === state.horizon) return;
         state.horizon = key;
-        state.selected = null;
+        pendingData = null;
+        state.data = null;
+        state.error = null;
+        state.selectedId = null;
         state.rows = ROWS_COLLAPSED;
-        forgetTrajectory();
-        load(false);
+        render();
+        load();
     }
 
-    function select(point) {
-        state.selected = point;
-        forgetTrajectory();
-        if (point && point.task) {
-            loadTrajectory(point.task);   // renders on its own
-        } else {
-            render();
+    function selectPoint(id) {
+        state.selectedId = id || null;
+        render();
+    }
+
+    function clearFilters() {
+        state.filters = { model: 'all', kind: 'all', origin: 'all', mode: 'all' };
+        state.rows = ROWS_COLLAPSED;
+        render();
+    }
+
+    // ------------------------------------------------------------ deriving
+
+    function selectedPoint() {
+        if (!state.selectedId || !state.data) return null;
+        var points = state.data.points || [];
+        for (var i = 0; i < points.length; i += 1) {
+            if (points[i].id === state.selectedId) return points[i];
         }
+        return null;
     }
 
-    // ------------------------------------------------------------ filtering
-
-    function applyFilters() {
-        var points = (state.data && state.data.points) || [];
+    function derive() {
+        var all = (state.data && state.data.points) || [];
         var f = state.filters;
-        state.points = points.filter(function (point) {
+        state.points = all.filter(function (point) {
             if (f.model !== 'all' && point.model !== f.model) return false;
             if (f.kind !== 'all' && point.category !== f.kind) return false;
             if (f.origin !== 'all' && point.source !== f.origin) return false;
             if (f.mode !== 'all' && (point.mode || 'unknown') !== f.mode) return false;
             return true;
         });
-        state.plotted = state.points.filter(function (point) {
-            return point.state === 'settled' && typeof point.prompt_tokens === 'number' && point.t;
-        });
+        state.plotted = state.points.filter(measured);
 
-        // Coverage for the view the owner is actually looking at, computed from
-        // the same points the chart draws — not from the whole-window counters,
-        // which describe a different population as soon as a filter is set.
-        var view = {
-            total: state.points.length, measured: 0, settledWithoutSize: 0,
-            withoutTime: 0, inFlight: 0, unresolved: 0, released: 0
-        };
+        // Coverage of the view the owner is looking at, from the same points
+        // the chart draws — not from the unfiltered counters.
+        var view = { total: state.points.length, measured: state.plotted.length,
+            withoutSize: 0, withoutTime: 0, notFinished: 0 };
         state.points.forEach(function (point) {
-            var sized = typeof point.prompt_tokens === 'number';
             if (point.state === 'settled') {
-                if (!sized) view.settledWithoutSize += 1;
-                else if (!point.t) view.withoutTime += 1;
-                else view.measured += 1;
-            } else if (point.state === 'reserved' || point.state === 'dispatched') {
-                view.inFlight += 1;
-            } else if (point.state === 'unresolved') {
-                view.unresolved += 1;
-            } else if (point.state === 'released') {
-                view.released += 1;
+                if (!isNumber(point.prompt_tokens)) view.withoutSize += 1;
+                else if (!isNumber(point.t)) view.withoutTime += 1;
+            } else {
+                view.notFinished += 1;
             }
         });
         state.view = view;
 
         var values = state.plotted.map(function (p) { return p.prompt_tokens; })
             .sort(function (a, b) { return a - b; });
-        state.stats = values.length ? {
+        state.stats = {
             count: values.length,
             median: quantile(values, 0.5),
             p95: quantile(values, 0.95),
-            peak: values[values.length - 1],
-            low: values[0]
-        } : { count: 0, median: null, p95: null, peak: null, low: null };
-        if (state.rows > Math.max(ROWS_COLLAPSED, state.points.length)) {
-            state.rows = Math.max(ROWS_COLLAPSED, state.points.length);
+            peak: values.length ? values[values.length - 1] : null
+        };
+
+        // Task focus: the selected request's task, from this same answer and
+        // these same filters. Nothing is fetched, and nothing is joined.
+        var chosen = selectedPoint();
+        state.focus = null;
+        if (chosen && chosen.task) {
+            var drawn = new Set(state.plotted);
+            var inView = state.plotted.filter(function (p) { return p.task === chosen.task; });
+            var hidden = all.filter(function (p) {
+                return p.task === chosen.task && measured(p) && !drawn.has(p);
+            });
+            state.focus = { task: chosen.task, inView: inView.length, hidden: hidden.length };
         }
+
+        var total = state.points.length;
+        if (state.rows > Math.max(ROWS_COLLAPSED, total)) state.rows = Math.max(ROWS_COLLAPSED, total);
     }
 
     // -------------------------------------------------------------- drawing
 
-    var chartColors = {};
-    var DARK_CHART_COLORS = {
-        ink: 'rgba(226,232,240,0.55)', accent: '#c93545', selected: '#f07a86',
-        grid: 'rgba(255,255,255,0.07)', muted: 'rgba(255,255,255,0.68)',
-        reference: 'rgba(240,122,134,0.45)', 'reference-label': 'rgba(240,122,134,0.85)',
-        related: 'rgba(255,255,255,0.42)', 'line-1': 'rgba(226,232,240,0.78)',
-        'line-2': 'rgba(226,232,240,0.56)', 'line-3': 'rgba(226,232,240,0.4)'
+    var CHART_TOKENS = ['chart-text', 'grid', 'point', 'point-dim', 'focus', 'selected', 'reference', 'ring'];
+    var DARK_CHART = {
+        'chart-text': '#a8b0bd', grid: 'rgba(255,255,255,0.10)', point: 'rgba(226,232,240,0.55)',
+        'point-dim': 'rgba(226,232,240,0.16)', focus: '#f07a86', selected: '#f07a86',
+        reference: 'rgba(168,176,189,0.75)', ring: '#0d0b0f'
     };
-    function readChartColors() {
-        if (typeof getComputedStyle !== 'function') {
-            chartColors = Object.assign({}, DARK_CHART_COLORS);
-            return;
-        }
-        var css = getComputedStyle(document.documentElement);
-        ['ink', 'accent', 'selected', 'grid', 'muted', 'reference', 'reference-label',
-            'related', 'line-1', 'line-2', 'line-3'].forEach(function (name) {
-            chartColors[name] = css.getPropertyValue('--lens-' + name).trim() || DARK_CHART_COLORS[name];
-        });
-    }
     var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
     // Clear space demanded between two measured pieces of chart text. Labels are
-    // dropped, never shrunk: every chart string stays at the 12px the rest of
-    // the card uses.
+    // dropped, never shrunk: every chart string stays at 12px.
     var LABEL_GAP = 6;
+
+    /* Canvas inks come from the same named tokens the stylesheet declares, read
+     * at draw time, so a theme change is a repaint and nothing more. */
+    function readChartColors() {
+        var css = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null;
+        CHART_TOKENS.forEach(function (name) {
+            var value = css && css.getPropertyValue ? String(css.getPropertyValue('--lens-' + name) || '').trim() : '';
+            chartColors[name] = value || DARK_CHART[name];
+        });
+    }
 
     function sizeCanvas(canvas) {
         var ratio = window.devicePixelRatio || 1;
         var width = Math.max(200, Math.round(canvas.clientWidth));
-        var height = Math.max(110, Math.round(canvas.clientHeight));
+        var height = Math.max(120, Math.round(canvas.clientHeight));
         canvas.width = Math.round(width * ratio);
         canvas.height = Math.round(height * ratio);
         var ctx = canvas.getContext('2d');
@@ -440,113 +451,86 @@
         return { ctx: ctx, width: width, height: height };
     }
 
-    function niceCeil(value) {
-        if (!value || value <= 0) return 1000;
-        var magnitude = Math.pow(10, Math.floor(Math.log10(value)));
-        var steps = [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10];
-        for (var i = 0; i < steps.length; i += 1) {
-            if (value <= steps[i] * magnitude) return steps[i] * magnitude;
-        }
-        return 10 * magnitude;
+    /* A readable tick step (1, 2 or 5 x 10^n) for about four intervals, so the
+     * axis says 50k / 100k / 150k rather than 63k / 125k / 188k. */
+    function niceStep(peak) {
+        var raw = (peak > 0 ? peak : 1000) / 4;
+        var magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
+        var fraction = raw / magnitude;
+        var nice = fraction < 1.5 ? 1 : fraction < 3 ? 2 : fraction < 7 ? 5 : 10;
+        return Math.max(1, nice * magnitude);
     }
 
-    function emptyChart(box, text) {
-        box.ctx.fillStyle = chartColors['muted'];
-        box.ctx.font = '14px ' + FONT;
-        box.ctx.textAlign = 'center';
-        box.ctx.textBaseline = 'middle';
-        box.ctx.fillText(text, box.width / 2, box.height / 2);
+    /* The x domain says what was read: the whole horizon when the selection is
+     * complete, from the oldest row read when a bound bit, up to the read
+     * instant for the live store — so an idle stretch shows as empty space
+     * rather than being stretched away. */
+    function timeDomain() {
+        var data = state.data;
+        var h = data.horizon || {};
+        var times = state.plotted.map(function (p) { return p.t; });
+        var lo = Math.min.apply(null, times);
+        var hi = Math.max.apply(null, times);
+        if (h.selection_complete && isNumber(h.cutoff_ms)) lo = Math.min(lo, h.cutoff_ms);
+        else if (isNumber(h.covered_from_ms)) lo = Math.min(lo, h.covered_from_ms);
+        if (data.source && data.source.current && isNumber(h.now_ms)) hi = Math.max(hi, h.now_ms);
+        if (hi - lo < 60000) { lo -= 30000; hi += 30000; }
+        return { lo: lo, hi: hi };
     }
 
     function drawScatter(canvas) {
         var box = sizeCanvas(canvas);
         var ctx = box.ctx;
-        // `top` leaves a whole 12px line above the plot for the axis captions.
-        // The topmost tick label sits at yOf(yMax) === pad.top, so a caption
-        // drawn inside the plot's own top edge lands on top of it — on a narrow
-        // card the two read as one garbled string. CAPTION_Y is that line's
-        // centre; the gap to the first tick label is (pad.top - CAPTION_Y).
-        var pad = { left: 50, right: 12, top: 30, bottom: 28 };
-        var CAPTION_Y = 12;
+        // `top` leaves a whole 12px line above the plot for the two captions,
+        // so neither can land on the topmost tick label.
+        var pad = { left: 46, right: 12, top: 26, bottom: 24 };
+        var CAPTION_Y = 10;
         var plotW = box.width - pad.left - pad.right;
         var plotH = box.height - pad.top - pad.bottom;
         canvas._hits = [];
-
         var points = state.plotted;
-        if (!points.length || plotW <= 0 || plotH <= 0) {
-            emptyChart(box, 'No measured requests in this view');
-            return;
-        }
+        if (!points.length || plotW <= 0 || plotH <= 0) return;
 
-        var times = points.map(function (p) { return p.t; });
-        var tMin = Math.min.apply(null, times);
-        var tMax = Math.max.apply(null, times);
-        if (tMax === tMin) { tMax = tMin + 1000; tMin -= 1000; }
-        var yMax = niceCeil(state.stats.peak * 1.08);
-
-        var xOf = function (t) { return pad.left + ((t - tMin) / (tMax - tMin)) * plotW; };
+        var domain = timeDomain();
+        var step = niceStep(state.stats.peak);
+        var yMax = Math.max(step, Math.ceil((state.stats.peak * 1.02) / step) * step);
+        var xOf = function (t) { return pad.left + ((t - domain.lo) / (domain.hi - domain.lo)) * plotW; };
         var yOf = function (v) { return pad.top + plotH - (v / yMax) * plotH; };
 
         ctx.font = '12px ' + FONT;
         ctx.textBaseline = 'middle';
-
-        for (var i = 0; i <= 4; i += 1) {
-            var value = (yMax / 4) * i;
-            var y = yOf(value);
-            ctx.strokeStyle = chartColors['grid'];
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(pad.left, Math.round(y) + 0.5);
-            ctx.lineTo(pad.left + plotW, Math.round(y) + 0.5);
-            ctx.stroke();
-            ctx.fillStyle = chartColors['muted'];
-            ctx.textAlign = 'right';
-            ctx.fillText(compact(value), pad.left - 8, y);
-        }
-
-        // Typical and 95%-below drawn as reference rules: spread stated, not implied.
-        [['Typical', state.stats.median], ['95% below', state.stats.p95]].forEach(function (entry) {
-            if (entry[1] === null || entry[1] > yMax) return;
-            var y = Math.round(yOf(entry[1])) + 0.5;
-            ctx.save();
-            ctx.strokeStyle = chartColors['reference'];
-            ctx.setLineDash(entry[0] === 'Typical' ? [5, 4] : [2, 4]);
-            ctx.lineWidth = 1;
+        ctx.lineWidth = 1;
+        for (var i = 0; i * step <= yMax; i += 1) {
+            var value = step * i;
+            var y = Math.round(yOf(value)) + 0.5;
+            ctx.strokeStyle = chartColors.grid;
             ctx.beginPath();
             ctx.moveTo(pad.left, y);
             ctx.lineTo(pad.left + plotW, y);
             ctx.stroke();
-            ctx.restore();
-            ctx.fillStyle = chartColors['reference-label'];
-            ctx.textAlign = 'left';
-            ctx.fillText(entry[0], pad.left + 6, y - 8);
-        });
+            ctx.fillStyle = chartColors['chart-text'];
+            ctx.textAlign = 'right';
+            ctx.fillText(compact(value), pad.left - 8, y);
+        }
 
-        // Both captions live on their own line above the plot, on opposite
-        // sides: nothing else is drawn there, so neither can land on a tick
-        // label. The right caption is measured against the left one so the two
-        // cannot meet on a very narrow canvas either.
-        ctx.fillStyle = chartColors['muted'];
+        ctx.fillStyle = chartColors['chart-text'];
         ctx.textAlign = 'left';
         ctx.fillText('input tokens', 2, CAPTION_Y);
-        var yCaptionRight = 2 + ctx.measureText('input tokens').width;
-        var xCaption = 'recorded time →';
-        var captionLeft = box.width - 2 - ctx.measureText(xCaption).width;
-        if (captionLeft >= yCaptionRight + LABEL_GAP) {
+        var leftEnd = 2 + ctx.measureText('input tokens').width;
+        var xCaption = 'usage recorded →';
+        if (box.width - 2 - ctx.measureText(xCaption).width >= leftEnd + LABEL_GAP) {
             ctx.textAlign = 'right';
             ctx.fillText(xCaption, box.width - 2, CAPTION_Y);
         }
 
-        // Time labels are measured, not merely clamped to the card edge: four
-        // evenly spaced timestamps do not fit a narrow card, and the previous
-        // centre-and-clamp ran the last two into each other. The first and last
-        // always survive — they are what states the range; an intermediate one
-        // is drawn only when its measured box clears both of them.
+        // Time labels are measured: the first and last always survive, an
+        // intermediate one only when its box clears both neighbours.
         ctx.textAlign = 'center';
+        var span = domain.hi - domain.lo;
         var ticks = [];
         for (var k = 0; k <= 3; k += 1) {
-            var t = tMin + ((tMax - tMin) / 3) * k;
-            var text = axisTime(t, tMax - tMin);
+            var t = domain.lo + (span / 3) * k;
+            var text = axisTime(t, span);
             var half = ctx.measureText(text).width / 2;
             var cx = Math.min(box.width - 2 - half, Math.max(2 + half, xOf(t)));
             ticks.push({ text: text, x: cx, left: cx - half, right: cx + half });
@@ -555,145 +539,105 @@
         var drawn = [ticks[0]];
         var prevRight = ticks[0].right;
         for (var m = 1; m < ticks.length - 1; m += 1) {
-            if (ticks[m].left >= prevRight + LABEL_GAP
-                && ticks[m].right + LABEL_GAP <= last.left) {
+            if (ticks[m].left >= prevRight + LABEL_GAP && ticks[m].right + LABEL_GAP <= last.left) {
                 drawn.push(ticks[m]);
                 prevRight = ticks[m].right;
             }
         }
-        drawn.push(last);
-        drawn.forEach(function (tick) {
-            ctx.fillText(tick.text, tick.x, box.height - 15);
-        });
+        if (last.left >= prevRight + LABEL_GAP) drawn.push(last);
+        drawn.forEach(function (tick) { ctx.fillText(tick.text, tick.x, box.height - 10); });
 
-        // Independent requests: dots only. Nothing is joined here — two
-        // consecutive requests may belong to unrelated tasks.
-        points.forEach(function (point) {
-            var x = xOf(point.t);
-            var y = yOf(Math.min(point.prompt_tokens, yMax));
-            var selected = state.selected && state.selected.id === point.id;
-            ctx.beginPath();
-            ctx.arc(x, y, selected ? 4.5 : 2.6, 0, Math.PI * 2);
-            ctx.fillStyle = selected ? chartColors['selected'] : chartColors['ink'];
-            ctx.fill();
-            if (selected) {
-                ctx.beginPath();
-                ctx.arc(x, y, 8, 0, Math.PI * 2);
-                ctx.strokeStyle = chartColors['accent'];
-                ctx.lineWidth = 1.5;
-                ctx.stroke();
-            }
-            canvas._hits.push({ x: x, y: y, point: point });
-        });
-    }
-
-    function drawTrajectory(canvas, payload) {
-        var box = sizeCanvas(canvas);
-        var ctx = box.ctx;
-        var pad = { left: 46, right: 10, top: 10, bottom: 20 };
-        var plotW = box.width - pad.left - pad.right;
-        var plotH = box.height - pad.top - pad.bottom;
-        var all = [];
-        (payload.groups || []).forEach(function (g) { all = all.concat(g.points); });
-        (payload.related || []).forEach(function (g) { all = all.concat(g.points); });
-        ctx.font = '12px ' + FONT;
-        ctx.textBaseline = 'middle';
-        if (!all.length || plotW <= 0 || plotH <= 0) {
-            emptyChart(box, 'No measured requests for this task');
-            return;
-        }
-        var times = all.map(function (p) { return p.t; }).filter(Boolean);
-        var tMin = Math.min.apply(null, times);
-        var tMax = Math.max.apply(null, times);
-        if (tMax === tMin) { tMax = tMin + 1000; tMin -= 1000; }
-        var peak = Math.max.apply(null, all.map(function (p) { return p.prompt_tokens; }));
-        var yMax = niceCeil(peak * 1.1);
-        var xOf = function (t) { return pad.left + ((t - tMin) / (tMax - tMin)) * plotW; };
-        var yOf = function (v) { return pad.top + plotH - (v / yMax) * plotH; };
-
-        for (var i = 0; i <= 2; i += 1) {
-            var value = (yMax / 2) * i;
-            var y = Math.round(yOf(value)) + 0.5;
-            ctx.strokeStyle = chartColors['grid'];
+        // Median and p95 of exactly these points, as quiet rules under the dots.
+        // Their labels are drawn after the dots, on a halo of the surface
+        // colour, inside the plot's right edge. Clamp first, then separate the
+        // labels, including coincident rules at the bottom of an all-zero plot.
+        var rules = [];
+        if (isNumber(state.stats.p95)) rules.push({ label: 'p95 ' + compact(state.stats.p95), y: yOf(state.stats.p95), dash: [2, 3] });
+        if (isNumber(state.stats.median)) rules.push({ label: 'median ' + compact(state.stats.median), y: yOf(state.stats.median), dash: [5, 4] });
+        rules.forEach(function (rule) {
+            var y = Math.round(rule.y) + 0.5;
+            ctx.save();
+            ctx.strokeStyle = chartColors.reference;
+            ctx.setLineDash(rule.dash);
             ctx.beginPath();
             ctx.moveTo(pad.left, y);
             ctx.lineTo(pad.left + plotW, y);
             ctx.stroke();
-            ctx.fillStyle = chartColors['muted'];
-            ctx.textAlign = 'right';
-            ctx.fillText(compact(value), pad.left - 8, yOf(value));
-        }
-
-        // Other tasks under the same root: points only, never joined.
-        (payload.related || []).forEach(function (group) {
-            group.points.forEach(function (point) {
-                ctx.beginPath();
-                ctx.arc(xOf(point.t), yOf(Math.min(point.prompt_tokens, yMax)), 2.2, 0, Math.PI * 2);
-                ctx.fillStyle = chartColors['related'];
-                ctx.fill();
-            });
+            ctx.restore();
         });
 
-        // This task's own homogeneous runs: joined inside a group only.
-        var shades = [chartColors['line-1'], chartColors['line-2'], chartColors['line-3']];
-        (payload.groups || []).forEach(function (group, index) {
-            var holdsSelection = state.selected && group.points.some(function (p) {
-                return p.id === state.selected.id;
-            });
-            var ink = holdsSelection ? chartColors['selected'] : shades[index % shades.length];
-            ctx.strokeStyle = ink;
-            ctx.lineWidth = holdsSelection ? 1.8 : 1.2;
+        // One dot per measured request. Nothing is ever joined: neighbouring
+        // dots can belong to unrelated tasks, and even one task's requests can
+        // be parallel review slots, other providers or other sources.
+        var focus = state.focus;
+        var chosen = state.selectedId;
+        var background = [];
+        var foreground = [];
+        points.forEach(function (point) {
+            var hit = { x: xOf(point.t), y: yOf(Math.min(point.prompt_tokens, yMax)), point: point };
+            canvas._hits.push(hit);
+            if (focus && point.task === focus.task) foreground.push(hit);
+            else background.push(hit);
+        });
+        background.forEach(function (hit) {
             ctx.beginPath();
-            group.points.forEach(function (point, position) {
-                var x = xOf(point.t);
-                var y = yOf(Math.min(point.prompt_tokens, yMax));
-                if (position === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-            });
-            ctx.stroke();
-            group.points.forEach(function (point) {
-                ctx.beginPath();
-                ctx.arc(xOf(point.t), yOf(Math.min(point.prompt_tokens, yMax)), 2.8, 0, Math.PI * 2);
-                ctx.fillStyle = ink;
-                ctx.fill();
-            });
+            ctx.arc(hit.x, hit.y, 2.5, 0, Math.PI * 2);
+            ctx.fillStyle = focus ? chartColors['point-dim'] : chartColors.point;
+            ctx.fill();
         });
-
-        // Same rule as the overview chart: the two ends of the range are
-        // measured before they are drawn. They are pushed to the outer edges of
-        // the plot, and when even that leaves them overlapping on a narrow card
-        // only the newest is drawn rather than two strings printed over each
-        // other. Neither is shrunk below the chart's 12px.
-        ctx.fillStyle = chartColors['muted'];
-        var startText = axisTime(tMin, tMax - tMin);
-        var endText = axisTime(tMax, tMax - tMin);
-        var startWidth = ctx.measureText(startText).width;
-        var endWidth = ctx.measureText(endText).width;
-        var right = pad.left + plotW;
-        if (startWidth + endWidth + LABEL_GAP <= plotW) {
-            ctx.textAlign = 'left';
-            ctx.fillText(startText, pad.left, box.height - 8);
+        foreground.forEach(function (hit) {
+            ctx.beginPath();
+            ctx.arc(hit.x, hit.y, 3.5, 0, Math.PI * 2);
+            ctx.fillStyle = chartColors.focus;
+            ctx.fill();
+        });
+        var labelTop = pad.top + 6;
+        var labelBottom = pad.top + plotH - 6;
+        rules.forEach(function (rule) {
+            rule.labelY = Math.max(labelTop, Math.min(labelBottom, rule.y - 8));
+        });
+        if (rules.length === 2 && rules[1].labelY - rules[0].labelY < 16) {
+            rules[1].labelY = Math.min(labelBottom, rules[0].labelY + 16);
+            rules[0].labelY = rules[1].labelY - 16;
         }
-        ctx.textAlign = 'right';
-        ctx.fillText(endText, right, box.height - 8);
+        rules.forEach(function (rule) {
+            ctx.save();
+            ctx.textAlign = 'right';
+            ctx.lineJoin = 'round';
+            ctx.lineWidth = 4;
+            ctx.strokeStyle = chartColors.ring;
+            ctx.strokeText(rule.label, pad.left + plotW - 2, rule.labelY);
+            ctx.fillStyle = chartColors['chart-text'];
+            ctx.fillText(rule.label, pad.left + plotW - 2, rule.labelY);
+            ctx.restore();
+        });
+        canvas._hits.forEach(function (hit) {
+            if (hit.point.id !== chosen) return;
+            ctx.beginPath();
+            ctx.arc(hit.x, hit.y, 5, 0, Math.PI * 2);
+            ctx.fillStyle = chartColors.selected;
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = chartColors.ring;
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(hit.x, hit.y, 8, 0, Math.PI * 2);
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = chartColors.selected;
+            ctx.stroke();
+        });
     }
 
     /* One draw per animation frame per chart, and never for a detached node.
-     *
-     * The observer redraws only when the box it watches actually changed size.
-     * A canvas redraw writes no layout, so a same-size notification can only
-     * come from something else on the page moving; answering it with another
-     * draw is how an observer ends up delivering notifications inside its own
-     * callback (the error WebKit reports as "ResizeObserver loop completed with
-     * undelivered notifications"). Nothing is caught or silenced here — the
-     * redundant work simply is not done. The card's frame height is fixed by the
-     * manifest, so the host mounts no auto-height observer above this one. */
+     * The observer redraws only when the observed box actually changed size: a
+     * canvas repaint writes no layout, so answering a same-size notification
+     * would only feed the observer its own work. The chart box has a fixed CSS
+     * height, so a redraw can never move the card's height either. */
     function liveChart(container, canvas, draw) {
-        chartDraws.push(draw);
+        chartDraws.push(function () { if (canvas.isConnected !== false) draw(); });
         schedule(draw);
         if (typeof ResizeObserver !== 'function') return;
         var pending = false;
-        // Seeded from the box as it is now, so the observer's own first
-        // notification — which reports exactly that size — costs no second draw.
         var lastW = Math.round(container.clientWidth || 0);
         var lastH = Math.round(container.clientHeight || 0);
         var observer = new ResizeObserver(function () {
@@ -713,15 +657,73 @@
         observers.push(observer);
     }
 
+    function repaintCharts() {
+        chartDraws.forEach(function (draw) { schedule(draw); });
+    }
+
     // ------------------------------------------------------------ rendering
 
-    function statTile(label, value, note, tip) {
-        var tile = el('div', 'tile');
-        if (tip) tile.title = tip;
-        tile.appendChild(el('div', 'tile-value', value));
-        tile.appendChild(el('div', 'tile-label', label));
-        tile.appendChild(el('div', 'tile-note', note || ' '));
-        return tile;
+    function sourceStatus() {
+        var data = state.data;
+        if (!data) {
+            if (state.error) return { tone: 'error', text: state.error.message };
+            return { tone: 'neutral', text: 'Reading usage…' };
+        }
+        var source = data.source || {};
+        var parts = [];
+        if (state.error) {
+            parts.push('Showing the read from ' + clock(source.read_at_ms));
+            parts.push('the latest refresh failed: ' + state.error.message);
+            return { tone: 'warn', text: parts.join(' · ') };
+        }
+        if (source.kind === 'usage_store') {
+            parts.push('Usage store');
+            parts.push('read ' + clock(source.read_at_ms));
+        } else {
+            parts.push('Retired usage journal — historical, this install has no usage store');
+        }
+        if (isNumber(source.newest_record_ms)) {
+            var gap = source.read_at_ms - source.newest_record_ms;
+            parts.push(source.kind === 'usage_store' && gap >= 0
+                ? 'newest record ' + (gap < 60000 ? 'under a minute' : duration(gap)) + ' before this read'
+                : 'newest record ' + dayTime(source.newest_record_ms));
+        } else {
+            parts.push('no timed record found');
+        }
+        if (state.loading) parts.push('refreshing…');
+        return { tone: source.kind === 'usage_store' ? 'ok' : 'neutral', text: parts.join(' · ') };
+    }
+
+    /* Status changes (a read starting, a refresh failing) update two nodes in
+     * place: no rebuild, so an open dropdown or a focused row is undisturbed. */
+    function paintStatus() {
+        if (!nodes.status || !nodes.refresh) return;
+        var status = sourceStatus();
+        nodes.dot.className = 'dot dot-' + status.tone;
+        nodes.statusText.textContent = status.text;
+        nodes.refresh.textContent = state.loading ? 'Refreshing…' : 'Refresh';
+        // Never disabled: a focused control that becomes disabled drops the
+        // keyboard, and a second press while reading joins the same read.
+        nodes.refresh.setAttribute('aria-busy', state.loading ? 'true' : 'false');
+    }
+
+    function renderHeader(root) {
+        var header = el('div', 'header');
+        var status = el('p', 'status');
+        var dot = el('span', 'dot');
+        dot.setAttribute('aria-hidden', 'true');
+        var text = el('span', 'status-text');
+        status.appendChild(dot);
+        status.appendChild(text);
+        header.appendChild(status);
+        var refresh = el('button', 'button', 'Refresh');
+        refresh.type = 'button';
+        refresh.setAttribute('data-focus', 'refresh');
+        on(refresh, 'click', function () { load(); });
+        header.appendChild(refresh);
+        root.appendChild(header);
+        nodes = { status: status, dot: dot, statusText: text, refresh: refresh };
+        paintStatus();
     }
 
     function addSelect(entry, parent) {
@@ -730,8 +732,7 @@
         picker.setAttribute('data-focus', 'filter-' + entry.key);
         var options = entry.options.slice();
         // A value that is filtering right now always stays selectable, even if
-        // the newest read no longer contains it — otherwise the control would
-        // show "All" while a filter is still in force.
+        // the newest answer no longer contains it.
         if (entry.value !== 'all' && options.indexOf(entry.value) < 0) options.push(entry.value);
         ['all'].concat(options).forEach(function (option) {
             var label = option === 'all'
@@ -746,27 +747,17 @@
         on(picker, 'change', function () {
             state.filters[entry.key] = picker.value;
             state.rows = ROWS_COLLAPSED;
-            state.selected = null;
-            forgetTrajectory();
             render();
         });
-        var wrap = el('label', 'field');
-        wrap.appendChild(el('span', 'field-label', entry.label));
-        wrap.appendChild(picker);
-        parent.appendChild(wrap);
+        on(picker, 'blur', function () { if (pendingRender) render(); });
+        parent.appendChild(picker);
     }
 
-    /* One row of buttons, one pressed. A segmented control rather than a select
-     * because the horizon is the first thing the card is read through, and the
-     * four spans plus "Available" fit on one line at this width. */
-    function renderHorizon(parent) {
-        var bar = el('div', 'horizon');
-        var label = el('span', 'field-label', 'Horizon');
-        label.id = 'horizon-label';
-        bar.appendChild(label);
+    function renderToolbar(root) {
+        var bar = el('div', 'toolbar');
         var group = el('div', 'segmented');
         group.setAttribute('role', 'group');
-        group.setAttribute('aria-labelledby', 'horizon-label');
+        group.setAttribute('aria-label', 'Horizon');
         HORIZONS.forEach(function (entry) {
             var button = el('button', 'segment', entry.label);
             button.type = 'button';
@@ -778,259 +769,317 @@
             group.appendChild(button);
         });
         bar.appendChild(group);
-        parent.appendChild(bar);
+
+        var filters = el('div', 'filters');
+        var facets = (state.data && state.data.facets) || { models: [], categories: [], sources: [], modes: [] };
+        addSelect({ key: 'model', label: 'Model', allLabel: 'All models', options: facets.models,
+            value: state.filters.model }, filters);
+        addSelect({ key: 'kind', label: 'Work kind', allLabel: 'All work kinds', options: facets.categories,
+            value: state.filters.kind, human: true }, filters);
+        addSelect({ key: 'origin', label: 'Recorded by', allLabel: 'All origins', options: facets.sources,
+            value: state.filters.origin, human: true }, filters);
+        // Unknown is a permanent option: "no mode was recorded" is a real answer
+        // about this install, not an artefact of what happens to be in view.
+        var modes = ['max', 'low', 'nano'].filter(function (mode) { return facets.modes.indexOf(mode) >= 0; });
+        modes.push('unknown');
+        addSelect({ key: 'mode', label: 'Mode', allLabel: 'All modes', options: modes,
+            labels: { max: 'Max', low: 'Low', nano: 'Nano', unknown: 'Unknown (not recorded)' },
+            value: state.filters.mode }, filters);
+        bar.appendChild(filters);
+        root.appendChild(bar);
     }
 
-    /* What the selected horizon really covers. The requested span is never
-     * presented as the delivered span: this reader holds a bounded tail of one
-     * file, so when the retained data starts later than the cutoff the observed
-     * range is stated instead. */
-    function horizonSentence() {
-        var h = state.data && state.data.horizon;
-        if (!h) return '';
+    /* One line: what the selection covers and how much of the view is measured.
+     * Completeness, the point cap and measurement are separate facts and are
+     * stated separately. */
+    function coverageSentence() {
+        var data = state.data;
+        var h = data.horizon || {};
         var spec = horizonSpec(h.selected);
-        var parts = [];
-        var observed = (h.observed_from_ms && h.observed_to_ms)
-            ? durationLabel(h.observed_to_ms - h.observed_from_ms) : null;
-
-        if (h.span_ms) {
-            parts.push('Requested ' + spec.full + ', measured back from ' + utcClock(h.now_ms));
-            if (h.covers_selected_span === true) {
-                parts.push('the whole span is inside the read window');
-            } else if (h.observed_from_ms) {
-                parts.push('the read window only reaches back to ' + utcClock(h.observed_from_ms)
-                    + ' (' + observed + ' observed), so this is NOT the full period');
+        var view = state.view;
+        var parts = [spec.key === 'available' ? 'Available requests' : 'Last ' + spec.full.replace('the last ', '')];
+        parts.push(plural(view.total, 'request') + ' in view, ' + num(view.measured) + ' with a measured input');
+        if (h.selection_complete === false) {
+            var from = isNumber(h.covered_from_ms) ? ' (from ' + when(h.covered_from_ms, h.now_ms) + ')' : '';
+            if ((h.partial_reasons || []).indexOf('journal_tail') >= 0) {
+                parts.push('the journal’s retained rows start later' + from + ', so this is not the whole span');
+            } else if ((h.partial_reasons || []).indexOf('row_cap') >= 0) {
+                parts.push('only the newest ' + num(data.limits && data.limits.max_rows) + ' rows were read' + from
+                    + ', so this is not the whole span');
             } else {
-                parts.push('nothing in the read window carries a usable time, so no part of the span is confirmed');
+                parts.push('the read stopped at a bound' + from + ', so this is not the whole span');
             }
-        } else {
-            parts.push('Everything still in the read window');
-            if (h.observed_from_ms && h.observed_to_ms) {
-                parts.push(observed + ' observed, ' + utcClock(h.observed_from_ms)
-                    + ' → ' + utcClock(h.observed_to_ms));
-            }
-            parts.push('older history is outside this bounded read and is not claimed');
         }
-
-        if (h.excluded_older_than_cutoff) {
-            parts.push(h.excluded_older_than_cutoff + ' retained records fall before the cutoff');
-        }
+        if (data.points_omitted) parts.push(plural(data.points_omitted, 'older request') + ' not sent');
         if (h.unknown_timestamp) {
-            parts.push(h.unknown_timestamp + ' record'
-                + (h.unknown_timestamp === 1 ? '' : 's')
-                + ' carry no usable timestamp, so '
-                + (h.span_ms ? 'a timed horizon cannot place them and they are left out'
-                    : 'they are counted but cannot be drawn'));
+            parts.push(plural(h.unknown_timestamp, 'row') + ' without a usable time not placed');
         }
-        if (h.ahead_of_anchor) {
-            parts.push(h.ahead_of_anchor + ' recorded after the anchor instant');
+        return parts.join(' · ');
+    }
+
+    function chartMessage(box, title, body, action) {
+        var message = el('div', 'chart-message');
+        message.appendChild(el('p', 'message-title', title));
+        if (body) message.appendChild(el('p', 'meta muted', body));
+        if (action) {
+            var button = el('button', 'button button-quiet', action.label);
+            button.type = 'button';
+            button.setAttribute('data-focus', action.focus);
+            on(button, 'click', action.run);
+            message.appendChild(button);
         }
-        return parts.join(' · ') + '.';
+        box.appendChild(message);
+    }
+
+    function emptyStateFor(box) {
+        var data = state.data;
+        if (!data) {
+            if (state.error) {
+                chartMessage(box, 'Usage could not be read', state.error.message,
+                    { label: 'Try again', focus: 'retry', run: function () { load(); } });
+            } else {
+                chartMessage(box, 'Reading usage…', null, null);
+            }
+            return true;
+        }
+        if (state.plotted.length) return false;
+        var h = data.horizon || {};
+        var source = data.source || {};
+        if (!(data.points || []).length) {
+            var spec = horizonSpec(h.selected);
+            var newest = isNumber(source.newest_record_ms)
+                ? 'The newest record found is from ' + dayTime(source.newest_record_ms) + '.'
+                : 'No timed record was found by this reader.';
+            if (h.records_selected) {
+                newest += ' ' + plural(h.records_selected, 'other row') + ' (session totals, aggregates) '
+                    + 'are counted in About this data.';
+            }
+            chartMessage(box, 'No requests recorded in ' + spec.full + '.', newest,
+                spec.key === 'available' ? null
+                    : { label: 'Show everything', focus: 'show-all', run: function () { selectHorizon('available'); } });
+            return true;
+        }
+        if (!state.points.length) {
+            chartMessage(box, 'No requests match these filters.', null,
+                { label: 'Clear filters', focus: 'clear-filters', run: clearFilters });
+            return true;
+        }
+        chartMessage(box, 'None of the ' + plural(state.points.length, 'request') + ' in view has a measured input.',
+            'Requests still in flight, released, unresolved or finished without a reported size are listed under '
+            + 'Requests and counted in About this data, never drawn as zero.', null);
+        return true;
+    }
+
+    function renderChart(root) {
+        var chart = el('div', 'chart');
+        var canvas = el('canvas', 'canvas');
+        canvas.setAttribute('role', 'img');
+        canvas.setAttribute('data-focus', 'chart');
+        chart.appendChild(canvas);
+        var tooltip = el('div', 'tooltip');
+        tooltip.hidden = true;
+        chart.appendChild(tooltip);
+        root.appendChild(chart);
+        var empty = emptyStateFor(chart);
+        canvas.setAttribute('aria-label', empty
+            ? 'Input size chart: nothing to draw.'
+            : 'Scatter chart of reported input tokens against the time usage was recorded, for the '
+                + plural(state.plotted.length, 'measured request') + ' in view. Median '
+                + compact(state.stats.median) + ', 95th percentile ' + compact(state.stats.p95)
+                + '. Arrow keys step through the requests; every request in view is also listed under Requests.');
+        liveChart(chart, canvas, function () { drawScatter(canvas); });
+        if (empty) return;
+        canvas.setAttribute('tabindex', '0');
+
+        var nearest = function (event) {
+            var rect = canvas.getBoundingClientRect();
+            var x = event.clientX - rect.left;
+            var y = event.clientY - rect.top;
+            var best = null;
+            (canvas._hits || []).forEach(function (hit) {
+                var distance = Math.hypot(hit.x - x, hit.y - y);
+                if (distance <= HIT_RADIUS && (!best || distance < best.distance)) {
+                    best = { hit: hit, distance: distance, rect: rect };
+                }
+            });
+            return best;
+        };
+        on(canvas, 'pointermove', function (event) {
+            var best = nearest(event);
+            if (!best) { tooltip.hidden = true; return; }
+            var point = best.hit.point;
+            tooltip.hidden = false;
+            tooltip.textContent = num(point.prompt_tokens) + ' input · ' + point.model + ' · '
+                + humanize(point.category) + ' · ' + clock(point.t);
+            var left = Math.min(best.rect.width - 8, Math.max(8, best.hit.x));
+            tooltip.style.left = left + 'px';
+            tooltip.style.top = Math.max(0, best.hit.y - 36) + 'px';
+        });
+        on(canvas, 'pointerleave', function () { tooltip.hidden = true; });
+        on(canvas, 'click', function (event) {
+            var best = nearest(event);
+            if (best) selectPoint(best.hit.point.id);
+        });
+        on(canvas, 'keydown', function (event) {
+            var ordered = state.plotted.slice().sort(function (a, b) { return a.t - b.t; });
+            if (!ordered.length) return;
+            var at = -1;
+            for (var i = 0; i < ordered.length; i += 1) {
+                if (ordered[i].id === state.selectedId) { at = i; break; }
+            }
+            var next = null;
+            if (event.key === 'ArrowRight') next = ordered[at < 0 ? 0 : Math.min(ordered.length - 1, at + 1)];
+            else if (event.key === 'ArrowLeft') next = ordered[at < 0 ? ordered.length - 1 : Math.max(0, at - 1)];
+            else if (event.key === 'Home') next = ordered[0];
+            else if (event.key === 'End') next = ordered[ordered.length - 1];
+            else if (event.key === 'Escape' && state.selectedId) { event.preventDefault(); selectPoint(null); return; }
+            if (!next) return;
+            event.preventDefault();
+            selectPoint(next.id);
+            announce(num(next.prompt_tokens) + ' input tokens, ' + next.model + ', ' + clock(next.t));
+        });
+    }
+
+    function announce(text) {
+        if (nodes.live) nodes.live.textContent = text;
     }
 
     function detailRow(parent, label, value, options) {
         var settings = options || {};
         var row = el('div', 'detail-row');
         var left = el('span', 'detail-label', label);
-        if (settings.exact) left.title = 'Recorded as: ' + settings.exact;
-        row.appendChild(left);
         var right = el('span', 'detail-value', value);
         if (settings.exact) right.title = 'Recorded as: ' + settings.exact;
+        row.appendChild(left);
         row.appendChild(right);
         parent.appendChild(row);
-        if (settings.note) parent.appendChild(el('div', 'detail-note', settings.note));
+        if (settings.note) parent.appendChild(el('p', 'detail-note', settings.note));
     }
 
-    function renderTrajectory(card, point) {
-        if (state.trajectory === 'loading') {
-            card.appendChild(el('p', 'muted meta', 'Loading this task’s trajectory…'));
-            return;
-        }
-        if (!state.trajectory || state.trajectoryTask !== point.task) return;
-        var payload = state.trajectory;
-        var head = el('div', 'card-head');
-        head.appendChild(el('h3', 'sub-title', 'This task over time'));
-        var reload = el('button', 'button button-quiet', 'Reload');
-        reload.type = 'button';
-        reload.setAttribute('data-focus', 'trajectory-reload');
-        on(reload, 'click', function () { loadTrajectory(point.task); });
-        head.appendChild(reload);
-        card.appendChild(head);
-
-        var chart = el('div', 'chart chart-small');
-        var canvas = el('canvas', 'canvas');
-        canvas.setAttribute('role', 'img');
-        canvas.setAttribute('aria-label',
-            'Input token sizes over time for this task, grouped by model and work kind. '
-            + 'The groups are listed underneath in text form.');
-        chart.appendChild(canvas);
-        card.appendChild(chart);
-        liveChart(chart, canvas, function () { drawTrajectory(canvas, payload); });
-
-        // The same horizon the overview is on, said out loud — a flat line here
-        // can mean "this task did not grow" or "the growth is before the
-        // cutoff", and those are different answers.
-        var scope = payload.horizon && payload.horizon.span_ms
-            ? 'Within ' + horizonSpec(payload.horizon.selected).full
-            : 'Across everything still in the read window';
-        if (payload.own_outside_horizon) {
-            scope += ' · ' + payload.own_outside_horizon + ' earlier request'
-                + (payload.own_outside_horizon === 1 ? ' of this task is' : 's of this task are')
-                + ' outside it';
-        }
-        card.appendChild(el('p', 'muted meta', scope + '.'));
-
-        var legend = el('ul', 'legend');
-        (payload.groups || []).forEach(function (group) {
-            var item = el('li', 'legend-item');
-            item.appendChild(el('span', 'legend-mark joined'));
-            item.appendChild(el('span', null,
-                group.model + ' · ' + humanize(group.category) + ' · ' + group.points.length + ' requests'));
-            legend.appendChild(item);
-        });
-        (payload.related || []).forEach(function (group) {
-            var item = el('li', 'legend-item');
-            item.appendChild(el('span', 'legend-mark loose'));
-            item.appendChild(el('span', null,
-                'Another task in the same tree · ' + group.model + ' · ' + humanize(group.category)
-                + ' · ' + group.points.length + ' requests'));
-            legend.appendChild(item);
-        });
-        if (legend.childNodes.length) card.appendChild(legend);
-        var why = el('details', 'inline-details');
-        why.appendChild(el('summary', null, 'Why some points are not joined'));
-        why.appendChild(el('p', 'muted meta',
-            'A line joins only requests of the same model doing the same kind of work inside this one task. '
-            + 'Requests from other tasks in the same tree — children, review slots — are drawn as loose points, '
-            + 'because joining independent runs would draw a trend that never happened.'));
-        card.appendChild(why);
+    function bindDisclosure(details, key) {
+        details.open = !!state.open[key];
+        details.setAttribute('data-open-key', key);
+        on(details, 'toggle', function () { state.open[key] = !!details.open; });
     }
 
-    function renderDetail(parent) {
-        var card = el('section', 'card detail-card');
-        var point = state.selected;
-        if (!point) {
-            card.appendChild(el('h2', 'card-title', 'Request detail'));
-            card.appendChild(el('p', 'muted body',
-                'Select a point on the chart, or a row in the list, to see what was recorded for that request.'));
-            parent.appendChild(card);
-            return;
+    function renderSelection(root) {
+        var point = selectedPoint();
+        if (!point) return;
+        var section = el('section', 'selection');
+        section.setAttribute('aria-label', 'Selected request');
+
+        var lead = el('div', 'selection-lead');
+        lead.appendChild(el('span', 'lead-value',
+            isNumber(point.prompt_tokens) ? num(point.prompt_tokens) : 'No size reported'));
+        lead.appendChild(el('span', 'meta muted', isNumber(point.prompt_tokens) ? 'input tokens' : ''));
+        var close = el('button', 'button button-quiet', 'Clear');
+        close.type = 'button';
+        close.setAttribute('data-focus', 'clear-selection');
+        close.setAttribute('aria-label', 'Clear the selected request');
+        on(close, 'click', function () { selectPoint(null); });
+        lead.appendChild(close);
+        section.appendChild(lead);
+
+        var facts = [point.model, humanize(point.category), modeLabel(point.mode) + ' mode',
+            'usage recorded ' + when(point.t, state.data.source && state.data.source.read_at_ms)];
+        if (point.state !== 'settled') facts.push(STATE_LABELS[point.state] || point.state);
+        section.appendChild(el('p', 'meta muted', facts.join(' · ')));
+
+        var focus = state.focus;
+        if (focus) {
+            var line = 'Same task: ' + plural(focus.inView, 'measured request') + ' highlighted in this view';
+            if (focus.hidden) line += ' · ' + num(focus.hidden) + ' more hidden by the filters';
+            if (state.data.points_omitted) line += ' · older requests beyond the point cap are not loaded';
+            line += '. They share a task; they are not joined, because one task can run parallel reviews, '
+                + 'providers or sources that are not one growing context.';
+            section.appendChild(el('p', 'meta focus-line', line));
+        } else if (!point.task) {
+            section.appendChild(el('p', 'meta muted', 'No task was recorded with this request, so nothing else is highlighted.'));
         }
-
-        var head = el('div', 'card-head');
-        head.appendChild(el('h2', 'card-title', 'Request detail'));
-        head.appendChild(el('span', 'muted meta', clockTime(point.t)));
-        card.appendChild(head);
-
-        var lead = el('div', 'lead');
-        var big = el('div', 'lead-value',
-            typeof point.prompt_tokens === 'number' ? num(point.prompt_tokens) : 'not reported');
-        lead.appendChild(big);
-        lead.appendChild(el('div', 'lead-label', 'reported input tokens'));
-        card.appendChild(lead);
-
-        var primary = el('div', 'detail-body');
-        detailRow(primary, 'Model', point.model);
-        detailRow(primary, 'Mode', modeLabel(point.mode), point.mode ? null : {
-            note: 'No context-fit measurement was recorded with this request, so its mode is genuinely unknown '
-                + 'rather than guessed.'
-        });
-        detailRow(primary, 'Work kind', humanize(point.category), { exact: point.category });
-        card.appendChild(primary);
-
-        // The trajectory answers "is this task growing?" — the question the
-        // detail panel exists for — so it sits above the recorded internals.
-        renderTrajectory(card, point);
 
         var technical = el('details', 'inline-details');
-        technical.appendChild(el('summary', null, 'Technical detail'));
+        bindDisclosure(technical, 'technical');
+        var summary = el('summary', null, 'Technical detail');
+        summary.setAttribute('data-focus', 'technical');
+        technical.appendChild(summary);
         var body = el('div', 'detail-body');
-        detailRow(body, 'Recorded at', fullTime(point.t));
-        detailRow(body, 'Of which cache reads', num(point.cached_tokens), {
-            note: 'Already included in the input number above. Ouroboros normalises provider usage so cache reads '
-                + 'and writes are part of the input count; adding them again would double-count.'
+        detailRow(body, 'Usage recorded or last updated', fullTime(point.t), {
+            note: 'The time of the latest accounting write for this request. A late receipt or a price '
+                + 'refinement moves it, so it is neither the send time nor a latency.'
         });
+        detailRow(body, 'State', point.state + ' — ' + (STATE_LABELS[point.state] || 'unknown'));
         detailRow(body, 'Output tokens', num(point.completion_tokens));
-        detailRow(body, 'Cache writes', num(point.cache_write_tokens));
+        detailRow(body, 'Cache reads (reported)', num(point.cached_tokens));
+        detailRow(body, 'Cache writes (reported)', num(point.cache_write_tokens), {
+            note: 'As the provider reported them. For some providers they are already part of the input number, '
+                + 'for others that is not established, so they are never added to it or turned into a share.'
+        });
         detailRow(body, 'Provider', point.provider);
         detailRow(body, 'Recorded by', humanize(point.source), { exact: point.source });
+        detailRow(body, 'Work kind', humanize(point.category), { exact: point.category });
+        detailRow(body, 'Mode', modeLabel(point.mode), point.mode ? null : {
+            note: 'No context-fit measurement was recorded with this request, so its mode is unknown rather than guessed.'
+        });
         if (point.profile) detailRow(body, 'Context profile', point.profile);
         if (point.basis) detailRow(body, 'Measurement basis', humanize(point.basis), { exact: point.basis });
-        if (typeof point.target_total_tokens === 'number') {
+        if (isNumber(point.target_total_tokens)) {
             detailRow(body, 'Target total for that round', num(point.target_total_tokens), {
-                note: 'The figure recorded with this request. It is not a live window size and no percentage is '
-                    + 'derived from it.'
+                note: 'Recorded with this request. It is not a live window size and no percentage is derived from it.'
             });
         }
-        if (typeof point.capacity_total_tokens === 'number') {
-            detailRow(body, 'Capacity total for that round', num(point.capacity_total_tokens));
-        }
+        if (isNumber(point.capacity_total_tokens)) detailRow(body, 'Capacity total for that round', num(point.capacity_total_tokens));
         if (point.target_miss === true) detailRow(body, 'Target miss', 'Yes, recorded');
         if (point.auto_pass === true) detailRow(body, 'Automatic pass used', 'Yes, recorded');
-        detailRow(body, 'States seen', point.states.join(' → ') || point.state);
-        if (typeof point.elapsed_sec === 'number') {
-            detailRow(body, 'Reserved to settled', point.elapsed_sec.toFixed(2) + ' s', {
-                note: 'Wall-clock between the two ledger rows. It includes waiting, so it is not a pure provider '
-                    + 'latency.'
-            });
-        }
-        detailRow(body, 'Task group', point.task || 'Not recorded');
+        if (point.late_receipt) detailRow(body, 'Settled by a late receipt', 'Yes, recorded');
+        detailRow(body, 'Task key', point.task || 'Not recorded');
         detailRow(body, 'Request key', point.id);
         technical.appendChild(body);
-        card.appendChild(technical);
-
-        parent.appendChild(card);
+        section.appendChild(technical);
+        root.appendChild(section);
     }
 
-    function renderList(parent) {
-        var card = el('section', 'card');
-        var head = el('div', 'card-head');
-        head.appendChild(el('h2', 'card-title', 'Recent requests'));
-        head.appendChild(el('span', 'muted meta', state.points.length + ' match the filter'));
-        card.appendChild(head);
-
+    function renderRequests(root) {
+        var details = el('details', 'disclosure');
+        bindDisclosure(details, 'requests');
         var total = state.points.length;
-        var shown = Math.min(state.rows, total);
+        var summary = el('summary', null, 'Requests · ' + num(total) + ' in view');
+        summary.setAttribute('data-focus', 'requests');
+        details.appendChild(summary);
         if (!total) {
-            card.appendChild(el('p', 'muted body', 'No requests match the current filter.'));
-            parent.appendChild(card);
+            details.appendChild(el('p', 'meta muted', 'No requests match the current view.'));
+            root.appendChild(details);
             return;
         }
-
+        var shown = Math.min(state.rows, total);
         var list = el('ul', 'list');
-        list.setAttribute('aria-label',
-            'Requests matching the current filter, newest first. Showing ' + shown + ' of ' + total + '.');
+        list.setAttribute('aria-label', 'Requests in view, newest first. Showing ' + shown + ' of ' + total + '.');
         state.points.slice().reverse().slice(0, shown).forEach(function (point) {
             var item = el('li', 'list-item');
             var button = el('button', 'row');
             button.type = 'button';
             button.setAttribute('data-focus', 'row-' + point.id);
-            if (state.selected && state.selected.id === point.id) {
+            if (point.id === state.selectedId) {
                 button.classList.add('row-active');
                 button.setAttribute('aria-current', 'true');
             }
             var left = el('span', 'row-main');
             left.appendChild(el('span', 'row-tokens',
-                typeof point.prompt_tokens === 'number' ? num(point.prompt_tokens) : 'not reported'));
+                isNumber(point.prompt_tokens) ? num(point.prompt_tokens) : 'no size'));
             left.appendChild(el('span', 'row-model', point.model));
-            var right = el('span', 'row-meta',
-                clockTime(point.t) + ' · ' + humanize(point.category)
-                + ' · ' + modeLabel(point.mode)
-                + (point.state === 'settled' ? '' : ' · ' + humanize(point.state)));
+            var right = el('span', 'row-meta', clock(point.t) + ' · ' + humanize(point.category)
+                + ' · ' + modeLabel(point.mode) + (point.state === 'settled' ? '' : ' · ' + point.state));
             right.title = point.category + ' · ' + point.state;
             button.appendChild(left);
             button.appendChild(right);
-            on(button, 'click', function () { select(point); });
+            on(button, 'click', function () { selectPoint(point.id); });
             item.appendChild(button);
             list.appendChild(item);
         });
-        card.appendChild(list);
-
+        details.appendChild(list);
         if (total > ROWS_COLLAPSED) {
             var actions = el('div', 'row-actions');
             if (shown < total) {
-                var more = el('button', 'button button-quiet',
-                    'Show more (' + (total - shown) + ' left)');
+                var more = el('button', 'button button-quiet', 'Show more (' + (total - shown) + ' left)');
                 more.type = 'button';
                 more.setAttribute('data-focus', 'rows-more');
                 on(more, 'click', function () {
@@ -1049,163 +1098,175 @@
                 });
                 actions.appendChild(less);
             }
-            card.appendChild(actions);
+            details.appendChild(actions);
         }
-        parent.appendChild(card);
+        root.appendChild(details);
     }
 
-    function renderHowToRead(parent) {
-        var block = el('details', 'card details-card');
-        block.appendChild(el('summary', null, 'How to read this'));
-        var notes = [
-            'The horizon cuts the records this widget holds, not the file. It is measured back from an '
-            + 'explicit UTC anchor shown above, and the line under the control says how much of the '
-            + 'requested span was actually observed. Picking 7 days does not make seven days of history '
-            + 'exist: this reader keeps a bounded tail of one file, so a longer horizon can only ever '
-            + 'show what that tail still contains.',
-            'Each point is one physical model request that finished and reported its input size. '
-            + 'Points are not joined: two consecutive requests can belong to entirely unrelated tasks.',
-            'A plateau or a sudden drop in the size of a task’s requests does NOT by itself prove that the '
-            + 'context was compacted. It is equally consistent with a shorter round, a different model, a branch '
-            + 'of work ending, or a request that reported nothing. A field tying a request to a compaction pass '
-            + 'is not available from this ledger — evidence may exist in observability artifacts, which are '
-            + 'outside this widget’s scope — so Context Lens never claims one happened.',
-            'Requests that never reported an input size are counted, not drawn. Missing is shown as missing, '
-            + 'never as zero. Reserved but unfinished requests carry no token estimate anywhere in the ledger, '
-            + 'so nothing is estimated for them.',
-            'No cost, no window percentage and no per-document contribution is shown, because the ledger holds '
-            + 'no exact figure this widget could derive them from without guessing.',
-            'Mode comes from the context-fit measurement recorded with a request. Requests without that '
-            + 'measurement stay under Unknown and are never assigned a mode.'
-        ];
+    function aboutBlock(parent, title, lines) {
+        if (!lines.length) return;
+        parent.appendChild(el('p', 'meta strong-line', title));
         var list = el('ul', 'notes');
-        notes.forEach(function (text) { list.appendChild(el('li', null, text)); });
-        block.appendChild(list);
-        parent.appendChild(block);
+        lines.forEach(function (text) { list.appendChild(el('li', null, text)); });
+        parent.appendChild(list);
     }
 
-    function coverageSentence() {
-        var view = state.view;
-        if (!view || !view.total) return 'No requests match the current filter.';
-        var parts = [view.measured + ' of ' + view.total + ' requests in this view have a recorded size and time'];
-        if (view.settledWithoutSize) parts.push(view.settledWithoutSize + ' finished without one');
-        if (view.withoutTime) parts.push(view.withoutTime + ' had no usable timestamp');
-        if (view.inFlight) parts.push(view.inFlight + ' still in flight');
-        if (view.unresolved) parts.push(view.unresolved + ' unresolved');
-        if (view.released) parts.push(view.released + ' released before dispatch');
-        return parts.join(' · ');
-    }
-
-    function windowSentence() {
-        var w = state.data.window;
-        var parts = ['Rows read ' + num(w.lines_read)];
-        if (w.omitted_prefix_bytes) parts.push('older ' + bytesLabel(w.omitted_prefix_bytes) + ' of the file not read');
-        if (w.evicted_records) parts.push(w.evicted_records + ' oldest records dropped from the cache');
-        if (w.malformed_lines) parts.push(w.malformed_lines + ' unreadable lines skipped');
-        if (w.pending_tail_bytes) parts.push('an unfinished tail row is waiting');
-        if (w.discarded_oversize_lines) {
-            parts.push(w.discarded_oversize_lines + ' line'
-                + (w.discarded_oversize_lines === 1 ? '' : 's')
-                + ' too long for one read discarded');
-        }
-        if (w.rotations_observed) parts.push('ledger replaced ' + w.rotations_observed + ' times while open');
-        if (state.data.points_omitted) parts.push(state.data.points_omitted + ' older points not sent');
-        return parts.join(' · ');
-    }
-
-    function renderCoverageDetails(parent) {
+    function renderAbout(root) {
+        var details = el('details', 'disclosure');
+        bindDisclosure(details, 'about');
+        var summary = el('summary', null, 'About this data');
+        summary.setAttribute('data-focus', 'about');
+        details.appendChild(summary);
         var data = state.data;
-        var c = data.counters;
-        var x = c.excluded;
-        var block = el('details', 'card details-card');
-        block.appendChild(el('summary', null, 'Coverage details'));
-
-        var h = data.horizon;
-        if (h) {
-            block.appendChild(el('p', 'meta strong-line', 'Horizon'));
-            var horizonFacts = ['Selected: ' + horizonSpec(h.selected).full,
-                'anchor ' + utcDay(h.now_ms)];
-            if (h.cutoff_ms) horizonFacts.push('cutoff ' + utcDay(h.cutoff_ms));
-            if (h.observed_from_ms) {
-                horizonFacts.push('observed ' + utcDay(h.observed_from_ms)
-                    + ' → ' + utcDay(h.observed_to_ms));
+        if (data) {
+            var source = data.source || {};
+            var h = data.horizon || {};
+            var c = data.counters || {};
+            var x = c.excluded || {};
+            var lines = [];
+            if (source.kind === 'usage_store') {
+                lines.push('The install’s usage store, read read-only in one short transaction'
+                    + (isNumber(source.transaction_ms) ? ' (' + source.transaction_ms + ' ms)' : '')
+                    + '. It keeps one row per request and updates that row as accounting completes.');
+                lines.push('Categories come from the store’s category summaries, plus unnamed categories. '
+                    + 'Legacy-only named categories may be absent: their rows can be missing from counts and '
+                    + 'the newest-record time. These facts describe the enumerated categories, not all store rows.');
+            } else {
+                lines.push('The retired usage journal. Core stopped writing it when the usage store was introduced; '
+                    + 'this install has no store file, so this is the journal’s retained tail and may be historical.');
             }
-            horizonFacts.push(h.records_selected + ' of ' + h.records_retained
-                + ' retained records selected');
-            if (h.covers_selected_span === false) {
-                horizonFacts.push('the selected span is NOT fully covered by the read window');
+            lines.push('Read at ' + fullTime(source.read_at_ms) + '. Newest record: '
+                + (isNumber(source.newest_record_ms) ? fullTime(source.newest_record_ms) : 'none with a usable time')
+                + '. An old newest record can simply mean nothing ran since.');
+            if (source.context_unread) {
+                lines.push(plural(source.context_unread, 'row') + ' carried metadata too large or unreadable to read, '
+                    + 'so their mode is Unknown.');
             }
-            if (h.history_truncated_by_source) {
-                horizonFacts.push('older rows exist in the file or its archive and were not read, '
-                    + 'so no horizon here can claim complete history');
+            aboutBlock(details, 'Source', lines);
+
+            lines = [];
+            if (isNumber(h.cutoff_ms)) {
+                lines.push('Horizon: ' + horizonSpec(h.selected).full + ', ' + fullTime(h.cutoff_ms) + ' to '
+                    + fullTime(h.now_ms) + '.');
+            } else {
+                lines.push('Horizon: available requests, newest first, up to the read bound.');
             }
-            block.appendChild(el('p', 'muted meta', horizonFacts.join(' · ') + '.'));
-        }
-
-        block.appendChild(el('p', 'meta strong-line', 'In this view (current filter)'));
-        block.appendChild(el('p', 'muted meta', coverageSentence()));
-
-        block.appendChild(el('p', 'meta strong-line', 'Across the selected horizon, before any filter'));
-        var whole = [c.measured + ' of ' + c.physical_attempts + ' attempts reported a size'];
-        if (c.settled_without_tokens) whole.push(c.settled_without_tokens + ' finished without one');
-        if (c.in_flight) whole.push(c.in_flight + ' in flight');
-        if (c.by_state.unresolved) whole.push(c.by_state.unresolved + ' unresolved');
-        if (c.by_state.released) whole.push(c.by_state.released + ' released before dispatch');
-        block.appendChild(el('p', 'muted meta', whole.join(' · ')));
-        block.appendChild(el('p', 'muted meta',
-            'These counts cover every filter at once, so they differ from the view figures above whenever a '
-            + 'filter is set. They are cut by the horizon first, exactly like the chart.'));
-
-        var excluded = [];
-        if (x.baseline_rows) {
-            var folded = num(x.folded_attempts) + ' folded attempts in '
-                + x.baseline_rows + ' compaction summary rows';
-            if (x.baselines_without_header) {
-                folded += ' (at least: ' + num(x.folded_attempts_from_groups)
-                    + ' of them are counted from group rows whose compaction header is outside this window, '
-                    + 'so group rows may be missing too)';
+            if (h.selection_complete === true) {
+                lines.push(source.kind === 'usage_store'
+                    ? 'Complete within the enumerated categories: every row in this span with a usable time was read. '
+                        + 'Core summarises physical-request categories, so this covers eligible physical requests; '
+                        + 'it does not guarantee complete legacy counts.'
+                    : 'Complete for the retained journal: every row of this span with a usable time was read.');
+            } else if (h.selection_complete === false) {
+                lines.push('Not complete: ' + partialText(h, data) + '.');
+            } else {
+                lines.push('Selection completeness is unknown.');
             }
-            excluded.push(folded + '. A summary row is a sum over many requests, never a request.');
-        }
-        if (x.subscription_sessions) {
-            excluded.push(x.subscription_sessions + ' harness subscription session totals. Each is one aggregate '
-                + 'for a whole delegated session, not a physical request, so it is excluded from the chart and '
-                + 'from every statistic here.');
-        }
-        if (x.external_unmetered) excluded.push(x.external_unmetered + ' external unmetered dispatches.');
-        if (x.legacy_rows) excluded.push(x.legacy_rows + ' legacy imported rows.');
-        if (x.unknown_kind) {
-            excluded.push(x.unknown_kind + ' rows of a kind this version does not recognise. They are excluded '
-                + 'rather than guessed into the chart.');
-        }
-        if (x.attempts_without_state) {
-            excluded.push(x.attempts_without_state + ' rows that look like attempts but carry no recognisable '
-                + 'state, so they are not treated as ordinary requests.');
-        }
-        if (data.window.compaction_epoch) {
-            excluded.push('The ledger has been compacted (epoch ' + data.window.compaction_epoch + '). Folded '
-                + 'attempts were moved to an archive this widget does not read, so they cannot appear as points.');
-        }
-        if (excluded.length) {
-            block.appendChild(el('p', 'meta strong-line', 'Counted but never drawn'));
-            var list = el('ul', 'notes');
-            excluded.forEach(function (text) { list.appendChild(el('li', null, text)); });
-            block.appendChild(list);
-        }
+            lines.push(plural(h.records_selected || 0, 'row') + ' selected, '
+                + plural(h.attempts_selected || 0, 'request') + ' among them'
+                + (isNumber(h.selected_from_ms) ? ', recorded ' + fullTime(h.selected_from_ms) + ' to '
+                    + fullTime(h.selected_to_ms) : '') + '.');
+            if (data.points_omitted) lines.push(plural(data.points_omitted, 'older request') + ' beyond the point cap were not sent.');
+            if (h.unknown_timestamp) {
+                lines.push(plural(h.unknown_timestamp, 'row') + (h.unknown_timestamp_capped ? ' or more' : '')
+                    + ' carry no usable time, so no horizon can place them.');
+            }
+            if (h.ahead_of_anchor) lines.push(plural(h.ahead_of_anchor, 'row') + ' recorded after the read instant.');
+            aboutBlock(details, 'Selection', lines);
 
-        block.appendChild(el('p', 'meta strong-line', 'Read window'));
-        block.appendChild(el('p', 'muted meta', windowSentence()));
-        parent.appendChild(block);
+            lines = [num(c.registered_attempts) + ' requests registered; ' + num(c.sent_attempts)
+                + ' of them were sent to a provider.'];
+            ['settled', 'dispatched', 'unresolved', 'reserved', 'released'].forEach(function (key) {
+                var count = c.by_state ? c.by_state[key] : 0;
+                if (count) lines.push(num(count) + ' ' + STATE_LABELS[key] + (key === 'settled'
+                    ? ' — ' + num(c.measured) + ' with an input size, ' + num(c.settled_without_tokens) + ' without'
+                    : ''));
+            });
+            aboutBlock(details, 'Requests in the selection, before filters', lines);
+
+            lines = [];
+            if (x.subscription_sessions) lines.push(plural(x.subscription_sessions, 'subscription session total')
+                + ' — one aggregate per delegated session, not a request.');
+            if (x.external_unmetered) lines.push(plural(x.external_unmetered, 'external unmetered dispatch', 'external unmetered dispatches') + '.');
+            if (x.baseline_rows) lines.push(plural(x.baseline_rows, 'compaction aggregate row') + ' folding '
+                + num(x.folded_attempts) + ' older requests' + (x.baselines_without_header ? ' at least' : '')
+                + ' — a sum over many requests, never one request.');
+            if (x.legacy_rows) lines.push(plural(x.legacy_rows, 'legacy imported row') + '.');
+            if (x.unknown_kind) lines.push(plural(x.unknown_kind, 'row') + ' of a kind this version does not recognise.');
+            if (x.attempts_without_state) lines.push(plural(x.attempts_without_state, 'request row')
+                + ' without a recognisable state.');
+            aboutBlock(details, 'Counted, never drawn', lines);
+        }
+        aboutBlock(details, 'How to read this', [
+            'One dot is one physical model request that finished with a reported input size. Missing sizes are '
+            + 'counted, never drawn as zero; an explicit zero is drawn.',
+            'The time axis is when usage was recorded or last updated. Late accounting can move a request later; '
+            + 'it is not the send time and the gap between writes is not a latency.',
+            'Median and p95 describe exactly the dots in view and move with the filters.',
+            'Selecting a request highlights the other requests of the same task. They are never joined: '
+            + 'one task can run parallel reviews, providers or sources, and a shared model and work kind does not '
+            + 'prove one growing context.',
+            'Cache reads and writes are shown as the provider reported them, never added to the input or turned into a share.',
+            'Mode comes from the context-fit measurement recorded with a request; without one it stays Unknown.',
+            'No cost, no window-fill percentage, no per-section contribution and no compaction cause is shown: the '
+            + 'record holds no exact fact to derive them from. A drop in size is consistent with compaction, a '
+            + 'shorter round, another model or a branch of work ending alike.'
+        ]);
+        if (data && data.limits) {
+            var limits = data.limits;
+            var bounds = [];
+            if (isNumber(limits.max_rows)) bounds.push('at most ' + num(limits.max_rows) + ' rows per read');
+            if (isNumber(limits.max_points)) bounds.push('at most ' + num(limits.max_points) + ' points per answer');
+            if (isNumber(limits.max_bytes_per_refresh)) bounds.push('at most ' + num(limits.max_bytes_per_refresh / 1048576) + ' MiB of the journal per read');
+            if (bounds.length) aboutBlock(details, 'Bounds', [bounds.join(', ') + '. A bound that bites is named above.']);
+        }
+        root.appendChild(details);
+    }
+
+    function partialText(h, data) {
+        var reasons = h.partial_reasons || [];
+        var from = isNumber(h.covered_from_ms) ? ' It reaches back to ' + fullTime(h.covered_from_ms) : '';
+        var words = reasons.map(function (reason) {
+            if (reason === 'row_cap') return 'the newest ' + num(data.limits && data.limits.max_rows) + ' rows were read and more exist';
+            if (reason === 'journal_tail') return 'the journal’s retained rows do not reach back that far';
+            if (reason === 'category_cap') return 'more work kinds exist than one read follows';
+            if (reason === 'byte_cap') return 'the metadata read bound was reached';
+            if (reason === 'time_budget' || reason === 'step_budget') return 'the read reached its time bound';
+            return 'a read bound was reached';
+        });
+        return (words.join('; ') || 'a read bound was reached') + '.' + from;
+    }
+
+    /* A rebuild while a native dropdown is open would close it under the
+     * owner's hands, so such a render waits for that control to lose focus. */
+    function renderSoon() {
+        var active = document.activeElement;
+        var root = document.getElementById('root');
+        if (active && root && root.contains(active) && active.tagName === 'SELECT') {
+            pendingRender = true;
+            paintStatus();
+            return;
+        }
+        render();
     }
 
     function render() {
         if (disposed) return;
-        applyFilters();
+        pendingRender = false;
+        // Status, derived values and the chart must describe one answer. While
+        // a SELECT holds the rebuild, theme/resize paints still use the old one.
+        if (pendingData) {
+            state.data = pendingData.data;
+            state.receivedAt = pendingData.receivedAt;
+            pendingData = null;
+            var still = (state.data.points || []).some(function (p) { return p.id === state.selectedId; });
+            if (!still) state.selectedId = null;
+        }
+        derive();
         var root = document.getElementById('root');
         if (!root) return;
 
-        // Keep the keyboard where it was: a poll, a filter change or a selection
-        // rebuilds the tree, and focus must not fall back to the document.
+        // Keep the keyboard where it was: a rebuild must not drop focus.
         var active = document.activeElement;
         var focusWanted = active && root.contains(active) && active.getAttribute
             ? active.getAttribute('data-focus') : null;
@@ -1223,142 +1284,19 @@
         });
         root.textContent = '';
 
-        var header = el('header', 'header');
-        var titles = el('div', 'titles');
-        titles.appendChild(el('h1', 'title', 'Context Lens'));
-        titles.appendChild(el('p', 'subtitle',
-            'Reported input size of model requests, read from the local usage ledger.'));
-        header.appendChild(titles);
-        var refresh = el('button', 'button', state.loading ? 'Refreshing…' : 'Refresh');
-        refresh.type = 'button';
-        refresh.disabled = state.loading;
-        refresh.setAttribute('data-focus', 'refresh');
-        on(refresh, 'click', function () { load(false); });
-        header.appendChild(refresh);
-        root.appendChild(header);
-        // The horizon stays reachable even while the answer is loading or
-        // unavailable: a span that returns nothing must still be changeable.
-        renderHorizon(root);
-
-        if (state.error) {
-            var problem = el('section', 'card');
-            problem.appendChild(el('h2', 'card-title', 'Telemetry unavailable'));
-            problem.appendChild(el('p', 'body', state.error));
-            problem.appendChild(el('p', 'muted meta',
-                'Context Lens reads one fixed local file and never reports its location or contents here.'));
-            root.appendChild(problem);
-            restoreFocus(root, focusWanted);
-            return;
+        renderHeader(root);
+        renderToolbar(root);
+        if (state.data) root.appendChild(el('p', 'meta muted coverage', coverageSentence()));
+        renderChart(root);
+        if (state.data) {
+            renderSelection(root);
+            renderRequests(root);
         }
-        if (!state.data) {
-            root.appendChild(el('p', 'muted body', 'Loading telemetry…'));
-            restoreFocus(root, focusWanted);
-            return;
-        }
-
-        root.appendChild(el('p', 'muted meta coverage-line', horizonSentence()));
-
-        var view = state.view;
-        var tiles = el('div', 'tiles');
-        tiles.appendChild(statTile('Typical input', compact(state.stats.median),
-            state.stats.count + ' measured',
-            'Median reported input tokens across the requests matching the current filter.'));
-        tiles.appendChild(statTile('95% below', compact(state.stats.p95),
-            state.stats.count ? 'smallest ' + compact(state.stats.low) : '',
-            '95% of the matching measured requests reported an input at or below this size '
-            + '(linear-interpolated 95th percentile).'));
-        tiles.appendChild(statTile('Peak', compact(state.stats.peak), 'largest in view',
-            'The largest reported input among the matching measured requests.'));
-        tiles.appendChild(statTile('Data coverage',
-            view.total ? Math.round((view.measured / view.total) * 100) + '%' : '—',
-            'of this view is measured',
-            'Share of matching attempts that finished with both an input size and a usable timestamp. '
-            + 'The rest are counted in Coverage details, never estimated.'));
-        root.appendChild(tiles);
-
-        var filters = el('div', 'filters');
-        var facets = state.data.facets;
-        addSelect({ key: 'model', label: 'Model', allLabel: 'All models', options: facets.models, value: state.filters.model }, filters);
-        addSelect({ key: 'kind', label: 'Work kind', allLabel: 'All work kinds', options: facets.categories, value: state.filters.kind, human: true }, filters);
-        addSelect({ key: 'origin', label: 'Recorded by', allLabel: 'All origins', options: facets.sources, value: state.filters.origin, human: true }, filters);
-        // Unknown is a permanent option: "no mode was recorded" is a real answer
-        // about this install, not an artefact of what happens to be in view.
-        var modes = ['max', 'low'].filter(function (mode) { return facets.modes.indexOf(mode) >= 0; });
-        modes.push('unknown');
-        addSelect({
-            key: 'mode', label: 'Mode', allLabel: 'All modes', options: modes,
-            labels: { max: 'Max', low: 'Low', unknown: 'Unknown (not recorded)' },
-            value: state.filters.mode
-        }, filters);
-        root.appendChild(filters);
-
-        var chartCard = el('section', 'card');
-        var chartHead = el('div', 'card-head');
-        chartHead.appendChild(el('h2', 'card-title', 'Input size over time'));
-        chartHead.appendChild(el('span', 'muted meta',
-            state.plotted.length + ' drawn of ' + state.points.length + ' in view'));
-        chartCard.appendChild(chartHead);
-        var chart = el('div', 'chart');
-        var canvas = el('canvas', 'canvas');
-        canvas.setAttribute('role', 'img');
-        canvas.setAttribute('aria-label',
-            'Scatter chart of reported input tokens over time for the ' + state.plotted.length
-            + ' measured requests in this view. Every one of the ' + state.points.length
-            + ' requests matching the current filter can be reached as text in the Recent requests list below, '
-            + 'which pages through them.');
-        chart.appendChild(canvas);
-        var tooltip = el('div', 'tooltip');
-        tooltip.hidden = true;
-        chart.appendChild(tooltip);
-        chartCard.appendChild(chart);
-        root.appendChild(chartCard);
-
-        var columns = el('div', 'columns');
-        var left = el('div', 'column');
-        var right = el('div', 'column');
-        renderList(left);
-        renderDetail(right);
-        columns.appendChild(left);
-        columns.appendChild(right);
-        root.appendChild(columns);
-
-        // Both closed by default and side by side, so the explanations cost one
-        // row of the card rather than two screens of prose.
-        var disclosures = el('div', 'disclosures');
-        renderHowToRead(disclosures);
-        renderCoverageDetails(disclosures);
-        root.appendChild(disclosures);
-
-        liveChart(chart, canvas, function () { drawScatter(canvas); });
-
-        var nearest = function (event) {
-            var rect = canvas.getBoundingClientRect();
-            var x = event.clientX - rect.left;
-            var y = event.clientY - rect.top;
-            var best = null;
-            (canvas._hits || []).forEach(function (hit) {
-                var distance = Math.hypot(hit.x - x, hit.y - y);
-                if (distance <= 14 && (!best || distance < best.distance)) {
-                    best = { hit: hit, distance: distance, rect: rect };
-                }
-            });
-            return best;
-        };
-        on(canvas, 'mousemove', function (event) {
-            var best = nearest(event);
-            if (!best) { tooltip.hidden = true; return; }
-            tooltip.hidden = false;
-            tooltip.textContent = num(best.hit.point.prompt_tokens) + ' input · ' + best.hit.point.model
-                + ' · ' + clockTime(best.hit.point.t);
-            tooltip.style.left = Math.min(best.rect.width - 20, Math.max(0, best.hit.x)) + 'px';
-            tooltip.style.top = Math.max(0, best.hit.y - 34) + 'px';
-        });
-        on(canvas, 'mouseleave', function () { tooltip.hidden = true; });
-        on(canvas, 'click', function (event) {
-            var best = nearest(event);
-            if (best) select(best.hit.point);
-        });
-
+        renderAbout(root);
+        var live = el('p', 'sr-only');
+        live.setAttribute('aria-live', 'polite');
+        root.appendChild(live);
+        nodes.live = live;
         restoreFocus(root, focusWanted);
     }
 
@@ -1373,120 +1311,104 @@
 
     function installStyle() {
         var css = [
-            ':root{color-scheme:dark;--lens-background:#0d0b0f;--lens-text:#e2e8f0;',
-            '--lens-muted:rgba(255,255,255,0.68);--lens-label:rgba(255,255,255,0.82);',
-            '--lens-faint:rgba(255,255,255,0.55);--lens-disabled:rgba(255,255,255,0.38);',
-            '--lens-ink-rgb:255,255,255;--lens-accent-rgb:201,53,69;--lens-tooltip:rgba(18,20,26,0.98);',
-            '--lens-ink:rgba(226,232,240,0.55);--lens-accent:#c93545;--lens-selected:#f07a86;',
-            '--lens-grid:rgba(255,255,255,0.07);--lens-reference:rgba(240,122,134,0.45);',
-            '--lens-reference-label:rgba(240,122,134,0.85);--lens-related:rgba(255,255,255,0.42);',
-            '--lens-line-1:rgba(226,232,240,0.78);--lens-line-2:rgba(226,232,240,0.56);--lens-line-3:rgba(226,232,240,0.4);}',
-            ':root[data-theme=light]{color-scheme:light;--lens-background:#f8fafc;--lens-text:#18212f;',
-            '--lens-muted:#526174;--lens-label:#334155;--lens-faint:#5b687a;--lens-disabled:#7c8797;',
-            '--lens-ink-rgb:15,23,42;--lens-accent-rgb:184,47,67;--lens-tooltip:rgba(255,255,255,0.98);',
-            '--lens-ink:#64748b;--lens-accent:#b82f43;--lens-selected:#b82f43;',
-            '--lens-grid:rgba(15,23,42,0.12);--lens-reference:rgba(184,47,67,0.55);',
-            '--lens-reference-label:#b82f43;--lens-related:#7c8797;',
-            '--lens-line-1:#475569;--lens-line-2:#64748b;--lens-line-3:#7c8797;}',
-
-            // The frame height is fixed by the manifest, so this document is the
-            // one scrolling surface: no inner pane competes with it and the last
-            // row of the card is always reachable.
-            'html{height:100%;}',
-            'html,body{margin:0;padding:0;background:var(--lens-background);max-width:100%;overflow-x:hidden;}',
-            'body{min-height:100%;overflow-y:auto;',
-            'font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;',
+            // Two named palettes, by value from web/ui.css. Dark is the default
+            // for hosts without the theme bridge.
+            ':root{color-scheme:dark;--lens-text:#e2e8f0;--lens-meta:rgba(255,255,255,0.68);',
+            '--lens-secondary:rgba(255,255,255,0.54);--lens-disabled:rgba(255,255,255,0.38);',
+            '--lens-border:rgba(255,255,255,0.10);--lens-control:rgba(255,255,255,0.04);',
+            '--lens-hover:rgba(255,255,255,0.08);--lens-surface:rgba(255,255,255,0.03);',
+            '--lens-accent-bg:rgba(201,53,69,0.18);--lens-accent-ring:rgba(201,53,69,0.40);',
+            '--lens-focus-ring:rgba(201,53,69,0.55);--lens-tooltip:rgba(18,20,26,0.98);',
+            '--lens-ok:#6ee7b7;--lens-warn:#fcd34d;--lens-error:#fca5a5;',
+            '--lens-chart-text:#a8b0bd;--lens-grid:rgba(255,255,255,0.10);--lens-point:rgba(226,232,240,0.55);',
+            '--lens-point-dim:rgba(226,232,240,0.16);--lens-focus:#f07a86;--lens-selected:#f07a86;',
+            '--lens-reference:rgba(168,176,189,0.75);--lens-ring:#0d0b0f;}',
+            ':root[data-theme=light]{color-scheme:light;--lens-text:#20232b;--lens-meta:#555d69;',
+            '--lens-secondary:#626977;--lens-disabled:#89909b;',
+            '--lens-border:rgba(32,35,43,0.12);--lens-control:rgba(32,35,43,0.03);',
+            '--lens-hover:rgba(32,35,43,0.06);--lens-surface:rgba(32,35,43,0.025);',
+            '--lens-accent-bg:rgba(201,53,69,0.10);--lens-accent-ring:rgba(168,44,59,0.35);',
+            '--lens-focus-ring:#a82c3b;--lens-tooltip:#ffffff;',
+            '--lens-ok:#176b49;--lens-warn:#805300;--lens-error:#b42332;',
+            '--lens-chart-text:#4a515d;--lens-grid:rgba(32,35,43,0.14);--lens-point:rgba(32,35,43,0.50);',
+            '--lens-point-dim:rgba(32,35,43,0.13);--lens-focus:#a82c3b;--lens-selected:#a82c3b;',
+            '--lens-reference:rgba(74,81,93,0.75);--lens-ring:#ffffff;}',
+            // Transparent: the host's own card surface shows through, in both
+            // themes. No viewport heights: the card follows its content.
+            'html,body{margin:0;padding:0;background:transparent;}',
+            'body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;',
             'color:var(--lens-text);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;}',
-            '#root{box-sizing:border-box;padding:16px;display:flex;flex-direction:column;gap:12px;max-width:100%;}',
+            '#root{box-sizing:border-box;padding:12px 14px 14px;display:flex;flex-direction:column;gap:10px;max-width:100%;}',
             '*{box-sizing:border-box;min-width:0;}',
-            'h1,h2,h3{margin:0;font-weight:600;}',
-            '.title{font-size:16px;line-height:1.3;}',
-            '.subtitle{margin:2px 0 0;font-size:12px;line-height:1.35;color:var(--lens-muted);}',
-            '.header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;}.titles{flex:1;}',
-            '.button{font:inherit;font-size:13px;min-height:34px;padding:6px 15px;border-radius:999px;',
-            'border:1px solid rgba(var(--lens-ink-rgb),0.08);background:rgba(var(--lens-ink-rgb),0.04);color:var(--lens-text);cursor:pointer;}',
-            '.button:hover:not(:disabled){background:rgba(var(--lens-ink-rgb),0.08);}',
-            '.button:disabled{color:var(--lens-disabled);cursor:default;}',
-            '.button-quiet{min-height:28px;padding:3px 12px;font-size:12px;}',
-            '.button:focus-visible,.control:focus-visible,.row:focus-visible,summary:focus-visible,',
-            '.segment:focus-visible{outline:2px solid rgba(var(--lens-accent-rgb),0.4);outline-offset:2px;}',
-            // Horizon: one segmented row, the pressed span carried by the brand
-            // red at low weight rather than by a second colour.
-            '.horizon{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}',
-            '.segmented{display:inline-flex;padding:2px;gap:2px;border-radius:999px;',
-            'border:1px solid rgba(var(--lens-ink-rgb),0.08);background:rgba(var(--lens-ink-rgb),0.03);}',
-            '.segment{font:inherit;font-size:13px;line-height:1.3;min-height:28px;padding:3px 13px;',
-            'border:0;border-radius:999px;background:transparent;color:var(--lens-muted);cursor:pointer;}',
-            '.segment:hover{color:var(--lens-text);background:rgba(var(--lens-ink-rgb),0.06);}',
-            '.segment-on{background:rgba(var(--lens-accent-rgb),0.18);color:var(--lens-text);',
-            'box-shadow:inset 0 0 0 1px rgba(var(--lens-accent-rgb),0.32);}',
-            '.coverage-line{margin:-2px 0 0;}',
-            '.card{border:1px solid rgba(var(--lens-ink-rgb),0.08);background:rgba(var(--lens-ink-rgb),0.03);',
-            'border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:8px;}',
-            '.card-title{font-size:16px;line-height:1.3;}',
-            '.sub-title{font-size:14px;line-height:1.3;}',
-            '.card-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;}',
-            '.muted{color:var(--lens-muted);}',
-            '.meta{font-size:12px;line-height:1.4;}',
-            '.body{font-size:14px;}',
             'p{margin:0;overflow-wrap:anywhere;}',
-            '.strong-line{color:var(--lens-text);font-weight:600;margin-top:2px;}',
-            '.tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}@media(min-width:660px){.tiles,.filters{grid-template-columns:repeat(4,minmax(0,1fr));}}',
-            '.tile{border:1px solid rgba(var(--lens-ink-rgb),0.08);background:rgba(var(--lens-ink-rgb),0.03);',
-            'border-radius:12px;padding:10px 12px;}',
-            '.tile-value{font-size:24px;line-height:1.25;font-weight:600;}',
-            '.tile-label{font-size:12px;line-height:1.35;color:var(--lens-label);margin-top:1px;}',
-            '.tile-note{font-size:12px;line-height:1.3;color:var(--lens-faint);min-height:14px;}',
-            '.filters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;}',
-            '.field{display:flex;flex-direction:column;gap:3px;}',
-            '.field-label{font-size:12px;line-height:1.35;color:var(--lens-muted);}',
-            '.control{font:inherit;font-size:14px;min-height:32px;padding:4px 8px;border-radius:8px;max-width:100%;',
-            'border:1px solid rgba(var(--lens-ink-rgb),0.08);background:rgba(var(--lens-ink-rgb),0.04);color:var(--lens-text);}',
-            '.chart{position:relative;height:220px;}',
-            '.chart-small{height:140px;}',
-            '.canvas{width:100%;height:100%;display:block;}',
-            '.tooltip{position:absolute;transform:translateX(-50%);pointer-events:none;font-size:12px;',
-            'line-height:1.35;padding:5px 8px;border-radius:8px;border:1px solid rgba(var(--lens-ink-rgb),0.08);',
-            'background:var(--lens-tooltip);color:var(--lens-text);white-space:nowrap;max-width:100%;}',
-            '.columns{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;align-items:start;}',
-            '@media (min-width:660px){.columns{grid-template-columns:minmax(0,1fr) minmax(0,1fr);}}',
-            '.column{display:flex;flex-direction:column;gap:10px;min-width:0;}',
-            // No inner scroll pane: the document scrolls, the list grows, and
-            // the owner never has to find a second scrollbar to reach a row.
-            '.list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;}',
-            '.row-actions{display:flex;gap:8px;flex-wrap:wrap;}',
-            '.row{display:flex;width:100%;align-items:baseline;justify-content:space-between;gap:10px;',
-            'font:inherit;text-align:left;padding:5px 8px;border-radius:8px;border:1px solid transparent;',
-            'background:transparent;color:var(--lens-text);cursor:pointer;}',
-            '.row:hover{background:rgba(var(--lens-ink-rgb),0.07);}',
-            '.row-active{background:rgba(var(--lens-accent-rgb),0.12);border-color:rgba(var(--lens-accent-rgb),0.25);}',
-            '.row-main{display:flex;align-items:baseline;gap:8px;min-width:0;}',
-            '.row-tokens{font-size:14px;font-weight:600;white-space:nowrap;}',
-            '.row-model{font-size:12px;line-height:1.35;color:var(--lens-faint);overflow:hidden;',
-            'text-overflow:ellipsis;white-space:nowrap;}',
-            '.row-meta{font-size:12px;line-height:1.35;color:var(--lens-muted);text-align:right;}',
-            '.lead{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;}',
-            '.lead-value{font-size:24px;line-height:1.25;font-weight:600;}',
-            '.lead-label{font-size:12px;line-height:1.35;color:var(--lens-muted);}',
-            '.detail-body{display:flex;flex-direction:column;gap:5px;}',
+            '.meta{font-size:12px;line-height:1.4;}',
+            '.muted{color:var(--lens-meta);}',
+            '.sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);border:0;}',
+            '.header{display:flex;align-items:center;justify-content:space-between;gap:12px;}',
+            '.status{display:flex;align-items:baseline;gap:8px;font-size:12px;line-height:1.4;color:var(--lens-meta);flex:1;}',
+            '.dot{flex:0 0 auto;width:8px;height:8px;border-radius:999px;background:var(--lens-disabled);transform:translateY(-1px);}',
+            '.dot-ok{background:var(--lens-ok);}.dot-warn{background:var(--lens-warn);}.dot-error{background:var(--lens-error);}',
+            '.button{font:inherit;font-size:13px;line-height:1.3;min-height:30px;padding:4px 13px;border-radius:999px;',
+            'border:1px solid var(--lens-border);background:var(--lens-control);color:var(--lens-text);cursor:pointer;}',
+            '.button:hover:not(:disabled){background:var(--lens-hover);}',
+            '.button:disabled{color:var(--lens-disabled);cursor:default;}',
+            '.button-quiet{min-height:26px;padding:2px 11px;font-size:12px;}',
+            '.button:focus-visible,.control:focus-visible,.row:focus-visible,summary:focus-visible,',
+            '.segment:focus-visible,.canvas:focus-visible{outline:2px solid var(--lens-focus-ring);outline-offset:2px;}',
+            '.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;}',
+            '.segmented{display:inline-flex;flex:0 0 auto;padding:2px;gap:2px;border-radius:999px;',
+            'border:1px solid var(--lens-border);background:var(--lens-surface);}',
+            '.segment{font:inherit;font-size:13px;line-height:1.3;min-height:28px;min-width:36px;padding:3px 10px;',
+            'border:0;border-radius:999px;background:transparent;color:var(--lens-meta);cursor:pointer;}',
+            '.segment:hover{color:var(--lens-text);background:var(--lens-hover);}',
+            '.segment-on{background:var(--lens-accent-bg);color:var(--lens-text);box-shadow:inset 0 0 0 1px var(--lens-accent-ring);}',
+            '.filters{flex:1 1 360px;display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:8px;}',
+            '.control{font:inherit;font-size:13px;min-height:30px;width:100%;padding:3px 8px;border-radius:8px;',
+            'border:1px solid var(--lens-border);background:var(--lens-control);color:var(--lens-text);',
+            'text-overflow:ellipsis;}',
+            '.coverage{margin-top:-2px;}',
+            '.chart{position:relative;height:260px;overflow:hidden;}',
+            '@media (max-width:640px){.chart{height:220px;}}',
+            '@media (max-width:400px){.chart{height:200px;}}',
+            '.canvas{width:100%;height:100%;display:block;border-radius:6px;}',
+            '.chart-message{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;',
+            'justify-content:center;gap:6px;padding:12px;text-align:center;}',
+            '.message-title{font-size:14px;line-height:1.4;font-weight:600;}',
+            '.tooltip{position:absolute;transform:translateX(-50%);pointer-events:none;font-size:12px;line-height:1.35;',
+            'padding:5px 8px;border-radius:8px;border:1px solid var(--lens-border);background:var(--lens-tooltip);',
+            'color:var(--lens-text);max-width:min(280px,90%);}',
+            '.selection{display:flex;flex-direction:column;gap:4px;padding:10px 12px;border-radius:10px;',
+            'background:var(--lens-surface);border:1px solid var(--lens-border);}',
+            '.selection-lead{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;}',
+            '.selection-lead .button{margin-left:auto;}',
+            '.lead-value{font-size:16px;line-height:1.3;font-weight:600;}',
+            '.focus-line{color:var(--lens-text);}',
+            '.disclosure{border-top:1px solid var(--lens-border);padding-top:8px;}',
+            'summary{cursor:pointer;font-size:14px;line-height:1.4;color:var(--lens-text);}',
+            '.disclosure[open]>summary{margin-bottom:8px;}',
+            '.inline-details>summary{font-size:12px;color:var(--lens-meta);}',
+            '.inline-details[open]>summary{margin-bottom:6px;}',
+            '.detail-body{display:flex;flex-direction:column;gap:4px;}',
             '.detail-row{display:flex;align-items:baseline;justify-content:space-between;gap:10px;}',
-            '.detail-label{font-size:12px;line-height:1.35;color:var(--lens-muted);}',
+            '.detail-label{font-size:12px;line-height:1.4;color:var(--lens-meta);}',
             '.detail-value{font-size:14px;text-align:right;overflow-wrap:anywhere;}',
-            '.detail-note{font-size:12px;line-height:1.35;color:var(--lens-muted);margin:-2px 0 3px;}',
-            '.legend{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px;',
-            'font-size:12px;line-height:1.35;color:var(--lens-muted);}',
-            '.legend-item{display:flex;align-items:center;gap:8px;}',
-            '.legend-mark{flex:0 0 auto;width:14px;height:2px;border-radius:2px;background:var(--lens-line-1);}',
-            '.legend-mark.loose{width:6px;height:6px;border-radius:999px;background:var(--lens-related);}',
-            '.notes{margin:0;padding-left:17px;display:flex;flex-direction:column;gap:5px;',
-            'font-size:12px;line-height:1.4;color:var(--lens-muted);}',
-            '.disclosures{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));',
-            'gap:10px;align-items:start;}',
-            'summary{cursor:pointer;font-size:14px;line-height:1.35;color:var(--lens-label);}',
-            '.details-card{gap:6px;}',
-            '.details-card[open]{gap:8px;}',
-            '.inline-details{display:flex;flex-direction:column;gap:6px;}',
-            '.inline-details>summary{font-size:12px;color:var(--lens-muted);}'
+            '.detail-note{font-size:12px;line-height:1.4;color:var(--lens-meta);margin:-2px 0 4px;}',
+            '.list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px;}',
+            '.row{display:flex;width:100%;align-items:baseline;justify-content:space-between;gap:10px;font:inherit;',
+            'text-align:left;padding:5px 8px;border-radius:8px;border:1px solid transparent;background:transparent;',
+            'color:var(--lens-text);cursor:pointer;}',
+            '.row:hover{background:var(--lens-hover);}',
+            '.row-active{background:var(--lens-accent-bg);border-color:var(--lens-accent-ring);}',
+            '.row-main{display:flex;flex:1 1 auto;align-items:baseline;gap:8px;min-width:0;}',
+            '.row-tokens{flex:0 0 auto;font-size:14px;font-weight:600;white-space:nowrap;}',
+            '.row-model{font-size:12px;line-height:1.35;color:var(--lens-secondary);overflow:hidden;',
+            'text-overflow:ellipsis;white-space:nowrap;}',
+            '.row-meta{flex:0 1 auto;font-size:12px;line-height:1.35;color:var(--lens-meta);text-align:right;}',
+            '@media (max-width:480px){.row{flex-direction:column;align-items:stretch;gap:1px;}.row-meta{text-align:left;}}',
+            '.row-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;}',
+            '.strong-line{color:var(--lens-text);font-weight:600;margin-top:6px;}',
+            '.notes{margin:4px 0 0;padding-left:17px;display:flex;flex-direction:column;gap:4px;',
+            'font-size:12px;line-height:1.4;color:var(--lens-meta);}'
         ].join('');
         var style = document.createElement('style');
         style.textContent = css;
@@ -1500,10 +1422,11 @@
     var offTheme = window.OuroborosWidget && typeof window.OuroborosWidget.onTheme === 'function'
         ? window.OuroborosWidget.onTheme(function (theme) {
             if (disposed) return;
-            document.documentElement.dataset.theme = theme;
+            document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
             readChartColors();
-            // A theme change never rebuilds controls or closes disclosures.
-            chartDraws.forEach(function (draw) { draw(); });
+            // A theme change repaints the canvas; it never rebuilds controls,
+            // moves focus or closes a disclosure.
+            repaintCharts();
         }) : null;
     if (!document.getElementById('root')) {
         var rootNode = document.createElement('div');
@@ -1511,17 +1434,19 @@
         document.body.appendChild(rootNode);
     }
     render();
-    load(false);
+    load();
 
     var poll = setInterval(function () {
         if (disposed || document.visibilityState !== 'visible') return;
-        // Never redraw under an open dropdown or a keyboard user's hands.
-        var root = document.getElementById('root');
-        var active = document.activeElement;
-        if (root && active && active !== document.body && root.contains(active)) return;
-        load(false);
+        load();
     }, POLL_MS);
     timers.push(poll);
+    // Coming back to a page that was hidden for longer than one poll reads at
+    // once instead of showing an old answer until the next tick.
+    on(document, 'visibilitychange', function () {
+        if (disposed || document.visibilityState !== 'visible') return;
+        if (!state.loading && Date.now() - state.receivedAt >= POLL_MS) load();
+    });
 
     if (typeof window.__ouroWidgetOnDispose === 'function') {
         window.__ouroWidgetOnDispose(function () {
@@ -1532,15 +1457,18 @@
             clearScheduled();
             observers.forEach(function (observer) { observer.disconnect(); });
             observers = [];
-        chartDraws = [];
+            chartDraws = [];
             listeners.forEach(function (entry) {
                 entry[0].removeEventListener(entry[1], entry[2], entry[3]);
             });
             listeners = [];
+            requestTimers.forEach(clearTimeout);
+            requestTimers.clear();
             controllers.forEach(abort);
             controllers.clear();
             dataController = null;
-            trajectoryController = null;
+            pendingData = null;
+            inFlight = null;
         });
     }
 })();

@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import re
 import sys
 import types
 from pathlib import Path
+from urllib.parse import parse_qsl
 
 import httpx
 import pytest
+from starlette.requests import Request
 
 from lib.events import parse_socket_envelope
 from lib.host_adapter import HostBindingTerminalError, HostDelivery, HostTurnStatus
@@ -282,8 +285,9 @@ class _Api:
 
 
 class _Request:
-    def __init__(self, body) -> None:
+    def __init__(self, body, method="POST") -> None:
         self.body = body
+        self.method = method
 
     async def json(self):
         return self.body
@@ -401,6 +405,115 @@ def test_slack_file_upload_copies_immutable_bytes_into_existing_outbox(tool_json
     item = BridgeStore(tmp_path).claim_outbox()
     assert item is not None and item.kind == "mutation" and item.operation == "upload_file"
     assert Path(item.payload["path"]).read_bytes() == b"bytes before enqueue"
+
+
+def _upload_provider(calls):
+    """Fake Slack External Upload API behind the real SlackClient."""
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/files.getUploadURLExternal"):
+            calls.append(("start", dict(parse_qsl(request.content.decode("utf-8")))))
+            return httpx.Response(200, json={"ok": True, "upload_url": "https://uploads.example/u", "file_id": "F1"})
+        if request.url.host == "uploads.example":
+            calls.append(("bytes", request.content))
+            return httpx.Response(200, text="ok")
+        assert request.url.path.endswith("/files.completeUploadExternal")
+        calls.append(("complete", json.loads(request.content)))
+        return httpx.Response(200, json={"ok": True, "files": [{"id": "F1"}]})
+
+    return provider
+
+
+def _deliver_outbox(state: Path, calls: list) -> None:
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_upload_provider(calls))) as http:
+            worker = OutboundWorker(BridgeStore(state), SlackClient("xoxb-test", "xapp-test", http_client=http))
+            assert await worker.process_once()
+            assert not await worker.process_once()
+
+    asyncio.run(run())
+
+
+_OPAQUE_REQUEST_IDS = {
+    "slash": "report/2026-10",
+    "traversal": "../../../escape",
+    "absolute": None,  # a path inside this test's own tmp_path
+    "windows_absolute": "C:\\temp\\absolute",
+    "windows_traversal": "..\\..\\escape",
+    "drive_relative": "C:escape",
+    "colon": "upload:1",
+    "long": "x" * 1000,
+    "unicode": "идея/с/слэшем",
+}
+
+
+@pytest.mark.parametrize("kind", list(_OPAQUE_REQUEST_IDS))
+def test_upload_request_id_is_only_an_outbox_key(tool_json, tmp_path, kind):
+    # Nested so that even the pre-fix traversal could not leave tmp_path.
+    state = tmp_path / "a" / "b" / "state"
+    state.mkdir(parents=True)
+    request_id = _OPAQUE_REQUEST_IDS[kind] or str(tmp_path / "absolute" / "x")
+    source = tmp_path / "source" / "Отчёт Q3 (final).txt"
+    source.parent.mkdir()
+    source.write_bytes(b"first bytes")
+    module = _load_plugin()
+    api = _Api(state)
+    module.register(api)
+    upload, _metadata = api.tools["slack_file_upload"]
+
+    def files():
+        return sorted(
+            path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")
+            if path.is_file() and not path.name.startswith("slack_bridge.sqlite3")
+        )
+
+    first = tool_json(upload(file_path=str(source), channel_id="C1", title="Title", request_id=request_id))
+    source.write_bytes(b"second bytes")
+    retry = tool_json(upload(file_path=str(source), channel_id="C2", title="Other", request_id=request_id))
+    assert first["ok"] and retry["ok"]
+    assert first["request_id"] == retry["request_id"] == request_id
+    assert first["deduplicated"] is False and retry["deduplicated"] is True
+    staged = list((state / "outbound" / "files").iterdir())
+    assert len(staged) == 1 and staged[0].read_bytes() == b"first bytes"
+    assert re.fullmatch(r"[0-9a-f]{32}", staged[0].name[:32])
+    assert staged[0].name[32:] == "-" + module._safe_name(source.name)
+    assert files() == sorted(["source/" + source.name, staged[0].relative_to(tmp_path).as_posix()])
+
+    calls = []
+    _deliver_outbox(state, calls)
+    assert calls == [
+        ("start", {"filename": source.name, "length": str(len(b"first bytes"))}),
+        ("bytes", b"first bytes"),
+        ("complete", {"files": [{"id": "F1", "title": "Title"}], "channel_id": "C1"}),
+    ]
+    receipt = BridgeStore(state).delivery_receipt(request_id)
+    assert receipt["request_id"] == request_id and receipt["operation"] == "upload_file"
+    assert [part["state"] for part in receipt["parts"]] == ["delivered"]
+    assert files() == ["source/" + source.name]
+
+
+def test_upload_queued_with_a_legacy_staged_name_is_delivered_as_stored(tmp_path):
+    # Slack Bridge 1.4.3 named staged copies after the request ID. The worker
+    # only follows the stored path, so those rows need no migration.
+    staged = tmp_path / "outbound" / "files" / "legacy-1-0123456789ab-report.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"legacy bytes")
+    BridgeStore(tmp_path).enqueue_mutation(
+        request_id="legacy-1", operation="upload_file",
+        payload={"path": str(staged), "filename": "report.txt", "title": "", "channel": "C1",
+                 "thread_ts": "", "initial_comment": ""},
+    )
+    _load_plugin().register(_Api(tmp_path))
+
+    calls = []
+    _deliver_outbox(tmp_path, calls)
+    assert calls == [
+        ("start", {"filename": "report.txt", "length": str(len(b"legacy bytes"))}),
+        ("bytes", b"legacy bytes"),
+        ("complete", {"files": [{"id": "F1", "title": "report.txt"}], "channel_id": "C1"}),
+    ]
+    assert not staged.exists()
+    assert BridgeStore(tmp_path).delivery_receipt("legacy-1")["parts"][0]["state"] == "delivered"
 
 
 def test_upload_completion_transport_loss_is_terminally_uncertain(tmp_path):
@@ -708,6 +821,110 @@ def test_saving_settings_refuses_to_overwrite_an_unreadable_file(tmp_path):
         accepted = await handler(_Request({"binding_id": "f" * 32}))
         assert accepted.status_code == 200
         assert json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))["binding_id"] == "f" * 32
+
+    asyncio.run(run())
+
+
+def _http_request(method: str, body: bytes = b"") -> Request:
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request({"type": "http", "method": method, "path": "/settings/save",
+                    "headers": [], "query_string": b""}, receive)
+
+
+def _settings_route(state: Path):
+    api = _Api(state)
+    _load_plugin().register(api)
+    handler, methods = api.routes["settings/save"]
+    form = api.settings["slack_presence"][1]["components"][1]
+    return handler, methods, [field["name"] for field in form["fields"]]
+
+
+def _file_identity(path: Path):
+    stat = path.stat()
+    return path.read_bytes(), stat.st_ino, stat.st_mtime_ns
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_settings_read_hydrates_the_form_without_writing(tmp_path, method):
+    async def run():
+        handler, methods, field_names = _settings_route(tmp_path)
+        assert methods == ("GET", "POST")
+        path = tmp_path / "settings.json"
+        # A read that consumed this body and saved it would clear the binding.
+        clearing = json.dumps({"binding_id": "", "SLACK_INBOUND_WORKERS": "9"}).encode()
+
+        absent = await handler(_http_request(method, clearing))
+        assert absent.status_code == 200
+        assert json.loads(absent.body) == {
+            "binding_id": "", "SLACK_INBOUND_WORKERS": "4", "SLACK_OUTBOUND_WORKERS": "2",
+        }
+        assert list(tmp_path.iterdir()) == []
+
+        path.write_text(json.dumps({"binding_id": "a" * 32, "SLACK_OUTBOUND_WORKERS": 5, "unrelated": True}))
+        before = _file_identity(path)
+        stored = json.loads((await handler(_http_request(method, clearing))).body)
+        assert stored == {"binding_id": "a" * 32, "SLACK_INBOUND_WORKERS": "4", "SLACK_OUTBOUND_WORKERS": "5"}
+        assert list(stored) == field_names
+        assert _file_identity(path) == before
+
+        path.write_bytes(b'{"binding_id": "' + b"a" * 32 + b'", truncated')
+        before = _file_identity(path)
+        refused = await handler(_http_request(method, clearing))
+        assert refused.status_code == 409
+        assert _file_identity(path) == before
+        assert [item.name for item in tmp_path.iterdir()] == ["settings.json"]
+
+    asyncio.run(run())
+
+
+def test_hydrated_settings_round_trip_keeps_binding_and_explicit_edits(tmp_path):
+    async def run():
+        handler, _methods, _fields = _settings_route(tmp_path)
+        path = tmp_path / "settings.json"
+        path.write_text(json.dumps({"binding_id": "a" * 32, "unrelated": True}))
+
+        async def read():
+            return json.loads((await handler(_http_request("GET"))).body)
+
+        async def save(values):
+            return await handler(_http_request("POST", json.dumps(values).encode()))
+
+        form = await read()
+        form["SLACK_OUTBOUND_WORKERS"] = "3"
+        assert (await save(form)).status_code == 200
+        assert json.loads(path.read_text()) == {
+            "binding_id": "a" * 32, "unrelated": True,
+            "SLACK_INBOUND_WORKERS": 4, "SLACK_OUTBOUND_WORKERS": 3,
+        }
+        assert await read() == {"binding_id": "a" * 32, "SLACK_INBOUND_WORKERS": "4", "SLACK_OUTBOUND_WORKERS": "3"}
+
+        # Replacing or deliberately clearing the binding stays an owner choice.
+        assert (await save({**form, "binding_id": "b" * 32})).status_code == 200
+        assert (await read())["binding_id"] == "b" * 32
+        assert (await save({**form, "binding_id": ""})).status_code == 200
+        assert json.loads(path.read_text())["binding_id"] == ""
+
+        before = path.read_bytes()
+        invalid = await save({"binding_id": "binding-1", "SLACK_INBOUND_WORKERS": "7"})
+        assert invalid.status_code == 400
+        assert path.read_bytes() == before
+
+    asyncio.run(run())
+
+
+def test_settings_save_keeps_its_error_order_on_unreadable_settings(tmp_path):
+    async def run():
+        handler, _methods, _fields = _settings_route(tmp_path)
+        path = tmp_path / "settings.json"
+        corrupt = b'{"binding_id": "' + b"a" * 32 + b'", truncated'
+        path.write_bytes(corrupt)
+        # A non-object body is refused before the settings file is read.
+        for body, status in ((b"[]", 400), (b"null", 400), (b"{}", 409), (b"{", 409), (b"", 409)):
+            response = await handler(_http_request("POST", body))
+            assert response.status_code == status, body
+            assert path.read_bytes() == corrupt
 
     asyncio.run(run())
 

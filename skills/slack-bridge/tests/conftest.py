@@ -12,6 +12,10 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "serial: process consumer requiring exclusive fixture execution")
+
+
 def _decode_tool_json(result: Any) -> Any:
     """Decode one registered tool's result, asserting the host's `str` ABI.
 

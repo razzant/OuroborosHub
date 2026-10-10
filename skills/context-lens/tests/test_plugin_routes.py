@@ -5,6 +5,10 @@ The gateway (``ouroboros/gateway/extensions.py``) calls a registered handler as
 JSON response, so a stand-in with ``query_params`` reproduces the real calling
 convention without importing the host. When Starlette happens to be installed,
 the same handlers are additionally exercised through a real ``Request``.
+
+Fixtures are written into a fresh temporary directory: a usage store built by
+``store_fixture`` (core schema 1) and/or a retired journal. Nothing here reads
+a real install.
 """
 
 from __future__ import annotations
@@ -22,6 +26,9 @@ import unittest
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import store_fixture as sf  # noqa: E402
 
 
 def _load(name: str, filename: str):
@@ -35,6 +42,7 @@ def _load(name: str, filename: str):
 
 plugin = _load("context_lens_plugin_under_test", "plugin.py")
 lens_core = plugin.lens_core
+lens_store = plugin.lens_store
 
 
 # ---------------------------------------------------------------------------
@@ -145,14 +153,13 @@ class TestRegistration(RouteTestCase):
         self.assertEqual(api.tools, [])
         self.assertEqual(api.ws_handlers, [])
 
-    def test_registers_the_module_widget_with_a_fixed_frame_height(self) -> None:
-        """A declared `height` is what keeps the host's auto-height observer off.
+    def test_registers_an_auto_height_module_that_follows_the_host_theme(self) -> None:
+        """No `height`: the card follows its content through the host's resize bridge.
 
-        `web/modules/widget_module.js` mounts the resize bridge only when
-        `render.height` is undefined or null; that bridge is the ResizeObserver
-        whose height round trip WebKit reported as an undelivered-notification
-        loop. So the fixed height is load-bearing, not cosmetic, and it must stay
-        inside the host's own frame bounds.
+        `web/modules/widget_module.js` mounts that bridge exactly when
+        `render.height` is absent. The widget keeps it loop-free (fixed-height
+        chart box, nothing sized from the viewport); `appearance: host` opts into
+        the resolved Light/Dark palette.
         """
         api = self.register()
         render = api.tabs["lens"]["render"]
@@ -160,54 +167,39 @@ class TestRegistration(RouteTestCase):
         self.assertEqual(render["entry"], "widget.js")
         self.assertEqual(render["appearance"], "host")
         self.assertEqual(render["start"], "auto")
-        self.assertEqual(render["height"], 760)
-        self.assertIsNotNone(render["height"])
-        self.assertNotIn("max_height", render)      # a fixed box, not a ceiling
-        self.assertLessEqual(render["height"], 8192)
-        self.assertGreaterEqual(render["height"], 320)
+        self.assertNotIn("height", render)
+        self.assertNotIn("max_height", render)
         self.assertTrue((_ROOT / render["entry"]).is_file())
 
-    def test_the_widget_owns_the_scrolling_the_fixed_height_implies(self) -> None:
-        # With no auto-height bridge the frame cannot grow, so the document must
-        # scroll itself and no inner pane may compete with that scroll.
-        widget = (_ROOT / "widget.js").read_text(encoding="utf-8")
-        self.assertIn("body{min-height:100%;overflow-y:auto;", widget)
-        self.assertNotIn("max-height:268px;overflow-y:auto", widget)
-        self.assertEqual(widget.count("overflow-y:auto"), 1)
-
     def test_asks_the_host_for_a_wide_card_through_the_declared_span(self) -> None:
-        # `span` is the host's own width contract for a widget card
-        # (extension_surface_names._widget_span_from_render normalizes it to 1
-        # or 2), so the chart is asked for two columns rather than being made
-        # wide by the widget's own CSS.
         api = self.register()
-        render = api.tabs["lens"]["render"]
-        self.assertEqual(render["span"], 2)
-        self.assertIn(render["span"], (1, 2))
+        self.assertEqual(api.tabs["lens"]["render"]["span"], 2)
 
     def test_manifest_and_registration_agree(self) -> None:
         api = self.register()
         render = api.tabs["lens"]["render"]
         text = (_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("tab_id: lens", text)
-        self.assertIn("entry: widget.js", text)
-        self.assertIn("height: %d" % render["height"], text)
-        self.assertIn("span: %d" % render["span"], text)
-        self.assertIn("start: auto", text)
-        self.assertNotIn("max_height:", text)
+        front = text.split("\n---\n", 1)[0]
+        self.assertIn("tab_id: lens", front)
+        self.assertIn("entry: widget.js", front)
+        self.assertIn("appearance: %s" % render["appearance"], front)
+        self.assertIn("span: %d" % render["span"], front)
+        self.assertIn("start: auto", front)
+        self.assertNotIn("height:", front)
 
     def test_manifest_version_matches_the_documented_release(self) -> None:
         text = (_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("version: 1.1.3", text)
+        self.assertIn("version: 1.2.0", text)
 
-    def test_unload_callback_releases_the_reader(self) -> None:
+    def test_unload_callback_releases_the_reader_and_the_snapshots(self) -> None:
         api = self.register()
         write_ledger(self.root, chain("a1", prompt_tokens=1000))
         plugin.route_data(FakeRequest())
-        self.assertTrue(api.unload)
+        self.assertTrue(plugin._snapshots)
         for callback in api.unload:
             callback()
         self.assertIsNone(plugin._window)
+        self.assertFalse(plugin._snapshots)
 
 
 class TestDataRoute(RouteTestCase):
@@ -242,7 +234,7 @@ class TestDataRoute(RouteTestCase):
         write_ledger(self.root, chain("a1", prompt_tokens=1000))
         plugin.route_data(FakeRequest())
         payload = plugin.route_data(FakeRequest(refresh="1"))
-        self.assertEqual(payload["counters"]["physical_attempts"], 1)
+        self.assertEqual(payload["counters"]["registered_attempts"], 1)
         self.assertEqual(payload["window"]["lines_read"], 3)   # re-read, not doubled
 
     def test_missing_ledger_is_an_explained_unavailability(self) -> None:
@@ -338,7 +330,7 @@ class TestDataRoute(RouteTestCase):
             thread.join()
         self.assertEqual(errors, [])
         for payload in results:
-            self.assertEqual(payload["counters"]["physical_attempts"], 30)
+            self.assertEqual(payload["counters"]["registered_attempts"], 30)
             self.assertEqual(payload["window"]["lines_read"], 90)
 
 
@@ -384,9 +376,13 @@ class TestHorizonParameter(RouteTestCase):
                          payload["horizon"]["now_ms"] - 7 * 24 * 3600 * 1000)
         self.assertEqual(payload["horizon"]["excluded_older_than_cutoff"], 1)
         self.assertEqual(len(payload["points"]), 1)
-        # A record older than the cutoff is still retained, so the seven days
-        # asked for really are inside the read window.
-        self.assertTrue(payload["horizon"]["covers_selected_span"])
+        # A record older than the cutoff is still retained, so every journal
+        # row of the seven days was read — complete relative to the journal,
+        # which is labelled historical rather than current.
+        self.assertTrue(payload["horizon"]["reaches_cutoff"])
+        self.assertTrue(payload["horizon"]["selection_complete"])
+        self.assertEqual(payload["source"]["kind"], "legacy_journal")
+        self.assertFalse(payload["source"]["current"])
         self.assertNotIn("vendor/model-old", json.dumps(payload))
 
     def test_an_unknown_horizon_is_neither_trusted_nor_reflected(self) -> None:
@@ -436,12 +432,13 @@ class TestHorizonParameter(RouteTestCase):
         task = lens_core._opaque("root", "t-")
         bounded = plugin.route_trajectory(FakeRequest(task=task, horizon="24h"))
         self.assertEqual(bounded["horizon"]["selected"], "24h")
-        self.assertEqual(bounded["own_outside_horizon"], 1)
+        # Bounded to its own snapshot: requests outside it are not counted.
+        self.assertIsNone(bounded["own_outside_horizon"])
+        self.assertRegex(bounded["snapshot"], r"\As-[0-9a-f]{12}\Z")
         sizes = [p["prompt_tokens"] for g in bounded["groups"] for p in g["points"]]
         self.assertEqual(sizes, [10000])
         every = plugin.route_trajectory(FakeRequest(task=task))
         self.assertEqual(every["horizon"]["selected"], "available")
-        self.assertEqual(every["own_outside_horizon"], 0)
         sizes = sorted(p["prompt_tokens"] for g in every["groups"] for p in g["points"])
         self.assertEqual(sizes, [10000, 30000])
 
@@ -477,7 +474,9 @@ class TestTrajectoryRoute(RouteTestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(len(payload["groups"]), 2)
         self.assertEqual(len(payload["related"]), 1)
-        self.assertTrue(all(group["joined"] for group in payload["groups"]))
+        # Nothing is joined: grouping is for reading, not a claimed sequence.
+        self.assertFalse(payload["joined"])
+        self.assertFalse(any(group["joined"] for group in payload["groups"]))
         self.assertFalse(payload["related"][0]["joined"])
 
     def test_missing_task_parameter(self) -> None:
@@ -517,6 +516,113 @@ class TestTrajectoryRoute(RouteTestCase):
         payload = plugin.route_trajectory(FakeRequest(task="t-abcdefabcdef"))
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["reason"], "no_ledger")
+
+
+class TestStoreRoutes(RouteTestCase):
+    """The usage store is the source whenever a store file exists."""
+
+    def _store(self, **kwargs) -> "sf.Store":
+        store = sf.Store(self.root, **kwargs)
+        now = lens_core.now_ms() / 1000.0
+        store.add("raw-attempt-one", epoch=now - 120, prompt_tokens=42000, task_id="raw-root-task",
+                  root_task_id="raw-root-task",
+                  extra={"physical_context": sf.FIT_NANO, "credential_profile_id": "CRED-SECRET"})
+        store.add("raw-attempt-two", epoch=now - 60, prompt_tokens=0, task_id="raw-root-task",
+                  root_task_id="raw-root-task")
+        store.add("raw-attempt-three", epoch=now - 30, prompt_tokens=7000, task_id="raw-child-task",
+                  root_task_id="raw-root-task",
+                  category="review")
+        return store
+
+    def test_the_store_answers_with_its_own_source_facts(self) -> None:
+        self.register()
+        self._store()
+        payload = plugin.route_data(FakeRequest(horizon="1h"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["source"]["kind"], "usage_store")
+        self.assertTrue(payload["source"]["current"])
+        self.assertEqual(payload["source"]["read_at_ms"], payload["horizon"]["now_ms"])
+        self.assertTrue(payload["horizon"]["selection_complete"])
+        self.assertEqual([p["prompt_tokens"] for p in payload["points"]], [42000, 0, 7000])
+        self.assertEqual(payload["points"][0]["mode"], "nano")
+        self.assertIsNone(payload["window"])
+        self.assertRegex(payload["snapshot"]["id"], r"\As-[0-9a-f]{12}\Z")
+        blob = json.dumps(payload)
+        for leaked in ("CRED-SECRET", self.root, "usage.sqlite", "raw-root-task", "raw-child-task",
+                       "raw-attempt"):
+            self.assertNotIn(leaked, blob)
+
+    def test_the_frozen_journal_is_never_read_while_a_store_exists(self) -> None:
+        self.register()
+        self._store()
+        write_ledger(self.root, chain("journal-only", prompt_tokens=123456))
+        payload = plugin.route_data(FakeRequest())
+        self.assertEqual(payload["source"]["kind"], "usage_store")
+        self.assertNotIn(123456, [p["prompt_tokens"] for p in payload["points"]])
+
+    def test_a_store_that_cannot_be_read_is_never_papered_over_with_the_journal(self) -> None:
+        self.register()
+        write_ledger(self.root, chain("journal-only", prompt_tokens=123456))
+        path = os.path.join(self.root, "state", "usage.sqlite")
+        for code, prepare in (
+            ("store_unreadable", lambda: pathlib.Path(path).write_bytes(b"not a database" * 50)),
+            ("store_name_tier", lambda: sf.Store(self.root, application_id=sf.APPLICATION_ID_NAME)),
+            ("store_unsupported", lambda: sf.Store(self.root, schema_version=9)),
+            ("store_not_ready", lambda: sf.Store(self.root, import_status="running")),
+        ):
+            if os.path.exists(path):
+                os.remove(path)
+            prepare()
+            payload = plugin.route_data(FakeRequest())
+            self.assertFalse(payload["ok"], code)
+            self.assertEqual(payload["reason"], code)
+            self.assertTrue(payload["message"])
+            blob = json.dumps(payload)
+            self.assertNotIn("123456", blob)
+            self.assertNotIn(self.root, blob)
+            self.assertNotIn("usage.sqlite", blob)
+
+    def test_a_busy_store_is_a_typed_visible_answer(self) -> None:
+        self.register()
+        store = self._store()
+        writer = store.connect()
+        writer.execute("BEGIN EXCLUSIVE")
+        try:
+            payload = plugin.route_data(FakeRequest())
+        finally:
+            writer.execute("ROLLBACK")
+            writer.close()
+        self.assertEqual(payload["reason"], "store_busy")
+        self.assertIn("busy", payload["message"])
+
+    def test_the_trajectory_answers_from_the_overview_snapshot(self) -> None:
+        self.register()
+        self._store()
+        overview = plugin.route_data(FakeRequest(horizon="24h"))
+        task = lens_core._opaque("raw-root-task", "t-")
+        answer = plugin.route_trajectory(FakeRequest(task=task, snapshot=overview["snapshot"]["id"]))
+        self.assertTrue(answer["ok"])
+        self.assertEqual(answer["snapshot"], overview["snapshot"]["id"])
+        self.assertEqual(answer["horizon"]["now_ms"], overview["horizon"]["now_ms"], "the same anchor")
+        self.assertEqual(sorted(p["prompt_tokens"] for g in answer["groups"] for p in g["points"]), [0, 42000])
+        self.assertEqual(len(answer["related"]), 1)
+        self.assertIsNone(answer["own_outside_horizon"])
+
+    def test_an_expired_snapshot_is_said_never_silently_replaced(self) -> None:
+        self.register()
+        self._store()
+        first = plugin.route_data(FakeRequest())["snapshot"]["id"]
+        for _ in range(plugin.MAX_SNAPSHOTS):
+            plugin.route_data(FakeRequest())
+        task = lens_core._opaque("raw-root-task", "t-")
+        answer = plugin.route_trajectory(FakeRequest(task=task, snapshot=first))
+        self.assertFalse(answer["ok"])
+        self.assertTrue(answer["available"])
+        self.assertEqual(answer["reason"], "snapshot_expired")
+        self.assertEqual(len(plugin._snapshots), plugin.MAX_SNAPSHOTS)
+        unknown = plugin.route_trajectory(FakeRequest(task=task, snapshot="<script>"))
+        self.assertEqual(unknown["reason"], "snapshot_expired")
+        self.assertNotIn("<script>", json.dumps(unknown))
 
 
 class TestStarletteIntegration(RouteTestCase):

@@ -1,9 +1,51 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 from typing import Any, Mapping, Sequence
+
+
+# Slack file-object facts a model may see (https://docs.slack.dev/reference/objects/file-object/).
+# Credentialed or bulky provider fields - url_private*, permalink_public, thumb_*,
+# preview*, shares, initial_comment - are deliberately absent.
+_FILE_TEXT_FACTS = (
+    "id", "name", "title", "filetype", "pretty_type", "mimetype", "mode", "external_type",
+    "external_id", "external_url", "permalink", "file_access",
+)
+_FILE_FLAG_FACTS = ("is_external", "is_deleted", "is_tombstoned", "is_hidden_by_limit")
+# Already carried by the stored declaration and the frozen attachment keys.
+DECLARED_FILE_KEYS = frozenset({"id", "name", "mimetype", "size"})
+
+
+def file_facts(raw: Any) -> dict[str, Any]:
+    """Project one Slack file object onto curated facts; malformed values are dropped."""
+    if not isinstance(raw, Mapping):
+        return {}
+    facts: dict[str, Any] = {}
+    for key in _FILE_TEXT_FACTS:
+        value = raw.get(key)
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool) and str(value).strip():
+            facts[key] = str(value).strip()
+    if isinstance(raw.get("size"), (str, int, float)) and not isinstance(raw.get("size"), bool):
+        facts["size"] = _int(raw["size"])
+    for key in _FILE_FLAG_FACTS:
+        if isinstance(raw.get(key), bool):
+            facts[key] = raw[key]
+    return facts
+
+
+def provider_facts(structured: Mapping[str, Any]) -> dict[str, Any]:
+    """Preserve event facts while omitting private file URLs and previews.
+
+    Submitted events and queued-event observations use the same projection.
+    """
+    facts = dict(structured)
+    for key in ("message", "previous_message"):
+        carrier = facts.get(key)
+        if isinstance(carrier, Mapping) and isinstance(carrier.get("files"), list):
+            facts[key] = {**carrier, "files": [file_facts(file) for file in carrier["files"]]}
+    return facts
 
 
 @dataclass(frozen=True)
@@ -13,14 +55,17 @@ class SlackFile:
     mimetype: str
     size: int
     url_private: str
+    facts: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
+        # url_private stays in the durable declaration for staging only.
         return {
             "file_id": self.file_id,
             "name": self.name,
             "mimetype": self.mimetype,
             "size": self.size,
             "url_private": self.url_private,
+            **{key: value for key, value in self.facts.items() if key not in DECLARED_FILE_KEYS},
         }
 
 
@@ -69,28 +114,33 @@ def _text(value: Any) -> str:
 def _int(value: Any) -> int:
     try:
         return max(0, int(value or 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
 def _files(raw: Any) -> tuple[SlackFile, ...]:
+    """Keep every declared file with an ID, including ones without a private URL.
+
+    Bytes are staged later when Slack serves them; the declaration itself is a
+    message fact the model sees either way.
+    """
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
         return ()
     parsed: list[SlackFile] = []
     for item in raw:
-        if not isinstance(item, Mapping):
+        facts = file_facts(item)
+        file_id = facts.get("id", "")
+        if not file_id:
             continue
-        file_id = _text(item.get("id"))
-        url_private = _text(item.get("url_private_download") or item.get("url_private"))
-        if not file_id or not url_private:
-            continue
+        url = item.get("url_private_download") or item.get("url_private")
         parsed.append(
             SlackFile(
                 file_id=file_id,
-                name=_text(item.get("name") or item.get("title") or file_id),
-                mimetype=_text(item.get("mimetype") or "application/octet-stream"),
-                size=_int(item.get("size")),
-                url_private=url_private,
+                name=facts.get("name") or facts.get("title") or file_id,
+                mimetype=facts.get("mimetype") or "application/octet-stream",
+                size=facts.get("size", 0),
+                url_private=url.strip() if isinstance(url, str) else "",
+                facts=facts,
             )
         )
     return tuple(parsed)
@@ -175,7 +225,15 @@ def parse_socket_envelope(
         actor_user_id = app_event_id
     item = event.get("item") if isinstance(event.get("item"), Mapping) else {}
     channel_id = _text(event.get("channel") or message.get("channel") or previous.get("channel") or item.get("channel"))
-    message_ts = _text(message.get("ts") or event.get("deleted_ts") or item.get("ts") or event.get("ts") or previous.get("ts"))
+    message_ts = _text(message.get("ts") or item.get("ts") or event.get("ts") or previous.get("ts"))
+    thread_ts = _text(event.get("thread_ts") or message.get("thread_ts") or item.get("thread_ts"))
+    event_ts = _text(event.get("event_ts") or wrapper.get("event_time"))
+    if subtype == "message_deleted":
+        # The outer ts stamps the deletion itself; the deleted message and its
+        # original thread are what the event is about.
+        message_ts = _text(event.get("deleted_ts") or previous.get("ts"))
+        thread_ts = _text(event.get("thread_ts") or previous.get("thread_ts"))
+        event_ts = _text(event.get("event_ts") or event.get("ts") or wrapper.get("event_time"))
     files = _files(message.get("files") or event.get("files"))
     structured: dict[str, Any] = {}
     blocks = message.get("blocks") or event.get("blocks")
@@ -234,8 +292,8 @@ def parse_socket_envelope(
         channel_id=channel_id,
         channel_type=channel_type,
         message_ts=message_ts,
-        thread_ts=_text(event.get("thread_ts") or message.get("thread_ts") or item.get("thread_ts")),
-        event_ts=_text(event.get("event_ts") or wrapper.get("event_time")),
+        thread_ts=thread_ts,
+        event_ts=event_ts,
         client_msg_id=_text(event.get("client_msg_id")),
         text=text,
         files=files,

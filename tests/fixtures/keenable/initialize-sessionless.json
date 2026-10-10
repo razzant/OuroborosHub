@@ -1,0 +1,16 @@
+{
+  "result": {
+    "protocolVersion": "2025-06-18",
+    "capabilities": {
+      "tools": {},
+      "resources": {},
+      "prompts": {}
+    },
+    "serverInfo": {
+      "name": "keenable-mcp-server",
+      "version": "0.2.1"
+    }
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

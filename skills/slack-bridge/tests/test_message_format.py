@@ -66,7 +66,7 @@ def test_retry_and_repeated_request_id_preserve_exact_format_and_payload(tmp_pat
         def provider(request):
             calls.append(json.loads(request.content))
             if len(calls) == 1:
-                raise httpx.ReadTimeout("Unknown acceptance", request=request)
+                return httpx.Response(429, json={"ok": False, "error": "ratelimited"})
             return httpx.Response(200, json={"ok": True, "ts": "123.457"})
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
             slack = SlackClient("xoxb-test", "xapp-test", http_client=http)

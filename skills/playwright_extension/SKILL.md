@@ -1,7 +1,7 @@
 ---
 name: playwright_extension
 description: Use an owner-configured Playwright MCP Chrome connection with task-owned transport and current-page checks; installation alone does not connect a browser.
-version: 0.1.1
+version: 0.1.2
 type: instruction
 when_to_use: The owner asks to inspect or act in an already-authorized Chrome tab and has configured a task-owned Playwright MCP bridge.
 model_experience:
@@ -35,6 +35,43 @@ or permission by itself. It is not a standalone skill-only browser driver.
 Installing this skill does not complete these steps. An absent bridge is a
 missing host/setup capability, not a reason to silently use raw MCP without
 checks. The proposed host currently refuses this bridge on Windows.
+
+## Connection focus and background actions
+
+Stock Microsoft pairing opens a connection page and activates the selected tab
+and its window before the host's page hook. Retaining a session avoids repeating
+that connection during the task; it does not make the initial connection
+non-disruptive. Announce that switch and let the owner choose the test tab.
+Do not automatically connect while the owner is unavailable. In particular,
+`--extension` may open visible Chrome even when a client requests headless mode;
+use only a non-extension isolated headless browser for unattended checks.
+Never restore focus by script or copy an authenticated profile as a workaround.
+
+An inactive tab can stop animation-frame callbacks. Ordinary pointer click
+waits for stable geometry, whereas filling a field does not use that same
+check. A successful background fill therefore does not prove background
+pointer-click capability. Do not increase timeouts or make forced clicks the
+default to hide this difference.
+
+Where the actual host policy already permits the server's listed run-code
+operation (the current bridge requires unrestricted Cyber Pro for bypass-capable
+code), an explicitly chosen Playwright `locator.click({force:true})` can test
+the pointer path without the ordinary stability wait. Discover its real tool
+name and argument schema; do not add invented `force` arguments to stock
+`browser_click`, weaken a host refusal, or silently replace pointer input with
+`HTMLElement.click()`. Force skips hit-target checks: an overlay may receive the
+input instead. Verify target-side pointer/down/up/click events and the intended
+effect, not just a returned success. Use harmless controlled fixtures first.
+Choose that operation before dispatch; it is not an automatic retry after an
+unknown click outcome.
+
+For an owner-coordinated A/B check, keep the owner on B and act only in the
+shared A through one retained connection. Record page visibility and a permitted
+external observation of active application/tab during actions and disconnect;
+`document.hasFocus()` alone is not proof because automation may emulate focus.
+Initial pairing, subsequent focus preservation, action effects, process closure
+and disappearance of the Extension indicator are separate observations. A
+headless fixture is not evidence of the owner's actual Chrome foreground.
 
 ## Page and action checks
 

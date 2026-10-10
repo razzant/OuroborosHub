@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.4.3
+version: 1.5.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -88,7 +88,9 @@ loopback presence endpoint using the dedicated `presence` permission. The
 host-injected Host Service token is held only as an opaque `SkillToken` and
 revealed at each loopback request; it is never logged, persisted, or exposed by
 the status route. Immediate text is queued once for Slack; deferred work keeps
-its durable work reference and is polled until terminal.
+its durable work reference and is polled until terminal. On a Host that
+supports it, a turn whose result waits for review answers early and its author
+is polled in the same way (see Presence continuation).
 
 ## Slack app setup
 
@@ -104,8 +106,33 @@ Every DM, MPDM, public channel, and private channel event that the installed app
 can receive is transported; the selected host binding decides admission. Invite the bot where Slack requires explicit
 membership; there is no second bridge-local channel allowlist.
 
-Inbound Slack files are downloaded from their authenticated `url_private`
-locations into the skill state directory before the host adapter sees them.
+Every file a Slack message declares becomes one entry of the event's
+`message.attachments`: its Slack ID, name, type and size, the curated file facts
+Slack supplied (such as `title`, `mode`, `external_type`, `external_url`,
+`permalink`, `file_access`) and what staging observed. Bytes from Slack's
+authenticated `url_private` locations are downloaded into the skill state
+directory and submitted to the host (`content_available: true`; `staged_as` is
+the staged file's basename, up to 180 characters after its ordinal; the host
+derives its attachment label from it but may shorten or normalize that label, so
+the two need not match exactly). A file this attempt could not stage is
+described with `content_available: false`, `stage_error` and
+`stage_error_details` while the message and its other files are still
+delivered: no private URL, a URL outside the private-file host (for example a
+Google Drive document), beyond ten files or 50 MiB of accepted bytes, a
+redirect, or a completed HTTP answer other than 408, 429 or 5xx. That is a
+fact about this attempt, not a promise the file stays unavailable. A 408, 429
+or 5xx answer, a network failure or a local write failure keeps the message
+queued and retried. `content_available` describes the bridge's staging; the
+host attachment manifest decides what the model can open. Credentialed URLs
+(`url_private*`, `permalink_public`) and previews are never placed in the
+event, including the file lists of edited and deleted messages.
+
+Rows queued by an earlier bridge version keep the file declarations they were
+stored with: those versions dropped files without a private URL (such as
+external or ID-only files) and their curated facts, and that is not recovered
+from raw storage on upgrade. Such a row drains with what it kept, and a message
+an earlier version ignored stays ignored.
+
 `slack_file_download` exposes the same provider-authenticated path for a file
 ID. Because those reads carry the bot credential, they are confined to Slack's
 documented private-file host `files.slack.com`: another scheme, an embedded
@@ -118,8 +145,11 @@ Outbound `slack_file_upload` copies immutable bytes into the skill state
 directory at enqueue, then the companion runs Slack's current three-phase
 External Upload API (`files.getUploadURLExternal`, raw bytes POST,
 `files.completeUploadExternal`). A lost response after bytes or completion is
-recorded as `uncertain`; the bridge never claims a provider-side exactly-once
-mutation.
+recorded as `uncertain` and the upload is not started again; a completion
+request that never reached Slack (connection failure) retries the whole upload.
+The bridge never claims a provider-side exactly-once mutation. Each staged copy
+gets its own random file name: `request_id` stays an opaque dedupe key, and a retry
+with the same ID keeps the first copy's bytes.
 
 `slack_list_conversations` and `slack_list_users` remain one-page low-level tools:
 follow `next_cursor` yourself and treat `complete=false` as incomplete.
@@ -232,7 +262,11 @@ source of [`message_changed`](https://docs.slack.dev/reference/events/message/me
 This snapshot comparison does not recover an original message missed while
 disconnected: an unchanged revision remains ignored even if it arrives first.
 History reads remain explicit; the bridge does not backfill old messages.
-Deletes preserve the deleted timestamp and previous message facts.
+A delete's `message_id` is the deleted message (`deleted_ts`, else
+`previous_message.ts`) and its `thread_id` is that message's original thread;
+the deletion's own timestamp stays its `event_ts`, and `deleted_ts` and the
+previous message remain provider facts. Deletes already queued by an earlier
+version keep the identity they were stored with.
 `reaction_added` and `reaction_removed` preserve the reacted message ID,
 reaction name and actor. Blocks-only messages are accepted when `blocks` carry
 content even if Slack's `text` field is empty. Other bot/app events remain
@@ -286,12 +320,16 @@ References: [conversations.list](https://docs.slack.dev/reference/methods/conver
 - Socket envelopes are acknowledged only after their durable SQLite transaction
   commits.
 - Slack retry envelopes and duplicate event IDs are deduplicated.
-- Expired leases are reclaimed after a crash.
+- Expired inbox leases and outbound leases that never began a provider write are
+  reclaimed after a crash. An outbound write whose receipt was not durably
+  recorded becomes `uncertain`, with no automatic resend.
 - Admission is ordered per Slack thread while independent threads may run
-  concurrently. Deferred work retains its durable reference and polling, but
-  allows later messages in the same thread after its initial acknowledgement.
-- An outbound item becomes terminally failed after five delivery attempts; that
-  failed item no longer blocks later messages in the same Slack thread.
+  concurrently. Deferred and continuing work retain their durable reference and
+  polling, but allow later messages in the same thread after the initial
+  acknowledgement.
+- Retryable refusals and connection failures before sending have at most five
+  attempts. An ambiguous write result ends `uncertain` on its first occurrence;
+  failed and uncertain items no longer block later messages in the same thread.
 - Long outbound text is split into Slack-safe chunks before it enters the
   durable outbox.
 - The Widgets tab reports connection state, queue depth, failures, and recent
@@ -302,11 +340,139 @@ An absent settings file simply means "not configured yet". A settings file that
 exists but cannot be read, is not JSON, or is not a JSON object is reported as
 `binding_state: "unreadable"` with `local_settings_error` in the status route,
 the companion refuses to start on it, and saving settings returns HTTP 409
-without overwriting the bytes nobody could parse.
+without overwriting the bytes nobody could parse. Opening the settings form
+reads the saved Binding ID and worker counts back without writing anything, so
+changing one field keeps the others; an unreadable file answers that read with
+409 as well, which disables Save.
 
-Delivery is durable and retries are bounded. A network interruption after Slack
-accepts a send but before the receipt is stored can still cause a repeated send;
-the transport does not claim provider-side exactly-once delivery.
+Delivery is durable and retries are bounded. Immediately before a provider
+write, the outbox persists an attempt marker under its current lease. A lost
+response, HTTP 408/5xx, malformed response or ambiguous Slack internal error
+ends that item `uncertain` immediately. Cancellation after the marker does the
+same; an expired marked lease is recovered as uncertain, never as permission
+to resend. A 429 rate-limit refusal or a connection/pool failure before the
+request can be sent clears the marker for a bounded retry. The marker precedes
+the network call, so a crash in that small gap can leave an unsent item
+uncertain. This is a deliberate unresolved result, not a delivery claim.
+If the client rejects mutation arguments locally, or cannot obtain nonempty
+bytes from a staged upload before any provider request, the receipt ends `failed`
+with `uncertain: false`. No provider request was sent, and the same request ID
+is not automatically retried. This applies only to those local refusals;
+an unclassified error after dispatch remains `uncertain`.
+
+On upgrade, pre-marker leased rows are treated conservatively as started.
+Historical pending retries retain their queued identity; the new bridge cannot
+recover whether an older version already repeated a send. Neither the marker
+nor a stable outbox ID promises Slack-side exactly-once delivery.
+
+Slack documents possible partial success for
+[`internal_error` and `fatal_error`](https://docs.slack.dev/reference/methods/chat.postMessage/#errors)
+and permits retry after the stated delay for
+[HTTP 429](https://docs.slack.dev/apis/web-api/rate-limits/#responding-to-rate-limiting-conditions).
+
+## Presence continuation
+
+The same `/identity` answer may advertise `presence_continuation_version: 1`.
+Only then does each new submission add `continuation_version: 1`, with either
+delivery-reporting mode. Without it no new field is sent and the request waits
+for the turn's end exactly as before; rows queued by an earlier bridge version
+keep their original references.
+
+A Host may then answer while the author's result still waits for review:
+`status: "continuing"` with the author's `continuation_ref`, the initial
+`outcome`/`text`/`output_ref`, and a promoted child's own `work_ref`. The bridge
+stores that write-once envelope as the event's Host reference; a retried event
+receives the identical stored envelope, never a rerun. Like deferred work, the
+event then only polls, so later messages in its thread are submitted meanwhile.
+If promotion happens on a later reentry, a pending, interrupted or terminal
+author poll can supply `child_work_ref`. The bridge checkpoints each discovered
+reference beside the initial envelope before polling it. After a restart, the
+child remains independently pollable even if the author is unavailable.
+The author and the child are polled concurrently through `/presence/work`.
+The existing inbound worker commits the initial selection before starting
+either poll, then commits each response's outputs as it arrives. A child
+result can be sent while an author poll is still awaiting HTTP, and vice
+versa. A later message can be submitted while these polls are in flight.
+The worker owns and reaps both requests on cancellation; no detached poll
+queue is added.
+The event is finished when every polled reference is terminal.
+
+Each released or terminal output is queued once under its Host `output_ref` and
+the event's exact Slack destination. This includes a v1 turn completed within
+the initial request, with no `continuation_ref`; its selection does not fall
+back to a legacy reply index. The outbox key comes from those
+identities, never from the text or a reply index: a repeated poll, a replayed
+envelope or a companion restart cannot queue it again, while an identical
+correction under a new `output_ref` is new speech. `silent` and
+`tool_delivered` send nothing; without a send tool, late text arrives through
+the poll. Released text is queued as soon as Host returns it; an unreadable poll
+backs off without holding it back. An output whose Slack outcome was failed or
+uncertain is never queued again by a later poll. With reporting enabled, each
+physical part keeps the automatic origin (source event plus the author's or
+child's task) and names the carried `output_ref` in the report's `message`.
+Release to the bridge is not proof of Slack delivery; provider receipts keep
+that role.
+
+A lost author (`status: "interrupted"`) is not restarted and its event is not
+resubmitted: once any child has finished, the inbox row ends `failed` with a
+visible error, keeping everything already sent.
+
+A Host turn response with `disposition: rejected` or `blocked` is retained
+durably, including its HTTP status, code and complete response body. If it carries an admitted `work_ref`
+(including HTTP 409), the bridge polls that work and queues its selected result
+without resubmitting the original event. Child success does not resolve the
+original refusal: once the child settles, the inbox row ends `failed` and retains
+the refusal. Refusal text itself is never sent as speech. Without admitted work,
+the refusal ends the row immediately. `disposition: retry` without a work reference
+continues normal backoff with no attempt cap; an admitted reference always moves
+the row to polling. The typed disposition controls recovery independently of
+HTTP status class. This handling is confined to turn submissions, not arbitrary
+responses from other Host endpoints.
+
+With a continuation-capable Host, each submission also carries
+`event.conversation.transport_queue`: a snapshot of this thread's later events
+that the bridge has durably received without a stored Host reference. It is read from the
+existing inbox immediately before the event's first submission attempt and kept
+with the event, so a retry resubmits the same observation, like the
+provider-context snapshot. Its fields are
+`schema_version: 1`, `source: "slack-bridge inbox"`, `observed_at`,
+`conversation_key`, `after_source_event_id`, `pending_count`, `omitted_count`,
+`complete`, `text_limit_chars`, a `note`, and `events`, each with
+`source_event_id`, `event_type`, `subtype`, `actor`, `message_id`,
+`thread_id`, `event_ts`, `received_at`, `inbox_state`, `text`, `text_chars`,
+`text_truncated`, declared `files` (ID and name only, never private URLs),
+`provider_facts` (the same blocks/edit/reaction facts and curated file projection
+as a normal submission), and, when present, `change` or `reaction`.
+
+Default snapshots carry every observed queued event and its full text:
+`omitted_count: 0`, `text_limit_chars: null`, `text_truncated: false` and
+`complete: true`. The Host can retain this exact event-bound observation for
+its scoped source reader rather than forcing an author to rely on a clipped
+preview or an unresolvable bridge URI. Explicit diagnostic limits report every
+omitted event and mark `complete: false` if either rows or text were cut.
+Older persisted snapshots are not silently replaced on retry: their cut
+counters remain, and their older `complete` field covered rows only. Consumers
+must also inspect `text_truncated` before claiming full coverage. This does increase request size with the observed
+queue; no hidden event-count cap is introduced.
+
+Each continuing-author poll also takes a fresh snapshot from the same inbox
+and posts `{binding_id, transport_queue}` to `/presence/work/{continuation_ref}`
+before its GET. This uses the original event's `after_source_event_id` and exact
+conversation. The pending report is saved separately from the immutable initial
+event and retried byte-for-byte after a lost ACK or restart. A `recorded`,
+`duplicate` or `stale` ACK permits a fresh observation on the next poll. The
+child's poll runs independently; released output is queued before either poll
+or observation report starts.
+
+A leased row may already have a submission in flight: absence of a stored Host
+reference is not proof of non-admission. These are observations of
+correspondents' words, not owner directives, a second queue or a submission: every listed event still reaches Host later as its own
+event. Host retains full refresh observations in the continuing task's source
+store for its existing scoped reader. The observation is dated: arrivals after
+that snapshot, including those racing reentry and delivery, remain unknown
+until a later report or admission. The bridge makes no continuous-freshness
+promise. A failed report is visible in the inbox error and retried; it cannot
+turn unavailable facts into an empty queue.
 
 ## Message formatting
 
@@ -322,7 +488,7 @@ combine `markdown_text` with `text` or `blocks`. The outbox stores the selected
 format with each chunk. Existing rows keep their original Slack-native mrkdwn
 interpretation; retries retain the same text, chunks, target, thread and format.
 An ambiguous provider error never triggers a second send in another format;
-the existing bounded outbox retry policy remains unchanged.
+it settles the item as uncertain. Known no-effect retries preserve the format.
 
 The existing lossless 3,900-character chunker stays in use. Very long code fences
 or other markup spanning a chunk boundary may render separately; keep formatted
@@ -359,10 +525,10 @@ acceptance. The status route exposes pending/acknowledged report counts and
 the last report error separately from provider delivery state.
 
 Reports identify tool versus automatic origin explicitly. Successful chunks
-are `delivered`; definitive terminal Slack errors are `failed`, and terminal
-network failures are `uncertain`, never a delivered full logical message. An
+are `delivered`; definitive terminal Slack errors are `failed`, and
+ambiguous write failures are `uncertain`, never a delivered full logical message. An
 unresolved user target is retained as requested with `target_resolved=false`;
 it does not claim a resolved DM channel. Queued messages are not spoken history.
-The previous bounded provider retry policy is unchanged: an ambiguous provider
-acceptance followed by retry can still duplicate a Slack message. Host report
-deduplication is not a provider-side exactly-once delivery guarantee.
+The first unknown provider effect stops automatic retries of that item.
+Host report deduplication is separate from the provider effect and does not
+establish provider-side exactly-once delivery.

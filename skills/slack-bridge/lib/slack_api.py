@@ -27,6 +27,12 @@ TEXT_FORMATS = ("markdown", "mrkdwn", "plain")
 # trailing-dot forms.
 SLACK_PRIVATE_FILE_HOSTS = frozenset({"files.slack.com"})
 _REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
+# Transport failures after a request may have reached Slack: a write behind one
+# of them may already be applied, so it is reported uncertain, never resent.
+_RESPONSE_LOST_ERRORS = (
+    httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError,
+    httpx.DecodingError, TimeoutError,
+)
 
 
 def normalize_text_format(value: str) -> str:
@@ -57,6 +63,28 @@ class SlackMutationUncertain(SlackApiError):
     def __init__(self, error: str, *, status_code: int = 0, details: Mapping[str, Any] | None = None) -> None:
         super().__init__(error, status_code=status_code, details=details)
         self.uncertain = True
+
+
+def mutation_may_have_applied(error: BaseException) -> bool:
+    """Classify one provider result, without treating a timeout as retry consent.
+
+    Rate limiting is an explicit refusal. Connection/pool failures occur before
+    sending the request. A lost or malformed response, server failure, or Slack's
+    internal/timeout response does not establish whether the mutation happened.
+    This is an uncertainty boundary, not a provider exactly-once guarantee.
+    """
+    if isinstance(error, SlackMutationUncertain):
+        return True
+    if isinstance(error, _RESPONSE_LOST_ERRORS):
+        return True
+    if not isinstance(error, SlackApiError):
+        return False
+    if error.status_code == 429 or error.error == "ratelimited":
+        return False
+    return error.status_code >= 500 or error.status_code == 408 or error.error in {
+        "invalid_json", "invalid_response", "unknown_error", "fatal_error",
+        "internal_error", "request_timeout", "service_unavailable",
+    }
 
 
 @dataclass(frozen=True)
@@ -105,7 +133,8 @@ def chunk_message(text: str, max_length: int = 3900) -> list[str]:
 def _safe_filename(name: str, fallback: str) -> str:
     leaf = pathlib.PurePath(str(name or "")).name
     clean = re.sub(r"[^A-Za-z0-9._ -]+", "_", leaf).strip(" .")
-    return clean[:180] or fallback
+    # Trim again after the cut: Host strips the staged paths it opens.
+    return clean[:180].rstrip(" .") or fallback
 
 
 def private_file_host(url: str) -> str:
@@ -118,8 +147,8 @@ def private_file_host(url: str) -> str:
     """
 
     raw = str(url or "").strip()
-    parsed = urlsplit(raw)
     try:
+        parsed = urlsplit(raw)
         port = parsed.port
     except ValueError:
         raise SlackApiError("invalid_private_file_url") from None
@@ -136,6 +165,20 @@ def private_file_host(url: str) -> str:
             "private_file_host_not_allowed", details={"host": parsed.hostname}
         )
     return parsed.hostname
+
+
+def _url_host(value: Any) -> str:
+    try:
+        return urlsplit(str(value or "")).hostname or ""
+    except ValueError:
+        return ""
+
+
+def _declared_size(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 class SlackClient:
@@ -213,6 +256,20 @@ class SlackClient:
         token: str,
     ) -> dict[str, Any]:
         return await self._request("GET", endpoint, payload, token=token)
+
+    async def _mutate(
+        self, endpoint: str, payload: Mapping[str, Any], *, method: str = "POST",
+    ) -> dict[str, Any]:
+        try:
+            return await self._request(method, endpoint, payload, token=self.bot_token)
+        except Exception as exc:
+            if mutation_may_have_applied(exc):
+                raise SlackMutationUncertain(
+                    exc.error if isinstance(exc, SlackApiError) else type(exc).__name__,
+                    status_code=exc.status_code if isinstance(exc, SlackApiError) else 0,
+                    details=exc.details if isinstance(exc, SlackApiError) else None,
+                ) from exc
+            raise
 
     async def _request(
         self,
@@ -302,13 +359,9 @@ class SlackClient:
         payload = dict(params or {}) if selected == "GET" else dict(body or {})
         if "token" in payload:
             raise SlackConfigurationError("generic Slack API payload must not include token")
-        try:
-            return await self._request(selected, endpoint, payload, token=self.bot_token)
-        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError,
-                httpx.WriteError, httpx.RemoteProtocolError) as exc:
-            if effect == "write":
-                raise SlackMutationUncertain(type(exc).__name__) from exc
-            raise
+        if effect == "write":
+            return await self._mutate(endpoint, payload, method=selected)
+        return await self._request(selected, endpoint, payload, token=self.bot_token)
 
     async def auth_test(self) -> dict[str, Any]:
         return await self._post("auth.test", {}, token=self.bot_token)
@@ -430,7 +483,7 @@ class SlackClient:
         channel_id = str(channel_id or "").strip()
         if not channel_id:
             raise SlackConfigurationError("channel_id is required")
-        return await self._post("conversations.join", {"channel": channel_id}, token=self.bot_token)
+        return await self._mutate("conversations.join", {"channel": channel_id})
 
     async def read_messages(
         self, channel_id: str, *, thread_ts: str = "", cursor: str = "",
@@ -503,7 +556,7 @@ class SlackClient:
             payload.update(text=str(text), mrkdwn=selected == "mrkdwn")
         if thread_ts:
             payload["thread_ts"] = str(thread_ts)
-        return await self._post("chat.postMessage", payload, token=self.bot_token)
+        return await self._mutate("chat.postMessage", payload)
 
     async def update_message(self, *, channel: str, ts: str, text: str = "",
                              blocks: Sequence[Mapping[str, Any]] | None = None,
@@ -519,27 +572,27 @@ class SlackClient:
             payload["markdown_text"] = str(text)
         else:
             payload.update(text=str(text), mrkdwn=selected == "mrkdwn")
-        return await self._post("chat.update", payload, token=self.bot_token)
+        return await self._mutate("chat.update", payload)
 
     async def delete_message(self, *, channel: str, ts: str) -> dict[str, Any]:
         channel, ts = str(channel or "").strip(), str(ts or "").strip()
         if not channel or not ts:
             raise SlackConfigurationError("channel and ts are required")
-        return await self._post("chat.delete", {"channel": channel, "ts": ts}, token=self.bot_token)
+        return await self._mutate("chat.delete", {"channel": channel, "ts": ts})
 
     async def reaction(self, *, channel: str, ts: str, name: str, add: bool = True) -> dict[str, Any]:
         channel, ts, name = str(channel or "").strip(), str(ts or "").strip(), str(name or "").strip()
         if not channel or not ts or not name:
             raise SlackConfigurationError("channel, ts and name are required")
         endpoint = "reactions.add" if add else "reactions.remove"
-        return await self._post(endpoint, {"channel": channel, "timestamp": ts, "name": name}, token=self.bot_token)
+        return await self._mutate(endpoint, {"channel": channel, "timestamp": ts, "name": name})
 
     async def pin(self, *, channel: str, ts: str, add: bool = True) -> dict[str, Any]:
         channel, ts = str(channel or "").strip(), str(ts or "").strip()
         if not channel or not ts:
             raise SlackConfigurationError("channel and ts are required")
         endpoint = "pins.add" if add else "pins.remove"
-        return await self._post(endpoint, {"channel": channel, "timestamp": ts}, token=self.bot_token)
+        return await self._mutate(endpoint, {"channel": channel, "timestamp": ts})
 
     async def bookmark(self, *, channel: str, bookmark_id: str = "", title: str = "",
                        link: str = "", emoji: str = "", add: bool = True) -> dict[str, Any]:
@@ -552,11 +605,11 @@ class SlackClient:
             payload = {"channel_id": channel, "title": str(title), "type": "link", "link": str(link)}
             if emoji:
                 payload["emoji"] = str(emoji)
-            return await self._post("bookmarks.add", payload, token=self.bot_token)
+            return await self._mutate("bookmarks.add", payload)
         bookmark_id = str(bookmark_id or "").strip()
         if not bookmark_id:
             raise SlackConfigurationError("bookmark_id is required")
-        return await self._post("bookmarks.remove", {"channel_id": channel, "bookmark_id": bookmark_id}, token=self.bot_token)
+        return await self._mutate("bookmarks.remove", {"channel_id": channel, "bookmark_id": bookmark_id})
 
     async def file_info(self, file_id: str) -> dict[str, Any]:
         file_id = str(file_id or "").strip()
@@ -587,7 +640,12 @@ class SlackClient:
     async def upload_file(self, *, path: pathlib.Path, filename: str, title: str = "",
                           channel: str = "", thread_ts: str = "", initial_comment: str = "") -> dict[str, Any]:
         """Upload immutable bytes through Slack's current External Upload API."""
-        data = path.read_bytes()
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            # This read precedes every provider request. Do not classify an
+            # OSError from any later upload phase as a local refusal.
+            raise SlackConfigurationError(f"could not read upload input: {exc}") from exc
         if not data:
             raise SlackConfigurationError("file must not be empty")
         request = await self._post_form("files.getUploadURLExternal", {
@@ -610,14 +668,8 @@ class SlackClient:
             payload["thread_ts"] = str(thread_ts)
         if initial_comment:
             payload["initial_comment"] = str(initial_comment)
-        try:
-            return await self._post("files.completeUploadExternal", payload, token=self.bot_token)
-        except SlackApiError as exc:
-            if exc.status_code >= 500 or exc.status_code in {0, 408} or exc.error in {
-                "fatal_error", "internal_error", "request_timeout", "service_unavailable",
-            }:
-                raise SlackMutationUncertain(exc.error, status_code=exc.status_code, details=exc.details) from exc
-            raise
+        # Completion shares the file; an unknown result must not start a fresh upload.
+        return await self._mutate("files.completeUploadExternal", payload)
 
     async def resolve_target(self, target: str) -> str:
         clean = str(target or "").strip()
@@ -639,71 +691,155 @@ class SlackClient:
         max_files: int = 10,
         max_total_bytes: int = 50 * 1024 * 1024,
     ) -> tuple[StagedSlackFile, ...]:
-        destination.mkdir(parents=True, exist_ok=True)
-        staged: list[StagedSlackFile] = []
+        """Stage every file or raise the first refusal before touching the next file."""
+        staged = await self._stage_batch(
+            files, destination=destination, strict=True,
+            max_files=max_files, max_total_bytes=max_total_bytes,
+        )
+        return tuple(item for item in staged if isinstance(item, StagedSlackFile))
+
+    async def stage_inbound_files(
+        self,
+        files: Sequence[Mapping[str, Any]],
+        *,
+        destination: pathlib.Path,
+        max_files: int = 10,
+        max_total_bytes: int = 50 * 1024 * 1024,
+    ) -> tuple[dict[str, Any], ...]:
+        """Return one outcome per declared file, in declared order.
+
+        A staged file keeps its path. A refusal this attempt observed - a URL the
+        bot credential may not read, the batch limits, a redirect, or a completed
+        HTTP answer other than 408, 429 or 5xx - becomes a blank path with its
+        reason. Conditions a retry may change (408, 429, 5xx, transport, local
+        write) raise and leave the whole batch to the caller's retry.
+        """
+        outcomes = await self._stage_batch(
+            files, destination=destination, strict=False,
+            max_files=max_files, max_total_bytes=max_total_bytes,
+        )
+        records: list[dict[str, Any]] = []
+        for item, outcome in zip(files, outcomes):
+            if isinstance(outcome, StagedSlackFile):
+                records.append(outcome.as_dict())
+                continue
+            records.append({
+                "file_id": str(item.get("file_id") or ""),
+                "name": str(item.get("name") or ""),
+                "mimetype": str(item.get("mimetype") or ""),
+                "size": _declared_size(item.get("size")),
+                "path": "",
+                "stage_error": outcome.error,
+                "stage_error_details": dict(outcome.details),
+            })
+        return tuple(records)
+
+    async def _stage_batch(
+        self,
+        files: Sequence[Mapping[str, Any]],
+        *,
+        destination: pathlib.Path,
+        strict: bool,
+        max_files: int,
+        max_total_bytes: int,
+    ) -> list[StagedSlackFile | SlackApiError]:
+        # One loop owns the declared ordinal, the NN-name path and the accepted
+        # byte budget, so strict and inbound staging cannot drift apart.
+        outcomes: list[StagedSlackFile | SlackApiError] = []
         total = 0
         for index, item in enumerate(files):
-            if index >= max_files:
-                raise SlackApiError("too_many_files")
-            file_id = str(item.get("file_id") or "").strip()
-            url = str(item.get("url_private") or "").strip()
+            outcome = await self._stage_file(
+                index, item, destination=destination, strict=strict,
+                max_files=max_files, remaining_bytes=max_total_bytes - total,
+            )
+            if isinstance(outcome, SlackApiError):
+                if strict:
+                    raise outcome
+            else:
+                total += outcome.size
+            outcomes.append(outcome)
+        return outcomes
+
+    async def _stage_file(
+        self,
+        index: int,
+        item: Mapping[str, Any],
+        *,
+        destination: pathlib.Path,
+        strict: bool,
+        max_files: int,
+        remaining_bytes: int,
+    ) -> StagedSlackFile | SlackApiError:
+        """Stage one file, return this attempt's refusal, or raise a retryable error."""
+        if index >= max_files:
+            return SlackApiError("too_many_files")
+        file_id = str(item.get("file_id") or "").strip()
+        url = str(item.get("url_private") or "").strip()
+        if not url and not strict:
+            # Inbound names the absent locator; strict keeps its URL refusal below.
+            return SlackApiError("missing_private_file_url")
+        try:
             # Refuse before the credential is built, not after the request.
             private_file_host(url)
-            declared_size = max(0, int(item.get("size") or 0))
-            if declared_size and total + declared_size > max_total_bytes:
-                raise SlackApiError("file_batch_too_large")
-            filename = _safe_filename(
-                str(item.get("name") or ""), file_id or f"file-{index}"
-            )
-            path = destination / f"{index:02d}-{filename}"
-            part = path.with_name(path.name + f".part.{os.getpid()}")
-            try:
-                async with self._http.stream(
-                    "GET",
-                    url,
-                    headers={"Authorization": f"Bearer {self.bot_token}"},
-                    # The shared client follows redirects; an authenticated file
-                    # read must not. A redirect is where the bot token would
-                    # otherwise be re-sent to another origin, and an unauthorized
-                    # url_private read redirects to a login page whose HTML would
-                    # silently be staged as the file's bytes.
-                    follow_redirects=False,
-                ) as response:
-                    if response.status_code in _REDIRECT_STATUS_CODES:
-                        raise SlackApiError(
-                            f"file_redirect_refused_{response.status_code}",
-                            status_code=response.status_code,
-                            details={
-                                "redirect_host": urlsplit(
-                                    response.headers.get("location") or ""
-                                ).hostname
-                                or "",
-                            },
-                        )
-                    if response.status_code != 200:
-                        raise SlackApiError(
-                            f"file_http_{response.status_code}",
-                            status_code=response.status_code,
-                        )
-                    written = 0
-                    with part.open("wb") as handle:
-                        async for chunk in response.aiter_bytes():
-                            written += len(chunk)
-                            if total + written > max_total_bytes:
-                                raise SlackApiError("file_batch_too_large")
-                            handle.write(chunk)
-                os.replace(part, path)
-            finally:
-                if part.exists():
-                    part.unlink()
-            total += written
-            staged.append(
-                StagedSlackFile(
-                    file_id=file_id,
-                    name=filename,
-                    mimetype=str(item.get("mimetype") or "application/octet-stream"),
-                    size=written,
-                    path=str(path),
-                )
-            )
-        return tuple(staged)
+            # httpx refuses some URLs urlsplit admits (control characters,
+            # length); no request can exist for them, so no retry changes them.
+            httpx.URL(url)
+        except httpx.InvalidURL:
+            return SlackApiError("invalid_private_file_url")
+        except SlackApiError as refusal:
+            return refusal
+        declared_size = _declared_size(item.get("size"))
+        if declared_size and declared_size > remaining_bytes:
+            return SlackApiError("file_batch_too_large")
+        # The fallback goes through the same leaf, charset and length bound.
+        filename = _safe_filename(
+            str(item.get("name") or ""), _safe_filename(file_id, f"file-{index}")
+        )
+        path = destination / f"{index:02d}-{filename}"
+        part = path.with_name(path.name + f".part.{os.getpid()}")
+        refusal: SlackApiError | None = None
+        written = 0
+        try:
+            async with self._http.stream(
+                "GET",
+                url,
+                headers={"Authorization": f"Bearer {self.bot_token}"},
+                # The shared client follows redirects; an authenticated file
+                # read must not. A redirect is where the bot token would
+                # otherwise be re-sent to another origin, and an unauthorized
+                # url_private read redirects to a login page whose HTML would
+                # silently be staged as the file's bytes.
+                follow_redirects=False,
+            ) as response:
+                status = response.status_code
+                if status in _REDIRECT_STATUS_CODES:
+                    return SlackApiError(
+                        f"file_redirect_refused_{status}",
+                        status_code=status,
+                        details={"redirect_host": _url_host(response.headers.get("location"))},
+                    )
+                if status in {408, 429} or status >= 500:
+                    raise SlackApiError(f"file_http_{status}", status_code=status)
+                if status != 200:
+                    return SlackApiError(f"file_http_{status}", status_code=status)
+                destination.mkdir(parents=True, exist_ok=True)
+                with part.open("wb") as handle:
+                    async for chunk in response.aiter_bytes():
+                        written += len(chunk)
+                        if written > remaining_bytes:
+                            refusal = SlackApiError("file_batch_too_large")
+                            break
+                        handle.write(chunk)
+            if refusal is not None:
+                return refusal
+            os.replace(part, path)
+        finally:
+            if part.exists():
+                part.unlink()
+        return StagedSlackFile(
+            file_id=file_id,
+            name=filename,
+            mimetype=str(item.get("mimetype") or "application/octet-stream"),
+            size=written,
+            path=str(path),
+        )

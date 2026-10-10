@@ -275,7 +275,8 @@ def test_terminal_provider_failure_is_not_reported_as_delivered(tmp_path, error,
             _due(store)
         report = store.claim_report()["payload"]
         assert report["state"] == state and report["message"]["error"]
-        assert store.status()["outbox_delivered"] == 0 and len(slack.sent) == 5
+        assert store.status()["outbox_delivered"] == 0
+        assert len(slack.sent) == (1 if state == "uncertain" else 5)
     asyncio.run(run())
 
 
