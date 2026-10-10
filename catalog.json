@@ -2148,6 +2148,20 @@
       "slug": "yylo-tasks",
       "type": "instruction",
       "version": "0.1.0"
+    },
+    {
+      "slug": "playwright_extension",
+      "name": "playwright_extension",
+      "version": "0.1.2",
+      "type": "instruction",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "7ca8f25f97afbb943ada3f12312515173e8e44772b4c56ed58a1ac7b2cfc6939",
+          "size": 8059
+        }
+      ],
+      "description": "Use an owner-configured Playwright MCP Chrome connection with task-owned transport and current-page checks; installation alone does not connect a browser."
     }
   ]
 }
