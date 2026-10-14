@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Foreground B</title></head>
+<body>
+<h1>Foreground page the owner is looking at</h1>
+<script>
+  window.visibility = [document.visibilityState];
+  window.blurs = 0;
+  document.addEventListener('visibilitychange', () => window.visibility.push(document.visibilityState));
+  window.addEventListener('blur', () => { window.blurs += 1; });
+</script>
+</body>
+</html>

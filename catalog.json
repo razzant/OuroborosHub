@@ -2162,6 +2162,146 @@
         }
       ],
       "description": "Use an owner-configured Playwright MCP Chrome connection with task-owned transport and current-page checks; installation alone does not connect a browser."
+    },
+    {
+      "slug": "check-in",
+      "name": "check-in",
+      "description": "Opt-in check-in agreement. If you miss a check-in you promised, Ouroboros first tells you; only if you armed it may it then write once to one consenting contact.",
+      "version": "0.1.4",
+      "type": "extension",
+      "files": [
+        {
+          "path": "ATTRIBUTION.md",
+          "sha256": "e314044567ba17e389a133fbdea5e1908bbb62bec55f604937d0991d38df9191",
+          "size": 1780
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "680203b39db48c35dd590c345847432367b2c2246eb73b82661d4d4efd4c5c9a",
+          "size": 15587
+        },
+        {
+          "path": "host.py",
+          "sha256": "f1b579b78e7c20baf4ff4b2f41c2715e36498d94b7653cd2ce94db8598dd487e",
+          "size": 3111
+        },
+        {
+          "path": "lease.py",
+          "sha256": "adf7457c6fdfee423e2bce412a7803119836f06e5bbd962211096e4806ad03a9",
+          "size": 8763
+        },
+        {
+          "path": "mailer.py",
+          "sha256": "0fa5c0c7e39d8d7944539646141db4b6b2d026788caeebf4c37db746e1cafdbd",
+          "size": 15199
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "31267b458f6cd65b0f9b5df0a6ba6e3216c3c7f3e7af565c85770afe829b3318",
+          "size": 48776
+        },
+        {
+          "path": "store.py",
+          "sha256": "c7614718acba03a6285a285efe9a30e4528afcffa3cd76b864ca04bf7b379908",
+          "size": 104700
+        },
+        {
+          "path": "widget.js",
+          "sha256": "1109872bccdcd5064442a3880cbaf8d77fbb052a09b6e2f940d1dc8f2ce02ce7",
+          "size": 20719
+        }
+      ]
+    },
+    {
+      "slug": "chrome_browser",
+      "name": "chrome_browser",
+      "description": "Act in your own Chrome through a paired extension - one explicitly shared tab or the agent's own background tab, trusted input without taking focus, and a clean handoff of the live page to you and back.",
+      "version": "0.1.0",
+      "type": "script",
+      "files": [
+        {
+          "path": "ATTRIBUTION.md",
+          "sha256": "47874eac9754a4410c5c2d28409b4123d2fd78bfcd407edef0bcf857696411f2",
+          "size": 1969
+        },
+        {
+          "path": "PROTOCOL.md",
+          "sha256": "4d730d072d88dce641520da319c9059ad55d007e59aaaf8eee0b8d2d1ce3519c",
+          "size": 31899
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "824d2ef313de16310299d4d3d5055628e819ddcca5a904e660b56b06489e6861",
+          "size": 13983
+        },
+        {
+          "path": "extension/bridge_protocol.mjs",
+          "sha256": "23febe9c22683d243199add31bb5fd8b5c84cd0eb7fcc81c572ca3480af1a654",
+          "size": 2269
+        },
+        {
+          "path": "extension/manifest.json",
+          "sha256": "b7ad9099957c5456bf3f458bd4e466e50419dee81d21aac2145a64d74063c39c",
+          "size": 928
+        },
+        {
+          "path": "extension/page_agent.js",
+          "sha256": "b9cdbf3d743be6b7a96a4644cbd99684969fd988e664b8f86761943c7c6a605c",
+          "size": 13072
+        },
+        {
+          "path": "extension/popup.html",
+          "sha256": "3105b97300ce8cf6a515f1fb7081dbb7dd84baceeaf709cdbef7882a8a35f8fd",
+          "size": 2063
+        },
+        {
+          "path": "extension/popup.js",
+          "sha256": "1dedbad1abc2ff632008f658f47389995856bd2e067d9b29ecde95da9bcaf17b",
+          "size": 2161
+        },
+        {
+          "path": "extension/service_worker.js",
+          "sha256": "70dbd674f14dfcc3a226ef804b5554cfdd7372de1052055d6aff22d3b45ba628",
+          "size": 49229
+        },
+        {
+          "path": "lib/executor.mjs",
+          "sha256": "85af36d0ba5e0a637d944616e3162ae816583f47664beb233dfde7db4a2e6578",
+          "size": 44479
+        },
+        {
+          "path": "lib/guard.mjs",
+          "sha256": "f4f9a9ec1cec63ade4e124b51e374c6b8682bd622118c403c46c561268b5dbc5",
+          "size": 1524
+        },
+        {
+          "path": "lib/pairing.mjs",
+          "sha256": "3c20def9a586583618812a0ea57ae674340c61cf1e888d712302acb535e91dec",
+          "size": 7532
+        },
+        {
+          "path": "scripts/mcp_server.mjs",
+          "sha256": "bb8bb2eced3112f8017d207b9bed729d86ac570e1a56753c28a1d32d72cbd5e3",
+          "size": 7530
+        },
+        {
+          "path": "scripts/setup.mjs",
+          "sha256": "07b571d8953649fbed70d1ba49bd67e4eb625ad47dd7b93a38795d5cd8a2e20e",
+          "size": 5187
+        },
+        {
+          "path": "tests/regressions.test.mjs",
+          "sha256": "0e0eb130a4a05fc00aa97960b22410b8be156421a2391865cdef951023038ad4",
+          "size": 45608
+        }
+      ],
+      "install_specs": [
+        {
+          "kind": "npm",
+          "package": "ws@8.22.0"
+        }
+      ],
+      "when_to_use": "The owner asks to read or act on a page in their real, signed-in Chrome, wants to keep working in another tab meanwhile, or needs to take over the same page for a login, CAPTCHA or decision and hand it back."
     }
   ]
 }
