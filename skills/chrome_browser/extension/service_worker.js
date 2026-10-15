@@ -27,6 +27,7 @@ const STABLE_TRIES = 8;
 const NAVIGATION_GRACE_MS = 120;
 const NAVIGATION_SETTLE_MS = 10000;
 const VERDICT_TIMEOUT_MS = 35000;
+const INPUT_FRAME_TIMEOUT_MS = 8000;
 
 class BridgeError extends Error {
   constructor(code, message) { super(message); this.code = code; }
@@ -397,10 +398,37 @@ function usable(sample) {
   return sample;
 }
 
-// Current geometry, read twice a short real-time interval apart. No animation
-// frame is awaited: a background tab does not produce them.
+// A newly loaded hidden renderer can acknowledge input without delivering any
+// DOM events. In headed Chrome, a frame capture (unlike a matched delay) makes
+// the first input deliverable without activating the tab or emulating focus.
+// Capture once per document/attachment; discard pixels, never replay input.
+async function prepareInputFrame(ctx) {
+  const l = fenced(ctx);
+  if (l.input_frame_generation === ctx.generation) return;
+  const started = Date.now();
+  let timer;
+  try {
+    const shot = await Promise.race([
+      cdp(ctx, 'Page.captureScreenshot', { format: 'png' }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new BridgeError('BROWSER_INPUT_NOT_READY', 'Chrome produced no input frame; no input was dispatched')), INPUT_FRAME_TIMEOUT_MS);
+      }),
+    ]);
+    fenced(ctx);
+    if (!shot || typeof shot.data !== 'string' || !shot.data)
+      throw new BridgeError('BROWSER_INPUT_NOT_READY', 'Chrome returned no input frame; no input was dispatched');
+    l.input_frame_generation = ctx.generation;
+    ctx.input_preparation = { kind: 'renderer_frame', elapsed_ms: Date.now() - started };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Current geometry after renderer preparation, read twice a short real-time
+// interval apart. No animation-frame wait or foreground activation.
 async function stablePoint(ctx, target) {
   await agent(ctx, 'scroll_into_view', { target });
+  await prepareInputFrame(ctx);
   let previous = usable(await agent(ctx, 'measure', { target }));
   for (let attempt = 0; attempt < STABLE_TRIES; attempt += 1) {
     await delay(STABLE_GAP_MS);
@@ -497,6 +525,7 @@ async function pressKey(ctx, combination) {
   }
   const text = modifiers & ~MODIFIERS.Shift ? undefined : facts.text;
   const base = { key: facts.key, code: facts.code, windowsVirtualKeyCode: facts.vk, nativeVirtualKeyCode: facts.vk, modifiers };
+  await prepareInputFrame(ctx);
   markInput(ctx);
   ctx.effect = 'partial';
   await cdp(ctx, 'Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', ...base, text, unmodifiedText: text });
@@ -527,8 +556,8 @@ const STEPS = {
     const l = ctx.lease;
     return { ...(await agent(ctx, 'observe')), url: l.url, document_id: l.document_id, tab_id: String(l.tab_id) };
   },
-  read: (ctx, args) => agent(ctx, 'text', { max_chars: args.max_chars }),
-  get_text: (ctx, args) => agent(ctx, 'text', { target: targetOf(ctx, args), max_chars: args.max_chars }),
+  read: (ctx, args) => agent(ctx, 'text', { start: args.start, max_chars: args.max_chars }),
+  get_text: (ctx, args) => agent(ctx, 'text', { target: targetOf(ctx, args), start: args.start, max_chars: args.max_chars }),
   async get_attribute(ctx, args) {
     if (typeof args.name !== 'string' || !args.name) throw new BridgeError('BROWSER_ARGUMENT_INVALID', 'name is required');
     return agent(ctx, 'attribute', { target: targetOf(ctx, args), name: args.name });
@@ -728,6 +757,7 @@ function handleStep(message) {
       if (!OPERATIONS.includes(operation) || !STEPS[operation]) throw new BridgeError('BROWSER_OPERATION_UNSUPPORTED', `unknown operation ${operation}`);
       const args = message.args && typeof message.args === 'object' ? message.args : {};
       const value = await STEPS[operation](ctx, args);
+      if (ctx.input_preparation && value && typeof value === 'object') value.input_preparation = ctx.input_preparation;
       answer({ ok: true, outcome: ctx.outcome || (ctx.effect === 'none' ? 'observed' : 'dispatched'), value });
     } catch (error) {
       const outcome = ctx.effect === 'none' ? 'not_dispatched' : ctx.effect === 'partial' ? 'unknown' : 'dispatched';
@@ -739,19 +769,23 @@ function handleStep(message) {
 // ---------------------------------------------------------------- requests
 
 function bodyFacts(request) {
-  if (!request.hasPostData) return { post_data: null, complete: true };
+  // CDP omits hasPostData when there is no body. Contradictory or malformed
+  // facts must not acquire the new idle bodyless-resource authority.
+  if ((request.hasPostData === undefined || request.hasPostData === false)
+      && request.postData === undefined && request.postDataEntries === undefined)
+    return { post_data: null, has_post_data: false, complete: true };
   const inline = typeof request.postData === 'string' ? request.postData : null;
   const entries = request.postDataEntries;
   if (!Array.isArray(entries) || !entries.length || !entries.every((entry) => typeof entry.bytes === 'string'))
-    return { post_data: inline, complete: false };
+    return { post_data: inline, has_post_data: request.hasPostData === true ? true : null, complete: false };
   try {
     const parts = entries.map((entry) => Uint8Array.from(atob(entry.bytes), (character) => character.charCodeAt(0)));
     const bytes = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
     let offset = 0;
     for (const part of parts) { bytes.set(part, offset); offset += part.length; }
-    return { post_data: new TextDecoder('utf-8', { fatal: true }).decode(bytes), complete: true };
+    return { post_data: new TextDecoder('utf-8', { fatal: true }).decode(bytes), has_post_data: true, complete: true };
   } catch (error) {
-    return { post_data: inline, complete: false };
+    return { post_data: inline, has_post_data: request.hasPostData === true ? true : null, complete: false };
   }
 }
 

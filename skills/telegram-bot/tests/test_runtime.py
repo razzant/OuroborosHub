@@ -1,6 +1,9 @@
 import asyncio
+import json
 import pathlib
 import sqlite3
+
+import pytest
 
 from telegram_bot.api import TelegramApiError, TelegramClient
 from telegram_bot.events import parse_telegram_update
@@ -320,24 +323,30 @@ async def _deferred_work_is_polled_and_late_text_is_queued_once(tmp_path):
 
 
 class RejectingSubmitter(AcceptingSubmitter):
+    def __init__(self, payload):
+        super().__init__()
+        self.payload = payload
+
     async def submit(self, event, staged_files):
         if event["source_event_id"].endswith(":50"):
-            raise PresenceHostHTTPError(403, "binding mismatch")
+            raise PresenceHostHTTPError(403, "binding mismatch", self.payload)
         return await super().submit(event, staged_files)
 
 
-def test_binding_rejection_fails_inbox_and_does_not_block_conversation(tmp_path):
+def test_typed_rejection_fails_inbox_and_does_not_block_conversation(tmp_path):
     asyncio.run(
-        _binding_rejection_fails_inbox_and_does_not_block_conversation(tmp_path)
+        _typed_rejection_fails_inbox_and_does_not_block_conversation(tmp_path)
     )
 
 
-async def _binding_rejection_fails_inbox_and_does_not_block_conversation(tmp_path):
+async def _typed_rejection_fails_inbox_and_does_not_block_conversation(tmp_path):
+    rejected = {"ok": False, "error": "presence event does not match its owner-created binding",
+                "code": "presence_origin_mismatch", "disposition": "rejected"}
     runtime = TelegramTransportRuntime(
         state_dir=tmp_path,
         token_provider=lambda: "token",
         logger=Logger(),
-        submitter=RejectingSubmitter(),
+        submitter=RejectingSubmitter(rejected),
         client_factory=RuntimeClient,
     )
     for update_id in (50, 51):
@@ -358,8 +367,45 @@ async def _binding_rejection_fails_inbox_and_does_not_block_conversation(tmp_pat
 
     assert await runtime.process_one_inbox()
     assert runtime.store.status_snapshot()["inbox_failed"] == 1
+    with sqlite3.connect(runtime.store.path) as conn:
+        receipt = conn.execute(
+            "SELECT host_receipt_json FROM inbox WHERE event_id='telegram:9:50'").fetchone()[0]
+    assert json.loads(receipt) == {"http_status": 403, "response": rejected}
     assert await runtime.process_one_inbox()
     assert runtime.store.status_snapshot()["inbox_submitted"] == 1
+
+
+@pytest.mark.parametrize("status_code,payload", [
+    (403, {"error": "binding mismatch"}),  # legacy Host: no typed disposition
+    (404, {"detail": "Not Found"}),
+    (403, {"ok": False, "code": "presence_auth_blocked", "disposition": "blocked"}),
+    (409, {"ok": False, "code": "presence_start_unwritable", "disposition": "retry"}),
+    (409, {"ok": False, "code": "presence_attempt_outcome_unknown", "disposition": "retained"}),
+])
+def test_untyped_blocked_and_retry_refusals_keep_the_event_first(tmp_path, status_code, payload):
+    async def run():
+        runtime = TelegramTransportRuntime(
+            state_dir=tmp_path, token_provider=lambda: "token", logger=Logger(),
+            submitter=RejectingSubmitter(payload), client_factory=RuntimeClient,
+        )
+        runtime.submitter.calls.clear()
+        for update_id in (50, 51):
+            runtime.store.commit_update(update_id, parse_telegram_update({
+                "update_id": update_id,
+                "message": {"message_id": update_id, "text": "hello", "from": {"id": 3},
+                            "chat": {"id": 4, "type": "private"}},
+            }, bot_account_id="9"))
+        for _ in range(3):
+            with sqlite3.connect(runtime.store.path) as conn:
+                conn.execute("UPDATE inbox SET available_at=0")
+            assert await runtime.process_one_inbox()
+            snapshot = runtime.store.status_snapshot()
+            # A retained receipt without its original turn is unusable, so it retries too.
+            assert snapshot["inbox_waiting"] == 2 and snapshot["inbox_failed"] == 0
+            assert snapshot["inbox_submitted"] == 0 and snapshot["work_waiting"] == 0
+        assert runtime.submitter.calls == []  # the later event never overtook the first
+
+    asyncio.run(run())
 
 
 class FailingDeliveryClient(RuntimeClient):

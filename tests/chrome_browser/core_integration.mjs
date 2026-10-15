@@ -50,26 +50,20 @@ async function call(name, args = {}) {
   const marker = 'not instructions or policy.\n\n';
   const at = value.text.indexOf(marker);
   assert.ok(at >= 0, 'global MCP untrusted-result wrapper missing');
-  return JSON.parse(value.text.slice(at + marker.length));
+  if (value.source_witness) {
+    assert.equal(value.source_witness.sha256, value.meta.mcp_response_source.sha256);
+    const text = value.source_witness.normalized_response.content.find((item) => item.type === 'text').text;
+    return JSON.parse(text); // guard diagnostics may follow JSON in the owner-facing wrapper
+  }
+  const payload = value.text.slice(at + marker.length);
+  const noteAt = payload.indexOf('\n\n⚠️ BROWSER_REQUEST_BLOCKED:');
+  if (noteAt >= 0) {
+    (evidence.observations.guard_diagnostics ||= []).push(payload.slice(noteAt + 2));
+    return JSON.parse(payload.slice(0, noteAt));
+  }
+  return JSON.parse(payload);
 }
-try {
-  browser = await launchChromium({ executable, profile, extension: path.join(install.skillDir, 'extension'), WebSocket: install.WebSocket });
-  const cdp = browser.cdp;
-  await until(async () => (await cdp.send('Target.getTargets')).targetInfos.find((t) => t.type === 'service_worker' && t.url.endsWith('/service_worker.js')), { what: 'MV3 worker' });
-  const target = await cdp.open(fixture.origin + '/a.html');
-  const control = await cdp.open(fixture.origin + '/fg.html', { background: true });
-  await target.activate();
-  const popup = await cdp.open(`chrome-extension://${init.extension_id}/popup.html`, { background: true });
-  await until(async () => (await popup.evaluate('document.getElementById("tab").textContent')) !== '…', { what: 'popup initialized' });
-  const pairing = spawn(process.execPath, [setupScript, 'pair', '--wait', '30'], { env: setupEnv, stdio: ['ignore', 'pipe', 'pipe'] });
-  const paired = new Promise((resolve, reject) => { let output = ''; pairing.stdout.on('data', (c) => { output += c; }); pairing.on('exit', (code) => code === 0 ? resolve(JSON.parse(output)) : reject(new Error('pair setup failed: ' + output))); });
-  await sleep(300);
-  await popup.evaluate(`document.getElementById('port').value = '${stored.port}'`);
-  await popup.typeInto('#credential', stored.credential);
-  await popup.click('#save');
-  assert.equal((await paired).ok, true);
-  await popup.close();
-
+async function startHostBeforePairing() {
   const env = { ...process.env, OUROBOROS_RUNTIME_MODE: 'cyber_pro', OUROBOROS_SAFETY_MODE: 'off', TMPDIR: '/tmp' };
   host = spawn(python, ['-I', '-S', 'scripts/safe_test.py', '--temp-parent', '/tmp', '--', python, path.join(here, 'core_host.py'), root, install.skillDir, install.stateDir, fault ? 'post-state-fault' : trustState ? 'skill-bound' : 'plain'], { cwd: core, env, stdio: ['pipe', 'pipe', 'pipe'] });
   host.stderr.on('data', (c) => { stderr += c; });
@@ -84,7 +78,32 @@ try {
   });
   evidence.observations.discovery = await request({ cmd: 'discover' });
   assert.equal(evidence.observations.discovery.length, 7);
-  await call('browser_state');
+  evidence.observations.before_pairing = await call('browser_state');
+  assert.equal(evidence.observations.before_pairing.pairing.origin_pinned, false);
+}
+try {
+  browser = await launchChromium({ executable, profile, extension: path.join(install.skillDir, 'extension'), WebSocket: install.WebSocket });
+  const cdp = browser.cdp;
+  await until(async () => (await cdp.send('Target.getTargets')).targetInfos.find((t) => t.type === 'service_worker' && t.url.endsWith('/service_worker.js')), { what: 'MV3 worker' });
+  const target = await cdp.open(fixture.origin + '/a.html');
+  const control = await cdp.open(fixture.origin + '/fg.html', { background: true });
+  await target.activate();
+  await startHostBeforePairing();
+  const popup = await cdp.open(`chrome-extension://${init.extension_id}/popup.html`, { background: true });
+  await until(async () => (await popup.evaluate('document.getElementById("tab").textContent')) !== '…', { what: 'popup initialized' });
+  const pairing = spawn(process.execPath, [setupScript, 'pair', '--wait', '30'], { env: setupEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  const paired = new Promise((resolve, reject) => { let output = ''; pairing.stdout.on('data', (c) => { output += c; }); pairing.on('exit', (code) => code === 0 ? resolve(JSON.parse(output)) : reject(new Error('pair setup failed: ' + output))); });
+  await sleep(300);
+  await popup.evaluate(`document.getElementById('port').value = '${stored.port}'`);
+  await popup.typeInto('#credential', stored.credential);
+  await popup.click('#save');
+  assert.equal((await paired).ok, true);
+  await popup.close();
+
+  evidence.observations.after_pairing = await call('browser_state');
+  assert.equal(evidence.observations.after_pairing.executor_generation, evidence.observations.before_pairing.executor_generation);
+  assert.equal(evidence.observations.after_pairing.pairing.origin_pinned, true);
+  assert.equal(evidence.observations.after_pairing.pairing.listener, 'listening');
   await target.activate();
   const share = await cdp.open(`chrome-extension://${init.extension_id}/popup.html`, { background: true });
   await until(async () => /Connected/.test(await share.evaluate('document.getElementById("summary").textContent')), { what: 'real executor paired' });
@@ -124,6 +143,19 @@ try {
     assert.equal(await target.evaluate('document.getElementById("count").textContent'), '2', 'action must not be retried');
     await call('browser_state'); // reconcile fresh observation, never replay the click
   }
+  const longText = 'a'.repeat(25000) + 'TAILNEEDLE' + 'b'.repeat(1000);
+  await target.evaluate(`(() => { const el=document.createElement('pre'); el.id='long-source'; el.textContent=${JSON.stringify(longText)}; document.body.append(el); })()`);
+  const window = await action('get_text', { selector: '#long-source', start: 24998, max_chars: 16 });
+  assert.equal(window.result.text, longText.slice(24998, 25014), 'first requested tail window must be addressable');
+  const capture = await action('get_text', { selector: '#long-source', max_chars: 16, capture_chars: 30000, cache_key: 'long' });
+  assert.equal(capture.result.text.length, 16);
+  assert.equal(capture.result.cached.coverage.complete, true);
+  const source = capture.result.cached.source;
+  await target.evaluate('document.getElementById("long-source").remove()');
+  const retained = await action('cached_text', { cache_key: 'long', start: 24998, max_chars: 16 });
+  assert.equal(retained.result.text, longText.slice(24998, 25014));
+  assert.deepEqual(retained.result.source, source, 'cache retains its original snapshot after DOM changes');
+  evidence.observations.addressed_text = { window, capture, retained };
   const handed = await call('browser_handoff');
   assert.equal(handed.connected, false);
   await target.typeInto('#name', ' plus owner');
@@ -166,6 +198,38 @@ try {
   fs.writeFileSync(path.join(imageDir, 'registered-target.png'), Buffer.from(rendered.data, 'base64'));
   const end = await call('browser_disconnect');
   evidence.observations.disconnect = end;
+  const closedState = await call('browser_state');
+  assert.equal(closedState.connected, false);
+  const ownUrl = fixture.origin + '/a.html?cold=own';
+  const own = await call('browser_connect', { url: ownUrl });
+  assert.equal(own.connected, true);
+  assert.ok(own.lease.generation > fragmentResume.lease.generation);
+  const ownTarget = await until(async () => (await cdp.send('Target.getTargets')).targetInfos.find((item) => item.type === 'page' && item.url === ownUrl), { what: 'new own background tab' });
+  const { sessionId } = await cdp.send('Target.attachToTarget', { targetId: ownTarget.targetId, flatten: true });
+  const { Page } = await import('./harness.mjs');
+  const cold = new Page(cdp, ownTarget.targetId, sessionId);
+  assert.equal(await cold.evaluate('document.visibilityState'), 'hidden');
+  const first = await action('click', { selector: '#go' });
+  assert.equal(first.ok, true);
+  assert.equal(first.result.input_preparation.kind, 'renderer_frame');
+  assert.equal(await cold.evaluate('document.getElementById("count").textContent'), '1');
+  assert.equal((await cold.evaluate('window.events')).filter((event) => event.type === 'click' && event.target === 'go' && event.trusted).length, 1);
+  const idleGet = await cold.evaluate(`fetch('/echo?idle-get').then(r=>({ok:r.ok}),error=>({ok:false,error:String(error)}))`);
+  const idleHead = await cold.evaluate(`fetch('/echo?idle-head',{method:'HEAD'}).then(r=>({ok:r.ok}),error=>({ok:false,error:String(error)}))`);
+  const idlePost = await cold.evaluate(`fetch('/echo?idle-post',{method:'POST',body:'not-permitted-between-tools'}).then(r=>({ok:r.ok}),error=>({ok:false,error:String(error)}))`);
+  assert.equal(idleGet.ok, true);
+  assert.equal(idleHead.ok, true);
+  assert.equal(idlePost.ok, false);
+  assert.equal(fixture.requests.filter((item) => item.query === '?idle-get').length, 1);
+  assert.equal(fixture.requests.filter((item) => item.query === '?idle-head').length, 1);
+  assert.equal(fixture.requests.filter((item) => item.query === '?idle-post').length, 0);
+  await cold.evaluate(`location.href=${JSON.stringify(fixture.origin + '/second.html?idle-document')}`);
+  await sleep(200);
+  assert.equal(fixture.requests.filter((item) => item.query === '?idle-document').length, 0);
+  assert.equal((await call('browser_state')).lease.document_id, own.lease.document_id);
+  evidence.observations.cold_reconnect_resources = { own, first, idleGet, idleHead, idlePost, requests: fixture.requests };
+  await call('browser_disconnect');
+  assert.equal(await target.evaluate('document.getElementById("notes").value'), 'Owner after fragment', 'the previously handed-off tab remains intact');
   evidence.observations.stop = await request({ cmd: 'stop' });
   assert.ok(evidence.observations.stop.every((x) => x.closure === 'confirmed'));
   host.stdin.end();

@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.4.3
+version: 0.5.0
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -158,6 +158,33 @@ speech-to-text claim. Reaction updates require the bot to be an administrator
 in the chat and an explicit Bot API `allowed_updates` subscription; Telegram
 does not deliver bot-authored reactions as user reactions.
 
+## Retained input and late results
+
+A typed Host `disposition: retained` means the original event is saved but has
+no canonical final result to deliver. The transport stores the complete refusal receipt
+with its source event, releases that conversation's input queue, and observes
+the original `turn_ref` and any real child `work_ref` independently. It never
+resubmits that retained event. A child finishing does not erase the original
+uncertainty or stop observation of its late selected output.
+
+A work view with `status: unresolved` remains observable. A failed task may
+still carry a selected answer; lifecycle status alone does not suppress speech.
+Canonical selected
+outputs keep their source and delivery identity across repeated polls and
+restarts; a retained receipt itself is never sent as speech. A recorded cancellation can remain under
+observation: it proves neither a live executor nor absence of external effects,
+and observation starts no new generation. This does not
+claim exactly-once provider delivery after ambiguous network acceptance.
+`rejected` ends an event-specific refusal; before-admission `retry` and `blocked`
+retain retry custody, including after account or binding repair. Missing or unknown typed
+dispositions stay retryable, even on HTTP 403/404. Full queue recovery requires
+both an updated Host and this transport; older Hosts may still return a
+retry-only refusal. Existing completed delivery receipts remain unchanged.
+
+The work table migrates transactionally from one row per event to one row per
+work reference, preserving existing work and its outbox identities. The original
+refusal remains in the inbox receipt after any child finishes.
+
 ## Delivery history
 
 Hosts advertising `presence_delivery_version=1` receive delivery observations
@@ -283,7 +310,7 @@ a timeout or unknown network response never triggers that fallback. The ordinary
 bounded outbox retry policy and its documented unknown-acceptance duplicate risk
 remain unchanged. See `FORMATTER_PROVENANCE.md` for the included helper source.
 
-## Upgrading to 0.4.3
+## Upgrading to 0.5.0
 
 - The payload content hash changes, so each install needs a fresh owner review
   and grant before the new version runs.

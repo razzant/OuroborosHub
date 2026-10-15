@@ -8,7 +8,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, Optional
+from typing import Sequence, Any, Dict, Iterator, Optional
 
 from .events import TelegramEvent
 from .formatting import prepare_text
@@ -35,6 +35,30 @@ class WorkLease:
     work_ref: str
     event: Dict[str, Any]
     attempts: int
+    role: str = "deferred"
+
+
+# One row per observed Host reference. ``deferred`` is a successful handoff's
+# work; ``turn`` is a retained event's original attempt and ``child`` real
+# admitted work of that event. Each is leased, polled and settled on its own.
+_PRESENCE_WORK_TABLE = """
+CREATE TABLE IF NOT EXISTS {name}(
+    work_ref TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL,
+    binding_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'deferred' CHECK(role IN ('deferred','turn','child')),
+    event_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(
+        state IN ('pending','leased','completed','failed','cancelled')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    available_at REAL NOT NULL,
+    lease_until REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    completed_at REAL,
+    last_error TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY(event_id) REFERENCES inbox(event_id)
+)"""
 
 
 class CustodyStore:
@@ -173,16 +197,91 @@ class CustodyStore:
             conn.commit()
         return released
 
-    def mark_inbox_failed(self, event_id: str, *, reason: str) -> None:
+    def mark_inbox_failed(
+        self, event_id: str, *, reason: str, receipt: Optional[Dict[str, Any]] = None
+    ) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE inbox
-                SET state='failed', lease_until=0, failed_at=?, last_error=?
+                SET state='failed', lease_until=0, failed_at=?, last_error=?,
+                    host_receipt_json=COALESCE(?, host_receipt_json)
                 WHERE event_id=? AND state='leased'
                 """,
-                (time.time(), str(reason)[:500], event_id),
+                (time.time(), str(reason)[:500], _json(receipt) if receipt else None, event_id),
             )
+
+    def record_retention(
+        self, event_id: str, *, binding_id: str, receipt: Dict[str, Any]
+    ) -> None:
+        """Release a retained event's conversation without resubmitting it.
+
+        The Host kept an admitted attempt it will not regenerate. The inbox row
+        keeps the source event and the complete typed receipt; the original
+        attempt and any real admitted child become separately observed work.
+        """
+        response = receipt.get("response") if isinstance(receipt.get("response"), dict) else {}
+        turn_ref = str(response.get("turn_ref") or "").strip()
+        if not turn_ref:
+            raise ValueError("retained receipt must name its original turn")
+        child_ref = str(response.get("work_ref") or "").strip()
+        mode = int(response.get("delivery_reporting_version") == 1)
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT payload_json FROM inbox WHERE event_id=? AND state='leased'",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise ValueError("inbox event is not leased")
+            event = json.loads(row["payload_json"])
+            self._add_work(conn, event_id, binding_id, turn_ref, "turn", event, mode, now)
+            if child_ref and child_ref != turn_ref:
+                self._add_work(conn, event_id, binding_id, child_ref, "child", event, mode, now)
+            updated = conn.execute(
+                """
+                UPDATE inbox
+                SET state='submitted', lease_until=0, submitted_at=?, submission_ref=?,
+                    host_receipt_json=?, last_error=''
+                WHERE event_id=? AND state='leased'
+                """,
+                (now, turn_ref[:500], _json(receipt), event_id),
+            )
+            if updated.rowcount != 1:
+                conn.rollback()
+                raise ValueError("inbox event lease changed")
+            conn.commit()
+
+    @staticmethod
+    def _add_work(
+        conn: sqlite3.Connection,
+        event_id: str,
+        binding_id: str,
+        work_ref: str,
+        role: str,
+        event: Dict[str, Any],
+        mode: int,
+        now: float,
+    ) -> None:
+        """Observe one more reference of an event; its late output names its own task."""
+        source = {key: value for key, value in event.items() if key != "_reporting"}
+        source["_reporting"] = {
+            "version": mode,
+            "account_id": event.get("account_id", ""),
+            "origin": {"kind": "automatic", "task_id": work_ref,
+                       "source_event_id": event.get("source_event_id", "")},
+        }
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO presence_work(
+                work_ref, event_id, binding_id, role, event_json, state,
+                attempts, available_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+            """,
+            (work_ref, event_id, binding_id, role, _json(source), now, now),
+        )
 
     def record_submission(
         self,
@@ -274,7 +373,7 @@ class CustodyStore:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT event_id, binding_id, work_ref, event_json, attempts
+                SELECT event_id, binding_id, work_ref, role, event_json, attempts
                 FROM presence_work
                 WHERE (state='pending' AND available_at<=?)
                    OR (state='leased' AND lease_until<=?)
@@ -290,12 +389,12 @@ class CustodyStore:
                 """
                 UPDATE presence_work
                 SET state='leased', lease_until=?, attempts=attempts+1, last_error=''
-                WHERE event_id=? AND (
+                WHERE work_ref=? AND (
                     (state='pending' AND available_at<=?)
                     OR (state='leased' AND lease_until<=?)
                 )
                 """,
-                (now + max(1.0, lease_sec), row["event_id"], now, now),
+                (now + max(1.0, lease_sec), row["work_ref"], now, now),
             )
             conn.commit()
             if updated.rowcount != 1:
@@ -306,30 +405,60 @@ class CustodyStore:
                 work_ref=str(row["work_ref"]),
                 event=json.loads(row["event_json"]),
                 attempts=int(row["attempts"]) + 1,
+                role=str(row["role"]),
             )
 
     def release_work(
-        self, event_id: str, *, reason: str, retry_after_sec: float
+        self, work_ref: str, *, reason: str, retry_after_sec: float, child_ref: str = ""
     ) -> None:
+        """Keep observing a reference; retain a newly named child in the same commit."""
+        now = time.time()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT event_id, binding_id, event_json FROM presence_work "
+                "WHERE work_ref=? AND state='leased'",
+                (work_ref,),
+            ).fetchone()
+            if row is not None and child_ref and child_ref != work_ref:
+                event = json.loads(row["event_json"])
+                mode = int((event.get("_reporting") or {}).get("version") == 1)
+                self._add_work(conn, row["event_id"], row["binding_id"], child_ref, "child",
+                               event, mode, now)
             conn.execute(
                 """
                 UPDATE presence_work
                 SET state='pending', available_at=?, lease_until=0, last_error=?
-                WHERE event_id=? AND state='leased'
+                WHERE work_ref=? AND state='leased'
                 """,
-                (time.time() + max(0.0, retry_after_sec), str(reason)[:500], event_id),
+                (now + max(0.0, retry_after_sec), str(reason)[:500], work_ref),
             )
+            conn.commit()
 
-    def complete_work(self, event_id: str, *, status: str, text: str) -> None:
+    def record_work_outputs(self, work_ref: str, outputs: Sequence[Dict[str, Any]]) -> None:
+        """Checkpoint selected outputs before releasing or settling their observation."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT event_id, event_json FROM presence_work WHERE work_ref=?",
+                               (work_ref,)).fetchone()
+            if row is None:
+                raise ValueError("presence work reference is missing")
+            event = json.loads(row["event_json"])
+            for output in outputs:
+                identity = f"presence:{row['event_id']}:output:{work_ref}:{output['output_ref']}"
+                self._enqueue_outbox(conn, identity, _reply_payload(event, str(output["text"])), time.time())
+            conn.commit()
+
+    def complete_work(self, work_ref: str, *, status: str, text: str) -> None:
         if status not in {"completed", "failed", "cancelled"}:
             raise ValueError("work status is not terminal")
         now = time.time()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT event_json FROM presence_work WHERE event_id=? AND state='leased'",
-                (event_id,),
+                "SELECT event_id, role, event_json FROM presence_work "
+                "WHERE work_ref=? AND state='leased'",
+                (work_ref,),
             ).fetchone()
             if row is None:
                 conn.rollback()
@@ -338,21 +467,21 @@ class CustodyStore:
                 """
                 UPDATE presence_work
                 SET state=?, lease_until=0, completed_at=?, last_error=''
-                WHERE event_id=? AND state='leased'
+                WHERE work_ref=? AND state='leased'
                 """,
-                (status, now, event_id),
+                (status, now, work_ref),
             )
             if updated.rowcount != 1:
                 conn.rollback()
                 raise ValueError("presence work lease changed")
             if text:
+                event_id, role = str(row["event_id"]), str(row["role"])
+                # A deferred handoff keeps its original identity; each retained
+                # reference speaks at most once under its own.
+                delivery_id = (f"presence:{event_id}:work" if role == "deferred"
+                               else f"presence:{event_id}:{role}:{work_ref}")
                 event = json.loads(row["event_json"])
-                self._enqueue_outbox(
-                    conn,
-                    f"presence:{event_id}:work",
-                    _reply_payload(event, text),
-                    now,
-                )
+                self._enqueue_outbox(conn, delivery_id, _reply_payload(event, text), now)
             conn.commit()
 
     def claim_outbox(self, *, lease_sec: float = 90.0) -> Optional[OutboxLease]:
@@ -562,6 +691,11 @@ class CustodyStore:
                 "inbox_waiting": inbox.get("pending", 0),
                 "inbox_leased": inbox.get("leased", 0),
                 "inbox_submitted": inbox.get("submitted", 0),
+                # Retained events whose original attempt or child is still observed.
+                "inbox_retained": conn.execute(
+                    "SELECT COUNT(DISTINCT event_id) FROM presence_work "
+                    "WHERE role IN ('turn','child') AND state IN ('pending','leased')"
+                ).fetchone()[0],
                 "inbox_failed": inbox.get("failed", 0),
                 "outbox_waiting": outbox.get("pending", 0),
                 "outbox_leased": outbox.get("leased", 0),
@@ -609,22 +743,9 @@ class CustodyStore:
                 );
                 CREATE INDEX IF NOT EXISTS inbox_ready_idx
                     ON inbox(state, available_at, lease_until, update_id);
-                CREATE TABLE IF NOT EXISTS presence_work(
-                    event_id TEXT PRIMARY KEY,
-                    binding_id TEXT NOT NULL,
-                    work_ref TEXT NOT NULL UNIQUE,
-                    event_json TEXT NOT NULL,
-                    state TEXT NOT NULL CHECK(
-                        state IN ('pending','leased','completed','failed','cancelled')
-                    ),
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    available_at REAL NOT NULL,
-                    lease_until REAL NOT NULL DEFAULT 0,
-                    created_at REAL NOT NULL,
-                    completed_at REAL,
-                    last_error TEXT NOT NULL DEFAULT '',
-                    FOREIGN KEY(event_id) REFERENCES inbox(event_id)
-                );
+                """
+                + _PRESENCE_WORK_TABLE.format(name="presence_work")
+                + """;
                 CREATE INDEX IF NOT EXISTS presence_work_ready_idx
                     ON presence_work(state, available_at, lease_until, created_at);
                 CREATE TABLE IF NOT EXISTS outbox(
@@ -650,8 +771,38 @@ class CustodyStore:
                 conn.execute("ALTER TABLE outbox ADD COLUMN reports_json TEXT NOT NULL DEFAULT '[]'")
                 conn.execute("ALTER TABLE outbox ADD COLUMN report_due_at REAL NOT NULL DEFAULT 0")
             conn.execute("CREATE INDEX IF NOT EXISTS outbox_reports_due ON outbox(report_due_at)")
+            if "host_receipt_json" not in {r[1] for r in conn.execute("PRAGMA table_info(inbox)")}:
+                conn.execute("ALTER TABLE inbox ADD COLUMN host_receipt_json TEXT NOT NULL DEFAULT ''")
+            if "role" not in {r[1] for r in conn.execute("PRAGMA table_info(presence_work)")}:
+                self._key_work_by_reference(conn)
             conn.commit()
             self._import_legacy_offset(conn)
+
+    @staticmethod
+    def _key_work_by_reference(conn: sqlite3.Connection) -> None:
+        """Rebuild the 0.4 work table, keyed by event id, under its Host reference.
+
+        SQLite cannot change a primary key in place. Every row moves unchanged as a
+        ``deferred`` handoff, so its leases, attempts and delivery identity survive.
+        """
+        conn.execute(_PRESENCE_WORK_TABLE.format(name="presence_work_by_ref"))
+        conn.execute(
+            """
+            INSERT INTO presence_work_by_ref(
+                work_ref, event_id, binding_id, role, event_json, state, attempts,
+                available_at, lease_until, created_at, completed_at, last_error
+            )
+            SELECT work_ref, event_id, binding_id, 'deferred', event_json, state, attempts,
+                   available_at, lease_until, created_at, completed_at, last_error
+            FROM presence_work
+            """
+        )
+        conn.execute("DROP TABLE presence_work")
+        conn.execute("ALTER TABLE presence_work_by_ref RENAME TO presence_work")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS presence_work_ready_idx "
+            "ON presence_work(state, available_at, lease_until, created_at)"
+        )
 
     def _import_legacy_offset(self, conn: sqlite3.Connection) -> None:
         if self._metadata_int(conn, "telegram_offset") > 0:

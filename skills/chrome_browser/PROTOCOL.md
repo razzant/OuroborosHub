@@ -145,6 +145,12 @@ Additional members (informative):
 
 No credential, proof or nonce appears in any tool result, log line or guard
 question.
+An unconfigured listener start (missing pairing file or pinned origin, or a
+start error before a listener exists) can be retried by a later tool call in
+the same executor generation. Concurrent callers share one start attempt.
+An existing listener, including one reporting a busy port, is not rebound.
+Revoked and transport-lost executors do not retry an unconfigured start or
+replay a browser action.
 
 ### 1.4 Guard socket
 
@@ -209,7 +215,7 @@ which also drops the socket, does not close it.
 ```json
 {"kind": "request", "invocation_id": "…", "step_id": 2, "causal_step_id": 1,
  "request_id": "4:interception-job-12.0", "url": "https://…", "method": "POST",
- "post_data": "a=1", "complete": true,
+ "post_data": "a=1", "has_post_data": true, "complete": true,
  "resource_type": "Document", "is_main_frame": true, "target_tab_id": "1234567",
  "state": {…}}
 ```
@@ -219,6 +225,8 @@ which also drops the socket, does not close it.
 * `complete` is `true` only when the whole body is in `post_data`, or there is
   no body (`post_data: null`). File parts, non-UTF-8 bytes and a body Chrome
   does not hand over are `complete:false`.
+  `has_post_data` is an explicit CDP-derived presence fact: `false` only for
+  no body, `true` for body-bearing requests, `null` for malformed/unknown facts.
 * `resource_type` is CDP's `Fetch.requestPaused.resourceType`.
   `is_main_frame` is `true` only when the paused request's CDP `frameId`
   equals the leased tab's main frame id; it is never inferred from the URL.
@@ -233,6 +241,15 @@ which also drops the socket, does not close it.
 * A refused `Document` request is answered `204`, so Chrome abandons the
   navigation and keeps the current document; any other refused request fails
   with `BlockedByClient`.
+
+With no active invocation, a compatible host may admit only a current armed
+lease's complete bodyless GET/HEAD subresources (`has_post_data:false`), still
+checking current task holds, binding and URL/request policy at arrival and after
+assessment. All Documents, bodies, unknown resource types and stale non-null
+invocation IDs refuse. A main-frame-origin Fetch/XHR remains a subresource;
+`is_main_frame` describes its origin frame, not navigation. No idle callback
+adopts a document or authorizes another action. GET/HEAD are not a semantic
+non-mutation guarantee. Older invocation-only hosts continue to refuse idle reads.
 
 **Document change** — on the actual `Page.frameNavigated` of the main frame:
 
@@ -348,7 +365,7 @@ failure.
 same operation), `click`, `double_click`, `fill`, `type`, `press`, `check`,
 `uncheck`, `scroll`.
 
-Refused as `BROWSER_OPERATION_UNSUPPORTED` in 0.1.0, without asking the
+Refused as `BROWSER_OPERATION_UNSUPPORTED` in this version, without asking the
 guard: `select`, `drag`, `upload`, `submit`.
 These names are excluded from the operation enum; this contract does not
 provide native selection, dragging, file upload or a standalone submit action.
@@ -366,11 +383,37 @@ Two operations are the executor's own:
   There is no question for the wrapper itself.
 * `cached_text` — `{"cache_key": "…", "find"?: "…", "start"?: n, "max_chars"?: n}`.
   Any read except `screenshot` may carry `cache_key` (1–64 of `A-Za-z0-9_.-`);
-  the executor keeps what it returned as text (at most 32 keys, 2,000,000
-  characters each). `cached_text` returns a slice, or the lines containing
-  `find`. It asks the guard as a primitive, needs no lease, and sends nothing
-  to the browser. Cached text survives navigation and handoff; element
-  handles do not.
+  the executor keeps what it captured as text (at most 32 keys, 2,000,000
+  characters each). `read` and `get_text` accept zero-based `start` and
+  `max_chars` (default 20,000, cap 200,000); their result retains `text`,
+  `length` and `truncated` and adds `coverage:{start,end,total_length,complete}`.
+  The offsets use JavaScript string characters and `end` is exclusive.
+  With `cache_key`, an optional `capture_chars` from `max_chars` through
+  200,000 captures a larger window into the cache while returning only
+  `max_chars` text. This is opt-in; the default read still returns and caches
+  at most 20,000 characters. `cached_text` returns a slice at an absolute
+  source offset or the lines containing `find`; it reports the captured
+  coverage and `complete`. A start outside captured coverage returns
+  `BROWSER_CACHE_MISS`, not empty text. A find with no matches and
+  `complete:false` proves absence only within the reported window. Historical
+  string cache entries remain readable. `cached_text` asks the guard as a
+  primitive, needs no lease, and sends nothing to the browser. Cached text
+  survives navigation and handoff; element handles do not.
+
+`read`/`get_text` cache records also identify the original observation (invocation/step,
+executor, lease generation, tab, document and observed URL). Later cache reads
+retain that source identity; a fresh page read never silently extends it.
+Coverage is rendered DOM text, not proof that a virtualized site exposed a whole file.
+
+Before the first pointer/keyboard input in a document/attachment, the extension
+requests one bounded renderer frame through the existing `Page.captureScreenshot`
+command, discards its pixels, and then measures/hit-tests the target afresh. This
+prepares hidden-tab input without activation, focus emulation or a sacrificial
+click. The first input result carries `input_preparation:{kind:"renderer_frame",
+elapsed_ms:...}`; later inputs reuse preparation until a new document or attachment.
+No frame within eight seconds, changed lease or revocation refuses before input.
+An input acknowledgement is still not proof of application effect; check the
+selected postcondition. Preparation does not cause an automatic replay.
 
 After an input step (`click`, `double_click`, `type`, `press`, `check`,
 `uncheck`) the step follows the navigation its input asked for. Chrome

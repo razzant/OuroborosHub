@@ -104,15 +104,15 @@ def test_late_promoted_child_survives_bridge_restart_before_parent_completion(tm
     assert facts["core_sources_unchanged"]
     assert facts["initial_status"] == "continuing" and facts["initial_child_ref"] == ""
     assert facts["discovered_child_ref"] and facts["child_completed_before_parent"]
-    assert facts["parent_discovery_status"] == ("interrupted" if dead_parent else "pending")
+    assert facts["parent_discovery_status"] == ("unresolved" if dead_parent else "pending")
     assert facts["bridge_restarts"] == 2
     assert facts["original_event_posts"] == 1
     assert facts["provider_texts"] == [CHILD_ANSWER]
     assert facts["outbox_states"] == ["delivered"]
     assert facts["output_task_ids"] == [facts["discovered_child_ref"]]
-    assert facts["final_inbox_state"] == ("failed" if dead_parent else "pending")
+    assert facts["final_inbox_state"] == "pending"
     if dead_parent:
-        assert "interrupted" in facts["final_inbox_error"]
+        assert "unresolved" in facts["final_inbox_error"]
         assert len(facts["host_pids"]) == 2 and len(set(facts["host_pids"])) == 2
         assert facts["killed_host_exit_codes"] == [-9]
 
@@ -129,7 +129,7 @@ def test_real_host_409_preserves_admitted_child_and_original_refusal_after_resta
     assert facts["provider_texts"] == [CHILD_ANSWER]
     assert facts["outbox_states"] == ["delivered"]
     assert facts["output_task_ids"] == [facts["discovered_child_ref"]]
-    assert facts["final_inbox_state"] == "failed"
+    assert facts["final_inbox_state"] == "pending"
     assert facts["original_refusal"] in facts["final_inbox_error"]
 
 
@@ -187,12 +187,11 @@ def _environment(root: Path, core: Path, mode: str) -> dict[str, str]:
         "OUROBOROS_PRESENCE_MAX_ACTIVE": "1", "OUROBOROS_MAX_ROUNDS": "12",
         "OUROBOROS_TASK_REVIEW_MODE": "auto", "OUROBOROS_REVIEW_ENFORCEMENT": mode,
         "OUROBOROS_REVIEW_MAX_CYCLES": "3", "OUROBOROS_SAFETY_MODE": "off",
-        "OUROBOROS_REVIEWER_SLOTS": json.dumps({
-            "triad": [{"slot_id": "acceptance-one", "route": {"kind": "api_chat", "target_id": "fixture/reviewer"},
-                       "effort": "high", "delivery": "packet"}],
-            "scope": [{"slot_id": "unused-scope", "route": {"kind": "api_chat", "target_id": "fixture/reviewer"}}],
-            "advisory": {"enabled": False, "route": {"kind": "api_chat", "target_id": "fixture/reviewer"}},
-        }),
+        "OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [{
+            "subagent_id": "acceptance-one", "recommended_use": "Review the fixture report",
+            "review_eligible": True, "route": {"kind": "api_model", "target_id": "openai::fixture/reviewer"},
+            "effort": "high", "delivery": "packet",
+        }]}),
     }
     return env
 
@@ -359,7 +358,7 @@ def _drive(root: Path, mode: str, reporting: int, scenario: str) -> dict:
             def restart_host():
                 # Kill the actual parked author process; its canonical row stays
                 # RUNNING. Core's controller witness, not a fabricated status,
-                # must project the lost author as interrupted after restart.
+                # must retain the lost author as unresolved after restart.
                 nonlocal process, host_url
                 with httpx.Client(trust_env=False, timeout=5) as client:
                     used_modules.update(client.get(host_url + "/fixture-sources").json())
@@ -558,7 +557,7 @@ async def _consume(root: Path, host_url: str, identity: dict, provider: Provider
                 if scenario == "refused-child":
                     assert initial["status_code"] == 409, initial
                     assert first["code"] == "presence_resources_unavailable", first
-                    assert first["disposition"] == "retry", first
+                    assert first["disposition"] == "retained", first
                     assert first["work_ref"] and not first.get("text"), first
                     state = await child_state(lambda _state: True)
                     await restart_bridge()
@@ -568,7 +567,8 @@ async def _consume(root: Path, host_url: str, identity: dict, provider: Provider
                     assert len(submitted) == 1, submitted
                 else:
                     assert first["status"] == "continuing" and first["work_ref"] == "", first
-                    assert provider.review_entered.is_set() and not provider.release.is_set()
+                    assert await asyncio.to_thread(provider.review_entered.wait, 10)
+                    assert not provider.release.is_set()
                     provider.release.set()
                     state = await child_state(lambda value: provider.parent_review_entered.is_set() and (
                         value["parent"]["presence_continuation"]["lent_at"]
@@ -600,8 +600,8 @@ async def _consume(root: Path, host_url: str, identity: dict, provider: Provider
                 inbox, outbox = rows("inbox")[0], rows("outbox")
                 refusal_preserved = False
                 if scenario == "refused-child":
-                    from lib.host_adapter import _decode_refused_reference
-                    refusal = _decode_refused_reference(inbox["host_reference"])
+                    from lib.host_adapter import _decode_retained_reference
+                    refusal = _decode_retained_reference(inbox["host_reference"])
                     refusal_preserved = (inbox["host_reference"] == retained
                                          and refusal["http_status"] == initial["status_code"]
                                          and refusal["response"] == first)
@@ -626,7 +626,8 @@ async def _consume(root: Path, host_url: str, identity: dict, provider: Provider
                 for index in range(6):
                     await ingest(f"Review-{index}", f"1.{index}", "Please prepare the status report.", f"1.{index}")
                     assert await inbound.process_once()
-                assert len(provider.reviews) == 6 and not provider.release.is_set()
+                await asyncio.to_thread(_wait, lambda: len(provider.reviews) == 6)
+                assert not provider.release.is_set()
                 parked = rows("inbox")
                 assert all(row["state"] == "pending" for row in parked), parked
                 before = [body["markdown_text"] for body in posted]
@@ -650,7 +651,8 @@ async def _consume(root: Path, host_url: str, identity: dict, provider: Provider
             bad_token = await host_http.get(host_url + "/identity", headers={"X-Skill-Token": "wrong"})
             await ingest("Review-1", "1.0", "Please prepare the status report.")
             assert await inbound.process_once()
-            assert provider.review_entered.is_set() and not provider.release.is_set()
+            assert await asyncio.to_thread(provider.review_entered.wait, 10)
+            assert not provider.release.is_set()
             first_body = submitted[0]
             first = (await host_http.post(host_url + "/presence/turn", headers=headers, json=first_body)).json()
             assert first["status"] == "continuing", first

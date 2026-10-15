@@ -132,6 +132,26 @@ async def _poll_encodes_reference_and_parses_pending_then_terminal(tmp_path):
     assert transport.calls[0][3] is None
 
 
+def test_unresolved_poll_is_an_observation_naming_only_real_child_work(tmp_path):
+    async def run():
+        views = [
+            {"ok": True, "status": "unresolved", "code": "presence_attempt_outcome_unknown", "turn_ref": "turn-1"},
+            {"ok": True, "status": "unresolved", "turn_ref": "turn-1", "work_ref": "turn-1"},
+            {"ok": True, "status": "unresolved", "turn_ref": "turn-1", "work_ref": "child-1"},
+            {"ok": True, "status": "unresolved", "turn_ref": "turn-1", "work_ref": "child-1",
+             "child_work_ref": "child-2", "outcome": "message", "text": "never speech"},
+        ]
+        client = PresenceHostClient(state_dir=tmp_path, token_provider=lambda: "skill-token",
+                                    host_base="http://127.0.0.1:8767", transport=FakeTransport(views))
+        results = [await client.poll("turn-1", "b" * 32) for _ in views]
+        assert all(not item.terminal and (item.status, item.outcome, item.text) == ("unresolved", "", "")
+                   for item in results)
+        assert [item.child_work_ref for item in results] == ["", "", "child-1", "child-2"]
+        assert results[0].code == "presence_attempt_outcome_unknown"
+
+    asyncio.run(run())
+
+
 def test_missing_local_binding_fails_before_transport(tmp_path):
     client = PresenceHostClient(
         state_dir=tmp_path,
@@ -164,3 +184,5 @@ def test_http_rejection_preserves_status_code(monkeypatch):
             1.0,
         )
     assert raised.value.status_code == 403
+    # An untyped error carries no recovery instruction: the runtime retries it.
+    assert raised.value.payload == {"error": "binding mismatch"} and raised.value.disposition == ""

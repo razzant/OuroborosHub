@@ -360,13 +360,14 @@ class BridgeStore:
 
     @staticmethod
     def _claimable_sql(table: str) -> str:
-        # A deferred, continuing or refused turn with admitted work only polls.
+        # A deferred, continuing, refused-with-work or retained turn only polls.
         # Once its durable reference exists, later conversation events may be
         # admitted, including while this row's independent polls are in flight.
         deferred = (
             "AND NOT (earlier.host_reference LIKE 'deferred:%'"
             " OR earlier.host_reference LIKE 'continuing:%'"
-            " OR earlier.host_reference LIKE 'refused:%')"
+            " OR earlier.host_reference LIKE 'refused:%'"
+            " OR earlier.host_reference LIKE 'retained:%')"
             if table == "inbox"
             else ""
         )
@@ -982,6 +983,10 @@ class BridgeStore:
             report_error = db.execute(
                 "SELECT report_error FROM outbox WHERE report_error<>'' ORDER BY id DESC LIMIT 1"
             ).fetchone()
+            # Retained events still observing their original attempt or child (counted in pending too).
+            retained = db.execute(
+                "SELECT COUNT(*) FROM inbox WHERE host_reference LIKE 'retained:%' AND state IN ('pending','leased')"
+            ).fetchone()[0]
             last_error = db.execute(
                 """
                 SELECT last_error FROM (
@@ -1008,6 +1013,7 @@ class BridgeStore:
             **runtime,
             "runtime_updated_at": runtime_updated_at,
             "inbox_pending": inbox.get("pending", 0),
+            "inbox_retained": int(retained),
             "inbox_leased": inbox.get("leased", 0),
             "inbox_delivered": inbox.get("delivered", 0),
             "inbox_failed": inbox.get("failed", 0),

@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, Optional, Protocol, Sequence
 
 _OUTCOMES = {"message", "silent", "tool_delivered", "deferred"}
 _TERMINAL_WORK_STATES = {"completed", "failed", "cancelled"}
+_DISPOSITIONS = {"retained", "rejected", "blocked", "retry"}
 _EVENT_KEYS = {
     "source_event_id",
     "provider",
@@ -35,9 +36,26 @@ class PresenceHostError(RuntimeError):
 class PresenceHostHTTPError(PresenceHostError):
     """The local Host returned a concrete HTTP rejection."""
 
-    def __init__(self, status_code: int, detail: str):
+    def __init__(self, status_code: int, detail: str, payload: Optional[Dict[str, Any]] = None):
         self.status_code = int(status_code)
+        # The complete JSON error object: a typed refusal is a durable receipt.
+        self.payload = dict(payload) if isinstance(payload, dict) else {}
+        self.binding_id = ""
         super().__init__(f"presence Host returned HTTP {self.status_code}: {detail}")
+
+    @property
+    def disposition(self) -> str:
+        """The Host's typed recovery instruction, or "" for an untyped error.
+
+        The disposition decides, never the HTTP status. A retained receipt that
+        does not name its original attempt is unusable and stays a retry.
+        """
+        disposition = str(self.payload.get("disposition") or "")
+        if self.payload.get("ok") is not False or disposition not in _DISPOSITIONS:
+            return ""
+        if disposition == "retained" and not str(self.payload.get("turn_ref") or "").strip():
+            return ""
+        return disposition
 
 
 @dataclass(frozen=True)
@@ -58,6 +76,11 @@ class PresenceWorkResult:
     text: str = ""
     work_ref: str = ""
     delivery_reporting_version: int = 0
+    # An unresolved observation: the retained code and any admitted child it names.
+    code: str = ""
+    child_work_ref: str = ""
+    outputs: tuple[Dict[str, Any], ...] = ()
+    output_ref: str = ""
 
     @property
     def terminal(self) -> bool:
@@ -118,8 +141,8 @@ class UrllibPresenceHostTransport:
             with urllib.request.urlopen(request, timeout=timeout_sec) as response:  # noqa: S310 - fixed loopback URL
                 data = response.read(2 * 1024 * 1024 + 1)
         except urllib.error.HTTPError as exc:
-            detail = _error_detail(exc.read(64 * 1024))
-            raise PresenceHostHTTPError(exc.code, detail) from exc
+            body = exc.read(64 * 1024)
+            raise PresenceHostHTTPError(exc.code, _error_detail(body), _error_payload(body)) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise PresenceHostError(
                 f"presence Host request failed: {type(exc).__name__}"
@@ -185,18 +208,22 @@ class PresenceHostClient:
             raise PresenceHostError("presence event does not match the frozen contract")
         binding_id = load_binding_id(self.state_dir)
         mode = await self.discover_delivery_support()
-        response = await self.transport.request_json(
-            "POST",
-            f"{self.host_base}/presence/turn",
-            headers=self._headers(),
-            payload={
-                "binding_id": binding_id,
-                "event": dict(event),
-                "staged_files": [str(path) for path in staged_files],
-                **({"delivery_reporting_version": 1} if mode else {}),
-            },
-            timeout_sec=1800.0,
-        )
+        try:
+            response = await self.transport.request_json(
+                "POST",
+                f"{self.host_base}/presence/turn",
+                headers=self._headers(),
+                payload={
+                    "binding_id": binding_id,
+                    "event": dict(event),
+                    "staged_files": [str(path) for path in staged_files],
+                    **({"delivery_reporting_version": 1} if mode else {}),
+                },
+                timeout_sec=1800.0,
+            )
+        except PresenceHostHTTPError as exc:
+            exc.binding_id = binding_id  # retained references are polled under this binding
+            raise
         if str(response.get("status") or "") != "completed":
             raise PresenceHostError("presence Host did not complete the turn request")
         outcome = str(response.get("outcome") or "")
@@ -226,8 +253,14 @@ class PresenceHostClient:
             timeout_sec=35.0,
         )
         status = str(response.get("status") or "")
+        outputs = _selected_outputs(response)
         if status == "pending":
-            return PresenceWorkResult(status=status, work_ref=str(work_ref))
+            return PresenceWorkResult(status=status, work_ref=str(work_ref), outputs=outputs)
+        if status == "unresolved":
+            # No canonical answer yet: an observation, never an outcome or a verdict.
+            return PresenceWorkResult(status=status, work_ref=str(work_ref),
+                                      code=str(response.get("code") or ""),
+                                      child_work_ref=_child_ref(response, str(work_ref)), outputs=outputs)
         if status not in _TERMINAL_WORK_STATES:
             raise PresenceHostError("presence Host returned an invalid work status")
         outcome = str(response.get("outcome") or "")
@@ -242,6 +275,7 @@ class PresenceHostClient:
             text=str(response.get("text") or ""),
             work_ref=str(work_ref),
             delivery_reporting_version=int(response.get("delivery_reporting_version") == 1),
+            outputs=outputs, output_ref=str(response.get("output_ref") or ""),
         )
 
     def _headers(self) -> Dict[str, str]:
@@ -266,13 +300,40 @@ def load_binding_id(state_dir: pathlib.Path) -> str:
     return binding_id.strip()
 
 
-def _error_detail(data: bytes) -> str:
+def _selected_outputs(response: Dict[str, Any]) -> tuple[Dict[str, Any], ...]:
+    """Already selected speech keeps its identity even while the author is unresolved."""
+    outputs = list(response.get("outputs") or [])
+    if response.get("output_ref") and response.get("text"):
+        outputs.append({key: response.get(key) for key in ("output_ref", "outcome", "text")})
+    selected = []
+    for output in outputs:
+        if not isinstance(output, dict) or not output.get("output_ref") or output.get("outcome") not in _OUTCOMES:
+            raise PresenceHostError("invalid released presence output")
+        if output["outcome"] in {"message", "deferred"} and str(output.get("text") or "").strip():
+            selected.append(dict(output))
+    return tuple(selected)
+
+
+def _child_ref(response: Dict[str, Any], polled: str) -> str:
+    """Admitted child work named by an unresolved view; the original is never its own child."""
+    original = {polled, str(response.get("turn_ref") or "").strip()}
+    for key in ("child_work_ref", "work_ref"):
+        value = str(response.get(key) or "").strip()
+        if value and value not in original:
+            return value
+    return ""
+
+
+def _error_payload(data: bytes) -> Dict[str, Any]:
     try:
         payload = json.loads(data.decode("utf-8", errors="replace"))
     except json.JSONDecodeError:
-        return "request rejected"
-    if not isinstance(payload, dict):
-        return "request rejected"
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _error_detail(data: bytes) -> str:
+    payload = _error_payload(data)
     return str(payload.get("error") or payload.get("code") or "request rejected")[:300]
 
 

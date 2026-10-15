@@ -20,7 +20,8 @@ live model, live review launcher or installed skill is used.
 The bridge consumer runs in a bounded driver process. Its supervised child runs
 the real Host ASGI application over a loopback TCP socket under uvicorn. Synthetic
 transport and behavior manifests, reviewed/enabled states, grants, token and
-binding are seeded only in the fixture data directory. Token authentication,
+binding are seeded only in the fixture data directory. A synthetic review-eligible
+catalog row selects the local reviewer through the current reviewer-pool contract. Token authentication,
 binding admission, Presence gate with active cap 1, Host in-flight reservations,
 execution registry, continuation and replay all execute production code.
 
@@ -57,8 +58,8 @@ The nine cases establish:
 | Six parked authors | Six same-skill turns obtain HTTP 200 and park simultaneously despite the normal five-request in-flight budget; all later finish, with six distinct selection identities for identical text. |
 | Full queued facts | Twelve still-unsubmitted events, each over 1,000 characters, reach the author through the production queue-refresh POST and its frozen `get_task_result` source reader. The model retrieves five pages, checks the complete SHA-256, and sees every exact text before finalizing within its original round limit. |
 | Late promoted child, live parent | Initial continuation has no child; a first Blocking FAIL returns the author to revise, and its new handoff is retained at the second real review park. A reopened bridge discovers the child from the pending author poll and delivers its result while the parent remains parked. |
-| Late promoted child, dead parent | After the second park and child completion, the actual isolated Host process is killed and restarted with its retained data. Core's persisted controller witness projects the old author as interrupted; the bridge still discovers and delivers the child and retains the unresolved parent failure. |
-| Admitted child in HTTP 409 | The real Host refuses the original event with `presence_resources_unavailable`, `disposition=retry` and an admitted child ref. The bridge durably polls that child across restart, sends its result once and retains the original refusal without resubmitting the event. |
+| Late promoted child, dead parent | After the second park and child completion, the actual isolated Host process is killed and restarted with its retained data. Core's persisted controller witness yields an unresolved retained view; the bridge discovers and delivers the child while continuing to observe the original. |
+| Admitted child in HTTP 409 | The real Host refuses the original event with `presence_resources_unavailable`, `disposition=retained` and an admitted child ref (no pre-dispatch retry certificate). The bridge durably polls that child across restart, sends its result once and retains the original refusal without resubmitting the event. |
 
 Each child case reopens the bridge store, adapter, workers and transport objects
 twice, discarding every in-memory bridge cache. This is a bridge state restart

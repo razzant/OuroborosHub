@@ -557,5 +557,7 @@ class EmailStore:
             counts["cursors"] = [json.loads(r[0]) for r in db.execute("SELECT value FROM runtime_state WHERE key LIKE 'cursor:%'")]
             counts["receipts"] = [dict(r) for r in db.execute("SELECT request_id,state,provider_message_id,last_error FROM outbox ORDER BY id DESC LIMIT 20")]
             counts["delivery_reports_pending"] = db.execute("SELECT COUNT(*) FROM outbox WHERE report_due_at>0").fetchone()[0]
+            # Retained events still observing their original attempt or child (counted in their inbox state too).
+            counts["inbox_retained"] = db.execute("SELECT COUNT(*) FROM inbox WHERE host_reference LIKE 'retained:%' AND state NOT IN ('completed','failed')").fetchone()[0]
             counts["delivery_support"] = self.get("delivery_support")
         return counts

@@ -39,7 +39,7 @@ def frontmatter() -> str:
 class PackageTests(unittest.TestCase):
     def test_manifest_declares_a_node_script_skill_with_one_pinned_dependency(self):
         front = frontmatter()
-        for line in ('name: chrome_browser', 'version: 0.1.0', 'type: script', 'runtime: node', 'permissions: [net, fs, subprocess]',
+        for line in ('name: chrome_browser', 'version: 0.1.1', 'type: script', 'runtime: node', 'permissions: [net, fs, subprocess]',
                      '  - name: mcp_server.mjs', '  - name: setup.mjs', '    package: ws@8.22.0'):
             self.assertIn(line, front)
         self.assertEqual(front.count('kind:'), 1)
@@ -56,7 +56,7 @@ class PackageTests(unittest.TestCase):
     def test_catalog_entry_matches_the_manifest(self):
         catalog = json.loads((ROOT / 'catalog.json').read_text(encoding='utf-8'))
         entry = next(item for item in catalog['skills'] if item['slug'] == 'chrome_browser')
-        self.assertEqual((entry['version'], entry['type']), ('0.1.0', 'script'))
+        self.assertEqual((entry['version'], entry['type']), ('0.1.1', 'script'))
         self.assertEqual(entry['install_specs'], [{'kind': 'npm', 'package': 'ws@8.22.0'}])
         self.assertEqual({item['path'] for item in entry['files']},
                          {path.relative_to(SKILL).as_posix() for path in SKILL.rglob('*') if path.is_file()})
@@ -68,7 +68,7 @@ class PackageTests(unittest.TestCase):
     def test_extension_asks_for_three_permissions_and_no_site_access(self):
         manifest = json.loads(source('manifest.json'))
         self.assertEqual(manifest['manifest_version'], 3)
-        self.assertEqual(manifest['version'], '0.1.0')
+        self.assertEqual(manifest['version'], '0.1.1')
         self.assertEqual(manifest['permissions'], ['debugger', 'storage', 'alarms'])
         self.assertTrue(manifest['key'])
         for absent in ('host_permissions', 'optional_permissions', 'optional_host_permissions', 'content_scripts',

@@ -18,7 +18,6 @@ from .host import PresenceHostHTTPError, PresenceSubmission, PresenceWorkResult
 
 
 _MAX_OUTBOX_ATTEMPTS = 5
-_TERMINAL_BINDING_HTTP_STATUSES = {403, 404}
 
 
 class PresenceSubmitter(Protocol):
@@ -198,16 +197,21 @@ class TelegramTransportRuntime:
         staged: List[pathlib.Path] = []
         try:
             staged = await self._stage_attachments(lease)
-            result = await self.submitter.submit(lease.payload, staged)
-            self.store.record_submission(
-                lease.event_id,
-                binding_id=result.binding_id,
-                turn_ref=result.turn_ref,
-                outcome=result.outcome,
-                text=result.text,
-                work_ref=result.work_ref,
-                delivery_reporting_version=result.delivery_reporting_version,
-            )
+            try:
+                result = await self.submitter.submit(lease.payload, staged)
+            except PresenceHostHTTPError as refusal:
+                if not self._settle_refusal(lease, refusal):
+                    raise
+            else:
+                self.store.record_submission(
+                    lease.event_id,
+                    binding_id=result.binding_id,
+                    turn_ref=result.turn_ref,
+                    outcome=result.outcome,
+                    text=result.text,
+                    work_ref=result.work_ref,
+                    delivery_reporting_version=result.delivery_reporting_version,
+                )
             self._remove_staged_files(staged)
             return True
         except asyncio.CancelledError:
@@ -216,20 +220,33 @@ class TelegramTransportRuntime:
             )
             raise
         except Exception as exc:
-            if (
-                isinstance(exc, PresenceHostHTTPError)
-                and exc.status_code in _TERMINAL_BINDING_HTTP_STATUSES
-            ):
-                self.store.mark_inbox_failed(lease.event_id, reason=_error(exc))
-                self._remove_staged_files(staged)
-            else:
-                self.store.release_inbox(
-                    lease.event_id,
-                    reason=_error(exc),
-                    retry_after_sec=_retry_delay(lease.attempts),
-                )
+            # Retry, blocked (repair first) and untyped Host errors, whatever their
+            # HTTP status, keep the event first in its conversation with backoff.
+            self.store.release_inbox(
+                lease.event_id,
+                reason=_error(exc),
+                retry_after_sec=_retry_delay(lease.attempts),
+            )
             self._last_error = _error(exc)
             return True
+
+    def _settle_refusal(self, lease: InboxLease, refusal: PresenceHostHTTPError) -> bool:
+        """Settle a typed final Host answer; False keeps the event for retry.
+
+        ``retained`` hands the event to observation and releases its conversation;
+        ``rejected`` ends this poison input. Both keep the complete receipt.
+        """
+        receipt = {"http_status": refusal.status_code, "response": refusal.payload}
+        if refusal.disposition == "retained":
+            self.store.record_retention(
+                lease.event_id, binding_id=refusal.binding_id, receipt=receipt
+            )
+        elif refusal.disposition == "rejected":
+            self.store.mark_inbox_failed(lease.event_id, reason=_error(refusal), receipt=receipt)
+        else:
+            return False
+        self._last_error = _error(refusal)
+        return True
 
     def _remove_staged_files(self, staged: Sequence[pathlib.Path]) -> None:
         for path in staged:
@@ -278,27 +295,38 @@ class TelegramTransportRuntime:
             return False
         try:
             result = await self.submitter.poll(lease.work_ref, lease.binding_id)
+            if result.outputs:
+                self.store.record_work_outputs(lease.work_ref, result.outputs)
             if result.terminal:
                 self.store.complete_work(
-                    lease.event_id,
+                    lease.work_ref,
                     status=result.status,
-                    text=result.text if result.outcome == "message" else "",
+                    text=result.text if result.outcome in {"message", "deferred"} and not result.output_ref else "",
+                )
+            elif result.status == "unresolved":
+                # No canonical answer yet: keep observing at the ordinary backoff
+                # pace, retaining any admitted child it names. Never a verdict.
+                self.store.release_work(
+                    lease.work_ref,
+                    reason=f"presence_work_unresolved: {result.code}",
+                    retry_after_sec=_retry_delay(lease.attempts),
+                    child_ref=result.child_work_ref,
                 )
             else:
                 self.store.release_work(
-                    lease.event_id,
+                    lease.work_ref,
                     reason="presence_work_pending",
                     retry_after_sec=5.0,
                 )
             return True
         except asyncio.CancelledError:
             self.store.release_work(
-                lease.event_id, reason="worker_cancelled", retry_after_sec=0
+                lease.work_ref, reason="worker_cancelled", retry_after_sec=0
             )
             raise
         except Exception as exc:
             self.store.release_work(
-                lease.event_id,
+                lease.work_ref,
                 reason=_error(exc),
                 retry_after_sec=_retry_delay(lease.attempts),
             )

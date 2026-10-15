@@ -55,3 +55,9 @@ synthetic child admission/completion. Full application bootstrap, configured
 review qualification, platform/native behavior and live adoption require their
 own evidence. Run logs and dated pass counts belong in the source-bound handoff,
 not in this maintained test description.
+
+`test_retained_custody.py` covers retained parent and real child observations,
+FIFO release, restart and late-output deduplication with real adapter/store/workers.
+It also checks typed blocked/retry/rejected and untyped HTTP failures. The Host
+responses in this module are scripted; cross-repository Host composition is a
+separate verification, not implied by these fixtures.

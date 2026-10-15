@@ -121,8 +121,16 @@ export class Executor {
    */
   ensureListener() {
     this.requireHost();
-    if (!this.listenerStart) this.listenerStart = this.startListener();
-    return this.listenerStart;
+    if (!this.listenerStart && !this.closure.revoked && !this.transportLost) {
+      const start = this.startListener();
+      const result = start.finally(() => {
+        // Setup can finish after an earlier state call. Retry only when no
+        // listener exists; a listening or busy port is never started twice.
+        if (this.listenerStart === result && !this.listener && !this.ext) this.listenerStart = null;
+      });
+      this.listenerStart = result;
+    }
+    return this.listenerStart || Promise.resolve();
   }
 
   async startListener() {
@@ -304,6 +312,7 @@ export class Executor {
           causal_step_id: invocation ? invocation.currentStep : null,
           request_id: request.request_id, url: request.url, method: request.method,
           post_data: request.post_data === undefined ? null : request.post_data, complete: request.complete === true,
+          has_post_data: typeof request.has_post_data === 'boolean' ? request.has_post_data : null,
           resource_type: request.resource_type, is_main_frame: request.is_main_frame === true, target_tab_id: lease.tab_id,
           state: this.contractState(),
         };
@@ -704,6 +713,22 @@ export class Executor {
       }
       if (!this.isCurrent(lease)) throw new BrowserError('BROWSER_LEASE_CHANGED', 'the lease changed while the host was deciding');
 
+      const textRead = operation === 'read' || operation === 'get_text';
+      let wireArgs = args;
+      let outputChars = 0;
+      if (textRead && (args.start !== undefined || args.capture_chars !== undefined)) {
+        const start = args.start === undefined ? 0 : args.start;
+        if (!Number.isSafeInteger(start) || start < 0)
+          throw new BrowserError('BROWSER_ARGUMENT_INVALID', 'start must be a nonnegative integer');
+        outputChars = Math.min(Math.max(Number(args.max_chars) || 20000, 1), 200000);
+        const capture = args.capture_chars === undefined ? outputChars : args.capture_chars;
+        if (!Number.isSafeInteger(capture) || capture < outputChars || capture > 200000)
+          throw new BrowserError('BROWSER_ARGUMENT_INVALID', 'capture_chars must be an integer from max_chars through 200000');
+        if (args.capture_chars !== undefined && !/^[\w.-]{1,64}$/.test(args.cache_key || ''))
+          throw new BrowserError('BROWSER_ARGUMENT_INVALID', 'capture_chars requires a valid cache_key');
+        wireArgs = { ...args, start, max_chars: capture };
+      }
+
       // Admitted. From here the step is settled before the invocation's receipt.
       let budget = 20000;
       if (typeof args.timeout_ms === 'number' && args.timeout_ms > 0) budget += Math.min(args.timeout_ms, 60000);
@@ -715,7 +740,7 @@ export class Executor {
       try {
         reply = await this.rpc({
           t: 'step', lease_id: lease.lease_id, generation: lease.generation, invocation_id: invocation.id, step_id: step.step_id,
-          operation, args,
+          operation, args: wireArgs,
         }, budget);
         await this.settleGuard();  // a document change this step caused is witnessed before its result is returned
       } finally {
@@ -746,7 +771,18 @@ export class Executor {
         value = { mime: value.mime, bytes: Math.floor(value.data.length * 3 / 4), image: invocation.images.length - 1, clipped: value.clipped };
       }
       if (typeof args.cache_key === 'string' && READ_OPERATIONS.includes(operation) && operation !== 'screenshot' && isRecord(value))
-        value.cached = this.remember(args.cache_key, value);
+        value.cached = this.remember(args.cache_key, value, {
+          observation_id: `${invocation.id}:${step.step_id}`, operation,
+          executor_generation: this.generation, lease_id: lease.lease_id,
+          generation: lease.generation, tab_id: lease.tab_id, document_id: lease.document_id, url: lease.url,
+        });
+      if (textRead && args.capture_chars !== undefined && isRecord(value) && typeof value.text === 'string') {
+        value = { ...value, text: value.text.slice(0, outputChars) };
+        const start = value.coverage?.start ?? (args.start || 0);
+        value.coverage = { start, end: start + value.text.length, total_length: value.length,
+          complete: start === 0 && start + value.text.length === value.length };
+        value.truncated = start + value.text.length < value.length;
+      }
       return value === undefined ? null : value;
     } catch (error) {
       step.error = { code: error.code || 'BROWSER_INTERNAL', message: String(error.message || error).slice(0, 600) };
@@ -755,28 +791,46 @@ export class Executor {
   }
 
   /** Keeps what a read returned, as text, for cached_text. Not tied to a document. */
-  remember(key, value) {
+  remember(key, value, source = null) {
     if (!/^[\w.-]{1,64}$/.test(key)) return { stored: false, reason: 'cache_key must be 1-64 letters, digits, dot, dash or underscore' };
     const text = typeof value.text === 'string' ? value.text : typeof value.outline === 'string' ? value.outline : JSON.stringify(value);
     if (text.length > CACHE_CHARS) return { stored: false, reason: 'too large to keep' };
+    const coverage = typeof value.text === 'string'
+      ? (value.coverage ? { ...value.coverage } : { start: 0, end: text.length, total_length: Number.isInteger(value.length) ? value.length : text.length,
+        complete: !Number.isInteger(value.length) || text.length === value.length }) : null;
     this.cache.delete(key);
     if (this.cache.size >= CACHE_KEYS) this.cache.delete(this.cache.keys().next().value);
-    this.cache.set(key, text);
-    return { stored: true, cache_key: key, length: text.length };
+    this.cache.set(key, coverage ? { text, coverage, source: source ? { ...source } : null } : text);
+    return { stored: true, cache_key: key, length: text.length, ...(coverage ? { coverage: { ...coverage }, source: source ? { ...source } : null } : {}) };
   }
 
   cachedText(args) {
-    const text = this.cache.get(args.cache_key);
-    if (typeof text !== 'string') throw new BrowserError('BROWSER_ARGUMENT_INVALID', 'nothing is cached under this cache_key');
+    const entry = this.cache.get(args.cache_key);
+    if (entry === undefined) throw new BrowserError('BROWSER_ARGUMENT_INVALID', 'nothing is cached under this cache_key');
+    const historical = typeof entry === 'string';
+    const text = historical ? entry : entry.text;
+    const coverage = historical
+      ? { start: 0, end: text.length, total_length: text.length, complete: true } : { ...entry.coverage };
+    const source = historical ? null : entry.source;
     const max = Math.min(Math.max(Number(args.max_chars) || 20000, 1), 200000);
     if (typeof args.find === 'string' && args.find) {
       const lines = text.split('\n');
       const matches = [];
       lines.forEach((line, index) => { if (matches.length < 50 && line.includes(args.find)) matches.push({ line: index + 1, text: line.slice(0, 400) }); });
-      return { cache_key: args.cache_key, length: text.length, find: args.find, matches };
+      return { cache_key: args.cache_key, length: text.length, find: args.find, matches,
+        coverage, complete: coverage.complete, ...(source ? { source: { ...source } } : {}) };
     }
-    const start = Math.min(Math.max(Number(args.start) || 0, 0), text.length);
-    return { cache_key: args.cache_key, length: text.length, start, text: text.slice(start, start + max), truncated: start + max < text.length };
+    const start = historical ? Math.min(Math.max(Number(args.start) || 0, 0), text.length)
+      : args.start === undefined ? coverage.start : args.start;
+    if (historical) return { cache_key: args.cache_key, length: text.length, start,
+      text: text.slice(start, start + max), truncated: start + max < text.length, coverage, complete: true };
+    if (!Number.isSafeInteger(start) || start < coverage.start || start > coverage.end
+      || (start === coverage.end && coverage.end < coverage.total_length))
+      throw new BrowserError('BROWSER_CACHE_MISS', `start is outside captured coverage ${coverage.start}..${coverage.end}; read the missing window from the page`);
+    const slice = text.slice(start - coverage.start, start - coverage.start + max);
+    return { cache_key: args.cache_key, length: text.length, start, text: slice,
+      truncated: start + slice.length < coverage.total_length, coverage, complete: coverage.complete,
+      ...(source ? { source: { ...source } } : {}) };
   }
 
   /** A finite list of typed steps in one invocation; it stops at the first step that fails. */

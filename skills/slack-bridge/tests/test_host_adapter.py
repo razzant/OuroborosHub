@@ -232,13 +232,15 @@ def test_presence_token_is_never_allowed_to_leave_loopback() -> None:
 
 
 @pytest.mark.parametrize("status_code", [403, 404])
-def test_binding_rejection_is_a_terminal_host_error(status_code: int) -> None:
+def test_untyped_turn_refusal_is_retried_never_terminal(status_code: int) -> None:
     async def run() -> None:
         adapter, http = _adapter(
             lambda _request: httpx.Response(status_code, json={"error": "binding"})
         )
-        with pytest.raises(HostBindingTerminalError, match=f"HTTP {status_code}"):
+        # No typed disposition: the HTTP status alone never ends an event.
+        with pytest.raises(HostContractError, match=f"HTTP {status_code} without a typed disposition") as raised:
             await adapter.submit(_item())
+        assert not isinstance(raised.value, HostBindingTerminalError)
         await adapter.aclose()
         await http.aclose()
 

@@ -7,7 +7,7 @@ import readline from 'node:readline';
 import { BrowserError, EXECUTOR_OPERATIONS, Executor } from '../lib/executor.mjs';
 import { OPERATIONS } from '../extension/bridge_protocol.mjs';
 
-const SERVER = { name: 'ouroboros-chrome-browser', version: '0.1.0' };
+const SERVER = { name: 'ouroboros-chrome-browser', version: '0.1.1' };
 const MCP_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const NO_ARGUMENTS = { type: 'object', properties: {}, additionalProperties: false };
 const TOOLS = [
@@ -22,7 +22,7 @@ const TOOLS = [
   },
   {
     name: 'browser_action',
-    description: 'One typed operation on the leased tab. Input operations use trusted pointer and keyboard events and refuse an obscured, hidden, disabled or moving target. "sequence" runs up to 32 {operation,args} steps in order and stops at the first failure; a read with cache_key keeps its text for "cached_text".',
+    description: 'One typed operation on the leased tab. Input uses trusted pointer/keyboard events and refuses obscured, hidden, disabled or moving targets. "sequence" runs up to 32 ordered {operation,args} steps, stopping on failure. read/get_text take start,max_chars; cache_key+capture_chars keeps larger coverage for cached_text without enlarging the reply.',
     inputSchema: {
       type: 'object', additionalProperties: false, required: ['operation', 'args'],
       properties: { operation: { type: 'string', enum: [...OPERATIONS, ...EXECUTOR_OPERATIONS] }, args: { type: 'object' } },

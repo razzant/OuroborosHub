@@ -148,7 +148,7 @@ class InboundWorker:
                         "Presence Host adapter returned an empty reference"
                     )
                 self.store.set_host_reference(item.row_id, item.lease_token, reference)
-                if reference.startswith(("continuing:", "refused:")):
+                if reference.startswith(("continuing:", "refused:", "retained:")):
                     # The durable reference separates submit from the new finite
                     # queue-report/poll phase. Later attempts already claim fresh
                     # leases. This is a token-checked renewal, not a heartbeat.

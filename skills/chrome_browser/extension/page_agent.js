@@ -184,8 +184,13 @@ export function pageAgent(op, args) {
       const el = args.target ? resolve(args.target) : document.body;
       if (el && isSecret(el)) refuse('BROWSER_ARGUMENT_INVALID', 'password fields are not read');
       const text = el ? valueOf(el) : '';
+      const requestedStart = args.start === undefined ? 0 : args.start;
+      if (!Number.isSafeInteger(requestedStart) || requestedStart < 0) refuse('BROWSER_ARGUMENT_INVALID', 'start must be a nonnegative integer');
+      const start = Math.min(requestedStart, text.length);
       const max = Math.min(Math.max(Number(args.max_chars) || 20000, 1), 200000);
-      return { text: text.slice(0, max), length: text.length, truncated: text.length > max };
+      const end = Math.min(start + max, text.length);
+      return { text: text.slice(start, end), length: text.length, truncated: end < text.length,
+        coverage: { start, end, total_length: text.length, complete: start === 0 && end === text.length } };
     },
 
     attribute() {

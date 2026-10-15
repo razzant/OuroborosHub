@@ -100,9 +100,16 @@ class EmailRuntime:
             if not item.host_reference:
                 self.store.set_host_reference(item.row_id, item.lease_token, ref)
             status = await self.host.status(ref)
+            if status.host_reference and status.host_reference != ref:
+                # A retained event's newly named child is kept before it is polled.
+                self.store.set_host_reference(item.row_id, item.lease_token, status.host_reference)
             self._reply(item, status.texts, "immediate", status.delivery_reporting_version, status.turn_ref)
+            for output in status.outputs:
+                self._reply(item, (output.text,), output.identity, status.delivery_reporting_version, output.turn_ref)
             if status.state == "pending":
-                self.store.retry_inbox(item.row_id, item.lease_token, "Host turn pending", 5)
+                # Plain pending keeps its pace; an unresolved or unreadable observation backs off.
+                self.store.retry_inbox(item.row_id, item.lease_token, status.error or "Host turn pending",
+                                       min(60, 2 ** min(item.attempts, 5)) if status.error else 5)
             elif status.state == "failed":
                 self.store.fail_inbox(item.row_id, item.lease_token, status.error)
             else:

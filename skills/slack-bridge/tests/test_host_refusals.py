@@ -262,7 +262,7 @@ def test_409_child_unknown_send_is_not_repeated_after_checkpoint_crash(tmp_path,
 
 
 @pytest.mark.parametrize("http_status", [400, 403, 404, 409, 429, 500, 503])
-@pytest.mark.parametrize("disposition", ["rejected", "blocked"])
+@pytest.mark.parametrize("disposition", ["rejected"])
 def test_typed_terminal_refusal_without_work_is_durable_and_not_retried(tmp_path, http_status, disposition):
     async def run():
         host, slack = RefusalHost(), FakeSlack()
@@ -318,12 +318,16 @@ def test_400_validation_refusal_without_optional_field_is_terminal(tmp_path):
 
 
 @pytest.mark.parametrize("http_status", [400, 403, 404, 409, 429, 500, 503])
-def test_typed_retry_without_work_has_no_attempt_cap_and_preserves_submission(tmp_path, http_status):
+@pytest.mark.parametrize("disposition,code", [("retry", "presence_resources_unavailable"),
+                                              ("blocked", "presence_auth_blocked")])
+def test_typed_retry_without_work_has_no_attempt_cap_and_preserves_submission(tmp_path, http_status,
+                                                                             disposition, code):
     async def run():
         host, slack = RefusalHost(), FakeSlack()
         host.turn_status["Ev-1"] = http_status
-        host.scripts["Ev-1"] = lambda body: refusal(body, disposition="retry", error="temporarily_unavailable",
-                                                  code="presence_resources_unavailable")
+        # Blocked waits for configuration repair, retry for time; neither drops the event.
+        host.scripts["Ev-1"] = lambda body: refusal(body, disposition=disposition, error="temporarily_unavailable",
+                                                  code=code)
         bridge = Bridge(tmp_path, host, slack)
         try:
             await bridge.ingest(envelope("Ev-1", ts="1.0", text="Research this"))
@@ -332,8 +336,8 @@ def test_typed_retry_without_work_has_no_attempt_cap_and_preserves_submission(tm
                 assert await bridge.inbound.process_once()
                 assert bridge.inbox() == {"Ev-1": "pending"}
                 assert inbox_row(bridge)["host_reference"] == ""
-                assert "retry" in bridge.inbox_error("Ev-1")
-                assert "presence_resources_unavailable" in bridge.inbox_error("Ev-1")
+                assert disposition in bridge.inbox_error("Ev-1")
+                assert code in bridge.inbox_error("Ev-1")
             await bridge.close()
             bridge = Bridge(tmp_path, host, slack)
             with sqlite3.connect(bridge.store.path) as db:

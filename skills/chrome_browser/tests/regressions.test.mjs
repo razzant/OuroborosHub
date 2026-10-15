@@ -486,6 +486,7 @@ async function worker({ closeAfterPaired = false, session = {} } = {}) {
         if (w.gates[method]) await w.gates[method].promise;
         if (method === 'Input.dispatchMouseEvent' && w.onInput) w.onInput(params);
         if (method === 'Page.createIsolatedWorld') return { executionContextId: 1 };
+        if (method === 'Page.captureScreenshot') return { data: 'fixture-frame' };
         // The page helper: answers per operation from w.page, as the injected function would.
         if (method === 'Runtime.callFunctionOn') {
           const [{ value: op }, { value: args }] = params.arguments;

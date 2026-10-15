@@ -1,7 +1,7 @@
 ---
 name: chrome_browser
 description: Act in your own Chrome through a paired extension - one explicitly shared tab or the agent's own background tab, trusted input without taking focus, and a clean handoff of the live page to you and back.
-version: 0.1.0
+version: 0.1.1
 type: script
 runtime: node
 license: MIT
@@ -74,6 +74,9 @@ load the extension or enter that credential in the owner's browser.
 - The executor listens on one loopback port (default 47831). The extension
   tries that port when its popup opens and every 30 seconds, so a task that
   just started may wait up to that long for it.
+- If the first `browser_state` runs before setup or pairing is complete, the
+  same executor checks the pairing file again on a later call. A listener
+  already listening or reporting a busy port is kept; it is not rebound.
 - **Your tab.** Open the tab, click the extension icon, **Share this tab**.
   Its id appears in `browser_state.approved_tabs`; `browser_connect` with that
   `tab_id` attaches. The extension has no permission to list tabs or to read
@@ -108,6 +111,21 @@ Operations: `observe`, `read`, `get_text`, `get_attribute`, `snapshot`,
 `double_click`, `fill`, `type`, `press`, `check`, `uncheck`, `scroll`,
 `cached_text`. A target is `{selector}` (CSS, must match one element, or add
 `nth`) or `{handle}` from `snapshot`.
+For `read` and `get_text`, `start` is a zero-based text offset and `max_chars`
+is the returned window size (20,000 by default, at most 200,000). Their
+`coverage` gives the captured `[start,end)` and total text length. To keep a
+larger window without returning it all, pass `cache_key` and `capture_chars`
+(up to 200,000); the response still returns only `max_chars`. For example,
+`{"start": 0, "max_chars": 2000, "capture_chars": 60000, "cache_key": "raw"}`
+captures up to 60,000 characters and returns the first 2,000.
+`cached_text` reports its coverage; a search with no matches and
+`complete:false` says only that the captured window has no match. To inspect
+an uncaptured offset, issue another `read` or `get_text` with that `start`.
+Before first input in each document/attachment, the executor prepares one
+renderer frame without activating the tab; pixels are discarded, not returned.
+A missing frame refuses before input, never triggers a sacrificial/repeated click.
+Still verify the requested effect: dispatch acknowledgement alone is not success.
+
 The operation enum excludes `select`, `drag`, `upload`, and `submit`: validating
 hosts refuse them at the schema boundary. Direct executor calls additionally
 return `BROWSER_OPERATION_UNSUPPORTED` without dispatch. A normal `click` or `press` can

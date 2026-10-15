@@ -79,6 +79,9 @@ _SPEECH = frozenset({"message", "deferred"})
 _TERMINAL_WORK_STATES = frozenset({"completed", "failed", "cancelled"})
 # A lost author is terminal for the transport: it is never restarted automatically.
 _CONTINUATION_TERMINAL = _TERMINAL_WORK_STATES | {"interrupted"}
+# Nonterminal observations: work still running, or no canonical answer yet.
+_OBSERVING = frozenset({"pending", "unresolved"})
+_DISPOSITIONS = frozenset({"retained", "rejected", "blocked", "retry"})
 _BINDING_ID_RE = re.compile(r"[0-9a-f]{32}")
 
 
@@ -378,6 +381,34 @@ def _decode_refused_reference(reference: str) -> dict[str, Any]:
     return receipt
 
 
+def _retained_reference(payload: Mapping[str, Any], http_status: int, reporting_version: int) -> str:
+    # The Host kept an admitted attempt it will not regenerate. The complete typed
+    # response stays the event's receipt; ``work_refs`` adds children named later.
+    mode = _reporting_version(payload) if "delivery_reporting_version" in payload else reporting_version
+    return _encode_receipt("retained", {
+        "status": "retained", "http_status": http_status, "response": dict(payload),
+        "delivery_reporting_version": mode, "work_refs": [],
+    })
+
+
+def _decode_retained_reference(reference: str) -> dict[str, Any]:
+    receipt = _decode_receipt(reference, "retained", "retained-turn")
+    response = receipt.get("response")
+    if not isinstance(response, dict) or not str(response.get("turn_ref") or "").strip():
+        raise HostContractError("Invalid persisted retained-turn receipt")
+    return receipt
+
+
+def _child_ref(payload: Mapping[str, Any], polled: str) -> str:
+    """Admitted child work named by an unresolved view; the original is never its own child."""
+    original = {polled, str(payload.get("turn_ref") or "").strip()}
+    for key in ("child_work_ref", "work_ref"):
+        value = str(payload.get(key) or "").strip()
+        if value and value not in original:
+            return value
+    return ""
+
+
 def _refusal_error(payload: Mapping[str, Any], http_status: int) -> str:
     reason = str(payload.get("error") or "")
     code = str(payload.get("code") or "")
@@ -495,8 +526,12 @@ class LoopbackPresenceHostAdapter:
             except ValueError:
                 payload = None
             if (isinstance(payload, dict) and payload.get("ok") is False
-                    and str(payload.get("disposition") or "") in {"rejected", "blocked", "retry"}):
+                    and str(payload.get("disposition") or "") in _DISPOSITIONS):
                 return payload
+            # Without a typed disposition no status, 403/404 included, ends an event.
+            raise HostContractError(
+                f"Presence Host returned HTTP {response.status_code} without a typed disposition"
+            )
         if response.status_code in {403, 404}:
             raise HostBindingTerminalError(
                 f"Presence binding was rejected by Host (HTTP {response.status_code})"
@@ -547,8 +582,13 @@ class LoopbackPresenceHostAdapter:
         payload = await self._json_response(response, turn_response=True)
         status = str(payload.get("status") or "")
         disposition = str(payload.get("disposition") or "")
-        if payload.get("ok") is False and disposition in {"rejected", "blocked", "retry"}:
-            if disposition == "retry" and not str(payload.get("work_ref") or "").strip():
+        if payload.get("ok") is False and disposition in _DISPOSITIONS:
+            if disposition == "retained":
+                if not str(payload.get("turn_ref") or "").strip():
+                    raise HostContractError("Retained presence refusal omitted its original turn_ref")
+                return _retained_reference(payload, response.status_code, mode)
+            # Blocked needs repair and retry needs time; both keep the event queued.
+            if disposition in {"retry", "blocked"} and not str(payload.get("work_ref") or "").strip():
                 raise HostRetryError(_refusal_error(payload, response.status_code))
             return _refused_reference(payload, response.status_code, mode)
         if continuing and (status == "continuing" or (
@@ -593,7 +633,7 @@ class LoopbackPresenceHostAdapter:
         if returned_ref and returned_ref != continuation_ref:
             raise HostContractError("Presence Host returned a different continuation_ref")
         payload["outputs"] = _released_outputs(payload)
-        if status == "pending":
+        if status in _OBSERVING:
             return payload
         if status not in _CONTINUATION_TERMINAL:
             raise HostContractError(f"Unknown presence work status: {status or '<empty>'}")
@@ -605,7 +645,7 @@ class LoopbackPresenceHostAdapter:
     async def _poll_work(self, work_ref: str) -> dict[str, Any]:
         payload = await self._get_work(work_ref)
         status = str(payload.get("status") or "").strip().lower()
-        if status == "pending":
+        if status in _OBSERVING:
             return payload
         if status not in _TERMINAL_WORK_STATES:
             raise HostContractError(
@@ -630,6 +670,7 @@ class LoopbackPresenceHostAdapter:
         mode = _reporting_version(receipt)
         outputs: dict[str, HostOutput] = {}
         transient: list[str] = []
+        unresolved: list[str] = []
         rejected: list[str] = []
         failures: list[str] = []
         pending = False
@@ -648,7 +689,7 @@ class LoopbackPresenceHostAdapter:
                 outputs[identity] = HostOutput(identity, text, turn_ref, output_ref)
 
         def snapshot(*, final: bool = False) -> HostTurnStatus:
-            state, error = "pending", "; ".join(transient + rejected + failures)
+            state, error = "pending", "; ".join(transient + unresolved + rejected + failures)
             if final:
                 if not transient and not pending:
                     state = "failed" if rejected or failures else "ready"
@@ -700,7 +741,7 @@ class LoopbackPresenceHostAdapter:
                         # Promotion can happen on any later reentry, including a
                         # park whose author subsequently dies. Retain the child
                         # before treating the author as pending or interrupted.
-                        child = str(payload.get("child_work_ref") or "").strip()
+                        child = _child_ref(payload, ref)
                         if child and child != ref and child not in work_refs:
                             work_refs.append(child)
                             reference = _encode_receipt("continuing", {**receipt, "work_refs": work_refs})
@@ -708,14 +749,18 @@ class LoopbackPresenceHostAdapter:
                             # run; restart then polls it independently of author.
                             yield snapshot()
                         start(child)
-                    if state == "pending":
+                    if state in _OBSERVING:
+                        # Unresolved has no canonical answer yet: keep observing, never a verdict.
                         pending = True
+                        if state == "unresolved":
+                            unresolved.append(f"{'continuation' if author else 'work'} {source} unresolved "
+                                              f"({payload.get('code') or 'retained'})")
                         continue
                     if author:
                         if state != "interrupted" and self._outcome(payload) in _SPEECH:
                             output_ref = str(payload.get("output_ref") or "")
                             add(_output_identity(output_ref, f"terminal:{ref}"), str(payload.get("text") or ""), ref, output_ref)
-                    elif state == "completed" and self._outcome(payload) == "message":
+                    elif self._outcome(payload) in _SPEECH:
                         output_ref = str(payload.get("output_ref") or "")
                         add(_output_identity(output_ref, f"work:{source}"), str(payload.get("text") or ""),
                             str(payload.get("turn_ref") or source), output_ref)
@@ -723,6 +768,87 @@ class LoopbackPresenceHostAdapter:
                         failures.append("Presence author was interrupted; it is not restarted automatically")
                     elif state != "completed":
                         failures.append(str(payload.get("error") or f"Presence work {state}"))
+                yield snapshot(final=not tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _retained_updates(self, receipt: Mapping[str, Any]) -> AsyncIterator[HostTurnStatus]:
+        """Observe a retained event's original attempt and real children independently.
+
+        The refusal is the event's receipt, never speech. Each reference's canonical
+        output is queued once under its own identity; a child named later is
+        checkpointed before its poll. Unresolved or unreadable polls keep custody.
+        The row ends only when every reference is terminal: ready if the original
+        attempt completed canonically, otherwise failed with the receipt kept.
+        """
+        response = receipt["response"]
+        turn_ref = str(response["turn_ref"]).strip()
+        mode = _reporting_version(receipt)
+        summary = _refusal_error(response, int(receipt.get("http_status") or 0))
+        refs = [ref for ref in dict.fromkeys([
+            turn_ref, str(response.get("work_ref") or "").strip(),
+            *[str(value).strip() for value in receipt.get("work_refs", [])],
+        ]) if ref]
+        reference = _encode_receipt("retained", receipt)
+        outputs: dict[str, HostOutput] = {}
+        settled: dict[str, str] = {}
+        notes: list[str] = []
+        tasks: dict[asyncio.Task, str] = {}
+
+        def snapshot(*, final: bool = False) -> HostTurnStatus:
+            state = "pending"
+            if final and all(ref in settled for ref in refs):
+                state = "ready" if settled[turn_ref] == "completed" else "failed"
+            original = [f"original {turn_ref}: {settled[turn_ref]}"] if turn_ref in settled else []
+            error = "" if state == "ready" else "; ".join([summary, *notes, *original])
+            return HostTurnStatus(state, error, (), mode, turn_ref, tuple(outputs.values()), False, reference)
+
+        async def poll(ref: str) -> dict[str, Any]:
+            cached = self._terminal_work.get(ref)
+            return cached if cached is not None else await self._poll_work(ref)
+
+        def start(ref: str) -> None:
+            tasks[asyncio.create_task(poll(ref))] = ref
+
+        for ref in refs:
+            start(ref)
+        try:
+            while tasks:
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    ref = tasks.pop(task)
+                    try:
+                        payload = task.result()
+                    except (HostContractError, httpx.HTTPError) as exc:
+                        notes.append(f"work {ref}: {exc or type(exc).__name__}")
+                        continue
+                    state = str(payload.get("status") or "").strip().lower()
+                    child = _child_ref(payload, ref)
+                    if child and child not in refs:
+                        refs.append(child)
+                        receipt = {**receipt, "work_refs": refs[1:]}
+                        reference = _encode_receipt("retained", receipt)
+                        yield snapshot()  # runtime persists the child before polling it
+                        start(child)
+                    for selected in _released_outputs(payload):
+                        if selected["outcome"] not in _SPEECH or not selected["text"].strip():
+                            continue
+                        output_ref = selected["output_ref"]
+                        identity = _output_identity(output_ref, f"work:{ref}")
+                        outputs.setdefault(identity, HostOutput(identity, selected["text"], ref, output_ref))
+                    if state in _OBSERVING:
+                        if state == "unresolved":
+                            notes.append(f"work {ref} unresolved ({payload.get('code') or 'retained'})")
+                        continue
+                    settled[ref] = state
+                    text = str(payload.get("text") or "")
+                    if self._outcome(payload) in _SPEECH and text.strip():
+                        output_ref = str(payload.get("output_ref") or "")
+                        identity = _output_identity(output_ref, f"work:{ref}")
+                        outputs.setdefault(identity, HostOutput(identity, text, ref, output_ref))
                 yield snapshot(final=not tasks)
         finally:
             for task in tasks:
@@ -776,8 +902,15 @@ class LoopbackPresenceHostAdapter:
             elif state in {"failed", "cancelled"}:
                 error += f"; work {work_ref}: {payload.get('error') or state}"
             # Finishing the child never resolves the original event's refusal.
-            yield HostTurnStatus("pending" if state == "pending" else "failed", error,
+            yield HostTurnStatus("pending" if state in _OBSERVING else "failed", error,
                                  delivery_reporting_version=mode, outputs=outputs)
+        elif reference.startswith("retained:"):
+            updates = self._retained_updates(_decode_retained_reference(reference))
+            try:
+                async for update in updates:
+                    yield update
+            finally:
+                await updates.aclose()
         elif reference.startswith("continuing:"):
             updates = self._continuation_updates(_decode_continuing_reference(reference), transport_queue)
             try:
@@ -807,7 +940,7 @@ class LoopbackPresenceHostAdapter:
         if reference.startswith("completed:"):
             receipt = _decode_completed_reference(reference)
             return self._initial_status(receipt, "ready")
-        if reference.startswith(("continuing:", "refused:")):
+        if reference.startswith(("continuing:", "refused:", "retained:")):
             async for update in self.status_updates(reference):
                 status = update
             return status
@@ -828,6 +961,10 @@ class LoopbackPresenceHostAdapter:
             # Every output of a continuation is already reported by ``status``.
             receipt = _decode_continuing_reference(reference)
             return HostDelivery((), _reporting_version(receipt), str(receipt["continuation_ref"]))
+        if reference.startswith("retained:"):
+            # Each observed reference's canonical output was already reported by ``status``.
+            receipt = _decode_retained_reference(reference)
+            return HostDelivery((), _reporting_version(receipt), str(receipt["response"]["turn_ref"]))
         if reference.startswith("completed:"):
             payload = _decode_completed_reference(reference)
             receipt = payload

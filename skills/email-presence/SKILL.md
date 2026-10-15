@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Bidirectional email Presence transport with IMAP polling, durable delivery, and RFC 5322 reply threading.
-version: 0.3.3
+version: 0.4.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -93,6 +93,33 @@ and retries transient provider or Host failures with bounded backoff.
   Inspect the receipt and sent mailbox before making an explicit new send.
 - The `status` extension route exposes poll health, activation/cursor state, queue
   counts and recent receipts. Host Skills/Activity shows companion process health.
+
+## Retained input and late results
+
+A typed Host `disposition: retained` means the original event is saved but has
+no canonical final result to deliver. The transport stores the complete refusal receipt
+with its source event, releases that conversation's input queue, and observes
+the original `turn_ref` and any real child `work_ref` independently. It never
+resubmits that retained event. A child finishing does not erase the original
+uncertainty or stop observation of its late selected output.
+
+A work view with `status: unresolved` remains observable. A failed task may
+still carry a selected answer; lifecycle status alone does not suppress speech.
+Canonical selected
+outputs keep their source and delivery identity across repeated polls and
+restarts; a retained receipt itself is never sent as speech. A recorded cancellation can remain under
+observation: it proves neither a live executor nor absence of external effects,
+and observation starts no new generation. This does not
+claim exactly-once provider delivery after ambiguous network acceptance.
+`rejected` ends an event-specific refusal; before-admission `retry` and `blocked`
+retain retry custody, including after account or binding repair. Missing or unknown typed
+dispositions stay retryable, even on HTTP 403/404. Full queue recovery requires
+both an updated Host and this transport; older Hosts may still return a
+retry-only refusal. Existing completed delivery receipts remain unchanged.
+
+The existing inbox Host-reference envelope retains the original receipt and
+observed references; late mail keeps the original RFC 5322 reply threading.
+Upgrade through the normal payload review/enable lifecycle.
 
 ## Delivery history
 
