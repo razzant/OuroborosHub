@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.6.0
+version: 1.6.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -197,12 +197,36 @@ edited public manifest does not grant scopes to an already-installed app.
 ## Provider context and on-demand reads
 
 After the Socket envelope is durably accepted, the inbound worker looks up its
-exact author with `users.info` and room with `conversations.info`. These two
-bounded calls run concurrently outside the Socket acknowledgement handler. The
+exact author with `users.info` and room with `conversations.info`. Messages and
+mentions also read `conversations.replies` using their thread root, or their own
+timestamp when they started the thread. A root with no replies returns its one
+message; a queued root can already have later replies at processing time. Other
+event kinds read thread context when they carry a thread timestamp. Cursor pages
+share the same ten-second provider-I/O budget (page size 200). These
+observations run concurrently outside the Socket acknowledgement handler. The
 worker saves their results, sources and observation times in the existing inbox
-before submitting to Host. A retry or restart reuses that event's snapshot rather
-than silently substituting a later profile. A subsequent event gets a fresh
-snapshot. Existing submitted rows retain their original Host reference.
+before submitting to Host. A retry or restart reuses that event's snapshot;
+a subsequent event gets a fresh snapshot. Existing submitted rows retain their
+original Host reference.
+
+`conversation.thread_history` carries the currently accessible thread, including
+messages newer than the triggering event. It preserves full provider message text,
+author IDs, creation/edit timestamps and blocks; files use the same curated facts
+as live messages, without credentialed URLs or previews. `observed_at` and
+`completed_at` date the scan, not the original speech. This is a current provider
+view, not a reconstruction of past revisions or an atomic export. `complete=true`
+means the provider returned no more pages, not that the credential could see every
+message ever posted. A later-page failure preserves the received prefix as
+`partial`, with the error and available cursor. A first-page refusal is
+`unavailable`; neither is an empty complete history. `continuation` names an
+explicit `slack_thread` read, or a timestamp range when Slack supplies no cursor.
+
+History is context for this one event. It creates no extra inbox events, replies,
+new work or obligation to answer; the model judges meaning and participation.
+A Host that retains Presence context sources exposes this dated snapshot through
+the incoming row's `memory_read(source_ref=...)` address for later turns. Older
+Hosts still receive the full current-event context but do not supply that later
+reader. Reading a retained source does not refresh Slack; `slack_thread` does.
 
 The model sees available display/real names, Slack username, profile fields
 (including email and title when returned), timezone, channel name/type/topic/
@@ -216,10 +240,11 @@ provider data on demand. Provider profile facts do not link people, infer roles
 or grant system ownership; those judgments stay with the model.
 
 `slack_history` and `slack_thread` fetch one page per call and preserve full
-provider message text, timestamps, author IDs and thread fields. They never
-automatically retrieve a directory or bulk history, feed historical messages
-into Presence, or change the transport's intake cursor. Use `slack_user_info` to
-resolve an author ID. `slack_thread` needs the root message's timestamp and also
+provider message text, timestamps, author IDs and thread fields. These explicit
+tools do not retrieve a directory, feed historical messages into Presence as new
+events, or change the transport's intake cursor. The automatic thread observation
+above uses the same provider reader across pages. Use `slack_user_info` to resolve
+an author ID. `slack_thread` needs the root message's timestamp and also
 returns the root when Slack includes it. Follow `next_cursor` with the same
 filters until `complete=true`; `has_more=true` without a cursor remains explicitly
 incomplete and requires an explicit timestamp-range continuation. `oldest`,
@@ -237,6 +262,18 @@ delay instead of pretending the result was empty. No automatic account login or
 HTTP retry is introduced.
 
 ## Inbound provider updates
+
+The manifest subscribes to `app_mention` with the `app_mentions:read` scope as
+well as the existing message subscriptions. An invitation via a mention may
+arrive without a corresponding general message event; it is admitted with its
+exact provider identity. If `message` and `app_mention` describe the same workspace, channel,
+message timestamp, text and provider revision, both envelopes are durable but
+only the first starts a turn (`duplicate_message_surface` on the second).
+Original revisions use the message timestamp; edits use `edited.ts` or their
+change-event timestamp. A later metadata update retaining an old edit stamp is
+still a separate change. Ordinary messages without mentions, real edits,
+deletes and reactions retain their existing admission. This adds no rule about
+who should answer or who is an owner.
 
 Accepted events expose the authenticated bot's `self_user_id`, when known, in
 `message.provider_facts`. Current messages also retain `mentioned_user_ids`
@@ -261,7 +298,8 @@ and still reach the model. Slack documents automatic language detection as one
 source of [`message_changed`](https://docs.slack.dev/reference/events/message/message_changed/).
 This snapshot comparison does not recover an original message missed while
 disconnected: an unchanged revision remains ignored even if it arrives first.
-History reads remain explicit; the bridge does not backfill old messages.
+The automatic thread observation can recover accessible earlier speech as context;
+it does not replay that speech as new inbox work.
 A delete's `message_id` is the deleted message (`deleted_ts`, else
 `previous_message.ts`) and its `thread_id` is that message's original thread;
 the deletion's own timestamp stays its `event_ts`, and `deleted_ts` and the

@@ -1,7 +1,7 @@
 ---
 name: chrome_browser
 description: Act in your own Chrome through a paired extension - one explicitly shared tab or the agent's own background tab, trusted input without taking focus, and a clean handoff of the live page to you and back.
-version: 0.1.1
+version: 0.1.2
 type: script
 runtime: node
 license: MIT
@@ -250,9 +250,12 @@ Never ask the owner for a password or a code in chat.
 worker and the setup script against a mocked extension socket, a mocked
 `chrome.*` and a disposable guard socket — no Chrome, no pairing:
 `node --test --test-force-exit tests/regressions.test.mjs`.
+`node --test tests/observation_startup.test.mjs` also checks late pairing,
+source-bound text windows and cached-read coverage without a browser.
 
-`tests/chrome_browser/` in the hub repository drives the real extension in a
-disposable `--headless=new` Chromium. Its pairing step types the credential
+`tests/chrome_browser/headless.test.mjs` and
+`tests/chrome_browser/input_frame.test.mjs` in the Hub repository drive the
+real extension in a disposable `--headless=new` Chromium. Its pairing step types the credential
 into the popup for the owner; it says nothing about a personal Chrome.
 
 The Core registry consumer uses the actual `ToolRegistry`/`MCPManager` with a

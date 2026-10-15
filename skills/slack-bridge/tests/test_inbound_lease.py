@@ -178,6 +178,10 @@ class _Slack:
     async def conversation_info(self, channel_id):
         return {"id": channel_id, "is_im": True}
 
+    async def read_messages(self, **kwargs):
+        return {"messages": [{"ts": kwargs["thread_ts"], "text": "Fixture root"}],
+                "complete": True, "next_cursor": None}
+
 
 class _Host:
     def __init__(self, *, reference="continuing:author", state="ready", error=None):

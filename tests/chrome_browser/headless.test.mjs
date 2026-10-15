@@ -532,6 +532,7 @@ test('headless consumer', { skip: executable ? false : 'OUROBOROS_CHROME_TEST_CH
       assert.match(text, /blocked:FAILED/);
       assert.match(text, /redirect:200 echoPOST \/echo 12/);
       const requests = host.factsFor(answer.invocationId).filter((item) => item.kind === 'request');
+      assert.deepEqual(requests.map((item) => item.has_post_data), [true, false, true, true]);
       const summary = requests.map((item) => ({ url: new URL(item.url).pathname, method: item.method, post_data: item.post_data, complete: item.complete, type: item.resource_type, verdict: item.verdict }));
       assert.deepEqual(summary, [
         { url: '/echo', method: 'POST', post_data: 'alpha=1&beta=two', complete: true, type: 'XHR', verdict: '' },
@@ -553,6 +554,7 @@ test('headless consumer', { skip: executable ? false : 'OUROBOROS_CHROME_TEST_CH
       assert.match(posted.json.result.echo.text, /^POST \/echo \d+$/);
       const facts = host.factsFor(posted.invocationId);
       const post = facts.find((item) => item.kind === 'request');
+      assert.equal(post.has_post_data, true);
       assert.deepEqual([post.method, post.resource_type, post.is_main_frame, post.complete], ['POST', 'Document', true, true]);
       assert.match(post.post_data, /name=Grace\+Hopper/);
       assert.ok(!post.post_data.includes('hunter2') || post.post_data.includes('secret='), 'the body is whatever the form sends, unedited');

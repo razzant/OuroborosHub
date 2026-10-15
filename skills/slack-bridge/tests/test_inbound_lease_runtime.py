@@ -186,6 +186,9 @@ class _Consumer:
                         await asyncio.sleep(0)
 
             return httpx.Response(200, stream=FiniteBytes())
+        if request.url.path.endswith("conversations.replies"):
+            return httpx.Response(200, json={"ok": True, "messages": [
+                {"ts": request.url.params["ts"], "text": "Fixture root"}]})
         if request.url.path.endswith("users.info"):
             return httpx.Response(200, json={"ok": True, "user": {"id": "U1"}})
         if request.url.path.endswith("conversations.info"):

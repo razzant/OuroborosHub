@@ -96,6 +96,9 @@ class _Host:
 
 
 def _provider(request: httpx.Request) -> httpx.Response:
+    if request.url.path.endswith("conversations.replies"):
+        return httpx.Response(200, json={"ok": True, "messages": [
+            {"ts": request.url.params["ts"], "text": "Fixture root"}]})
     if request.url.path.endswith("users.info"):
         return httpx.Response(200, json={"ok": True, "user": {"id": request.url.params["user"]}})
     return httpx.Response(200, json={"ok": True, "channel": {"id": request.url.params["channel"]}})

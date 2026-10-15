@@ -250,7 +250,7 @@ def parse_socket_envelope(
             "user_id": actor_user_id,
             "item": dict(event.get("item")) if isinstance(event.get("item"), Mapping) else {},
         }
-    if event_type not in {"message", "reaction_added", "reaction_removed"}:
+    if event_type not in {"message", "app_mention", "reaction_added", "reaction_removed"}:
         return ParsedEnvelope(envelope_id, event_id, False, "unsupported_event", None)
     if ((bot_id and bot_event_id == bot_id) or (app_id and app_event_id == app_id)
             or (bot_user_id and actor_user_id == bot_user_id)):
@@ -271,7 +271,9 @@ def parse_socket_envelope(
     # event admissible or turn an occurrence into a request to this bot.
     if bot_user_id:
         structured["self_user_id"] = bot_user_id
-    if event_type == "message" and subtype != "message_deleted":
+    if event_type in {"message", "app_mention"} and subtype != "message_deleted":
+        if subtype != "message_changed" and isinstance(message.get("edited"), Mapping):
+            structured["edited"] = dict(message["edited"])
         mentioned = _mentioned_user_ids(message)
         if mentioned:
             structured["mentioned_user_ids"] = mentioned

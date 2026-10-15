@@ -23,7 +23,7 @@ class _WebSocket:
         self.sent.append(json.loads(value))
 
 
-def _raw() -> str:
+def _raw(event_type: str = "message") -> str:
     return json.dumps(
         {
             "type": "events_api",
@@ -32,7 +32,7 @@ def _raw() -> str:
                 "event_id": "Ev-1",
                 "team_id": "T1",
                 "event": {
-                    "type": "message",
+                    "type": event_type,
                     "user": "U1",
                     "channel": "C1",
                     "ts": "1.1",
@@ -43,11 +43,12 @@ def _raw() -> str:
     )
 
 
-def test_socket_ack_happens_only_after_durable_insert(tmp_path) -> None:
-    asyncio.run(_socket_ack_happens_only_after_durable_insert(tmp_path))
+@pytest.mark.parametrize("event_type", ["message", "app_mention"])
+def test_socket_ack_happens_only_after_durable_insert(tmp_path, event_type) -> None:
+    asyncio.run(_socket_ack_happens_only_after_durable_insert(tmp_path, event_type))
 
 
-async def _socket_ack_happens_only_after_durable_insert(tmp_path) -> None:
+async def _socket_ack_happens_only_after_durable_insert(tmp_path, event_type) -> None:
     store = BridgeStore(tmp_path)
     websocket = _WebSocket(store)
     socket = SocketModeClient(
@@ -56,16 +57,17 @@ async def _socket_ack_happens_only_after_durable_insert(tmp_path) -> None:
         bot_user_id="U_BOT",
     )
 
-    await socket.handle_raw_message(websocket, _raw())
+    await socket.handle_raw_message(websocket, _raw(event_type))
 
     assert websocket.sent == [{"envelope_id": "env-1"}]
 
 
-def test_failed_durable_insert_is_not_acknowledged(tmp_path, monkeypatch) -> None:
-    asyncio.run(_failed_durable_insert_is_not_acknowledged(tmp_path, monkeypatch))
+@pytest.mark.parametrize("event_type", ["message", "app_mention"])
+def test_failed_durable_insert_is_not_acknowledged(tmp_path, monkeypatch, event_type) -> None:
+    asyncio.run(_failed_durable_insert_is_not_acknowledged(tmp_path, monkeypatch, event_type))
 
 
-async def _failed_durable_insert_is_not_acknowledged(tmp_path, monkeypatch) -> None:
+async def _failed_durable_insert_is_not_acknowledged(tmp_path, monkeypatch, event_type) -> None:
     store = BridgeStore(tmp_path)
     websocket = _WebSocket(store)
     socket = SocketModeClient(
@@ -79,5 +81,5 @@ async def _failed_durable_insert_is_not_acknowledged(tmp_path, monkeypatch) -> N
 
     monkeypatch.setattr(store, "ingest_envelope", fail)
     with pytest.raises(OSError, match="disk unavailable"):
-        await socket.handle_raw_message(websocket, _raw())
+        await socket.handle_raw_message(websocket, _raw(event_type))
     assert websocket.sent == []

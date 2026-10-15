@@ -107,6 +107,21 @@ def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(float(epoch), timezone.utc).isoformat()
 
 
+def _message_revision(row: Mapping[str, Any] | sqlite3.Row) -> str:
+    """The provider revision shared by message and app_mention deliveries."""
+    facts = json.loads(row["structured_json"])
+    changed = row["subtype"] == "message_changed"
+    message = facts.get("message", {}) if changed else facts
+    edited = message.get("edited")
+    previous_edited = facts.get("previous_message", {}).get("edited") if changed else None
+    # An attachment/metadata update may retain an earlier text-edit stamp.
+    # Its own event time keeps that real change separate from that old edit.
+    if (isinstance(edited, Mapping) and str(edited.get("ts") or "").strip()
+            and (not isinstance(previous_edited, Mapping) or previous_edited.get("ts") != edited["ts"])):
+        return str(edited["ts"]).strip()
+    return str(row["event_ts"] if changed else row["message_ts"])
+
+
 def _queued_event(row: sqlite3.Row, text_chars: int | None) -> dict[str, Any]:
     """One received event without a durable Host reference, as transport facts."""
     text = str(row["text"])
@@ -206,6 +221,8 @@ class BridgeStore:
                     ON inbox(state, available_at, id);
                 CREATE INDEX IF NOT EXISTS inbox_thread
                     ON inbox(ordering_key, id, state);
+                CREATE INDEX IF NOT EXISTS inbox_message
+                    ON inbox(team_id, channel_id, message_ts, event_type);
 
                 CREATE TABLE IF NOT EXISTS outbox (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -340,6 +357,23 @@ class BridgeStore:
         placeholders = ", ".join(f":{name}" for name in values)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if (parsed.accepted and event is not None and event.team_id
+                    and event.event_type in {"message", "app_mention"}
+                    and event.subtype != "message_deleted"):
+                # Both subscriptions can describe one revision. Preserve both
+                # envelopes, admitting one turn only when identity and text agree.
+                other_type = "message" if event.event_type == "app_mention" else "app_mention"
+                candidates = db.execute(
+                    """SELECT subtype, message_ts, event_ts, structured_json FROM inbox
+                       WHERE team_id=? AND channel_id=? AND message_ts=?
+                         AND event_type=? AND text=? AND state!='ignored'
+                         AND subtype!='message_deleted'""",
+                    (event.team_id, event.channel_id, event.message_ts, other_type, event.text),
+                )
+                revision = _message_revision(values)
+                if revision and any(_message_revision(row) == revision for row in candidates):
+                    values["state"] = "ignored"
+                    values["ignored_reason"] = "duplicate_message_surface"
             cursor = db.execute(
                 f"INSERT OR IGNORE INTO inbox ({columns}) VALUES ({placeholders})",
                 values,

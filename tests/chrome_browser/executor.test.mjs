@@ -79,6 +79,18 @@ async function setup(t) {
 const nav = { t: 'nav', previous: { lease_id: 'l1', generation: 1, document_id: 'D1' }, lease_id: 'l2', generation: 2,
   document_id: 'D2', url: 'http://fixture/second.html', request_id: '1:r1' };
 
+test('request forwarding preserves explicit body booleans and leaves missing metadata unknown', async (t) => {
+  const { guard, executor } = await setup(t);
+  for (const [index, body] of [true, false, undefined].entries()) {
+    await executor.onRequest({ lease_id: 'l1', generation: 1, request: {
+      request_id: `body-${index}`, url: 'http://fixture/resource', method: 'GET',
+      post_data: null, complete: true, has_post_data: body, resource_type: 'XHR',
+    } });
+  }
+  assert.deepEqual(guard.facts.filter((fact) => fact.kind === 'request').map((fact) => fact.has_post_data),
+    [true, false, null]);
+});
+
 test('a document the host refuses after an admitted step fails the call and keeps the step\'s dispatched outcome', async (t) => {
   const { guard, executor, ext } = await setup(t);
   guard.policy = (facts) => (facts.kind === 'document' ? 'BROWSER_REQUEST_GUARD_UNAVAILABLE: guard socket ECONNRESET' : '');

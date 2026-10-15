@@ -205,6 +205,10 @@ def _drive(root: Path) -> dict:
             params = request.url.params
             if request.url.path.endswith("users.info"):
                 return httpx.Response(200, json={"ok": True, "user": {"id": params["user"], "name": "reader"}})
+            if request.url.path.endswith("conversations.replies"):
+                assert "latest" not in params and "oldest" not in params
+                return httpx.Response(200, json={"ok": True, "messages": [
+                    {"ts": "1.0", "user": "U1", "text": "Earlier thread context"}], "has_more": False})
             return httpx.Response(200, json={"ok": True, "channel": {"id": params["channel"]}})
         file_requests.append(f"{request.url.host}{request.url.path}")
         return httpx.Response(200, content=b"%PDF-1.4 synthetic")

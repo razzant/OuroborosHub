@@ -43,6 +43,10 @@ class Slack:
     async def user_info(self, user_id): return {"id": user_id}
     async def conversation_info(self, channel_id): return {"id": channel_id}
 
+    async def read_messages(self, **kwargs):
+        return {"messages": [{"ts": kwargs["thread_ts"], "text": "Fixture root"}],
+                "complete": True, "next_cursor": None}
+
     async def resolve_target(self, target):
         self.resolved.append(target)
         return "D_RESOLVED" if target.startswith("U") else target

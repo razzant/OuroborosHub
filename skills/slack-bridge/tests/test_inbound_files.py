@@ -68,6 +68,9 @@ class _Provider:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         if request.url.host == "slack.com":
+            if request.url.path.endswith("conversations.replies"):
+                return httpx.Response(200, json={"ok": True, "messages": [
+                    {"ts": request.url.params["ts"], "text": "Fixture root"}]})
             if request.url.path.endswith("users.info"):
                 return httpx.Response(200, json={"ok": True, "user": {"id": request.url.params["user"]}})
             return httpx.Response(200, json={"ok": True, "channel": {"id": request.url.params["channel"]}})

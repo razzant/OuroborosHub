@@ -768,6 +768,44 @@ async function leasedWorker() {
   return w;
 }
 
+test('extension: raw renderer-frame rejection is input-not-ready, with no input or replay', async () => {
+  const w = await leasedWorker();
+  const command = chrome.debugger.sendCommand;
+  chrome.debugger.sendCommand = async (target, method, params) => {
+    if (method === 'Page.captureScreenshot') throw new Error('Unable to capture screenshot');
+    return command(target, method, params);
+  };
+  w.click(2);
+  await until(() => w.result(2));
+  assert.deepEqual([w.result(2).ok, w.result(2).outcome, w.result(2).error.code],
+    [false, 'not_dispatched', 'BROWSER_INPUT_NOT_READY']);
+  assert.match(w.result(2).error.message, /Unable to capture screenshot/);
+  assert.equal(w.commands.includes('Input.dispatchMouseEvent'), false);
+});
+
+test('extension: emitted body facts distinguish bodyless resources from complete and incomplete bodies', async () => {
+  const w = await leasedWorker();
+  const cases = [
+    [{}, [false, null, true]],
+    [{ hasPostData: true, postDataEntries: [{ bytes: Buffer.from('a=1').toString('base64') }] }, [true, 'a=1', true]],
+    [{ hasPostData: true, postData: 'a=1', postDataEntries: [{}] }, [true, 'a=1', false]],
+    [{ hasPostData: true, postDataEntries: [{ bytes: '/w==' }] }, [true, null, false]],
+    [{ postData: 'x' }, [null, 'x', false]],
+  ];
+  for (const [index, [body, expected]] of cases.entries()) {
+    const requestId = `body-${index}`;
+    w.fire('event', { tabId: 7 }, 'Fetch.requestPaused', {
+      requestId, resourceType: 'XHR', frameId: 'F',
+      request: { url: `https://a.test/${requestId}`, method: 'GET', ...body },
+    });
+    await until(() => w.sent.some((m) => m.t === 'request' && m.request.request_id === `3:${requestId}`));
+    const facts = w.sent.find((m) => m.t === 'request' && m.request.request_id === `3:${requestId}`).request;
+    assert.deepEqual([facts.has_post_data, facts.post_data, facts.complete], expected);
+    w.fromExecutor({ t: 'verdict', request_id: facts.request_id, block: '' });
+    await until(() => w.commands.filter((m) => m === 'Fetch.continueRequest').length === index + 1);
+  }
+});
+
 test('extension: a target that turns transparent, disabled or pointer-inert on its second sample is refused unsent; a stationary one is clicked', async () => {
   const w = await leasedWorker();
   const steady = w.page.measure;

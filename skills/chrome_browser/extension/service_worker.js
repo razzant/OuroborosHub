@@ -419,6 +419,10 @@ async function prepareInputFrame(ctx) {
       throw new BridgeError('BROWSER_INPUT_NOT_READY', 'Chrome returned no input frame; no input was dispatched');
     l.input_frame_generation = ctx.generation;
     ctx.input_preparation = { kind: 'renderer_frame', elapsed_ms: Date.now() - started };
+  } catch (error) {
+    fenced(ctx);
+    if (error instanceof BridgeError) throw error;
+    throw new BridgeError('BROWSER_INPUT_NOT_READY', `Chrome input frame failed: ${error.message || error}; no input was dispatched`);
   } finally {
     clearTimeout(timer);
   }

@@ -325,7 +325,7 @@ non-mutation guarantee. Older invocation-only hosts continue to refuse idle read
 * The page receives no callbacks, timers, observers or listeners from this
   package. Page-side work is one synchronous fixed function call in an
   isolated world; waiting is polled from the extension.
-* `browser_action` and `browser_execute` run one at a time, in arrival order.
+* `browser_connect`, `browser_resume`, `browser_action` and `browser_execute` run one at a time, in arrival order.
   `browser_state`, `browser_handoff` and `browser_disconnect` do not queue.
 
 ### 1.6 Receipt
@@ -523,7 +523,7 @@ them before acting and before believing an answer.
 | ext → srv | `{"t":"step_result","id":n,"lease_id":"…","generation":n,"outcome":"…","ok":true,"value":…,"error":{…}}` |
 | ext → srv | `{"t":"nav","previous":{"lease_id":"…","generation":n,"document_id":"…"},"lease_id":"…","generation":n,"document_id":"…","url":"…","request_id":"…"}` |
 | ext → srv | `{"t":"url","lease_id":"…","generation":n,"url":"…"}` — same-document change |
-| ext → srv | `{"t":"request","lease_id":"…","generation":n,"request":{"request_id":"…","url":"…","method":"…","post_data":…,"complete":true,"resource_type":"…","is_main_frame":false}}` |
+| ext → srv | `{"t":"request","lease_id":"…","generation":n,"request":{"request_id":"…","url":"…","method":"…","post_data":…,"has_post_data":false,"complete":true,"resource_type":"…","is_main_frame":false}}` |
 | srv → ext | `{"t":"verdict","request_id":"…","block":""}` |
 | srv → ext | `{"t":"release","id":n,"tab_id":"…","reason":"handoff | disconnect | shutdown | refused | navigation_refused"}` — for a tab without a lease (a handoff ended by `browser_disconnect`) it only withdraws that tab from resume; `refused` for the lease a `browser_resume` was making gives the tab back to the owner, resumable as before |
 | ext → srv | `{"t":"released","id":n,"detached":true,"closed_tab":false,"error":"…"}` |

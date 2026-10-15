@@ -172,6 +172,8 @@ class FakeSlack:
             return httpx.Response(200, json={"ok": True, "user": {"id": request.url.params["user"], "name": "reader"}})
         if method == "conversations.info":
             return httpx.Response(200, json={"ok": True, "channel": {"id": request.url.params["channel"]}})
+        if method == "conversations.replies":
+            return httpx.Response(200, json={"ok": True, "messages": [], "has_more": False})
         assert method == "chat.postMessage", method
         body = json.loads(request.content)
         self.attempts += 1

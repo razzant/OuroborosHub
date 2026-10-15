@@ -39,7 +39,7 @@ def frontmatter() -> str:
 class PackageTests(unittest.TestCase):
     def test_manifest_declares_a_node_script_skill_with_one_pinned_dependency(self):
         front = frontmatter()
-        for line in ('name: chrome_browser', 'version: 0.1.1', 'type: script', 'runtime: node', 'permissions: [net, fs, subprocess]',
+        for line in ('name: chrome_browser', 'version: 0.1.2', 'type: script', 'runtime: node', 'permissions: [net, fs, subprocess]',
                      '  - name: mcp_server.mjs', '  - name: setup.mjs', '    package: ws@8.22.0'):
             self.assertIn(line, front)
         self.assertEqual(front.count('kind:'), 1)
@@ -56,7 +56,7 @@ class PackageTests(unittest.TestCase):
     def test_catalog_entry_matches_the_manifest(self):
         catalog = json.loads((ROOT / 'catalog.json').read_text(encoding='utf-8'))
         entry = next(item for item in catalog['skills'] if item['slug'] == 'chrome_browser')
-        self.assertEqual((entry['version'], entry['type']), ('0.1.1', 'script'))
+        self.assertEqual((entry['version'], entry['type']), ('0.1.2', 'script'))
         self.assertEqual(entry['install_specs'], [{'kind': 'npm', 'package': 'ws@8.22.0'}])
         self.assertEqual({item['path'] for item in entry['files']},
                          {path.relative_to(SKILL).as_posix() for path in SKILL.rglob('*') if path.is_file()})
@@ -65,10 +65,16 @@ class PackageTests(unittest.TestCase):
         declared = yaml.safe_load((ROOT / 'skills' / 'playwright_extension' / 'SKILL.md').read_text(encoding='utf-8').split('---', 2)[1])
         self.assertEqual((playwright['version'], playwright['type']), (str(declared['version']), 'instruction'))
 
+    def test_mcp_initialize_version_matches_the_package(self):
+        version = str(yaml.safe_load(frontmatter())['version'])
+        server = (SKILL / 'scripts' / 'mcp_server.mjs').read_text(encoding='utf-8')
+        self.assertIn(f"version: '{version}'", server)
+        self.assertEqual(json.loads(source('manifest.json'))['version'], version)
+
     def test_extension_asks_for_three_permissions_and_no_site_access(self):
         manifest = json.loads(source('manifest.json'))
         self.assertEqual(manifest['manifest_version'], 3)
-        self.assertEqual(manifest['version'], '0.1.1')
+        self.assertEqual(manifest['version'], '0.1.2')
         self.assertEqual(manifest['permissions'], ['debugger', 'storage', 'alarms'])
         self.assertTrue(manifest['key'])
         for absent in ('host_permissions', 'optional_permissions', 'optional_host_permissions', 'content_scripts',
@@ -135,10 +141,17 @@ class PackageTests(unittest.TestCase):
                              capture_output=True, text=True, timeout=120, cwd=SKILL)
         self.assertEqual(run.returncode, 0, run.stdout[-6000:] + run.stderr[-2000:])
 
+    @unittest.skipUnless(shutil.which('node'), 'node is not installed')
+    def test_observation_startup_without_a_browser(self):
+        run = subprocess.run(['node', '--test', str(SKILL / 'tests' / 'observation_startup.test.mjs')],
+                             capture_output=True, text=True, timeout=120, cwd=SKILL)
+        self.assertEqual(run.returncode, 0, run.stdout[-6000:] + run.stderr[-2000:])
+
     @unittest.skipUnless(shutil.which('node') and os.environ.get('OUROBOROS_CHROME_TEST_CHROMIUM'),
                          'set OUROBOROS_CHROME_TEST_CHROMIUM to a full Chromium executable to run the real-browser test')
     def test_real_extension_in_headless_chromium(self):
-        run = subprocess.run(['node', '--test', str(ROOT / 'tests' / 'chrome_browser' / 'headless.test.mjs')],
+        run = subprocess.run(['node', '--test', str(ROOT / 'tests' / 'chrome_browser' / 'headless.test.mjs'),
+                             str(ROOT / 'tests' / 'chrome_browser' / 'input_frame.test.mjs')],
                              capture_output=True, text=True, timeout=600)
         self.assertEqual(run.returncode, 0, run.stdout[-6000:] + run.stderr[-2000:])
 

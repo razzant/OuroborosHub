@@ -1473,8 +1473,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "06d1390d9fd6357206e652a727d37528f503663d25db0f4b26dc85b5b976c94d",
-          "size": 34701
+          "sha256": "495d20bf213aeb5077cabe0d4261b5cb1090500e1d1b437c00567f28a7ff1599",
+          "size": 37368
         },
         {
           "path": "lib/__init__.py",
@@ -1488,8 +1488,8 @@
         },
         {
           "path": "lib/events.py",
-          "sha256": "2c75afac3592d2b5de14752465ce1fd11ea4eb0dc62e21afd22c3752b9718dd6",
-          "size": 12751
+          "sha256": "f48551d5d2a11241c304760fa018dc9f88d595fbf6cc4eec2fbd6ccb7d554573",
+          "size": 12930
         },
         {
           "path": "lib/host_adapter.py",
@@ -1503,8 +1503,8 @@
         },
         {
           "path": "lib/provider_context.py",
-          "sha256": "7035cb66e28fb002917559fd7199e64b682fa60f51e4971c00d0ee2be15ccc45",
-          "size": 3962
+          "sha256": "fdb2798b076ad045ca439aa78deb762835070605acd4aa3acaef795046f5bf17",
+          "size": 6847
         },
         {
           "path": "lib/read_tools.py",
@@ -1528,8 +1528,8 @@
         },
         {
           "path": "lib/store.py",
-          "sha256": "39fb24a4e08da350b1ef36579a5fd4114e89cdd93920da26dc040cb602fd7f2a",
-          "size": 48510
+          "sha256": "df264821396fcacdae8655529e994640ecbb57ea7a488efd9d7b4b41ed869810",
+          "size": 50697
         },
         {
           "path": "lib/tool_results.py",
@@ -1538,8 +1538,8 @@
         },
         {
           "path": "manifest.json",
-          "sha256": "a7e5290ce30052778320acc397bc4c593fd2d3f511a929a4bed0e9b6cfaf5b29",
-          "size": 1169
+          "sha256": "f6d6c531bc5441fb263f3ac5408a08e6e3ea686c412ee5d7a0ba7da36cfa31b4",
+          "size": 1221
         },
         {
           "path": "plugin.py",
@@ -1583,8 +1583,8 @@
         },
         {
           "path": "tests/test_delivery_reporting.py",
-          "sha256": "6d7b2c6fdc620cfabde50b75850e06c171dabde9ca5f11c58402c8f28465dbd3",
-          "size": 22245
+          "sha256": "5a08ae68268547eb448f02545b92347825b75435dafcec4a7f57b8c93b078aca",
+          "size": 22429
         },
         {
           "path": "tests/test_directory.py",
@@ -1593,8 +1593,8 @@
         },
         {
           "path": "tests/test_events_store.py",
-          "sha256": "55e292bc58a2b5c5713dd057f2ddcb373d54b9e9c2799fcc0f769e287a1d80a4",
-          "size": 11280
+          "sha256": "6ad1856a46f61931246c090d7081fc1430973fa84d6f3bb4749f4070e28b6041",
+          "size": 12265
         },
         {
           "path": "tests/test_host_adapter.py",
@@ -1608,28 +1608,33 @@
         },
         {
           "path": "tests/test_inbound_files.py",
-          "sha256": "92bb846d7d52bc3735269bcaeb9fb3bccfdc5d7d533dc11a9fa3f88be25499c0",
-          "size": 29022
+          "sha256": "697a541994b70ab3c4d81a6b833c1dcea639a278936b8d06aa1d40c2204cbcae",
+          "size": 29244
         },
         {
           "path": "tests/test_inbound_lease.py",
-          "sha256": "bfc7112fc639f5228eb2cace9b7366d56d2661583026bb61487bfda92efef84a",
-          "size": 15864
+          "sha256": "0ffc2916eaba13b9ce44234045ea6bb72a826c014d538ea789e9da50ff6db088",
+          "size": 16048
         },
         {
           "path": "tests/test_inbound_lease_runtime.py",
-          "sha256": "c29f5c59106afca788384c64201e5ac6afa95cf4bdaa90cde7204cde96ed5e20",
-          "size": 12901
+          "sha256": "b3571607f2deaa38893ef9f6ad6214ecac5d4cd32c4a494dd314823d7f113a75",
+          "size": 13111
         },
         {
           "path": "tests/test_message_deletion.py",
-          "sha256": "e1b98a6487d119d9deb5881d7890294c29a7ec7ed1eee9f60fc0eb62374d7ca4",
-          "size": 7019
+          "sha256": "171da8187b3192f3c68dded875616674a4b5bd818f630e7d85d450a00c97b9f6",
+          "size": 7217
         },
         {
           "path": "tests/test_message_format.py",
           "sha256": "575c05a77ecbde6facaaf7310eb66b3037e8ac45f5f4ef1a205110478c1914d7",
           "size": 5118
+        },
+        {
+          "path": "tests/test_message_mentions.py",
+          "sha256": "2d2ff01e7ee560f858f0407e2b5e5de4b940a652e7dd2b477ed8b94b0c171382",
+          "size": 9925
         },
         {
           "path": "tests/test_message_revisions.py",
@@ -1638,18 +1643,18 @@
         },
         {
           "path": "tests/test_presence_continuation.py",
-          "sha256": "6db95ff5af9292e91103dce8ca4aff8798dfb24613f3a89907a04d8abd21e829",
-          "size": 59053
+          "sha256": "ff3626f505d8b43f03f6771f3e58f311db182372d681d73f39119629df4cabec",
+          "size": 59192
         },
         {
           "path": "tests/test_presence_process_consumer.py",
-          "sha256": "92cf73baa9a24e64054cacbd9fb66e0db291d82c25f02147b3b9a8de1847bea4",
-          "size": 42871
+          "sha256": "03ed1c70f8f18c577b4e89be0342989a842bda816ac8e98767758a37ec6b59af",
+          "size": 44548
         },
         {
           "path": "tests/test_provider_context.py",
-          "sha256": "b3c34ee712e9a4584771a74ed3334f15405d103cd5b3c77624b61f1ed874cc56",
-          "size": 14335
+          "sha256": "3fecb638d592205aa7ab41ddc7f131015a63d9387e509a3642b55d18b515da57",
+          "size": 15055
         },
         {
           "path": "tests/test_read_tools.py",
@@ -1673,8 +1678,13 @@
         },
         {
           "path": "tests/test_socket_mode.py",
-          "sha256": "f2bd398507ec7f4d4b28acd01590e34b5524d4c7cdfd120074f0cee15b582b5d",
-          "size": 2150
+          "sha256": "0705fee16762875399b1a27b65289b06e85c501d193a442506b0a25f19ff2284",
+          "size": 2404
+        },
+        {
+          "path": "tests/test_thread_context.py",
+          "sha256": "33534ef498199eeda2649a01dbadbf9c6b5399526ad44d834e21ef409157b486",
+          "size": 16895
         },
         {
           "path": "tests/test_tool_contract.py",
@@ -1688,14 +1698,14 @@
         },
         {
           "path": "tests/test_workers_plugin.py",
-          "sha256": "7b7085e66d872adb41dcfd5f48fdf6493b0c81ddbb76a67423af70e0e9b0d70a",
-          "size": 41922
+          "sha256": "5293d467e26b697886539a878f36f0608fb5d028bb18524719e1cfcf68afd719",
+          "size": 42106
         }
       ],
       "name": "slack-bridge",
       "slug": "slack-bridge",
       "type": "extension",
-      "version": "1.6.0"
+      "version": "1.6.1"
     },
     {
       "description": "Inspect, filter, sort, group, and aggregate CSV and XLSX tables while reporting truncation and non-numeric values honestly.",
@@ -2089,24 +2099,24 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "62369957ca5b2e5b40deae99aec2a7f242c0a37e877491b299ad35a03904a860",
-          "size": 3820
+          "sha256": "d3b59a06e6bb33c541f5e399722ca7320d1218b74475fc5ebb7f1b58925bcf30",
+          "size": 5474
         },
         {
           "path": "plugin.py",
-          "sha256": "73cc912aadf3cd0cce95f9d8de338c651c91607a052c9b2fb8a3060347dd8c95",
-          "size": 11895
+          "sha256": "ab6920f9aeb66374c5d8b64c7c0960a6828af36ef01baeb0c69a78ac345f57ff",
+          "size": 12688
         },
         {
           "path": "whoop_client.py",
-          "sha256": "6213b81c775c4132333b287ca6f160effa55b472cda2c9a4ae150ff1fece9c34",
-          "size": 13651
+          "sha256": "76d53e247b17a5c0818c4e4b792b1ddd1b9ca1a20efbcd91cbd9dff17108b485",
+          "size": 14519
         }
       ],
       "name": "whoop-health",
       "slug": "whoop-health",
       "type": "extension",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "when_to_use": "Пользователь спрашивает о данных с WHOOP: сон, восстановление, нагрузка (strain), тренировки, HRV, пульс, SpO2. Примеры: «покажи recovery с WHOOP», «как я спал по WHOOP?», «сводка здоровья WHOOP», «авторизуй WHOOP»."
     },
     {
@@ -2231,7 +2241,7 @@
       "slug": "chrome_browser",
       "name": "chrome_browser",
       "description": "Act in your own Chrome through a paired extension - one explicitly shared tab or the agent's own background tab, trusted input without taking focus, and a clean handoff of the live page to you and back.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "type": "script",
       "files": [
         {
@@ -2241,13 +2251,13 @@
         },
         {
           "path": "PROTOCOL.md",
-          "sha256": "49a2deba1497ed94b3c0d2556c212fbcb7244086fcade244424ccf7b579bef4d",
-          "size": 35428
+          "sha256": "ceabf03664b7a13bacf5a753b0fcccd724b5e15afeb96fdf288a90d62c4177b0",
+          "size": 35487
         },
         {
           "path": "SKILL.md",
-          "sha256": "b122162bd0a18f397925ebf95f498f949514ef48563a4445b8dd8d9f28a9720f",
-          "size": 15875
+          "sha256": "77ce9a19d510ba4a619301c31422a154e11a4f1daaecd35cfc447d0409fd2b16",
+          "size": 16084
         },
         {
           "path": "extension/bridge_protocol.mjs",
@@ -2256,7 +2266,7 @@
         },
         {
           "path": "extension/manifest.json",
-          "sha256": "71afe8fb0849e37df4555a50498cbb60288e9af6885c5446d21aeb8cc7535b56",
+          "sha256": "dcdeff256f5ed6ecce656aef722351c932b4c7973894424299643fdcf0f1b2f8",
           "size": 928
         },
         {
@@ -2276,8 +2286,8 @@
         },
         {
           "path": "extension/service_worker.js",
-          "sha256": "dcde937b3cae65ac286c0f7fe3427a12197cadba3ada776d6bdcc22b136b136d",
-          "size": 51244
+          "sha256": "7a36707cb382f33bea99507813dd6b22654fd5475031f60f611c7a5486d2ba67",
+          "size": 51467
         },
         {
           "path": "lib/executor.mjs",
@@ -2296,7 +2306,7 @@
         },
         {
           "path": "scripts/mcp_server.mjs",
-          "sha256": "b19675f92d701302b7a5bc739178c1c5046ac1ce1d1ed0878f396ae25f2e7a89",
+          "sha256": "3ec8f5c9dec564f4e6ded4691c2d0d94cb2cc5c9956d10b4196259c340ff4eab",
           "size": 7575
         },
         {
@@ -2311,8 +2321,8 @@
         },
         {
           "path": "tests/regressions.test.mjs",
-          "sha256": "db16c9c2239d12a42d5aa97d268200c4d416ce51c4a100c6bbac0ef91e57179f",
-          "size": 48200
+          "sha256": "5c44d14e95b03fbd6d0d4b1bf6f65aa3dfa0cabb2239876746d54852aac27288",
+          "size": 50281
         }
       ],
       "install_specs": [

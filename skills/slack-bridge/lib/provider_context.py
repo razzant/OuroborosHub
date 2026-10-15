@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable, Mapping
 
 import httpx
 
+from .events import provider_facts
 from .slack_api import SlackApiError
 
 
@@ -40,12 +41,62 @@ async def observe(source: str, call: Callable[[], Awaitable[dict[str, Any]]]) ->
 
 
 async def capture_context(slack: Any, item: Any, workspace_name: str) -> dict[str, Any]:
-    user, conversation = await asyncio.gather(
+    lookups = [
         observe("users.info", lambda: slack.user_info(item.actor_user_id)),
         observe("conversations.info", lambda: slack.conversation_info(item.channel_id)),
-    )
-    return {"user": user, "conversation": conversation,
-            "workspace": {"name": workspace_name, "source": "auth.test"}}
+    ]
+    has_thread = bool(item.thread_ts or item.event_type in {"message", "app_mention"})
+    if has_thread:
+        lookups.append(capture_thread(slack, item))
+    results = await asyncio.gather(*lookups)
+    snapshot = {"user": results[0], "conversation": results[1],
+                "workspace": {"name": workspace_name, "source": "auth.test"}}
+    if has_thread:
+        snapshot["thread"] = results[2]
+    return snapshot
+
+
+async def capture_thread(slack: Any, item: Any) -> dict[str, Any]:
+    """Observe the currently accessible thread, not only the triggering event's past.
+
+    Pages share the existing provider-I/O budget. The dated result is context,
+    never additional inbox work or an atomic snapshot of the conversation.
+    """
+    arguments = {"channel_id": item.channel_id, "thread_ts": item.thread_ts or item.message_ts, "limit": 200}
+    data: dict[str, Any] = {**arguments, "messages": [], "complete": False,
+                           "next_cursor": None, "pages_read": 0}
+
+    async def read() -> dict[str, Any]:
+        cursors: set[str] = set()
+        while True:
+            cursor = data["next_cursor"] or ""
+            if cursor in cursors:
+                raise SlackApiError("repeated_history_cursor")
+            cursors.add(cursor)
+            page = await slack.read_messages(**arguments, cursor=cursor)
+            data["messages"].extend(page["messages"])
+            data.update(complete=page["complete"], next_cursor=page["next_cursor"],
+                        pages_read=data["pages_read"] + 1)
+            if page.get("continuation_note"):
+                data["continuation_note"] = page["continuation_note"]
+            if data["complete"] or not data["next_cursor"]:
+                return data
+
+    observation = await observe("conversations.replies", read)
+    observation["completed_at"] = datetime.now(timezone.utc).isoformat()
+    observation["scope"] = "current_accessible_thread"
+    if not data["complete"]:
+        if data["pages_read"]:
+            observation.update(status="partial", data=data)
+        if data["pages_read"] and not data["next_cursor"]:
+            observation["continuation"] = {
+                "tool": "slack_thread", "requires": "explicit_timestamp_range", "filters": arguments,
+            }
+        else:
+            observation["continuation"] = {
+                "tool": "slack_thread", "arguments": {**arguments, "cursor": data["next_cursor"] or ""},
+            }
+    return observation
 
 
 def enrich_event(event: dict[str, Any], snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -79,4 +130,15 @@ def enrich_event(event: dict[str, Any], snapshot: Mapping[str, Any] | None) -> d
     if workspace_name:
         event["conversation"]["workspace_name"] = workspace_name
         event["conversation"]["workspace_name_source"] = "auth.test"
+    if "thread" in snapshot:
+        thread = dict(snapshot["thread"])
+        data = thread.get("data")
+        if isinstance(data, dict):
+            # Preserve speech and identity, applying the live-message projection
+            # to top-level files. Their private download URLs stay in state.
+            thread["data"] = {**data, "messages": [
+                provider_facts({"message": message})["message"]
+                for message in data.get("messages", [])
+            ]}
+        event["conversation"]["thread_history"] = thread
     return event
