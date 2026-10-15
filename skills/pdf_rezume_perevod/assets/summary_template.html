@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>{{TITLE}}</title>
+<style>
+/* ===================================================================
+   AI-SUMMARY · единый стиль резюме аналитических отчётов
+   Формат: одна страница A4, печать и экран. Менять только контент.
+   =================================================================== */
+:root{
+  --ink:#15191E;          /* основной текст            */
+  --ink-soft:#4A5560;     /* подписи, служебный текст  */
+  --brand:#1F4E79;        /* тёмно-синий: заголовок H1 */
+  --accent:#2E75B6;       /* синий: заголовки секций   */
+  --rule:#C9D4DF;         /* линейки                   */
+  --tint:#F4F7FA;         /* фон блока вопросов        */
+  --tint-edge:#2E75B6;    /* левая полоса блока        */
+  --sans:Arial, sans-serif;
+}
+@page{ size:A4; margin:0; }
+*{ box-sizing:border-box; margin:0; padding:0; }
+html,body{ background:#EEF1F4; }
+body{
+  font-family:var(--sans); font-size:12pt; line-height:1.5; color:var(--ink);
+  -webkit-font-smoothing:antialiased;
+}
+
+.page{
+  width:210mm; min-height:297mm; margin:0 auto; background:#fff;
+  padding:12mm 14mm 9mm; display:flex; flex-direction:column;
+  font-size:12pt; line-height:1.5;
+}
+
+/* ---------- шапка ---------- */
+.masthead{
+  display:flex; justify-content:space-between; align-items:baseline;
+  font-size:10pt; line-height:1.5; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--ink-soft); border-bottom:1.6pt solid var(--brand);
+  padding-bottom:3pt;
+}
+.masthead b{ color:var(--brand); font-weight:700; }
+
+h1{
+  font-family:var(--sans); font-size:14pt; line-height:1.5; font-weight:700;
+  color:var(--brand); margin:7pt 0 3.5pt; letter-spacing:-.01em;
+}
+.lede{
+  font-size:12pt; line-height:1.5; color:var(--ink-soft);
+  padding-bottom:5.5pt; border-bottom:.5pt solid var(--rule);
+}
+.lede b{ color:var(--ink); font-weight:600; }
+
+/* ---------- заголовки секций ---------- */
+h2{
+  display:flex; align-items:center; gap:6pt;
+  font-size:14pt; line-height:1.5; font-weight:700; color:var(--accent);
+  text-transform:uppercase; letter-spacing:.09em;
+  margin:7.5pt 0 4.5pt;
+}
+h2::after{ content:""; flex:1; height:.5pt; background:var(--rule); }
+h2 .idx{
+  font-family:var(--sans); font-size:14pt; line-height:1.5; font-weight:700;
+  color:#fff; background:var(--accent);
+  width:21pt; height:21pt; border-radius:50%;
+  display:inline-flex; align-items:center; justify-content:center;
+  letter-spacing:0; text-transform:none;
+}
+
+/* ---------- ключевые выводы ---------- */
+.findings{ list-style:none; }
+.findings li{
+  position:relative; padding:0 0 4.6pt 9pt; text-align:left; font-size:12pt; line-height:1.5;
+}
+.findings li::before{
+  content:""; position:absolute; left:0; top:8pt;
+  width:3pt; height:3pt; background:var(--accent); border-radius:50%;
+}
+.findings b{ font-weight:700; color:var(--brand); }
+.findings li:last-child{ padding-bottom:0; }
+
+/* ---------- вопросы для обсуждения ---------- */
+.discussion{
+  background:var(--tint); border-left:2pt solid var(--tint-edge);
+  padding:6pt 8pt 5pt; margin-top:1pt;
+}
+.discussion h2{ margin-top:0; }
+.discussion h2::after{ background:#D3DEE8; }
+.qa{ list-style:none; counter-reset:q; }
+.qa li{ padding:0 0 5pt 15pt; position:relative; text-align:left; font-size:12pt; line-height:1.5; }
+.qa li:last-child{ padding-bottom:0; }
+.qa li::before{
+  counter-increment:q; content:counter(q,decimal-leading-zero);
+  position:absolute; left:0; top:.4pt;
+  font-family:var(--sans); font-size:12pt; line-height:1.5; font-weight:700; color:var(--accent);
+}
+.qa .q{ display:block; font-weight:700; color:var(--brand); margin-bottom:1pt; }
+.qa .ask{ font-weight:600; color:var(--ink); }
+
+/* ---------- подвал ---------- */
+footer{
+  margin-top:auto; padding-top:6pt; border-top:.5pt solid var(--rule);
+  font-size:9pt; line-height:1.5; color:var(--ink-soft);
+}
+footer .tag{ color:var(--accent); font-weight:700; text-transform:uppercase; letter-spacing:.07em; }
+@media print{ html,body{ background:#fff; } .page{ margin:0; } }
+</style>
+{{DENSITY_CSS}}
+</head>
+<body>
+<div class="page">
+
+  <div class="masthead">
+    <span><b>{{MASTHEAD_LEFT}}</b></span>
+    <span>{{MASTHEAD_RIGHT}}</span>
+  </div>
+
+  <h1>{{TITLE}}</h1>
+
+  <p class="lede"><b>Резюме для руководства.</b> {{LEDE}}</p>
+
+  <section>
+    <h2><span class="idx">1</span>Ключевые выводы</h2>
+    <ul class="findings">
+{{FINDINGS}}
+    </ul>
+  </section>
+
+  <section class="discussion">
+    <h2><span class="idx">2</span>Вопросы для обсуждения</h2>
+    <ol class="qa">
+{{QUESTIONS}}
+    </ol>
+  </section>
+
+  <footer>
+    <span class="tag">Источник</span> · {{SOURCE_FOOTER}}.
+    Резюме подготовлено исключительно на основе содержания указанного отчёта; внешние данные не привлекались.
+  </footer>
+
+</div>
+</body>
+</html>
