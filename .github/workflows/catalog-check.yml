@@ -26,6 +26,25 @@ jobs:
       - run: PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q tests/test_widget_theme_contracts.py
       - run: python scripts/build_catalog.py --check
 
+  telegram-user-session-offline:
+    # Source-only tests live outside skills/: they must not become an installed
+    # payload or change its reviewed catalog hash. No Telegram credentials.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install pytest telethon==1.45.0
+      - name: Check user-session protocol and custody without a Telegram account
+        run: PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs tests/telegram_user_session
+
   transport-skills:
     runs-on: ubuntu-latest
     steps:

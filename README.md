@@ -126,6 +126,20 @@ metadata, formatting and intentionally unlisted development files are preserved.
 The same validation runs before normal catalog generation writes its result.
 Pull requests and pushes to `main` run these checks in CI.
 
+The source-only offline regression suite for `telegram-user-session` lives at
+`tests/telegram_user_session/`, outside `skills/` and the install catalog. To
+repeat its protocol, companion and custody checks without Telegram credentials:
+
+```bash
+python -m pip install pytest telethon==1.45.0
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs tests/telegram_user_session
+```
+
+The `telegram-user-session-offline` PR job runs this suite on Python 3.10 through 3.14.
+These source tests use fakes and inspect Telethon request objects; they do not
+attest a live Telegram login or compatibility with every installed Ouroboros
+version. Skill payload review and this test job are separate evidence.
+
 The dashboard browser acceptance needs a local Ouroboros core checkout (including
 its Git history), Playwright, Chromium and WebKit. Run it explicitly; ordinary
 catalog CI does not provide these dependencies:

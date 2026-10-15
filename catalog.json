@@ -2212,6 +2212,99 @@
           "size": 20719
         }
       ]
+    },
+    {
+      "slug": "telegram-user-session",
+      "name": "telegram-user-session",
+      "version": "0.1.0",
+      "type": "extension",
+      "files": [
+        {
+          "path": "plugin.py",
+          "sha256": "7a78c348ba2092b3834da710bb956e18895eff5a9156ad72eb5529c7ea6f0395",
+          "size": 44998
+        },
+        {
+          "path": "scripts/companion.py",
+          "sha256": "bc0c8ede067a38d26b3278c92fc640089bd2a8169fb422772d64d66553cfef72",
+          "size": 16460
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "9445c71d5e2f8b9eded90929245bcd24e2fd1e5b0f44babce05787a03d0fe05b",
+          "size": 11316
+        },
+        {
+          "path": "userbot/__init__.py",
+          "sha256": "281895169681b5ee5645cad05545a7c89aadb81ae8e9fc330aee79adb503d38c",
+          "size": 71
+        },
+        {
+          "path": "userbot/action_store.py",
+          "sha256": "dec3dffe26196c976fe9312425988ca52f2149f1c371e76cab45558b1898dc27",
+          "size": 15836
+        },
+        {
+          "path": "userbot/actions.py",
+          "sha256": "3d638e989cb2de894db240e32833bc296801aa03366844f2eed2eacb18bae949",
+          "size": 8964
+        },
+        {
+          "path": "userbot/config.py",
+          "sha256": "15cfe836068831082a5d508425e62ecbf68e7e57456ed7c855648368ef24fb2a",
+          "size": 20459
+        },
+        {
+          "path": "userbot/dossier.py",
+          "sha256": "0f3f2f9b1418e1c993bdae6423d934d3927dbaf6ead59a79dc66f00d8f2f47fc",
+          "size": 9744
+        },
+        {
+          "path": "userbot/presence.py",
+          "sha256": "8a9d65d2ee35281efc25db82fb811d1e5adcbca9cf3131e87b4f4f2603d23926",
+          "size": 16200
+        },
+        {
+          "path": "userbot/runtime.py",
+          "sha256": "3e74465abe7f9bef1828bc5e2f24a19d876d778864caa91288f2db6a89130f6b",
+          "size": 49066
+        },
+        {
+          "path": "userbot/store.py",
+          "sha256": "0c422addc1b1ef260dbf8fb0932336c1020d818d485629d04a87fe1148de7141",
+          "size": 34557
+        },
+        {
+          "path": "userbot/telegram.py",
+          "sha256": "d4aabc067278329ccab042e38bb5b17ad6586dfd51a9f3db7e3a68ad74f623ec",
+          "size": 13665
+        },
+        {
+          "path": "userbot/topic.py",
+          "sha256": "0fe6b05804e02f179b786645ee07bcd96c7924261d30440ab5587dfb611f00ab",
+          "size": 5125
+        }
+      ],
+      "description": "Explicitly configured Telegram user-account conversations through MTProto and Ouroboros Presence."
+    },
+    {
+      "slug": "telegram-user-presence",
+      "name": "telegram-user-presence",
+      "version": "0.1.0",
+      "type": "instruction",
+      "files": [
+        {
+          "path": "presence.md",
+          "sha256": "d5c52fdbb8489a06867dffed21544526609c5d4e84306533feaab9ab3320ae40",
+          "size": 3879
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "8b91fd27835c63b841b970e1e93b169d7a87a96b443f4ec16bf7fc60e4cbe5db",
+          "size": 1494
+        }
+      ],
+      "description": "Conservative conversation behavior for an explicitly bound Telegram user-account transport."
     }
   ]
 }

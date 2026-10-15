@@ -1,0 +1,56 @@
+---
+name: telegram-user-session
+description: Explicitly configured Telegram user-account conversations through MTProto and Ouroboros Presence.
+version: 0.1.0
+type: extension
+entry: plugin.py
+plugin_api: "2.0"
+runtime: python3
+permissions: [net, tool, route, widget, presence, companion_process]
+dependencies:
+  - kind: pip
+    package: telethon==1.45.0
+    allow_source_build: true
+    check:
+      argv: [python, -c, "import telethon"]
+      cwd: .
+when_to_use: The owner has explicitly enabled a user-account Telegram session and selected this transport's scoped tools or Presence binding.
+model_experience:
+  what_model_sees: Explicitly scoped text/action intent/status and opt-in dossier tools; inbound third-party messages arrive only through owner-created exact Presence bindings, never as owner instructions.
+  token_effect: Tool schemas only while enabled; the companion does not call the model without an admitted Presence event.
+companion_processes:
+  - name: mtproto
+    command: [python3, scripts/companion.py]
+    runtime: python3
+    restart_policy: on_failure
+    max_restarts: 5
+---
+
+# Telegram user session
+
+This is a **separate** user-account transport, not a replacement for the owner-only Bot API bridge. Installation alone does nothing. An owner must review, grant `presence`, enable the extension, enter their own Telegram API credentials, explicitly sign in, select permitted peers, and create a Presence binding to a reviewed behavior profile. No session, account, phone number or API secret is shipped in this package. A Telegram account may be restricted by Telegram; this skill does not bypass platform permissions, flood controls or privacy.
+
+The sole long-running companion holds the Telethon session. Short-lived tools and setup routes exchange durable jobs through private skill state. A text send or single-message edit/delete/reaction is recorded as an intent before its one physical attempt; an ambiguous outcome is UNKNOWN and is never automatically tried again. A distinct newly authorized operation can still duplicate an earlier unknown effect; inspect Telegram and reconcile first. Non-owner messages enter Host Service Presence, not `/chat/inject` or owner command routing. Binding and a behavior profile are separate owner decisions. No permission to harvest whole rooms or import outside dossiers is implied.
+
+The owner setup routes use Ouroboros's existing gateway authentication, not a second identity system. On a non-loopback deployment without `OUROBOROS_NETWORK_PASSWORD`, that gateway (including owner Settings and this skill's credential-entry routes) is deliberately open: set the password or do not publish the port. The out-of-process extension's virtual loopback request address is **not** proof that a caller is local or the owner. The user account's `.session` and API hash are reusable credentials; disable and revoke the session at Telegram when the device or account is compromised. Disabling the skill stops its companion but deliberately does not erase its private state.
+
+A bound peer/topic admits **all** its text updates to Presence, including unmentioned group speech; the reviewed behavior profile decides whether to respond or remain silent. A binding may incur model usage for each message. Select only conversations whose traffic and privacy expectations justify that cost; an allowlist entry without an exact binding invokes no model. Events within one peer are handled in durable callback-capture order; a pending earlier turn holds later events in that peer, while unrelated peers can advance. Each companion pass attempts at most 100 peer-head events, including failures, and rotates the cursor for fairness across peers. Telegram's remote delivery order beyond what the local callback observed is not inferred. Two identical edit callbacks with the same timestamp and body cannot be distinguished and intentionally coalesce.
+
+## Owner setup and scope
+
+1. Install and review this payload before enabling it: deterministic `skill_preflight`, independent `skill_review`, manifest grants and the pinned Telethon dependency are distinct gates. Do not place a real `.session` in Git or review artifacts. The second `behavior/` directory is a separate instruction-only Presence profile; install/review/enable it independently. Its Presence behavior requests no generic tool grant: authored final text (or an interim plus correlated child result) is pinned by the transport to the admitted event. The general `send_text` tool is for separately authorized owner tasks, **not** for the participant-facing Presence binding.
+2. Create a **separate owner Presence binding for each permitted conversation and forum topic** with provider=`telegram`, `account_id` the numeric Telegram user ID returned by the companion's authenticated `get_me()`, `conversation_id` the numeric peer ID (as text), and `thread_id` the topic root ID (as text) for non-General; General/private/group uses an empty thread. Enter your own `api_id`, `api_hash`, E.164 phone and numeric peer allowlist in Settings. Map each exact peer/topic to its 32-hex Host binding ID in the `bindings` JSON field, sorted by peer then topic, e.g. `[{"peer_id":-100123,"topic_id":null,"binding_id":"<32 hex>"},{"peer_id":-100123,"topic_id":40,"binding_id":"<another 32 hex>"}]`. The older single `binding_id` field works only for one allowlisted peer's General/root conversation, never all its topics. A mapped list is authoritative and has **no** default binding fallback. An unbound topic cannot invoke the model or borrow a neighbor's binding. The mapping is an owner decision, not a value a Telegram participant can set. A peer allowlist does not confer a Telegram membership or moderator right.
+3. Use **Request Telegram login code** only when you intend to sign in. The companion records a challenge without showing it in Settings; enter the received code and, if Telegram requests it, the 2FA password through the private one-shot handoff. When the account is already authorized, a staged login handoff is consumed without attempting another login; logical deletion does not erase backups. A restart cannot certify that an in-flight code request did not reach Telegram. `setup/status.code_request_status=password_required` means the code was accepted and the owner should stage only the 2FA password; `definitely_refused` is a proven code-request refusal, while `already_authorized` means a later code request was retired without another Telegram call. A transport-unknown request remains in-flight: stop the companion and reconcile it before manually resetting markers. `account_id_recorded` is a stored ID, not a live login health check.
+4. Keep the owner-only Bot API skill separate. Test a consenting spare user account in a permitted private room and a forum, including General and two non-General topics, before any public claim of live compatibility. Never use the owner's primary account as an implicit test asset. On disable the companion stops; the private MTProto session persists until the owner separately revokes it with Telegram and removes state.
+
+## Limits and private state
+
+A completed Presence response may carry both interim text and a deferred `work_ref`: the interim is queued as part 0 under its own durable intent, the child result as part 1, and both report separately after Telegram acceptance. Neither is repeated on restart. An automatic Presence reply above 4096 UTF-8 bytes is held as `REPLY_TOO_LONG` without acknowledging its source event or sending a partial Telegram message; owner correction is required. An ambiguous forum reply is not routed into General merely because the current catalog is stale. A direct General reply is admitted only after a bounded, cycle-safe ancestry check reaches a verified ordinary General root; the same proof is used before sending back into that chain.
+
+After a caller queues text or an action, it must check `send_status` or `action_status` until `sent`, `failed`, or `unknown` before claiming completion. `queued`, `leased`, and `attempted` are **not** delivery; an ended task receives no automatic completion notification. `unknown` requires manual reconciliation against Telegram before any new intent that might repeat the effect. The companion first reads Host `/identity` and requests delivery reporting v1 only when advertised; legacy/unavailable capability is disclosed in `setup/status.delivery_reporting`.
+
+The first slice handles plain-text messages, single-message edit/delete/reaction in selected forum topics, and opt-in dossier facts. `action_status` reports the durable intent's fate; transient action preflight failures wait at least 30 seconds, and a Telegram FloodWait honors its retry-after up to 30 days (longer waits retire for owner action), while other jobs can progress. The separately implemented bounded history reader is not a public tool yet. Media, mass history collection, join/invite/moderation and Telegram rate-limit bypass are not implied. Topic routing uses a complete current forum catalog and leaves an unknown route pending; replies to ordinary messages in a non-General topic carry both reply and topic root IDs. A send intent's `random_id` is written before the physical call; `UNKNOWN` requires inspection/reconciliation and is never auto-resubmitted. Host Presence delivery receipts follow provider acknowledgement, not a queued job. Missed Telethon updates are requested after handlers register (`catch_up`) and are deduplicated locally/at Host; this is not proof of a gap-free live history across every Telegram outage. Intake is bounded to 1,000 pending/held events (each admitted text <=60 KB). At that bound the callback records `INGRESS_BACKPRESSURE` in private health, stops the host-supervised companion rather than silently discarding and continuing. An allowlisted text above 60 KB similarly records `INGRESS_TOO_LARGE` and stops; neither is a successful capture. Repeated Host/catalog failures set `setup/status.inbound_repair_needed` after five attempts and pace that peer while others advance. For these states the owner must back up/inspect private state, resolve held work or increase resources, then reconcile possible missed Telegram history manually before an explicit restart. Catch-up is best effort, never proof that a callback refused at the bound will be redelivered.
+
+Private state holds the reusable session, API hash, one-shot login challenge, pending raw inbound text, outgoing message payloads and durable status. Accepted inbound text is scrubbed logically from the store on ACK while a hashed identity tombstone remains; SQLite WAL/free pages and backups are not forensically wiped. Sent/failed outgoing payloads and held/unknown events remain for audit and require a deliberate, offline owner cleanup after their custody is resolved; uninstall or disable alone is not data erasure. An opt-in dossier module uses numeric account/user IDs, confines fact reads to the source peer, retains source/time and a finite TTL, and never harvests conversations by default.
+
+The source-only test suite is offline. Its successes do **not** attest a live login, a real forum round trip or public publication. A real pilot needs a consenting spare test account and test forum; it may be performed later by another Ouroboros/owner who controls such a credential.
