@@ -39,7 +39,11 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install pytest httpx starlette websockets
-      - name: Check registered schemas and offline transport behavior
+      - name: Check registered schemas and offline Slack transport behavior
         # Provider HTTP calls are mocked. Two optional Host-contract probes skip
         # without a local Ouroboros checkout; no live core or credentials are used.
-        run: PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/slack-bridge/tests skills/telegram-bot/tests
+        # Separate collections retain each skill's bare sibling test imports.
+        run: PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/slack-bridge/tests
+      - name: Check registered schemas and offline Telegram transport behavior
+        if: ${{ !cancelled() }}
+        run: PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/telegram-bot/tests
