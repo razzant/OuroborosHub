@@ -802,17 +802,23 @@ async function onRequestPaused(l, params) {
   // The destination as the page will commit it, fragment included.
   const url = `${params.request.url}${params.request.urlFragment || ''}`;
   const isMainFrame = params.frameId === l.frame_id;
-  const block = await new Promise((resolve) => {
-    l.paused.set(factId, { resolve, document: isDocument, cdp_id: requestId });
-    setTimeout(() => resolve('BROWSER_REQUEST_GUARD_UNAVAILABLE: no verdict arrived'), VERDICT_TIMEOUT_MS);
-    send({
-      t: 'request', lease_id: l.lease_id, generation: l.generation,
-      request: {
-        request_id: factId, url, method: params.request.method, ...bodyFacts(params.request),
-        resource_type: params.resourceType, is_main_frame: isMainFrame,
-      },
+  let verdictTimer;
+  let block;
+  try {
+    block = await new Promise((resolve) => {
+      l.paused.set(factId, { resolve, document: isDocument, cdp_id: requestId });
+      verdictTimer = setTimeout(() => resolve('BROWSER_REQUEST_GUARD_UNAVAILABLE: no verdict arrived'), VERDICT_TIMEOUT_MS);
+      send({
+        t: 'request', lease_id: l.lease_id, generation: l.generation,
+        request: {
+          request_id: factId, url, method: params.request.method, ...bodyFacts(params.request),
+          resource_type: params.resourceType, is_main_frame: isMainFrame,
+        },
+      });
     });
-  });
+  } finally {
+    clearTimeout(verdictTimer);
+  }
   if (!l.paused.delete(factId)) return;  // released meanwhile: releaseLease() already refused it
   if (block === '') {
     // CDP's own identity of the coming document: its network id is the loader id.

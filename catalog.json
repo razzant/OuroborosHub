@@ -2241,18 +2241,18 @@
         },
         {
           "path": "PROTOCOL.md",
-          "sha256": "8ee733014553e48bff02026af7ee66e101ec09e03c61a66e7c9ef3beb374bcc2",
-          "size": 35012
+          "sha256": "49a2deba1497ed94b3c0d2556c212fbcb7244086fcade244424ccf7b579bef4d",
+          "size": 35428
         },
         {
           "path": "SKILL.md",
-          "sha256": "39443493a79ae7f418d06e5dd7488f3f7abe4457907b84772f412747e8b364d8",
-          "size": 15264
+          "sha256": "b122162bd0a18f397925ebf95f498f949514ef48563a4445b8dd8d9f28a9720f",
+          "size": 15875
         },
         {
           "path": "extension/bridge_protocol.mjs",
-          "sha256": "23febe9c22683d243199add31bb5fd8b5c84cd0eb7fcc81c572ca3480af1a654",
-          "size": 2269
+          "sha256": "e110ed85a13be1bae3d35280f82a503a7f86ab8b74f92b861abaf0feaca9b524",
+          "size": 2279
         },
         {
           "path": "extension/manifest.json",
@@ -2276,8 +2276,8 @@
         },
         {
           "path": "extension/service_worker.js",
-          "sha256": "a2582829a9f93c3346c3983eeaf21013386f37570a6d5c156ee9f67191437f3b",
-          "size": 51122
+          "sha256": "dcde937b3cae65ac286c0f7fe3427a12197cadba3ada776d6bdcc22b136b136d",
+          "size": 51244
         },
         {
           "path": "lib/executor.mjs",
@@ -2311,8 +2311,8 @@
         },
         {
           "path": "tests/regressions.test.mjs",
-          "sha256": "1da46374f35a37436facca1134d6c420a87a80fc5adf7e581384ef074482aa47",
-          "size": 45691
+          "sha256": "db16c9c2239d12a42d5aa97d268200c4d416ce51c4a100c6bbac0ef91e57179f",
+          "size": 48200
         }
       ],
       "install_specs": [

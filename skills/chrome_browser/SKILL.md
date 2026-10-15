@@ -69,6 +69,11 @@ load the extension or enter that credential in the owner's browser.
 `setup.mjs rotate` replaces the credential and forgets the extension;
 **Forget pairing** in the popup removes the extension's copy.
 
+After a package update, use **Reload** for this unpacked extension in
+`chrome://extensions`. Do not forget the pairing or enter the credential again.
+The build digest checks package files on disk, not the old worker's loaded code;
+verify the new input-preparation receipt and the requested page effect after Reload.
+
 ## What happens in a task
 
 - The executor listens on one loopback port (default 47831). The extension
@@ -121,6 +126,8 @@ captures up to 60,000 characters and returns the first 2,000.
 `cached_text` reports its coverage; a search with no matches and
 `complete:false` says only that the captured window has no match. To inspect
 an uncaptured offset, issue another `read` or `get_text` with that `start`.
+Coverage describes rendered DOM text, not proof that a virtualized site exposed
+the entire underlying file.
 Before first input in each document/attachment, the executor prepares one
 renderer frame without activating the tab; pixels are discarded, not returned.
 A missing frame refuses before input, never triggers a sacrificial/repeated click.
@@ -191,9 +198,11 @@ Never ask the owner for a password or a code in chat.
 - **The first load of the agent's own tab** happens before the debugger is
   attached: the host admits the URL and then sees the landing URL, but that
   load's individual requests are not judged.
-- **Between calls** a request the page starts by itself has no invocation to
-  belong to; the host refuses it. A page that keeps talking to its server
-  between tool calls will see failures.
+- **Between calls**, a current compatible host may admit complete bodyless
+  GET/HEAD subresource reads on the same valid lease, under its current task
+  and destination policy. Documents, bodies and unknown resource types are
+  refused; older hosts refuse all requests without an invocation. GET/HEAD
+  describe request shape, not a guarantee that the server changes nothing.
 - **Navigation after the call.** A click (or key, or check) that asks the page
   to navigate — a link, a form post, a script — is followed inside its step,
   also when Chrome starts that navigation late, for at most 10 seconds. The

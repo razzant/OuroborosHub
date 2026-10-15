@@ -139,7 +139,7 @@ Additional members (informative):
 "approved_tabs": [{"tab_id": "1234567"}],
 "handoff": {"tab_id": "1234567", "previous_lease_id": "l3f9c…"},
 "transport_lost": false,
-"last_closure": {"reason": "handoff | disconnect | refused | owner_revoked | canceled_by_user | target_closed | transport_lost | navigation_refused",
+"last_closure": {"reason": "handoff | disconnect | refused | owner_revoked | canceled_by_user | target_closed | transport_lost | navigation_refused | shutdown | replaced_with_devtools",
                  "debugger_detach_ack": true, "detail": "…"}
 ```
 
@@ -493,6 +493,11 @@ srv → {"t":"paired","proof":HMAC-SHA256(credential,"srv|nonce_e|nonce_s"),"exe
 * `build` is the SHA-256 over this package's extension files (the list is in
   `extension/bridge_protocol.mjs`). A valid proof from another build gets
   `{"t":"refused","code":"BUILD_MISMATCH"}`: reload the unpacked extension.
+  This digest proves the files read from disk at handshake, not the code already
+  loaded in an older worker. After every package update, the owner must Reload
+  the unpacked extension. A new `input_preparation` receipt plus trusted-event
+  and page-effect checks establish the tested loaded behavior; the digest alone
+  does not.
 * The extension verifies the server's proof and drops a listener that cannot
   give it. A listener that closes while its proof is checked (the setup
   script's `pair` does) is not a connection; the extension reports
@@ -571,6 +576,7 @@ one the executor sent is recorded `unknown`.
 `BROWSER_INVOCATION_CLOSED`, `BROWSER_EXECUTE_TIMEOUT`,
 `BROWSER_SCRIPT_ERROR`, `BROWSER_OPERATION_UNSUPPORTED`,
 `BROWSER_ARGUMENT_INVALID`, `BROWSER_TARGET_NOT_FOUND`,
+`BROWSER_INPUT_NOT_READY`, `BROWSER_CACHE_MISS`,
 `BROWSER_TARGET_AMBIGUOUS`, `BROWSER_TARGET_NOT_VISIBLE`,
 `BROWSER_TARGET_DISABLED`, `BROWSER_TARGET_UNSTABLE`,
 `BROWSER_TARGET_OBSCURED`, `BROWSER_HANDLE_STALE`,

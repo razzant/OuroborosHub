@@ -540,6 +540,58 @@ async function worker({ closeAfterPaired = false, session = {} } = {}) {
 }
 const attachedAnswers = (w) => w.sent.filter((m) => m.t === 'attached');
 
+test('extension: verdict timeouts drain after allowed, refused and released requests', async () => {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const pending = new Set();
+  let armed = 0;
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    if (delay !== 35000) return realSetTimeout(callback, delay, ...args);
+    let handle;
+    handle = realSetTimeout((...values) => { pending.delete(handle); callback(...values); }, delay, ...args);
+    pending.add(handle);
+    armed += 1;
+    return handle;
+  };
+  globalThis.clearTimeout = (handle) => { pending.delete(handle); realClearTimeout(handle); };
+  try {
+    const w = await worker();
+    await w.popup({ type: 'share', tab_id: 7 });
+    w.fromExecutor({ t: 'attach', id: 1, lease_id: 'lA', generation: 3, tab_id: '7' });
+    await until(() => attachedAnswers(w).length === 1);
+    assert.equal(attachedAnswers(w)[0].ok, true);
+
+    const pause = async (requestId) => {
+      w.fire('event', { tabId: 7 }, 'Fetch.requestPaused', {
+        requestId, resourceType: 'Image', frameId: 'F',
+        request: { url: `https://a.test/${requestId}`, method: 'GET', hasPostData: false },
+      });
+      await until(() => w.sent.some((m) => m.t === 'request' && m.request.request_id === `3:${requestId}`));
+      assert.equal(pending.size, 1, `${requestId} arms one verdict timer`);
+    };
+    await pause('allowed');
+    w.fromExecutor({ t: 'verdict', request_id: '3:allowed', block: '' });
+    await until(() => w.commands.includes('Fetch.continueRequest'));
+    assert.equal(pending.size, 0, 'allowed verdict clears its timer');
+
+    await pause('refused');
+    w.fromExecutor({ t: 'verdict', request_id: '3:refused', block: 'BROWSER_REQUEST_BLOCKED: test' });
+    await until(() => w.commands.includes('Fetch.failRequest'));
+    assert.equal(pending.size, 0, 'refused verdict clears its timer');
+
+    await pause('released');
+    w.fromExecutor({ t: 'release', id: 2, tab_id: '7', reason: 'disconnect' });
+    await until(() => w.sent.some((m) => m.t === 'released' && m.id === 2));
+    assert.equal(pending.size, 0, 'release clears its paused request timer');
+    assert.equal(w.commands.filter((method) => method === 'Fetch.failRequest').length, 2, 'each refused request is answered once');
+    assert.equal(armed, 3);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+    for (const handle of pending) realClearTimeout(handle);
+  }
+});
+
 test('extension: Stop sharing while Chrome is still arming the tab refuses the attachment', async () => {
   const w = await worker();
   await w.popup({ type: 'share', tab_id: 7 });

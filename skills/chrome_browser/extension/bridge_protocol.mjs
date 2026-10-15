@@ -1,6 +1,6 @@
 // Shared by the Node executor and the extension service worker: the bridge
-// constants and the pairing proofs. Both sides hash these exact files, so a
-// loaded extension that is not this package's extension cannot pair.
+// constants and pairing proofs. Both sides hash the package files on disk;
+// this is not an attestation of a still-loaded worker after an in-place update.
 
 export const BRIDGE_VERSION = 1;
 export const DEFAULT_PORT = 47831;
