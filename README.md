@@ -138,6 +138,17 @@ It uses real current and pre-theme module bridges with synthetic skill responses
 checks both palettes, state preservation, Canvas/SVG repaint and disposal, and
 confirms that an older bridge keeps the dark fallback.
 
+The Smart Lists unit suite is included in catalog CI. Its real module-bridge
+browser checks are opt-in and use isolated skill state (not installed skills):
+
+```bash
+python -m pytest -q skills/smart_lists/tests
+OUROBOROS_THEME_CORE_ROOT=/path/to/ouroboros python -m pytest -q tests/test_smart_lists_browser.py
+```
+
+The optional core manifest validator in the unit suite uses `OUROBOROS_CORE_ROOT`;
+its absence is a disclosed skip, not a successful core-validation check.
+
 ## Review and trust model
 
 OuroborosHub is curated, but hub membership does not bypass review.

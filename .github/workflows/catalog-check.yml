@@ -24,6 +24,8 @@ jobs:
           node-version: '20'
       - run: python -m pip install PyYAML pytest
       - run: python -m unittest discover -s tests -v
+      - name: Smart Lists registered tools and routes
+        run: PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/smart_lists/tests
       - run: python -B skills/gigasearch/test_gigasearch.py -v
       - run: PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q skills/cache_efficiency_snapshot/test_cache_efficiency.py
       - run: PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q tests/test_widget_theme_contracts.py
