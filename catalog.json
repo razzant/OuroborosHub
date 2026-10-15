@@ -2212,6 +2212,45 @@
           "size": 20719
         }
       ]
+    },
+    {
+      "slug": "yandex-travel",
+      "name": "yandex-travel",
+      "version": "0.2.2",
+      "type": "extension",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "86220bda3d7e281f34217d56bfaa533987e81cd1847840c6b0b965825a4c75b5",
+          "size": 12143
+        },
+        {
+          "path": "eats_driver.py",
+          "sha256": "e6b107201589697c4285514aaf0dbb47a45e6dd4489ed72f82af3eedf2611d05",
+          "size": 9514
+        },
+        {
+          "path": "eats_session.py",
+          "sha256": "8b5e2945bbf883a508f4d677578ed231b514b273bf67fe408a55d8501b57564f",
+          "size": 42053
+        },
+        {
+          "path": "observer.js",
+          "sha256": "709159ba9eac3e915effb4fcdaafac0f755467012b4cbf24874550cd4c6591c1",
+          "size": 20271
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "b485d79b66890e32a5a20b9bbe70ac91de7c04581a4ffa60b6bd9e06c11fc224",
+          "size": 6351
+        },
+        {
+          "path": "scripts/eats_browser.py",
+          "sha256": "41483f6205b9a896827d8eda87193168c511d8a51bd244a922945be3e7c14350",
+          "size": 2015
+        }
+      ],
+      "description": "Draft adaptive Yandex Eats cart preparation: reusable session, fresh DOM-guided choices, bounded asynchronous observation and private cart capture. Taxi and checkout are not implemented; installed-host/live validation remains required."
     }
   ]
 }
