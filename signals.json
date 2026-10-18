@@ -1,0 +1,257 @@
+{
+  "author_repos": {},
+  "generated_at": "2026-10-18T06:25:29.840365Z",
+  "schema_version": 1,
+  "skills": {
+    "2gis": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/149",
+      "votes": 0
+    },
+    "a2a": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/150",
+      "votes": 0
+    },
+    "adaptive-code-review": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/151",
+      "votes": 0
+    },
+    "agentrq-bridge": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/152",
+      "votes": 0
+    },
+    "anime_studio": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/153",
+      "votes": 0
+    },
+    "anti-slop": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/154",
+      "votes": 0
+    },
+    "backlog_manager": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/155",
+      "votes": 0
+    },
+    "bank-ops-director": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/156",
+      "votes": 0
+    },
+    "cache_efficiency_snapshot": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/157",
+      "votes": 0
+    },
+    "calendar": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/158",
+      "votes": 0
+    },
+    "check-in": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/159",
+      "votes": 0
+    },
+    "classic-doom": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/160",
+      "votes": 0
+    },
+    "claudexor_quotas": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/161",
+      "votes": 0
+    },
+    "confluence": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/162",
+      "votes": 0
+    },
+    "context-lens": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/163",
+      "votes": 0
+    },
+    "doctor-booking-v4": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/164",
+      "votes": 0
+    },
+    "duckduckgo": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/165",
+      "votes": 0
+    },
+    "email": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/166",
+      "votes": 0
+    },
+    "email-presence": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/167",
+      "votes": 0
+    },
+    "gdelt-mcp": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/168",
+      "votes": 0
+    },
+    "gigasearch": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/169",
+      "votes": 0
+    },
+    "google-workspace": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/170",
+      "votes": 0
+    },
+    "happy_farm": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/171",
+      "votes": 0
+    },
+    "kandinsky-skill": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/172",
+      "votes": 0
+    },
+    "keenable": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/173",
+      "votes": 0
+    },
+    "medical-lab-analyzer": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/174",
+      "votes": 0
+    },
+    "meeting-brief": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/175",
+      "votes": 0
+    },
+    "memory-atlas": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/176",
+      "votes": 0
+    },
+    "music_gen": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/177",
+      "votes": 0
+    },
+    "nanobanana": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/178",
+      "votes": 0
+    },
+    "pdf_tools": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/179",
+      "votes": 0
+    },
+    "perplexity": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/180",
+      "votes": 0
+    },
+    "restaurant_booking": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/181",
+      "votes": 0
+    },
+    "roadmap_analyst": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/182",
+      "votes": 0
+    },
+    "sat3dgen": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/183",
+      "votes": 0
+    },
+    "sber-ring": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/184",
+      "votes": 0
+    },
+    "sber_operational_director": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/185",
+      "votes": 0
+    },
+    "scholion": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/186",
+      "votes": 0
+    },
+    "slack-bridge": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/187",
+      "votes": 0
+    },
+    "smart_lists": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/188",
+      "votes": 0
+    },
+    "table_tools": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/192",
+      "votes": 0
+    },
+    "telegram-bot": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/193",
+      "votes": 0
+    },
+    "token-usage": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/194",
+      "votes": 0
+    },
+    "video_gen": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/195",
+      "votes": 0
+    },
+    "video_studio": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/196",
+      "votes": 0
+    },
+    "vkusvill": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/197",
+      "votes": 0
+    },
+    "weather": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/198",
+      "votes": 0
+    },
+    "whoop-health": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/199",
+      "votes": 0
+    },
+    "word_tools": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/200",
+      "votes": 0
+    },
+    "yylo-tasks": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/201",
+      "votes": 0
+    }
+  }
+}
