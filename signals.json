@@ -1,6 +1,6 @@
 {
   "author_repos": {},
-  "generated_at": "2026-10-19T10:00:47.461795Z",
+  "generated_at": "2026-10-20T09:29:17.319569Z",
   "schema_version": 1,
   "skills": {
     "2gis": {
@@ -236,6 +236,11 @@
     "weather": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/198",
+      "votes": 0
+    },
+    "whisper-voice": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/205",
       "votes": 0
     },
     "whoop-health": {
