@@ -130,7 +130,9 @@ larger window without returning it all, pass `cache_key` and `capture_chars`
 (up to 200,000); the response still returns only `max_chars`. For example,
 `{"start": 0, "max_chars": 2000, "capture_chars": 60000, "cache_key": "raw"}`
 captures up to 60,000 characters and returns the first 2,000.
-`cached_text` reports its coverage; a search with no matches and
+`cached_text` is answered only while a lease is connected; the cache itself
+survives handoff and navigation, so resume first. It reports its coverage; a
+search with no matches and
 `complete:false` says only that the captured window has no match. To inspect
 an uncaptured offset, issue another `read` or `get_text` with that `start`.
 Coverage describes rendered DOM text, not proof that a virtualized site exposed
@@ -190,9 +192,13 @@ position in `vars` so the next call continues instead of starting over. The
 rules of this skill hold inside a script exactly as between calls: a step with
 an `unknown` outcome is not sent again — read the page; a login or CAPTCHA is
 a `browser_handoff`, never a retry; one script is bounded by
-`OUROBOROS_CHROME_EXECUTE_TIMEOUT_MS` (120 s by default) and by the host's
-Stop, so size a stretch to that and prefer `browser.wait` to `sleep` (30 s at
-most per call). What a cut script already put in `vars` stays there.
+`OUROBOROS_CHROME_EXECUTE_TIMEOUT_MS` (50 s by default) and by the host's
+Stop. Keep each `browser_execute` under about 50 s: the host's per-call limit
+is 60 s by default (`MCP_TOOL_TIMEOUT_SEC`) and a call that exceeds it ends
+the whole task's browser session, not just the script. Split a longer loop
+into resumable chunks that keep their position in `vars`, and prefer
+`browser.wait` to `sleep` (30 s at most per call). What a cut script already
+put in `vars` stays there.
 
 ```js
 // browser_execute: every page of a known list in one call; stop where judgment is needed

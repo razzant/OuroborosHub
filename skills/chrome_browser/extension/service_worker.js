@@ -730,6 +730,7 @@ const STEPS = {
     const settled = await settleNavigation(ctx);
     if (settled.navigated) return settled;
     const after = await agent(ctx, 'value', { target }).catch(() => ({ value: null, length: null }));
+    if (after.value === args.text || (after.value === null && after.length === args.text.length)) ctx.outcome = 'confirmed';
     return { value: after.value, length: after.length, ...settled };
   },
   async press(ctx, args) {
@@ -743,7 +744,8 @@ const STEPS = {
   uncheck: (ctx, args) => setChecked(ctx, args, false),
   async scroll(ctx, args) {
     const target = targetOf(ctx, args, false);
-    ctx.effect = 'partial';
+    // The page helper resolves the target and scrolls in one call: a refusal (no such element, hidden)
+    // means nothing was sent and keeps its own code; only a resolved call marks the effect as sent.
     const result = target ? await agent(ctx, 'scroll_into_view', { target })
       : await agent(ctx, 'scroll_by', { delta_x: args.delta_x, delta_y: args.delta_y });
     ctx.effect = 'sent';

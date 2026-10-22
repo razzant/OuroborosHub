@@ -802,6 +802,38 @@ async function leasedWorker() {
   return w;
 }
 
+test('extension: a scroll the page refuses is not_dispatched with its own code; a resolved one is dispatched', async () => {
+  const w = await leasedWorker();
+  const command = chrome.debugger.sendCommand;
+  chrome.debugger.sendCommand = async (target, method, params) => {
+    if (method === 'Runtime.callFunctionOn' && params.arguments[0].value === 'scroll_into_view' && params.arguments[1].value.target.selector === '#missing')
+      return { result: { value: { error: { code: 'BROWSER_TARGET_NOT_FOUND', message: 'no element matches #missing' } } } };
+    return command(target, method, params);
+  };
+  const scroll = (id, selector) => w.fromExecutor({ t: 'step', id, lease_id: 'lA', generation: 3, invocation_id: 'I', step_id: id, operation: 'scroll', args: { selector } });
+  scroll(11, '#missing');
+  await until(() => w.result(11));
+  assert.deepEqual([w.result(11).ok, w.result(11).outcome, w.result(11).error.code], [false, 'not_dispatched', 'BROWSER_TARGET_NOT_FOUND']);
+  scroll(12, '#send');
+  await until(() => w.result(12));
+  assert.deepEqual([w.result(12).ok, w.result(12).outcome], [true, 'dispatched']);
+});
+
+test('extension: type is confirmed when the field reads back the text, dispatched when it does not', async () => {
+  const w = await leasedWorker();
+  let value = 'ok';
+  w.page.info = () => ({ text_field: true, focused: true, what: 'input#notes' });
+  w.page.value = () => ({ value, length: value.length });
+  const type = (id, text) => w.fromExecutor({ t: 'step', id, lease_id: 'lA', generation: 3, invocation_id: 'I', step_id: id, operation: 'type', args: { selector: '#notes', text } });
+  type(13, 'ok');
+  await until(() => w.result(13), 4000);
+  assert.deepEqual([w.result(13).ok, w.result(13).outcome, w.result(13).value.value], [true, 'confirmed', 'ok']);
+  value = 'other';
+  type(14, 'ok');
+  await until(() => w.result(14), 4000);
+  assert.deepEqual([w.result(14).ok, w.result(14).outcome], [true, 'dispatched']);
+});
+
 test('extension: raw renderer-frame rejection is input-not-ready, with no input or replay', async () => {
   const w = await leasedWorker();
   const command = chrome.debugger.sendCommand;

@@ -29,16 +29,17 @@ argument: `node <absolute path>/scripts/mcp_server.mjs`.
 The executor finds its private state directory (the pairing credential, §3.2)
 in this order: `OUROBOROS_CHROME_STATE_DIR`, `OUROBOROS_SKILL_STATE_DIR`,
 then `<skill dir>/../../../state/skills/<skill dir name>` when that `state`
-directory exists. **Open point for the host:** the bound MCP process does not
-receive `OUROBOROS_SKILL_STATE_DIR` today; `skill_exec` scripts do. The
+directory exists. The
 override names an installation's (or a test's) own directory: it is chosen by
 whoever sets the executor's environment, and the package does not confine it.
 `setup.mjs status` prints the MCP server entry (`id`, `name`, `enabled`,
 `command` — the absolute path of the Node that ran it, 20 or newer — `args`,
 `env`).
 
-`OUROBOROS_CHROME_EXECUTE_TIMEOUT_MS` (default `120000`) bounds one
-`browser_execute`.
+`OUROBOROS_CHROME_EXECUTE_TIMEOUT_MS` (default `50000`, at most `600000`)
+bounds one `browser_execute`. The default stays below the host's own per-call
+limit (`MCP_TOOL_TIMEOUT_SEC`, 60 s by default), which ends the task's whole
+browser session when a call exceeds it.
 
 ### 1.2 MCP
 
@@ -401,8 +402,9 @@ Two operations are the executor's own:
   `BROWSER_CACHE_MISS`, not empty text. A find with no matches and
   `complete:false` proves absence only within the reported window. Historical
   string cache entries remain readable. `cached_text` asks the guard as a
-  primitive, needs no lease, and sends nothing to the browser. Cached text
-  survives navigation and handoff; element handles do not.
+  primitive and sends nothing to the browser; the host answers it only while
+  a lease is connected (not during a handoff or after a disconnect). The cache
+  itself survives navigation and handoff; element handles do not.
 
 `read`/`get_text` cache records also identify the original observation (invocation/step,
 executor, lease generation, tab, document and observed URL). Later cache reads

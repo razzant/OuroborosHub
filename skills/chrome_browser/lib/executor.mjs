@@ -42,8 +42,10 @@ export class Executor {
     this.owner = { task_id: env.OUROBOROS_BROWSER_OWNER_TASK_ID || '', attempt: env.OUROBOROS_BROWSER_OWNER_ATTEMPT || '' };
     this.guardPath = env.OUROBOROS_BROWSER_GUARD || '';
     this.generation = crypto.randomInt(1, 2 ** 47);
+    // Below the host's own per-call limit (MCP_TOOL_TIMEOUT_SEC, 60 s by default), which would end the
+    // whole task browser session instead of one script.
     const timeout = Number(env.OUROBOROS_CHROME_EXECUTE_TIMEOUT_MS);
-    this.executeTimeout = Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, 600000) : 120000;
+    this.executeTimeout = Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, 600000) : 50000;
 
     this.listener = null;
     this.listenerStart = null;

@@ -232,3 +232,10 @@ test('historical string cache values remain readable', () => {
     coverage: { start: 0, end: 8, total_length: 8, complete: true }, complete: true,
   });
 });
+
+test('browser_execute is bounded to 50 s by default, below the host per-call limit; an override is clamped to 600 s', () => {
+  assert.equal(host().executeTimeout, 50000);
+  assert.equal(new Executor({ ...host().env, OUROBOROS_CHROME_EXECUTE_TIMEOUT_MS: '1500' }).executeTimeout, 1500);
+  assert.equal(new Executor({ ...host().env, OUROBOROS_CHROME_EXECUTE_TIMEOUT_MS: '900000' }).executeTimeout, 600000);
+  assert.equal(new Executor({ ...host().env, OUROBOROS_CHROME_EXECUTE_TIMEOUT_MS: 'soon' }).executeTimeout, 50000);
+});

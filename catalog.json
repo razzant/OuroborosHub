@@ -2304,13 +2304,13 @@
         },
         {
           "path": "PROTOCOL.md",
-          "sha256": "42b1822581a191cd4d6feae8d0da8a23bf7c02bf867b291d9a33ff8b7b817e08",
-          "size": 35950
+          "sha256": "d69fbef22a06ad47c0a7c39f9170299f9ac33a85882ff16909a9d7cc390e0add",
+          "size": 36092
         },
         {
           "path": "SKILL.md",
-          "sha256": "abf3f0434f92600952cec52d0170c9694a28876b7f8362227af80f7081aad2bf",
-          "size": 21728
+          "sha256": "9bb644b63f396331e29a2a9d5fc2fffefab0abffa88836d9e94e05800f36c2e7",
+          "size": 22097
         },
         {
           "path": "extension/bridge_protocol.mjs",
@@ -2339,13 +2339,13 @@
         },
         {
           "path": "extension/service_worker.js",
-          "sha256": "ba462b5ab2e0cd170c5e1f7e29a1f7caa4e972a4e668aa9f0a331a845358934e",
-          "size": 52836
+          "sha256": "089e3f0143bedb1233116e6c9fb9d69ded878d819f20441c4ea993b03eef9ce6",
+          "size": 53138
         },
         {
           "path": "lib/executor.mjs",
-          "sha256": "db789dfa7e423cdd29e8a405797e2fc95811c716774d244cb897e4a189babf3c",
-          "size": 50018
+          "sha256": "24bd6b0046c6e698355257302eea246096d91f97bb4870513a25fe66854e7638",
+          "size": 50178
         },
         {
           "path": "lib/guard.mjs",
@@ -2359,8 +2359,8 @@
         },
         {
           "path": "references/executor-brief.md",
-          "sha256": "b0b72eba374e090d3c5102e8d2bf174a71713702d799b15bd30997b64d1092d3",
-          "size": 5626
+          "sha256": "5ad226ca4d21aa425cdf2de00c773631edb9aff08c3089ebf159a4b814d0ad12",
+          "size": 5795
         },
         {
           "path": "scripts/mcp_server.mjs",
@@ -2374,13 +2374,13 @@
         },
         {
           "path": "tests/observation_startup.test.mjs",
-          "sha256": "0e69939cc0fef8fcbd1a362959cb01510e3e1766fd3eed6b2462f58cb0a565f6",
-          "size": 12093
+          "sha256": "d3408e5157c9ad450cb97bc9a31aaad4d729725add33eda18867b4a5c43f5ff1",
+          "size": 12620
         },
         {
           "path": "tests/regressions.test.mjs",
-          "sha256": "f87c2d4a849bbc5bb54ecbd59611868ed52ad6822cf2250abbb9490158d916ba",
-          "size": 51716
+          "sha256": "bb38e143f9b338b6430b711ca6189eb1012778ede5e823c533957e8f54efddee",
+          "size": 53675
         }
       ],
       "install_specs": [
