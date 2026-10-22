@@ -221,9 +221,9 @@ return { pages: urls.length, sizes: vars.sizes };
 
 ## Delegating to an executor
 
-Long browser work belongs to a short-context child of the same model: the
-main agent keeps the conversation and decides the semantic forks, the executor
-drives the page and comes back only at a fork. The standing policy (escalation
+Delegate browser work to a task-focused child of the same model. Keep the main
+agent's full context unchanged: it briefs, supervises and decides semantic forks;
+the child drives the page. Do not mirror each click or reread every page in main. The standing policy (escalation
 classes E0–E7, how the child waits for an answer, the return schema) and the
 brief template live once in
 [`references/executor-brief.md`](references/executor-brief.md); the child reads

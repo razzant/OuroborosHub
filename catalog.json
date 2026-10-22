@@ -2309,8 +2309,8 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "9bb644b63f396331e29a2a9d5fc2fffefab0abffa88836d9e94e05800f36c2e7",
-          "size": 22097
+          "sha256": "4f5eb0675120d53de5172ebba580a032adfd473e23f1528803d855e4050b5a85",
+          "size": 22140
         },
         {
           "path": "extension/bridge_protocol.mjs",
