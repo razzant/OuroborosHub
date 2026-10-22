@@ -1,6 +1,6 @@
 {
   "author_repos": {},
-  "generated_at": "2026-10-21T09:25:18.384782Z",
+  "generated_at": "2026-10-22T09:34:40.873730Z",
   "schema_version": 1,
   "skills": {
     "2gis": {
@@ -153,6 +153,11 @@
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/178",
       "votes": 0
     },
+    "office_reader": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/211",
+      "votes": 0
+    },
     "pdf_tools": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/179",
@@ -191,6 +196,11 @@
     "scholion": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/186",
+      "votes": 0
+    },
+    "science_search": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/212",
       "votes": 0
     },
     "slack-bridge": {
