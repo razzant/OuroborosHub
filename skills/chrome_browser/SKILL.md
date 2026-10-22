@@ -77,11 +77,18 @@ verify the new input-preparation receipt and the requested page effect after Rel
 ## What happens in a task
 
 - The executor listens on one loopback port (default 47831). The extension
-  tries that port when its popup opens and every 30 seconds, so a task that
-  just started may wait up to that long for it.
+  tries that port when its popup opens, every 30 seconds, and within seconds
+  after its connection to an executor closes (retries at 1, 2, 4, 8 and 16 s),
+  so a task that just started may wait up to 30 s for it.
 - If the first `browser_state` runs before setup or pairing is complete, the
   same executor checks the pairing file again on a later call. A listener
-  already listening or reporting a busy port is kept; it is not rebound.
+  already listening is kept. A busy port (`BROWSER_PORT_BUSY`: another task's
+  executor holds it) is tried again on the next call, not remembered.
+- **One port, one executor at a time.** When a lease ends with nothing to
+  resume — `browser_disconnect`, a refused document, a refused connection — the
+  executor closes its listener so another task's executor (for example a
+  delegated browser executor) can bind the port. A handoff keeps it. The next
+  `browser_connect` binds the port again and waits for the extension.
 - **Your tab.** Open the tab, click the extension icon, **Share this tab**.
   Its id appears in `browser_state.approved_tabs`; `browser_connect` with that
   `tab_id` attaches. The extension has no permission to list tabs or to read
@@ -105,8 +112,8 @@ verify the new input-preparation receipt and the requested page effect after Rel
 | --- | --- |
 | `browser_state` | Who owns the executor, what is leased, whether it was revoked or detached. |
 | `browser_connect` | Exactly `{tab_id}` (a shared tab) or exactly `{url}` (own background tab). |
-| `browser_action` | One typed operation, or `sequence` with up to 32 of them. |
-| `browser_execute` | A script in the task's persistent realm. Only where the host allows unrestricted execution. |
+| `browser_action` | One typed operation, or `sequence` with up to 32 of them: a single step or a short fixed series without a loop or a condition. |
+| `browser_execute` | The main tool for a series of steps: a script in the task's persistent realm runs one whole mechanical stretch (a loop over known pages or elements, waits, results kept in `vars`) in one call. Only where the host allows unrestricted execution. |
 | `browser_handoff` | Detach now and leave the page, with everything typed into it, to the owner. |
 | `browser_resume` | Attach to the handed-off tab again. |
 | `browser_disconnect` | End the lease and report whether Chrome confirmed the detach. |
@@ -157,6 +164,95 @@ const links = vars.snap.elements.filter((e) => e.tag === 'a');
 await browser.click({ handle: links[0].handle });
 return (await browser.read({ cache_key: 'page' })).length;
 ```
+
+## One call per mechanical stretch
+
+Step-by-step control — one tool call, one model round, the next call — is for
+the moments that need judgment, not the norm. The norm is one `browser_execute`
+(or one typed `sequence`) for the whole mechanical stretch up to the next
+semantic uncertainty: a loop over a known list of pages or elements, reading
+many pages, waiting with `browser.wait`, collecting results in `vars`, and
+returning one compact summary. A model round costs seconds; a step inside a
+script costs milliseconds, and the receipt lists each step's outcome, not every
+page's text — only what the script returns comes back.
+
+Observe and start a new round only when something needs judgment: a login or
+CAPTCHA, a page whose structure is not what the script expected, an action
+whose effect is unknown, or a decision the owner would want to make. A new
+page by itself is not such a moment: navigate, wait, read and go on inside the
+script. `sequence` is for a short fixed series (at most 32 steps, stopping at
+the first failure); anything with a loop or a condition is a script.
+
+This is not "one script for everything". Write the script to stop at the first
+thing it cannot decide and return what it collected together with what it saw
+(the URL and the first lines of the unexpected page, for example); keep its
+position in `vars` so the next call continues instead of starting over. The
+rules of this skill hold inside a script exactly as between calls: a step with
+an `unknown` outcome is not sent again — read the page; a login or CAPTCHA is
+a `browser_handoff`, never a retry; one script is bounded by
+`OUROBOROS_CHROME_EXECUTE_TIMEOUT_MS` (120 s by default) and by the host's
+Stop, so size a stretch to that and prefer `browser.wait` to `sleep` (30 s at
+most per call). What a cut script already put in `vars` stays there.
+
+```js
+// browser_execute: every page of a known list in one call; stop where judgment is needed
+const snap = await browser.snapshot({ max_nodes: 300 });
+const urls = snap.elements
+  .filter((e) => e.tag === 'a' && e.href && e.href.includes('/models/'))
+  .map((e) => new URL(e.href, snap.url).href);
+vars.sizes = vars.sizes || {};
+for (const url of urls) {
+  if (url in vars.sizes) continue;  // a later call continues, it does not restart
+  await browser.navigate(url);
+  await browser.wait({ selector: 'h1', timeout_ms: 10000 });
+  const page = await browser.read({ max_chars: 20000 });
+  const size = page.text.match(/Model size\s+([\d.]+[KMB]) params/);
+  if (!size) return { stopped_at: url, seen: page.text.slice(0, 300), done: vars.sizes };
+  vars.sizes[url] = size[1];
+}
+return { pages: urls.length, sizes: vars.sizes };
+```
+
+## Delegating to an executor
+
+Long browser work belongs to a short-context child of the same model: the
+main agent keeps the conversation and decides the semantic forks, the executor
+drives the page and comes back only at a fork. The standing policy (escalation
+classes E0–E7, how the child waits for an answer, the return schema) and the
+brief template live once in
+[`references/executor-brief.md`](references/executor-brief.md); the child reads
+that file first, the parent does not paste it.
+
+1. Release the browser: `browser_disconnect` frees the port (a handoff keeps it).
+2. Fill the brief template; `owner_words` — the owner's exact sentences — is
+   mandatory, and the parent withholds what would bias a measurement.
+3. Schedule, then wait with `wait_task` (not a cold sleep: the child may escalate):
+
+```
+schedule_subagent(
+  subagent_id="<the same API-model row as the main agent>",
+  objective="<the goal in one sentence>",
+  expected_output="the return JSON of references/executor-brief.md",
+  input_sources="declared",
+  write_surface="external_workspace", write_root="<project folder>",
+  initial_tool_names=["mcp_chrome_browser__browser_state", "mcp_chrome_browser__browser_connect",
+    "mcp_chrome_browser__browser_action", "mcp_chrome_browser__browser_execute",
+    "mcp_chrome_browser__browser_handoff", "mcp_chrome_browser__browser_resume",
+    "mcp_chrome_browser__browser_disconnect",
+    "escalate", "await_messages", "read_file", "finish_task"],
+  external_tool_grants=[<the same seven mcp_chrome_browser__* names>],
+  context="<the filled brief, starting with: read references/executor-brief.md of the chrome_browser skill>")
+```
+
+The tool names carry the MCP server id from Settings → MCP (`chrome_browser`
+with the entry `setup.mjs status` prints). `external_tool_grants` is what lets
+the child use the browser tools at all; `initial_tool_names` only makes them
+resident from its first round.
+
+4. A child's escalation arrives as mail. Answer with
+   `forward_to_worker(task_id=<child>, message=...)`; when it is above your
+   authority, `escalate` it to the owner yourself, quoting the child's
+   question verbatim. The child sleeps warm meanwhile, keeping its tab.
 
 ## Reading a receipt
 

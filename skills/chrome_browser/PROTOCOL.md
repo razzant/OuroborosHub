@@ -134,7 +134,7 @@ Additional members (informative):
 
 ```json
 "phase": "idle | connected | handoff | closed",
-"pairing": {"paired": true, "port": 47831, "listener": "idle | listening | busy | unconfigured",
+"pairing": {"paired": true, "port": 47831, "listener": "idle | listening | busy | unconfigured | released",
             "credential_present": true, "origin_pinned": true, "failed_attempts": 0},
 "approved_tabs": [{"tab_id": "1234567"}],
 "handoff": {"tab_id": "1234567", "previous_lease_id": "l3f9c…"},
@@ -148,7 +148,11 @@ question.
 An unconfigured listener start (missing pairing file or pinned origin, or a
 start error before a listener exists) can be retried by a later tool call in
 the same executor generation. Concurrent callers share one start attempt.
-An existing listener, including one reporting a busy port, is not rebound.
+A listening listener is not rebound. A busy port (`BROWSER_PORT_BUSY`) leaves
+no listener behind: the next tool call tries the port again. When a lease ends
+with no handoff to resume (disconnect, a refused document, a refused
+connection) the executor closes its listener (`pairing.listener:"released"`)
+so another task's executor can bind the port; the next connect binds it again.
 Revoked and transport-lost executors do not retry an unconfigured start or
 replay a browser action.
 
@@ -459,7 +463,8 @@ extension sends only the CDP methods listed in `service_worker.js`
 ### 3.1 Listener
 
 `ws://127.0.0.1:<port>`, port from the state file (default `47831`). A busy
-port is reported (`pairing.listener:"busy"`), never replaced. The upgrade is
+port is reported (`pairing.listener:"busy"`), never replaced, and tried again
+on the next call. The upgrade is
 answered with a bare `403` unless `Origin` equals the origin pinned in the
 state file. One extension connection at a time. Before authentication the
 executor sends nothing but a random nonce.
@@ -502,8 +507,10 @@ srv → {"t":"paired","proof":HMAC-SHA256(credential,"srv|nonce_e|nonce_s"),"exe
   give it. A listener that closes while its proof is checked (the setup
   script's `pair` does) is not a connection; the extension reports
   `connected` only for an open socket.
-* The extension tries the port when its popup opens and every 30 s
-  (`chrome.alarms`); an executor that just started may wait that long.
+* The extension tries the port when its popup opens, every 30 s
+  (`chrome.alarms`), and after a connection closes on its own at 1, 2, 4, 8
+  and 16 s (a bounded retry, not after Forget pairing); an executor that just
+  started may wait up to 30 s.
 
 ### 3.3 Messages after pairing
 

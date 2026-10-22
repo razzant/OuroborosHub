@@ -691,7 +691,7 @@ test('extension: an opened tab still the agent\'s when the worker restarts is cl
   const next = await worker({ session });
   assert.deepEqual(next.removed, [7], 'an untransferred agent tab is cleaned up');
   assert.equal(session.created_tab, undefined);
-  w.server.drop();
+  await w.popup({ type: 'forget' });  // the owner drops the old worker's connection: no retry from it later
   w.fire('updated', 7, { status: 'complete' });
   await tick(20);
 });
@@ -740,6 +740,40 @@ test('extension: a listener that closes right after its proof is not a connectio
   const w = await worker({ closeAfterPaired: true });
   const status = await w.popup({ type: 'status' });
   assert.equal(status.connected, false);
+});
+
+test('extension: a connection the executor closes is retried within seconds, with bounded backoff, until Forget pairing', async () => {
+  const w = await worker();
+  const Paired = globalThis.WebSocket;
+  const first = w.server;
+  const tabsSent = () => w.sent.filter((m) => m.t === 'tabs').length;
+  assert.equal(tabsSent(), 1);
+
+  // 1. The executor's task released the port: the worker reconnects to the next listener by itself, without the 30 s alarm.
+  first.drop();
+  await until(() => tabsSent() === 2, 3000);
+  assert.notEqual(w.server, first);
+  assert.equal(w.server.readyState, 1);
+
+  // 2. No executor listens yet: attempts are spaced out (1 s, then 2 s, ...), never a busy loop.
+  let attempts = 0;
+  globalThis.WebSocket = class {
+    static OPEN = 1;
+    constructor() { attempts += 1; this.readyState = 0; setTimeout(() => { this.readyState = 3; if (this.onerror) this.onerror(new Error('refused')); }); }
+    addEventListener() {}
+    close() {}
+    send() {}
+  };
+  w.server.drop();
+  await tick(3500);
+  assert.ok(attempts >= 1 && attempts <= 2, `attempts within 3.5 s: ${attempts}`);
+
+  // 3. Forget pairing cancels the pending retry: the attempt due at 7 s never happens.
+  await w.popup({ type: 'forget' });
+  const seen = attempts;
+  await tick(4000);
+  assert.equal(attempts, seen);
+  globalThis.WebSocket = Paired;
 });
 
 // ------------------------------------------------------------ extension: what an input step follows

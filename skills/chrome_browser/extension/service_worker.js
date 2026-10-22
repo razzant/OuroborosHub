@@ -28,6 +28,10 @@ const NAVIGATION_GRACE_MS = 120;
 const NAVIGATION_SETTLE_MS = 10000;
 const VERDICT_TIMEOUT_MS = 35000;
 const INPUT_FRAME_TIMEOUT_MS = 8000;
+// After an executor closes its connection (its task released the port), another task's executor may
+// bind the port within seconds: retry at 1, 2, 4, 8 and 16 s, then leave the cadence to the 30 s alarm.
+const RECONNECT_MIN_MS = 1000;
+const RECONNECT_MAX_MS = 16000;
 
 class BridgeError extends Error {
   constructor(code, message) { super(message); this.code = code; }
@@ -35,6 +39,8 @@ class BridgeError extends Error {
 
 let socket = null;       // authenticated WebSocket, or null
 let connecting = null;   // in-flight connection attempt
+let reconnectTimer = null;           // the one pending retry after a closed connection, or null
+let reconnectDelay = RECONNECT_MIN_MS;
 let executorGeneration = null;
 let lastError = '';
 const approved = new Set();  // tab ids the owner shared with the connected executor
@@ -125,6 +131,7 @@ async function connectOnce() {
     socket = ws;
     executorGeneration = answer.executor_generation;
     lastError = '';
+    cancelReconnect();
     ws.onmessage = (event) => onServerMessage(ws, event);
     ws.onerror = () => {};
     sendTabs();
@@ -138,12 +145,31 @@ async function connectOnce() {
 
 function tryConnect() {
   if (isOpen(socket)) return Promise.resolve(true);
-  if (socket) onSocketClosed(socket);  // closed without an event reaching us: release what it held, then connect anew
+  if (socket) onSocketClosed(socket, { reconnect: false });  // closed without an event reaching us: release what it held, then connect anew
   if (!connecting) connecting = connectOnce().finally(() => { connecting = null; });
   return connecting;
 }
 
-async function onSocketClosed(ws) {
+function cancelReconnect() {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  reconnectDelay = RECONNECT_MIN_MS;
+}
+
+// Bounded, never a busy loop: one pending retry at a time, doubling up to RECONNECT_MAX_MS, then the alarm alone.
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  const wait = reconnectDelay;
+  reconnectDelay = Math.min(wait * 2, RECONNECT_MAX_MS);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    tryConnect().then((connected) => { if (!connected && wait < RECONNECT_MAX_MS) scheduleReconnect(); });
+  }, wait);
+}
+
+// A connection that closed on its own (the executor's task released the port, or it exited) is retried
+// promptly; one the owner dropped (Forget pairing, a new credential) is not.
+async function onSocketClosed(ws, { reconnect = true } = {}) {
   if (socket !== ws) return;
   socket = null;
   executorGeneration = null;
@@ -152,14 +178,19 @@ async function onSocketClosed(ws) {
   handedOff.clear();
   const orphans = Array.from(ownTabs).filter((id) => !lease || lease.tab_id !== id);
   ownTabs.clear();
-  if (lease) await releaseLease(lease, 'socket_closed');
-  await Promise.allSettled(orphans.map((id) => chrome.tabs.remove(id)));
+  try {
+    if (lease) await releaseLease(lease, 'socket_closed');
+    await Promise.allSettled(orphans.map((id) => chrome.tabs.remove(id)));
+  } finally {
+    if (reconnect) scheduleReconnect();
+  }
 }
 
 function dropSocket() {
+  cancelReconnect();
   const ws = socket;
   if (!ws) return Promise.resolve();
-  const done = onSocketClosed(ws);
+  const done = onSocketClosed(ws, { reconnect: false });
   try { ws.close(); } catch (error) { /* already closed */ }
   return done;
 }

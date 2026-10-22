@@ -151,6 +151,9 @@ export class Executor {
         executorGeneration: this.generation, onPaired: (socket) => this.onPaired(socket),
       });
       this.listenerStatus = await this.listener.start();
+      // Busy: nothing is bound (another task's executor holds the port). Keeping no listener lets
+      // ensureListener try the port again on the next call instead of remembering the refusal.
+      if (this.listenerStatus === 'busy') this.listener = null;
     } catch (error) {
       this.listener = null;
       this.pairing.detail = String(error.message || error);
@@ -362,7 +365,7 @@ export class Executor {
       await new Promise((resolve) => setTimeout(resolve, 100));
     if (this.ext) return;
     if (this.listenerStatus === 'busy')
-      throw new BrowserError('BROWSER_PORT_BUSY', `port ${this.pairing.port} is held by another process, probably another task's browser`);
+      throw new BrowserError('BROWSER_PORT_BUSY', `port ${this.pairing.port} is held by another process, probably another task's browser; it is tried again on the next call`);
     throw new BrowserError('BROWSER_NOT_PAIRED', this.pairing.detail
       || 'the paired extension did not connect; Chrome must be running with the extension enabled (it retries every 30 s)');
   }
@@ -463,7 +466,30 @@ export class Executor {
     if (!lease) return false;
     this.lease = null;
     this.closeActive();
-    return this.releaseTab(lease.tab_id, reason, detail);
+    const acknowledged = await this.releaseTab(lease.tab_id, reason, detail);
+    // A lease that ended with nothing to resume (a refused document or connection) leaves the port to
+    // the next executor once the current invocation is over; disconnect and shutdown do it themselves.
+    if (!['handoff', 'disconnect', 'shutdown'].includes(reason)) this.enqueue(() => this.releaseListener().catch(() => false));
+    return acknowledged;
+  }
+
+  /**
+   * Gives the single loopback port back: with no lease, no handoff and nothing being attached or
+   * released, the listener is closed so another task's executor can bind the port. The extension
+   * reconnects to whoever listens next; this executor's next connect binds the port again.
+   */
+  async releaseListener() {
+    if (this.lease || this.handoff || this.attaching || this.releasing || !this.listener) return false;
+    const listener = this.listener;
+    this.listener = null;
+    this.listenerStart = null;
+    this.listenerStatus = 'released';
+    this.ext = null;
+    this.approved.clear();
+    for (const settle of this.pending.values()) settle({ transport_lost: true });
+    this.pending.clear();
+    await listener.close();
+    return true;
   }
 
   /** Sends `release` for a tab in this very turn and records what the extension confirmed. */
@@ -560,10 +586,12 @@ export class Executor {
       this.handoff = null;
       const reply = await this.rpc({ t: 'release', tab_id: tab, reason: 'disconnect' }, 5000);
       this.lastClosure = { reason: 'disconnect', debugger_detach_ack: this.closure.detached && reply.detached === true };
+      await this.releaseListener();
       return;
     }
     if (!this.lease) throw new BrowserError('BROWSER_SESSION_DETACHED', 'no connected lease');
     await this.release('disconnect');
+    await this.releaseListener();
   }
 
   /** stdio EOF: ask for the detach, wait briefly, and say whether it was confirmed. */

@@ -255,3 +255,49 @@ test('a late successful attach cannot adopt a handoff withdrawn during resume', 
   assert.equal(guard.facts.length, 0, 'no guard question for the withdrawn attachment');
   assert.ok(ext.sent.some((message) => message.t === 'release' && message.reason === 'refused'), 'late success is released');
 });
+
+test('a handoff keeps the port; disconnect gives it back and the next call binds it again', async (t) => {
+  const { executor, ext } = await setup(t);
+  let closed = 0;
+  executor.listener = { failed: 0, lastRefusal: '', close: async () => { closed += 1; ext.terminate(); } };
+  executor.listenerStart = Promise.resolve();
+  executor.listenerStatus = 'listening';
+
+  // The owner holds the tab: the extension connection and the port stay for browser_resume.
+  await executor.handoffToOwner();
+  assert.equal(executor.state().phase, 'handoff');
+  assert.equal(closed, 0);
+
+  // Disconnect ends the handoff: nothing is held, the listener closes, another task's executor may bind the port.
+  await executor.disconnect();
+  assert.equal(closed, 1);
+  assert.deepEqual([executor.listener, executor.listenerStart, executor.ext], [null, null, null]);
+  assert.deepEqual([executor.state().pairing.listener, executor.state().pairing.paired, executor.state().phase], ['released', false, 'idle']);
+  assert.equal(executor.state().last_closure.reason, 'disconnect');
+
+  let starts = 0;
+  executor.startListener = async () => { starts += 1; executor.listener = { server: {} }; executor.listenerStatus = 'listening'; };
+  await executor.ensureListener();
+  assert.equal(starts, 1, 'the next call binds the port again');
+});
+
+test('a document the host refuses ends the lease and gives the port back once the call is over', async (t) => {
+  const { guard, executor, ext } = await setup(t);
+  let closed = 0;
+  executor.listener = { failed: 0, lastRefusal: '', close: async () => { closed += 1; ext.terminate(); } };
+  executor.listenerStart = Promise.resolve();
+  executor.listenerStatus = 'listening';
+  guard.policy = (facts) => (facts.kind === 'document' ? 'BROWSER_REQUEST_GUARD_UNAVAILABLE: guard socket ECONNRESET' : '');
+  ext.answer.step = async (message) => {
+    ext.push(nav);
+    await sleep(30);
+    return { t: 'step_result', id: message.id, lease_id: message.lease_id, generation: message.generation, ok: true, outcome: 'dispatched', value: { navigated: null } };
+  };
+  const receipt = await executor.action('click', { selector: '#go' }, 'inv-port');
+  assert.equal(receipt.isError, true, receipt.text);
+  assert.equal(JSON.parse(receipt.text).error.code, 'BROWSER_REQUEST_GUARD_UNAVAILABLE');
+  assert.equal(executor.state().last_closure.reason, 'navigation_refused');
+  // The release is queued behind the invocation: the receipt is complete, then the port is given back.
+  await until(() => closed === 1, { what: 'listener released after the refused document' });
+  assert.deepEqual([executor.listener, executor.state().pairing.listener], [null, 'released']);
+});

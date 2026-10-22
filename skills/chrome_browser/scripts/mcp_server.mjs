@@ -22,7 +22,7 @@ const TOOLS = [
   },
   {
     name: 'browser_action',
-    description: 'One typed operation on the leased tab. Input uses trusted pointer/keyboard events and refuses obscured, hidden, disabled or moving targets. "sequence" runs up to 32 ordered {operation,args} steps, stopping on failure. read/get_text take start,max_chars; cache_key+capture_chars keeps larger coverage for cached_text without enlarging the reply.',
+    description: 'One typed operation on the leased tab, or "sequence" with up to 32 ordered {operation,args} steps, stopping on failure: a single step or a short fixed series. A loop or a condition belongs in one browser_execute call. Input uses trusted pointer/keyboard events and refuses obscured, hidden, disabled or moving targets. read/get_text take start,max_chars; cache_key+capture_chars keeps larger coverage for cached_text without enlarging the reply.',
     inputSchema: {
       type: 'object', additionalProperties: false, required: ['operation', 'args'],
       properties: { operation: { type: 'string', enum: [...OPERATIONS, ...EXECUTOR_OPERATIONS] }, args: { type: 'object' } },
@@ -30,7 +30,7 @@ const TOOLS = [
   },
   {
     name: 'browser_execute',
-    description: 'Run a script body as async (browser, vars, console, sleep) in the task\'s persistent realm. browser.<operation>(args) are the same typed operations; vars keeps values between calls. Not a sandbox.',
+    description: 'The main tool for a series of steps: runs a script body as async (browser, vars, console, sleep) in the task\'s persistent realm, so one call covers a whole mechanical stretch - a loop over known pages or elements, reading many pages, browser.wait for conditions, results collected in vars - up to the next thing that needs judgment (a login, a CAPTCHA, an unexpected page, an unknown effect). A new page alone is not that. Return one compact JSON value; the receipt lists step outcomes, not page text. browser.<operation>(args) are the same typed operations; a step with an unknown outcome is not repeated; vars keeps values between calls. Not a sandbox.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['code'], properties: { code: { type: 'string' } } },
   },
   { name: 'browser_handoff', description: 'Give the tab to the owner now: the debugger is detached, the page and its unsaved fields stay.', inputSchema: NO_ARGUMENTS },

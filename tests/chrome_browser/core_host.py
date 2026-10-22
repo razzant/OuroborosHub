@@ -59,9 +59,9 @@ def main(root: str, skill: str, state: str, mode: str = 'plain') -> None:
             answer = {'id': request['id']}
             try:
                 if request['cmd'] == 'discover':
-                    observed = manager.refresh_server('chrome', authority=ctx)
-                    if not observed.get('ok'):
-                        raise RuntimeError(json.dumps(observed))
+                    # Exercise the same initial task schema path as an ordinary turn.
+                    # No manual manager.refresh_server call can supply missing authority.
+                    registry.schemas()
                     answer['value'] = [row for row in manager.list_tools_for_registry()
                                        if row['name'].startswith('mcp_chrome__')]
                 elif request['cmd'] == 'stop':

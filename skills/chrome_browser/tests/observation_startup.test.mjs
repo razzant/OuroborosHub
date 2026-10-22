@@ -93,14 +93,37 @@ test('revoked and transport-lost executors remain closed without replaying an ac
   }
 });
 
-test('a busy listener and an active pairing never trigger a second listener', async () => {
-  for (const status of ['busy', 'listening']) {
-    const executor = host();
-    let starts = 0;
-    executor.startListener = async () => { starts += 1; executor.listener = { server: status === 'listening' ? {} : null }; executor.listenerStatus = status; };
+test('a listening listener is never started twice', async () => {
+  const executor = host();
+  let starts = 0;
+  executor.startListener = async () => { starts += 1; executor.listener = { server: {} }; executor.listenerStatus = 'listening'; };
+  await executor.ensureListener();
+  await executor.ensureListener();
+  assert.equal(starts, 1);
+});
+
+test('a busy port is BROWSER_PORT_BUSY now and tried again on the next call', async () => {
+  // Another task's executor holds the port; when it releases the port, this executor's next call binds it.
+  const dir = fs.mkdtempSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '.pairing-test-'));
+  fs.writeFileSync(path.join(dir, 'pairing.json'),
+    JSON.stringify({ credential: 'A'.repeat(64), port: 47831, pinned_origin: `chrome-extension://${'a'.repeat(32)}` }), { mode: 0o600 });
+  const executor = new Executor({ ...host().env, OUROBOROS_CHROME_STATE_DIR: dir });
+  const originalStart = Listener.prototype.start;
+  const outcomes = ['busy', 'listening'];
+  let starts = 0;
+  Listener.prototype.start = async function () { starts += 1; return outcomes.shift() || 'listening'; };
+  try {
     await executor.ensureListener();
+    assert.equal(executor.state().pairing.listener, 'busy');
+    await assert.rejects(executor.waitPaired(), (error) => error.code === 'BROWSER_PORT_BUSY' && /tried again/.test(error.message));
     await executor.ensureListener();
-    assert.equal(starts, 1, status);
+    assert.equal(starts, 2, 'a busy port is tried again');
+    assert.equal(executor.state().pairing.listener, 'listening');
+    await executor.ensureListener();
+    assert.equal(starts, 2, 'a listening listener is kept');
+  } finally {
+    Listener.prototype.start = originalStart;
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
