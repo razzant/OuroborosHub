@@ -1,0 +1,35 @@
+{
+  "category": [
+    "messaging"
+  ],
+  "connects": [
+    "Telegram"
+  ],
+  "description": "Own Telegram user-account participant: addressed Presence, durable named MTProto operations, profile/chats/media/stickers/admin tools and an expandable account widget. Uses actual account permissions, never strangers as owner.",
+  "digest": "29ca641fa3dc0d92ea93cc2daae08697800affbc48b0ae156e5d2aa328b830f9",
+  "install_specs": [
+    {
+      "allow_source_build": true,
+      "check": {
+        "argv": [
+          "python",
+          "-c",
+          "import telethon"
+        ],
+        "cwd": "."
+      },
+      "kind": "pip",
+      "package": "telethon==1.45.0"
+    }
+  ],
+  "name": "telegram-user-session",
+  "owner": "josephsteuerjr",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/telegram-user-session"
+  },
+  "type": "extension",
+  "version": "0.2.0",
+  "withdrawn": null
+}

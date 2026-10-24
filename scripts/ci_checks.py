@@ -35,6 +35,8 @@ SUITES = {
                         'dependencies': ['PyJWT[crypto]>=2.13,<3', 'httpx', 'starlette']},
     'telegram-bot': {'skills': ['telegram-bot'], 'tests': ['skills/telegram-bot/tests'],
                      'dependencies': ['httpx', 'starlette', 'websockets']},
+    'telegram-user-session': {'skills': ['telegram-user-session'], 'tests': ['skills/telegram-user-session/tests'],
+                              'dependencies': ['telethon>=1.45,<2', 'PySocks>=1.7.1', 'httpx', 'starlette']},
     '2gis': {'skills': ['2gis'], 'tests': ['tests/test_2gis.py']},
     'keenable': {'skills': ['keenable'], 'tests': ['tests/test_keenable_transport.py', 'tests/test_keenable_widget.py'],
                  'shared': ['tests/fixtures/keenable/']},
