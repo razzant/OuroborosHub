@@ -2,13 +2,14 @@
   "manifest_version": 3,
   "name": "Ouroboros Chrome Browser",
   "description": "Lets one Ouroboros task act in tabs you explicitly share. Pairing and sharing are manual; nothing is shared by installing.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "minimum_chrome_version": "125",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA5fFK3Y/AI/2KrSaS2mymFL08jBETT5U5EeytGQ2O7DRQj8CCgWKDpLvMKUlUNkiutSrKhe1BMrdyds1yphWaFJwvP+bhg/E6bbuoCEE/FmX/zPwVKu0cj9jtnmHIburDCvIpZ2BWSsp/2qplwMVl7o4CotWwDFE7B38IzuQJB6M0GSYLmWGEOKxvXzFMWnHkXEPhn4LnUnv+nz1sFLugsg8wktJ3uHEcA+xE35hCNmc9hiqMWuk8JbqtD6W5FeZarLDMMLxviMDN21ibDpAbNKed1mRAwRBdxrAynNCZnIpN0NXNhs+ZTBrA0cJ/vxG+GFG5UaZEYf0/FKJR7LBpQQIDAQAB",
   "permissions": [
     "debugger",
     "storage",
-    "alarms"
+    "alarms",
+    "nativeMessaging"
   ],
   "background": {
     "service_worker": "service_worker.js",

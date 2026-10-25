@@ -111,6 +111,7 @@ test('headless consumer', { skip: executable ? false : 'OUROBOROS_CHROME_TEST_CH
       probe.once('connect', () => { probe.destroy(); resolve(true); });
       probe.once('error', () => resolve(false));
     }), { what: 'pairing listener' });
+    await popup.click('details > summary');  // the owner opens Manual pairing; Connect's native path is native_onboarding.test.mjs
     await popup.evaluate(`document.getElementById('port').value = '${port}'`);
     await popup.typeInto('#credential', stored.credential);
     await popup.press('save');
@@ -1016,6 +1017,7 @@ test('headless consumer', { skip: executable ? false : 'OUROBOROS_CHROME_TEST_CH
       assert.equal(await extensionAttached(view, opened), false, 'nothing was attached after its load finished');
       // The owner closes that tab and pairs again, as after any Forget.
       await (await pageOf(`${fixture.origin}/slow`)).close();
+      await view.click('details > summary');
       await view.evaluate(`document.getElementById('port').value = '${port}'`);
       await view.typeInto('#credential', stored.credential);
       await view.press('save');

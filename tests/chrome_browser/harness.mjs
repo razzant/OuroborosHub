@@ -166,11 +166,12 @@ export class Page {
   close() { return this.cdp.send('Target.closeTarget', { targetId: this.targetId }); }
 }
 
-export async function launchChromium({ executable, profile, extension, WebSocket }) {
+/** `env` replaces Chromium's environment (for example a disposable HOME); by default it inherits this process's. */
+export async function launchChromium({ executable, profile, extension, WebSocket, env = process.env }) {
   const args = chromiumArgs({ profile, extension });
   assertSafeRecipe(args, profile);
   const started = Date.now();
-  const child = spawn(executable, args, { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  const child = spawn(executable, args, { detached: true, stdio: ['ignore', 'ignore', 'pipe'], env });
   let stderr = '';
   child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-4000); });
   const exited = new Promise((resolve) => child.once('exit', resolve));

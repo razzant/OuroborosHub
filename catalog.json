@@ -2294,7 +2294,7 @@
       "slug": "chrome_browser",
       "name": "chrome_browser",
       "description": "Act in your own Chrome through a paired extension - one explicitly shared tab or the agent's own background tab, trusted input without taking focus, and a clean handoff of the live page to you and back.",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "type": "script",
       "files": [
         {
@@ -2304,13 +2304,13 @@
         },
         {
           "path": "PROTOCOL.md",
-          "sha256": "d69fbef22a06ad47c0a7c39f9170299f9ac33a85882ff16909a9d7cc390e0add",
-          "size": 36092
+          "sha256": "df3b8b48459b53ec56b1d7b3fd425cb3dfbb27ad6dd416cf76a4015052a26170",
+          "size": 38899
         },
         {
           "path": "SKILL.md",
-          "sha256": "4f5eb0675120d53de5172ebba580a032adfd473e23f1528803d855e4050b5a85",
-          "size": 22140
+          "sha256": "9539cddbc186ab1e4fdc5ad7d7c2c44ff45c3efa87cf2ee591e39e437060621e",
+          "size": 24349
         },
         {
           "path": "extension/bridge_protocol.mjs",
@@ -2319,8 +2319,8 @@
         },
         {
           "path": "extension/manifest.json",
-          "sha256": "dcdeff256f5ed6ecce656aef722351c932b4c7973894424299643fdcf0f1b2f8",
-          "size": 928
+          "sha256": "089b7c953514adf3fc152d185983c85d6d168eb34b8f56aec0d6985f774c244d",
+          "size": 951
         },
         {
           "path": "extension/page_agent.js",
@@ -2329,18 +2329,18 @@
         },
         {
           "path": "extension/popup.html",
-          "sha256": "3105b97300ce8cf6a515f1fb7081dbb7dd84baceeaf709cdbef7882a8a35f8fd",
-          "size": 2063
+          "sha256": "cb0a5a83fd7b5aa2508f4fbd509486a28057aae60415c52d3158715a787bb832",
+          "size": 2514
         },
         {
           "path": "extension/popup.js",
-          "sha256": "1dedbad1abc2ff632008f658f47389995856bd2e067d9b29ecde95da9bcaf17b",
-          "size": 2161
+          "sha256": "a0ef4c33eb8f303997745a57118ce163343fa418e0455273cd03c8e7e88f4df4",
+          "size": 3181
         },
         {
           "path": "extension/service_worker.js",
-          "sha256": "089e3f0143bedb1233116e6c9fb9d69ded878d819f20441c4ea993b03eef9ce6",
-          "size": 53138
+          "sha256": "4ef10bff7aa738be8870224ba234d398c11d0aa85dd40960066d6812474e4f05",
+          "size": 55672
         },
         {
           "path": "lib/executor.mjs",
@@ -2353,9 +2353,14 @@
           "size": 1524
         },
         {
+          "path": "lib/native_setup.mjs",
+          "sha256": "ae4c17311f5bec8e14c860a70dd098bcc9bb3dbd182474b29d544950db7aba4b",
+          "size": 3151
+        },
+        {
           "path": "lib/pairing.mjs",
-          "sha256": "3c20def9a586583618812a0ea57ae674340c61cf1e888d712302acb535e91dec",
-          "size": 7532
+          "sha256": "32561fbd24f5e0b74277e047295837b8e3e743e9e8d1186ddfd90a50f6d6caa9",
+          "size": 7864
         },
         {
           "path": "references/executor-brief.md",
@@ -2364,13 +2369,23 @@
         },
         {
           "path": "scripts/mcp_server.mjs",
-          "sha256": "632651e33f89093d51098dabe7cc9c4586ae857fc883d836a0939c3c47654d14",
+          "sha256": "8d9ae4740a230e5f20641fca478a923777a1e1f437923da92cac365ee4460e01",
           "size": 8135
         },
         {
+          "path": "scripts/native_host.mjs",
+          "sha256": "7858890352f30b04ae6969afb239458245d10b85d44dfdb3759509e04eb79a22",
+          "size": 2993
+        },
+        {
           "path": "scripts/setup.mjs",
-          "sha256": "07b571d8953649fbed70d1ba49bd67e4eb625ad47dd7b93a38795d5cd8a2e20e",
-          "size": 5187
+          "sha256": "d139cd24a69fbf1e9140d9892196474eb062e87fce8982382b1db77707978a18",
+          "size": 7546
+        },
+        {
+          "path": "tests/native_bootstrap.test.mjs",
+          "sha256": "c31a86b08f1d9995db618db9bf06be4848c6abeb5a85a123271d6191c8a55e9a",
+          "size": 12995
         },
         {
           "path": "tests/observation_startup.test.mjs",
@@ -2379,8 +2394,8 @@
         },
         {
           "path": "tests/regressions.test.mjs",
-          "sha256": "bb38e143f9b338b6430b711ca6189eb1012778ede5e823c533957e8f54efddee",
-          "size": 53675
+          "sha256": "ceb2e6d2de04785ab51ed96ade4b1b5e92b60ba8230ea3b1cb0d9ece48a97a80",
+          "size": 58445
         }
       ],
       "install_specs": [

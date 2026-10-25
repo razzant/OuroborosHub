@@ -103,16 +103,19 @@ function nextMessage(ws, timeoutMs) {
 
 async function connectOnce() {
   const { credential, port } = await chrome.storage.local.get(['credential', 'port']);
-  if (!credential) { lastError = 'No pairing credential stored.'; return false; }
+  if (!credential) { lastError = ''; return false; }  // the popup says Not paired: nothing failed
   const ws = new WebSocket(`ws://127.0.0.1:${Number(port) || DEFAULT_PORT}`);
   // Permanent: nextMessage() takes the on* handlers away between handshake messages, and a close in such a gap
   // must not be missed. Before the socket is adopted this does nothing.
   ws.addEventListener('close', () => { onSocketClosed(ws); });
   try {
     await new Promise((resolve, reject) => {
+      // Chrome does not say why: nothing may listen, or the listener may already hold another Chrome profile.
+      const refused = () => reject(new Error(
+        'No Ouroboros task accepted the connection. None may be running, or another Chrome profile may be connected with this pairing.'));
       ws.onopen = resolve;
-      ws.onerror = () => reject(new Error('no executor is listening'));
-      ws.onclose = () => reject(new Error('no executor is listening'));
+      ws.onerror = refused;
+      ws.onclose = refused;
     });
     const nonceE = randomHex(16);
     ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_VERSION, nonce_e: nonceE }));
@@ -126,8 +129,11 @@ async function connectOnce() {
       ? 'This extension is not the build the installed skill expects. Reload it from the skill folder.' : `refused (${answer.code})`);
     if (answer.t !== 'paired' || answer.proof !== await proof(credential, 'srv', nonceE, challenge.nonce_s))
       throw new Error('the listener on this port is not the paired Ouroboros executor');
-    // The setup script's `pair` closes right after its proof: a socket that closed while the proof was checked is not a connection.
-    if (!isOpen(ws)) throw new Error('the listener closed the connection after pairing');
+    // A Forget, or another pairing saved, during the handshake wins over this connection.
+    if ((await chrome.storage.local.get(['credential'])).credential !== credential) throw new Error('Pairing changed while connecting.');
+    // The setup script's `pair` closes right after its proof: a socket that closed while the proof was checked is not a
+    // connection, but both sides proved the pairing, so the popup shows it saved and nothing failed.
+    if (!isOpen(ws)) { lastError = ''; return false; }
     socket = ws;
     executorGeneration = answer.executor_generation;
     lastError = '';
@@ -989,10 +995,25 @@ async function ownerStop(tabId) {
   sendTabs();
 }
 
+// Counts the owner's pairing changes in this profile. Connect sends the count it saw before awaiting the
+// local helper, so a Forget or Save made meanwhile wins over the helper's late answer. The changes take
+// turns: each reads and writes storage before the next one starts.
+const pairingEpoch = async () => Number((await chrome.storage.local.get(['pairing_epoch'])).pairing_epoch) || 0;
+let pairingChanges = Promise.resolve();
+function changePairing(change) {
+  const run = pairingChanges.then(async () => {
+    const epoch = await pairingEpoch();
+    const items = await change(epoch);
+    if (items) await chrome.storage.local.set({ ...items, pairing_epoch: epoch + 1 });
+  });
+  pairingChanges = run.catch(() => {});
+  return run;
+}
+
 async function status() {
   const { credential, port } = await chrome.storage.local.get(['credential', 'port']);
   return {
-    connected: isOpen(socket), has_credential: Boolean(credential), port: Number(port) || DEFAULT_PORT,
+    connected: isOpen(socket), has_credential: Boolean(credential), port: Number(port) || DEFAULT_PORT, pairing_epoch: await pairingEpoch(),
     executor_generation: executorGeneration, error: lastError, approved: Array.from(approved),
     lease: lease ? { tab_id: lease.tab_id, created: lease.created } : null,
   };
@@ -1000,21 +1021,40 @@ async function status() {
 
 const OWNER_ACTIONS = {
   status: async () => { await tryConnect(); },
+  bootstrap: async (message) => {
+    const credential = normalizeCode(message.credential);
+    const port = Number(message.port);
+    if (credential.length < 32) throw new Error('The local helper returned an invalid pairing credential.');
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('The local helper returned an invalid port.');
+    await changePairing(async (epoch) => {
+      if (message.epoch !== epoch) throw new Error('Pairing changed in this profile while the local helper answered. Nothing was saved.');
+      const stored = await chrome.storage.local.get(['credential', 'port']);
+      if (stored.credential) {
+        if (stored.credential !== credential || Number(stored.port) !== port)
+          throw new Error('This profile already has pairing. Choose Forget pairing before connecting a different one.');
+        return null;  // the same pairing: a live connection, its lease or a handoff stays as it is
+      }
+      if (isOpen(socket) || lease || attaching || handedOff.size)
+        throw new Error('Ouroboros is still connected in this profile. Choose Forget pairing before connecting again.');
+      return { credential, port };
+    });
+    await tryConnect();
+  },
   save: async (message) => {
     const credential = normalizeCode(message.credential);
     const port = Number(message.port);
     if (credential.length < 32) throw new Error('That is not a pairing credential.');
     if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('The port must be between 1024 and 65535.');
     await dropSocket();
-    await chrome.storage.local.set({ credential, port });
+    await changePairing(async () => ({ credential, port }));
     await tryConnect();
   },
   forget: async () => {
     if (lease) await ownerStop(lease.tab_id);
     else if (attaching && attaching.tab_id !== null) await ownerStop(attaching.tab_id);
-    await chrome.storage.local.remove(['credential']);
+    await changePairing(async () => { await chrome.storage.local.remove(['credential']); return {}; });
     await dropSocket();
-    lastError = 'No pairing credential stored.';
+    lastError = '';
   },
   share: async (message) => {
     if (!isOpen(socket)) throw new Error('No Ouroboros task is connected right now. Sharing applies to a running task.');

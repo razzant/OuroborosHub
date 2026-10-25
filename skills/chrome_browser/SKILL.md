@@ -1,7 +1,7 @@
 ---
 name: chrome_browser
 description: Act in your own Chrome through a paired extension - one explicitly shared tab or the agent's own background tab, trusted input without taking focus, and a clean handoff of the live page to you and back.
-version: 0.1.2
+version: 0.1.3
 type: script
 runtime: node
 license: MIT
@@ -15,7 +15,7 @@ scripts:
   - name: mcp_server.mjs
     description: The task's browser executor, an MCP stdio server. The host starts it for one task attempt; it is not run by hand.
   - name: setup.mjs
-    description: Owner setup. "status" shows what is configured, "init" creates the private pairing credential, "pair" confirms the extension, "rotate" replaces the credential. It never prints the credential.
+    description: Setup Ouroboros runs for the owner. "init" creates pairing, "install-native --browser" registers that browser's local helper, "pair" confirms the extension, "rotate" replaces pairing, and "recover --confirm" moves malformed state aside. It never prints the credential.
 install_specs:
   - kind: npm
     package: ws@8.22.0
@@ -42,32 +42,63 @@ host's guard socket. `fs` and `subprocess` are declared because
 process: the `vm` realm is not a sandbox, and such a script can reach the file
 system and start processes with the rights of that process. The host admits
 `browser_execute` only where it allows unrestricted execution; the typed
-`browser_action` operations use neither. The skill's own code reads and writes
-only its state directory. `OUROBOROS_CHROME_STATE_DIR` names that directory for
+`browser_action` operations use neither. The executor reads and writes only
+its state directory; `install-native` also writes one native-host registration
+for the browser it names, in that browser's user data directory.
+`OUROBOROS_CHROME_STATE_DIR` names the state directory for
 an installation (or a disposable test root); whoever sets the executor's
 environment chooses it, and the skill does not confine it further.
 
 ## What the owner does once
 
 Loading and pairing in personal Chrome are owner gestures, not agent consent.
-Ouroboros can prepare the package and private credential; it does not silently
-load the extension or enter that credential in the owner's browser.
+Ouroboros prepares the package, the private credential and a local helper; it
+does not silently load the extension or enter that credential in the owner's
+browser. The owner runs no script and copies no credential.
 
-1. Run `setup.mjs init`. It prints the extension folder and the path of a
-   private file, `pairing.json` (mode 600), in the skill's state directory.
-2. In `chrome://extensions`, turn on **Developer mode**, choose **Load
-   unpacked**, and pick the printed `extension` folder.
-3. Open `pairing.json` yourself, copy the value of `credential`, click the
-   extension's icon, paste it under **Pairing**, check the port, and choose
-   **Save and connect**. Do not paste the credential into a chat: the setup
-   script never prints it, and no tool ever returns it.
-4. Run `setup.mjs pair`. It waits for that extension to prove the credential
-   and records which extension it was; only that one is admitted afterwards.
-5. Add the MCP server that `setup.mjs status` prints under `mcp_server` in
+1. Ouroboros runs `setup.mjs init` and then `setup.mjs install-native --browser
+   chrome` (or `chrome-for-testing`, `chromium`) as the OS user who runs that
+   browser. The first creates private `pairing.json` (mode 600); the second
+   registers a local helper for that browser on macOS or Linux. For a browser
+   started with its own `--user-data-dir`, add `--user-data-dir` with the same
+   directory. Neither prints the credential; repeating `install-native` updates
+   paths after a move.
+2. The owner opens `chrome://extensions`, turns on **Developer mode**, chooses
+   **Load unpacked**, and picks the printed `extension` folder.
+3. Ouroboros starts `setup.mjs pair`, which waits up to 120 s, and asks the
+   owner to click the extension icon and choose **Connect**. The popup asks the
+   local helper for the existing pairing, stores it in this Chrome profile and
+   shares no tab; `pair` then records which extension proved it, and only that
+   one is admitted afterwards. The popup shows **Pairing saved** until a task
+   connects, then **Connected**. If the helper is unavailable, **Manual
+   pairing** accepts the credential and port from `pairing.json`; never paste
+   it into a chat.
+4. Add the MCP server that `setup.mjs status` prints under `mcp_server` in
    Settings → MCP.
 
-`setup.mjs rotate` replaces the credential and forgets the extension;
-**Forget pairing** in the popup removes the extension's copy.
+`setup.mjs rotate` replaces the credential and clears the pinned extension.
+The popup keeps its old copy and disables **Connect** until the owner chooses
+**Forget pairing**. Start `pair`, then ask the owner to choose **Forget pairing**
+and **Connect**. The same steps apply after changing the port with `init --port`.
+If setup reports malformed pairing, nothing is replaced.
+`setup.mjs recover --confirm` moves that file aside unchanged (same bytes and
+mode) and creates a new credential;
+then the owner chooses **Forget pairing** and **Connect** while `pair` waits.
+
+Use the pairing in one Chrome profile at a time. To move it to another
+profile, choose **Forget pairing** in the old one or turn the extension off
+there; **Stop sharing** ends tab access but keeps the connection. The helper
+sees the extension ID, not the profile, and the listener admits one extension
+connection, so a second profile cannot be detected: when the popup cannot
+connect it says that no task may be running or that another profile may be
+connected. Automatic multi-profile provisioning is not supported; separate state directories and ports alone do not arrange separate native-host registrations.
+
+An unpacked extension still requires Developer mode and Load unpacked. Native
+bootstrap registration supports Google Chrome, Chrome for Testing and Chromium
+on macOS and Linux; elsewhere only Manual pairing remains. This package is not
+published in the Chrome Web Store and does not provide one-click installation.
+A managed Chrome policy may also block Developer mode, unpacked extensions, or
+Native Messaging.
 
 After a package update, use **Reload** for this unpacked extension in
 `chrome://extensions`. Do not forget the pairing or enter the credential again.

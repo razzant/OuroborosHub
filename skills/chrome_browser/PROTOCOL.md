@@ -477,8 +477,34 @@ executor sends nothing but a random nonce.
   credential in `<state dir>/pairing.json` (mode `0600`, directory `0700`);
   run again it keeps the credential and only changes `--port`. It prints the
   file's path, never its content.
-* The owner pastes the credential into the extension popup; the extension
-  keeps it in `chrome.storage.local`.
+* On macOS/Linux Ouroboros runs `setup.mjs install-native --browser B` as the
+  user who runs browser `B` (`chrome`, `chrome-for-testing` or `chromium`). It
+  installs a private launcher under the state directory and an absolute-path
+  `com.ouroboros.chrome_browser` Native Messaging manifest in
+  `<user data dir>/NativeMessagingHosts`, where that browser reads a user's
+  native hosts: its default user data directory, or `--user-data-dir D` for a
+  browser started with that directory. Without `--browser` it writes nothing.
+  The manifest admits only this package's extension origin, including Chrome's
+  required trailing slash. Repeating setup updates paths idempotently; Node's
+  absolute path is fixed at registration time. Chrome launches the script only
+  for an explicit popup **Connect**. The script reads one request framed by a
+  32-bit length in native byte order, refuses a length over 1024 bytes before
+  reading the body, gives exactly one answer, and answers with an error if no
+  complete request arrives within 5 s. It checks the sender origin passed by
+  Chrome, reads and validates the existing pairing, and returns its credential
+  and port to that popup. It never creates, rotates or writes pairing and never
+  opens a socket or a browser lease.
+* The popup stores the credential in `chrome.storage.local`. Each owner change
+  of the stored pairing (Connect, Save, Forget) advances a counter there;
+  Connect sends the counter it was clicked at, and an answer that arrives after
+  a Forget or Save is refused, so the later gesture wins. A connection whose
+  handshake ends after a credential change is not adopted; this guarantee does
+  not cover a port-only change. Connect leaves an already stored matching
+  pairing and its socket, lease and handoff alone, refuses to replace a
+  different pairing until the owner chooses **Forget pairing**, and
+  does not store a pairing while a connection is still live. If native setup is
+  unavailable, the owner can paste the credential and port in the popup's
+  manual section.
 * `scripts/setup.mjs pair` creates no credential (without one it fails and
   asks for `init`). It waits for that extension to complete the handshake
   below and pins its `Origin` in the state file. Executors accept only that
@@ -486,6 +512,18 @@ executor sends nothing but a random nonce.
 * `setup.mjs rotate` replaces the credential and clears the pinned origin;
   *Forget pairing* in the popup deletes the extension's copy. Either ends the
   pairing; a live session whose extension forgets is closed and revoked.
+* A malformed pairing file fails setup and bootstrap with a clear error. Neither
+  defaults its port or pinned origin nor rotates it. Only an explicit
+  `setup.mjs recover --confirm` renames that file in the state directory,
+  keeping its bytes and mode, and creates a new credential; the owner then
+  forgets the old popup pairing and chooses Connect while `pair` waits.
+* Native Messaging sees an extension origin, not a Chrome profile identity.
+  Owners use one Chrome profile per pairing at a time and move it with
+  *Forget pairing* or by turning the extension off in the old profile; *Stop
+  sharing* keeps the connection. The listener admits one active extension
+  socket, but neither side can detect or reserve a profile: a refused
+  connection is reported as "no task may be running, or another profile may
+  be connected", never as proof that a profile holds it.
 
 Handshake, each connection, fresh nonces:
 

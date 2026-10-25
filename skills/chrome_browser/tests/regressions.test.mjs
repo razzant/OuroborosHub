@@ -406,7 +406,7 @@ test('a host that does not speak the protocol gets no listener', async () => {
 
 test('calls that arrive together wait for the same listener start', async () => {
   const dir = fs.mkdtempSync(path.join(TMP, 'state-'));
-  fs.writeFileSync(path.join(dir, 'pairing.json'), JSON.stringify({ credential: 'A'.repeat(64), port: 1, pinned_origin: `chrome-extension://${'a'.repeat(32)}` }), { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, 'pairing.json'), JSON.stringify({ credential: 'A'.repeat(64), port: 47831, pinned_origin: `chrome-extension://${'a'.repeat(32)}` }), { mode: 0o600 });
   const executor = new Executor({ ...hostEnv(), OUROBOROS_CHROME_STATE_DIR: dir });
   executor.ensureListener();
   await executor.ensureListener();
@@ -456,7 +456,12 @@ test('a target that is transparent, itself or through an ancestor, is not visibl
 
 const CREDENTIAL = 'B'.repeat(64);
 let workerSeq = 0;
-async function worker({ closeAfterPaired = false, session = {} } = {}) {
+const store = (items) => ({
+  get: async (keys) => Object.fromEntries([].concat(keys).filter((key) => key in items).map((key) => [key, items[key]])),
+  set: async (values) => { Object.assign(items, values); },
+  remove: async (keys) => { for (const key of [].concat(keys)) delete items[key]; },
+});
+async function worker({ closeAfterPaired = false, session = {}, local = null } = {}) {
   const events = {};
   const event = (name) => ({ addListener: (fn) => { (events[name] = events[name] || []).push(fn); }, removeListener: (fn) => { events[name] = (events[name] || []).filter((item) => item !== fn); } });
   const fire = (name, ...args) => (events[name] || []).map((fn) => fn(...args));
@@ -466,13 +471,10 @@ async function worker({ closeAfterPaired = false, session = {} } = {}) {
     runtime: { id: 'ext', getURL: (name) => `chrome-extension://ext/${name}`, onMessage: event('message') },
     action: { setBadgeText: async () => {} },
     storage: {
-      local: { get: async () => ({ credential: CREDENTIAL, port: 1 }), set: async () => {}, remove: async () => {} },
+      // A test that passes `local` sees what the worker writes; otherwise the stored pairing never changes.
+      local: local ? store(local) : { get: async () => ({ credential: CREDENTIAL, port: 47831 }), set: async () => {}, remove: async () => {} },
       // Kept across a worker restart when a test passes the same object, as chrome.storage.session is.
-      session: {
-        get: async (keys) => Object.fromEntries([].concat(keys).filter((key) => key in session).map((key) => [key, session[key]])),
-        set: async (items) => { Object.assign(session, items); },
-        remove: async (keys) => { for (const key of [].concat(keys)) delete session[key]; },
-      },
+      session: store(session),
     },
     alarms: { create: async () => {}, onAlarm: event('alarm') },
     tabs: {
@@ -539,6 +541,82 @@ async function worker({ closeAfterPaired = false, session = {} } = {}) {
   return w;
 }
 const attachedAnswers = (w) => w.sent.filter((m) => m.t === 'attached');
+
+test('extension: Connect with the same pairing leaves the live socket, its lease and a handoff alone; a different pairing requires Forget', async () => {
+  const local = { credential: CREDENTIAL, port: 47831 };
+  const w = await worker({ local });
+  const status = await w.popup({ type: 'status' });
+  assert.deepEqual([status.connected, status.pairing_epoch], [true, 0]);
+  const active = w.server;
+  await w.popup({ type: 'share', tab_id: 7 });
+  w.fromExecutor({ t: 'attach', id: 1, lease_id: 'lA', generation: 3, tab_id: '7' });
+  await until(() => attachedAnswers(w).length === 1);
+  const connect = (credential, epoch = 0) => w.popup({ type: 'bootstrap', credential, port: 47831, epoch });
+  const same = await connect(CREDENTIAL);
+  assert.equal(same.ok, true);
+  assert.deepEqual(same.lease, { tab_id: 7, created: false });
+  w.fromExecutor({ t: 'release', id: 2, tab_id: '7', reason: 'handoff' });
+  await until(() => w.sent.some((m) => m.t === 'released' && m.id === 2));
+  const detached = w.detached;
+  assert.equal((await connect(CREDENTIAL)).ok, true);
+  const different = await connect('C'.repeat(64));
+  assert.equal(different.ok, false);
+  assert.match(different.message, /Forget pairing/);
+  assert.equal(w.server, active);
+  assert.equal(active.readyState, 1);
+  assert.equal(w.detached, detached);
+  assert.equal(w.sent.some((m) => m.t === 'lost'), false);
+  // The handed-off tab is still the agent's to resume.
+  w.fromExecutor({ t: 'attach', id: 3, lease_id: 'lB', generation: 4, tab_id: '7' });
+  await until(() => attachedAnswers(w).length === 2);
+  assert.equal(attachedAnswers(w)[1].ok, true);
+  assert.deepEqual(local, { credential: CREDENTIAL, port: 47831 }, 'nothing was rewritten');
+});
+
+test('extension: a Forget or Save made while the local helper answers wins over its answer', async () => {
+  const local = { credential: CREDENTIAL, port: 47831 };
+  const w = await worker({ local });
+  const connect = (epoch, credential = CREDENTIAL) => w.popup({ type: 'bootstrap', credential, port: 47831, epoch });
+  // Connect was chosen at epoch 0; the owner chose Forget before the helper answered.
+  assert.equal((await w.popup({ type: 'forget' })).pairing_epoch, 1);
+  const late = await connect(0);
+  assert.equal(late.ok, false);
+  assert.match(late.message, /Pairing changed.*Nothing was saved/);
+  assert.deepEqual([late.has_credential, late.connected, local.credential], [false, false, undefined]);
+  const fresh = await connect(1);
+  assert.deepEqual([fresh.ok, fresh.connected, fresh.pairing_epoch], [true, true, 2]);
+  // A manual Save meanwhile wins the same way.
+  assert.equal((await w.popup({ type: 'save', credential: CREDENTIAL, port: 47831 })).pairing_epoch, 3);
+  assert.equal((await connect(2, 'C'.repeat(64))).ok, false);
+  assert.equal(local.credential, CREDENTIAL);
+  // Forget and a Connect answered in the same moment: Forget still wins, whichever runs first.
+  for (const order of [['bootstrap', 'forget'], ['forget', 'bootstrap']]) {
+    const epoch = (await w.popup({ type: 'status' })).pairing_epoch;
+    if (!local.credential) assert.equal((await connect(epoch)).connected, true);
+    const current = (await w.popup({ type: 'status' })).pairing_epoch;
+    await w.popup({ type: 'forget' });
+    assert.equal(local.credential, undefined);
+    const answers = await Promise.all(order.map((type) => (type === 'forget' ? w.popup({ type }) : connect(current + 1))));
+    await tick(30);
+    const after = await w.popup({ type: 'status' });
+    if (order[0] === 'forget') assert.equal(answers[1].ok, false, 'the Connect answered after that Forget is refused');
+    else assert.equal(after.has_credential, false, 'the Forget answered after that Connect removed it');
+    assert.equal(after.has_credential, false);
+    assert.equal(after.connected, false, 'no connection outlives the Forget');
+  }
+});
+
+test('extension: Connect never replaces a pairing that vanished under a live connection', async () => {
+  const local = { credential: CREDENTIAL, port: 47831 };
+  const w = await worker({ local });
+  assert.equal((await w.popup({ type: 'status' })).connected, true);
+  delete local.credential;  // storage lost it; the socket proved it and stays
+  const refused = await w.popup({ type: 'bootstrap', credential: 'C'.repeat(64), port: 47831, epoch: 0 });
+  assert.equal(refused.ok, false);
+  assert.match(refused.message, /still connected.*Forget pairing/);
+  assert.equal(w.server.readyState, 1);
+  assert.equal(local.credential, undefined);
+});
 
 test('extension: verdict timeouts drain after allowed, refused and released requests', async () => {
   const realSetTimeout = globalThis.setTimeout;
@@ -740,6 +818,7 @@ test('extension: a listener that closes right after its proof is not a connectio
   const w = await worker({ closeAfterPaired: true });
   const status = await w.popup({ type: 'status' });
   assert.equal(status.connected, false);
+  assert.equal(status.error, '', 'both sides proved the pairing: the popup reports it saved, not failed');
 });
 
 test('extension: a connection the executor closes is retried within seconds, with bounded backoff, until Forget pairing', async () => {

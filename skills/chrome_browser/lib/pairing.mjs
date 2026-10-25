@@ -39,12 +39,18 @@ export function readPairing(dir) {
     if (error.code === 'ENOENT') return null;
     throw error;
   }
-  const data = JSON.parse(text);
-  if (typeof data.credential !== 'string' || data.credential.length < 32) throw new Error('pairing file has no usable credential');
+  let data;
+  try { data = JSON.parse(text); } catch { throw new Error('pairing file is not valid JSON'); }
+  if (!data || typeof data !== 'object' || typeof data.credential !== 'string' || data.credential.length < 32)
+    throw new Error('pairing file has no usable credential');
+  if (!Number.isInteger(data.port) || data.port < 1024 || data.port > 65535)
+    throw new Error('pairing file has an invalid port (expected 1024–65535)');
+  if (data.pinned_origin != null && !ORIGIN.test(data.pinned_origin || ''))
+    throw new Error('pairing file has an invalid pinned_origin');
   return {
     credential: data.credential,
-    port: Number.isInteger(data.port) ? data.port : DEFAULT_PORT,
-    pinned_origin: ORIGIN.test(data.pinned_origin || '') ? data.pinned_origin : null,
+    port: data.port,
+    pinned_origin: data.pinned_origin ?? null,
   };
 }
 

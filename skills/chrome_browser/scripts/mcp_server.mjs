@@ -7,7 +7,7 @@ import readline from 'node:readline';
 import { BrowserError, EXECUTOR_OPERATIONS, Executor } from '../lib/executor.mjs';
 import { OPERATIONS } from '../extension/bridge_protocol.mjs';
 
-const SERVER = { name: 'ouroboros-chrome-browser', version: '0.1.2' };
+const SERVER = { name: 'ouroboros-chrome-browser', version: '0.1.3' };
 const MCP_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 const NO_ARGUMENTS = { type: 'object', properties: {}, additionalProperties: false };
 const TOOLS = [

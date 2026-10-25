@@ -48,6 +48,7 @@ test('MV3 prepares the hidden renderer before first input, once per document and
         probe.once('connect', () => { probe.destroy(); resolve(true); });
         probe.once('error', () => resolve(false));
       }), { what: 'pairing listener' });
+      await popup.click('details > summary');  // the owner opens Manual pairing
       await popup.evaluate(`document.getElementById('port').value = ${JSON.stringify(String(init.port))}`);
       await popup.typeInto('#credential', credential);
       await popup.click('#save');
