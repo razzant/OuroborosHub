@@ -1,0 +1,18 @@
+{
+  "author": "kuznetsoffandrey",
+  "category": [
+    "health"
+  ],
+  "description": "Health data from Sber Smart Ring (Life Balance): HR, HRV, SpO2, sleep, steps, stress, temperature.",
+  "digest": "c19f386569c51c46ed876b71343c18647719ea1932b750f093098d41a373c619",
+  "name": "sber-ring",
+  "owner": "kuznetsoffandrey",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/sber-ring"
+  },
+  "type": "extension",
+  "version": "1.0.1",
+  "withdrawn": null
+}

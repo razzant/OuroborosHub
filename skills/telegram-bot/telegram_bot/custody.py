@@ -449,20 +449,25 @@ class CustodyStore:
                 self._enqueue_outbox(conn, identity, _reply_payload(event, str(output["text"])), time.time())
             conn.commit()
 
-    def complete_work(self, work_ref: str, *, status: str, text: str) -> None:
+    def complete_work(self, work_ref: str, *, status: str, text: str, child_ref: str = "") -> None:
+        """Settle a reference; retain a child its terminal view names in the same commit."""
         if status not in {"completed", "failed", "cancelled"}:
             raise ValueError("work status is not terminal")
         now = time.time()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT event_id, role, event_json FROM presence_work "
+                "SELECT event_id, binding_id, role, event_json FROM presence_work "
                 "WHERE work_ref=? AND state='leased'",
                 (work_ref,),
             ).fetchone()
             if row is None:
                 conn.rollback()
                 raise ValueError("presence work is not leased")
+            if child_ref and child_ref != work_ref:
+                event = json.loads(row["event_json"])
+                mode = int((event.get("_reporting") or {}).get("version") == 1)
+                self._add_work(conn, row["event_id"], row["binding_id"], child_ref, "child", event, mode, now)
             updated = conn.execute(
                 """
                 UPDATE presence_work
@@ -545,6 +550,12 @@ class CustodyStore:
                     delivery_id,
                 ),
             )
+
+    def hold_outbox(self, delivery_id: str, reason: str) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE outbox SET state='pending',available_at=?,lease_until=0,"
+                         "last_error=?,attempts=MAX(0,attempts-1) WHERE delivery_id=? AND state='leased'",
+                         (time.time() + 5, reason, delivery_id))
 
     def mark_outbox_failed(self, delivery_id: str, *, reason: str, report=None,
                            state: str = "failed") -> None:
@@ -651,7 +662,7 @@ class CustodyStore:
             return {"state": "not_found"}
         payload = json.loads(row["payload_json"])
         return {
-            "state": "uncertain" if payload.get("_terminal_outcome") == "uncertain" else str(row["state"]),
+            "state": "held" if row["state"] == "pending" and str(row["last_error"]).startswith("Held:") else "uncertain" if payload.get("_terminal_outcome") == "uncertain" else str(row["state"]),
             "attempts": int(row["attempts"]),
             "delivered_at": _timestamp(row["delivered_at"]),
             "provider_receipt": json.loads(row["provider_receipt_json"] or "{}"),
@@ -698,6 +709,7 @@ class CustodyStore:
                 ).fetchone()[0],
                 "inbox_failed": inbox.get("failed", 0),
                 "outbox_waiting": outbox.get("pending", 0),
+                "outbox_held": conn.execute("SELECT COUNT(*) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%'").fetchone()[0],
                 "outbox_leased": outbox.get("leased", 0),
                 "outbox_delivered": outbox.get("delivered", 0),
                 "outbox_failed": outbox.get("failed", 0) - conn.execute(

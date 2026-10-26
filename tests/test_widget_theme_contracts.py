@@ -16,6 +16,7 @@ DASHBOARDS = (
     "memory-atlas",
     "token-usage",
     "smart_lists",
+    "calendar",
 )
 
 

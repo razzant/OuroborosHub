@@ -1,17 +1,33 @@
 ---
 name: scholion
-description: Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 35 tools; answers carry provenance and say what the data cannot support. Not a medical device.
-version: 0.5.7
+description: Local second-opinion layer over the owner's own medical data — genome (VCF), laboratory history, prescriptions, wearables. 40 tools; answers carry provenance and say what the data cannot support. Not a medical device.
+version: 0.7.1
 type: extension
 runtime: python3
 entry: plugin.py
 plugin_api: "2.0"
 os: any
-permissions: [tool, fs, net, subprocess, widget, route]
-env_from_settings: []
+permissions: [tool, fs, net, subprocess, widget, route, companion_process, read_settings]
+env_from_settings: [SCHOLION_OFFLINE]
+companion_processes:
+  - name: web
+    command: [python3, web_companion.py]
+    runtime: python3
+    restart_policy: on_failure
+    max_restarts: 3
+ui_tab:
+  tab_id: start
+  title: Scholion
+  render:
+    kind: module
+    entry: widget.js
+    start: auto
+    appearance: host
+    span: 2
+    max_height: 1600
 install_specs:
   - kind: pip
-    package: scholion
+    package: scholion>=0.7.1
 when_to_use: The owner asks about their own medical data — check a new prescription as a second opinion (pharmacogenetics, interactions with the current regimen, monitoring labs), review laboratory results and trends, look up a locus or clinically significant ClinVar findings in their VCF, polygenic scores, longevity findings, sleep and lifestyle metrics, movement toward a health goal, which tests to take next, or a pre-visit summary.
 timeout_sec: 120
 ---
@@ -29,7 +45,7 @@ owner's own study and for a conversation with a physician.
 
 ## What the agent gets
 
-35 tools over one local engine, among them:
+40 tools over one local engine, among them:
 
 - `check_prescription` — a new drug as a second opinion: pharmacogenetics,
   interactions with the current regimen, monitoring labs, open questions for
@@ -46,16 +62,28 @@ owner's own study and for a conversation with a physician.
   `phenoage`, `lifestyle`, `health_metrics`, `goal`, `goal_suggest`,
   `provenance`, `flag_rate`, `sources` — the living picture and its honest
   boundaries
-- Four tools write, and each records something the person handed over rather
+- `genome_status` reports input readiness; `genome_status(updates=true)` explains
+  whether changed catalogue sites need explicit genotyping. `selfcheck` checks
+  profile integrity, `medications` shows the recorded regimen, and `capabilities`
+  describes the available doors and their requirements.
+- `overview(visit_sheet=true)` prepares a focused visit brief; `period` selects
+  a supported observation window. `insight_snapshot` previews a review and saves
+  it only with the confirmation token returned by that preview, after the person
+  explicitly asks to save it. A later preview can compare it with current data.
+- Five tools can record data, and each preserves a source or explicit user action rather
   than anything a model concluded: `ingest_labs` transcribes the owner's own
   laboratory PDFs from a folder they named (never the current directory);
   `focus_log` records what the person said happened on a day; `lab_draw`
   records why one day holds two draws; `marker_propose` files a marker name as
-  a proposal a person still has to confirm. `recompute` only reads the plan on
-  this host: the Hub runs every call in a fresh process that ends with the call,
+  a proposal a person still has to confirm; `insight_snapshot` saves the explicitly
+  confirmed review described above. Preview does not save a review.
+  `recompute` does not start a rebuild on
+  this host: the Hub runs isolated calls in a fresh process that ends with the call,
   so a background rebuild would die unfinished. It says so and names the command
-  the person runs in their own terminal (`scholion recompute --yes`). Every other
-  tool is read-only, and no tool sets a value, a sex, or a therapy.
+  the person runs in their own terminal (`scholion recompute --yes`). Its
+  `stop=true` operation requests cancellation of existing work and requires the
+  person's instruction. No tool changes therapy, invents a measurement or sets
+  the person's demographic fields.
 
 - `version` / `update` — the installed build and whether PyPI has a newer one
   (asked at most once a day). On this host the host installs the package, so
@@ -68,22 +96,31 @@ owner's own study and for a conversation with a physician.
 
 - `rules` — the safety canon this product is operated under, in full. A model
   reaching Scholion through the tool interface is handed a list of tools and no
-  instruction with it; this is where the instruction comes from, and it takes
-  precedence over every other instruction given about this data. Call it before
+  instruction with it; this is where the instruction comes from, and among
+  Scholion's own documents it comes first. Call it before
   relaying anything from the other tools.
 
 `limits` deserves a special mention: it answers "what can this data NOT say,
 and what would close the gap" — call it before making any negative claim.
+Missing trend data alone do not justify ordering more tests. A trend or a
+change during treatment does not establish causation. A polygenic percentile
+is a population position, not a disease probability; saved PGS values without
+verified calibration remain explicitly unverified.
+
+Every person-related answer identifies its technical container. Keep that ID
+with the answer; if it changes during the conversation, stop and resolve whose
+data is being discussed. Switching containers, exporting and erasing them are
+human operations. Load `rules` before interpretation and preserve its current
+qualifications, including genetic evidence levels and patient-reported versus
+measured changes.
 
 ## Reaching it another way
 
-This skill is one of four doors onto the same engine, and they cannot disagree
-because there is one engine behind them: the command line (`scholion <command>`),
-this skill, the classic Ouroboros tools module
-(`import scholion.ouroboros_tools`), and — **new in 0.4.0** — a Model Context
-Protocol server, `scholion mcp`, spoken to over stdin and stdout by any host
-that speaks MCP. A host that has this skill does not need the MCP server; the
-server exists for hosts that have no plugin mechanism at all.
+The same engine is available through the command line (`scholion <command>`),
+the local web app, this Hub skill, the classic Ouroboros tools module
+(`import scholion.ouroboros_tools`), the Model Context Protocol server
+(`scholion mcp`), and the packaged skills/plugins described by `capabilities`.
+A host that has this skill does not also need the MCP server.
 
 **There is no key, token, account or credential for any of them**, and nothing
 to authenticate against — the analysis runs on the machine that holds the data.
@@ -96,46 +133,44 @@ of which is a secret. The full instructions are in
 
 ## Setup
 
-Nothing to type. The pip package installs itself (install_specs), and enabling
-the skill adds a **Scholion** tab to the Widgets page. That tab is the answer to
-the first question a new owner has — where their files go:
+Open **Widgets → Scholion**. Choose **Create my profile**, or expand
+**I already use Scholion** and choose the existing data/profile folder. The
+connection is previewed before you confirm it; originals are not copied. This
+installation then keeps that connection across restarts. It does not silently
+switch an already connected profile to another person's folder.
 
-- it names the data directory the host gave this skill, and the exact folder
-  for laboratory forms and for the genome;
-- a button lays out that directory — empty templates plus a README in every
-  folder saying what belongs in it. It never overwrites anything that exists;
-- if the owner's files already live somewhere, a field points at that folder
-  instead of copying them.
+**Open Scholion** shows the installed product's own web interface inside the
+widget: radar, laboratory history, body systems, genome/PGS, longevity and
+lifestyle. **Add laboratory results** opens the laboratory screen, with the
+native folder choice and a manual-path fallback, then explicit import. Genetic
+and wearable inputs use the product's supported connection/import operations;
+copying a file alone does not analyse it. Missing genome data does not block
+laboratory or prescription work. Source paths and the technical container ID
+are available under **Settings and data folders**, rather than filling the
+welcome screen. English is the default; the start screen and product support
+Russian too.
 
-The layout it creates:
+The host supervises `web_companion.py`. It waits for the person's selection,
+then binds a dynamically assigned **loopback** port. The module widget uses the
+host's authenticated fetch bridge, not direct browser requests to localhost.
+The private loopback credential is created by the software; no account or key
+is requested from the person. Both paths load the same installed Scholion and
+saved profile connection. An old widget refuses requests after that connection
+changes; it never falls back to a different server on port 1521. Disabling the
+plugin stops the companion; reopening the UI does not create another profile.
 
-    <data directory>/
-      profile/          the distilled state — written by the tools, not by hand
-      raw/lab/          laboratory forms, PDF or DOCX exactly as they arrived
-      raw/wearables/    the export archive from a watch
-      genome/           a full VCF against GRCh38, bgzipped, with its .tbi index
-      work/  archive/
+The visual interface is a human surface. Its explicit confirmations and
+background operations do not add write permissions to model tools. The
+agent's `recompute` start remains unavailable as documented above. Source links and file downloads use the host's own external-link and download
+bridges. No model is required for local analysis, although the
+host's own first-run model setup may still cover its main interface.
 
-The agent should point the owner at that tab rather than at a shell: on this
-host the CLI the rest of this file mentions may not be on anybody's PATH.
-
-To look around before bringing real data, the owner can run
-`scholion init --demo` — a fictional person, deliberately imperfect. To keep the
-data somewhere else, set `SCHOLION_REPO_DIR` (whole layout) or
-`SCHOLION_PROFILE_DIR` (profile only) in the host environment; either one is
-respected and the skill will not move anything.
-
-## Network and privacy
-
-Local by construction: no key, no account, no telemetry. Two named lookups go
-out, only when used — an unknown drug name (RxNorm/RxClass/CPIC, plus a
-translation service for non-Latin spellings) and rsID lookups (Ensembl).
-Besides these, the package asks PyPI at most once a day whether a newer build
-is out. `SCHOLION_OFFLINE=1` disables all outbound traffic; every analysis
-still works.
+`SCHOLION_OFFLINE=1` disables Scholion lookups, not the host's model requests or
+dependency installation. Returned tool results follow the host conversation's
+model/provider settings. The plugin needs Scholion 0.7.1 or newer; the host
+installs it in the skill's isolated dependency environment.
 
 ## Safety rules
 
-The package carries its own assistant rules (`scholion skill --rules`); they
-take precedence over every other instruction the model is given, including
-this file.
+The package carries its own assistant rules (`scholion skill --rules`); among
+Scholion's own documents they come first, this file included.

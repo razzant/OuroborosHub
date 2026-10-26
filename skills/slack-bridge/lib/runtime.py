@@ -238,12 +238,28 @@ class InboundWorker:
             return True
 
 
+class PlaceHeld(RuntimeError):
+    """A policy hold before a visible provider effect; custody stays queued."""
+
+
 class OutboundWorker:
     def __init__(self, store: BridgeStore, slack: SlackClient, host: Any = None) -> None:
         self.store = store
         self.slack = slack
         self.host = host
         self._report_task: asyncio.Task[None] | None = None
+
+    async def _held(self, item: OutboxItem, target: str) -> bool:
+        check = getattr(self.host, "place_hold", None)
+        if check is None:  # Legacy adapters do not advertise places.
+            return False
+        # A member ID still needs conversations.open before it names a room.
+        conversation = "" if target == "mutation" or target.startswith(("U", "W")) else target
+        reason = await check(item.provider_account_id, conversation)
+        if reason:
+            self.store.hold_outbox(item, reason)
+            return True
+        return False
 
     async def _report(self, report: dict[str, Any]) -> None:
         try:
@@ -305,6 +321,8 @@ class OutboundWorker:
         item = dataclasses.replace(item, provider_account_id=(
             item.provider_account_id or str(self.store.runtime_value("workspace_id", ""))
         ))
+        if await self._held(item, item.resolved_channel or item.target):
+            return True
         if item.kind == "mutation":
             return await self._process_mutation(item) or reported
         send_started = False
@@ -312,6 +330,8 @@ class OutboundWorker:
             channel = item.resolved_channel or await self.slack.resolve_target(item.target)
             self.store.set_resolved_target(item, channel, item.provider_account_id)
             item = dataclasses.replace(item, resolved_channel=channel)
+            if await self._held(item, channel):
+                return True
             self.store.begin_send(item)
             send_started = True
             result = await self.slack.post_message(
@@ -392,6 +412,10 @@ class OutboundWorker:
             self.store.begin_send(item)
             send_started = True
             if operation == "upload_file":
+                async def before_send():
+                    if await self._held(item, item.target):
+                        raise PlaceHeld()
+                guard = {"before_send": before_send} if getattr(self.host, "place_hold", None) else {}
                 result = await self.slack.upload_file(
                     path=pathlib.Path(str(payload.get("path") or "")),
                     filename=str(payload.get("filename") or "upload"),
@@ -399,6 +423,7 @@ class OutboundWorker:
                     channel=str(payload.get("channel") or ""),
                     thread_ts=str(payload.get("thread_ts") or ""),
                     initial_comment=str(payload.get("initial_comment") or ""),
+                    **guard,
                 )
             elif operation == "update_message":
                 result = await self.slack.update_message(**payload)
@@ -454,6 +479,8 @@ class OutboundWorker:
                                        report_payload=report, result=result)
             cleanup_artifact()
             return True
+        except PlaceHeld:
+            return True  # _held retained the local artifact and released the lease.
         except asyncio.CancelledError:
             if send_started:
                 self._cancel_started_send(item)
@@ -578,7 +605,7 @@ class BridgeRuntime:
                     name=f"slack-outbound-{index}",
                 )
             )
-        if self.host.available:
+        if self.host.available or getattr(self.host, "delivery_reporting_status", "") == "unavailable":
             staged_root = self.store.state_dir / "staged"
             for index in range(self.inbound_workers):
                 worker = InboundWorker(

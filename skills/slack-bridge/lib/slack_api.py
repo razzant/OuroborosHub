@@ -638,7 +638,7 @@ class SlackClient:
         return staged[0]
 
     async def upload_file(self, *, path: pathlib.Path, filename: str, title: str = "",
-                          channel: str = "", thread_ts: str = "", initial_comment: str = "") -> dict[str, Any]:
+                          channel: str = "", thread_ts: str = "", initial_comment: str = "", before_send=None) -> dict[str, Any]:
         """Upload immutable bytes through Slack's current External Upload API."""
         try:
             data = path.read_bytes()
@@ -648,6 +648,8 @@ class SlackClient:
             raise SlackConfigurationError(f"could not read upload input: {exc}") from exc
         if not data:
             raise SlackConfigurationError("file must not be empty")
+        if before_send:
+            await before_send()
         request = await self._post_form("files.getUploadURLExternal", {
             "filename": str(filename), "length": str(len(data)),
         }, token=self.bot_token)
@@ -655,6 +657,8 @@ class SlackClient:
         file_id = str(request.get("file_id") or "").strip()
         if not upload_url or not file_id:
             raise SlackApiError("missing_upload_url", details=request)
+        if before_send:
+            await before_send()
         try:
             response = await self._http.post(upload_url, content=data, headers={"Content-Type": "application/octet-stream"})
         except (httpx.HTTPError, TimeoutError) as exc:
@@ -669,6 +673,8 @@ class SlackClient:
         if initial_comment:
             payload["initial_comment"] = str(initial_comment)
         # Completion shares the file; an unknown result must not start a fresh upload.
+        if before_send:
+            await before_send()
         return await self._mutate("files.completeUploadExternal", payload)
 
     async def resolve_target(self, target: str) -> str:

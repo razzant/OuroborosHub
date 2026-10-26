@@ -1,0 +1,18 @@
+{
+  "category": [
+    "search"
+  ],
+  "description": "GDELT Cloud geopolitical intelligence: conflict events, news stories, entity graph, energy infrastructure, macro-finance, prediction markets, and web research via MCP Progressive Discovery.",
+  "digest": "8d395ec0a3a664fe573fbbe6cbaa287ca129e7726cec0018af9978378587b798",
+  "name": "gdelt-mcp",
+  "owner": "kuznetsoffandrey",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/gdelt-mcp"
+  },
+  "type": "extension",
+  "version": "0.1.0",
+  "when_to_use": "User asks about geopolitical events, conflict data, news stories, entities, energy infrastructure, macro-finance indicators, prediction markets, or needs real-time structured intelligence. Covers: armed clashes, protests, disasters, political events, CAMEO+ coded events, clustered news stories with article evidence, entity profiles, GEM energy assets, macro-finance quotes/series, Kalshi prediction market probabilities, and web research with source extraction.",
+  "withdrawn": null
+}

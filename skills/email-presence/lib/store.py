@@ -509,6 +509,12 @@ class EmailStore:
     def retry_outbox(self, row_id, token, error, delay=5):
         self._update("outbox", row_id, token, "retry", error, delay)
 
+    def hold_outbox(self, item, reason):
+        with self._connect() as db:
+            db.execute("UPDATE outbox SET state='retry',last_error=?,lease_token='',lease_until=0,"
+                       "available_at=?,updated_at=?,attempts=MAX(0,attempts-1) WHERE id=? AND lease_token=?",
+                       (reason, time.time() + 5, time.time(), item.row_id, item.lease_token))
+
     def uncertain_outbox(self, row_id, token, error, *, reports=()):
         self._update("outbox", row_id, token, "uncertain", error, reports=reports)
 
@@ -545,6 +551,8 @@ class EmailStore:
             if not r:
                 return None
             result = dict(r)
+            if result["state"] == "retry" and str(result["last_error"]).startswith("Held:"):
+                result["state"] = "held"
             result["delivery_reporting"] = json.loads(result.pop("reporting_json"))
             result["history_reports"] = json.loads(result.pop("reports_json"))
             result["accepted_recipients"] = json.loads(result.pop("accepted_json") or "[]")
@@ -557,6 +565,7 @@ class EmailStore:
             counts["cursors"] = [json.loads(r[0]) for r in db.execute("SELECT value FROM runtime_state WHERE key LIKE 'cursor:%'")]
             counts["receipts"] = [dict(r) for r in db.execute("SELECT request_id,state,provider_message_id,last_error FROM outbox ORDER BY id DESC LIMIT 20")]
             counts["delivery_reports_pending"] = db.execute("SELECT COUNT(*) FROM outbox WHERE report_due_at>0").fetchone()[0]
+            counts["outbox_held"] = db.execute("SELECT COUNT(*) FROM outbox WHERE state='retry' AND last_error LIKE 'Held:%'").fetchone()[0]
             # Retained events still observing their original attempt or child (counted in their inbox state too).
             counts["inbox_retained"] = db.execute("SELECT COUNT(*) FROM inbox WHERE host_reference LIKE 'retained:%' AND state NOT IN ('completed','failed')").fetchone()[0]
             counts["delivery_support"] = self.get("delivery_support")

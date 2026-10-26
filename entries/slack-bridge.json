@@ -1,0 +1,25 @@
+{
+  "category": [
+    "messaging"
+  ],
+  "connects": [
+    "Slack"
+  ],
+  "description": "Slack connector for workspace places, with typed conversation facts, durable threaded replies, files, and live place-state delivery holds.",
+  "digest": "e49b193556f65a2cd972ad45f194f544bea2618be4098e9388fcf068dbabf989",
+  "icon": "ui/icon.svg",
+  "install_specs": [
+    "httpx",
+    "websockets"
+  ],
+  "name": "slack-bridge",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/slack-bridge"
+  },
+  "type": "extension",
+  "version": "1.7.0",
+  "withdrawn": null
+}

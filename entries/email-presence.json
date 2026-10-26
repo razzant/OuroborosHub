@@ -1,0 +1,25 @@
+{
+  "category": [
+    "messaging"
+  ],
+  "connects": [
+    "Email"
+  ],
+  "description": "Email connector for IMAP/SMTP places, with threaded conversations, durable receipts and attachments, and live place-state delivery holds.",
+  "digest": "830bfc6494d6d3ef3a8b6d99210d67034d84cd551c7bfa7283d359f421d9ea32",
+  "icon": "ui/icon.svg",
+  "install_specs": [
+    "httpx",
+    "starlette"
+  ],
+  "name": "email-presence",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/email-presence"
+  },
+  "type": "extension",
+  "version": "0.5.0",
+  "withdrawn": null
+}

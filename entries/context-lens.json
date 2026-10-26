@@ -1,0 +1,18 @@
+{
+  "category": [
+    "ouroboros"
+  ],
+  "description": "Read-only chart of model-request input sizes from the local usage store, with honest freshness and coverage.",
+  "digest": "728c992edd4b22a7a7c2bf78983052274120b0e97b110ef6fbe18e024e6ad43d",
+  "name": "context-lens",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/context-lens"
+  },
+  "type": "extension",
+  "version": "1.2.0",
+  "when_to_use": "The owner wants to understand reported input sizes, their spread and which requests belong to one task.",
+  "withdrawn": null
+}

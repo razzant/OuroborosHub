@@ -55,7 +55,7 @@ def normalize_binding_id(value: Any) -> str:
         raise HostContractError("binding_id must be 32 lowercase hexadecimal characters")
     return value
 
-def email_presence_event(item: InboxItem, *, account_id: str) -> dict[str, Any]:
+def email_presence_event(item: InboxItem, *, account_id: str, places: bool = False) -> dict[str, Any]:
     return {
         "source_event_id": item.provider_event_key,
         "provider": "email",
@@ -72,6 +72,7 @@ def email_presence_event(item: InboxItem, *, account_id: str) -> dict[str, Any]:
                     "subject": item.subject, "to": list(item.recipients),
                     **item.context},
         "text": f"Subject: {item.subject}\n\n{item.body}",
+        **({"facts": ["any_message"]} if places else {}),
     }
 
 def _ref(kind: str, payload: Mapping[str, Any]) -> str:
@@ -117,7 +118,8 @@ class _SkillToken:
 
 
 class LoopbackPresenceHostAdapter:
-    def __init__(self, binding_id: str, *, host_service_url: str, skill_token: str, http_client: httpx.AsyncClient | None = None):
+    def __init__(self, binding_id: str, *, host_service_url: str, skill_token: str, http_client: httpx.AsyncClient | None = None,
+                 place_http_client: httpx.Client | None = None):
         self.binding_id = normalize_binding_id(binding_id) if str(binding_id or "").strip() else ""
         self.host_service_url = host_service_url.rstrip("/")
         if not _loopback(self.host_service_url): raise HostContractError("HOST_SERVICE_URL must be an HTTP loopback URL")
@@ -125,6 +127,36 @@ class LoopbackPresenceHostAdapter:
         self._http = http_client or httpx.AsyncClient(timeout=35, trust_env=False); self._owns = http_client is None; self._terminal: dict[str, dict[str, Any]] = {}
         self.delivery_reporting_status = "unknown"
         self.delivery_reporting_version = 0
+        self.places_version = 0
+        self._place_http = place_http_client
+
+    def _identity(self, payload):
+        version = payload.get("places_version")
+        self.places_version = int(type(version) is int and version >= 1)
+        self.available = bool(self._token._value and (self.binding_id or self.places_version))
+        self.delivery_reporting_version = int(payload.get("presence_delivery_version") == 1)
+        self.delivery_reporting_status = "supported" if self.delivery_reporting_version else "unsupported"
+
+    def place_hold(self, account_id, conversation_id):
+        """The SMTP worker is synchronous; use its own HTTP client on that thread."""
+        try:
+            if self._place_http is None:
+                self._place_http = httpx.Client(timeout=10, trust_env=False)
+            if self.delivery_reporting_status in {"unknown", "unavailable"}:
+                identity = self._place_http.get(f"{self.host_service_url}/identity", headers=self._headers())
+                identity.raise_for_status()
+                self._identity(identity.json())
+            if not self.places_version:
+                return ""
+            response = self._place_http.get(f"{self.host_service_url}/presence/place", headers=self._headers(),
+                                            params={"provider": "email", "account_id": account_id,
+                                                    "conversation_id": conversation_id})
+            response.raise_for_status()
+            place = response.json()
+            state = place.get("state")
+            return "" if state == "active" else f"Held: {place.get('label') or 'Email'} is {state or 'unavailable'}"
+        except (HostContractError, httpx.HTTPError, ValueError, AttributeError):
+            return "Held: place policy unavailable"
     def _headers(self): return {"X-Skill-Token": self._token.use_in_request(), "Content-Type": "application/json"}
     async def discover_delivery_support(self):
         if self.delivery_reporting_status in {"supported", "unsupported"}:
@@ -132,8 +164,7 @@ class LoopbackPresenceHostAdapter:
         try:
             response = await self._http.get(f"{self.host_service_url}/identity", headers=self._headers(), timeout=10)
             payload = await self._json(response)
-            self.delivery_reporting_version = int(payload.get("presence_delivery_version") == 1)
-            self.delivery_reporting_status = "supported" if self.delivery_reporting_version else "unsupported"
+            self._identity(payload)
         except (HostContractError, httpx.HTTPError, TimeoutError, asyncio.TimeoutError):
             self.delivery_reporting_version = 0
             self.delivery_reporting_status = "unavailable"
@@ -163,9 +194,10 @@ class LoopbackPresenceHostAdapter:
         if outcome not in _OUTCOMES: raise HostContractError(f"Unknown presence outcome: {outcome or '<empty>'}")
         return outcome
     async def submit(self, item: InboxItem) -> str:
-        if not self.available: raise HostAdapterUnavailable("Presence binding or Host Service token is not configured")
         mode = await self.discover_delivery_support()
-        request = {"binding_id": self.binding_id, "event": email_presence_event(item, account_id=os.environ.get("EMAIL_USER", ""))}
+        if not self.available: raise HostAdapterUnavailable("Place or legacy binding is not configured")
+        request = {**({"binding_id": self.binding_id} if not self.places_version else {}),
+                   "event": email_presence_event(item, account_id=os.environ.get("EMAIL_USER", ""), places=bool(self.places_version))}
         if item.staged_files:
             request["staged_files"] = [str(file.get("path") or "") for file in item.staged_files if str(file.get("path") or "").strip()]
         if mode:
@@ -189,7 +221,8 @@ class LoopbackPresenceHostAdapter:
         if outcome=="deferred" and not data["work_ref"]: raise HostContractError("Deferred presence turn omitted work_ref")
         return _ref(outcome, data) if outcome=="deferred" else _ref("completed", data)
     async def _poll(self, work_ref):
-        response=await self._http.get(f"{self.host_service_url}/presence/work/{quote(work_ref,safe='')}",headers=self._headers(),params={"binding_id":self.binding_id},timeout=35)
+        await self.discover_delivery_support()
+        response=await self._http.get(f"{self.host_service_url}/presence/work/{quote(work_ref,safe='')}",headers=self._headers(),params={} if self.places_version else {"binding_id":self.binding_id},timeout=35)
         payload=await self._json(response); state=str(payload.get("status") or "").lower()
         if state in _OBSERVING: return payload
         if state not in {"completed","failed","cancelled"}: raise HostContractError(f"Unknown presence work status: {state or '<empty>'}")
@@ -257,6 +290,7 @@ class LoopbackPresenceHostAdapter:
         return HostDelivery((text,) if text.strip() else (), int(receipt.get("delivery_reporting_version") == 1), str(receipt.get("turn_ref") or ""))
     async def aclose(self):
         if self._owns: await self._http.aclose()
+        if self._place_http is not None: self._place_http.close()
 
 def create_host_adapter(binding_id: str, *, http_client=None):
     return LoopbackPresenceHostAdapter(binding_id,host_service_url=os.environ.get("HOST_SERVICE_URL","http://127.0.0.1:8767"),skill_token=os.environ.get("HOST_SERVICE_TOKEN",""),http_client=http_client)

@@ -39,10 +39,20 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:  # the host loads plugin.py as a package: siblings are relative imports
+    from . import quota_analytics as qa
+    from . import quota_chip
+    from . import quota_context
     from . import quota_history
+    from . import quota_resources as qr
+    from . import quota_scope
     from . import quota_summary as qs
 except ImportError:  # imported directly from the skill directory (tests)
+    import quota_analytics as qa  # type: ignore[no-redef]
+    import quota_chip  # type: ignore[no-redef]
+    import quota_context  # type: ignore[no-redef]
     import quota_history  # type: ignore[no-redef]
+    import quota_resources as qr  # type: ignore[no-redef]
+    import quota_scope  # type: ignore[no-redef]
     import quota_summary as qs  # type: ignore[no-redef]
 
 STATUS_TIMEOUT_SEC = 25.0
@@ -112,7 +122,7 @@ READ_STATES = (READ_OK, "not_read", "failed")
 FACET_KEYS: Dict[str, Tuple[str, ...]] = {
     "catalog": ("harnesses",),
     "accounts": ("profiles", "unified_accounts"),
-    "quota": ("quota", "quota_absences"),
+    "quota": ("quota", "quota_absences", "resources", "availability_scope"),
 }
 
 
@@ -421,8 +431,9 @@ def _constraint_view(constraint: Dict[str, Any], at_limit: bool = False,
     ratio, problem = qs.ratio_of(constraint.get("used_ratio"))
     models = constraint.get("applies_to_models")
     scoped = [str(m) for m in models if m] if isinstance(models, list) else []
+    desc = quota_scope.scope_of(constraint)
     if scope is None:
-        scope = qs._scope_hash(qs._models_of(models))
+        scope = desc.token
     return {
         "id": str(constraint.get("id") or ""),
         "label": str(constraint.get("label") or constraint.get("id") or "constraint"),
@@ -433,6 +444,11 @@ def _constraint_view(constraint: Dict[str, Any], at_limit: bool = False,
         "resets_at": str(constraint.get("resets_at") or ""),
         "cooldown_until": str(constraint.get("cooldown_until") or ""),
         "scoped_models": scoped,
+        # Family prefixes the window is tied to, and every scope field exactly
+        # as sent (absent, empty and false stay apart): a prefix-only window
+        # is model-scoped, never a shared limit.
+        "scoped_prefixes": list(desc.prefixes),
+        "scope_fields": desc.describe(),
         # Display names can be shortened; the reserve's identity cannot.
         "scope_key": scope,
         "window_seconds": constraint.get("window_seconds"),
@@ -457,7 +473,9 @@ def _cooldown_view(cooldown: qs.Cooldown, now: float) -> Dict[str, Any]:
     else:
         until, note = "", "unreadable" if cooldown.until_text else "not_reported"
     return {
-        "scope": "models" if cooldown.models else "account",
+        # A cooldown tied only to family prefixes still holds models, not the
+        # whole account: its scope id says so where no name is listed.
+        "scope": "models" if cooldown.models or cooldown.scope != "-" else "account",
         "scope_key": cooldown.scope,
         "models": list(cooldown.models),
         "models_omitted": cooldown.models_omitted,
@@ -836,7 +854,7 @@ def verification_view(
     verification: str,
     source: str,
     accounts_read: str,
-    signed_in: bool,
+    signed_in: Optional[bool],
 ) -> Dict[str, str]:
     """Honest verification wording; degraded reads can never look green."""
     verification = str(verification or "").strip()
@@ -976,7 +994,8 @@ def _native_account(
     attributed: Optional[qs.Attributed] = None,
 ) -> Dict[str, Any]:
     identity = row.get("identity") or {}
-    signed_in = bool(row.get("native_login_detected"))
+    detected = row.get("native_login_detected")
+    signed_in = detected if isinstance(detected, bool) else None
     return {
         "key": f"{hid}:native",
         "kind": "native",
@@ -1016,7 +1035,7 @@ def _profile_account(
     verification = str(status.get("verification") or "")
     verification_source = str(status.get("verification_source") or "")
     availability = str(status.get("availability") or "")
-    signed_in = verification == "passed" or availability == "available"
+    signed_in = qs.sign_in_of(verification, availability)
     return {
         "key": f"{hid}:{profile_id}",
         "kind": "profile",
@@ -1026,7 +1045,7 @@ def _profile_account(
         "email": str(identity.get("email") or ""),
         "plan": str(identity.get("plan") or status.get("plan_label") or ""),
         "enabled": bool(profile.get("enabled")),
-        "signed_in": bool(signed_in),
+        "signed_in": signed_in,
         "next_up": is_next_up(verdict, "profile", profile_id),
         "last_verified_at": str(status.get("last_verified_at") or ""),
         "verification_state": verification,
@@ -1040,7 +1059,7 @@ def _profile_account(
         "availability": availability,
         "verification": verification_view(
             verification, verification_source,
-            accounts_read, bool(signed_in),
+            accounts_read, signed_in,
         ),
         "quota": quota_for(snapshots, hid, profile_id, quota_read, absences, now=now,
                            attributed=attributed),
@@ -1119,6 +1138,15 @@ def build_view(payload: Optional[Dict[str, Any]], transport_error: str,
     # quota read or preventing a healthy screen from becoming the fallback.
     required = tuple(f for f in FACETS if not (
         f == "catalog" and passive["mode"] == "quota" and states.get(f) == "not_read"))
+    groups = build_groups(payload, group_states, now) if isinstance(payload, dict) else []
+    kept = "quota" in (cached or {})
+    for group in groups:
+        for account in group["accounts"]:
+            # Resource facets, exactly as the engine dated them (None: this
+            # answer carries no row for the account — nothing is invented).
+            account["resources"] = (qr.account_resources(payload, group["harness_id"],
+                                                         account["subject_id"], kept, now)
+                                    if account.get("subject_id") else None)
     view: Dict[str, Any] = {
         "ok": bool(payload) and not transport_error,
         "transport_error": transport_error,
@@ -1132,7 +1160,8 @@ def build_view(payload: Optional[Dict[str, Any]], transport_error: str,
             "self_started": bool(daemon.get("self_started")),
             "last_error": str(runtime.get("last_error") or daemon.get("last_error") or ""),
         },
-        "groups": build_groups(payload, group_states, now) if isinstance(payload, dict) else [],
+        "groups": groups,
+        "availability_scope": qr.scope_echo(payload),
         # Facets shown from the last read that answered them: facet -> when.
         "cached": {facet: qs.iso(at) for facet, at in sorted((cached or {}).items())},
         # Every requested facet read now and nothing failed on the way: the
@@ -1190,6 +1219,69 @@ def prefs_order(raw: Any) -> Optional[Tuple[str, int]]:
     if isinstance(seq, bool) or not isinstance(seq, int) or seq < 1:
         return None
     return frame, seq
+
+
+# Which rows the reader hides from the widget — display only. The hidden set
+# never removes a window from the reserve, the account view, the history, the
+# tool or the context snapshot: it only decides what this widget draws, and
+# it is reversible (an empty set shows everything). A separate file and route
+# keep the legacy prefs file exactly as it was.
+DISPLAY_FILE = "display.json"
+MAX_HIDDEN = 64
+MAX_HIDDEN_KEY = 240
+
+
+def clean_display(raw: Any) -> Dict[str, Any]:
+    hidden: List[str] = []
+    if isinstance(raw, dict) and isinstance(raw.get("hidden"), list):
+        for item in reversed(raw["hidden"]):
+            if isinstance(item, str) and 0 < len(item) <= MAX_HIDDEN_KEY and item not in hidden:
+                hidden.append(item)
+            if len(hidden) >= MAX_HIDDEN:
+                break
+    return {"hidden": list(reversed(hidden))}
+
+
+def _display_path(api: Any) -> Optional[Path]:
+    try:
+        return Path(api.get_state_dir()) / DISPLAY_FILE
+    except Exception:
+        return None
+
+
+def read_display(api: Any) -> Dict[str, Any]:
+    path = _display_path(api)
+    if path is None or not path.is_file():
+        return clean_display(None)
+    try:
+        return clean_display(json.loads(path.read_text(encoding="utf-8")))
+    except Exception:
+        return clean_display(None)
+
+
+def write_display(api: Any, raw: Any) -> Tuple[Dict[str, Any], str]:
+    """Returns (what is now stored, error), as write_prefs does: one temporary
+    file of its own moved over the stored one."""
+    display = clean_display(raw)
+    path = _display_path(api)
+    if path is None:
+        return display, "no state directory"
+    tmp: Optional[Path] = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+        tmp = Path(name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(display))
+        os.replace(tmp, path)
+    except Exception as exc:
+        try:
+            if tmp is not None:
+                tmp.unlink()
+        except Exception:
+            pass
+        return display, f"{type(exc).__name__}: {exc}"
+    return display, ""
 
 
 def _prefs_path(api: Any) -> Optional[Path]:
@@ -1360,6 +1452,11 @@ def reserve_view(
     cached: Optional[Dict[str, float]] = None,
     reads: Optional[Dict[str, str]] = None,
     name_accounts: bool = False,
+    analytics: bool = False,
+    model: Optional[str] = None,
+    kind: str = "text",
+    families: bool = False,
+    echo: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The one reserve calculation the widget and the tool share. History is
     read, never written, here. ``cached``/``reads``: see build_view.
@@ -1370,8 +1467,17 @@ def reserve_view(
              chart_for: Optional[qs.GroupCalc]) -> qs.HistoryView:
         if store is None:
             return qs.HistoryView(state="unavailable", error="no state directory")
+        def requests(salt: str) -> Dict[Tuple[str, str], float]:
+            wanted = qs.history_requests(groups, salt, now, chart_for, horizon, norm=norm)
+            if analytics and chart_for is not None:
+                qa.extend_requests(wanted, groups, chart_for, salt, now, model, kind)
+            if families:  # the tool and the snapshot: each family's figures now
+                for hid in sorted({g.harness for g in groups}):
+                    qa.extend_requests(wanted, groups, qs.default_group(groups, hid), salt, now)
+            return wanted
+
         return store.read(
-            lambda salt: qs.history_requests(groups, salt, now, chart_for, horizon, norm=norm), now,
+            requests, now,
             latest=lambda salt: qs.latest_requests(norm, groups, salt),
             roster=lambda salt: qs.roster_requests(norm, salt),
             chart_series=(chart_for.key, now - qs.HORIZONS.get(horizon, qs.HORIZONS["24h"]))
@@ -1400,6 +1506,17 @@ def reserve_view(
     }
     if chart:
         out["chart"] = qs.build_chart(state, chart_calc.key if chart_calc else "", harness, horizon)
+        if analytics and out["chart"] is not None:
+            out["chart"]["analytics"] = qa.build(
+                state, qs.pick_chart_group(state.groups, chart_calc.key if chart_calc else "", harness),
+                horizon, model=model, kind=kind, echo=echo)
+    if families:
+        found: Dict[str, Any] = {}
+        for hid in sorted({g.harness for g in state.groups}):
+            built = qa.build(state, qs.default_group(state.groups, hid), "24h", light=True, echo=echo)
+            if built is not None:
+                found[hid] = built
+        out["analytics"] = found
     return out
 
 
@@ -1562,6 +1679,13 @@ def make_collector(
                 # released after that, and settlement is signalled after this.
                 persist_sweep(store, payload, error, read_at, control=run)
                 unreadable = ""
+                run.check()
+                try:
+                    publish_snapshot(api, store, payload, error, read_at, latest, control=run)
+                except quota_history.HistoryStopped:
+                    raise
+                except Exception as exc:  # the snapshot is optional: the history is already kept
+                    api.log("warning", f"claudexor context snapshot not written: {type(exc).__name__}")
             finally:
                 release(fd)
         finally:
@@ -1672,6 +1796,84 @@ TOOL_SCHEMA: Dict[str, Any] = {
 }
 
 
+def compact_analytics(found: Dict[str, Any], wanted: str = "") -> Dict[str, Any]:
+    """The model tool's reading of the same analytics the widget draws: per
+    family the same-account figure now, whose it covers and what is left
+    out, the conditional hours, the calibration period — every number from
+    quota_analytics, none computed again here."""
+    out: Dict[str, Any] = {}
+    for hid, built in sorted(found.items()):
+        if wanted and hid != wanted:
+            continue
+        joint = (built or {}).get("joint") or {}
+        if not joint.get("available"):
+            out[hid] = {"available": False, "reason": joint.get("reason", "")}
+            continue
+        cal = joint.get("calibration") or {}
+        out[hid] = {
+            "available": True, "unit": f"{qs.duration_words(joint['unit']['window_seconds'])} window",
+            "unit_window_seconds": joint["unit"]["window_seconds"],
+            "scope": {k: v for k, v in (built.get("scope") or {}).items()
+                      if k in ("model", "request_kind", "basis", "echo", "unreadable_windows")},
+            "same_account_capacity": joint["figure"], "accounts_counted": joint["known"],
+            "accounts": joint["accounts"], "left_out": joint["unknown_reasons"],
+            "conditional_account_hours": (joint["hours"] or {}).get("value"),
+            "hours_known_accounts": (joint["hours"] or {}).get("known"),
+            "hours_unknown_accounts": (joint["hours"] or {}).get("unknown"),
+            "hours_pace_basis": (joint["hours"] or {}).get("pace_basis"),
+            "hours_pace_lookback_seconds": (joint["hours"] or {}).get("pace_lookback_seconds"),
+            "calibrated_accounts": cal.get("calibrated"),
+            "calibration_common_seconds_min": cal.get("common_seconds_min"),
+            "calibration_common_seconds_max": cal.get("common_seconds_max"),
+            "windows": [w["label"] for w in joint["windows"]],
+        }
+    return out
+
+
+def answer_of(store: Optional[quota_history.HistoryStore], effective: Optional[Dict[str, Any]],
+              cached: Optional[Dict[str, float]], payload: Optional[Dict[str, Any]],
+              status_read_at: Optional[float], moment: float, wanted: str = "",
+              detail: bool = False) -> Dict[str, Any]:
+    """The model tool's answer for one status read — and, byte for byte, the
+    source the context snapshot's text is built from, so the two cannot
+    disagree."""
+    result = reserve_view(store, effective, status_read_at, moment, chart=False, cached=cached,
+                          reads=qs.facet_reads(payload), families=True, echo=qr.scope_echo(effective))
+    answer = qs.compact(result["summary"], wanted, detail)
+    answer["joint"] = compact_analytics(result.get("analytics") or {}, wanted)
+    kept = "quota" in (cached or {})
+    answer["availability_scope"] = qr.scope_echo(effective)
+    answer["resources"] = {hid: row for hid, row in qr.family_resources(effective, kept, moment).items()
+                           if not wanted or hid == wanted}
+    resets = {hid: qr.family_resets(effective, hid, kept, moment)
+              for hid in sorted({str(g["key"]).split("|")[0] for g in answer["groups"]}
+                                | set(answer["resources"]))
+              if not wanted or hid == wanted}
+    answer["manual_reset_offers"] = {h: r for h, r in resets.items()
+                                     if r["accounts_current"] or r["accounts_last_known"]}
+    return answer
+
+
+def publish_snapshot(api: Any, store: Optional[quota_history.HistoryStore],
+                     payload: Optional[Dict[str, Any]], error: str, read_at: float,
+                     latest: LatestRead, *, control=None) -> str:
+    """After a successful sweep the collector offers the host one complete
+    snapshot (quota_context). A failed or unreadable sweep writes nothing: the
+    last file simply expires and the host says so once — no stale text is
+    ever refreshed as a measurement."""
+    if error or not isinstance(payload, dict) or qs.facet_reads(payload)["quota"] != "ok":
+        return "skipped"
+    effective, cached = latest.effective(payload)
+    answer = answer_of(store, effective, cached, payload, read_at, read_at)
+    if control is not None:
+        control.check()
+    text = quota_context.snapshot_text(answer)
+    reset = quota_context.earliest_reset(answer)
+    return quota_context.publish(Path(api.get_state_dir()), text, read_at,
+                                 qs.parse_instant(reset) if reset else None, qs.iso_exact, qs.parse_instant,
+                                 control=control)
+
+
 def tool_answer(
     api: Any,
     latest: LatestRead,
@@ -1696,9 +1898,8 @@ def tool_answer(
         latest.put(payload, error, read_at, epoch)
     moment = time.time() if now is None else now
     effective, cached = latest.effective(payload)
-    result = reserve_view(history_store(api), effective, None if error else read_at, moment,
-                          chart=False, cached=cached, reads=qs.facet_reads(payload))
-    answer = qs.compact(result["summary"], wanted, detail is True)
+    answer = answer_of(history_store(api), effective, cached, payload, None if error else read_at,
+                       moment, wanted, detail is True)
     answer["passive_read"] = passive_read_info(payload, error)
     if len(answer["groups"]) > TOOL_MAX_GROUPS:
         answer["groups_omitted"] = len(answer["groups"]) - TOOL_MAX_GROUPS
@@ -1744,6 +1945,8 @@ def register(api: Any) -> None:
         effective, cached = latest.effective(payload)
         reads = facet_states(payload)
         view = build_view(effective, transport_error, moment, reads=reads, cached=cached)
+        # Which rows the reader hides (display only; see DISPLAY_FILE).
+        view["display"] = read_display(api)
         # Legacy since 0.8.0: the display choices (row detail, model filter,
         # folding) belonged to the account list the 0.7 widget drew. This
         # widget draws nothing from them and saves none; they are still sent,
@@ -1759,6 +1962,12 @@ def register(api: Any) -> None:
                 # the chart and its longer history read are not computed.
                 chart=_query(request, "chart") != "0",
                 cached=cached, reads=reads, name_accounts=True,
+                # The joint analytics read more history; asked for only by a
+                # widget that draws them (joint=1), never by the poll alone.
+                analytics=_query(request, "joint") == "1",
+                model=_query(request, "model") or None,
+                kind=_query(request, "kind") if _query(request, "kind") in qr.REQUEST_KINDS else "text",
+                echo=qr.scope_echo(effective),
             )
         except Exception as exc:
             api.log("error", f"claudexor reserve summary failed: {type(exc).__name__}: {exc}")
@@ -1817,6 +2026,39 @@ def register(api: Any) -> None:
             api.log("error", f"claudexor prefs write failed: {error}")
         return {"prefs": prefs, "error": error}
 
+    display_lock = threading.Lock()
+    display_arrivals = itertools.count(1)
+    display_stored = 0
+    display_newest: Dict[str, int] = {}
+
+    def save_display(arrival: int, payload: Any) -> Tuple[Dict[str, Any], str]:
+        nonlocal display_stored
+        with display_lock:
+            if arrival < display_stored:
+                return read_display(api), ""
+            display_stored = arrival
+            return write_display(api, payload)
+
+    async def display_route(request: Any) -> Dict[str, Any]:
+        try:
+            payload = await request.json()
+        except Exception:
+            return {"display": read_display(api), "error": "request body was not JSON"}
+        loop = asyncio.get_running_loop()
+        order = prefs_order(payload)
+        if order is not None:
+            frame, seq = order
+            if seq <= display_newest.get(frame, 0):
+                return {"display": await loop.run_in_executor(None, read_display, api), "error": ""}
+            display_newest.pop(frame, None)
+            display_newest[frame] = seq
+            while len(display_newest) > MAX_PREFS_FRAMES:
+                display_newest.pop(next(iter(display_newest)))
+        display, error = await loop.run_in_executor(None, save_display, next(display_arrivals), payload)
+        if error:
+            api.log("error", f"claudexor display write failed: {error}")
+        return {"display": display, "error": error}
+
     def refresh_route(_request: Any) -> Dict[str, Any]:
         payload, transport_error, status = _refresh_quota(_server_port(api))
         # Whatever the outcome (the host may still finish a request that
@@ -1865,9 +2107,14 @@ def register(api: Any) -> None:
             answer = {"error": f"quota summary failed ({type(exc).__name__}); nothing is claimed"}
         return json.dumps(answer, separators=(",", ":"))
 
+    def chip_route(_request: Any) -> Dict[str, Any]:
+        return quota_chip.chip(quotas_route({"query_params": {"reuse": "1", "chart": "0"}}))
+
+    api.register_route("chip", chip_route, methods=("GET",))
     api.register_route("quotas", quotas_route, methods=("GET",))
     api.register_route("refresh", refresh_route, methods=("POST",))
     api.register_route("prefs", prefs_route, methods=("POST",))
+    api.register_route("display", display_route, methods=("POST",))
     api.register_tool(
         "quota_summary",
         quota_summary_tool,

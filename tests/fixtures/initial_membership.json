@@ -1,0 +1,302 @@
+{
+  "2gis": {
+    "category": [
+      "city"
+    ],
+    "owner": "kuznetsoffandrey"
+  },
+  "a2a": {
+    "category": [
+      "messaging"
+    ],
+    "owner": "razzant"
+  },
+  "adaptive-code-review": {
+    "category": [
+      "writing"
+    ],
+    "owner": "ouroboros-agent"
+  },
+  "agentrq-bridge": {
+    "category": [
+      "messaging"
+    ],
+    "owner": "kuznetsoffandrey"
+  },
+  "anime_studio": {
+    "category": [
+      "media"
+    ],
+    "owner": "razzant"
+  },
+  "anti-slop": {
+    "category": [
+      "writing"
+    ],
+    "owner": "ouroboros-agent"
+  },
+  "backlog_manager": {
+    "category": [
+      "planning"
+    ],
+    "owner": "razzant"
+  },
+  "bank-ops-director": {
+    "category": [
+      "business"
+    ],
+    "owner": "Mikhail2018"
+  },
+  "cache_efficiency_snapshot": {
+    "category": [
+      "ouroboros"
+    ],
+    "owner": "razzant"
+  },
+  "calendar": {
+    "category": [
+      "planning"
+    ],
+    "owner": "kazzand"
+  },
+  "check-in": {
+    "category": [
+      "planning"
+    ],
+    "owner": "ouroboros-agent"
+  },
+  "classic-doom": {
+    "category": [
+      "games"
+    ],
+    "owner": "razzant"
+  },
+  "claudexor_quotas": {
+    "category": [
+      "ouroboros"
+    ],
+    "owner": "razzant"
+  },
+  "confluence": {
+    "category": [
+      "documents"
+    ],
+    "owner": "razzant"
+  },
+  "context-lens": {
+    "category": [
+      "ouroboros"
+    ],
+    "owner": "razzant"
+  },
+  "doctor-booking-v4": {
+    "category": [
+      "health"
+    ],
+    "owner": "komsikov"
+  },
+  "duckduckgo": {
+    "category": [
+      "search"
+    ],
+    "owner": "razzant"
+  },
+  "email": {
+    "category": [
+      "messaging"
+    ],
+    "owner": "razzant"
+  },
+  "email-presence": {
+    "category": [
+      "messaging"
+    ],
+    "owner": "razzant"
+  },
+  "gdelt-mcp": {
+    "category": [
+      "search"
+    ],
+    "owner": "kuznetsoffandrey"
+  },
+  "gigasearch": {
+    "category": [
+      "search"
+    ],
+    "owner": "komsikov"
+  },
+  "google-workspace": {
+    "category": [
+      "documents"
+    ],
+    "owner": "razzant"
+  },
+  "happy_farm": {
+    "category": [
+      "games"
+    ],
+    "owner": "razzant"
+  },
+  "kandinsky-skill": {
+    "category": [
+      "media"
+    ],
+    "owner": "DiscordantST"
+  },
+  "keenable": {
+    "category": [
+      "search"
+    ],
+    "owner": "razzant"
+  },
+  "medical-lab-analyzer": {
+    "category": [
+      "health"
+    ],
+    "owner": "komsikov"
+  },
+  "meeting-brief": {
+    "category": [
+      "planning"
+    ],
+    "owner": "kazzand"
+  },
+  "memory-atlas": {
+    "category": [
+      "ouroboros"
+    ],
+    "owner": "razzant"
+  },
+  "music_gen": {
+    "category": [
+      "media"
+    ],
+    "owner": "razzant"
+  },
+  "nanobanana": {
+    "category": [
+      "media"
+    ],
+    "owner": "razzant"
+  },
+  "pdf_tools": {
+    "category": [
+      "documents"
+    ],
+    "owner": "kazzand"
+  },
+  "perplexity": {
+    "category": [
+      "search"
+    ],
+    "owner": "razzant"
+  },
+  "restaurant_booking": {
+    "category": [
+      "city"
+    ],
+    "owner": "seva8756"
+  },
+  "roadmap_analyst": {
+    "category": [
+      "planning"
+    ],
+    "owner": "bitcomtlh"
+  },
+  "sat3dgen": {
+    "category": [
+      "media"
+    ],
+    "owner": "kuznetsoffandrey"
+  },
+  "sber-ring": {
+    "category": [
+      "health"
+    ],
+    "owner": "kuznetsoffandrey"
+  },
+  "sber_operational_director": {
+    "category": [
+      "business"
+    ],
+    "owner": "andreyprokhorof"
+  },
+  "scholion": {
+    "category": [
+      "health"
+    ],
+    "owner": "l1nkberry"
+  },
+  "slack-bridge": {
+    "category": [
+      "messaging"
+    ],
+    "owner": "ouroboros-agent"
+  },
+  "smart_lists": {
+    "category": [
+      "planning"
+    ],
+    "owner": "kazzand"
+  },
+  "table_tools": {
+    "category": [
+      "documents"
+    ],
+    "owner": "kazzand"
+  },
+  "telegram-bot": {
+    "category": [
+      "messaging"
+    ],
+    "owner": "ouroboros-agent"
+  },
+  "token-usage": {
+    "category": [
+      "ouroboros"
+    ],
+    "owner": "razzant"
+  },
+  "video_gen": {
+    "category": [
+      "media"
+    ],
+    "owner": "razzant"
+  },
+  "video_studio": {
+    "category": [
+      "media"
+    ],
+    "owner": "razzant"
+  },
+  "vkusvill": {
+    "category": [
+      "city"
+    ],
+    "owner": "kuznetsoffandrey"
+  },
+  "weather": {
+    "category": [
+      "city"
+    ],
+    "owner": "razzant"
+  },
+  "whoop-health": {
+    "category": [
+      "health"
+    ],
+    "owner": "kuznetsoffandrey"
+  },
+  "word_tools": {
+    "category": [
+      "documents"
+    ],
+    "owner": "kazzand"
+  },
+  "yylo-tasks": {
+    "category": [
+      "planning"
+    ],
+    "owner": "InsightFactoryAPP"
+  }
+}

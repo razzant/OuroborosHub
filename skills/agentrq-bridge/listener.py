@@ -4,7 +4,7 @@
 Holds a persistent SSE connection to the AgentRQ MCP Streamable HTTP
 endpoint and forwards real-time workspace events (new tasks, human
 replies, permission verdicts) into Ouroboros via the Host Service
-``/chat/inject`` API.
+``/presence/turn`` API.
 
 Environment variables (injected by the host companion supervisor):
     AGENTRQ_MCP_URL   — MCP Streamable HTTP base URL (with ?token=... or separate)
@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import threading
 import sys
 import time
 import urllib.error
@@ -43,42 +44,8 @@ RECONNECT_DELAY = 5        # seconds between reconnection attempts
 HEARTBEAT_TIMEOUT = 120    # consider connection dead after N seconds of silence
 MAX_BACKOFF = 60           # max reconnect delay
 
-# Rate limiter: max RATE_LIMIT_MAX injections per RATE_LIMIT_WINDOW seconds
-RATE_LIMIT_MAX = 20
-RATE_LIMIT_WINDOW = 60     # 1 minute
-
 _running = True
-_inject_timestamps: list = []  # monotonic timestamps of recent injections
-
-# ── Deduplication cache ─────────────────────────────────────────────
-# Prevents the same notification from being injected multiple times
-# (AgentRQ may re-push events on SSE reconnect).
-_DEDUP_TTL = 300  # 5 minutes
-_DEDUP_MAX = 200  # max entries before forced prune
-_seen_events: dict[str, float] = {}  # key → monotonic timestamp
-
-
-def _dedup_key(msg_type: str, task_id: str, extra: str = "") -> str:
-    """Build a dedup key from event type + task id + optional extra."""
-    return f"{msg_type}:{task_id}:{extra}"
-
-
-def _is_duplicate(key: str) -> bool:
-    """Return True if this event was already seen within TTL window."""
-    now = time.monotonic()
-    # Prune expired entries first (always, not just on overflow)
-    cutoff = now - _DEDUP_TTL
-    expired = [k for k, t in _seen_events.items() if t < cutoff]
-    for k in expired:
-        del _seen_events[k]
-    # Enforce hard size cap: evict oldest entries if still over limit
-    while len(_seen_events) > _DEDUP_MAX:
-        oldest_key = min(_seen_events, key=_seen_events.get)
-        del _seen_events[oldest_key]
-    if key in _seen_events and (now - _seen_events[key]) < _DEDUP_TTL:
-        return True
-    _seen_events[key] = now
-    return False
+_inbox = None
 
 
 def _sigterm_handler(signum, frame):
@@ -92,57 +59,21 @@ signal.signal(signal.SIGTERM, _sigterm_handler)
 
 # ── Host Service helpers ────────────────────────────────────────────
 
-def _rate_limit_ok() -> bool:
-    """Token-bucket rate limiter: allow up to RATE_LIMIT_MAX calls per window."""
-    now = time.monotonic()
-    # Prune old timestamps outside the window
-    cutoff = now - RATE_LIMIT_WINDOW
-    while _inject_timestamps and _inject_timestamps[0] < cutoff:
-        _inject_timestamps.pop(0)
-    if len(_inject_timestamps) >= RATE_LIMIT_MAX:
-        return False
-    _inject_timestamps.append(now)
-    return True
+def _presence_inbox():
+    global _inbox
+    if _inbox is None:
+        from presence import PresenceInbox
+        from plugin import AgentRQClient
+        client = AgentRQClient(MCP_URL, AUTH_TOKEN)
+        _inbox = PresenceInbox(os.environ.get("OUROBOROS_SKILL_STATE_DIR") or ".", HOST_BASE, SKILL_TOKEN,
+            lambda task, text: client.call_tool("reply", {"chatId": task, "text": text}))
+    return _inbox
 
 
-def _sanitize_text(text: str) -> str:
-    """Strip leading slash commands and control chars as defense-in-depth."""
-    # Host Service also rejects slash commands, but local guard is required
-    cleaned = text.lstrip()
-    if cleaned.startswith("/"):
-        cleaned = "[blocked slash prefix] " + cleaned[1:]
-    return cleaned
-
-
-def inject_chat(text: str) -> bool:
-    """Push a message into Ouroboros chat via Host Service /chat/inject."""
-    if not SKILL_TOKEN:
-        print("[listener] SKILL_TOKEN missing, cannot inject", file=sys.stderr)
-        return False
-    if not _rate_limit_ok():
-        print("[listener] rate limit exceeded, dropping message", file=sys.stderr)
-        return False
-    text = _sanitize_text(text)
-    try:
-        payload = json.dumps({
-            "text": text,
-            "source": "agentrq-bridge",
-            "sender": "agentrq",
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            f"{HOST_BASE}/chat/inject",
-            data=payload,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "X-Skill-Token": SKILL_TOKEN,
-            },
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except Exception as exc:
-        print(f"[listener] inject_chat failed: {exc}", file=sys.stderr)
-        return False
+def _presence_loop(stop):
+    while not stop.is_set():
+        _presence_inbox().process_pending()
+        stop.wait(5)  # transport retry interval, independent of SSE delivery
 
 
 # ── SSE parser ──────────────────────────────────────────────────────
@@ -191,68 +122,9 @@ def _handle_event(event: dict) -> None:
 
 
 def _handle_notification_message(params: dict) -> None:
-    """Parse AgentRQ notification payload and inject into Ouroboros chat."""
-    # AgentRQ notifications embed a message object with type/content
-    msg_type = params.get("type", "")
-    content = params.get("content", "")
-    task_id = params.get("taskId", params.get("task_id", ""))
-    title = params.get("title", "")
-    assignee = params.get("assignee", "")
-    sender = params.get("sender", "")
-    text = params.get("text", content)
-
-    # ── Dedup gate: skip already-seen events within TTL window ──
-    dedup_extra = ""
-    if msg_type == "message.created":
-        # For messages, include a text prefix to distinguish different replies
-        dedup_extra = (text or "")[:80]
-    elif msg_type == "status.updated":
-        dedup_extra = params.get("status", "")
-    key = _dedup_key(msg_type or "bare", task_id, dedup_extra)
-    if _is_duplicate(key):
-        print(f"[listener] dedup: skipping duplicate {msg_type} task={task_id}", file=sys.stderr)
-        return
-
-    # Determine what happened
-    if msg_type == "task.created" and assignee == "agent":
-        inject_chat(
-            f"📋 [AgentRQ] [Task {task_id}] {title or 'Untitled'}\n"
-            f"{(text or '')[:500] if text else 'Используй rq_pull_next чтобы взять в работу.'}"
-        )
-    elif msg_type == "task.created" and assignee == "human":
-        inject_chat(
-            f"📋 [AgentRQ] Создана задача для человека: «{title or 'Untitled'}» "
-            f"(ID: {task_id})."
-        )
-    elif msg_type == "message.created" and sender == "human":
-        preview = (text or "")[:500]
-        inject_chat(
-            f"💬 [AgentRQ] Человек ответил в задаче {task_id}: {preview}"
-        )
-    elif msg_type == "status.updated":
-        status = params.get("status", "?")
-        inject_chat(
-            f"🔄 [AgentRQ] Задача {task_id} → статус: {status}"
-        )
-    elif msg_type == "permission.granted":
-        inject_chat(
-            f"✅ [AgentRQ] Разрешение выдано по задаче {task_id}"
-        )
-    elif msg_type == "permission.denied":
-        inject_chat(
-            f"❌ [AgentRQ] Разрешение отклонено по задаче {task_id}"
-        )
-    elif msg_type:
-        # Generic fallback for unknown but typed events
-        inject_chat(
-            f"🔔 [AgentRQ] Событие: {msg_type}"
-            + (f" (задача {task_id})" if task_id else "")
-            + (f": {(text or '')[:200]}" if text else "")
-        )
-    else:
-        # Bare text notification (e.g. channel push with plain content)
-        if text:
-            inject_chat(f"🔔 [AgentRQ] {text[:500]}")
+    """Capture full neutral provider facts before any Host submission."""
+    from presence import provider_event
+    _presence_inbox().enqueue(provider_event(params, MCP_URL))
 
 
 # ── Main SSE loop ───────────────────────────────────────────────────
@@ -293,7 +165,7 @@ def _mcp_initialize() -> str:
             "capabilities": {},
             "clientInfo": {
                 "name": "ouroboros-agentrq-listener",
-                "version": "0.1.0",
+                "version": "0.2.0",
             },
         },
     }).encode("utf-8")
@@ -422,13 +294,20 @@ def main():
 
     if not SKILL_TOKEN:
         print(
-            "[listener] SKILL_TOKEN not set — cannot inject into Ouroboros chat. "
-            "Ensure the skill has inject_chat permission granted.",
+            "[listener] SKILL_TOKEN not set — cannot submit place events. "
+            "Ensure the skill has presence permission granted.",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    listen_loop()
+    stop = threading.Event()
+    worker = threading.Thread(target=_presence_loop, args=(stop,), name="agentrq-presence", daemon=True)
+    worker.start()
+    try:
+        listen_loop()
+    finally:
+        stop.set()
+        worker.join(timeout=2)
 
 
 if __name__ == "__main__":

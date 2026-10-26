@@ -151,7 +151,7 @@ class TelegramClient:
                 # Keep ordinary messages while opting into provider facts that
                 # the parser can preserve. The bot must be an admin for reaction
                 # updates; Telegram simply omits them otherwise.
-                "allowed_updates": ["message", "edited_message", "message_reaction"],
+                "allowed_updates": ["message", "edited_message", "message_reaction", "channel_post", "edited_channel_post"],
             },
             timeout_sec=float(timeout_sec) + 15.0,
         )

@@ -1,0 +1,22 @@
+{
+  "category": [
+    "messaging"
+  ],
+  "connects": [
+    "AgentRQ"
+  ],
+  "description": "AgentRQ workspace connector for task places, human replies and agent requests, with durable Presence receipts and task delivery.",
+  "digest": "9a80709d1d5ea82d193d10fb577ee4c92d5d77f6249b76a7d5fb4c93f080651e",
+  "icon": "ui/icon.svg",
+  "name": "agentrq-bridge",
+  "owner": "kuznetsoffandrey",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/agentrq-bridge"
+  },
+  "type": "extension",
+  "version": "0.2.0",
+  "when_to_use": "User wants to interact with an AgentRQ workspace: pull tasks, create tasks for human review, reply to task threads, update task status, or request human permission for sensitive actions.",
+  "withdrawn": null
+}

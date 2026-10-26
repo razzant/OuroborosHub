@@ -1,7 +1,7 @@
 ---
 name: smart_lists
 description: "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders."
-version: 0.3.5
+version: 0.4.0
 type: extension
 runtime: python3
 entry: plugin.py
@@ -13,6 +13,16 @@ model_experience:
   what_model_sees: Nine small Smart Lists tools (add, read, update, complete, move, delete, group, select, store) returning compact JSON.
   token_effect: Small fixed schema cost per round while enabled; tool JSON stays below the host 15k cap with visible omitted counts. Read and subtree selection support offset pagination.
 timeout_sec: 30
+contributes:
+  - id: add_to_list
+    placement: composer.plus
+    label: Add to list
+    title: Save the draft as an item in Smart Lists
+    action: {verb: skill.request, route: add, with: draft, then: clear_draft}
+  - id: save_answer
+    placement: message.action
+    label: Save to list
+    action: {verb: skill.request, route: add, with: message}
 ui_tab:
   tab_id: lists
   title: Smart Lists
@@ -36,6 +46,15 @@ shows and edits the same data.
 Smart Lists does not import lists from another app. Each entry belongs to
 exactly one group; groups may be nested and moved. An import/sync layer and
 multi-list labels are deliberately outside this version.
+
+“+ → Add to list” saves the draft as one verbatim entry and clears it after
+success. “Save to list” on a reply saves that reply. Both use `POST add` with
+`{text, group?, request_id?}`; without a group they create/find top-level `Inbox`.
+The store must already be initialized through the normal skill lifecycle.
+Reusing a request id returns the original entry; callers should send a fresh id
+per intentional capture and reuse it for retries. Without an id each call is a
+new capture, including repeated text. Errors return HTTP 400 without clearing
+the draft.
 
 ## Model
 

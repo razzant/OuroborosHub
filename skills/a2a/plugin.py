@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 
 from .lib import client
@@ -109,7 +108,6 @@ def register(api):
                         {"name": "A2A_RESPONSE_TIMEOUT_SEC", "label": "Host response wait seconds (max 1740)", "type": "number", "placeholder": "600"},
                         {"name": "A2A_STREAM_DEADLINE_SEC", "label": "Total per-message deadline seconds", "type": "number", "placeholder": "3600"},
                         {"name": "A2A_HEARTBEAT_SEC", "label": "Working-status heartbeat seconds", "type": "number", "placeholder": "25"},
-                        {"name": "A2A_PROGRESS_ENRICH", "label": "Stream host progress notes (1/0)", "type": "text", "placeholder": "1"},
                         {"name": "A2A_SERVER_PASSWORD", "label": "Server password for non-loopback binds", "type": "password"},
                     ],
                     "submit_label": "Save A2A settings",
@@ -117,6 +115,5 @@ def register(api):
             ]
         },
     )
-    info = api.get_runtime_info()
     _token = api.get_skill_token()  # noqa: F841 -- retained for companion token provisioning
     api.register_companion_process("a2a_server")

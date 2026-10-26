@@ -1,0 +1,22 @@
+{
+  "category": [
+    "planning"
+  ],
+  "description": "Единый календарь владельца — свои локальные календари, Яндекс (CalDAV) и Google (личный OAuth-клиент); события, повторения, свободные окна, служебные события-распорядок, напоминания без модели, виджет День/Неделя.",
+  "digest": "51ef0ffb77bc0616b665e99c75e0615fb23686f9c0573dc5561b524cbda7feef",
+  "install_specs": [
+    "icalendar",
+    "python-dateutil",
+    "cryptography"
+  ],
+  "name": "calendar",
+  "owner": "kazzand",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/calendar"
+  },
+  "type": "extension",
+  "version": "1.0.13",
+  "withdrawn": null
+}

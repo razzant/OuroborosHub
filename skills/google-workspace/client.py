@@ -1,4 +1,4 @@
-"""Google Workspace REST Client for Sheets, Docs, and Drive APIs."""
+"""Google Workspace REST Client for Sheets, Docs, Drive, Slides and Calendar APIs."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from urllib.parse import quote, urlsplit, parse_qs
 import httpx
 
 try:
-    from .auth import get_access_token, get_user_access_token
+    from .auth import CALENDAR_SCOPES, get_access_token, get_user_access_token
 except ImportError:
-    from auth import get_access_token, get_user_access_token
+    from auth import CALENDAR_SCOPES, get_access_token, get_user_access_token
 
 SHEETS_BASE_URL = "https://sheets.googleapis.com/v4/spreadsheets"
 DOCS_BASE_URL = "https://docs.googleapis.com/v1/documents"
@@ -20,7 +20,13 @@ SERVICE_BASE_URLS = {
     "drive": "https://www.googleapis.com/drive/v3",
     "docs": "https://docs.googleapis.com/v1",
     "sheets": "https://sheets.googleapis.com/v4",
+    "slides": "https://slides.googleapis.com/v1",
+    "calendar": "https://www.googleapis.com/calendar/v3",
 }
+# Service-account scopes that differ from the base set. Slides accepts the
+# base Drive scope; Calendar needs its own. User OAuth tokens carry whatever
+# the user granted at consent and ignore this table.
+SERVICE_ACCOUNT_SCOPES = {"calendar": CALENDAR_SCOPES}
 
 DEFAULT_TIMEOUT = 30.0
 MAX_TEXT_EXPORT_CHARS = 100_000
@@ -87,7 +93,7 @@ def _file_context(item: Dict[str, Any], file_id: str) -> Dict[str, Any]:
 
 
 class GoogleWorkspaceClient:
-    """Client for Sheets, Docs and Drive using one explicitly selected identity."""
+    """Client for Sheets, Docs, Drive, Slides and Calendar using one explicitly selected identity."""
 
     def __init__(
         self,
@@ -121,7 +127,7 @@ class GoogleWorkspaceClient:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.close()
 
-    def _get_headers(self, force_refresh: bool = False) -> Dict[str, str]:
+    def _get_headers(self, force_refresh: bool = False, scopes: Optional[List[str]] = None) -> Dict[str, str]:
         if self.access_token or self.refresh_token or self.client_id or self.client_secret:
             token = get_user_access_token(
                 self.client_id, self.client_secret, self.refresh_token, self.client,
@@ -133,6 +139,7 @@ class GoogleWorkspaceClient:
                 http_client=self.client,
                 force_refresh=force_refresh,
                 subject=self.subject,
+                scopes=scopes,
             )
         return {
             "Authorization": f"Bearer {token}",
@@ -147,9 +154,10 @@ class GoogleWorkspaceClient:
         params: Optional[Dict[str, Any]] = None,
         json_body: Optional[Any] = None,
         content: Optional[bytes] = None,
+        scopes: Optional[List[str]] = None,
     ) -> httpx.Response:
         """Execute an HTTP request with automatic 401 token refresh retry."""
-        req_headers = self._get_headers(force_refresh=False)
+        req_headers = self._get_headers(force_refresh=False, scopes=scopes)
         if headers:
             req_headers.update(headers)
 
@@ -164,7 +172,7 @@ class GoogleWorkspaceClient:
 
         # Retry once on 401 Unauthorized with fresh token
         if resp.status_code == 401:
-            req_headers = self._get_headers(force_refresh=True)
+            req_headers = self._get_headers(force_refresh=True, scopes=scopes)
             if headers:
                 req_headers.update(headers)
             resp = self.client.request(
@@ -203,13 +211,13 @@ class GoogleWorkspaceClient:
         and resource permissions. Binary transfers use the artifact tools.
         """
         if service not in SERVICE_BASE_URLS:
-            raise ValueError("service must be drive, docs, or sheets.")
+            raise ValueError("service must be drive, docs, sheets, slides or calendar.")
         parsed = urlsplit(path)
         if not path.strip() or parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
             raise ValueError("path must be an API-relative path; supply query parameters in query.")
         response = self._request(
             method.upper(), f"{SERVICE_BASE_URLS[service]}/{path.lstrip('/')}",
-            params=query, json_body=json_body,
+            params=query, json_body=json_body, scopes=SERVICE_ACCOUNT_SCOPES.get(service),
         )
         result: Dict[str, Any] = {"status_code": response.status_code}
         if response.content:

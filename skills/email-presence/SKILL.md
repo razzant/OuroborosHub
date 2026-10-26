@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Bidirectional email Presence transport with IMAP polling, durable delivery, and RFC 5322 reply threading.
-version: 0.4.0
+version: 0.5.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -9,7 +9,7 @@ runtime: python3
 permissions: [net, read_settings, route, tool, widget, companion_process, presence]
 env_from_settings: [EMAIL_IMAP_HOST, EMAIL_IMAP_PORT, EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_USER, EMAIL_PASSWORD, EMAIL_DEFAULT_FOLDER, EMAIL_AUTH_MODE, EMAIL_OAUTH_ACCESS_TOKEN, EMAIL_OAUTH_REFRESH_TOKEN, EMAIL_OAUTH_CLIENT_ID, EMAIL_OAUTH_CLIENT_SECRET]
 dependencies: [httpx, starlette]
-when_to_use: User wants Ouroboros to receive and reply to email through a Presence binding, or send a proactive email.
+when_to_use: User wants Ouroboros to receive and reply to email through a place, or send a proactive email.
 timeout_sec: 120
 companion_processes:
   - name: email_poller
@@ -19,30 +19,56 @@ companion_processes:
     max_restarts: 10
 tools:
   - name: email_send
+    effect: message
+    target: [to,cc,bcc]
+    conversation: reply_to_message_id
     description: Queue a proactive email or threaded reply for durable delivery.
   - name: email_search
+    effect: read
+    target: []
     description: Search old and new mailbox messages using IMAP criteria.
   - name: email_read
+    effect: write
+    target: []
     description: Read a message by stable UID and UIDVALIDITY.
   - name: email_mailbox
+    effect: write
+    target: []
     description: List/create folders, copy/move messages and update flags.
   - name: email_draft
+    effect: write
+    target: [to,cc,bcc]
+    conversation: reply_to_message_id
     description: Save a text draft without sending.
   - name: email_receipt
+    effect: read
+    target: []
     description: Read durable delivery state and Message-ID.
   - name: email_test_connection
+    effect: read
+    target: []
     description: Check TLS and authentication without sending mail.
+icon: ui/icon.svg
+contributes:
+  - id: place
+    provides: place
+    label: Email
+    destination: vendor:Email
+    scope: account
+    source: {route: status, refresh_s: 15}
+    icon: ui/icon.svg
+    wakes: [any_message]
 ---
 
 # Email Presence
 
 This transport connects one IMAP mailbox and SMTP sender to an owner-created
-Presence binding. Incoming messages are persisted before they are submitted to
+Email place. Incoming messages are persisted before they are submitted to
 the loopback Presence endpoint. Replies use `Message-ID`, `In-Reply-To`, and
 `References` so normal mail clients keep one conversation thread.
 
 The transport carries provider facts only. Identity, memory, behavior, and
-capabilities are selected by the host Presence binding. The companion keeps its
+capabilities are selected by the host place. The companion keeps its
 SQLite inbox/outbox and cursor in the skill state directory, survives restarts,
 and retries transient provider or Host failures with bounded backoff.
 
@@ -58,9 +84,8 @@ and retries transient provider or Host failures with bounded backoff.
    `imap.gmail.com`, `smtp.gmail.com`, and the `https://mail.google.com/` scope.
    The skill does not start login, create accounts or configure domain delegation.
    A service-account JSON by itself is not a mailbox credential for this skill.
-3. Create a Presence binding for provider `email`, account `EMAIL_USER`, and a
-   selected RFC Message-ID conversation root or `*`; save its binding ID in the
-   skill settings. Enable the skill after grants and review.
+3. Connect an Email place with provider `email` and account `EMAIL_USER`.
+   Choose wakes and notes in Places. Enable the skill after grants and review.
 4. The first successful connection records UIDNEXT as the activation baseline;
    only subsequent arrivals enter Presence. Existing mail remains fully reachable
    through `email_search` and `email_read`. Disabling/re-enabling preserves the
@@ -103,14 +128,19 @@ the original `turn_ref` and any real child `work_ref` independently. It never
 resubmits that retained event. A child finishing does not erase the original
 uncertainty or stop observation of its late selected output.
 
-A work view with `status: unresolved` remains observable. A failed task may
-still carry a selected answer; lifecycle status alone does not suppress speech.
-Canonical selected
-outputs keep their source and delivery identity across repeated polls and
-restarts; a retained receipt itself is never sent as speech. A recorded cancellation can remain under
-observation: it proves neither a live executor nor absence of external effects,
-and observation starts no new generation. This does not
-claim exactly-once provider delivery after ambiguous network acceptance.
+A work view answers `pending` while the turn's executor can still change it and
+is terminal once nothing can. A failed task may still carry a selected answer;
+lifecycle status alone does not suppress speech. A turn that ended without a
+canonical answer reads `failed` (`cancelled` when recorded so) with
+`outcome: "silent"`: nothing further to deliver from that reference. Its reason
+facts (`code`, `recorded_status`, `uncertainty`) prove neither delivery nor the
+absence of external effects, and observation starts no new generation. A real
+child keeps its own reference in `child_work_ref`, which any view may name, and
+is observed on its own. Older Hosts may still answer `unresolved`, which
+stays observable. Canonical selected outputs keep their source and delivery
+identity across repeated polls and restarts; a retained receipt itself is never
+sent as speech. This does not claim exactly-once provider delivery after
+ambiguous network acceptance.
 `rejected` ends an event-specific refusal; before-admission `retry` and `blocked`
 retain retry custody, including after account or binding repair. Missing or unknown typed
 dispositions stay retryable, even on HTTP 403/404. Full queue recovery requires
@@ -175,3 +205,17 @@ replaces nor removes its tools.
 
 References: [Gmail XOAUTH2](https://developers.google.com/workspace/gmail/imap/xoauth2-protocol),
 [Google refresh tokens](https://developers.google.com/identity/protocols/oauth2/web-server#offline).
+
+## Place protocol
+
+Hosts advertising `places_version >= 1` receive every captured email with
+`facts: [any_message]`, without a binding ID. Older hosts receive the saved
+legacy binding and event shape. Existing Message-IDs, UIDVALIDITY epochs,
+staged attachments, work references and delivery reports are preserved.
+The SMTP worker re-reads the place immediately before sending. Silent/Paused
+or an unavailable lookup holds the same queue item with a visible reason;
+Active resumes it without spending the retry budget on policy holds.
+
+Mixed tools (`email_read` can mark mail as read, and `email_mailbox` can mutate)
+are declared write. Sending is message; search, receipts and connection checks
+are declared read. To/Cc/Bcc are all destination arguments.

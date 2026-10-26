@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+import secrets
 
 try:  # Loaded as a package by the extension loader.
     from . import lists_core
@@ -697,6 +698,40 @@ async def route_check(request: Any) -> Dict[str, Any]:
         return {"ok": False, "error": exc.message}
 
 
+async def route_add(request: Any) -> Any:
+    # A non-2xx answer keeps the owner's draft (the composer's skill.request clears it only after a 2xx),
+    # so this route answers with a Response; imported here, the rest of the skill needs no web stack.
+    from starlette.responses import JSONResponse
+
+    body = await _json_body(request)
+
+    def add() -> Dict[str, Any]:
+        service = _service()
+        group = body.get("group") or "Inbox"
+        request_id = body.get("request_id") or f"capture-{secrets.token_hex(16)}"
+        items = [{"text": body.get("text")}]
+        try:
+            return service.add(group, items, request_id=request_id)
+        except ListError as exc:
+            if body.get("group") or exc.code != "not_found":
+                raise
+        # No default group existed. The store serializes creates; another
+        # request may have created Inbox between the failed add and this call.
+        try:
+            service.group("create", name="Inbox")
+        except ListError as exc:
+            if exc.code != "conflict":
+                raise
+        return service.add(group, items, request_id=request_id)
+
+    try:
+        result = await asyncio.to_thread(add)
+        return JSONResponse({"ok": True, "notice": f"Added to {result['group']['path']}",
+                             "entry_id": result["added"][0]["id"]})
+    except ListError as exc:
+        return JSONResponse({"ok": False, "error": exc.message}, status_code=400)
+
+
 ROUTES = (
     ("view", route_view, ("GET",)),
     ("edit", route_edit, ("POST",)),
@@ -706,6 +741,7 @@ ROUTES = (
     ("export", route_export, ("GET",)),
     ("today", route_today, ("GET",)),
     ("check", route_check, ("POST",)),
+    ("add", route_add, ("POST",)),
 )
 
 
@@ -719,7 +755,7 @@ WIDGET_RENDER: Dict[str, Any] = {
 
 
 def register(api: Any) -> None:
-    """PluginAPI entry point: one store, nine tools, eight routes, one widget."""
+    """PluginAPI entry point: one store, nine tools, nine routes, one widget."""
     global _SERVICE
     _SERVICE = lists_core.SmartLists(Path(api.get_state_dir()))
     for name, handler, description, schema in TOOLS:
@@ -727,7 +763,7 @@ def register(api: Any) -> None:
     for path, handler, methods in ROUTES:
         api.register_route(path, handler, methods=methods)
     api.register_ui_tab("lists", "Smart Lists", icon="📋", render=WIDGET_RENDER)
-    api.log("info", "smart_lists registered: local store, 9 tools, 8 routes, Today widget")
+    api.log("info", "smart_lists registered: local store, 9 tools, 9 routes, Today widget")
 
 
 __all__ = ["register"]

@@ -217,7 +217,7 @@ class RegistrationTests(SkillCase):
         self.assertEqual(self.api.tools["add"]["schema"]["required"], ["group", "items", "request_id"])
         self.assertEqual({path: route["methods"] for path, route in self.api.routes.items()}, {
             "view": ("GET",), "edit": ("POST",), "group": ("POST",), "select": ("GET",), "store": ("POST",),
-            "export": ("GET",), "today": ("GET",), "check": ("POST",)})
+            "export": ("GET",), "today": ("GET",), "check": ("POST",), "add": ("POST",)})
         self.assertIn("even without", self.api.tools["add"]["description"])
         self.assertIn("even without saying 'add'", manifest_text())
         self.assertEqual(list(self.api.tabs), ["lists"])
@@ -419,7 +419,7 @@ class RegistrationTests(SkillCase):
     def test_payload_imports_no_network_process_or_host_settings(self):
         allowed = {"__future__", "asyncio", "copy", "json", "pathlib", "typing", "importlib", "hashlib", "os", "re", "zoneinfo",
                    "secrets", "tempfile", "threading", "contextlib", "datetime", "fcntl", "msvcrt", "errno",
-                   "time", "math", "base64", "zlib"}
+                   "time", "math", "base64", "zlib", "starlette"}
         for name in ("plugin.py", "lists_core.py"):
             tree = ast.parse((SKILL_DIR / name).read_text(encoding="utf-8"))
             imported = set()
@@ -428,6 +428,9 @@ class RegistrationTests(SkillCase):
                     imported.update(alias.name.split(".")[0] for alias in node.names)
                 elif isinstance(node, ast.ImportFrom) and node.level == 0:
                     imported.add(node.module.split(".")[0])
+                    if node.module.startswith("starlette"):
+                        self.assertEqual(node.module, "starlette.responses")
+                        self.assertEqual([alias.name for alias in node.names], ["JSONResponse"])
                 elif isinstance(node, ast.Attribute):
                     self.assertNotIn(node.attr, {"get_settings", "send_ws_message"}, name)
             self.assertLessEqual(imported, allowed, name)

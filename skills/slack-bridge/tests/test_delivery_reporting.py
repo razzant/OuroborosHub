@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import inspect
 import sqlite3
 from types import SimpleNamespace
 
@@ -27,8 +28,13 @@ def _enqueue_inbox(store):
     store.ingest_envelope(payload, parse_socket_envelope(payload))
 
 
-def _host(handler):
-    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+def _host(handler, *, passthrough_identity=False):
+    async def negotiated(request):
+        if request.url.path == "/identity" and not passthrough_identity:
+            return httpx.Response(200, json={"presence_delivery_version": 1})
+        result = handler(request)
+        return await result if inspect.isawaitable(result) else result
+    http = httpx.AsyncClient(transport=httpx.MockTransport(negotiated))
     host = LoopbackPresenceHostAdapter(binding_id="a" * 32, host_service_url="http://127.0.0.1:8767",
                                        skill_token="fixture-host-token", http_client=http)
     return host, http
@@ -81,7 +87,7 @@ def test_identity_opt_in_and_original_turn_echo_own_automatic_mode(tmp_path, adv
             result = {"status": "completed", "outcome": "message", "text": "Answer", "turn_ref": "turn-1"}
             if echoed is not None: result["delivery_reporting_version"] = echoed
             return httpx.Response(200, json=result)
-        host, http = _host(handler)
+        host, http = _host(handler, passthrough_identity=True)
         try:
             assert await InboundWorker(store, Slack(), host, staged_root=tmp_path / "staged").process_once()
             item = store.claim_outbox()
@@ -109,7 +115,7 @@ def test_deferred_ack_and_final_keep_original_mode_across_restart(tmp_path):
                 return httpx.Response(200, json={"status": "pending", "work_ref": "work-1", "delivery_reporting_version": 1})
             return httpx.Response(200, json={"status": "completed", "outcome": "message", "text": "Done",
                                             "work_ref": "work-1", "turn_ref": "work-1", "delivery_reporting_version": 1})
-        host, http = _host(handler)
+        host, http = _host(handler, passthrough_identity=True)
         try:
             await InboundWorker(store, Slack(), host, staged_root=tmp_path / "staged").process_once()
             ack = store.claim_outbox()
@@ -118,7 +124,7 @@ def test_deferred_ack_and_final_keep_original_mode_across_restart(tmp_path):
             _due(store)
             # New adapter instance has not discovered any capability. The saved
             # deferred receipt, not this new instance, owns the original mode.
-            resumed, resumed_http = _host(handler)
+            resumed, resumed_http = _host(handler, passthrough_identity=True)
             try:
                 await InboundWorker(BridgeStore(tmp_path), Slack(), resumed, staged_root=tmp_path / "staged").process_once()
                 final = store.claim_outbox()
@@ -401,12 +407,12 @@ def test_one_worker_sends_two_later_messages_while_host_report_is_blocked(tmp_pa
         enqueue(1)
         running = asyncio.create_task(_worker_loop(worker, stop))
         try:
-            await asyncio.wait_for(entered.wait(), 1)
+            await asyncio.wait_for(entered.wait(), 10)
             pending_report = worker._report_task
             assert pending_report is not None and not pending_report.done()
             enqueue(2)
             enqueue(3)
-            await asyncio.wait_for(sent_three.wait(), 1)
+            await asyncio.wait_for(sent_three.wait(), 10)
             assert not release.is_set() and len(reports) == 1
             assert worker._report_task is pending_report
             assert store.status()["outbox_delivered"] == 3
@@ -418,7 +424,7 @@ def test_one_worker_sends_two_later_messages_while_host_report_is_blocked(tmp_pa
             assert len(slack.sent) == 3 and len(reports) == 3
         finally:
             stop.set()
-            await asyncio.wait_for(running, 1)
+            await asyncio.wait_for(running, 10)
             await http.aclose()
         assert worker._report_task is None
     asyncio.run(run())
@@ -442,15 +448,15 @@ def test_worker_shutdown_cancels_and_awaits_inflight_report(tmp_path, cancel_wor
         worker = OutboundWorker(store, slack, host)
         running = asyncio.create_task(_worker_loop(worker, stop))
         try:
-            await asyncio.wait_for(entered.wait(), 1)
+            await asyncio.wait_for(entered.wait(), 10)
             report_task = worker._report_task
             if cancel_worker:
                 running.cancel()
                 with pytest.raises(asyncio.CancelledError):
-                    await asyncio.wait_for(running, 1)
+                    await asyncio.wait_for(running, 10)
             else:
                 stop.set()
-                await asyncio.wait_for(running, 1)
+                await asyncio.wait_for(running, 10)
             assert cancelled.is_set() and report_task.cancelled()
             assert worker._report_task is None
             assert not any(t.get_name() == "slack-delivery-report" and not t.done() for t in asyncio.all_tasks())

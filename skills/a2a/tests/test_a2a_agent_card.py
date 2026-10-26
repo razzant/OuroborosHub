@@ -140,7 +140,7 @@ def test_capability_first_card_with_live_tools():
     assert card["protocolVersion"] == "0.3.0"
     assert card["preferredTransport"] == "JSONRPC"
     assert card["additionalInterfaces"] and card["additionalInterfaces"][0]["transport"] == "JSONRPC"
-    assert card["version"] == "1.4.0"
+    assert card["version"] == "1.5.0"
 
 
 def test_env_override_beats_everything():

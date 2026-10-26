@@ -1,0 +1,18 @@
+{
+  "category": [
+    "media"
+  ],
+  "description": "Generate images from a text prompt via OpenRouter's image generation API (Nano Banana / Gemini Flash Image). Displays the result inside the widget and saves to disk for download.",
+  "digest": "369c3698d2255b4a503a1ac9fa74ae1a72eb9e6966d528f3f9b09a84ad9a1bd0",
+  "name": "nanobanana",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/nanobanana"
+  },
+  "type": "extension",
+  "version": "0.2.4",
+  "when_to_use": "User wants to generate or render an image from a text description, right now, inside the web UI. Also saves the image to disk so it can be downloaded.",
+  "withdrawn": null
+}

@@ -1,7 +1,7 @@
 ---
 name: perplexity
 description: Deep web research via OpenRouter web_search server tool. Uses any model + grounded search with citations.
-version: 0.1.1
+version: 0.1.2
 type: extension
 runtime: python3
 entry: plugin.py
@@ -60,7 +60,7 @@ and returns a synthesized answer with citations.
 ## Capabilities
 
 - **Agent tool**: `ext_..._perplexity_research` — deep research with citations
-- **HTTP route**: `POST /api/extensions/perplexity/research` — JSON body `{"query": "..."}`
+- **HTTP route**: `POST /api/extensions/perplexity/research` — JSON object `{"query": "...", "max_results": 5}`. An omitted, null, empty or zero result count uses 5; integers and integer form text are clamped to 1–25. Malformed JSON, non-object bodies and non-integer counts return HTTP 400 before reading the key or starting research.
 - **Widget**: declarative form on the Widgets page
 
 ## Network policy

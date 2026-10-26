@@ -1,0 +1,24 @@
+{
+  "category": [
+    "computer"
+  ],
+  "description": "Act in your own Chrome through a paired extension - one explicitly shared tab or the agent's own background tab, trusted input without taking focus, and a clean handoff of the live page to you and back.",
+  "digest": "deed8e405fe2afb29faf0a029efadc4dfe14cd525781eed461121783036fd2a7",
+  "install_specs": [
+    {
+      "kind": "npm",
+      "package": "ws@8.22.0"
+    }
+  ],
+  "name": "chrome_browser",
+  "owner": "kazzand",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/chrome_browser"
+  },
+  "type": "script",
+  "version": "0.1.3",
+  "when_to_use": "The owner asks to read or act on a page in their real, signed-in Chrome, wants to keep working in another tab meanwhile, or needs to take over the same page for a login, CAPTCHA or decision and hand it back.",
+  "withdrawn": null
+}

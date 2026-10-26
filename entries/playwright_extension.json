@@ -1,0 +1,18 @@
+{
+  "category": [
+    "computer"
+  ],
+  "description": "Use an owner-configured Playwright MCP Chrome connection with task-owned transport and current-page checks; installation alone does not connect a browser.",
+  "digest": "be1bb7d1941a080f971c6cf2ecc1e90d2fe3dbe4fd176718e34b3e6d681b4769",
+  "name": "playwright_extension",
+  "owner": "kazzand",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/playwright_extension"
+  },
+  "type": "instruction",
+  "version": "0.1.2",
+  "when_to_use": "The owner asks to inspect or act in an already-authorized Chrome tab and has configured a task-owned Playwright MCP bridge.",
+  "withdrawn": null
+}

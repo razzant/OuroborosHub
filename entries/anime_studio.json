@@ -1,0 +1,21 @@
+{
+  "category": [
+    "media"
+  ],
+  "description": "AI-powered 2D anime generator with VLM-verified assets, video analysis via Gemini, sequential keyframes, scene continuity chain, multi-model image/video generation, LLM-powered error recovery, and parallel asset+music pipeline",
+  "digest": "19db3b006bc1e2df4c69273a55d7ee229a0667cfdc675004d21fba1187d3ef93",
+  "install_specs": [
+    "Pillow"
+  ],
+  "name": "anime_studio",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/anime_studio"
+  },
+  "type": "extension",
+  "version": "3.2.0",
+  "when_to_use": "User wants to generate a short animated 2D anime cartoon, music video, or animated scene with consistent characters, VLM verification, and narrative continuity.",
+  "withdrawn": null
+}

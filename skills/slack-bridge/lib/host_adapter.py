@@ -240,7 +240,7 @@ def _attachments(item: InboxItem) -> list[dict[str, Any]]:
     return attachments
 
 
-def slack_presence_event(item: InboxItem, *, transport_queue: bool = False) -> dict[str, Any]:
+def slack_presence_event(item: InboxItem, *, transport_queue: bool = False, places: bool = False) -> dict[str, Any]:
     """Map exact Slack facts into the frozen provider-neutral event shape.
 
     ``transport_queue`` adds the inbox snapshot taken before the event's first
@@ -285,9 +285,36 @@ def slack_presence_event(item: InboxItem, *, transport_queue: bool = False) -> d
         "text": item.text,
     }
     event = enrich_event(event, item.provider_context)
+    if places:
+        event["facts"] = slack_wake_facts(event)
     if transport_queue and item.transport_queue is not None:
         event["conversation"]["transport_queue"] = dict(item.transport_queue)
     return event
+
+
+def slack_wake_facts(event: Mapping[str, Any]) -> list[str]:
+    """Match only provider identities/relationships, never the meaning of speech."""
+    conversation, message = event["conversation"], event["message"]
+    provider = message.get("provider_facts") or {}
+    own = provider.get("self_user_id")
+    facts = []
+    if message.get("event_type") in {"message", "app_mention"} and message.get("subtype") != "message_deleted":
+        facts.append("any_message")
+        if conversation.get("channel_type") == "im" or conversation.get("is_im"):
+            facts.append("direct_message")
+        if conversation.get("channel_type") == "mpim" or conversation.get("is_mpim"):
+            facts.append("group_dm")
+        if own and own in provider.get("mentioned_user_ids", []):
+            facts.append("mention")
+        if message.get("thread_id"):
+            if own and provider.get("parent_user_id") == own:
+                facts.extend(["reply_to_me", "my_thread"])
+            history = (conversation.get("thread_history") or {}).get("data") or {}
+            if own and "my_thread" not in facts and any(row.get("user") == own for row in history.get("messages", [])):
+                facts.append("my_thread")
+    if event["actor"].get("is_bot") or provider.get("actor_is_bot"):
+        facts.append("from_bot")
+    return facts
 
 
 def _encode_receipt(status: str, receipt: Mapping[str, Any]) -> str:
@@ -471,6 +498,7 @@ class LoopbackPresenceHostAdapter:
         self.delivery_reporting_status = "unknown"
         # Discovered with delivery reporting from the same /identity answer.
         self.continuation_version = 0
+        self.places_version = 0
 
     async def discover_delivery_support(self) -> int:
         if self.delivery_reporting_status in {"supported", "unsupported"}:
@@ -491,16 +519,35 @@ class LoopbackPresenceHostAdapter:
                 timeout=5.0,
             )
             payload = await self._json_response(response)
+            version = payload.get("places_version")
+            self.places_version = int(type(version) is int and version >= 1)
+            self.available = bool(self._skill_token and (self.binding_id or self.places_version))
             self.delivery_reporting_version = 1 if payload.get("presence_delivery_version") == 1 else 0
             self.continuation_version = 1 if payload.get("presence_continuation_version") == 1 else 0
             self.delivery_reporting_status = "supported" if self.delivery_reporting_version else "unsupported"
         except (HostContractError, httpx.HTTPError):
-            # Capability discovery must never prevent sending on an old or
-            # temporarily unavailable Host. The next operation can retry it.
+            # Failed discovery can retry. The outbox holds until policy is known.
             self.delivery_reporting_version = 0
             self.continuation_version = 0
             self.delivery_reporting_status = "unavailable"
         return self.delivery_reporting_version
+
+    async def place_hold(self, account_id: str, conversation_id: str) -> str:
+        """Recheck live policy immediately before a queued physical effect."""
+        await self.discover_delivery_support()
+        if not self.places_version:
+            return "Held: place policy unavailable" if self.delivery_reporting_status == "unavailable" else ""
+        try:
+            response = await self._http.get(
+                f"{self.host_service_url}/presence/place",
+                headers={"X-Skill-Token": self._skill_token.use_in_request()},
+                params={"provider": "slack", "account_id": account_id, "conversation_id": conversation_id}, timeout=10,
+            )
+            place = await self._json_response(response)
+        except (HostContractError, httpx.HTTPError):
+            return "Held: place policy unavailable"
+        state = place.get("state")
+        return "" if state == "active" else f"Held: {place.get('label') or 'Slack'} is {state or 'unavailable'}"
 
     async def report_delivery(self, payload: Mapping[str, Any]) -> None:
         if self._skill_token is None:
@@ -556,11 +603,11 @@ class LoopbackPresenceHostAdapter:
         return outcome
 
     async def submit(self, event: InboxItem) -> str:
+        mode = await self.discover_delivery_support()
         if not self.available:
             raise HostAdapterUnavailable("binding_id is not configured")
         if self._skill_token is None:
             raise HostContractError("HOST_SERVICE_TOKEN is missing")
-        mode = await self.discover_delivery_support()
         continuing = self.continuation_version == 1
         response = await self._http.post(
             f"{self.host_service_url}/presence/turn",
@@ -569,8 +616,8 @@ class LoopbackPresenceHostAdapter:
                 "Content-Type": "application/json",
             },
             json={
-                "binding_id": self.binding_id,
-                "event": slack_presence_event(event, transport_queue=continuing),
+                **({"binding_id": self.binding_id} if not self.places_version else {}),
+                "event": slack_presence_event(event, transport_queue=continuing, places=bool(self.places_version)),
                 "staged_files": [
                     _staged_path(file) for file in event.staged_files if _staged_path(file)
                 ],
@@ -610,6 +657,7 @@ class LoopbackPresenceHostAdapter:
         return _completed_reference(payload)
 
     async def _get_work(self, work_ref: str) -> dict[str, Any]:
+        await self.discover_delivery_support()
         if self._skill_token is None:
             raise HostContractError("HOST_SERVICE_TOKEN is missing")
         response = await self._http.get(
@@ -618,7 +666,7 @@ class LoopbackPresenceHostAdapter:
                 "X-Skill-Token": self._skill_token.use_in_request(),
                 "Content-Type": "application/json",
             },
-            params={"binding_id": self.binding_id},
+            params={} if self.places_version else {"binding_id": self.binding_id},
             timeout=35.0,
         )
         return await self._json_response(response)
@@ -857,13 +905,14 @@ class LoopbackPresenceHostAdapter:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     async def refresh_transport_queue(self, continuation_ref: str, snapshot: Mapping[str, Any]) -> None:
-        """Report dated inbox facts on the existing binding-scoped work route."""
+        """Report dated inbox facts on the existing connector-owned work route."""
         if self._skill_token is None:
             raise HostContractError("HOST_SERVICE_TOKEN is missing")
+        await self.discover_delivery_support()
         response = await self._http.post(
             f"{self.host_service_url}/presence/work/{quote(continuation_ref, safe='')}",
             headers={"X-Skill-Token": self._skill_token.use_in_request(), "Content-Type": "application/json"},
-            json={"binding_id": self.binding_id, "transport_queue": dict(snapshot)}, timeout=10.0,
+            json={**({"binding_id": self.binding_id} if not self.places_version else {}), "transport_queue": dict(snapshot)}, timeout=10.0,
         )
         payload = await self._json_response(response)
         if payload.get("ok") is not True or payload.get("status") not in {"recorded", "duplicate", "stale"}:

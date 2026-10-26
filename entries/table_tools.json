@@ -1,0 +1,24 @@
+{
+  "category": [
+    "documents"
+  ],
+  "description": "Inspect, filter, sort, group, and aggregate CSV and XLSX tables while reporting truncation and non-numeric values honestly.",
+  "digest": "4e24776e52cbde4fcac39f03733881019b4b09f656f4f2dc7531ad39c80a0efd",
+  "install_specs": [
+    {
+      "kind": "pip",
+      "package": "openpyxl"
+    }
+  ],
+  "name": "table_tools",
+  "owner": "kazzand",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/table_tools"
+  },
+  "type": "script",
+  "version": "0.1.0",
+  "when_to_use": "The user attached a CSV or XLSX file and asks to inspect, summarize, filter, compare, group, sort, or calculate from its data.",
+  "withdrawn": null
+}

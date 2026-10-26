@@ -271,6 +271,8 @@ def parse_socket_envelope(
     # event admissible or turn an occurrence into a request to this bot.
     if bot_user_id:
         structured["self_user_id"] = bot_user_id
+    if bot_event_id or app_event_id or message.get("bot_profile"):
+        structured["actor_is_bot"] = True
     if event_type in {"message", "app_mention"} and subtype != "message_deleted":
         if subtype != "message_changed" and isinstance(message.get("edited"), Mapping):
             structured["edited"] = dict(message["edited"])

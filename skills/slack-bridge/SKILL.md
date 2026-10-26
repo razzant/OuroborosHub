@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.6.1
+version: 1.7.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -19,51 +19,125 @@ companion_processes:
     max_restarts: 10
 tools:
   - name: slack_send
+    effect: message
+    target: channel_or_user
+    conversation: channel_or_user
+    thread: thread_ts
     description: Queue a proactive Slack message or threaded reply with explicit Markdown, Slack mrkdwn, or plain text format.
   - name: slack_user_info
+    effect: read
+    target: user_id
     description: Read one user's available Slack profile facts by exact user ID.
   - name: slack_conversation_info
+    effect: read
+    target: channel_id
+    conversation: channel_id
     description: Read one conversation's provider metadata by exact channel ID.
   - name: slack_history
+    effect: read
+    target: channel_id
+    conversation: channel_id
     description: Read one explicit page of conversation history without trimming message text.
   - name: slack_thread
+    effect: read
+    target: channel_id
+    conversation: channel_id
+    thread: thread_ts
     description: Read one explicit page of a thread using its root timestamp.
   - name: slack_list_conversations
+    effect: read
+    target: []
     description: List one paginated conversation directory page with exact IDs and URLs.
   - name: slack_list_users
+    effect: read
+    target: []
     description: List one paginated user directory page with exact IDs and profile facts.
   - name: slack_lookup_user_email
+    effect: read
+    target: email
     description: Resolve one email to an exact Slack user ID when the provider permits it.
   - name: slack_members
+    effect: read
+    target: channel_id
+    conversation: channel_id
     description: List one paginated member-ID page for an exact conversation.
   - name: slack_join
+    effect: write
+    target: channel_id
+    conversation: channel_id
     description: Queue an explicit join of one public conversation by exact ID and keep its provider receipt.
   - name: slack_resolve
+    effect: read
+    target: query
     description: Return name/email/URL/ID directory candidates without guessing ambiguous matches.
   - name: slack_file_upload
+    effect: message
+    target: channel_id
+    conversation: channel_id
+    thread: thread_ts
     description: Stage immutable bytes and queue Slack External Upload API delivery.
   - name: slack_file_download
+    effect: read
+    target: file_id
     description: Download one provider file into the skill state artifact directory.
   - name: slack_message_edit
+    effect: message
+    target: channel
+    conversation: channel
     description: Queue an update of an own Slack message by exact channel and timestamp.
   - name: slack_message_delete
+    effect: write
+    target: channel
+    conversation: channel
     description: Queue deletion of an own Slack message by exact channel and timestamp.
   - name: slack_reaction_add
+    effect: write
+    target: channel
+    conversation: channel
     description: Queue adding a reaction to an exact Slack message.
   - name: slack_reaction_remove
+    effect: write
+    target: channel
+    conversation: channel
     description: Queue removing a reaction from an exact Slack message.
   - name: slack_pin_add
+    effect: write
+    target: channel
+    conversation: channel
     description: Queue pinning an exact Slack message.
   - name: slack_pin_remove
+    effect: write
+    target: channel
+    conversation: channel
     description: Queue unpinning an exact Slack message.
   - name: slack_bookmark_add
+    effect: write
+    target: channel
+    conversation: channel
     description: Queue adding a bookmark to an exact Slack conversation.
   - name: slack_bookmark_remove
+    effect: write
+    target: channel
+    conversation: channel
     description: Queue removing a bookmark by exact provider bookmark ID.
   - name: slack_api
+    effect: write
+    target: []
     description: Call an actual Slack Web API method with a model-selected read or durable write effect.
   - name: slack_receipt
+    effect: read
+    target: []
     description: Inspect provider outcome, uncertainty and Host history-report status by request ID.
+icon: ui/icon.svg
+contributes:
+  - id: place
+    provides: place
+    label: Slack
+    destination: vendor:Slack
+    scope: account
+    source: {route: status, refresh_s: 15}
+    icon: ui/icon.svg
+    wakes: [direct_message, group_dm, mention, my_thread, reply_to_me]
 ---
 
 # Slack Bridge
@@ -78,19 +152,25 @@ or turn Slack messages into owner commands. It transports conversation events
 and leaves identity, authority, memory, and turn policy to the host presence
 runtime.
 
-## Presence binding
+## Slack place
 
-Choose the owner-created exact or account-wide presence binding in this skill's settings.
-Create it for provider `slack`, the workspace Team ID shown in the widget, and
-an exact channel conversation ID or `*`. The bridge keeps that one 32-character lowercase
-hexadecimal Binding ID and submits neutral provider events to the reviewed
-loopback presence endpoint using the dedicated `presence` permission. The
-host-injected Host Service token is held only as an opaque `SkillToken` and
-revealed at each loopback request; it is never logged, persisted, or exposed by
-the status route. Immediate text is queued once for Slack; deferred work keeps
-its durable work reference and is polled until terminal. On a Host that
-supports it, a turn whose result waits for review answers early and its author
-is polled in the same way (see Presence continuation).
+Connect Slack in Places using provider `slack` and the workspace Team ID shown
+in the widget. The host selects the place by account and conversation. Suggested
+wakes are direct messages, group DMs, mentions, my threads, and replies to me.
+Every supported event reaches the host for capture; its typed facts determine
+whether consciousness wakes. Bot messages carry `from_bot` and need an explicit
+wake choice. Place notes supply behavior instructions.
+
+The adapter negotiates `places_version >= 1` through `/identity`, omits
+`binding_id`, and uses the dedicated `presence` permission. Older hosts still
+receive an already-saved local binding ID and the legacy event shape. Existing
+receipts and deferred work references remain valid. The injected Host Service
+token is opaque and revealed only at authenticated loopback requests.
+
+Queued sends re-read the place immediately before delivery. Silent or Paused
+keeps the item held with its original identity and bytes; Active allows it to
+resume. An unavailable policy lookup also holds with a visible reason. Holds
+do not consume the transport retry budget.
 
 ## Slack app setup
 
@@ -99,11 +179,11 @@ is polled in the same way (see Presence continuation).
    `SLACK_APP_TOKEN`.
 3. Install the app and save its bot token as `SLACK_BOT_TOKEN`.
 4. Grant both settings to this reviewed skill, then enable it.
-5. Save the owner-created Presence Binding ID in the skill settings.
+5. Connect the Slack place and choose its wakes and notes.
 6. Invite the bot to channels where it should participate.
 
 Every DM, MPDM, public channel, and private channel event that the installed app
-can receive is transported; the selected host binding decides admission. Invite the bot where Slack requires explicit
+can receive is transported; the host place decides admission. Invite the bot where Slack requires explicit
 membership; there is no second bridge-local channel allowlist.
 
 Every file a Slack message declares becomes one entry of the event's
@@ -422,10 +502,11 @@ A Host may then answer while the author's result still waits for review:
 stores that write-once envelope as the event's Host reference; a retried event
 receives the identical stored envelope, never a rerun. Like deferred work, the
 event then only polls, so later messages in its thread are submitted meanwhile.
-If promotion happens on a later reentry, a pending, interrupted or terminal
-author poll can supply `child_work_ref`. The bridge checkpoints each discovered
-reference beside the initial envelope before polling it. After a restart, the
-child remains independently pollable even if the author is unavailable.
+If promotion happens on a later reentry, a pending or terminal author poll (or
+an older Host's `interrupted` one) can supply `child_work_ref`. The bridge
+checkpoints each discovered reference beside the initial envelope before polling
+it. After a restart, the child remains independently pollable even if the author
+is unavailable.
 The author and the child are polled concurrently through `/presence/work`.
 The existing inbound worker commits the initial selection before starting
 either poll, then commits each response's outputs as it arrives. A child
@@ -451,11 +532,13 @@ child's task) and names the carried `output_ref` in the report's `message`.
 Release to the bridge is not proof of Slack delivery; provider receipts keep
 that role.
 
-A positively lost author is `status: "unresolved"` with `disposition: "retained"`
-on the current Host. Its input is not resubmitted; the original and real children
-remain independently observed, including after a child finishes. Released outputs
-keep their identities. Older Hosts may return `interrupted`; that legacy shape
-ends the row `failed` after its children finish, preserving sent output.
+An author whose attempt ended without a canonical answer polls `failed`
+(`cancelled` when recorded so) with `outcome: "silent"` and its reason facts on
+the current Host. Its input is not resubmitted; real children remain
+independently observed after the author's reference ends. Released outputs keep
+their identities. Older Hosts may return `unresolved`, which stays observed, or
+`interrupted`, which ends the row `failed` after its children finish, preserving
+sent output.
 
 Older persisted `refused:` references keep their original refusal and any
 admitted child. New `rejected` responses retain their full receipt and end the
@@ -490,8 +573,8 @@ must also inspect `text_truncated` before claiming full coverage. This does incr
 queue; no hidden event-count cap is introduced.
 
 Each continuing-author poll also takes a fresh snapshot from the same inbox
-and posts `{binding_id, transport_queue}` to `/presence/work/{continuation_ref}`
-before its GET. This uses the original event's `after_source_event_id` and exact
+and posts `{transport_queue}` to `/presence/work/{continuation_ref}` before its
+GET (including the saved `binding_id` on legacy hosts). This uses the original event's `after_source_event_id` and exact
 conversation. The pending report is saved separately from the immutable initial
 event and retried byte-for-byte after a lost ACK or restart. A `recorded`,
 `duplicate` or `stale` ACK permits a fresh observation on the next poll. The
@@ -576,14 +659,19 @@ the original `turn_ref` and any real child `work_ref` independently. It never
 resubmits that retained event. A child finishing does not erase the original
 uncertainty or stop observation of its late selected output.
 
-A work view with `status: unresolved` remains observable. A failed task may
-still carry a selected answer; lifecycle status alone does not suppress speech.
-Canonical selected
-outputs keep their source and delivery identity across repeated polls and
-restarts; a retained receipt itself is never sent as speech. A recorded cancellation can remain under
-observation: it proves neither a live executor nor absence of external effects,
-and observation starts no new generation. This does not
-claim exactly-once provider delivery after ambiguous network acceptance.
+A work view answers `pending` while the turn's executor can still change it and
+is terminal once nothing can. A failed task may still carry a selected answer;
+lifecycle status alone does not suppress speech. A turn that ended without a
+canonical answer reads `failed` (`cancelled` when recorded so) with
+`outcome: "silent"`: nothing further to deliver from that reference. Its reason
+facts (`code`, `recorded_status`, `uncertainty`) prove neither delivery nor the
+absence of external effects, and observation starts no new generation. A real
+child keeps its own reference in `child_work_ref`, which any view may name, and
+is observed on its own. Older Hosts may still answer `unresolved`, which
+stays observable. Canonical selected outputs keep their source and delivery
+identity across repeated polls and restarts; a retained receipt itself is never
+sent as speech. This does not claim exactly-once provider delivery after
+ambiguous network acceptance.
 `rejected` ends an event-specific refusal; before-admission `retry` and `blocked`
 retain retry custody, including after account or binding repair. Missing or unknown typed
 dispositions stay retryable, even on HTTP 403/404. Full queue recovery requires

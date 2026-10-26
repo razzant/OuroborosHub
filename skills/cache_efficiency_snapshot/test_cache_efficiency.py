@@ -1,5 +1,6 @@
 """Cache measurements preserve unknown values and compare the same input totals."""
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -19,6 +20,7 @@ spec.loader.exec_module(plugin)
 
 LedgerCache = plugin.LedgerCache
 UsageEventsCache = plugin.UsageEventsCache
+session_key = plugin._session_identity
 _normalize_record = plugin._normalize_record
 _normalize_usage_event = plugin._normalize_usage_event
 calculate_analytics = plugin.calculate_analytics
@@ -430,7 +432,250 @@ def test_missing_live_log_is_degraded_but_archives_still_count(tmp_path: Path) -
 
 
 # ---------------------------------------------------------------------------
-# Sessions: the retained ledger keeps whole-session rows, never requests
+# Sessions and code versions: also from the event log
+# ---------------------------------------------------------------------------
+
+def session_event(route: str = "codex", run_id: str = "run-1", **values: Any) -> Dict[str, Any]:
+    """A reviewer session's ``llm_usage`` row (``review_session_usage.session_usage_facts``)."""
+    result = event(source="review_substrate:plan_review", category="review", model="gpt-6-astra",
+                   prompt_tokens=2043012, cached_tokens=1846016, cache_write_tokens=None,
+                   claudexor={"run_id": run_id, "requested_route": route, "delegated_route": route,
+                              "observed_attempt": {"harness_id": route, "model": "gpt-6-astra"}})
+    result.update(values)
+    return result
+
+
+def ledger_event(run_id: str = "run-1", route: str = "claude", **values: Any) -> Dict[str, Any]:
+    result = {"type": "delegate_run_ledger_recorded", "ts": (NOW - timedelta(minutes=9)).isoformat(),
+              "run_id": run_id, "task_id": "t", "route": route}
+    result.update(values)
+    return result
+
+
+def boot(sha: str, minutes_ago: float, pid: int = 1) -> Dict[str, Any]:
+    return {"type": "worker_boot", "ts": (NOW - timedelta(minutes=minutes_ago)).isoformat(),
+            "pid": pid, "git_branch": "ouroboros", "git_sha": sha}
+
+
+def test_a_session_total_is_a_session_never_a_request() -> None:
+    codex = _normalize_usage_event(session_event())
+    assert codex["kind"] == "subscription_session" and codex["identity"] == session_key("run-1")
+    assert (codex["prompt_tokens"], codex["cached_tokens"], codex["measured"]) == (2043012, 1846016, True)
+    # Claude's native input excludes cache reads and the event names no cache writes:
+    # its counters cannot form an inclusive total, so the session stays unknown.
+    claude = _normalize_usage_event(session_event(route="claude", prompt_tokens=4, cached_tokens=248987))
+    assert claude["kind"] == "subscription_session" and claude["provider"] == "claude"
+    assert (claude["prompt_tokens"], claude["cached_tokens"], claude["measured"]) == (None, None, False)
+    # A normalized split, when the core sends one, is authoritative on every route.
+    split = _normalize_usage_event(session_event(route="claude", prompt_tokens=4, cached_tokens=248987,
+                                                 input_token_usage=measurement(248991, 245981, 3006)))
+    assert (split["prompt_tokens"], split["cached_tokens"], split["measured"]) == (248991, 245981, True)
+    # A per-call event of a native review episode has no run receipt, and a Claudexor
+    # model call's receipt names an operation, not a run: both are requests.
+    assert _normalize_usage_event(event(source="review_substrate:plan_review"))["kind"] == "attempt"
+    loop_call = _normalize_usage_event(event(claudexor={"operation_id": "op-1", "model_role": "main"}))
+    assert loop_call["kind"] == "attempt" and loop_call["prompt_tokens"] == 100
+    summary = calculate_analytics([codex, claude, _normalize_usage_event(event())], timeframe="1H", now=NOW)["summary"]
+    assert (summary["request_count"], summary["session_count"]) == (1, 2)
+    assert summary["eligible_prompt_tokens"] == 2043012 + 100
+
+
+@pytest.mark.parametrize("usage_first", [True, False])
+def test_a_usage_event_supplies_the_tokens_of_a_recorded_session(tmp_path: Path, usage_first: bool) -> None:
+    live = tmp_path / "logs" / "events.jsonl"
+    rows = [session_event(run_id="run-1"), ledger_event(run_id="run-1", route="codex")]
+    write_rows(live, *(rows if usage_first else rows[::-1]), ledger_event(run_id="run-2"))
+    records, meta = UsageEventsCache().update(live, tmp_path / "archive", now=NOW)
+    sessions = {r["identity"]: r for r in records}
+    first, second = session_key("run-1"), session_key("run-2")
+    assert set(sessions) == {first, second}
+    assert sessions[first]["prompt_tokens"] == 2043012 and sessions[first]["token_facts"]
+    assert sessions[second]["model"] == plugin.NO_USAGE_EVENT_MODEL
+    assert sessions[second]["measured"] is False and not sessions[second]["token_facts"]
+    analytics = calculate_analytics(records, timeframe="1H", now=NOW)
+    assert analytics["summary"]["session_count"] == 2 and analytics["summary"]["request_count"] == 0
+    assert analytics["quality"]["sessions_without_usage_event"] == 1
+    assert meta["raw_stats"]["session_usage_events"] == 1
+    assert meta["raw_stats"]["session_ledger_events"] == (1 if usage_first else 2)
+    assert meta["raw_stats"]["duplicate_events_skipped"] == (1 if usage_first else 0)
+
+
+# A run can emit several ``llm_usage`` session events: an early failed one without the
+# normalized split, a later recovered one with it. Evidence ranks per run:
+# normalized ``input_token_usage`` > legacy counters / tokenless usage event > ledger event.
+# Equal rank keeps the first event; a lower rank never replaces or fills a higher one.
+
+RUN = "run-recovered"
+
+
+def _legacy_unknown(**values: Any) -> Dict[str, Any]:
+    """A failed review's session event: Claude route, legacy counters, no normalized split."""
+    return session_event(route="claude", run_id=RUN, prompt_tokens=4, cached_tokens=248987,
+                         cache_write_tokens=None, **values)
+
+
+def _normalized(total: Any = 20488, read: Any = 12738, write: Any = 7746, **values: Any) -> Dict[str, Any]:
+    return session_event(route="claude", run_id=RUN, prompt_tokens=4, cached_tokens=248987,
+                         input_token_usage=measurement(total, read, write), **values)
+
+
+def _read_session(tmp_path: Path, *rows: Dict[str, Any]):
+    live = tmp_path / "logs" / "events.jsonl"
+    write_rows(live, *rows)
+    records, meta = UsageEventsCache().update(live, tmp_path / "archive", now=NOW)
+    sessions = [r for r in records if r["kind"] == "subscription_session"]
+    return records, sessions, meta
+
+
+def test_later_normalized_split_replaces_an_earlier_legacy_event_of_the_same_run(tmp_path: Path) -> None:
+    records, sessions, meta = _read_session(
+        tmp_path, _legacy_unknown(ts=(NOW - timedelta(minutes=9)).isoformat()),
+        _normalized(ts=(NOW - timedelta(minutes=5)).isoformat()))
+    assert len(records) == 1 and len(sessions) == 1  # one run, one session, never summed
+    session = sessions[0]
+    assert session["identity"] == session_key(RUN) and session["token_facts"] is True
+    assert (session["prompt_tokens"], session["cached_tokens"], session["cache_write_tokens"]) == (20488, 12738, 7746)
+    assert session["measured"] is True and session["uncached_tokens"] == 20488 - 12738
+    assert meta["raw_stats"]["duplicate_events_skipped"] == 0
+    analytics = calculate_analytics(records, timeframe="1H", now=NOW)
+    summary = analytics["summary"]
+    assert (summary["session_count"], summary["request_count"]) == (1, 0)
+    assert (summary["prompt_tokens"], summary["cached_tokens"]) == (20488, 12738)
+    assert (summary["eligible_prompt_tokens"], summary["eligible_cached_tokens"]) == (20488, 12738)
+    assert summary["cache_read_rate"] == round(12738 / 20488 * 100, 2)
+    assert (summary["unknown_total_records"], summary["unknown_read_records"]) == (0, 0)
+    assert analytics["quality"]["sessions_without_usage_event"] == 0
+
+
+def test_later_legacy_event_never_replaces_or_downgrades_a_normalized_split(tmp_path: Path) -> None:
+    for legacy in (_legacy_unknown(ts=(NOW - timedelta(minutes=5)).isoformat()),
+                   # a legacy Codex counter pair is measured, still not authoritative over the split
+                   session_event(route="codex", run_id=RUN, ts=(NOW - timedelta(minutes=5)).isoformat())):
+        records, sessions, meta = _read_session(tmp_path, _normalized(ts=(NOW - timedelta(minutes=9)).isoformat()), legacy)
+        assert len(sessions) == 1
+        assert (sessions[0]["prompt_tokens"], sessions[0]["cached_tokens"], sessions[0]["cache_write_tokens"]) == (20488, 12738, 7746)
+        assert meta["raw_stats"]["duplicate_events_skipped"] == 1
+        assert calculate_analytics(records, timeframe="1H", now=NOW)["summary"]["session_count"] == 1
+
+
+def test_authoritative_nulls_of_a_normalized_split_are_not_filled_from_legacy_counters(tmp_path: Path) -> None:
+    unknown_write = _normalized(20488, 12738, None)
+    codex_legacy = session_event(route="codex", run_id=RUN, prompt_tokens=999, cached_tokens=111, cache_write_tokens=5)
+    for rows in ((unknown_write, codex_legacy), (codex_legacy, unknown_write)):
+        records, sessions, meta = _read_session(tmp_path, *rows)
+        assert len(sessions) == 1
+        # Either order: the normalized split wins, its null write stays null, nothing is borrowed.
+        assert (sessions[0]["prompt_tokens"], sessions[0]["cached_tokens"], sessions[0]["cache_write_tokens"]) == (20488, 12738, None)
+    all_null = _normalized(None, None, None)
+    records, sessions, _ = _read_session(tmp_path, all_null, codex_legacy)
+    assert (sessions[0]["prompt_tokens"], sessions[0]["cached_tokens"], sessions[0]["measured"]) == (None, None, False)
+    assert sessions[0]["token_facts"] is True  # unknown tokens, but the run does have a usage event
+    assert calculate_analytics(records, timeframe="1H", now=NOW)["quality"]["sessions_without_usage_event"] == 0
+
+
+@pytest.mark.parametrize("malformed", [None, [], "unavailable"])
+def test_a_malformed_split_is_not_normalized_evidence(tmp_path: Path, malformed: Any) -> None:
+    # Present but not an object: stays an authoritative-unknown legacy-rank event (first wins).
+    records, sessions, _ = _read_session(
+        tmp_path, _legacy_unknown(), _normalized(), session_event(route="claude", run_id=RUN, input_token_usage=malformed))
+    assert len(sessions) == 1 and sessions[0]["prompt_tokens"] == 20488
+    records, sessions, _ = _read_session(
+        tmp_path, session_event(route="claude", run_id=RUN, input_token_usage=malformed), _normalized())
+    assert len(sessions) == 1 and sessions[0]["prompt_tokens"] == 20488  # a later valid split still supersedes
+
+
+def test_equal_rank_events_of_one_run_keep_the_first_as_before(tmp_path: Path) -> None:
+    # Two legacy events: first wins. Two normalized events: first wins (a materially different
+    # later split is reported in the skill notes, never merged or summed).
+    records, sessions, meta = _read_session(
+        tmp_path, session_event(route="codex", run_id=RUN, prompt_tokens=100, cached_tokens=40),
+        session_event(route="codex", run_id=RUN, prompt_tokens=900, cached_tokens=800))
+    assert [s["prompt_tokens"] for s in sessions] == [100] and meta["raw_stats"]["duplicate_events_skipped"] == 1
+    records, sessions, meta = _read_session(tmp_path, _normalized(100, 40, 1), _normalized(900, 800, 2),
+                                            _normalized(None, None, None))
+    assert [(s["prompt_tokens"], s["cached_tokens"]) for s in sessions] == [(100, 40)]
+    assert meta["raw_stats"]["duplicate_events_skipped"] == 2
+
+
+def test_evidence_order_survives_ledger_events_archives_and_incremental_reads(tmp_path: Path) -> None:
+    live, archive_dir = tmp_path / "logs" / "events.jsonl", tmp_path / "archive"
+    write_rows(archive_dir / "events_20260911T100000.jsonl", ledger_event(run_id=RUN, route="claude"),
+               _legacy_unknown(ts=(NOW - timedelta(minutes=9)).isoformat()))
+    cache = UsageEventsCache()
+    first, _ = cache.update(live, archive_dir, now=NOW)
+    assert [(r["prompt_tokens"], r["token_facts"]) for r in first] == [(None, True)]
+    write_rows(live, _normalized(ts=(NOW - timedelta(minutes=5)).isoformat()), ledger_event(run_id=RUN, route="claude"))
+    records, meta = cache.update(live, archive_dir, now=NOW)
+    assert len(records) == 1 and records[0]["prompt_tokens"] == 20488 and records[0]["cache_write_tokens"] == 7746
+    append_rows(live, _legacy_unknown(), _normalized(1, 0, 0, ts=(NOW - timedelta(minutes=4)).isoformat()))
+    records, meta = cache.update(live, archive_dir, now=NOW)  # later, lower or equal rank: nothing changes
+    assert len(records) == 1 and records[0]["prompt_tokens"] == 20488
+    assert calculate_analytics(records, timeframe="1H", now=NOW)["summary"]["session_count"] == 1
+
+
+def test_route_reports_the_recovered_session_once_with_normalized_tokens(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    early, late = ((now - timedelta(minutes=m)).isoformat() for m in (9, 5))
+    write_rows(tmp_path / "logs" / "events.jsonl", _legacy_unknown(ts=early), ledger_event(ts=early, run_id=RUN, route="claude"),
+               _normalized(ts=late), event(ts=late, prompt_tokens=100, cached_tokens=90))
+    api = MockAPI(tmp_path)
+    register(api)
+    try:
+        response = api.routes["data"]({"query_params": {"timeframe": "1H"}})
+        summary = response["summary"]
+        assert (summary["request_count"], summary["session_count"]) == (1, 1)
+        assert (summary["eligible_prompt_tokens"], summary["eligible_cached_tokens"]) == (20488 + 100, 12738 + 90)
+        assert response["quality"]["sessions_without_usage_event"] == 0
+        sessions = [m for m in response["models"] if m["kind"] == "subscription_session"]
+        assert [(m["prompt_tokens"], m["cached_tokens"], m["measured_records"]) for m in sessions] == [(20488, 12738, 1)]
+    finally:
+        api.unload_fn()
+
+
+def test_code_marks_are_first_boots_on_a_new_commit(tmp_path: Path) -> None:
+    live = tmp_path / "logs" / "events.jsonl"
+    write_rows(live, boot("a" * 40, 200), boot("a" * 40, 50, pid=2), boot("b" * 40, 45),
+               boot("b" * 40, 44, pid=3), boot("c" * 40, 10), boot("", 5))
+    cache = UsageEventsCache()
+    records, meta = cache.update(live, tmp_path / "archive", now=NOW)
+    assert records == [] and meta["raw_stats"]["worker_boots"] == 5
+    marks = calculate_analytics(records, timeframe="1H", now=NOW, boots=cache.boot_snapshot())["markers"]
+    # The earliest boot has no predecessor; restarts on the same commit mark nothing.
+    assert [(m["code"], m["position"]) for m in marks] == [("bbbbbbbbb", 3.0), ("ccccccccc", 10.0)]
+    assert all(m["branch"] == "ouroboros" and m["ts"].endswith("+00:00") for m in marks)
+    day = calculate_analytics(records, timeframe="24H", now=NOW, boots=cache.boot_snapshot())
+    assert [m["code"] for m in day["markers"]] == ["bbbbbbbbb", "ccccccccc"]
+    assert all(0 <= m["position"] < len(day["buckets"]) for m in day["markers"])
+    assert calculate_analytics(records, timeframe="1H", now=NOW)["markers"] == []
+
+
+def test_a_mark_needs_only_a_different_predecessor_even_outside_the_window(monkeypatch) -> None:
+    def boots(*pairs):
+        return [plugin._boot_from_event(boot(sha, minutes)) for sha, minutes in pairs]
+
+    hour = calculate_analytics([], timeframe="1H", now=NOW, boots=boots(("a" * 40, 200), ("b" * 40, 45)))
+    assert [m["code"] for m in hour["markers"]] == ["bbbbbbbbb"] and hour["quality"]["markers_omitted"] == 0
+    monkeypatch.setattr(plugin, "MAX_MARKERS_RETURNED", 2)
+    many = calculate_analytics([], timeframe="1H", now=NOW,
+                               boots=boots(*((sha * 40, 50 - 10 * i) for i, sha in enumerate("abcde"))))
+    assert [m["code"] for m in many["markers"]] == ["ddddddddd", "eeeeeeeee"]
+    assert many["quality"]["markers_omitted"] == 2
+
+
+def test_sessions_and_boots_leave_with_the_window(tmp_path: Path) -> None:
+    live = tmp_path / "logs" / "events.jsonl"
+    old = (NOW - timedelta(days=9)).isoformat()
+    write_rows(live, session_event(ts=old, run_id="old"), ledger_event(ts=old, run_id="older"),
+               {**boot("a" * 40, 0), "ts": old}, session_event(run_id="new"), boot("b" * 40, 5))
+    cache = UsageEventsCache()
+    records, meta = cache.update(live, tmp_path / "archive", now=NOW)
+    assert [r["identity"] for r in records] == [session_key("new")]
+    assert [b["sha"][:1] for b in cache.boot_snapshot()] == ["b"]
+    assert meta["raw_stats"]["worker_boots"] == 2
+
+
+# ---------------------------------------------------------------------------
+# The JSONL ledger: live before the usage store (7.6.0 and older), retired after
 # ---------------------------------------------------------------------------
 
 def test_ledger_keeps_sessions_and_skips_requests_baseline_and_unsettled(tmp_path: Path) -> None:
@@ -476,6 +721,28 @@ def test_ledger_rotation_and_truncation_replace_cached_records(tmp_path: Path) -
     assert [item["model"] for item in records] == ["x"]
 
 
+def test_a_live_ledger_supplies_the_tokens_of_its_sessions_and_a_retired_one_is_skipped(tmp_path: Path) -> None:
+    sha = lambda run: hashlib.sha256(run.encode()).hexdigest()  # noqa: E731 -- the ledger's own key, not the plugin's
+    horizon = NOW - timedelta(days=plugin.USAGE_ARCHIVE_WINDOW_DAYS)
+    tokenless = [plugin._session_from_ledger_event(ledger_event(run_id=run)) for run in ("run-a", "run-b")]
+    measured = _normalize_usage_event(session_event(run_id="run-c"))
+    rows = normalized(*(row(kind="subscription_session", provider="claude", session_id_sha256=sha(run),
+                            input_token_usage=measurement(100, 90)) for run in ("run-a", "run-c")))
+    merged = plugin._merge_ledger_sessions([*tokenless, measured], rows, horizon)
+    by_key = {r["identity"]: r for r in merged}
+    assert set(by_key) == {session_key("run-a"), session_key("run-b"), session_key("run-c")}
+    assert by_key[session_key("run-a")]["prompt_tokens"] == 100  # the ledger row replaced the tokenless event
+    assert by_key[session_key("run-b")]["token_facts"] is False
+    assert by_key[session_key("run-c")]["prompt_tokens"] == 2043012  # a measured event keeps its tokens
+    ledger = tmp_path / "usage_attempts.jsonl"
+    write_rows(ledger, row())
+    assert plugin._ledger_is_live(ledger, horizon=datetime.now(timezone.utc) - timedelta(days=7))
+    stale = (datetime.now(timezone.utc) - timedelta(days=12)).timestamp()
+    os.utime(ledger, (stale, stale))
+    assert not plugin._ledger_is_live(ledger, horizon=datetime.now(timezone.utc) - timedelta(days=7))
+    assert not plugin._ledger_is_live(tmp_path / "missing.jsonl", horizon=horizon)
+
+
 class MockAPI:
     def __init__(self, data_dir: Path) -> None:
         self._data_dir = data_dir
@@ -495,15 +762,22 @@ class MockAPI:
         self.unload_fn = fn
 
 
-def test_plugin_route_joins_usage_events_with_ledger_sessions_and_unload_clears(tmp_path: Path) -> None:
-    stamp = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+def test_plugin_route_reads_requests_sessions_and_marks_from_events_and_unload_clears(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    stamp = (now - timedelta(minutes=10)).isoformat()
     live = tmp_path / "logs" / "events.jsonl"
-    write_rows(live, event(ts=stamp, prompt_tokens=100, cached_tokens=90, ledger_attempt_ids=["a1"]))
+    write_rows(live, event(ts=stamp, prompt_tokens=100, cached_tokens=90, ledger_attempt_ids=["a1"]),
+               session_event(ts=stamp, prompt_tokens=100, cached_tokens=90),
+               ledger_event(ts=stamp, run_id="run-2"),
+               {**boot("a" * 40, 0), "ts": (now - timedelta(minutes=40)).isoformat()},
+               {**boot("b" * 40, 0), "ts": (now - timedelta(minutes=20)).isoformat()})
     write_rows(tmp_path / "archive" / "events_20260911T100000.jsonl",
                event(ts=stamp, model="archived", prompt_tokens=100, cached_tokens=90, ledger_attempt_ids=["a2"]))
-    ledger = tmp_path / "state" / "usage_attempts.jsonl"
-    write_rows(ledger, row(ts=stamp, prompt_tokens=100, cached_tokens=0),  # a request row: not counted twice
-               row(ts=stamp, kind="subscription_session", provider="claude", input_token_usage=measurement(100, 90)))
+    # A JSONL ledger the usage store retired (unchanged for longer than the window) is not read.
+    retired = tmp_path / "state" / "usage_attempts.jsonl"
+    write_rows(retired, row(ts=stamp, kind="subscription_session", provider="claude", input_token_usage=measurement(100, 90)))
+    old = (now - timedelta(days=12)).timestamp()
+    os.utime(retired, (old, old))
     api = MockAPI(tmp_path)
     register(api)
     assert "data" in api.routes
@@ -518,27 +792,40 @@ def test_plugin_route_joins_usage_events_with_ledger_sessions_and_unload_clears(
         assert response["status"] == "ok"
         assert response["summary"]["cache_read_rate"] == 90.0
         assert response["summary"]["request_count"] == 2
-        assert response["summary"]["session_count"] == 1
+        assert response["summary"]["session_count"] == 2
         assert len(response["buckets"]) == 12
+        assert [m["code"] for m in response["markers"]] == ["bbbbbbbbb"]
         quality = response["quality"]
-        assert quality["events_path"] == str(live) and quality["ledger_path"] == str(ledger)
+        assert quality["events_path"] == str(live) and quality["ledger_live"] is False
         assert quality["raw_stats"]["archives_read"] == 1
-        assert quality["raw_stats"]["ledger_request_rows_skipped"] == 1
-        assert "usage events" in quality["coverage"]
+        assert quality["sessions_without_usage_event"] == 1
+        assert "event log" in quality["coverage"]
         assert api.routes["data"]({"query_params": {"timeframe": "6H"}})["timeframe"] == "6H"
     finally:
         api.unload_fn()
-    assert plugin._CACHE.records == [] and plugin._EVENTS.records == []
+    assert plugin._EVENTS.records == [] and plugin._EVENTS.sessions == {} and plugin._EVENTS.boots == []
+    assert plugin._CACHE.records == []
 
 
-def test_missing_ledger_only_loses_sessions(tmp_path: Path) -> None:
+def test_a_live_ledger_route_counts_each_session_once_with_its_tokens(tmp_path: Path) -> None:
     stamp = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
-    write_rows(tmp_path / "logs" / "events.jsonl", event(ts=stamp))
+    write_rows(tmp_path / "logs" / "events.jsonl", event(ts=stamp), ledger_event(ts=stamp, run_id="run-a"))
+    write_rows(tmp_path / "state" / "usage_attempts.jsonl",
+               row(ts=stamp, kind="subscription_session", provider="claude", input_token_usage=measurement(100, 90),
+                   session_id_sha256=hashlib.sha256(b"run-a").hexdigest()),
+               # older history of a live ledger stays outside the window, ALL included
+               row(ts=(datetime.now(timezone.utc) - timedelta(days=12)).isoformat(), kind="subscription_session",
+                   provider="claude", input_token_usage=measurement(100, 90), session_id_sha256="0" * 64))
     api = MockAPI(tmp_path)
     register(api)
     try:
         response = api.routes["data"]({"query_params": {"timeframe": "1H"}})
-        assert response["status"] == "ok" and response["summary"]["request_count"] == 1
-        assert response["quality"]["ledger_read_error"] == "file_not_found"
+        assert response["quality"]["ledger_live"] is True
+        assert (response["summary"]["request_count"], response["summary"]["session_count"]) == (1, 1)
+        assert response["quality"]["sessions_without_usage_event"] == 0
+        assert response["summary"]["eligible_prompt_tokens"] == 200
+        assert "live JSONL ledger" in response["quality"]["coverage"]
+        everything = api.routes["data"]({"query_params": {"timeframe": "ALL"}})["summary"]
+        assert (everything["request_count"], everything["session_count"]) == (1, 1)
     finally:
         api.unload_fn()

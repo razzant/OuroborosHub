@@ -20,58 +20,19 @@ def _load_daemon(tmp_path, monkeypatch):
     return module
 
 
-def test_dispatch_rejects_owner_slash_commands(tmp_path, monkeypatch):
-    daemon = _load_daemon(tmp_path, monkeypatch)
-
-    async def run():
-        try:
-            await daemon._dispatch_to_host("/panic")
-        except ValueError as exc:
-            assert "slash commands" in str(exc)
-        else:
-            raise AssertionError("slash command was not rejected")
-
-    asyncio.run(run())
-
-
-def test_dispatch_adds_transport_metadata_and_timeout(tmp_path, monkeypatch):
+def test_dispatch_sends_peer_text_to_presence(tmp_path, monkeypatch):
     daemon = _load_daemon(tmp_path, monkeypatch)
     calls = []
-
-    class Response:
-        status_code = 200
-
-        def __init__(self, payload):
-            self._payload = payload
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return self._payload
-
-    def fake_post(url, **kwargs):
+    def post(url, **kwargs):
         calls.append((url, kwargs))
-        if url.endswith("/chat/allocate-internal"):
-            return Response({"chat_id": -123})
-        return Response({"response": "ok"})
-
-    monkeypatch.setattr(daemon.httpx, "post", fake_post)
-
-    async def run():
-        assert await daemon._dispatch_to_host("hello") == "ok"
-
-    asyncio.run(run())
-
-    inject_url, inject_kwargs = calls[-1]
-    assert inject_url.endswith("/chat/inject")
-    payload = inject_kwargs["json"]
-    assert payload["timeout_sec"] == daemon.A2A_RESPONSE_TIMEOUT_SEC
-    assert payload["transport"] == {
-        "kind": "a2a",
-        "conversation_id": "-123",
-        "sender_label": "A2A",
-    }
+        return _Resp(200, {"status": "completed", "outcome": "message", "text": "ok"})
+    monkeypatch.setattr(daemon.httpx, "post", post)
+    assert asyncio.run(daemon._dispatch_to_host("/panic", task_id="task", context_id="ctx", message_id="m")) == "ok"
+    assert len(calls) == 1 and calls[0][0].endswith("/presence/turn")
+    event = calls[0][1]["json"]["event"]
+    assert event["text"] == "/panic" and event["conversation_id"] == "ctx"
+    assert event["facts"] == ["direct_message", "from_bot"]
+    assert calls[0][1]["timeout"] == daemon.A2A_RESPONSE_TIMEOUT_SEC + 15
 
 
 def test_dispatch_applies_backpressure(tmp_path, monkeypatch):
@@ -197,28 +158,6 @@ def test_response_timeout_is_clamped_below_the_stream_deadline(tmp_path, monkeyp
     assert daemon.A2A_RESPONSE_TIMEOUT_SEC + 15 <= daemon.A2A_STREAM_DEADLINE_SEC
 
 
-def test_inject_failure_envelope_is_not_an_empty_answer(tmp_path, monkeypatch):
-    """HTTP 200 with {"ok": false} must surface the host error, not "" as success."""
-    daemon = _load_daemon(tmp_path, monkeypatch)
-
-    class Response:
-        status_code = 200
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {"ok": False, "error": "host refused the injection"}
-
-    monkeypatch.setattr(daemon.httpx, "post", lambda url, **kwargs: Response())
-    with pytest.raises(RuntimeError) as excinfo:
-        daemon._inject_sync(-123, "hello")
-    assert "host refused the injection" in str(excinfo.value)
-
-
-# --- v1.4.0: the host operation binding and honest cancellation (#667) --------
-
-
 class _Resp:
     def __init__(self, status_code, payload):
         self.status_code = status_code
@@ -232,168 +171,56 @@ class _Resp:
         return self._payload
 
 
-def test_message_send_binds_the_host_operation_in_the_durable_record(tmp_path, monkeypatch):
+def test_message_send_binds_presence_and_replay_keeps_source(tmp_path, monkeypatch):
     daemon = _load_daemon(tmp_path, monkeypatch)
     calls = []
-
-    def fake_post(url, **kwargs):
-        calls.append((url, kwargs["json"]))
-        if url.endswith("/chat/allocate-internal"):
-            return _Resp(200, {"chat_id": -123})
-        return _Resp(200, {"ok": True, "response": "ok", "operation_ref": f"-123:{kwargs['json']['client_message_id']}"})
-
-    monkeypatch.setattr(daemon.httpx, "post", fake_post)
-
+    def post(url, **kwargs):
+        calls.append(kwargs["json"])
+        return _Resp(200, {"status": "completed", "outcome": "message", "text": "ok"})
+    monkeypatch.setattr(daemon.httpx, "post", post)
     def send(message_id):
-        return asyncio.run(daemon._dispatch_to_host(
-            "hello", task_id="task-1", context_id="ctx-1", message_id=message_id,
-        ))
-
-    assert send("msg-1") == "ok"
-    first_id = daemon._client_message_id("task-1", "msg-1")
-    second_id = daemon._client_message_id("task-1", "msg-2")
-    assert calls[-1][1]["client_message_id"] == first_id
-    assert daemon._load_task("task-1")["ouroboros"] == {
-        "chat_id": -123, "client_message_id": first_id, "operation_ref": f"-123:{first_id}", "message_ids": [first_id],
-    }
-    # A re-delivered message reuses the bound chat and identity: no second
-    # allocation, and the host sees the SAME (chat_id, client_message_id).
-    calls.clear()
-    assert send("msg-1") == "ok"
-    assert [url.rsplit("/", 1)[1] for url, _body in calls] == ["inject"]
-    assert calls[0][1]["chat_id"] == -123 and calls[0][1]["client_message_id"] == first_id
-    # A NEW message in the same task continues the conversation under its own identity.
-    calls.clear()
-    assert send("msg-2") == "ok"
-    assert calls[-1][1]["chat_id"] == -123 and calls[-1][1]["client_message_id"] == second_id
-    assert daemon._load_task("task-1")["ouroboros"]["operation_ref"] == f"-123:{second_id}"
+        return asyncio.run(daemon._dispatch_to_host("hello", task_id="task", context_id="ctx", message_id=message_id))
+    assert send("one") == send("one") == "ok" and len(calls) == 1
+    assert send("two") == "ok" and len(calls) == 2
+    bound = daemon._load_task("task")["ouroboros"]
+    assert bound["protocol"] == "presence" and bound["conversation_id"] == "ctx"
+    assert "chat_id" not in bound
+    assert calls[0]["event"]["source_event_id"] != calls[1]["event"]["source_event_id"]
 
 
-def test_cancel_reports_only_what_the_host_proved(tmp_path, monkeypatch):
-    daemon = _load_daemon(tmp_path, monkeypatch)
-    with pytest.raises(daemon._HostCancelRefused) as unbound:
-        daemon._cancel_host_operation_sync("never-seen")
-    assert unbound.value.outcome == "unbound"
-    daemon._update_task_record("task-1", "ctx", binding={
-        "chat_id": -5, "client_message_id": "a2a:task-1:m", "operation_ref": "-5:a2a:task-1:m",
-    })
-    answers = iter([
-        (409, {"ok": False, "outcome": "cancel_unsupported", "reason": "not_started"}),
-        (503, {"ok": False, "outcome": "unresolved", "reason": "cancellation_did_not_settle"}),
-        (200, {"ok": True, "outcome": "already_terminal", "status": "completed"}),
-        (200, {"ok": True, "outcome": "cancelled", "task_id": "abc", "status": "cancelled"}),
-    ])
-    posted = []
-
-    def fake_post(url, **kwargs):
-        posted.append((url, kwargs["json"]))
-        status, payload = next(answers)
-        return _Resp(status, payload)
-
-    monkeypatch.setattr(daemon.httpx, "post", fake_post)
-    for expected in ("cancel_unsupported", "unresolved", "already_terminal"):
-        with pytest.raises(daemon._HostCancelRefused) as refused:
-            daemon._cancel_host_operation_sync("task-1")
-        assert refused.value.outcome == expected
-    assert daemon._cancel_host_operation_sync("task-1")["outcome"] == "cancelled"
-    assert all(url.endswith("/chat/cancel") and body["operation_ref"] == "-5:a2a:task-1:m" for url, body in posted)
-
-
-def _rpc_body(response):
-    import json
-
-    return json.loads(response.body)
-
-
-def test_jsonrpc_tasks_cancel_never_fakes_a_canceled_task(tmp_path, monkeypatch):
-    daemon = _load_daemon(tmp_path, monkeypatch)
-    missing = _rpc_body(asyncio.run(daemon._jsonrpc_cancel("r1", "never-seen")))
-    assert missing["error"]["code"] == -32001
-    daemon._update_task_record("task-1", "ctx", binding={
-        "chat_id": -5, "client_message_id": "a2a:task-1:m", "operation_ref": "-5:a2a:task-1:m",
-    })
-    monkeypatch.setattr(daemon.httpx, "post", lambda url, **kw: _Resp(
-        409, {"ok": False, "outcome": "cancel_unsupported", "reason": "decision_turn_in_flight"},
-    ))
-    refused = _rpc_body(asyncio.run(daemon._jsonrpc_cancel("r2", "task-1")))
-    assert refused["error"]["code"] == -32002 and "decision_turn_in_flight" in refused["error"]["message"]
-    assert daemon._load_task("task-1")["status"]["state"] == "working"
-    monkeypatch.setattr(daemon.httpx, "post", lambda url, **kw: _Resp(
-        200, {"ok": True, "outcome": "cancelled", "task_id": "abc", "status": "cancelled"},
-    ))
-    cancelled = _rpc_body(asyncio.run(daemon._jsonrpc_cancel("r3", "task-1")))
-    assert cancelled["result"]["status"]["state"] == "canceled"
-    assert daemon._load_task("task-1")["status"]["state"] == "canceled"
-    terminal = _rpc_body(asyncio.run(daemon._jsonrpc_cancel("r4", "task-1")))
-    assert terminal["error"]["code"] == -32002 and "canceled" in terminal["error"]["message"]
-
-
-def test_sdk_executor_cancel_publishes_canceled_only_on_the_host_outcome(tmp_path, monkeypatch):
-    """The executor's ``cancel`` (stubbed SDK surface) raises the SDK's
-    TaskNotCancelableError on every refusal and publishes ``canceled`` only for
-    the host's ``cancelled`` outcome."""
-    from types import SimpleNamespace
-
-    daemon = _load_daemon(tmp_path, monkeypatch)
-    published = []
-
-    class _Updater:
-        def __init__(self, queue, task_id, context_id):
-            self.task_id = task_id
-
-        def new_agent_message(self, parts):
-            return {"parts": parts}
-
-        async def cancel(self, message=None):
-            published.append((self.task_id, message))
-
-    monkeypatch.setattr(daemon, "TaskUpdater", _Updater, raising=False)
-    monkeypatch.setattr(daemon, "Part", lambda text: {"text": text}, raising=False)
-    context = SimpleNamespace(task_id="task-1", context_id="ctx-1")
-    executor = daemon.OuroborosExecutor()
-    with pytest.raises(daemon.TaskNotCancelableError) as unbound:
-        asyncio.run(executor.cancel(context, []))
-    assert "no host operation" in str(unbound.value)
-    assert published == []
-    daemon._update_task_record("task-1", "ctx-1", binding={
-        "chat_id": -5, "client_message_id": "a2a:task-1:m", "operation_ref": "-5:a2a:task-1:m",
-    })
-    monkeypatch.setattr(daemon.httpx, "post", lambda url, **kw: _Resp(
-        503, {"ok": False, "outcome": "unresolved", "reason": "cancellation_did_not_settle"},
-    ))
-    with pytest.raises(daemon.TaskNotCancelableError) as unresolved:
-        asyncio.run(executor.cancel(context, []))
-    assert "unresolved" in str(unresolved.value)
-    assert published == []
-    monkeypatch.setattr(daemon.httpx, "post", lambda url, **kw: _Resp(
-        200, {"ok": True, "outcome": "cancelled", "task_id": "abc", "status": "cancelled"},
-    ))
-    asyncio.run(executor.cancel(context, []))
-    assert published and published[0][0] == "task-1"
-    assert daemon._load_task("task-1")["status"]["state"] == "canceled"
-
-
-def test_fallback_route_dispatches_tasks_cancel(tmp_path, monkeypatch):
-    """The no-SDK JSON-RPC route reaches ``tasks/cancel`` (the first probe run
-    answered ``method not found`` because the branch sat behind the
-    ``message/send`` guard); an unknown method still answers -32601."""
+def test_cancellation_is_honestly_unsupported_on_presence(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
-
     daemon = _load_daemon(tmp_path, monkeypatch)
-    if daemon._A2A_SDK_AVAILABLE:
-        pytest.skip("the SDK routes own tasks/cancel when the a2a-sdk is installed")
-    client = TestClient(daemon.app)
-    missing = client.post("/", json={"jsonrpc": "2.0", "id": "r1", "method": "tasks/cancel",
-                                     "params": {"id": "never-seen"}}).json()
-    assert missing["error"]["code"] == -32001
-    unknown = client.post("/", json={"jsonrpc": "2.0", "id": "r2", "method": "tasks/nope", "params": {}}).json()
-    assert unknown["error"]["code"] == -32601
-    daemon._update_task_record("task-1", "ctx", binding={
-        "chat_id": -5, "client_message_id": "a2a:task-1:m", "operation_ref": "-5:a2a:task-1:m",
-    })
-    monkeypatch.setattr(daemon.httpx, "post", lambda url, **kw: _Resp(
-        200, {"ok": True, "outcome": "cancelled", "task_id": "abc", "status": "cancelled"},
-    ))
-    cancelled = client.post("/", json={"jsonrpc": "2.0", "id": "r3", "method": "tasks/cancel",
-                                       "params": {"id": "task-1"}}).json()
-    assert cancelled["result"]["status"]["state"] == "canceled"
+    daemon._A2A_SDK_AVAILABLE = False
+    monkeypatch.setattr(daemon.httpx, "post", lambda *a, **kw: pytest.fail("no owner-chat cancel endpoint"))
+    with pytest.raises(daemon._HostCancelRefused, match="no host operation"):
+        daemon._cancel_host_operation_sync("unknown")
+    daemon._bind_inbound_message_sync("task", "ctx", "m")
+    with TestClient(daemon._build_app()) as client:
+        missing = client.post("/", json={"method": "tasks/cancel", "params": {"id": "unknown"}}).json()
+        assert missing["error"]["code"] == -32001
+        refused = client.post("/", json={"method": "tasks/cancel", "params": {"id": "task"}}).json()
+        assert refused["error"]["code"] == -32002 and "no cancellation endpoint" in refused["error"]["message"]
+        assert daemon._load_task("task")["status"]["state"] == "working"
+        unknown = client.post("/", json={"method": "tasks/nope", "params": {}}).json()
+        assert unknown["error"]["code"] == -32601
+
+
+def test_sdk_cancellation_refusal_does_not_publish_canceled(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    daemon = _load_daemon(tmp_path, monkeypatch)
+    daemon._bind_inbound_message_sync("task", "ctx", "m")
+    with pytest.raises(daemon.TaskNotCancelableError, match="no cancellation endpoint"):
+        asyncio.run(daemon.OuroborosExecutor().cancel(SimpleNamespace(task_id="task", context_id="ctx"), []))
+    assert daemon._load_task("task")["status"]["state"] == "working"
+
+
+def test_legacy_message_is_not_resubmitted_under_place_authority(tmp_path, monkeypatch):
+    daemon = _load_daemon(tmp_path, monkeypatch)
+    old = daemon._client_message_id("task", "old")
+    daemon._update_task_record("task", "ctx", binding={"chat_id": -1, "client_message_id": old, "operation_ref": "old"})
+    before = daemon._task_path("task").read_bytes()
+    with pytest.raises(daemon._HostMessageConflict, match="Legacy"):
+        daemon._bind_inbound_message_sync("task", "ctx", "old")
+    assert daemon._task_path("task").read_bytes() == before
+    assert daemon._bind_inbound_message_sync("task", "ctx", "new")[0] == "ctx"

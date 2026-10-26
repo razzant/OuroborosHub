@@ -76,7 +76,7 @@ class PresenceWorkResult:
     text: str = ""
     work_ref: str = ""
     delivery_reporting_version: int = 0
-    # An unresolved observation: the retained code and any admitted child it names.
+    # Any view may name admitted child work; an older Host's unresolved view also names its code.
     code: str = ""
     child_work_ref: str = ""
     outputs: tuple[Dict[str, Any], ...] = ()
@@ -175,6 +175,7 @@ class PresenceHostClient:
         self.transport = transport or UrllibPresenceHostTransport()
         self.delivery_reporting_status = "unknown"
         self.delivery_reporting_version = 0
+        self.places_version = 0
 
     async def discover_delivery_support(self) -> int:
         if self.delivery_reporting_status in {"supported", "unsupported"}:
@@ -185,11 +186,31 @@ class PresenceHostClient:
                 payload=None, timeout_sec=10.0,
             )
             self.delivery_reporting_version = int(response.get("presence_delivery_version") == 1)
+            version = response.get("places_version")
+            self.places_version = int(type(version) is int and version >= 1)
             self.delivery_reporting_status = "supported" if self.delivery_reporting_version else "unsupported"
         except (PresenceHostError, OSError, TimeoutError, asyncio.TimeoutError):
             self.delivery_reporting_status = "unavailable"
             self.delivery_reporting_version = 0
         return self.delivery_reporting_version
+
+    async def place_hold(self, account_id: str, conversation_id: str) -> str:
+        await self.discover_delivery_support()
+        if not self.places_version:
+            return "Held: place policy unavailable" if self.delivery_reporting_status == "unavailable" else ""
+        if str(conversation_id).isdigit():
+            return "Held: Telegram places support groups and channels only"
+        try:
+            query = urllib.parse.urlencode({"provider": "telegram", "account_id": account_id,
+                                            "conversation_id": conversation_id})
+            place = await self.transport.request_json(
+                "GET", f"{self.host_base}/presence/place?{query}", headers=self._headers(),
+                payload=None, timeout_sec=10.0,
+            )
+        except (PresenceHostError, OSError, TimeoutError):
+            return "Held: place policy unavailable"
+        state = place.get("state")
+        return "" if state == "active" else f"Held: {place.get('label') or 'Telegram'} is {state or 'unavailable'}"
 
     async def report_delivery(self, payload: Dict[str, Any]) -> None:
         response = await self.transport.request_json(
@@ -204,17 +225,20 @@ class PresenceHostClient:
         event: Dict[str, Any],
         staged_files: Sequence[pathlib.Path],
     ) -> PresenceSubmission:
-        if not isinstance(event, dict) or set(event) != _EVENT_KEYS:
+        if not isinstance(event, dict) or set(event) - {"facts"} != _EVENT_KEYS:
             raise PresenceHostError("presence event does not match the frozen contract")
-        binding_id = load_binding_id(self.state_dir)
         mode = await self.discover_delivery_support()
+        binding_id = "" if self.places_version else load_binding_id(self.state_dir)
+        event = dict(event)
+        if not self.places_version:
+            event.pop("facts", None)
         try:
             response = await self.transport.request_json(
                 "POST",
                 f"{self.host_base}/presence/turn",
                 headers=self._headers(),
                 payload={
-                    "binding_id": binding_id,
+                    **({"binding_id": binding_id} if not self.places_version else {}),
                     "event": dict(event),
                     "staged_files": [str(path) for path in staged_files],
                     **({"delivery_reporting_version": 1} if mode else {}),
@@ -244,7 +268,7 @@ class PresenceHostClient:
 
     async def poll(self, work_ref: str, binding_id: str) -> PresenceWorkResult:
         encoded_ref = urllib.parse.quote(str(work_ref), safe="")
-        query = urllib.parse.urlencode({"binding_id": str(binding_id)})
+        query = urllib.parse.urlencode({"binding_id": str(binding_id)}) if binding_id else ""
         response = await self.transport.request_json(
             "GET",
             f"{self.host_base}/presence/work/{encoded_ref}?{query}",
@@ -254,13 +278,14 @@ class PresenceHostClient:
         )
         status = str(response.get("status") or "")
         outputs = _selected_outputs(response)
+        child = _child_ref(response, str(work_ref))
         if status == "pending":
-            return PresenceWorkResult(status=status, work_ref=str(work_ref), outputs=outputs)
+            return PresenceWorkResult(status=status, work_ref=str(work_ref), child_work_ref=child, outputs=outputs)
         if status == "unresolved":
-            # No canonical answer yet: an observation, never an outcome or a verdict.
+            # An older Host without a canonical answer yet: an observation, never an outcome or a verdict.
             return PresenceWorkResult(status=status, work_ref=str(work_ref),
                                       code=str(response.get("code") or ""),
-                                      child_work_ref=_child_ref(response, str(work_ref)), outputs=outputs)
+                                      child_work_ref=child, outputs=outputs)
         if status not in _TERMINAL_WORK_STATES:
             raise PresenceHostError("presence Host returned an invalid work status")
         outcome = str(response.get("outcome") or "")
@@ -275,7 +300,7 @@ class PresenceHostClient:
             text=str(response.get("text") or ""),
             work_ref=str(work_ref),
             delivery_reporting_version=int(response.get("delivery_reporting_version") == 1),
-            outputs=outputs, output_ref=str(response.get("output_ref") or ""),
+            child_work_ref=child, outputs=outputs, output_ref=str(response.get("output_ref") or ""),
         )
 
     def _headers(self) -> Dict[str, str]:
@@ -315,7 +340,7 @@ def _selected_outputs(response: Dict[str, Any]) -> tuple[Dict[str, Any], ...]:
 
 
 def _child_ref(response: Dict[str, Any], polled: str) -> str:
-    """Admitted child work named by an unresolved view; the original is never its own child."""
+    """Admitted child work named by any work view; the original is never its own child."""
     original = {polled, str(response.get("turn_ref") or "").strip()}
     for key in ("child_work_ref", "work_ref"):
         value = str(response.get(key) or "").strip()

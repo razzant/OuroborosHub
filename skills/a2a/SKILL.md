@@ -1,12 +1,12 @@
 ---
 name: a2a
 description: Agent-to-Agent protocol bridge for Ouroboros. Provides a local A2A-compatible server plus client tools for discovering and messaging other A2A agents.
-version: 1.4.0
+version: 1.5.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
 runtime: python3
-permissions: [net, tool, route, widget, companion_process, inject_chat]
+permissions: [net, tool, route, widget, companion_process, presence]
 env_from_settings: []
 when_to_use: User asks to communicate with another A2A-compatible agent, discover an agent card, send an A2A message, check A2A task status, or expose this Ouroboros instance as an A2A peer.
 timeout_sec: 120
@@ -20,6 +20,28 @@ companion_processes:
     command: [python3, scripts/a2a_daemon.py]
     runtime: python3
     restart_policy: on_failure
+icon: ui/icon.svg
+contributes:
+  - id: place
+    provides: place
+    label: A2A
+    destination: vendor:A2A
+    scope: account
+    icon: ui/icon.svg
+    wakes: [direct_message, from_bot]
+tools:
+  - name: discover
+    effect: read
+    target: url
+  - name: send
+    effect: message
+    target: url
+    conversation: context_id
+    thread: task_id
+  - name: status
+    effect: read
+    target: url
+    conversation: task_id
 ---
 
 # A2A skill
@@ -75,75 +97,33 @@ unavailable the card still carries the curated categories — it never
 collapses to a contentless "General" stub nor to an identity-persona-only
 entry.
 
-## Streaming and long-running messages
+## A2A place and durable requests
 
-`message/stream` emits real intermediate events (SDK mode): `submitted`,
-then `working` status updates that forward the host agent's own progress
-notes (the same narration the web UI shows, polled from the loopback
-gateway's read-only `/api/logs/progress` endpoint and filtered by this
-message's private negative chat id), with periodic heartbeats while the
-agent is quiet, and finally one artifact plus a terminal `completed`
-status. Failures end the stream with a terminal `failed` status carrying a
-human-readable message — not a JSON-RPC `-32603` stream error.
+Connect provider `a2a`, account `server` in Places. Direct peer requests carry
+`direct_message` and `from_bot`; both are suggested for this agent-facing place.
+Requests go through `/presence/turn` using the `presence` permission. Peer text,
+including slash prefixes, stays conversation data. A places-capable Host is
+required; there is no fallback to owner chat.
 
-Long tasks no longer die on internal timeouts. The chat-id allocation call
-uses a configurable timeout with one retry (`A2A_ALLOCATE_TIMEOUT_SEC`,
-default 30s — the old hardcoded 5s was a spurious-timeout source on busy
-hosts). The host response wait (`A2A_RESPONSE_TIMEOUT_SEC`, default 600s)
-may now be raised to 1740s, and when it expires the bridge does NOT fail:
-the host task keeps running, and the bridge switches to polling the
-host's operation view for the final answer until `A2A_STREAM_DEADLINE_SEC`
-(default 3600s) elapses. Set `A2A_PROGRESS_ENRICH=0` to disable progress
-forwarding (heartbeats only); `A2A_GATEWAY_URL` (loopback-only, default
-`http://127.0.0.1:8765`) points the read-only log polling at a non-default
-gateway port. The no-SDK fallback route shares the
-same resilient dispatch pipeline without the event stream.
+The context ID addresses the conversation. Each task/message pair has a stable
+source-event digest. The exact event is saved before submission, and Host
+turn/work references are retained under `presence/` alongside the existing task
+records. Identical retries reuse the receipt; changed content under the same
+message ID is refused. Unknown admission remains working, never falsely complete.
+Deferred work is polled through `/presence/work/{ref}`. Silent and tool-delivered
+outcomes produce no duplicate answer.
 
-## Operation correlation and cancellation
+SDK streams show working status and periodic heartbeats until a final artifact.
+There is no chat-log scraping. `A2A_RESPONSE_TIMEOUT_SEC` bounds the initial wait;
+`A2A_STREAM_DEADLINE_SEC` bounds the overall wait without cancelling Host work.
+Legacy allocation/progress configuration remains readable but is unused.
 
-Every inbound message is delivered to the host with a stable identity
-(`client_message_id` is a bounded digest of the complete task/message-id pair), so the host answers with
-the correlated `operation_ref` and a repeated delivery of the same message
-(an SDK retry or a reconnect) REJOINS the accepted work instead of starting
-a second host turn. The binding (`chat_id`, `client_message_id`,
-`operation_ref`) is stored in the skill's existing durable task record
-(`tasks/<id>.json`, shared by the SDK executor and the no-SDK fallback), so
-`tasks/get` and `tasks/cancel` can find the host work after a wait expired
-or the daemon restarted. After a wait expiry the bridge reads
-`GET /chat/operations/{operation_ref}` (a late answer, a promoted task's
-terminal status, or `lost` after a host restart). Unavailable exact-operation
-state remains unknown; a named message never takes another chat answer.
-Confirmed `lost` becomes a failed Task with the host-restart explanation,
-including reconnect reads and replay of the original message.
-Legacy unnamed single-use dispatch retains its chat-log fallback.
+Task records remain atomic and fenced by the current message. SDK terminal
+replays verify original content/context, and listing reads local snapshots with
+owner filtering. The no-SDK route shares the same durable protocol. Legacy
+owner-chat records stay readable, but old messages cannot be resubmitted as
+place events; a new message may start a place conversation.
 
-Named recovery and cancellation require a Host with
-`GET /chat/operations/{operation_ref}` and `POST /chat/cancel`. On an older
-Host, fast answers still work, an expired named wait stays `working` with an
-unknown outcome, and cancellation reports a refusal.
-
-The existing task record is replaced atomically and its current-message binding
-fences late status writes. The SDK uses that same durable record. A confirmed
-terminal replay of an already accepted SDK message returns the saved/reconciled
-Task directly after checking its original content and context. A NEW message
-on a terminal SDK taskId keeps the SDK's standard error; continue with a new
-task in the desired context. The fallback's existing same-task conversation
-path accepts a distinct message and resets only its current operation state.
-An accepted nonterminal replay creates no new SDK producer: nonblocking requests
-return the current Task, blocking/streaming requests attach through the existing
-SDK task subscription. After a daemon restart, the existing host-operation
-wait/status path reconciles the answer; wait expiry stays nonterminal/unknown.
-
-SDK `ListTasks` returns locally stored task snapshots for the current SDK
-owner, with the SDK's filtering and pagination. `tasks/get` / `GetTask`
-reconciles the requested task with the Host. A corrupt task record produces
-an explicit state error; listing does not silently omit it.
-
-`tasks/cancel` (SDK executor `cancel` and the fallback JSON-RPC method)
-calls the host's `POST /chat/cancel` for the bound operation and reports
-only what the host proved: `cancelled` becomes the A2A `canceled` state;
-`already_terminal`, `unresolved` (the host work is still live) and
-`cancel_unsupported` (nothing addressable started yet, or the message was
-steered into a pre-existing task) surface as the A2A `TaskNotCancelableError`
-carrying the host's reason. The bridge never emits `canceled` merely because
-the caller stopped waiting.
+The Presence protocol currently has no cancellation endpoint. `tasks/cancel`
+returns `TaskNotCancelableError` with that reason; work remains unchanged.
+This applies equally to SDK and fallback routes.

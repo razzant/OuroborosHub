@@ -93,6 +93,9 @@ class EmailRuntime:
         if not item:
             return False
         try:
+            discover = getattr(self.host, "discover_delivery_support", None)
+            if discover:
+                await discover()
             if not self.host.available:
                 self.store.retry_inbox(item.row_id, item.lease_token, "Presence binding is not configured", 30)
                 return True
@@ -143,6 +146,13 @@ class EmailRuntime:
             self.store.set_reporting(item, reporting)
             item = replace(item, reporting=reporting)
             with self.client.smtp() as smtp:
+                check = getattr(self.host, "place_hold", None)
+                if check:
+                    conversation = item.references[0] if item.references else item.in_reply_to or item.message_id
+                    reason = check(self.account, conversation)
+                    if reason:
+                        self.store.hold_outbox(item, reason)
+                        return True
                 if not self.store.mark_sending(item):
                     return True
                 sending = True

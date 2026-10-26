@@ -1,0 +1,21 @@
+{
+  "category": [
+    "search"
+  ],
+  "description": "Web search via DuckDuckGo — free, no API key required. Returns titles, URLs, and snippets.",
+  "digest": "4f8613be4dc4bab36b9effba01748f367419f1f536a19aec5c88f9a22c2dd90e",
+  "install_specs": [
+    "ddgs"
+  ],
+  "name": "duckduckgo",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/duckduckgo"
+  },
+  "type": "extension",
+  "version": "0.1.2",
+  "when_to_use": "User asks to search the web, find information, look up facts, or research a topic — and no OpenAI key is available for web_search.",
+  "withdrawn": null
+}

@@ -202,7 +202,7 @@ def test_unresolved_continuing_author_keeps_released_output_and_child_and_stays_
                 assert await bridge.inbound.process_once()
             await bridge.send_all()
             assert slack.texts() == ["Early answer", "Child result"]
-            # The current Host retains a lost author as unresolved; child lifecycle is separate.
+            # An older Host retains a lost author as unresolved; child lifecycle is separate.
             assert bridge.inbox() == {"Ev-1": "pending"} and "unresolved" in bridge.inbox_error("Ev-1")
             host.work["turn-1"] = [(200, {**_author("turn-1", released, 1), "status": "completed",
                                           "outcome": "message", "text": "Late correction", "output_ref": "out-2",

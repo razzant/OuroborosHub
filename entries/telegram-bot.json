@@ -1,0 +1,21 @@
+{
+  "category": [
+    "messaging"
+  ],
+  "connects": [
+    "Telegram"
+  ],
+  "description": "Telegram bot connector for group and channel places, with typed mentions and replies, durable media delivery, and live place-state holds. Owner chat uses the built-in Telegram bridge.",
+  "digest": "9e258b56d390786a5ac0fd68120af0b270b684d402a51068b99eab9ed058e90c",
+  "icon": "ui/icon.svg",
+  "name": "telegram-bot",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/telegram-bot"
+  },
+  "type": "extension",
+  "version": "0.6.0",
+  "withdrawn": null
+}

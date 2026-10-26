@@ -41,20 +41,12 @@ def _widget_render() -> Dict[str, Any]:
                 "submit_label": "Save transport settings",
                 "fields": [
                     {
-                        "name": "binding_id",
-                        "label": "Presence Binding ID",
-                        "type": "text",
-                        "placeholder": "32-character binding id",
-                        "help": "Owner-created binding for this Telegram transport "
-                        "(conversation_id=exact id or conversation_id=*).",
-                    },
-                    {
                         "name": "management_group_id",
                         "label": "Management group ID",
                         "type": "text",
                         "placeholder": "Optional numeric Telegram group ID",
                         "help": "Marks this room in event facts. Work instructions stay "
-                        "in the behavior profile; no owner permissions are "
+                        "in the place notes; no owner permissions are "
                         "granted.",
                     },
                 ],
@@ -111,6 +103,7 @@ def _widget_render() -> Dict[str, Any]:
                         "path": "outbox_waiting",
                         "target": "status",
                     },
+                        {"type": "metric", "label": "Outbox held", "path": "outbox_held", "target": "status"},
                     {
                         "type": "metric",
                         "label": "Delivered",
@@ -178,7 +171,11 @@ def _status_payload() -> Dict[str, Any]:
 
 
 async def _status_route(_request: Any) -> JSONResponse:
-    return JSONResponse(_status_payload())
+    payload = _status_payload()
+    held = payload.get("outbox_held", 0)
+    payload.update(text=f"{held} held" if held else payload["runtime_state"],
+                   tone="warn" if held else "muted", title="Telegram transport")
+    return JSONResponse(payload)
 
 
 def _load_local_settings() -> Dict[str, Any]:
@@ -269,18 +266,17 @@ async def _settings_save_route(request: Any) -> JSONResponse:
         body = None
     if (
         not isinstance(body, dict)
-        or "binding_id" not in body
         or set(body) - {"binding_id", "management_group_id"}
     ):
         return JSONResponse(
             {
                 "ok": False,
-                "error": "Expected binding_id and optional management_group_id",
+                "error": "Expected transport settings",
             },
             status_code=400,
         )
     binding_id = str(body.get("binding_id") or "").strip()
-    if re.fullmatch(r"[0-9a-f]{32}", binding_id) is None:
+    if "binding_id" in body and re.fullmatch(r"[0-9a-f]{32}", binding_id) is None:
         return JSONResponse(
             {"ok": False, "error": "binding_id must be 32 lowercase hex characters"},
             status_code=400,
@@ -302,7 +298,8 @@ async def _settings_save_route(request: Any) -> JSONResponse:
                 status_code=400,
             )
         settings["management_group_id"] = group_id
-    settings["binding_id"] = binding_id
+    if "binding_id" in body:
+        settings["binding_id"] = binding_id
     path = _STATE_DIR / "settings.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.tmp.{uuid.uuid4().hex}")
@@ -311,7 +308,7 @@ async def _settings_save_route(request: Any) -> JSONResponse:
         encoding="utf-8",
     )
     temporary.replace(path)
-    return JSONResponse({"ok": True, "binding_id": binding_id})
+    return JSONResponse({"ok": True, **({"binding_id": binding_id} if "binding_id" in body else {})})
 
 
 def register(api: Any) -> None:

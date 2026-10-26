@@ -870,7 +870,8 @@ def test_settings_read_hydrates_the_form_without_writing(tmp_path, method):
         before = _file_identity(path)
         stored = json.loads((await handler(_http_request(method, clearing))).body)
         assert stored == {"binding_id": "a" * 32, "SLACK_INBOUND_WORKERS": "4", "SLACK_OUTBOUND_WORKERS": "5"}
-        assert list(stored) == field_names
+        assert "binding_id" not in field_names
+        assert [key for key in stored if key != "binding_id"] == field_names
         assert _file_identity(path) == before
 
         path.write_bytes(b'{"binding_id": "' + b"a" * 32 + b'", truncated')

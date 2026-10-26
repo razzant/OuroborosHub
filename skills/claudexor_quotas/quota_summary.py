@@ -39,6 +39,11 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
+try:  # the host loads the skill as a package: siblings are relative imports
+    from . import quota_scope
+except ImportError:  # imported directly from the skill directory (tests)
+    import quota_scope  # type: ignore[no-redef]
+
 SUMMARY_SCHEMA = 1
 
 # Two readings of one limit belong to the same cycle when their reported resets
@@ -221,28 +226,22 @@ def meaning_of(harness: str, constraint_id: str, label: str) -> str:
     return cid
 
 
-def _scope_hash(models: Sequence[str]) -> str:
-    """A model scope's identity: the whole sorted list, every name in full.
-    Only what is shown is bounded, never what tells two scopes apart.
-
-    The list is serialized so that two different lists never give the same
-    bytes. Joined by newlines it already is, as long as no name holds a
-    newline — and every scope recorded so far is such a list, so it keeps the
-    key its history is stored under. A list with a newline inside a name
-    (``["a\\nb"]`` against ``["a", "b"]``) is serialized as JSON behind a
-    leading newline instead: a joined list never starts with one, because
-    every name is stripped (see _models_of) and never empty."""
-    if not models:
-        return "-"
-    if any("\n" in name for name in models):
-        joined = "\n" + json.dumps(list(models), ensure_ascii=False, separators=(",", ":"))
-    else:
-        joined = "\n".join(models)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:10]
+def _scope_hash(models: Sequence[str], prefixes: Sequence[str] = ()) -> str:
+    """A model scope's identity: the whole sorted list, every name in full,
+    and the family prefixes when there are any (quota_scope.models_hash owns
+    the serialization; with no prefixes it is the id the history has always
+    stored). Only what is shown is bounded, never what tells two scopes
+    apart."""
+    return quota_scope.models_hash(models, prefixes)
 
 
-def group_key(harness: str, meaning: str, window: Optional[int], models: Sequence[str]) -> str:
-    return f"{harness}|{meaning}|{window or 0}|{_scope_hash(models)}"
+def group_key(harness: str, meaning: str, window: Optional[int], models: Sequence[str],
+              scope_token: Optional[str] = None) -> str:
+    """``harness|meaning|window|scope``. ``scope_token`` is the window's own
+    quota_scope key token (models, prefixes, unspecified flag, request kinds);
+    without it the scope is the model list alone, as before."""
+    token = scope_token if scope_token is not None else _scope_hash(models)
+    return f"{harness}|{meaning}|{window or 0}|{token}"
 
 
 def plan_evidence(quota_label: str, account_plan: Optional[str]) -> str:
@@ -408,7 +407,9 @@ class Account:
     subject_id: str
     kind: str
     enabled: Optional[bool]
-    signed_in: bool
+    # True/False only on positive evidence; None when the engine did not say
+    # (verification not run, availability unknown): never read as signed out.
+    signed_in: Optional[bool]
     auth_failed: bool
     plan: str
     identity: str  # sign-in address, lowercased; compared in memory, never emitted
@@ -436,6 +437,9 @@ class Reading:
     # is the bounded list shown, ``models_omitted`` what it leaves out.
     scope: str = "-"
     models_omitted: int = 0
+    # The window's exact scope fields as sent (quota_scope.Scope); None only
+    # for a reading built by hand without one.
+    desc: Optional[quota_scope.Scope] = None
 
 
 @dataclass
@@ -757,19 +761,34 @@ def reading_of(constraint: Dict[str, Any], harness: str, subject_id: str, *, sou
     raw_ratio = constraint.get("used_ratio")
     if window is None and raw_ratio is None:
         return None
-    scope_models = _models_of(constraint.get("applies_to_models"))
+    desc = quota_scope.scope_of(constraint)
+    scope_models = desc.models
     models = _shown_models(scope_models)
     ratio, problem = ratio_of(raw_ratio)
     label = _text(constraint.get("label") or constraint.get("id")) or "limit"
     meaning = meaning_of(harness, _text(constraint.get("id"), 120), label)
     return Reading(
         harness=harness, subject_id=subject_id, source=source, fresh=fresh,
-        observed_at=observed, key=group_key(harness, meaning, window, scope_models),
+        observed_at=observed,
+        key=group_key(harness, meaning, window, scope_models, desc.key_token()),
         meaning=meaning, label=label, window=window, models=models, ratio=ratio,
         ratio_problem=problem, resets_at=parse_instant(constraint.get("resets_at")),
-        plan=plan, plan_key=plan_key, scope=_scope_hash(scope_models),
-        models_omitted=len(scope_models) - len(models),
+        plan=plan, plan_key=plan_key, scope=desc.token,
+        models_omitted=len(scope_models) - len(models), desc=desc,
     )
+
+
+def sign_in_of(verification: Any, availability: Any) -> Optional[bool]:
+    """Whether a credential profile is signed in, on the evidence the engine
+    gave. ``passed`` or ``available`` says yes; a failed check or an
+    ``unavailable`` credential says no; verification not run with availability
+    unknown (the engine's ``not_run`` / ``unknown``, or neither field) says
+    nothing — None, which is never a signed-out restriction."""
+    if verification == "passed" or availability == "available":
+        return True
+    if verification == "failed" or availability == "unavailable":
+        return False
+    return None
 
 
 def _accounts_of(payload: Dict[str, Any], unified: bool) -> Dict[Tuple[str, str], Account]:
@@ -789,7 +808,8 @@ def _accounts_of(payload: Dict[str, Any], unified: bool) -> Dict[Tuple[str, str]
         out[(hid, "")] = Account(
             harness=hid, subject_id="", kind="native",
             enabled=row.get("native_credentials_enabled") is not False,
-            signed_in=bool(row.get("native_login_detected")),
+            signed_in=(row.get("native_login_detected")
+                       if isinstance(row.get("native_login_detected"), bool) else None),
             auth_failed=False,
             plan=_text(identity.get("plan")),
             identity=_text(identity.get("email"), 200).lower(),
@@ -811,7 +831,7 @@ def _accounts_of(payload: Dict[str, Any], unified: bool) -> Dict[Tuple[str, str]
             # Absent reads as enabled, as the host's own account list does:
             # a missing field is not the owner switching the account off.
             enabled=False if profile.get("enabled") is False else True,
-            signed_in=verification == "passed" or status.get("availability") == "available",
+            signed_in=sign_in_of(verification, status.get("availability")),
             auth_failed=verification == "failed",
             plan=_text(identity.get("plan") or status.get("plan_label")),
             identity=_text(identity.get("email"), 200).lower(),
@@ -916,12 +936,12 @@ def cooldowns_of(row: Dict[str, Any], harness: str, subject_id: str, now: float,
     out: List[Cooldown] = []
 
     def fact(raw: Any, scope_models: Tuple[str, ...], kind: str, label: str,
-             fresh: bool = fresh) -> Cooldown:
+             fresh: bool = fresh, prefixes: Tuple[str, ...] = ()) -> Cooldown:
         reported = raw not in (None, "")
         shown = _shown_models(scope_models)
         return Cooldown(
             harness=harness, subject_id=subject_id, models=shown,
-            scope=_scope_hash(scope_models), until=parse_instant(raw) if reported else None,
+            scope=_scope_hash(scope_models, prefixes), until=parse_instant(raw) if reported else None,
             until_text=_text(raw, 64) if reported else "", kind=kind, label=label,
             source=source, fresh=fresh, observed_at=observed,
             models_omitted=len(scope_models) - len(shown))
@@ -943,8 +963,9 @@ def cooldowns_of(row: Dict[str, Any], harness: str, subject_id: str, now: float,
         if until is not None and until <= now:
             continue
         label = _text(constraint.get("label") or constraint.get("id")) or "cooldown"
-        out.append(fact(raw, _models_of(constraint.get("applies_to_models")), "constraint", label,
-                        constraint_freshness(row, constraint, projection) == "fresh"))
+        scope = quota_scope.scope_of(constraint)
+        out.append(fact(raw, scope.models, "constraint", label,
+                        constraint_freshness(row, constraint, projection) == "fresh", scope.prefixes))
     return out
 
 
@@ -971,6 +992,7 @@ def exhaustions_of(row: Dict[str, Any], harness: str, subject_id: str,
         if not isinstance(entry, dict):
             continue
         scope_models = _models_of(entry.get("applies_to_models"))
+        scope_prefixes = quota_scope.names_of(entry.get("applies_to_model_prefixes"))
         shown = _shown_models(scope_models)
         raw = entry.get("resets_at")
         reported = raw not in (None, "")
@@ -986,7 +1008,8 @@ def exhaustions_of(row: Dict[str, Any], harness: str, subject_id: str,
         out.append(Exhaustion(
             harness=harness, subject_id=subject_id,
             constraint_id=_text(entry.get("constraint_id"), 120), models=shown,
-            models_omitted=len(scope_models) - len(shown), scope=_scope_hash(scope_models),
+            models_omitted=len(scope_models) - len(shown),
+            scope=_scope_hash(scope_models, scope_prefixes),
             resets_at=resets_at, resets_text=_text(raw, 64) if reported else "",
             live=not note, note=note, source=source, fresh=fresh, observed_at=observed))
     return out
@@ -1208,6 +1231,9 @@ class GroupCalc:
     possible_duplicates: int
     models_omitted: int = 0
     scope: str = "-"
+    # The exact scope fields of the window as sent; None for a limit known
+    # only from the history (which records the scope id, not its fields).
+    scope_info: Optional[quota_scope.Scope] = None
     # Accounts of the current roster that report no reading of this limit
     # in this answer but whose last reading of it the local history keeps
     # (status history_only). Never counted as measured.
@@ -1322,6 +1348,12 @@ def _order_key(norm: Normalized, calc: GroupCalc) -> Tuple[Any, ...]:
     )
 
 
+def _scoped(reading: Reading) -> bool:
+    """Whether a window is tied to some models — by name or by family prefix.
+    A prefix-only window (no model list) is scoped, never a shared limit."""
+    return bool(reading.models) or (reading.desc.scoped if reading.desc is not None else False)
+
+
 def resolve_groups(norm: Normalized, now: float) -> List[GroupCalc]:
     by_key: Dict[str, Dict[str, List[Reading]]] = {}
     for reading in norm.readings:
@@ -1335,7 +1367,7 @@ def resolve_groups(norm: Normalized, now: float) -> List[GroupCalc]:
     spent: Dict[Tuple[str, str], Set[str]] = {}
     for key, members in resolved.items():
         for member in members:
-            if member.status == "measured" and not member.reading.models \
+            if member.status == "measured" and not _scoped(member.reading) \
                     and member.remaining <= RATIO_EPS:
                 spent.setdefault((member.harness, member.subject_id), set()).add(key)
     norm.spent = spent
@@ -1360,7 +1392,7 @@ def resolve_groups(norm: Normalized, now: float) -> List[GroupCalc]:
             other_family_accounts=other,
             possible_duplicates=_shared_identities(norm, members),
             models_omitted=sample.models_omitted,
-            scope=sample.scope,
+            scope=sample.scope, scope_info=sample.desc,
         ))
     groups.sort(key=lambda calc: _order_key(norm, calc))
     return groups[:MAX_GROUPS]
@@ -1384,7 +1416,7 @@ def _decorate(norm: Normalized, member: Member, key: str, scope: str,
     elif account is not None:
         if account.enabled is False:
             flags.append("disabled")
-        if not account.signed_in:
+        if account.signed_in is False:
             flags.append("signed_out")
         if account.auth_failed:
             flags.append("auth_failed")
@@ -1397,7 +1429,15 @@ def _decorate(norm: Normalized, member: Member, key: str, scope: str,
     if scope != "-" and scope in norm.exhausted_scoped.get(subject, set()) \
             and member.status == "measured" and member.remaining > RATIO_EPS:
         flags.append("model_exhausted")
-    if any(other != key for other in spent.get(subject, set())):
+    # Model-unscoped does not mean request-kind-unscoped. In particular the
+    # Codex text and image buckets do not hold one another. Compare the exact
+    # declared kind sets; unreadable/missing history never proves disjointness.
+    def kinds(limit: str) -> Set[str]:
+        desc = next((r.desc for r in norm.readings
+                     if (r.harness, r.subject_id) == subject and r.key == limit), None)
+        return (set(desc.kinds) if desc is not None and desc.kinds is not None
+                and desc.kinds_state != "unreadable" else set(quota_scope.REQUEST_KINDS))
+    if any(other != key and kinds(other) & kinds(key) for other in spent.get(subject, set())):
         flags.append("other_limit_spent")
     member.flags = tuple(flags)
 
@@ -1702,6 +1742,8 @@ def _model_scope(calc: GroupCalc) -> str:
     not carry: only the history's scope id is known)."""
     if calc.models:
         return "named"
+    if calc.scope_info is not None and calc.scope_info.prefixes:
+        return "prefixes"  # tied to model families by prefix; ``scope`` names them
     return "none" if calc.scope in ("-", "") else "names_unknown"
 
 
@@ -1743,7 +1785,7 @@ def _group_output(calc: GroupCalc, now: float, named: bool = False) -> Dict[str,
     if fixed:
         soonest = min(at for at, _m in fixed)
         next_reset = {
-            "at": iso(soonest),
+            "at": iso_exact(soonest),
             "accounts": sum(1 for at, _m in fixed if at - soonest <= RESET_TOLERANCE_SEC),
         }
         # What a full refill of those accounts would give back if nothing more
@@ -1846,6 +1888,9 @@ def _group_output(calc: GroupCalc, now: float, named: bool = False) -> Dict[str,
         # history keeps its scope but not its names (``names_unknown``):
         # still scoped, never read as the family's shared limit.
         "model_scope": _model_scope(calc),
+        # Additive: every scope field exactly as the window sent it (absent,
+        # empty and false stay apart); None for a limit restored from history.
+        "scope": calc.scope_info.describe() if calc.scope_info is not None else None,
         "measured": {
             "accounts": len(measured),
             "windows": _round(windows),
@@ -2036,6 +2081,13 @@ def roster_requests(norm: Normalized, salt: str) -> List[str]:
     return [pseudo_id(salt, harness, subject_id) for (harness, subject_id) in sorted(norm.accounts)]
 
 
+def _window_of_series(text: str) -> int:
+    try:
+        return int(text) or 0
+    except ValueError:
+        return 0
+
+
 def _history_group(norm: Normalized, key: str, harness: str) -> Optional[GroupCalc]:
     """A limit known only from the history of a roster account (no reading
     of this answer names it): its identity is the recorded series key alone.
@@ -2067,8 +2119,21 @@ def finish(norm: Normalized, groups: List[GroupCalc], view: Optional[HistoryView
         # (below).
         known = {calc.key for calc in groups}
         roster = {pseudo_id(salt, h, sid): h for (h, sid) in norm.accounts}
+        # A window whose scope now carries fields an older skill ignored
+        # (family prefixes, the unspecified-model flag, request kinds) has a
+        # new series key; the old key of the same limit stays recorded and is
+        # never read as the new scope, but it is not restored as a second,
+        # unscoped limit beside it either.
+        shadowed = {(g.harness, g.meaning, g.window or 0, _scope_hash(g.scope_info.models))
+                    for g in groups
+                    if g.scope_info is not None and g.key.endswith("|" + g.scope_info.key_token())
+                    and g.scope_info.key_token() != _scope_hash(g.scope_info.models)}
         for subject, series in sorted(view.roster_series):
             if subject not in roster or series in known:
+                continue
+            parts = series.split("|")
+            if (len(parts) >= 4 and (parts[0], "|".join(parts[1:-2]),
+                                     _window_of_series(parts[-2]), parts[-1]) in shadowed):
                 continue
             calc = _history_group(norm, series, roster[subject])
             if calc is not None:
@@ -3142,6 +3207,15 @@ def compact(summary: Dict[str, Any], harness: str = "", detail: bool = False) ->
         if group.get("model_scope") == "names_unknown":
             # Restored from the history: tied to models, names not recorded.
             row["model_scope"] = "model-scoped; model names unavailable from history"
+        scope_fields = group.get("scope") or {}
+        if group.get("model_scope") == "prefixes":
+            row["model_scope"] = "tied to model families by prefix"
+        if (scope_fields.get("prefixes") or {}).get("names"):
+            row["model_prefixes"] = scope_fields["prefixes"]["names"]
+        if scope_fields.get("unspecified_model") is True:
+            row["governs_unspecified_model"] = True
+        if scope_fields.get("request_kinds") is not None:
+            row["request_kinds"] = scope_fields["request_kinds"]
         if group.get("models_omitted"):
             row["models_omitted"] = group["models_omitted"]
         if group["restrictions"]:

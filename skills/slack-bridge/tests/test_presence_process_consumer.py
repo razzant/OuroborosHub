@@ -109,15 +109,16 @@ def test_late_promoted_child_survives_bridge_restart_before_parent_completion(tm
     assert facts["core_sources_unchanged"]
     assert facts["initial_status"] == "continuing" and facts["initial_child_ref"] == ""
     assert facts["discovered_child_ref"] and facts["child_completed_before_parent"]
-    assert facts["parent_discovery_status"] == ("unresolved" if dead_parent else "pending")
+    assert facts["parent_discovery_status"] == ("failed" if dead_parent else "pending")
     assert facts["bridge_restarts"] == 2
     assert facts["original_event_posts"] == 1
     assert facts["provider_texts"] == [CHILD_ANSWER]
     assert facts["outbox_states"] == ["delivered"]
     assert facts["output_task_ids"] == [facts["discovered_child_ref"]]
-    assert facts["final_inbox_state"] == "pending"
+    # A dead parent's view is terminal (nothing can change it), so the row ends once its child is delivered.
+    assert facts["final_inbox_state"] == ("failed" if dead_parent else "pending")
     if dead_parent:
-        assert "unresolved" in facts["final_inbox_error"]
+        assert facts["final_inbox_error"].endswith(": failed")
         assert len(facts["host_pids"]) == 2 and len(set(facts["host_pids"])) == 2
         assert facts["killed_host_exit_codes"] == [-9]
 
@@ -134,8 +135,10 @@ def test_real_host_409_preserves_admitted_child_and_original_refusal_after_resta
     assert facts["provider_texts"] == [CHILD_ANSWER]
     assert facts["outbox_states"] == ["delivered"]
     assert facts["output_task_ids"] == [facts["discovered_child_ref"]]
-    assert facts["final_inbox_state"] == "pending"
+    # The refused original can no longer change: its view ends `failed` and the row ends after the child.
+    assert facts["final_inbox_state"] == "failed"
     assert facts["original_refusal"] in facts["final_inbox_error"]
+    assert facts["final_inbox_error"].endswith(": failed")
 
 
 def _run_consumer(tmp_path, mode, reporting, scenario="main"):

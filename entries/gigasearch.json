@@ -1,0 +1,17 @@
+{
+  "category": [
+    "search"
+  ],
+  "description": "Основной веб-поиск этой установки. Для обычного поиска внешней информации сначала используй GigaSearch; при явном выборе пользователя или недоступности сервиса выбери подходящую альтернативу.",
+  "digest": "891f7685618edced87fa164b27ee05443fa486e43dca47f82b4cfe4e9c2f1c48",
+  "name": "gigasearch",
+  "owner": "komsikov",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/gigasearch"
+  },
+  "type": "extension",
+  "version": "0.1.1",
+  "withdrawn": null
+}

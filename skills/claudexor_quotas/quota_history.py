@@ -602,18 +602,24 @@ class HistoryStore:
                     view.sweeps_from = view.sweeps[0]
                     view.truncated = True
             budget = max(1, int(max_rows))
-            for (subject, series), since in sorted(wanted.items()):
+            ordered = sorted(wanted.items())
+            for pair_index, ((subject, series), since) in enumerate(ordered):
                 if budget <= 0:
                     view.truncated = True
                     break
+                # A wider calibration read must not spend every later
+                # account's trailing-hour evidence. Each pair gets a fair
+                # share of the remaining cap, newest first; unused shares
+                # carry forward. Any shortened history remains disclosed.
+                allowance = max(1, budget // (len(ordered) - pair_index))
                 rows = conn.execute(
                     f"SELECT {_RUN_FIELDS} FROM run WHERE subject=? AND series=? AND last_seen>=? "
                     "ORDER BY first_seen DESC, id DESC LIMIT ?",
-                    (subject, series, float(since), budget + 1),
+                    (subject, series, float(since), allowance + 1),
                 ).fetchall()
-                if len(rows) > budget:
+                if len(rows) > allowance:
                     view.truncated = True
-                    rows = rows[:budget]
+                    rows = rows[:allowance]
                 budget -= len(rows)
                 view.runs[(subject, series)] = [_run_of(row) for row in reversed(rows)]
                 if chart_series is not None and series == chart_series[0] and budget > 0:

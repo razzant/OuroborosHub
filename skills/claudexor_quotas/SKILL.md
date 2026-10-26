@@ -1,18 +1,26 @@
 ---
 name: claudexor_quotas
-description: "Claudexor quota widget and read-only quota_summary tool: one bar per account and limit (current, dated last-known, or unknown — never zero), reserve in account-windows with coverage, restrictions and reported resets, and under the chosen limit a timeline — its recorded past and one conditional future (no new use, or the recent pace) of the accounts read now, with its reset schedule — from a bounded local history of passive readings."
-version: 0.9.0
+description: "Claudexor quota dashboard and read-only quota_summary: sorted account bars, per-window and calibrated joint timelines, reported resets, measured pace, dated account resources and reversible row visibility. The optional granted context snapshot supplies the same figures at eligible host context tails; no routing, account changes or automatic provider refresh."
+version: 0.12.1
 type: extension
 runtime: python3
 entry: plugin.py
 plugin_api: "2.0"
-permissions: [net, route, widget, tool, supervised_task]
+permissions: [net, route, widget, tool, supervised_task, context_snapshot]
+context_snapshot:
+  path: context-snapshot.json
 env_from_settings: []
 when_to_use: "The owner wants quota windows, resets and remaining reserve of the authorized Claudexor accounts; or, before choosing executors, the model wants measured reserve by family and limit. Advisory only: never a dispatch guarantee or a pin change."
 model_experience:
-  what_model_sees: "One tool, quota_summary, with a fixed schema. Only when called does compact JSON (account-windows per family and limit, current and dated last-known apart, coverage, restrictions, resets, pace, and a one-line headline per limit) arrive as a tool result; nothing is auto-inserted."
-  token_effect: "Fixed schema and description while enabled; each voluntary call adds about 1-8 KB of JSON, less per family. No automatic call or cache benefit is promised."
+  what_model_sees: "One read-only quota_summary tool with a fixed schema returns reserve, coverage, resets, measured pace, joint metrics and individually dated resources. Separately, when the host grants context_snapshot, the collector publishes a deterministic local snapshot for eligible integrating contexts; the host appends it at the tail, expires or withdraws it, without provider calls or dispatch authority."
+  token_effect: "Fixed tool schema/description while enabled; voluntary calls add JSON, smaller per family. The optional granted local snapshot adds changed text at the eligible host context tail, with validity/withdrawal; unchanged valid content is not duplicated. No automatic tool call or prompt-cache benefit is promised."
 timeout_sec: 180
+contributes:
+  - id: quota
+    placement: composer.chips
+    label: Quotas
+    source: {route: chip, refresh_s: 60}
+    action: {verb: open.tab}
 ui_tab:
   tab_id: quotas
   title: Claudexor Quotas
@@ -25,7 +33,16 @@ ui_tab:
     start: auto
 ---
 
-# Claudexor Quotas (v0.9.0)
+# Claudexor Quotas (v0.12.1)
+
+The composer quota chip opens this widget. `GET chip` uses the same passive
+cached read as `quotas?reuse=1&chart=0`; it never requests provider refresh.
+`quota_chip.py` formats the summary's tightest measured limit per family:
+average remaining share across measured accounts, never a sum across limits.
+Its text is at most 24 characters, prioritizing the lowest remaining families;
+the title lists every family and its reported next reset (or unknown).
+Color thresholds are display formatting only: <=10% bad, <=25% warn, otherwise
+ok. Unavailable readings show a muted “—” with the reason; unknown is not zero.
 
 A projection of the host's own account surface, plus a small planner on top of
 it: how much measured quota is left per agent family and limit, when it is
@@ -58,6 +75,110 @@ it (`api.get_state_dir()`):
 - `quota_collector.lock` — an empty lease file, never removed while the skill
   runs. Its OS lock serializes collector cycles across unload/reload; it holds
   no account or quota data. SQLite may also keep its standard WAL/SHM files.
+
+## What changed in 0.12.1
+
+- **A steady snapshot text.** The context snapshot changes only when a printed
+  fact changes. A current resource reading carries no observation time (the
+  snapshot envelope dates the text), so equal current facts fold into one
+  counted line; a last-known reading keeps its date. Measured pace and the
+  conditional account-hours print at one decimal like the other derived
+  figures (a positive value below that resolution is never 0), and reported
+  instants print to the nearest second; validity still uses the exact reset.
+  Before this, every two-minute sweep rewrote the whole note.
+
+## What changed in 0.11.0
+
+- **Calm timeline, retained bars.** The compact timeline adds per-window and Combined
+  tabs, a request-model choice based on reported scopes, one headline/reset and
+  one softly filled curve, with details folded. Sorted, equal-height 40 px account
+  bars remain. One selected-account inspector stands immediately under its opening
+  limit row, before that row's chart; a list selection stands under its account
+  row. If its opening limit is hidden or absent, it moves to the account list
+  (under the header while folded). Long model labels wrap within narrow list rows
+  without removing their full accessible names.
+- **Exact scope.** A window's scope is kept field by field as sent
+  (`applies_to_models`, `applies_to_model_prefixes`,
+  `applies_to_unspecified_model`, `applies_to_request_kinds`): absent, empty
+  and `false` stay apart for inspection (`scope` on each group and
+  `scope_fields` on each account window). A window with none of the new fields
+  keeps its exact old group key and history; a prefix-only window is scoped
+  (never a shared limit that blocks the others), and a window that also carries
+  the unspecified-model flag or request kinds gets its own key. The old key of
+  such a limit is never read as the new scope, and is not restored beside it.
+  Unknown verification (`not_run` / `unknown`) is never "signed out": only a
+  failed check or an `unavailable` credential says so.
+- **Combined view.** Per account the smaller of its binding windows in units of
+  its shortest window, with a retrospective ratio `k` calibrated on that
+  account's *common watched period* (all binding windows observed in one
+  cycle, unbroken, last 7 days, at least 6 h and 2 points of movement each).
+  An account with an unknown window, no history or too little common time is
+  left out and counted apart, never counted as positive; a known exhausted
+  window is a known 0 only while it stays exhausted: an uncalibrated account
+  becomes unknown again after its reported refill. Future coverage and reset
+  amounts retain that distinction. Conditional account-hours use each account's
+  common-watched-period pace (up to 7 days), with known/unknown coverage; this is
+  distinct from a window's trailing-hour Recent pace.
+  The two futures are conditions, not forecasts: *no new use* (each window
+  refilled once at its next reported reset) and *measured pace* (work runs
+  while every binding window has share, stops for every window while any is
+  exhausted, resumes after its reported reset; nothing is drained while no
+  work can run). Which windows bind follows the existing engine `quota_block`
+  projection: model aliases match by case-insensitive containment in either
+  direction; declared prefixes remain literal/case-sensitive, with request-kind
+  and explicit unspecified-model scope. This is not BudgetLedger's stricter
+  predicate or an execution guarantee. Unreadable/history-only scope never
+  grants positive joint capacity or paced burn. A legacy history-only model
+  digest without the new-field suffix proves it cannot bind a request naming
+  no model; only that proven exclusion is used, never a guessed lost model list.
+  Historical points use only the
+  common evidence available by that point, never a ratio learned afterwards. `GET .../quotas?...&joint=1[&model=][&kind=]`
+  adds `chart.analytics`; the tool carries the same figures as `joint`.
+- **Resources.** Balances, spending and manual reset offers from the passive
+  `resources_freshness` view, as the engine dated them: current, last known
+  (dated) or not reported; missing is never 0, a team figure is the team's, a
+  zero included amount is not a block, and an offer is information only.
+  `availability_scope` (with its `basis`) is carried, never interpreted.
+- **Display set.** `POST .../display {hidden:[group keys]}` (own file
+  `display.json`) hides rows in the widget only; the reserve, history, tool
+  and snapshot are untouched. Hiding the charted row selects another visible
+  row without unhiding it, so the timeline and Combined remain reachable.
+  "Show all rows" undoes this family's hides only. Saves use the legacy prefs'
+  frame/sequence ordering; the newest 64 hidden keys are retained.
+- **Context snapshot.** This version declares the `context_snapshot` permission:
+  it requires a host supporting that declaration and its grant before the whole
+  extension can be enabled. The skill remains optional; installing it does not
+  offer a separate ungranted widget-only mode. After a successful sweep the collector writes
+  `context-snapshot.json` (`schema_version`, `observed_at`, `valid_until`,
+  `text`) — the tool's own figures as one deterministic text; derived
+  figures print at one decimal (capacity and hours marked ≈), reported
+  instants to the nearest second, current readings without a poll time. An
+  unchanged text is not rewritten until its validity nears its end; a failed
+  sweep writes nothing, so the file expires. Validity is at most 420 seconds
+  after the successful read and never beyond the exact earliest reported quota
+  reset or a current resource reset/period end (no minimum lifetime or reset rounding).
+  A resource fact whose boundary passed is dated last known individually, not
+  renewed fresh and not allowed to suppress unrelated useful families. The
+  existing timestamp parser handles fractional ISO instants consistently.
+  A passed reset cannot renew a fresh claim. Stop is checked after computation
+  and before atomic publication admission. The compact text includes numeric measured pace in account-windows/h
+  with its measured cohort, coverage, and resources (last-known ones dated); a family
+  with resources but no quota window is still shown, never inferred available.
+  Positive sub-hour conditional work is not rounded to zero. The default text
+  bound is 12,000 characters, not 2,400; any omitted lines name their families
+  and point to the complete `quota_summary` answer. Amounts in unlike accounts,
+  scopes or currencies are never added. Resource `unit`, `currency` and
+  `decimal_places` are retained: integer `minor` values are scaled by exact
+  digit placement (never float); other units remain explicit raw units, never
+  relabelled as whole currency. A selected window not binding the requested
+  model/kind stays visible but does not burn at that request's pace
+  (`chart.analytics.window.scope_applies`); its legend explains the hold rather
+  than claiming no history. A per-window future uses the same trailing-hour
+  per-account estimator as the tool's `recent_pace`, held by all its binding
+  windows. Combined uses the separate common-period calibration/pace. Details'
+  history and future samples belong to the view actually drawn, including
+  Combined. The bounded history read shares its newest rows among requested
+  pairs; truncation is disclosed, not mislabelled as absent history.
 
 ## What changed in 0.9.0: last-known history and manual reset credits
 
@@ -781,9 +902,10 @@ widget shows. It never refreshes a
 provider, never changes model or account pins or routing, and never injects
 chat or writes memory.
 
-The tool's schema and description are static; numbers appear only in the tool
-result, at the end of the conversation, when the model chooses to call it.
-Nothing calls it automatically and nothing guarantees a prompt-cache hit.
+The tool's schema and description are static; tool numbers appear only in its
+result when called. Nothing calls the tool automatically or guarantees a
+prompt-cache hit. Independently, the granted `context_snapshot` contract above
+allows the host to append the collector's local text at eligible context tails.
 
 ## What it reads
 
@@ -1018,18 +1140,22 @@ exhausted window is never reported as the default login's.
 ## Owner-controlled steps
 
 The skill declares no secrets (`env_from_settings: []`). Its permissions are
-`net` + `route` + `widget` + `tool` + `supervised_task`:
+`net` + `route` + `widget` + `tool` + `supervised_task` + `context_snapshot`:
 
 - `net` — the routes, the tool and the collector read the host's own endpoints
   over loopback with `urllib` (no external host and no proxy handler): passive
   status GET with a 25-second bound (20 seconds for the tool), and the explicit
   foreground quota POST with 180 seconds, only from the Refresh button;
-- `route` + `widget` — the widget, its three routes (the prefs route kept
-  for an older widget) and its tab;
+- `route` + `widget` — the widget and its quotas, refresh, display and legacy prefs
+  routes, plus its tab;
 - `tool` — the read-only `quota_summary` tool;
-- `supervised_task` — the one history collector described above.
+- `supervised_task` — the one history collector described above;
+- `context_snapshot` — the optional reviewed declaration and separate host grant
+  for the collector's local snapshot; not permission to refresh, route or spend.
 
 No secret key grant is required. Everything the skill writes lives in its own
-state directory: `prefs.json` with three display choices, and the bounded
-history, which holds no account name, address, credential or raw response.
+state directory: legacy `prefs.json`, row-visibility `display.json`, the dated
+`context-snapshot.json`, and the bounded history. History contains no account name,
+address, credential or raw response; the snapshot carries the tool's bounded
+resource facts, not credentials.
 Enabling a reviewed skill remains the owner's action in Skills.

@@ -114,6 +114,9 @@ def _make_status(api: Any):
     async def status(_request: Any = None) -> JSONResponse:
         store = BridgeStore(_state_dir(api))
         payload = store.status()
+        held = payload.get("outbox_held", 0)
+        payload.update(text=f"{held} held" if held else str(payload.get("socket_state") or "Not connected"),
+                       tone="warn" if held else "muted", title="Slack transport")
         protected = api.get_settings(["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"])
         settings_error = ""
         try:
@@ -518,12 +521,6 @@ def register(api: Any) -> None:
                         },
                         {
                             "type": "metric",
-                            "label": "Presence binding",
-                            "path": "binding_state",
-                            "target": "status",
-                        },
-                        {
-                            "type": "metric",
                             "label": "Workspace",
                             "path": "workspace_name",
                             "tone": "info",
@@ -550,6 +547,7 @@ def register(api: Any) -> None:
                             "tone": "neutral",
                             "target": "status",
                         },
+                        {"type": "metric", "label": "Outbox held", "path": "outbox_held", "target": "status"},
                         {
                             "type": "metric",
                             "label": "Outbox delivered",
@@ -607,8 +605,7 @@ def register(api: Any) -> None:
                     "type": "markdown",
                     "text": (
                         "Set and grant `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in Secrets. "
-                        "Select an owner-created Presence Binding ID for "
-                        "provider `slack`, the workspace Team ID, and an exact channel conversation ID or `*`. "
+                        "Connect Slack under Consciousness → Places. "
                         "The bridge receives messages from every DM, MPDM, public channel, "
                         "and private channel that the installed app can actually see."
                     ),
@@ -619,13 +616,6 @@ def register(api: Any) -> None:
                     "method": "POST",
                     "submit_label": "Save Slack settings",
                     "fields": [
-                        {
-                            "name": "binding_id",
-                            "label": "Presence Binding ID",
-                            "type": "text",
-                            "placeholder": "32 lowercase hexadecimal characters",
-                            "help": "Owner-created binding for provider slack, this workspace Team ID, and an exact channel conversation ID or *.",
-                        },
                         {
                             "name": "SLACK_INBOUND_WORKERS",
                             "label": "Inbound workers",

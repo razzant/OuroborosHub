@@ -60,7 +60,10 @@ def assert_refusal_receipt(bridge, expected, *, source="Ev-1", http_status=409, 
 
 @pytest.mark.parametrize("reporting", [True, False])
 @pytest.mark.parametrize("disposition", ["rejected", "blocked", "retry"])
-def test_409_admitted_child_survives_restart_and_releases_the_thread(tmp_path, reporting, disposition):
+def test_409_admitted_child_survives_restart_and_releases_the_thread(tmp_path, reporting, disposition, monkeypatch):
+    # The first child's retry must remain in the future until bridge.due().
+    # Filesystem latency must not choose which inbox row this test claims.
+    monkeypatch.setattr("time.time", lambda: 1000.0)
     async def run():
         host, slack = RefusalHost(reporting=reporting), FakeSlack()
         host.turn_status["Ev-1"] = 409

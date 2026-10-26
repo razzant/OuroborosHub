@@ -1,0 +1,17 @@
+{
+  "category": [
+    "ouroboros"
+  ],
+  "description": "Interactive cache observability dashboard with token-weighted read rates, separate request and session counts, measurement coverage, and Canvas charts.",
+  "digest": "56cf860a9ce43e1d9c0d6737de94036cc7a40aaa4ae3dd8656806cf822169480",
+  "name": "cache_efficiency_snapshot",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/cache_efficiency_snapshot"
+  },
+  "type": "extension",
+  "version": "0.6.1",
+  "withdrawn": null
+}

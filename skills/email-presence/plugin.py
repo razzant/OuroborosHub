@@ -165,6 +165,10 @@ def register(api):
                        imap_host_configured=bool(settings.get("EMAIL_IMAP_HOST")),
                        smtp_host_configured=bool(settings.get("EMAIL_SMTP_HOST")),
                        poll_health=store().get("poll_health"))
+        held = payload.get("outbox_held", 0)
+        connected = bool((payload.get("poll_health") or {}).get("ok"))
+        payload.update(text=f"{held} held" if held else "Connected" if connected else "Not connected",
+                       tone="warn" if held else "ok" if connected else "muted", title="Email transport")
         return JSONResponse(payload)
 
     async def save(request):
@@ -201,8 +205,7 @@ def register(api):
             {"type": "status", "target": "status", "idle": "Refresh to inspect mailbox intake and delivery receipts.", "loading": "Reading local status…", "success": "Status loaded.", "error": "Status unavailable."},
             {"type": "json", "target": "status"}]})
     api.register_settings_section("email_presence", title="Email Presence", schema={"components": [
-        {"type": "markdown", "text": "Configure granted IMAP/SMTP credentials and a Presence binding. First connection records the intake baseline; older mail remains accessible through tools."},
+        {"type": "markdown", "text": "Configure granted IMAP/SMTP credentials and connect an Email place. First connection records the intake baseline; older mail remains accessible through tools."},
         {"type": "form", "route": "settings/save", "method": "POST", "submit_label": "Save email settings", "fields": [
-            {"name": "binding_id", "label": "Presence Binding ID", "type": "text"},
             {"name": "folder", "label": "Intake folder", "type": "text", "placeholder": "INBOX"},
             {"name": "poll_interval_sec", "label": "Maximum idle poll interval (seconds)", "type": "number", "placeholder": "30"}]}]})

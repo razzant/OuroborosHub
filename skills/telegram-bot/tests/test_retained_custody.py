@@ -46,6 +46,14 @@ def pending(ref):
     return 202, {"ok": True, "status": "pending", "work_ref": ref, "delivery_reporting_version": 1}
 
 
+def ended(ref, *, child="", status="failed", code="presence_attempt_outcome_unknown"):
+    # A current Host's view of an attempt that ended without a canonical answer: nothing
+    # further to deliver, its facts, and a real child under its own reference.
+    return 200, {"ok": True, "status": status, "outcome": "silent", "text": "", "output_ref": "", "code": code,
+                 "turn_ref": ref, "recorded_status": "running", "work_ref": ref, "child_work_ref": child,
+                 "delivery_reporting_version": 1}
+
+
 def answered(turn, text, *, outcome="message", work_ref=""):
     return 200, {"ok": True, "status": "completed", "outcome": outcome, "text": text, "turn_ref": turn,
                  "work_ref": work_ref, "delivery_reporting_version": 1}
@@ -424,4 +432,37 @@ def test_selected_output_survives_unresolved_author_and_repeated_terminal(tmp_pa
         assert bridge.sent() == ["Selected answer"]
         assert bridge.work()["turn-1"] == ("turn", "failed")
         assert len(host.reports) == 1 and host.reports[0]["origin"]["task_id"] == "turn-1"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("first_named", ["pending", "failed", "cancelled"])
+def test_a_child_first_named_by_any_view_is_observed_after_its_turn_ends(tmp_path, host, first_named):
+    async def run():
+        host.turns["telegram:9:1"] = retained("turn-1")  # the receipt names no child yet
+        later = ended("turn-1", child="child-1", status="failed" if first_named == "pending" else first_named)
+        host.work["turn-1"] = ([(202, {**pending("turn-1")[1], "child_work_ref": "child-1"}), later]
+                               if first_named == "pending" else [later])
+        host.work["child-1"] = [pending("child-1"), done("child-1", "Child answer")]
+        bridge = Bridge(tmp_path, host)
+        assert bridge.receive(1, "What is the weather?")
+        await bridge.inbox()
+        assert bridge.work() == {"turn-1": ("turn", "pending")}
+
+        assert await bridge.poll()
+        if first_named == "pending":
+            assert bridge.work() == {"turn-1": ("turn", "pending"), "child-1": ("child", "pending")}
+            bridge.restart()
+            assert await bridge.poll()
+        # The ended turn settles at once; the child it named stays observed across a restart.
+        ended_status = "failed" if first_named == "pending" else first_named
+        assert bridge.work()["turn-1"] == ("turn", ended_status)
+        assert bridge.work()["child-1"][0] == "child"
+        bridge.restart()
+        while bridge.work()["child-1"][1] != "completed":
+            assert await bridge.poll()
+        await bridge.send()
+        assert bridge.sent() == ["Child answer"]
+        assert host.generations == ["telegram:9:1"]
+        assert bridge.receipt("telegram:9:1")["http_status"] == 409
+
     asyncio.run(run())

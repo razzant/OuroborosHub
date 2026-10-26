@@ -889,7 +889,7 @@ class BridgeStore:
             ).fetchall()
         if not rows:
             return {"state": "not_found", "request_id": str(request_id)}
-        parts = [{"part_id": str(row["chunk_index"]), "state": str(row["state"]),
+        parts = [{"part_id": str(row["chunk_index"]), "state": "held" if str(row["last_error"]).startswith("Held:") and row["state"] == "pending" else str(row["state"]),
                   "attempts": int(row["attempts"]), "target": str(row["target"]),
                   "resolved_channel": str(row["resolved_channel"]),
                   "provider_message_ts": str(row["provider_message_ts"]),
@@ -929,6 +929,13 @@ class BridgeStore:
                 raise RuntimeError(
                     "Slack outbox lease no longer belongs to this worker"
                 )
+
+    def hold_outbox(self, item: OutboxItem, reason: str) -> None:
+        """Keep custody and FIFO order without spending a provider attempt."""
+        self._leased_update("outbox", item.row_id, item.lease_token,
+                            "state='pending',lease_token='',lease_until=0,send_started=0,available_at=?,"
+                            "attempts=MAX(0,attempts-1),last_error=?",
+                            (time.time() + 5, reason))
 
     def _leased_update(
         self,
@@ -1007,6 +1014,7 @@ class BridgeStore:
                     "SELECT state, COUNT(*) AS count FROM outbox GROUP BY state"
                 ).fetchall()
             }
+            held = db.execute("SELECT COUNT(*) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%'").fetchone()[0]
             mutations = {
                 str(row["state"]): int(row["count"])
                 for row in db.execute("SELECT state,COUNT(*) AS count FROM outbox WHERE kind='mutation' GROUP BY state").fetchall()
@@ -1039,6 +1047,7 @@ class BridgeStore:
                 runtime[str(row["key"])] = None
             runtime_updated_at = max(runtime_updated_at, float(row["updated_at"]))
         return {
+            "outbox_held": held,
             "socket_state": "stopped",
             "host_adapter_state": "missing_binding_id",
             "workspace_name": "",

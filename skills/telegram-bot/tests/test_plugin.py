@@ -81,7 +81,7 @@ def test_package_style_plugin_registration_and_status_route(tmp_path):
     assert api.tools[0][0] == "telegram_send"
     form = api.tabs[0][2]["render"]["components"][0]
     assert form["type"] == "form" and form["route"] == "settings/save"
-    assert "conversation_id=*" in form["fields"][0]["help"]
+    assert all(field["name"] != "binding_id" for field in form["fields"])
     assert callable(api.unload)
 
     # Check the model-visible catalog, not only direct Python handler calls.

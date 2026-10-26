@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.5.0
+version: 0.6.0
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -20,7 +20,7 @@ env_from_settings:
 - TELEGRAM_PUBLIC_BOT_TOKEN
 timeout_sec: 60
 when_to_use: The owner wants a reviewed Telegram bot transport for one or more external presence
-  bindings, separate from the native owner-control Telegram bridge.
+  places, separate from the native owner-control Telegram bridge.
 ui_tab:
   tab_id: transport
   title: Telegram Transport
@@ -34,16 +34,11 @@ ui_tab:
       method: POST
       submit_label: Save transport settings
       fields:
-      - name: binding_id
-        label: Presence Binding ID
-        type: text
-        placeholder: 32-character binding id
-        help: Owner-created binding for this Telegram transport (conversation_id=exact id or conversation_id=*).
       - name: management_group_id
         label: Management group ID
         type: text
         placeholder: Optional numeric Telegram group ID
-        help: Marks this room in event facts. Work instructions stay in the behavior profile; no
+        help: Marks this room in event facts. Work instructions stay in place notes; no
           owner permissions are granted.
     - type: poll
       route: status
@@ -112,13 +107,36 @@ ui_tab:
       target: status
 tools:
 - name: telegram_send
+  effect: message
+  target: chat_id
+  conversation: chat_id
+  thread: topic_id
   description: Queue a proactive Telegram text, photo, or document for durable delivery.
 - name: telegram_moderate
+  effect: write
+  target: chat_id
+  conversation: chat_id
   description: Queue exact-message deletion or member restriction, ban, or unban with durable receipts.
 - name: telegram_operation
+  effect: write
+  target: chat_id
+  conversation: chat_id
+  thread: topic_id
   description: Queue an own-message edit or reaction through the Telegram Bot API with durable receipts.
 - name: telegram_receipt
+  effect: read
+  target: []
   description: Inspect delivery state and provider receipts for a queued Telegram operation.
+icon: ui/icon.svg
+contributes:
+  - id: place
+    provides: place
+    label: Telegram
+    destination: vendor:Telegram
+    scope: account
+    source: {route: status, refresh_s: 15}
+    icon: ui/icon.svg
+    wakes: [mention, reply_to_me]
 ---
 
 # Telegram Bot Presence Transport
@@ -144,12 +162,18 @@ It provides:
 
 The payload does not call the owner `/chat/inject` path, allocate synthetic
 internal chats, interpret owner commands, or create prompt envelopes. It uses
-only the reviewed `presence` Host permission. Configure the opaque,
-owner-created binding (an exact conversation or `conversation_id="*"`) as
-`binding_id` in this skill's local `settings.json`; inbound Telegram text is
-never treated as configuration. The adapter submits the actual provider
-conversation facts to the loopback Host and durably polls any deferred work
-before delivering its late text once.
+only the reviewed `presence` Host permission. Connect a Telegram place with the
+bot account ID. On hosts advertising `places_version >= 1`, groups and channels
+are captured without a binding ID; private bot chats are excluded. Suggested
+wakes are explicit mentions and replies to the bot. Typed facts come from
+Telegram entities and reply identities, not text interpretation. Other bots
+carry `from_bot`; own bot echoes are ignored.
+
+Older hosts retain the previous event filtering and receive the already-saved
+`binding_id` from local settings. Deferred references, offsets, staged files and
+delivery identities survive the upgrade. Before each outgoing message part or
+mutation the worker re-reads the place. Silent/Paused or an unavailable lookup
+holds the queued bytes and receipts without consuming retries; Active resumes.
 
 Supported v1 Telegram content is text/caption, photos, documents, edited
 messages, and message-reaction provider facts. Voice/audio bytes are still
@@ -167,14 +191,21 @@ the original `turn_ref` and any real child `work_ref` independently. It never
 resubmits that retained event. A child finishing does not erase the original
 uncertainty or stop observation of its late selected output.
 
-A work view with `status: unresolved` remains observable. A failed task may
-still carry a selected answer; lifecycle status alone does not suppress speech.
-Canonical selected
-outputs keep their source and delivery identity across repeated polls and
-restarts; a retained receipt itself is never sent as speech. A recorded cancellation can remain under
-observation: it proves neither a live executor nor absence of external effects,
-and observation starts no new generation. This does not
-claim exactly-once provider delivery after ambiguous network acceptance.
+A work view answers `pending` while the turn's executor can still change it and
+is terminal once nothing can. A failed task may still carry a selected answer;
+lifecycle status alone does not suppress speech. A turn that ended without a
+canonical answer reads `failed` (`cancelled` when recorded so) with
+`outcome: "silent"`: nothing further to deliver from that reference. Its reason
+facts (`code`, `recorded_status`, `uncertainty`) prove neither delivery nor the
+absence of external effects, and observation starts no new generation. A real
+child keeps its own reference in `child_work_ref`, which any view may name, and
+is observed on its own. The transport stores it in the same commit that records
+the poll that named it, releasing a pending reference or settling a terminal
+one. Older Hosts may still answer `unresolved`, which stays observable.
+Canonical selected outputs keep their source and delivery identity across
+repeated polls and restarts; a retained receipt itself is never sent as speech.
+This does not claim exactly-once provider delivery after ambiguous network
+acceptance.
 `rejected` ends an event-specific refusal; before-admission `retry` and `blocked`
 retain retry custody, including after account or binding repair. Missing or unknown typed
 dispositions stay retryable, even on HTTP 403/404. Full queue recovery requires
@@ -238,7 +269,7 @@ photo/document attachments continue through the existing staging path.
 
 The optional `management_group_id` in the transport settings is a numeric group
 ID, not a secret. Messages in that group carry
-`conversation.configured_room="management_group"`; the reviewed behavior profile
+`conversation.configured_room="management_group"`; the place notes
 interprets this room fact. It grants no owner commands or system-settings access,
 and the adapter does not copy a member roster or classify message intent. For
 all human messages to reach the bot, disable bot privacy mode in BotFather or

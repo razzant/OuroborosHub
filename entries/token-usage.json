@@ -1,0 +1,18 @@
+{
+  "category": [
+    "ouroboros"
+  ],
+  "description": "Token Observatory — Liquid Glass dashboard for recorded Ouroboros token usage, tasks and models.",
+  "digest": "c648ac315e6806b245721e5fd2215498a3002c53699ab2e3eb470518b1fbbc94",
+  "name": "token-usage",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/token-usage"
+  },
+  "type": "extension",
+  "version": "1.2.0",
+  "when_to_use": "Inspect token usage across Ouroboros models, harnesses, projects and tasks over the retained history.",
+  "withdrawn": null
+}

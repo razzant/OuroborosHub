@@ -1,0 +1,32 @@
+name: Skill Signals
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  discussions: write
+
+concurrency:
+  group: skill-signals
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    if: github.repository == 'razzant/OuroborosHub'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Update Discussions and publish the daily snapshot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -B scripts/update_signals.py

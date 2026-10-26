@@ -32,13 +32,18 @@ class TelegramEvent:
     conversation: Dict[str, Any]
     message: Dict[str, Any]
     text: str
+    facts: Optional[list[str]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        if self.facts is None:
+            result.pop("facts")
+        return result
 
 
 def parse_telegram_update(
-    update: Dict[str, Any], *, bot_account_id: str, management_group_id: str = ""
+    update: Dict[str, Any], *, bot_account_id: str, management_group_id: str = "",
+    places: bool = False, bot_username: str = "",
 ) -> Optional[TelegramEvent]:
     """Return one factual external-message event or ``None`` for unsupported updates."""
     if not isinstance(update, dict):
@@ -49,6 +54,11 @@ def parse_telegram_update(
     if not isinstance(message, dict) and isinstance(update.get("edited_message"), dict):
         message = update["edited_message"]
         event_kind = "edited_message"
+    if places and not isinstance(message, dict):
+        for kind in ("channel_post", "edited_channel_post"):
+            if isinstance(update.get(kind), dict):
+                message, event_kind = update[kind], kind
+                break
     reaction = update.get("message_reaction")
     if not isinstance(message, dict) and isinstance(reaction, dict):
         return _parse_reaction_update(
@@ -56,16 +66,19 @@ def parse_telegram_update(
             reaction,
             bot_account_id=bot_account_id,
             management_group_id=management_group_id,
+            places=places,
         )
     if update_id is None or not isinstance(message, dict):
         return None
 
-    actor = message.get("from")
+    actor = (message.get("sender_chat") or message.get("from")) if places else message.get("from")
     chat = message.get("chat")
     message_id = _integer(message.get("message_id"))
     if not isinstance(actor, dict) or not isinstance(chat, dict) or message_id is None:
         return None
-    if actor.get("is_bot"):
+    if (not places and actor.get("is_bot")) or (places and str(actor.get("id")) == bot_account_id):
+        return None
+    if places and chat.get("type") not in {"group", "supergroup", "channel"}:
         return None
 
     actor_id = _integer(actor.get("id"))
@@ -91,6 +104,10 @@ def parse_telegram_update(
         "last_name": str(actor.get("last_name") or ""),
         "language_code": str(actor.get("language_code") or ""),
     }
+    if places:
+        actor_fact["is_bot"] = bool(actor.get("is_bot"))
+        if message.get("sender_chat"):
+            actor_fact["sender_chat"] = deepcopy(message["sender_chat"])
     conversation_fact = {
         "platform": "telegram",
         "bot_account_id": bot_id,
@@ -135,7 +152,31 @@ def parse_telegram_update(
         conversation=conversation_fact,
         message=message_fact,
         text=text,
+        facts=telegram_wake_facts(message, bot_id, bot_username) if places else None,
     )
+
+
+def telegram_wake_facts(message: Dict[str, Any], bot_id: str, username: str) -> list[str]:
+    """Telegram entity offsets are UTF-16; only explicit entities establish mentions."""
+    facts = ["any_message"]
+    if not message.get("sender_chat") and (message.get("from") or {}).get("is_bot"):
+        facts.append("from_bot")
+    reply = message.get("reply_to_message") or {}
+    if str((reply.get("from") or {}).get("id") or "") == bot_id:
+        facts.append("reply_to_me")
+    for text_key, entities_key in (("text", "entities"), ("caption", "caption_entities")):
+        wire = str(message.get(text_key) or "").encode("utf-16-le")
+        for entity in message.get(entities_key) or []:
+            if entity.get("type") == "text_mention" and str((entity.get("user") or {}).get("id") or "") == bot_id:
+                if "mention" not in facts:
+                    facts.append("mention")
+            if entity.get("type") == "mention" and username:
+                start, length = entity.get("offset"), entity.get("length")
+                if type(start) is int and type(length) is int and start >= 0 and length > 0:
+                    token = wire[2 * start:2 * (start + length)].decode("utf-16-le", errors="replace")
+                    if token.casefold() == "@" + username.lstrip("@").casefold() and "mention" not in facts:
+                        facts.append("mention")
+    return facts
 
 
 def _parse_reaction_update(
@@ -144,6 +185,7 @@ def _parse_reaction_update(
     *,
     bot_account_id: str,
     management_group_id: str = "",
+    places: bool = False,
 ) -> Optional[TelegramEvent]:
     """Turn Telegram's reaction update into a neutral provider fact.
 
@@ -158,7 +200,9 @@ def _parse_reaction_update(
     update_id = _integer(update.get("update_id"))
     if update_id is None or message_id is None or chat_id is None or actor_id is None:
         return None
-    if isinstance(actor, dict) and actor.get("is_bot"):
+    if (not places and actor.get("is_bot")) or (places and str(actor_id) == bot_account_id):
+        return None
+    if places and chat.get("type") not in {"group", "supergroup", "channel"}:
         return None
     bot_id = str(bot_account_id or "unknown").strip() or "unknown"
     conversation_key = f"telegram:{bot_id}:{chat_id}:0"
@@ -195,6 +239,7 @@ def _parse_reaction_update(
             "new_reaction": deepcopy(reaction.get("new_reaction") or []),
         },
         text="",
+        facts=(["from_bot"] if actor.get("is_bot") else []) if places else None,
     )
 
 

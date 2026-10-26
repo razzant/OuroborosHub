@@ -1,7 +1,7 @@
 """Google Workspace Extension Plugin for Ouroboros.
 
-Exposes tools for Google Sheets, Docs, and Drive, settings configuration,
-and a declarative status UI tab.
+Exposes tools for Google Sheets, Docs, Drive, Slides and Calendar, settings
+configuration, and a declarative status UI tab.
 """
 
 from __future__ import annotations
@@ -450,11 +450,11 @@ def register(api: PluginAPI) -> None:
     register_tool(
         name="workspace_request",
         handler=_make_workspace_request(api),
-        description="Call any Drive v3, Docs v1 or Sheets v4 REST operation with the selected identity. Supply a relative API path, query and JSON body; Google enforces scopes and permissions. No automatic retry after transport errors.",
+        description="Call any Drive v3, Docs v1, Sheets v4, Slides v1 or Calendar v3 REST operation with the selected identity. Supply a relative API path, query and JSON body; Google enforces scopes and permissions. Examples: hide a slide with slides POST presentations/ID:batchUpdate and an updateSlideProperties request (fields 'isSkipped'); attach a Drive file with calendar PATCH calendars/primary/events/EVENT_ID, query supportsAttachments=true and the event's full attachments list, only when the event shows organizer.self or guestsCanModify true, then read it back. calendars/primary is the OAuth user's calendar; a service account must use the ID of a calendar shared with it. No automatic retry after transport errors.",
         schema={"type": "object", "properties": {
-            "service": {"type": "string", "enum": ["drive", "docs", "sheets"]},
+            "service": {"type": "string", "enum": ["drive", "docs", "sheets", "slides", "calendar"]},
             "method": {"type": "string", "description": "HTTP method, e.g. GET, POST, PATCH, PUT, DELETE."},
-            "path": {"type": "string", "description": "Relative to service API root, e.g. files/ID/permissions or documents/ID:batchUpdate."},
+            "path": {"type": "string", "description": "Relative to service API root, e.g. files/ID/permissions, documents/ID:batchUpdate, presentations/ID:batchUpdate or calendars/primary/events/EVENT_ID. Percent-encode calendar IDs that contain # or /."},
             "query": {"type": "object"}, "json_body": {},
             "auth_mode": {"type": "string", "enum": ["service_account", "oauth"], "default": "service_account"},
         }, "required": ["service", "method", "path"]}, timeout_sec=90,
@@ -739,7 +739,7 @@ def register(api: PluginAPI) -> None:
                     "type": "callout",
                     "title": "Google Workspace Integration",
                     "tone": "info",
-                    "text": "Access Sheets, Docs and Drive using an explicitly selected OAuth user or service account. Verify the authenticated actor and the actual resource access separately.",
+                    "text": "Access Sheets, Docs, Drive, Slides and Calendar using an explicitly selected OAuth user or service account. Verify the authenticated actor and the actual resource access separately.",
                 },
                 {
                     "type": "group",
@@ -771,7 +771,7 @@ def register(api: PluginAPI) -> None:
                                 "- `docs_read` / `docs_update`: Read document structure and apply provider batch requests.\n"
                                 "- `sheets_update` / `sheets_batch_update`: Update values or workbook structure.\n"
                                 "- `drive_download` / `drive_export` / `drive_upload`: Exchange file bytes.\n"
-                                "- `workspace_request`: Use Drive, Docs or Sheets REST operations with the selected credentials.\n"
+                                "- `workspace_request`: Use Drive, Docs, Sheets, Slides or Calendar REST operations with the selected credentials.\n"
                                 "- `workspace_auth_status`: Verify the selected route and return its actual actor."
                             ),
                         }

@@ -6,7 +6,7 @@ import hashlib
 import json
 import time
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 import httpx
 
@@ -26,6 +26,9 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/drive",
 ]
+# Requested by a service account only for Calendar calls, so delegation
+# entries authorized for the base scopes keep working for every other API.
+CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 # In-memory token cache keyed by credential identity fingerprint + subject
 # Shape: {cache_key: (access_token, expiration_timestamp)}
@@ -100,16 +103,24 @@ def _base64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
 
 
-def _compute_credential_fingerprint(sa_info: Dict[str, Any], subject: Optional[str] = None) -> str:
-    """Compute a non-secret deterministic fingerprint for credential identity including key hash and optional subject."""
+def _compute_credential_fingerprint(
+    sa_info: Dict[str, Any], subject: Optional[str] = None, scopes: Optional[List[str]] = None,
+) -> str:
+    """Compute a non-secret deterministic fingerprint for credential identity, subject and scopes.
+
+    The base scope set keeps its original fingerprint; any other set gets its
+    own cache entry, so a Calendar token is never reused for Drive or back.
+    """
     client_email = sa_info.get("client_email", "")
     private_key_id = sa_info.get("private_key_id", "")
     project_id = sa_info.get("project_id", "")
     private_key_raw = sa_info.get("private_key", "")
     key_sha = hashlib.sha256(private_key_raw.encode("utf-8")).hexdigest()[:16]
     sub_val = (subject or "").strip()
-    key_material = f"{project_id}:{client_email}:{private_key_id}:{key_sha}:{sub_val}".encode("utf-8")
-    return hashlib.sha256(key_material).hexdigest()
+    key_material = f"{project_id}:{client_email}:{private_key_id}:{key_sha}:{sub_val}"
+    if scopes is not None and list(scopes) != GOOGLE_SCOPES:
+        key_material += ":" + " ".join(sorted(scopes))
+    return hashlib.sha256(key_material.encode("utf-8")).hexdigest()
 
 
 def parse_service_account_info(raw_info: Optional[str]) -> Dict[str, Any]:
@@ -146,7 +157,9 @@ def parse_service_account_info(raw_info: Optional[str]) -> Dict[str, Any]:
     return data
 
 
-def create_signed_jwt(sa_info: Dict[str, Any], subject: Optional[str] = None) -> str:
+def create_signed_jwt(
+    sa_info: Dict[str, Any], subject: Optional[str] = None, scopes: Optional[List[str]] = None,
+) -> str:
     """Create a signed RS256 JWT assertion for Google OAuth2 token exchange."""
     # Registration and execution have separate isolated-dependency scopes.
     # Load native crypto only in the tool child that performs the signing;
@@ -167,7 +180,7 @@ def create_signed_jwt(sa_info: Dict[str, Any], subject: Optional[str] = None) ->
     # It is included only if explicit domain-wide delegation subject is supplied.
     payload: Dict[str, Any] = {
         "iss": client_email,
-        "scope": " ".join(GOOGLE_SCOPES),
+        "scope": " ".join(GOOGLE_SCOPES if scopes is None else scopes),
         "aud": token_uri,
         "exp": expiry,
         "iat": now,
@@ -213,10 +226,11 @@ def get_access_token(
     http_client: Optional[httpx.Client] = None,
     force_refresh: bool = False,
     subject: Optional[str] = None,
+    scopes: Optional[List[str]] = None,
 ) -> str:
-    """Obtain a valid OAuth 2.0 Bearer access token using credential- and subject-keyed caching."""
+    """Obtain a valid OAuth 2.0 Bearer access token using credential-, subject- and scope-keyed caching."""
     sa_info = parse_service_account_info(raw_info)
-    fingerprint = _compute_credential_fingerprint(sa_info, subject=subject)
+    fingerprint = _compute_credential_fingerprint(sa_info, subject=subject, scopes=scopes)
     now = time.time()
 
     if not force_refresh and fingerprint in _TOKEN_CACHE:
@@ -226,7 +240,7 @@ def get_access_token(
             return cached_token
 
     # Build signed JWT and exchange for Bearer token
-    jwt_assertion = create_signed_jwt(sa_info, subject=subject)
+    jwt_assertion = create_signed_jwt(sa_info, subject=subject, scopes=scopes)
     token_uri = sa_info.get("token_uri", GOOGLE_TOKEN_URI)
 
     data = {

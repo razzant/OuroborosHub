@@ -24,6 +24,7 @@
 
     var ROUTE = '/api/extensions/claudexor_quotas/quotas';
     var REFRESH_ROUTE = '/api/extensions/claudexor_quotas/refresh';
+    var DISPLAY_ROUTE = '/api/extensions/claudexor_quotas/display';
     var REFRESH_MS = 30000;
     // How long one request may take before the widget stops waiting for it.
     // Each bound sits above the skill's own bound on that route — its status
@@ -62,12 +63,18 @@
     var selectedHarness = '';
     var selectedAccountKey = '';
     // The bar or account-list row that selected it (its data-focus key):
-    // where Clear and Escape give the keyboard back (clearAccount).
+    // where Clear and Escape give the keyboard back (clearAccount) — and, for
+    // a bar, the limit it belongs to, where the account's card stands
+    // (inspectorSlot).
     var selectionOpener = '';
+    var selectionLimit = '';
     var accountsOpen = false;
     var diagnosticsOpen = false;
     var aboutOpen = false;
     var currentView = null;
+    var displayFrame = String(Date.now()) + '-' + String(Math.random()).slice(2);
+    var displaySeq = 0;
+    var displaySettled = 0;
     var staleMessage = '';
     var actionMessage = '';
     // The timeline: open on every mount. Its limit per family is the one the
@@ -79,6 +86,15 @@
     var chartKeys = {};
     var chartAsked = '';
     var horizonChoice = '';
+    // 'window' draws the selected limit; 'joint' the same-account combined view
+    // (one choice for this visit, like the span).
+    var graphMode = 'window';
+    // Which request the windows are read for: a model the family's limits
+    // name ('' = a request naming no model) and the request kind. The model
+    // list opens in place and survives a redraw, like About.
+    var modelChoice = '';
+    var kindChoice = 'text';
+    var modelMenuOpen = false;
     var scenario = 'no_new_use';
     var detailsOpen = false;
     var scheduleAll = false;
@@ -113,7 +129,7 @@
         "--status-warn-border:#665238;--status-bad:#e99a9f;--status-bad-bg:#40292e;--status-bad-border:#72444b;",
         "--warn-text:var(--status-warn);--bad-text:var(--status-bad);",
         "--focus-accent-border:#ec7782;--share-ink:#a6a6b3;--scenario-ink:#9ab9fa;",
-        "--share-track:rgba(var(--neutral-rgb),.07);--area:rgba(var(--neutral-rgb),.10);",
+        "--share-track:rgba(var(--neutral-rgb),.07);--area:rgba(var(--neutral-rgb),.10);--calm-a:#ee8a62;--calm-b:#f2a65a;",
         "--type-meta:12px;--type-body:14px;--type-section:16px;--row-h:32px;--ctl-w:96px;",
         "--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:24px;",
         "--radius-sm:6px;--radius-md:8px;",
@@ -126,7 +142,7 @@
         "--edge:#e2e2e7;--edge-strong:#91919d;--neutral-rgb:38,38,43;",
         "--status-ok:#38704f;--status-warn:#845713;--status-warn-bg:#fbf5e9;",
         "--status-warn-border:#e4c78d;--status-bad:#a73c49;--status-bad-bg:#fcf0f1;--status-bad-border:#e8b3ba;",
-        "--focus-accent-border:#b62f42;--share-ink:#787884;--scenario-ink:#365eac;",
+        "--focus-accent-border:#b62f42;--share-ink:#787884;--scenario-ink:#365eac;--calm-a:#cf5636;--calm-b:#d9822b;",
         "--hatch:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc2JyBoZWlnaHQ9JzYnPjxwYXRoIGQ9J00tMSAxbDItMk0wIDZsNi02TTUgN2wyLTInIHN0cm9rZT0nIzc4Nzg4NCcgc3Ryb2tlLXdpZHRoPScxLjUnLz48L3N2Zz4=);",
         "--hatch-warn:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc2JyBoZWlnaHQ9JzYnPjxwYXRoIGQ9J00tMSAxbDItMk0wIDZsNi02TTUgN2wyLTInIHN0cm9rZT0nIzg0NTcxMycgc3Ryb2tlLXdpZHRoPScxLjUnLz48L3N2Zz4=)}",
         "*{box-sizing:border-box}",
@@ -227,7 +243,45 @@
         ".strip-legend .bar{display:inline-block;width:12px;height:16px;flex:none}",
         // The timeline: one limit, the record behind now and one future ahead.
         ".inspector,.accounts,.about-panel{min-width:0;padding:var(--space-3) var(--space-4);border:1px solid var(--edge);border-radius:var(--radius-md);background:var(--surface)}",
-        ".tl-block{padding:var(--space-1) var(--space-2) var(--space-3);border-bottom:1px solid var(--edge);background:var(--inset)}",
+        // The selected account's card stands in the list it was chosen from as
+        // one more band of it, in the list's own rhythm; under a folded list's
+        // header it stays a card.
+        ".lrows>.inspector,.acc-table>.inspector{border-width:0 0 1px;border-radius:0;padding:var(--space-3) var(--space-2)}",
+        ".acc-table>.inspector{padding-inline:0;font-size:var(--type-body)}",
+        ".acc-head+.inspector{margin-top:var(--space-2)}",
+        ".tl-block{padding:var(--space-2) var(--space-2) var(--space-3);border-bottom:1px solid var(--edge);background:var(--inset)}",
+        // The calm timeline: graph tabs and the model choice on one line, a
+        // headline with the nearest reset, two quiet segments, the plot, one
+        // short legend; everything else folded under Details.
+        ".tl-head{display:flex;align-items:flex-end;gap:var(--space-2);min-width:0;border-bottom:1px solid var(--edge);margin-bottom:var(--space-3)}",
+        ".tl-tabs{display:flex;flex:1 1 auto;min-width:0;gap:2px;overflow-x:auto;scrollbar-width:none}",
+        ".tl-tabs::-webkit-scrollbar{display:none}",
+        ".tl-tab{appearance:none;flex:none;position:relative;min-height:32px;padding:4px 10px;border:0;border-radius:var(--radius-sm) var(--radius-sm) 0 0;background:none;color:var(--text-meta);font-size:var(--type-meta);white-space:nowrap}",
+        ".tl-tab:hover{color:var(--text-primary);background:rgba(var(--neutral-rgb),.05)}",
+        ".tl-tab[aria-selected=true]{color:var(--text-primary);font-weight:600}",
+        ".tl-tab[aria-selected=true]:after{content:\"\";position:absolute;left:8px;right:8px;bottom:-1px;height:2px;border-radius:2px;background:var(--calm-a)}",
+        ".tl-model{flex:none;max-width:48%;margin-bottom:3px;min-height:26px;padding:2px 8px;color:var(--text-meta)}",
+        ".tl-model-k{color:var(--text-meta);font-weight:400}",
+        ".tl-model-v{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary);font-weight:500}",
+        ".tl-model-panel{margin:calc(var(--space-2) * -1) 0 var(--space-3);padding:var(--space-2) var(--space-3);border:1px solid var(--edge);border-radius:var(--radius-md);background:var(--surface)}",
+        ".tl-model-opts{display:flex;flex-wrap:wrap;gap:var(--space-1);margin-top:var(--space-2)}",
+        ".tl-model-opts .seg-opt{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;justify-content:flex-start}",
+        ".tl-model-panel .seg{margin-top:var(--space-2)}",
+        ".tl-hero{display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:var(--space-2) var(--space-5)}",
+        ".tl-num{font-size:28px;line-height:1.15;font-weight:600;letter-spacing:-.01em;font-variant-numeric:tabular-nums}",
+        ".tl-unit{margin-left:var(--space-2);font-size:var(--type-meta);font-weight:400;letter-spacing:0;color:var(--text-meta)}",
+        ".tl-sub{font-size:var(--type-meta);color:var(--text-meta);font-variant-numeric:tabular-nums}",
+        ".tl-next{text-align:right}",
+        ".tl-next-v{font-size:var(--type-section);font-weight:600;font-variant-numeric:tabular-nums}",
+        ".tl-next-v.dim{color:var(--text-meta);font-weight:400}",
+        ".tl-block .tl-controls{justify-content:space-between;margin-top:var(--space-3)}",
+        ".tl-block .tl-controls .seg{padding:2px;border-radius:999px;background:rgba(var(--neutral-rgb),.06);gap:0}",
+        ".tl-block .tl-controls .seg-opt{min-height:26px;padding:2px 11px;border-color:transparent;border-radius:999px;color:var(--text-meta)}",
+        ".tl-block .tl-controls .seg-opt.active{background:var(--surface);border-color:transparent;color:var(--text-primary);box-shadow:0 1px 4px rgba(0,0,0,.18)}",
+        ".tl-body.is-updating .chart-plot{opacity:.5}",
+        ".calm-legend{display:flex;flex-wrap:wrap;gap:var(--space-1) var(--space-3);margin-top:var(--space-2);font-size:var(--type-meta);color:var(--text-meta)}",
+        ".calm-legend .legend-item{align-items:center}.calm-legend .legend-item svg{margin-top:0}",
+        ".chart-table>.chart-legend,.chart-table>.tl-facts,.chart-table>.checkpoints,.chart-table>.tl-joint{margin-bottom:var(--space-2)}",
         ".cover-link{margin-top:var(--space-2);padding:2px 0;border:0;background:none;font-size:var(--type-meta);color:var(--text-meta);text-decoration:underline;text-decoration-color:var(--edge-strong);text-underline-offset:3px}",
         ".acc-cover{margin-top:var(--space-2);font-size:var(--type-meta);color:var(--text-meta)}",
         ".insp-head,.acc-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);flex-wrap:wrap}",
@@ -240,20 +294,29 @@
         ".chart-svg{display:block;max-width:100%;height:auto;overflow:visible;touch-action:none}",
         ".chart-svg .grid,.chart-svg .tick,.chart-svg .day-rule{stroke:var(--edge);stroke-width:1}",
         ".chart-svg .grid.base,.chart-svg .grid.cap{stroke:var(--edge-strong)}",
-        ".chart-svg .reset-line{stroke:var(--scenario-ink);stroke-width:1;stroke-dasharray:1 3;opacity:.7}",
+        ".chart-svg .reset-line{stroke:var(--calm-b);stroke-width:1;stroke-dasharray:1 3;opacity:.45}",
         ".chart-svg .axis-text{fill:var(--text-meta);font-size:var(--type-meta);font-family:inherit;font-variant-numeric:tabular-nums}",
         ".chart-svg .axis-text.now,.chart-svg .axis-text.day{fill:var(--text-primary);font-weight:500}",
         ".chart-svg .future-bg{fill:rgba(var(--neutral-rgb),.035)}",
         ".chart-svg .now-line,.chart-svg .cursor-line{stroke:var(--text-meta);stroke-width:1}",
         ".chart-svg .hit{fill:transparent;cursor:crosshair}",
-        ".area-observed{fill:var(--area)}",
-        ".line-observed{fill:none;stroke:var(--text-primary);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}",
-        ".line-carried{fill:none;stroke:var(--text-primary);stroke-width:2;stroke-dasharray:3 4;stroke-linejoin:round;stroke-linecap:round}",
-        ".line-scenario{fill:none;stroke:var(--scenario-ink);stroke-width:2;stroke-dasharray:6 4;stroke-linejoin:round;stroke-linecap:round}",
-        ".scenario-start{fill:var(--scenario-ink);stroke:var(--surface);stroke-width:1.5}",
+        ".area-observed{fill:url(#qa-area)}",
+        ".line-observed{fill:none;stroke:var(--calm-a);stroke-width:2.25;stroke-linejoin:round;stroke-linecap:round}",
+        ".line-carried{fill:none;stroke:var(--calm-a);stroke-width:2.25;stroke-dasharray:3 4;stroke-linejoin:round;stroke-linecap:round}",
+        // One hue for the whole curve: solid is recorded, dashed carried, dotted a condition ahead of now.
+        ".chart-svg .reset-dot,.calm-legend .reset-dot{fill:var(--inset);stroke:var(--calm-b);stroke-width:2}",
+        ".chart-svg .area-scenario{fill:url(#qa-area);opacity:.4;stroke:none}",
+        ".chart-svg .unit-text{fill:var(--text-meta);font-size:var(--type-meta);font-family:inherit}",
+        ".tl-joint{display:grid;gap:2px;margin-top:var(--space-2);font-size:var(--type-meta);color:var(--text-meta)}",
+        ".tl-joint b{color:var(--text-primary);font-weight:600}",
+        ".rows-menu{margin-top:var(--space-2);font-size:var(--type-meta);color:var(--text-meta)}",
+        ".rows-menu summary{cursor:pointer;min-height:24px}",
+        ".rows-menu label{display:flex;gap:var(--space-2);align-items:center;min-height:28px}",
+        ".line-scenario{fill:none;stroke:var(--calm-a);stroke-width:2.5;stroke-dasharray:.1 6;stroke-linejoin:round;stroke-linecap:round;opacity:.9}",
+        ".scenario-start{fill:var(--calm-a);stroke:var(--surface);stroke-width:1.5}",
         ".chart-svg .cursor-dot{stroke:var(--surface);stroke-width:2;stroke-dasharray:none}",
-        ".chart-svg .cursor-dot.line-observed{fill:var(--text-primary)}",
-        ".chart-svg .cursor-dot.line-scenario{fill:var(--scenario-ink)}",
+        ".chart-svg .cursor-dot.line-observed{fill:var(--calm-a)}",
+        ".chart-svg .cursor-dot.line-scenario{fill:var(--calm-a);stroke-dasharray:none}",
         ".chart-tip{position:absolute;z-index:5;pointer-events:none;max-width:100%;padding:var(--space-2);border-radius:var(--radius-sm);background:var(--popup);border:1px solid var(--edge-strong);font-size:var(--type-meta);color:var(--text-meta);overflow-wrap:anywhere}",
         ".tip-when,.tip-val{color:var(--text-primary);font-weight:500}",
         ".tip-row{display:flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums}",
@@ -360,7 +423,7 @@
         ".acc-row:hover,.acc-row.active{background:var(--inset)}",
         ".acc-name{display:flex;align-items:center;gap:6px;min-width:0;font-size:var(--type-body)}",
         ".acc-name-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-        ".acc-cell{text-align:right;font-variant-numeric:tabular-nums;color:var(--text-primary)}",
+        ".acc-cell{min-width:0;max-width:100%;overflow-wrap:anywhere;text-align:right;font-variant-numeric:tabular-nums;color:var(--text-primary)}",
         ".acc-cell.last{color:var(--text-meta);text-decoration:underline dotted;text-underline-offset:3px}",
         ".acc-cell.bad{color:var(--bad-text)}",
         ".acc-cell.held{color:var(--warn-text)}",
@@ -386,7 +449,9 @@
         // Narrower still, the figure and its caption each take a line of their
         // own under the name (sharing one line left them overlapping at a
         // 343 px card); the control spans the name and the figure.
-        "@media(max-width:360px){.lrow{grid-template-areas:\"name name ctl\" \"fig fig ctl\" \"sub sub sub\" \"strip strip strip\" \"tail tail tail\"}.l-fig{justify-self:start;white-space:normal}}"
+        "@media(max-width:360px){.lrow{grid-template-areas:\"name name ctl\" \"fig fig ctl\" \"sub sub sub\" \"strip strip strip\" \"tail tail tail\"}.l-fig{justify-self:start;white-space:normal}}",
+        "@media(max-width:520px){.tl-head{flex-wrap:wrap;align-items:center}.tl-tabs{flex-basis:100%}.tl-model{max-width:100%;margin:0 0 var(--space-2)}.tl-hero{display:block}.tl-next{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 var(--space-2);margin-top:var(--space-1);text-align:left}.tl-block .tl-controls{gap:var(--space-2)}}",
+        "@media(prefers-reduced-motion:reduce){.tl-tab,.tl-body .chart-plot{transition:none}}"
     ].join('');
 
     function el(tag, cls, text) {
@@ -858,7 +923,8 @@
     // known, only last known.
     function inactiveReason(account, facets) {
         if (facets && facets.accounts && facets.accounts !== 'ok') return '';
-        if (!account.signed_in) return 'signed_out';
+        // Only positive evidence says signed out: null is the engine not saying.
+        if (account.signed_in === false) return 'signed_out';
         if (account.enabled === false) return 'disabled';
         if (verificationFailed(account)) return 'failed';
         return '';
@@ -879,7 +945,7 @@
     }
 
     function isActive(account) {
-        return !!account.signed_in && account.enabled !== false;
+        return account.signed_in !== false && account.enabled !== false;
     }
 
     // The engine skips per-model caps when it decides whether an account is
@@ -1485,6 +1551,8 @@
     // left" does not move it; only a click, or the limit's absence from a
     // whole answer, chooses again.
     function chartKeyFor(harnessId, groups) {
+        var hidden = hiddenRows(currentView);
+        groups = groups.filter(function (g) { return !hidden[g.key]; });
         var picked = chartKeys[harnessId];
         var i;
         for (i = 0; i < groups.length; i++) {
@@ -1517,6 +1585,11 @@
             var key = selectedHarness ? chartKeyFor(selectedHarness, groups) : '';
             if (key) parts.push('group=' + encodeURIComponent(key));
             parts.push('horizon=' + encodeURIComponent(horizonFor(groupByKey(groups, key))));
+            // The combined same-account view reads more history; it is asked
+            // for with the chart, never on its own.
+            parts.push('joint=1');
+            if (modelChoice) parts.push('model=' + encodeURIComponent(modelChoice));
+            if (kindChoice !== 'text') parts.push('kind=' + encodeURIComponent(kindChoice));
         } else {
             // The timeline is folded: the skill need not draw it, nor read the
             // longer stretch of history it would need.
@@ -1532,7 +1605,8 @@
         if (!groups.length) return false;
         var key = chartKeyFor(selectedHarness, groups);
         var chart = view.reserve.chart;
-        return !chart || chart.group_key !== key || chart.horizon !== horizonFor(groupByKey(groups, key));
+        return !chart || chart.group_key !== key || chart.horizon !== horizonFor(groupByKey(groups, key))
+            || scopeStale(chart);
     }
 
     // After any drawing: when the timeline is open and the chart on hand is
@@ -1841,7 +1915,7 @@
                 b.addEventListener('click', function (e) {
                     e.stopPropagation();
                     selectAccount(bar.account === selectedAccountKey ? '' : bar.account,
-                        'bar:' + g.key + ':' + bar.account);
+                        'bar:' + g.key + ':' + bar.account, g.key);
                     restoreFocus('bar:' + g.key + ':' + bar.account);
                 });
             } else {
@@ -1852,9 +1926,12 @@
         return strip;
     }
 
-    function selectAccount(key, opener) {
+    // `limitKey` is the limit whose bar selected the account; a row of the
+    // account list passes none.
+    function selectAccount(key, opener, limitKey) {
         selectedAccountKey = key || '';
         selectionOpener = selectedAccountKey ? (opener || '') : '';
+        selectionLimit = selectedAccountKey ? (limitKey || '') : '';
         diagnosticsOpen = false;
         rerender();
     }
@@ -2176,6 +2253,88 @@
         parent.appendChild(row);
     }
 
+    // The engine's resource facets of one account (balances, spending, manual
+    // reset offers), each as it dated them: current, last known (dated, never
+    // current) or not reported (never 0). A team figure says it is the team's,
+    // a zero included amount says it is not a block, and a reset offer is
+    // information only — nothing here spends it.
+    // An amount as the engine sent it: a decimal string, never a float. In
+    // unit "minor" it is the currency's smallest unit and decimal_places says
+    // the scale (2345678 with 2 places is 23,456.78): the point is placed in
+    // the digits themselves, so no value is rounded or lost. Without a scale
+    // the minor figure is shown as it is and said to be unscaled; any other unit
+    // is shown as sent. Returns '' for an amount not reported — never 0.
+    function moneyWords(raw, item) {
+        if (raw === null || raw === undefined) return '';
+        var text = String(raw).trim();
+        var cur = item.currency || '';
+        var unit = item.unit || '';
+        var parts = /^(-?)(\d+)$/.exec(text);
+        if (unit === 'minor') {
+            if (!parts || typeof item.decimal_places !== 'number' || item.decimal_places % 1 !== 0
+                    || item.decimal_places < 0 || item.decimal_places > 12) {
+                return text + (cur ? ' ' + cur : '') + ' minor units ('
+                    + (item.decimal_places === null || item.decimal_places === undefined ? 'scale not reported'
+                        : 'reported scale ' + item.decimal_places + ', not formatted') + ')';
+            }
+            var places = item.decimal_places;
+            var digits = parts[2].length > places ? parts[2] : new Array(places - parts[2].length + 2).join('0') + parts[2];
+            var whole = digits.slice(0, digits.length - places).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+            var frac = places ? '.' + digits.slice(digits.length - places) : '';
+            return parts[1] + whole + frac + (cur ? ' ' + cur : '');
+        }
+        // A unit this widget has no scale rule for (an older engine's "cents", or none): the figure as
+        // sent, with the unit, currency and scale as sent — never read as a major-unit amount.
+        var said = [unit || 'unit not reported'];
+        if (cur && cur.toLowerCase() !== unit.toLowerCase()) said.push(cur);
+        if (item.decimal_places !== null && item.decimal_places !== undefined) said.push(item.decimal_places + ' decimal places');
+        return text + ' ' + said.join(' · ');
+    }
+
+    function renderAccountResources(parent, resources) {
+        if (!resources) return;
+        var FACET_NAMES = { balances: 'Balances', spending: 'Spending', resets: 'Reset offers', diagnostics: 'Diagnostics' };
+        var box = el('div', 'account-resources');
+        box.setAttribute('role', 'group');
+        box.setAttribute('aria-label', 'Resources of this account');
+        var any = false;
+        ['balances', 'spending', 'resets', 'diagnostics'].forEach(function (name) {
+            var facet = resources[name];
+            if (!facet || (name === 'diagnostics' && !(facet.rows || []).length)) return;
+            any = true;
+            var row = el('div', 'reset-credits');
+            row.appendChild(el('strong', null, FACET_NAMES[name]));
+            box.appendChild(row);
+            if (facet.state === 'not_reported') {
+                row.appendChild(document.createTextNode(' · not reported'));
+            } else {
+                var when = facet.observed_at ? ' · observed ' + whenWords(facet.observed_at) : '';
+                row.appendChild(document.createTextNode((facet.state === 'last_known' ? ' · last known' : '') + when
+                    + (facet.state === 'last_known' ? ', not current' : '')));
+                (facet.rows || []).forEach(function (item) {
+                    var text;
+                    if (name === 'balances') {
+                        text = item.label + ': ' + (item.unlimited ? 'unlimited' : item.amount === null ? 'amount not reported'
+                            : moneyWords(item.amount, item)) + (item.usage_kind ? ' (' + item.usage_kind.replace('_', '-') + ')' : '');
+                    } else if (name === 'spending') {
+                        text = item.label + ': ' + (item.used === null ? 'not reported' : moneyWords(item.used, item))
+                            + (item.limit ? ' of ' + moneyWords(item.limit, item) : '')
+                            + (item.enabled === false ? ' (off)' : '');
+                    } else if (name === 'resets') {
+                        text = item.label + ': ' + (item.available_count === null ? 'count not reported' : item.available_count + ' available')
+                            + (item.usable_now === false ? ' (not usable now)' : item.usable_now === true
+                                ? ' (usable now)' : ' (usability unknown)');
+                    } else {
+                        text = item.code + (item.detail ? ' — ' + item.detail : '');
+                    }
+                    var line = el('div', 'tl-scope', text + (item.note ? ' · ' + item.note : ''));
+                    box.appendChild(line);
+                });
+            }
+        });
+        if (any) parent.appendChild(box);
+    }
+
     function renderAccountCredits(parent, quota) {
         var c = quota && quota.reset_credits;
         if (!c || c.reason === 'not_reported') return;
@@ -2200,7 +2359,9 @@
 
     // The family's limits. Returns what the timeline, the selected account
     // and the account list read from — or null when there is no overview.
-    function renderReserve(parent, reserve, family, view) {
+    // `card` (inspectorSlot) is drawn under the limit whose bar selected the
+    // account, if that limit is drawn.
+    function renderReserve(parent, reserve, family, view, card) {
         if (!reserve || typeof reserve !== 'object') reserve = {};
         var section = el('section', 'reserve');
         section.setAttribute('aria-label', 'Reserve overview');
@@ -2251,13 +2412,22 @@
         var table = el('div', 'lrows');
         table.setAttribute('role', 'group');
         table.setAttribute('aria-label', 'Limits of ' + (family ? familyName(family) : 'this family'));
+        // Rows the reader hid are not drawn here — display only: they stay in
+        // the reserve, the account view, the history, the tool and the snapshot.
+        var hidden = hiddenRows(view);
         groups.forEach(function (g) {
+            if (hidden[g.key]) return;
             table.appendChild(limitRow(g, ctx.names[g.key], chartKey, ctx.index, g.tightest && measuredGroups > 1));
+            // The card of the account a bar of this limit selected stands
+            // right under the limit, before the limit's own timeline — whichever
+            // limit is charted.
+            if (card && !card.drawn && card.limit === g.key) card.draw(table, ctx);
             // The timeline of the charted limit stands right under its row;
             // folded, it leaves nothing behind — the row's control says "Show chart".
             if (g.key === chartKey && timelineOpen) table.appendChild(timelineBlock(ctx, g));
         });
         section.appendChild(table);
+        section.appendChild(rowsMenu(ctx, groups, hidden));
         var keptAt = (view && view.kept) || summary.roster === 'cached'
             ? String((summary.cached || {}).accounts || '') : null;
         // Who stands in no row, by name, is said in the account list; here a
@@ -2282,6 +2452,72 @@
         }
         parent.appendChild(section);
         return ctx;
+    }
+
+    // Which limits the reader chose not to draw: the skill's saved display
+    // set, as the last answer carried it.
+    function hiddenRows(view) {
+        var set = {};
+        ((view && view.display && view.display.hidden) || []).forEach(function (key) { set[key] = true; });
+        return set;
+    }
+
+    // "Rows": show or hide a limit's row (display only, saved by the skill
+    // so it survives a reload; "Show all" undoes every hide).
+    function rowsMenu(ctx, groups, hidden) {
+        var count = groups.filter(function (g) { return hidden[g.key]; }).length;
+        var menu = el('details', 'rows-menu');
+        menu.setAttribute('data-focus', 'rows-menu');
+        menu.appendChild(el('summary', null, 'Rows' + (count ? ' · ' + count + ' hidden' : '')));
+        groups.forEach(function (g) {
+            var label = el('label', null);
+            var box = el('input', null);
+            box.setAttribute('type', 'checkbox');
+            if (!hidden[g.key]) box.setAttribute('checked', 'checked');
+            box.checked = !hidden[g.key];
+            box.setAttribute('aria-label', 'Show ' + ctx.names[g.key]);
+            box.addEventListener('change', function () {
+                var next = Object.keys(hiddenRows(currentView)).filter(function (key) { return key !== g.key; });
+                if (!box.checked) next.push(g.key);
+                saveHidden(next);
+            });
+            label.appendChild(box);
+            label.appendChild(el('span', null, ctx.names[g.key]));
+            menu.appendChild(label);
+        });
+        if (count) {
+            var all = el('button', 'cover-link', 'Show all rows');
+            all.setAttribute('type', 'button');
+            all.addEventListener('click', function () {
+                var familyKeys = {};
+                groups.forEach(function (g) { familyKeys[g.key] = true; });
+                saveHidden(Object.keys(hiddenRows(currentView)).filter(function (key) { return !familyKeys[key]; }));
+            });
+            menu.appendChild(all);
+        }
+        if (count || menu.open) menu.setAttribute('open', 'open');
+        return menu;
+    }
+
+    function saveHidden(list) {
+        if (stopped || !currentView) return;
+        var seq = ++displaySeq;
+        currentView.display = { hidden: list };
+        rerender();
+        request(DISPLAY_ROUTE, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                 body: JSON.stringify({ hidden: list, frame: displayFrame, seq: seq }) }, GET_TIMEOUT_MS).then(function (result) {
+            var answer = null;
+            try { answer = JSON.parse(result.body); } catch (err) { answer = null; }
+            if (seq !== displaySeq || stopped || !currentView) return;
+            displaySettled = seq;
+            if (!answer || answer.error || !answer.display) {
+                actionMessage = 'Row visibility could not be saved; the next reading shows what was kept.';
+                rerender();
+                return;
+            }
+            currentView.display = answer.display;
+            rerender();
+        });
     }
 
     // How many of the family's accounts stand in no row at all.
@@ -2309,11 +2545,13 @@
         return all && all[scenario] ? all[scenario] : null;
     }
 
-    function segControl(label, options, current, focusPrefix, onPick) {
+    // `quiet` keeps the group's name for a screen reader only: the options
+    // say what they are.
+    function segControl(label, options, current, focusPrefix, onPick, quiet) {
         var seg = el('div', 'seg');
         seg.setAttribute('role', 'group');
         seg.setAttribute('aria-label', label);
-        seg.appendChild(el('span', 'seg-label', label));
+        seg.appendChild(el('span', quiet ? 'seg-label sr-only' : 'seg-label', label));
         options.forEach(function (opt) {
             var on = opt.key === current;
             var b = el('button', 'seg-opt' + (on ? ' active' : ''), opt.name);
@@ -2331,17 +2569,316 @@
         return seg;
     }
 
-    // The timeline of the charted limit, right under its row (its one toggle
-    // is the row's control): its span and its future; the chart; under it
-    // the legend — whose total each line is, and what the future assumes —
-    // where that future stands a few moments ahead, the next reported
-    // resets, and the details folded.
+    // What the plot draws for the chosen view, in the shape drawChart already
+    // reads: the selected limit (with its coupled futures when the skill sent
+    // them) or the combined same-account view. Nothing is computed here.
+    function drawnChart(chart) {
+        var analytics = chart.analytics || {};
+        var joint = analytics.joint;
+        if (graphMode === 'joint' && joint && joint.available) {
+            var hist = joint.history || { line: [], details: [], max_accounts: 0 };
+            var known = joint.known || 0;
+            return Object.assign({}, chart, {
+                mode: 'joint', history: hist, scenarios: joint.scenarios, table: joint.table || [],
+                y_max: joint.y_max, accounts: known,
+                past_accounts: hist.max_accounts || 0, unit_text: unitWords(joint) + ' equivalents left',
+                pace_words: 'the common watched period (up to 7 days)', past: [], points: [],
+                assumptions: joint.limitations || [],
+                joint_note: joint
+            });
+        }
+        var own = analytics.window;
+        return Object.assign({}, chart, {
+            mode: 'window', unit_text: 'account-windows left',
+            scenarios: own && own.scenarios ? own.scenarios : chart.scenarios,
+            table: own && own.scenarios ? own.table || [] : chart.table,
+            scope_applies: own ? own.scope_applies : true,
+            held_to_other_windows: own ? own.held_to_other_windows : 0,
+            pace_words: ''
+        });
+    }
+
+    // The unit of the combined view in words: the shortest binding window.
+    function unitWords(joint) {
+        return lengthName(joint.unit.window_seconds) + ' window';
+    }
+
+    // The combined view's figures, once: the figure now and whose it is, the
+    // conditional hours, who is left out and why, and what the number is not.
+    function jointNote(joint) {
+        var box = el('div', 'tl-joint');
+        box.setAttribute('role', 'group');
+        box.setAttribute('aria-label', 'Combined same-account figures');
+        var line = el('div', null);
+        line.appendChild(el('b', null, num(joint.figure, 2)));
+        line.appendChild(document.createTextNode(' ' + unitWords(joint) + ' equivalents now · ' + joint.known + ' of '
+            + plural(joint.accounts, 'account') + ' counted'));
+        var hours = joint.hours || {};
+        if (hours.value !== null && hours.value !== undefined) {
+            line.appendChild(document.createTextNode(' · conditional ' + (hours.value > 0 && hours.value < .005
+                ? '<0.01' : num(hours.value, 2))
+                + ' account-hours if each account\u2019s common-watched-period pace holds (up to 7 days; '
+                + hours.known + ' known, ' + hours.unknown + ' unknown)'));
+        }
+        box.appendChild(line);
+        var left = Object.keys(joint.unknown_reasons || {}).map(function (why) {
+            return joint.unknown_reasons[why] + ' ' + why.replace(/_/g, ' ');
+        });
+        if (left.length) box.appendChild(el('div', null, 'Left out, never counted as positive: ' + left.join(', ')));
+        var cal = joint.calibration || {};
+        box.appendChild(el('div', null, 'Windows: ' + (joint.windows || []).map(function (w) { return w.label; }).join(' + ')
+            + (cal.calibrated !== undefined ? ' · calibrated on ' + plural(cal.calibrated, 'account') : '')
+            + ' · ' + (joint.limitations || [])[0]));
+        return box;
+    }
+
+    // What the reader may ask the windows about, from the limits themselves:
+    // the model names the family's constraints list, each exactly as sent. A
+    // name the skill had to cut (its display bound) is never offered — a cut
+    // name is not a model id — and names the skill left out are said, not
+    // guessed. Nothing here is a list of models known in advance.
+    var MODEL_NAME_BOUND = 80;
+
+    function modelChoices(groups) {
+        var seen = {};
+        var names = [];
+        var cut = false;
+        var unlisted = false;
+        groups.forEach(function (g) {
+            (g.models || []).forEach(function (name) {
+                var text = String(name);
+                if (text.length >= MODEL_NAME_BOUND) { cut = true; return; }
+                if (!seen[text]) { seen[text] = true; names.push(text); }
+            });
+            if (g.models_omitted) unlisted = true;
+        });
+        names.sort();
+        return { names: names, cut: cut, unlisted: unlisted };
+    }
+
+    // Whether any window of the family says which request kinds it governs.
+    function kindsVary(groups) {
+        return groups.some(function (g) { return !!(g.scope && Array.isArray(g.scope.request_kinds)); });
+    }
+
+    // The scope the chart on hand was computed for, against the reader's choice:
+    // a differing answer is asked for once (askForChart), never in a loop.
+    function scopeStale(chart) {
+        var scope = chart && chart.analytics && chart.analytics.scope;
+        if (!scope) return false;
+        return (scope.model || '') !== modelChoice || (scope.request_kind || 'text') !== kindChoice;
+    }
+
+    // Arrow keys move the keyboard along a row of buttons; Enter or Space then
+    // chooses, as on any button.
+    function arrowRow(box, keys) {
+        box.addEventListener('keydown', function (e) {
+            var move = keys.indexOf(e.key) < 0 ? 0 : (e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : -1);
+            var home = e.key === 'Home' ? 1 : (e.key === 'End' ? 2 : 0);
+            if (!move && !home) return;
+            var nodes = Array.prototype.slice.call(box.querySelectorAll('button')).filter(function (n) { return !n.disabled; });
+            var at = nodes.indexOf(document.activeElement);
+            if (at < 0 || !nodes.length) return;
+            var next = home === 1 ? 0 : (home === 2 ? nodes.length - 1 : (at + move + nodes.length) % nodes.length);
+            nodes.forEach(function (n) { if (n.getAttribute('role') === 'tab') n.setAttribute('tabindex', n === nodes[next] ? '0' : '-1'); });
+            nodes[next].focus();
+            if (e.preventDefault) e.preventDefault();
+        });
+    }
+
+    // The graph choices of one family and scope, as compact tabs: the combined
+    // same-account view first, then each window that governs the scope. A
+    // window the reader hid from the rows is not offered.
+    function timelineTabs(ctx, g, analytics) {
+        var joint = analytics && analytics.joint && analytics.joint.available ? analytics.joint : null;
+        var hidden = hiddenRows(currentView);
+        var tabs = [];
+        var have = {};
+        if (joint) {
+            tabs.push({ key: 'joint', name: 'Combined', title: 'Per account the smaller of its binding limits, in units of its '
+                + 'shortest window — a retrospective ratio of use, not compute' });
+            (joint.windows || []).forEach(function (w) {
+                if (have[w.key] || !groupByKey(ctx.groups, w.key) || (hidden[w.key] && w.key !== g.key)) return;
+                have[w.key] = true;
+                tabs.push({ key: w.key, name: ctx.names[w.key] || w.label });
+            });
+        }
+        if (!have[g.key]) tabs.push({ key: g.key, name: ctx.names[g.key] });
+        return { tabs: tabs, joint: joint, active: joint && graphMode === 'joint' ? 'joint' : g.key };
+    }
+
+    function pickTab(key, g) {
+        if (key === 'joint') {
+            graphMode = 'joint';
+        } else {
+            graphMode = 'window';
+            if (key !== g.key) {
+                chartKeys[g.harness] = key;
+                scheduleAll = false;
+                chartAsked = '';
+            }
+        }
+        chartCursor = null;
+        rerender();
+    }
+
+    function tabStrip(set, g) {
+        var strip = el('div', 'tl-tabs');
+        strip.setAttribute('role', 'tablist');
+        strip.setAttribute('aria-label', 'What the graph shows');
+        set.tabs.forEach(function (t) {
+            var on = t.key === set.active;
+            var b = el('button', 'tl-tab', t.name);
+            b.setAttribute('type', 'button');
+            b.setAttribute('role', 'tab');
+            b.setAttribute('aria-selected', on ? 'true' : 'false');
+            b.setAttribute('tabindex', on ? '0' : '-1');
+            b.setAttribute('data-focus', 'tab:' + t.key);
+            if (t.title) b.title = t.title;
+            b.addEventListener('click', function (e) {
+                e.stopPropagation();
+                pickTab(t.key, g);
+            });
+            strip.appendChild(b);
+        });
+        arrowRow(strip, ['ArrowLeft', 'ArrowRight']);
+        return strip;
+    }
+
+    // "Model: any": which request the windows are asked about. The choice is
+    // one of the names the limits list (or none); the list opens in place and
+    // survives a redraw like About does.
+    function modelMenu(ctx) {
+        var choices = modelChoices(ctx.groups);
+        var kinds = kindsVary(ctx.groups);
+        if (!choices.names.length && !kinds && !modelChoice && kindChoice === 'text') return null;
+        var btn = el('button', 'pill-btn tl-model' + (modelMenuOpen ? ' on' : ''));
+        btn.setAttribute('type', 'button');
+        btn.appendChild(el('span', 'tl-model-k', 'Model'));
+        btn.appendChild(el('span', 'tl-model-v', modelChoice || 'unspecified'));
+        if (kindChoice === 'image') btn.appendChild(el('span', 'tl-model-k', 'image'));
+        btn.appendChild(icon('caret', 12));
+        btn.setAttribute('aria-expanded', modelMenuOpen ? 'true' : 'false');
+        btn.setAttribute('aria-controls', 'quotas-model-panel');
+        btn.setAttribute('aria-label', 'Model and request kind: ' + (modelChoice || 'a request naming no model') + ', ' + kindChoice
+            + ' requests — choose which requests the windows are read for');
+        btn.title = btn.getAttribute('aria-label');
+        btn.setAttribute('data-focus', 'tl-model');
+        btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            modelMenuOpen = !modelMenuOpen;
+            rerender();
+            restoreFocus('tl-model');
+        });
+        var panel = null;
+        if (modelMenuOpen) {
+            panel = el('div', 'tl-model-panel');
+            panel.id = 'quotas-model-panel';
+            panel.setAttribute('role', 'group');
+            panel.setAttribute('aria-label', 'Model and request kind');
+            panel.appendChild(el('div', 'tl-scope', 'The windows that govern a request naming this model, by the engine’s own '
+                + 'rule. The names are the ones the limits list; none is guessed.'));
+            var opts = el('div', 'tl-model-opts');
+            var names = choices.names.slice();
+            var orphan = modelChoice && names.indexOf(modelChoice) < 0;
+            if (orphan) names.unshift(modelChoice);
+            [''].concat(names).forEach(function (name) {
+                var on = name === modelChoice;
+                var o = el('button', 'seg-opt' + (on ? ' active' : ''), name || 'No model named');
+                o.setAttribute('type', 'button');
+                o.setAttribute('aria-pressed', on ? 'true' : 'false');
+                o.setAttribute('data-focus', 'tl-model:' + name);
+                o.title = name ? (name === modelChoice && orphan ? name + ' — not named by any current limit' : name)
+                    : 'A request that names no model';
+                o.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    modelChoice = name;
+                    chartAsked = '';
+                    chartCursor = null;
+                    rerender();
+                });
+                opts.appendChild(o);
+            });
+            arrowRow(opts, ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
+            panel.appendChild(opts);
+            if (kinds) {
+                panel.appendChild(segControl('Request', [{ key: 'text', name: 'Text' }, { key: 'image', name: 'Image' }],
+                    kindChoice, 'tl-kind:', function (picked) {
+                        kindChoice = picked;
+                        chartAsked = '';
+                        chartCursor = null;
+                        rerender();
+                    }));
+            }
+            if (choices.unlisted) panel.appendChild(el('div', 'tl-scope', 'More models are tied to limits than the skill lists here.'));
+            if (choices.cut) panel.appendChild(el('div', 'tl-scope', 'Names too long to be sure of in full are not offered.'));
+        }
+        return { button: btn, panel: panel };
+    }
+
+    // The headline and the nearest reset, in a line each: the figure of the
+    // tab on screen and whose it is, then the soonest reported reset.
+    function timelineHero(g, shown, sc) {
+        var hero = el('div', 'tl-hero');
+        var left = el('div', 'tl-now');
+        var figure;
+        var unit;
+        var sub;
+        var next = null;
+        if (shown.joint_note) {
+            var joint = shown.joint_note;
+            figure = joint.figure === null || joint.figure === undefined ? '—' : num(joint.figure, 2);
+            unit = unitWords(joint) + ' equivalents left';
+            sub = joint.known + ' of ' + plural(joint.accounts, 'account') + ' counted'
+                + (joint.accounts > joint.known ? ' · ' + (joint.accounts - joint.known) + ' left out' : '');
+            var first = sc && (sc.schedule || [])[0];
+            if (first) next = { iso: isoOf(first.at), accounts: first.accounts };
+        } else {
+            var fig = rowFigure(g);
+            figure = fig.text;
+            unit = 'account-windows left';
+            sub = (fig.any ? (g.measured || {}).accounts : 0) + ' of ' + plural(fig.of, 'account') + ' read now';
+            if (g.next_reset && g.next_reset.at) next = { iso: g.next_reset.at, accounts: g.next_reset.accounts || 0 };
+        }
+        var big = el('div', 'tl-num', figure);
+        big.appendChild(el('span', 'tl-unit', unit));
+        left.appendChild(big);
+        left.appendChild(el('div', 'tl-sub', sub));
+        hero.appendChild(left);
+        var right = el('div', 'tl-next');
+        right.appendChild(el('div', 'tl-sub', 'Next reset'));
+        if (next && next.iso) {
+            right.appendChild(el('div', 'tl-next-v', relTime(next.iso) || whenWords(next.iso)));
+            right.appendChild(el('div', 'tl-sub', whenWords(next.iso) + (next.accounts > 1 ? ' · ' + next.accounts + ' accounts' : '')));
+        } else {
+            right.appendChild(el('div', 'tl-next-v dim', 'none reported'));
+        }
+        hero.appendChild(right);
+        return hero;
+    }
+
+    // The calm timeline of the charted limit, right under its row: graph tabs
+    // (the combined view and each window that governs the scope) and the model
+    // choice; the headline figure with the nearest reset; the span and the
+    // future; the chart with one short legend. Everything longer — the
+    // combined figures' caveats, the long legend, the reset schedule, the
+    // details and data — is folded under Details, never thrown away.
     function timelineBlock(ctx, g) {
         var box = el('div', 'tl-block');
         box.setAttribute('role', 'group');
         box.setAttribute('aria-label', 'Timeline of ' + ctx.names[g.key]);
         var name = ctx.names[g.key];
         var horizon = horizonFor(g);
+        var chart = ctx.reserve.chart;
+        var onHand = !!chart && chart.group_key === g.key && chart.horizon === horizon;
+        var set = timelineTabs(ctx, g, chart && chart.analytics);
+        var menu = modelMenu(ctx);
+        var head = el('div', 'tl-head');
+        head.appendChild(tabStrip(set, g));
+        if (menu) head.appendChild(menu.button);
+        box.appendChild(head);
+        if (menu && menu.panel) box.appendChild(menu.panel);
+
         var controls = el('div', 'tl-controls');
         controls.appendChild(segControl('Span', HORIZONS.map(function (h) {
             return { key: h, name: h === '24h' ? '24 h' : '7 days',
@@ -2350,7 +2887,7 @@
             horizonChoice = picked;
             chartCursor = null;
             rerender();
-        }));
+        }, true));
         controls.appendChild(segControl('Future', SCENARIOS.map(function (s) {
             return { key: s.key, name: s.name, title: s.key === 'no_new_use'
                 ? 'Every account read now keeps its share and refills once at its next reported reset'
@@ -2358,39 +2895,83 @@
         }), scenario, 'scenario:', function (picked) {
             scenario = picked;
             rerender();
-        }));
-        box.appendChild(controls);
-        if (scopeWords(g)) box.appendChild(el('div', 'tl-scope', scopeWords(g)));
+        }, true));
 
-        var chart = ctx.reserve.chart;
-        if (!chart || chart.group_key !== g.key || chart.horizon !== horizon) {
+        if (!onHand) {
+            box.appendChild(controls);
             box.appendChild(el('div', 'reserve-note chart-wait', 'Loading the timeline for this limit…'));
             return box;
         }
         if (!chart.y_max) {
+            box.appendChild(controls);
             box.appendChild(el('div', 'reserve-note', 'No account known for this limit: nothing to draw.'));
             return box;
         }
-        var sc = scenarioOf(chart);
-        drawChart(box, name, chart, sc);
-        var facts = timelineFacts(g, chart, sc, ctx);
-        box.appendChild(chartLegend(chart, sc, facts.lead));
+        var updating = scopeStale(chart);
+        var shown = drawnChart(chart);
+        var sc = scenarioOf(shown);
+        box.appendChild(timelineHero(g, shown, sc));
+        box.appendChild(controls);
+        var body = el('div', 'tl-body' + (updating ? ' is-updating' : ''));
+        if (updating) {
+            body.setAttribute('aria-busy', 'true');
+            box.appendChild(el('div', 'reserve-note tl-updating', 'Reading the windows for ' + (modelChoice || 'a request naming no model')
+                + (kindChoice === 'image' ? ' (image)' : '') + '… the graph below is of the previous choice.'));
+        }
+        drawChart(body, name + (shown.mode === 'joint' ? ' · combined' : ''), shown, sc);
+        body.appendChild(calmLegend(shown, sc));
+        box.appendChild(body);
+
+        // Under Details: everything the calm view folds away.
+        var front = [];
+        if (scopeWords(g)) front.push(el('div', 'tl-scope', scopeWords(g)));
+        if (shown.joint_note) front.push(jointNote(shown.joint_note));
+        var facts = timelineFacts(g, shown, sc, ctx);
+        front.push(chartLegend(shown, sc, facts.lead));
         if (facts.shown.length) {
             var said = el('div', 'tl-facts');
             facts.shown.forEach(function (f) { said.appendChild(el('div', f[1] || null, f[0])); });
-            box.appendChild(said);
+            front.push(said);
         }
         if (sc) {
-            var cp = checkpointLine(sc, chart);
-            if (cp) box.appendChild(cp);
-        }
-        if (sc) {
-            box.appendChild(scheduleTable(sc, chart, horizon));
+            var cp = checkpointLine(sc, shown);
+            if (cp) front.push(cp);
+            front.push(scheduleTable(sc, shown, horizon));
             var note = scheduleNote(g, sc, ctx, horizon);
-            if (note) box.appendChild(note);
+            if (note) front.push(note);
         }
-        box.appendChild(detailsBlock(g, chart, sc, ctx, facts.notes));
+        box.appendChild(detailsBlock(g, shown, sc, ctx, facts.notes, front));
         return box;
+    }
+
+    // One short line under the plot: only what is drawn, each in a few words.
+    // The long legend, with whose total each line is, stays under Details.
+    function calmLegend(chart, sc) {
+        var legend = el('div', 'calm-legend');
+        function item(swatch, text) {
+            var li = el('span', 'legend-item');
+            if (swatch) li.appendChild(swatch);
+            li.appendChild(el('span', null, text));
+            legend.appendChild(li);
+        }
+        var drawn = recordDrawn(recordLine(chart));
+        var carried = !!(chart.history && (chart.history.details || []).some(function (d) { return d && d.carried; }));
+        if (drawn) item(legendSwatch('line-observed'), 'recorded');
+        if (carried) item(legendSwatch('line-carried'), 'carried: last known');
+        if (!drawn && !carried) item(null, 'no record in this span yet');
+        if (sc) {
+            item(legendSwatch('line-scenario'), scenarioName(scenario).toLowerCase() + ': a condition, not a forecast');
+            if ((sc.schedule || []).length) item(resetSwatch(), 'reported reset');
+        } else {
+            item(null, 'no future drawn: no current reading');
+        }
+        return legend;
+    }
+
+    function resetSwatch() {
+        var svg = svgCanvas('0 0 10 10', 10, 10);
+        svg.appendChild(svgEl('circle', { cx: 5, cy: 5, r: 3.5, 'class': 'reset-dot' }));
+        return svg;
     }
 
     // Who each line sums, one line each under the chart — the record's
@@ -2452,7 +3033,8 @@
                         + plural(chart.past_accounts || 0, 'account') + ' shown as last known';
             return { lead: lead, shown: shown, notes: notes };
         }
-        var span = spanWords((g.recent_pace || {}).span_min_seconds, (g.recent_pace || {}).span_max_seconds);
+        var span = chart.pace_words
+            || spanWords((g.recent_pace || {}).span_min_seconds, (g.recent_pace || {}).span_max_seconds);
         var scenarioWord = scenarioName(scenario).toLowerCase() + ' · ';
         if (scenario === 'no_new_use') {
             lead = scenarioWord + plural(sc.accounts, 'current account') + (sc.accounts === 1
@@ -2462,9 +3044,15 @@
             lead = scenarioWord + plural(sc.accounts, 'current account')
                 + (sc.accounts === 1 ? ' held at its share' : ' held at their shares')
                 + '; each refilled once at its next reported reset; no later reset is assumed. '
-                + 'No account has a measured pace yet (' + paceStateWords(g) + '): the same as no new use';
+                + (chart.scope_applies === false ? 'This window does not govern the selected request; no burn is inferred.'
+                    : chart.scope_applies === null ? 'Some window applicability is unknown; no burn is inferred.'
+                    : chart.held_to_other_windows ? 'A binding window is unknown; no burn is inferred.'
+                    : chart.mode === 'joint' ? 'A common-period pace is not known for every binding window; accounts are held.'
+                    : (g.recent_pace || {}).state === 'ok' ? 'No positive draining pace qualifies across all binding windows; accounts are held.'
+                    : 'No account has a measured pace yet (' + paceStateWords(g) + '): the same as no new use');
         } else {
-            lead = scenarioWord + sc.at_pace + ' of ' + sc.accounts + ' current at their pace of the last ' + span
+            lead = scenarioWord + sc.at_pace + ' of ' + sc.accounts + ' current at their pace '
+                + (chart.pace_words ? 'over ' : 'of the last ') + span
                 + (sc.held ? ', ' + sc.held + ' held' : '') + '; each refilled once at its next reported reset; '
                 + 'no later reset is assumed';
             var runs = runsOutWords(sc, ctx);
@@ -2501,6 +3089,7 @@
         var pace = g.recent_pace || {};
         if (pace.state === 'warming_up') return 'warming up: it needs 15 minutes of comparable readings within the last hour';
         if (pace.state === 'unavailable') return 'the local history could not be read';
+        if (pace.state === 'ok') return 'measured, but other binding windows may hold this request';
         return 'no comparable readings in the last hour';
     }
 
@@ -2550,8 +3139,9 @@
                 + ' · ' + relTime(iso);
             tr.appendChild(when);
             tr.appendChild(el('td', 'n', String(row.accounts)));
-            tr.appendChild(el('td', 'n', '+' + amountWords(row.adds)));
-            tr.appendChild(el('td', 'n', num(row.total_after, 2) + ' of ' + chart.y_max));
+            tr.appendChild(el('td', 'n', row.adds === null ? 'unknown' : '+' + amountWords(row.adds)));
+            tr.appendChild(el('td', 'n', (row.total_after === null ? 'unknown' : num(row.total_after, 2))
+                + ' of ' + chart.y_max + (row.unknown_after ? ' · ' + row.unknown_after + ' unknown' : '')));
             body.appendChild(tr);
         });
         if (rows.length > SCHEDULE_ROWS) {
@@ -2634,7 +3224,7 @@
         points.forEach(function (cp, i) {
             if (i) line.appendChild(document.createTextNode(' · '));
             line.appendChild(document.createTextNode(offsetWords(cp.after_seconds) + ' '));
-            line.appendChild(el('b', null, '≈ ' + num(cp.value, 2)));
+            line.appendChild(el('b', null, cp.value === null ? 'unknown' : '≈ ' + num(cp.value, 2)));
         });
         line.appendChild(document.createTextNode(' (of ' + chart.y_max + ')'));
         return line;
@@ -2744,13 +3334,16 @@
 
     // The limit's details, the notes and the data table, folded under one
     // summary: the diagnostics behind the timeline, never thrown away.
-    function detailsBlock(g, chart, sc, ctx, extraNotes) {
+    function detailsBlock(g, chart, sc, ctx, extraNotes, front) {
         var details = el('details', 'chart-table');
         if (detailsOpen) details.open = true;
         details.addEventListener('toggle', function () { detailsOpen = !!details.open; });
         var summary = el('summary', null, 'Details, notes and data');
         summary.setAttribute('data-focus', 'chart-table');
         details.appendChild(summary);
+        (front || []).forEach(function (node) { details.appendChild(node); });
+        if (chart.mode === 'joint') details.appendChild(el('div', 'tl-scope',
+            'Selected window details · ' + ctx.names[g.key] + ' (not Combined figures)'));
         details.appendChild(reserveDetail(g, ctx.summary.history));
         var notes = el('div', 'chart-notes');
         (extraNotes || []).forEach(function (line) { notes.appendChild(el('p', null, line)); });
@@ -2867,7 +3460,8 @@
             var d = row.history;
             var tr = el('tr');
             [momentWords(row.at), d ? (d.value === null ? 'gap' : num(d.value, 2) + ' of ' + d.accounts) : '',
-             num(row.noUse, 2), num(row.pace, 2), row.event].forEach(function (text) {
+             row.noUse === null ? 'unknown' : num(row.noUse, 2),
+             row.pace === null ? 'unknown' : num(row.pace, 2), row.event].forEach(function (text) {
                 tr.appendChild(el('td', null, text));
             });
             body.appendChild(tr);
@@ -2959,7 +3553,9 @@
         for (var i = 0; i + 1 < points.length; i++) {
             var a = points[i], b = points[i + 1];
             if (a[0] <= t && t <= b[0]) {
-                value = b[0] === a[0] ? b[1] : a[1] + (b[1] - a[1]) * (t - a[0]) / (b[0] - a[0]);
+                value = b[0] === a[0] || t === b[0] ? b[1] : t === a[0] ? a[1]
+                    : a[1] === null || b[1] === null ? null
+                    : a[1] + (b[1] - a[1]) * (t - a[0]) / (b[0] - a[0]);
                 if (t < b[0]) break;
             }
         }
@@ -3143,6 +3739,24 @@
         }).join('');
     }
 
+    // Runs that meet end to start (a recorded stretch handing over to a carried
+    // one at the same value) are one outline for the fill, so no seam of
+    // background shows between them; a gap in the record still breaks it.
+    function joinRuns(runs) {
+        var sorted = runs.filter(function (run) { return run.length; }).slice().sort(function (a, b) { return a[0][0] - b[0][0]; });
+        var out = [];
+        sorted.forEach(function (run) {
+            var last = out.length ? out[out.length - 1] : null;
+            var end = last ? last[last.length - 1] : null;
+            if (end && Math.abs(end[0] - run[0][0]) < 0.06 && Math.abs(end[1] - run[0][1]) < 0.06) {
+                out[out.length - 1] = last.concat(run.slice(1));
+            } else {
+                out.push(run.slice());
+            }
+        });
+        return out;
+    }
+
     function runArea(runs, base) {
         return runs.filter(function (run) { return run.length > 1; }).map(function (run) {
             var first = run[0], last = run[run.length - 1];
@@ -3161,7 +3775,7 @@
         var avail = (root && root.clientWidth) || 580;
         var W = Math.max(260, Math.min(1000, Math.floor(avail - 2 * 17)));
         var H = W < 460 ? 180 : 210;
-        var pl = 30, pr = 12, pt = 10, pb = 24;
+        var pl = 30, pr = 12, pt = 22, pb = 24;
         var now = chart.now;
         var t0 = Math.floor(chart.start / 3600) * 3600;
         var t1 = t0 + Math.ceil((chart.end - t0) / 3600) * 3600;
@@ -3174,11 +3788,21 @@
         plot.setAttribute('tabindex', '0');
         plot.setAttribute('data-focus', 'chart-plot');
         plot.setAttribute('role', 'group');
-        plot.setAttribute('aria-label', 'Timeline of ' + name + ', account-windows left: the record behind now'
+        plot.setAttribute('aria-label', 'Timeline of ' + name + ', ' + (chart.unit_text || 'account-windows left') + ': the record behind now'
             + (sc ? ', ' + scenarioName(scenario).toLowerCase() + ' ahead' : '')
             + '. Arrow keys move through time; the data table under Details lists the values.');
         var svg = svgCanvas('0 0 ' + W + ' ' + H, W, H);
         svg.setAttribute('class', 'chart-svg');
+        // One soft fill under the one curve; the unit is said on the plot itself.
+        var defs = svgEl('defs', {});
+        var fade = svgEl('linearGradient', { id: 'qa-area', x1: 0, y1: 0, x2: 0, y2: 1 });
+        fade.appendChild(svgEl('stop', { offset: '0', style: 'stop-color:var(--calm-a);stop-opacity:.30' }));
+        fade.appendChild(svgEl('stop', { offset: '1', style: 'stop-color:var(--calm-a);stop-opacity:.02' }));
+        defs.appendChild(fade);
+        svg.appendChild(defs);
+        var unitText = svgEl('text', { x: pl, y: 11, 'class': 'unit-text' });
+        unitText.textContent = chart.unit_text || 'account-windows left';
+        svg.appendChild(unitText);
         svg.appendChild(svgEl('rect', { x: x(now), y: pt, width: Math.max(0, x(t1) - x(now)), height: bottom - pt,
             'class': 'future-bg' }));
 
@@ -3211,6 +3835,7 @@
         if (sc) {
             (sc.schedule || []).forEach(function (r) {
                 svg.appendChild(svgEl('line', { x1: x(r.at), x2: x(r.at), y1: pt, y2: bottom, 'class': 'reset-line' }));
+                svg.appendChild(svgEl('circle', { cx: x(r.at).toFixed(1), cy: bottom.toFixed(1), r: 3.5, 'class': 'reset-dot' }));
             });
         }
         svg.appendChild(svgEl('line', { x1: x(now), x2: x(now), y1: pt, y2: bottom + 4, 'class': 'now-line' }));
@@ -3221,19 +3846,30 @@
 
         var history = historyRuns(chart, x, y, t0);
         var runs = history.recorded;
-        var area = runArea(runs, bottom);
+        var area = runArea(joinRuns(history.recorded.concat(history.carried)), bottom);
         if (area) svg.appendChild(svgEl('path', { d: area, 'class': 'area-observed' }));
         var d = runPath(runs);
         if (d) svg.appendChild(svgEl('path', { d: d, 'class': 'line-observed' }));
         var carried = runPath(history.carried);
         if (carried) svg.appendChild(svgEl('path', { d: carried, 'class': 'line-carried' }));
         if (sc && sc.line && sc.line.length) {
-            var path = sc.line.map(function (p, j) {
-                return (j ? 'L' : 'M') + x(p[0]).toFixed(1) + ' ' + y(p[1]).toFixed(1);
-            }).join('');
-            svg.appendChild(svgEl('path', { d: path, 'class': 'line-scenario' }));
-            svg.appendChild(svgEl('circle', { cx: x(now).toFixed(1), cy: y(sc.line[0][1]).toFixed(1), r: 3,
-                'class': 'scenario-start' }));
+            // Futures can lose a known zero at an uncalibrated refill. Null
+            // breaks the line/fill, just as it breaks the record; y(null)
+            // would silently paint a numeric zero and the cursor must not
+            // interpolate through that unknown stretch either (lineAt).
+            var futureRuns = [], currentRun = null;
+            sc.line.forEach(function (p) {
+                if (p[1] === null || p[1] === undefined) { currentRun = null; return; }
+                if (!currentRun) { currentRun = []; futureRuns.push(currentRun); }
+                currentRun.push([x(p[0]), y(p[1])]);
+            });
+            var path = runPath(futureRuns);
+            // A faint fill under the condition, fainter than the record's: ahead of now nothing is observed.
+            var futureArea = runArea(futureRuns, bottom);
+            if (futureArea) svg.appendChild(svgEl('path', { d: futureArea, 'class': 'area-scenario' }));
+            if (path) svg.appendChild(svgEl('path', { d: path, 'class': 'line-scenario' }));
+            if (sc.line[0][1] !== null) svg.appendChild(svgEl('circle', {
+                cx: x(now).toFixed(1), cy: y(sc.line[0][1]).toFixed(1), r: 3, 'class': 'scenario-start' }));
         }
 
         var cursor = svgEl('line', { x1: 0, x2: 0, y1: pt, y2: bottom, 'class': 'cursor-line', visibility: 'hidden' });
@@ -3288,7 +3924,7 @@
             if (t <= chart.now) historyWords(historyDetailAt(chart, t), t).forEach(function (words) {
                 tip.appendChild(el('div', 'tip-foot', words));
             });
-            tip.appendChild(el('div', 'tip-foot', name + ' · account-windows left, scale ' + ymax));
+            tip.appendChild(el('div', 'tip-foot', name + ' · ' + (chart.unit_text || 'account-windows left') + ', scale ' + ymax));
             tip.style.display = 'block';
             var rect = svg.getBoundingClientRect ? svg.getBoundingClientRect() : null;
             var scale = rect && rect.width ? rect.width / W : 1;
@@ -3435,6 +4071,24 @@
         });
     }
 
+    // Where the selected account's one card stands. The parts of the screen
+    // offer the slot in drawing order and the first that fits draws it, once:
+    // right under the limit whose bar selected the account (before that
+    // limit's own timeline, whichever limit is charted); under its row of the
+    // account list when a row selected it, or when that limit is no longer
+    // drawn (a limit the reader hid, a reading without it); under the list's
+    // header when the list is folded. Never at the far end of the screen.
+    function inspectorSlot(group, account, facets) {
+        var slot = {
+            limit: selectionLimit, account: account.key, drawn: false,
+            draw: function (parent, ctx) {
+                slot.drawn = true;
+                renderInspector(parent, group, account, ctx, facets);
+            }
+        };
+        return slot;
+    }
+
     function renderInspector(parent, group, account, ctx, facets) {
         var quota = account.quota || {};
         var overview = !!(ctx && ctx.groups.length);
@@ -3489,6 +4143,7 @@
             box.appendChild(renderQuotaVerdict(quota));
         }
         renderAccountCredits(box, quota);
+        renderAccountResources(box, account.resources);
         if (overview) accountLimits(box, ctx, account);
         renderAbsence(box, account, quota.absence);
         renderCooldowns(box, quota);
@@ -3549,8 +4204,9 @@
     // Every account of the family, in the engine's order, with its share left
     // in every limit (from the same bars) and its state; the ones that cannot
     // run anything follow under their reasons. A row selects the account —
-    // the same selection a bar makes.
-    function renderAccounts(parent, group, ctx, facets, forceOpen) {
+    // the same selection a bar makes. `card` (inspectorSlot) is drawn under
+    // the selected account's row, or under the header of a folded list.
+    function renderAccounts(parent, group, ctx, facets, forceOpen, card) {
         var accounts = group.accounts || [];
         if (!accounts.length) return;
         var groups = ctx ? ctx.groups : [];
@@ -3581,6 +4237,7 @@
         }
         box.appendChild(head);
         if (!open) {
+            if (card && !card.drawn) card.draw(box, ctx);
             parent.appendChild(box);
             return;
         }
@@ -3650,11 +4307,15 @@
             });
             return btn;
         }
-        running.forEach(function (a) { table.appendChild(row(a)); });
+        function put(account) {
+            table.appendChild(row(account));
+            if (card && !card.drawn && card.account === account.key) card.draw(table, ctx);
+        }
+        running.forEach(put);
         if (idle.length) {
             table.appendChild(el('div', 'acc-sec', 'Not running — '
                 + 'switched off, signed out or failing their check; not counted as alerts'));
-            idle.forEach(function (a) { table.appendChild(row(a)); });
+            idle.forEach(put);
         }
         box.appendChild(table);
         parent.appendChild(box);
@@ -3817,6 +4478,8 @@
     // One read of the whole projection: {view} to draw (with `why` when it
     // reports itself incomplete), or {why} when there is nothing to draw.
     function readView(reuse) {
+        var displayAtStart = displaySeq;
+        var displayPending = displaySeq !== displaySettled;
         return request(reserveUrl(reuse), { method: 'GET' }, GET_TIMEOUT_MS).then(function (result) {
             var view = null;
             if (result.ok) {
@@ -3831,6 +4494,9 @@
             // reason; with none and nothing to draw it is not a screen.
             var unexplained = !view.ok && !view.transport_error && !view.facet_note;
             if (unexplained && !hasContent(view)) return { view: null, why: 'response reported itself incomplete' };
+            if (currentView && (displayAtStart !== displaySeq || displayPending || displaySeq !== displaySettled)) {
+                view.display = currentView.display;
+            }
             return { view: view, why: unexplained ? 'response reported itself incomplete' : '' };
         });
     }
@@ -4310,6 +4976,10 @@
                     selectedHarness = group.harness_id;
                     selectedAccountKey = '';
                     chartCursor = null;
+                    // The models a family lists are its own: another family starts on "any model".
+                    modelChoice = '';
+                    kindChoice = 'text';
+                    modelMenuOpen = false;
                 }
                 rerender();
             });
@@ -4431,13 +5101,15 @@
                 statusProblem);
         }
 
-        /* 3. The family's limits; the account selected in them; its timeline;
-           its accounts. */
+        /* 3. The family's limits and the timeline of one; its accounts; the
+           selected account's card in the one place that belongs to it
+           (inspectorSlot): under the limit whose bar selected it, or under
+           its row of the list. */
         var ctx = null;
-        if (hasAnswer && selection.group) ctx = renderReserve(root, view.reserve, selection.group, view);
-        if (selection.account) renderInspector(root, selection.group, selection.account, ctx, facets);
+        var card = selection.account ? inspectorSlot(selection.group, selection.account, facets) : null;
+        if (hasAnswer && selection.group) ctx = renderReserve(root, view.reserve, selection.group, view, card);
         if (selection.group && (selection.group.accounts || []).length) {
-            renderAccounts(root, selection.group, ctx, facets, !(ctx && ctx.groups.length));
+            renderAccounts(root, selection.group, ctx, facets, !(ctx && ctx.groups.length), card);
         }
         if (!hasAnswer) {
             emptyCard('refresh', 'Reading accounts…', 'Asking the Claudexor daemon for accounts and quota.');
@@ -4533,7 +5205,11 @@
     // the keyboard to the control that opened it.
     function onDocumentKey(e) {
         if (e.key !== 'Escape') return;
-        if (aboutOpen) {
+        if (modelMenuOpen) {
+            modelMenuOpen = false;
+            rerender();
+            restoreFocus('tl-model');
+        } else if (aboutOpen) {
             aboutOpen = false;
             rerender();
             restoreFocus('about');

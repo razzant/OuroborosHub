@@ -1,0 +1,17 @@
+{
+  "category": [
+    "city"
+  ],
+  "description": "Поиск товаров ВкусВилл, просмотр деталей (состав, КБЖУ, цена, рейтинг) и создание ссылки на корзину через официальный MCP API ВкусВилл.",
+  "digest": "6b8cb837ae9213a0746c3aeacd23e4e1666afdc57f8f8b41b047e2ab453cf542",
+  "name": "vkusvill",
+  "owner": "kuznetsoffandrey",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/vkusvill"
+  },
+  "type": "extension",
+  "version": "1.0.1",
+  "withdrawn": null
+}
