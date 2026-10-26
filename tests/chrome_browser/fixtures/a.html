@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fixture A</title>
+<style>
+  body { font: 14px sans-serif; margin: 16px; }
+  #overlay { position: fixed; left: 10px; top: 430px; width: 320px; height: 70px; background: rgba(200, 0, 0, .25); }
+  #covered { position: absolute; left: 30px; top: 445px; }
+  #mover { position: relative; }
+</style>
+</head>
+<body>
+<h1>Fixture A</h1>
+<p id="loadId"></p>
+<p><button id="go">Go</button> clicks: <span id="count">0</span>
+   <button id="ghost" style="opacity: 0">Ghost</button> <span style="opacity: 0"><button id="ghostChild">Ghost child</button></span></p>
+<form id="form" method="post" action="/echo">
+  <input id="name" name="name" placeholder="Name">
+  <input id="email" name="email" type="email" placeholder="Email">
+  <label><input id="agree" name="agree" type="checkbox"> Agree</label>
+  <textarea id="notes" name="notes" placeholder="Notes"></textarea>
+  <input id="secret" name="secret" type="password" value="hunter2">
+  <button id="send" type="submit">Send</button>
+</form>
+<p><button id="start">Start</button></p>
+<div id="flow"></div>
+<p><a id="link" href="/second.html">Second</a> <a id="redirectLink" href="/go-second">Via redirect</a>
+   <a id="blockedLink" href="/blocked/page">Blocked page</a></p>
+<p><button id="fetchOk">fetch ok</button> <button id="fetchBlocked">fetch blocked</button>
+   <button id="postRedirect">post via redirect</button> <button id="later">navigate later</button></p>
+<pre id="net"></pre>
+<p><button id="mover">Mover</button></p>
+<button id="covered">Covered</button>
+<div id="overlay"></div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  window.events = [];
+  $('loadId').textContent = `load-${Math.random().toString(36).slice(2)}`;
+  for (const type of ['mouseover', 'mousemove', 'pointerdown', 'mousedown', 'mouseup', 'click', 'keydown', 'keyup', 'beforeinput', 'input', 'change']) {
+    document.addEventListener(type, (event) => window.events.push({
+      type, trusted: event.isTrusted, target: event.target.id || event.target.tagName, visibility: document.visibilityState,
+    }), true);
+  }
+  $('go').addEventListener('click', () => { $('count').textContent = String(Number($('count').textContent) + 1); });
+  $('covered').addEventListener('click', () => { $('covered').dataset.clicked = '1'; });
+  $('mover').addEventListener('click', () => { $('mover').dataset.clicked = '1'; });
+  for (const id of ['ghost', 'ghostChild']) $(id).addEventListener('click', () => { $(id).dataset.clicked = '1'; });
+  $('start').addEventListener('click', () => setTimeout(() => {
+    $('flow').innerHTML = '<input id="step2" placeholder="Step 2"> <button id="next">Next</button>';
+    $('next').addEventListener('click', () => setTimeout(() => {
+      const done = document.createElement('p');
+      done.id = 'done';
+      done.textContent = `done: ${$('step2').value}`;
+      $('flow').appendChild(done);
+    }, 600));
+  }, 700));
+  const report = async (label, run) => {
+    try {
+      const response = await run();
+      $('net').textContent += `${label}:${response.status} ${(await response.text()).replace(/<[^>]+>/g, '').trim().slice(0, 40)}\n`;
+    } catch (error) {
+      $('net').textContent += `${label}:FAILED\n`;
+    }
+  };
+  $('fetchOk').addEventListener('click', () => report('ok', () => fetch('/echo', { method: 'POST', body: 'alpha=1&beta=two' })));
+  $('fetchBlocked').addEventListener('click', () => report('blocked', () => fetch('/blocked/data')));
+  $('postRedirect').addEventListener('click', () => report('redirect', () => fetch('/redirect', { method: 'POST', body: 'carried=body' })));
+  $('later').addEventListener('click', () => setTimeout(() => { location.href = '/second.html'; }, 900));
+  // Keeps moving for `duration` ms: geometry that is not stable.
+  window.shake = (duration) => {
+    const started = Date.now();
+    const timer = setInterval(() => {
+      $('mover').style.left = `${((Date.now() - started) / 10) % 200}px`;
+      if (Date.now() - started > duration) clearInterval(timer);
+    }, 15);
+  };
+</script>
+</body>
+</html>

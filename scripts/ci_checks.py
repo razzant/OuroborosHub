@@ -13,6 +13,9 @@ if __package__ in {None, ''}:
 from scripts.build_index import refresh_legacy_entries, run_git
 
 SUITES = {
+    'chrome-browser': {'skills': ['chrome_browser', 'playwright_extension'],
+                       'tests': ['tests/test_chrome_browser.py'],
+                       'shared': ['tests/chrome_browser/']},
     'perplexity': {'skills': ['perplexity'], 'tests': ['tests/test_perplexity.py'],
                    'dependencies': ['httpx', 'starlette']},
     'smart-lists': {'skills': ['smart_lists'], 'tests': ['skills/smart_lists/tests', 'tests/test_smart_lists_browser.py'],

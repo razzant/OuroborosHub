@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/294a8730607059c949f9fa851bcbad2e54839a05",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
   "skills": [
     {
@@ -645,6 +645,122 @@
       "slug": "check-in",
       "type": "extension",
       "version": "0.1.4"
+    },
+    {
+      "description": "Act in your own Chrome through a paired extension - one explicitly shared tab or the agent's own background tab, trusted input without taking focus, and a clean handoff of the live page to you and back.",
+      "files": [
+        {
+          "path": "ATTRIBUTION.md",
+          "sha256": "47874eac9754a4410c5c2d28409b4123d2fd78bfcd407edef0bcf857696411f2",
+          "size": 1969
+        },
+        {
+          "path": "PROTOCOL.md",
+          "sha256": "df3b8b48459b53ec56b1d7b3fd425cb3dfbb27ad6dd416cf76a4015052a26170",
+          "size": 38899
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "9539cddbc186ab1e4fdc5ad7d7c2c44ff45c3efa87cf2ee591e39e437060621e",
+          "size": 24349
+        },
+        {
+          "path": "extension/bridge_protocol.mjs",
+          "sha256": "e110ed85a13be1bae3d35280f82a503a7f86ab8b74f92b861abaf0feaca9b524",
+          "size": 2279
+        },
+        {
+          "path": "extension/manifest.json",
+          "sha256": "089b7c953514adf3fc152d185983c85d6d168eb34b8f56aec0d6985f774c244d",
+          "size": 951
+        },
+        {
+          "path": "extension/page_agent.js",
+          "sha256": "b10b80a2e9b6d9fbb36139ae6b71bb7b6f694bb26631b7b35063f239b73a5d82",
+          "size": 13514
+        },
+        {
+          "path": "extension/popup.html",
+          "sha256": "cb0a5a83fd7b5aa2508f4fbd509486a28057aae60415c52d3158715a787bb832",
+          "size": 2514
+        },
+        {
+          "path": "extension/popup.js",
+          "sha256": "a0ef4c33eb8f303997745a57118ce163343fa418e0455273cd03c8e7e88f4df4",
+          "size": 3181
+        },
+        {
+          "path": "extension/service_worker.js",
+          "sha256": "4ef10bff7aa738be8870224ba234d398c11d0aa85dd40960066d6812474e4f05",
+          "size": 55672
+        },
+        {
+          "path": "lib/executor.mjs",
+          "sha256": "24bd6b0046c6e698355257302eea246096d91f97bb4870513a25fe66854e7638",
+          "size": 50178
+        },
+        {
+          "path": "lib/guard.mjs",
+          "sha256": "f4f9a9ec1cec63ade4e124b51e374c6b8682bd622118c403c46c561268b5dbc5",
+          "size": 1524
+        },
+        {
+          "path": "lib/native_setup.mjs",
+          "sha256": "ae4c17311f5bec8e14c860a70dd098bcc9bb3dbd182474b29d544950db7aba4b",
+          "size": 3151
+        },
+        {
+          "path": "lib/pairing.mjs",
+          "sha256": "32561fbd24f5e0b74277e047295837b8e3e743e9e8d1186ddfd90a50f6d6caa9",
+          "size": 7864
+        },
+        {
+          "path": "references/executor-brief.md",
+          "sha256": "5ad226ca4d21aa425cdf2de00c773631edb9aff08c3089ebf159a4b814d0ad12",
+          "size": 5795
+        },
+        {
+          "path": "scripts/mcp_server.mjs",
+          "sha256": "8d9ae4740a230e5f20641fca478a923777a1e1f437923da92cac365ee4460e01",
+          "size": 8135
+        },
+        {
+          "path": "scripts/native_host.mjs",
+          "sha256": "7858890352f30b04ae6969afb239458245d10b85d44dfdb3759509e04eb79a22",
+          "size": 2993
+        },
+        {
+          "path": "scripts/setup.mjs",
+          "sha256": "d139cd24a69fbf1e9140d9892196474eb062e87fce8982382b1db77707978a18",
+          "size": 7546
+        },
+        {
+          "path": "tests/native_bootstrap.test.mjs",
+          "sha256": "c31a86b08f1d9995db618db9bf06be4848c6abeb5a85a123271d6191c8a55e9a",
+          "size": 12995
+        },
+        {
+          "path": "tests/observation_startup.test.mjs",
+          "sha256": "d3408e5157c9ad450cb97bc9a31aaad4d729725add33eda18867b4a5c43f5ff1",
+          "size": 12620
+        },
+        {
+          "path": "tests/regressions.test.mjs",
+          "sha256": "ceb2e6d2de04785ab51ed96ade4b1b5e92b60ba8230ea3b1cb0d9ece48a97a80",
+          "size": 58445
+        }
+      ],
+      "install_specs": [
+        {
+          "kind": "npm",
+          "package": "ws@8.22.0"
+        }
+      ],
+      "name": "chrome_browser",
+      "slug": "chrome_browser",
+      "type": "script",
+      "version": "0.1.3",
+      "when_to_use": "The owner asks to read or act on a page in their real, signed-in Chrome, wants to keep working in another tab meanwhile, or needs to take over the same page for a login, CAPTCHA or decision and hand it back."
     },
     {
       "description": "Fully playable Classic Doom (1993) standalone 2.5D FPS raycaster extension widget with textured walls, procedural sprite enemies, authentic weapons, levels, HUD, Web Audio sound and heavy metal music synthesizer.",
@@ -1937,6 +2053,21 @@
       "slug": "perplexity",
       "type": "extension",
       "version": "0.1.2"
+    },
+    {
+      "description": "Use an owner-configured Playwright MCP Chrome connection with task-owned transport and current-page checks; installation alone does not connect a browser.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "7ca8f25f97afbb943ada3f12312515173e8e44772b4c56ed58a1ac7b2cfc6939",
+          "size": 8059
+        }
+      ],
+      "name": "playwright_extension",
+      "slug": "playwright_extension",
+      "type": "instruction",
+      "version": "0.1.2",
+      "when_to_use": "The owner asks to inspect or act in an already-authorized Chrome tab and has configured a task-owned Playwright MCP bridge."
     },
     {
       "description": "Оркестратор автоматического бронирования ресторанов: нормализует список ресторанов, формирует задачу для агента-исполнителя и валидирует результат.",

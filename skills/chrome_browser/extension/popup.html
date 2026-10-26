@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ouroboros Chrome Browser</title>
+<style>
+  body { font: 13px/1.4 system-ui, sans-serif; margin: 0; padding: 12px; width: 320px; color: #1c1c1e; background: #fff; }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  h2 { font-size: 12px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: #555; }
+  p { margin: 4px 0; }
+  label { display: block; margin: 6px 0 2px; }
+  input { width: 100%; box-sizing: border-box; padding: 5px 6px; font: inherit; border: 1px solid #b5b5ba; border-radius: 4px; }
+  button { font: inherit; padding: 5px 10px; margin: 6px 6px 0 0; border: 1px solid #8e8e93; border-radius: 4px; background: #f2f2f7; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .note { color: #555; font-size: 12px; }
+  .error { color: #b00020; }
+  .on { color: #0a7a2f; font-weight: 600; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #f2f2f7; background: #1c1c1e; }
+    h2, .note { color: #aeaeb2; }
+    input { background: #2c2c2e; color: inherit; border-color: #48484a; }
+    button { background: #2c2c2e; color: inherit; border-color: #636366; }
+    .error { color: #ff6b6b; }
+    .on { color: #4cd964; }
+  }
+</style>
+</head>
+<body>
+<h1>Ouroboros Chrome Browser</h1>
+<p id="summary" class="note">…</p>
+<p id="error" class="error" role="alert"></p>
+
+<h2>This tab</h2>
+<p id="tab" class="note">…</p>
+<button id="share" type="button">Share this tab</button>
+<button id="stop" type="button">Stop sharing</button>
+
+<h2>Pairing</h2>
+<p class="note">When Ouroboros has prepared this computer, choose Connect. It saves the pairing in this Chrome profile and shares no tab.</p>
+<button id="connect" type="button">Connect</button>
+<p class="note">Use the pairing in one Chrome profile at a time. To switch, choose Forget pairing or turn this extension off in the other profile; Stop sharing is not enough.</p>
+<details>
+<summary>Manual pairing if the helper is unavailable</summary>
+<p class="note">Open the private pairing file named by setup. Copy its credential here; do not paste it into a chat.</p>
+<label for="credential">Credential</label>
+<input id="credential" type="password" autocomplete="off" spellcheck="false">
+<label for="port">Port</label>
+<input id="port" type="number" min="1024" max="65535">
+<button id="save" type="button">Save and connect</button>
+</details>
+<button id="forget" type="button">Forget pairing</button>
+
+<script src="popup.js"></script>
+</body>
+</html>

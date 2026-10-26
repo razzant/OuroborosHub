@@ -215,6 +215,10 @@ class WorkflowTests(unittest.TestCase):
             'suite': '${{ fromJSON(needs.catalog.outputs.suites) }}'}})
         self.assertEqual(workflow['jobs']['catalog']['outputs'], {'suites': '${{ steps.prepare.outputs.suites }}'})
         self.assertEqual(hosted['steps'][-1]['run'], 'python -B scripts/ci_checks.py run "$SUITE"')
+        node_setup = next(s for s in hosted['steps'] if s.get('uses') == 'actions/setup-node@v4')
+        self.assertEqual(node_setup['if'], "matrix.suite == 'chrome-browser'")
+        self.assertEqual(node_setup['with']['node-version'], '20')
+        self.assertIn('tests/test_chrome_browser.py', ci_checks.SUITES['chrome-browser']['tests'])
         self.assertIn('skills/slack-bridge/tests', ci_checks.SUITES['slack-bridge']['tests'])
         self.assertIn('skills/telegram-bot/tests', ci_checks.SUITES['telegram-bot']['tests'])
         for path in (ROOT / 'tests').glob('test_*.py'):

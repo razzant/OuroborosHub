@@ -40,6 +40,7 @@ class SelectionTests(unittest.TestCase):
             'context-lens': {'widgets'}, 'memory-atlas': {'widgets'}, 'token-usage': {'widgets'},
             'office_reader': {'office-reader'}, 'science_search': {'science-search'},
             'github-presence': {'github-presence'},
+            'chrome_browser': {'chrome-browser'}, 'playwright_extension': {'chrome-browser'},
         }
         for skill, expected in consumers.items():
             with self.subTest(skill=skill):
@@ -108,4 +109,3 @@ class SelectionTests(unittest.TestCase):
                 self.assertTrue(install.kwargs['check'])
                 self.assertTrue(test.kwargs['check'])
                 self.assertEqual(test.kwargs['env']['PYTHONDONTWRITEBYTECODE'], '1')
-
