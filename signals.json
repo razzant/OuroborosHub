@@ -1,6 +1,6 @@
 {
   "author_repos": {},
-  "generated_at": "2026-10-26T10:14:54.395438Z",
+  "generated_at": "2026-10-27T09:52:18.390462Z",
   "schema_version": 1,
   "skills": {
     "2gis": {
@@ -226,6 +226,11 @@
     "telegram-bot": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/193",
+      "votes": 0
+    },
+    "telegram-user-session": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/227",
       "votes": 0
     },
     "token-usage": {
