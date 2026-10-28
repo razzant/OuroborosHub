@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "status": "draft-source-proposal-not-installable",
+  "upstream_repository": "https://github.com/razzant/ouroboros",
+  "upstream_base_commit": "06fc0c067cbc58315452d50c0ac8e6b5a4d1ec58",
+  "local_feature_commit": "ea15396d37bf32a372e946daff88918f12ccee6b",
+  "captured_commit": "7f86c7b8c83073ec507b6b07f686510072fd3f3c",
+  "native_skill_version": "1.4.0",
+  "native_release_digest": "93373c75ce551bd633350122e1c864ba62b5eeb049fcb8ffe035f6c687683a8d",
+  "payload_files": [
+    {
+      "path": "SKILL.md",
+      "git_blob": "70c99bc9271b2fe315cc0d261341974417d6feca",
+      "sha256": "24dc952e994d03b21345aa77edab0dbe41848509dec67e1740985bf183fbd7bd",
+      "bytes": 21690,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/miniapp_registration.py",
+      "git_blob": "9e3ed292b9eb4928c87f74e66361031fc15243e8",
+      "sha256": "0f895f63dc4f148e290318b015c9f4d4860a1532adcd5c815e904b235c4b5e44",
+      "bytes": 8957,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/telegram_actions.py",
+      "git_blob": "769af6b51bbc29aaf25aa5a7ab7d5f9b0d3a4054",
+      "sha256": "54a70f485e5f7630cd28874710298bd905c99fd3fc93f51dae52e8987833e1fb",
+      "bytes": 22319,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/telegram_api.py",
+      "git_blob": "8691b16060dd74138eccda0b34b8da08f39cb5f7",
+      "sha256": "efe174298e135f7ab57b2146126b5a7ae89a028be4188edb4fbd736ac0f47245",
+      "bytes": 41198,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/telegram_health.py",
+      "git_blob": "74076d99ac46cc9603d7bebf10b97f18e370ec91",
+      "sha256": "e1e4f57eb88a1b63e3f9683783e06471fdc16f9f70b43931496df328a3ccf27b",
+      "bytes": 5597,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/telegram_i18n.py",
+      "git_blob": "b81c428cec0259d8f8859b8e99dcdcbe91198ba7",
+      "sha256": "374864df1e3233005c71f877c9231db0440a4528146b12d4c2906ce398ed8c2a",
+      "bytes": 8164,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/telegram_inbound.py",
+      "git_blob": "de20180868ef0b4d487f39d0b018142843634f85",
+      "sha256": "e807a2f2b78f83bc5ce2e915a08197dc707231419dd81aa905b5d2564cf2517f",
+      "bytes": 4495,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/telegram_mirror.py",
+      "git_blob": "5d0c46cf242845bd2b19a0a1e8a0c35207ee02e7",
+      "sha256": "be37558a07982ef64895ddb31a011655cfc94b908d6ab4d1495ce81a836e4ecb",
+      "bytes": 5621,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/telegram_news.py",
+      "git_blob": "e78e06abf5ca79eb9bcdbc186c862d62a3cad9ad",
+      "sha256": "5f204846599f65f1d700f99814caab534ea61bcfa25a366f6c0b91d713a3a758",
+      "bytes": 10936,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/telegram_notifier.py",
+      "git_blob": "f1ddc56c86b40f5c4a0acc926c4c7ef5d767842f",
+      "sha256": "b964b0e425d64aecbb0facfdf2aae8bdb07cf5c8f23608d90e1a943db7b93544",
+      "bytes": 19229,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/telegram_places.py",
+      "git_blob": "255ab1d7aff3f158784f7f5874fce8a7ff147f75",
+      "sha256": "8e222fd9e9af2d25c6c9144caf1e13bb21f4c434092bffca554ee26efb60e812",
+      "bytes": 53282,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/telegram_quiz.py",
+      "git_blob": "1b2571ed1b68fadce3bb0aac5dab81d7840ceed8",
+      "sha256": "cb691732ee2ff145f0b1bead2df69f97c2477945e77eb1795e91d26e5052bb60",
+      "bytes": 22770,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/telegram_state.py",
+      "git_blob": "4a7792015b6b24abfde2688f1969ca6995dc571d",
+      "sha256": "60f27d456111000b29ebe4ebbc4622c896c329a928d3e42a03f3e6e5fe54011f",
+      "bytes": 21272,
+      "mode": "100644"
+    },
+    {
+      "path": "lib/telegram_typing.py",
+      "git_blob": "f38b6c4ea223dfb5288c7aefbd0c68fd627882d1",
+      "sha256": "ec1d2b4a89058d446d5a13a01e631d8ce53912219b586f647e2793262d4c1497",
+      "bytes": 9566,
+      "mode": "100644"
+    },
+    {
+      "path": "plugin.py",
+      "git_blob": "99f030099dadb0529563b9cd01541739904c8333",
+      "sha256": "0f6e4eaf1c91a5d933710ae93fa55943219e12ba1955e27219f9cd58daa9a7bd",
+      "bytes": 81617,
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/cloudflare_tunnel.py",
+      "git_blob": "44a54672431dfe78566a88f1c4f8621e188eb2b9",
+      "sha256": "85388fe5d85272dc1a3290155871b603a4177d68ef000b85f224d94f85374ce1",
+      "bytes": 35353,
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/companion.py",
+      "git_blob": "28471dbcb77da0f7a29a6b0d3ea0566492791865",
+      "sha256": "c2e2b35785fd2b613770233d4660219fae8fbdac0d48c4643ec983930be2c702",
+      "bytes": 56314,
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/platform_support.py",
+      "git_blob": "d6ba3fa4f2e09574ffa041d27c4e77f0f4d7b7a8",
+      "sha256": "e654d879b0d33153598b77e82902f1cd0ba9158d2d9262573642a33a5d5ff878",
+      "bytes": 13078,
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/public_gateway.py",
+      "git_blob": "11c0224c9cd9ebb907af939b8b2004d82b861ff6",
+      "sha256": "33378c0c99b5a1f29897f3821b3b2db3cf0bca105ce12b5b5b31b86a989e1f21",
+      "bytes": 13885,
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/runtime_status.py",
+      "git_blob": "d26d5b14c500e77c7c0f43830f87094d76b58333",
+      "sha256": "a367a71dec9f432a0f12475e15f310c009c22dc1bc8f68931fb4019c02115c43",
+      "bytes": 5912,
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/sidecar.py",
+      "git_blob": "447986fccec1261d6777ce6eeaeca8da265305cc",
+      "sha256": "d3e5545fec76f34c10de56d429e0bf8d1b1d17be4cdb44057f5b4517d0b290d4",
+      "bytes": 41169,
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/telegram_menu.py",
+      "git_blob": "604549c318828ec330c561d7b89d5ea4dd5622c4",
+      "sha256": "070b9ad65e0c6dda75d8346d09244c0de9da09dba66c92bbb4605847779ebdbc",
+      "bytes": 17568,
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/telegram_settings.py",
+      "git_blob": "de95025d35fdb53adabe8fcd3a1d460a66cc059b",
+      "sha256": "ea77f609068193a3f7d426bf2ea47d0938ef1264bb0feea977b05cb04196183d",
+      "bytes": 10424,
+      "mode": "100644"
+    },
+    {
+      "path": "scripts/tunnel_watchdog.py",
+      "git_blob": "f74d4722722887cf4ee6849ef93ba5254350fa95",
+      "sha256": "3cdcdf4438fcb433d6c7bf6f1fcd2bfbf0cbec825a30ed9e2fdf32f2952afa49",
+      "bytes": 1882,
+      "mode": "100644"
+    }
+  ],
+  "reference_patch": {
+    "path": "host-media-provenance.patch",
+    "sha256": "22ac2d6c524b7b0a677b33f79a11a62dfaef9a94992887211d3c05090ec139a5",
+    "base_commit": "06fc0c067cbc58315452d50c0ac8e6b5a4d1ec58",
+    "head_commit": "ea15396d37bf32a372e946daff88918f12ccee6b",
+    "paths": [
+      "supervisor/message_bus.py",
+      "tests/test_message_bus.py"
+    ]
+  },
+  "excluded": [
+    "installation marker .seed-origin",
+    "runtime settings and credentials",
+    "owner identities and conversation history",
+    "delivery queues and receipts",
+    "unrelated host-action UI changes"
+  ],
+  "reference_tests": {
+    "path": "host-tests.patch",
+    "sha256": "ae53a4d50a7a6f5d7bad04384a7a4d3d4e5dcf1864bb8361639f7315d44de192",
+    "base_commit": "06fc0c067cbc58315452d50c0ac8e6b5a4d1ec58",
+    "head_commit": "ea15396d37bf32a372e946daff88918f12ccee6b",
+    "scope": "Original Telegram test changes, excluding test_message_bus.py which is in host-media-provenance.patch. Requires the original host test harness; not a standalone Hub test suite."
+  }
+}
