@@ -2,6 +2,7 @@
 // CORE and PYTHON name an Ouroboros checkout and its dependency-only interpreter.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,6 +64,79 @@ async function call(name, args = {}) {
   }
   return JSON.parse(payload);
 }
+// A screenshot as the model receives it: one bridge call through Core's loop
+// executor and result consumer. The assistant turn is fixed; no model is called.
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const BASE64_RUN = /[A-Za-z0-9+/=]{1024,}/;
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+// Evidence stays small: long base64 runs become their length and digest.
+const redacted = (value) => JSON.parse(JSON.stringify(value, (key, item) => typeof item === 'string'
+  ? item.replace(new RegExp(BASE64_RUN.source, 'g'), (run) => `<base64 ${run.length} chars sha256:${sha256(run)}>`) : item));
+async function modelContextImage(page, imageDir, harnessCapture) {
+  const round = await request({ cmd: 'loop', name: 'browser_action', args: { operation: 'screenshot', args: {} } });
+  fs.writeFileSync(path.join(imageDir, 'model-context-round.redacted.json'), JSON.stringify(redacted(round), null, 1));
+  const summary = JSON.stringify(redacted({ errors: round.errors, status: round.status, code: round.code, meta: round.meta }));
+  assert.equal(round.errors, 0, summary);
+  assert.equal(round.status, 'ok', summary);
+  // Final loop messages: text the model reads carries no image bytes; the image is typed.
+  const visible = [], images = [];
+  round.messages.forEach((message, index) => {
+    if (typeof message.content === 'string') visible.push(message.content);
+    else for (const part of message.content || []) {
+      if (part.type === 'image_url') images.push({ index, url: part.image_url.url });
+      else visible.push(JSON.stringify(part));
+    }
+  });
+  const toolIndex = round.messages.findIndex((message) => message.role === 'tool' && message.tool_call_id === 'call-model-image');
+  assert.ok(toolIndex >= 0, 'tool result row');
+  assert.match(round.messages[toolIndex].content, /image\/png/);
+  for (const text of visible) assert.doesNotMatch(text, BASE64_RUN, 'inline binary in model-visible text');
+  assert.equal(images.length, 1, 'exactly one typed image block');
+  const [image] = images;
+  assert.equal(round.messages[image.index].role, 'user');
+  assert.ok(image.index > toolIndex, 'the image follows the tool result row');
+  // Emitted bytes: the Node/MV3 response as Core retained it from the SDK.
+  assert.ok(round.source_witness, 'screenshot response source must be retained: ' + summary);
+  assert.equal(round.source_witness.sha256, round.meta.mcp_response_source.sha256);
+  const content = round.source_witness.normalized_response.content;
+  const shots = content.filter((part) => part.type === 'image');
+  assert.equal(shots.length, 1);
+  assert.equal(shots[0].mimeType, 'image/png');
+  const receipt = JSON.parse(content.find((part) => part.type === 'text').text);
+  assert.equal(receipt.ok, true, JSON.stringify(receipt));
+  assert.equal(receipt.result.image, 0, 'the receipt names the image item instead of carrying it');
+  const encoded = shots[0].data;
+  const emitted = Buffer.from(encoded, 'base64');
+  assert.equal(emitted.toString('base64'), encoded);
+  assert.ok(emitted.subarray(0, 8).equals(PNG_SIGNATURE), 'emitted bytes are a PNG');
+  assert.equal(emitted.toString('latin1', 12, 16), 'IHDR');
+  const width = emitted.readUInt32BE(16), height = emitted.readUInt32BE(20);
+  const [innerWidth, innerHeight, ratio] = await page.evaluate('[innerWidth, innerHeight, devicePixelRatio]');
+  assert.deepEqual([width, height], [Math.round(innerWidth * ratio), Math.round(innerHeight * ratio)], 'a full viewport frame of the leased tab');
+  for (const text of visible) assert.ok(!text.includes(encoded.slice(64, 320)), 'screenshot base64 leaked into model-visible text');
+  assert.equal(image.url, 'data:image/png;base64,' + encoded);
+  const attached = Buffer.from(image.url.slice(image.url.indexOf(',') + 1), 'base64');
+  assert.ok(attached.equals(emitted), 'model-context bytes are the emitted PNG bytes');
+  // Core's send copy keeps the same typed block and no base64 elsewhere.
+  const wireImages = round.wire_witness.flatMap((message) => Array.isArray(message.content)
+    ? message.content.filter((part) => part.type === 'image_url') : []);
+  assert.equal(wireImages.length, 1);
+  assert.equal(wireImages[0].image_url.url, image.url);
+  assert.doesNotMatch(JSON.stringify(round.wire_witness).split(image.url).join('<image_url>'), BASE64_RUN);
+  fs.writeFileSync(path.join(imageDir, 'model-context-image.png'), attached);
+  return {
+    label: 'Core loop transcript and Core send-copy shape only; no provider request or model inference was made',
+    call: 'mcp_chrome__browser_action {operation: "screenshot"} via handle_tool_calls -> process_tool_results',
+    png: { file: 'model-context-image.png', sha256: sha256(attached), bytes: attached.length, width, height, viewport: [innerWidth, innerHeight, ratio] },
+    response_source: round.meta.mcp_response_source,
+    image_owner: round.meta.mcp_browser_image_owner ?? null,
+    roles: round.messages.map((message) => message.role),
+    tool_text: round.messages[toolIndex].content,
+    trace_image_attachment: round.trace.at(-1)?.image_attachment ?? null,
+    harness_capture_bytes_equal: harnessCapture.equals(emitted),
+  };
+}
+
 async function startHostBeforePairing() {
   const env = { ...process.env, OUROBOROS_RUNTIME_MODE: 'cyber_pro', OUROBOROS_SAFETY_MODE: 'off', TMPDIR: '/tmp' };
   host = spawn(python, ['-I', '-S', 'scripts/safe_test.py', '--temp-parent', '/tmp', '--', python, path.join(here, 'core_host.py'), root, install.skillDir, install.stateDir, fault ? 'post-state-fault' : trustState ? 'skill-bound' : 'plain'], { cwd: core, env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -94,6 +168,7 @@ try {
   const pairing = spawn(process.execPath, [setupScript, 'pair', '--wait', '30'], { env: setupEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   const paired = new Promise((resolve, reject) => { let output = ''; pairing.stdout.on('data', (c) => { output += c; }); pairing.on('exit', (code) => code === 0 ? resolve(JSON.parse(output)) : reject(new Error('pair setup failed: ' + output))); });
   await sleep(300);
+  await popup.click('details > summary');  // the owner opens Manual pairing, as in headless.test.mjs
   await popup.evaluate(`document.getElementById('port').value = '${stored.port}'`);
   await popup.typeInto('#credential', stored.credential);
   await popup.click('#save');
@@ -195,7 +270,9 @@ try {
   const imageDir = process.env.OUROBOROS_CHROME_TEST_EVIDENCE || path.join(root, 'evidence');
   fs.mkdirSync(imageDir, { recursive: true });
   const rendered = await cdp.send('Page.captureScreenshot', { format: 'png' }, target.sessionId);
-  fs.writeFileSync(path.join(imageDir, 'registered-target.png'), Buffer.from(rendered.data, 'base64'));
+  const harnessShot = Buffer.from(rendered.data, 'base64');
+  fs.writeFileSync(path.join(imageDir, 'registered-target.png'), harnessShot);
+  evidence.observations.model_context_image = await modelContextImage(target, imageDir, harnessShot);
   const end = await call('browser_disconnect');
   evidence.observations.disconnect = end;
   const closedState = await call('browser_state');

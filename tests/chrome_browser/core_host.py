@@ -1,7 +1,9 @@
 """Real global ToolRegistry and MCP manager over one isolated fixture installation.
 
 Enter through safe_test before imports. No policy, registry handler or transport
-is replaced; optional binding exercises canonical ready-skill resolution.
+is replaced; optional binding exercises canonical ready-skill resolution. The
+``loop`` command runs one tool round through the loop's own executor and result
+consumer; the assistant turn is fixed here and no model is called.
 """
 from __future__ import annotations
 
@@ -16,6 +18,57 @@ sys.path.insert(0, os.getcwd())
 from ouroboros import config, mcp_client, mcp_task_sessions
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.utils import atomic_write_json
+
+
+def source_witness(meta: dict, data: pathlib.Path, task_id: str) -> dict | None:
+    """The response bytes Core retained from the SDK, before any projection."""
+    source = meta.get('mcp_response_source')
+    if not source:
+        return None
+    import hashlib
+    p = pathlib.Path(source['path'])
+    if not p.is_absolute():
+        p = data / 'task_results' / 'artifacts' / task_id / p
+    saved = p.read_bytes()
+    return {'sha256': hashlib.sha256(saved).hexdigest(), 'size': len(saved),
+            'normalized_response': json.loads(saved)}
+
+
+def loop_round(registry: ToolRegistry, ctx: ToolContext, data: pathlib.Path, name: str, args: dict) -> dict:
+    """One assistant tool call through handle_tool_calls -> process_tool_results."""
+    from ouroboros import loop_tool_execution as loop
+    from ouroboros.llm_messages import _MessageShapingMixin
+    call = {'id': 'call-model-image', 'type': 'function',
+            'function': {'name': 'mcp_chrome__' + name, 'arguments': json.dumps(args)}}
+    messages = [{'role': 'user', 'content': 'Show me the connected tab.'},
+                {'role': 'assistant', 'content': '', 'tool_calls': [call]}]
+    trace, consumed = {'tool_calls': []}, []
+    original_process = loop.process_tool_results
+    def process(results, *a, **k):
+        consumed.extend(results)
+        return original_process(results, *a, **k)
+    # Observation spy delegates to the production consumer; it keeps the typed row.
+    loop.process_tool_results = process
+    live, ctx.messages = ctx.messages, messages
+    stateful = loop.StatefulToolExecutor()
+    (data / 'logs').mkdir(parents=True, exist_ok=True)
+    try:
+        errors = loop.handle_tool_calls([call], registry, data / 'logs', ctx.task_id, stateful,
+                                        messages, trace, lambda *_a, **_k: None)
+    finally:
+        stateful.shutdown(wait=True)
+        loop.process_tool_results = original_process
+        ctx.messages = live
+    row = consumed[-1]
+    typed = row['tool_result']
+    # Core's own send-copy transform; a message-shape witness, not a provider request.
+    wire = _MessageShapingMixin._copy_messages_with_cache_policy(
+        messages, allow_message_cache_control=False, flatten_tool_content_blocks=True)
+    return {'errors': errors, 'is_error': row['is_error'], 'status': typed.status, 'code': typed.code,
+            'meta': dict(typed.meta), 'source_witness': source_witness(typed.meta, data, ctx.task_id),
+            'messages': json.loads(json.dumps(messages, default=str)),
+            'wire_witness': json.loads(json.dumps(wire, default=str)),
+            'trace': json.loads(json.dumps(trace['tool_calls'], default=str))}
 
 
 def main(root: str, skill: str, state: str, mode: str = 'plain') -> None:
@@ -66,6 +119,8 @@ def main(root: str, skill: str, state: str, mode: str = 'plain') -> None:
                                        if row['name'].startswith('mcp_chrome__')]
                 elif request['cmd'] == 'stop':
                     answer['value'] = mcp_task_sessions.stop_task(ctx)
+                elif request['cmd'] == 'loop':
+                    answer['value'] = loop_round(registry, ctx, data, request['name'], request.get('args', {}))
                 else:
                     result = registry.execute_result('mcp_chrome__' + request['name'],
                                                      request.get('args', {}))
@@ -73,16 +128,9 @@ def main(root: str, skill: str, state: str, mode: str = 'plain') -> None:
                     answer['value'] = {'status': result.status, 'text': result.text,
                                        'code': result.code, 'meta': dict(result.meta),
                                        'returned_calls': returned.get('mcp_chrome__' + request['name'], 0)}
-                    source = result.meta.get('mcp_response_source')
-                    if source:
-                        import hashlib
-                        p = pathlib.Path(source['path'])
-                        if not p.is_absolute():
-                            p = data / 'task_results' / 'artifacts' / ctx.task_id / p
-                        saved = p.read_bytes()
-                        answer['value']['source_witness'] = {
-                            'sha256': hashlib.sha256(saved).hexdigest(), 'size': len(saved),
-                            'normalized_response': json.loads(saved)}
+                    witness = source_witness(result.meta, data, ctx.task_id)
+                    if witness:
+                        answer['value']['source_witness'] = witness
             except Exception as exc:
                 answer['error'] = type(exc).__name__ + ': ' + str(exc)
             print(json.dumps(answer), flush=True)
