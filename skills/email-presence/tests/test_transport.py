@@ -124,7 +124,8 @@ def test_new_only_intake_does_not_disable_historical_mail_tools(rig):
     box.add(2, "<new>", arrived=clock[0])
     assert runtime.poll() == 1
     assert runtime.poll() == 0
-    assert all("BODY.PEEK[]" in args[1] for op, args in box.commands if op == "FETCH")
+    assert all("BODY.PEEK[" in args[1] for op, args in box.commands if op == "FETCH")
+    assert any("BODY.PEEK[HEADER]" in args[1] for op, args in box.commands if op == "FETCH")
     asyncio.run(runtime.process_inbox())
     assert [x.message_id for x in host.submissions] == ["<new>"]
     assert runtime.process_outbox()

@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse
 
 import ops
 import tools
+import accounts
 from model import (
     AVAIL_BUSY, AVAIL_SOFT, SCOPES, VISIBILITY_HIDDEN, VISIBILITY_SHOWN, WEEKDAY_LABELS, day_bounds, event_public, iso_local, iso_utc,
     parse_input, parse_stored, tz_name, week_bounds,
@@ -80,7 +81,9 @@ def agenda_payload(ctx: tools.Context, view: str, anchor: str, calendar_ids: Any
                        "default": bool(c["is_default"])} for c in cals],
         "events": events, "hidden_busy": hatches, "usual": usual if show_hidden else [],
         "show_hidden": show_hidden, "working_hours": ctx.store.get_setting("working_hours") or "09:00-19:00",
-        "sync": {"pending": pending.get("pending", 0), "conflict": pending.get("conflict", 0), "failed": pending.get("failed", 0), "companion": ctx.companion_health().get("state")},
+        "sync": {"pending": pending.get("pending", 0), "conflict": pending.get("conflict", 0), "failed": pending.get("failed", 0),
+                 'uncertain': pending.get('uncertain', 0), "companion": ctx.companion_health().get("state")},
+        "link_issues": ctx.store.link_issues(),
         "accounts": [{"id": a["id"], "alias": a["alias"], "provider": a["provider"], "status": a["status"], "last_sync": a.get("last_sync")} for a in ctx.store.list_accounts()],
     }
 
@@ -161,7 +164,7 @@ def register_routes(api, make_ctx) -> None:
                 return _err("событие не найдено", 404)
             exception = next((e for e in ctx.store.exceptions_for(row["id"]) if e.get("recurrence_id") == occ), None) if occ else None
             effective = exception or row
-            old_s = parse_stored(effective["start_utc"] if exception else (occ or row["start_utc"]))
+            old_s = ops.routine_time(row, effective["start_utc"] if exception else (occ or row["start_utc"]), ctx.tz)
             dur = parse_stored(effective["end_utc"]) - parse_stored(effective["start_utc"])
             s, is_date = parse_input(body.get("start"), ctx.tz, old_s)
             e, _ = parse_input(body.get("end"), ctx.tz, None)
@@ -189,7 +192,7 @@ def register_routes(api, make_ctx) -> None:
             changes["attendees"] = [{"email": str(a).strip()} if not isinstance(a, dict) else a for a in body.get("attendees") or [] if str(a).strip()]
         result = {"status": "ok", "event": None, "assignments": []}
         if changes:
-            result = ops.update_event(ctx.store, ctx.providers, event_id, changes, scope=scope, send_updates=bool(body.get("send_updates")))
+            result = ops.update_event(ctx.store, ctx.providers, event_id, changes, scope=scope, send_updates=bool(body.get("send_updates")), owner_tz=ctx.tz)
             if result.get("status") == "not_found":
                 return _err("событие не найдено", 404)
         if body.get("calendars"):
@@ -201,6 +204,9 @@ def register_routes(api, make_ctx) -> None:
             if row is None:
                 return _err("событие не найдено", 404)
             result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, row, cal_ids)
+            if result['reassign'].get('failed') and not any(a.get('status') in ('failed', 'conflict') and a.get('message') for a in result['reassign']['added']):
+                result['assignments'].append({'calendar_id': row['calendar_id'], 'calendar_name': row.get('calendar_name') or row['calendar_id'], 'event_id': row['id'],
+                                              'action': 'reassign', 'status': 'failed', 'message': result['reassign']['failed']})
             result["assignments"] = list(result["assignments"]) + list(result["reassign"]["added"]) \
                 + [{**a, "action": "removed"} for r in result["reassign"]["removed"] for a in r["assignments"]]
         warning = tools._plan_reminders(ctx)
@@ -245,6 +251,15 @@ def register_routes(api, make_ctx) -> None:
             return JSONResponse(data, status_code=404)
         return JSONResponse(data)
 
+    async def event_link(request):
+        body = await _body(request)
+        try:
+            result = json.loads(tools.cal_update(make_ctx(), id=str(body.get('id') or ''),
+                                                link_action=str(body.get('action') or ''), scope=str(body.get('scope') or 'all'), confirm=True))
+        except ValueError as exc:
+            return _err(str(exc))
+        return JSONResponse(result, status_code=400 if result.get('status') in ('error', 'not_found') else 200)
+
     async def reminders_get(request):
         ctx = make_ctx()
         return JSONResponse(json.loads(tools.cal_reminders(ctx, action="list")))
@@ -258,23 +273,41 @@ def register_routes(api, make_ctx) -> None:
     async def oauth_callback(request):
         """Google redirects the owner's browser here (loopback passes without a session)."""
         from starlette.responses import HTMLResponse
-        import providers_google as gp
         ctx = make_ctx()
         q = request.query_params
         code, state, error = str(q.get("code") or ""), str(q.get("state") or ""), str(q.get("error") or "")
-        if error or not code or not state:
-            return HTMLResponse(f"<h3>Google не завершил вход</h3><p>{html.escape(error or 'нет кода авторизации')}. Закрой вкладку и попробуй снова из чата.</p>", status_code=400)
         try:
-            done = gp.finish_auth(ctx.store, ctx.secrets, ctx.state_dir, code, state)
-            ctx.providers = tools.Providers(ctx.secrets, ctx.state_dir)
-            report = tools.reload_google(ctx)
-        except ops.ProviderError as exc:
-            return HTMLResponse(f"<h3>Ошибка подключения Google</h3><p>{html.escape(exc.message)}</p>", status_code=502)
+            done = accounts.complete_google(ctx, code=code, state=state, error=error)
         except Exception as exc:  # a malformed token response must still end as a page, not a bare 500
             return HTMLResponse(f"<h3>Ошибка подключения Google</h3><p>{html.escape(f'{type(exc).__name__}: {exc}')}</p>", status_code=502)
-        cals = [c["name"] for a in report.get("accounts", []) if a.get("account") == done["account_id"] for c in a.get("calendars", [])]
-        return HTMLResponse("<h3>Google подключён: " + html.escape(done["email"]) + "</h3><p>Календари: " + html.escape(", ".join(cals))
-                            + "</p><p>Вкладку можно закрыть; вернись в чат Уробороса.</p>")
+        message = done.get('message') if done.get('ok') else done.get('error')
+        return HTMLResponse('<h3>' + html.escape(str(message or 'OAuth завершён')) + '</h3><p>'
+                            + html.escape(str(done.get('email') or '')) + '</p>', status_code=200 if done.get('ok') else 400)
+
+    async def oauth_begin(request):
+        ctx, body = make_ctx(), await _body(request)
+        origin = str((getattr(request, 'headers', {}) or {}).get('origin') or '')
+        base = body.get('public_base_url') or ctx.store.get_setting('public_base_url') or (origin if origin != 'null' else '')
+        result = accounts.connect_google(ctx, public_base_url=base)
+        return JSONResponse(result, status_code=200 if result.get('status') == 'ok' else 400)
+
+    async def oauth_complete(request):
+        body = await _body(request)
+        result = accounts.complete_google(make_ctx(), **{key: str(body.get(key) or '') for key in ('code', 'state', 'error', 'error_description')})
+        return JSONResponse(result, status_code=200 if result.get('ok') else 400)
+
+    async def connect_account(request):
+        body = await _body(request)
+        try:
+            result = accounts.connect_caldav(make_ctx(), **{key: str(body.get(key) or '') for key in ('login', 'password', 'server_url', 'alias')},
+                                             preset=str(body.get('preset') or 'caldav'))
+        except (ops.ProviderError, ValueError) as exc:
+            return _err(str(exc))
+        return JSONResponse(result, status_code=200 if result.get('status') == 'connected' else 400)
+
+    async def disconnect_account(request):
+        body = await _body(request)
+        return JSONResponse(json.loads(tools.cal_settings(make_ctx(), action='disconnect', calendar_id=str(body.get('account_id') or ''), confirm=True)))
 
     async def sync_now(request):
         ctx = make_ctx()
@@ -285,9 +318,14 @@ def register_routes(api, make_ctx) -> None:
     api.register_route("status", status, methods=("GET",))
     api.register_route("event", event_create, methods=("POST",))
     api.register_route("event/get", event_get, methods=("GET",))
+    api.register_route('event/link', event_link, methods=('POST',))
     api.register_route("event/update", event_update, methods=("POST",))
     api.register_route("event/delete", event_delete, methods=("POST",))
     api.register_route("reminders", reminders_get, methods=("GET",))
     api.register_route("reminders/save", reminders_save, methods=("POST",))
     api.register_route("sync", sync_now, methods=("POST",))
     api.register_route("oauth/callback", oauth_callback, methods=("GET",))
+    api.register_route('oauth/begin', oauth_begin, methods=('POST',))
+    api.register_route('oauth/complete', oauth_complete, methods=('POST',))
+    api.register_route('accounts/connect', connect_account, methods=('POST',))
+    api.register_route('accounts/disconnect', disconnect_account, methods=('POST',))

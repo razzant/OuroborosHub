@@ -198,13 +198,16 @@ class AbsenceRaceTests(SyncCase):
         self.assertTrue(self.ctx.store.get_event(sibling["id"])["deleted_at"])
         self.assertEqual([c[0] for c in self.recording.calls if c[0] == "delete"], [])  # already absent source is never deleted again
 
-    def test_remote_deletion_cannot_cascade_over_an_edit_of_the_linked_copy(self):
+    def test_confirmed_source_deletion_keeps_an_independently_edited_projection(self):
         source, sibling = self.linked()
         adapter = FeedAdapter()
         seam = Seam(adapter, 'exists', lambda: self.owner_edit(sibling['id']))
         result = self.sync(adapter)
         self.assertEqual(seam.fired, ['exists'])
-        self.assertEqual(result[1], 0)
+        # The source observation is true; a diverged projection is now independent
+        # of this cascade under the owner-selected directional-link contract.
+        self.assertEqual(result[1], 1)
+        self.assertTrue(self.ctx.store.get_event(source['id'])['deleted_at'])
         self.assertIsNone(self.ctx.store.get_event(sibling['id'])['deleted_at'])
         self.assertEqual(self.ctx.store.get_event(sibling['id'])['title'], 'Owner edit')
 

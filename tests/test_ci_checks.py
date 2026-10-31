@@ -1,6 +1,7 @@
 """Changed-path suite selection and offline workflow execution contracts."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,18 @@ from scripts import ci_checks as ci
 from scripts.build_index import run_git
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@contextmanager
+def consumer_core():
+    with tempfile.TemporaryDirectory(prefix='hub-consumer-core-') as tmp:
+        core = Path(tmp)
+        for name in ('ouroboros/gateway/host_service.py', 'web/provider-return.html'):
+            path = core / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture', encoding='utf-8')
+        with patch.dict(os.environ, {'OUROBOROS_SOURCE_DIR': str(core), 'OUROBOROS_THEME_CORE_ROOT': str(core)}):
+            yield core
 
 
 class SelectionTests(unittest.TestCase):
@@ -101,7 +114,7 @@ class SelectionTests(unittest.TestCase):
 
     def test_selected_suites_install_dependencies_and_run_in_separate_interpreters(self):
         for name, suite in ci.SUITES.items():
-            with self.subTest(suite=name), patch.object(ci.subprocess, 'run') as run:
+            with self.subTest(suite=name), consumer_core() as core, patch.object(ci.subprocess, 'run') as run:
                 ci.run_suite(name)
                 install, test = run.call_args_list
                 self.assertEqual(install.args[0][1:6], ['-B', '-m', 'pip', 'install', 'PyYAML'])
@@ -114,6 +127,21 @@ class SelectionTests(unittest.TestCase):
                 self.assertTrue(install.kwargs['check'])
                 self.assertTrue(test.kwargs['check'])
                 self.assertEqual(test.kwargs['env']['PYTHONDONTWRITEBYTECODE'], '1')
+                if suite.get('core_env'):
+                    self.assertEqual(test.kwargs['env'][suite['core_env']], str(core.resolve()))
+                for key, value in suite.get('env', {}).items():
+                    self.assertEqual(test.kwargs['env'][key], value)
+
+    def test_selected_consumers_refuse_absent_or_old_core_before_running_an_all_skipped_suite(self):
+        for name, key in [('email-presence', 'OUROBOROS_SOURCE_DIR'), ('calendar-skill', 'OUROBOROS_THEME_CORE_ROOT')]:
+            with self.subTest(suite=name), consumer_core() as core, patch.object(ci.subprocess, 'run') as run:
+                for value in ('', str(core / 'missing')):
+                    with patch.dict(os.environ, {key: value}), self.assertRaisesRegex(RuntimeError, key):
+                        ci.run_suite(name)
+                (core / 'web/provider-return.html').unlink()
+                with self.assertRaisesRegex(RuntimeError, 'must run, not skip'):
+                    ci.run_suite(name)
+                run.assert_not_called()
 
     def test_payload_imports_work_in_the_actual_suite_subprocess(self):
         real_run = subprocess.run
@@ -124,7 +152,11 @@ class SelectionTests(unittest.TestCase):
             (payload / 'tests').mkdir()
             (payload / 'lib/__init__.py').write_text('VALUE = 791\n', encoding='utf-8')
             (payload / 'tests/test_import.py').write_text(
-                'from lib import VALUE\ndef test_value():\n    assert VALUE == 791\n', encoding='utf-8')
+                'import os\nfrom pathlib import Path\nfrom lib import VALUE\ndef test_value():\n'
+                '    assert VALUE == 791\n'
+                '    assert os.environ["OUROBOROS_RUN_MAIL_BROWSER"] == "1"\n'
+                '    assert (Path(os.environ["OUROBOROS_SOURCE_DIR"]) / "web/provider-return.html").is_file()\n',
+                encoding='utf-8')
             calls = []
 
             def run(command, **kwargs):
@@ -135,7 +167,7 @@ class SelectionTests(unittest.TestCase):
 
             suite = dict(ci.SUITES['email-presence'])
             suite['tests'] = ['skills/email-presence/tests/test_import.py']
-            with patch.object(ci, '__file__', str(root / 'scripts/ci_checks.py')), \
+            with consumer_core(), patch.object(ci, '__file__', str(root / 'scripts/ci_checks.py')), \
                     patch.dict(ci.SUITES, {'email-presence': suite}), \
                     patch.dict(os.environ, {'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1'}), \
                     patch.object(ci.subprocess, 'run', side_effect=run):

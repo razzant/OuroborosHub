@@ -25,7 +25,7 @@ def main():
     from tests._extension_loader_shared import _mark_isolated_deps_installed
 
     drive.mkdir(exist_ok=True)
-    (drive / "settings.json").write_text("{}", encoding="utf-8")
+    (drive / "settings.json").write_text(json.dumps({"EMAIL_USER": "mail@example.invalid"}), encoding="utf-8")
     state.init(drive)
     queue.init(drive)
     skills = temp_root / "skills"
@@ -53,7 +53,7 @@ class OfflineMailClient:
     def mark_read(self, **kwargs):
         return {"ok": True, "uid": kwargs["uid"], "uidvalidity": kwargs["uidvalidity"], "folder": kwargs["folder"]}
     def mailbox(self, **kwargs):
-        return [{"name": "INBOX", "selectable": True}, {"name": "Архив", "optional": None}]
+        return {"folders": [{"name": "INBOX", "selectable": True}, {"name": "Архив", "optional": None}]}
     def draft(self, **kwargs):
         return {"ok": True, "saved": kwargs["body"], "sent": False, "uid": None}
     def test_connection(self):
@@ -61,6 +61,7 @@ class OfflineMailClient:
 
 def register(api):
     original_plugin.MailClient = OfflineMailClient
+    original_plugin.MailService.capture_binding = lambda *args, **kwargs: {"supported": False}
     original_plugin.register(api)
     async def asynchronous(ctx, *, fail=False):
         if fail:
@@ -81,7 +82,7 @@ def register(api):
                       requested_keys=keys, granted_permissions=permissions, requested_permissions=permissions)
     _mark_isolated_deps_installed(drive, loaded)
     loaded = find_skill(drive, loaded.name, repo_path=str(skills))
-    error = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive)
+    error = extension_loader.load_extension(loaded, lambda: {"EMAIL_USER": "mail@example.invalid"}, drive_root=drive)
     assert error is None, error
     try:
         ctx = ToolContext(repo_dir=repo, drive_root=drive, task_id="mail-fixture")
@@ -95,6 +96,16 @@ def register(api):
             return json.loads(raw)
 
         assert invoke("email_receipt", request_id="missing") is None
+        accounts = invoke("email_accounts")["accounts"]
+        assert [account["id"] for account in accounts] == ["mail@example.invalid"]
+        assert invoke("email_folders", account_id="mail@example.invalid") == {
+            "folders": [{"name": "INBOX", "selectable": True}, {"name": "Архив", "optional": None}],
+            "account_id": "mail@example.invalid"}
+        assert invoke("email_settings_read", account_id="mail@example.invalid")["code"] == "website_required"
+        assert invoke("email_settings", account_id="mail@example.invalid", resource="vacation")["code"] == "website_required"
+        sys.path.insert(0, str(skill))
+        from lib.store import EmailStore
+        EmailStore(skill_state_dir(drive, loaded.name))
         db_path = skill_state_dir(drive, loaded.name) / "email_presence.sqlite3"
         cursor = json.dumps({"uidvalidity": 7, "uid": 99, "activated_at": 1})
         with sqlite3.connect(db_path) as connection:
@@ -102,17 +113,17 @@ def register(api):
                                ('cursor:["mail@example.invalid", "INBOX"]', cursor, 1))
         search = invoke("email_search", criteria=["ALL"])
         assert search == {"folder": "INBOX", "uidvalidity": 7, "uids": [4],
-                          "nested": {"seen": False, "optional": None, "label": "Почта 📬"}}
+                          "nested": {"seen": False, "optional": None, "label": "Почта 📬"}, "account_id": "mail@example.invalid"}
         message = invoke("email_read", uid=4, uidvalidity=7)
         assert message["body"] == "Unicode 📬 and 'quoted' text"
         assert "_raw_source" not in message
         assert Path(message["source_artifact"]["path"]).read_bytes() == b"Subject: fixture\r\n\r\nbody"
-        assert invoke("email_mark_read", uid=4, uidvalidity=7) == {"ok": True, "uid": 4, "uidvalidity": 7, "folder": "INBOX"}
-        assert invoke("email_mailbox", action="list") == [
-            {"name": "INBOX", "selectable": True}, {"name": "Архив", "optional": None}]
+        assert invoke("email_mark_read", uid=4, uidvalidity=7) == {"ok": True, "uid": 4, "uidvalidity": 7, "folder": "INBOX", "account_id": "mail@example.invalid"}
+        assert invoke("email_mailbox", action="list") == {"folders": [
+            {"name": "INBOX", "selectable": True}, {"name": "Архив", "optional": None}], "account_id": "mail@example.invalid"}
         assert invoke("email_draft", to="reader@example.invalid", subject="Draft", body="Черновик") == {
-            "ok": True, "saved": "Черновик", "sent": False, "uid": None}
-        assert invoke("email_test_connection") == {"ok": True, "imap": True, "smtp": True, "error": None}
+            "ok": True, "saved": "Черновик", "sent": False, "uid": None, "account_id": "mail@example.invalid", "sender": "mail@example.invalid"}
+        assert invoke("email_test_connection") == {"ok": True, "imap": True, "smtp": True, "error": None, "account_id": "mail@example.invalid"}
         assert invoke("email_receipt", request_id="missing") is None
         sent = invoke("email_send", to="reader@example.invalid", body="Hello 📬", request_id="stable")
         again = invoke("email_send", to="reader@example.invalid", body="Hello 📬", request_id="stable")
@@ -140,7 +151,7 @@ def register(api):
                 assert expected in str(exc), str(exc)
             else:
                 raise AssertionError("Handler error became a successful result")
-        print("verified eight email tools across the child boundary")
+        print("verified twelve email tools across the child boundary")
     finally:
         extension_loader.unload_extension(loaded.name)
 

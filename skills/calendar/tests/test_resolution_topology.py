@@ -72,7 +72,7 @@ def test_new_split_resource_keeps_pending_later_cancellation():
     assert iso_utc(_day(6)) not in provider_slots(ctx, cid, server, master['href'])
 
 
-def test_protected_google_deletion_retains_rescan_until_copy_settles():
+def test_google_source_deletion_keeps_independent_pending_copy_edit():
     from test_cancellation_replay import linked_google_primary
     from scripts.worker import reconcile_calendar
     ctx, cid, left, server, google, adapter, caldav, eid, copy = linked_google_primary()
@@ -82,11 +82,14 @@ def test_protected_google_deletion_retains_rescan_until_copy_settles():
     ext = ctx.store.get_event(eid)['external_id']
     google.events[ext].update(status='cancelled', etag=google._etag())
     observation = reconcile_calendar(ctx.store, ctx.providers, adapter, ctx.store.get_calendar(cid), ctx.tz, 'old-token')
-    assert observation[3] == '', observation
+    assert observation[3] == 'sync-2', observation
     assert ctx.store.get_event(copy['id'])['title'] == 'Accepted copy edit'
-    assert not ctx.store.get_event(eid)['deleted_at']
+    assert ctx.store.get_event(copy['id'])['link_state'] == 'diverged'
+    assert ctx.store.get_event(eid)['deleted_at']
     server.down = False
     run_open_intents(ctx, 4)
     reconcile_calendar(ctx.store, ctx.providers, adapter, ctx.store.get_calendar(cid), ctx.tz, '')
     assert ctx.store.get_event(eid)['deleted_at']
+    assert ctx.store.get_event(copy['id'])['title'] == 'Accepted copy edit'
+    assert not ctx.store.get_event(copy['id'])['deleted_at']
     assert not ctx.store.open_intents()

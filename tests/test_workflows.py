@@ -237,6 +237,35 @@ class WorkflowTests(unittest.TestCase):
                                      env={**os.environ, 'NEEDS': json.dumps(needs)}, capture_output=True)
                 self.assertEqual(run.returncode, 0 if all(r in {'success', 'skipped'} for r in results) else 1)
 
+    def test_mail_calendar_workflow_connects_the_pinned_core_to_real_consumers(self):
+        hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']
+        checkout = next(step for step in hosted['steps'] if step.get('with', {}).get('path') == 'mail-calendar-core')
+        install = next(step for step in hosted['steps'] if step.get('name') == 'Install the mail and calendar consumer runtime')
+        condition = "matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill'"
+        self.assertEqual(checkout['if'], condition)
+        self.assertEqual(install['if'], condition)
+        self.assertEqual(checkout['with']['repository'], 'razzant/ouroboros')
+        self.assertRegex(checkout['with']['ref'], r'^[a-f0-9]{40}$')
+        self.assertEqual(checkout['with']['persist-credentials'], 'false')
+        python = next(step for step in hosted['steps'] if step.get('uses') == 'actions/setup-python@v5')
+        self.assertEqual(python['with']['python-version'],
+                         '${{ contains(fromJSON(\'["memory-atlas", "calendar-skill", "email-presence"]\'), matrix.suite) && \'3.10\' || \'3.11\' }}')
+        with tempfile.TemporaryDirectory(prefix='hub consumer workflow ') as tmp:
+            root = Path(tmp)
+            output = root / 'environment'
+            # Execute the actual shell step; substitute only downloads, not its variable expansion.
+            prelude = 'python() { printf "%s\\n" "$*" >> "$PROBES"; }\n'
+            result = subprocess.run(['/bin/sh', '-c', prelude + install['run']], check=True,
+                                    env={**os.environ, 'GITHUB_WORKSPACE': str(root), 'GITHUB_ENV': str(output),
+                                         'PROBES': str(root / 'probes')}, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0)
+            env = dict(line.split('=', 1) for line in output.read_text(encoding='utf-8').splitlines())
+            self.assertEqual(env, {key: str(root / 'mail-calendar-core')
+                                  for key in ('OUROBOROS_SOURCE_DIR', 'OUROBOROS_THEME_CORE_ROOT')})
+            self.assertEqual((root / 'probes').read_text(encoding='utf-8').splitlines(),
+                             ['-m pip install -r mail-calendar-core/requirements.txt',
+                              '-m playwright install --with-deps chromium webkit'])
+
     def test_owner_write_job_uses_only_main_helpers_and_data_artifacts(self):
         workflow = self.workflow('owner-updates.yml')
         self.assertEqual(workflow['on'], {'workflow_run': {'workflows': ['Validate Catalog'], 'types': ['completed']}})

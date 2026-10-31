@@ -120,7 +120,8 @@ def test_identity_authentication_and_words_are_negotiated_on_wire_and_status(tmp
         assert status["identity"] == sent[0]["identity"] == expected
         assert sent[0]["actor"]["authenticated"] is False
     else:
-        assert "identity" not in sent[0] and "identity" not in status
+        assert "identity" not in sent[0]
+        assert status["identity"] == expected  # Account facts remain visible before wire capability negotiation.
         assert "authenticated" not in sent[0]["actor"]
     assert ("signal.words" in sent[0].get("facts", [])) is (capabilities.get("presence_wake_signals") == 1)
     assert ("facts" in sent[0]) is bool(capabilities.get("places_version"))
@@ -139,6 +140,8 @@ def registered(tmp_path, monkeypatch):
         settings = {"EMAIL_USER": ACCOUNT}
         def __init__(self, _settings):
             pass
+        def close(self):
+            pass
         def __getattr__(self, name):
             def call(**kwargs):
                 calls.append(name)
@@ -146,7 +149,7 @@ def registered(tmp_path, monkeypatch):
             return call
     monkeypatch.setattr(plugin, "MailClient", Client)
     tools = {}
-    api = SimpleNamespace(get_state_dir=lambda: str(tmp_path), get_settings=lambda keys: {},
+    api = SimpleNamespace(get_state_dir=lambda: str(tmp_path), get_settings=lambda keys: {"EMAIL_USER": ACCOUNT},
                           register_tool=lambda name, handler, **kw: tools.update({name: handler}))
     for name in ("register_route", "register_companion_process", "register_settings_section", "register_ui_tab"):
         setattr(api, name, lambda *args, **kwargs: None)
@@ -156,7 +159,7 @@ def registered(tmp_path, monkeypatch):
 
 def test_sending_setting_defaults_roundtrips_and_leaves_other_tools_working(tmp_path, monkeypatch):
     tools, calls = registered(tmp_path, monkeypatch)
-    with TestClient(_settings_app(tmp_path)) as client:
+    with TestClient(_settings_app(tmp_path, {"EMAIL_USER": ACCOUNT})) as client:
         assert client.get("/settings/save").json()["sending"] == "on"
         assert json.loads(tools["email_send"](to=ACCOUNT, body="one", request_id="one"))["ok"]
         assert client.post("/settings/save", json={"sending": "off", "words": ["invoice", "счёт"]}).status_code == 200
@@ -164,7 +167,7 @@ def test_sending_setting_defaults_roundtrips_and_leaves_other_tools_working(tmp_
         assert client.get("/settings/save").json()["words"] == "invoice\nсчёт"
         assert client.get("/status").json()["readiness"]["sending"] == "off"
         refusal = json.loads(tools["email_send"](to=ACCOUNT, body="two", request_id="two"))
-        assert refusal == {"ok": False, "code": "sending_off", "error":
+        assert refusal == {"ok": False, "account_id": ACCOUNT, "code": "sending_off", "error":
                            "Sending is off for this mailbox in its connector settings; reading, drafts and tidying keep working"}
         assert EmailStore(tmp_path).receipt("two") is None
         for name, kwargs in (("email_search", {}), ("email_read", {"uid": 1, "uidvalidity": 7}),
@@ -230,7 +233,7 @@ def test_outgoing_body_is_authored_without_connector_marks(body):
 
 def test_manifest_offers_facts_without_default_wakes():
     manifest = yaml.safe_load((Path(__file__).resolve().parents[1] / "SKILL.md").read_text().split("---", 2)[1])
-    assert manifest["version"] == "0.8.0"
+    assert manifest["version"] == "0.9.0"
     place = manifest["contributes"][0]
     assert place["wakes"] == []
     assert place["settings"] == "email_presence"

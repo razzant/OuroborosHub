@@ -1,41 +1,22 @@
-"""Email tools and configuration; the companion owns automatic intake/delivery."""
+"""Mail tools and owner-facing account configuration; the companion owns delivery."""
 from __future__ import annotations
 
+import asyncio
 import json
-import inspect
 import time
-import uuid
-from functools import wraps
 from pathlib import Path
 
 from starlette.responses import JSONResponse
 
+from .lib.accounts import AccountError, SETTING_KEYS
 from .lib.client import MailClient
-from .lib.delivery import tool_origin
-from .lib.host_adapter import HostContractError, normalize_binding_id
 from .lib.facts import mailbox_identity
-from .lib.mime import reply_all_recipients
+from .lib import google_auth
+from .lib.host_adapter import HostContractError, normalize_binding_id
+from .lib.service import MailService, json_tool, register_tools
+
+_json_tool = json_tool  # Retain the existing extension text-boundary helper.
 from .lib.settings import SENDING_OFF, load_settings, normalize_words
-from .lib.store import EmailStore, RequestIdConflict
-
-SETTING_KEYS = ["EMAIL_IMAP_HOST", "EMAIL_IMAP_PORT", "EMAIL_SMTP_HOST", "EMAIL_SMTP_PORT",
-                "EMAIL_USER", "EMAIL_PASSWORD", "EMAIL_DEFAULT_FOLDER", "EMAIL_AUTH_MODE",
-                "EMAIL_OAUTH_ACCESS_TOKEN", "EMAIL_OAUTH_REFRESH_TOKEN", "EMAIL_OAUTH_CLIENT_ID",
-                "EMAIL_OAUTH_CLIENT_SECRET"]
-
-
-def _json_tool(handler):
-    """Encode only the tool boundary; preserve ctx discovery and exceptions."""
-    if inspect.iscoroutinefunction(handler):
-        @wraps(handler)
-        async def encoded_async(*args, **kwargs):
-            return json.dumps(await handler(*args, **kwargs), ensure_ascii=False)
-        return encoded_async
-
-    @wraps(handler)
-    def encoded(*args, **kwargs):
-        return json.dumps(handler(*args, **kwargs), ensure_ascii=False)
-    return encoded
 
 
 def _load(api):
@@ -44,149 +25,127 @@ def _load(api):
 
 def register(api):
     state = Path(api.get_state_dir())
+    service = MailService(api, mail_client=MailClient)
     api.register_companion_process("email_poller")
+    register_tools(api, service)
 
-    def store():
-        return EmailStore(state)
-
-    def client():
-        return MailClient(api.get_settings(SETTING_KEYS))
-
-    def addresses(value):
-        values = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
-        return [str(x).strip() for x in values if str(x).strip()]
-
-    def send(ctx=None, *, to="", body="", subject="", reply_to_message_id="", references=None,
-             cc=None, bcc=None, reply_all=False, html_body="", body_type="plain", attachments=None, request_id=""):
-        if _load(api).get("sending", "on") == "off":
-            return {"ok": False, "code": "sending_off", "error": SENDING_OFF}
-        recipients = addresses(to)
-        visible_cc = addresses(cc)
-        visible_bcc = addresses(bcc)
-        if reply_all:
-            if not reply_to_message_id:
-                raise ValueError("reply_to_message_id is required for reply_all")
-            original = store().message_by_id(reply_to_message_id)
-            if not original:
-                raise ValueError("reply_all source message is not in the durable inbox")
-            derived = reply_all_recipients(original, client().settings.get("EMAIL_USER"))
-            recipients = derived["to"] + recipients
-            visible_cc = derived["cc"] + visible_cc
-            if references is None:
-                references = original.get("references") or []
-        if not recipients or (not str(body).strip() and not str(html_body).strip()):
-            raise ValueError("to (or reply_all source) and body are required")
-        rid = request_id or uuid.uuid4().hex
-        mailbox = store()
-        staged = mailbox.stage_outbound_attachments(rid, attachments or [])
-        try:
-            inserted = mailbox.enqueue_outbox(request_id=rid, to=recipients, cc=visible_cc, bcc=visible_bcc, subject=subject,
-                                              body=body, in_reply_to=reply_to_message_id, references=references or [],
-                                              attachments=staged, html_body=html_body, body_type=body_type,
-                                              reporting={"version": -1, "origin": tool_origin(ctx)})
-        except RequestIdConflict as exc:
-            return {"ok": False, "code": "request_id_conflict", "error": str(exc), "request_id": rid}
-        return {"ok": True, "request_id": rid, "deduplicated": not inserted, "receipt": mailbox.receipt(rid)}
-
-    def default_folder():
-        return client().settings.get("EMAIL_DEFAULT_FOLDER") or "INBOX"
-
-    def search(**kwargs):
-        kwargs.setdefault("folder", default_folder())
-        return client().search(**kwargs)
-
-    def read(*, uid, uidvalidity, folder=None):
-        # Declared `effect: read`: there is deliberately no argument that changes flags.
-        message = client().read(uid=uid, uidvalidity=uidvalidity, folder=folder or default_folder(),
-                                include_attachment_data=True)
-        if message.get("_raw_source") is not None or message.get("attachments"):
-            store().stage_inbound_attachments(message)
-        return message
-
-    def mark_read(*, uid, uidvalidity, folder=None):
-        return client().mark_read(uid=uid, uidvalidity=uidvalidity, folder=folder or default_folder())
-
-    def draft(**kwargs):
-        if kwargs.pop("reply_all", False):
-            source_id = kwargs.get("reply_to_message_id")
-            if not source_id:
-                raise ValueError("reply_to_message_id is required for reply_all")
-            original = store().message_by_id(source_id)
-            if not original:
-                raise ValueError("reply_all source message is not in the durable inbox")
-            derived = reply_all_recipients(original, client().settings.get("EMAIL_USER"))
-            kwargs["to"] = derived["to"] + addresses(kwargs.get("to"))
-            kwargs["cc"] = derived["cc"] + addresses(kwargs.get("cc"))
-            if kwargs.get("references") is None:
-                kwargs["references"] = original.get("references") or []
-        staged = store().stage_outbound_attachments("draft:" + uuid.uuid4().hex, kwargs.pop("attachments", None) or [])
-        for key in ("cc", "bcc"):
-            kwargs[key] = addresses(kwargs.get(key))
-        kwargs["attachments"] = staged
-        return client().draft(**kwargs)
-
-    string = {"type": "string"}
-    integer = {"type": "integer"}
-    array = {"type": "array", "items": string}
-
-    def tool(name, handler, description, properties, required=()):
-        api.register_tool(name, _json_tool(handler), description=description,
-                          schema={"type": "object", "properties": properties, "required": list(required)},
-                          timeout_sec=120)
-
-    tool("email_send", send, "Queue a text email or threaded reply. Reuse request_id to deduplicate; query email_receipt for delivery.",
-         {"to": string, "body": string, "subject": string, "reply_to_message_id": string,
-          "references": array, "cc": {"type": "array", "items": string},
-          "bcc": {"type": "array", "items": string}, "reply_all": {"type": "boolean"},
-          "html_body": string, "body_type": {"type": "string", "enum": ["plain", "html"]},
-          "attachments": {"type": "array", "items": {"type": "object"}}, "request_id": string}, ("body",))
-    tool("email_search", search, "Search all mail, including mail before activation. IMAP criteria tokens, e.g. ['UNSEEN'], ['FROM', '\"alice@example.org\"'], ['HEADER', 'Message-ID', '\"<id>\"']. Returns stable UID and UIDVALIDITY.",
-         {"folder": string, "criteria": array, "limit": integer})
-    tool("email_read", read, "Read any old or new message using UID and UIDVALIDITY from email_search. Only peeks: flags never change; use email_mark_read to mark it read.",
-         {"uid": integer, "uidvalidity": integer, "folder": string}, ("uid", "uidvalidity"))
-    tool("email_mark_read", mark_read, "Mark one message read (add \\Seen) by UID and UIDVALIDITY from email_search or email_read.",
-         {"uid": integer, "uidvalidity": integer, "folder": string}, ("uid", "uidvalidity"))
-    tool("email_mailbox", lambda **kw: client().mailbox(**kw),
-         "List/create folders, copy/move a message, or add/remove flags (Seen, Flagged, Deleted). Move requires server UID MOVE. No global expunge.",
-         {"action": {"type": "string", "enum": ["list", "create", "copy", "move", "flags"]},
-          "folder": string, "uid": integer, "uidvalidity": integer, "destination": string,
-          "flags": array, "remove_flags": {"type": "boolean"}})
-    tool("email_draft", draft,
-         "Save a text draft without sending it. Choose the real draft folder from email_mailbox list.",
-         {"to": string, "subject": string, "body": string, "folder": string,
-          "reply_to_message_id": string, "references": array, "cc": {"type": "array", "items": string},
-          "bcc": {"type": "array", "items": string}, "html_body": string,
-          "reply_all": {"type": "boolean"},
-          "body_type": {"type": "string", "enum": ["plain", "html"]},
-          "attachments": {"type": "array", "items": {"type": "object"}}}, ("to", "subject"))
-    tool("email_receipt", lambda request_id: store().receipt(request_id),
-         "Get queued/completed/failed/uncertain email delivery and its stable Message-ID. Uncertain SMTP acceptance requires inspection before any new send.",
-         {"request_id": string}, ("request_id",))
-    tool("email_test_connection", lambda: client().test_connection(),
-         "Check IMAP/SMTP TLS and authentication without sending or ingesting messages.", {})
-
-    async def status(_request=None):
-        settings = api.get_settings(SETTING_KEYS)
-        payload = store().status()
-        payload["labels"] = {"direct_message": "Mail addressed to you"}
-        current = _load(api)
-        sending = current.get("sending", "on")
-        payload["readiness"] = {"sending": sending, "text": "Sending on" if sending == "on" else SENDING_OFF}
-        account = str(settings.get("EMAIL_USER") or "").strip()
-        payload["connect"] = [{"account_id": account, "conversation_id": "", "label": account}] if account else []
-        if account and (store().get("delivery_support") or {}).get("presence_identity") == 1:
-            payload["identity"] = mailbox_identity(account)
-        payload.update(binding_id_configured=bool(_load(api).get("binding_id")),
-                       imap_host_configured=bool(settings.get("EMAIL_IMAP_HOST")),
-                       smtp_host_configured=bool(settings.get("EMAIL_SMTP_HOST")),
-                       poll_health=store().get("poll_health"))
+    def account_status(account):
+        payload = service.queue_status(account)
+        health = payload.get("poll_health")
+        payload.update(account_id=account["id"], address=account["address"], label=account["label"],
+                       provider=account["provider"], connected=account["connected"], poll_health=health,
+                       runtime_error=account.get("runtime_error", ""))
+        sending = account.get("sending", "on")
         held = payload.get("outbox_held", 0)
-        connected = bool((payload.get("poll_health") or {}).get("ok"))
-        payload.update(text=f"{held} held" if held else "Connected" if connected else "Not connected",
-                       tone="warn" if held else "ok" if connected else "muted", title="Email transport")
-        return JSONResponse(payload)
+        payload["readiness"] = {
+            "sending": sending, "connected": account["connected"],
+            "text": "Disconnected; history retained" if not account["connected"] else
+                    SENDING_OFF if sending == "off" else "Sending on",
+        }
+        payload["identity"] = mailbox_identity(account["address"], senders=account["senders"],
+                                                sender=account.get("sender") or account["address"])
+        text = "Disconnected" if not account["connected"] else (
+            "Worker stopped: " + account["runtime_error"] if account.get("runtime_error") else
+            f"{held} held" if held else "Tools account; no automatic intake" if (health or {}).get("intake") == "no_place"
+            else "Authenticated intake" if (health or {}).get("ok") else "Configured; test connection")
+        payload.update(text=text, tone="warn" if held or not account["connected"] or account.get("runtime_error") else "ok" if (health or {}).get("ok") else "muted",
+                       title="Email transport")
+        return payload
+
+    async def status(request=None):
+        def build():
+            records = service.accounts.list()
+            selected = str(request.query_params.get("account_id") or "") if request is not None else ""
+            if selected:
+                payload = account_status(service.accounts.get(selected))
+            elif len(records) == 1:
+                payload = account_status(records[0])
+            else:
+                payload = {"accounts": [account_status(record) for record in records], "text": f"{len(records)} accounts",
+                           "title": "Email accounts", "tone": "muted"}
+            payload["labels"] = {"direct_message": "Mail addressed to you"}
+            payload["connect"] = [{"account_id": record["id"], "conversation_id": "", "label": record["label"]}
+                                  for record in records if record["connected"]]
+            return payload
+        try:
+            return JSONResponse(await asyncio.to_thread(build))
+        except AccountError as exc:
+            return JSONResponse({"ok": False, "code": "account_not_found", "error": str(exc)}, status_code=404)
+
+    async def account_list(_request):
+        def build():
+            result = service.list_accounts()
+            settings = api.get_settings(SETTING_KEYS)
+            result["google_client_configured"] = bool(settings.get("GOOGLE_OAUTH_CLIENT_ID") or settings.get("EMAIL_OAUTH_CLIENT_ID"))
+            result["credential_storage"] = "Credentials are stored in this skill's private local state (file mode 0600). Disconnect keeps mail history."
+            return result
+        return JSONResponse(await asyncio.to_thread(build))
+
+    async def mutate_account(request):
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("Expected an object")
+            action = request.url.path.rsplit("/", 1)[-1]
+            def perform():
+                accounts = service.accounts
+                if action == "save":
+                    return accounts.public(accounts.save_imap(body))
+                account_id = str(body.get("account_id") or "")
+                if action == "preferences":
+                    return accounts.public(accounts.update_preferences(account_id, body))
+                if action == "disconnect":
+                    return accounts.public(accounts.disconnect(account_id))
+                if action == "test":
+                    return service.test_connection(account_id=account_id)
+                if action == "refresh-senders":
+                    with service.target(account_id) as (account, _store, client):
+                        if account["provider"] != "gmail":
+                            raise AccountError("Edit configured sender addresses for this IMAP account")
+                        values = client.settings_read(resource="sendAs")
+                        senders = list(dict.fromkeys([account["address"]] + [
+                            row["sendAsEmail"] for row in values.get("sendAs", [])
+                            if row.get("sendAsEmail") and row.get("verificationStatus") == "accepted"]))
+                        return accounts.public(accounts.update_senders(account_id, senders, account["generation"]))
+                if action == "resume-legacy":
+                    legacy = accounts._legacy_account()
+                    if not legacy or legacy["id"] != account_id:
+                        raise AccountError("The original legacy mailbox is no longer configured in Settings")
+                    with accounts._db(write=True) as db:
+                        db.execute("UPDATE accounts SET connected=1,generation=? WHERE id=? AND json_extract(record,'$.uses_env')=1",
+                                   (str(time.time_ns()), account_id))
+                    return accounts.public(accounts.get(account_id))
+                raise ValueError("Unknown account action")
+            result = await asyncio.to_thread(perform)
+            return JSONResponse({"ok": True, "account": result})
+        except (ValueError, TypeError, RuntimeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    async def oauth_begin(request):
+        try:
+            body = await request.json()
+            origin = str(body.get("origin") or "").rstrip("/")
+            if not origin:
+                info = api.get_runtime_info()
+                origin = f"http://127.0.0.1:{int(info['server_port'])}"
+            result = await asyncio.to_thread(google_auth.begin, service.accounts, api.get_settings(SETTING_KEYS),
+                                            origin=origin, login_hint=str(body.get("login_hint") or ""),
+                                            permanent_delete=body.get("permanent_delete") is True)
+            return JSONResponse(result)
+        except (ValueError, TypeError, KeyError, RuntimeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    async def oauth_complete(request):
+        try:
+            body = await request.json()
+            result = await asyncio.to_thread(google_auth.finish, service.accounts, state=str(body.get("state") or ""),
+                                            code=str(body.get("code") or ""), error=str(body.get("error") or ""))
+            return JSONResponse(result)
+        except (ValueError, TypeError, RuntimeError) as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
     async def save(request):
+        """Legacy settings stay at the original route and state path."""
         try:
             current = _load(api)
             if request.method == "GET":
@@ -216,20 +175,23 @@ def register(api):
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
         state.mkdir(parents=True, exist_ok=True)
         temporary = state / f"settings.tmp.{time.time_ns()}"
-        temporary.write_text(json.dumps(current, indent=2) + "\n")
+        temporary.write_text(json.dumps(current, indent=2) + "\n", encoding="utf-8")
         temporary.replace(state / "settings.json")
-        return JSONResponse({"ok": True, "message": "Saved. Toggle the skill to restart its companion."})
+        return JSONResponse({"ok": True, "message": "Saved. The companion reloads account settings automatically."})
 
     api.register_route("status", status, methods=("GET",))
+    api.register_route("accounts", account_list, methods=("GET",))
+    for action in ("save", "preferences", "disconnect", "test", "refresh-senders", "resume-legacy"):
+        api.register_route("accounts/" + action, mutate_account, methods=("POST",))
+    api.register_route("oauth/begin", oauth_begin, methods=("POST",))
+    api.register_route("oauth/complete", oauth_complete, methods=("POST",))
     api.register_route("settings/save", save, methods=("GET", "POST"))
-    api.register_ui_tab("email_presence", title="Email Presence", render={
-        "kind": "declarative", "schema_version": 1, "components": [
-            {"type": "action", "target": "status", "route": "status", "method": "GET", "label": "Refresh delivery status", "fields": []},
-            {"type": "status", "target": "status", "idle": "Refresh to inspect mailbox intake and delivery receipts.", "loading": "Reading local status…", "success": "Status loaded.", "error": "Status unavailable."},
-            {"type": "json", "target": "status"}]})
-    api.register_settings_section("email_presence", title="Email Presence", schema={"components": [
-        {"type": "markdown", "text": "Configure granted IMAP/SMTP credentials and connect an Email place. First connection records the intake baseline; older mail remains accessible through tools."},
-        {"type": "form", "route": "settings/save", "method": "POST", "submit_label": "Save email settings", "fields": [
+    api.register_ui_tab("email_presence", title="Email accounts", render={
+        "kind": "module", "entry": "ui/accounts.js", "entry_type": "module",
+        "assets": ["ui/accounts.css"], "appearance": "host", "start": "auto", "height": 620})
+    api.register_settings_section("email_presence", title="Email accounts", schema={"components": [
+        {"type": "markdown", "text": "Use the Email accounts widget to add Google, IMAP or Proton Bridge accounts and choose sender addresses. Google needs your installation's granted GOOGLE_OAUTH_CLIENT_ID (and CLIENT_SECRET when required). These fields below keep the original EMAIL_* mailbox configuration."},
+        {"type": "form", "route": "settings/save", "method": "POST", "submit_label": "Save legacy mailbox settings", "fields": [
             {"name": "folder", "label": "Intake folder", "type": "text", "placeholder": "INBOX"},
             {"name": "sending", "label": "Sending", "type": "select", "default": "on",
              "options": [{"value": "on", "label": "On"}, {"value": "off", "label": "Off"}]},

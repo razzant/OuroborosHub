@@ -1,8 +1,8 @@
 """Google Calendar adapter: BYO Desktop OAuth client (PKCE), REST v3 on urllib, encrypted tokens.
 
 Owner-provided client parameters come from Settings → Secrets; per-account tokens
-live in ``state_dir/google_tokens.enc`` (Fernet, key derived from CALENDAR_TOKEN_KEY
-with PBKDF2). Sync: first pass ``timeMin = now − 365 d`` and NO timeMax (the sync
+live in the shared skill credential vault ``state_dir/google_tokens.enc`` (Fernet;
+a generated local key for new installs, or the retained CALENDAR_TOKEN_KEY/PBKDF2 key). Sync: first pass ``timeMin = now − 365 d`` and NO timeMax (the sync
 token inherits the filters), then ``syncToken`` only; 410 → the caller wipes this
 calendar's external cache and starts over.
 """
@@ -11,141 +11,80 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import json
 import os
 import secrets as pysecrets
-import sqlite3
-import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
-from contextlib import closing
 from typing import Any, Dict, List, Optional, Tuple
 
 from model import AVAIL_BUSY, PROVIDER_GOOGLE, account_id as make_account_id, calendar_id as make_calendar_id, get_tz, iso_utc, now_utc, own_reminders, parse_stored
 from model import tz_name as zone_name
 from ops import ProviderError, created_content_matches
+from credentials import (
+    TOKENS_FILE as TOKENS_FILE, SALT_FILE as SALT_FILE, KEY_FILE as KEY_FILE,
+    load_tokens, save_tokens as save_tokens, _mutate_tokens, _write_tokens as _write_tokens, _fernet as _fernet,
+)
 
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 API = "https://www.googleapis.com/calendar/v3"
-SCOPES = ("https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/calendar.calendarlist")
+SCOPES = ('openid', 'email', "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/calendar.calendarlist",
+          'https://www.googleapis.com/auth/calendar.calendars', 'https://www.googleapis.com/auth/calendar.acls')
+USERINFO_URL = 'https://openidconnect.googleapis.com/v1/userinfo'
 HTTP_TIMEOUT = 25
 INITIAL_PAST_DAYS = 365
-TOKENS_FILE = "google_tokens.enc"
-SALT_FILE = "google_tokens.salt"
 PENDING_PREFIX = "google_oauth_pending:"
-
-
-# ── token vault ─────────────────────────────────────────────────────
-
-def _fernet(state_dir: str, passphrase: str):
-    try:
-        from cryptography.fernet import Fernet
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-    except Exception as exc:
-        raise ProviderError("unsupported", f"библиотека cryptography недоступна: {exc}")
-    if not passphrase:
-        raise ProviderError("auth", "нет CALENDAR_TOKEN_KEY в Settings → Secrets — им шифруются токены Google")
-    salt_path = os.path.join(state_dir, SALT_FILE)
-    try:
-        with open(salt_path, "rb") as fh:
-            salt = fh.read()
-    except OSError:
-        salt = os.urandom(16)
-        fd = os.open(salt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(salt)
-    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=200_000)
-    key = base64.urlsafe_b64encode(kdf.derive(passphrase.encode("utf-8")))
-    return Fernet(key)
-
-
-def load_tokens(state_dir: str, passphrase: str) -> Dict[str, Dict[str, Any]]:
-    path = os.path.join(state_dir, TOKENS_FILE)
-    if not os.path.exists(path):
-        return {}
-    f = _fernet(state_dir, passphrase)
-    with open(path, "rb") as fh:
-        blob = fh.read()
-    try:
-        return json.loads(f.decrypt(blob).decode("utf-8"))
-    except Exception:
-        raise ProviderError("auth", "не удалось расшифровать токены Google: восстанови прежний CALENDAR_TOKEN_KEY. Если ключ утрачен, сначала сохрани google_tokens.enc и google_tokens.salt из каталога состояния навыка отдельно, затем убери только эти файлы и подключи все Google-аккаунты заново; обычное переподключение не прочитает старое хранилище")
-
-
-def save_tokens(state_dir: str, passphrase: str, tokens: Dict[str, Dict[str, Any]]) -> None:
-    """Explicit whole-vault replacement; ordinary writers merge under the same lock."""
-    def replace(fresh):
-        fresh.clear()
-        fresh.update(tokens)
-        return True
-    _mutate_tokens(state_dir, passphrase, replace)
-
-
-def _mutate_tokens(state_dir, passphrase, mutate):
-    """Serialize vault read/merge/replace with the existing calendar DB writer.
-
-    No HTTP or schema initialization belongs under this lock. Atomic file replace
-    is the vault commit; this empty DB transaction only serializes its writers.
-    Readers use the complete old or new ciphertext, never an intermediate file.
-    """
-    from store import DB_FILENAME
-    with closing(sqlite3.connect(os.path.join(state_dir, DB_FILENAME), timeout=5, isolation_level=None)) as conn:
-        with conn:
-            conn.execute('BEGIN IMMEDIATE')
-            fresh = load_tokens(state_dir, passphrase)
-            if not mutate(fresh):
-                return False
-            _write_tokens(state_dir, passphrase, fresh)
-            return True
-
-
-def _write_tokens(state_dir, passphrase, tokens):
-    f = _fernet(state_dir, passphrase)
-    path = os.path.join(state_dir, TOKENS_FILE)
-    fd, tmp = tempfile.mkstemp(prefix=TOKENS_FILE + '.', suffix='.tmp', dir=state_dir)
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(f.encrypt(json.dumps(tokens).encode("utf-8")))
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
 
 
 # ── OAuth (PKCE, loopback callback on the host) ─────────────────────
 
+def client_credentials(secrets, entry=None):
+    """One installation default, retaining the client that actually issued each grant."""
+    pairs = [(str(secrets.get(prefix + '_CLIENT_ID') or '').strip(), str(secrets.get(prefix + '_CLIENT_SECRET') or ''))
+             for prefix in ('GOOGLE_OAUTH', 'GOOGLE_CALENDAR')]
+    if entry is not None:
+        if entry.get('client_id'):
+            return next((pair for pair in pairs if pair[0] == entry['client_id']),
+                        (entry['client_id'], str(entry.get('client_secret') or '')))
+        pairs.reverse()  # legacy calendar tokens were issued to the calendar-specific client
+    return next((pair for pair in pairs if pair[0]), ('', ''))
+
+
 def start_auth(store, secrets: Dict[str, Any], redirect_uri: str) -> Dict[str, Any]:
-    client_id = str(secrets.get("GOOGLE_CALENDAR_CLIENT_ID") or "").strip()
+    client_id, _ = client_credentials(secrets)
     if not client_id:
-        raise ProviderError("auth", "нет GOOGLE_CALENDAR_CLIENT_ID в Settings → Secrets")
+        raise ProviderError("auth", "нет GOOGLE_OAUTH_CLIENT_ID (или прежнего GOOGLE_CALENDAR_CLIENT_ID) в Settings → Secrets")
     verifier = base64.urlsafe_b64encode(os.urandom(48)).decode("ascii").rstrip("=")
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
-    state = pysecrets.token_urlsafe(24)
+    state = base64.urlsafe_b64encode(json.dumps({'v': 1, 'skill': 'calendar', 'nonce': pysecrets.token_urlsafe(24)},
+                                              separators=(',', ':')).encode()).decode().rstrip('=')
     for key, value in list(store.all_settings().items()):   # abandoned logins do not pile up
         if key.startswith(PENDING_PREFIX):
             created = parse_stored((value or {}).get("created_at")) if isinstance(value, dict) else None
             if not isinstance(value, dict) or created is None or now_utc() - created > timedelta(minutes=30):
                 store.delete_setting(key)
-    store.set_setting(PENDING_PREFIX + state, {"verifier": verifier, "redirect_uri": redirect_uri, "created_at": iso_utc(now_utc())})
+    store.set_setting(PENDING_PREFIX + state, {"verifier": verifier, "redirect_uri": redirect_uri,
+                                             'client_id': client_id, "created_at": iso_utc(now_utc())})
     params = {"client_id": client_id, "redirect_uri": redirect_uri, "response_type": "code", "scope": " ".join(SCOPES),
               "code_challenge": challenge, "code_challenge_method": "S256", "state": state, "access_type": "offline", "prompt": "consent"}
     return {"auth_url": AUTH_URL + "?" + urllib.parse.urlencode(params), "state": state, "redirect_uri": redirect_uri}
 
 
 def finish_auth(store, secrets: Dict[str, Any], state_dir: str, code: str, state: str) -> Dict[str, Any]:
-    pending = store.get_setting(PENDING_PREFIX + state)
+    pending = store.pop_setting(PENDING_PREFIX + state)
     if not pending:
         raise ProviderError("auth", "неизвестный или устаревший state в ответе Google — начни подключение заново")
     created = parse_stored(pending.get("created_at"))
     if created and now_utc() - created > timedelta(minutes=30):
         raise ProviderError("auth", "ссылка для входа устарела (30 минут) — начни подключение заново")
-    client_id = str(secrets.get("GOOGLE_CALENDAR_CLIENT_ID") or "").strip()
-    client_secret = str(secrets.get("GOOGLE_CALENDAR_CLIENT_SECRET") or "").strip()
+    client_id, client_secret = client_credentials(secrets, {'client_id': pending.get('client_id')})
+    if not client_id:
+        raise ProviderError('auth', 'OAuth-клиент больше не настроен; начни вход заново')
     body = {"client_id": client_id, "code": code, "code_verifier": pending["verifier"], "grant_type": "authorization_code",
             "redirect_uri": pending["redirect_uri"]}
     if client_secret:
@@ -155,16 +94,31 @@ def finish_auth(store, secrets: Dict[str, Any], state_dir: str, code: str, state
                             client_id, client_secret, None)
     email = adapter.primary_email()
     if not email:
-        raise ProviderError("auth", "Google не вернул основной календарь — не удалось определить аккаунт")
+        raise ProviderError("auth", "Google не подтвердил личность аккаунта")
+    subject = (getattr(adapter, '_identity', {}) or {}).get('sub')
+    connected = {}
     def connect(tokens):
-        prev = tokens.get(email) or {}
-        tokens[email] = {"access_token": data["access_token"], "refresh_token": data.get("refresh_token") or prev.get("refresh_token", ""),
+        key = next((key for key, value in tokens.items() if subject and value.get('subject') == subject), email)
+        if subject and tokens.get(key, {}).get('subject') not in (None, subject):
+            key = 'oidc:' + subject
+        prev = tokens.get(key) or {}
+        if prev.get('client_id') not in (None, client_id):
+            prev = {}  # a refresh token belongs to its issuing OAuth client
+        tokens[key] = {"access_token": data["access_token"], "refresh_token": data.get("refresh_token") or prev.get("refresh_token", ""),
                          "expires_at": iso_utc(now_utc() + timedelta(seconds=int(data.get("expires_in") or 3600))),
-                         "scope": data.get("scope", ""), "generation": uuid.uuid4().hex}
+                         "scope": data.get("scope", ""), 'email': email, 'subject': subject, 'provider': PROVIDER_GOOGLE,
+                         'client_id': client_id, 'client_secret': client_secret, "generation": uuid.uuid4().hex}
+        connected['key'] = key
+        connected['offline_access'] = bool(tokens[key].get('refresh_token'))
         return True
     _mutate_tokens(state_dir, str(secrets.get("CALENDAR_TOKEN_KEY") or ""), connect)
-    store.delete_setting(PENDING_PREFIX + state)
-    return {"email": email, "account_id": make_account_id(PROVIDER_GOOGLE, email)}
+    return {"email": email, "account_id": make_account_id(PROVIDER_GOOGLE, connected['key']),
+            'offline_access': connected['offline_access']}
+
+
+def cancel_auth(store, state):
+    if not store.pop_setting(PENDING_PREFIX + str(state)):
+        raise ProviderError('auth', 'Неизвестный или уже завершённый OAuth state')
 
 
 def forget_account(state_dir: str, passphrase: str, email: str) -> bool:
@@ -206,6 +160,8 @@ def _token_request(body: Dict[str, Any]) -> Dict[str, Any]:
         raise ProviderError("network", f"нет связи с Google OAuth: {exc.reason}")
     except TimeoutError:
         raise ProviderError("network", "таймаут Google OAuth")
+    except (http.client.HTTPException, OSError) as exc:
+        raise ProviderError('network', f'Соединение с Google OAuth прервано: {type(exc).__name__}') from exc
 
 
 # ── adapter ─────────────────────────────────────────────────────────
@@ -213,22 +169,26 @@ def _token_request(body: Dict[str, Any]) -> Dict[str, Any]:
 class GoogleAdapter:
     provider = PROVIDER_GOOGLE
 
-    def __init__(self, email: str, access_token: str, refresh_token: str, expires_at: datetime, client_id: str, client_secret: str, persist):
+    def __init__(self, email: str, access_token: str, refresh_token: str, expires_at: datetime, client_id: str, client_secret: str, persist,
+                 *, credential_key=None, scopes=None):
         self.email = email
-        self.account_id = make_account_id(PROVIDER_GOOGLE, email)
+        self.credential_key = credential_key or email
+        self.account_id = make_account_id(PROVIDER_GOOGLE, self.credential_key)
+        self.scopes = set(str(scopes).split()) if scopes else None
+        self._identity = {}
         self.access_token, self.refresh_token, self.expires_at = access_token, refresh_token, expires_at
         self.client_id, self.client_secret = client_id, client_secret
         self._persist = persist   # callable(tokens dict) or None
 
     @classmethod
-    def for_account(cls, secrets: Dict[str, Any], state_dir: str, email: str) -> Optional["GoogleAdapter"]:
+    def for_account(cls, secrets: Dict[str, Any], state_dir: str, email: str, *, tokens=None) -> Optional["GoogleAdapter"]:
         passphrase = str(secrets.get("CALENDAR_TOKEN_KEY") or "")
-        client_id = str(secrets.get("GOOGLE_CALENDAR_CLIENT_ID") or "").strip()
-        if not passphrase or not client_id:
-            return None
-        tokens = load_tokens(state_dir, passphrase)
+        tokens = load_tokens(state_dir, passphrase) if tokens is None else tokens
         entry = tokens.get(email)
-        if not entry or not entry.get("refresh_token"):
+        if not entry or entry.get('provider', PROVIDER_GOOGLE) != PROVIDER_GOOGLE or not (entry.get('access_token') or entry.get("refresh_token")):
+            return None
+        client_id, client_secret = client_credentials(secrets, entry)
+        if not client_id:
             return None
         expires = parse_stored(entry.get("expires_at")) or now_utc()
 
@@ -241,7 +201,8 @@ class GoogleAdapter:
                 return True
             _mutate_tokens(state_dir, passphrase, refresh)
 
-        return cls(email, entry.get("access_token", ""), entry["refresh_token"], expires, client_id, str(secrets.get("GOOGLE_CALENDAR_CLIENT_SECRET") or ""), persist)
+        return cls(entry.get('email') or email, entry.get("access_token", ""), entry.get("refresh_token", ''), expires,
+                   client_id, client_secret, persist, credential_key=email, scopes=entry.get('scope'))
 
     # transport
     def _refresh(self) -> None:
@@ -309,15 +270,22 @@ class GoogleAdapter:
             raise ProviderError("network", f"нет связи с Google: {exc.reason}")
         except TimeoutError:
             raise ProviderError("network", "таймаут Google Calendar API")
+        except (http.client.HTTPException, OSError) as exc:
+            raise ProviderError('network', f'Соединение с Google Calendar прервано: {type(exc).__name__}') from exc
 
     # identity / calendars
     def primary_email(self) -> str:
-        _, _, data = self._request("GET", "/users/me/calendarList", {"minAccessRole": "owner", "maxResults": 50})
-        for item in data.get("items", []):
-            if item.get("primary"):
-                return str(item.get("id") or "")
-        items = data.get("items", [])
-        return str(items[0].get("id") or "") if items else ""
+        """Identity comes from Google userinfo, never an arbitrary calendar resource."""
+        request = urllib.request.Request(USERINFO_URL, headers={'Authorization': 'Bearer ' + self.access_token})
+        try:
+            with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+                identity = json.loads(response.read().decode('utf-8'))
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
+            raise ProviderError('auth', 'Не удалось подтвердить личность Google; требуется вход с openid/email') from exc
+        if not identity.get('sub') or not identity.get('email') or identity.get('email_verified') is not True:
+            raise ProviderError('auth', 'Google не вернул подтверждённые sub/email')
+        self._identity = {'sub': str(identity['sub']), 'email': str(identity['email'])}
+        return self._identity['email']
 
     def list_calendars(self) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
@@ -326,14 +294,77 @@ class GoogleAdapter:
             _, _, data = self._request("GET", "/users/me/calendarList", {"maxResults": 250, "pageToken": token, "showHidden": "true"})
             for item in data.get("items", []):
                 role = str(item.get("accessRole") or "reader")
-                out.append({"id": make_calendar_id(PROVIDER_GOOGLE, self.email, str(item["id"])), "account_id": self.account_id, "provider": PROVIDER_GOOGLE,
+                out.append({"id": make_calendar_id(PROVIDER_GOOGLE, self.credential_key, str(item["id"])), "account_id": self.account_id, "provider": PROVIDER_GOOGLE,
                             "external_id": str(item["id"]), "href": "", "name": str(item.get("summaryOverride") or item.get("summary") or item["id"]),
+                            'description': str(item.get('description') or ''),
                             "tz": str(item.get("timeZone") or ""), "writable": role in ("owner", "writer"), "access_role": role,
                             "is_primary": bool(item.get("primary")), "default_reminders": item.get("defaultReminders") or []})
             token = data.get("nextPageToken")
             if not token:
                 break
         return out
+
+    def calendar_capabilities(self):
+        def granted(*values):
+            if self.scopes is None:
+                return None
+            return bool(self.scopes.intersection({'https://www.googleapis.com/auth/calendar', *values}))
+        return {'create': granted('https://www.googleapis.com/auth/calendar.calendars'),
+                'update': granted('https://www.googleapis.com/auth/calendar.calendars'),
+                'delete': granted('https://www.googleapis.com/auth/calendar.calendars'),
+                'sharing': granted('https://www.googleapis.com/auth/calendar.acls'),
+                'offline_access': bool(self.refresh_token),
+                'granted_scopes': sorted(self.scopes) if self.scopes is not None else None}
+
+    def _calendar_record(self, data):
+        if not data.get('id'):
+            raise ProviderError('parse', 'Google не вернул идентификатор календаря')
+        return {'id': make_calendar_id(PROVIDER_GOOGLE, self.credential_key, str(data['id'])),
+                'account_id': self.account_id, 'provider': PROVIDER_GOOGLE, 'external_id': str(data['id']),
+                'name': data.get('summary') or data['id'], 'description': data.get('description') or '',
+                'tz': data.get('timeZone') or '', 'writable': True, 'access_role': 'owner'}
+
+    def create_calendar(self, changes):
+        _, _, data = self._request('POST', '/calendars', body={key: value for key, value in {
+            'summary': changes.get('name'), 'description': changes.get('description'), 'timeZone': changes.get('timezone')}.items() if value is not None})
+        return self._calendar_record(data)
+
+    def update_calendar(self, calendar, changes):
+        fields = {'name': 'summary', 'description': 'description', 'timezone': 'timeZone'}
+        body = {fields[key]: value for key, value in changes.items() if key in fields}
+        _, _, data = self._request('PATCH', '/calendars/' + urllib.parse.quote(calendar['external_id'], safe=''), body=body)
+        return {**calendar, **self._calendar_record(data), 'access_role': calendar.get('access_role', 'owner'),
+                'writable': calendar.get('writable', True)}
+
+    def delete_calendar(self, calendar):
+        self._request('DELETE', '/calendars/' + urllib.parse.quote(calendar['external_id'], safe=''))
+        return {'deleted': True, 'calendar_id': calendar['id']}
+
+    def calendar_acl(self, calendar):
+        items, token = [], None
+        while True:
+            _, _, data = self._request('GET', '/calendars/' + urllib.parse.quote(calendar['external_id'], safe='') + '/acl',
+                                       {'pageToken': token, 'maxResults': 250})
+            items.extend(data.get('items') or [])
+            token = data.get('nextPageToken')
+            if not token:
+                return items
+
+    def share_calendar(self, calendar, sharing):
+        scope = {'type': str(sharing.get('type') or 'user')}
+        if sharing.get('value'):
+            scope['value'] = str(sharing['value'])
+        _, _, data = self._request('POST', '/calendars/' + urllib.parse.quote(calendar['external_id'], safe='') + '/acl',
+                                   {'sendNotifications': 'true' if sharing.get('send_notifications') else 'false'},
+                                   {'scope': scope, 'role': str(sharing.get('role') or 'reader')})
+        return data
+
+    def unshare_calendar(self, calendar, sharing):
+        rule = str(sharing.get('rule_id') or '')
+        if not rule:
+            raise ProviderError('parse', 'Нужен rule_id из cal_calendars(include_acl=true)')
+        self._request('DELETE', '/calendars/' + urllib.parse.quote(calendar['external_id'], safe='') + '/acl/' + urllib.parse.quote(rule, safe=''))
+        return {'deleted': True, 'rule_id': rule}
 
     # events
     def fetch(self, calendar: Dict[str, Any], cursor: str = "", tz=None) -> Tuple[List[Dict[str, Any]], str, str, List[str]]:
