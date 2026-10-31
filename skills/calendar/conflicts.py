@@ -285,7 +285,7 @@ def _accept_provider(local, state, current, templates):
                 current_row = local.get_event(eid)
                 master = local.get_event(current_row.get('master_id')) if current_row.get('master_id') else current_row
                 previous = before_rows.get(eid) or next(r for r in state['rows'] if r['id'] == eid)
-                if master and master.get('link_group_id') and not links.source_is(local, master) and links.changed(previous, observed, provider_observation=True):
+                if master and master.get('link_group_id') and not links.source_is(local, master) and (current_row.get('link_state') == links.DIVERGED or links.changed(previous, observed, provider_observation=True)):
                     local.update_event(master['id'], {'link_state': links.DIVERGED})
                     local.update_event(eid, {'link_state': links.DIVERGED})
         local.drop_reminders_for(eid)

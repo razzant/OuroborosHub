@@ -730,7 +730,7 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
         if name:
             fields["name"] = str(name)
         if default is not None and _bool(default):
-            for c in st.list_calendars():
+            for c in st.list_calendars(include_deleted=True):
                 if c["is_default"]:
                     st.update_calendar(c["id"], {"is_default": 0})
             fields["is_default"] = 1
