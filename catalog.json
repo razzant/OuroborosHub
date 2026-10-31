@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/1b3f0ae33c3fbea66065e4d970c1c0c146b3b464",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/92ccf197ee2b133025b50de76d92fc333799a71b",
   "schema_version": 1,
   "skills": [
     {
@@ -379,8 +379,8 @@
         },
         {
           "path": "conflicts.py",
-          "sha256": "cb0e8d7a4da90a57c1b873cce1151fd79b6b7a2650b803b3c6b58ac59b20b675",
-          "size": 19316
+          "sha256": "662381f947f06c370d2123e95ac5a7d275a94be6f5beb9dc173b40484d4d753e",
+          "size": 19296
         },
         {
           "path": "credentials.py",
@@ -429,8 +429,8 @@
         },
         {
           "path": "routes.py",
-          "sha256": "03c3e2bfbaef6dd227d50f0cdb451e1f0dab3faf1de2a819fac4c3513c58021d",
-          "size": 18725
+          "sha256": "4a9bcf568a77e5c1087cb4eb4c42f910306beb56a010c84c95af19cab3ab282f",
+          "size": 18838
         },
         {
           "path": "scripts/worker.py",
@@ -439,8 +439,8 @@
         },
         {
           "path": "store.py",
-          "sha256": "2ef078cefad32e303b34feb0c673c6e75b395fbce5601207dbda08d7e2bf3223",
-          "size": 61672
+          "sha256": "950bbcf412a8bd159c5cbcec84b56670ee3a9b2234a6c848546e36d6776521ac",
+          "size": 61759
         },
         {
           "path": "tests/test_birth_recovery.py",
@@ -539,8 +539,8 @@
         },
         {
           "path": "tests/test_calendar_review_round1.py",
-          "sha256": "00fe3510f3253d0263e7025742e4edea3b7342077636543714038bc25f43e87f",
-          "size": 17045
+          "sha256": "d495f12e86b6f723342316b2c0e63c3e6e5adc0d690032babb285f9bc605e315",
+          "size": 21905
         },
         {
           "path": "tests/test_calendar_round2.py",
@@ -624,8 +624,8 @@
         },
         {
           "path": "tools.py",
-          "sha256": "3ebbb57c24be46674320f25ddba348d4fe1974d016e588d87113340ecdbdbb9d",
-          "size": 53709
+          "sha256": "9dd4f101f8f8500e69b0d8b49a25e36b141b2b8459a58ffaaee533a7c5b48678",
+          "size": 53844
         },
         {
           "path": "widget.js",
