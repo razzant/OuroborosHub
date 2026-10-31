@@ -263,6 +263,33 @@ def bounded_result(obj: Dict[str, Any], limit: int = TOOL_RESULT_LIMIT, list_key
     return json_dumps({"status": trimmed.get("status") or "error", "message": "ответ слишком большой даже после сокращения", "truncated": True})
 
 
+def event_field_value(row, field, *, provider_observation=False):
+    """Comparable event meaning; provider wire formats cannot represent local soft preference."""
+    value = row.get(field)
+    if field == 'availability' and provider_observation:
+        return AVAIL_FREE if value == AVAIL_FREE else AVAIL_BUSY
+    if field == 'all_day':
+        return bool(value)
+    if field in ('start_utc', 'end_utc'):
+        instant = parse_stored(value)
+        return instant.astimezone(get_tz(row.get('tz') or '')).date() if instant and row.get('all_day') else instant
+    if field in ('rdates', 'exdates'):
+        values = [part.strip() for part in str(value or '').split(',') if part.strip()]
+        instants = [parse_stored(part) or part for part in values]
+        if row.get('all_day'):
+            return frozenset(value.astimezone(get_tz(row.get('tz') or '')).date() if isinstance(value, datetime) else value for value in instants)
+        return frozenset(instants)
+    if field == 'rrule':
+        parts = []
+        for part in str(value or '').upper().split(';'):
+            if not part:
+                continue
+            key, _, entry = part.partition('=')
+            parts.append((key, tuple(sorted(entry.split(','))) if key.startswith('BY') else entry))
+        return tuple(sorted(parts))
+    return value or ''
+
+
 def routine_time(row, value, owner_tz):
     """Project a routine's wall time without changing its canonical recurrence address."""
     instant = parse_stored(value)

@@ -601,7 +601,12 @@ class CalDAVAdapter:
                 **({'tz': changes['timezone']} if 'timezone' in changes else {})}
 
     def delete_calendar(self, calendar):
-        self._request('DELETE', calendar['href'])
+        status, _, text = self._request('DELETE', calendar['href'])
+        if status == 207:
+            root = self._xml(text, 'DELETE')
+            results = [node.text or '' for node in root.findall('.//d:status', NS)]
+            if not results or any(len(value.split()) < 2 or not value.split()[1].startswith('2') for value in results):
+                raise ProviderError('partial', 'CalDAV не подтвердил удаление всей коллекции; часть ресурсов могла остаться. ' + '; '.join(results))
         return {'deleted': True, 'calendar_id': calendar['id']}
 
     def calendar_acl(self, calendar):

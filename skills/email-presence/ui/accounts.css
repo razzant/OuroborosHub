@@ -31,3 +31,7 @@ input[type="checkbox"] { width:auto; margin-top:4px; }
 pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
 .spacer { flex:1; }
 @media(max-width:420px) { #root { padding:10px; } .account,form { padding:10px; } .actions button { flex:1 1 auto; } }
+
+.delivery-summary { margin-top:12px; overflow-wrap:anywhere; }
+.delivery-summary p { margin-bottom:5px; }
+.receipt { border-top:1px solid var(--line); padding:8px 0; }

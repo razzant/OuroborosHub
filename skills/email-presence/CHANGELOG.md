@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.9.0
+
+- Add multiple independent Gmail API and IMAP/SMTP accounts, separate sender
+  addresses, account-bound message references and account-scoped request ids.
+  Existing EMAIL_* accounts retain their original state and credentials.
+- Add skill-owned Google PKCE sign-in through the builtin return page, metadata
+  search, native Gmail drafts/labels and provider-supported account settings.
+  Calendar consent stays separate; full-mail deletion scope is optional.
+- Support Bridge STARTTLS with explicit CA trust or certificate pin, separate
+  SMTP credentials, Unicode folders/search and trailing IMAP FETCH metadata.
+- Keep ordinary account tools independent from optional Presence intake while
+  preserving applicable Silent/Paused holds and retained enqueue bindings.
+  Known replies carry their thread, capture outages retry the cached output, and
+  held rows avoid provider login while still rechecking before actual delivery.
+- Add account setup/preferences in the existing opaque widget, queue counts and
+  recent receipts in both account discovery and UI, including after disconnect.
+  No signatures, automatic purge or per-message approval flow is introduced.
+
 ## 0.8.0
 
 - Negotiate Presence continuation version 2 only when `/identity` lists it in

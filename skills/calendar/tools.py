@@ -52,25 +52,29 @@ class Context:
     def resolve_calendars(self, spec: Any) -> Tuple[List[str], str]:
         """Names, aliases, ids, provider words, 'all', 'busy_set', 'default' → ordered calendar ids."""
         cals = self.store.list_calendars()
+        default = self.store.default_calendar()
+        no_default = 'Календарь по умолчанию удалён или отключён; выбери календарь явно или задай новый default.'
         if spec in (None, "", [], "default"):
-            return [self.store.default_calendar()["id"]], ""
+            return ([default["id"]], "") if default else ([], no_default)
         items = spec if isinstance(spec, list) else [p.strip() for p in str(spec).replace(";", ",").split(",") if p.strip()]
         out: List[str] = []
         for item in items:
             key = str(item).strip()
             low = key.lower()
+            if low in ('all', 'busy_set', 'занятость', 'publish', 'default') and default is None:
+                return [], no_default
             if low == "all":
                 # 5 A: «во все календари» = календарь по умолчанию + набор публикации занятости, не все с правом записи
-                out.append(self.store.default_calendar()["id"])
+                out.append(default["id"])
                 out.extend(c["id"] for c in cals if c["role_publish"] and c["writable"])
                 continue
             if low in ("busy_set", "занятость", "publish"):
                 # same meaning as 'all' (5 A): the default calendar plus the saved busy-publication set
-                out.append(self.store.default_calendar()["id"])
+                out.append(default["id"])
                 out.extend(c["id"] for c in cals if c["role_publish"] and c["writable"])
                 continue
             if low == "default":
-                out.append(self.store.default_calendar()["id"])
+                out.append(default["id"])
                 continue
             exact = [c for c in cals if c["id"] == key]
             if exact:

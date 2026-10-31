@@ -155,7 +155,8 @@ remain readable by explicit account_id.
 ## Mailbox tools and transport behavior
 
 - All twelve tools return JSON text. email_accounts lists canonical account ids
-  and sender addresses. Select account_id explicitly when more than one account
+  and sender addresses, existing queue counts and the latest 20 delivery receipts,
+  including disconnected accounts. Select account_id explicitly when more than one account
   is connected; unknown ids never fall back to a neighbor. email_receipt returns
   JSON null for a missing request, with request_id scoped to the chosen account.
 - email_search uses Gmail query/page_token or IMAP criteria tokens. It retrieves

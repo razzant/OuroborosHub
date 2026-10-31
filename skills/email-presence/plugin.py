@@ -17,7 +17,6 @@ from .lib.service import MailService, json_tool, register_tools
 
 _json_tool = json_tool  # Retain the existing extension text-boundary helper.
 from .lib.settings import SENDING_OFF, load_settings, normalize_words
-from .lib.store import EmailStore
 
 
 def _load(api):
@@ -31,11 +30,8 @@ def register(api):
     register_tools(api, service)
 
     def account_status(account):
-        directory = service.accounts.mail_dir(account)
-        payload = EmailStore(directory).status() if (directory / "email_presence.sqlite3").exists() else {}
+        payload = service.queue_status(account)
         health = payload.get("poll_health")
-        if (directory / "email_presence.sqlite3").exists():
-            health = EmailStore(directory).get("poll_health")
         payload.update(account_id=account["id"], address=account["address"], label=account["label"],
                        provider=account["provider"], connected=account["connected"], poll_health=health,
                        runtime_error=account.get("runtime_error", ""))

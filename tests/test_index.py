@@ -658,7 +658,8 @@ def exported_names(directory, prefix):
         return recorded_registration(directory)[0]
     names = set()
     for function, node in plugin_calls({"tool", "register_tool", "register_json_tool"},
-                                       [directory / "plugin.py", *directory.glob("lib/read_tools.py")]):
+                                       [directory / "plugin.py", *directory.glob("lib/read_tools.py"),
+                                        *directory.glob("lib/service.py")]):
         if function:
             index = 1 if function == "register_json_tool" else 0
             arg = node.args[index] if len(node.args) > index else None
@@ -791,4 +792,4 @@ def test_mixed_tools_remain_write_and_email_covers_all_recipients():
     for connector, name in [("slack-bridge", "slack_history"), ("email-presence", "email_read")]:
         assert manifests[connector][name]["effect"] == "read"
     assert manifests["email-presence"]["email_send"]["effect"] == "message"
-    assert manifests["email-presence"]["email_send"]["target"] == ["to", "cc", "bcc"]
+    assert manifests["email-presence"]["email_send"]["target"] == ["account_id", "to", "cc", "bcc"]

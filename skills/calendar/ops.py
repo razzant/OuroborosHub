@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, BUSY_COPY_TITLE, INTENT_CONFLICT, INTENT_DONE, INTENT_FAILED, INTENT_PENDING,
     PROVIDER_LOCAL, CALDAV_PROVIDERS, PUBLISH_BUSY, PUBLISH_FULL, SCOPES, SCOPE_ALL, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_SHOWN,
-    get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time,
+    get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time, event_field_value,
 )
 
 RETRY_BACKOFF_SEC = (30, 120, 600, 1800, 7200)
@@ -458,7 +458,10 @@ def _stage_create_event(store, spec: Dict[str, Any], owner: str = "") -> Dict[st
     location, attendees, reminders (offsets, minutes), rrule. Returns event + per-calendar assignments."""
     calendar_ids: List[str] = [c for c in spec.get("calendar_ids") or [] if c]
     if not calendar_ids:
-        calendar_ids = [store.default_calendar()["id"]]
+        default = store.default_calendar()
+        if default is None:
+            raise ValueError('Календарь по умолчанию удалён или отключён; выбери календарь явно или задай новый default.')
+        calendar_ids = [default["id"]]
     link_group = new_id("lg") if len(calendar_ids) > 1 else ""
     uid = new_uid()
     op_id = new_id("op")
@@ -1250,19 +1253,18 @@ def _matches_unversioned_baseline(payload, remote, adapter):
     if any(k in keys for k in ('start_utc', 'end_utc', 'all_day', 'tz')):
         keys.update(('start_utc', 'end_utc', 'all_day'))
         keys.discard('tz')  # equivalent zone spellings do not change the instants
+    baselines = [baseline]
+    if payload.get('after_intent_id') and payload.get('baseline_after_predecessor'):
+        baselines.append(payload['baseline_after_predecessor'])
     for key in keys:
         field = {'attendees': 'attendees_json', 'reminders': 'reminders_json'}.get(key, key)
-        if field.endswith('_json'):
-            old, new = json.loads(baseline.get(field) or '[]'), json.loads(remote.get(field) or '[]')
-            if old != new:
-                return False
-        elif field == 'availability':
-            # Google has transparent/opaque, not the local soft-routine state.
-            old = AVAIL_FREE if baseline.get(field) == AVAIL_FREE else AVAIL_BUSY
-            new = AVAIL_FREE if remote.get(field) == AVAIL_FREE else AVAIL_BUSY
-            if old != new:
-                return False
-        elif (baseline.get(field) or '') != (remote.get(field) or ''):
+        def value(row):
+            if field.endswith('_json'):
+                return json.loads(row.get(field) or '[]')
+            if field == 'availability':
+                return event_field_value(row, field, provider_observation=True)
+            return row.get(field) or ''
+        if all(value(candidate) != value(remote) for candidate in baselines):
             return False
     return True
 
@@ -1460,7 +1462,7 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
     members = store.group_masters(group) if group else [row]
     source = links.source(store, row)
     if source is None or source.get('deleted_at'):
-        return {'added': [], 'removed': [], 'failed': 'У связи нет однозначного живого источника: выбери его через cal_update(link_action="source").'}
+        return {'added': [], 'removed': [], 'failed': 'Не выбран единственный действующий источник связи. Выбери источник на карточке события или в чате.'}
     row = source
     own_cal = store.get_calendar(row["calendar_id"])
     for cal_ in (clicked_cal, own_cal):

@@ -361,12 +361,12 @@ class Store:
             row = c.execute("SELECT * FROM calendars WHERE id=?", (calendar_id,)).fetchone()
         return dict(row) if row else None
 
-    def default_calendar(self) -> Dict[str, Any]:
+    def default_calendar(self) -> Optional[Dict[str, Any]]:
         with self._conn() as c:
             row = c.execute("SELECT * FROM calendars WHERE is_default=1 AND deleted_at IS NULL ORDER BY provider LIMIT 1").fetchone()
             if row is None:
-                row = c.execute("SELECT * FROM calendars WHERE id=?", (DEFAULT_LOCAL_CALENDAR_ID,)).fetchone()
-        return dict(row)
+                row = c.execute("SELECT * FROM calendars WHERE id=? AND deleted_at IS NULL", (DEFAULT_LOCAL_CALENDAR_ID,)).fetchone()
+        return dict(row) if row else None
 
     # ── events ──────────────────────────────────────────────────────
 
@@ -674,7 +674,7 @@ class Store:
         """Retained changed/missing projections, including provider-deleted rows."""
         with self._conn() as c:
             rows = c.execute("SELECT id, calendar_id, title, link_group_id, link_state, deleted_at FROM events"
-                             " WHERE link_group_id!='' AND link_state!='following' ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+                             " WHERE link_group_id!='' AND link_state!='following' AND (deleted_at IS NULL OR link_state='missing') ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
     def group_masters(self, link_group_id: str) -> List[Dict[str, Any]]:

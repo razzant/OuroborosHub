@@ -508,3 +508,45 @@ def test_link_actions_change_the_real_store_only_after_the_owner_applies_them(li
             assert context.outside == []
         finally:
             browser.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('partial', [False, True])
+def test_calendar_reassign_failure_stays_visible_and_success_still_closes(link_host, tmp_path, engine, partial):
+    from playwright.sync_api import sync_playwright, expect
+    ctx, groups, state, url = link_host
+    group = groups['Planning']
+    ctx.store.update_event(group['copy'], {'is_primary': 1})
+    evidence = evidence_dir(tmp_path)
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True, downloads_path=str(tmp_path / 'downloads'))
+        try:
+            context, page, frame = widget_frame(browser, url, engine, height=720)
+            frame.locator('.ev').filter(has_text='Planning').filter(has_text='work').click()
+            expect(frame.locator('.card .status')).not_to_have_text('Загружаю событие…')
+            frame.locator('.card .cals label', has_text='personal').locator('input').uncheck()
+            if partial:
+                frame.get_by_placeholder('Название', exact=True).fill('Content applied')
+            frame.get_by_role('button', name='Сохранить', exact=True).click()
+            wait_until(page, lambda: any(name == 'event/update' for name, _, _ in state['responses']))
+            response = next(json.loads(raw) for name, _, raw in reversed(state['responses']) if name == 'event/update')
+            assert response['status'] == ('partial' if partial else 'failed'), response
+            if partial:
+                expect(frame.locator('.card')).to_have_count(0)
+                expect(frame.locator('#root > .status', has_text='источник')).to_be_visible()
+                assert ctx.store.get_event(group['source'])['title'] == 'Content applied'
+                frame.get_by_role('button', name='Сегодня', exact=True).click()
+                expect(frame.locator('#root > .status', has_text='источник')).to_be_visible()
+            else:
+                expect(frame.locator('.card .status.err')).to_contain_text('источник')
+                expect(frame.get_by_role('button', name='Сохранить', exact=True)).to_be_enabled()
+            shoot(page, frame, evidence, f'calendar-{engine}-reassign-{ "partial" if partial else "failed" }')
+            assert ctx.store.get_event(group['copy'])['deleted_at'] is None
+            if not partial:
+                ctx.store.update_event(group['copy'], {'is_primary': 0})
+                frame.get_by_role('button', name='Сохранить', exact=True).click()
+                expect(frame.locator('.card')).to_have_count(0)
+                assert ctx.store.get_event(group['copy'])['deleted_at']
+            assert context.outside == []
+        finally:
+            browser.close()

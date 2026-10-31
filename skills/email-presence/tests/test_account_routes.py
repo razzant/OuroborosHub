@@ -97,3 +97,33 @@ def test_one_worker_failure_does_not_stop_other_accounts_or_spin_restarts(tmp_pa
             await task
     asyncio.run(exercise())
     assert not running and len(closed) == 2
+
+
+def test_account_discovery_retains_counts_and_addressable_receipts_after_disconnect(tmp_path):
+    from types import SimpleNamespace
+    from lib.service import MailService
+    from lib.store import EmailStore
+    accounts = AccountStore(tmp_path)
+    account = accounts.save_imap(imap_values())
+    store = EmailStore(accounts.mail_dir(account))
+    store.enqueue_outbox(request_id="held-before-disconnect", to=["reader@example.invalid"], body="owed", hold_reason="place_disconnected")
+    store.enqueue_outbox(request_id="unknown-acceptance", to=["reader@example.invalid"], body="uncertain")
+    item = store.claim_outbox()
+    store.uncertain_outbox(item.row_id, item.lease_token, "Provider acceptance unknown")
+    store.enqueue_outbox(request_id="failed", to=["reader@example.invalid"], body="failed")
+    item = store.claim_outbox()
+    store.fail_outbox(item.row_id, item.lease_token, "Provider rejected message")
+    accounts.disconnect(account["id"])
+    service = MailService(SimpleNamespace(get_state_dir=lambda: tmp_path, get_settings=lambda _: {}))
+    api_queue = service.list_accounts()["accounts"][0]["queue"]
+    assert api_queue["outbox_held"] == 1
+    assert api_queue["outbox"]["uncertain"] == api_queue["outbox"]["failed"] == 1
+    by_request = {row["request_id"]: row for row in api_queue["receipts"]}
+    assert by_request["held-before-disconnect"]["state"] == "held"
+    assert by_request["unknown-acceptance"]["state"] == "uncertain"
+    assert by_request["failed"]["state"] == "failed"
+    assert service.receipt("held-before-disconnect", account_id=account["id"])["state"] == "held"
+    with TestClient(_settings_app(tmp_path)) as http:
+        web_queue = http.get("/accounts").json()["accounts"][0]["queue"]
+        assert web_queue == api_queue
+        assert http.get("/status", params={"account_id": account["id"]}).json()["receipts"] == api_queue["receipts"]

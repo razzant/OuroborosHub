@@ -291,7 +291,7 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
         if master_row:
             payload.update({key: master_row.get(key) for key in ('link_group_id', 'is_primary', 'link_state')})
         changed = exc is None or exc.get("etag") != row["etag"]
-        materially = exc is None or links.changed(exc, row)
+        materially = exc is None or links.changed(exc, row, provider_observation=True)
         if exc is None:
             if store.insert_provider_exception(master_id, payload) is None:
                 next_cursor = ''
@@ -321,8 +321,10 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
                     if str(row.get("status") or "") == "cancelled":
                         copy_commands.setdefault(sib['id'], []).append(('delete', f"{sib['id']}@{key}", {}, 'this'))
                     else:
-                        moved = {"start_utc": row["start_utc"], "end_utc": row["end_utc"], "all_day": row.get("all_day")}
-                        copy_commands.setdefault(sib['id'], []).append(('update', f"{sib['id']}@{key}", moved, 'this'))
+                        projected = links.projection_changes(store, row, sib)
+                        for field in ('rrule', 'rdates', 'exdates'):
+                            projected.pop(field, None)
+                        copy_commands.setdefault(sib['id'], []).append(('update', f"{sib['id']}@{key}", projected, 'this'))
     for master_id, uid in refreshed.items():
         # A CalDAV series is one resource read whole: an override VEVENT the server no longer holds (its date
         # cancelled by EXDATE, or the move undone) is not a local exception any more. Our own unsent writes stay.
@@ -430,8 +432,15 @@ def _stage_sync_copy_commands(view, basis, root, commands):
             for iid in assignment.get('_intent_ids', []):
                 intent = view.get_intent(iid)
                 payload = json.loads(intent['payload_json'])
-                if previous and not payload.get('after_intent_id'):
-                    payload['after_intent_id'] = previous
+                if previous:
+                    payload.setdefault('after_intent_id', previous)
+                    if payload.get('baseline'):
+                        observed = ops._baseline_before(basis, view.get_event(intent['event_id']))
+                        if observed and links.changed(observed, payload['baseline']):
+                            # An instance may inherit the acknowledged master change or
+                            # keep its own prior content. Keep both addressed facts.
+                            payload['baseline_after_predecessor'] = payload['baseline']
+                            payload['baseline'] = observed
                     with view._conn() as c:
                         c.execute('UPDATE intents SET payload_json=? WHERE id=?', (json.dumps(payload), iid))
                 previous = iid

@@ -169,6 +169,36 @@ function preferences(account) {
     return form;
 }
 
+function queueView(account) {
+    const queue = account.queue || {};
+    const outgoing = {...(queue.outbox || {})};
+    const held = queue.outbox_held || 0;
+    if (held) {
+        outgoing.retry = Math.max(0, (outgoing.retry || 0) - held);
+        outgoing.held = held;
+    }
+    const counts = rows => Object.entries(rows || {}).filter(([, count]) => count > 0)
+        .map(([state, count]) => `${count} ${state}`).join(' · ');
+    const view = node('div', {class:'delivery-summary'}, [
+        node('p', {text:`Inbox: ${counts(queue.inbox) || 'no captured mail'}`}),
+        node('p', {text:`Outbox: ${counts(outgoing) || 'no queued mail'}`}),
+    ]);
+    if (queue.delivery_reports_pending) view.append(node('p', {class:'note', text:`${queue.delivery_reports_pending} delivery reports waiting for host acknowledgement`}));
+    const rows = queue.receipts || [];
+    if (rows.length) {
+        const recent = node('details', {class:'recent-deliveries'}, [node('summary', {text:'Recent deliveries (latest 20)'})]);
+        for (const receipt of rows) recent.append(node('div', {class:'receipt'}, [
+            node('strong', {text:receipt.state === 'completed' ? 'Accepted by provider' : receipt.state}),
+            node('div', {class:'secondary', text:`Request id: ${receipt.request_id}`}),
+            node('div', {class:'secondary', text:`Message-ID: ${receipt.provider_message_id}`}),
+            receipt.last_error ? node('div', {class:'note', text:receipt.last_error}) : null,
+        ]));
+        recent.append(node('p', {class:'note', text:'Queued or held is not sent. Uncertain acceptance must be inspected before any new send. Use email_receipt with this account id and request id for complete details.'}));
+        view.append(recent);
+    }
+    return view;
+}
+
 function card(account) {
     const card = node('section', {class:'account'});
     card.append(node('div', {class:'address', text:account.label || account.address}),
@@ -197,7 +227,7 @@ function card(account) {
     if (account.connected) controls.append(button('Disconnect locally', async () => {
         await request('accounts/disconnect', {account_id:account.id}); notice = 'Disconnected locally. Mail history and receipts were retained; Google project grants were not revoked.'; noticeError = false; await refresh();
     }, 'danger'));
-    card.append(controls);
+    card.append(controls, queueView(account));
     const details = node('details', {}, [node('summary', {text:`${account.senders.length} sender address${account.senders.length === 1 ? '' : 'es'} · account details`})]);
     details.append(node('p', {class:'secondary', text:`Account id: ${account.id}`}),
                    node('pre', {text:account.senders.join('\n')}));

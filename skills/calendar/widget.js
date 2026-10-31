@@ -387,8 +387,9 @@
 
     function noteAssignments(r) {
         var pend = (r && r.assignments || []).filter(function (a) { return a.status !== 'done'; });
-        state.error = pend.length ? 'Сохранено локально; ' + pend.map(function (a) { return (a.calendar_name || a.calendar_id) + ': ' + (a.message || a.status); }).join('; ') : '';
+        state.error = pend.length ? (r.status === 'failed' || r.status === 'error' ? 'Не сохранено; ' : 'Сохранено локально; ') + pend.map(function (a) { return (a.calendar_name || a.calendar_id) + ': ' + (a.message || a.status); }).join('; ') : '';
         if (r && r.warning) state.error = (state.error ? state.error + '; ' : '') + r.warning;
+        return state.error;
     }
 
     /* ---------- card ---------- */
@@ -535,8 +536,15 @@
             }
             saveButton.disabled = true;
             status.textContent = 'Сохраняю…'; status.className = 'status';
-            p.then(function (r) { state.editing = null; noteAssignments(r); return load(); })
-                .catch(function (e) { saveButton.disabled = false; status.textContent = e.message; status.className = 'status err'; });
+            p.then(function (r) {
+                var outcome = noteAssignments(r);
+                if (r.status === 'failed' || r.status === 'error') {
+                    saveButton.disabled = false; status.textContent = outcome || r.message || 'Изменение не применено';
+                    status.className = 'status err'; return;
+                }
+                state.editing = null; state.notice = outcome;
+                return load();
+            }).catch(function (e) { saveButton.disabled = false; status.textContent = e.message; status.className = 'status err'; });
         }
         if (f.readonly) {
             [title, start, end, allDay, hidden, avail, loc, desc, rem, att, notify, rrule, scopeSel].concat(calInputs).forEach(function (x) { x.disabled = true; });

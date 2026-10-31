@@ -7,6 +7,7 @@ import hashlib
 import json
 
 import ops
+import links
 from model import event_public, iso_utc, new_id, now_utc, parse_stored
 from store import EVENT_COLUMNS
 
@@ -254,7 +255,7 @@ def _accept_provider(local, state, current, templates):
     restore = list(before_rows.values())
     for before in restore:
         if before['id'] in affected:
-            local.update_event(before['id'], {k: v for k, v in before.items() if k != 'id'})
+            local.update_event(before['id'], {k: v for k, v in before.items() if k not in ('id', 'link_state')})
     # Retain history but withdraw a segment whose prerequisite never succeeded.
     # A possibly sent create is never inferred absent from an empty identity.
     for eid in created:
@@ -271,7 +272,7 @@ def _accept_provider(local, state, current, templates):
             # The before-image contains independently accepted unsent content.
             before = before_rows.get(eid)
             if before:
-                local.update_event(eid, {k: v for k, v in before.items() if k not in ('id','external_id','href','etag')})
+                local.update_event(eid, {k: v for k, v in before.items() if k not in ('id','external_id','href','etag','link_state')})
             local.update_event(eid, {'sync_state': 'pending'})
         else:
             observed = current['targets'][eid]['event']
@@ -281,6 +282,12 @@ def _accept_provider(local, state, current, templates):
                 fields = {k: observed[k] for k in _PROVIDER_FIELDS if k in observed}
                 fields.update(sync_state='synced', deleted_at=None)
                 local.update_event(eid, fields)
+                current_row = local.get_event(eid)
+                master = local.get_event(current_row.get('master_id')) if current_row.get('master_id') else current_row
+                previous = before_rows.get(eid) or next(r for r in state['rows'] if r['id'] == eid)
+                if master and master.get('link_group_id') and not links.source_is(local, master) and links.changed(previous, observed, provider_observation=True):
+                    local.update_event(master['id'], {'link_state': links.DIVERGED})
+                    local.update_event(eid, {'link_state': links.DIVERGED})
         local.drop_reminders_for(eid)
     local.set_sync_state(row['calendar_id'], cursor='')
 

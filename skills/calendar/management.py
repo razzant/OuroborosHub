@@ -152,7 +152,7 @@ def cal_manage(ctx, action='', account_id='', calendar_id='', changes=None, shar
             view.settle_intent(rid, 'done', result)
         return bounded_result({'status': 'done', 'request_id': rid, 'result': result})
     except ProviderError as exc:
-        state = 'uncertain' if exc.kind in ('network', 'server', 'retry', 'parse') else 'failed'
+        state = 'uncertain' if exc.kind in ('network', 'server', 'retry', 'parse', 'partial') else 'failed'
         result = {'kind': exc.kind, 'message': exc.message, 'automatic_retry': False}
     except Exception as exc:
         state, result = 'uncertain', {'message': f'Outcome not recorded: {type(exc).__name__}', 'automatic_retry': False}

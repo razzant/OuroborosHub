@@ -164,6 +164,19 @@ def test_accounts_real_frame_forms_aliases_themes_disconnect(tmp_path, monkeypat
             assert account["sender"] == aliases[-1] and account["sending"] == "off"
             assert account["config"]["EMAIL_IMAP_SECURITY"] == "starttls" and account["config"]["EMAIL_IMAP_PORT"] == 1143
             assert len(account["senders"]) == 21
+            from lib.store import EmailStore
+            store = EmailStore(AccountStore(tmp_path).mail_dir(account))
+            store.enqueue_outbox(request_id="held-after-place-disconnect", to=["reader@example.invalid"], body="owed", hold_reason="place_disconnected")
+            store.enqueue_outbox(request_id="uncertain-provider-response", to=["reader@example.invalid"], body="unknown")
+            item = store.claim_outbox()
+            store.uncertain_outbox(item.row_id, item.lease_token, "Provider acceptance unknown")
+            store.enqueue_outbox(request_id="provider-rejected", to=["reader@example.invalid"], body="failed")
+            item = store.claim_outbox()
+            store.fail_outbox(item.row_id, item.lease_token, "Provider rejected message")
+            frame.get_by_role("button", name="Refresh", exact=True).click()
+            expect(frame.locator(".delivery-summary")).to_contain_text("1 held")
+            expect(frame.locator(".delivery-summary")).to_contain_text("1 uncertain")
+            expect(frame.locator(".delivery-summary")).to_contain_text("1 failed")
             for theme in ("light", "dark"):
                 page.evaluate("theme => ouroTheme.set(theme)", theme)
                 expect(frame.locator("html")).to_have_attribute("data-theme", theme)
@@ -174,6 +187,13 @@ def test_accounts_real_frame_forms_aliases_themes_disconnect(tmp_path, monkeypat
             expect(frame.get_by_role("button", name="Reconnect", exact=True)).to_be_visible()
             saved = AccountStore(tmp_path).get(account["id"])
             assert not saved["connected"] and "EMAIL_PASSWORD" not in saved["config"]
+            frame.locator(".recent-deliveries summary").click()
+            expect(frame.locator(".recent-deliveries")).to_contain_text("held-after-place-disconnect")
+            expect(frame.locator(".recent-deliveries")).to_contain_text("uncertain-provider-response")
+            expect(frame.locator(".recent-deliveries")).to_contain_text("provider-rejected")
+            expect(frame.locator(".recent-deliveries")).to_contain_text("Held: place_disconnected")
+            frame.locator(".recent-deliveries").scroll_into_view_if_needed()
+            screenshot(page, f"retained-receipts-{width}.png")
             assert "/api/extensions/email-presence/accounts/preferences" in observed["posts"]
             assert not observed["faults"], observed["faults"]
             page.evaluate("() => disposeWidget()")

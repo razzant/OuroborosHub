@@ -110,7 +110,7 @@ def test_request_ids_and_message_refs_are_account_scoped(tmp_path, monkeypatch):
     assert first["receipt"]["provider_message_id"] != other["receipt"]["provider_message_id"]
     assert first["receipt"]["delivery_reporting"]["place_binding"]["place_id"] == ""
     assert first["receipt"]["delivery_reporting"]["origin"]["source_event_id"] == "another-account-source"
-    assert calls == [a["id"], a["id"], b["id"]]
+    assert calls == [a["id"], b["id"]], "An identical retry must not recapture the existing row's binding"
     conflict = service.send(account_id=a["id"], sender=a["address"], to="recipient@example.invalid", body="hello", request_id="same")
     assert conflict["code"] == "request_id_conflict"
     reference = service.wrap_ref(a, {"message_ref": "gmail:abc"})

@@ -156,20 +156,23 @@ class EmailRuntime:
                          "origin": {"kind": "automatic", "task_id": turn_ref, "source_event_id": item.provider_event_key}}
             if target.context.get("provider_thread_id"):
                 reporting["gmail_thread_id"] = target.context["provider_thread_id"]
+            request_id = f"presence:{item.provider_event_key}:{suffix}"
+            existing = self.store.receipt(request_id)
             hold = ""
             capture = getattr(self.host, "capture_binding", None)
-            if capture:
-                try:
-                    facts = capture(self.account, target.thread_key, thread_id=target.thread_key, require_place=True)
-                    if facts.get("supported"):
-                        reporting["place_binding"] = facts.get("binding")
-                        if not facts.get("allowed"):
-                            hold = str(facts.get("code") or facts.get("state") or "place policy unavailable")
-                except Exception as exc:
-                    reporting["place_binding"] = None
-                    hold = "Original Place binding unavailable (" + type(exc).__name__ + ")"
+            if existing is not None:
+                reporting = existing["delivery_reporting"]
+            elif capture:
+                # Transport failure precedes any outbox record. Let the inbox's
+                # existing retry custody replay the cached paid output, not mint
+                # an immutable unknown binding from a temporary outage.
+                facts = capture(self.account, target.thread_key, thread_id=target.thread_key, require_place=True)
+                if facts.get("supported"):
+                    reporting["place_binding"] = facts.get("binding")
+                    if not facts.get("allowed"):
+                        hold = str(facts.get("code") or facts.get("state") or "place policy unavailable")
             try:
-                self.store.enqueue_outbox(request_id=f"presence:{item.provider_event_key}:{suffix}",
+                self.store.enqueue_outbox(request_id=request_id,
                                           recipients=target.context.get("reply_to") or [target.sender], subject=subject,
                                           body=text, in_reply_to=target.message_id,
                                           references=target.references or ([target.in_reply_to] if target.in_reply_to else []),
@@ -244,6 +247,17 @@ class EmailRuntime:
             self.store.retry_inbox(item.row_id, item.lease_token, note, delay)
         return True
 
+    def _delivery_hold(self, item):
+        conversation = item.references[0] if item.references else item.in_reply_to or item.message_id
+        if "place_binding" in item.reporting:
+            check = getattr(self.host, "binding_hold", None)
+            binding = item.reporting["place_binding"]
+            conversation = binding.get("conversation_id", "") if isinstance(binding, dict) else conversation
+            thread = binding.get("thread_id", "") if isinstance(binding, dict) else ""
+            return check(binding, self.account, conversation, thread_id=thread) if check else "Held: Host cannot check the original Place binding"
+        check = getattr(self.host, "place_hold", None)
+        return check(self.account, conversation) if check else ""
+
     def process_outbox(self):
         item = self.store.claim_outbox()
         if not item:
@@ -253,6 +267,10 @@ class EmailRuntime:
             current = self.account_loader() if self.account_loader else load_settings(self.store.state_dir)
             if current.get("sending", "on") == "off":
                 self.store.hold_outbox(item, "Held: " + SENDING_OFF)
+                return True
+            reason = self._delivery_hold(item)
+            if reason:
+                self.store.hold_outbox(item, reason)
                 return True
             message = self.client.message(item)
             reporting = dict(item.reporting)
@@ -271,16 +289,8 @@ class EmailRuntime:
             item = replace(item, reporting=reporting)
             delivery = getattr(self.client, "delivery", None) or self.client.smtp
             with delivery() as smtp:
-                conversation = item.references[0] if item.references else item.in_reply_to or item.message_id
-                if "place_binding" in reporting:
-                    check = getattr(self.host, "binding_hold", None)
-                    binding = reporting["place_binding"]
-                    conversation = binding.get("conversation_id", "") if isinstance(binding, dict) else conversation
-                    thread = binding.get("thread_id", "") if isinstance(binding, dict) else ""
-                    reason = check(binding, self.account, conversation, thread_id=thread) if check else "Held: Host cannot check the original Place binding"
-                else:
-                    check = getattr(self.host, "place_hold", None)
-                    reason = check(self.account, conversation) if check else ""
+                # Policy may have changed while the provider connection opened.
+                reason = self._delivery_hold(item)
                 if reason:
                     self.store.hold_outbox(item, reason)
                     return True

@@ -4,7 +4,7 @@ The event-level primary flag chooses one source for a relationship. A projection
 observed divergence survives provider ACKs; only an explicit link operation resumes
 following. This module writes no provider data and creates no delivery queue.
 """
-from model import parse_stored, BUSY_COPY_TITLE
+from model import BUSY_COPY_TITLE, event_field_value
 
 FOLLOWING = 'following'
 DIVERGED = 'diverged'
@@ -34,30 +34,18 @@ def followers(store, row):
             if member['id'] != row['id'] and member.get('link_state', FOLLOWING) == FOLLOWING]
 
 
-def changed(previous, incoming):
-    """A new ETag alone is not an edit of the projection's content."""
-    for field in COPY_FIELDS:
-        if field not in incoming:
-            continue
-        left, right = previous.get(field), incoming.get(field)
-        if field in ('start_utc', 'end_utc'):
-            left, right = parse_stored(left), parse_stored(right)
-        elif field == 'all_day':
-            left, right = bool(left), bool(right)
-        elif field == 'tz':
-            continue  # equivalent provider zone spellings do not change the instants
-        else:
-            left, right = left or '', right or ''
-        if left != right:
-            return True
-    return False
+def changed(previous, incoming, *, provider_observation=False):
+    """Compare content meaning, without confusing provider normalization with an edit."""
+    return any(event_field_value(previous, field, provider_observation=provider_observation)
+               != event_field_value(incoming, field, provider_observation=provider_observation)
+               for field in COPY_FIELDS if field in incoming and field != 'tz')
 
 
 def observe_projection(store, previous, incoming):
     """Keep the observed relation separate from its next delivery acknowledgement."""
     if not previous.get('link_group_id') or source_is(store, previous):
         return
-    if changed(previous, incoming):
+    if changed(previous, incoming, provider_observation=True):
         store.update_event(previous['id'], {'link_state': DIVERGED})
 
 

@@ -89,7 +89,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: razzant/ouroboros
-          ref: 796574aa6cd7630309a5268b0e5bb1563d66453c
+          ref: 9c4411457bdb752d9379f17a97cf171a22384402
           path: mail-calendar-core
           persist-credentials: false
       - name: Install the mail and calendar consumer runtime

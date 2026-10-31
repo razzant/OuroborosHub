@@ -21,6 +21,10 @@ _MAX_ATTACHMENT_FILES = 10
 _MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 
+def _delivery_state(state, error):
+    return "held" if state == "retry" and str(error).startswith("Held:") else state
+
+
 class RequestIdConflict(ValueError):
     """A request id already names a different outgoing message."""
 
@@ -607,8 +611,7 @@ class EmailStore:
             if not r:
                 return None
             result = dict(r)
-            if result["state"] == "retry" and str(result["last_error"]).startswith("Held:"):
-                result["state"] = "held"
+            result["state"] = _delivery_state(result["state"], result["last_error"])
             result["delivery_reporting"] = json.loads(result.pop("reporting_json"))
             result["account_id"] = result["delivery_reporting"].get("account_id", "")
             result["sender"] = result["delivery_reporting"].get("sender", "")
@@ -622,7 +625,8 @@ class EmailStore:
         with self._connect() as db:
             counts = {table: {r[0]: r[1] for r in db.execute(f"SELECT state,COUNT(*) FROM {table} GROUP BY state")} for table in ("inbox", "outbox")}
             counts["cursors"] = [json.loads(r[0]) for r in db.execute("SELECT value FROM runtime_state WHERE key LIKE 'cursor:%'")]
-            counts["receipts"] = [dict(r) for r in db.execute("SELECT request_id,state,provider_message_id,last_error FROM outbox ORDER BY id DESC LIMIT 20")]
+            counts["receipts"] = [{**dict(r), "state": _delivery_state(r["state"], r["last_error"])} for r in db.execute(
+                "SELECT request_id,state,provider_message_id,last_error FROM outbox ORDER BY id DESC LIMIT 20")]
             counts["delivery_reports_pending"] = db.execute("SELECT COUNT(*) FROM outbox WHERE report_due_at>0").fetchone()[0]
             counts["outbox_held"] = db.execute("SELECT COUNT(*) FROM outbox WHERE state='retry' AND last_error LIKE 'Held:%'").fetchone()[0]
             # Retained events still observing their original attempt or child (counted in their inbox state too).

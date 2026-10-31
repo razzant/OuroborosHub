@@ -72,7 +72,7 @@ class MailService:
         url = os.environ.get("HOST_SERVICE_URL") or f"http://127.0.0.1:{port}"
         host = LoopbackPresenceHostAdapter("", host_service_url=url, skill_token=getter(), sync_only=True)
         try:
-            return host.capture_binding(account["id"], conversation)
+            return host.capture_binding(account["id"], conversation, thread_id=conversation)
         finally:
             host.close_sync()
 
@@ -109,8 +109,15 @@ class MailService:
             pass
         raise ValueError("Use the complete message_ref returned by email_search or email_read")
 
+    def queue_status(self, account):
+        directory = self.accounts.mail_dir(account)
+        if not (directory / "email_presence.sqlite3").exists():
+            return {"inbox": {}, "outbox": {}, "outbox_held": 0, "receipts": [], "delivery_reports_pending": 0}
+        store = EmailStore(directory)
+        return {**store.status(), "poll_health": store.get("poll_health")}
+
     def list_accounts(self):
-        return {"accounts": [AccountStore.public(row) for row in self.accounts.list()],
+        return {"accounts": [{**AccountStore.public(row), "queue": self.queue_status(row)} for row in self.accounts.list()],
                 "setup": "Open the Email accounts widget to connect Google, IMAP or Proton Bridge. A Place is optional for ordinary tools."}
 
     def search(self, *, account_id="", folder=None, criteria=None, query="", limit=50, page_token=""):
@@ -192,7 +199,10 @@ class MailService:
                 raise ValueError("to (or reply_all source) and body are required")
             rid = str(request_id or uuid.uuid4().hex)
             thread = (references or [reply_to_message_id or store.message_id_for(rid)])[0]
-            binding = self.capture_binding(account, thread)
+            # Identical retries keep the first row's binding, including an unknown
+            # or disconnected one. The store still compares payload and sender.
+            existing = store.receipt(rid)
+            binding = self.capture_binding(account, thread) if existing is None else {}
             reporting = {"version": -1, "account_id": account["id"], "sender": chosen_sender, "origin": tool_origin(ctx)}
             if original and original.get("provider_thread_id"):
                 reporting["gmail_thread_id"] = original["provider_thread_id"]

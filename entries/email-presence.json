@@ -6,7 +6,7 @@
     "Email"
   ],
   "description": "Multi-account Gmail API and IMAP/SMTP mail, account settings, folders, drafts and durable delivery, with optional Presence intake.",
-  "digest": "62b5789e39e8f22add925f51866daae9699aa07d178e82d2198e54b75476ab02",
+  "digest": "92b7902abe89c18370fb0358009d05fa449015cc8a7f8e4fcc9f370e858d1d68",
   "icon": "ui/icon.svg",
   "install_specs": [
     "httpx",
