@@ -22,11 +22,10 @@ class ReviewR6Tests(unittest.TestCase):
         for clearing in (False, True):
             with self.subTest(clearing=clearing):
                 ctx, cid, source, dest, adapter, eid, copy = r5.ReviewR5Tests().linked()
-                # Establish old date sets at both ends through real conditional writes.
-                for target in (eid, copy['id']):
-                    result = ops.update_event(ctx.store, ctx.providers, target,
-                        {'exdates':iso_utc(_day(3)), 'rdates':iso_utc(_day(9))}, scope='all', propagate=False)
-                    self.assertTrue(all(a['status']=='done' for a in result['assignments']),result)
+                # Source-driven setup keeps the second calendar a following projection.
+                result = ops.update_event(ctx.store, ctx.providers, eid,
+                    {'exdates':iso_utc(_day(3)), 'rdates':iso_utc(_day(9))}, scope='all')
+                self.assertTrue(all(a['status']=='done' for a in result['assignments']),result)
                 wanted_ex = [] if clearing else [_day(4)+timedelta(hours=1),_day(5)+timedelta(hours=1)]
                 wanted_rd = [] if clearing else [_day(10)+timedelta(hours=1)]
                 def edit(calendar):
@@ -61,7 +60,7 @@ class ReviewR6Tests(unittest.TestCase):
                 if not competing: self.assertEqual(server.events[rid]['transparency'],'transparent')
 
     def test_google_exdate_removal_replaces_caldav_copy_exclusions(self):
-        ctx,cid,caldav,google,left,eid,copy=r5.ReviewR5Tests().linked()
+        ctx,cid,caldav,google,left,eid,copy=r5.ReviewR5Tests().linked(source_provider="google")
         right=ctx.providers.adapter_for('google:owner@example.test')
         remote=google.events[copy['external_id']]
         for dates in ([iso_utc(_day(3))], []):

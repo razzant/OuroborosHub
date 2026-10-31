@@ -8,19 +8,21 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import ops
+import links
 import conflicts as conflict_ops
 import reminders as rem
 from model import (
-    AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, DEFAULT_LOCAL_CALENDAR_ID, MAX_EVENTS, MAX_WINDOW_DAYS, PROVIDER_GOOGLE,
-    PROVIDER_LOCAL, PROVIDER_YANDEX, REMINDERS_DEFAULT, SCOPES, SECRET_KEYS, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_HIDDEN, VISIBILITY_SHOWN,
+    AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, MAX_EVENTS, MAX_WINDOW_DAYS, PROVIDER_GOOGLE,
+    PROVIDER_LOCAL, REMINDERS_DEFAULT, SCOPES, SECRET_KEYS, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_HIDDEN, VISIBILITY_SHOWN,
     WEEKDAY_LABELS,
-    bounded_result, day_bounds, event_public, get_tz, iso_local, iso_utc, json_dumps, label, now_utc, parse_input,
+    bounded_result, day_bounds, event_public, get_tz, iso_local, iso_utc, json_dumps, label, new_id, now_utc, parse_input,
     parse_stored, parse_working_hours, tz_name,
 )
 from providers import Providers
+from accounts import connect_google, reload_google, reload_yandex, _public_base
 from store import Store
 
-CONFIRM_MESSAGE = "Запись делается только по явной команде владельца или после его выбора: повтори вызов с confirm=true"
+CONFIRM_MESSAGE = "Это предварительный просмотр. Если действие входит в разовое или постоянное поручение, примени его с confirm=true; при неясности уточни у владельца."
 
 
 class Context:
@@ -167,16 +169,17 @@ def cal_status(ctx: Context, **kwargs) -> str:
     counts = st.intent_counts()
     channel = st.get_setting("notify_channel_state") or {"state": "unknown"}
     next_steps: List[str] = []
+    account_details = {}
     if ctx.providers.yandex_error:
         next_steps.append(ctx.providers.yandex_error)
-    if not ctx.secrets.get("YANDEX_CALDAV_ACCOUNTS") and not any(a["provider"] == PROVIDER_YANDEX for a in accounts):
-        next_steps.append("Яндекс не подключён: владелец кладёт YANDEX_CALDAV_ACCOUNTS в Settings → Secrets, затем cal_settings(action='reload_yandex')")
-    if not ctx.secrets.get("GOOGLE_CALENDAR_CLIENT_ID"):
-        next_steps.append("Google не подключён: нужны GOOGLE_CALENDAR_CLIENT_ID/SECRET и CALENDAR_TOKEN_KEY в Settings → Secrets (этап Google)")
+    import providers_google as gp
     for a in accounts:
         if a["provider"] == PROVIDER_LOCAL:
+            account_details[a['id']] = {'capabilities': {'create': True, 'update': True, 'delete': True, 'sharing': False}}
             continue
-        ctx.providers.adapter_for(a["id"])   # fills providers.errors with the concrete reason when there is none
+        adapter = ctx.providers.adapter_for(a["id"])   # fills providers.errors with the concrete reason when there is none
+        account_details[a['id']] = {'capabilities': adapter.calendar_capabilities() if adapter and hasattr(adapter, 'calendar_capabilities') else None,
+                                    'server_url': getattr(adapter, 'server_url', '') if adapter else ''}
         reason = ctx.providers.errors.get(a["id"])
         if reason:
             next_steps.append(f"{a['alias'] or a['id']}: адаптер недоступен — {reason}")
@@ -198,6 +201,7 @@ def cal_status(ctx: Context, **kwargs) -> str:
         "timezone": tz_name(ctx.tz), "now_local": now.replace(microsecond=0).isoformat(), "today": now.date().isoformat(),
         "weekday": WEEKDAY_LABELS[now.weekday()],
         "accounts": [{"id": a["id"], "provider": a["provider"], "alias": a["alias"], "status": a["status"], "last_sync": a.get("last_sync"),
+                      'login': a.get('login') or '', **account_details.get(a['id'], {}),
                       "last_error": (a.get("last_error") or "")[:160],
                       **({"adapter_error": ctx.providers.errors[a["id"]][:160]} if ctx.providers.errors.get(a["id"]) else {})} for a in accounts],
         "calendars": [{"id": c["id"], "name": c["name"], "account_id": c["account_id"], "provider": c["provider"], "writable": bool(c["writable"]),
@@ -206,11 +210,18 @@ def cal_status(ctx: Context, **kwargs) -> str:
         "events_today": len([o for o in today if o.get("visibility") != VISIBILITY_HIDDEN]),
         "hidden_today": len([o for o in today if o.get("visibility") == VISIBILITY_HIDDEN]),
         "pending_writes": counts.get("pending", 0), "conflicts": counts.get("conflict", 0), "failed_writes": counts.get("failed", 0),
-        "reminders": {"rules": rem.get_rules(st), "channel": channel, "upcoming": rem.upcoming(st, ctx.tz, limit=5),
+        'uncertain_writes': counts.get('uncertain', 0),
+        'calendar_operations': [{'request_id': row['id'], 'state': row['state'], 'account_id': row['account_id'],
+                                 'calendar_id': row['calendar_id'], 'result': json.loads(row['result_json'])}
+                                for row in st.calendar_operations()],
+        "reminders": {"rules": rem.get_rules(st), 'modes': st.get_setting(rem.MODE_KEY) or {}, "channel": channel, "upcoming": rem.upcoming(st, ctx.tz, limit=5),
                       "unknown_count": unknown_reminders},
         "settings": {"working_hours": st.get_setting("working_hours") or "09:00-19:00", "preferences": st.get_setting("preferences") or "",
+                     'public_base_url': st.get_setting('public_base_url') or '', 'full_preferences': 'cal_settings(action=get)',
                      "busy_publish_set": [c["id"] for c in cals if c["role_publish"]]},
+        'connection_options': {'google_client_configured': bool(gp.client_credentials(ctx.secrets)[0]), 'caldav_form': True},
         "companion": ctx.companion_health(),
+        "link_issues": st.link_issues(),
         "next_step": next_steps + _companion_secret_gap(ctx),
         "hint": "Времена — ISO 8601 с offset владельца; «сегодня/завтра» считай от now_local. Скрытые (служебные) события — распорядок владельца, их видно тебе, а в виджете по переключателю.",
     })
@@ -220,7 +231,7 @@ def _companion_secret_gap(ctx: Context) -> List[str]:
     """The companion inherits granted secrets at spawn; a newly added key needs a skill restart (toggle off/on)."""
     health = ctx.companion_health()
     seen = health.get("secrets_present") or {}
-    missing = [k for k in SECRET_KEYS if ctx.secrets.get(k) and seen and not seen.get(k)]
+    missing = [k for k in ('YANDEX_CALDAV_ACCOUNTS', 'CALENDAR_TOKEN_KEY') if ctx.secrets.get(k) and seen and not seen.get(k)]
     if missing:
         return [f"Фоновый процесс ещё не видит секреты {', '.join(missing)}: выключи и включи скилл calendar в Skills (toggle), чтобы он перезапустился"]
     return []
@@ -232,7 +243,7 @@ def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = No
     if id:
         base, occ = ops._series_id(str(id))
         row = st.get_event(base)
-        if row is None or (row.get('deleted_at') and row.get('sync_state') != 'conflict'):
+        if row is None or (row.get('deleted_at') and row.get('sync_state') != 'conflict' and row.get('link_state') != links.MISSING):
             return json_dumps({"status": "not_found", "message": f"событие {id} не найдено"})
         try:
             master, occ = ops.resolve_occurrence(st, row, occ)
@@ -244,10 +255,11 @@ def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = No
             else:
                 return json_dumps({"status": "not_found", "message": f"событие {id} не найдено"})
         out = event_public(row, ctx.tz, compact=False)
+        if row.get('link_group_id'):
+            out['link'] = links.inspect(st, master)
         if occ:
-            occ_dt = parse_stored(occ)
             exception = next((e for e in st.exceptions_for(master["id"]) if e.get("recurrence_id") == occ), None)
-            effective = parse_stored(exception["start_utc"]) if exception else occ_dt
+            effective = ops.routine_time(master, exception["start_utc"] if exception else occ, ctx.tz)
             live = [o for o in ops.expand([master], effective - timedelta(minutes=1), effective + timedelta(days=2),
                                           st.exceptions_for, owner_tz=ctx.tz)
                     if o.get("occurrence_start_utc") == occ] if effective else []
@@ -365,7 +377,20 @@ def cal_create(ctx: Context, title: str = "", start: str = "", end: str = "", du
 def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", duration_min: Any = None, all_day: Any = None, title: str = "",
                description: Any = None, location: Any = None, hidden: Any = None, availability: str = "", calendars: Any = None,
                attendees: Any = None, reminders: Any = None, rrule: Any = None, response: str = "", scope: str = SCOPE_THIS,
-               send_updates: bool = False, confirm: bool = False, resolution: str = '', resolution_token: str = '', **kwargs) -> str:
+               send_updates: bool = False, confirm: bool = False, resolution: str = '', resolution_token: str = '', link_action: str = '', **kwargs) -> str:
+    if link_action:
+        row = ctx.store.get_event(ops._series_id(str(id))[0])
+        if row is None:
+            return json_dumps({'status': 'not_found'})
+        if any((start, end, title, calendars, response, resolution, resolution_token)) or any(
+                value is not None for value in (duration_min, all_day, description, location, hidden, attendees, reminders, rrule)):
+            return json_dumps({'status': 'error', 'message': 'link_action применяется отдельно от изменения содержания'})
+        if not _bool(confirm):
+            return bounded_result({'status': 'needs_confirm', 'message': CONFIRM_MESSAGE, 'event': event_public(row, ctx.tz),
+                                   'link_action': link_action, 'scope': scope, 'link': links.inspect(ctx.store, row)})
+        result = ops.link_event(ctx.store, ctx.providers, str(id), str(link_action), scope=scope)
+        warning = _plan_reminders(ctx)
+        return bounded_result({**result, **({'warning': warning} if warning else {})})
     if resolution or resolution_token:
         if not id:
             return json_dumps({'status':'error', 'message':'нужен id выбранной копии'})
@@ -399,7 +424,7 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
     if start or end or duration_min is not None or all_day is not None:
         exception = next((e for e in ctx.store.exceptions_for(row["id"]) if e.get("recurrence_id") == occ), None) if occ else None
         effective = exception or row
-        old_s = parse_stored(effective["start_utc"] if exception else (occ or row["start_utc"]))
+        old_s = ops.routine_time(row, effective["start_utc"] if exception else (occ or row["start_utc"]), ctx.tz)
         old_dur = (parse_stored(effective["end_utc"]) - parse_stored(effective["start_utc"])) if effective.get("start_utc") and effective.get("end_utc") else timedelta(hours=1)
         new_s, is_date = parse_input(start, ctx.tz, old_s)
         new_e, _ = parse_input(end, ctx.tz, None)
@@ -448,7 +473,7 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
         return bounded_result({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "event": event_public(row, ctx.tz), "changes": changes, "scope": scope})
     result = {"status": "ok", "event": None, "assignments": []}
     if changes:
-        result = ops.update_event(ctx.store, ctx.providers, str(id), changes, scope=scope, send_updates=_bool(send_updates))
+        result = ops.update_event(ctx.store, ctx.providers, str(id), changes, scope=scope, send_updates=_bool(send_updates), owner_tz=ctx.tz)
     if cal_ids is not None:
         target_row = ctx.store.get_event(result.get("split_master_id") or base) or row
         result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, target_row, cal_ids)
@@ -457,10 +482,12 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
     warning = _plan_reminders(ctx)
     ev = result.get("event") or ctx.store.get_event(base)
     statuses = {a["status"] for a in result["assignments"]}
-    status = "updated" if statuses <= {"done"} else ("pending" if "pending" in statuses else "conflict" if "conflict" in statuses else "updated_partially")
-    return bounded_result({"status": status, "message": _assignment_message("Обновлено", ev, result["assignments"], ctx.tz),
+    if (result.get('reassign') or {}).get('failed'):
+        statuses.add('failed')
+    status = "updated" if statuses <= {"done"} else ("pending" if "pending" in statuses else "conflict" if "conflict" in statuses else "updated_partially" if 'done' in statuses else 'failed')
+    return bounded_result({"status": status, "message": _assignment_message("Не изменено" if status == 'failed' else "Обновлено", ev, result["assignments"], ctx.tz),
                            "event": event_public(ev, ctx.tz, compact=False) if ev else None, "assignments": result["assignments"],
-                           "reassign": result.get("reassign"), **({"warning": warning} if warning else {})})
+                           "reassign": result.get("reassign"), 'link': result.get('link'), **({"warning": warning} if warning else {})})
 
 
 def cal_delete(ctx: Context, id: str = "", scope: str = SCOPE_THIS, send_updates: bool = False, confirm: bool = False, **kwargs) -> str:
@@ -490,8 +517,8 @@ def cal_delete(ctx: Context, id: str = "", scope: str = SCOPE_THIS, send_updates
                                "scope": scope, "affected": affected})
     result = ops.delete_event(ctx.store, ctx.providers, str(id), scope=scope, send_updates=_bool(send_updates))
     statuses = {a["status"] for a in result["assignments"]}
-    status = "deleted" if statuses <= {"done"} else ("pending" if "pending" in statuses else ("conflict" if "conflict" in statuses else "deleted_partially"))
-    return bounded_result({"status": status, "message": _assignment_message("Удалено", row, result["assignments"], ctx.tz), "assignments": result["assignments"]})
+    status = "deleted" if statuses <= {"done"} else ("pending" if "pending" in statuses else "conflict" if "conflict" in statuses else "deleted_partially" if 'done' in statuses else 'failed')
+    return bounded_result({"status": status, "message": _assignment_message("Не удалено" if status == 'failed' else "Удалено", row, result["assignments"], ctx.tz), "assignments": result["assignments"]})
 
 
 def cal_free(ctx: Context, start: str = "", end: str = "", duration_min: int = 60, sources: Any = None, working_hours: str = "", max_slots: int = 6, **kwargs) -> str:
@@ -532,7 +559,8 @@ def cal_free(ctx: Context, start: str = "", end: str = "", duration_min: int = 6
     })
 
 
-def cal_reminders(ctx: Context, action: str = "list", offsets: Any = None, calendar_id: str = "", confirm: bool = False, **kwargs) -> str:
+def cal_reminders(ctx: Context, action: str = "list", offsets: Any = None, calendar_id: str = "", confirm: bool = False,
+                  restore_provider: bool = True, **kwargs) -> str:
     st = ctx.store
     action = str(action or "list").lower()
     if action == "list":
@@ -563,7 +591,7 @@ def cal_reminders(ctx: Context, action: str = "list", offsets: Any = None, calen
         cal_ids, err = ctx.resolve_calendars(calendar_id)
         if err or not cal_ids:
             return json_dumps({"status": "error", "message": err or "нужен calendar_id"})
-        report = set_reminder_mode(ctx, cal_ids[0], action == "enable_calendar")
+        report = set_reminder_mode(ctx, cal_ids[0], action == "enable_calendar", restore_provider=_bool(restore_provider, True))
         _plan_reminders(ctx)
         return bounded_result({"status": "updated", **report, "rules": rem.get_rules(st), "upcoming": rem.upcoming(st, ctx.tz, limit=10)})
     else:
@@ -572,7 +600,7 @@ def cal_reminders(ctx: Context, action: str = "list", offsets: Any = None, calen
     return bounded_result({"status": "updated", "rules": rules, "upcoming": rem.upcoming(st, ctx.tz, limit=10)})
 
 
-def set_reminder_mode(ctx: Context, calendar_id: str, on: bool) -> Dict[str, Any]:
+def set_reminder_mode(ctx: Context, calendar_id: str, on: bool, *, restore_provider: bool = True) -> Dict[str, Any]:
     """20 A for one external calendar: import the provider's default reminders as the calendar rule, keep per-event
     alerts as Ouroboros reminders, then silence the provider (calendar defaults now, per-event overrides on next write)."""
     st = ctx.store
@@ -582,29 +610,48 @@ def set_reminder_mode(ctx: Context, calendar_id: str, on: bool) -> Dict[str, Any
     if cal["provider"] == PROVIDER_LOCAL:
         return {"calendar_id": calendar_id, "note": "локальный календарь и так напоминает через Уроборос"}
     report: Dict[str, Any] = {"calendar_id": calendar_id, "mode": "on" if on else "off", "provider_muted": False, "manual_steps": []}
+    backup_key = f"google_pre_mute_reminders:{calendar_id}"
+    backup = st.get_setting(backup_key)
+    adapter = ctx.providers.adapter_for(cal["account_id"])
     if not on:
-        saved = st.get_setting(f"google_default_reminders:{calendar_id}") or []
-        adapter = ctx.providers.adapter_for(cal["account_id"])
-        if saved and adapter is not None and hasattr(adapter, "set_default_reminders"):
+        if cal['provider'] == PROVIDER_GOOGLE and restore_provider and (backup is None or adapter is None):
+            return {**report, 'mode': 'on', 'status': 'failed',
+                    'message': 'Исходные напоминания или аккаунт недоступны. Режим оставлен включённым; '
+                               'restore_provider=false выключает только местные уведомления, не обещая восстановление Google.'}
+        if restore_provider and backup is not None and adapter is not None and hasattr(adapter, "set_default_reminders"):
             try:
-                adapter.set_default_reminders(cal, saved)
-                report["provider_restored"] = saved
+                adapter.set_default_reminders(cal, backup)
+                st.set_setting(f"google_default_reminders:{calendar_id}", backup)
+                report["provider_restored"] = backup
+                st.delete_setting(backup_key)
             except ops.ProviderError as exc:
                 # neither side would remind: keep Ouroboros on and say so
                 report.update({"mode": "on", "status": "failed",
                                "message": f"режим оставлен включённым: не удалось вернуть напоминания провайдера — {exc.message}"})
                 return report
-        else:
+        elif restore_provider:
             report["manual_steps"].append("напоминания провайдера, снятые при включении режима, восстанови в его настройках вручную")
         rem.set_mode(st, calendar_id, False)
         return report
-    modes = rem.set_mode(st, calendar_id, True)
-    defaults = st.get_setting(f"google_default_reminders:{calendar_id}") or []
+    was_on = bool((st.get_setting(rem.MODE_KEY) or {}).get(calendar_id))
+    defaults = st.get_setting(f"google_default_reminders:{calendar_id}")
+    if cal['provider'] == PROVIDER_GOOGLE and backup is None and not was_on:
+        if defaults is None:
+            if adapter is None:
+                return {**report, 'mode': 'off', 'status': 'failed', 'message': 'Google не подключён; напоминания не изменены'}
+            try:
+                current = next(c for c in adapter.list_calendars() if c['id'] == calendar_id)
+                defaults = current.get('default_reminders') or []
+            except (StopIteration, ops.ProviderError) as exc:
+                return {**report, 'mode': 'off', 'status': 'failed', 'message': f'Не удалось прочитать исходные напоминания: {exc}'}
+        st.set_setting(backup_key, defaults)
+        backup = defaults
+    rem.set_mode(st, calendar_id, True)
+    defaults = backup if backup is not None else (defaults or [])
     minutes = sorted({int(d.get("minutes")) for d in defaults if isinstance(d, dict) and d.get("minutes") is not None})
-    if minutes:
+    if minutes and not was_on:
         rem.set_rules(st, calendar_id=calendar_id, calendar_offsets=minutes)
         report["imported_default"] = minutes
-    adapter = ctx.providers.adapter_for(cal["account_id"])
     if adapter is not None and hasattr(adapter, "set_default_reminders"):
         try:
             adapter.set_default_reminders(cal, [])
@@ -619,27 +666,48 @@ def set_reminder_mode(ctx: Context, calendar_id: str, on: bool) -> Dict[str, Any
 
 def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visible: Any = None, busy_source: Any = None, publish_busy: Any = None,
                  publish_mode: str = "", default: Any = None, name: str = "", working_hours: str = "", timezone: str = "", preferences: Any = None,
-                 confirm: bool = False, **kwargs) -> str:
+                 confirm: bool = False, public_base_url: str = "", **kwargs) -> str:
     st = ctx.store
     action = str(action or "get").lower()
     if action == "get":
-        return bounded_result({"status": "ok", "timezone": tz_name(ctx.tz), "working_hours": st.get_setting("working_hours") or "09:00-19:00",
-                               "preferences": st.get_setting("preferences") or "",
+        return json_dumps({"status": "ok", "timezone": tz_name(ctx.tz), "working_hours": st.get_setting("working_hours") or "09:00-19:00",
+                               "preferences": st.get_setting("preferences") or "", 'public_base_url': st.get_setting('public_base_url') or '',
                                "calendars": [{"id": c["id"], "name": c["name"], "provider": c["provider"], "visible": bool(c["role_visible"]),
                                               "busy_source": bool(c["role_busy"]), "publish_busy": bool(c["role_publish"]), "publish_mode": c["publish_mode"],
                                               "default": bool(c["is_default"]), "writable": bool(c["writable"])} for c in st.list_calendars()],
                                "accounts": st.list_accounts(), "secrets_present": {k: bool(ctx.secrets.get(k)) for k in SECRET_KEYS},
                                "actions": ["set", "set_calendar", "new_local_calendar", "reload_yandex", "connect_google", "reload_google", "disconnect", "sync_now"]})
     if not _bool(confirm):
-        return json_dumps({"status": "needs_confirm", "message": "Изменение настроек календаря — по команде владельца: повтори с confirm=true", "action": action})
+        return json_dumps({"status": "needs_confirm", "message": CONFIRM_MESSAGE, "action": action})
     if action == "set":
+        fields = {}
         if working_hours:
-            parse_working_hours(working_hours)
-            st.set_setting("working_hours", str(working_hours))
+            try:
+                first, last = str(working_hours).split('-', 1)
+                beginning, finish = datetime.strptime(first, '%H:%M').time(), datetime.strptime(last, '%H:%M').time()
+                if beginning >= finish:
+                    raise ValueError('end before start')
+                fields['working_hours'] = beginning.strftime('%H:%M') + '-' + finish.strftime('%H:%M')
+            except ValueError:
+                return json_dumps({'status': 'error', 'message': 'working_hours: HH:MM-HH:MM в пределах одного дня'})
         if timezone:
-            st.set_setting("timezone", str(timezone))
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+            try:
+                ZoneInfo(timezone)
+            except (ZoneInfoNotFoundError, ValueError):
+                return json_dumps({'status': 'error', 'message': 'Нужна существующая временная зона IANA, например Europe/Moscow'})
+            fields['timezone'] = str(timezone)
+        if public_base_url:
+            try:
+                fields['public_base_url'] = _public_base(public_base_url)
+            except ValueError as exc:
+                return json_dumps({'status': 'error', 'message': str(exc)})
         if preferences is not None:
-            st.set_setting("preferences", str(preferences)[:4000])
+            fields['preferences'] = str(preferences)
+        with st.transaction() as view:
+            for key, value in fields.items():
+                view.set_setting(key, value)
+        ctx.tz = get_tz(st.get_setting('timezone') or '')
         return json_dumps({"status": "updated", "working_hours": st.get_setting("working_hours"), "timezone": st.get_setting("timezone") or tz_name(ctx.tz),
                            "preferences": st.get_setting("preferences") or ""})
     if action == "set_calendar":
@@ -669,12 +737,14 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
             return json_dumps({"status": "error", "message": "нужно name"})
         slug = "".join(ch for ch in name.lower().replace(" ", "_") if ch.isalnum() or ch == "_")[:24] or "cal"
         cid = f"local:{slug}"
+        if st.get_calendar(cid) is not None:
+            cid = 'local:' + new_id(slug)
         st.upsert_calendar({"id": cid, "account_id": "local", "provider": PROVIDER_LOCAL, "external_id": slug, "name": name, "writable": True})
         return json_dumps({"status": "created", "calendar": st.get_calendar(cid)})
     if action == "reload_yandex":
         return bounded_result(reload_yandex(ctx))
     if action == "connect_google":
-        return bounded_result(connect_google(ctx))
+        return bounded_result(connect_google(ctx, public_base_url=public_base_url))
     if action == "reload_google":
         return bounded_result(reload_google(ctx))
     if action == "disconnect":
@@ -682,12 +752,19 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
         if not accounts:
             return json_dumps({"status": "not_found", "message": "укажи id аккаунта (см. cal_status → accounts)"})
         acc = accounts[0]
+        if acc['provider'] == PROVIDER_LOCAL:
+            return json_dumps({'status': 'error', 'message': 'Локальный календарь не является внешним подключением; события и настройки сохранены'})
         cancelled = st.cancel_intents_for_account(acc["id"])
         st.delete_account(acc["id"])
         forgot = False
         if acc["provider"] == PROVIDER_GOOGLE:
             import providers_google as gp
-            forgot = gp.forget_account(ctx.state_dir, str(ctx.secrets.get("CALENDAR_TOKEN_KEY") or ""), acc.get("login") or acc["id"].split(":", 1)[-1])
+            forgot = gp.forget_account(ctx.state_dir, str(ctx.secrets.get("CALENDAR_TOKEN_KEY") or ""), acc["id"].split(":", 1)[-1])
+        else:
+            from credentials import _mutate_tokens
+            def forget(vault):
+                return vault.pop(acc['id'], None) is not None
+            forgot = _mutate_tokens(ctx.state_dir, str(ctx.secrets.get('CALENDAR_TOKEN_KEY') or ''), forget)
         ctx.providers = Providers(ctx.secrets, ctx.state_dir)
         return json_dumps({"status": "updated", "cancelled_intents": cancelled, "tokens_dropped": forgot,
                            "message": f"аккаунт {acc['id']} отключён; локальные события не тронуты, незавершённых записей отменено: {cancelled};"
@@ -696,96 +773,6 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
         st.set_setting("sync_requested_at", iso_utc(now_utc()))
         return json_dumps({"status": "accepted", "message": "фоновая синхронизация запрошена; результат — в cal_status через минуту"})
     return json_dumps({"status": "error", "message": "неизвестное action"})
-
-
-def reload_yandex(ctx: Context) -> Dict[str, Any]:
-    """Read accounts from the secret, discover calendars, keep owner roles of known calendars."""
-    st = ctx.store
-    if ctx.providers.yandex_error:
-        return {"status": "error", "message": ctx.providers.yandex_error}
-    if not ctx.providers.yandex_accounts:
-        return {"status": "not_connected", "message": "YANDEX_CALDAV_ACCOUNTS пуст или не выдан скиллу (грант выдаётся после появления ключа в Secrets)"}
-    report = []
-    for acc in ctx.providers.yandex_accounts:
-        account_id = f"{PROVIDER_YANDEX}:{acc['login']}"
-        st.upsert_account({"id": account_id, "provider": PROVIDER_YANDEX, "alias": acc["alias"], "login": acc["login"], "status": "ok"})
-        adapter = ctx.providers.adapter_for(account_id)
-        try:
-            cals = adapter.list_calendars()
-        except ops.ProviderError as exc:
-            st.set_account_status(account_id, "auth_failed" if exc.kind == "auth" else "error", exc.message)
-            report.append({"account": account_id, "status": exc.kind, "message": exc.message})
-            continue
-        for cal in cals:
-            existing = st.get_calendar(cal["id"])
-            st.upsert_calendar({**cal, "role_visible": existing["role_visible"] if existing else True,
-                                "role_busy": existing["role_busy"] if existing else True,
-                                "role_publish": existing["role_publish"] if existing else False,
-                                "publish_mode": existing["publish_mode"] if existing else "busy"})
-        st.set_account_status(account_id, "ok", "", synced=False)
-        report.append({"account": account_id, "status": "ok", "calendars": [{"id": c["id"], "name": c["name"], "writable": c["writable"]} for c in cals]})
-    st.set_setting("sync_requested_at", iso_utc(now_utc()))
-    return {"status": "ok", "accounts": report, "next_step": "Роли календарей (показывать / источник занятости / публикация «Занят») — cal_settings(action='set_calendar', …)"}
-
-
-def connect_google(ctx: Context) -> Dict[str, Any]:
-    """Start the BYO OAuth flow: the owner opens the URL in the system browser; the host route finishes it."""
-    import providers_google as gp
-    if not ctx.secrets.get("GOOGLE_CALENDAR_CLIENT_ID"):
-        return {"status": "not_connected", "message": "Нет GOOGLE_CALENDAR_CLIENT_ID в Settings → Secrets (грант выдаётся после появления ключей)"}
-    if not ctx.secrets.get("CALENDAR_TOKEN_KEY"):
-        return {"status": "not_connected", "message": "Нет CALENDAR_TOKEN_KEY в Settings → Secrets — им шифруются токены Google"}
-    try:
-        port = int((ctx.api.get_runtime_info() or {}).get("server_port") or 8765)
-    except Exception:
-        port = 8765
-    redirect_uri = f"http://127.0.0.1:{port}/api/extensions/calendar/oauth/callback"
-    try:
-        started = gp.start_auth(ctx.store, ctx.secrets, redirect_uri)
-    except ops.ProviderError as exc:
-        return {"status": "error", "message": exc.message}
-    return {"status": "ok", "auth_url": started["auth_url"], "redirect_uri": redirect_uri,
-            "message": "Открой ссылку в системном браузере под нужным аккаунтом Google и разреши доступ; после возврата на 127.0.0.1 аккаунт появится в cal_status. "
-                       "Если Google откажет из-за redirect_uri — сообщи владельцу: понадобится другой адрес возврата (первое живое подключение — точка проверки).",
-            "next_step": "После входа: cal_settings(action='reload_google', confirm=true) при необходимости; роли календарей — set_calendar"}
-
-
-def reload_google(ctx: Context) -> Dict[str, Any]:
-    """Discover calendars of every Google account whose tokens are stored; keep owner roles."""
-    import providers_google as gp
-    st = ctx.store
-    try:
-        tokens = gp.load_tokens(ctx.state_dir, str(ctx.secrets.get("CALENDAR_TOKEN_KEY") or ""))
-    except ops.ProviderError as exc:
-        return {"status": "error", "message": exc.message}
-    if not tokens:
-        return {"status": "not_connected", "message": "Ни один аккаунт Google ещё не подключён: cal_settings(action='connect_google')"}
-    report = []
-    for email in tokens:
-        account_id = f"{PROVIDER_GOOGLE}:{email}"
-        st.upsert_account({"id": account_id, "provider": PROVIDER_GOOGLE, "alias": st.get_account(account_id)["alias"] if st.get_account(account_id) else email.split("@")[0],
-                           "login": email, "status": "ok"})
-        adapter = ctx.providers.adapter_for(account_id)
-        if adapter is None:
-            report.append({"account": account_id, "status": "not_connected", "message": ctx.providers.errors.get(account_id, "")})
-            continue
-        try:
-            cals = adapter.list_calendars()
-        except ops.ProviderError as exc:
-            st.set_account_status(account_id, "auth_failed" if exc.kind == "auth" else "error", exc.message)
-            report.append({"account": account_id, "status": exc.kind, "message": exc.message})
-            continue
-        for cal in cals:
-            existing = st.get_calendar(cal["id"])
-            st.upsert_calendar({**cal, "role_visible": existing["role_visible"] if existing else True,
-                                "role_busy": existing["role_busy"] if existing else True,
-                                "role_publish": existing["role_publish"] if existing else False,
-                                "publish_mode": existing["publish_mode"] if existing else "busy"})
-            st.set_setting(f"google_default_reminders:{cal['id']}", cal.get("default_reminders") or [])
-        st.set_account_status(account_id, "ok", "", synced=False)
-        report.append({"account": account_id, "status": "ok", "calendars": [{"id": c["id"], "name": c["name"], "writable": c["writable"], "primary": c.get("is_primary", False)} for c in cals]})
-    st.set_setting("sync_requested_at", iso_utc(now_utc()))
-    return {"status": "ok", "accounts": report}
 
 
 def _plan_reminders(ctx: Context) -> str:

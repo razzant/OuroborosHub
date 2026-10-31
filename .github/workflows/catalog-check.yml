@@ -53,7 +53,7 @@ jobs:
     name: ${{ matrix.suite }}
     # memory-atlas drives its card in a real host with Chromium and WebKit as macOS runs them, on the core's Python.
     runs-on: ${{ matrix.suite == 'memory-atlas' && 'macos-latest' || 'ubuntu-latest' }}
-    timeout-minutes: ${{ matrix.suite == 'memory-atlas' && 30 || 15 }}
+    timeout-minutes: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence"]'), matrix.suite) && 30 || 15 }}
     strategy:
       fail-fast: false
       matrix:
@@ -64,7 +64,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.suite == 'memory-atlas' && '3.10' || '3.11' }}
+          python-version: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence"]'), matrix.suite) && '3.10' || '3.11' }}
       - run: python -m pip install PyYAML
       # The core Memory Atlas reads memory through (PluginAPI 2.1 read_memory): razzant/ouroboros at the merge of its
       # PR 2426. Its runtime lock brings Playwright. Without the core or a browser the suite fails; it never skips.
@@ -82,6 +82,23 @@ jobs:
           python -m pip install -r atlas-core/requirements.txt
           python -m playwright install chromium webkit
           echo "ATLAS_CORE=$GITHUB_WORKSPACE/atlas-core" >> "$GITHUB_ENV"
+      # Mail and Calendar exercise the actual Host Service, child tool dispatcher, opaque widgets and sign-in return.
+      # This exact core contains their coordinated seam; provider edges remain offline fixtures.
+      - name: Check out the pinned core for mail and calendar
+        if: matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill'
+        uses: actions/checkout@v4
+        with:
+          repository: razzant/ouroboros
+          ref: 796574aa6cd7630309a5268b0e5bb1563d66453c
+          path: mail-calendar-core
+          persist-credentials: false
+      - name: Install the mail and calendar consumer runtime
+        if: matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill'
+        run: |
+          python -m pip install -r mail-calendar-core/requirements.txt
+          python -m playwright install --with-deps chromium webkit
+          echo "OUROBOROS_SOURCE_DIR=$GITHUB_WORKSPACE/mail-calendar-core" >> "$GITHUB_ENV"
+          echo "OUROBOROS_THEME_CORE_ROOT=$GITHUB_WORKSPACE/mail-calendar-core" >> "$GITHUB_ENV"
       - name: Run the selected hosted suite with its runtime dependencies
         env:
           SUITE: ${{ matrix.suite }}

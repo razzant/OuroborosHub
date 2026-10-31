@@ -41,7 +41,7 @@ class ReviewR5Tests(unittest.TestCase):
         self.assertEqual(server.events[remote_id]['summary'], 'Moved')
         self.assertEqual(parse_stored(server.events[remote_id]['start']['dateTime']), _day(3)+timedelta(hours=2))
 
-    def linked(self):
+    def linked(self, source_provider="caldav"):
         ctx, left, server = caldav_context()
         right = add_google_calendar(ctx.store)
         google = FakeGoogle()
@@ -57,6 +57,9 @@ class ReviewR5Tests(unittest.TestCase):
         self.assertEqual(out['status'], 'created', out)
         eid = out['event']['id']
         copy = next(r for r in ctx.store.group_masters(ctx.store.get_event(eid)['link_group_id']) if r['calendar_id'] == right)
+        if source_provider == "google":
+            chosen = ops.link_event(ctx.store, ctx.providers, copy["id"], "source")
+            self.assertEqual(chosen["source_id"], copy["id"])
         return ctx, left, server, google, caldav, eid, copy
 
     def change_source(self, ctx, server, eid, cancelled=False):

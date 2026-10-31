@@ -30,12 +30,14 @@ SUITES = {
     'calendar-skill': {'skills': ['calendar'],
                        'tests': ['skills/calendar/tests', 'tests/test_calendar_skill.py',
                                  'tests/test_calendar_host_browser.py'],
-                       'dependencies': ['icalendar', 'python-dateutil', 'cryptography']},
+                       'dependencies': ['icalendar', 'python-dateutil', 'cryptography'],
+                       'core_env': 'OUROBOROS_THEME_CORE_ROOT'},
     'slack-bridge': {'skills': ['slack-bridge'],
                      'tests': ['skills/slack-bridge/tests', 'tests/test_slack_presence_core_consumer.py'],
                      'dependencies': ['httpx', 'starlette', 'websockets']},
     'email-presence': {'skills': ['email-presence'], 'tests': ['skills/email-presence/tests'],
-                       'dependencies': ['httpx', 'starlette'], 'cwd': 'skills/email-presence'},
+                       'dependencies': ['httpx', 'starlette'], 'cwd': 'skills/email-presence',
+                       'core_env': 'OUROBOROS_SOURCE_DIR', 'env': {'OUROBOROS_RUN_MAIL_BROWSER': '1'}},
     'agentrq-bridge': {'skills': ['agentrq-bridge'], 'tests': ['skills/agentrq-bridge/tests'],
                       'dependencies': ['starlette']},
     'github': {'skills': ['github'], 'tests': ['skills/github/tests'],
@@ -85,6 +87,15 @@ def prepare(root, event_name, event):
 
 def run_suite(name):
     suite = SUITES[name]
+    env = {**os.environ, **suite.get('env', {}), 'PYTHONDONTWRITEBYTECODE': '1'}
+    if core_env := suite.get('core_env'):
+        configured = env.get(core_env)
+        core = Path(configured).resolve() if configured else None
+        if core is None or not all((core / path).is_file() for path in (
+                'ouroboros/gateway/host_service.py', 'web/provider-return.html')):
+            raise RuntimeError(f'{name} requires {core_env} to name the coordinated core checkout; '
+                               'its host and provider return consumers must run, not skip')
+        env[core_env] = str(core)
     subprocess.run([sys.executable, '-B', '-m', 'pip', 'install', 'PyYAML', 'pytest',
                     *suite.get('dependencies', [])], check=True)
     # Selection paths stay repository-relative; some suites import from their own payload.
@@ -94,7 +105,7 @@ def run_suite(name):
     # Each skill gets its own interpreter; sibling test imports cannot collide.
     subprocess.run([sys.executable, '-B', '-m', 'pytest', '-p', 'no:cacheprovider', '-q', '-rs',
                     *tests], check=True, cwd=cwd,
-                   env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+                   env=env)
 
 
 def main():

@@ -1,6 +1,6 @@
-"""Provider adapters: Yandex CalDAV (live) and the resolver both processes share.
+"""CalDAV adapters (including Yandex) and the resolver both processes share.
 
-Each adapter knows ONE calendar per call and exposes exactly:
+Event calls address one calendar and expose:
 ``list_calendars() -> [calendar dict]``, ``fetch(calendar, cursor, tz) -> (events, cursor, kind, extra)``,
 ``create(calendar, event, payload) -> {external_id, href, etag}``,
 ``update(calendar, event, expected_etag, payload) -> {etag}``,
@@ -11,6 +11,8 @@ Recurrence scopes, linked copies and leases are ``ops.py``'s job, never the adap
 from __future__ import annotations
 
 import base64
+import http.client
+import uuid
 import json
 import urllib.error
 import urllib.parse
@@ -20,10 +22,11 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from model import (
-    AVAIL_BUSY, AVAIL_FREE, PROVIDER_GOOGLE, PROVIDER_LOCAL, PROVIDER_YANDEX, account_id as make_account_id, calendar_id as make_calendar_id,
+    AVAIL_BUSY, AVAIL_FREE, PROVIDER_GOOGLE, PROVIDER_LOCAL, PROVIDER_YANDEX, PROVIDER_CALDAV, account_id as make_account_id, calendar_id as make_calendar_id,
     get_tz, tz_name as zone_name, iso_utc, now_utc, own_reminders, parse_stored,
 )
 from ops import ProviderError
+from xml.sax.saxutils import escape
 
 YANDEX_BASE = "https://caldav.yandex.ru"
 HTTP_TIMEOUT = 20
@@ -31,6 +34,12 @@ USER_AGENT = "Ouroboros-Calendar/1.0"
 NS = {"d": "DAV:", "c": "urn:ietf:params:xml:ns:caldav", "cs": "http://calendarserver.org/ns/"}
 SYNC_WINDOW_PAST_DAYS = 30
 SYNC_WINDOW_FUTURE_DAYS = 400
+
+
+def sync_window(at=None):
+    """The exact UTC-day query interval, shared with the ctag cache key."""
+    today = (at or now_utc()).astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    return today - timedelta(days=SYNC_WINDOW_PAST_DAYS), today + timedelta(days=SYNC_WINDOW_FUTURE_DAYS + 1)
 
 
 # ── secrets → accounts ──────────────────────────────────────────────
@@ -72,12 +81,26 @@ class Providers:
         self.yandex_accounts, self.yandex_error = parse_yandex_accounts(self.secrets.get("YANDEX_CALDAV_ACCOUNTS"))
         self._cache: Dict[str, Any] = {}
         self.errors: Dict[str, str] = {}   # account_id → why no adapter (wrong key, missing token…), for honest statuses
+        self.saved_accounts = {}
+        self.vault_error = ''
+        try:
+            from credentials import load_tokens
+            self.saved_accounts = load_tokens(state_dir, str(self.secrets.get('CALENDAR_TOKEN_KEY') or ''))
+        except ProviderError as exc:
+            self.vault_error = exc.message
 
     def adapter_for(self, account_id: str):
         if account_id in self._cache:
             return self._cache[account_id]
         adapter = None
-        if account_id.startswith(PROVIDER_YANDEX + ":"):
+        saved = self.saved_accounts.get(account_id) or {}
+        if saved.get('provider') in (PROVIDER_YANDEX, PROVIDER_CALDAV):
+            if saved['provider'] == PROVIDER_YANDEX:
+                adapter = YandexAdapter(saved['login'], saved['password'])
+            else:
+                adapter = CalDAVAdapter(saved['login'], saved['password'], saved['server_url'], account_id=account_id,
+                                        home_url=saved.get('home_url'))
+        elif account_id.startswith(PROVIDER_YANDEX + ":"):
             login = account_id.split(":", 1)[1]
             for acc in self.yandex_accounts:
                 if acc["login"] == login:
@@ -86,7 +109,9 @@ class Providers:
         elif account_id.startswith(PROVIDER_GOOGLE + ":"):
             try:
                 from providers_google import GoogleAdapter
-                adapter = GoogleAdapter.for_account(self.secrets, self.state_dir, account_id.split(":", 1)[1])
+                if self.vault_error:
+                    raise ProviderError('auth', self.vault_error)
+                adapter = GoogleAdapter.for_account(self.secrets, self.state_dir, account_id.split(":", 1)[1], tokens=self.saved_accounts)
                 if adapter is None:
                     self.errors[account_id] = "нет сохранённых токенов Google для этого аккаунта — подключи его заново (connect_google)"
             except ProviderError as exc:
@@ -256,6 +281,10 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         vevent = icalendar.Event()
         cal.add_component(vevent)
     else:
+        if not event.get('rrule') and vevent.get('RRULE'):
+            for comp in list(cal.walk('VEVENT')):
+                if comp.get('RECURRENCE-ID') is not None:
+                    cal.subcomponents.remove(comp)
         until = _rrule_until(str(event.get("rrule") or ""))
         if until is not None:   # the series was cut: exceptions past the cut moved to the new series locally
             for comp in list(cal.walk("VEVENT")):
@@ -384,29 +413,74 @@ class _YandexRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-class YandexAdapter:
-    """Thin CalDAV client for caldav.yandex.ru (principal/home derived from the login, no discovery)."""
+class _CalDAVRedirect(urllib.request.HTTPRedirectHandler):
+    def __init__(self, check):
+        self.check = check
 
-    provider = PROVIDER_YANDEX
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self.check(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
-    def __init__(self, login: str, app_password: str):
+
+class CalDAVAdapter:
+    """One configured CalDAV origin; principal/home discovery stays in this adapter."""
+
+    provider = PROVIDER_CALDAV
+
+    def __init__(self, login: str, app_password: str, server_url: str, *, account_id: str = '', home_url: str = ''):
         self.login = login.strip()
         self.parse_errors: List[str] = []   # resources the last fetch could not parse (surfaced in sync status)
-        self.account_id = make_account_id(PROVIDER_YANDEX, self.login)
-        self.home = f"{YANDEX_BASE}/calendars/{urllib.parse.quote(self.login, safe='')}/"
+        parsed = urllib.parse.urlsplit(server_url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ProviderError('auth', 'Нужен CalDAV server URL без встроенных учётных данных, query или fragment')
+        self.server_url = server_url.rstrip('/') + '/'
+        self._origin = (parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80))
+        self.account_id = account_id or make_account_id(self.provider, self.login)
+        self.credential_key = self.account_id.split(':', 1)[-1]
+        self.home = home_url or self.server_url
+        self._discovered = bool(home_url)
+        self._check_address(self.home)
         token = base64.b64encode(f"{self.login}:{app_password}".encode("utf-8")).decode("ascii")
         self._auth = f"Basic {token}"
 
+    def _check_address(self, url):
+        parsed = urllib.parse.urlsplit(url)
+        origin = (parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80))
+        if origin != self._origin or parsed.username or parsed.password:
+            raise ProviderError('network', 'CalDAV credentials cannot leave the configured server origin')
+
+    def _redirect(self):
+        return _CalDAVRedirect(self._check_address)
+
+    def _discover_home(self):
+        body = ('<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+                '<d:prop><d:current-user-principal/><c:calendar-home-set/></d:prop></d:propfind>')
+        address = self.server_url
+        for _ in range(2):  # RFC discovery: current principal, then its calendar home
+            _, _, text = self._request('PROPFIND', address, body, {'Depth': '0', 'Content-Type': 'application/xml; charset=utf-8'})
+            root = self._xml(text, 'PROPFIND')
+            home = root.find('.//c:calendar-home-set/d:href', NS)
+            if home is not None and home.text:
+                self.home = urllib.parse.urljoin(address, home.text)
+                self._check_address(self.home)
+                break
+            principal = root.find('.//d:current-user-principal/d:href', NS)
+            if principal is None or not principal.text:
+                break  # an explicit collection/home URL needs no principal indirection
+            address = urllib.parse.urljoin(address, principal.text)
+            self._check_address(address)
+        self._discovered = True
+
     # transport
     def _request(self, method: str, url: str, body: Optional[str] = None, headers: Optional[Dict[str, str]] = None) -> Tuple[int, Dict[str, str], str]:
-        _check_yandex_address(url)
+        self._check_address(url)
         req = urllib.request.Request(url, data=body.encode("utf-8") if body is not None else None, method=method)
         req.add_header("Authorization", self._auth)
         req.add_header("User-Agent", USER_AGENT)
         for k, v in (headers or {}).items():
             req.add_header(k, v)
         try:
-            with urllib.request.build_opener(_YandexRedirect()).open(req, timeout=HTTP_TIMEOUT) as resp:
+            with urllib.request.build_opener(self._redirect()).open(req, timeout=HTTP_TIMEOUT) as resp:
                 return resp.status, {k.lower(): v for k, v in resp.headers.items()}, resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             text = ""
@@ -415,34 +489,38 @@ class YandexAdapter:
             except Exception:
                 pass
             if exc.code == 401:
-                raise ProviderError("auth", "Яндекс не принял логин или пароль приложения (401); новый пароль может активироваться до 2–3 часов", 401)
+                raise ProviderError("auth", "CalDAV не принял логин или пароль приложения (401)", 401)
             if exc.code == 403:
-                raise ProviderError("forbidden", "Яндекс отказал в доступе (403)", 403)
+                raise ProviderError("forbidden", "CalDAV отказал в доступе (403)", 403)
             if exc.code == 404:
-                raise ProviderError("not_found", "ресурс не найден на сервере Яндекса (404)", 404)
+                raise ProviderError("not_found", "ресурс не найден на сервере CalDAV (404)", 404)
             if exc.code == 412:
-                raise ProviderError("conflict", "событие изменилось на сервере Яндекса (412)", 412)
+                raise ProviderError("conflict", "событие изменилось на сервере CalDAV (412)", 412)
             if exc.code in (405, 501):
-                raise ProviderError("unsupported", f"метод не поддерживается сервером Яндекса ({exc.code})", exc.code)
+                raise ProviderError("unsupported", f"метод не поддерживается сервером CalDAV ({exc.code})", exc.code)
             if exc.code in (500, 502, 503, 504, 507):
-                raise ProviderError("server", f"сервер Яндекса временно не отвечает ({exc.code})", exc.code)
-            raise ProviderError("http", f"HTTP {exc.code} от Яндекса: {text[:200]}", exc.code)
+                raise ProviderError("server", f"сервер CalDAV временно не отвечает ({exc.code})", exc.code)
+            raise ProviderError("http", f"HTTP {exc.code} от CalDAV: {text[:200]}", exc.code)
         except urllib.error.URLError as exc:
-            raise ProviderError("network", f"нет связи с caldav.yandex.ru: {exc.reason}")
+            raise ProviderError("network", f"нет связи с CalDAV: {exc.reason}")
         except TimeoutError:
-            raise ProviderError("network", "таймаут при обращении к caldav.yandex.ru")
+            raise ProviderError("network", "таймаут при обращении к CalDAV")
+        except (http.client.HTTPException, OSError) as exc:
+            raise ProviderError('network', f'CalDAV connection interrupted: {type(exc).__name__}') from exc
 
     @staticmethod
     def _xml(text: str, what: str) -> ET.Element:
         try:
             return ET.fromstring(text)
         except ET.ParseError:
-            raise ProviderError("parse", f"не удалось разобрать ответ {what} от Яндекса")
+            raise ProviderError("parse", f"не удалось разобрать ответ {what} от CalDAV")
 
     # calendars
     def list_calendars(self) -> List[Dict[str, Any]]:
+        if not self._discovered:
+            self._discover_home()
         body = ('<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/">'
-                '<d:prop><d:displayname/><d:resourcetype/><d:current-user-privilege-set/><cs:getctag/></d:prop></d:propfind>')
+                '<d:prop><d:displayname/><c:calendar-description/><d:resourcetype/><d:current-user-privilege-set/><cs:getctag/></d:prop></d:propfind>')
         _, _, text = self._request("PROPFIND", self.home, body, {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
         root = self._xml(text, "PROPFIND")
         out: List[Dict[str, Any]] = []
@@ -454,9 +532,10 @@ class YandexAdapter:
             if not any(p.find("d:resourcetype/c:calendar", NS) is not None for p in props):
                 continue
             collection = href.rstrip("/").rsplit("/", 1)[-1] or href
-            display, ctag, privs_seen, can_write = "", "", False, False
+            display, description, ctag, privs_seen, can_write = "", "", "", False, False
             for p in props:
                 display = (p.findtext("d:displayname", default="", namespaces=NS) or display).strip()
+                description = p.findtext('c:calendar-description', default='', namespaces=NS) or description
                 ctag = (p.findtext("cs:getctag", default="", namespaces=NS) or ctag).strip()
                 privs = p.find("d:current-user-privilege-set", NS)
                 if privs is not None and len(list(privs)):
@@ -465,18 +544,80 @@ class YandexAdapter:
                                                  for pr in privs.findall("d:privilege", NS))
             # no privilege set from the server = rights unknown: treat as writable and let the server answer 403 honestly
             writable = can_write if privs_seen else True
-            full = href if href.startswith("http") else YANDEX_BASE + href
-            out.append({"id": make_calendar_id(PROVIDER_YANDEX, self.login, collection), "account_id": self.account_id,
-                        "provider": PROVIDER_YANDEX, "external_id": collection, "href": full, "name": display or collection,
+            full = urllib.parse.urljoin(self.home, href)
+            out.append({"id": make_calendar_id(self.provider, self.credential_key, collection), "account_id": self.account_id,
+                        "provider": self.provider, "external_id": collection, "href": full, "name": display or collection, 'description': description,
                         "writable": writable, "access_role": "owner" if writable else "reader", "ctag": ctag})
         return out
+
+    def calendar_capabilities(self):
+        return {'create': None, 'update': None, 'delete': None, 'sharing': False,
+                'note': 'Collection management is server-dependent. Sharing needs the provider website; no portable email-to-principal sharing API is assumed.'}
+
+    @staticmethod
+    def _calendar_properties(changes):
+        props = []
+        if 'name' in changes:
+            props.append('<d:displayname>' + escape(str(changes['name'])) + '</d:displayname>')
+        if 'description' in changes:
+            props.append('<c:calendar-description>' + escape(str(changes['description'])) + '</c:calendar-description>')
+        if changes.get('timezone'):
+            ical = _ical()
+            zone = ical.Timezone.from_tzinfo(get_tz(str(changes['timezone'])))
+            calendar = ical.Calendar()
+            calendar.add('VERSION', '2.0')
+            calendar.add_component(zone)
+            props.append('<c:calendar-timezone>' + escape(calendar.to_ical().decode('utf-8')) + '</c:calendar-timezone>')
+        return ''.join(props)
+
+    def _check_properties_result(self, status, text):
+        if status == 207:
+            root = self._xml(text, 'PROPPATCH')
+            failures = [node.text for node in root.findall('.//d:status', NS)
+                        if node.text and not node.text.split()[1].startswith('2')]
+            if failures:
+                raise ProviderError('forbidden', 'CalDAV не применил свойства: ' + '; '.join(failures))
+
+    def create_calendar(self, changes):
+        if not self._discovered:
+            self._discover_home()
+        collection = uuid.uuid4().hex
+        href = urllib.parse.urljoin(self.home.rstrip('/') + '/', collection + '/')
+        body = ('<c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:set><d:prop>'
+                + self._calendar_properties(changes) + '</d:prop></d:set></c:mkcalendar>')
+        status, _, text = self._request('MKCALENDAR', href, body, {'Content-Type': 'application/xml; charset=utf-8'})
+        self._check_properties_result(status, text)
+        return {'id': make_calendar_id(self.provider, self.credential_key, collection), 'account_id': self.account_id,
+                'provider': self.provider, 'external_id': collection, 'href': href, 'name': changes['name'], 'description': changes.get('description') or '',
+                'tz': changes.get('timezone') or '', 'writable': True, 'access_role': 'owner'}
+
+    def update_calendar(self, calendar, changes):
+        body = ('<d:propertyupdate xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:set><d:prop>'
+                + self._calendar_properties(changes) + '</d:prop></d:set></d:propertyupdate>')
+        status, _, text = self._request('PROPPATCH', calendar['href'], body, {'Content-Type': 'application/xml; charset=utf-8'})
+        self._check_properties_result(status, text)
+        return {**calendar, **({'name': changes['name']} if 'name' in changes else {}),
+                **({'description': changes['description']} if 'description' in changes else {}),
+                **({'tz': changes['timezone']} if 'timezone' in changes else {})}
+
+    def delete_calendar(self, calendar):
+        self._request('DELETE', calendar['href'])
+        return {'deleted': True, 'calendar_id': calendar['id']}
+
+    def calendar_acl(self, calendar):
+        raise ProviderError('unsupported', 'Настройка и просмотр доступа: сайт CalDAV-провайдера')
+
+    def share_calendar(self, calendar, sharing):
+        raise ProviderError('unsupported', 'Выдача доступа по email: сайт CalDAV-провайдера')
+
+    def unshare_calendar(self, calendar, sharing):
+        raise ProviderError('unsupported', 'Отзыв доступа по email: сайт CalDAV-провайдера')
 
     # events
     def fetch(self, calendar: Dict[str, Any], cursor: str = "", tz=None) -> Tuple[List[Dict[str, Any]], str, str, List[str]]:
         """Window read (calendar-query). Returns (rows, cursor, cursor_kind, hrefs_seen)."""
         tz = tz or timezone.utc
-        start = now_utc() - timedelta(days=SYNC_WINDOW_PAST_DAYS)
-        end = now_utc() + timedelta(days=SYNC_WINDOW_FUTURE_DAYS)
+        start, end = sync_window()
         body = ('<?xml version="1.0" encoding="utf-8"?><c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
                 '<d:prop><d:getetag/><c:calendar-data/></d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">'
                 f'<c:time-range start="{start:%Y%m%dT%H%M%SZ}" end="{end:%Y%m%dT%H%M%SZ}"/>'
@@ -494,7 +635,7 @@ class YandexAdapter:
                 data = p.findtext("c:calendar-data", default="", namespaces=NS) or data
             if not data:
                 continue
-            full = href if href.startswith("http") else YANDEX_BASE + href
+            full = urllib.parse.urljoin(self.home, href)
             hrefs.append(full)
             try:
                 rows.extend(ics_to_rows(data, calendar["id"], full, etag, tz))
@@ -682,7 +823,7 @@ class YandexAdapter:
             keys.add(iso_utc(prev))   # the series moved: the old slot of this occurrence goes away
         for comp in list(cal.walk("VEVENT")):
             rid = comp.decoded("RECURRENCE-ID", None)
-            if rid is not None and iso_utc(rid if getattr(rid, "tzinfo", None) else datetime.combine(rid, datetime.min.time(), tzinfo=tz)) in keys:
+            if rid is not None and _as_utc(rid, tz)[0] in keys:
                 cal.subcomponents.remove(comp)
         if str(event.get("status") or "") == "cancelled":
             existing = master.get("EXDATE")
@@ -712,3 +853,18 @@ class YandexAdapter:
         _, resp_headers, _ = self._request("PUT", href, sent, headers)
         new_etag = self._write_version(href, sent, resp_headers)
         return {"etag": new_etag, "external_id": str(event.get("uid") or ""), "href": href, "master_etag": new_etag}
+
+
+class YandexAdapter(CalDAVAdapter):
+    """The Yandex preset preserves established account ids and the HTTPS origin."""
+    provider = PROVIDER_YANDEX
+
+    def __init__(self, login: str, app_password: str):
+        home = f"{YANDEX_BASE}/calendars/{urllib.parse.quote(login.strip(), safe='')}/"
+        super().__init__(login, app_password, YANDEX_BASE, account_id=make_account_id(PROVIDER_YANDEX, login.strip()), home_url=home)
+
+    def _check_address(self, url):
+        _check_yandex_address(url)
+
+    def _redirect(self):
+        return _YandexRedirect()

@@ -7,18 +7,21 @@ from pathlib import Path
 from .mime import extract_body
 
 
-def mailbox_identity(account):
-    entry = {"id": account, "label": account, "kind": "user"}
-    return {"sends_as": entry, "reads_as": [dict(entry)]}
+def mailbox_identity(account, *, senders=(), sender=""):
+    addresses = list(dict.fromkeys([account] + list(senders)))
+    def entry(address):
+        return {"id": address, "label": address, "kind": "user"}
+    return {"sends_as": entry(sender or account), "reads_as": [entry(address) for address in addresses if address]}
 
 
-def email_facts(item, account, words=()):
+def email_facts(item, account, words=(), aliases=()):
     headers = item.context.get("headers") or {}
     precedence = {value.strip().casefold() for value in headers.get("precedence", [])}
     bulk = bool(precedence & {"bulk", "list", "junk"})
     facts = ["any_message"]
     recipients = (*item.recipients, *item.cc, *item.context.get("cc", []))
-    if (account and account.casefold() in {value.casefold() for value in recipients}
+    addresses = {value.casefold() for value in (account, *aliases) if value}
+    if (addresses & {value.casefold() for value in recipients}
             and not any(name in headers for name in ("list-id", "list-unsubscribe")) and not bulk):
         facts.append("direct_message")
     local = item.sender.partition("@")[0].casefold()

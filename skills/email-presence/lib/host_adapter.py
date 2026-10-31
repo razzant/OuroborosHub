@@ -71,7 +71,7 @@ def normalize_binding_id(value: Any) -> str:
     return value
 
 def email_presence_event(item: InboxItem, *, account_id: str, places: bool = False,
-                         identity: bool = False, words=()) -> dict[str, Any]:
+                         identity: bool = False, words=(), address="", senders=(), sender="") -> dict[str, Any]:
     return {
         "source_event_id": item.provider_event_key,
         "provider": "email",
@@ -89,8 +89,8 @@ def email_presence_event(item: InboxItem, *, account_id: str, places: bool = Fal
                     "subject": item.subject, "to": list(item.recipients),
                     **item.context},
         "text": f"Subject: {item.subject}\n\n{item.body}",
-        **({"facts": email_facts(item, account_id, words)} if places else {}),
-        **({"identity": mailbox_identity(account_id)} if identity else {}),
+        **({"facts": email_facts(item, address or account_id, words, senders)} if places else {}),
+        **({"identity": mailbox_identity(address or account_id, senders=senders, sender=sender)} if identity else {}),
     }
 
 def _ref(kind: str, payload: Mapping[str, Any]) -> str:
@@ -165,8 +165,14 @@ def _loopback(url: str) -> bool:
     except ValueError: return False
 
 class _SkillToken:
-    def __init__(self, value: str): self._value = str(value or "")
+    def __init__(self, value):
+        self._source = value if hasattr(value, "use_in_request") else None
+        self._value = str(value or "") if self._source is None else ""
+    @property
+    def available(self): return bool(self._source is not None or self._value)
     def use_in_request(self) -> str:
+        if self._source is not None:
+            return self._source.use_in_request()
         if not self._value: raise HostContractError("Presence Host token is unavailable")
         return self._value
     def __repr__(self) -> str: return "<SkillToken:redacted>"
@@ -174,21 +180,26 @@ class _SkillToken:
 
 class LoopbackPresenceHostAdapter:
     def __init__(self, binding_id: str, *, host_service_url: str, skill_token: str, http_client: httpx.AsyncClient | None = None,
-                 place_http_client: httpx.Client | None = None, words=()):
+                 place_http_client: httpx.Client | None = None, words=(), account_id="", address="", senders=(), sender="", sync_only=False):
         self.binding_id = normalize_binding_id(binding_id) if str(binding_id or "").strip() else ""
         self.host_service_url = host_service_url.rstrip("/")
         if not _loopback(self.host_service_url): raise HostContractError("HOST_SERVICE_URL must be an HTTP loopback URL")
-        self._token = _SkillToken(skill_token); self.available = bool(self.binding_id and skill_token)
-        self._http = http_client or httpx.AsyncClient(timeout=35, trust_env=False); self._owns = http_client is None; self._terminal: dict[str, dict[str, Any]] = {}
+        self._token = _SkillToken(skill_token); self.available = bool(self.binding_id and self._token.available)
+        self._http = http_client if sync_only else http_client or httpx.AsyncClient(timeout=35, trust_env=False)
+        self._owns = http_client is None and not sync_only
+        self._terminal: dict[str, dict[str, Any]] = {}
         self.delivery_reporting_status = "unknown"
         self.delivery_reporting_version = 0
         self.places_version = 0
         self.presence_identity = 0
         self.presence_wake_signals = 0
+        self.presence_place_binding_version = 0
         # 2 only when /identity lists it in presence_continuation_versions; this
         # transport never negotiated version 1, so an older Host keeps the plain turn.
         self.continuation_version = 0
         self.words = words
+        self.address, self.senders, self.sender = address, tuple(senders), sender
+        self.account_id = account_id
         self._place_http = place_http_client
 
     def _identity(self, payload):
@@ -196,7 +207,8 @@ class LoopbackPresenceHostAdapter:
         self.places_version = int(type(version) is int and version >= 1)
         self.presence_identity = int(payload.get("presence_identity") == 1)
         self.presence_wake_signals = int(payload.get("presence_wake_signals") == 1)
-        self.available = bool(self._token._value and (self.binding_id or self.places_version))
+        self.available = bool(self._token.available and (self.binding_id or self.places_version))
+        self.presence_place_binding_version = int(payload.get("presence_place_binding_version") == 1)
         self.delivery_reporting_version = int(payload.get("presence_delivery_version") == 1)
         self.delivery_reporting_status = "supported" if self.delivery_reporting_version else "unsupported"
         listed = payload.get("presence_continuation_versions")
@@ -216,12 +228,62 @@ class LoopbackPresenceHostAdapter:
             response = self._place_http.get(f"{self.host_service_url}/presence/place", headers=self._headers(),
                                             params={"provider": "email", "account_id": account_id,
                                                     "conversation_id": conversation_id})
+            if response.status_code == 404:
+                payload = response.json()
+                if payload.get("code") == "place_not_connected":
+                    return "Held: no connected Place; this legacy send has no captured unbound authorization"
             response.raise_for_status()
             place = response.json()
             state = place.get("state")
             return "" if state == "active" else f"Held: {place.get('label') or 'Email'} is {state or 'unavailable'}"
         except (HostContractError, httpx.HTTPError, ValueError, AttributeError):
             return "Held: place policy unavailable"
+
+    def _place_client(self):
+        if self._place_http is None:
+            self._place_http = httpx.Client(timeout=10, trust_env=False)
+        return self._place_http
+
+    def capture_binding(self, account_id, conversation_id, *, thread_id="", require_place=False):
+        if self.delivery_reporting_status in {"unknown", "unavailable"}:
+            identity = self._place_client().get(f"{self.host_service_url}/identity", headers=self._headers())
+            identity.raise_for_status()
+            self._identity(identity.json())
+        if not self.presence_place_binding_version:
+            return {"supported": False}
+        response = self._place_client().get(f"{self.host_service_url}/presence/place", headers=self._headers(), params={
+            "operation": "bind", "provider": "email", "account_id": account_id,
+            "conversation_id": conversation_id, "thread_id": thread_id,
+            "require_place": "true" if require_place else "false"})
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or type(payload.get("allowed")) is not bool or "binding" not in payload:
+            raise HostContractError("Host omitted the mail operation's binding facts")
+        return {**payload, "supported": True}
+
+    def binding_hold(self, binding, account_id, conversation_id, *, thread_id=""):
+        if not isinstance(binding, dict):
+            return "Held: the original Place binding was not captured; inspect the receipt before a new send"
+        try:
+            response = self._place_client().get(f"{self.host_service_url}/presence/place", headers=self._headers(), params={
+                "operation": "check", "provider": "email", "account_id": account_id,
+                "conversation_id": conversation_id, "thread_id": thread_id,
+                "binding": json.dumps(binding, separators=(",", ":"))})
+            payload = response.json()
+            if response.status_code == 403:
+                return "Held: host authorization blocked"
+            if response.status_code >= 400:
+                return "Held: " + str(payload.get("code") or "place policy unavailable")
+            if payload.get("allowed") is True:
+                return ""
+            return "Held: " + str(payload.get("code") or payload.get("state") or "place policy unavailable")
+        except (HostContractError, httpx.HTTPError, ValueError, AttributeError):
+            return "Held: place policy unavailable"
+
+    def close_sync(self):
+        if self._place_http is not None:
+            self._place_http.close()
+            self._place_http = None
     def _headers(self): return {"X-Skill-Token": self._token.use_in_request(), "Content-Type": "application/json"}
     async def discover_delivery_support(self):
         if self.delivery_reporting_status in {"supported", "unsupported"}:
@@ -263,9 +325,10 @@ class LoopbackPresenceHostAdapter:
         mode = await self.discover_delivery_support()
         if not self.available: raise HostAdapterUnavailable("Place or legacy binding is not configured")
         request = {**({"binding_id": self.binding_id} if not self.places_version else {}),
-                   "event": email_presence_event(item, account_id=os.environ.get("EMAIL_USER", ""),
+                   "event": email_presence_event(item, account_id=self.account_id or os.environ.get("EMAIL_USER", ""),
                                                   places=bool(self.places_version), identity=bool(self.presence_identity),
-                                                  words=self.words if self.presence_wake_signals else ())}
+                                                  words=self.words if self.presence_wake_signals else (),
+                                                  address=self.address, senders=self.senders, sender=self.sender)}
         if item.staged_files:
             request["staged_files"] = [str(file.get("path") or "") for file in item.staged_files if str(file.get("path") or "").strip()]
         if mode:
@@ -485,5 +548,7 @@ class LoopbackPresenceHostAdapter:
         if self._owns: await self._http.aclose()
         if self._place_http is not None: self._place_http.close()
 
-def create_host_adapter(binding_id: str, *, http_client=None, words=()):
-    return LoopbackPresenceHostAdapter(binding_id,host_service_url=os.environ.get("HOST_SERVICE_URL","http://127.0.0.1:8767"),skill_token=os.environ.get("HOST_SERVICE_TOKEN",""),http_client=http_client, words=words)
+def create_host_adapter(binding_id: str, *, http_client=None, words=(), account_id="", address="", senders=(), sender=""):
+    return LoopbackPresenceHostAdapter(binding_id, host_service_url=os.environ.get("HOST_SERVICE_URL", "http://127.0.0.1:8767"),
+                                      skill_token=os.environ.get("HOST_SERVICE_TOKEN", ""), http_client=http_client, words=words,
+                                      account_id=account_id, address=address, senders=senders, sender=sender)

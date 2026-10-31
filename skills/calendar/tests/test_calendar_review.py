@@ -634,8 +634,9 @@ class ContractReviewTests(unittest.TestCase):
         ctx = make_context()
         status = json.loads(tools.cal_status(ctx))
         self.assertEqual(status["status"], "ok")
-        self.assertTrue(any("Яндекс не подключён" in step for step in status["next_step"]))
-        self.assertTrue(any("Google не подключён" in step for step in status["next_step"]))
+        self.assertFalse(status['connection_options']['google_client_configured'])
+        self.assertTrue(status['connection_options']['caldav_form'])
+        self.assertEqual({account['provider'] for account in status['accounts']}, {'local'})
 
 
 class MigrationReviewTests(unittest.TestCase):

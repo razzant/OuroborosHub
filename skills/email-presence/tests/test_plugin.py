@@ -88,7 +88,7 @@ def test_registered_tools_and_status_share_durable_store(tmp_path):
         def get_state_dir(self):
             return str(tmp_path)
         def get_settings(self, keys):
-            return {}
+            return {key: value for key, value in {"EMAIL_USER": "owner@example.org", "EMAIL_DEFAULT_FOLDER": "Work"}.items() if key in keys}
         def register_companion_process(self, name):
             assert name == "email_poller"
         def register_tool(self, name, handler, **kw):
@@ -102,14 +102,15 @@ def test_registered_tools_and_status_share_durable_store(tmp_path):
     api = API()
     plugin.register(api)
     expected = {"email_send", "email_search", "email_read", "email_mark_read", "email_mailbox", "email_draft", "email_receipt",
-                "email_test_connection"}
+                "email_test_connection", "email_accounts", "email_folders", "email_settings_read", "email_settings"}
     assert set(api.tools) == expected
     first = json.loads(api.tools["email_send"](to="a@example.org", body="Hello", request_id="stable"))
     duplicate = json.loads(api.tools["email_send"](to="a@example.org", body="Hello", request_id="stable"))
     assert duplicate["deduplicated"]
     assert first["receipt"]["state"] == "pending"
     assert json.loads(api.tools["email_receipt"]("stable"))["provider_message_id"] == first["receipt"]["provider_message_id"]
-    assert api.tabs[0]["components"][0]["method"] == "GET"
+    assert api.tabs[0]["kind"] == "module"
+    assert api.tabs[0]["entry"] == "ui/accounts.js"
 
 
 def test_read_tool_only_peeks_and_mark_read_is_its_own_write(tmp_path, monkeypatch):
@@ -139,7 +140,7 @@ def test_read_tool_only_peeks_and_mark_read_is_its_own_write(tmp_path, monkeypat
         def get_state_dir(self):
             return str(tmp_path)
         def get_settings(self, keys):
-            return {}
+            return {key: value for key, value in {"EMAIL_USER": "owner@example.org", "EMAIL_DEFAULT_FOLDER": "Work"}.items() if key in keys}
         def register_companion_process(self, name):
             pass
         def register_tool(self, name, handler, **kw):
@@ -156,13 +157,13 @@ def test_read_tool_only_peeks_and_mark_read_is_its_own_write(tmp_path, monkeypat
     plugin.register(api)
     read, read_schema = api.tools["email_read"]
     mark, mark_schema = api.tools["email_mark_read"]
-    assert set(read_schema["properties"]) == set(mark_schema["properties"]) == {"uid", "uidvalidity", "folder"}
-    assert read_schema["required"] == mark_schema["required"] == ["uid", "uidvalidity"]
+    assert set(read_schema["properties"]) == set(mark_schema["properties"]) == {"account_id", "message_ref", "uid", "uidvalidity", "folder"}
+    assert read_schema["required"] == mark_schema["required"] == []
     assert json.loads(read(uid=4, uidvalidity=7))["uid"] == 4
     assert calls == [("read", {"uid": 4, "uidvalidity": 7, "folder": "Work", "include_attachment_data": True})]
     # The declared read has no way to change flags; that stays a separate write.
     with pytest.raises(TypeError):
         read(uid=4, uidvalidity=7, mark_as_read=True)
     assert len(calls) == 1
-    assert json.loads(mark(uid=4, uidvalidity=7, folder="Archive")) == {"ok": True, "uid": 4}
+    assert json.loads(mark(uid=4, uidvalidity=7, folder="Archive")) == {"ok": True, "uid": 4, "account_id": "owner@example.org"}
     assert calls[-1] == ("mark_read", {"uid": 4, "uidvalidity": 7, "folder": "Archive"})

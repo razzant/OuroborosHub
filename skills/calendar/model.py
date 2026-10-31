@@ -26,7 +26,9 @@ DEFAULT_LOCAL_CALENDAR_NAME = "Личное"
 PROVIDER_LOCAL = "local"
 PROVIDER_YANDEX = "yandex"
 PROVIDER_GOOGLE = "google"
-PROVIDERS = (PROVIDER_LOCAL, PROVIDER_YANDEX, PROVIDER_GOOGLE)
+PROVIDER_CALDAV = 'caldav'
+PROVIDERS = (PROVIDER_LOCAL, PROVIDER_YANDEX, PROVIDER_GOOGLE, PROVIDER_CALDAV)
+CALDAV_PROVIDERS = (PROVIDER_YANDEX, PROVIDER_CALDAV)
 
 VISIBILITY_SHOWN = "shown"
 VISIBILITY_HIDDEN = "hidden"
@@ -44,7 +46,8 @@ SCOPE_FOLLOWING = "following"
 SCOPE_ALL = "all"
 SCOPES = (SCOPE_THIS, SCOPE_FOLLOWING, SCOPE_ALL)
 
-SECRET_KEYS = ("YANDEX_CALDAV_ACCOUNTS", "GOOGLE_CALENDAR_CLIENT_ID", "GOOGLE_CALENDAR_CLIENT_SECRET", "CALENDAR_TOKEN_KEY")
+SECRET_KEYS = ("YANDEX_CALDAV_ACCOUNTS", "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET",
+               "GOOGLE_CALENDAR_CLIENT_ID", "GOOGLE_CALENDAR_CLIENT_SECRET", "CALENDAR_TOKEN_KEY")
 
 INTENT_PENDING = "pending"
 INTENT_DONE = "done"
@@ -260,13 +263,22 @@ def bounded_result(obj: Dict[str, Any], limit: int = TOOL_RESULT_LIMIT, list_key
     return json_dumps({"status": trimmed.get("status") or "error", "message": "ответ слишком большой даже после сокращения", "truncated": True})
 
 
+def routine_time(row, value, owner_tz):
+    """Project a routine's wall time without changing its canonical recurrence address."""
+    instant = parse_stored(value)
+    if instant is not None and owner_tz is not None and row.get('availability') == AVAIL_SOFT and row.get('origin', 'local') == 'local':
+        return instant.astimezone(get_tz(row.get('tz') or '')).replace(tzinfo=owner_tz)
+    return instant
+
+
 def event_public(row: Dict[str, Any], tz, compact: bool = True) -> Dict[str, Any]:
     """Public projection of an event row for tools and the widget."""
+    project = not row.get('display_occurrence_start_utc') and (row.get('rrule') or row.get('master_id'))
     out: Dict[str, Any] = {
         "id": row.get("id"),
         "title": row.get("title") or "",
-        "start": iso_local(row.get("start_utc"), tz),
-        "end": iso_local(row.get("end_utc"), tz),
+        "start": iso_local(routine_time(row, row.get("start_utc"), tz) if project else row.get("start_utc"), tz),
+        "end": iso_local(routine_time(row, row.get("end_utc"), tz) if project else row.get("end_utc"), tz),
         "all_day": bool(row.get("all_day")),
         "calendar_id": row.get("calendar_id"),
         "calendar_name": row.get("calendar_name") or "",
@@ -275,13 +287,16 @@ def event_public(row: Dict[str, Any], tz, compact: bool = True) -> Dict[str, Any
         "status": row.get("status") or "confirmed",
     }
     if row.get("occurrence_start_utc"):
-        out["occurrence_start"] = iso_local(row.get("occurrence_start_utc"), tz)
+        out["occurrence_start"] = iso_local(row.get("display_occurrence_start_utc") or row.get("occurrence_start_utc"), tz)
         out["series_id"] = row.get("series_id") or row.get("id")
     if row.get("rrule"):
         out["rrule"] = row.get("rrule")
     if row.get("link_group_id"):
         out["link_group_id"] = row.get("link_group_id")
         out["is_primary"] = bool(row.get("is_primary", 1))
+        out['link_state'] = row.get('link_state') or 'following'
+        if row.get('deleted_at'):
+            out['missing'] = True
     if row.get("sync_state") and row.get("sync_state") != "synced":
         out["sync_state"] = row.get("sync_state")
     if not compact:
@@ -346,8 +361,8 @@ def overlaps(a_start: datetime, a_end: datetime, b_start: datetime, b_end: datet
 
 
 def label(ev: Dict[str, Any], tz) -> str:
-    s = parse_stored(ev.get("start_utc"))
-    e = parse_stored(ev.get("end_utc"))
+    shown = event_public(ev, tz)
+    s, e = parse_stored(shown['start']), parse_stored(shown['end'])
     if s is None or e is None:
         return str(ev.get("title") or "")
     if ev.get("all_day"):

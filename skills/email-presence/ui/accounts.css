@@ -1,0 +1,33 @@
+:root { color-scheme: light; --paper:#fff; --ink:#252529; --muted:#6b6b73; --line:#dedee3; --soft:#f5f5f7; --accent:#436bce; --bad:#ad303e; }
+:root[data-theme="dark"] { color-scheme: dark; --paper:#202024; --ink:#ededf1; --muted:#aaaab5; --line:#45454d; --soft:#2a2a30; --accent:#99b3ff; --bad:#ff9aa6; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--paper); color:var(--ink); font:14px/1.5 system-ui,sans-serif; }
+#root { padding:16px; }
+h2,h3,p { margin:0 0 10px; }
+h2 { font-size:20px; font-weight:600; }
+h3 { font-size:16px; }
+button,input,select,textarea { font:inherit; }
+button { border:1px solid var(--line); border-radius:8px; padding:7px 12px; background:var(--paper); color:var(--ink); cursor:pointer; }
+button:hover { background:var(--soft); }
+button:disabled { opacity:.6; cursor:wait; }
+button.primary { background:var(--accent); color:var(--paper); border-color:var(--accent); }
+button.danger { color:var(--bad); }
+.toolbar,.actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 0; }
+.toolbar h2 { flex:1 1 180px; margin:0; }
+.note,.secondary { color:var(--muted); font-size:13px; }
+.notice { border-left:3px solid var(--accent); padding:8px 12px; margin:12px 0; background:var(--soft); overflow-wrap:anywhere; }
+.notice.error { border-color:var(--bad); color:var(--bad); }
+.account { border:1px solid var(--line); border-radius:12px; padding:14px; margin:12px 0; overflow-wrap:anywhere; }
+.account .address { font-weight:600; }
+details { margin:8px 0; }
+summary { cursor:pointer; color:var(--accent); }
+form { background:var(--soft); padding:14px; border-radius:12px; margin:12px 0; }
+.fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr)); gap:12px; }
+label { display:flex; flex-direction:column; gap:4px; color:var(--muted); font-size:13px; min-width:0; }
+input,select,textarea { width:100%; min-width:0; border:1px solid var(--line); border-radius:7px; padding:8px; background:var(--paper); color:var(--ink); }
+textarea { min-height:74px; resize:vertical; }
+label.check { flex-direction:row; align-items:start; gap:8px; }
+input[type="checkbox"] { width:auto; margin-top:4px; }
+pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
+.spacer { flex:1; }
+@media(max-width:420px) { #root { padding:10px; } .account,form { padding:10px; } .actions button { flex:1 1 auto; } }

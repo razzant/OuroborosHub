@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from model import (
-    DEFAULT_LOCAL_CALENDAR_ID, DEFAULT_LOCAL_CALENDAR_NAME, INTENT_DONE, INTENT_FAILED, INTENT_PENDING, LOCAL_ACCOUNT_ID, iso_utc, new_id, now_utc, parse_stored,
+    DEFAULT_LOCAL_CALENDAR_ID, DEFAULT_LOCAL_CALENDAR_NAME, INTENT_DONE, INTENT_FAILED, INTENT_PENDING, LOCAL_ACCOUNT_ID, CALDAV_PROVIDERS, iso_utc, new_id, now_utc, parse_stored,
 )
 
 SCHEMA_VERSION = 1
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS calendars (
     id TEXT PRIMARY KEY, account_id TEXT NOT NULL, provider TEXT NOT NULL,
-    external_id TEXT NOT NULL DEFAULT '', href TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, tz TEXT NOT NULL DEFAULT '',
+    external_id TEXT NOT NULL DEFAULT '', href TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', tz TEXT NOT NULL DEFAULT '',
     writable INTEGER NOT NULL DEFAULT 1, access_role TEXT NOT NULL DEFAULT 'owner',
     role_visible INTEGER NOT NULL DEFAULT 1, role_busy INTEGER NOT NULL DEFAULT 1, role_publish INTEGER NOT NULL DEFAULT 0,
     publish_mode TEXT NOT NULL DEFAULT 'full', sort_order INTEGER NOT NULL DEFAULT 0, is_default INTEGER NOT NULL DEFAULT 0,
@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS events (
     recurrence_id TEXT NOT NULL DEFAULT '', master_id TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'confirmed', organizer TEXT NOT NULL DEFAULT '', attendees_json TEXT NOT NULL DEFAULT '[]',
     my_response TEXT NOT NULL DEFAULT '', reminders_json TEXT NOT NULL DEFAULT '[]',
-    origin TEXT NOT NULL DEFAULT 'local', link_group_id TEXT NOT NULL DEFAULT '', sync_state TEXT NOT NULL DEFAULT 'synced',
+    origin TEXT NOT NULL DEFAULT 'local', link_group_id TEXT NOT NULL DEFAULT '', link_state TEXT NOT NULL DEFAULT 'following', sync_state TEXT NOT NULL DEFAULT 'synced',
     raw_payload TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_events_window ON events(calendar_id, start_utc, end_utc);
 CREATE INDEX IF NOT EXISTS idx_events_uid ON events(uid);
@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS intents (
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_intents_state ON intents(state, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_intents_event ON intents(event_id);
+CREATE INDEX IF NOT EXISTS idx_intents_kind ON intents(kind, created_at);
 CREATE TABLE IF NOT EXISTS reminders (
     id TEXT PRIMARY KEY, event_id TEXT NOT NULL, occurrence_start_utc TEXT NOT NULL,
     recurrence_id TEXT NOT NULL DEFAULT '', offset_min INTEGER NOT NULL,
@@ -77,7 +78,7 @@ EVENT_COLUMNS = (
     "id", "calendar_id", "uid", "external_id", "href", "etag", "visibility", "availability", "is_primary", "title",
     "description", "location", "start_utc", "end_utc", "tz", "all_day", "rrule", "rdates", "exdates", "recurrence_id",
     "master_id", "status", "organizer", "attendees_json", "my_response", "reminders_json", "origin", "link_group_id",
-    "sync_state", "raw_payload", "created_at", "updated_at", "deleted_at",
+    "link_state", "sync_state", "raw_payload", "created_at", "updated_at", "deleted_at",
 )
 
 
@@ -140,6 +141,11 @@ class Store:
             if legacy:
                 self._migrate_prototype(c)
             c.executescript(_SCHEMA)
+            if 'description' not in {r[1] for r in c.execute('PRAGMA table_info(calendars)')}:
+                c.execute("ALTER TABLE calendars ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+            event_columns = {r[1] for r in c.execute('PRAGMA table_info(events)')}
+            if 'link_state' not in event_columns:
+                c.execute("ALTER TABLE events ADD COLUMN link_state TEXT NOT NULL DEFAULT 'following'")
             cols = {r[1] for r in c.execute("PRAGMA table_info(reminders)").fetchall()}
             if "attempts" not in cols:
                 c.execute("ALTER TABLE reminders ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
@@ -236,6 +242,13 @@ class Store:
         with self._conn() as c:
             c.execute("DELETE FROM settings WHERE key = ?", (key,))
 
+    def pop_setting(self, key: str):
+        """Consume an issued OAuth transaction once, before any provider request."""
+        with self._write_conn() as c:
+            row = c.execute('SELECT value_json FROM settings WHERE key=?', (key,)).fetchone()
+            c.execute('DELETE FROM settings WHERE key=?', (key,))
+        return json.loads(row[0]) if row else None
+
     def set_setting(self, key: str, value: Any) -> None:
         with self._conn() as c:
             c.execute("INSERT INTO settings (key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
@@ -297,15 +310,16 @@ class Store:
         ts = _ts()
         with self._conn() as c:
             c.execute(
-                "INSERT INTO calendars (id, account_id, provider, external_id, href, name, tz, writable, access_role,"
+                "INSERT INTO calendars (id, account_id, provider, external_id, href, name, description, tz, writable, access_role,"
                 " role_visible, role_busy, role_publish, publish_mode, sort_order, is_default, deleted_at, updated_at)"
-                " VALUES (:id, :account_id, :provider, :external_id, :href, :name, :tz, :writable, :access_role,"
+                " VALUES (:id, :account_id, :provider, :external_id, :href, :name, :description, :tz, :writable, :access_role,"
                 " :role_visible, :role_busy, :role_publish, :publish_mode, :sort_order, :is_default, NULL, :ts)"
-                " ON CONFLICT(id) DO UPDATE SET external_id=excluded.external_id, href=excluded.href, name=excluded.name,"
+                " ON CONFLICT(id) DO UPDATE SET external_id=excluded.external_id, href=excluded.href, name=excluded.name, description=excluded.description,"
                 " tz=excluded.tz, writable=excluded.writable, access_role=excluded.access_role, deleted_at=NULL, updated_at=excluded.updated_at",
                 {
                     "id": cal["id"], "account_id": cal["account_id"], "provider": cal["provider"],
                     "external_id": cal.get("external_id") or "", "href": cal.get("href") or "", "name": cal.get("name") or cal["id"],
+                    'description': cal.get('description') or '',
                     "tz": cal.get("tz") or "", "writable": 1 if cal.get("writable", True) else 0,
                     "access_role": cal.get("access_role") or "owner",
                     "role_visible": 1 if cal.get("role_visible", True) else 0,
@@ -317,7 +331,7 @@ class Store:
             )
 
     def update_calendar(self, calendar_id: str, fields: Dict[str, Any]) -> None:
-        allowed = {"name", "role_visible", "role_busy", "role_publish", "publish_mode", "sort_order", "is_default", "tz", "deleted_at"}
+        allowed = {"name", "description", "role_visible", "role_busy", "role_publish", "publish_mode", "sort_order", "is_default", "tz", "deleted_at"}
         data = {k: v for k, v in fields.items() if k in allowed}
         if not data:
             return
@@ -367,7 +381,7 @@ class Store:
                              ("availability", "busy"), ("title", ""), ("description", ""), ("location", ""), ("tz", ""), ("all_day", 0),
                              ("rrule", ""), ("rdates", ""), ("exdates", ""), ("recurrence_id", ""), ("master_id", ""), ("status", "confirmed"),
                              ("organizer", ""), ("attendees_json", "[]"), ("my_response", ""), ("reminders_json", "[]"), ("origin", "local"),
-                             ("link_group_id", ""), ("sync_state", "synced"), ("raw_payload", "")):
+                             ("link_group_id", ""), ("link_state", "following"), ("sync_state", "synced"), ("raw_payload", "")):
             if row.get(key) is None:
                 row[key] = default
         row["all_day"] = 1 if row["all_day"] else 0
@@ -646,14 +660,22 @@ class Store:
                     return dict(row)
         return None
 
-    def group_members(self, link_group_id: str) -> List[Dict[str, Any]]:
+    def group_members(self, link_group_id: str, include_deleted: bool = False) -> List[Dict[str, Any]]:
         if not link_group_id:
             return []
         with self._conn() as c:
             rows = c.execute("SELECT e.*, c.name AS calendar_name, c.provider AS provider, c.account_id AS account_id, c.publish_mode AS publish_mode"
-                             " FROM events e JOIN calendars c ON c.id=e.calendar_id WHERE e.link_group_id=? AND e.deleted_at IS NULL",
+                             " FROM events e JOIN calendars c ON c.id=e.calendar_id WHERE e.link_group_id=?"
+                             + ("" if include_deleted else " AND e.deleted_at IS NULL"),
                              (link_group_id,)).fetchall()
         return [dict(r) for r in rows]
+
+    def link_issues(self, limit=50):
+        """Retained changed/missing projections, including provider-deleted rows."""
+        with self._conn() as c:
+            rows = c.execute("SELECT id, calendar_id, title, link_group_id, link_state, deleted_at FROM events"
+                             " WHERE link_group_id!='' AND link_state!='following' ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
 
     def group_masters(self, link_group_id: str) -> List[Dict[str, Any]]:
         """Group members that are events in their own right (no exception rows): the targets of propagation and reassignment."""
@@ -728,22 +750,22 @@ class Store:
         return True
 
     def add_intent(self, kind: str, account_id: str, calendar_id: str, event_id: str, payload: Dict[str, Any],
-                   scope: str = "this", expected_etag: str = "", op_id: str = "") -> Dict[str, Any]:
+                   scope: str = "this", expected_etag: str = "", op_id: str = "", intent_id: str = '') -> Dict[str, Any]:
         ts = now_utc().isoformat(timespec="microseconds")   # intents of one call must order strictly (dependents wait for earlier writes)
         payload = {**(payload or {}), **({"op_id": op_id} if op_id else {})}   # one owner command = one op: its parts share the fate
         payload['desired'] = {k: v for k, v in (self.get_event(event_id) or {}).items()
                               if k in EVENT_COLUMNS and k != 'raw_payload'}
         event = payload['desired'] or {}
         calendar = self.get_calendar(calendar_id) or {}
-        if calendar.get('provider') == 'yandex' and event.get('rrule') and not event.get('master_id'):
+        if calendar.get('provider') in CALDAV_PROVIDERS and event.get('rrule') and not event.get('master_id'):
             # Every master write serializes the same complete desired family.
             # A queued cancellation is already accepted local intent, even
             # before its provider ACK; later commands must not resurrect it.
             payload['cancelled_slots'] = sorted({e['recurrence_id'] for e in self.exceptions_for(event_id)
                 if e.get('status') == 'cancelled'})
         payload['resource_id'] = ((event.get('master_id') or event_id)
-                                  if calendar.get('provider') == 'yandex' else event_id)
-        row = {"id": new_id("int"), "kind": kind, "account_id": account_id, "calendar_id": calendar_id, "event_id": event_id,
+                                  if calendar.get('provider') in CALDAV_PROVIDERS else event_id)
+        row = {"id": intent_id or new_id("int"), "kind": kind, "account_id": account_id, "calendar_id": calendar_id, "event_id": event_id,
                "scope": scope, "payload_json": json.dumps(payload, ensure_ascii=False, default=str), "expected_etag": expected_etag or "",
                "state": INTENT_PENDING, "attempts": 0, "next_attempt_at": ts, "lease_until": None, "lease_owner": "",
                "result_json": "{}", "created_at": ts, "updated_at": ts}
@@ -817,10 +839,16 @@ class Store:
     def intent_counts(self, active_only: bool = False) -> Dict[str, int]:
         # The frequently polled widget needs only unsettled counts. Keep the
         # complete history available to explicit status/diagnostic readers.
-        where = " WHERE state IN ('pending','conflict','failed')" if active_only else ""
+        where = " WHERE state IN ('pending','conflict','failed','uncertain')" if active_only else ""
         with self._conn() as c:
             rows = c.execute("SELECT state, COUNT(*) AS n FROM intents" + where + " GROUP BY state").fetchall()
         return {r["state"]: int(r["n"]) for r in rows}
+
+    def calendar_operations(self, limit=10):
+        with self._conn() as c:
+            rows = c.execute("SELECT id, state, account_id, calendar_id, payload_json, result_json FROM intents"
+                             " WHERE kind='calendar' ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
 
     # ── reminders ───────────────────────────────────────────────────
 
