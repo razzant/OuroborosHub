@@ -255,7 +255,7 @@ def _accept_provider(local, state, current, templates):
     restore = list(before_rows.values())
     for before in restore:
         if before['id'] in affected:
-            local.update_event(before['id'], {k: v for k, v in before.items() if k not in ('id', 'link_state')})
+            local.update_event(before['id'], {k: v for k, v in before.items() if k != 'id'})
     # Retain history but withdraw a segment whose prerequisite never succeeded.
     # A possibly sent create is never inferred absent from an empty identity.
     for eid in created:

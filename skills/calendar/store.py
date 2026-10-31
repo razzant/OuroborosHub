@@ -364,7 +364,7 @@ class Store:
     def default_calendar(self) -> Optional[Dict[str, Any]]:
         with self._conn() as c:
             row = c.execute("SELECT * FROM calendars WHERE is_default=1 AND deleted_at IS NULL ORDER BY provider LIMIT 1").fetchone()
-            if row is None:
+            if row is None and c.execute("SELECT 1 FROM calendars WHERE is_default=1 LIMIT 1").fetchone() is None:
                 row = c.execute("SELECT * FROM calendars WHERE id=? AND deleted_at IS NULL", (DEFAULT_LOCAL_CALENDAR_ID,)).fetchone()
         return dict(row) if row else None
 

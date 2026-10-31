@@ -204,7 +204,7 @@ def register_routes(api, make_ctx) -> None:
             if row is None:
                 return _err("событие не найдено", 404)
             result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, row, cal_ids)
-            if result['reassign'].get('failed'):
+            if result['reassign'].get('failed') and not any(a.get('status') in ('failed', 'conflict') and a.get('message') for a in result['reassign']['added']):
                 result['assignments'].append({'calendar_id': row['calendar_id'], 'calendar_name': row.get('calendar_name') or row['calendar_id'], 'event_id': row['id'],
                                               'action': 'reassign', 'status': 'failed', 'message': result['reassign']['failed']})
             result["assignments"] = list(result["assignments"]) + list(result["reassign"]["added"]) \

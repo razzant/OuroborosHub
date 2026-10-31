@@ -166,11 +166,25 @@ def test_provider_representation_does_not_mark_a_copy_changed(shape):
     assert links.changed(source, actual_edit, provider_observation=True)
 
 
-def test_retired_default_is_explicit_and_named_selection_still_works(tmp_path):
+@pytest.mark.parametrize('retired', ['original', 'selected', 'disconnected'])
+def test_retired_default_is_explicit_and_named_selection_still_works(tmp_path, retired):
     ctx = make_context()
     ctx.store = Store(str(tmp_path))
     other = add_local_calendar(ctx.store, 'other', 'full')
-    assert json.loads(management.cal_manage(ctx, action='delete', calendar_id=DEFAULT_LOCAL_CALENDAR_ID, confirm=True))['status'] == 'done'
+    assert ctx.store.default_calendar()['id'] == DEFAULT_LOCAL_CALENDAR_ID
+    if retired == 'disconnected':
+        from test_calendar_provider_divergence import add_google_calendar
+        chosen = add_google_calendar(ctx.store)
+    else:
+        chosen = DEFAULT_LOCAL_CALENDAR_ID if retired == 'original' else add_local_calendar(ctx.store, 'selected', 'full')
+    assert json.loads(tools.cal_settings(ctx, action='set_calendar', calendar_id=chosen, default=True, confirm=True))['status'] == 'updated'
+    assert ctx.store.default_calendar()['id'] == chosen
+    if retired == 'disconnected':
+        account_id = ctx.store.get_calendar(chosen)['account_id']
+        assert json.loads(tools.cal_settings(ctx, action='disconnect', calendar_id=account_id, confirm=True))['status'] == 'updated'
+    else:
+        assert json.loads(management.cal_manage(ctx, action='delete', calendar_id=chosen, confirm=True))['status'] == 'done'
+    ctx.store = Store(str(tmp_path))  # selection/retirement facts survive a process restart
     result = json.loads(tools.cal_create(ctx, title='Private', start=_day(2).isoformat(), confirm=True))
     assert result['status'] == 'error' and 'по умолчанию' in result['message']
     assert ctx.store.default_calendar() is None
@@ -273,3 +287,61 @@ def test_source_batch_keeps_predecessor_and_observed_instance_baselines(linked_w
         assert override['sync_state'] == 'conflict'
         assert google.events[remote_id]['summary'] == 'Separate edit'
         assert parse_stored(google.events[remote_id]['start']['dateTime']) == _day(3)
+
+
+@pytest.mark.parametrize('attempt', ['follow', 'direct'])
+@pytest.mark.parametrize('choice', ['provider', 'local'])
+def test_conflict_choice_restores_relation_before_the_abandoned_command(linked_world, attempt, choice):
+    from test_calendar_provider_divergence import run_open_intents
+    ctx, cid, caldav, google, left, source_id, projection = linked_world
+    target = projection['id']
+    remote = google.events[projection['external_id']]
+    if attempt == 'follow':
+        assert json.loads(tools.cal_update(ctx, id=target, title='Copy own', scope='all', confirm=True))['status'] == 'updated'
+        assert ctx.store.get_event(target)['link_state'] == links.DIVERGED
+    remote['etag'] = google._etag()  # metadata only, no independent content edit
+    args = {'link_action': 'follow'} if attempt == 'follow' else {'title': 'Local desired'}
+    tools.cal_update(ctx, id=target, scope='all', confirm=True, **args)
+    assert ctx.store.get_event(target)['sync_state'] == 'conflict'
+    detail = json.loads(tools.cal_events(ctx, id=target))['event']['conflict']
+    result = json.loads(tools.cal_update(ctx, id=target, resolution=choice, resolution_token=detail['resolution_token'], confirm=True))
+    assert result['status'] == ('resolved' if choice == 'provider' else 'pending')
+    run_open_intents(ctx, 3)
+    following = (attempt == 'direct') if choice == 'provider' else (attempt == 'follow')
+    expected = links.FOLLOWING if following else links.DIVERGED
+    assert ctx.store.get_event(target)['link_state'] == expected
+    kept = remote['summary']
+    assert json.loads(tools.cal_update(ctx, id=source_id, title='Later source edit', scope='all', confirm=True))['status'] == 'updated'
+    assert remote['summary'] == ('Later source edit' if following else kept)
+
+
+def test_external_occurrence_conflict_keeps_both_relation_observations(linked_world):
+    ctx, cid, caldav, google, left, source_id, projection = linked_world
+    remote_id, address = instance(ctx, google, projection['id'], 3)
+    remote = google.events[remote_id]
+    remote.update(summary='Remote occurrence', etag=google._etag())
+    result = json.loads(tools.cal_update(ctx, id=address, title='Local occurrence', confirm=True))
+    assert result['status'] == 'conflict'
+    occurrence = ctx.store.exceptions_for(projection['id'])[0]
+    detail = json.loads(tools.cal_events(ctx, id=occurrence['id']))['event']['conflict']
+    assert json.loads(tools.cal_update(ctx, id=occurrence['id'], resolution='provider', resolution_token=detail['resolution_token'], confirm=True))['status'] == 'resolved'
+    assert ctx.store.get_event(projection['id'])['link_state'] == links.DIVERGED
+    assert ctx.store.get_event(occurrence['id'])['link_state'] == links.DIVERGED
+    tools.cal_update(ctx, id=source_id, title='Later source edit', scope='all', confirm=True)
+    assert remote['summary'] == 'Remote occurrence'
+
+
+def test_reassign_waiting_for_deletion_keeps_existing_human_explanation(linked_world):
+    ctx, cid, caldav, google, left, source_id, projection = linked_world
+    real = ctx.providers
+    ctx.providers = SimpleNamespace(adapter_for=lambda account: None if account.startswith('google:') else real.adapter_for(account), errors={})
+    assert json.loads(tools.cal_delete(ctx, id=projection['id'], scope='all', confirm=True))['status'] == 'pending'
+    api = RouteAPI()
+    routes.register_routes(api, lambda: ctx)
+    response = asyncio.run(api.routes['event/update'](Request({'id': source_id, 'scope': 'all', 'calendars': [cid, projection['calendar_id']]})))
+    result = json.loads(response.body)
+    assert result['status'] == 'conflict'
+    messages = [row.get('message', '') for row in result['assignments']]
+    assert 'pending_delete' not in messages
+    assert any('удаление копии ещё не подтверждено' in message for message in messages)
+    assert len(messages) == 1

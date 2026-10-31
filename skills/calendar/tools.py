@@ -559,7 +559,7 @@ def cal_free(ctx: Context, start: str = "", end: str = "", duration_min: int = 6
         "soft_overlaps": soft_hits[:10],
         'next_step': ('Окна предварительные: сначала проверь конфликтные события через cal_events(id) и ошибки повторений; '
                       'не считай эти окна подтверждённо свободными' if incomplete else
-                      'Предложи владельцу 2–4 варианта, затем cal_create с confirm=true'),
+                      'Выбирай окно в рамках разового или постоянного поручения; предложи варианты, когда выбор нужен владельцу. Затем cal_create с confirm=true'),
     })
 
 
