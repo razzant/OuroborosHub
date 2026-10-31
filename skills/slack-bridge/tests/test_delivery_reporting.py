@@ -302,6 +302,7 @@ def test_migrated_automatic_rows_and_old_terminal_rows_do_not_report(tmp_path):
              "report_attempts", "report_available_at", "report_error")
     with sqlite3.connect(store.path) as db:
         db.execute("DROP INDEX outbox_report_work")
+        db.execute("DROP INDEX outbox_message")
         for name in names: db.execute(f"ALTER TABLE outbox DROP COLUMN {name}")
     migrated = BridgeStore(tmp_path)
     item = migrated.claim_outbox()

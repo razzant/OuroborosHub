@@ -56,6 +56,25 @@ def test_private_reply_from_bot_place_is_checked_not_refused(tmp_path):
     asyncio.run(run())
 
 
+def test_place_lookup_names_a_thread_only_when_one_is_given(tmp_path):
+    async def run():
+        class Transport:
+            lookups = []
+            async def request_json(self, method, url, **kwargs):
+                if url.endswith("/identity"):
+                    return {"places_version": 1}
+                self.lookups.append(url.split("?", 1)[1])
+                return {"state": "active", "label": "Telegram"}
+        transport = Transport()
+        host = PresenceHostClient(state_dir=tmp_path, token_provider=lambda: "token",
+                                  host_base="http://127.0.0.1:8767", transport=transport)
+        assert await host.place_hold("9", "-100", thread_id="5") == ""
+        assert await host.place_hold("9", "-100") == ""
+        assert transport.lookups == ["provider=telegram&account_id=9&conversation_id=-100&thread_id=5",
+                                     "provider=telegram&account_id=9&conversation_id=-100"]
+    asyncio.run(run())
+
+
 def test_unbound_submission_negotiates_and_live_checks_do_not_cache_state(tmp_path):
     async def run():
         class Transport:

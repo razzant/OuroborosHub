@@ -9,8 +9,61 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Sequence
 
-from .events import ParsedEnvelope, provider_facts
+from .events import REACTION_EVENTS, ParsedEnvelope, provider_facts
 from .slack_api import normalize_text_format
+
+
+# An inbox row kept on a Host that cannot hold it as context-only; it is never submitted later.
+REACTION_WITHHELD = "reaction_host_context_unavailable"
+_REACTION_OPERATIONS = {"reaction_add": ("add", "new", "reactions.add"),
+                        "reaction_remove": ("remove", "old", "reactions.remove")}
+
+
+def _reaction_address(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """The channel, timestamp and name SlackClient.reaction sends, for everything else that names them."""
+    return {**payload, **{key: str(payload.get(key) or "").strip() for key in ("channel", "ts", "name")}}
+
+
+def _reaction_lane(operation: str, payload: Mapping[str, Any]) -> str:
+    """A reaction write's FIFO lane: its one message, never the channel or a thread found later.
+
+    ``slack_api`` reactions.add/remove naming the same channel and timestamp share it, with
+    their bytes and handling unchanged. A write naming no message gets ``""``: its usual lane.
+    """
+    if operation in _REACTION_OPERATIONS:
+        address = _reaction_address(payload)
+        channel, ts = address["channel"], address["ts"]
+    elif operation == "generic_api" and payload.get("path") in {"reactions.add", "reactions.remove"}:
+        arguments = payload.get("body") if payload.get("method") == "POST" else payload.get("params")
+        arguments = arguments if isinstance(arguments, Mapping) else {}
+        channel, ts = (str(arguments.get(key) or "").strip() for key in ("channel", "timestamp"))
+    else:
+        return ""
+    return f"reaction:{channel}:{ts}" if channel and ts else ""
+
+
+def _lane_reactions_by_message(db: sqlite3.Connection) -> None:
+    """Move live reaction rows an earlier version queued in their channel's lane to their message's.
+
+    Id, lease and send marker stay, so writes to one message keep their order and an
+    attempt that may have reached Slack is still never repeated. Only rows still in an
+    older lane are read, and of ``slack_api`` rows only those naming a reactions method;
+    one naming no message, or unreadable, keeps the lane it has.
+    """
+    rows = db.execute(
+        """SELECT id,operation,payload_json FROM outbox WHERE state IN ('pending','leased')
+           AND operation IN ('reaction_add','reaction_remove','generic_api') AND ordering_key NOT LIKE 'reaction:%'
+           AND (operation<>'generic_api' OR payload_json LIKE '%"reactions.add"%'
+                OR payload_json LIKE '%"reactions.remove"%')"""
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        lane = _reaction_lane(str(row["operation"]), payload) if isinstance(payload, dict) else ""
+        if lane:
+            db.execute("UPDATE outbox SET ordering_key=? WHERE id=?", (lane, row["id"]))
 
 
 class InboxLeaseLost(RuntimeError):
@@ -100,6 +153,28 @@ class OutboxItem:
             "conversation_id": str(result.get("channel") or self.resolved_channel or self.target),
             "thread_id": self.thread_ts, "text": self.text, "format": self.text_format,
             "message": message, "origin": self.origin,
+        }
+
+
+    def reaction_report(self, state: str, *, retained: Mapping[str, Any] | None = None, effect: str = "",
+                        error: str = "") -> dict[str, Any] | None:
+        """One reaction write's non-speech receipt: no words, and only the value this write named."""
+        operation = _REACTION_OPERATIONS.get(self.operation)
+        if operation is None or self.delivery_reporting_version != 1 or not self.provider_account_id:
+            return None
+        verb, field, method = operation
+        reaction = {"schema_version": 1, "operation": verb,
+                    field: [{"type": "name", "value": str(self.payload.get("name") or "")}],
+                    "target": {"message_id": str(self.payload.get("ts") or ""),
+                               "resolution": "resolved" if retained else "unresolved"},
+                    **({"effect": effect} if effect else {})}
+        message = {"kind": "operation", "method": method, "reaction": reaction, **({"error": error} if error else {})}
+        return {
+            "schema_version": 1, "delivery_id": self.request_id, "part_id": "0", "state": state,
+            "provider": "slack", "account_id": self.provider_account_id,
+            "conversation_id": str(self.payload.get("channel") or self.target),
+            "thread_id": str(retained["thread_ts"]) if retained else "",
+            "text": "", "format": "", "message": message, "origin": self.origin,
         }
 
 
@@ -304,6 +379,8 @@ class BridgeStore:
                 # physical send boundary. Its expiry cannot authorize a resend.
                 db.execute("UPDATE outbox SET send_started=1 WHERE state='leased'")
             db.execute("CREATE INDEX IF NOT EXISTS outbox_report_work ON outbox(report_state,report_available_at,id)")
+            db.execute("CREATE INDEX IF NOT EXISTS outbox_message ON outbox(resolved_channel,provider_message_ts)")
+            _lane_reactions_by_message(db)
             db.commit()
 
     def ingest_envelope(
@@ -512,20 +589,63 @@ class BridgeStore:
             (json.dumps(value, ensure_ascii=False, separators=(",", ":")) if value is not None else "",),
         )
 
+    def retained_message(self, team_id: str, channel_id: str, message_ts: str) -> dict[str, Any] | None:
+        """One exact message from retained records, by indexed team, channel and timestamp.
+
+        An own receipt names its author exactly; only a posted text chunk's creation receipt
+        counts, never another mutation that merely returned a ``ts``. Nothing is inferred from
+        time or text, and the same timestamp in another channel or workspace does not match.
+        """
+        if not team_id or not channel_id or not message_ts:
+            return None
+        with self._connect() as db:
+            own = db.execute(
+                """SELECT thread_ts,text FROM outbox WHERE resolved_channel=? AND provider_message_ts=?
+                   AND provider_account_id=? AND kind='text' AND state='delivered' ORDER BY id DESC LIMIT 1""",
+                (channel_id, message_ts, team_id),
+            ).fetchone()
+            seen = None if own else db.execute(
+                """SELECT actor_user_id,thread_ts,text FROM inbox WHERE team_id=? AND channel_id=? AND message_ts=?
+                   AND event_type IN ('message','app_mention') AND subtype!='message_deleted'
+                   ORDER BY id DESC LIMIT 1""",
+                (team_id, channel_id, message_ts),
+            ).fetchone()
+        row = own or seen
+        if row is None:
+            return None
+        message = {"ts": message_ts, "text": str(row["text"]),
+                   **({"user": str(seen["actor_user_id"])} if seen else {})}
+        return {"source": "slack-bridge outbox" if own else "slack-bridge inbox", "message": message,
+                "thread_ts": str(row["thread_ts"] or message_ts), **({"is_self": True} if own else {})}
+
+    def withhold_inbox(self, row_id: int, lease_token: str, reason: str) -> None:
+        """Settle a retained observation without submitting it, now or after an update."""
+        with self._connect() as db:
+            updated = db.execute(
+                """UPDATE inbox SET state='ignored',ignored_reason=?,lease_token='',lease_until=0,updated_at=?
+                   WHERE id=? AND state='leased' AND lease_token=?""",
+                (reason, time.time(), row_id, lease_token),
+            )
+            if updated.rowcount != 1:
+                raise InboxLeaseLost("Slack inbox lease no longer belongs to this worker")
+
     def conversation_queue(self, item: InboxItem, *, limit: int | None = None,
-                           text_chars: int | None = None) -> dict[str, Any]:
+                           text_chars: int | None = None, reactions: bool = True) -> dict[str, Any]:
         """This conversation's later events without an acknowledged Host reference.
 
         One read transaction over the existing inbox: rows of the same ordering key
         received after ``item`` that are pending or leased without a Host reference.
         Rows Host already holds (deferred/continuing references) and ignored rows are
-        not queued events. The transport sends all rows and full text, so Host can
+        not queued events, nor reactions on a Host that cannot hold them (``reactions=False``). The transport sends all rows and full text, so Host can
         retain the exact observation for its scoped source reader. Optional limits
         are diagnostic views only: every cut makes completeness false. Each event
         still reaches Host later as its own submission.
         """
         where = ("FROM inbox WHERE ordering_key=? AND id>? AND state IN ('pending','leased') "
                  "AND host_reference=''")
+        if not reactions:
+            types = ",".join(f"'{kind}'" for kind in sorted(REACTION_EVENTS))
+            where += f" AND event_type NOT IN ({types})"
         arguments = (item.ordering_key, item.row_id)
         with self._connect() as db:
             db.execute("BEGIN")
@@ -690,18 +810,22 @@ class BridgeStore:
         if not operation:
             raise ValueError("Slack mutation operation is required")
         now = time.time()
+        if operation in _REACTION_OPERATIONS:
+            payload = _reaction_address(payload)
         arguments = payload.get("body") if payload.get("method") == "POST" else payload.get("params")
         arguments = arguments if isinstance(arguments, Mapping) else {}
         target = str(payload.get("channel") or payload.get("channel_id")
                      or arguments.get("channel") or arguments.get("channel_id") or "mutation")
         thread_ts = str(payload.get("thread_ts") or arguments.get("thread_ts") or "")
+        # A reaction held for its thread's place waits only with writes to that message.
+        lane = _reaction_lane(operation, payload) or f"{target}:{thread_ts}"
         with self._connect() as db:
             db.execute(
                 """INSERT OR IGNORE INTO outbox
                    (request_id,chunk_index,chunk_count,target,thread_ts,text,ordering_key,kind,operation,payload_json,
                     origin_json,delivery_reporting_version,created_at,updated_at)
                    VALUES(?,0,1,?,?, '', ?, 'mutation', ?, ?, ?, ?, ?, ?)""",
-                (request_id, target, thread_ts, f"{target}:{thread_ts}", operation,
+                (request_id, target, thread_ts, lane, operation,
                  json.dumps(dict(payload), ensure_ascii=False),
                  json.dumps(dict(origin or {}), ensure_ascii=False),
                  1 if delivery_reporting_version == 1 else 0, now, now),
@@ -735,6 +859,8 @@ class BridgeStore:
                        WHERE id=? AND state='leased' AND send_started=1 AND lease_until<=?""",
                     (now, report, "pending" if report else "", lost["id"], now),
                 )
+            # Opening the store moved earlier rows; this also moves one an older process queued since.
+            _lane_reactions_by_message(db)
             row = db.execute(self._claimable_sql("outbox"), {"now": now}).fetchone()
             if row is None:
                 db.commit()
@@ -760,13 +886,19 @@ class BridgeStore:
 
     @staticmethod
     def _outbox_item(claimed: sqlite3.Row) -> OutboxItem:
+        operation, target = str(claimed["operation"] or ""), str(claimed["target"])
+        payload = json.loads(claimed["payload_json"] or "{}")
+        if operation in _REACTION_OPERATIONS:
+            # A row queued before enqueue did this keeps its bytes; only its lane moved to its message.
+            payload = _reaction_address(payload)
+            target = payload["channel"] or "mutation"
         return OutboxItem(
             row_id=int(claimed["id"]),
             lease_token=str(claimed["lease_token"]),
             request_id=str(claimed["request_id"]),
             chunk_index=int(claimed["chunk_index"]),
             chunk_count=int(claimed["chunk_count"]),
-            target=str(claimed["target"]),
+            target=target,
             thread_ts=str(claimed["thread_ts"]),
             text=str(claimed["text"]),
             ordering_key=str(claimed["ordering_key"]),
@@ -777,19 +909,20 @@ class BridgeStore:
             resolved_channel=str(claimed["resolved_channel"]),
             provider_account_id=str(claimed["provider_account_id"]),
             kind=str(claimed["kind"] or "text"),
-            operation=str(claimed["operation"] or ""),
-            payload=json.loads(claimed["payload_json"] or "{}"),
+            operation=operation,
+            payload=payload,
             output_ref=str(claimed["output_ref"] or ""),
         )
 
-    def begin_send(self, item: OutboxItem) -> None:
+    def begin_send(self, item: OutboxItem, *, uncertain_report: Mapping[str, Any] | None = None) -> None:
         """Durably mark one provider attempt before dispatch, under its live lease.
 
         The prepared uncertainty report is withheld while the request is live;
         crash recovery can publish it with the original identity and format.
+        A mutation that reports supplies its own.
         """
         now = time.time()
-        report = item.delivery_report("uncertain", error="send_result_unrecorded") if item.kind == "text" else None
+        report = item.delivery_report("uncertain", error="send_result_unrecorded") if item.kind == "text" else uncertain_report
         with self._connect() as db:
             changed = db.execute(
                 """UPDATE outbox SET send_started=1,provider_account_id=?,updated_at=?,
@@ -904,7 +1037,8 @@ class BridgeStore:
         if not rows:
             return {"state": "not_found", "request_id": str(request_id)}
         parts = [{"part_id": str(row["chunk_index"]), "state": "held" if str(row["last_error"]).startswith("Held:") and row["state"] == "pending" else str(row["state"]),
-                  "attempts": int(row["attempts"]), "target": str(row["target"]),
+                  "attempts": int(row["attempts"]),
+                  "target": str(row["target"]).strip() if row["operation"] in _REACTION_OPERATIONS else str(row["target"]),
                   "resolved_channel": str(row["resolved_channel"]),
                   "provider_message_ts": str(row["provider_message_ts"]),
                   "provider_result": json.loads(row["result_json"] or "{}"),
@@ -1043,6 +1177,9 @@ class BridgeStore:
             retained = db.execute(
                 "SELECT COUNT(*) FROM inbox WHERE host_reference LIKE 'retained:%' AND state IN ('pending','leased')"
             ).fetchone()[0]
+            withheld = db.execute(
+                "SELECT COUNT(*) FROM inbox WHERE state='ignored' AND ignored_reason=?", (REACTION_WITHHELD,)
+            ).fetchone()[0]
             last_error = db.execute(
                 """
                 SELECT last_error FROM (
@@ -1064,6 +1201,7 @@ class BridgeStore:
             "outbox_held": held,
             "socket_state": "stopped",
             "host_adapter_state": "missing_binding_id",
+            "reaction_context_state": "unknown",
             "workspace_name": "",
             "workspace_id": "",
             "bot_user_id": "",
@@ -1075,6 +1213,7 @@ class BridgeStore:
             "inbox_delivered": inbox.get("delivered", 0),
             "inbox_failed": inbox.get("failed", 0),
             "inbox_ignored": inbox.get("ignored", 0),
+            "reactions_withheld": int(withheld),
             "outbox_pending": outbox.get("pending", 0),
             "outbox_leased": outbox.get("leased", 0),
             "outbox_delivered": outbox.get("delivered", 0),

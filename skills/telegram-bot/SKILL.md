@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.9.0
+version: 0.10.0
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -115,6 +115,8 @@ ui_tab:
         path: last_delivery_at
       - label: Last error
         path: last_error
+      - label: Reactions in Host context
+        path: reaction_context
       target: status
 tools:
 - name: telegram_send
@@ -133,7 +135,7 @@ tools:
   target: chat_id
   conversation: chat_id
   thread: topic_id
-  description: Queue an own-message edit or reaction through the Telegram Bot API with durable receipts.
+  description: Queue an edit of this bot's own message, or set or clear its reaction on a reachable message, with durable receipts.
 - name: telegram_receipt
   effect: read
   target: []
@@ -213,7 +215,8 @@ messages, and message-reaction provider facts. Voice/audio bytes are still
 outside the interpreted content contract: this transport makes no
 speech-to-text claim. Reaction updates require the bot to be an administrator
 in the chat and an explicit Bot API `allowed_updates` subscription; Telegram
-does not deliver bot-authored reactions as user reactions.
+does not deliver bot-authored reactions as user reactions. See
+[Reactions](#reactions-0100).
 
 ## Connecting groups (0.9.0)
 
@@ -376,9 +379,9 @@ message stays in that topic. Telegram also sets `message_thread_id` on replies
 outside topics (ordinary groups, a forum's General topic, private chats); that
 value names a reply chain, not a topic, so the reply stays in the chat's
 conversation (`topic_id` null, replies sent without a topic) and the raw value is
-kept as `message.reply_chain_id`. Reaction updates carry no topic, so reactions
-always use the chat's conversation, also in forums. Album members keep
-Telegram's `media_group_id`.
+kept as `message.reply_chain_id`. Reaction updates carry no topic; a reaction uses
+the topic of its exact retained target and otherwise the chat's conversation (see
+[Reactions](#reactions-0100)). Album members keep Telegram's `media_group_id`.
 Text and caption entities retain their original UTF-16 offsets, hidden link
 URLs, and text-mention user facts.
 When Telegram supplies a replied-to message, the event includes its text or
@@ -394,6 +397,148 @@ message text. These are observations for model judgment, not automatic replies.
 Reply context comes only from that incoming update. It does not fetch history,
 follow nested reply chains, or download the replied-to message's media. Direct
 photo/document attachments continue through the existing staging path.
+
+## Reactions (0.10.0)
+
+A reaction can be the whole social response: it shows you understood, saw or
+laughed without another message. It is optional, it is not speech, a read
+receipt or agreement, and an early gesture does not replace a promised result.
+This connector has no emoji dictionary and no required sequence of gestures.
+
+**What this bot can read.** Telegram sends a bot reaction updates only when it is
+an administrator of the chat, and only as they happen. `message_reaction` names
+one person's or chat's change. `message_reaction_count` reports anonymous totals,
+grouped and delayed by up to a few minutes. Neither names the target's topic, text
+or author. The Bot API has no method to read a message's current reactions or
+earlier history, so what this bot knows is what it observed. Being an administrator
+is the owner's choice; this connector never asks for or changes it. Delivery in
+private chats is not established by Telegram's documentation.
+
+**Incoming.** With a Host whose `/identity` says `presence_reaction_context: 1`
+(strictly that integer, read when the transport meets the Host), each update
+becomes an event with empty `text`, no attachments, Telegram's raw
+`old_reaction`/`new_reaction` or `reaction_counts`, `message.sent_at` from its
+`date`, and `event.message.reaction` (contract version 1):
+
+- `change` is `add`, `remove` or `replace` for a person or chat, with `old` and
+  `new` as that actor's values in this update, or `count` with `counts` for an
+  aggregate. Values are `{"type": "emoji", "value": "👍"}`, `{"type":
+  "custom_emoji", "value": "<id>"}` and `{"type": "paid", "value": ""}`. They say
+  nothing about other people's reactions. An update that changes nothing is
+  dropped.
+- `actor.kind` is `user` for one person or bot, `chat` with
+  `authenticated: false` for a chat acting as itself, and `anonymous` with
+  `authenticated: false` and no id for an aggregate. Neither of the last two is a
+  person or an owner candidate. `user` is not necessarily the owner.
+- `target.resolution` says whether `event.thread_id` is proven. A retained exact
+  account+chat+message record proves its topic. Without one, a private chat, group,
+  channel or non-forum supergroup is its chat-level conversation and is `resolved`;
+  a forum, or a chat whose retained messages have shown topics, is `unresolved`
+  with an empty `thread_id`, so a reaction is never presumed to be in General. A
+  private chat can have topics too, so its later messages outside a topic do not
+  undo the topics it has shown.
+- A retained record also adds `target.author` (with `is_self`, set only from the
+  exact receipt of this bot's own send) and `target.excerpt`: up to 500 characters
+  with `truncated: true` whenever words were cut; the full words stay in
+  `message.target_lookup`. A record keeps the newest words this bot received, so its
+  own later edits are not reflected.
+
+The record is an exact-key table of messages this bot received or sent from this
+version on, in the custody database. Earlier messages stay unknown.
+The Host, not this connector, decides that a reaction starts no focus.
+
+**On an older or unknown Host.** A reaction is not delivered, because that Host
+cannot promise not to wake on it. It stays in custody as a terminal row counted by
+`reactions_withheld` (not `inbox_failed`), and `status` shows
+`reaction_context: update_required`. It is never replayed after an update, as a
+live arrival or as history. A reaction row queued before this version is treated
+the same on any Host. Ordinary messages are unaffected.
+
+**Outgoing.** `telegram_operation` with `setMessageReaction` takes at most one
+reaction: `{"type": "emoji", "emoji": ...}` or `{"type": "custom_emoji",
+"custom_emoji_id": ...}`, and `[]` clears it. Telegram's rule is that this replaces
+the bot's earlier reaction. Paid reactions are refused because bots cannot use
+them. Which emoji or custom emoji a chat allows is left to Telegram's answer.
+
+In a forum the guard needs the real topic. A retained target in a topic requires
+that `topic_id`, and a wrong one is refused. A target this bot has no record of, in
+a forum or in a group it has not yet observed, is refused with `forum_topic_unknown`
+unless you pass a `topic_id` you know; nothing is sent, and the whole chat's permission is
+not borrowed. Such an explicit topic is recorded as `resolution: unresolved`. Known
+private and non-forum targets need no topic. A private chat's records cannot show
+that it has no topics, so a `topic_id` for a private target with no record is kept
+the same way. Once a private chat has shown a topic, such a target needs its
+`topic_id` as in a forum, whatever messages outside topics came later; a private
+chat that has shown none stays one conversation. Until a group's next update after this
+version, its forum status is unknown, so such a target needs a `topic_id` even if
+the group has no topics.
+
+These rules read the records of the bot `getMe` last confirmed for the token
+configured now. The tool often runs in a pooled worker whose own runtime never
+polls, so that answer is kept in custody beside a digest of the token, never the
+token itself. Until `getMe` confirms the current token (a new token, one Telegram
+refused, or none), no record is read as this bot's. A group or forum
+target without a `topic_id` is then refused with `forum_topic_unknown`, which names
+the unconfirmed identity; nothing is sent. An explicit `topic_id` and a private
+target are kept as `resolution: unresolved`. A failed `getMe` that does not refuse
+the token leaves the last answer standing. This is separate from the status route,
+which reports only its own running process's bot.
+
+`telegram_receipt(operation="operation", ...)` then shows each outcome:
+
+| Provider answer | Receipt | Meaning |
+| --- | --- | --- |
+| True | `delivered`, `effect: applied` | Telegram accepted this set for the requested message. It does not say what it replaced. |
+| 400 or 403 | `failed`, once, with Telegram's description | The next queued item proceeds at once. |
+| Lost or unreadable response, 5xx, any code not listed here such as 408 | `uncertain`, once | Never sent again, including after a restart mid-call. |
+| Earlier attempt ended with no answer: expired or stopped lease, or a cancel; or 0.9.0 made it and kept no proof it did nothing ([Upgrading to 0.10.0](#upgrading-to-0100)) | `uncertain`, with no call | The next queued item proceeds at once. A row without a recorded result may have reached Telegram. |
+| 401, 404, 429 | retried, bounded | Telegram answered that it did not do this now. No effect is claimed meanwhile. |
+
+A cancel or crash just before the call also ends `uncertain`, since the row cannot
+show that no call was made. The reaction is then simply not retried. The marker is
+written before the call, so a failure before it (token, Host, place read, or that
+write itself) proves no call: the row retries, and after five attempts ends `failed`.
+A retry after a hold or a 401, 404 or 429 also sends.
+
+A confirmed result is never asked about again. If recording it fails, the row keeps
+the result and finishes later with no token, Host or call. If the store refuses even
+that, this process keeps the result until the lease expires; a restart before then
+loses it, and the row, whose marker is stored, ends `uncertain` rather than repeat.
+The same double failure after a 429 also ends `uncertain`.
+Telegram documents no error for a reaction
+that is already set, so no already-present result is claimed.
+
+`target.message_id` and `effect` describe the requested message. In an album Telegram
+[sets the reaction on the first non-deleted member instead](https://core.telegram.org/bots/api#setmessagereaction)
+and answers only True, so which member took it is unknown here. When the retained
+record names an album, the receipt and report add
+`album: {media_group_id, effective_message_id: "unknown"}`. Without `album`, nothing is
+proved about albums: a target with no record may still be a member.
+
+Silent and Paused hold the write. Just before the call the worker re-reads the place
+of the queued `topic_id`, the topic the guard checked. So a reaction queued while
+active is held once that topic's own place is Paused, even while the chat stays
+Active. A reaction queued without a topic is checked as the chat's, as before. Later
+rows for that topic wait behind the held one; General and other topics do not. A Host
+advertising `presence_explicit_completion: 1` also receives `/presence/delivery`
+with empty text, `message.kind: "operation"` and a typed `message.reaction`
+(`operation: set`, `new`, `target`, and `effect` when it took effect, with no `old`
+because the earlier value is unknown). Other Hosts receive no reaction report, since
+they could count it as speech, and the receipt's `history_limitation` says so. Edits
+and sends report as before.
+
+That rule also holds at the moment a report is sent, including one frozen before this
+version or for a Host that has since changed. On a Host without the capability, or
+one that cannot be asked, the report stays stored unchanged and unacknowledged and is
+checked again later. Its `error` starts with `Held:`, `status` counts it in
+`delivery_reports_held`, and Telegram is not called again. This connector keeps a
+Host's supported or unsupported `/identity` answer until it restarts, and asks again
+only while the Host cannot answer. So a Host's capability change reaches a running
+connector at its next restart, and until then it keeps acting on the earlier answer,
+for held reports and new reports alike. On a capable Host, an
+earlier version's list-shaped report is sent in the typed shape built from its own
+message ID and values, with `resolution: unresolved` because it recorded no topic. One
+that does not state them stays held and says so.
 
 ## Connector settings and facts (0.6.3)
 
@@ -447,20 +592,19 @@ Reuse `request_id` when retrying the same action, and inspect `telegram_receipt`
 with `operation="moderate"` (or `"send"`) for the provider outcome. A queue receipt
 is not proof of provider delivery.
 
-`telegram_operation` extends the same outbox for the two provider operations
-that update an own message: `editMessageText` and `setMessageReaction`. It
+`telegram_operation` extends the same outbox for two provider operations:
+`editMessageText` updates this bot's own message, and `setMessageReaction` sets or
+clears this bot's reaction on any message it can reach (see
+[Reactions](#reactions-0100)). It
 accepts Bot API-shaped parameters and retains a new operation identity plus an
 optional `original_delivery_id` source reference, so an edit/reaction never
 rewrites the original outbound delivery history. For edits, omit `parse_mode`
 for plain text or choose `HTML` / `MarkdownV2` for provider formatting. Inspect its result with
 `telegram_receipt(operation="operation", request_id=...)`. The original
 delivery reference stays in provider message facts; Host origin retains its
-standard `kind`/task/source-event provenance. A reaction update contains
-only Telegram's reaction objects; this skill does not invent a forum topic ID
-when the provider's reaction update omits one. Supply a known local topic ID
-only for `editMessageText` when the caller has it. Provider rights, reaction
-administration requirements, and errors remain authoritative; a queued row is
-not a delivery claim.
+standard `kind`/task/source-event provenance. A known `topic_id` is a local fact
+for the guard, ordering and history, and is never sent to Telegram. Provider
+rights and errors remain authoritative; a queued row is not a delivery claim.
 An ambiguous transport result for an edit/reaction is terminally `uncertain` in
 its own operation receipt, without an automatic second provider call. A
 confirmed operation is checkpointed before its row completes, so restart
@@ -556,3 +700,32 @@ from the incoming message's actor. Older hosts receive no identity key.
 - `getUpdates` also requests `my_chat_member`. Telegram applies the new
   subscription to updates created after it, so an addition made before the
   upgrade is not reported.
+
+## Upgrading to 0.10.0
+
+- `getUpdates` also requests `message_reaction_count`. Telegram applies it to
+  updates created after it.
+- A reaction row that 0.9.0 left leased, or released after a restart or cancel,
+  has no record of whether Telegram took it. It ends `uncertain` without another
+  call. Edit, send and moderation rows keep their existing handling.
+- 0.9.0 marked nothing before asking Telegram and kept only the newest attempt's
+  error. A reaction row it released for a retry is sent again only when that error
+  proves its one counted attempt did nothing: Telegram answered 400, 401, 403, 404
+  or 429, or the call was never made (no token, a failed `getMe` or
+  `deleteWebhook`). Any other answer, such as 408, 5xx or an unreadable
+  `error_code`, a hold that replaced the error, or more than one counted attempt
+  ends `uncertain` without another call, whatever happens to this version's first
+  attempt. A row 0.9.0 never attempted, or only held, is sent as usual.
+- Attempts 0.9.0 makes during a rollback are judged the same way. Each reaction row
+  keeps the attempt count this version last left it with, so on return any attempt
+  counted since then is 0.9.0's; a hold gives its attempt back in either version.
+  0.9.0 reads neither that count nor the send marker, so while it runs it may repeat
+  a reaction this version was sending when it stopped.
+- The custody file gains a `telegram_messages` table on first start. It starts
+  empty: messages received or sent earlier stay unknown as reaction targets, and
+  nothing is backfilled.
+- Without `presence_reaction_context: 1` on the Host, reactions stop reaching it and
+  stay in custody. Without `presence_explicit_completion: 1`, own reactions stop being
+  reported as deliveries, and reports frozen before the upgrade wait unsent (see
+  [Reactions](#reactions-0100)). The promise that a reaction alone never wakes anyone
+  needs an updated Host and this version together.

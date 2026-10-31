@@ -433,6 +433,8 @@ class LoopbackPresenceHostAdapter:
         self.continuation_version = 0
         self.places_version = 0
         self.presence_identity = 0
+        self.reaction_context = 0
+        self.explicit_completion = 0
         self.connector_identity = dict(identity or {})
 
     async def discover_delivery_support(self) -> int:
@@ -457,6 +459,11 @@ class LoopbackPresenceHostAdapter:
             version = payload.get("places_version")
             self.places_version = int(type(version) is int and version >= 1)
             self.presence_identity = int(payload.get("presence_identity") == 1)
+            # A JSON true is not the capability; bool compares equal to 1 in Python.
+            self.reaction_context = int(type(payload.get("presence_reaction_context")) is int
+                                        and payload["presence_reaction_context"] == 1)
+            self.explicit_completion = int(type(payload.get("presence_explicit_completion")) is int
+                                           and payload["presence_explicit_completion"] == 1)
             self.available = bool(self._skill_token and (self.binding_id or self.places_version))
             self.delivery_reporting_version = 1 if payload.get("presence_delivery_version") == 1 else 0
             self.continuation_version = _continuation_version(payload)
@@ -465,11 +472,16 @@ class LoopbackPresenceHostAdapter:
             # Failed discovery can retry. The outbox holds until policy is known.
             self.delivery_reporting_version = 0
             self.continuation_version = 0
+            self.reaction_context = 0
+            self.explicit_completion = 0
             self.delivery_reporting_status = "unavailable"
         return self.delivery_reporting_version
 
-    async def place_hold(self, account_id: str, conversation_id: str) -> str:
-        """Recheck live policy immediately before a queued physical effect."""
+    async def place_hold(self, account_id: str, conversation_id: str, thread_id: str = "") -> str:
+        """Recheck live policy immediately before a queued physical effect.
+
+        Host excludes a thread's own place from a lookup that names no thread; one without asks as before.
+        """
         await self.discover_delivery_support()
         if not self.places_version:
             return "Held: place policy unavailable" if self.delivery_reporting_status == "unavailable" else ""
@@ -477,7 +489,8 @@ class LoopbackPresenceHostAdapter:
             response = await self._http.get(
                 f"{self.host_service_url}/presence/place",
                 headers={"X-Skill-Token": self._skill_token.use_in_request()},
-                params={"provider": "slack", "account_id": account_id, "conversation_id": conversation_id}, timeout=10,
+                params={"provider": "slack", "account_id": account_id, "conversation_id": conversation_id,
+                        **({"thread_id": thread_id} if thread_id else {})}, timeout=10,
             )
             place = await self._json_response(response)
         except (HostContractError, httpx.HTTPError):

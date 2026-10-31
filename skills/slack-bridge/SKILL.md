@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.8.0
+version: 1.9.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -43,7 +43,12 @@ tools:
     target: channel_id
     conversation: channel_id
     thread: thread_ts
-    description: Read one explicit page of a thread using its root timestamp.
+    description: Read one explicit page of a thread using its root timestamp or a reply's.
+  - name: slack_reactions
+    effect: read
+    target: channel_id
+    conversation: channel_id
+    description: Read one message's current reactions by exact channel and timestamp, with counts and possibly partial users.
   - name: slack_list_conversations
     effect: read
     target: []
@@ -94,12 +99,12 @@ tools:
     effect: write
     target: channel
     conversation: channel
-    description: Queue adding a reaction to an exact Slack message.
+    description: Queue adding this bot's reaction to an exact Slack message; a reaction is not speech.
   - name: slack_reaction_remove
     effect: write
     target: channel
     conversation: channel
-    description: Queue removing a reaction from an exact Slack message.
+    description: Queue removing this bot's reaction from an exact Slack message.
   - name: slack_pin_add
     effect: write
     target: channel
@@ -281,7 +286,8 @@ exact author with `users.info` and room with `conversations.info`. Messages and
 mentions also read `conversations.replies` using their thread root, or their own
 timestamp when they started the thread. A root with no replies returns its one
 message; a queued root can already have later replies at processing time. Other
-event kinds read thread context when they carry a thread timestamp. Cursor pages
+event kinds read thread context when they carry a thread timestamp, except
+reactions, which read at most [their target](#reactions). Cursor pages
 share the same ten-second provider-I/O budget (page size 200). These
 observations run concurrently outside the Socket acknowledgement handler. The
 worker saves their results, sources and observation times in the existing inbox
@@ -324,8 +330,8 @@ provider message text, timestamps, author IDs and thread fields. These explicit
 tools do not retrieve a directory, feed historical messages into Presence as new
 events, or change the transport's intake cursor. The automatic thread observation
 above uses the same provider reader across pages. Use `slack_user_info` to resolve
-an author ID. `slack_thread` needs the root message's timestamp and also
-returns the root when Slack includes it. Follow `next_cursor` with the same
+an author ID. `slack_thread` takes the root message's timestamp or a reply's,
+and also returns the root when Slack includes it. Follow `next_cursor` with the same
 filters until `complete=true`; `has_more=true` without a cursor remains explicitly
 incomplete and requires an explicit timestamp-range continuation. `oldest`,
 `latest`, and `inclusive` expose Slack's normal time filters. Requested page size
@@ -386,13 +392,122 @@ the deletion's own timestamp stays its `event_ts`, and `deleted_ts` and the
 previous message remain provider facts. Deletes already queued by an earlier
 version keep the identity they were stored with.
 `reaction_added` and `reaction_removed` preserve the reacted message ID,
-reaction name and actor. Blocks-only messages are accepted when `blocks` carry
+reaction name, actor and `item_user`; [Reactions](#reactions) describes what they
+become. Blocks-only messages are accepted when `blocks` carry
 content even if Slack's `text` field is empty. Other bot/app events remain
 provider facts and can reach Presence; the bridge drops only its own bot/app
 events using the authenticated identity, preserving self-deduplication and
 avoiding reply loops. These updates use the existing ordered inbox, host
 adapter, and LLM-selected silent/message outcomes; no keyword or semantic gate
 is added by the transport.
+
+## Reactions
+
+A reaction can be the whole social response: it shows you understood, saw or
+laughed without another message. It is optional, it is not speech, a read
+receipt or agreement, and an early gesture does not replace a promised result.
+This bridge has no emoji dictionary and no required sequence of gestures.
+
+**Incoming.** With a Host whose `/identity` says `presence_reaction_context: 1`
+(strictly that integer, read when the bridge meets the Host; a supported or
+unsupported answer is kept until the bridge restarts, and only an unreachable Host is
+asked again), each
+`reaction_added`/`reaction_removed` on a message becomes an event with empty
+`text`, no attachments and `event.message.reaction` (contract version 1):
+
+- `change` is `add` or `remove`, with the one value this event names in `new` or
+  `old` as `{"type": "name", "value": "thumbsup::skin-tone-2"}`. That is a delta:
+  it says nothing about other reactions on the message.
+- `target.message_id` is the exact reacted message. `target.resolution` says
+  whether `event.thread_id` is proven. `resolved` comes from an exact
+  team+channel+message record (this bridge's inbox, or the creation receipt of its
+  own posted text) or from one narrow `conversations.replies` read of that
+  timestamp when no record exists. A top-level message keeps its own timestamp as
+  its conversation and a reply names its proved root. No retry and no history scan
+  follow. Refused, rate-limited or empty reads leave `unresolved` with an empty
+  `thread_id`, never a thread named after the reacted message, and the read's
+  error stays in `provider_facts.reaction.target_lookup`.
+- `target.author` holds what is known (`item_user`, or the retained or read
+  message's user, and `is_self`). `target.excerpt` holds up to 500 characters with
+  `truncated: true` whenever words were cut; the full retained or read message
+  stays in `target_lookup`. An own message's excerpt is the text this bridge sent,
+  so a later edit of it is not reflected.
+- `actor.kind` is `user`: one person or bot, not necessarily the owner.
+  `message.sent_at` is the provider's `event_ts`. Other bots' reactions keep their
+  `from_bot` fact and the bridge's own stay dropped.
+
+The Host, not this bridge, decides that a reaction starts no focus. Reactions on
+files and other non-message items have no message target and stay ignored.
+
+**On an older or unknown Host.** A reaction is not delivered, not read from
+Slack and not listed in transport queues, because that Host cannot promise not to
+wake on it. It stays in this bridge's inbox as `ignored` with reason
+`reaction_host_context_unavailable`, counted by `reactions_withheld`.
+`status` shows `reaction_context_state: update_required`. It is never replayed
+after an update, as a live arrival or as history. Ordinary messages are
+unaffected. Reactions already submitted before this version keep their references.
+One exception: a transport queue snapshot saved before this version may already list
+a reaction. A retry repeats its saved observation unchanged, so that snapshot still
+goes to the Host as it is. No snapshot taken from this version on lists one.
+
+**Reading on demand.** `slack_reactions` reads one message's current reactions with
+Slack's `reactions.get` (`full=true`), by exact channel and timestamp, a reply's
+included. It is a declared read, so it stays available in Advises, Silent and Paused
+places, with the bot credential and the existing `reactions:read` scope. Each row
+keeps Slack's `name`, `count` and `users`. `count` covers everyone who reacted, and
+`users` may list only some of them, as
+[Slack documents](https://docs.slack.dev/reference/methods/reactions.get/). A message
+without reactions gives `reactions: []`. A deleted or unknown message returns
+`ok: false` with its provider code, such as `message_not_found`, not an empty list.
+The read keeps no state and creates no event.
+
+`slack_thread` with a reply's timestamp reads the message and its conversation.
+Slack's `conversations.replies` page does not document a `reactions` array. When one
+is present it is passed through whole, and its absence is not proof of no reactions.
+
+**Outgoing.** `slack_reaction_add` and `slack_reaction_remove` use the durable
+mutation queue with the bot's identity and return `queued`. Surrounding whitespace is
+removed from `channel`, `ts` and `name` once, so the place check, the write, the
+target lookup and the receipt all name the same message; a row queued earlier is read
+the same way. `slack_receipt` then shows each outcome:
+
+| Provider answer | Receipt | Meaning |
+| --- | --- | --- |
+| ok | `delivered`, `effect: applied` | This write took effect. |
+| `already_reacted` | `delivered`, `effect: already_present` | This bot's reaction was already there. No new effect. |
+| `no_reaction` | `delivered`, `effect: already_absent` | This bot had no such reaction. Others' reactions are not implied. No new effect. |
+| Documented permanent refusal | `failed`, once | The next queued item proceeds at once. |
+| Lost response, 408/5xx, `internal_error` | `uncertain`, once | Never sent again. |
+| Rate limit | retried, bounded | No effect is claimed meanwhile. |
+
+Silent and Paused hold the write as for any other mutation. Just before the write
+the bridge re-reads the place in the thread that the target's retained record names,
+the same thread its receipt names. So a reaction queued while active is held once
+that thread's own place is Paused, even under an Active channel. A target with no
+record is checked as the channel's, as before. The tool declares only the channel,
+so the call-time guard sees the channel's place, and such a thread's hold comes at
+this re-read. Reaction writes queue per reacted message, the same `channel` and `ts`.
+A held reaction keeps its place only ahead of later reaction writes to that message,
+which keep their queue order whatever name they carry. That holds even when the
+message's record arrived after the first write was queued, and for rows an earlier
+version queued. Top-level sends, edits, pins, uploads and reactions to other messages
+in that Active channel go on meanwhile. In exchange, a reaction is no longer ordered
+against those other writes in its channel. `slack_api` calls of `reactions.add` and
+`reactions.remove` that name a `channel` and `timestamp` share that message's queue.
+Their bytes and handling are unchanged. A Host advertising
+`presence_explicit_completion: 1` also receives `/presence/delivery` with empty
+text, `message.kind: "operation"` and a typed `message.reaction`
+(`operation`, `new` or `old`, `target`, and `effect` when it took effect); other
+Hosts keep only this local receipt, and `reaction_history_limitation` says so. A
+report frozen for a Host that no longer advertises it stays pending and is not sent;
+`history_report_error` says why. Because the bridge keeps its last `/identity` answer
+until it restarts, a Host's capability change reaches a running bridge at its next
+restart, and the report is sent then if the Host advertises it.
+`slack_api` writes to `reactions.add` remain generic operations.
+
+Queued rows from an earlier version become this event shape when they are claimed.
+Their target is looked up the same way unless a saved provider snapshot predates
+it, in which case they are `unresolved`.
 
 ## Generic Slack Web API access
 
@@ -454,6 +569,13 @@ References: [conversations.list](https://docs.slack.dev/reference/methods/conver
 - Retryable refusals and connection failures before sending have at most five
   attempts. An ambiguous write result ends `uncertain` on its first occurrence;
   failed and uncertain items no longer block later messages in the same thread.
+- Outgoing writes keep queue order within one lane. For sends and most mutations,
+  a lane is one thread, or a conversation's top level. For reaction writes, it is
+  the reacted message. A held or in-flight item holds back only its own lane.
+  Opening the store moves live reaction rows, including such `slack_api` calls,
+  that an earlier version queued per channel into their message's lane. Each claim
+  does the same, so a row an older process queues later is ordered too. Their
+  lease, send marker and bytes stay the same.
 - Long outbound text is split into Slack-safe chunks before it enters the
   durable outbox.
 - The Widgets tab reports connection state, queue depth, failures, and recent
@@ -567,7 +689,8 @@ provider-context snapshot. Its fields are
 `thread_id`, `event_ts`, `received_at`, `inbox_state`, `text`, `text_chars`,
 `text_truncated`, declared `files` (ID and name only, never private URLs),
 `provider_facts` (the same blocks/edit/reaction facts and curated file projection
-as a normal submission), and, when present, `change` or `reaction`.
+as a normal submission), and, when present, `change` or `reaction`. On a Host
+without `presence_reaction_context: 1` a reaction is not listed.
 
 Default snapshots carry every observed queued event and its full text:
 `omitted_count: 0`, `text_limit_chars: null`, `text_truncated: false` and

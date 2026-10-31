@@ -9,9 +9,10 @@ from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
 from .api import TelegramClient, TelegramApiError, _split_text
-from .delivery import delivery_report
+from .delivery import (REACTION_HISTORY_UNAVAILABLE, REACTION_REPORT_UNREADABLE, delivery_report,
+                       is_reaction_report, reaction_receipt, typed_reaction_report)
 from .formatting import prepare_text, prepare_caption
-from .custody import CustodyStore, InboxLease, OutboxLease
+from .custody import REACTION_WITHHELD, CustodyStore, InboxLease, OutboxLease, _chat_forum
 from .discovery import group_sightings
 from .events import parse_telegram_update
 from .host import PresenceHostHTTPError, PresenceSubmission, PresenceWorkResult
@@ -20,6 +21,17 @@ from .settings import load_settings
 
 _MAX_OUTBOX_ATTEMPTS = 5
 _BOT_ID = re.compile(r"[1-9][0-9]*")
+_REACTION_KINDS = frozenset({"message_reaction", "message_reaction_count"})
+REACTION_METHOD = "setMessageReaction"
+# Telegram's "the request is wrong" and "you may not" (https://core.telegram.org/api/errors; the
+# Bot API documents no reaction-specific code and keeps its description as the explanation).
+_REACTION_REFUSALS = frozenset({400, 403})
+# Telegram answered that it did not do this now: bad token or address, or flood wait. Only these
+# permit another call. Any other answer, such as a 408 or an unreadable one, says nothing about the effect.
+_REACTION_NOT_DONE = frozenset({401, 404, 429})
+_REACTION_MARKER = "_provider_call_started"
+# Telegram's answer that this token names no bot: revoked or wrong (401), or malformed (404).
+_TOKEN_REFUSED = frozenset({401, 404})
 
 
 class PlaceHeld(RuntimeError):
@@ -65,6 +77,8 @@ class TelegramTransportRuntime:
         self._bot_label = "not connected"
         self._runtime_state = "not_started"
         self._last_error = ""
+        # Telegram's yes that the store could not take yet, by delivery id. See _keep_known_reaction.
+        self._unrecorded_reactions: Dict[str, Dict[str, Any]] = {}
 
     async def run(self) -> None:
         self._stopping = False
@@ -122,8 +136,16 @@ class TelegramTransportRuntime:
             return "", "Bot identity is unconfirmed; check the transport status"
         return self._bot_id, ""
 
-    def status_snapshot(self) -> Dict[str, Any]:
-        custody = self.store.status_snapshot()
+    def recorded_bot(self) -> str:
+        """The bot getMe last confirmed for the token configured now, whichever process's runtime asked.
+
+        For tools, which also run in pooled workers whose runtime never starts. ``confirmed_bot``
+        stays this runtime's own answer, which the status route reports as not running there.
+        """
+        return self.store.confirmed_account(str(self.token_provider() or "").strip())
+
+    def status_snapshot(self, custody: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        custody = self.store.status_snapshot() if custody is None else custody
         return {
             "runtime_state": self._runtime_state,
             "bot_label": self._bot_label,
@@ -134,6 +156,10 @@ class TelegramTransportRuntime:
             "delivery_reporting": getattr(self.submitter, "delivery_reporting_status", "unsupported"),
             # 2: early custody answers; 0: each turn waits for its terminal (older Host).
             "presence_continuation_version": getattr(self.submitter, "continuation_version", 0),
+            "reaction_context": ("available" if getattr(self.submitter, "presence_reaction_context", 0) == 1
+                                 else "update_required"),
+            "reaction_history": ("available" if getattr(self.submitter, "presence_explicit_completion", 0) == 1
+                                 else "update_required"),
             "last_event_at": custody.get("last_event_at", ""),
             "last_delivery_at": custody.get("last_delivery_at", ""),
         }
@@ -196,9 +222,20 @@ class TelegramTransportRuntime:
             if self._client is not None and token == self._client_token:
                 return self._client
             client = self.client_factory(token)
-            await client.delete_webhook()
-            identity = await client.get_me()
-            self._bot_id = str(identity.get("id") or "unknown")
+            try:
+                await client.delete_webhook()
+                identity = await client.get_me()
+            except TelegramApiError as exc:
+                if exc.error_code in _TOKEN_REFUSED:
+                    self.store.forget_confirmed_bot(token)
+                raise
+            bot_id = str(identity.get("id") or "unknown")
+            # Before anything in memory changes: if the store refuses, the next call asks getMe again.
+            if _BOT_ID.fullmatch(bot_id):
+                self.store.record_confirmed_bot(token, bot_id)
+            else:
+                self.store.forget_confirmed_bot(token)
+            self._bot_id = bot_id
             username = str(identity.get("username") or "").strip()
             self._bot_username = username
             self._bot_label = f"@{username}" if username else self._bot_id
@@ -222,6 +259,11 @@ class TelegramTransportRuntime:
         lease = self.store.claim_inbox(lease_sec=1860.0)
         if lease is None:
             return False
+        if str((lease.payload.get("message") or {}).get("event_kind") or "") in _REACTION_KINDS:
+            if not await self._reaction_deliverable(lease.payload):
+                # Retained here as a terminal row, whatever a later Host can do.
+                self.store.mark_inbox_failed(lease.event_id, reason=REACTION_WITHHELD)
+                return True
         staged: List[pathlib.Path] = []
         try:
             staged = await self._stage_attachments(lease)
@@ -267,6 +309,15 @@ class TelegramTransportRuntime:
             )
             self._last_error = _error(exc)
             return True
+
+    async def _reaction_deliverable(self, event: Dict[str, Any]) -> bool:
+        """Only a typed fact on a Host that holds it as context; a row queued before the typed
+        fact existed has no such promise, on any Host."""
+        discover = getattr(self.submitter, "discover_delivery_support", None)
+        if discover:
+            await discover()
+        return ("reaction" in (event.get("message") or {})
+                and getattr(self.submitter, "presence_reaction_context", 0) == 1)
 
     def _settle_refusal(self, lease: InboxLease, refusal: PresenceHostHTTPError) -> bool:
         """Settle a typed final Host answer; False keeps the event for retry.
@@ -398,6 +449,17 @@ class TelegramTransportRuntime:
             return False
         delivery_id, index, payload = pending
         try:
+            if is_reaction_report(payload):
+                # Whatever froze this report, it reaches only a Host that will not count it as speech.
+                discover = getattr(self.submitter, "discover_delivery_support", None)
+                if discover:
+                    await discover()
+                capable = getattr(self.submitter, "presence_explicit_completion", 0) == 1
+                payload = typed_reaction_report(payload) if capable else None
+                if payload is None:
+                    self.store.finish_delivery_report(delivery_id, index, error=(
+                        REACTION_REPORT_UNREADABLE if capable else REACTION_HISTORY_UNAVAILABLE))
+                    return True
             await self.submitter.report_delivery(payload)
         except asyncio.CancelledError:
             raise
@@ -411,27 +473,19 @@ class TelegramTransportRuntime:
         lease = self.store.claim_outbox(lease_sec=120.0)
         if lease is None:
             return False
+        if _is_reaction(lease.payload):
+            await self._process_reaction(lease)
+            return True
         try:
             client = await self._ready_client()
             if client is None:
                 raise RuntimeError("telegram token is unavailable")
-            reporting = dict(lease.payload.get("_reporting") or {"version": 0})
-            if reporting.get("version") == -1:
-                discover = getattr(self.submitter, "discover_delivery_support", None)
-                reporting["version"] = await discover() if discover else 0
-                reporting["status"] = getattr(self.submitter, "delivery_reporting_status", "unsupported")
-            if reporting.get("version") == 1 and not reporting.get("account_id"):
-                reporting["account_id"] = self._bot_id
-            lease = replace(lease, payload={**lease.payload, "_reporting": reporting})
+            lease = replace(lease, payload={**lease.payload, "_reporting": await self._resolved_reporting(lease.payload)})
             self.store.checkpoint_outbox(lease.delivery_id, lease.payload)
             async def before_send():
-                check = getattr(self.submitter, "place_hold", None)
-                if check:
-                    reason = await check(self._bot_id, str(lease.payload.get("chat_id") or ""))
-                    if reason:
-                        raise PlaceHeld(reason)
+                await self._check_place(lease.payload)
 
-            receipt = await _deliver(client, lease, self.store, before_send=before_send)
+            receipt = await _deliver(client, lease, self.store, before_send=before_send, account_id=self._bot_id)
             self.store.mark_delivered(lease.delivery_id, provider_receipt=receipt)
             return True
         except PlaceHeld as exc:
@@ -446,8 +500,8 @@ class TelegramTransportRuntime:
             if (lease.payload.get("kind") == "operation" and isinstance(exc, TelegramApiError)
                     and exc.error_code == 0):
                 # The provider may have accepted this mutation before the
-                # response was lost. Do not execute a second physical edit or
-                # reaction merely because this lease can be reclaimed.
+                # response was lost. Do not execute a second physical edit
+                # merely because this lease can be reclaimed.
                 payload = self.store.outbox_payload(lease.delivery_id)
                 report = delivery_report(lease.delivery_id, payload, part_id="status",
                                          state="uncertain", error=_error(exc))
@@ -469,6 +523,138 @@ class TelegramTransportRuntime:
             self._last_error = _error(exc)
             return True
 
+    async def _resolved_reporting(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        reporting = dict(payload.get("_reporting") or {"version": 0})
+        discover = getattr(self.submitter, "discover_delivery_support", None)
+        if reporting.get("version") == -1:
+            reporting["version"] = await discover() if discover else 0
+            reporting["status"] = getattr(self.submitter, "delivery_reporting_status", "unsupported")
+        if reporting.get("version") == 1 and not reporting.get("account_id"):
+            reporting["account_id"] = self._bot_id
+        if reporting.get("version") == 1:
+            if _is_reaction(payload) and discover:
+                await discover()
+            reporting["explicit_completion"] = getattr(self.submitter, "presence_explicit_completion", 0)
+        return reporting
+
+    async def _check_place(self, payload: Dict[str, Any], *, thread_id: str = "") -> None:
+        check = getattr(self.submitter, "place_hold", None)
+        if check:
+            reason = await check(self._bot_id, str(payload.get("chat_id") or ""),
+                                 **({"thread_id": thread_id} if thread_id else {}))
+            if reason:
+                raise PlaceHeld(reason)
+
+    async def _process_reaction(self, lease: OutboxLease) -> None:
+        """One setMessageReaction row, sent at most once.
+
+        ``known`` is the newest thing this process has learned about the row. Telegram can only be
+        reached after the marker is durable, so a row without one was not sent by this version.
+        A known yes finishes with no token, Host or call; a marker without an answer ends uncertain.
+        """
+        known = dict(self._unrecorded_reactions.pop(lease.delivery_id, None) or lease.payload)
+        if "_operation_result" in known:
+            self._finish_reaction(lease, known)
+            return
+        if lease.previous_unanswered:
+            # No marker does not prove no call: 0.9.0 wrote none.
+            known[_REACTION_MARKER] = True
+        if known.get(_REACTION_MARKER):
+            await self._settle_unanswered_reaction(lease, known)
+            return
+        try:
+            client = await self._ready_client()
+            if client is None:
+                raise RuntimeError("telegram token is unavailable")
+            known["_reporting"] = await self._resolved_reporting(known)
+            self.store.checkpoint_outbox(lease.delivery_id, known)
+            parameters = known.get("parameters")
+            if not str(known.get("chat_id") or "").strip() or not isinstance(parameters, dict):
+                raise ValueError("Telegram reaction chat_id and parameters are required")
+            # The topic the tool's guard checked, so a topic paused after queueing holds this row too.
+            await self._check_place(known, thread_id=str(known.get("topic_id") or ""))
+            self.store.checkpoint_outbox(lease.delivery_id, {**known, _REACTION_MARKER: True})
+            known[_REACTION_MARKER] = True
+            result = await client.operation(REACTION_METHOD, dict(parameters))
+            if result.get("ok") is False:
+                raise TelegramApiError(REACTION_METHOD, "Telegram did not confirm the reaction")
+            known["_operation_result"] = result
+        except PlaceHeld as exc:
+            self.store.hold_outbox(lease.delivery_id, str(exc))
+        except asyncio.CancelledError:
+            self.store.release_outbox(lease.delivery_id, reason="worker_cancelled", retry_after_sec=0)
+            raise
+        except Exception as exc:
+            self._last_error = _error(exc)
+            try:
+                self._after_reaction_error(lease, known, exc)
+            except Exception as store_error:
+                # The row stays leased, and an expired lease is never sent again.
+                self._last_error = _error(store_error)
+        else:
+            self._finish_reaction(lease, known)
+
+    def _after_reaction_error(self, lease: OutboxLease, known: Dict[str, Any], exc: Exception) -> None:
+        code = exc.error_code if isinstance(exc, TelegramApiError) else None
+        if known.get(_REACTION_MARKER):
+            if code in _REACTION_REFUSALS:
+                # Telegram answered and refused: no retry can change it, so the lane moves on.
+                self._settle_reaction(lease, known, state="failed", error=_error(exc))
+                return
+            if code not in _REACTION_NOT_DONE:
+                self._settle_reaction(lease, known, state="uncertain", error=_error(exc))
+                return
+            del known[_REACTION_MARKER]
+            self.store.checkpoint_outbox(lease.delivery_id, known)
+        if lease.attempts >= _MAX_OUTBOX_ATTEMPTS:
+            self._settle_reaction(lease, known, state="failed", error=_error(exc))
+        else:
+            self.store.release_outbox(lease.delivery_id, reason=_error(exc), retry_after_sec=_retry_delay(lease.attempts))
+
+    async def _settle_unanswered_reaction(self, lease: OutboxLease, known: Dict[str, Any]) -> None:
+        try:
+            if await self._ready_client() is not None:
+                known["_reporting"] = await self._resolved_reporting(known)
+        except Exception as exc:
+            # Neither changes what is known. Without them this outcome stays in the local receipt.
+            self._last_error = _error(exc)
+        error = _error(TelegramApiError(REACTION_METHOD, "send_result_unrecorded"))
+        try:
+            self._settle_reaction(lease, known, state="uncertain", error=error)
+        except Exception as exc:
+            self._last_error = _error(exc)
+
+    def _settle_reaction(self, lease: OutboxLease, known: Dict[str, Any], *, state: str, error: str) -> None:
+        self.store.checkpoint_outbox(lease.delivery_id, known)
+        report = delivery_report(lease.delivery_id, known, part_id="status", state=state, error=error)
+        self.store.mark_outbox_failed(lease.delivery_id, reason=error, report=report, state=state)
+        self._last_error = error
+
+    def _finish_reaction(self, lease: OutboxLease, known: Dict[str, Any]) -> None:
+        try:
+            report = delivery_report(lease.delivery_id, known, part_id="0", state="delivered",
+                                     receipt=known["_operation_result"], text=str(known.get("text") or ""), fmt="plain")
+            self.store.checkpoint_outbox(lease.delivery_id, known, report=report)
+            self.store.mark_delivered(lease.delivery_id, provider_receipt=reaction_receipt(known))
+        except Exception as exc:
+            self._keep_known_reaction(lease, known, exc)
+
+    def _keep_known_reaction(self, lease: OutboxLease, known: Dict[str, Any], exc: Exception) -> None:
+        """Telegram said yes and only the record failed: no later attempt may ask it again.
+
+        If the store cannot take even this, the row stays leased with its marker. This process still
+        knows the result and finishes it after the lease expires; a restart first ends it uncertain.
+        """
+        self._last_error = _error(exc)
+        self._unrecorded_reactions[lease.delivery_id] = known
+        try:
+            self.store.checkpoint_outbox(lease.delivery_id, known)
+            self.store.release_outbox(lease.delivery_id, reason=_error(exc), retry_after_sec=_retry_delay(lease.attempts))
+        except Exception as store_error:
+            self._last_error = _error(store_error)
+        else:
+            del self._unrecorded_reactions[lease.delivery_id]
+
     async def _pause(self, seconds: float) -> None:
         if self._stop_event is None:
             await asyncio.sleep(max(0.01, seconds))
@@ -484,8 +670,23 @@ class TelegramTransportRuntime:
             callback(level, message)
 
 
+def _is_reaction(payload: Dict[str, Any]) -> bool:
+    return payload.get("kind") == "operation" and payload.get("method") == REACTION_METHOD
+
+
+def _own_message(account_id: str, chat_id: str, topic_id: Any, result: Dict[str, Any], words: str) -> Optional[Tuple]:
+    """A confirmed send's retained row; without its exact provider id there is nothing to remember."""
+    message_id = result.get("message_id")
+    if not account_id or type(message_id) is not int:
+        return None
+    chat = result.get("chat") if isinstance(result.get("chat"), dict) else {}
+    return (account_id, chat_id, message_id, str(topic_id or ""),
+            _chat_forum(chat.get("type"), chat.get("is_forum"), topic_id), account_id, "", 1, str(result.get("text") or result.get("caption") or words),
+            str(result.get("media_group_id") or ""))
+
+
 async def _deliver(
-    client: TelegramClient, lease: OutboxLease, store: CustodyStore, *, before_send=None,
+    client: TelegramClient, lease: OutboxLease, store: CustodyStore, *, before_send=None, account_id: str = "",
 ) -> Dict[str, Any]:
     payload = lease.payload
     kind = str(payload.get("kind") or "message")
@@ -528,7 +729,8 @@ async def _deliver(
                                      text=chunk["text"], fmt="html" if chunk["parse_mode"] == "HTML" else "plain")
             messages.append({key: value for key, value in result.items() if key != "_delivery"})
             store.checkpoint_outbox(
-                lease.delivery_id, {**payload, "_sent_messages": messages}, report=report
+                lease.delivery_id, {**payload, "_sent_messages": messages}, report=report,
+                sent=_own_message(account_id, chat_id, topic_id, result, chunk["text"]),
             )
         return {"kind": kind, "messages": messages}
     if kind == "moderation":
@@ -583,7 +785,8 @@ async def _deliver(
     report = delivery_report(lease.delivery_id, payload, part_id=0, state="delivered", receipt=result,
                              text=caption["text"], fmt="html" if caption["parse_mode"] == "HTML" else "plain")
     result = {key: value for key, value in result.items() if key != "_delivery"}
-    store.checkpoint_outbox(lease.delivery_id, {**payload, "_sent_media": result}, report=report)
+    store.checkpoint_outbox(lease.delivery_id, {**payload, "_sent_media": result}, report=report,
+                            sent=_own_message(account_id, chat_id, topic_id, result, caption["text"]))
     return {"kind": kind, "message": result}
 
 

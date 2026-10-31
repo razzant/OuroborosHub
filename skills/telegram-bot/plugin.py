@@ -149,6 +149,7 @@ def _widget_render() -> Dict[str, Any]:
                     {"label": "Last provider event", "path": "last_event_at"},
                     {"label": "Last delivery", "path": "last_delivery_at"},
                     {"label": "Last error", "path": "last_error"},
+                    {"label": "Reactions in Host context", "path": "reaction_context"},
                 ],
                 "target": "status",
             },
@@ -163,7 +164,7 @@ def _status_payload() -> Dict[str, Any]:
         counts: Dict[str, Any] = {}
     else:
         counts = CustodyStore(_STATE_DIR / "custody.sqlite3").status_snapshot()
-    runtime = _RUNTIME.status_snapshot() if _RUNTIME is not None else {}
+    runtime = _RUNTIME.status_snapshot(counts) if _RUNTIME is not None else {}
     binding_id = str(_load_local_settings().get("binding_id") or "").strip()
     # Connect offers only the groups of the bot getMe confirmed for the current token.
     # null, never [], while that bot or its groups cannot be read.
@@ -183,6 +184,8 @@ def _status_payload() -> Dict[str, Any]:
         "last_error": runtime.get("last_error", ""),
         "delivery_reporting": runtime.get("delivery_reporting", "unknown"),
         "presence_continuation_version": runtime.get("presence_continuation_version", 0),
+        "reaction_context": runtime.get("reaction_context", "update_required"),
+        "reaction_history": runtime.get("reaction_history", "update_required"),
         "has_presence_binding": bool(binding_id),
         "management_group_id": str(
             _load_local_settings().get("management_group_id") or ""
@@ -366,7 +369,7 @@ def register(api: Any) -> None:
         token_provider=host_token_provider,
         host_base=f"http://127.0.0.1:{host_port}",
     )
-    _RUNTIME = TelegramTransportRuntime(
+    runtime = _RUNTIME = TelegramTransportRuntime(
         state_dir=_STATE_DIR,
         token_provider=token_provider,
         logger=api,
@@ -433,10 +436,12 @@ def register(api: Any) -> None:
     )
     api.register_tool(
         "telegram_operation",
-        make_operation_tool(api),
+        make_operation_tool(api, runtime.recorded_bot),
         description=(
-            "Queue an own-message Telegram edit or reaction through the existing outbox. "
-            "Use exact numeric chat/message IDs and a new request_id; reactions do not invent forum topic IDs."
+            "Queue an edit of this bot's own message, or set or clear this bot's reaction on any message it can "
+            "reach, through the existing outbox. A reaction can be the whole social response, and it is not "
+            "speech or proof of finished work. Use exact numeric chat/message IDs and a new request_id; "
+            "in a forum pass the target's known topic_id, which is never invented."
         ),
         schema=TELEGRAM_OPERATION_SCHEMA,
     )

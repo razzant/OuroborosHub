@@ -94,6 +94,7 @@ def test_every_registered_tool_returns_json_text_for_success_and_failure(tool_js
         "slack_conversation_info": False,
         "slack_history": False,
         "slack_thread": False,
+        "slack_reactions": False,
         "slack_list_conversations": False,
         "slack_list_users": False,
         "slack_lookup_user_email": False,

@@ -4,9 +4,12 @@ from __future__ import annotations
 import os
 from typing import Any, Mapping
 
-from .events import DECLARED_FILE_KEYS, file_facts, provider_facts
+from .events import DECLARED_FILE_KEYS, REACTION_EVENTS, file_facts, provider_facts
 from .provider_context import enrich_event
-from .store import InboxItem
+from .store import InboxItem, _iso
+
+# reaction.target.excerpt never exceeds this; the full words stay in provider_facts.
+_REACTION_EXCERPT_CHARS = 500
 
 
 def slack_identity(auth):
@@ -56,6 +59,67 @@ def _attachments(item: InboxItem) -> list[dict[str, Any]]:
     return attachments
 
 
+def _reaction_target(item: InboxItem, lookup: Mapping[str, Any], self_user_id: str) -> dict[str, Any]:
+    """What is known about the reacted message; each fact only when its source states it."""
+    message = lookup.get("message") if lookup.get("status") == "available" else None
+    message = message if isinstance(message, Mapping) else {}
+    target: dict[str, Any] = {"message_id": item.message_ts, "resolution": "resolved" if message else "unresolved"}
+    own_receipt = lookup.get("is_self") is True
+    author = (str((item.structured.get("reaction") or {}).get("item_user") or "") or str(message.get("user") or "")
+              or (self_user_id if own_receipt else ""))
+    if author or own_receipt:
+        target["author"] = {"platform_actor_id": author} if author else {}
+        if own_receipt or self_user_id:
+            target["author"]["is_self"] = own_receipt or author == self_user_id
+    words = str(message.get("text") or "")
+    if words.strip():
+        target["excerpt"] = {"text": words[:_REACTION_EXCERPT_CHARS],
+                             "truncated": len(words) > _REACTION_EXCERPT_CHARS}
+    return target
+
+
+def _with_reaction_fact(event: dict[str, Any], item: InboxItem) -> None:
+    """Put the provider-neutral fact beside the raw facts, on the conversation it proves.
+
+    ``thread_id`` is the only thread carrier: an unknown conversation stays channel-level,
+    never a phantom root named after the reacted message. Own words stay out of ``text``.
+    """
+    raw = item.structured.get("reaction") or {}
+    value = [{"type": "name", "value": str(raw.get("name") or "")}]
+    lookup = (item.provider_context or {}).get("reaction_target") or {}
+    target = _reaction_target(item, lookup, str(item.structured.get("self_user_id") or ""))
+    thread_id = str(lookup.get("thread_ts") or "") if target["resolution"] == "resolved" else ""
+    event.update(thread_id=thread_id, text="",
+                 conversation_key=f"slack:{item.team_id}:{item.channel_id}:{thread_id or '0'}")
+    event["actor"]["kind"] = "user"
+    event["conversation"]["thread_ts"] = thread_id
+    message = event["message"]
+    message["reaction"] = {"schema_version": 1, "target": target,
+                           "change": "add" if item.event_type == "reaction_added" else "remove",
+                           ("new" if item.event_type == "reaction_added" else "old"): value}
+    if lookup:
+        facts = {**message["provider_facts"], "reaction": {**raw, "target_lookup": _public_lookup(lookup)}}
+        message["provider_facts"] = facts
+    sent_at = _sent_at(item.event_ts)
+    if sent_at:
+        message["sent_at"] = sent_at
+
+
+def _public_lookup(lookup: Mapping[str, Any]) -> dict[str, Any]:
+    """The full retained or provider target, without credentialed file URLs."""
+    public = dict(lookup)
+    if isinstance(public.get("message"), Mapping):
+        public["message"] = provider_facts({"message": dict(public["message"])})["message"]
+    return public
+
+
+def _sent_at(event_ts: str) -> str:
+    try:
+        return _iso(float(event_ts))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
 def slack_presence_event(item: InboxItem, *, transport_queue: bool = False, places: bool = False) -> dict[str, Any]:
     """Map exact Slack facts into the frozen provider-neutral event shape.
 
@@ -101,9 +165,12 @@ def slack_presence_event(item: InboxItem, *, transport_queue: bool = False, plac
         "text": item.text,
     }
     event = enrich_event(event, item.provider_context)
+    if item.event_type in REACTION_EVENTS:
+        _with_reaction_fact(event, item)
     if places:
         event["facts"] = slack_wake_facts(event)
-    if transport_queue and item.transport_queue is not None:
+    # A reaction's inbox lane is its target's timestamp, not the conversation it proves.
+    if transport_queue and item.transport_queue is not None and item.event_type not in REACTION_EVENTS:
         event["conversation"]["transport_queue"] = dict(item.transport_queue)
     return event
 

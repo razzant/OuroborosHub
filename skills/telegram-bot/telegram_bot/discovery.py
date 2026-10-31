@@ -90,7 +90,8 @@ def group_sightings(update: Any, account_id: str) -> Tuple[GroupSighting, ...]:
     message = next((update[kind] for kind in ("message", "edited_message")
                     if isinstance(update.get(kind), dict)), None)
     if message is None:
-        return _sighting(account_id, _object(update.get("message_reaction")).get("chat"), "present")
+        reaction = update.get("message_reaction") or update.get("message_reaction_count")
+        return _sighting(account_id, _object(reaction).get("chat"), "present")
     chat = message.get("chat")
     if _user_id(message.get("left_chat_member")) == account_id:
         return _sighting(account_id, chat, "left")

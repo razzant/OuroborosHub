@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from .events import _reaction_values
+
 
 def tool_origin(ctx):
     origin = {"kind": "tool"}
@@ -14,9 +16,75 @@ def tool_origin(ctx):
     return origin
 
 
+REACTION_HISTORY_UNAVAILABLE = ("Held: Host history for reactions is unavailable until the Host is updated; "
+                                "the provider receipt stays here")
+REACTION_REPORT_UNREADABLE = ("Held: this earlier reaction report does not state its message and values, "
+                              "so it is not added to Host history")
+
+
+def _reaction_fact(values, target, state):
+    """A set says what was asked for. Telegram does not say what it replaced, so nothing here does."""
+    return {"schema_version": 1, "operation": "set", "new": values, "target": target,
+            **({"effect": "applied"} if state in {"delivered", "accepted"} else {})}
+
+
+def _reaction_receipt(payload, state):
+    parameters = payload.get("parameters") or {}
+    return _reaction_fact(_reaction_values(parameters.get("reaction")), payload.get("_reaction_target") or {
+        "message_id": str(parameters.get("message_id") or ""), "resolution": "unresolved"}, state)
+
+
+def _album(payload):
+    """Telegram moves a reaction on an album member to the album's first undeleted one and answers only True.
+
+    So the fact keeps the requested message, and which member took it stays unknown. Only a retained
+    record names the album; other targets say nothing either way.
+    """
+    group = payload.get("_reaction_album")
+    return {"album": {"media_group_id": group, "effective_message_id": "unknown"}} if group else {}
+
+
+def reaction_receipt(payload):
+    """The local provider receipt of a set Telegram confirmed."""
+    return {"kind": "operation", "method": payload["method"], "result": payload["_operation_result"],
+            "effect": "applied", **_album(payload)}
+
+
+def is_reaction_report(report):
+    """A frozen report of a reaction, in today's typed shape or an earlier version's list."""
+    message = report.get("message")
+    return isinstance(message, dict) and (message.get("method") == "setMessageReaction"
+                                          or (message.get("kind") == "operation" and "reaction" in message))
+
+
+def typed_reaction_report(report):
+    """What a Host that reads typed actions may receive, from this report's own retained facts.
+
+    An earlier version froze ``reaction`` as Telegram's list. Its message and values are exact, and
+    its topic was never recorded, so the target stays unresolved. ``None`` when the facts do not say.
+    The stored report is not changed.
+    """
+    message = report["message"]
+    reaction, target = message.get("reaction"), message.get("target_message_id")
+    if isinstance(reaction, dict):
+        return report if reaction.get("schema_version") == 1 else None
+    if not isinstance(reaction, list) or type(target) not in (int, str) or not str(target).strip():
+        return None
+    values = _reaction_values(reaction)
+    if len(values) != len(reaction):
+        return None
+    fact = _reaction_fact(values, {"message_id": str(target), "resolution": "unresolved"}, report.get("state"))
+    return {**report, "message": {**message, "reaction": fact}}
+
+
 def delivery_report(delivery_id, payload, *, part_id, state, receipt=None, text="", fmt="", error=""):
     reporting = payload.get("_reporting") or {}
     if reporting.get("version") != 1:
+        return None
+    reaction = payload.get("kind") == "operation" and payload.get("method") == "setMessageReaction"
+    if reaction and reporting.get("explicit_completion") != 1:
+        # A Host without it may count this receipt as speech and drop the later answer. The
+        # provider receipt stays local; edits and sends keep reporting as they always have.
         return None
     receipt = receipt or {}
     wire = receipt.get("_delivery") or {}
@@ -33,8 +101,9 @@ def delivery_report(delivery_id, payload, *, part_id, state, receipt=None, text=
         message["target_message_id"] = (payload.get("parameters") or {}).get("message_id")
         if payload.get("method") == "editMessageText":
             message["replacement_text"] = str(payload.get("text") or "")
-        if payload.get("method") == "setMessageReaction":
-            message["reaction"] = (payload.get("parameters") or {}).get("reaction", [])
+        if reaction:
+            message["reaction"] = _reaction_receipt(payload, state)
+            message.update(_album(payload))
         if payload.get("original_delivery_id"):
             message["original_delivery_id"] = str(payload["original_delivery_id"])
     if error:

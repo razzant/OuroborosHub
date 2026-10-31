@@ -340,7 +340,9 @@ def _register_mutation_tools(api: Any) -> None:
         ("slack_bookmark_remove", "bookmark_remove", {"channel": {"type": "string"}, "bookmark_id": {"type": "string"}, "request_id": {"type": "string"}}, ["channel", "bookmark_id"]),
     ]
     for name, operation, properties, required in action_specs:
-        register_json_tool(api, name, _make_action(api, operation), description=f"Queue Slack {operation.replace('_', ' ')} and preserve its provider receipt.", schema={"type": "object", "properties": properties, "required": required, "additionalProperties": False}, timeout_sec=30)
+        note = (" A reaction can be the whole social response; it is not speech or proof of finished work."
+                " The provider outcome, including a no-op, is read with slack_receipt." if name.startswith("slack_reaction") else "")
+        register_json_tool(api, name, _make_action(api, operation), description=f"Queue Slack {operation.replace('_', ' ')} and preserve its provider receipt.{note}", schema={"type": "object", "properties": properties, "required": required, "additionalProperties": False}, timeout_sec=30)
     register_json_tool(
         api,
         "slack_join",
@@ -584,6 +586,12 @@ def register(api: Any) -> None:
                             "label": "Mutations uncertain",
                             "path": "mutations_uncertain",
                             "tone": "danger",
+                            "target": "status",
+                        },
+                        {
+                            "type": "metric",
+                            "label": "Reactions in Host context",
+                            "path": "reaction_context_state",
                             "target": "status",
                         },
                     ],

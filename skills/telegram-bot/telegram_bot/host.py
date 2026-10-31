@@ -207,6 +207,8 @@ class PresenceHostClient:
         self.presence_wake_signals = 0
         self.presence_identity = 0
         self.connector_identity = {}
+        self.presence_reaction_context = 0
+        self.presence_explicit_completion = 0
         # 2 only when ``/identity`` lists it; otherwise each turn waits for its terminal (0).
         self.continuation_version = 0
 
@@ -223,6 +225,11 @@ class PresenceHostClient:
             self.places_version = int(type(version) is int and version >= 1)
             self.presence_wake_signals = int(response.get("presence_wake_signals") == 1)
             self.presence_identity = int(response.get("presence_identity") == 1)
+            # A JSON true is not the capability; bool compares equal to 1 in Python.
+            self.presence_reaction_context = int(type(response.get("presence_reaction_context")) is int
+                                                 and response["presence_reaction_context"] == 1)
+            self.presence_explicit_completion = int(type(response.get("presence_explicit_completion")) is int
+                                                    and response["presence_explicit_completion"] == 1)
             # The scalar ``presence_continuation_version`` stays 1 for deployed consumers; the list decides.
             versions = response.get("presence_continuation_versions")
             self.continuation_version = _EARLY_CONTINUATION if isinstance(versions, list) and any(
@@ -232,15 +239,19 @@ class PresenceHostClient:
             self.delivery_reporting_status = "unavailable"
             self.delivery_reporting_version = 0
             self.continuation_version = 0
+            self.presence_reaction_context = 0
+            self.presence_explicit_completion = 0
         return self.delivery_reporting_version
 
-    async def place_hold(self, account_id: str, conversation_id: str) -> str:
+    async def place_hold(self, account_id: str, conversation_id: str, thread_id: str = "") -> str:
         await self.discover_delivery_support()
         if not self.places_version:
             return "Held: place policy unavailable" if self.delivery_reporting_status == "unavailable" else ""
         try:
+            # Host excludes a thread's own place from a lookup that names no thread; one without asks as before.
             query = urllib.parse.urlencode({"provider": "telegram", "account_id": account_id,
-                                            "conversation_id": conversation_id})
+                                            "conversation_id": conversation_id,
+                                            **({"thread_id": thread_id} if thread_id else {})})
             place = await self.transport.request_json(
                 "GET", f"{self.host_base}/presence/place?{query}", headers=self._headers(),
                 payload=None, timeout_sec=10.0,

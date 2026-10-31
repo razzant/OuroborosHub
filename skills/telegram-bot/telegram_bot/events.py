@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import re
 from typing import Any, Dict, Optional, Sequence, Tuple
 
@@ -64,6 +65,8 @@ def parse_telegram_update(
                 message, event_kind = update[kind], kind
                 break
     reaction = update.get("message_reaction")
+    if not isinstance(reaction, dict):
+        reaction = update.get("message_reaction_count")
     if not isinstance(message, dict) and isinstance(reaction, dict):
         return _parse_reaction_update(
             update,
@@ -120,6 +123,7 @@ def parse_telegram_update(
         "title": str(chat.get("title") or ""),
         "username": str(chat.get("username") or ""),
         "topic_id": topic_id,
+        **({"is_forum": True} if chat.get("is_forum") is True else {}),
     }
     if str(chat_id) == str(management_group_id).strip() and chat.get("type") in {
         "group",
@@ -201,21 +205,41 @@ def _parse_reaction_update(
 ) -> Optional[TelegramEvent]:
     """Turn Telegram's reaction update into a neutral provider fact.
 
-    Reaction updates intentionally carry no synthetic text.  The Presence turn
-    receives the structured reaction payload and can decide whether it matters.
+    Reaction updates intentionally carry no synthetic text. ``user`` is an individual,
+    ``actor_chat`` a chat speaking as itself, and ``message_reaction_count`` an anonymous
+    aggregate with no individual at all. Neither update names the target's topic, text or
+    author: the store adds those only from an exact retained record (``CustodyStore``).
     """
-    actor = reaction.get("user") or reaction.get("actor_chat") or {}
+    counted = "reactions" in reaction
+    user = reaction.get("user") if isinstance(reaction.get("user"), dict) else None
+    actor_chat = reaction.get("actor_chat") if isinstance(reaction.get("actor_chat"), dict) else None
+    source = user or actor_chat or {}
     chat = reaction.get("chat") or {}
     message_id = _integer(reaction.get("message_id"))
     chat_id = _integer(chat.get("id")) if isinstance(chat, dict) else None
-    actor_id = _integer(actor.get("id")) if isinstance(actor, dict) else None
+    actor_id = _integer(source.get("id"))
     update_id = _integer(update.get("update_id"))
-    if update_id is None or message_id is None or chat_id is None or actor_id is None:
+    if update_id is None or message_id is None or chat_id is None or (actor_id is None and not counted):
         return None
-    if (not places and actor.get("is_bot")) or (places and str(actor_id) == bot_account_id):
+    if (not places and source.get("is_bot")) or (places and str(actor_id) == bot_account_id):
         return None
     if places and chat.get("type") not in _PLACE_CHAT_TYPES:
         return None
+    if counted:
+        values = {"change": "count", "counts": [
+            {**_reaction_values([row.get("type")])[0], "count": row["total_count"]}
+            for row in (reaction["reactions"] if isinstance(reaction["reactions"], list) else [])
+            if isinstance(row, dict) and _reaction_values([row.get("type")])
+            and type(row.get("total_count")) is int and row["total_count"] >= 0]}
+        raw = {"reaction_counts": deepcopy(reaction["reactions"])}
+    else:
+        old, new = _reaction_values(reaction.get("old_reaction")), _reaction_values(reaction.get("new_reaction"))
+        if sorted(map(str, old)) == sorted(map(str, new)):
+            return None  # names no change: nothing here for anyone to read
+        values = ({"change": "add", "new": new} if not old else {"change": "remove", "old": old} if not new
+                  else {"change": "replace", "old": old, "new": new})
+        raw = {"old_reaction": deepcopy(reaction.get("old_reaction") or []),
+               "new_reaction": deepcopy(reaction.get("new_reaction") or [])}
     bot_id = str(bot_account_id or "unknown").strip() or "unknown"
     conversation_key = f"telegram:{bot_id}:{chat_id}:0"
     conversation = {
@@ -226,9 +250,14 @@ def _parse_reaction_update(
         "title": str(chat.get("title") or ""),
         "username": str(chat.get("username") or ""),
         "topic_id": None,
+        **({"is_forum": True} if chat.get("is_forum") is True else {}),
     }
     if str(chat_id) == str(management_group_id).strip() and chat.get("type") in {"group", "supergroup"}:
         conversation["configured_room"] = "management_group"
+    # Outside a forum the chat is the conversation. In a forum only a retained record proves the topic.
+    proven = chat.get("is_forum") is not True and chat.get("type") in _PLACE_CHAT_TYPES
+    sent_at_epoch = _integer(reaction.get("date"))
+    sent_at = _iso_time(sent_at_epoch) if sent_at_epoch else ""
     return TelegramEvent(
         source_event_id=f"telegram:{bot_id}:{update_id}",
         provider="telegram",
@@ -236,23 +265,53 @@ def _parse_reaction_update(
         conversation_id=str(chat_id),
         thread_id="",
         conversation_key=conversation_key,
-        actor={
-            "platform": "telegram",
-            "platform_actor_id": str(actor_id),
-            "username": str(actor.get("username") or "") if isinstance(actor, dict) else "",
-            "first_name": str(actor.get("first_name") or "") if isinstance(actor, dict) else "",
-            "last_name": str(actor.get("last_name") or "") if isinstance(actor, dict) else "",
-        },
+        actor=_reaction_actor(user, actor_chat, places=places),
         conversation=conversation,
         message={
-            "event_kind": "message_reaction",
+            "event_kind": "message_reaction_count" if counted else "message_reaction",
             "message_id": message_id,
-            "old_reaction": deepcopy(reaction.get("old_reaction") or []),
-            "new_reaction": deepcopy(reaction.get("new_reaction") or []),
+            "sent_at_epoch": sent_at_epoch,
+            **({"sent_at": sent_at} if sent_at else {}),
+            **raw,
+            "reaction": {"schema_version": 1, **values, "target": {
+                "message_id": str(message_id), "resolution": "resolved" if proven else "unresolved"}},
         },
         text="",
-        facts=(["from_bot"] if actor.get("is_bot") else []) if places else None,
+        facts=(["from_bot"] if source.get("is_bot") else []) if places else None,
     )
+
+
+def _reaction_actor(user: Optional[Dict[str, Any]], actor_chat: Optional[Dict[str, Any]], *, places: bool) -> Dict[str, Any]:
+    """An individual, a chat acting as itself, or nobody in particular; never a made-up person."""
+    if user:
+        return {
+            "kind": "user", "platform": "telegram", "platform_actor_id": str(user["id"]),
+            "username": str(user.get("username") or ""), "first_name": str(user.get("first_name") or ""),
+            "last_name": str(user.get("last_name") or ""),
+            **({"is_bot": bool(user.get("is_bot"))} if places else {}),
+        }
+    if actor_chat:
+        return {"kind": "chat", "platform": "telegram", "platform_actor_id": str(actor_chat["id"]),
+                "display_name": str(actor_chat.get("title") or ""), "username": str(actor_chat.get("username") or ""),
+                "authenticated": False}
+    return {"kind": "anonymous", "platform": "telegram", "authenticated": False}
+
+
+def _reaction_values(raw: Any) -> list[Dict[str, str]]:
+    """Telegram ReactionType objects as provider values, with no emoji mapping or allowlist."""
+    values = []
+    for item in raw if isinstance(raw, list) else []:
+        if isinstance(item, dict) and isinstance(item.get("type"), str) and item["type"]:
+            field = {"emoji": "emoji", "custom_emoji": "custom_emoji_id"}.get(item["type"], "")
+            values.append({"type": item["type"], "value": str(item.get(field) or "")})
+    return values
+
+
+def _iso_time(epoch: int) -> str:
+    try:
+        return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return ""
 
 
 def _attachments(message: Dict[str, Any]) -> Tuple[TelegramAttachment, ...]:

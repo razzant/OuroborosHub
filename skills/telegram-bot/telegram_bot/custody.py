@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Sequence, Any, Dict, Iterator, List, Optional
 
 from . import discovery
@@ -27,6 +30,9 @@ class OutboxLease:
     delivery_id: str
     payload: Dict[str, Any]
     attempts: int
+    # An earlier attempt may have reached Telegram: it ended with no answer (stale lease, restart or cancel), or
+    # 0.9.0 made it and kept no proof that it did nothing.
+    previous_unanswered: bool = False
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,135 @@ CREATE TABLE IF NOT EXISTS {name}(
 )"""
 
 
+# The retained answer to "which conversation is this message in, who wrote it and what did it
+# say", by exact account, chat and message. Own messages live only in outbox JSON, so nothing
+# else can answer it without scanning. Rows older than this table stay unknown, never guessed.
+_MESSAGES_TABLE = """
+CREATE TABLE IF NOT EXISTS telegram_messages(
+    account_id TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    topic_id TEXT NOT NULL DEFAULT '',
+    chat_forum INTEGER,
+    author_id TEXT NOT NULL DEFAULT '',
+    author_name TEXT NOT NULL DEFAULT '',
+    is_self INTEGER NOT NULL DEFAULT 0,
+    text TEXT NOT NULL DEFAULT '',
+    media_group_id TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(account_id, chat_id, message_id)
+)"""
+# A private message outside a topic records no forum fact, so the newest row that does is found without reading those.
+_MESSAGES_FORUM_INDEX = """
+CREATE INDEX IF NOT EXISTS telegram_messages_forum
+    ON telegram_messages(account_id, chat_id, message_id) WHERE chat_forum IS NOT NULL"""
+_REMEMBER_MESSAGE = """
+INSERT OR REPLACE INTO telegram_messages(
+    account_id, chat_id, message_id, topic_id, chat_forum, author_id, author_name, is_self, text, media_group_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+# Rows with an unacknowledged report always have a due time, so acknowledged history is not expanded.
+_HELD_REPORTS = (
+    "SELECT COUNT(*) FROM outbox, json_each(outbox.reports_json) AS entry WHERE outbox.report_due_at>0 "
+    "AND json_extract(entry.value,'$.acked')=0 AND json_extract(entry.value,'$.error') LIKE 'Held:%'"
+)
+# reaction.target.excerpt never exceeds this; the full words stay in message.target_lookup.
+_REACTION_EXCERPT_CHARS = 500
+# How an outbox attempt that got no answer is recorded; a provider refusal or a hold names itself instead.
+_UNANSWERED_ATTEMPT = frozenset({"released_at_runtime_start", "worker_cancelled"})
+# The attempts count a reaction row had when this version last wrote it. Each attempt of this version stores the send
+# marker before Telegram can be asked, so while the count is unchanged the row's own record says whether it was.
+# Attempts past it are another version's, such as 0.9.0 after a rollback, which stores no marker.
+REACTION_ATTEMPTS_MARKED = "_attempts_marked"
+_STAMP_PATH = "$." + REACTION_ATTEMPTS_MARKED
+# 0.9.0 stored no marker and kept only its newest attempt's error, in its client's words before Telegram's
+# description. Only these prove that attempt did nothing: Telegram's 400, 401, 403, 404 or 429 to this call,
+# or a failure before the call.
+_UNMARKED_NO_EFFECT = re.compile(
+    r"TelegramApiError: Telegram (?:setMessageReaction failed \((?:400|401|403|404|429)\)"
+    r"|(?:getMe|deleteWebhook) failed \(\w+\)): |RuntimeError: telegram token is unavailable\Z")
+# An inbox row kept on a Host that cannot hold it as context-only; it is never submitted later.
+REACTION_WITHHELD = "reaction_host_context_unavailable"
+# The bot getMe last confirmed, for tools in processes whose runtime does not poll: "<token digest>:<bot id>".
+# The digest ties it to that one token. The token itself is not stored, and this row is read only by confirmed_account.
+_CONFIRMED_BOT = "confirmed_bot"
+
+
+def _token_binding(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest() + ":"
+
+
+def _chat_forum(chat_type: Any, is_forum: Any, topic_id: Any = "") -> Optional[int]:
+    """1 has topics, 0 known not to, None when this record does not say.
+
+    A private chat can have topics too, so its message outside one says nothing either way.
+    """
+    if is_forum is True or topic_id not in ("", None):
+        return 1
+    return 0 if chat_type in {"group", "supergroup", "channel"} else None
+
+
+def _unmarked_reaction(payload: Dict[str, Any]) -> bool:
+    """A reaction row whose record holds no send marker or result; one that does decides by it."""
+    return (payload.get("kind") == "operation" and payload.get("method") == "setMessageReaction"
+            and not {"_provider_call_started", "_operation_result"} & set(payload))
+
+
+def _remember_event(conn: sqlite3.Connection, event: TelegramEvent) -> None:
+    actor = event.actor
+    name = " ".join(part for part in (str(actor.get("first_name") or ""), str(actor.get("last_name") or "")) if part)
+    conn.execute(_REMEMBER_MESSAGE, (
+        event.account_id, event.conversation_id, int(event.message["message_id"]), event.thread_id,
+        _chat_forum(event.conversation.get("chat_type"), event.conversation.get("is_forum"), event.thread_id),
+        str(actor.get("platform_actor_id") or ""),
+        name or str((actor.get("sender_chat") or {}).get("title") or ""), 0, event.text,
+        str(event.message.get("media_group_id") or ""),
+    ))
+
+
+def _retained_message(conn: sqlite3.Connection, account_id: str, chat_id: str, message_id: Any) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM telegram_messages WHERE account_id=? AND chat_id=? AND message_id=?",
+        (str(account_id), str(chat_id), int(message_id)),
+    ).fetchone()
+
+
+def _newest_chat_forum(conn: sqlite3.Connection, event: Any) -> Optional[int]:
+    newest = conn.execute(
+        "SELECT chat_forum FROM telegram_messages WHERE account_id=? AND chat_id=? "
+        "AND chat_forum IS NOT NULL ORDER BY message_id DESC LIMIT 1",
+        (str(event.account_id), str(event.conversation_id)),
+    ).fetchone()
+    return newest["chat_forum"] if newest else None
+
+
+def _with_reaction_target(conn: sqlite3.Connection, event: TelegramEvent) -> TelegramEvent:
+    """Add what an exact retained record proves about the target; a miss changes nothing."""
+    fact = event.message["reaction"]
+    row = _retained_message(conn, event.account_id, event.conversation_id, event.message["message_id"])
+    if row is None:
+        if fact["target"]["resolution"] == "resolved" and _newest_chat_forum(conn, event) == 1:
+            # The update named no forum, yet this chat has shown topics: the conversation is unproven.
+            return replace(event, message={**event.message, "reaction": {
+                **fact, "target": {**fact["target"], "resolution": "unresolved"}}})
+        return event
+    author = {**({"platform_actor_id": row["author_id"]} if row["author_id"] else {}),
+              **({"display_name": row["author_name"]} if row["author_name"] else {}),
+              "is_self": bool(row["is_self"])}
+    words = str(row["text"])
+    target = {**fact["target"], "resolution": "resolved", "author": author,
+              **({"excerpt": {"text": words[:_REACTION_EXCERPT_CHARS],
+                              "truncated": len(words) > _REACTION_EXCERPT_CHARS}} if words.strip() else {})}
+    topic = str(row["topic_id"])
+    return replace(
+        event, thread_id=topic,
+        conversation_key=f"telegram:{event.account_id}:{event.conversation_id}:{topic or '0'}",
+        conversation={**event.conversation, "topic_id": int(topic) if topic else None},
+        message={**event.message, "reaction": {**fact, "target": target},
+                 "target_lookup": {"source": "telegram-bot custody", "text": words, "topic_id": topic,
+                                   "author_id": row["author_id"], "author_name": row["author_name"],
+                                   "is_self": bool(row["is_self"])}},
+    )
+
+
 class CustodyStore:
     """Small connection-per-call store; SQLite owns queue truth across restarts."""
 
@@ -78,6 +213,10 @@ class CustodyStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if event is not None:
+                if "reaction" in event.message:
+                    event = _with_reaction_target(conn, event)
+                else:
+                    _remember_event(conn, event)
                 cursor = conn.execute(
                     """
                     INSERT OR IGNORE INTO inbox(
@@ -109,6 +248,26 @@ class CustodyStore:
     def telegram_offset(self) -> int:
         with self._connect() as conn:
             return self._metadata_int(conn, "telegram_offset")
+
+    def record_confirmed_bot(self, token: str, account_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO metadata(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_CONFIRMED_BOT, _token_binding(token) + account_id),
+            )
+
+    def forget_confirmed_bot(self, token: str) -> None:
+        """getMe no longer confirms this token. A record of another token is not this answer's to remove."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM metadata WHERE key=? AND value LIKE ?", (_CONFIRMED_BOT, _token_binding(token) + "%"))
+
+    def confirmed_account(self, token: str) -> str:
+        """The bot getMe last confirmed for exactly this token; ``""`` for any other token or none."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM metadata WHERE key=?", (_CONFIRMED_BOT,)).fetchone()
+        binding = _token_binding(token)
+        return row["value"][len(binding):] if row is not None and row["value"].startswith(binding) else ""
 
     def claim_inbox(self, *, lease_sec: float = 90.0) -> Optional[InboxLease]:
         now = time.time()
@@ -563,7 +722,8 @@ class CustodyStore:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT candidate.delivery_id, candidate.payload_json, candidate.attempts
+                SELECT candidate.delivery_id, candidate.payload_json, candidate.attempts,
+                       candidate.state, candidate.last_error
                 FROM outbox AS candidate
                 WHERE ((candidate.state='pending' AND candidate.available_at<=?)
                    OR (candidate.state='leased' AND candidate.lease_until<=?))
@@ -582,24 +742,39 @@ class CustodyStore:
             if row is None:
                 conn.commit()
                 return None
+            payload = json.loads(row["payload_json"])
+            unanswered = row["state"] == "leased" or row["last_error"] in _UNANSWERED_ATTEMPT
+            marked = None
+            if _unmarked_reaction(payload):
+                # Attempts past the stamp were another version's, which kept only its newest error. Decided before
+                # this claim clears that error, so no later failure can overwrite it.
+                stamp = payload.get(REACTION_ATTEMPTS_MARKED)
+                other = row["attempts"] - (stamp if type(stamp) is int else 0)
+                unanswered = unanswered or not 0 <= other <= 1 or (
+                    other == 1 and not _UNMARKED_NO_EFFECT.match(row["last_error"]))
+                if not unanswered:
+                    payload = {**payload, REACTION_ATTEMPTS_MARKED: row["attempts"] + 1}
+                    marked = _json(payload)
             updated = conn.execute(
                 """
                 UPDATE outbox
-                SET state='leased', lease_until=?, attempts=attempts+1, last_error=''
+                SET state='leased', lease_until=?, attempts=attempts+1, last_error='',
+                    payload_json=COALESCE(?, payload_json)
                 WHERE delivery_id=? AND (
                     (state='pending' AND available_at<=?)
                     OR (state='leased' AND lease_until<=?)
                 )
                 """,
-                (now + max(1.0, lease_sec), row["delivery_id"], now, now),
+                (now + max(1.0, lease_sec), marked, row["delivery_id"], now, now),
             )
             conn.commit()
             if updated.rowcount != 1:
                 return None
             return OutboxLease(
                 delivery_id=str(row["delivery_id"]),
-                payload=json.loads(row["payload_json"]),
+                payload=payload,
                 attempts=int(row["attempts"]) + 1,
+                previous_unanswered=unanswered,
             )
 
     def release_outbox(
@@ -620,10 +795,13 @@ class CustodyStore:
             )
 
     def hold_outbox(self, delivery_id: str, reason: str) -> None:
+        # A hold returns its attempt to the count; a reaction's stamp of that count moves with it.
         with self._connect() as conn:
             conn.execute("UPDATE outbox SET state='pending',available_at=?,lease_until=0,"
-                         "last_error=?,attempts=MAX(0,attempts-1) WHERE delivery_id=? AND state='leased'",
-                         (time.time() + 5, reason, delivery_id))
+                         "last_error=?,attempts=MAX(0,attempts-1),payload_json=CASE WHEN "
+                         "json_extract(payload_json,?)=attempts THEN json_set(payload_json,?,MAX(0,attempts-1)) "
+                         "ELSE payload_json END WHERE delivery_id=? AND state='leased'",
+                         (time.time() + 5, reason, _STAMP_PATH, _STAMP_PATH, delivery_id))
 
     def mark_outbox_failed(self, delivery_id: str, *, reason: str, report=None,
                            state: str = "failed") -> None:
@@ -649,14 +827,21 @@ class CustodyStore:
             self._add_reports(conn, delivery_id, [report] if report else [])
             conn.commit()
 
-    def checkpoint_outbox(self, delivery_id: str, payload: Dict[str, Any], *, report=None) -> None:
-        """Retain confirmed text chunks before attempting the next provider call."""
+    def checkpoint_outbox(self, delivery_id: str, payload: Dict[str, Any], *, report=None,
+                          sent: Optional[Sequence[Any]] = None) -> None:
+        """Retain confirmed text chunks before attempting the next provider call.
+
+        ``sent`` remembers a just-confirmed own message: its exact creation receipt is what
+        later identifies a reaction on it as a reaction on this bot's words.
+        """
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "UPDATE outbox SET payload_json=? WHERE delivery_id=? AND state='leased'",
                 (_json(payload), delivery_id),
             )
+            if sent:
+                conn.execute(_REMEMBER_MESSAGE, sent)
             self._add_reports(conn, delivery_id, [report] if report else [])
             conn.commit()
 
@@ -714,6 +899,20 @@ class CustodyStore:
             self._write_reports(conn, delivery_id, entries)
             conn.commit()
 
+    def reaction_target(self, account_id: str, chat_id: str, message_id: int) -> Dict[str, Any]:
+        """What retained records say about one message's conversation, from indexed rows only.
+
+        ``retained`` names the exact message and its topic. Otherwise ``forum`` is what the newest
+        retained message of this chat that says anything recorded (1, 0 or None). In a private chat
+        only a topic message says, so a later message outside a topic leaves its topics shown.
+        """
+        with self._connect() as conn:
+            row = _retained_message(conn, account_id, chat_id, message_id)
+            if row is not None:
+                return {"retained": True, "topic_id": str(row["topic_id"]), "media_group_id": str(row["media_group_id"])}
+            scope = SimpleNamespace(account_id=account_id, conversation_id=chat_id)
+            return {"retained": False, "forum": _newest_chat_forum(conn, scope)}
+
     def outbox_payload(self, delivery_id):
         with self._connect() as conn:
             row = conn.execute("SELECT payload_json FROM outbox WHERE delivery_id=?", (delivery_id,)).fetchone()
@@ -729,7 +928,14 @@ class CustodyStore:
         if row is None:
             return {"state": "not_found"}
         payload = json.loads(row["payload_json"])
+        reaction = payload.get("kind") == "operation" and payload.get("method") == "setMessageReaction"
+        reporting = payload.get("_reporting") or {}
         return {
+            # -1: the outbox has not yet asked this Host.
+            **({"history_limitation": "Host history for reactions is unavailable: this receipt stays local."}
+               if reaction and (reporting.get("version") != -1 or row["state"] != "pending")
+               and reporting.get("explicit_completion") != 1
+               and not any(entry["acked"] for entry in json.loads(row["reports_json"])) else {}),
             "state": "held" if row["state"] == "pending" and str(row["last_error"]).startswith("Held:") else "uncertain" if payload.get("_terminal_outcome") == "uncertain" else str(row["state"]),
             "attempts": int(row["attempts"]),
             "delivered_at": _timestamp(row["delivered_at"]),
@@ -780,7 +986,10 @@ class CustodyStore:
                     "SELECT COUNT(DISTINCT event_id) FROM presence_work "
                     "WHERE role IN ('turn','child') AND state IN ('pending','leased')"
                 ).fetchone()[0],
-                "inbox_failed": inbox.get("failed", 0),
+                "inbox_failed": inbox.get("failed", 0) - (withheld := conn.execute(
+                    "SELECT COUNT(*) FROM inbox WHERE state='failed' AND last_error=?", (REACTION_WITHHELD,)
+                ).fetchone()[0]),
+                "reactions_withheld": withheld,
                 "outbox_waiting": outbox.get("pending", 0),
                 "outbox_held": conn.execute("SELECT COUNT(*) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%'").fetchone()[0],
                 "outbox_leased": outbox.get("leased", 0),
@@ -797,6 +1006,7 @@ class CustodyStore:
                     work.get(state, 0) for state in ("completed", "failed", "cancelled")
                 ),
                 "delivery_reports_pending": conn.execute("SELECT COUNT(*) FROM outbox WHERE report_due_at>0").fetchone()[0],
+                "delivery_reports_held": conn.execute(_HELD_REPORTS).fetchone()[0],
                 "group_backfill_unreadable": discovery.backfill_unreadable(conn),
                 "last_event_at": _timestamp(last_event),
                 "last_delivery_at": _timestamp(last_delivery),
@@ -851,6 +1061,10 @@ class CustodyStore:
                     ON outbox(state, available_at, lease_until, created_at);
                 """
                 + discovery.GROUPS_TABLE
+                + ";"
+                + _MESSAGES_TABLE
+                + ";"
+                + _MESSAGES_FORUM_INDEX
             )
             conn.execute("BEGIN IMMEDIATE")
             columns = {r[1] for r in conn.execute("PRAGMA table_info(outbox)")}

@@ -189,7 +189,7 @@ def test_telegram_operation_queues_edit_and_reaction_with_new_identity(tmp_path)
         request_id="op-edit-1",
     )
     reaction = operations["telegram_operation"](
-        method="setMessageReaction", chat_id="-10042", message_id=9,
+        method="setMessageReaction", chat_id="-10042", message_id=9, topic_id=7,
         reaction=[{"type": "emoji", "emoji": "👍"}], request_id="op-react-1",
     )
     assert edit["state"] == "queued" and reaction["state"] == "queued"

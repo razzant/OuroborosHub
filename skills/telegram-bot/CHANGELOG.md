@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.10.0 — unreleased
+
+- Send incoming reactions as the typed `message.reaction` fact (schema version 1)
+  when the Host advertises `presence_reaction_context: 1`, including anonymous
+  `message_reaction_count` totals and chats acting as themselves. Keep Telegram's
+  raw arrays and `date`. Elsewhere keep them in custody without delivering them
+  or replaying them later.
+- Prove a reaction's topic, author and excerpt only from an exact
+  account+chat+message record of what this bot received or sent. An unproven forum
+  target stays `unresolved`.
+- Describe `setMessageReaction` correctly: it is not limited to own messages. Refuse
+  more than one reaction and paid reactions, refuse a forum target without a known
+  topic, and keep `topic_id` local.
+- Resolve a reaction's target the same way in a pooled worker as in the polling
+  process, from the bot `getMe` last confirmed for the current token, kept in custody
+  with a digest of that token. A changed, refused or never-confirmed token reads no
+  record: the refusal names the unconfirmed identity, and an explicit topic or a
+  private target stays `unresolved`.
+- Report own reactions as typed non-speech receipts only when the Host advertises
+  `presence_explicit_completion: 1`, including reports frozen earlier, which wait
+  unsent until then and go in the typed shape. Settle 400/403 at once, retry only
+  401/404/429, and treat a lost or unreadable response, 5xx, any other code or a restart
+  mid-call as `uncertain`, never sent twice. That includes a reaction row 0.9.0 left
+  leased, released or cancelled with no recorded result, or released for a retry
+  without proof that Telegram did nothing, whether before the upgrade or during a
+  rollback to 0.9.0.
+- Keep a reaction Telegram confirmed when recording it fails: the row finishes from
+  that result with no token, Host or second call. A failure before the call stays an
+  ordinary retry, and an unreadable `error_code` counts as no code.
+- Name a retained album in a reaction's receipt and report, with the member that took
+  it left unknown. Keep an explicit `topic_id` for a private target with no record,
+  and keep the topics a private chat has shown when a later message is outside one.
+- Recheck a queued reaction in its `topic_id`, so a topic whose own place is Paused
+  after queueing holds it. A reaction without a topic, and every other send and edit,
+  is checked as before.
+
 ## 0.9.0 — 2026-10-29
 
 - Offer each group and supergroup the bot has been seen in by name when a

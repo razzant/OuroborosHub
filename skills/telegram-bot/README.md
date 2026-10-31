@@ -1,4 +1,4 @@
-# Telegram Bot 0.9.0
+# Telegram Bot 0.10.0
 
 A public Telegram bot connector for private-chat, group and channel places,
 separate from the built-in owner-control Telegram bridge. It keeps incoming
@@ -20,6 +20,12 @@ boundaries on both sides. The list is empty by default. Choose **Words you
 chose appear (connector setting)** under **What calls it here** on the place's
 sheet to let matching events wake it. Silent places can wake but still hold
 replies and writes; bot messages still require the bot wake choice.
+
+A reaction on an album member is set by Telegram on the album's first non-deleted
+message, and Telegram answers only True. Receipts therefore name the requested
+message, and which member took the reaction stays unknown. A missing `album` field
+does not prove that the message is outside an album. See
+[Reactions](SKILL.md#reactions-0100).
 
 See [SKILL.md](SKILL.md#connector-settings-and-facts-063) for the fact rules,
 setup, provider visibility and delivery behavior, and [CHANGELOG.md](CHANGELOG.md)

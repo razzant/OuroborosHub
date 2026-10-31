@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from .events import provider_facts
 from .provider_context import lookup_error
 from .slack_api import SlackApiError, SlackClient, SlackConfigurationError
 from .tool_results import register_json_tool
@@ -36,6 +37,15 @@ def _handler(api: Any, kind: str):
                     return await slack.conversation_members(**params)
                 if kind == "resolve":
                     return await resolve_directory(api, slack, settings.get("SLACK_BOT_TOKEN", ""), **params)
+                if kind == "reactions":
+                    channel_id, ts = str(params["channel_id"] or "").strip(), str(params["ts"] or "").strip()
+                    data = await slack.read_reactions(channel_id, ts=ts)
+                    message = provider_facts({"message": data["message"]})["message"]
+                    return {"ok": True, "source": "reactions.get", "observed_at": observed_at,
+                            "channel_id": data.get("channel") or channel_id, "ts": ts,
+                            "reactions": message.get("reactions") or [], "message": message,
+                            # https://docs.slack.dev/reference/methods/reactions.get/
+                            "users_note": "count covers everyone who reacted; users may list only some of them."}
                 if kind == "thread" and not str(params.get("thread_ts") or "").strip():
                     raise SlackConfigurationError("thread_ts is required for slack_thread")
                 return await slack.read_messages(**params)
@@ -65,9 +75,12 @@ def register_read_tools(api: Any) -> None:
          {"channel_id": channel}, ["channel_id"]),
         ("slack_history", "history", "Read one page of conversation history without silently trimming message text. Follow next_cursor while complete=false. Author IDs can be resolved with slack_user_info. Retrieval does not submit old messages to Presence.",
          page, ["channel_id"]),
-        ("slack_thread", "thread", "Read one page of a Slack thread including the root message. Supply the root timestamp. Token/scopes/membership restrictions return explicit errors, never an invented empty thread. Follow next_cursor while complete=false.",
-         {**page, "thread_ts": {"type": "string", "description": "Root Slack message timestamp (thread_ts or the root message's ts)."}},
+        ("slack_thread", "thread", "Read one page of a Slack thread including the root message. Supply the root timestamp, or a reply's: Slack answers with that reply's thread. A reactions array, when Slack includes one on a message, is passed through untrimmed; its absence is not proof of no reactions, so use slack_reactions for them. Token/scopes/membership restrictions return explicit errors, never an invented empty thread. Follow next_cursor while complete=false.",
+         {**page, "thread_ts": {"type": "string", "description": "Root Slack message timestamp (thread_ts or the root message's ts), or a reply's ts."}},
          ["channel_id", "thread_ts"]),
+        ("slack_reactions", "reactions", "Read one Slack message's current reactions by exact channel and timestamp, a reply's included. Each row's count covers everyone who reacted; its users may list only some of them. A deleted or unknown message returns its provider error, never an empty list.",
+         {"channel_id": channel, "ts": {"type": "string", "description": "Exact timestamp of the message, root or reply."}},
+         ["channel_id", "ts"]),
         ("slack_list_conversations", "conversations", "List one paginated Slack conversation directory page. Return exact IDs, provider names, URLs and completeness facts; private conversations the bot cannot see remain provider-invisible.",
          {"cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 100},
           "types": {"type": "array", "items": {"type": "string"}, "description": "Optional Slack conversation types."},
