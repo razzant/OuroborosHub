@@ -33,6 +33,9 @@ def connect_caldav(ctx, *, login, password, server_url='', alias='', preset='cal
         adapter = CalDAVAdapter(login, password, server_url, account_id=account_id)
     else:
         return {'status': 'error', 'message': 'preset: caldav | yandex'}
+    transport = urllib.parse.urlsplit(server_url).scheme
+    transport_info = {'transport': transport, 'transport_warning':
+                      'HTTP sends your login and password without encryption.' if transport == 'http' else ''}
     entry = {'provider': preset, 'login': login, 'password': str(password), 'server_url': server_url,
              'alias': str(alias or login), 'generation': uuid.uuid4().hex}
     def save(vault):
@@ -48,7 +51,7 @@ def connect_caldav(ctx, *, login, password, server_url='', alias='', preset='cal
                 return False
             return save(vault)
         if not _mutate_tokens(ctx.state_dir, str(ctx.secrets.get('CALENDAR_TOKEN_KEY') or ''), discovered):
-            return {'status': 'superseded', 'account_id': account_id, 'message': 'Подключение уже изменено или отключено'}
+            return {'status': 'superseded', 'account_id': account_id, **transport_info, 'message': 'Подключение уже изменено или отключено'}
         for calendar in calendars:
             existing = ctx.store.get_calendar(calendar['id'])
             ctx.store.upsert_calendar({**calendar,
@@ -56,12 +59,12 @@ def connect_caldav(ctx, *, login, password, server_url='', alias='', preset='cal
         ctx.store.set_account_status(account_id, 'ok')
     except ops.ProviderError as exc:
         ctx.store.set_account_status(account_id, 'auth_failed' if exc.kind == 'auth' else 'error', exc.message)
-        return {'status': 'error', 'account_id': account_id, 'saved': True, 'message': exc.message}
+        return {'status': 'error', 'account_id': account_id, 'saved': True, 'message': exc.message, **transport_info}
     ctx.store.set_setting('sync_requested_at', iso_utc(now_utc()))
     ctx.providers = Providers(ctx.secrets, ctx.state_dir)
     return {'status': 'connected', 'account_id': account_id, 'label': entry['alias'],
             'calendars': [{'id': calendar['id'], 'name': calendar['name']} for calendar in calendars],
-            'transport': urllib.parse.urlsplit(server_url).scheme}
+            **transport_info}
 
 
 def complete_google(ctx, *, code='', state='', error='', error_description=''):

@@ -107,7 +107,7 @@ class BirthRecoveryTests(unittest.TestCase):
         self.assertEqual(ctx.store.get_intent(birth['id']), birth)
         self.assertEqual(len(server.calls), calls)
 
-    def test_hard_rejection_and_missing_original_snapshot_are_not_reopened(self):
+    def test_explicit_retry_requires_the_original_snapshot(self):
         for mode in ('auth', 'missing_snapshot'):
             with self.subTest(mode=mode):
                 ctx, cid, server, eid, birth = self.lost(caldav_context, 'PUT')
@@ -118,9 +118,15 @@ class BirthRecoveryTests(unittest.TestCase):
                         c.execute('UPDATE intents SET payload_json=? WHERE id=?', (json.dumps(payload), birth['id']))
                 calls = len(server.calls)
                 result = json.loads(tools.cal_update(ctx, id=eid, title='After', confirm=True))
-                self.assertNotEqual(result['status'], 'updated')
-                self.assertEqual(ctx.store.get_intent(birth['id'])['state'], 'failed')
-                self.assertEqual(len(server.calls), calls)
+                if mode == 'auth':
+                    self.assertEqual(result['status'], 'updated')
+                    self.assertEqual(ctx.store.get_intent(birth['id'])['state'], 'done')
+                    self.assertGreater(len(server.calls), calls)
+                    self.assertEqual(len(server.resources), 1)
+                else:
+                    self.assertNotEqual(result['status'], 'updated')
+                    self.assertEqual(ctx.store.get_intent(birth['id'])['state'], 'failed')
+                    self.assertEqual(len(server.calls), calls)
 
     def test_google_revival_uses_pinned_if_match_and_no_body_identity(self):
         ctx, cid, server = google_context()

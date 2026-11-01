@@ -83,9 +83,18 @@ def _retire_calendar(store, calendar_id):
                      " AND event_id IN (SELECT id FROM events WHERE calendar_id=?)", (calendar_id,))
 
 
-def cal_manage(ctx, action='', account_id='', calendar_id='', changes=None, sharing=None, confirm=False, request_id='', **kwargs):
+def cal_manage(ctx, action='', account_id='', calendar_id='', changes=None, sharing=None, confirm=False, request_id='', grantee=None, rule_id=None, **kwargs):
     """Apply one named collection operation, without automatic retry after uncertainty."""
     changes, sharing = dict(changes or {}), dict(sharing or {})
+    required_target = 'grantee' if action == 'share' and sharing.get('type', 'user') != 'default' else 'rule_id' if action == 'unshare' else ''
+    if required_target and not str((grantee if required_target == 'grantee' else rule_id) or '').strip():
+        return bounded_result({'status': 'error', 'reason_code': 'argument_required', 'argument': required_target,
+                               'message': f'Use the top-level {required_target} argument so the destination is declared; no operation was sent'})
+    for public_name, nested_name, value in (('grantee', 'value', grantee), ('rule_id', 'rule_id', rule_id)):
+        if value is not None:
+            if nested_name in sharing and str(sharing[nested_name]) != str(value):
+                return bounded_result({'status': 'error', 'message': f'{public_name} conflicts with sharing.{nested_name}; no operation was sent'})
+            sharing[nested_name] = str(value)
     previous = ctx.store.get_intent(str(request_id)) if request_id else None
     if previous:
         prior_request = json.loads(previous['payload_json']).get('request') or {}

@@ -13,11 +13,11 @@ import os
 import shutil
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from model import (
-    DEFAULT_LOCAL_CALENDAR_ID, DEFAULT_LOCAL_CALENDAR_NAME, INTENT_DONE, INTENT_FAILED, INTENT_PENDING, LOCAL_ACCOUNT_ID, PROVIDER_LOCAL, CALDAV_PROVIDERS, iso_utc, new_id, now_utc, parse_stored,
+    DEFAULT_LOCAL_CALENDAR_ID, DEFAULT_LOCAL_CALENDAR_NAME, INTENT_DONE, INTENT_FAILED, INTENT_PENDING, LOCAL_ACCOUNT_ID, PROVIDER_LOCAL, CALDAV_PROVIDERS, has_recurrence, iso_utc, new_id, now_utc, parse_stored,
 )
 
 SCHEMA_VERSION = 1
@@ -315,8 +315,9 @@ class Store:
             c.execute(
                 "INSERT INTO calendars (id, account_id, provider, external_id, href, name, description, tz, writable, access_role,"
                 " role_visible, role_busy, role_publish, publish_mode, sort_order, is_default, deleted_at, updated_at)"
-                " VALUES (:id, :account_id, :provider, :external_id, :href, :name, :description, :tz, :writable, :access_role,"
-                " :role_visible, :role_busy, :role_publish, :publish_mode, :sort_order, :is_default, NULL, :ts)"
+                " SELECT :id, :account_id, :provider, :external_id, :href, :name, :description, :tz, :writable, :access_role,"
+                " :role_visible, :role_busy, :role_publish, :publish_mode, :sort_order, :is_default, NULL, :ts"
+                " WHERE EXISTS (SELECT 1 FROM accounts WHERE id=:account_id)"
                 " ON CONFLICT(id) DO UPDATE SET external_id=excluded.external_id, href=excluded.href, name=excluded.name, description=excluded.description,"
                 " tz=excluded.tz, writable=excluded.writable, access_role=excluded.access_role, deleted_at=NULL, updated_at=excluded.updated_at",
                 {
@@ -623,20 +624,20 @@ class Store:
             args.extend(calendar_ids)
         if not include_hidden:
             clauses.append("e.visibility = 'shown'")
-        time_clause = "(e.start_utc < ? AND e.end_utc > ? AND e.rrule = '')"
+        time_clause = "(e.start_utc < ? AND e.end_utc > ? AND e.rrule = '' AND e.rdates='' AND e.exdates='')"
         targs: List[Any] = [iso_utc(end), iso_utc(start)]
         if owner_tz is not None:
             # Civil dates/floating times are projected later. Any two legal
             # datetime UTC offsets differ by less than 48h; this widens candidates,
             # never the returned occurrence window or the memory horizon.
-            time_clause = "(" + time_clause + " OR (e.rrule='' AND (e.all_day=1 OR e.time_kind='floating') AND e.start_utc < ? AND e.end_utc > ?))"
+            time_clause = "(" + time_clause + " OR (e.rrule='' AND e.rdates='' AND e.exdates='' AND (e.all_day=1 OR e.time_kind='floating') AND e.start_utc < ? AND e.end_utc > ?))"
             targs.extend((iso_utc(end + timedelta(days=2)), iso_utc(start - timedelta(days=2))))
         if include_masters:
             # A moved exception can enter this window before its master's DTSTART. Include that
             # master so expansion overlays its reminder rules rather than treating the exception
             # as a standalone event with the wrong default offset.
-            time_clause = ("(" + time_clause + " OR (e.rrule != '' AND e.start_utc < ? AND e.master_id = '')"
-                           " OR (e.rrule != '' AND e.id IN (SELECT master_id FROM events"
+            time_clause = ("(" + time_clause + " OR ((e.rrule != '' OR e.rdates != '' OR e.exdates != '') AND (e.start_utc < ? OR e.rdates != '') AND e.master_id = '')"
+                           " OR ((e.rrule != '' OR e.rdates != '' OR e.exdates != '') AND e.id IN (SELECT master_id FROM events"
                            " WHERE master_id != '' AND deleted_at IS NULL AND start_utc < ? AND end_utc > ?)))")
             padding = timedelta(days=2) if owner_tz is not None else timedelta()
             targs.extend((iso_utc(end + padding), iso_utc(end + padding), iso_utc(start - padding)))
@@ -767,7 +768,7 @@ class Store:
                               if k in EVENT_COLUMNS and k != 'raw_payload'}
         event = payload['desired'] or {}
         calendar = self.get_calendar(calendar_id) or {}
-        if calendar.get('provider') in CALDAV_PROVIDERS and event.get('rrule') and not event.get('master_id'):
+        if calendar.get('provider') in CALDAV_PROVIDERS and has_recurrence(event):
             # Every master write serializes the same complete desired family.
             # A queued cancellation is already accepted local intent, even
             # before its provider ACK; later commands must not resurrect it.
@@ -849,9 +850,12 @@ class Store:
     def intent_counts(self, active_only: bool = False) -> Dict[str, int]:
         # The frequently polled widget needs only unsettled counts. Keep the
         # complete history available to explicit status/diagnostic readers.
-        where = " WHERE state IN ('pending','conflict','failed','uncertain')" if active_only else ""
+        where = (" WHERE i.state IN ('pending','conflict','failed','uncertain') AND (i.state!='failed'"
+                 " OR i.kind='calendar' OR (EXISTS (SELECT 1 FROM events e WHERE e.id=i.event_id AND e.deleted_at IS NULL)"
+                 " AND NOT EXISTS (SELECT 1 FROM intents later WHERE later.event_id=i.event_id AND later.rowid>i.rowid AND later.state='done')))"
+                 if active_only else "")
         with self._conn() as c:
-            rows = c.execute("SELECT state, COUNT(*) AS n FROM intents" + where + " GROUP BY state").fetchall()
+            rows = c.execute("SELECT i.state, COUNT(*) AS n FROM intents i" + where + " GROUP BY i.state").fetchall()
         return {r["state"]: int(r["n"]) for r in rows}
 
     def calendar_operations(self, limit=10):
@@ -890,7 +894,7 @@ class Store:
         with self._conn() as c:
             skipped = list(except_events)
             sql = ("DELETE FROM reminders WHERE recurrence_id='' AND state IN ('scheduled', 'no_channel')"
-                   " AND event_id IN (SELECT id FROM events WHERE rrule != '')")
+                   " AND event_id IN (SELECT id FROM events WHERE master_id='' AND (rrule != '' OR rdates != '' OR exdates != ''))")
             if skipped:
                 sql += " AND event_id NOT IN (" + ",".join("?" for _ in skipped) + ")"
             c.execute(sql, skipped)

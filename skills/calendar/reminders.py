@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from model import get_tz, iso_local, iso_utc, now_utc, own_reminders, parse_stored, calendar_time
+from model import iso_local, iso_utc, now_utc, own_reminders, parse_stored, calendar_time, has_recurrence
 
 PLAN_HORIZON = timedelta(hours=24)
 CATCHUP_GRACE = timedelta(minutes=10)      # a reminder older than this after downtime is batched, not sent alone
@@ -262,7 +263,7 @@ class NotifyChannel:
         req.add_header("X-Skill-Token", self._token.use_in_request() if self._token is not None else "")
         req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=10) as resp:
                 raw = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             raise _HttpError(exc.code, exc.read().decode("utf-8", "replace") if exc.fp else "")
@@ -278,21 +279,23 @@ class _HttpError(Exception):
         self.status, self.body = status, body
 
 
-def format_text(event: Dict[str, Any], occurrence_start_utc: str, offset: int, tz) -> str:
+def format_text(event: Dict[str, Any], occurrence_start_utc: str, offset: int, tz, now=None) -> str:
     start = parse_stored(occurrence_start_utc) or calendar_time(event, event.get("start_utc"), tz)
     when = start.astimezone(tz) if start else None
     head = f"{when:%H:%M}" if when else ""
     if event.get("all_day"):
         head = f"{when:%d.%m}" if when else ""
-    soon = "сейчас" if offset == 0 else f"через {offset} мин"
-    parts = [f"⏰ {head} · {str(event.get('title') or 'Событие')[:120]} ({soon})"]
+    remaining = math.ceil((start - (now or now_utc())).total_seconds() / 60) if start else None
+    soon = "сейчас" if remaining == 0 else f"через {remaining} мин" if remaining and remaining > 0 else f"началось {-remaining} мин назад" if remaining else "время неизвестно"
+    clean = lambda value: ' '.join(str(value).split())
+    parts = [f"⏰ {head} · {clean(event.get('title') or 'Событие')[:120]} ({soon})"]
     if event.get("calendar_name"):
-        parts.append(str(event["calendar_name"])[:120])
+        parts.append(clean(event["calendar_name"])[:120])
     if event.get("location"):
-        parts.append(str(event["location"])[:80])
+        parts.append(clean(event["location"])[:80])
     text = " · ".join(parts)
     # Leave room for the catch-up header even when one event has long labels.
-    limit = MAX_NOTICE_CHARS - len("⏰ Пока Уроборос не работал, подошли напоминания:") - 1
+    limit = MAX_NOTICE_CHARS - len("⏰ Напоминания из очереди:") - 1
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
@@ -353,17 +356,17 @@ def deliver_due(store, channel: NotifyChannel, tz, now: Optional[datetime] = Non
         event = _live_reminder(store, rem, tz, max(now, now_utc()), stats)
         if event is None:
             continue
-        text = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)
+        text = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz, now=now)
         if not _reserve(store, channel, [rem["id"]]):
             continue  # a concurrent calendar edit removed this pending reminder
         state, detail = channel.send(rem["notice_id"], text)
         _record(store, rem["id"], state, detail, stats)
     if stale:
-        header = "⏰ Пока Уроборос не работал, подошли напоминания:"
+        header = "⏰ Напоминания из очереди:"
         batch: List[Tuple[Dict[str, Any], str]] = []
         size = len(header)
         for rem, event in stale:
-            line = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)
+            line = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz, now=now)
             if batch and size + 1 + len(line) > MAX_NOTICE_CHARS:
                 _send_batch(store, channel, header, batch, tz, now, stats)
                 batch, size = [], len(header)
@@ -382,7 +385,7 @@ def _send_batch(store, channel: NotifyChannel, header: str, batch: List[Tuple[Di
         event = _live_reminder(store, rem, tz, max(now, now_utc()), stats)
         if event is None:
             continue
-        line = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz)
+        line = format_text(event, rem["occurrence_start_utc"], int(rem["offset_min"]), tz, now=now)
         if current and size + 1 + len(line) > MAX_NOTICE_CHARS:
             _emit_batch(store, channel, header, current, stats)
             current, size = [], len(header)
@@ -404,7 +407,7 @@ def _emit_batch(store, channel: NotifyChannel, header: str, batch: List[Tuple[Di
     stats["batched"] += len(batch)
 
 
-_OCCURRENCE_FIELDS = ("title", "description", "location", "end_utc", "visibility", "my_response")
+_OCCURRENCE_FIELDS = ("title", "description", "location", "end_utc", "visibility", "my_response", "all_day", "time_kind", "tz")
 
 
 def _occurrence_overlay(event: Dict[str, Any], exc: Dict[str, Any]) -> Dict[str, Any]:
@@ -424,7 +427,7 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
         return "нет времени вхождения", event
     m_start, m_end = parse_stored(event.get("start_utc")), parse_stored(event.get("end_utc"))
     duration = (m_end - m_start) if (m_start and m_end and m_end > m_start) else timedelta(hours=1)
-    if not event.get("rrule"):
+    if not has_recurrence(event):
         m_start = calendar_time(event, event.get('start_utc'), owner_tz)
         m_end = calendar_time(event, event.get('end_utc'), owner_tz)
         if m_start and m_start != start:
@@ -440,10 +443,11 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
     if exc is not None:
         if str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at") or original in _ops.excluded_slots(event):
             return "вхождение отменено", event
-        effective_start = _ops.routine_time(event, exc.get('start_utc'), owner_tz)
+        effective = _occurrence_overlay(event, exc)
+        effective_start = _ops.routine_time(effective, exc.get('start_utc'), owner_tz)
         if effective_start != start:
             return "вхождение перенесено; напоминание перепланировано", event
-        end_at = _ops.routine_time(event, exc.get('end_utc'), owner_tz) or start + duration
+        end_at = _ops.routine_time(effective, exc.get('end_utc'), owner_tz) or start + duration
         live_row = {**_occurrence_overlay(event, exc), 'start_utc': iso_utc(start), 'end_utc': iso_utc(end_at)}
     else:
         # A legacy row with no original-slot identity must not impersonate a

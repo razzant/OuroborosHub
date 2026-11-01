@@ -8,11 +8,11 @@ import json
 
 import ops
 import links
-from model import event_public, iso_utc, new_id, now_utc, parse_stored
+from model import event_public, new_id, now_utc, parse_stored
 from store import EVENT_COLUMNS
 
 _UNFINISHED = ('pending', 'conflict', 'failed')
-_PROVIDER_FIELDS = ('title', 'description', 'location', 'start_utc', 'end_utc', 'tz',
+_PROVIDER_FIELDS = ('title', 'description', 'location', 'start_utc', 'end_utc', 'tz', 'time_kind',
                     'all_day', 'rrule', 'rdates', 'exdates', 'recurrence_id', 'status',
                     'organizer', 'attendees_json', 'my_response', 'availability',
                     'external_id', 'href', 'etag', 'raw_payload')
@@ -140,7 +140,8 @@ def _load(ctx, event_id):
         return state, None, {**body, 'status': 'unavailable', 'message': 'аккаунт не подключён; выбор не применён'}
     master = next((r for r in state['rows'] if r['id'] == row.get('master_id')), {})
     address = {**row, 'master_external_id': master.get('external_id') or '',
-               'master_href': master.get('href') or '', 'master_etag': master.get('etag') or ''}
+               'master_href': master.get('href') or '', 'master_etag': master.get('etag') or '',
+               'master_tz': master.get('tz') or '', 'master_all_day': master.get('all_day', row.get('all_day'))}
     chosen = next((i for i in templates if i['event_id'] == row['id'] and i['state'] == 'conflict'), None)
     try:
         current = adapter.read_current(cal, address, _payload(chosen) if chosen else {})
@@ -201,7 +202,8 @@ def _read_targets(state, adapter, current, templates):
             continue
         master = before.get(row.get('master_id')) or rows.get(row.get('master_id'), {})
         address = {**row, 'master_external_id': master.get('external_id') or '',
-                   'master_href': master.get('href') or '', 'master_etag': master.get('etag') or ''}
+                   'master_href': master.get('href') or '', 'master_etag': master.get('etag') or '',
+                   'master_tz': master.get('tz') or '', 'master_all_day': master.get('all_day', row.get('all_day'))}
         try:
             targets[eid] = adapter.read_current(state['calendar'], address, _payload(intent))
         except ops.ProviderError as exc:
@@ -214,7 +216,6 @@ def _read_targets(state, adapter, current, templates):
 
 def _clones(state, current, templates, new_op):
     ids = {i['id']: new_id('int') for i in templates}
-    row = state['event']
     clones = []
     for original in templates:
         payload = {**_payload(original), 'op_id': new_op}

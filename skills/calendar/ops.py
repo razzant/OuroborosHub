@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, BUSY_COPY_TITLE, INTENT_CONFLICT, INTENT_DONE, INTENT_FAILED, INTENT_PENDING,
     PROVIDER_LOCAL, CALDAV_PROVIDERS, PUBLISH_BUSY, PUBLISH_FULL, SCOPES, SCOPE_ALL, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_SHOWN,
-    get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time, calendar_time, event_field_value, normalize_rrule_until,
+    get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time, calendar_time, event_field_value, normalize_rrule_until, has_recurrence,
 )
 
 RETRY_BACKOFF_SEC = (30, 120, 600, 1800, 7200)
@@ -76,7 +76,7 @@ def resolve_occurrence(store, row: Dict[str, Any], occ_key: str) -> Tuple[Dict[s
     if not occ_key:
         return row, ""
     slot = _parse_occurrence_key(occ_key)
-    if slot is None or not row.get("rrule") or not row.get("id"):
+    if slot is None or not has_recurrence(row) or not row.get("id"):
         raise ValueError("invalid occurrence id")
     key = iso_utc(slot)
     if key in excluded_slots(row):
@@ -102,7 +102,7 @@ def expand(rows: Sequence[Dict[str, Any]], start: datetime, end: datetime, excep
     A local «обычно» (soft) routine follows the owner's CURRENT zone (16 A), everything else keeps its own zone.
     """
     out: List[Dict[str, Any]] = []
-    present = {row["id"] for row in rows if row.get("rrule") and not row.get("master_id")}
+    present = {row["id"] for row in rows if has_recurrence(row)}
     for row in rows:
         if row.get("master_id"):
             if row["master_id"] in present or str(row.get("status") or "") == "cancelled":
@@ -116,7 +116,7 @@ def expand(rows: Sequence[Dict[str, Any]], start: datetime, end: datetime, excep
                 item.update(start_utc=iso_utc(s), end_utc=iso_utc(e), _display_times=True)
                 out.append(item)
             continue
-        if not row.get("rrule"):
+        if not has_recurrence(row):
             s, e = calendar_time(row, row.get("start_utc"), owner_tz), calendar_time(row, row.get("end_utc"), owner_tz)
             if s and e and overlaps(s, e, start, end):
                 out.append({**row, 'start_utc': iso_utc(s), 'end_utc': iso_utc(e), '_display_times': True})
@@ -161,7 +161,7 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
         return []
     duration = m_end - m_start
     try:
-        from dateutil.rrule import rrulestr  # transitive dependency of icalendar
+        from dateutil.rrule import rrulestr, rruleset  # transitive dependency of icalendar
     except Exception:
         if strict:
             raise  # a partial recurrence projection must not authorize destructive queue reconciliation
@@ -184,7 +184,9 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
                     moved = routine_time(master, iso_utc(bound), force_tz)
                     parts[index] = 'UNTIL=' + moved.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
             rule_text = ';'.join(parts)
-        rule = rrulestr(normalize_rrule_until(rule_text, tz), dtstart=dtstart, forceset=True)
+        rule = rrulestr(normalize_rrule_until(rule_text, tz), dtstart=dtstart, forceset=True) if rule_text else rruleset()
+        if not rule_text:
+            rule.rdate(dtstart)
         for ex in _split_dates(master.get("exdates")):
             rule.exdate(routine_time(master, iso_utc(ex), force_tz).astimezone(tz))
         for rd in _split_dates(master.get("rdates")):
@@ -217,7 +219,7 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
             row["id"] = exc["id"]
             if force_tz is not None:
                 for field in ('start_utc', 'end_utc'):
-                    row[field] = iso_utc(routine_time(master, row[field], force_tz))
+                    row[field] = iso_utc(routine_time(row, row[field], force_tz))
         else:
             row = dict(master)
             row["id"] = f"{master['id']}@{key}"
@@ -237,7 +239,8 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
     for key, exc in by_recurrence.items():
         if key in visited or key in excluded or str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at"):
             continue
-        s, e = routine_time(master, exc.get("start_utc"), force_tz), routine_time(master, exc.get("end_utc"), force_tz)
+        effective = {**master, **{k: v for k, v in exc.items() if v is not None}}
+        s, e = routine_time(effective, exc.get("start_utc"), force_tz), routine_time(effective, exc.get("end_utc"), force_tz)
         if s and e and overlaps(s, e, start, end):
             row = dict(master)
             row.update({k: v for k, v in exc.items() if v is not None})
@@ -514,7 +517,7 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
         for field in ('start_utc', 'end_utc'):
             if changes.get(field):
                 changes[field] = iso_utc(parse_stored(changes[field]).astimezone(owner_tz).replace(tzinfo=get_tz(row.get('tz') or '')))
-    if row.get("rrule") and not occ_key and scope == SCOPE_THIS:
+    if has_recurrence(row) and not occ_key and scope == SCOPE_THIS:
         raise ValueError("a recurring master needs an occurrence id or scope=all")
     if scope == SCOPE_FOLLOWING and not occ_key:
         raise ValueError("scope=following needs an occurrence id")
@@ -600,7 +603,7 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
         write_kind = "create" if (not target.get("external_id") and not target.get("href") and not target.get("master_id")) else "update"
         birth = next((i for i in store.intents_for_event(target['id'])
                       if i['kind'] == 'create' and i['state'] in (INTENT_PENDING, INTENT_FAILED, INTENT_CONFLICT)), None)
-        recover_birth = _recover_failed_create(store, birth) if birth else False
+        recover_birth = _recover_failed_create(store, birth, explicit_edit=not from_source) if birth else False
         if birth:
             write_kind = 'update'
         kinds: List[str] = []
@@ -614,6 +617,8 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
         for kind in kinds:
             payload = {"scope": scope, "changes": {k: v for k, v in changes.items() if k != "my_response"}, "send_updates": bool(send_updates)}
             payload['family_root_id'] = roots[cal['id']]
+            if occ_key and scope == SCOPE_FOLLOWING and target['id'] == roots[cal['id']]:
+                payload['truncate_before'] = occ_key
             previous = previous_by_calendar.get(cal['id'])
             if previous:
                 payload['after_intent_id'] = previous
@@ -666,7 +671,7 @@ def _stage_delete_event(store, event_id: str, scope: str = SCOPE_THIS, send_upda
     if row is None or row.get("deleted_at"):
         return {"status": "not_found", "assignments": []}
     row, occ_key = resolve_occurrence(store, row, occ_key)
-    if row.get("rrule") and not occ_key and scope == SCOPE_THIS:
+    if has_recurrence(row) and not occ_key and scope == SCOPE_THIS:
         raise ValueError("a recurring master needs an occurrence id or scope=all")
     if scope == SCOPE_FOLLOWING and not occ_key:
         raise ValueError("scope=following needs an occurrence id")
@@ -713,6 +718,8 @@ def _stage_delete_event(store, event_id: str, scope: str = SCOPE_THIS, send_upda
                    'baseline': _baseline_before(before, victim), 'family_root_id': target['id'],
                    'restore_rows': [{k: v for k, v in e.items() if k not in ('raw_payload','provider','account_id','calendar_name')}
                                     for e in before.values()]}
+        if occ_key and scope == SCOPE_FOLLOWING:
+            payload['truncate_before'] = occ_key
         intent = store.add_intent(kind, cal["account_id"], cal["id"], victim["id"], payload,
                                   scope=scope, expected_etag=_write_etag(store, cal, victim))
         result = {"status": INTENT_PENDING, "_intent_ids": [intent["id"]]}
@@ -762,7 +769,7 @@ def _apply_changes(store, row: Dict[str, Any], changes: Dict[str, Any]) -> None:
             store.drop_reminders_for_occurrence(row["master_id"], str(row.get("start_utc") or ""))
     if fields:
         store.update_event(row["id"], fields)
-        if row.get("rrule") and fields.get("rrule") == "" and not row.get("master_id"):
+        if row.get("rrule") and fields.get("rrule") == "" and not (fields.get("rdates") or fields.get("exdates")) and not row.get("master_id"):
             store.update_event(row['id'], {'exdates': '', 'rdates': ''})
             from reminders import notice_id_for
             start_key = str(fields.get("start_utc") or row["start_utc"])
@@ -815,16 +822,25 @@ def _read_only_preflight(store, rows: List[Dict[str, Any]], assignments: List[Di
 
 def _series_delta(master: Dict[str, Any], changes: Dict[str, Any]) -> Optional[timedelta]:
     """How far a whole series moves when its master start changes (None when the start does not change)."""
-    if not master.get("rrule") or not changes.get("start_utc"):
+    if not has_recurrence(master) or not changes.get("start_utc"):
         return None
     old, new = parse_stored(master.get("start_utc")), parse_stored(changes.get("start_utc"))
     if old is None or new is None or old == new:
         return None
+    return _time_delta(old, new, master)
+
+
+def _time_delta(old, new, row):
+    if row.get('time_kind') == 'floating':
+        zone = get_tz(row.get('tz') or '')
+        return new.astimezone(zone).replace(tzinfo=None) - old.astimezone(zone).replace(tzinfo=None)
     return new - old
 
 
-def _shift_instant(dt: datetime, delta: timedelta, all_day: bool, tz) -> datetime:
-    """Timed rows move by the exact delta; all-day rows move by whole calendar days in their zone (DST-safe)."""
+def _shift_instant(dt: datetime, delta: timedelta, all_day: bool, tz, floating: bool = False) -> datetime:
+    """Absolute instants use elapsed time; DATE/floating values keep their civil coordinates."""
+    if floating and not all_day:
+        return (dt.astimezone(tz).replace(tzinfo=None) + delta).replace(tzinfo=tz)
     if not all_day:
         return dt + delta
     days = int(round(delta.total_seconds() / 86400.0))
@@ -845,7 +861,7 @@ def _shift_series_rows(store, master: Dict[str, Any], delta: timedelta, changes=
         out = []
         for x in str(csv or "").split(","):
             dt = parse_stored(x) if x else None
-            out.append(iso_utc(_shift_instant(dt, delta, all_day, tz)) if dt else x)
+            out.append(iso_utc(_shift_instant(dt, delta, all_day, tz, master.get('time_kind') == 'floating')) if dt else x)
         return ",".join(v for v in out if v)
     fields = {}
     if master.get("exdates") and 'exdates' not in (changes or {}):
@@ -859,9 +875,9 @@ def _shift_series_rows(store, master: Dict[str, Any], delta: timedelta, changes=
         rid, s, e = parse_stored(exc.get("recurrence_id")), parse_stored(exc.get("start_utc")), parse_stored(exc.get("end_utc"))
         upd = {}
         if rid is not None:
-            upd["recurrence_id"] = iso_utc(_shift_instant(rid, delta, all_day, tz))
+            upd["recurrence_id"] = iso_utc(_shift_instant(rid, delta, all_day, tz, master.get('time_kind') == 'floating'))
         if s is not None and e is not None:
-            upd.update({"start_utc": iso_utc(_shift_instant(s, delta, all_day, tz)), "end_utc": iso_utc(_shift_instant(e, delta, all_day, tz))})
+            upd.update({"start_utc": iso_utc(_shift_instant(s, delta, bool(exc.get('all_day')), get_tz(exc.get('tz') or master.get('tz') or ''), exc.get('time_kind') == 'floating')), "end_utc": iso_utc(_shift_instant(e, delta, bool(exc.get('all_day')), get_tz(exc.get('tz') or master.get('tz') or ''), exc.get('time_kind') == 'floating'))})
         if upd:
             store.update_event(exc["id"], upd)
             fresh = store.get_event(exc["id"])
@@ -891,8 +907,8 @@ def _shift_for_scope_all(store, row: Dict[str, Any], occ_key: str, scope: str, c
         return {**changes, 'start_utc': iso_utc(datetime.combine(first, datetime.min.time(), tzinfo=zone)),
                 'end_utc': iso_utc(datetime.combine(first + timedelta(days=max(1, days)), datetime.min.time(), tzinfo=zone))}
     duration = (new_e - new_s) if new_e else ((m_e - m_s) if m_e else timedelta(hours=1))
-    delta = new_s - occ_s
-    return {**changes, "start_utc": iso_utc(m_s + delta), "end_utc": iso_utc(m_s + delta + duration)}
+    shifted = _shift_instant(m_s, _time_delta(occ_s, new_s, row), False, get_tz(row.get('tz') or ''), row.get('time_kind') == 'floating')
+    return {**changes, "start_utc": iso_utc(shifted), "end_utc": iso_utc(shifted + duration)}
 
 
 def _ensure_exception(store, master: Dict[str, Any], occ_key: str, changes: Dict[str, Any]) -> str:
@@ -956,9 +972,11 @@ def _truncate_series(store, master: Dict[str, Any], occ_key: str, keep_later_exc
     parts.append(f"UNTIL={until}")
     # A following-delete must also remove explicit extra dates past the cut;
     # RRULE truncation alone leaves RDATE occurrences live at the source.
-    fields = {"rrule": ";".join(parts)}
+    fields = {"rrule": ";".join(parts) if master.get('rrule') else ''}
     for field in ("rdates", "exdates"):
         fields[field] = ",".join(x for x in str(master.get(field) or "").split(",") if x and x < occ_key)
+    if not master.get('rrule') and str(master.get('start_utc') or '') >= occ_key:
+        fields['exdates'] = ','.join(sorted(set(filter(None, fields['exdates'].split(','))) | {master['start_utc']}))
     store.update_event(master["id"], fields)
     later = []
     for exc in store.exceptions_for(master["id"]):
@@ -989,16 +1007,17 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     # only a change from the effective start moves the following series.
     cut_effective = cut_start or occ_start
     requested_start = parse_stored(changes.get("start_utc")) or cut_effective
-    shift = requested_start - cut_effective
+    elapsed_shift = requested_start - cut_effective
+    shift = _time_delta(cut_effective, requested_start, master)
     zone = get_tz(master.get('tz') or '')
-    new_start = _shift_instant(occ_start, shift, bool(master.get('all_day')), zone)
+    new_start = _shift_instant(occ_start, shift, bool(master.get('all_day')), zone, master.get('time_kind') == 'floating')
     requested_end = parse_stored(changes.get("end_utc"))
     new_duration = (requested_end - requested_start) if requested_end else duration
     span = {**master, 'start_utc': iso_utc(requested_start), 'end_utc': iso_utc(requested_end)} if requested_end else master
     new_end = _occurrence_end(span, new_start) if master.get('all_day') else new_start + new_duration
-    new_cut_start = _shift_instant(cut_effective, shift, bool(master.get('all_day')), zone)
+    new_cut_start = _shift_instant(cut_effective, shift, bool(master.get('all_day')), zone, master.get('time_kind') == 'floating')
     cut_end = parse_stored(cut_exception.get("end_utc")) if cut_exception else None
-    new_cut_end = requested_end or ((cut_end + shift) if cut_end else (new_cut_start + duration))
+    new_cut_end = requested_end or (_shift_instant(cut_end, shift, bool(master.get('all_day')), zone, master.get('time_kind') == 'floating') if cut_end else (new_cut_start + duration))
     if master.get('all_day'):
         cut_span = span if requested_end or cut_end is None else {**master, 'start_utc': iso_utc(cut_effective), 'end_utc': iso_utc(cut_end)}
         new_cut_end = _occurrence_end(cut_span, new_cut_start)
@@ -1024,7 +1043,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
                 else:
                     stamp_format = "%Y%m%dT%H%M%SZ" if until_part.endswith("Z") else "%Y%m%dT%H%M%S"
                     until_dt = datetime.strptime(until_part, stamp_format)
-                    bound_shift = shift if until_part.endswith("Z") else (
+                    bound_shift = elapsed_shift if until_part.endswith("Z") else (
                         requested_start.astimezone(split_tz).replace(tzinfo=None) - cut_effective.astimezone(split_tz).replace(tzinfo=None))
                     until_part = (until_dt + bound_shift).strftime(stamp_format)
             except ValueError:
@@ -1035,7 +1054,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
         for x in str(csv or "").split(","):
             if x and x >= occ_key:
                 dt = parse_stored(x)
-                out.append(iso_utc(_shift_instant(dt, shift, split_all_day, split_tz)) if dt is not None else x)
+                out.append(iso_utc(_shift_instant(dt, shift, split_all_day, split_tz, master.get('time_kind') == 'floating')) if dt is not None else x)
         return ",".join(out)
     row.update({"uid": split_uid or new_uid(), "start_utc": iso_utc(new_start), "end_utc": iso_utc(new_end), "link_group_id": new_group,
                 "exdates": _shift_csv(master.get("exdates")), "rdates": _shift_csv(master.get("rdates")),
@@ -1078,14 +1097,14 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
                 effective = iso_utc(new_cut_start)
                 fire_at = iso_utc(new_cut_start - timedelta(minutes=int(previous["offset_min"])))
             else:
-                effective = iso_utc(_shift_instant(old_effective, shift, split_all_day, split_tz))
-                fire_at = iso_utc(_shift_instant(old_fire, shift, split_all_day, split_tz))
+                effective = iso_utc(_shift_instant(old_effective, shift, split_all_day, split_tz, master.get('time_kind') == 'floating'))
+                fire_at = iso_utc(_shift_instant(old_fire, shift, split_all_day, split_tz, master.get('time_kind') == 'floating'))
             # The owner chose a fresh reminder for a genuinely moved meeting.
             # A content-only split retains sent/unknown history; a changed effective
             # start has a new notification slot, not a retry of the old send.
             if effective != iso_utc(old_effective):
                 continue
-            original = iso_utc(_shift_instant(original_dt, shift, split_all_day, split_tz))
+            original = iso_utc(_shift_instant(original_dt, shift, split_all_day, split_tz, master.get('time_kind') == 'floating'))
             store.carry_settled_reminder(previous, saved["id"], effective, original, fire_at,
                                         notice_id_for(saved["id"], effective, previous["offset_min"], original))
     _apply_changes(store, saved, {k: v for k, v in changes.items() if k not in ("start_utc", "end_utc", "rrule")})
@@ -1094,7 +1113,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
         old_key = parse_stored(exc.get("recurrence_id"))
         if old_key is None:
             continue
-        new_key = _shift_instant(old_key, shift, split_all_day, split_tz)
+        new_key = _shift_instant(old_key, shift, split_all_day, split_tz, master.get('time_kind') == 'floating')
         upd = {"master_id": saved["id"], "recurrence_id": iso_utc(new_key), "uid": saved["uid"], "link_group_id": new_group,
                "external_id": "", "href": "", "etag": "", "sync_state": "synced" if not master.get("external_id") and not master.get("href") else "pending"}
         if str(exc.get("recurrence_id") or "") == occ_key:
@@ -1112,7 +1131,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
 
 # ── intents ─────────────────────────────────────────────────────────
 
-def _recover_failed_create(store, birth) -> bool:
+def _recover_failed_create(store, birth, explicit_edit=False) -> bool:
     """A new owner edit may recover a retained, transient-unknown creation.
 
     Reuse the original desired snapshot and version, not the edited display row
@@ -1124,7 +1143,8 @@ def _recover_failed_create(store, birth) -> bool:
         return False
     payload = json.loads(birth.get('payload_json') or '{}')
     previous = json.loads(birth.get('result_json') or '{}')
-    if not payload.get('desired') or previous.get('kind') not in ('network', 'server', 'retry'):
+    recoverable = ('network', 'server', 'retry') + (('auth', 'forbidden', 'http') if explicit_edit else ())
+    if not payload.get('desired') or previous.get('kind') not in recoverable:
         return False
     store.settle_intent(birth['id'], INTENT_PENDING,
                         {'note': 'owner edit requests original creation recovery', 'previous': previous})
@@ -1275,6 +1295,8 @@ def _matches_unversioned_baseline(payload, remote, adapter):
         baselines.append(payload['baseline_after_predecessor'])
     for field in keys:
         def value(row):
+            if field == 'attendees_json':
+                return event_field_value(row, field, provider_observation=True)
             if field.endswith('_json'):
                 return json.loads(row.get(field) or '[]')
             if field == 'availability':
@@ -1323,7 +1345,8 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
     if event.get("master_id"):   # every exception write resolves through its master (CalDAV: the master's resource; Google: instance id)
         master = store.get_event(event["master_id"])
         event = {**event, "master_external_id": (master or {}).get("external_id") or "", "master_href": (master or {}).get("href") or "",
-                 "master_etag": (master or {}).get("etag") or ""}
+                 "master_etag": (master or {}).get("etag") or "",
+                 **{'master_' + key: (master or {}).get(key) for key in ('tz', 'all_day', 'time_kind')}}
     modes = store.get_setting("reminder_mode") or {}
     payload["mute_provider_reminders"] = bool(modes.get(str(cal["id"])))
     expected = intent.get('expected_etag') or ''

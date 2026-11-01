@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from model import (
     AVAIL_BUSY, AVAIL_FREE, PROVIDER_GOOGLE, PROVIDER_LOCAL, PROVIDER_YANDEX, PROVIDER_CALDAV, account_id as make_account_id, calendar_id as make_calendar_id,
-    get_tz, tz_name as zone_name, iso_utc, now_utc, own_reminders, parse_stored, normalize_rrule_until,
+    get_tz, tz_name as zone_name, iso_utc, now_utc, own_reminders, parse_stored, normalize_rrule_until, has_recurrence,
 )
 from ops import ProviderError
 from xml.sax.saxutils import escape
@@ -95,32 +95,32 @@ class Providers:
             return self._cache[account_id]
         adapter = None
         saved = self.saved_accounts.get(account_id) or {}
-        if saved.get('provider') in (PROVIDER_YANDEX, PROVIDER_CALDAV):
-            if saved['provider'] == PROVIDER_YANDEX:
-                adapter = YandexAdapter(saved['login'], saved['password'])
-            else:
-                adapter = CalDAVAdapter(saved['login'], saved['password'], saved['server_url'], account_id=account_id,
-                                        home_url=saved.get('home_url'))
-        elif account_id.startswith(PROVIDER_YANDEX + ":"):
-            login = account_id.split(":", 1)[1]
-            for acc in self.yandex_accounts:
-                if acc["login"] == login:
-                    adapter = YandexAdapter(login, acc["app_password"])
-                    break
-        elif account_id.startswith(PROVIDER_GOOGLE + ":"):
-            try:
+        try:
+            if saved.get('provider') in (PROVIDER_YANDEX, PROVIDER_CALDAV):
+                if not saved.get('login') or not saved.get('password'):
+                    raise ProviderError('auth', 'Saved CalDAV credentials are incomplete; reconnect this account.')
+                if saved['provider'] == PROVIDER_YANDEX:
+                    adapter = YandexAdapter(saved['login'], saved['password'])
+                else:
+                    adapter = CalDAVAdapter(saved['login'], saved['password'], saved['server_url'], account_id=account_id,
+                                            home_url=saved.get('home_url'))
+            elif account_id.startswith(PROVIDER_YANDEX + ":"):
+                login = account_id.split(":", 1)[1]
+                for acc in self.yandex_accounts:
+                    if acc["login"] == login:
+                        adapter = YandexAdapter(login, acc["app_password"])
+                        break
+            elif account_id.startswith(PROVIDER_GOOGLE + ":"):
                 from providers_google import GoogleAdapter
                 if self.vault_error:
                     raise ProviderError('auth', self.vault_error)
                 adapter = GoogleAdapter.for_account(self.secrets, self.state_dir, account_id.split(":", 1)[1], tokens=self.saved_accounts)
-                if adapter is None:
-                    self.errors[account_id] = "нет сохранённых токенов Google для этого аккаунта — подключи его заново (connect_google)"
-            except ProviderError as exc:
-                adapter = None
-                self.errors[account_id] = exc.message
-            except Exception as exc:  # defensive: an import/runtime problem is still a reason, not silence
-                adapter = None
-                self.errors[account_id] = f"{type(exc).__name__}: {exc}"
+        except ProviderError as exc:
+            self.errors[account_id] = exc.message
+        except Exception as exc:
+            self.errors[account_id] = f"{type(exc).__name__}: {exc}"
+        if adapter is None and account_id != PROVIDER_LOCAL and account_id not in self.errors:
+            self.errors[account_id] = self.vault_error or 'No saved credentials for this account; reconnect it to restore access.'
         self._cache[account_id] = adapter
         return adapter
 
@@ -150,19 +150,6 @@ def _floating_start(component):
     """RFC 5545 floating DATE-TIME has neither UTC offset nor a TZID parameter."""
     value = component.decoded('DTSTART', None)
     return isinstance(value, datetime) and value.tzinfo is None and not getattr(component.get('DTSTART'), 'params', {}).get('TZID')
-
-
-def _rrule_until(rrule: str, tz) -> Optional[str]:
-    """UTC cutoff with local DATE/DATE-TIME interpreted in the series basis."""
-    for part in normalize_rrule_until(str(rrule or ""), tz).split(";"):
-        if part.upper().startswith("UNTIL="):
-            raw = part.split("=", 1)[1].strip()
-            try:
-                dt = datetime.strptime(raw, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-                return iso_utc(dt)
-            except ValueError:
-                return None
-    return None
 
 
 def _dt_list(prop: Any, tz_hint=timezone.utc) -> List[str]:
@@ -212,7 +199,8 @@ def ics_to_rows(ics_text: str, calendar_id: str, href: str, etag: str, default_t
         rrule = comp.get("RRULE")
         rrule_text = rrule.to_ical().decode() if rrule is not None else ""
         rec_id = comp.decoded("RECURRENCE-ID", None)
-        rec_key = _as_utc(rec_id, tz_hint)[0] if rec_id is not None else ""
+        rec_tz = getattr(rec_id, 'tzinfo', None) or default_tz
+        rec_key = _as_utc(rec_id, rec_tz)[0] if rec_id is not None else ""
         attendees = []
         for att in _listify(comp.get("ATTENDEE")):
             params = getattr(att, "params", {}) or {}
@@ -232,7 +220,8 @@ def ics_to_rows(ics_text: str, calendar_id: str, href: str, etag: str, default_t
             "time_kind": "floating" if floating else "absolute",
             "all_day": all_day, "rrule": rrule_text, "exdates": ",".join(_dt_list(comp.get("EXDATE"), tz_hint)) if comp.get("EXDATE") else "",
             "rdates": ",".join(_dt_list(comp.get("RDATE"), tz_hint)) if comp.get("RDATE") else "",
-            "recurrence_id": rec_key, "status": "cancelled" if status == "cancelled" else "confirmed",
+            "recurrence_id": rec_key, "_recurrence_tz": zone_name(rec_tz),
+            "status": "cancelled" if status == "cancelled" else "confirmed",
             "organizer": organizer, "attendees_json": json.dumps(attendees, ensure_ascii=False),
             "reminders_json": json.dumps(sorted(set(reminders))), "origin": "external",
             "availability": AVAIL_FREE if str(comp.get("TRANSP") or "OPAQUE").upper() == "TRANSPARENT" else AVAIL_BUSY,
@@ -256,14 +245,15 @@ def _listify(value: Any) -> List[Any]:
 
 def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU", mute_alarms: bool = False,
                removed_exdates: Optional[List[str]] = None, cancelled_slots: Optional[List[str]] = None,
-               changed_fields=None) -> str:
+               changed_fields=None, truncate_before=None, rsvp=None) -> str:
     """Build VCALENDAR from a row; when the row carries the provider's original text, edit it in place.
 
     ``mute_alarms`` = the owner switched «напоминает Уроборос» on for this calendar: no VALARM goes to the provider.
     ``removed_exdates`` removes only observed replaced dates; ``cancelled_slots``
     retains separately acknowledged occurrence cancellations across rule changes.
     ``changed_fields=None`` keeps full replacement for creates/legacy callers.
-    An explicit sparse set preserves untouched raw temporal properties and alarms;
+    ``truncate_before`` retires detached slots only for an explicit series split/cut.
+    An explicit sparse set preserves untouched raw temporal properties, guests and alarms;
     fields without a raw source are constructed from the desired row.
     """
     icalendar = _ical()
@@ -295,30 +285,31 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         keep_start = keep_end = False
     else:
         temporal = set(changed_fields) if changed_fields is not None else None
-        keep_start = temporal is not None and not temporal.intersection(('start_utc', 'all_day', 'tz', 'time_kind'))
-        keep_end = temporal is not None and not temporal.intersection(('end_utc', 'all_day', 'tz', 'time_kind'))
+        recurrence_added = has_recurrence(event) and not (vevent.get('RRULE') or vevent.get('RDATE') or vevent.get('EXDATE'))
+        keep_start = temporal is not None and not recurrence_added and not temporal.intersection(('start_utc', 'all_day', 'tz', 'time_kind'))
+        keep_end = temporal is not None and not recurrence_added and not temporal.intersection(('end_utc', 'all_day', 'tz', 'time_kind'))
         if vevent.get('DURATION') is not None and temporal is not None and 'start_utc' in temporal:
             keep_end = False
-        if not event.get('rrule') and vevent.get('RRULE'):
+        if not has_recurrence(event) and (vevent.get('RRULE') or vevent.get('RDATE')):
             for comp in list(cal.walk('VEVENT')):
                 if comp.get('RECURRENCE-ID') is not None:
                     cal.subcomponents.remove(comp)
-        until = _rrule_until(str(event.get("rrule") or ""), tz)
-        if until is not None:   # the series was cut: exceptions past the cut moved to the new series locally
+        cut = parse_stored(truncate_before)
+        if cut is not None:
             for comp in list(cal.walk("VEVENT")):
                 rid = comp.get("RECURRENCE-ID")
                 if rid is None:
                     continue
                 rid_dt = comp.decoded("RECURRENCE-ID")
                 rid_utc = _as_utc(rid_dt, tz)[0] if rid_dt is not None else ""
-                if rid_utc and rid_utc > until:
+                if rid_utc and parse_stored(rid_utc) >= cut:
                     cal.subcomponents.remove(comp)
     try:
         seq = int(vevent.get("SEQUENCE", 0)) + 1
     except (TypeError, ValueError):
         seq = 1
     live_exdates: List[str] = []
-    if vevent.get("EXDATE") is not None and event.get("rrule"):
+    if vevent.get("EXDATE") is not None and has_recurrence(event):
         try:
             live_start = _as_utc(vevent.decoded("DTSTART"), tz)[0]
             live_rule = vevent.get("RRULE").to_ical().decode("utf-8") if vevent.get("RRULE") is not None else ""
@@ -330,7 +321,7 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
     floating = event['time_kind'] == 'floating' if event.get('time_kind') else _floating_start(vevent)
     kept = ({'DTSTART'} if keep_start else set()) | ({'DTEND', 'DURATION'} if keep_end else set())
     for key in ("DTSTART", "DTEND", "DURATION", "SUMMARY", "DESCRIPTION", "LOCATION", "RRULE", "STATUS", "LAST-MODIFIED", "DTSTAMP", "SEQUENCE",
-                "EXDATE", "RDATE", "ATTENDEE", "ORGANIZER", "TRANSP"):
+                "EXDATE", "RDATE", "TRANSP"):
         if key in vevent and key not in kept:
             del vevent[key]
     uid = str(event.get("uid") or event.get("external_id") or "")
@@ -339,7 +330,7 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
     now = now_utc()
     def wire_time(value):
         local = value.astimezone(tz)
-        return local.date() if all_day else local.replace(tzinfo=None) if floating else local if event.get('rrule') else value.astimezone(timezone.utc)
+        return local.date() if all_day else local.replace(tzinfo=None) if floating else local if has_recurrence(event) else value.astimezone(timezone.utc)
     if not keep_start:
         vevent.add('DTSTART', wire_time(start))
     if not keep_end:
@@ -356,8 +347,8 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         if until_kind != "floating" or event.get("tz"):
             rule = normalize_rrule_until(rule, tz, until_kind)
         vevent.add("RRULE", icalendar.vRecur.from_ical(rule))
-    all_exdates = sorted(set([x for x in str(event.get("exdates") or "").split(",") if x] + (live_exdates if event.get("rrule") else [])))
-    if event.get('rrule'):
+    all_exdates = sorted(set([x for x in str(event.get("exdates") or "").split(",") if x] + (live_exdates if has_recurrence(event) else [])))
+    if has_recurrence(event):
         all_exdates = sorted(set(all_exdates) | set(cancelled_slots or []))
     if all_exdates:
         ex = [parse_stored(x) for x in all_exdates]
@@ -376,8 +367,33 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
     vevent.add("DTSTAMP", now)
     vevent.add("LAST-MODIFIED", now)
     vevent.add("SEQUENCE", seq)
-    if event.get("organizer"):
-        vevent.add("ORGANIZER", "mailto:" + str(event["organizer"]).replace("mailto:", ""))
+    _write_event_people(vevent, event, changed_fields, source=alarm_source, rsvp=rsvp)
+    _write_event_alarms(vevent, event, mute_alarms, changed_fields, source=alarm_source)
+    if hasattr(cal, "add_missing_timezones"):
+        try:
+            cal.add_missing_timezones()
+        except Exception:
+            pass
+    return cal.to_ical().decode("utf-8")
+
+
+def _write_event_people(vevent, event, changed_fields, *, source=None, rsvp=None):
+    """A sparse edit preserves native guest parameters; RSVP changes only our PARTSTAT."""
+    icalendar = _ical()
+    for field, key in (('organizer', 'ORGANIZER'), ('attendees', 'ATTENDEE')):
+        keep = changed_fields is not None and field not in changed_fields and (field + '_json') not in changed_fields and source is not None
+        original = copy.deepcopy(source.get(key)) if keep else None
+        vevent.pop(key, None)
+        if original is not None:
+            vevent[key] = original
+        if key == 'ORGANIZER' and not keep and event.get('organizer'):
+            vevent.add(key, 'mailto:' + str(event['organizer']).replace('mailto:', ''))
+        if key == 'ATTENDEE' and keep:
+            if rsvp:
+                for attendee in _listify(vevent.get(key)):
+                    if str(attendee).lower().removeprefix('mailto:') == rsvp['email'].lower():
+                        attendee.params['PARTSTAT'] = str(rsvp['response']).upper()
+            return
     try:
         attendees = json.loads(event.get("attendees_json") or "[]")
     except ValueError:
@@ -397,14 +413,9 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
             addr.params["ROLE"] = icalendar.vText("OPT-PARTICIPANT")
         elif role in ("CHAIR", "NON-PARTICIPANT"):
             addr.params["ROLE"] = icalendar.vText(role)
+        if event.get('_schedule_agent'):
+            addr.params['SCHEDULE-AGENT'] = event['_schedule_agent']
         vevent.add("ATTENDEE", addr, encode=0)
-    _write_event_alarms(vevent, event, mute_alarms, changed_fields, source=alarm_source)
-    if hasattr(cal, "add_missing_timezones"):
-        try:
-            cal.add_missing_timezones()
-        except Exception:
-            pass
-    return cal.to_ical().decode("utf-8")
 
 
 def _write_event_alarms(vevent, event, mute, changed_fields, *, source=None):
@@ -445,7 +456,7 @@ def _check_yandex_address(url: str) -> None:
 class _YandexRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         _check_yandex_address(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        return _redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class _CalDAVRedirect(urllib.request.HTTPRedirectHandler):
@@ -454,7 +465,16 @@ class _CalDAVRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         self.check(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        return _redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _redirect_request(req, fp, code, msg, headers, newurl):
+    """Same-origin DAV redirects retain the operation, body and conditional headers."""
+    if code in (301, 302, 307, 308) and req.get_method() not in ('GET', 'HEAD'):
+        return urllib.request.Request(newurl, data=req.data, headers=dict(req.header_items()),
+                                      method=req.get_method(), origin_req_host=req.origin_req_host,
+                                      unverifiable=True)
+    return urllib.request.HTTPRedirectHandler().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class CalDAVAdapter:
@@ -587,7 +607,8 @@ class CalDAVAdapter:
 
     def calendar_capabilities(self):
         return {'create': None, 'update': None, 'delete': None, 'sharing': False,
-                'note': 'Collection management is server-dependent. Sharing needs the provider website; no portable email-to-principal sharing API is assumed.'}
+                'event_notifications': 'provider_controlled',
+                'note': 'Collection management is server-dependent. Sharing needs the provider website. Existing CalDAV invitations may notify participants on edits or deletion according to server scheduling; send_updates=false cannot guarantee suppression.'}
 
     @staticmethod
     def _calendar_properties(changes):
@@ -719,7 +740,9 @@ class CalDAVAdapter:
     def _create(self, calendar: Dict[str, Any], event: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         identity = self.created_identity(calendar, event)
         uid, href = identity["external_id"], identity["href"]
-        ics = row_to_ics({**event, "raw_payload": ""}, mute_alarms=bool(payload.get("mute_provider_reminders")),
+        # NONE is safe for a fresh resource. Changing an existing SERVER value
+        # to NONE can itself send CANCEL under RFC 6638, so updates preserve it.
+        ics = row_to_ics({**event, "raw_payload": "", '_schedule_agent': None if payload.get('send_updates') else 'NONE'}, mute_alarms=bool(payload.get("mute_provider_reminders")),
                          cancelled_slots=payload.get('cancelled_slots'))
         try:
             _, headers, _ = self._request("PUT", href, ics, {"Content-Type": "text/calendar; charset=utf-8", "If-None-Match": "*"})
@@ -777,7 +800,8 @@ class CalDAVAdapter:
             removed = sorted(previous - desired)
         changed_fields = set(payload['changes']) if isinstance(payload.get('changes'), dict) and not payload.get('_revive_cancelled') else None
         sent = row_to_ics(event, mute_alarms=bool(payload.get("mute_provider_reminders")),
-                          removed_exdates=removed, cancelled_slots=payload.get('cancelled_slots'), changed_fields=changed_fields)
+                          removed_exdates=removed, cancelled_slots=payload.get('cancelled_slots'), changed_fields=changed_fields,
+                          truncate_before=payload.get('truncate_before'), rsvp=payload.get('_rsvp'))
         _, resp_headers, _ = self._request("PUT", href, sent, headers)
         return {"etag": self._write_version(href, sent, resp_headers)}
 
@@ -794,12 +818,12 @@ class CalDAVAdapter:
         if not href:
             raise ProviderError('not_found', 'у события нет адреса провайдера', 404)
         text, etag = self.get(href)
-        rows = ics_to_rows(text, calendar['id'], href, etag, get_tz(event.get('tz') or ''))
+        rows = ics_to_rows(text, calendar['id'], href, etag, get_tz(event.get('master_tz') or event.get('tz') or ''))
         key = event.get('recurrence_id') or ''
         row = next((r for r in rows if r.get('recurrence_id', '') == key), None)
         if row is None and key:
             master = next((r for r in rows if not r.get('recurrence_id')), None)
-            if master and master.get('rrule'):
+            if master and has_recurrence(master):
                 from ops import _expand_master
                 start = parse_stored(key)
                 exceptions = [{**r, 'id': r['recurrence_id']} for r in rows if r.get('recurrence_id')]
@@ -831,7 +855,8 @@ class CalDAVAdapter:
         if not hit:
             raise ProviderError("unsupported", "среди участников события нет этого аккаунта — ответить нечем")
         return self.update(calendar, {**event, **current['event'], 'master_id': event.get('master_id') or '',
-                                      'attendees_json': json.dumps(attendees, ensure_ascii=False)}, expected, payload)
+                                      'attendees_json': json.dumps(attendees, ensure_ascii=False)}, expected,
+                           {**payload, 'changes': {'my_response': response}, '_rsvp': {'email': self.login, 'response': response}})
 
     def _write_exception(self, event: Dict[str, Any], payload: Dict[str, Any], expected_etag: str = '') -> Dict[str, Any]:
         """One changed/cancelled date of a series lives INSIDE the master's .ics: cancelled → EXDATE on the master,
@@ -856,9 +881,12 @@ class CalDAVAdapter:
         rec = parse_stored(event.get("recurrence_id"))
         if rec is None:
             raise ProviderError("parse", "у исключения нет даты вхождения")
-        tz = get_tz(event.get("tz") or "")
-        rec_local = rec.astimezone(tz)
-        floating = event['time_kind'] == 'floating' if event.get('time_kind') else _floating_start(master)
+        tz = get_tz(event.get("master_tz") or event.get("tz") or "")
+        master_start = master.decoded('DTSTART')
+        slot_tz = getattr(master_start, 'tzinfo', None) or tz
+        rec_local = rec.astimezone(slot_tz)
+        slot_date = isinstance(master_start, date) and not isinstance(master_start, datetime)
+        slot_floating = _floating_start(master)
         keys = {iso_utc(rec)}
         prev = parse_stored((payload or {}).get("previous_recurrence_id"))
         if prev is not None:
@@ -868,21 +896,21 @@ class CalDAVAdapter:
         changed_fields = set(payload['changes']) if isinstance(payload.get('changes'), dict) and not payload.get('_revive_cancelled') else None
         for comp in list(cal.walk("VEVENT")):
             rid = comp.decoded("RECURRENCE-ID", None)
-            if rid is not None and _as_utc(rid, tz)[0] in keys:
+            if rid is not None and _as_utc(rid, slot_tz)[0] in keys:
                 alarm_source = comp
                 temporal_source = comp
                 cal.subcomponents.remove(comp)
         if str(event.get("status") or "") == "cancelled":
             existing = master.get("EXDATE")
-            dates = _dt_list(existing, tz) if existing is not None else []
+            dates = _dt_list(existing, slot_tz) if existing is not None else []
             if "EXDATE" in master:
                 del master["EXDATE"]
             all_dates = sorted(set(dates + [iso_utc(rec)]))
-            if event.get("all_day"):
-                master.add("EXDATE", [parse_stored(d).astimezone(tz).date() for d in all_dates])
+            if slot_date:
+                master.add("EXDATE", [parse_stored(d).astimezone(slot_tz).date() for d in all_dates])
                 master["EXDATE"].params["VALUE"] = "DATE"
             else:
-                master.add("EXDATE", [parse_stored(d).astimezone(tz).replace(tzinfo=None) if floating else parse_stored(d).astimezone(tz) for d in all_dates])
+                master.add("EXDATE", [parse_stored(d).astimezone(slot_tz).replace(tzinfo=None) if slot_floating else parse_stored(d).astimezone(slot_tz) for d in all_dates])
         else:
             retained = ''
             if temporal_source is not None:
@@ -891,13 +919,13 @@ class CalDAVAdapter:
                 retained_event.pop('RECURRENCE-ID', None)
                 retained_calendar.add_component(retained_event)
                 retained = retained_calendar.to_ical().decode('utf-8')
-            exc_cal = icalendar.Calendar.from_ical(row_to_ics({**event, "raw_payload": retained, "rrule": "", "exdates": "", "uid": str(master.get("UID") or event.get("uid") or ""),
-                                                               'time_kind': 'floating' if floating else event.get('time_kind', '')},
+            exc_cal = icalendar.Calendar.from_ical(row_to_ics({**event, "raw_payload": retained, "rrule": "", "exdates": "", "rdates": "", "uid": str(master.get("UID") or event.get("uid") or "")},
                                                               mute_alarms=bool(payload.get("mute_provider_reminders")),
-                                                              changed_fields=changed_fields))
+                                                              changed_fields=changed_fields, rsvp=payload.get('_rsvp')))
             vevent = next(c for c in exc_cal.walk("VEVENT"))
+            _write_event_people(vevent, event, changed_fields, source=alarm_source, rsvp=payload.get('_rsvp'))
             _write_event_alarms(vevent, event, bool(payload.get('mute_provider_reminders')), changed_fields, source=alarm_source)
-            vevent.add("RECURRENCE-ID", rec_local.date() if event.get("all_day") else rec_local.replace(tzinfo=None) if floating else rec_local)
+            vevent.add("RECURRENCE-ID", rec_local.date() if slot_date else rec_local.replace(tzinfo=None) if slot_floating else rec_local)
             cal.add_component(vevent)
         if hasattr(cal, "add_missing_timezones"):
             try:

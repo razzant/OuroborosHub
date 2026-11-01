@@ -147,23 +147,23 @@ def parse_input(value: Any, tz, default: Optional[datetime] = None) -> Tuple[Opt
 
     Returns ``(aware_datetime, is_date_only)``. A bare ``YYYY-MM-DD`` means an
     all-day date at local midnight; a naive datetime is interpreted in ``tz``;
-    an explicit offset is honoured. Unparseable input returns ``(default, False)``.
+    an explicit offset is honoured. Invalid supplied text raises ``ValueError``; omission keeps the default.
     """
     if isinstance(value, datetime):
         return (value if value.tzinfo else value.replace(tzinfo=tz)), False
-    text = str(value or "").strip()
+    text = "" if value is None else str(value).strip()
     if not text:
         return default, False
     if _DATE_RE.match(text):
         try:
             d = date.fromisoformat(text)
-        except ValueError:
-            return default, False
+        except ValueError as exc:
+            raise ValueError(f"Invalid calendar date: {text!r}") from exc
         return datetime.combine(d, time(0, 0), tzinfo=tz), True
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return default, False
+    except ValueError as exc:
+        raise ValueError(f"Invalid calendar time: {text!r}; use an ISO date or datetime") from exc
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=tz)
     return dt, False
@@ -299,6 +299,22 @@ def normalize_rrule_until(rule_text: str, tz, value_kind: str = "utc") -> str:
 def event_field_value(row, field, *, provider_observation=False):
     """Comparable event meaning; provider wire formats cannot represent local soft preference."""
     value = row.get(field)
+    if field == 'attendees_json':
+        try:
+            people = json.loads(value or '[]') if isinstance(value, str) or value is None else value
+        except (ValueError, TypeError):
+            return value
+        if not isinstance(people, list) or any(not isinstance(person, dict) for person in people):
+            return people
+        normalized = []
+        for person in people:
+            status = str(person.get('status') or person.get('responseStatus') or 'needsAction').lower().replace('-', '')
+            role = str(person.get('role') or ('optional' if person.get('optional') else '')).lower()
+            role = 'optional' if role in ('optional', 'opt-participant') else '' if role in ('', 'required', 'req-participant') else role
+            normalized.append(json.dumps({'email': person.get('email') or '', 'name': person.get('name') or person.get('displayName') or '',
+                'comment': person.get('comment') or '', 'status': status, 'role': role,
+                'additionalGuests': person.get('additionalGuests') or 0, 'resource': bool(person.get('resource'))}, sort_keys=True))
+        return tuple(sorted(normalized))
     if field == 'availability' and provider_observation:
         return AVAIL_FREE if value == AVAIL_FREE else AVAIL_BUSY
     if field == 'all_day':
@@ -336,21 +352,33 @@ def calendar_time(row, value, owner_tz):
     return instant
 
 
-def floating_in_basis(row, basis):
-    """Keep a known floating record's canonical addresses across owner-zone changes."""
-    if row.get('time_kind') != 'floating' or not basis.get('tz'):
+def has_recurrence(row):
+    """DTSTART plus any recurrence property forms a set, including EXDATE-only cancellation."""
+    return not row.get('master_id') and any(row.get(field) for field in ('rrule', 'rdates', 'exdates'))
+
+
+def civil_in_basis(row, basis):
+    """Retain civil/floating anchors; the original slot and effective event have distinct kinds."""
+    if not basis.get('tz'):
         return row
     incoming_zone, stored_zone = get_tz(row.get('tz') or ''), get_tz(basis['tz'])
-    def anchor(value):
+    def anchor(value, zone, date_only=False):
         instant = parse_stored(value)
-        return iso_utc(instant.astimezone(incoming_zone).replace(tzinfo=stored_zone)) if instant else value
-    result = {**row, 'tz': basis['tz']}
-    for field in ('start_utc', 'end_utc', 'recurrence_id'):
-        if result.get(field):
-            result[field] = anchor(result[field])
-    for field in ('exdates', 'rdates'):
-        if result.get(field):
-            result[field] = ','.join(anchor(value) for value in result[field].split(','))
+        if instant is None:
+            return value
+        local = instant.astimezone(zone)
+        return iso_utc(datetime.combine(local.date(), time(), tzinfo=stored_zone) if date_only else local.replace(tzinfo=stored_zone))
+    result = dict(row)
+    if row.get('all_day') or row.get('time_kind') == 'floating':
+        result['tz'] = basis['tz']
+        for field in ('start_utc', 'end_utc'):
+            if result.get(field):
+                result[field] = anchor(result[field], incoming_zone, bool(row.get('all_day')))
+        for field in ('exdates', 'rdates'):
+            if result.get(field):
+                result[field] = ','.join(anchor(value, incoming_zone, bool(row.get('all_day'))) for value in result[field].split(','))
+    if result.get('recurrence_id') and (basis.get('all_day') or basis.get('time_kind') == 'floating'):
+        result['recurrence_id'] = anchor(result['recurrence_id'], get_tz(row.get('_recurrence_tz') or row.get('tz') or ''), bool(basis.get('all_day')))
     return result
 
 
@@ -366,7 +394,7 @@ def routine_time(row, value, owner_tz):
 
 def event_public(row: Dict[str, Any], tz, compact: bool = True) -> Dict[str, Any]:
     """Public projection of an event row for tools and the widget."""
-    project = not row.get('display_occurrence_start_utc') and (row.get('rrule') or row.get('master_id'))
+    project = not row.get('display_occurrence_start_utc') and (has_recurrence(row) or row.get('master_id'))
     def displayed(field):
         value = row.get(field)
         if row.get('_display_times') or row.get('display_occurrence_start_utc'):

@@ -16,7 +16,7 @@ from model import (
     PROVIDER_LOCAL, REMINDERS_DEFAULT, SCOPES, SECRET_KEYS, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_HIDDEN, VISIBILITY_SHOWN,
     TOOL_RESULT_LIMIT, WEEKDAY_LABELS,
     bounded_result, day_bounds, event_public, get_tz, iso_local, iso_utc, json_dumps, label, new_id, now_utc, parse_input,
-    parse_stored, parse_working_hours, tz_name,
+    parse_stored, parse_working_hours, tz_name, has_recurrence,
 )
 from providers import Providers
 from accounts import connect_google, reload_google, reload_yandex, _public_base
@@ -169,11 +169,14 @@ def cal_status(ctx: Context, **kwargs) -> str:
     accounts = st.list_accounts()
     cals = st.list_calendars()
     day_s, day_e = day_bounds(now.date(), ctx.tz)
-    today = ctx.occurrences(day_s, day_e)
-    counts = st.intent_counts()
+    today_failed = {}
+    today = ctx.occurrences(day_s, day_e, strict=True, failed=today_failed)
+    counts = st.intent_counts(active_only=True)
     channel = st.get_setting("notify_channel_state") or {"state": "unknown"}
     next_steps: List[str] = []
     account_details = {}
+    if today_failed:
+        next_steps.append('Some recurring events could not be expanded; inspect unexpanded_series before relying on today counts')
     if ctx.providers.yandex_error:
         next_steps.append(ctx.providers.yandex_error)
     import providers_google as gp
@@ -189,6 +192,8 @@ def cal_status(ctx: Context, **kwargs) -> str:
             next_steps.append(f"{a['alias'] or a['id']}: адаптер недоступен — {reason}")
         elif a["status"] != "ok":
             next_steps.append(f"{a['alias'] or a['id']}: {a['status']} — {a.get('last_error') or ''}".strip())
+    sync_warnings = {c['id']: st.get_sync_state(c['id']).get('last_error') or '' for c in cals}
+    next_steps.extend(f"{c['name']}: {sync_warnings[c['id']]}" for c in cals if sync_warnings[c['id']])
     if counts.get("conflict"):
         next_steps.append(f"{counts['conflict']} операций в конфликте с внешней версией: см. cal_events(id=…) и реши, что оставить")
     if channel.get("state") in ("no_route", "unknown"):
@@ -207,10 +212,12 @@ def cal_status(ctx: Context, **kwargs) -> str:
         "accounts": [{"id": a["id"], "provider": a["provider"], "alias": a["alias"], "status": a["status"], "last_sync": a.get("last_sync"),
                       'login': a.get('login') or '', **account_details.get(a['id'], {}),
                       "last_error": (a.get("last_error") or "")[:160],
-                      **({"adapter_error": ctx.providers.errors[a["id"]][:160]} if ctx.providers.errors.get(a["id"]) else {})} for a in accounts],
+                      **({"adapter_error": ctx.providers.errors[a["id"]][:160], 'status': 'unavailable',
+                          'last_error': ctx.providers.errors[a['id']][:160]} if ctx.providers.errors.get(a["id"]) else {})} for a in accounts],
         "calendars": [{"id": c["id"], "name": c["name"], "account_id": c["account_id"], "provider": c["provider"], "writable": bool(c["writable"]),
                        "visible": bool(c["role_visible"]), "busy_source": bool(c["role_busy"]), "publish_busy": bool(c["role_publish"]),
-                       "publish_mode": c["publish_mode"], "default": bool(c["is_default"])} for c in cals],
+                       "publish_mode": c["publish_mode"], "default": bool(c["is_default"]), 'sync_warning': sync_warnings[c['id']]} for c in cals],
+        "events_complete": not today_failed, "unexpanded_series": today_failed,
         "events_today": len([o for o in today if o.get("visibility") != VISIBILITY_HIDDEN]),
         "hidden_today": len([o for o in today if o.get("visibility") == VISIBILITY_HIDDEN]),
         "pending_writes": counts.get("pending", 0), "conflicts": counts.get("conflict", 0), "failed_writes": counts.get("failed", 0),
@@ -263,10 +270,14 @@ def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = No
             out['link'] = links.inspect(st, master)
         if occ:
             exception = next((e for e in st.exceptions_for(master["id"]) if e.get("recurrence_id") == occ), None)
-            effective = ops.routine_time(master, exception["start_utc"] if exception else occ, ctx.tz)
+            effective_row = {**master, **exception} if exception else master
+            effective = ops.routine_time(effective_row, exception["start_utc"] if exception else occ, ctx.tz)
+            failed = {}
             live = [o for o in ops.expand([master], effective - timedelta(minutes=1), effective + timedelta(days=2),
-                                          st.exceptions_for, owner_tz=ctx.tz)
+                                          st.exceptions_for, owner_tz=ctx.tz, strict=True, failed=failed)
                     if o.get("occurrence_start_utc") == occ] if effective else []
+            if failed:
+                return json_dumps({'status': 'error', 'events_complete': False, 'unexpanded_series': failed, 'event': out})
             if live:
                 out.update(event_public({**master, **live[0], "id": f"{master['id']}@{occ}"}, ctx.tz, compact=False))
                 out["series_id"] = master["id"]
@@ -283,13 +294,17 @@ def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = No
             out['conflict'].pop('resolution_token', None)
             out['conflict']['comparison_incomplete'] = True
         return bounded_result(result) if out.get('conflict') else json_dumps(result)
-    s, e = ctx.parse_range(start, end)
+    try:
+        s, e = ctx.parse_range(start, end)
+    except ValueError as exc:
+        return json_dumps({'status': 'error', 'message': str(exc)})
     cal_ids: Optional[List[str]] = None
     if calendars:
         cal_ids, err = ctx.resolve_calendars(calendars)
         if err:
             return json_dumps({"status": "error", "message": err})
-    occs = ctx.occurrences(s, e, cal_ids, include_hidden=_bool(include_hidden, True))
+    failed = {}
+    occs = ctx.occurrences(s, e, cal_ids, include_hidden=_bool(include_hidden, True), strict=True, failed=failed)
     if query:
         q = str(query).lower()
         occs = [o for o in occs if q in (o.get("title") or "").lower() or q in (o.get("description") or "").lower() or q in (o.get("location") or "").lower()]
@@ -300,6 +315,7 @@ def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = No
     result = {
         "status": "ok", "timezone": tz_name(ctx.tz), "range": {"start": iso_local(s, ctx.tz), "end": iso_local(e, ctx.tz)},
         "events": [event_public(o, ctx.tz) for o in page], "conflicts": _conflicts(page), "total": total,
+        "events_complete": not failed, "unexpanded_series": failed,
         "next_offset": offset + len(page) if offset + len(page) < total else None,
     }
     while True:
@@ -334,11 +350,14 @@ def _conflicts(occs: Sequence[Dict[str, Any]]) -> List[List[str]]:
 
 
 def _spec_from_args(ctx: Context, start: Any, end: Any, duration_min: Any, all_day: Any) -> Tuple[Optional[Dict[str, Any]], str]:
-    s, is_date = parse_input(start, ctx.tz)
+    try:
+        s, is_date = parse_input(start, ctx.tz)
+        e, _ = parse_input(end, ctx.tz)
+    except ValueError as exc:
+        return None, str(exc)
     if s is None:
         return None, "нужно время начала в ISO 8601, например 2026-09-26T16:00 (без offset = местное время владельца)"
     all_day = _bool(all_day, is_date)
-    e, _ = parse_input(end, ctx.tz)
     if all_day:
         s = s.astimezone(ctx.tz).replace(hour=0, minute=0, second=0, microsecond=0)
         if e is None or e <= s:
@@ -357,11 +376,16 @@ def _update_times(ctx, row, occurrence, *, start='', end='', duration_min=None, 
     exception = next((e for e in ctx.store.exceptions_for(row['id']) if e.get('recurrence_id') == occurrence), None) if occurrence else None
     effective = exception or row
     original = effective['start_utc'] if exception else occurrence or row['start_utc']
-    civil = bool(row.get('all_day')) and all_day is not False
-    old_start = parse_stored(original) if civil else ops.routine_time(row, original, ctx.tz)
-    zone = get_tz(row.get('tz') or '') if civil or all_day is True else ctx.tz
-    new_start, is_date = parse_input(start, zone, old_start)
-    new_end, _ = parse_input(end, zone, None)
+    civil = bool(effective.get('all_day')) and all_day is not False or all_day is True
+    old_start = parse_stored(original) if civil else ops.routine_time(effective, original, ctx.tz)
+    new_start, is_date = parse_input(start, ctx.tz, old_start)
+    new_end, _ = parse_input(end, ctx.tz, None)
+    if civil:
+        zone = get_tz(effective.get('tz') or row.get('tz') or '')
+        if start:
+            new_start = datetime.combine(new_start.astimezone(ctx.tz).date(), datetime.min.time(), tzinfo=zone)
+        if end:
+            new_end = datetime.combine(new_end.astimezone(ctx.tz).date(), datetime.min.time(), tzinfo=zone)
     if duration_min is not None and new_end is None:
         new_end = new_start + timedelta(minutes=max(5, _int(duration_min, 60)))
     if new_end is None or new_end <= new_start:
@@ -406,13 +430,14 @@ def cal_create(ctx: Context, title: str = "", start: str = "", end: str = "", du
     if ev is None:
         return bounded_result({"status": "error", "message": "ни один календарь не принял событие", "assignments": result["assignments"]})
     s, e = parse_stored(ev["start_utc"]), parse_stored(ev["end_utc"])
-    overlaps = [event_public(o, ctx.tz) for o in ctx.occurrences(s, e) if o.get("id") != ev["id"] and (o.get("availability") or AVAIL_BUSY) == AVAIL_BUSY
+    overlap_failed = {}
+    overlaps = [event_public(o, ctx.tz) for o in ctx.occurrences(s, e, strict=True, failed=overlap_failed) if o.get("id") != ev["id"] and (o.get("availability") or AVAIL_BUSY) == AVAIL_BUSY
                 and o.get("link_group_id", "") != (ev.get("link_group_id") or "x")][:5]
     warning = _plan_reminders(ctx)
     statuses = {a["status"] for a in result["assignments"]}
-    status = "created" if statuses <= {"done"} else ("pending" if "pending" in statuses else ("conflict" if "conflict" in statuses else "created_partially"))
-    return bounded_result({"status": status, "message": _assignment_message("Создано", ev, result["assignments"], ctx.tz),
-                           "event": event_public(ev, ctx.tz, compact=False), "assignments": result["assignments"], "overlaps": overlaps,
+    status = "created" if statuses <= {"done"} else ("pending" if "pending" in statuses else ("conflict" if "conflict" in statuses else "created_partially" if 'done' in statuses else "failed"))
+    return bounded_result({"status": status, "message": _assignment_message("Не создано" if status == 'failed' else "Создано", ev, result["assignments"], ctx.tz),
+                           "event": event_public(ev, ctx.tz, compact=False), "assignments": result["assignments"], "overlaps": overlaps, 'overlaps_complete': not overlap_failed, 'unexpanded_series': overlap_failed,
                            **({"warning": warning} if warning else {})})
 
 
@@ -457,14 +482,17 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
     scope = str(scope or SCOPE_THIS).lower()
     if scope not in SCOPES:
         return json_dumps({"status": "error", "message": "scope: this | following | all"})
-    if row.get("rrule") and not occ and scope == SCOPE_THIS:
+    if has_recurrence(row) and not occ and scope == SCOPE_THIS:
         return json_dumps({"status": "ambiguous", "message": "это повторяющееся событие: укажи id конкретного вхождения (…@дата) для одной даты, "
                                                                 "scope='all' для всей серии или scope='following' с id вхождения — «начиная с этой даты»"})
     if scope == SCOPE_FOLLOWING and not occ and not row.get("master_id"):
         return json_dumps({"status": "error", "message": "scope='following' требует id вхождения (…@дата): с какой даты менять"})
     changes: Dict[str, Any] = {}
     if start or end or duration_min is not None or all_day is not None:
-        changes.update(_update_times(ctx, row, occ, start=start, end=end, duration_min=duration_min, all_day=all_day, scope=scope))
+        try:
+            changes.update(_update_times(ctx, row, occ, start=start, end=end, duration_min=duration_min, all_day=all_day, scope=scope))
+        except ValueError as exc:
+            return json_dumps({'status': 'error', 'message': str(exc)})
     if title not in (None, ""):
         changes["title"] = str(title)
     for key, value in (("description", description), ("location", location)):
@@ -532,7 +560,7 @@ def cal_delete(ctx: Context, id: str = "", scope: str = SCOPE_THIS, send_updates
     scope = str(scope or SCOPE_THIS).lower()
     if scope not in SCOPES:
         return json_dumps({"status": "error", "message": "scope: this | following | all"})
-    if row.get("rrule") and not occ and scope == SCOPE_THIS:
+    if has_recurrence(row) and not occ and scope == SCOPE_THIS:
         return json_dumps({"status": "ambiguous", "message": "повторяющееся событие: уточни у владельца — удалить только эту дату (id вхождения), "
                                                                 "всё расписание (scope='all') или начиная с даты (scope='following')"})
     if scope == SCOPE_FOLLOWING and not occ and not row.get("master_id"):
@@ -551,7 +579,10 @@ def cal_delete(ctx: Context, id: str = "", scope: str = SCOPE_THIS, send_updates
 
 def cal_free(ctx: Context, start: str = "", end: str = "", duration_min: int = 60, sources: Any = None, working_hours: str = "", max_slots: int = 6, **kwargs) -> str:
     now = ctx.now()
-    s, e = ctx.parse_range(start or now.replace(microsecond=0).isoformat(), end, default_days=3)
+    try:
+        s, e = ctx.parse_range(start or now.replace(microsecond=0).isoformat(), end, default_days=3)
+    except ValueError as exc:
+        return json_dumps({'status': 'error', 'message': str(exc)})
     if s < now and not start:
         s = now
     cal_ids: Optional[List[str]]
@@ -600,6 +631,8 @@ def cal_reminders(ctx: Context, action: str = "list", offsets: Any = None, calen
                                        "[] = у этого события без напоминаний, 'default' = снова по правилам"})
     if not _bool(confirm):
         return json_dumps({"status": "needs_confirm", "message": "Изменение правил напоминаний — по команде владельца: повтори с confirm=true"})
+    if action in ('set_calendar', 'clear_calendar', 'enable_calendar', 'disable_calendar') and not str(calendar_id or '').strip():
+        return json_dumps({'status': 'error', 'message': 'Choose an explicit calendar_id'})
     mins = [_int(x, 0) for x in _list(offsets)] if offsets is not None else None
     if action == "set_default":
         rules = rem.set_rules(st, default=mins or [])
@@ -739,6 +772,8 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
         return json_dumps({"status": "updated", "working_hours": st.get_setting("working_hours"), "timezone": st.get_setting("timezone") or tz_name(ctx.tz),
                            "preferences": st.get_setting("preferences") or ""})
     if action == "set_calendar":
+        if not str(calendar_id or '').strip():
+            return json_dumps({'status': 'error', 'message': 'Choose an explicit calendar_id'})
         cal_ids, err = ctx.resolve_calendars(calendar_id)
         if err or not cal_ids:
             return json_dumps({"status": "error", "message": err or "нужен calendar_id"})
@@ -751,8 +786,17 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
             fields["role_publish"] = 1 if _bool(publish_busy) else 0
         if publish_mode in ("full", "busy"):
             fields["publish_mode"] = publish_mode
+        if len(cal_ids) != 1:
+            return json_dumps({'status': 'error', 'message': 'Choose one explicit calendar_id'})
         if name:
-            fields["name"] = str(name)
+            calendar = st.get_calendar(cal_ids[0])
+            if calendar['provider'] == PROVIDER_LOCAL:
+                fields['name'] = str(name)
+            else:
+                from management import cal_manage
+                renamed = json.loads(cal_manage(ctx, action='update', calendar_id=calendar['id'], changes={'name': str(name)}, confirm=True))
+                if renamed.get('status') != 'done':
+                    return json_dumps(renamed)
         if default is not None and _bool(default):
             for c in st.list_calendars(include_deleted=True):
                 if c["is_default"]:
@@ -776,7 +820,11 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
     if action == "reload_google":
         return bounded_result(reload_google(ctx))
     if action == "disconnect":
-        accounts = [a for a in st.list_accounts() if a["id"] == calendar_id or a["alias"] == calendar_id]
+        accounts = [a for a in st.list_accounts() if a["id"] == calendar_id]
+        if not accounts:
+            accounts = [a for a in st.list_accounts() if a["alias"] == calendar_id and calendar_id]
+        if len(accounts) > 1:
+            return json_dumps({'status': 'error', 'message': 'Account alias is ambiguous; use its canonical account_id'})
         if not accounts:
             return json_dumps({"status": "not_found", "message": "укажи id аккаунта (см. cal_status → accounts)"})
         acc = accounts[0]

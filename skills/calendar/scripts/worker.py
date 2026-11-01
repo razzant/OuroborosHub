@@ -18,7 +18,7 @@ import sys
 import time
 import traceback
 from datetime import timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PAYLOAD = os.path.dirname(HERE)
@@ -28,7 +28,7 @@ if PAYLOAD not in sys.path:
 import ops  # noqa: E402
 import links  # noqa: E402
 import reminders as rem  # noqa: E402
-from model import PROVIDER_GOOGLE, PROVIDER_LOCAL, CALDAV_PROVIDERS, SCOPE_ALL, SECRET_KEYS, get_tz, iso_utc, now_utc, own_reminders, parse_stored, floating_in_basis  # noqa: E402
+from model import PROVIDER_GOOGLE, PROVIDER_LOCAL, CALDAV_PROVIDERS, SCOPE_ALL, SECRET_KEYS, get_tz, iso_utc, now_utc, own_reminders, parse_stored, civil_in_basis, has_recurrence  # noqa: E402
 from providers import Providers, sync_window  # noqa: E402
 from store import Store  # noqa: E402
 
@@ -85,8 +85,10 @@ def sync_account(store: Store, providers: Providers, account: Dict[str, Any], tz
                                    "role_busy": existing["role_busy"] if existing else True,
                                    "role_publish": existing["role_publish"] if existing else False,
                                    "publish_mode": existing["publish_mode"] if existing else "busy"})
-            report["calendars"] += 1
             stored = store.get_calendar(cal["id"])
+            if stored is None:
+                continue  # disconnected while discovery was in flight
+            report["calendars"] += 1
             state = store.get_sync_state(cal["id"])
             ctag = cal.get("ctag") or ""
             window_start, window_end = map(iso_utc, sync_window(now_utc()))
@@ -256,10 +258,22 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
                 retry_required = True
                 temporal_gaps.append('Legacy floating event ' + existing['id'] + ' has no recorded parsing zone; stored times and pending work were retained.')
                 continue
-            row = floating_in_basis(row, existing)
+        row = civil_in_basis(row, existing)
         if existing.get("etag") == row["etag"] and existing.get("sync_state") == "synced" and not existing.get("deleted_at"):
-            if row.get('time_kind', '') == existing.get('time_kind', ''):
-                continue
+            # Our acknowledged wire format may use UTC for a zoned one-off.
+            # Equal ETags permit type enrichment, not replacing its authoring zone.
+            if row.get('time_kind') and row['time_kind'] != existing.get('time_kind'):
+                enrichment = {'time_kind': row['time_kind']}
+                if not existing.get('tz') and row.get('tz'):
+                    enrichment['tz'] = row['tz']
+                if existing['id'] not in basis or not store.apply_provider_snapshot(existing['id'], enrichment, observed=basis[existing['id']]):
+                    protected_masters.add(existing['id'])
+                    next_cursor = ''
+                    continue
+                upserts += 1
+            if kind != 'google_sync_token' and has_recurrence(row):
+                refreshed[existing['id']] = row['uid']
+            continue
         changes = {k: row[k] for k in ("title", "description", "location", "start_utc", "end_utc", "tz", "time_kind", "all_day", "rrule", "exdates", "rdates",
                                         "status", "organizer", "attendees_json", "my_response", "etag", "raw_payload") if k in row}
         if existing.get("origin") == "external":
@@ -271,7 +285,7 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
             continue
         links.observe_projection(store, existing, row)
         upserts += 1
-        if kind != "google_sync_token" and row.get("rrule"):
+        if kind != "google_sync_token" and has_recurrence(row):
             refreshed[existing["id"]] = row["uid"]
         if existing.get("link_group_id") and links.source_is(store, existing):
             # One observation is one complete master change. Splitting time,
@@ -298,31 +312,54 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
         if master_id in protected_masters:
             continue
         master_row = store.get_event(master_id)
-        row = floating_in_basis(row, master_row or {})
+        row = civil_in_basis(row, master_row or {})
         if row['recurrence_id'] in ops.excluded_slots(master_row or {}):
             continue  # a stale instance cannot undo the master's explicit EXDATE
-        exc = next((e for e in store.exceptions_for(master_id) if e.get("recurrence_id") == row["recurrence_id"]), None)
+        exceptions = store.exceptions_for(master_id)
+        exc = next((e for e in exceptions if e.get("recurrence_id") == row["recurrence_id"]), None)
+        # Google has one stable external identity per exception; older imports
+        # could file that same instance under the owner's then-current zone.
+        same_identity = [e for e in exceptions if kind == 'google_sync_token' and row.get('external_id')
+                         and e.get('external_id') == row['external_id']]
+        if exc is None and same_identity:
+            exc = min(same_identity, key=lambda e: (e.get('created_at') or '', e['id']))
         payload = {k: v for k, v in row.items() if k != "master_external_id"}
         payload.update({"master_id": master_id, "raw_payload": ""})
         if master_row:
             payload.update({key: master_row.get(key) for key in ('link_group_id', 'is_primary', 'link_state')})
-        changed = exc is None or exc.get("etag") != row["etag"] or exc.get('time_kind', '') != row.get('time_kind', '')
+        changed = exc is None or exc.get("etag") != row["etag"] or exc.get('recurrence_id') != row['recurrence_id'] or ('time_kind' in row and exc.get('time_kind', '') != row['time_kind'])
         materially = exc is None or links.changed(exc, row, provider_observation=True)
         if exc is None:
-            if store.insert_provider_exception(master_id, payload) is None:
+            saved = store.insert_provider_exception(master_id, payload)
+            if saved is None:
                 next_cursor = ''
                 continue   # the slot was taken by an owner write, or the series closed, since we looked: the next pass decides
+            observed_id = saved['id']
         elif changed:
             if exc.get("sync_state") in ("pending", "conflict", "pending_delete", "failed"):
+                if exc.get('recurrence_id') != row['recurrence_id']:
+                    temporal_gaps.append('Provider instance ' + exc['id'] + ' retains an older recurrence address while its owner write is unsettled.')
+                    next_cursor = ''
                 continue   # our own write to this occurrence is in flight
             fields = {k: payload[k] for k in ("title", "description", "location", "start_utc", "end_utc", "status", "etag",
-                                              "attendees_json", "my_response", "tz", "time_kind", "all_day") if k in payload}
+                                              "attendees_json", "my_response", "tz", "time_kind", "all_day", "recurrence_id") if k in payload}
             if exc.get("origin") == "external":
                 fields['availability'] = payload.get('availability') or exc.get('availability')
                 fields["reminders_json"] = _imported_reminders(exc, payload.get("reminders_json") or "[]", cal["provider"], bool((store.get_setting(rem.MODE_KEY) or {}).get(cal["id"])))
             if exc['id'] not in basis or not store.apply_provider_snapshot(exc["id"], fields, observed=basis[exc['id']]):
                 next_cursor = ''
                 continue
+            _carry_readdressed_notices(store, master_id, exc.get('recurrence_id'), row['recurrence_id'])
+            observed_id = exc['id']
+        else:
+            observed_id = exc['id']
+        for duplicate in same_identity:
+            if duplicate['id'] != observed_id and duplicate['id'] in basis:
+                if store.retire_synced_exception(duplicate['id'], observed=basis[duplicate['id']]):
+                    _carry_readdressed_notices(store, master_id, duplicate.get('recurrence_id'), row['recurrence_id'])
+                else:
+                    temporal_gaps.append('Duplicate provider instance ' + duplicate['id'] + ' was retained because its owner write is unsettled.')
+                    next_cursor = ''
         upserts += 1
         if changed and materially:   # a mere resource etag bump (any PUT of the series) is not a change of this occurrence
             master_row = store.get_event(master_id)
@@ -344,20 +381,40 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
     for master_id, uid in refreshed.items():
         # A CalDAV series is one resource read whole: an override VEVENT the server no longer holds (its date
         # cancelled by EXDATE, or the move undone) is not a local exception any more. Our own unsent writes stay.
-        present = {r["recurrence_id"] for r in rows if r.get("recurrence_id") and r.get("uid") == uid}
-        excluded = ops.excluded_slots(store.get_event(master_id) or {})
+        master = store.get_event(master_id) or {}
+        present = {civil_in_basis(r, master)["recurrence_id"] for r in rows if r.get("recurrence_id") and r.get("uid") == uid}
+        excluded = ops.excluded_slots(master)
         for exc in store.exceptions_for(master_id):
             if exc.get('status') == 'cancelled' and exc.get('recurrence_id') in excluded:
                 continue  # CalDAV confirms a cancelled slot with EXDATE, not an override VEVENT.
             if exc.get("recurrence_id") not in present and exc['id'] in basis:
-                store.retire_synced_exception(exc["id"], observed=basis[exc['id']])
+                canonical = civil_in_basis(exc, master).get('recurrence_id')
+                if store.retire_synced_exception(exc["id"], observed=basis[exc['id']]):
+                    if canonical in present:
+                        _carry_readdressed_notices(store, master_id, exc.get('recurrence_id'), canonical)
+                elif canonical in present and canonical != exc.get('recurrence_id'):
+                    temporal_gaps.append('Duplicate provider instance ' + exc['id'] + ' retains unsettled owner work.')
+                    next_cursor = ''
     for root, commands in copy_commands.items():
         result = _stage_sync_copy(store, basis, root, commands)
         propagated += int(result.get('status') == 'ok')
         retry_required |= result.get('status') != 'ok'
         assignments.extend(result.get('assignments', []))
+        if result.get('message'):
+            temporal_gaps.append('Linked copy ' + root + ' not propagated: ' + result['message'])
     return {'upserts': upserts, 'deleted': deleted, 'propagated': propagated,
             'next_cursor': next_cursor, 'assignments': assignments, 'retry_required': retry_required, 'temporal_gaps': temporal_gaps}
+
+
+def _carry_readdressed_notices(store, master_id, before, after):
+    """A repaired original-slot address must not resend a settled notice for the same effective meeting."""
+    if not before or not after or before == after:
+        return
+    for previous in store.settled_reminders_for_split(master_id, before):
+        if previous.get('recurrence_id') == before:
+            effective = previous['occurrence_start_utc']
+            store.carry_settled_reminder(previous, master_id, effective, after, previous['fire_at_utc'],
+                                        rem.notice_id_for(master_id, effective, previous['offset_min'], after))
 
 
 def _awaiting_identity(store: Store, adapter, cal: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
