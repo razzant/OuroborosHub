@@ -290,8 +290,39 @@ def event_field_value(row, field, *, provider_observation=False):
     return value or ''
 
 
+def calendar_time(row, value, owner_tz):
+    """Project DATE/floating wall time; the stored anchor and its parsing zone stay intact."""
+    instant = parse_stored(value)
+    if instant is not None and owner_tz is not None:
+        if row.get('all_day'):
+            return datetime.combine(instant.astimezone(get_tz(row.get('tz') or '')).date(), time(), tzinfo=owner_tz)
+        if row.get('time_kind') == 'floating':
+            return instant.astimezone(get_tz(row.get('tz') or '')).replace(tzinfo=owner_tz)
+    return instant
+
+
+def floating_in_basis(row, basis):
+    """Keep a known floating record's canonical addresses across owner-zone changes."""
+    if row.get('time_kind') != 'floating' or not basis.get('tz'):
+        return row
+    incoming_zone, stored_zone = get_tz(row.get('tz') or ''), get_tz(basis['tz'])
+    def anchor(value):
+        instant = parse_stored(value)
+        return iso_utc(instant.astimezone(incoming_zone).replace(tzinfo=stored_zone)) if instant else value
+    result = {**row, 'tz': basis['tz']}
+    for field in ('start_utc', 'end_utc', 'recurrence_id'):
+        if result.get(field):
+            result[field] = anchor(result[field])
+    for field in ('exdates', 'rdates'):
+        if result.get(field):
+            result[field] = ','.join(anchor(value) for value in result[field].split(','))
+    return result
+
+
 def routine_time(row, value, owner_tz):
-    """Project a routine's wall time without changing its canonical recurrence address."""
+    """Project a civil date or routine's wall time without changing its recurrence address."""
+    if row.get('all_day') or row.get('time_kind') == 'floating':
+        return calendar_time(row, value, owner_tz)
     instant = parse_stored(value)
     if instant is not None and owner_tz is not None and row.get('availability') == AVAIL_SOFT and row.get('origin', 'local') == 'local':
         return instant.astimezone(get_tz(row.get('tz') or '')).replace(tzinfo=owner_tz)
@@ -301,11 +332,16 @@ def routine_time(row, value, owner_tz):
 def event_public(row: Dict[str, Any], tz, compact: bool = True) -> Dict[str, Any]:
     """Public projection of an event row for tools and the widget."""
     project = not row.get('display_occurrence_start_utc') and (row.get('rrule') or row.get('master_id'))
+    def displayed(field):
+        value = row.get(field)
+        if row.get('_display_times') or row.get('display_occurrence_start_utc'):
+            return value
+        return routine_time(row, value, tz) if project else calendar_time(row, value, tz)
     out: Dict[str, Any] = {
         "id": row.get("id"),
         "title": row.get("title") or "",
-        "start": iso_local(routine_time(row, row.get("start_utc"), tz) if project else row.get("start_utc"), tz),
-        "end": iso_local(routine_time(row, row.get("end_utc"), tz) if project else row.get("end_utc"), tz),
+        "start": iso_local(displayed('start_utc'), tz),
+        "end": iso_local(displayed('end_utc'), tz),
         "all_day": bool(row.get("all_day")),
         "calendar_id": row.get("calendar_id"),
         "calendar_name": row.get("calendar_name") or "",

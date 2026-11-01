@@ -2,7 +2,8 @@
 
 The grid tests mount the widget against a one-route fake. The Accounts and link tests script the whole skill behind
 the same bridge, so the forms, failures, waiting and link actions run exactly as the widget sends them; the real
-routes behind the real host bridge are covered by tests/test_calendar_host_browser.py.
+routes behind the real host bridge are covered in the OuroborosHub repository, outside this payload:
+https://github.com/razzant/OuroborosHub/blob/main/tests/test_calendar_host_browser.py.
 """
 
 import os

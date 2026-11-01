@@ -17,7 +17,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from model import get_tz, iso_local, iso_utc, now_utc, own_reminders, parse_stored
+from model import get_tz, iso_local, iso_utc, now_utc, own_reminders, parse_stored, calendar_time
 
 PLAN_HORIZON = timedelta(hours=24)
 CATCHUP_GRACE = timedelta(minutes=10)      # a reminder older than this after downtime is batched, not sent alone
@@ -279,7 +279,7 @@ class _HttpError(Exception):
 
 
 def format_text(event: Dict[str, Any], occurrence_start_utc: str, offset: int, tz) -> str:
-    start = parse_stored(occurrence_start_utc) or parse_stored(event.get("start_utc"))
+    start = parse_stored(occurrence_start_utc) or calendar_time(event, event.get("start_utc"), tz)
     when = start.astimezone(tz) if start else None
     head = f"{when:%H:%M}" if when else ""
     if event.get("all_day"):
@@ -425,11 +425,13 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
     m_start, m_end = parse_stored(event.get("start_utc")), parse_stored(event.get("end_utc"))
     duration = (m_end - m_start) if (m_start and m_end and m_end > m_start) else timedelta(hours=1)
     if not event.get("rrule"):
+        m_start = calendar_time(event, event.get('start_utc'), owner_tz)
+        m_end = calendar_time(event, event.get('end_utc'), owner_tz)
         if m_start and m_start != start:
             return "событие перенесено; напоминание перепланировано", event
         if m_end and m_end < now:
             return "событие уже закончилось", event
-        return "", event
+        return "", {**event, 'start_utc': iso_utc(m_start), 'end_utc': iso_utc(m_end)} if m_start and m_end else event
     key = iso_utc(start)
     original = recurrence_id or key  # old queue rows know only the effective slot
     exceptions = store.exceptions_for(event["id"])

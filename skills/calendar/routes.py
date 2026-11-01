@@ -14,7 +14,7 @@ import tools
 import accounts
 from model import (
     AVAIL_BUSY, AVAIL_SOFT, SCOPES, VISIBILITY_HIDDEN, VISIBILITY_SHOWN, WEEKDAY_LABELS, day_bounds, event_public, iso_local, iso_utc,
-    parse_input, parse_stored, tz_name, week_bounds,
+    parse_input, tz_name, week_bounds,
 )
 
 
@@ -158,21 +158,8 @@ def register_routes(api, make_ctx) -> None:
                 return _err(err)
         changes: Dict[str, Any] = {}
         if body.get("start") or body.get("end"):
-            base, occ = ops._series_id(event_id)
-            row = ctx.store.get_event(base)
-            if row is None:
-                return _err("событие не найдено", 404)
-            exception = next((e for e in ctx.store.exceptions_for(row["id"]) if e.get("recurrence_id") == occ), None) if occ else None
-            effective = exception or row
-            old_s = ops.routine_time(row, effective["start_utc"] if exception else (occ or row["start_utc"]), ctx.tz)
-            dur = parse_stored(effective["end_utc"]) - parse_stored(effective["start_utc"])
-            s, is_date = parse_input(body.get("start"), ctx.tz, old_s)
-            e, _ = parse_input(body.get("end"), ctx.tz, None)
-            if e is None or e <= s:
-                e = s + dur
-            if body.get("start") or scope != "following":
-                changes["start_utc"] = iso_utc(s)
-            changes["end_utc"] = iso_utc(e)
+            changes.update(tools._update_times(ctx, current, occurrence, start=body.get('start'), end=body.get('end'),
+                                               all_day=body.get('all_day'), scope=scope))
         if "all_day" in body and body.get("all_day") != bool(current.get("all_day")):
             changes["all_day"] = bool(body.get("all_day"))
         for key in ("title", "description", "location", "availability", "rrule"):

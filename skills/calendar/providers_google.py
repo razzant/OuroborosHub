@@ -471,9 +471,10 @@ class GoogleAdapter:
             # PATCH arrays replace the whole provider array. Unrelated edits must
             # not rewrite guests from a potentially older local projection.
             body.pop("attendees", None)
-        if event.get("master_id") and "reminders" not in (payload.get("changes") or {}) and not payload.get("mute_provider_reminders"):
-            # PATCH of a title-only occurrence must not turn inherited master reminders
-            # into an explicit Google instance default (or overwrite an existing override).
+        if ("reminders" not in changes and not payload.get("mute_provider_reminders") and not payload.get('_revive_cancelled')
+                and (isinstance(payload.get('changes'), dict) or event.get('master_id'))):
+            # Sparse PATCHes leave provider alarms intact. Full revival/legacy
+            # master replacement still owns the requested complete reminder value.
             body.pop("reminders", None)
         # Removing the last guest is still an update for which the caller may
         # request notifications. The remaining guest count is not that choice.
