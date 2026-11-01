@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from model import (
     AVAIL_BUSY, AVAIL_FREE, PROVIDER_GOOGLE, PROVIDER_LOCAL, PROVIDER_YANDEX, PROVIDER_CALDAV, account_id as make_account_id, calendar_id as make_calendar_id,
-    get_tz, tz_name as zone_name, iso_utc, now_utc, own_reminders, parse_stored, rrule_with_utc_until,
+    get_tz, tz_name as zone_name, iso_utc, now_utc, own_reminders, parse_stored, normalize_rrule_until,
 )
 from ops import ProviderError
 from xml.sax.saxutils import escape
@@ -154,7 +154,7 @@ def _floating_start(component):
 
 def _rrule_until(rrule: str, tz) -> Optional[str]:
     """UTC cutoff with local DATE/DATE-TIME interpreted in the series basis."""
-    for part in rrule_with_utc_until(str(rrule or ""), tz).split(";"):
+    for part in normalize_rrule_until(str(rrule or ""), tz).split(";"):
         if part.upper().startswith("UNTIL="):
             raw = part.split("=", 1)[1].strip()
             try:
@@ -351,7 +351,11 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         vevent.add("LOCATION", str(event["location"]))
     if event.get("rrule"):
         rule = str(event["rrule"])
-        vevent.add("RRULE", icalendar.vRecur.from_ical(rule if all_day or floating else rrule_with_utc_until(rule, tz)))
+        emitted_start = vevent.decoded("DTSTART")
+        until_kind = "date" if not isinstance(emitted_start, datetime) else "floating" if emitted_start.tzinfo is None else "utc"
+        if until_kind != "floating" or event.get("tz"):
+            rule = normalize_rrule_until(rule, tz, until_kind)
+        vevent.add("RRULE", icalendar.vRecur.from_ical(rule))
     all_exdates = sorted(set([x for x in str(event.get("exdates") or "").split(",") if x] + (live_exdates if event.get("rrule") else [])))
     if event.get('rrule'):
         all_exdates = sorted(set(all_exdates) | set(cancelled_slots or []))

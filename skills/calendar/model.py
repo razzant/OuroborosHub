@@ -263,8 +263,12 @@ def bounded_result(obj: Dict[str, Any], limit: int = TOOL_RESULT_LIMIT, list_key
     return json_dumps({"status": trimmed.get("status") or "error", "message": "ответ слишком большой даже после сокращения", "truncated": True})
 
 
-def rrule_with_utc_until(rule_text: str, tz) -> str:
-    """Interpret a local UNTIL in its DTSTART zone for an aware parser or zoned wire."""
+def normalize_rrule_until(rule_text: str, tz, value_kind: str = "utc") -> str:
+    """Preserve the inclusive cutoff while rendering UNTIL as UTC, floating time or DATE.
+
+    Native writers choose the kind from the DTSTART they actually emit; aware
+    expansion/comparison uses UTC. ``tz`` is the record's existing time basis.
+    """
     parts = rule_text.split(";")
     for index, part in enumerate(parts):
         if not part.upper().startswith("UNTIL="):
@@ -276,11 +280,19 @@ def rrule_with_utc_until(rule_text: str, tz) -> str:
                                          datetime.min.time(), tzinfo=tz) - timedelta(seconds=1)
             elif len(value) == 15 and value[8].upper() == "T":
                 until = datetime.strptime(value.upper(), "%Y%m%dT%H%M%S").replace(tzinfo=tz)
+            elif len(value) == 16 and value.upper().endswith("Z"):
+                until = datetime.strptime(value.upper(), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
             else:
                 continue
         except ValueError:
             continue  # Keep malformed legacy text visible; validation still rejects it.
-        parts[index] = "UNTIL=" + until.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        if value_kind == "date":
+            bound = until.astimezone(tz).strftime("%Y%m%d")
+        elif value_kind == "floating":
+            bound = until.astimezone(tz).strftime("%Y%m%dT%H%M%S")
+        else:
+            bound = until.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        parts[index] = "UNTIL=" + bound
     return ";".join(parts)
 
 
@@ -301,8 +313,8 @@ def event_field_value(row, field, *, provider_observation=False):
             return frozenset(value.astimezone(get_tz(row.get('tz') or '')).date() if isinstance(value, datetime) else value for value in instants)
         return frozenset(instants)
     if field == 'rrule':
-        if not row.get('all_day'):
-            value = rrule_with_utc_until(str(value or ''), get_tz(row.get('tz') or ''))
+        value = normalize_rrule_until(str(value or ''), get_tz(row.get('tz') or ''),
+                                      'date' if row.get('all_day') else 'utc')
         parts = []
         for part in str(value or '').upper().split(';'):
             if not part:

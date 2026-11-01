@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from model import AVAIL_BUSY, PROVIDER_GOOGLE, account_id as make_account_id, calendar_id as make_calendar_id, get_tz, iso_utc, now_utc, own_reminders, parse_stored
-from model import tz_name as zone_name, rrule_with_utc_until
+from model import tz_name as zone_name, normalize_rrule_until
 from ops import ProviderError, created_content_matches
 from credentials import (
     TOKENS_FILE as TOKENS_FILE, SALT_FILE as SALT_FILE, KEY_FILE as KEY_FILE,
@@ -701,7 +701,7 @@ def row_to_gevent(event: Dict[str, Any], mute: bool = False) -> Dict[str, Any]:
     recurrence = []
     if event.get("rrule"):
         rule = str(event["rrule"])
-        recurrence.append("RRULE:" + (rule if event.get("all_day") else rrule_with_utc_until(rule, tz)))
+        recurrence.append("RRULE:" + normalize_rrule_until(rule, tz, "date" if event.get("all_day") else "utc"))
     if event.get("exdates"):
         stamps = [parse_stored(x) for x in str(event["exdates"]).split(",") if x]
         if event.get("all_day"):

@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, BUSY_COPY_TITLE, INTENT_CONFLICT, INTENT_DONE, INTENT_FAILED, INTENT_PENDING,
     PROVIDER_LOCAL, CALDAV_PROVIDERS, PUBLISH_BUSY, PUBLISH_FULL, SCOPES, SCOPE_ALL, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_SHOWN,
-    get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time, calendar_time, event_field_value, rrule_with_utc_until,
+    get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time, calendar_time, event_field_value, normalize_rrule_until,
 )
 
 RETRY_BACKOFF_SEC = (30, 120, 600, 1800, 7200)
@@ -146,7 +146,7 @@ def validate_rrule(rule: Any, start_utc: str, zone: str) -> str:
     try:
         tz = get_tz(zone)
         start = parse_stored(start_utc).astimezone(tz)
-        rrulestr(rrule_with_utc_until(text, tz), dtstart=start, forceset=True)
+        rrulestr(normalize_rrule_until(text, tz), dtstart=start, forceset=True)
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         raise ValueError(f"rrule не разобрано: {exc}; пример FREQ=WEEKLY;BYDAY=MO,WE") from exc
     return text
@@ -184,7 +184,7 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
                     moved = routine_time(master, iso_utc(bound), force_tz)
                     parts[index] = 'UNTIL=' + moved.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
             rule_text = ';'.join(parts)
-        rule = rrulestr(rrule_with_utc_until(rule_text, tz), dtstart=dtstart, forceset=True)
+        rule = rrulestr(normalize_rrule_until(rule_text, tz), dtstart=dtstart, forceset=True)
         for ex in _split_dates(master.get("exdates")):
             rule.exdate(routine_time(master, iso_utc(ex), force_tz).astimezone(tz))
         for rd in _split_dates(master.get("rdates")):
@@ -562,6 +562,9 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
     # Linked copies: only time moves to busy copies; full copies get everything but attendees/reminders.
     if propagate and row.get("link_group_id"):
         sibling_changes = _sibling_changes(changes)
+        if occ_key and scope == SCOPE_FOLLOWING:
+            # The source owns the new bound, even if a copy's readback changed its wire spelling.
+            sibling_changes["rrule"] = targets[1]["rrule"]
         for sib in members[1:]:
             if sib["id"] in blocked or store.delete_requested(sib["id"]) or not sibling_changes:
                 continue
@@ -1259,16 +1262,18 @@ def _matches_unversioned_baseline(payload, remote, adapter):
             return str(row.get('my_response') or own.get('status') or own.get('responseStatus') or 'needsAction').lower()
         return response(baseline) == response(remote)
     changes = payload.get('changes') or {}
-    keys = set(changes) | {'status'}
-    keys.discard('time_kind')  # Internal projection fact, absent from Google's wire fields.
+    keys = {{'attendees': 'attendees_json', 'reminders': 'reminders_json'}.get(key, key) for key in changes}
+    # The parser emits canonical empty values for absent wire fields. Compare
+    # that projection, not raw JSON membership or local-only event metadata.
+    keys.intersection_update(remote)
+    keys.add('status')
     if any(k in keys for k in ('start_utc', 'end_utc', 'all_day', 'tz')):
         keys.update(('start_utc', 'end_utc', 'all_day'))
         keys.discard('tz')  # equivalent zone spellings do not change the instants
     baselines = [baseline]
     if payload.get('after_intent_id') and payload.get('baseline_after_predecessor'):
         baselines.append(payload['baseline_after_predecessor'])
-    for key in keys:
-        field = {'attendees': 'attendees_json', 'reminders': 'reminders_json'}.get(key, key)
+    for field in keys:
         def value(row):
             if field.endswith('_json'):
                 return json.loads(row.get(field) or '[]')

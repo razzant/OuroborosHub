@@ -118,11 +118,13 @@ def test_floating_split_retains_and_shifts_local_until(tmp_path, move):
         (26, 10 if move == 'hour' else 9), (27, 10 if move == 'hour' else 9)])
 
 
-@pytest.mark.parametrize('action', ['birth', 'split', 'delete'])
-def test_floating_local_until_google_copy_has_zoned_wire_and_no_false_divergence(tmp_path, action):
+@pytest.mark.parametrize('action', ['birth', 'split', 'delete', 'move_across_dst'])
+@pytest.mark.parametrize('mode', ['full', 'busy'])
+def test_floating_local_until_google_copy_has_zoned_wire_and_no_false_divergence(tmp_path, action, mode):
     ctx, source, caldav = native_context(tmp_path, 'floating', until=True)
     source_adapter = ctx.providers.adapter_for(source['account_id'])
     cid = add_google_calendar(ctx.store)
+    ctx.store.update_calendar(cid, {'publish_mode': mode})
     google = FakeGoogle()
     adapter = google.attach(providers_google.GoogleAdapter('fixture', 'token', 'refresh', model.now_utc(), 'client', '', None))
     ctx.providers = SimpleNamespace(errors={}, adapter_for=lambda aid: source_adapter if aid == source['account_id'] else adapter)
@@ -146,8 +148,9 @@ def test_floating_local_until_google_copy_has_zoned_wire_and_no_false_divergence
 
     if action != 'birth':
         occurrence = source['id'] + '@2026-10-26T08:00:00+00:00'
-        if action == 'split':
-            changed = json.loads(tools.cal_update(ctx, id=occurrence, title='Following', scope='following', confirm=True))
+        if action in ('split', 'move_across_dst'):
+            moved = {'start': '2026-10-24T09:00', 'end': '2026-10-24T10:00'} if action == 'move_across_dst' else {}
+            changed = json.loads(tools.cal_update(ctx, id=occurrence, title='Following', scope='following', confirm=True, **moved))
             assert changed['status'] == 'updated', changed
         else:
             changed = json.loads(tools.cal_delete(ctx, id=occurrence, scope='following', confirm=True))
@@ -158,10 +161,80 @@ def test_floating_local_until_google_copy_has_zoned_wire_and_no_false_divergence
             first = datetime.fromisoformat(event['start']['dateTime']).astimezone(model.get_tz(event['start']['timeZone']))
             rule = next(rule[6:] for rule in event['recurrence'] if rule.startswith('RRULE:'))
             google_slots.extend((slot.day, slot.hour) for slot in rrulestr(rule, dtstart=first))
-        expected = [(day, 9) for day in ([24, 25, 26, 27] if action == 'split' else [24, 25])]
+        expected = [(day, 9) for day in ([24, 25, 26, 27] if action == 'split' else [24, 24, 25, 25] if action == 'move_across_dst' else [24, 25])]
         assert sorted(google_slots) == expected
         assert sorted((slot.day, slot.hour) for wire, _ in caldav.resources.values()
                       for slot in strict_native_occurrences(wire)) == expected
         reconcile_calendar(ctx.store, ctx.providers, adapter, ctx.store.get_calendar(cid), ctx.tz)
         masters = ctx.store.window(datetime(2026, 10, 24, tzinfo=ctx.tz), datetime(2026, 10, 30, tzinfo=ctx.tz))
         assert all(master['link_state'] == links.FOLLOWING for master in masters)
+
+
+@pytest.mark.parametrize('kind', ['floating', 'date', 'utc', 'tzid'])
+@pytest.mark.parametrize('bound', ['20261027', '20261027T090000', '20261027T080000Z'])
+def test_accepted_until_input_keeps_native_kind_membership_and_readback(tmp_path, kind, bound):
+    ctx, source, server = native_context(tmp_path, kind)
+    rule = 'FREQ=DAILY;UNTIL=' + bound
+    result = json.loads(tools.cal_update(ctx, id=source['id'], rrule=rule, scope='all', confirm=True))
+    assert result['status'] == 'updated', result
+    wire, etag = server.resources[source['href']]
+    original = master_component(source['raw_payload'])
+    actual = master_component(wire)
+    assert (actual['DTSTART'].to_ical(), dict(actual['DTSTART'].params)) == (
+        original['DTSTART'].to_ical(), dict(original['DTSTART'].params))
+    until = actual.decoded('RRULE')['UNTIL'][0]
+    if kind == 'date':
+        assert type(until) is date
+    else:
+        assert isinstance(until, datetime) and (until.tzinfo is None) == (kind == 'floating')
+    native_days = [slot.day for slot in strict_native_occurrences(wire)]
+    shown = json.loads(tools.cal_events(ctx, start='2026-10-24', end='2026-10-29'))['events']
+    assert native_days == [int(event['start'][8:10]) for event in shown] == [24, 25, 26, 27]
+    observed = providers.ics_to_rows(wire, source['calendar_id'], source['href'], etag, ctx.tz)[0]
+    assert model.event_field_value({**source, 'rrule': rule}, 'rrule') == model.event_field_value(observed, 'rrule')
+    calls = list(server.calls)
+    adapter = ctx.providers.adapter_for(source['account_id'])
+    reconcile_calendar(ctx.store, ctx.providers, adapter, ctx.store.get_calendar(source['calendar_id']), ctx.tz)
+    assert [call for call in server.calls[len(calls):] if call[0] in ('PUT', 'DELETE')] == []
+    readback = json.loads(tools.cal_events(ctx, start='2026-10-24', end='2026-10-29'))['events']
+    assert [int(event['start'][8:10]) for event in readback] == native_days
+
+
+def test_known_floating_basis_uses_raw_start_kind_without_readdressing(tmp_path):
+    ctx, source, server = native_context(tmp_path, 'floating')
+    ctx.store.update_event(source['id'], {'time_kind': ''})
+    key = '2026-10-26T08:00:00+00:00'
+    before = ctx.store.get_event(source['id'])
+    result = json.loads(tools.cal_update(ctx, id=source['id'] + '@' + key, title='Following', scope='following', confirm=True))
+    assert result['status'] == 'updated', result
+    run_open_intents(ctx, 3)
+    after = ctx.store.get_event(source['id'])
+    assert {key: after[key] for key in ('id', 'uid', 'href', 'start_utc', 'tz')} == {
+        key: before[key] for key in ('id', 'uid', 'href', 'start_utc', 'tz')}
+    wire = server.resources[source['href']][0]
+    assert master_component(wire).decoded('DTSTART').tzinfo is None
+    assert [slot.day for slot in strict_native_occurrences(wire)] == [24, 25]
+
+
+def test_date_utc_until_google_projection_and_readback(tmp_path):
+    ctx, source, server = native_context(tmp_path, 'date')
+    rule = 'FREQ=DAILY;UNTIL=20261027T080000Z'
+    result = json.loads(tools.cal_update(ctx, id=source['id'], rrule=rule, scope='all', confirm=True))
+    assert result['status'] == 'updated', result
+    source = ctx.store.get_event(source['id'])
+    source_adapter = ctx.providers.adapter_for(source['account_id'])
+    cid = add_google_calendar(ctx.store)
+    google = FakeGoogle()
+    adapter = google.attach(providers_google.GoogleAdapter('fixture', 'token', 'refresh', model.now_utc(), 'client', '', None))
+    ctx.providers = SimpleNamespace(errors={}, adapter_for=lambda aid: source_adapter if aid == source['account_id'] else adapter)
+    added = json.loads(tools.cal_update(ctx, id=source['id'], calendars=[source['calendar_id'], cid], scope='all', confirm=True))
+    assert added['status'] == 'updated', added
+    copy = ctx.store.get_event(added['reassign']['added'][0]['event_id'])
+    wire = google.events[copy['external_id']]
+    assert wire['start'] == {'date': '2026-10-24'}
+    assert wire['recurrence'] == ['RRULE:FREQ=DAILY;UNTIL=20261027']
+    reconcile_calendar(ctx.store, ctx.providers, adapter, ctx.store.get_calendar(cid), ctx.tz)
+    observed = ctx.store.get_event(copy['id'])
+    assert observed['link_state'] == links.FOLLOWING
+    assert not links.changed(observed, links.projection_changes(ctx.store, source, observed))
+    assert [slot.day for slot in strict_native_occurrences(server.resources[source['href']][0])] == [24, 25, 26, 27]

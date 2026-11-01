@@ -5,8 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_calendar_temporal_roundtrip import floating_context
+from test_calendar_temporal_roundtrip import context, floating_context
 from test_calendar_provider_divergence import FakeCalDAV, FakeGoogle, add_google_calendar, run_open_intents
+from test_calendar_atomic_replay import instance
+from test_calendar_provider_divergence import _day
 from test_calendar_round2 import OneAdapterProviders, add_external_calendar, add_local_calendar
 from test_sync_atomicity import FeedAdapter
 import links
@@ -14,6 +16,7 @@ import model
 import ops
 import providers
 import providers_google
+import routes
 import tools
 from scripts.worker import reconcile_calendar
 from store import Store
@@ -291,3 +294,98 @@ def test_linked_busy_dedup_keeps_distinct_intervals_and_availability(availabilit
         hard, soft = ops.busy_intervals(rows)
         assert hard == (expected if availability == model.AVAIL_BUSY else [])
         assert sorted(soft) == ([(s, e, 'Meeting') for s, e in expected] if availability == model.AVAIL_SOFT else [])
+
+
+def google_first_write_context(tmp_path, *, hidden=False):
+    ctx = context(tmp_path, 'UTC')
+    cid = add_google_calendar(ctx.store)
+    server = FakeGoogle()
+    adapter = server.attach(providers_google.GoogleAdapter('owner@example.test', 'token', 'refresh',
+        model.now_utc() + timedelta(days=1), 'client', '', None))
+    ctx.providers = OneAdapterProviders(adapter)
+    created = json.loads(tools.cal_create(ctx, title='Series', start=_day(2).isoformat(), duration_min=60,
+        rrule='FREQ=DAILY;COUNT=5', calendars=[cid], description='Original details', location='Original room',
+        attendees=['old@example.test'], reminders=[15], hidden=hidden, confirm=True))
+    assert created['status'] == 'created', created
+    # An accepted newer provider snapshot supplies canonical guest metadata.
+    created_row = ctx.store.get_event(created['event']['id'])
+    server.events[created_row['external_id']]['etag'] = server._etag()
+    reconcile_calendar(ctx.store, ctx.providers, adapter, ctx.store.get_calendar(cid), ctx.tz)
+    row = ctx.store.get_event(created['event']['id'])
+    ext, addressed = instance(ctx, server, row['id'])
+    return ctx, row, server, ext, addressed
+
+
+@pytest.mark.parametrize('field,new_value,canonical,empty', [
+    ('description', 'New details', 'description', ''), ('location', 'New room', 'location', ''),
+    ('attendees', ['new@example.test'], 'attendees_json', '[]'), ('reminders', [30], 'reminders_json', '[]'),
+])
+@pytest.mark.parametrize('deleted_at_provider', [False, True])
+def test_google_first_pin_retains_deleted_wire_field_conflicts(tmp_path, field, new_value, canonical, empty, deleted_at_provider):
+    ctx, row, server, ext, addressed = google_first_write_context(tmp_path)
+    assert row[canonical] != empty
+    server.down = True
+    result = json.loads(tools.cal_update(ctx, id=addressed, confirm=True, **{field: new_value}))
+    assert result['status'] == 'pending', result
+    server.down = False
+    if deleted_at_provider:
+        server.events[ext].pop(field)
+        server.events[ext]['etag'] = server._etag()
+    observed = providers_google.gevent_to_row(server.events[ext], row['calendar_id'], ctx.tz)
+    assert canonical in observed  # Missing raw fields are empty values, not missing canonical fields.
+    assert observed[canonical] == (empty if deleted_at_provider else row[canonical])
+    expected_etag = server.events[ext]['etag']
+    adapter = ctx.providers.adapter_for('')
+    request, sent = adapter._request, []
+    def record(method, path, params=None, body=None, headers=None, **kwargs):
+        if method == 'PATCH':
+            sent.append((dict(body), dict(headers)))
+        return request(method, path, params, body, headers, **kwargs)
+    adapter._request = record
+    run_open_intents(ctx, 2)
+    child, = ctx.store.exceptions_for(row['id'])
+    intent, = ctx.store.intents_for_event(child['id'])
+    assert (intent['state'], child['sync_state']) == (('conflict', 'conflict') if deleted_at_provider else ('done', 'synced'))
+    if deleted_at_provider:
+        assert not sent and field not in server.events[ext]
+        assert not intent['expected_etag']
+    else:
+        assert len(sent) == 1 and sent[0][1] == {'If-Match': expected_etag}
+        assert intent['expected_etag'] == expected_etag
+        expected = ([{'email': 'new@example.test'}] if field == 'attendees' else
+                    {'useDefault': False, 'overrides': [{'method': 'popup', 'minutes': 30}]} if field == 'reminders' else new_value)
+        assert sent[0][0][field] == server.events[ext][field] == expected
+
+
+@pytest.mark.parametrize('hidden', [False, True])
+@pytest.mark.parametrize('remote_status', ['confirmed', 'omitted', 'cancelled'])
+def test_google_first_pin_local_visibility_keeps_status_and_widget_filtering(tmp_path, hidden, remote_status):
+    ctx, row, server, ext, addressed = google_first_write_context(tmp_path, hidden=not hidden)
+    if remote_status == 'omitted':
+        server.events[ext].pop('status')
+    else:
+        server.events[ext]['status'] = remote_status
+    server.events[ext]['visibility'] = 'private'  # Google privacy is unrelated to local display hiding.
+    expected_etag = server.events[ext]['etag']
+    before = len(server.calls)
+    result = json.loads(tools.cal_update(ctx, id=addressed, hidden=hidden, confirm=True))
+    run_open_intents(ctx, 2)
+    child, = ctx.store.exceptions_for(row['id'])
+    intent, = ctx.store.intents_for_event(child['id'])
+    assert child['visibility'] == ('hidden' if hidden else 'shown')
+    assert ctx.store.get_event(row['id'])['visibility'] == row['visibility']
+    assert server.events[ext]['visibility'] == 'private'
+    if remote_status == 'cancelled':
+        assert result['status'] == child['sync_state'] == intent['state'] == 'conflict'
+        assert not any(call[0] == 'PATCH' for call in server.calls[before:])
+    else:
+        assert result['status'] == 'updated' and (child['sync_state'], intent['state']) == ('synced', 'done')
+        assert intent['expected_etag'] == expected_etag
+        # Exercise the widget's actual agenda projection without starting a browser.
+        day = _day(3).date().isoformat()
+        shown = routes.agenda_payload(ctx, 'day', day, [row['calendar_id']], True)
+        normal = routes.agenda_payload(ctx, 'day', day, [row['calendar_id']], False)
+        assert [event['id'] for event in shown['events']] == [child['id']]
+        assert shown['events'][0]['visibility'] == child['visibility']
+        assert [event['id'] for event in normal['events']] == ([] if hidden else [child['id']])
+        assert bool(normal['hidden_busy']) == hidden
