@@ -3,7 +3,7 @@
     "planning"
   ],
   "description": "Local, Google and CalDAV calendars with account setup, event and calendar management, source-directed linked copies, recurrence, availability, reminders and a day/week widget.",
-  "digest": "58d896f9c7aab5220fa8ff1015a228a026c323ba0364a833cbd87ffa8bbc992f",
+  "digest": "911063dc7f2d4ccb4b60da8443cef12196d87b17fde5b11ea9fe05d2a5ba2a8c",
   "install_specs": [
     "icalendar",
     "python-dateutil",

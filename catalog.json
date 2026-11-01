@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/4677145478c037e476a0b94b7373ffe7ccd76b17",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/56a94b2ffa9bc58381c0360c607d8eb8a8f3789a",
   "schema_version": 1,
   "skills": [
     {
@@ -399,13 +399,13 @@
         },
         {
           "path": "model.py",
-          "sha256": "7b6174f30bfcc6f814e46a104c1111d922b8a24e25f4daa7a561e37d01e4ac81",
-          "size": 17348
+          "sha256": "9990dcddb2c1fa4a33c42b2b62faccbf9a60141315bc7bd7c03b5d43e1d9fb03",
+          "size": 18485
         },
         {
           "path": "ops.py",
-          "sha256": "0366f6f0ddfe7128c06196d744b39e86ee86f72a2378b8aca89e958441d3c742",
-          "size": 94767
+          "sha256": "7e3cf0d68af835be702a9a37a52d3eae31ebf7ba1d4929ebda9b6a4d2ac80338",
+          "size": 94631
         },
         {
           "path": "plugin.py",
@@ -414,13 +414,13 @@
         },
         {
           "path": "providers.py",
-          "sha256": "d59a0ecf3767355a5e5481fd802c1a42bada556a00a5bcdce10f8101894d3a08",
-          "size": 51735
+          "sha256": "1b1a72c281b0167d2ca8f4d0449988b8d547c65350dafc58e4f078c8badc7f73",
+          "size": 51734
         },
         {
           "path": "providers_google.py",
-          "sha256": "4223ca4699cbae916db0a648e266975f558c6b4f74a018288fe587c4fe137dc4",
-          "size": 45458
+          "sha256": "d1b803bf117ce70962feae143ae9bf54148d3b7e8886159a74d021cccc4914f9",
+          "size": 45562
         },
         {
           "path": "reminders.py",
@@ -599,8 +599,8 @@
         },
         {
           "path": "tests/test_linked_temporal_semantics.py",
-          "sha256": "d3fcb4335544c146865434c3dbb470bd14b0e090c4b79e57a942f485291ce97d",
-          "size": 11672
+          "sha256": "7d9946b798b77b44b18112480c398619c507575328c22e48038c9298c43d798c",
+          "size": 17887
         },
         {
           "path": "tests/test_offline_retention.py",
@@ -616,6 +616,11 @@
           "path": "tests/test_recurrence_intake.py",
           "sha256": "f8e97fe2f1642fcd7e801db5a79c11c2b2530efdd9ecb132c39038c35ef61afd",
           "size": 6136
+        },
+        {
+          "path": "tests/test_recurrence_until_semantics.py",
+          "sha256": "ed4b9fb38dd181e1ebe90684835ce9ad49d30c33d52d31500b0d0d06c456db33",
+          "size": 9616
         },
         {
           "path": "tests/test_resolution_dependencies.py",
