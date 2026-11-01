@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
 from model import (
-    DEFAULT_LOCAL_CALENDAR_ID, DEFAULT_LOCAL_CALENDAR_NAME, INTENT_DONE, INTENT_FAILED, INTENT_PENDING, LOCAL_ACCOUNT_ID, CALDAV_PROVIDERS, iso_utc, new_id, now_utc, parse_stored,
+    DEFAULT_LOCAL_CALENDAR_ID, DEFAULT_LOCAL_CALENDAR_NAME, INTENT_DONE, INTENT_FAILED, INTENT_PENDING, LOCAL_ACCOUNT_ID, PROVIDER_LOCAL, CALDAV_PROVIDERS, iso_utc, new_id, now_utc, parse_stored,
 )
 
 SCHEMA_VERSION = 1
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS events (
     href TEXT NOT NULL DEFAULT '', etag TEXT NOT NULL DEFAULT '',
     visibility TEXT NOT NULL DEFAULT 'shown', availability TEXT NOT NULL DEFAULT 'busy', is_primary INTEGER NOT NULL DEFAULT 1,
     title TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '',
-    start_utc TEXT NOT NULL, end_utc TEXT NOT NULL, tz TEXT NOT NULL DEFAULT '', all_day INTEGER NOT NULL DEFAULT 0,
+    start_utc TEXT NOT NULL, end_utc TEXT NOT NULL, tz TEXT NOT NULL DEFAULT '', time_kind TEXT NOT NULL DEFAULT '', all_day INTEGER NOT NULL DEFAULT 0,
     rrule TEXT NOT NULL DEFAULT '', rdates TEXT NOT NULL DEFAULT '', exdates TEXT NOT NULL DEFAULT '',
     recurrence_id TEXT NOT NULL DEFAULT '', master_id TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'confirmed', organizer TEXT NOT NULL DEFAULT '', attendees_json TEXT NOT NULL DEFAULT '[]',
@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value_json TEXT NOT N
 
 EVENT_COLUMNS = (
     "id", "calendar_id", "uid", "external_id", "href", "etag", "visibility", "availability", "is_primary", "title",
-    "description", "location", "start_utc", "end_utc", "tz", "all_day", "rrule", "rdates", "exdates", "recurrence_id",
+    "description", "location", "start_utc", "end_utc", "tz", "time_kind", "all_day", "rrule", "rdates", "exdates", "recurrence_id",
     "master_id", "status", "organizer", "attendees_json", "my_response", "reminders_json", "origin", "link_group_id",
     "link_state", "sync_state", "raw_payload", "created_at", "updated_at", "deleted_at",
 )
@@ -146,6 +146,9 @@ class Store:
             event_columns = {r[1] for r in c.execute('PRAGMA table_info(events)')}
             if 'link_state' not in event_columns:
                 c.execute("ALTER TABLE events ADD COLUMN link_state TEXT NOT NULL DEFAULT 'following'")
+            if 'time_kind' not in event_columns:
+                # Unknown legacy parsing provenance never licenses rewriting anchors or queued work.
+                c.execute("ALTER TABLE events ADD COLUMN time_kind TEXT NOT NULL DEFAULT ''")
             cols = {r[1] for r in c.execute("PRAGMA table_info(reminders)").fetchall()}
             if "attempts" not in cols:
                 c.execute("ALTER TABLE reminders ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
@@ -325,7 +328,7 @@ class Store:
                     "role_visible": 1 if cal.get("role_visible", True) else 0,
                     "role_busy": 1 if cal.get("role_busy", True) else 0,
                     "role_publish": 1 if cal.get("role_publish", False) else 0,
-                    "publish_mode": cal.get("publish_mode") or "full", "sort_order": int(cal.get("sort_order") or 0),
+                    "publish_mode": cal.get("publish_mode") or ("full" if cal["provider"] == PROVIDER_LOCAL else "busy"), "sort_order": int(cal.get("sort_order") or 0),
                     "is_default": 1 if cal.get("is_default") else 0, "ts": ts,
                 },
             )
@@ -378,7 +381,7 @@ class Store:
         row["created_at"] = row.get("created_at") or ts
         row["updated_at"] = ts
         for key, default in (("uid", ""), ("external_id", ""), ("href", ""), ("etag", ""), ("visibility", "shown"), ("is_primary", 1),
-                             ("availability", "busy"), ("title", ""), ("description", ""), ("location", ""), ("tz", ""), ("all_day", 0),
+                             ("availability", "busy"), ("title", ""), ("description", ""), ("location", ""), ("tz", ""), ("time_kind", ""), ("all_day", 0),
                              ("rrule", ""), ("rdates", ""), ("exdates", ""), ("recurrence_id", ""), ("master_id", ""), ("status", "confirmed"),
                              ("organizer", ""), ("attendees_json", "[]"), ("my_response", ""), ("reminders_json", "[]"), ("origin", "local"),
                              ("link_group_id", ""), ("link_state", "following"), ("sync_state", "synced"), ("raw_payload", "")):
@@ -610,7 +613,7 @@ class Store:
         return True
 
     def window(self, start: datetime, end: datetime, calendar_ids: Optional[Sequence[str]] = None,
-               include_hidden: bool = True, include_masters: bool = True) -> List[Dict[str, Any]]:
+               include_hidden: bool = True, include_masters: bool = True, owner_tz=None) -> List[Dict[str, Any]]:
         """Rows overlapping [start, end) plus (optionally) recurrence masters that may expand into it."""
         clauses = ["e.deleted_at IS NULL", "c.deleted_at IS NULL",
                    "(e.master_id='' OR EXISTS (SELECT 1 FROM events m WHERE m.id=e.master_id AND m.deleted_at IS NULL))"]
@@ -622,6 +625,12 @@ class Store:
             clauses.append("e.visibility = 'shown'")
         time_clause = "(e.start_utc < ? AND e.end_utc > ? AND e.rrule = '')"
         targs: List[Any] = [iso_utc(end), iso_utc(start)]
+        if owner_tz is not None:
+            # Civil dates/floating times are projected later. Any two legal
+            # datetime UTC offsets differ by less than 48h; this widens candidates,
+            # never the returned occurrence window or the memory horizon.
+            time_clause = "(" + time_clause + " OR (e.rrule='' AND (e.all_day=1 OR e.time_kind='floating') AND e.start_utc < ? AND e.end_utc > ?))"
+            targs.extend((iso_utc(end + timedelta(days=2)), iso_utc(start - timedelta(days=2))))
         if include_masters:
             # A moved exception can enter this window before its master's DTSTART. Include that
             # master so expansion overlays its reminder rules rather than treating the exception
@@ -629,7 +638,8 @@ class Store:
             time_clause = ("(" + time_clause + " OR (e.rrule != '' AND e.start_utc < ? AND e.master_id = '')"
                            " OR (e.rrule != '' AND e.id IN (SELECT master_id FROM events"
                            " WHERE master_id != '' AND deleted_at IS NULL AND start_utc < ? AND end_utc > ?)))")
-            targs.extend((iso_utc(end), iso_utc(end), iso_utc(start)))
+            padding = timedelta(days=2) if owner_tz is not None else timedelta()
+            targs.extend((iso_utc(end + padding), iso_utc(end + padding), iso_utc(start - padding)))
         clauses.append(time_clause)
         args.extend(targs)
         sql = ("SELECT e.*, c.name AS calendar_name, c.provider AS provider, c.account_id AS account_id,"

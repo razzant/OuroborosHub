@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from model import AVAIL_BUSY, PROVIDER_GOOGLE, account_id as make_account_id, calendar_id as make_calendar_id, get_tz, iso_utc, now_utc, own_reminders, parse_stored
-from model import tz_name as zone_name
+from model import tz_name as zone_name, normalize_rrule_until
 from ops import ProviderError, created_content_matches
 from credentials import (
     TOKENS_FILE as TOKENS_FILE, SALT_FILE as SALT_FILE, KEY_FILE as KEY_FILE,
@@ -471,9 +471,10 @@ class GoogleAdapter:
             # PATCH arrays replace the whole provider array. Unrelated edits must
             # not rewrite guests from a potentially older local projection.
             body.pop("attendees", None)
-        if event.get("master_id") and "reminders" not in (payload.get("changes") or {}) and not payload.get("mute_provider_reminders"):
-            # PATCH of a title-only occurrence must not turn inherited master reminders
-            # into an explicit Google instance default (or overwrite an existing override).
+        if ("reminders" not in changes and not payload.get("mute_provider_reminders") and not payload.get('_revive_cancelled')
+                and (isinstance(payload.get('changes'), dict) or event.get('master_id'))):
+            # Sparse PATCHes leave provider alarms intact. Full revival/legacy
+            # master replacement still owns the requested complete reminder value.
             body.pop("reminders", None)
         # Removing the last guest is still an update for which the caller may
         # request notifications. The remaining guest count is not that choice.
@@ -699,7 +700,8 @@ def row_to_gevent(event: Dict[str, Any], mute: bool = False) -> Dict[str, Any]:
         body["end"] = {"dateTime": end.astimezone(tz).isoformat(), "timeZone": tz_name}
     recurrence = []
     if event.get("rrule"):
-        recurrence.append("RRULE:" + str(event["rrule"]))
+        rule = str(event["rrule"])
+        recurrence.append("RRULE:" + normalize_rrule_until(rule, tz, "date" if event.get("all_day") else "utc"))
     if event.get("exdates"):
         stamps = [parse_stored(x) for x in str(event["exdates"]).split(",") if x]
         if event.get("all_day"):
