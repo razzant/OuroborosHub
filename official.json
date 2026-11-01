@@ -21,6 +21,11 @@
       "recommended": false
     },
     {
+      "digest": "813e170b185b00734856da3a1a1bd26aa678ddaae3de6208a2abc42086d2b51f",
+      "name": "calendar",
+      "recommended": false
+    },
+    {
       "digest": "9ebc010de160df6706d57e1a751a832f712f2eedb595db31400ae1e2c1297331",
       "name": "claudexor_quotas",
       "recommended": false
