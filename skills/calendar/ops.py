@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, BUSY_COPY_TITLE, INTENT_CONFLICT, INTENT_DONE, INTENT_FAILED, INTENT_PENDING,
     PROVIDER_LOCAL, CALDAV_PROVIDERS, PUBLISH_BUSY, PUBLISH_FULL, SCOPES, SCOPE_ALL, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_SHOWN,
-    get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time, calendar_time, event_field_value,
+    get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time, calendar_time, event_field_value, rrule_with_utc_until,
 )
 
 RETRY_BACKOFF_SEC = (30, 120, 600, 1800, 7200)
@@ -133,24 +133,6 @@ def expand(rows: Sequence[Dict[str, Any]], start: datetime, end: datetime, excep
     return out
 
 
-def _parser_rule(rule_text: str, tz) -> str:
-    """Normalize floating UNTIL for the parser, without rewriting provider text."""
-    parts = rule_text.split(";")
-    for index, part in enumerate(parts):
-        if not part.upper().startswith("UNTIL="):
-            continue
-        value = part.split("=", 1)[1].strip()
-        if len(value) == 8:
-            until = datetime.combine(datetime.strptime(value, "%Y%m%d").date() + timedelta(days=1),
-                                     datetime.min.time(), tzinfo=tz) - timedelta(seconds=1)
-        elif len(value) == 15 and value[8].upper() == "T":
-            until = datetime.strptime(value.upper(), "%Y%m%dT%H%M%S").replace(tzinfo=tz)
-        else:
-            continue
-        parts[index] = "UNTIL=" + until.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return ";".join(parts)
-
-
 def validate_rrule(rule: Any, start_utc: str, zone: str) -> str:
     """Validate a user rule before any write; missing parser is not validation."""
     from dateutil.rrule import rrulestr
@@ -164,7 +146,7 @@ def validate_rrule(rule: Any, start_utc: str, zone: str) -> str:
     try:
         tz = get_tz(zone)
         start = parse_stored(start_utc).astimezone(tz)
-        rrulestr(_parser_rule(text, tz), dtstart=start, forceset=True)
+        rrulestr(rrule_with_utc_until(text, tz), dtstart=start, forceset=True)
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         raise ValueError(f"rrule не разобрано: {exc}; пример FREQ=WEEKLY;BYDAY=MO,WE") from exc
     return text
@@ -202,7 +184,7 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
                     moved = routine_time(master, iso_utc(bound), force_tz)
                     parts[index] = 'UNTIL=' + moved.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
             rule_text = ';'.join(parts)
-        rule = rrulestr(_parser_rule(rule_text, tz), dtstart=dtstart, forceset=True)
+        rule = rrulestr(rrule_with_utc_until(rule_text, tz), dtstart=dtstart, forceset=True)
         for ex in _split_dates(master.get("exdates")):
             rule.exdate(routine_time(master, iso_utc(ex), force_tz).astimezone(tz))
         for rd in _split_dates(master.get("rdates")):
@@ -287,22 +269,24 @@ def excluded_slots(master: Dict[str, Any]) -> set:
 # ── free/busy ───────────────────────────────────────────────────────
 
 def busy_intervals(occurrences: Sequence[Dict[str, Any]]) -> Tuple[List[Tuple[datetime, datetime]], List[Tuple[datetime, datetime, str]]]:
-    """(hard busy intervals, soft «обычно» intervals with titles); linked copies counted once."""
+    """(hard busy intervals, soft «обычно» intervals with titles); coincident linked copies counted once."""
     hard: List[Tuple[datetime, datetime]] = []
     soft: List[Tuple[datetime, datetime, str]] = []
     seen_groups = set()
     for occ in occurrences:
         if str(occ.get("status") or "") == "cancelled":
             continue
+        s, e = parse_stored(occ.get("start_utc")), parse_stored(occ.get("end_utc"))
+        if not s or not e:
+            continue
         group = (occ.get("link_group_id") or "") if occ.get('link_state', links.FOLLOWING) == links.FOLLOWING else ''
-        key = (group, occ.get("occurrence_start_utc") or occ.get("start_utc")) if group else None
+        # A floating source and a fixed-zone copy can share a recurrence address
+        # while occupying different real intervals in the owner's current zone.
+        key = (group, occ.get("occurrence_start_utc") or occ.get("start_utc"), s, e) if group else None
         if key and key in seen_groups:
             continue
         if key:
             seen_groups.add(key)
-        s, e = parse_stored(occ.get("start_utc")), parse_stored(occ.get("end_utc"))
-        if not s or not e:
-            continue
         avail = occ.get("availability") or AVAIL_BUSY
         if avail == AVAIL_FREE:
             continue
@@ -955,13 +939,14 @@ def _count_remaining(master: Dict[str, Any], rrule: str, cut: Optional[datetime]
 
 
 def _truncate_series(store, master: Dict[str, Any], occ_key: str, keep_later_exceptions: bool = False) -> List[Dict[str, Any]]:
-    """Series ends before ``occ_key``: UNTIL = occurrence start − 1s (RFC 5545, UTC). Returns the detached later exceptions."""
+    """End before the canonical slot, keeping UNTIL in the DTSTART value kind (RFC 5545)."""
     occ = parse_stored(occ_key)
     if occ is None:
         return []
     if master.get("all_day"):
-        from model import get_tz
         until = (occ.astimezone(get_tz(master.get("tz") or "")).date() - timedelta(days=1)).strftime("%Y%m%d")
+    elif master.get("time_kind") == "floating":
+        until = (occ.astimezone(get_tz(master.get("tz") or "")).replace(tzinfo=None) - timedelta(seconds=1)).strftime("%Y%m%dT%H%M%S")
     else:
         until = (occ - timedelta(seconds=1)).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     parts = [p for p in str(master.get("rrule") or "").split(";") if p and not p.upper().startswith(("UNTIL=", "COUNT="))]
@@ -1034,8 +1019,11 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
                     moved_day = until_day + timedelta(days=round(shift.total_seconds() / 86400))
                     until_part = moved_day.strftime("%Y%m%d")
                 else:
-                    until_dt = datetime.strptime(until_part, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-                    until_part = (until_dt + shift).strftime("%Y%m%dT%H%M%SZ")
+                    stamp_format = "%Y%m%dT%H%M%SZ" if until_part.endswith("Z") else "%Y%m%dT%H%M%S"
+                    until_dt = datetime.strptime(until_part, stamp_format)
+                    bound_shift = shift if until_part.endswith("Z") else (
+                        requested_start.astimezone(split_tz).replace(tzinfo=None) - cut_effective.astimezone(split_tz).replace(tzinfo=None))
+                    until_part = (until_dt + bound_shift).strftime(stamp_format)
             except ValueError:
                 pass  # retain a malformed legacy bound; never turn a finite rule into an endless one
         rule_parts.append(f"UNTIL={until_part}")
@@ -1272,6 +1260,7 @@ def _matches_unversioned_baseline(payload, remote, adapter):
         return response(baseline) == response(remote)
     changes = payload.get('changes') or {}
     keys = set(changes) | {'status'}
+    keys.discard('time_kind')  # Internal projection fact, absent from Google's wire fields.
     if any(k in keys for k in ('start_utc', 'end_utc', 'all_day', 'tz')):
         keys.update(('start_utc', 'end_utc', 'all_day'))
         keys.discard('tz')  # equivalent zone spellings do not change the instants

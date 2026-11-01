@@ -1,6 +1,6 @@
 """Linked copies retain temporal meaning through birth, source updates and explicit follow."""
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -147,6 +147,14 @@ def test_google_copy_and_follow_keep_the_actual_zoned_wire(tmp_path, mode):
     assert times[source['calendar_id']].endswith('09:00:00-04:00')
     assert times[copy['calendar_id']].endswith('04:00:00-04:00')
     assert server.calls == calls  # Owner-zone/display changes never move the provider event.
+    availability = json.loads(tools.cal_free(ctx, start='2026-10-25T00:00', end='2026-10-26T00:00',
+        duration_min=30, working_hours='00:00-23:59', max_slots=10))
+    assert availability['availability_complete']
+    for event in visible:
+        start, end = model.parse_stored(event['start']), model.parse_stored(event['end'])
+        assert not any(model.parse_stored(slot['start']) < end and start < model.parse_stored(slot['end'])
+                       for slot in availability['slots'])
+    assert server.calls == calls
     assert copy['time_kind'] == 'absolute'
     ctx.store.update_event(copy['id'], {'link_state': links.DIVERGED, 'time_kind': ''})
     result = json.loads(tools.cal_update(ctx, id=copy['id'], link_action='follow', scope='all', confirm=True))
@@ -190,3 +198,96 @@ def test_legacy_type_enrichment_alone_does_not_diverge_copy(tmp_path, edited):
     assert saved['time_kind'] == 'absolute'
     assert saved['link_state'] == (links.DIVERGED if edited else links.FOLLOWING)
     assert ctx.store.get_event(source['id'])['title'] == source['title']
+
+
+@pytest.mark.parametrize('representation,path,concurrent', [
+    ('tzid', 'feed', ''), ('floating', 'feed', ''), ('tzid', 'follow', ''), ('tzid', 'create', ''),
+    ('tzid', 'feed', 'before_read'), ('tzid', 'feed', 'after_read'),
+])
+def test_google_linked_occurrence_pins_wire_fields_and_etag(tmp_path, representation, path, concurrent):
+    import icalendar
+    ctx, source, copy, server = linked_context(tmp_path, representation, 'google', 'full')
+    adapter = ctx.providers.adapter_for(source['account_id'])
+    source_server = adapter._request.__self__
+    calendar = ctx.store.get_calendar(source['calendar_id'])
+    if path == 'create':
+        created = json.loads(tools.cal_create(ctx, title='Created series', start='2026-10-24T09:00', duration_min=60,
+            rrule='FREQ=DAILY;COUNT=5', calendars=[source['calendar_id'], copy['calendar_id']], confirm=True))
+        assert created['status'] == 'created', created
+        source = ctx.store.get_event(created['event']['id'])
+        copy = next(row for row in ctx.store.group_masters(source['link_group_id']) if row['id'] != source['id'])
+        reconcile_calendar(ctx.store, ctx.providers, adapter, calendar, ctx.tz)
+        run_open_intents(ctx, 2)
+        copy = ctx.store.get_event(copy['id'])
+    slot = datetime(2026, 10, 25, 9, tzinfo=ctx.tz)
+    key = model.iso_utc(slot)
+    ext = copy['external_id'] + '_' + model.parse_stored(key).strftime('%Y%m%dT%H%M%SZ')
+    server.events[ext] = {**server.events[copy['external_id']], 'id': ext, 'etag': server._etag(),
+        'start': {'dateTime': slot.isoformat(), 'timeZone': 'Europe/Berlin'},
+        'end': {'dateTime': (slot + timedelta(hours=1)).isoformat(), 'timeZone': 'Europe/Berlin'},
+        'originalStartTime': {'dateTime': slot.isoformat()}, 'recurringEventId': copy['external_id']}
+    server.events[ext].pop('recurrence', None)
+    assert 'time_kind' not in providers_google.gevent_to_row(server.events[ext], copy['calendar_id'], ctx.tz)
+    assert copy['time_kind'] == 'absolute'
+    before_intents = ctx.store.intents_for_event(copy['id'])
+    if concurrent == 'before_read':
+        server.events[ext].update(summary='Another client', etag=server._etag())
+    pinned_etag = server.events[ext]['etag']
+    google = ctx.providers.adapter_for(copy['account_id'])
+    request = google._request
+    races = []
+    def race(method, *args, **kwargs):
+        if concurrent == 'after_read' and method == 'PATCH':
+            races.append(True)
+            server.events[ext].update(summary='Another client', etag=server._etag())
+        return request(method, *args, **kwargs)
+    google._request = race
+    def moved_occurrence(cal):
+        event = icalendar.Event()
+        event.add('UID', source['uid'])
+        event.add('SUMMARY', 'Moved at source')
+        native_slot = slot.replace(tzinfo=None) if representation == 'floating' else slot
+        event.add('RECURRENCE-ID', native_slot)
+        event.add('DTSTART', native_slot + timedelta(hours=3))
+        event.add('DTEND', native_slot + timedelta(hours=4))
+        cal.add_component(event)
+    source_server.edit(source['href'], moved_occurrence)
+    if path == 'follow':
+        ctx.store.update_event(copy['id'], {'link_state': links.DIVERGED})
+    call_count = len(server.calls)
+    reconcile_calendar(ctx.store, ctx.providers, adapter, calendar, ctx.tz)
+    if path == 'follow':
+        assert not ctx.store.exceptions_for(copy['id'])
+        json.loads(tools.cal_update(ctx, id=copy['id'], link_action='follow', scope='all', confirm=True))
+    run_open_intents(ctx, 2)
+    child, = ctx.store.exceptions_for(copy['id'])
+    intent, = ctx.store.intents_for_event(child['id'])
+    assert child['recurrence_id'] == key and child['master_id'] == copy['id']
+    assert child['link_group_id'] == source['link_group_id']
+    assert all(ctx.store.get_intent(item['id']) == item for item in before_intents)
+    assert (intent['state'], child['sync_state']) == (('conflict', 'conflict') if concurrent else ('done', 'synced'))
+    assert server.events[ext]['summary'] == ('Another client' if concurrent else 'Moved at source')
+    if concurrent == 'before_read':
+        assert not any(call[0] == 'PATCH' for call in server.calls[call_count:])
+    else:
+        assert intent['expected_etag'] == pinned_etag
+        assert bool(races) == (concurrent == 'after_read')
+        if not concurrent:
+            assert model.parse_stored(server.events[ext]['start']['dateTime']) == slot + timedelta(hours=3)
+
+
+@pytest.mark.parametrize('availability', [model.AVAIL_BUSY, model.AVAIL_SOFT, model.AVAIL_FREE])
+@pytest.mark.parametrize('shift_hours', [0, 6])
+def test_linked_busy_dedup_keeps_distinct_intervals_and_availability(availability, shift_hours):
+    start = datetime(2026, 11, 26, 9, tzinfo=model.get_tz('UTC'))
+    end = start + timedelta(hours=1)
+    source = {'link_group_id': 'group', 'occurrence_start_utc': model.iso_utc(start),
+        'start_utc': model.iso_utc(start), 'end_utc': model.iso_utc(end), 'availability': availability, 'title': 'Meeting'}
+    delta = timedelta(hours=shift_hours)
+    copy = {**source, 'start_utc': model.iso_utc(start+delta), 'end_utc': model.iso_utc(end+delta)}
+    cancelled = {**source, 'status': 'cancelled', 'start_utc': model.iso_utc(start-delta)}
+    expected = [(start, end)] + ([(start+delta, end+delta)] if shift_hours else [])
+    for rows in ([cancelled, source, copy], [cancelled, copy, source]):
+        hard, soft = ops.busy_intervals(rows)
+        assert hard == (expected if availability == model.AVAIL_BUSY else [])
+        assert sorted(soft) == ([(s, e, 'Meeting') for s, e in expected] if availability == model.AVAIL_SOFT else [])

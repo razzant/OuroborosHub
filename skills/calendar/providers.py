@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from model import (
     AVAIL_BUSY, AVAIL_FREE, PROVIDER_GOOGLE, PROVIDER_LOCAL, PROVIDER_YANDEX, PROVIDER_CALDAV, account_id as make_account_id, calendar_id as make_calendar_id,
-    get_tz, tz_name as zone_name, iso_utc, now_utc, own_reminders, parse_stored,
+    get_tz, tz_name as zone_name, iso_utc, now_utc, own_reminders, parse_stored, rrule_with_utc_until,
 )
 from ops import ProviderError
 from xml.sax.saxutils import escape
@@ -152,15 +152,13 @@ def _floating_start(component):
     return isinstance(value, datetime) and value.tzinfo is None and not getattr(component.get('DTSTART'), 'params', {}).get('TZID')
 
 
-def _rrule_until(rrule: str) -> Optional[str]:
-    """ISO-UTC string of the RRULE UNTIL (date or datetime), None when absent."""
-    for part in str(rrule or "").split(";"):
+def _rrule_until(rrule: str, tz) -> Optional[str]:
+    """UTC cutoff with local DATE/DATE-TIME interpreted in the series basis."""
+    for part in rrule_with_utc_until(str(rrule or ""), tz).split(";"):
         if part.upper().startswith("UNTIL="):
             raw = part.split("=", 1)[1].strip()
             try:
-                if len(raw) == 8:
-                    return raw[:4] + "-" + raw[4:6] + "-" + raw[6:8] + "T23:59:59+00:00"
-                dt = datetime.strptime(raw.rstrip("Z"), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+                dt = datetime.strptime(raw, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
                 return iso_utc(dt)
             except ValueError:
                 return None
@@ -305,7 +303,7 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
             for comp in list(cal.walk('VEVENT')):
                 if comp.get('RECURRENCE-ID') is not None:
                     cal.subcomponents.remove(comp)
-        until = _rrule_until(str(event.get("rrule") or ""))
+        until = _rrule_until(str(event.get("rrule") or ""), tz)
         if until is not None:   # the series was cut: exceptions past the cut moved to the new series locally
             for comp in list(cal.walk("VEVENT")):
                 rid = comp.get("RECURRENCE-ID")
@@ -352,7 +350,8 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
     if event.get("location"):
         vevent.add("LOCATION", str(event["location"]))
     if event.get("rrule"):
-        vevent.add("RRULE", icalendar.vRecur.from_ical(str(event["rrule"])))
+        rule = str(event["rrule"])
+        vevent.add("RRULE", icalendar.vRecur.from_ical(rule if all_day or floating else rrule_with_utc_until(rule, tz)))
     all_exdates = sorted(set([x for x in str(event.get("exdates") or "").split(",") if x] + (live_exdates if event.get("rrule") else [])))
     if event.get('rrule'):
         all_exdates = sorted(set(all_exdates) | set(cancelled_slots or []))
