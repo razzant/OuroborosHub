@@ -1,0 +1,18 @@
+{
+  "category": [
+    "search"
+  ],
+  "description": "Use Pomerado's keyless MCP connection for bounded, public, read-only website lookups: discover a suitable tool, inspect its schemas, run once and follow the same job.",
+  "digest": "65aefd8c9b386bd911c08b13194bb289c6e20bc68197dacc1335f85d02ed8e47",
+  "name": "pomerado",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/pomerado"
+  },
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "A person wants current public website information, such as flight fares, product prices, listings or availability, and Pomerado is connected or the owner wants help connecting it. Not for private data, website changes, account login or building tools.",
+  "withdrawn": null
+}
