@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/8683ab3d605d82c6577ce69d435781c9d7af053f",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/4677145478c037e476a0b94b7373ffe7ccd76b17",
   "schema_version": 1,
   "skills": [
     {
@@ -369,8 +369,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "06d72d6eef0cb6eb7d3a2330dc2ebd7988676751b4c9338284a92d319d96d319",
-          "size": 42487
+          "sha256": "b7d6cc69d4aed1661429ab22e4a84a4ae920fba3c83dff62889ce213b71da6c0",
+          "size": 42912
         },
         {
           "path": "accounts.py",
@@ -389,8 +389,8 @@
         },
         {
           "path": "links.py",
-          "sha256": "1c125932e03cb9ba06c7913e58cc314d430451f0855d9ac2b827a069d797de6e",
-          "size": 4716
+          "sha256": "cf168518685a634c816f35bb05b08a3eed7f73af81948b797795141294f0ed50",
+          "size": 5445
         },
         {
           "path": "management.py",
@@ -404,8 +404,8 @@
         },
         {
           "path": "ops.py",
-          "sha256": "9da836249cfd24c1847bceccf5a501eae78d410e0fd4e7b9ed15ef33c4c32f9c",
-          "size": 94462
+          "sha256": "0366f6f0ddfe7128c06196d744b39e86ee86f72a2378b8aca89e958441d3c742",
+          "size": 94767
         },
         {
           "path": "plugin.py",
@@ -414,8 +414,8 @@
         },
         {
           "path": "providers.py",
-          "sha256": "0928a6d18494d734af786d3df0caef81aea2b8bcc8c7567a426d60049bb3204d",
-          "size": 51687
+          "sha256": "d59a0ecf3767355a5e5481fd802c1a42bada556a00a5bcdce10f8101894d3a08",
+          "size": 51735
         },
         {
           "path": "providers_google.py",
@@ -596,6 +596,11 @@
           "path": "tests/test_google_vault.py",
           "sha256": "c4b9dec5578ecccf8fe1dc10eedd1852b621209fde3f966fbffef5b62c514eb6",
           "size": 6438
+        },
+        {
+          "path": "tests/test_linked_temporal_semantics.py",
+          "sha256": "d3fcb4335544c146865434c3dbb470bd14b0e090c4b79e57a942f485291ce97d",
+          "size": 11672
         },
         {
           "path": "tests/test_offline_retention.py",
