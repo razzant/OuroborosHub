@@ -1,6 +1,6 @@
 {
   "author_repos": {},
-  "generated_at": "2026-10-31T10:26:44.105942Z",
+  "generated_at": "2026-11-01T11:21:07.161494Z",
   "schema_version": 1,
   "skills": {
     "2gis": {
@@ -171,6 +171,11 @@
     "perplexity": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/180",
+      "votes": 0
+    },
+    "pomerado": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/244",
       "votes": 0
     },
     "restaurant_booking": {
