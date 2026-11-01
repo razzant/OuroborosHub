@@ -11,6 +11,7 @@
     "kind": "hosted",
     "path": "skills/pomerado"
   },
+  "title": "Pomerado (keyless)",
   "type": "instruction",
   "version": "0.1.0",
   "when_to_use": "A person wants current public website information, such as flight fares, product prices, listings or availability, and Pomerado is connected or the owner wants help connecting it. Not for private data, website changes, account login or building tools.",

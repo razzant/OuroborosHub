@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/8442faf30a15c1aa7ff95475127630c943a53597",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/001d607de068b6741d4ed5f03e292ca99f991c88",
   "schema_version": 1,
   "skills": [
     {
@@ -2106,6 +2106,22 @@
       "slug": "perplexity",
       "type": "extension",
       "version": "0.1.3"
+    },
+    {
+      "description": "Use Pomerado's keyless MCP connection for bounded, public, read-only website lookups: discover a suitable tool, inspect its schemas, run once and follow the same job.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "055295e870268d96330740ee5f136a3904a8186f06d8d5ce67db730bad3aa1c6",
+          "size": 9251
+        }
+      ],
+      "name": "pomerado",
+      "slug": "pomerado",
+      "title": "Pomerado (keyless)",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "A person wants current public website information, such as flight fares, product prices, listings or availability, and Pomerado is connected or the owner wants help connecting it. Not for private data, website changes, account login or building tools."
     },
     {
       "description": "Оркестратор автоматического бронирования ресторанов: нормализует список ресторанов, формирует задачу для агента-исполнителя и валидирует результат.",
