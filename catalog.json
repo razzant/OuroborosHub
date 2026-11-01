@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/56a94b2ffa9bc58381c0360c607d8eb8a8f3789a",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/0b636d90984c8c13b3fc1243b6f5ec0803678b5b",
   "schema_version": 1,
   "skills": [
     {
@@ -369,8 +369,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "b7d6cc69d4aed1661429ab22e4a84a4ae920fba3c83dff62889ce213b71da6c0",
-          "size": 42912
+          "sha256": "52bd79ade35765e0c3f92f6b72455d4f425897c038f1cae326ee0fac7cef14a7",
+          "size": 43043
         },
         {
           "path": "accounts.py",
@@ -399,13 +399,13 @@
         },
         {
           "path": "model.py",
-          "sha256": "9990dcddb2c1fa4a33c42b2b62faccbf9a60141315bc7bd7c03b5d43e1d9fb03",
-          "size": 18485
+          "sha256": "175e16964f2048b725628ac052cd2f8d1d48bfd6e2d4a1698cc492630c2a2e54",
+          "size": 19129
         },
         {
           "path": "ops.py",
-          "sha256": "7e3cf0d68af835be702a9a37a52d3eae31ebf7ba1d4929ebda9b6a4d2ac80338",
-          "size": 94631
+          "sha256": "a6c6ec4ed225840508a6dfb9aa92518ae4722abf4c2e16dd1ee4f671fc31f8f2",
+          "size": 94943
         },
         {
           "path": "plugin.py",
@@ -414,13 +414,13 @@
         },
         {
           "path": "providers.py",
-          "sha256": "1b1a72c281b0167d2ca8f4d0449988b8d547c65350dafc58e4f078c8badc7f73",
-          "size": 51734
+          "sha256": "d80c7ac7dae0e7c760bcb29b765ee2231e1b6d158f6bd11f6e59abf666813454",
+          "size": 51976
         },
         {
           "path": "providers_google.py",
-          "sha256": "d1b803bf117ce70962feae143ae9bf54148d3b7e8886159a74d021cccc4914f9",
-          "size": 45562
+          "sha256": "854c8b413c6d6fdc658b8612636e3db903038d6b1b13b7a67d19ee6d602ad739",
+          "size": 45571
         },
         {
           "path": "reminders.py",
@@ -599,8 +599,8 @@
         },
         {
           "path": "tests/test_linked_temporal_semantics.py",
-          "sha256": "7d9946b798b77b44b18112480c398619c507575328c22e48038c9298c43d798c",
-          "size": 17887
+          "sha256": "08940078c333fac86564d0e3499e5323bbd572e106a87395a5a1b4adb75ee978",
+          "size": 23640
         },
         {
           "path": "tests/test_offline_retention.py",
@@ -619,8 +619,8 @@
         },
         {
           "path": "tests/test_recurrence_until_semantics.py",
-          "sha256": "ed4b9fb38dd181e1ebe90684835ce9ad49d30c33d52d31500b0d0d06c456db33",
-          "size": 9616
+          "sha256": "496bdb6636b66bf91104b2ba5617046e2ab6e0f9850b13bbd093f4df85cf2659",
+          "size": 14396
         },
         {
           "path": "tests/test_resolution_dependencies.py",
