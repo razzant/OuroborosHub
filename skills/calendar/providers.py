@@ -329,7 +329,7 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         if live_start == str(event.get("start_utc") or "") and live_rule == str(event.get("rrule") or ""):
             live_exdates = _dt_list(vevent.get("EXDATE"), tz)   # same series: cancellations that live only on the server stay
     live_exdates = [value for value in live_exdates if value not in (removed_exdates or [])]
-    floating = event.get('time_kind') == 'floating' or _floating_start(vevent)
+    floating = event['time_kind'] == 'floating' if event.get('time_kind') else _floating_start(vevent)
     kept = ({'DTSTART'} if keep_start else set()) | ({'DTEND', 'DURATION'} if keep_end else set())
     for key in ("DTSTART", "DTEND", "DURATION", "SUMMARY", "DESCRIPTION", "LOCATION", "RRULE", "STATUS", "LAST-MODIFIED", "DTSTAMP", "SEQUENCE",
                 "EXDATE", "RDATE", "ATTENDEE", "ORGANIZER", "TRANSP"):
@@ -855,7 +855,7 @@ class CalDAVAdapter:
             raise ProviderError("parse", "у исключения нет даты вхождения")
         tz = get_tz(event.get("tz") or "")
         rec_local = rec.astimezone(tz)
-        floating = event.get('time_kind') == 'floating' or _floating_start(master)
+        floating = event['time_kind'] == 'floating' if event.get('time_kind') else _floating_start(master)
         keys = {iso_utc(rec)}
         prev = parse_stored((payload or {}).get("previous_recurrence_id"))
         if prev is not None:

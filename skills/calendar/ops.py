@@ -759,10 +759,12 @@ def _write_etag(store, calendar, event):
 
 def _apply_changes(store, row: Dict[str, Any], changes: Dict[str, Any]) -> None:
     fields: Dict[str, Any] = {}
-    for key in ("start_utc", "end_utc", "all_day", "tz", "title", "description", "location", "visibility",
+    for key in ("start_utc", "end_utc", "all_day", "tz", "time_kind", "title", "description", "location", "visibility",
                 "availability", "rrule", "my_response", "status", "exdates", "rdates"):
         if key in changes and changes[key] is not None:
             fields[key] = changes[key]
+    if 'time_kind' in fields:
+        fields['time_kind'] = links.projection_time_kind(fields, store.get_calendar(row['calendar_id']) or {})
     if "attendees" in changes and changes["attendees"] is not None:
         fields["attendees_json"] = json.dumps(changes["attendees"], ensure_ascii=False)
     if "reminders" in changes and changes["reminders"] is not None:
@@ -1517,6 +1519,7 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
             continue
         mode = cal.get("publish_mode") or PUBLISH_BUSY
         copy = {k: row.get(k) for k in ("uid", "visibility", "availability", "start_utc", "end_utc", "tz", "all_day", "rrule", "exdates", "rdates")}
+        copy['time_kind'] = links.projection_time_kind(row, cal)
         copy.update({"calendar_id": cid, "is_primary": 0, "link_group_id": group,
                      "title": BUSY_COPY_TITLE if mode == PUBLISH_BUSY else row.get("title") or "",
                      "description": "" if mode == PUBLISH_BUSY else row.get("description") or "",
@@ -1528,6 +1531,7 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
         exception_rows = []
         for exc in store.exceptions_for(row["id"]):
             exc_copy = {k: exc.get(k) for k in ("visibility", "availability", "start_utc", "end_utc", "tz", "all_day", "recurrence_id", "status")}
+            exc_copy['time_kind'] = links.projection_time_kind(exc, cal)
             exc_copy.update({"calendar_id": cid, "uid": saved["uid"], "master_id": saved["id"], "is_primary": 0, "link_group_id": group,
                              "title": copy["title"] if mode == PUBLISH_BUSY else exc.get("title") or copy["title"],
                              "description": "" if mode == PUBLISH_BUSY else exc.get("description") or "",
@@ -1546,7 +1550,7 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
             # explicit birth dependency through offline replay and resolution.
             baseline = _baseline_before({saved['id']: saved}, exc_row)
             changes = {key: exc_row[key] for key in ('title', 'description', 'location', 'availability',
-                       'start_utc', 'end_utc', 'tz', 'all_day', 'status')
+                       'start_utc', 'end_utc', 'tz', 'time_kind', 'all_day', 'status')
                        if exc_row.get(key) != baseline.get(key)}
             store.add_intent("update", cal["account_id"], cid, exc_row["id"],
                              {"scope": SCOPE_THIS, "changes": changes, "baseline": baseline,
