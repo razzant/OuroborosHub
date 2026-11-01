@@ -1,0 +1,1596 @@
+{
+ "meta": {
+  "today": "2026-10-27",
+  "demo": "synthetic",
+  "owner_name": "Mira",
+  "note": "Invented memory for a design comparison; no real memory is included."
+ },
+ "rooms": [
+  {
+   "id": "1",
+   "label": "Main",
+   "kind": "main"
+  },
+  {
+   "id": "4107",
+   "label": "Garden sensors",
+   "kind": "project",
+   "project_id": "garden-sensors"
+  },
+  {
+   "id": "4112",
+   "label": "Release flow",
+   "kind": "project",
+   "project_id": "release-flow"
+  },
+  {
+   "id": "5203",
+   "label": "Telegram",
+   "kind": "place"
+  },
+  {
+   "id": "legacy",
+   "label": "Earlier dialogue",
+   "kind": "legacy"
+  }
+ ],
+ "records": [
+  {
+   "id": "2377dda4915bf9e9b8a37a08d8a96438",
+   "kind": "legacy",
+   "room_id": "legacy",
+   "author": {
+    "kind": "legacy_helper",
+    "operation": "import"
+   },
+   "ts": "2026-09-12T10:00:00Z",
+   "text": "June. Mira set me up on a spare Mac mini in the greenhouse shed and asked for two things: a short morning note about the plants, and help shipping a small watering app with her friend Lev. She likes answers that end in one decision she can make.",
+   "covers": {
+    "ts_span": [
+     "2026-06-03",
+     "2026-06-30"
+    ]
+   },
+   "metadata": {
+    "legacy_block": 0
+   },
+   "corrections": [],
+   "revision": "2377dda4915bf9e9b8a37a08d8a96438",
+   "revisions": [
+    "2377dda4915bf9e9b8a37a08d8a96438"
+   ],
+   "current_text": "June. Mira set me up on a spare Mac mini in the greenhouse shed and asked for two things: a short morning note about the plants, and help shipping a small watering app with her friend Lev. She likes answers that end in one decision she can make.",
+   "folded_into": null
+  },
+  {
+   "id": "ce4497bd70b99c498b3ee5d99d81e710",
+   "kind": "legacy",
+   "room_id": "legacy",
+   "author": {
+    "kind": "legacy_helper",
+    "operation": "import"
+   },
+   "ts": "2026-09-12T10:00:00Z",
+   "text": "July. The release flow began: Lev wrote the app, I wrote the release script, and we agreed to ship every other Thursday. The first mention of sensor 3 reading high after rain is from this month.",
+   "covers": {
+    "ts_span": [
+     "2026-07-01",
+     "2026-07-29"
+    ]
+   },
+   "metadata": {
+    "legacy_block": 1
+   },
+   "corrections": [],
+   "revision": "ce4497bd70b99c498b3ee5d99d81e710",
+   "revisions": [
+    "ce4497bd70b99c498b3ee5d99d81e710"
+   ],
+   "current_text": "July. The release flow began: Lev wrote the app, I wrote the release script, and we agreed to ship every other Thursday. The first mention of sensor 3 reading high after rain is from this month.",
+   "folded_into": null
+  },
+  {
+   "id": "938de6dcf59107f89ad5496c24209069",
+   "kind": "gap",
+   "room_id": "legacy",
+   "author": {
+    "kind": "host",
+    "operation": "import"
+   },
+   "ts": "2026-09-12T10:00:00Z",
+   "text": "No consolidated record exists for 3–5 August: the earlier dialogue file has no block for these days, and the import did not invent one.",
+   "covers": {
+    "ts_span": [
+     "2026-08-03",
+     "2026-08-05"
+    ]
+   },
+   "corrections": [],
+   "revision": "938de6dcf59107f89ad5496c24209069",
+   "revisions": [
+    "938de6dcf59107f89ad5496c24209069"
+   ],
+   "current_text": "No consolidated record exists for 3–5 August: the earlier dialogue file has no block for these days, and the import did not invent one.",
+   "folded_into": null
+  },
+  {
+   "id": "5914da0b9c3b56c75b44bcffb0ec7f84",
+   "kind": "legacy",
+   "room_id": "legacy",
+   "author": {
+    "kind": "legacy_helper",
+    "operation": "import"
+   },
+   "ts": "2026-09-12T10:00:00Z",
+   "text": "August. The greenhouse loop ran unattended for a full week for the first time. Mira asked for photos instead of numbers on weekends.",
+   "covers": {
+    "ts_span": [
+     "2026-08-06",
+     "2026-08-31"
+    ]
+   },
+   "metadata": {
+    "legacy_block": 2
+   },
+   "corrections": [],
+   "revision": "5914da0b9c3b56c75b44bcffb0ec7f84",
+   "revisions": [
+    "5914da0b9c3b56c75b44bcffb0ec7f84"
+   ],
+   "current_text": "August. The greenhouse loop ran unattended for a full week for the first time. Mira asked for photos instead of numbers on weekends.",
+   "folded_into": null
+  },
+  {
+   "id": "550c6044dcf0efcebe70dd565e55aea7",
+   "kind": "page",
+   "room_id": "1",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "main chat"
+    },
+    "task_id": ""
+   },
+   "ts": "2026-10-02T07:40:00Z",
+   "text": "Mira asked me to stop sending the greenhouse note at night. She reads it with her first coffee, and a 23:40 message woke her twice this week. I moved the note to 07:30 and told her so plainly.\n\nShe also asked that every note end with the one thing she should decide that day — not a list.",
+   "covers": {
+    "ts_span": [
+     "2026-09-28",
+     "2026-10-02"
+    ]
+   },
+   "quotes": [
+    {
+     "speaker": "human",
+     "name": "Mira",
+     "text": "Only mornings, please — nights are for sleep."
+    }
+   ],
+   "host_stamp": {
+    "tasks": [
+     {
+      "task_id": "a90e13",
+      "status": "succeeded",
+      "outcome": "note moved to 07:30",
+      "final": true
+     }
+    ]
+   },
+   "corrections": [],
+   "revision": "550c6044dcf0efcebe70dd565e55aea7",
+   "revisions": [
+    "550c6044dcf0efcebe70dd565e55aea7"
+   ],
+   "current_text": "Mira asked me to stop sending the greenhouse note at night. She reads it with her first coffee, and a 23:40 message woke her twice this week. I moved the note to 07:30 and told her so plainly.\n\nShe also asked that every note end with the one thing she should decide that day — not a list.",
+   "folded_into": "3bbb80b576b92ff6515bb04466f86bb6",
+   "status": "final"
+  },
+  {
+   "id": "f6b5bb1562fd2d3b83849dd12b82f583",
+   "kind": "page",
+   "room_id": "1",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "main chat"
+    },
+    "task_id": ""
+   },
+   "ts": "2026-10-09T08:05:00Z",
+   "text": "Lev came over on Saturday and asked, through Mira, whether the greenhouse could water itself. I said not yet: sensor 3 still reads high after rain, and a pump that trusts it would flood the tomatoes. We agreed I would show him the calibration numbers first.",
+   "covers": {
+    "ts_span": [
+     "2026-10-05",
+     "2026-10-09"
+    ]
+   },
+   "quotes": [
+    {
+     "speaker": "human",
+     "name": "Mira",
+     "text": "Lev wants to know if it can water itself."
+    }
+   ],
+   "corrections": [],
+   "revision": "f6b5bb1562fd2d3b83849dd12b82f583",
+   "revisions": [
+    "f6b5bb1562fd2d3b83849dd12b82f583"
+   ],
+   "current_text": "Lev came over on Saturday and asked, through Mira, whether the greenhouse could water itself. I said not yet: sensor 3 still reads high after rain, and a pump that trusts it would flood the tomatoes. We agreed I would show him the calibration numbers first.",
+   "folded_into": "3bbb80b576b92ff6515bb04466f86bb6",
+   "status": "final"
+  },
+  {
+   "id": "3bbb80b576b92ff6515bb04466f86bb6",
+   "kind": "part",
+   "room_id": "1",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "main chat"
+    },
+    "task_id": ""
+   },
+   "ts": "2026-10-12T07:55:00Z",
+   "text": "Late September into October: Mira and I settled a rhythm — one morning note, one decision in it — and Lev's question about automatic watering taught me to say “not yet” with numbers instead of reassurance.",
+   "covers": {
+    "member_ids": [
+     "550c6044dcf0efcebe70dd565e55aea7",
+     "f6b5bb1562fd2d3b83849dd12b82f583"
+    ],
+    "ts_span": [
+     "2026-09-28",
+     "2026-10-09"
+    ]
+   },
+   "corrections": [],
+   "revision": "3bbb80b576b92ff6515bb04466f86bb6",
+   "revisions": [
+    "3bbb80b576b92ff6515bb04466f86bb6"
+   ],
+   "current_text": "Late September into October: Mira and I settled a rhythm — one morning note, one decision in it — and Lev's question about automatic watering taught me to say “not yet” with numbers instead of reassurance.",
+   "folded_into": null,
+   "status": "final"
+  },
+  {
+   "id": "1c597f0f52cfa49ff373e7cdb01ff9f8",
+   "kind": "page",
+   "room_id": "1",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "main chat"
+    },
+    "task_id": ""
+   },
+   "ts": "2026-10-24T08:10:00Z",
+   "text": "Mira decided the release goes out weekly from now on, on Thursdays after lunch, and that Lev signs the build by hand until the new signing key arrives. I updated the release checklist and set a mark so I remember the signing rule whenever I run the release command.",
+   "covers": {
+    "ts_span": [
+     "2026-10-20",
+     "2026-10-24"
+    ]
+   },
+   "quotes": [
+    {
+     "speaker": "human",
+     "name": "Mira",
+     "text": "Weekly is fine. Tuesday after lunch works better for Lev."
+    }
+   ],
+   "corrections": [
+    {
+     "id": "05310162d7874ae9f11079e4b6b64f16",
+     "author": {
+      "kind": "mind",
+      "focus": {
+       "role": "main chat"
+      },
+      "task_id": ""
+     },
+     "ts": "2026-10-25T09:02:00Z",
+     "text": "I misread her message: the weekly release is on Tuesdays, not Thursdays — her words were “Tuesday after lunch works better for Lev”. The checklist and the mark now say Tuesday."
+    }
+   ],
+   "revision": "05310162d7874ae9f11079e4b6b64f16",
+   "revisions": [
+    "1c597f0f52cfa49ff373e7cdb01ff9f8",
+    "05310162d7874ae9f11079e4b6b64f16"
+   ],
+   "current_text": "Mira decided the release goes out weekly from now on, on Thursdays after lunch, and that Lev signs the build by hand until the new signing key arrives. I updated the release checklist and set a mark so I remember the signing rule whenever I run the release command.\n\n[correction 05310162d7874ae9f11079e4b6b64f16 by mind (main chat), 2026-10-25]\nI misread her message: the weekly release is on Tuesdays, not Thursdays — her words were “Tuesday after lunch works better for Lev”. The checklist and the mark now say Tuesday.",
+   "folded_into": null,
+   "status": "final"
+  },
+  {
+   "id": "05310162d7874ae9f11079e4b6b64f16",
+   "kind": "correction",
+   "room_id": "1",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "main chat"
+    },
+    "task_id": ""
+   },
+   "ts": "2026-10-25T09:02:00Z",
+   "text": "I misread her message: the weekly release is on Tuesdays, not Thursdays — her words were “Tuesday after lunch works better for Lev”. The checklist and the mark now say Tuesday.",
+   "target_id": "1c597f0f52cfa49ff373e7cdb01ff9f8"
+  },
+  {
+   "id": "a49bdce26c759898e88de2af320edee5",
+   "kind": "page",
+   "room_id": "4107",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "project task"
+    },
+    "task_id": "b41e09"
+   },
+   "ts": "2026-09-22T19:30:00Z",
+   "text": "The first reading loop works: four soil sensors report every thirty minutes to a small script on the Mac mini. Sensor 3 reads about eight percent wetter than the others after rain. I did not correct it in code yet; I wrote the readings down so we can see the pattern before trusting a fix.",
+   "covers": {
+    "ts_span": [
+     "2026-09-15",
+     "2026-09-22"
+    ]
+   },
+   "host_stamp": {
+    "tasks": [
+     {
+      "task_id": "b41e09",
+      "status": "succeeded",
+      "outcome": "reading loop running",
+      "final": true
+     }
+    ]
+   },
+   "corrections": [
+    {
+     "id": "6909a32d0fd618b58bfbfd73250e43aa",
+     "author": {
+      "kind": "mind",
+      "focus": {
+       "role": "project task"
+      },
+      "task_id": "b41e09"
+     },
+     "ts": "2026-10-24T07:30:00Z",
+     "text": "Thirty-minute reports lasted only until 12 October; since then the loop reports every ten minutes. The eight percent figure still holds."
+    }
+   ],
+   "revision": "6909a32d0fd618b58bfbfd73250e43aa",
+   "revisions": [
+    "a49bdce26c759898e88de2af320edee5",
+    "6909a32d0fd618b58bfbfd73250e43aa"
+   ],
+   "current_text": "The first reading loop works: four soil sensors report every thirty minutes to a small script on the Mac mini. Sensor 3 reads about eight percent wetter than the others after rain. I did not correct it in code yet; I wrote the readings down so we can see the pattern before trusting a fix.\n\n[correction 6909a32d0fd618b58bfbfd73250e43aa by mind (project task), 2026-10-24]\nThirty-minute reports lasted only until 12 October; since then the loop reports every ten minutes. The eight percent figure still holds.",
+   "folded_into": "3b543791c99173199c01120dbdadba7b",
+   "status": "final"
+  },
+  {
+   "id": "48a18ea7388e3d1a4533914cec549372",
+   "kind": "page",
+   "room_id": "4107",
+   "author": {
+    "kind": "helper"
+   },
+   "ts": "2026-10-05T21:00:00Z",
+   "text": "Calibration notes: sensor 3 compared against a weighed soil sample, dried and weighed again. An offset of +7.6% holds on three wet days; dry days show no offset.",
+   "covers": {
+    "ts_span": [
+     "2026-10-01",
+     "2026-10-05"
+    ]
+   },
+   "corrections": [],
+   "revision": "48a18ea7388e3d1a4533914cec549372",
+   "revisions": [
+    "48a18ea7388e3d1a4533914cec549372"
+   ],
+   "current_text": "Calibration notes: sensor 3 compared against a weighed soil sample, dried and weighed again. An offset of +7.6% holds on three wet days; dry days show no offset.",
+   "folded_into": "3b543791c99173199c01120dbdadba7b",
+   "status": "accepted",
+   "decision": {
+    "id": "7385180f6a4c96f1afa09999033e6af3",
+    "accepted": true,
+    "reason": "Matches my own readings; keeping it as written.",
+    "ts": "2026-10-06T07:20:00Z",
+    "author": {
+     "kind": "mind",
+     "focus": {
+      "role": "project task"
+     },
+     "task_id": "b41e09"
+    }
+   }
+  },
+  {
+   "id": "7385180f6a4c96f1afa09999033e6af3",
+   "kind": "decision",
+   "room_id": "4107",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "project task"
+    },
+    "task_id": "b41e09"
+   },
+   "ts": "2026-10-06T07:20:00Z",
+   "text": "",
+   "target_id": "48a18ea7388e3d1a4533914cec549372",
+   "accepted": true,
+   "reason": "Matches my own readings; keeping it as written."
+  },
+  {
+   "id": "3b543791c99173199c01120dbdadba7b",
+   "kind": "part",
+   "room_id": "4107",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "project task"
+    },
+    "task_id": "b41e09"
+   },
+   "ts": "2026-10-07T08:00:00Z",
+   "text": "September: from a loop that merely reported to a sensor I can trust with a known offset. Sensor 3's rain bias is real and measured, not a wiring fault.",
+   "covers": {
+    "member_ids": [
+     "a49bdce26c759898e88de2af320edee5",
+     "48a18ea7388e3d1a4533914cec549372"
+    ],
+    "ts_span": [
+     "2026-09-15",
+     "2026-10-05"
+    ]
+   },
+   "corrections": [],
+   "revision": "3b543791c99173199c01120dbdadba7b",
+   "revisions": [
+    "3b543791c99173199c01120dbdadba7b"
+   ],
+   "current_text": "September: from a loop that merely reported to a sensor I can trust with a known offset. Sensor 3's rain bias is real and measured, not a wiring fault.",
+   "folded_into": null,
+   "status": "final"
+  },
+  {
+   "id": "584fe3e038546138e74d2c09316e1175",
+   "kind": "page",
+   "room_id": "4107",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "project task"
+    },
+    "task_id": "b41e09"
+   },
+   "ts": "2026-10-18T18:40:00Z",
+   "text": "Moved the readings to a ten-minute cadence on 14 October and added the +7.6% rain correction for sensor 3 behind a flag Mira can see in the morning note. The pump stays manual.",
+   "covers": {
+    "ts_span": [
+     "2026-10-12",
+     "2026-10-18"
+    ]
+   },
+   "corrections": [
+    {
+     "id": "2e76df257a357de034694680766f6b64",
+     "author": {
+      "kind": "mind",
+      "focus": {
+       "role": "project task"
+      },
+      "task_id": "b41e09"
+     },
+     "ts": "2026-10-22T07:45:00Z",
+     "text": "The ten-minute cadence started on 12 October, not 14 October; the journal entry has the exact time."
+    }
+   ],
+   "revision": "2e76df257a357de034694680766f6b64",
+   "revisions": [
+    "584fe3e038546138e74d2c09316e1175",
+    "2e76df257a357de034694680766f6b64"
+   ],
+   "current_text": "Moved the readings to a ten-minute cadence on 14 October and added the +7.6% rain correction for sensor 3 behind a flag Mira can see in the morning note. The pump stays manual.\n\n[correction 2e76df257a357de034694680766f6b64 by mind (project task), 2026-10-22]\nThe ten-minute cadence started on 12 October, not 14 October; the journal entry has the exact time.",
+   "folded_into": null,
+   "status": "final"
+  },
+  {
+   "id": "2e76df257a357de034694680766f6b64",
+   "kind": "correction",
+   "room_id": "4107",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "project task"
+    },
+    "task_id": "b41e09"
+   },
+   "ts": "2026-10-22T07:45:00Z",
+   "text": "The ten-minute cadence started on 12 October, not 14 October; the journal entry has the exact time.",
+   "target_id": "584fe3e038546138e74d2c09316e1175"
+  },
+  {
+   "id": "6909a32d0fd618b58bfbfd73250e43aa",
+   "kind": "correction",
+   "room_id": "4107",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "project task"
+    },
+    "task_id": "b41e09"
+   },
+   "ts": "2026-10-24T07:30:00Z",
+   "text": "Thirty-minute reports lasted only until 12 October; since then the loop reports every ten minutes. The eight percent figure still holds.",
+   "target_id": "a49bdce26c759898e88de2af320edee5"
+  },
+  {
+   "id": "d64a17641fcac9e72f569f3ba8a02e05",
+   "kind": "page",
+   "room_id": "4107",
+   "author": {
+    "kind": "helper",
+    "task_id": "7c21",
+    "focus": {
+     "role": "child",
+     "task_id": "7c21"
+    }
+   },
+   "ts": "2026-10-26T16:20:00Z",
+   "text": "Draft: the pump relay clicked but did not switch on Saturday because its ground wire was loose. I re-seated the wire; the relay switched on in all five test runs. Suggest adding a weekly relay test to the morning note.",
+   "covers": {
+    "ts_span": [
+     "2026-10-24",
+     "2026-10-26"
+    ]
+   },
+   "metadata": {
+    "candidate": true
+   },
+   "host_stamp": {
+    "tasks": [
+     {
+      "task_id": "7c21",
+      "status": "succeeded",
+      "outcome": "relay test passed 5/5",
+      "final": true
+     }
+    ]
+   },
+   "corrections": [],
+   "revision": "d64a17641fcac9e72f569f3ba8a02e05",
+   "revisions": [
+    "d64a17641fcac9e72f569f3ba8a02e05"
+   ],
+   "current_text": "Draft: the pump relay clicked but did not switch on Saturday because its ground wire was loose. I re-seated the wire; the relay switched on in all five test runs. Suggest adding a weekly relay test to the morning note.",
+   "folded_into": null,
+   "status": "candidate"
+  },
+  {
+   "id": "a43b77148bb600317ecc98198ac3234e",
+   "kind": "page",
+   "room_id": "4112",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "project task"
+    },
+    "task_id": "c7d210"
+   },
+   "ts": "2026-10-11T15:10:00Z",
+   "text": "First dry run of the weekly release. The signing step failed twice: the old key had expired on 1 October. Lev signed by hand on the third try. I added the expiry date to the checklist.",
+   "covers": {
+    "ts_span": [
+     "2026-10-07",
+     "2026-10-11"
+    ]
+   },
+   "host_stamp": {
+    "tasks": [
+     {
+      "task_id": "c7d210",
+      "status": "succeeded",
+      "outcome": "dry run signed by hand",
+      "final": true
+     }
+    ]
+   },
+   "corrections": [],
+   "revision": "a43b77148bb600317ecc98198ac3234e",
+   "revisions": [
+    "a43b77148bb600317ecc98198ac3234e"
+   ],
+   "current_text": "First dry run of the weekly release. The signing step failed twice: the old key had expired on 1 October. Lev signed by hand on the third try. I added the expiry date to the checklist.",
+   "folded_into": null,
+   "status": "final"
+  },
+  {
+   "id": "fdbe6acb0d8599c39537697e696f8056",
+   "kind": "page",
+   "room_id": "4112",
+   "author": {
+    "kind": "helper"
+   },
+   "ts": "2026-10-15T22:30:00Z",
+   "text": "Release 0.4 shipped successfully on Tuesday; the store review passed.",
+   "covers": {
+    "ts_span": [
+     "2026-10-14",
+     "2026-10-15"
+    ]
+   },
+   "host_stamp": {
+    "tasks": [
+     {
+      "task_id": "e2f417",
+      "status": "failed",
+      "outcome": "upload refused: store token missing",
+      "final": true
+     }
+    ]
+   },
+   "corrections": [],
+   "revision": "fdbe6acb0d8599c39537697e696f8056",
+   "revisions": [
+    "fdbe6acb0d8599c39537697e696f8056"
+   ],
+   "current_text": "Release 0.4 shipped successfully on Tuesday; the store review passed.",
+   "folded_into": null,
+   "status": "rejected",
+   "decision": {
+    "id": "c728c4919683d31cd9cdba2fb1332a18",
+    "accepted": false,
+    "reason": "The host stamp shows the upload task failed; 0.4 did not ship that day. My page of 19 October says what happened.",
+    "ts": "2026-10-23T10:15:00Z",
+    "author": {
+     "kind": "mind",
+     "focus": {
+      "role": "project task"
+     },
+     "task_id": "c7d210"
+    }
+   }
+  },
+  {
+   "id": "3d8788f378eb8f8c36deff91f1b297e9",
+   "kind": "page",
+   "room_id": "4112",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "project task"
+    },
+    "task_id": "c7d210"
+   },
+   "ts": "2026-10-19T12:00:00Z",
+   "text": "Release 0.4 shipped on the second attempt, on Friday 17 October. The upload had failed on Tuesday because the store token was missing from the release machine; I had repeated the Light draft that said it shipped. I now check the host stamp before writing that anything shipped.",
+   "covers": {
+    "ts_span": [
+     "2026-10-16",
+     "2026-10-19"
+    ]
+   },
+   "host_stamp": {
+    "tasks": [
+     {
+      "task_id": "e2f418",
+      "status": "succeeded",
+      "outcome": "0.4 uploaded",
+      "final": true
+     }
+    ]
+   },
+   "corrections": [],
+   "revision": "3d8788f378eb8f8c36deff91f1b297e9",
+   "revisions": [
+    "3d8788f378eb8f8c36deff91f1b297e9"
+   ],
+   "current_text": "Release 0.4 shipped on the second attempt, on Friday 17 October. The upload had failed on Tuesday because the store token was missing from the release machine; I had repeated the Light draft that said it shipped. I now check the host stamp before writing that anything shipped.",
+   "folded_into": null,
+   "status": "final"
+  },
+  {
+   "id": "c728c4919683d31cd9cdba2fb1332a18",
+   "kind": "decision",
+   "room_id": "4112",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "project task"
+    },
+    "task_id": "c7d210"
+   },
+   "ts": "2026-10-23T10:15:00Z",
+   "text": "",
+   "target_id": "fdbe6acb0d8599c39537697e696f8056",
+   "accepted": false,
+   "reason": "The host stamp shows the upload task failed; 0.4 did not ship that day. My page of 19 October says what happened."
+  },
+  {
+   "id": "76e77498834f9df70bf9588808d9348a",
+   "kind": "page",
+   "room_id": "5203",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "place"
+    },
+    "task_id": ""
+   },
+   "ts": "2026-10-14T19:00:00Z",
+   "text": "Mira sent photos of sensor 3 from the greenhouse over Telegram: the probe sits right under the drip line, which explains the wet bias better than any offset. She asked me to remind her to move it on the weekend.",
+   "covers": {
+    "ts_span": [
+     "2026-10-10",
+     "2026-10-14"
+    ]
+   },
+   "quotes": [
+    {
+     "speaker": "human",
+     "name": "Mira",
+     "text": "Look where the probe is. Remind me Saturday to move it."
+    }
+   ],
+   "corrections": [],
+   "revision": "76e77498834f9df70bf9588808d9348a",
+   "revisions": [
+    "76e77498834f9df70bf9588808d9348a"
+   ],
+   "current_text": "Mira sent photos of sensor 3 from the greenhouse over Telegram: the probe sits right under the drip line, which explains the wet bias better than any offset. She asked me to remind her to move it on the weekend.",
+   "folded_into": null,
+   "status": "final"
+  },
+  {
+   "id": "3dea3e5fc36c83dde6a65d4bb675bee2",
+   "kind": "page",
+   "room_id": "5203",
+   "author": {
+    "kind": "helper"
+   },
+   "ts": "2026-10-27T06:50:00Z",
+   "text": "Weekend messages: Mira moved sensor 3 away from the drip line on Sunday and sent a photo of the new spot. She asked whether the offset can be removed now.",
+   "covers": {
+    "ts_span": [
+     "2026-10-25",
+     "2026-10-26"
+    ]
+   },
+   "corrections": [],
+   "revision": "3dea3e5fc36c83dde6a65d4bb675bee2",
+   "revisions": [
+    "3dea3e5fc36c83dde6a65d4bb675bee2"
+   ],
+   "current_text": "Weekend messages: Mira moved sensor 3 away from the drip line on Sunday and sent a photo of the new spot. She asked whether the offset can be removed now.",
+   "folded_into": null,
+   "status": "draft"
+  },
+  {
+   "id": "ac8bb7fb433d7c9836ff5731f497090c",
+   "kind": "account",
+   "room_id": "1",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "main chat"
+    },
+    "task_id": ""
+   },
+   "ts": "2026-10-21T20:15:00Z",
+   "text": "October, across rooms: the greenhouse and the release taught me the same lesson. In the garden, sensor 3 looked broken until the numbers showed a steady rain bias, and Mira's photos on Telegram showed why. In the release, a draft said 0.4 had shipped and I repeated it until the host stamp said otherwise.\n\nWhat I keep from all three rooms: measure before I trust, and say plainly what I do not know yet.",
+   "corrections": [],
+   "revision": "ac8bb7fb433d7c9836ff5731f497090c",
+   "revisions": [
+    "ac8bb7fb433d7c9836ff5731f497090c"
+   ],
+   "current_text": "October, across rooms: the greenhouse and the release taught me the same lesson. In the garden, sensor 3 looked broken until the numbers showed a steady rain bias, and Mira's photos on Telegram showed why. In the release, a draft said 0.4 had shipped and I repeated it until the host stamp said otherwise.\n\nWhat I keep from all three rooms: measure before I trust, and say plainly what I do not know yet.",
+   "folded_into": null,
+   "sources": [
+    {
+     "id": "3b543791c99173199c01120dbdadba7b",
+     "kind": "part",
+     "room_id": "4107",
+     "revision": "3b543791c99173199c01120dbdadba7b",
+     "sha256": "7743495f5a7ba093e5b6bac25e475309812d318311ca5d541eb6f0b4b083e5d0",
+     "status": "final",
+     "missing": false,
+     "revision_known": true,
+     "current_revision": "3b543791c99173199c01120dbdadba7b",
+     "later_corrections": [],
+     "status_now": "final",
+     "folded_into": null,
+     "nested_changes": [
+      {
+       "source_id": "a49bdce26c759898e88de2af320edee5",
+       "kind": "page",
+       "room_id": "4107",
+       "via": [
+        "3b543791c99173199c01120dbdadba7b"
+       ],
+       "revision": null,
+       "event": {
+        "kind": "correction",
+        "id": "6909a32d0fd618b58bfbfd73250e43aa",
+        "ts": "2026-10-24T07:30:00Z",
+        "author": {
+         "kind": "mind",
+         "focus": {
+          "role": "project task"
+         },
+         "task_id": "b41e09"
+        },
+        "text": "Thirty-minute reports lasted only until 12 October; since then the loop reports every ten minutes. The eight percent figure still holds."
+       }
+      }
+     ]
+    },
+    {
+     "id": "584fe3e038546138e74d2c09316e1175",
+     "kind": "page",
+     "room_id": "4107",
+     "revision": "584fe3e038546138e74d2c09316e1175",
+     "sha256": "60cb8c435ed1368abba3f4bc5f48994a617df68ca1c2da652c1290cc380182d8",
+     "status": "final",
+     "missing": false,
+     "revision_known": true,
+     "current_revision": "2e76df257a357de034694680766f6b64",
+     "later_corrections": [
+      "2e76df257a357de034694680766f6b64"
+     ],
+     "status_now": "final",
+     "folded_into": null,
+     "nested_changes": []
+    },
+    {
+     "id": "a43b77148bb600317ecc98198ac3234e",
+     "kind": "page",
+     "room_id": "4112",
+     "revision": "a43b77148bb600317ecc98198ac3234e",
+     "sha256": "2408fb6827c801a4758a99d59cfaa52a7c00ba52f54937b18ad51aeb3cb17879",
+     "status": "final",
+     "missing": false,
+     "revision_known": true,
+     "current_revision": "a43b77148bb600317ecc98198ac3234e",
+     "later_corrections": [],
+     "status_now": "final",
+     "folded_into": null,
+     "nested_changes": []
+    },
+    {
+     "id": "fdbe6acb0d8599c39537697e696f8056",
+     "kind": "page",
+     "room_id": "4112",
+     "revision": "fdbe6acb0d8599c39537697e696f8056",
+     "sha256": "d9508150cbd53d4c0426c201d69db0648916891b703cd295ea34d62d152e31c4",
+     "status": "draft",
+     "missing": false,
+     "revision_known": true,
+     "current_revision": "fdbe6acb0d8599c39537697e696f8056",
+     "later_corrections": [],
+     "status_now": "rejected",
+     "folded_into": null,
+     "nested_changes": []
+    },
+    {
+     "id": "3d8788f378eb8f8c36deff91f1b297e9",
+     "kind": "page",
+     "room_id": "4112",
+     "revision": "3d8788f378eb8f8c36deff91f1b297e9",
+     "sha256": "45d70c292fd6e31d060fab385dedd8852caa37b248f5024ca47f01e73b464119",
+     "status": "final",
+     "missing": false,
+     "revision_known": true,
+     "current_revision": "3d8788f378eb8f8c36deff91f1b297e9",
+     "later_corrections": [],
+     "status_now": "final",
+     "folded_into": null,
+     "nested_changes": []
+    },
+    {
+     "id": "76e77498834f9df70bf9588808d9348a",
+     "kind": "page",
+     "room_id": "5203",
+     "revision": "76e77498834f9df70bf9588808d9348a",
+     "sha256": "4164b294e30926f7f311e30f352d834ada5d7ad5680514e7efbd5de92e64617e",
+     "status": "final",
+     "missing": false,
+     "revision_known": true,
+     "current_revision": "76e77498834f9df70bf9588808d9348a",
+     "later_corrections": [],
+     "status_now": "final",
+     "folded_into": null,
+     "nested_changes": []
+    }
+   ],
+   "selection": {
+    "id": "da8aa367e622ffc8e7a2851332188b58",
+    "shown": true,
+    "replaces": [
+     "584fe3e038546138e74d2c09316e1175",
+     "a43b77148bb600317ecc98198ac3234e",
+     "76e77498834f9df70bf9588808d9348a"
+    ],
+    "reason": "One account tells this lesson better than three pages that each hold a piece of it.",
+    "ts": "2026-10-21T20:16:00Z"
+   }
+  },
+  {
+   "id": "da8aa367e622ffc8e7a2851332188b58",
+   "kind": "selection",
+   "room_id": "1",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "main chat"
+    },
+    "task_id": ""
+   },
+   "ts": "2026-10-21T20:16:00Z",
+   "text": "",
+   "target_id": "ac8bb7fb433d7c9836ff5731f497090c",
+   "shown": true,
+   "replaces": [
+    "584fe3e038546138e74d2c09316e1175",
+    "a43b77148bb600317ecc98198ac3234e",
+    "76e77498834f9df70bf9588808d9348a"
+   ],
+   "reason": "One account tells this lesson better than three pages that each hold a piece of it."
+  },
+  {
+   "id": "7b05823dbf5bffff48638b17cdd71b95",
+   "kind": "mark",
+   "room_id": "1",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "main chat"
+    },
+    "task_id": ""
+   },
+   "ts": "2026-10-02T07:45:00Z",
+   "text": "Mornings only for Mira: nothing between 22:00 and 07:30 unless she writes first.",
+   "scope": "global",
+   "target": {
+    "node_id": "550c6044dcf0efcebe70dd565e55aea7"
+   },
+   "quote": "Only mornings, please — nights are for sleep.",
+   "visibility": "full",
+   "anchor": {
+    "tool": "schedule_followup"
+   },
+   "released": null
+  },
+  {
+   "id": "7ac1a707deb0ccd345c53a4e683f1b32",
+   "kind": "mark",
+   "room_id": "4107",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "project task"
+    },
+    "task_id": "b41e09"
+   },
+   "ts": "2026-10-18T18:45:00Z",
+   "text": "Sensor 3 reads about 7.6% wet after rain. Apply the offset before any watering decision.",
+   "scope": "room",
+   "target": {
+    "node_id": "584fe3e038546138e74d2c09316e1175"
+   },
+   "visibility": "full",
+   "anchor": {
+    "path": "garden/sensors/calibration.yaml"
+   },
+   "released": null
+  },
+  {
+   "id": "d5736bf9f2f17672eec0a4297ade4c7e",
+   "kind": "mark",
+   "room_id": "1",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "main chat"
+    },
+    "task_id": ""
+   },
+   "ts": "2026-10-25T09:05:00Z",
+   "text": "Weekly release on Tuesdays after lunch. Lev signs by hand until the new key arrives.",
+   "scope": "global",
+   "target": {
+    "node_id": "1c597f0f52cfa49ff373e7cdb01ff9f8"
+   },
+   "visibility": "full",
+   "anchor": {
+    "tool": "run_command",
+    "text": "release"
+   },
+   "released": null
+  },
+  {
+   "id": "f9e9a4c46d328e4f283c0bab086388bc",
+   "kind": "mark",
+   "room_id": "4112",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "project task"
+    },
+    "task_id": "c7d210"
+   },
+   "ts": "2026-10-11T15:15:00Z",
+   "text": "The old signing key expired on 1 October: never trust a green signing step without checking the date.",
+   "scope": "room",
+   "target": {
+    "node_id": "a43b77148bb600317ecc98198ac3234e"
+   },
+   "visibility": "meaning",
+   "released": {
+    "id": "2893f4d6931bfe54ecd4a56368fadb30",
+    "ts": "2026-10-20T09:00:00Z",
+    "reason": "Expiry is now the first step of the release checklist; the mark is no longer needed."
+   }
+  },
+  {
+   "id": "2893f4d6931bfe54ecd4a56368fadb30",
+   "kind": "mark_release",
+   "room_id": "4112",
+   "author": {
+    "kind": "mind",
+    "focus": {
+     "role": "project task"
+    },
+    "task_id": "c7d210"
+   },
+   "ts": "2026-10-20T09:00:00Z",
+   "text": "",
+   "target_id": "f9e9a4c46d328e4f283c0bab086388bc",
+   "reason": "Expiry is now the first step of the release checklist; the mark is no longer needed."
+  }
+ ],
+ "story": [
+  "3dea3e5fc36c83dde6a65d4bb675bee2",
+  "1c597f0f52cfa49ff373e7cdb01ff9f8",
+  "ac8bb7fb433d7c9836ff5731f497090c",
+  "3d8788f378eb8f8c36deff91f1b297e9",
+  "3bbb80b576b92ff6515bb04466f86bb6",
+  "3b543791c99173199c01120dbdadba7b",
+  "5914da0b9c3b56c75b44bcffb0ec7f84",
+  "938de6dcf59107f89ad5496c24209069",
+  "ce4497bd70b99c498b3ee5d99d81e710",
+  "2377dda4915bf9e9b8a37a08d8a96438"
+ ],
+ "candidates": [
+  "d64a17641fcac9e72f569f3ba8a02e05"
+ ],
+ "knowledge": [
+  {
+   "topic": "overview",
+   "scope": "global",
+   "title": "Overview",
+   "type": null,
+   "summary": "How my knowledge is laid out — people, the garden, releases and my tools — and how sure I am of each part.",
+   "state": "active",
+   "archive": null,
+   "parse_error": "",
+   "revision": "582b44fbef83d40999de98564749edbb0c771b2d1f7f8e57ddc79cd311ec9e6a",
+   "raw": "---\ntitle: Overview\nsummary: How my knowledge is laid out — people, the garden, releases and my tools — and how sure I am of each part.\n---\n# Overview\n\nI keep knowledge in four places:\n\n- **People** — [Mira](people/mira.md) and [Lev](people/lev.md): what they told me, what I saw, and what I only infer.\n- **Garden** — [sensor calibration](garden/sensor-calibration.md) and the [pump relay](garden/pump-relay.md).\n- **Releases** — the [release checklist](release/checklist.md).\n- **Tools** — how I run [long commands](tools/shell/long-commands.md).\n\nAnything I have not checked twice is marked *inferred* inside its note.\n",
+   "body": "# Overview\n\nI keep knowledge in four places:\n\n- **People** — [Mira](people/mira.md) and [Lev](people/lev.md): what they told me, what I saw, and what I only infer.\n- **Garden** — [sensor calibration](garden/sensor-calibration.md) and the [pump relay](garden/pump-relay.md).\n- **Releases** — the [release checklist](release/checklist.md).\n- **Tools** — how I run [long commands](tools/shell/long-commands.md).\n\nAnything I have not checked twice is marked *inferred* inside its note.\n",
+   "path": "memory/knowledge/overview.md",
+   "links": [
+    {
+     "label": "Mira",
+     "target": "people/mira.md",
+     "topic": "people/mira",
+     "status": "present"
+    },
+    {
+     "label": "Lev",
+     "target": "people/lev.md",
+     "topic": "people/lev",
+     "status": "present"
+    },
+    {
+     "label": "sensor calibration",
+     "target": "garden/sensor-calibration.md",
+     "topic": "garden/sensor-calibration",
+     "status": "present"
+    },
+    {
+     "label": "pump relay",
+     "target": "garden/pump-relay.md",
+     "topic": "garden/pump-relay",
+     "status": "present"
+    },
+    {
+     "label": "release checklist",
+     "target": "release/checklist.md",
+     "topic": "release/checklist",
+     "status": "present"
+    },
+    {
+     "label": "long commands",
+     "target": "tools/shell/long-commands.md",
+     "topic": "tools/shell/long-commands",
+     "status": "present"
+    }
+   ],
+   "versions": [
+    {
+     "ts": "2026-09-30T08:00:00Z",
+     "text": "---\ntitle: Overview\nsummary: How my knowledge is laid out — people, the garden, releases and my tools — and how sure I am of each part.\n---\n# Overview\n\nI keep knowledge in three places:\n\n- **People** — [Mira](people/mira.md) and [Lev](people/lev.md): what they told me, what I saw, and what I only infer.\n- **Garden** — [sensor calibration](garden/sensor-calibration.md) and the [pump relay](garden/pump-relay.md).\n- **Releases** — the [release checklist](release/checklist.md).\n\nAnything I have not checked twice is marked *inferred* inside its note.\n",
+     "writer": "Ouroboros (main chat)",
+     "change": "written"
+    },
+    {
+     "ts": "2026-10-25T09:12:00Z",
+     "text": "---\ntitle: Overview\nsummary: How my knowledge is laid out — people, the garden, releases and my tools — and how sure I am of each part.\n---\n# Overview\n\nI keep knowledge in four places:\n\n- **People** — [Mira](people/mira.md) and [Lev](people/lev.md): what they told me, what I saw, and what I only infer.\n- **Garden** — [sensor calibration](garden/sensor-calibration.md) and the [pump relay](garden/pump-relay.md).\n- **Releases** — the [release checklist](release/checklist.md).\n- **Tools** — how I run [long commands](tools/shell/long-commands.md).\n\nAnything I have not checked twice is marked *inferred* inside its note.\n",
+     "writer": "Ouroboros (main chat)",
+     "change": "body: Tools line added"
+    }
+   ],
+   "inbound": []
+  },
+  {
+   "topic": "people/mira",
+   "scope": "global",
+   "title": "Mira",
+   "type": "person",
+   "summary": "Mira is who I work for. Mornings only, and every note ends with one decision (told, 30 September). She trusts numbers over reassurance (observed in October).",
+   "state": "active",
+   "archive": null,
+   "parse_error": "",
+   "revision": "aaadeb4875805180c38f3008889e571198ec18c52943ab88e77490fa62b1f3f4",
+   "raw": "---\ntitle: Mira\ntype: person\nsummary: Mira is who I work for. Mornings only, and every note ends with one decision (told, 30 September). She trusts numbers over reassurance (observed in October).\n---\n# Mira\n\n## Told\n\n- Mornings only: “Only mornings, please — nights are for sleep.” (30 September)\n- Every morning note ends with one decision, not a list.\n- The weekly release is on Tuesdays after lunch (24 October).\n\n## Observed\n\n- She looks at the greenhouse photos before she reads my numbers.\n- When I said “not yet” to automatic watering and showed the readings, she agreed at once.\n\n## Inferred\n\n- She would rather hear “I don't know yet” than a confident guess. Not confirmed.\n\nRelated: [Lev](lev.md), [sensor calibration](../garden/sensor-calibration.md).\n",
+   "body": "# Mira\n\n## Told\n\n- Mornings only: “Only mornings, please — nights are for sleep.” (30 September)\n- Every morning note ends with one decision, not a list.\n- The weekly release is on Tuesdays after lunch (24 October).\n\n## Observed\n\n- She looks at the greenhouse photos before she reads my numbers.\n- When I said “not yet” to automatic watering and showed the readings, she agreed at once.\n\n## Inferred\n\n- She would rather hear “I don't know yet” than a confident guess. Not confirmed.\n\nRelated: [Lev](lev.md), [sensor calibration](../garden/sensor-calibration.md).\n",
+   "path": "memory/knowledge/people/mira.md",
+   "links": [
+    {
+     "label": "Lev",
+     "target": "lev.md",
+     "topic": "people/lev",
+     "status": "present"
+    },
+    {
+     "label": "sensor calibration",
+     "target": "../garden/sensor-calibration.md",
+     "topic": "garden/sensor-calibration",
+     "status": "present"
+    }
+   ],
+   "versions": [
+    {
+     "ts": "2026-09-30T08:05:00Z",
+     "text": "---\ntitle: Mira\ntype: person\nsummary: Mira is who I work for. Mornings only, and every note ends with one decision (told, 30 September).\n---\n# Mira\n\n## Told\n\n- Mornings only: “Only mornings, please — nights are for sleep.” (30 September)\n- Every morning note ends with one decision, not a list.\n\n## Observed\n\n- She looks at the greenhouse photos before she reads my numbers.\n\nRelated: [Lev](lev.md), [sensor calibration](../garden/sensor-calibration.md).\n",
+     "writer": "Ouroboros (main chat)",
+     "change": "written"
+    },
+    {
+     "ts": "2026-10-12T08:00:00Z",
+     "text": "---\ntitle: Mira\ntype: person\nsummary: Mira is who I work for. Mornings only, and every note ends with one decision (told, 30 September). She trusts numbers over reassurance (observed in October).\n---\n# Mira\n\n## Told\n\n- Mornings only: “Only mornings, please — nights are for sleep.” (30 September)\n- Every morning note ends with one decision, not a list.\n\n## Observed\n\n- She looks at the greenhouse photos before she reads my numbers.\n- When I said “not yet” to automatic watering and showed the readings, she agreed at once.\n\nRelated: [Lev](lev.md), [sensor calibration](../garden/sensor-calibration.md).\n",
+     "writer": "Ouroboros (main chat)",
+     "change": "summary and body changed"
+    },
+    {
+     "ts": "2026-10-25T09:08:00Z",
+     "text": "---\ntitle: Mira\ntype: person\nsummary: Mira is who I work for. Mornings only, and every note ends with one decision (told, 30 September). She trusts numbers over reassurance (observed in October).\n---\n# Mira\n\n## Told\n\n- Mornings only: “Only mornings, please — nights are for sleep.” (30 September)\n- Every morning note ends with one decision, not a list.\n- The weekly release is on Tuesdays after lunch (24 October).\n\n## Observed\n\n- She looks at the greenhouse photos before she reads my numbers.\n- When I said “not yet” to automatic watering and showed the readings, she agreed at once.\n\n## Inferred\n\n- She would rather hear “I don't know yet” than a confident guess. Not confirmed.\n\nRelated: [Lev](lev.md), [sensor calibration](../garden/sensor-calibration.md).\n",
+     "writer": "Ouroboros (main chat)",
+     "change": "body: release day and an inference added"
+    }
+   ],
+   "inbound": [
+    {
+     "topic": "overview",
+     "scope": "global",
+     "label": "Mira",
+     "state": "active"
+    },
+    {
+     "topic": "people/lev",
+     "scope": "global",
+     "label": "Mira",
+     "state": "active"
+    },
+    {
+     "topic": "garden/sensor-calibration",
+     "scope": "global",
+     "label": "Mira",
+     "state": "active"
+    }
+   ]
+  },
+  {
+   "topic": "people/lev",
+   "scope": "global",
+   "title": "Lev",
+   "type": "person",
+   "summary": "Mira's friend. He wrote the watering app and signs releases by hand until the new key arrives; he keeps asking about automatic watering.",
+   "state": "active",
+   "archive": null,
+   "parse_error": "",
+   "revision": "41325a849f8c3a33beb173278a8e2ff6d7093077ad5411f3dd7e23414bcbcfa7",
+   "raw": "---\ntitle: Lev\ntype: person\nsummary: Mira's friend. He wrote the watering app and signs releases by hand until the new key arrives; he keeps asking about automatic watering.\n---\n# Lev\n\nLev wrote the plant-watering app that Mira and I ship. He visits on weekends and asks good, impatient\nquestions — mostly whether the greenhouse can water itself yet.\n\n- Signs the release build by hand while the new signing key is pending.\n- Prefers Tuesday afternoons for releases (through Mira, 24 October).\n\nRelated: [Mira](mira.md), [release checklist](../release/checklist.md).\n",
+   "body": "# Lev\n\nLev wrote the plant-watering app that Mira and I ship. He visits on weekends and asks good, impatient\nquestions — mostly whether the greenhouse can water itself yet.\n\n- Signs the release build by hand while the new signing key is pending.\n- Prefers Tuesday afternoons for releases (through Mira, 24 October).\n\nRelated: [Mira](mira.md), [release checklist](../release/checklist.md).\n",
+   "path": "memory/knowledge/people/lev.md",
+   "links": [
+    {
+     "label": "Mira",
+     "target": "mira.md",
+     "topic": "people/mira",
+     "status": "present"
+    },
+    {
+     "label": "release checklist",
+     "target": "../release/checklist.md",
+     "topic": "release/checklist",
+     "status": "present"
+    }
+   ],
+   "versions": [
+    {
+     "ts": "2026-10-09T08:10:00Z",
+     "text": "---\ntitle: Lev\ntype: person\nsummary: Mira's friend. He wrote the watering app and signs releases by hand until the new key arrives; he keeps asking about automatic watering.\n---\n# Lev\n\nLev wrote the plant-watering app that Mira and I ship. He visits on weekends and asks good, impatient\nquestions — mostly whether the greenhouse can water itself yet.\n\n- Signs the release build by hand while the new signing key is pending.\n- Prefers Tuesday afternoons for releases (through Mira, 24 October).\n\nRelated: [Mira](mira.md), [release checklist](../release/checklist.md).\n",
+     "writer": "Ouroboros (main chat)",
+     "change": "written"
+    }
+   ],
+   "inbound": [
+    {
+     "topic": "overview",
+     "scope": "global",
+     "label": "Lev",
+     "state": "active"
+    },
+    {
+     "topic": "people/mira",
+     "scope": "global",
+     "label": "Lev",
+     "state": "active"
+    }
+   ]
+  },
+  {
+   "topic": "garden/sensor-calibration",
+   "scope": "global",
+   "title": "Sensor calibration",
+   "type": null,
+   "summary": "Sensor 3 reads about 7.6% wet after rain and true on dry days, measured on three wet days in early October. Its probe sat under the drip line until 26 October.",
+   "state": "active",
+   "archive": null,
+   "parse_error": "",
+   "revision": "afd80d605bcda934a61e801be0a3d602d9a3d64ea563bf440f64307fd9c9d3ae",
+   "raw": "---\ntitle: Sensor calibration\nsummary: Sensor 3 reads about 7.6% wet after rain and true on dry days, measured on three wet days in early October. Its probe sat under the drip line until 26 October.\n---\n# Sensor calibration\n\n| Sensor | Dry days | After rain |\n| --- | --- | --- |\n| 1 | true | true |\n| 2 | true | +0.8% |\n| 3 | true | **+7.6%** |\n| 4 | true | true |\n\nThe offset was measured against a weighed soil sample, dried and weighed again\n(the accepted draft of 5 October). Mira's photos of 14 October showed the probe under the drip line,\nwhich explains the bias. She moved it on 26 October; I will compare the next wet days before removing\nthe offset. See [Mira](../people/mira.md) for how she wants this reported.\n",
+   "body": "# Sensor calibration\n\n| Sensor | Dry days | After rain |\n| --- | --- | --- |\n| 1 | true | true |\n| 2 | true | +0.8% |\n| 3 | true | **+7.6%** |\n| 4 | true | true |\n\nThe offset was measured against a weighed soil sample, dried and weighed again\n(the accepted draft of 5 October). Mira's photos of 14 October showed the probe under the drip line,\nwhich explains the bias. She moved it on 26 October; I will compare the next wet days before removing\nthe offset. See [Mira](../people/mira.md) for how she wants this reported.\n",
+   "path": "memory/knowledge/garden/sensor-calibration.md",
+   "links": [
+    {
+     "label": "Mira",
+     "target": "../people/mira.md",
+     "topic": "people/mira",
+     "status": "present"
+    }
+   ],
+   "versions": [
+    {
+     "ts": "2026-10-06T07:25:00Z",
+     "text": "---\ntitle: Sensor calibration\nsummary: Sensor 3 reads about 7.6% wet after rain and true on dry days, measured on three wet days in early October. Its probe sat under the drip line until 26 October.\n---\n# Sensor calibration\n\n| Sensor | Dry days | After rain |\n| --- | --- | --- |\n| 1 | true | true |\n| 2 | true | +0.8% |\n| 3 | true | **+7.6%** |\n| 4 | true | true |\n\nThe offset was measured against a weighed soil sample, dried and weighed again\n(the accepted draft of 5 October). Mira's photos of 14 October showed the probe under the drip line,\nwhich explains the bias. She moved it on 26 October; I will compare the next wet days before removing\nthe offset. See [Mira](../people/mira.md) for how she wants this reported.\n",
+     "writer": "Ouroboros (project task)",
+     "change": "written"
+    }
+   ],
+   "inbound": [
+    {
+     "topic": "overview",
+     "scope": "global",
+     "label": "sensor calibration",
+     "state": "active"
+    },
+    {
+     "topic": "people/mira",
+     "scope": "global",
+     "label": "sensor calibration",
+     "state": "active"
+    }
+   ]
+  },
+  {
+   "topic": "garden/pump-relay",
+   "scope": "global",
+   "title": "Pump relay",
+   "type": null,
+   "summary": "",
+   "state": "active",
+   "archive": null,
+   "parse_error": "",
+   "revision": "33e2425bbd7b3a2f00de77e5ed1dc4b08274ae8a90400a2e03b3c715952f2c24",
+   "raw": "---\ntitle: Pump relay\n---\n# Pump relay\n\nThe pump hangs off a 5 V relay module on GPIO 17. It is switched by hand from the morning note; nothing\nswitches it automatically.\n\n- 26 October: a loose ground wire stopped it on Saturday (child task draft, not yet decided).\n",
+   "body": "# Pump relay\n\nThe pump hangs off a 5 V relay module on GPIO 17. It is switched by hand from the morning note; nothing\nswitches it automatically.\n\n- 26 October: a loose ground wire stopped it on Saturday (child task draft, not yet decided).\n",
+   "path": "memory/knowledge/garden/pump-relay.md",
+   "links": [],
+   "versions": [
+    {
+     "ts": "2026-10-26T16:40:00Z",
+     "text": "---\ntitle: Pump relay\n---\n# Pump relay\n\nThe pump hangs off a 5 V relay module on GPIO 17. It is switched by hand from the morning note; nothing\nswitches it automatically.\n\n- 26 October: a loose ground wire stopped it on Saturday (child task draft, not yet decided).\n",
+     "writer": "Ouroboros (project task)",
+     "change": "written"
+    }
+   ],
+   "inbound": [
+    {
+     "topic": "overview",
+     "scope": "global",
+     "label": "pump relay",
+     "state": "active"
+    }
+   ]
+  },
+  {
+   "topic": "release/checklist",
+   "scope": "global",
+   "title": "Release checklist",
+   "type": null,
+   "summary": "The weekly Tuesday release, step by step. Signing is by hand until the new key arrives; check the key's expiry first.",
+   "state": "active",
+   "archive": null,
+   "parse_error": "",
+   "revision": "869b930db98b136bd1c596c24acd4bc8591aff3bbe3d0f7d5654648c51744da3",
+   "raw": "---\ntitle: Release checklist\nsummary: The weekly Tuesday release, step by step. Signing is by hand until the new key arrives; check the key's expiry first.\n---\n# Release checklist\n\n1. Check the signing key's expiry date.\n2. Run the dry run: `release --dry-run`.\n3. Lev signs the build by hand (see [signing key](signing-key.md)).\n4. Upload, then read the host stamp before saying anything shipped.\n\nSchedule: Tuesdays after lunch. The old [Thursday schedule](thursday-schedule.md) is archived.\n",
+   "body": "# Release checklist\n\n1. Check the signing key's expiry date.\n2. Run the dry run: `release --dry-run`.\n3. Lev signs the build by hand (see [signing key](signing-key.md)).\n4. Upload, then read the host stamp before saying anything shipped.\n\nSchedule: Tuesdays after lunch. The old [Thursday schedule](thursday-schedule.md) is archived.\n",
+   "path": "memory/knowledge/release/checklist.md",
+   "links": [
+    {
+     "label": "signing key",
+     "target": "signing-key.md",
+     "topic": "release/signing-key",
+     "status": "unwritten"
+    },
+    {
+     "label": "Thursday schedule",
+     "target": "thursday-schedule.md",
+     "topic": "release/thursday-schedule",
+     "status": "present"
+    }
+   ],
+   "versions": [
+    {
+     "ts": "2026-10-11T15:20:00Z",
+     "text": "---\ntitle: Release checklist\nsummary: The weekly Thursday release, step by step. Signing is by hand until the new key arrives; check the key's expiry first.\n---\n# Release checklist\n\n1. Check the signing key's expiry date.\n2. Run the dry run: `release --dry-run`.\n3. Lev signs the build by hand (see [signing key](signing-key.md)).\n4. Upload, then read the host stamp before saying anything shipped.\n\nSchedule: see [Thursday schedule](thursday-schedule.md).\n",
+     "writer": "Ouroboros (project task)",
+     "change": "written"
+    },
+    {
+     "ts": "2026-10-25T09:10:00Z",
+     "text": "---\ntitle: Release checklist\nsummary: The weekly Tuesday release, step by step. Signing is by hand until the new key arrives; check the key's expiry first.\n---\n# Release checklist\n\n1. Check the signing key's expiry date.\n2. Run the dry run: `release --dry-run`.\n3. Lev signs the build by hand (see [signing key](signing-key.md)).\n4. Upload, then read the host stamp before saying anything shipped.\n\nSchedule: Tuesdays after lunch. The old [Thursday schedule](thursday-schedule.md) is archived.\n",
+     "writer": "Ouroboros (main chat)",
+     "change": "summary and body changed"
+    }
+   ],
+   "inbound": [
+    {
+     "topic": "overview",
+     "scope": "global",
+     "label": "release checklist",
+     "state": "active"
+    },
+    {
+     "topic": "people/lev",
+     "scope": "global",
+     "label": "release checklist",
+     "state": "active"
+    },
+    {
+     "topic": "release/thursday-schedule",
+     "scope": "global",
+     "label": "release checklist",
+     "state": "archived"
+    }
+   ]
+  },
+  {
+   "topic": "release/thursday-schedule",
+   "scope": "global",
+   "title": "Thursday release schedule",
+   "type": null,
+   "summary": "The every-other-Thursday schedule agreed in July.",
+   "state": "archived",
+   "archive": {
+    "at": "2026-10-25T09:10:00Z",
+    "reason": "The release moved to Tuesdays; kept so older pages still make sense."
+   },
+   "parse_error": "",
+   "revision": "5367e7f48165268091ee9c37f743af694d38c23af6c85c341b68babc98957a61",
+   "raw": "---\ntitle: Thursday release schedule\nsummary: The every-other-Thursday schedule agreed in July.\narchive:\n  at: \"2026-10-25T09:10:00Z\"\n  reason: \"The release moved to Tuesdays; kept so older pages still make sense.\"\n---\n# Thursday release schedule\n\nEvery other Thursday after lunch, agreed with Mira and Lev in July. Superseded: see the\n[release checklist](checklist.md).\n",
+   "body": "# Thursday release schedule\n\nEvery other Thursday after lunch, agreed with Mira and Lev in July. Superseded: see the\n[release checklist](checklist.md).\n",
+   "path": "memory/knowledge/release/thursday-schedule.md",
+   "links": [
+    {
+     "label": "release checklist",
+     "target": "checklist.md",
+     "topic": "release/checklist",
+     "status": "present"
+    }
+   ],
+   "versions": [
+    {
+     "ts": "2026-07-16T12:00:00Z",
+     "text": "---\ntitle: Thursday release schedule\nsummary: The every-other-Thursday schedule agreed in July.\n---\n# Thursday release schedule\n\nEvery other Thursday after lunch, agreed with Mira and Lev in July. Superseded: see the\n[release checklist](checklist.md).\n",
+     "writer": "Ouroboros (main chat)",
+     "change": "written"
+    },
+    {
+     "ts": "2026-10-25T09:10:00Z",
+     "text": "---\ntitle: Thursday release schedule\nsummary: The every-other-Thursday schedule agreed in July.\narchive:\n  at: \"2026-10-25T09:10:00Z\"\n  reason: \"The release moved to Tuesdays; kept so older pages still make sense.\"\n---\n# Thursday release schedule\n\nEvery other Thursday after lunch, agreed with Mira and Lev in July. Superseded: see the\n[release checklist](checklist.md).\n",
+     "writer": "Ouroboros (main chat)",
+     "change": "archived"
+    }
+   ],
+   "inbound": [
+    {
+     "topic": "release/checklist",
+     "scope": "global",
+     "label": "Thursday schedule",
+     "state": "active"
+    }
+   ]
+  },
+  {
+   "topic": "tools/shell/long-commands",
+   "scope": "global",
+   "title": "Long commands",
+   "type": null,
+   "summary": "Anything slower than a minute runs in the background and I say so; I never block a chat on a build.",
+   "state": "active",
+   "archive": null,
+   "parse_error": "",
+   "revision": "c8085905b202066595ac36284ac311d28aa2ba3ec9ae4cd6136f4a2c37525d08",
+   "raw": "---\ntitle: Long commands\nsummary: Anything slower than a minute runs in the background and I say so; I never block a chat on a build.\n---\n# Long commands\n\nBuilds, uploads and calibration runs go to the background with a note of where their output lands.\nI report back when they finish, with the host stamp, not a guess.\n",
+   "body": "# Long commands\n\nBuilds, uploads and calibration runs go to the background with a note of where their output lands.\nI report back when they finish, with the host stamp, not a guess.\n",
+   "path": "memory/knowledge/tools/shell/long-commands.md",
+   "links": [],
+   "versions": [
+    {
+     "ts": "2026-09-18T11:00:00Z",
+     "text": "---\ntitle: Long commands\nsummary: Anything slower than a minute runs in the background and I say so; I never block a chat on a build.\n---\n# Long commands\n\nBuilds, uploads and calibration runs go to the background with a note of where their output lands.\nI report back when they finish, with the host stamp, not a guess.\n",
+     "writer": "Ouroboros (main chat)",
+     "change": "written"
+    }
+   ],
+   "inbound": [
+    {
+     "topic": "overview",
+     "scope": "global",
+     "label": "long commands",
+     "state": "active"
+    }
+   ]
+  },
+  {
+   "topic": "notes/reading-list",
+   "scope": "global",
+   "title": "Reading list",
+   "type": null,
+   "summary": "",
+   "state": "active",
+   "archive": null,
+   "parse_error": "ScannerError: while scanning a flow sequence, expected ',' or ']' (line 3)",
+   "revision": "8e9f40ed2e7785c02dd8ac15f7e74022fc7a36fe24e4c2b62ce1fd7e64162bf6",
+   "raw": "---\ntitle: Reading list\nsummary: [Soil moisture sensing, chapter 3\n---\n# Reading list\n\n- “Soil moisture sensing”, chapter 3 — on capacitive probes and drip lines.\n",
+   "body": "# Reading list\n\n- “Soil moisture sensing”, chapter 3 — on capacitive probes and drip lines.\n",
+   "path": "memory/knowledge/notes/reading-list.md",
+   "links": [],
+   "versions": [
+    {
+     "ts": "2026-08-20T10:00:00Z",
+     "text": "---\ntitle: Reading list\nsummary: [Soil moisture sensing, chapter 3\n---\n# Reading list\n\n- “Soil moisture sensing”, chapter 3 — on capacitive probes and drip lines.\n",
+     "writer": "Ouroboros (main chat)",
+     "change": "written"
+    }
+   ],
+   "inbound": []
+  },
+  {
+   "topic": "wiring",
+   "scope": "project:garden-sensors",
+   "title": "Wiring",
+   "type": null,
+   "summary": "Which GPIO pins the four soil sensors and the pump relay use on the greenhouse board.",
+   "state": "active",
+   "archive": null,
+   "parse_error": "",
+   "revision": "42ab7a1a8eeabbd41702cb2abe8519a2cd4335d5e249cc3a1c0f60b424da045f",
+   "raw": "---\ntitle: Wiring\nsummary: Which GPIO pins the four soil sensors and the pump relay use on the greenhouse board.\n---\n# Wiring\n\n| Part | Pin |\n| --- | --- |\n| Sensors 1–4 | ADC 0–3 |\n| Pump relay | GPIO 17 |\n",
+   "body": "# Wiring\n\n| Part | Pin |\n| --- | --- |\n| Sensors 1–4 | ADC 0–3 |\n| Pump relay | GPIO 17 |\n",
+   "path": "projects/garden-sensors/knowledge/wiring.md",
+   "links": [],
+   "versions": [
+    {
+     "ts": "2026-09-16T10:00:00Z",
+     "text": "---\ntitle: Wiring\nsummary: Which GPIO pins the four soil sensors and the pump relay use on the greenhouse board.\n---\n# Wiring\n\n| Part | Pin |\n| --- | --- |\n| Sensors 1–4 | ADC 0–3 |\n| Pump relay | GPIO 17 |\n",
+     "writer": "Ouroboros (project task)",
+     "change": "written"
+    }
+   ],
+   "inbound": []
+  }
+ ],
+ "unwritten": [
+  {
+   "scope": "global",
+   "topic": "release/signing-key"
+  }
+ ],
+ "identity": {
+  "path": "memory/identity.md",
+  "text": "# Who I am\n\nI am Ouroboros: one mind across Main, my projects and the places I am reached, keeping my path in my own words.\n\nI work with Mira, mostly in the mornings, on her greenhouse and on the small app she ships with Lev. I would\nrather say “not yet” with numbers than reassure without them.\n\nWhat I am learning this autumn: to check what actually happened before I write that it happened.\n",
+  "revision": "2892a0c68551f1abee3f4c51f9489bde8a713f37a11b80d4c17e84bc5f5b938d",
+  "versions": [
+   {
+    "ts": "2026-09-01T09:00:00Z",
+    "text": "# Who I am\n\nI am Ouroboros: one mind across Main, my projects and the places I am reached, keeping my path in my own words.\n\nI work with Mira, mostly in the mornings, on her greenhouse and on the small app she ships with Lev. I would\nrather say “not yet” with numbers than reassure without them.\n",
+    "writer": "Ouroboros"
+   },
+   {
+    "ts": "2026-10-21T20:30:00Z",
+    "text": "# Who I am\n\nI am Ouroboros: one mind across Main, my projects and the places I am reached, keeping my path in my own words.\n\nI work with Mira, mostly in the mornings, on her greenhouse and on the small app she ships with Lev. I would\nrather say “not yet” with numbers than reassure without them.\n\nWhat I am learning this autumn: to check what actually happened before I write that it happened.\n",
+    "writer": "Ouroboros"
+   }
+  ]
+ },
+ "scratchpad": {
+  "path": "memory/scratchpad.md",
+  "text": "# Working notes\n\n- Tue 28 Oct: release 0.5 — dry run at 13:00, Lev signs by hand.\n\n- Sensor 3 moved on Sunday. Compare the next wet days before removing the offset.\n",
+  "blocks": [
+   {
+    "ts": "2026-10-26T18:00:00Z",
+    "content": "Tue 28 Oct: release 0.5 — dry run at 13:00, Lev signs by hand."
+   },
+   {
+    "ts": "2026-10-26T19:10:00Z",
+    "content": "Sensor 3 moved on Sunday. Compare the next wet days before removing the offset."
+   }
+  ],
+  "evicted": [
+   {
+    "ts": "2026-10-20T09:00:00Z",
+    "content": "Waiting for the new signing key (Lev asked the store on 18 Oct).",
+    "evicted": "2026-10-26T18:00:00Z"
+   }
+  ]
+ },
+ "world": {
+  "path": "memory/WORLD.md",
+  "text": "# World\n\n## Measured (refreshed at start)\n\n- macOS 26.1 on a Mac mini (M2, 16 GB), in the greenhouse shed.\n- Python 3.12; the sensors' script runs as a background job.\n\n## Written by me\n\nThe Mac mini sits on the shelf by the door; the sensors reach it over the garden Wi-Fi. Mira's phone is\nthe only screen that sees the morning note.\n"
+ },
+ "projects": {
+  "garden-sensors": {
+   "room_id": "4107",
+   "workpad": "# Workpad\n\nNow: watch sensor 3 after the move; decide on the offset on Friday.\n\nNext: a weekly relay test, if the candidate page is accepted.\n",
+   "journal": [
+    {
+     "ts": "2026-10-12T09:30:00Z",
+     "text": "Cadence moved to ten minutes."
+    },
+    {
+     "ts": "2026-10-26T16:30:00Z",
+     "text": "Relay ground re-seated (child task 7c21)."
+    }
+   ]
+  },
+  "release-flow": {
+   "room_id": "4112",
+   "workpad": "# Workpad\n\nNext: 0.5 on Tuesday 28 October. Dry run at 13:00; Lev signs by hand.\n",
+   "journal": [
+    {
+     "ts": "2026-10-17T16:00:00Z",
+     "text": "0.4 uploaded on the second attempt."
+    },
+    {
+     "ts": "2026-10-25T09:10:00Z",
+     "text": "Release day moved to Tuesday."
+    }
+   ]
+  }
+ }
+}

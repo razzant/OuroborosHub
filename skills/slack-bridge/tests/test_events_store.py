@@ -151,17 +151,32 @@ def test_ordinary_visible_channel_messages_are_accepted_without_a_second_allowli
     assert accepted.accepted is True
 
 
-def test_app_mention_is_ignored_because_message_events_are_the_single_ingress() -> None:
-    payload = _payload(envelope_id="env-mention", event_id="Ev-mention")
-    payload["payload"]["event"]["type"] = "app_mention"
+def test_app_mention_preserves_the_inciting_message_without_a_message_event(tmp_path) -> None:
+    payload = _payload(envelope_id="env-mention", event_id="Ev-mention",
+                       text="<@U_BOT> what do you think?", thread_ts="1709999999.900")
+    payload["payload"]["event"].update(type="app_mention", parent_user_id="U_PARENT")
+    payload["payload"]["event"].pop("channel_type")
 
-    ignored = parse_socket_envelope(payload, bot_user_id="U_BOT")
+    parsed = _parse(payload)
 
-    assert ignored.accepted is False
-    assert ignored.reason == "unsupported_event"
+    assert parsed.accepted is True
+    store = BridgeStore(tmp_path)
+    store.ingest_envelope(payload, parsed)
+    item = store.claim_inbox()
+    assert item is not None
+    assert item.event_type == "app_mention"
+    assert item.text == "<@U_BOT> what do you think?"
+    assert item.channel_id == "C123" and item.channel_type == ""
+    assert item.thread_ts == "1709999999.900"
+    assert item.actor_user_id == "U_ACTOR" and item.team_id == "T_WORKSPACE"
+    assert item.files[0]["file_id"] == "F123"
+    assert item.structured["self_user_id"] == "U_BOT"
+    assert item.structured["mentioned_user_ids"] == ["U_BOT"]
+    assert item.structured["parent_user_id"] == "U_PARENT"
+    assert store.claim_inbox() is None
 
 
-def test_slack_manifest_subscribes_only_to_message_ingress() -> None:
+def test_slack_manifest_subscribes_to_mentions_and_all_existing_message_ingress() -> None:
     manifest = json.loads(
         (Path(__file__).resolve().parents[1] / "manifest.json").read_text(
             encoding="utf-8"
@@ -170,8 +185,11 @@ def test_slack_manifest_subscribes_only_to_message_ingress() -> None:
     scopes = manifest["oauth_config"]["scopes"]["bot"]
     events = manifest["settings"]["event_subscriptions"]["bot_events"]
 
-    assert "app_mentions:read" not in scopes
-    assert "app_mention" not in events
+    # Wire spelling is the scope heading / Socket Mode manifest example, not
+    # the dotted URL slug of docs.slack.dev/reference/scopes/app_mentions.read/.
+    assert "app_mentions:read" in scopes
+    assert "app_mentions.read" not in scopes
+    assert "app_mention" in events
     assert events[:4] == [
         "message.channels", "message.groups", "message.im", "message.mpim",
     ]

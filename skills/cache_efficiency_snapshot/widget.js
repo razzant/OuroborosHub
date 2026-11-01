@@ -476,6 +476,38 @@
     return `${value.measured_records.toLocaleString()} / ${counted(value.total_records, 'record')} measured`;
   }
 
+  // Bins are labelled in the viewer's own time zone, and the zone is named:
+  // unlabelled server (UTC) times read as local time and moved a drop by hours.
+  function zoneName() {
+    const minutes = -new Date().getTimezoneOffset();
+    const abs = Math.abs(minutes);
+    const offset = `UTC${minutes >= 0 ? '+' : '-'}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
+    let zone = '';
+    try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (err) { zone = ''; }
+    return zone ? `${zone} (${offset})` : offset;
+  }
+
+  function localStamp(iso, withYear) {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return String(iso || '');
+    const pad = value => String(value).padStart(2, '0');
+    const stamp = `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    return withYear ? `${date.getFullYear()}-${stamp}` : stamp;
+  }
+
+  function bucketLabel(bucket) {
+    return localStamp(bucket.ts, Boolean(state.data && state.data.timeframe === 'ALL'));
+  }
+
+  function legendText() {
+    const base = state.chartMode === 'trend'
+      ? 'Gaps mean no comparable measurement. A measured zero is 0%.'
+      : 'Green: cache reads · Slate: other input · Amber: input with unknown cache reads. Unknown input volumes cannot be drawn.';
+    const marks = state.data && state.data.markers && state.data.markers.length
+      ? ' Dashed violet lines: first start of a new code version (a time mark, not a cause).' : '';
+    return `${base}${marks} Times: ${zoneName()}.`;
+  }
+
   // Render Skeleton Layout
   root.innerHTML = `
     <div class="ces-container">
@@ -563,7 +595,7 @@
 
       <div class="ces-card">
         <div class="ces-chart-title" style="margin-bottom:10px;">Model and Route Measurements</div>
-        <div class="ces-note">Session totals may span attempts and models; their label names the final reported model. Rates use only records with both input and cache-read measurements.</div>
+        <div class="ces-note">Session totals may span attempts and models; their label names the final reported model. A session recorded without a usage event shows only its route; its tokens are unknown here. Rates use only records with both input and cache-read measurements.</div>
         <div class="ces-table-wrap">
           <table class="ces-table" id="modelsTable">
             <thead>
@@ -591,7 +623,7 @@
             <div class="ces-diag-item">Window Samples: <b id="diagWindow">--</b></div>
             <div class="ces-diag-item">Retained Records: <b id="diagTotal">--</b></div>
             <div class="ces-diag-item">Window Span: <b id="diagSpan">--</b></div>
-            <div class="ces-diag-item">Omitted Rows / Buckets: <b id="diagOmitted">--</b></div>
+            <div class="ces-diag-item">Omitted Rows / Buckets / Marks: <b id="diagOmitted">--</b></div>
           </div>
           <div class="ces-note" id="retainedCoverage" style="margin-top:8px;"></div>
         </details>
@@ -609,7 +641,7 @@
   function readChartColors() {
     const css = getComputedStyle(document.documentElement);
     colors = {};
-    for (const name of ['background', 'muted', 'slate', 'green', 'cyan', 'accent', 'amber', 'grid', 'crosshair']) {
+    for (const name of ['background', 'muted', 'slate', 'green', 'cyan', 'violet', 'accent', 'amber', 'grid', 'crosshair']) {
       colors[name] = css.getPropertyValue('--ces-' + name).trim();
     }
   }
@@ -717,14 +749,48 @@
     const labelStep = Math.max(1, Math.ceil(buckets.length / Math.max(1, Math.floor(cw / 120))));
     for (let index = 0; index < buckets.length; index += labelStep) {
       const x = Math.max(75, Math.min(w - 65, points[index].x));
-      ctx.fillText(buckets[index].label, x, h - 8);
+      ctx.fillText(bucketLabel(buckets[index]), x, h - 8);
     }
+  }
+
+  // A dashed line is the first start of new code: a time mark, not a cause.
+  function drawMarkers(count, pad, cw, ch) {
+    const marks = (state.data && state.data.markers) || [];
+    if (!marks.length) return;
+    ctx.save();
+    ctx.strokeStyle = colors.violet;
+    ctx.fillStyle = colors.violet;
+    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1;
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'left';
+    let labelEnd = -Infinity;
+    for (const mark of marks) {
+      const x = pad.left + mark.position * cw / count;
+      ctx.beginPath();
+      ctx.moveTo(x, pad.top);
+      ctx.lineTo(x, pad.top + ch);
+      ctx.stroke();
+      // A label that would overlap its neighbour is left to the inspection reading.
+      const text = mark.code.slice(0, 7);
+      const width = ctx.measureText(text).width;
+      const textX = Math.min(x + 3, pad.left + cw - width);
+      if (textX >= labelEnd + 6) {
+        ctx.fillText(text, textX, pad.top + 10);
+        labelEnd = textX + width;
+      }
+    }
+    ctx.restore();
   }
 
   function inspectChart(points, pad, cw, ch) {
     if (!isHovering || !points.length) return;
     const closest = points.reduce((best, point) => Math.abs(mouseX - point.x) < Math.abs(mouseX - best.x) ? point : best);
     const data = closest.data;
+    const index = points.indexOf(closest);
+    const label = bucketLabel(data);
+    const marks = ((state.data && state.data.markers) || []).filter(mark => mark.position >= index && mark.position < index + 1);
+    const started = marks.length ? `New code started: ${marks.map(mark => `${mark.code} at ${localStamp(mark.ts, false).slice(6)}`).join(', ')}.` : '';
     ctx.strokeStyle = colors.crosshair;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
@@ -735,8 +801,8 @@
     const measured = Number.isFinite(data.rate) ? ` (${formatTokens(data.eligible_cached_tokens)} / ${formatTokens(data.eligible_prompt_tokens)} measured)` : '';
     const detail = data.total_records === 0 ? 'No activity' : `${formatRate(data.rate)}${measured} · ${coverageText(data)} · ${recordUnits(data)}`;
     const unknown = `${counted(data.unknown_total_records, 'record')} with unknown input; ${data.unknown_read_records} with unknown cache reads`;
-    document.getElementById('chartReading').textContent = `${data.label}: ${detail}. ${unknown}.`;
-    tooltip.innerHTML = `<b>${escapeHtml(data.label)}</b><br>${escapeHtml(detail)}<br>Known input: ${formatTokens(data.prompt_tokens)}<br>Known cache reads: ${formatTokens(data.cached_tokens)}<br>${escapeHtml(unknown)}`;
+    document.getElementById('chartReading').textContent = `${label}: ${detail}. ${unknown}.${started ? ' ' + started : ''}`;
+    tooltip.innerHTML = `<b>${escapeHtml(label)}</b><br>${escapeHtml(detail)}<br>Known input: ${formatTokens(data.prompt_tokens)}<br>Known cache reads: ${formatTokens(data.cached_tokens)}<br>${escapeHtml(unknown)}${started ? '<br>' + escapeHtml(started) : ''}`;
     tooltip.style.display = 'block';
     const width = tooltip.offsetWidth;
     tooltip.style.left = `${Math.max(8, Math.min(closest.x - width / 2, canvasWrap.clientWidth - width - 8))}px`;
@@ -777,6 +843,7 @@
       ctx.textAlign = 'center';
       ctx.fillText('No comparable cache measurements', pad.left + cw / 2, pad.top + ch / 2);
     }
+    drawMarkers(buckets.length, pad, cw, ch);
     inspectChart(points, pad, cw, ch);
   }
 
@@ -794,6 +861,7 @@
         ctx.fillRect(points[index].x - step * 0.32, y, step * 0.64, height);
       }
     });
+    drawMarkers(buckets.length, pad, cw, ch);
     inspectChart(points, pad, cw, ch);
   }
 
@@ -873,9 +941,10 @@
     document.getElementById('timeRangeSub').textContent = `${state.data.timeframe === 'ALL' ? 'All retained records' : state.data.timeframe + ' window'} · measured input tokens and cache reads`;
     document.getElementById('diagWindow').textContent = `${q.window_records || 0} records`;
     document.getElementById('diagTotal').textContent = `${q.settled_records_total || 0} records`;
-    document.getElementById('diagOmitted').textContent = `${q.models_omitted || 0} rows / ${q.buckets_omitted || 0} buckets`;
-    document.getElementById('diagSpan').textContent = q.oldest_ts && q.newest_ts ? `${q.oldest_ts.slice(0,10)} → ${q.newest_ts.slice(0,10)}` : 'No activity';
-    document.getElementById('retainedCoverage').textContent = `${q.coverage || ''} Archives read: ${q.raw_stats?.archives_read || 0} · duplicate events skipped: ${q.raw_stats?.duplicate_events_skipped || 0} · compacted ledger summaries skipped: ${q.raw_stats?.ledger_compacted_records_skipped || 0}.`;
+    document.getElementById('diagOmitted').textContent = `${q.models_omitted || 0} rows / ${q.buckets_omitted || 0} buckets / ${q.markers_omitted || 0} code marks`;
+    document.getElementById('diagSpan').textContent = q.oldest_ts && q.newest_ts ? `${localStamp(q.oldest_ts, true).slice(0, 10)} → ${localStamp(q.newest_ts, true).slice(0, 10)}` : 'No activity';
+    document.getElementById('retainedCoverage').textContent = `${q.coverage || ''} Archives read: ${q.raw_stats?.archives_read || 0} · duplicate events skipped: ${q.raw_stats?.duplicate_events_skipped || 0} · sessions in this window without a usage event: ${q.sessions_without_usage_event || 0}.`;
+    document.getElementById('chartLegend').textContent = legendText();
 
     // A poll keeps the selected point; renderChart re-inspects the nearest bin.
     renderTable();
@@ -905,7 +974,7 @@
       <tr>
         <td style="font-weight:600; color:var(--ces-text);">
           ${escapeHtml(model.model)}
-          <span class="ces-route">${escapeHtml(model.provider)} · ${model.kind === 'subscription_session' ? 'Session aggregate · final reported model' : escapeHtml(model.kind)}</span>
+          <span class="ces-route">${escapeHtml(model.provider)} · ${model.kind !== 'subscription_session' ? escapeHtml(model.kind) : model.model === 'no usage event' ? 'Session · tokens not in the event log' : 'Session aggregate · final reported model'}</span>
           ${model.rate === null ? '' : `<div class="ces-bar-wrap"><div class="ces-bar-fill" style="width:${model.rate}%"></div></div>`}
         </td>
         <td>${counted(model.total_records, model.kind === 'attempt' ? 'request' : model.kind === 'subscription_session' ? 'session' : 'record')}</td>
@@ -946,7 +1015,7 @@
       state.chartMode = e.target.dataset.mode;
       clearInspection();
       document.getElementById('chartTitle').textContent = state.chartMode === 'trend' ? 'Cache-Read Rate Trend (%)' : 'Token Volume Composition';
-      document.getElementById('chartLegend').textContent = state.chartMode === 'trend' ? 'Gaps mean no comparable measurement. A measured zero is 0%.' : 'Green: cache reads · Slate: other input · Amber: input with unknown cache reads. Unknown input volumes cannot be drawn.';
+      document.getElementById('chartLegend').textContent = legendText();
       renderChart();
     }
   });

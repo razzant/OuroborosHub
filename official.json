@@ -1,0 +1,101 @@
+{
+  "endorsements": [
+    {
+      "digest": "8ded2740818b0f4c288e87a6a3c847a43ecec3eed3d3b66b78f6f288d30bf3ca",
+      "name": "a2a",
+      "recommended": false
+    },
+    {
+      "digest": "5ff5a1e88045929ef34981fdce4b6dadd086c1d1abb9a330168705c98b49a64d",
+      "name": "adaptive-code-review",
+      "recommended": false
+    },
+    {
+      "digest": "9618521e5113ead1a7acd79a46feb135cd1d10ca6061000c672082867ab801f1",
+      "name": "anti-slop",
+      "recommended": true
+    },
+    {
+      "digest": "56cf860a9ce43e1d9c0d6737de94036cc7a40aaa4ae3dd8656806cf822169480",
+      "name": "cache_efficiency_snapshot",
+      "recommended": false
+    },
+    {
+      "digest": "9ebc010de160df6706d57e1a751a832f712f2eedb595db31400ae1e2c1297331",
+      "name": "claudexor_quotas",
+      "recommended": false
+    },
+    {
+      "digest": "890d0acfb25d40d481684863ce8d1e75cacd4a54908c7aabe2d2f08ec2653a22",
+      "name": "confluence",
+      "recommended": false
+    },
+    {
+      "digest": "728c992edd4b22a7a7c2bf78983052274120b0e97b110ef6fbe18e024e6ad43d",
+      "name": "context-lens",
+      "recommended": false
+    },
+    {
+      "digest": "4f8613be4dc4bab36b9effba01748f367419f1f536a19aec5c88f9a22c2dd90e",
+      "name": "duckduckgo",
+      "recommended": true
+    },
+    {
+      "digest": "0e56122071ec4f9d21c83b9835e7423c7c4cebd8e513d012778c65c49db1e351",
+      "name": "email",
+      "recommended": false
+    },
+    {
+      "digest": "92b7902abe89c18370fb0358009d05fa449015cc8a7f8e4fcc9f370e858d1d68",
+      "name": "email-presence",
+      "recommended": false
+    },
+    {
+      "digest": "5c1af3f64088ebd88cc1e64bbaf1562c47eb3d4b1dd90802c73ef98c61fa3802",
+      "name": "github",
+      "recommended": false
+    },
+    {
+      "digest": "f7332f5fc9bb2d84e98a71bd594de62f8fc3ee215cba7e72a9a8988be73e20b3",
+      "name": "google-workspace",
+      "recommended": false
+    },
+    {
+      "digest": "7d5dcdf9407b1e327a528cea075bf9f1d086af5d80fdbb96e2c89fc8eda01701",
+      "name": "keenable",
+      "recommended": false
+    },
+    {
+      "digest": "02af7b5a3ded32550bb3655a33d0570bf17a1d05da6ceca7bba9d6335d3412b2",
+      "name": "memory-atlas",
+      "recommended": true
+    },
+    {
+      "digest": "42983d82fa1cb5ed03abc6c7a6aeb68ce6063cce1159389981586634fa52f25d",
+      "name": "pdf_tools",
+      "recommended": true
+    },
+    {
+      "digest": "2088c52c1a76ec363b67129270152761b22350080f5dd16575f4298814e85fa5",
+      "name": "perplexity",
+      "recommended": false
+    },
+    {
+      "digest": "927dff6f659045ce92499f50fae0083fe5aa0992521a9c87b6551010848d39bc",
+      "name": "slack-bridge",
+      "recommended": false
+    },
+    {
+      "digest": "9b6ad2a4daca30535e841f074a45f724ae63f895b833c111010132e06bb0434d",
+      "name": "telegram-bot",
+      "recommended": false
+    },
+    {
+      "digest": "8250c81f2c6ccd2032fee27e3e1b0962bd22f9283e7d00d384a04e434b05a106",
+      "name": "word_tools",
+      "recommended": true
+    }
+  ],
+  "maintainer": "razzant",
+  "schema_version": 1
+}

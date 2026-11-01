@@ -1,13 +1,18 @@
 """High-performance, multi-timeframe cache efficiency analytics engine for Ouroboros.
 
-Requests come from the per-call ``llm_usage`` events (the live ``logs/events.jsonl``
-plus its rotated ``archive/events_*.jsonl`` files inside a bounded window), which
-survive ledger compaction; whole harness sessions still come from the retained
-``state/usage_attempts.jsonl`` ledger. Both readers are incremental and thread-safe,
-measurements keep explicit coverage, and one HTTP endpoint feeds the module widget.
+Everything comes from the event log (the live ``logs/events.jsonl`` plus its rotated
+``archive/events_*.jsonl`` files inside a bounded window): per-call ``llm_usage``
+events are requests; an ``llm_usage`` event carrying a Claudexor run receipt is a
+whole harness session, and a ``delegate_run_ledger_recorded`` event without one is a
+session whose tokens the log does not hold; ``worker_boot`` events mark when a new
+code version first started. Cores before the usage store (7.6.0 and older) still
+keep session tokens in a live ``state/usage_attempts.jsonl``, which is read while it
+keeps changing. Readers are incremental and thread-safe, measurements keep explicit
+coverage, and one HTTP endpoint feeds the module widget.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -19,9 +24,14 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 TERMINAL_STATE = "settled"
 MAX_MODELS_RETURNED = 25
 MAX_BUCKETS_RETURNED = 120
+MAX_MARKERS_RETURNED = 60
 MAX_CACHE_RETAIN_DAYS = 30
 BASELINE_KINDS = frozenset({"usage_baseline", "usage_baseline_group"})
 USAGE_EVENT_TYPE = "llm_usage"
+SESSION_LEDGER_EVENT_TYPE = "delegate_run_ledger_recorded"
+BOOT_EVENT_TYPE = "worker_boot"
+_EVENT_MARKERS = tuple(f'"{name}"'.encode() for name in (USAGE_EVENT_TYPE, SESSION_LEDGER_EVENT_TYPE, BOOT_EVENT_TYPE))
+NO_USAGE_EVENT_MODEL = "no usage event"
 USAGE_ARCHIVE_GLOB = "events_*.jsonl"
 USAGE_ARCHIVE_WINDOW_DAYS = 7
 _EMPTY_EVENT_STATS = {
@@ -29,6 +39,9 @@ _EMPTY_EVENT_STATS = {
     "malformed_lines": 0,
     "non_usage_lines": 0,
     "usage_events": 0,
+    "session_usage_events": 0,
+    "session_ledger_events": 0,
+    "worker_boots": 0,
     "unparsed_events": 0,
     "duplicate_events_skipped": 0,
     "archives_read": 0,
@@ -47,11 +60,12 @@ _DATA_DIR: Optional[Path] = None
 
 
 class LedgerCache:
-    """Thread-safe incremental cache for whole-session rows of the usage ledger.
+    """Thread-safe incremental cache for whole-session rows of a live JSONL ledger.
 
-    Physical request rows are NOT taken from here any more: compaction folds them
-    into ``usage_baseline_group`` summaries within hours, so the per-call
-    ``llm_usage`` events are the request source (``UsageEventsCache``).
+    Cores before the usage store keep session tokens only here. Physical request
+    rows are NOT taken from it: compaction folds them into ``usage_baseline_group``
+    summaries within hours, so the per-call ``llm_usage`` events are the request
+    source (``UsageEventsCache``).
     """
 
     def __init__(self) -> None:
@@ -194,7 +208,14 @@ def _usage_event_identity(row: Mapping[str, Any]) -> str:
 
 
 def _normalize_usage_event(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
-    """A per-call ``llm_usage`` event: inclusive input, cache reads, cache writes."""
+    """A per-call ``llm_usage`` event: inclusive input, cache reads, cache writes.
+
+    An event carrying a Claudexor run receipt is one whole harness session, never a
+    request: its counters are the run summary's, read by the session rules."""
+    receipt = row.get("claudexor")
+    run_id = receipt.get("run_id") if isinstance(receipt, Mapping) else None
+    if run_id:
+        return _session_from_usage_event(row, receipt, str(run_id))
     stamp = _parse_timestamp(row)
     if stamp is None:
         return None
@@ -216,15 +237,69 @@ def _normalize_usage_event(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def _session_identity(run_id: str) -> str:
+    """The ledger keys a session by the sha256 of its run id; every source uses that key."""
+    return "session:" + hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+
+
+def _session_from_usage_event(row: Mapping[str, Any], receipt: Mapping[str, Any],
+                              run_id: str) -> Optional[Dict[str, Any]]:
+    """The session row the ledger would hold, read by the same rules as a ledger session."""
+    route = str(receipt.get("delegated_route") or receipt.get("requested_route") or "unknown")
+    shaped = {"ts": row.get("ts"), "kind": "subscription_session", "provider": route,
+              "subscription_route": route, "model": row.get("model"),
+              "prompt_tokens": row.get("prompt_tokens"), "cached_tokens": row.get("cached_tokens"),
+              "cache_write_tokens": row.get("cache_write_tokens")}
+    if "input_token_usage" in row:
+        shaped["input_token_usage"] = row["input_token_usage"]
+    record = _normalize_record(shaped)
+    if record is not None:
+        # ``normalized``: the event carries the core's input-token split (an object, nulls
+        # included), the only evidence that outranks legacy counters; see ``_evidence_rank``.
+        record.update(identity=_session_identity(run_id), token_facts=True,
+                      normalized=isinstance(row.get("input_token_usage"), Mapping))
+    return record
+
+
+def _evidence_rank(session: Mapping[str, Any]) -> int:
+    """Evidence of one run: normalized split (2) > legacy usage event (1) > ledger event, tokenless (0)."""
+    return 2 if session.get("normalized") else 1 if session.get("token_facts") else 0
+
+
+def _session_from_ledger_event(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """A session the core recorded without a usage event: route and time, tokens unknown."""
+    stamp, run_id = _parse_timestamp(row), row.get("run_id")
+    if stamp is None or not run_id:
+        return None
+    return {
+        "ts": stamp, "kind": "subscription_session", "provider": str(row.get("route") or "unknown"),
+        "model": NO_USAGE_EVENT_MODEL, "display_name": NO_USAGE_EVENT_MODEL,
+        "prompt_tokens": None, "cached_tokens": None, "cache_write_tokens": None,
+        "measured": False, "eligible": False, "uncached_tokens": None,
+        "identity": _session_identity(str(run_id)), "token_facts": False,
+    }
+
+
+def _boot_from_event(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    stamp, sha = _parse_timestamp(row), str(row.get("git_sha") or "").strip()
+    if stamp is None or not sha:
+        return None
+    return {"ts": stamp, "sha": sha, "branch": str(row.get("git_branch") or ""),
+            "identity": f"boot:{row.get('ts')}:{row.get('pid')}:{sha}"}
+
+
 class UsageEventsCache:
-    """Thread-safe incremental cache over the per-call ``llm_usage`` events.
+    """Thread-safe incremental cache over usage, session and boot events.
 
     The live ``logs/events.jsonl`` is read incrementally (identity, offset, torn
-    trailing line) like the ledger. The core rotates it by renaming it to
+    trailing line). The core rotates it by renaming it to
     ``archive/events_<stamp>.jsonl``; those files are immutable once they exist
     and each is read once, inside a bounded mtime window. Records are keyed by
     call identity, so the rotation seam (a tail already read from the live file
     and then met again inside the new archive) never counts a request twice.
+    Sessions are keyed by run and kept by evidence rank (``_evidence_rank``): a
+    later event replaces the kept one only with strictly higher evidence, never
+    the reverse and never by merging fields; equal rank keeps the first event.
     """
 
     def __init__(self) -> None:
@@ -232,6 +307,8 @@ class UsageEventsCache:
         self.file_identity: Optional[Tuple[int, int]] = None
         self.last_size: int = 0
         self.records: List[Dict[str, Any]] = []
+        self.sessions: Dict[str, Dict[str, Any]] = {}
+        self.boots: List[Dict[str, Any]] = []
         self.seen: set = set()
         self.archives: Dict[str, Tuple[int, int]] = {}
         self.raw_stats: Dict[str, int] = dict(_EMPTY_EVENT_STATS)
@@ -241,9 +318,15 @@ class UsageEventsCache:
             self.file_identity = None
             self.last_size = 0
             self.records = []
+            self.sessions = {}
+            self.boots = []
             self.seen = set()
             self.archives = {}
             self.raw_stats = dict(_EMPTY_EVENT_STATS)
+
+    def boot_snapshot(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return list(self.boots)
 
     def update(self, live_path: Path, archive_dir: Path, *,
                now: Optional[datetime] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
@@ -264,7 +347,7 @@ class UsageEventsCache:
                 meta["read_error"] = meta["read_error"] or "file_not_found"
             self._prune(horizon)
             meta["raw_stats"] = dict(self.raw_stats)
-            return list(self.records), meta
+            return list(self.records) + list(self.sessions.values()), meta
 
     def _ingest_archives(self, archive_dir: Path, horizon: datetime, meta: Dict[str, Any]) -> None:
         try:
@@ -326,7 +409,7 @@ class UsageEventsCache:
             if not raw.strip():
                 continue
             self.raw_stats["total_lines_read"] += 1
-            if USAGE_EVENT_TYPE.encode() not in raw:
+            if not any(marker in raw for marker in _EVENT_MARKERS):
                 self.raw_stats["non_usage_lines"] += 1
                 continue
             try:
@@ -334,26 +417,53 @@ class UsageEventsCache:
             except Exception:
                 self.raw_stats["malformed_lines"] += 1
                 continue
-            if not isinstance(row, dict) or row.get("type") != USAGE_EVENT_TYPE:
+            kind = row.get("type") if isinstance(row, dict) else None
+            if kind == USAGE_EVENT_TYPE:
+                record = _normalize_usage_event(row)
+            elif kind == SESSION_LEDGER_EVENT_TYPE:
+                record = _session_from_ledger_event(row)
+            elif kind == BOOT_EVENT_TYPE:
+                record = _boot_from_event(row)
+            else:
                 self.raw_stats["non_usage_lines"] += 1
                 continue
-            record = _normalize_usage_event(row)
             if record is None:
                 self.raw_stats["unparsed_events"] += 1
-                continue
-            if record["identity"] in self.seen:
+            elif kind == BOOT_EVENT_TYPE:
+                self._add_boot(record)
+            elif record["kind"] == "subscription_session":
+                self._add_session(record, from_usage=kind == USAGE_EVENT_TYPE)
+            elif record["identity"] in self.seen:
                 self.raw_stats["duplicate_events_skipped"] += 1
-                continue
-            self.seen.add(record["identity"])
-            self.records.append(record)
-            self.raw_stats["usage_events"] += 1
+            else:
+                self.seen.add(record["identity"])
+                self.records.append(record)
+                self.raw_stats["usage_events"] += 1
+
+    def _add_session(self, record: Dict[str, Any], *, from_usage: bool) -> None:
+        current = self.sessions.get(record["identity"])
+        if current is not None and _evidence_rank(record) <= _evidence_rank(current):
+            self.raw_stats["duplicate_events_skipped"] += 1
+            return
+        self.sessions[record["identity"]] = record
+        self.raw_stats["session_usage_events" if from_usage else "session_ledger_events"] += 1
+
+    def _add_boot(self, boot: Dict[str, Any]) -> None:
+        if boot["identity"] in self.seen:
+            self.raw_stats["duplicate_events_skipped"] += 1
+            return
+        self.seen.add(boot["identity"])
+        self.boots.append(boot)
+        self.raw_stats["worker_boots"] += 1
 
     def _prune(self, horizon: datetime) -> None:
         # Archives are read in name order and the live tail last, so an expired
         # record can sit anywhere in the list; scan the whole list.
-        if any(r["ts"] < horizon for r in self.records):
+        if any(r["ts"] < horizon for r in [*self.records, *self.boots, *self.sessions.values()]):
             self.records = [r for r in self.records if r["ts"] >= horizon]
-            self.seen = {r["identity"] for r in self.records}
+            self.boots = [b for b in self.boots if b["ts"] >= horizon]
+            self.sessions = {key: s for key, s in self.sessions.items() if s["ts"] >= horizon}
+            self.seen = {r["identity"] for r in [*self.records, *self.boots]}
         for key in list(self.archives):
             try:
                 stale = datetime.fromtimestamp(Path(key).stat().st_mtime, tz=timezone.utc) < horizon
@@ -424,9 +534,9 @@ def _normalize_record(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         kind == "subscription_session" and provider == "codex"
         and row.get("subscription_route") == "codex"
     ):
-        # Physical attempts are already canonical. Legacy native Codex sessions
-        # report inclusive input and cache reads; Claude/Cursor combined reads
-        # and creation in the old cached field, so cannot be reconstructed here.
+        # Physical attempts are already canonical. Codex sessions (a ledger row or
+        # a run summary) report inclusive input and cache reads; other harnesses'
+        # session counters do not form an inclusive total, so they stay unknown.
         usage = row.get("usage") if isinstance(row.get("usage"), Mapping) else {}
         prompt = _token_count(row.get("prompt_tokens", usage.get("prompt_tokens")))
         cached = _token_count(row.get("cached_tokens", usage.get("cached_tokens")))
@@ -437,13 +547,16 @@ def _normalize_record(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     if prompt is not None and cached is not None and cached > prompt:
         cached = None  # Inconsistent measurements are unknown, never clipped or guessed.
     measured = prompt is not None and cached is not None
-    return {
+    record = {
         "ts": stamp, "kind": kind, "provider": provider, "model": model,
         "display_name": _clean_model_display_name(model),
         "prompt_tokens": prompt, "cached_tokens": cached, "cache_write_tokens": write,
         "measured": measured, "eligible": measured and prompt > 0,
         "uncached_tokens": prompt - cached if measured else None,
     }
+    if row.get("session_id_sha256"):
+        record.update(identity=f"session:{row['session_id_sha256']}", token_facts=True)
+    return record
 
 
 def _aggregate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -483,12 +596,30 @@ def _get_timeframe_bounds(tf: str, now: datetime) -> Tuple[datetime, timedelta]:
     return now - timedelta(hours=24), timedelta(hours=1)
 
 
+def _version_markers(boots: List[Dict[str, Any]], start: datetime, now: datetime,
+                     step: timedelta, omitted: int) -> Tuple[List[Dict[str, Any]], int]:
+    """The first boot on a commit different from the previous boot's: when new code started.
+
+    The earliest retained boot has no predecessor, so it marks nothing; a mark is a
+    time, not a cause, and positions use the same bins as the records."""
+    markers, previous = [], None
+    for boot in sorted(boots, key=lambda item: item["ts"]):
+        if previous is not None and boot["sha"] != previous and start <= boot["ts"] < now:
+            position = (boot["ts"] - start).total_seconds() / step.total_seconds() - omitted
+            if position >= 0:
+                markers.append({"ts": boot["ts"].isoformat(), "code": boot["sha"][:9],
+                                "branch": boot["branch"], "position": round(position, 4)})
+        previous = boot["sha"]
+    return markers[-MAX_MARKERS_RETURNED:], max(0, len(markers) - MAX_MARKERS_RETURNED)
+
+
 def calculate_analytics(
     records: List[Dict[str, Any]],
     timeframe: str = "24H",
     meta: Optional[Dict[str, Any]] = None,
     *,
     now: Optional[datetime] = None,
+    boots: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     tf = str(timeframe or "24H").upper().strip()
     if tf not in ("1H", "6H", "24H", "7D", "ALL"):
@@ -506,6 +637,7 @@ def calculate_analytics(
     # ALL also retains empty intervals, so the chart cannot bridge unobserved time.
     count = math.ceil((now - start).total_seconds() / step.total_seconds())
     omitted = max(0, count - MAX_BUCKETS_RETURNED)
+    markers, markers_omitted = _version_markers(boots or [], start, now, step, omitted)
     bucket_records: Dict[int, List[Dict[str, Any]]] = {i: [] for i in range(omitted, count)}
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
     for record in window:
@@ -544,10 +676,15 @@ def calculate_analytics(
         "newest_ts": max((r["ts"] for r in window), default=None),
         "models_omitted": max(0, len(models) - MAX_MODELS_RETURNED),
         "buckets_omitted": omitted,
+        "markers_omitted": markers_omitted,
+        "sessions_without_usage_event": sum(r["kind"] == "subscription_session" and not r.get("token_facts", True)
+                                            for r in window),
         "coverage": (
-            "Requests come from the per-call usage events (live log plus rotated archives within "
-            f"the last {USAGE_ARCHIVE_WINDOW_DAYS} days); whole harness sessions come from the "
-            "retained ledger. Older history is not reconstructed."
+            "Requests and harness sessions come from the event log (live log plus rotated archives "
+            f"within the last {USAGE_ARCHIVE_WINDOW_DAYS} days)"
+            + ("; a live JSONL ledger (cores before the usage store) adds its session tokens" if quality.get("ledger_live")
+               else "")
+            + ". A session recorded without measured tokens counts as unknown. Older history is not reconstructed."
         ),
     })
     for key in ("oldest_ts", "newest_ts"):
@@ -555,7 +692,26 @@ def calculate_analytics(
     return {
         "status": "degraded" if quality.get("read_error") else "ok", "timeframe": tf,
         "summary": summary, "buckets": buckets, "models": models[:MAX_MODELS_RETURNED], "quality": quality,
+        "markers": markers,
     }
+
+
+def _merge_ledger_sessions(records: List[Dict[str, Any]], ledger_rows: List[Dict[str, Any]],
+                           horizon: datetime) -> List[Dict[str, Any]]:
+    """A ledger session row replaces the same run's unmeasured event session, never a measured one."""
+    measured = {r["identity"] for r in records if r["kind"] == "subscription_session" and r.get("measured")}
+    rows = [r for r in ledger_rows if r["ts"] >= horizon and r.get("identity") not in measured]
+    covered = {r["identity"] for r in rows if r.get("identity")}
+    kept = [r for r in records if not (r["kind"] == "subscription_session" and r["identity"] in covered)]
+    return kept + rows
+
+
+def _ledger_is_live(ledger_path: Path, horizon: datetime) -> bool:
+    """Cores with the usage store stopped writing the JSONL ledger; a file changed inside the window is live."""
+    try:
+        return datetime.fromtimestamp(ledger_path.stat().st_mtime, tz=timezone.utc) >= horizon
+    except OSError:
+        return False
 
 
 def register(api: Any) -> None:
@@ -576,16 +732,16 @@ def register(api: Any) -> None:
             elif isinstance(request, Mapping) and "query_params" in request:
                 timeframe = request["query_params"].get("timeframe", "24H")
 
-        requests, events_meta = _EVENTS.update(events_path, archive_dir)
-        sessions, ledger_meta = _CACHE.update(ledger_path)
-        # A missing ledger loses only the session rows; the request view stays healthy.
-        meta = {
-            **events_meta, "ledger_path": str(ledger_path),
-            "ledger_read_error": ledger_meta.get("read_error"),
-            "raw_stats": {**events_meta["raw_stats"],
-                          **{f"ledger_{key}": value for key, value in ledger_meta["raw_stats"].items()}},
-        }
-        return calculate_analytics(requests + sessions, timeframe=timeframe, meta=meta)
+        records, meta = _EVENTS.update(events_path, archive_dir)
+        horizon = datetime.now(timezone.utc) - timedelta(days=USAGE_ARCHIVE_WINDOW_DAYS)
+        meta["ledger_path"] = str(ledger_path)
+        meta["ledger_live"] = _ledger_is_live(ledger_path, horizon)
+        if meta["ledger_live"]:
+            sessions, ledger_meta = _CACHE.update(ledger_path)
+            records = _merge_ledger_sessions(records, sessions, horizon)
+            meta["ledger_read_error"] = ledger_meta.get("read_error")
+            meta["raw_stats"].update({f"ledger_{key}": value for key, value in ledger_meta["raw_stats"].items()})
+        return calculate_analytics(records, timeframe=timeframe, meta=meta, boots=_EVENTS.boot_snapshot())
 
     api.register_route("data", route_handler, methods=("GET",))
     api.register_ui_tab(

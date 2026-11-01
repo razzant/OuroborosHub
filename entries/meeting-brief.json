@@ -1,0 +1,17 @@
+{
+  "category": [
+    "planning"
+  ],
+  "description": "Prepare sourced morning work briefs, selected-meeting briefs, and post-meeting or end-of-day debriefs using existing calendar and approved information sources.",
+  "digest": "19e9cf34605d2369b7d6032ead4f26b8c59b4372a4b7aa9fd62378b372e79715",
+  "name": "meeting-brief",
+  "owner": "kazzand",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/meeting-brief"
+  },
+  "type": "instruction",
+  "version": "0.1.3",
+  "withdrawn": null
+}

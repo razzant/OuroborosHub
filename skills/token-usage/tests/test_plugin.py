@@ -57,9 +57,10 @@ spec.loader.exec_module(module)
 
 class OwnedTemporaryCase(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix=".test-plugin-", dir=ROOT)
+        self.temporary = tempfile.TemporaryDirectory(prefix="test-plugin-")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        # macOS temp folders sit behind /var -> /private/var; preferences refuse symlinked parents.
+        self.root = Path(self.temporary.name).resolve()
 
 
 @unittest.skipIf(plugin is None, "Starlette is unavailable; strict plugin import requires host dependency")
@@ -167,7 +168,7 @@ class FakeAPI:
     def register_route(self, path, handler, *, methods=("GET",)):
         if path in self.routes:
             raise AssertionError("Host disallows duplicate route paths")
-        if path not in ("data", "export", "preferences"):
+        if path not in ("data", "export", "preferences", "chip"):
             raise AssertionError("Only own relative routes are allowed")
         expected = ["GET", "PUT"] if path == "preferences" else ["GET"]
         if methods != expected:
@@ -224,7 +225,7 @@ class PluginContractTests(OwnedTemporaryCase):
 
     def test_exact_host_registration_ui_cleanup_and_lazy_start(self):
         api, service = self.register_fake()
-        self.assertEqual(set(api.routes), {"data", "export", "preferences"})
+        self.assertEqual(set(api.routes), {"data", "export", "preferences", "chip"})
         self.assertEqual(api.tabs, {"observatory": {"title": "Token Observatory", "icon": "◉", "render": {
             "kind": "module", "entry": "widget.js", "appearance": "host", "height": 560, "span": 2, "start": "manual"}}})
         self.assertIs(service.index.stop_event, service._stop)

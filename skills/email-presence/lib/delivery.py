@@ -24,8 +24,12 @@ def email_report(item, state, *, recipients=None, error="", refused=None):
         "message_id": item.message_id, "subject": wire.get("subject", item.subject),
         "recipients": list(targets),
         "in_reply_to": item.in_reply_to, "references": references,
-        "smtp_accepted": state == "accepted",
+        "smtp_accepted": state == "accepted" and (info.get("provider_receipt") or {}).get("transport", "smtp") == "smtp",
     }
+    if info.get("provider_receipt"):
+        message["provider_receipt"] = info["provider_receipt"]
+    if info.get("sender"):
+        message["from"] = info["sender"]
     if "to" in wire:
         message["to"] = wire["to"]
     if "cc" in wire:

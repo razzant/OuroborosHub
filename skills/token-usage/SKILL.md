@@ -1,7 +1,7 @@
 ---
 name: token-usage
 description: Token Observatory — Liquid Glass dashboard for recorded Ouroboros token usage, tasks and models.
-version: 1.1.1
+version: 1.2.0
 type: extension
 runtime: python3
 entry: plugin.py
@@ -11,6 +11,12 @@ when_to_use: Inspect token usage across Ouroboros models, harnesses, projects an
 model_experience:
   what_model_sees: No tools are registered; this skill adds a Widgets dashboard and its own HTTP routes.
   token_effect: Small constant manifest metadata only; the dashboard calls no language model.
+contributes:
+  - id: usage
+    placement: composer.chips
+    label: Usage
+    source: {route: chip, refresh_s: 120}
+    action: {verb: open.tab}
 ui_tab:
   tab_id: observatory
   title: Token Observatory
@@ -25,6 +31,13 @@ ui_tab:
 ---
 
 # Token Observatory
+
+The composer usage chip opens this widget. `GET chip` queries the same
+in-process `data?period=24h&page_size=1` summary, showing recorded confirmed cost
+when present, otherwise reported physical-call tokens. The title gives calls,
+tokens, confirmed cost and missing coverage. Subscription sessions, estimates
+and holds are not added to these totals. Loading or failed reads show “—”.
+
 
 ## Host appearance
 

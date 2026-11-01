@@ -1,0 +1,17 @@
+{
+  "category": [
+    "planning"
+  ],
+  "description": "Анализирует дорожные карты проектов (.pptx) одной программы и строит эталонную дорожную карту-шаблон для новых проектов той же программы: визуальная диаграмма Ганта по кварталам (8 кварталов, 5 фаз PMI PMBOK 7), WBS по фазам из реальных работ исходников и чек-лист по ICB4 / PMBOK 7. Все артефакты на русском, текст вписывается в слайды.",
+  "digest": "2de74a40d95dc75594e08a73bfce858c29cf2736f34a43b43da2677d07efc652",
+  "name": "roadmap_analyst",
+  "owner": "bitcomtlh",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/roadmap_analyst"
+  },
+  "type": "extension",
+  "version": "2.2.0",
+  "withdrawn": null
+}

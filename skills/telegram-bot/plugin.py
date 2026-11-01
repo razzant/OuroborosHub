@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import re
+import sqlite3
 import uuid
 from typing import Any, Dict, Optional
 
@@ -16,6 +17,7 @@ from .telegram_bot.delivery import tool_origin
 from .telegram_bot.formatting import prepare_text, prepare_caption
 from .telegram_bot.host import PresenceHostClient
 from .telegram_bot.runtime import TelegramTransportRuntime
+from .telegram_bot.settings import load_settings, normalize_words
 from .telegram_bot.tools import (
     make_moderation_tool,
     make_operation_tool,
@@ -24,6 +26,14 @@ from .telegram_bot.tools import (
     TELEGRAM_OPERATION_SCHEMA,
 )
 
+
+_BOT_DIFFERENCES = (
+    "**Telegram bot.** Telegram labels this account as a bot. People reach it in a private "
+    "chat they opened themselves and in groups or channels it was added to; group coverage depends "
+    "on privacy mode and admin rights. A bot cannot start a private chat with someone who never "
+    "opened one. The Bot API cannot read earlier chat history: only messages that arrive while it "
+    "runs are received. A dedicated ordinary account is the separate Telegram participant connector."
+)
 
 _RUNTIME: Optional[TelegramTransportRuntime] = None
 _STATE_DIR: Optional[pathlib.Path] = None
@@ -34,6 +44,7 @@ def _widget_render() -> Dict[str, Any]:
         "kind": "declarative",
         "schema_version": 1,
         "components": [
+            {"type": "markdown", "text": _BOT_DIFFERENCES},
             {
                 "type": "form",
                 "route": "settings/save",
@@ -41,20 +52,12 @@ def _widget_render() -> Dict[str, Any]:
                 "submit_label": "Save transport settings",
                 "fields": [
                     {
-                        "name": "binding_id",
-                        "label": "Presence Binding ID",
-                        "type": "text",
-                        "placeholder": "32-character binding id",
-                        "help": "Owner-created binding for this Telegram transport "
-                        "(conversation_id=exact id or conversation_id=*).",
-                    },
-                    {
                         "name": "management_group_id",
                         "label": "Management group ID",
                         "type": "text",
                         "placeholder": "Optional numeric Telegram group ID",
                         "help": "Marks this room in event facts. Work instructions stay "
-                        "in the behavior profile; no owner permissions are "
+                        "in the place notes; no owner permissions are "
                         "granted.",
                     },
                 ],
@@ -111,6 +114,7 @@ def _widget_render() -> Dict[str, Any]:
                         "path": "outbox_waiting",
                         "target": "status",
                     },
+                        {"type": "metric", "label": "Outbox held", "path": "outbox_held", "target": "status"},
                     {
                         "type": "metric",
                         "label": "Delivered",
@@ -145,6 +149,7 @@ def _widget_render() -> Dict[str, Any]:
                     {"label": "Last provider event", "path": "last_event_at"},
                     {"label": "Last delivery", "path": "last_delivery_at"},
                     {"label": "Last error", "path": "last_error"},
+                    {"label": "Reactions in Host context", "path": "reaction_context"},
                 ],
                 "target": "status",
             },
@@ -159,37 +164,51 @@ def _status_payload() -> Dict[str, Any]:
         counts: Dict[str, Any] = {}
     else:
         counts = CustodyStore(_STATE_DIR / "custody.sqlite3").status_snapshot()
-    runtime = _RUNTIME.status_snapshot() if _RUNTIME is not None else {}
+    runtime = _RUNTIME.status_snapshot(counts) if _RUNTIME is not None else {}
     binding_id = str(_load_local_settings().get("binding_id") or "").strip()
+    # Connect offers only the groups of the bot getMe confirmed for the current token.
+    # null, never [], while that bot or its groups cannot be read.
+    account, unavailable = _RUNTIME.confirmed_bot() if _RUNTIME is not None else ("", "Telegram bot not running")
+    groups = None
+    if account:
+        try:
+            groups = _RUNTIME.store.offered_groups(account)
+        except (sqlite3.Error, OSError):
+            unavailable = "Observed groups could not be read"
     return {
         "runtime_state": runtime.get("runtime_state", "not_started"),
         "bot_label": runtime.get("bot_label", "not connected"),
+        **({"identity": runtime["identity"]} if "identity" in runtime else {}),
         "last_event_at": runtime.get("last_event_at", ""),
         "last_delivery_at": runtime.get("last_delivery_at", ""),
         "last_error": runtime.get("last_error", ""),
         "delivery_reporting": runtime.get("delivery_reporting", "unknown"),
+        "presence_continuation_version": runtime.get("presence_continuation_version", 0),
+        "reaction_context": runtime.get("reaction_context", "update_required"),
+        "reaction_history": runtime.get("reaction_history", "update_required"),
         "has_presence_binding": bool(binding_id),
         "management_group_id": str(
             _load_local_settings().get("management_group_id") or ""
         ),
         "binding_state": "configured" if binding_id else "missing",
+        "connect": groups,
+        **({"connect_unavailable": unavailable} if groups is None else {}),
         **counts,
     }
 
 
 async def _status_route(_request: Any) -> JSONResponse:
-    return JSONResponse(_status_payload())
+    payload = _status_payload()
+    held = payload.get("outbox_held", 0)
+    text, tone = ((f"{held} held", "warn") if held else
+                  (payload["connect_unavailable"], "warn") if payload["connect"] is None else
+                  (payload["runtime_state"], "muted"))
+    payload.update(text=text, tone=tone, title="Telegram transport")
+    return JSONResponse(payload)
 
 
 def _load_local_settings() -> Dict[str, Any]:
-    if _STATE_DIR is None:
-        return {}
-    path = _STATE_DIR / "settings.json"
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    return load_settings(_STATE_DIR) if _STATE_DIR is not None else {}
 
 
 def _make_telegram_send(api: Any):
@@ -263,24 +282,29 @@ def _make_telegram_send(api: Any):
 
 
 async def _settings_save_route(request: Any) -> JSONResponse:
+    if request.method == "GET":
+        settings = _load_local_settings()
+        return JSONResponse({
+            "management_group_id": settings.get("management_group_id") or "",
+            "words": "\n".join(settings.get("words", [])),
+        })
     try:
         body = await request.json()
     except Exception:
         body = None
     if (
         not isinstance(body, dict)
-        or "binding_id" not in body
-        or set(body) - {"binding_id", "management_group_id"}
+        or set(body) - {"binding_id", "management_group_id", "words"}
     ):
         return JSONResponse(
             {
                 "ok": False,
-                "error": "Expected binding_id and optional management_group_id",
+                "error": "Expected transport settings",
             },
             status_code=400,
         )
     binding_id = str(body.get("binding_id") or "").strip()
-    if re.fullmatch(r"[0-9a-f]{32}", binding_id) is None:
+    if "binding_id" in body and re.fullmatch(r"[0-9a-f]{32}", binding_id) is None:
         return JSONResponse(
             {"ok": False, "error": "binding_id must be 32 lowercase hex characters"},
             status_code=400,
@@ -291,6 +315,11 @@ async def _settings_save_route(request: Any) -> JSONResponse:
             status_code=503,
         )
     settings = _load_local_settings()
+    if "words" in body:
+        try:
+            settings["words"] = normalize_words(body["words"])
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     if "management_group_id" in body:
         group_id = str(body.get("management_group_id") or "").strip()
         if group_id and re.fullmatch(r"-[0-9]+", group_id) is None:
@@ -302,7 +331,8 @@ async def _settings_save_route(request: Any) -> JSONResponse:
                 status_code=400,
             )
         settings["management_group_id"] = group_id
-    settings["binding_id"] = binding_id
+    if "binding_id" in body:
+        settings["binding_id"] = binding_id
     path = _STATE_DIR / "settings.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.tmp.{uuid.uuid4().hex}")
@@ -311,7 +341,7 @@ async def _settings_save_route(request: Any) -> JSONResponse:
         encoding="utf-8",
     )
     temporary.replace(path)
-    return JSONResponse({"ok": True, "binding_id": binding_id})
+    return JSONResponse({"ok": True, **({"binding_id": binding_id} if "binding_id" in body else {})})
 
 
 def register(api: Any) -> None:
@@ -339,7 +369,7 @@ def register(api: Any) -> None:
         token_provider=host_token_provider,
         host_base=f"http://127.0.0.1:{host_port}",
     )
-    _RUNTIME = TelegramTransportRuntime(
+    runtime = _RUNTIME = TelegramTransportRuntime(
         state_dir=_STATE_DIR,
         token_provider=token_provider,
         logger=api,
@@ -406,10 +436,12 @@ def register(api: Any) -> None:
     )
     api.register_tool(
         "telegram_operation",
-        make_operation_tool(api),
+        make_operation_tool(api, runtime.recorded_bot),
         description=(
-            "Queue an own-message Telegram edit or reaction through the existing outbox. "
-            "Use exact numeric chat/message IDs and a new request_id; reactions do not invent forum topic IDs."
+            "Queue an edit of this bot's own message, or set or clear this bot's reaction on any message it can "
+            "reach, through the existing outbox. A reaction can be the whole social response, and it is not "
+            "speech or proof of finished work. Use exact numeric chat/message IDs and a new request_id; "
+            "in a forum pass the target's known topic_id, which is never invented."
         ),
         schema=TELEGRAM_OPERATION_SCHEMA,
     )
@@ -427,7 +459,13 @@ def register(api: Any) -> None:
         },
     )
     api.register_route("status", _status_route, methods=("GET",))
-    api.register_route("settings/save", _settings_save_route, methods=("POST",))
+    api.register_route("settings/save", _settings_save_route, methods=("GET", "POST"))
+    api.register_settings_section("transport", title="Telegram", schema={"components": [
+        {"type": "form", "route": "settings/save", "method": "POST",
+         "submit_label": "Save transport settings", "fields": [
+             {"name": "words", "label": "Words to notice (one per line)", "type": "textarea"},
+         ]},
+    ]})
     api.register_ui_tab(
         "transport",
         "Telegram Transport",

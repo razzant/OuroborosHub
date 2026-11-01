@@ -1,0 +1,18 @@
+{
+  "category": [
+    "ouroboros"
+  ],
+  "description": "Read Ouroboros's memory room by room, beside the record you open, with corrections, drafts and decisions, knowledge notes, marks and identity, and copy an exact address to paste into a chat. Long lists and texts continue where they stopped; Refresh shows what changed. Read-only, no model calls.",
+  "digest": "02af7b5a3ded32550bb3655a33d0570bf17a1d05da6ceca7bba9d6335d3412b2",
+  "name": "memory-atlas",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/memory-atlas"
+  },
+  "title": "Memory Atlas",
+  "type": "extension",
+  "version": "0.3.0",
+  "withdrawn": null
+}

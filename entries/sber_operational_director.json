@@ -1,0 +1,32 @@
+{
+  "category": [
+    "business"
+  ],
+  "description": "ИИ-агент «Операционный директор» Сбербанка через MCP — сбор клиентских данных и ответы на бизнес-вопросы (ограничения, задолженность, справки, карты, профиль и т.п.).",
+  "digest": "1ccc01bd14c5843fe33a8c8e4b70a6038ab401653c4de10023ae63b0dd9533b6",
+  "install_specs": [
+    {
+      "kind": "pip",
+      "package": "httpx"
+    },
+    {
+      "kind": "pip",
+      "package": "cryptography"
+    },
+    {
+      "kind": "pip",
+      "package": "starlette"
+    }
+  ],
+  "name": "sber_operational_director",
+  "owner": "andreyprokhorof",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/sber_operational_director"
+  },
+  "type": "extension",
+  "version": "0.2.10",
+  "when_to_use": "Пользователь просит у «Операционного директора» Сбера бизнес-сведения — есть ли ограничения на счетах, задолженность, готовые справки, бизнес-карты, профиль организации, доверенности, операции, балансы, обороты, сводку по банку и т.п. (без технических кодов разделов).",
+  "withdrawn": null
+}

@@ -1,0 +1,17 @@
+{
+  "category": [
+    "health"
+  ],
+  "description": "Помогает выбрать клинику и врача, посмотреть свободные слоты и оформить очную запись через DocDoc API 1.0.13.",
+  "digest": "5a5a424c392235cc738a752cc64e66a51afcbcb0bc60b57dc1091a228e8e92fe",
+  "name": "doctor-booking-v4",
+  "owner": "komsikov",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/doctor-booking-v4"
+  },
+  "type": "extension",
+  "version": "2.2.1",
+  "withdrawn": null
+}

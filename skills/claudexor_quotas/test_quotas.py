@@ -4,7 +4,8 @@ The Python cases cover projection and actual registered handlers. A bundled-Node
 in-process harness executes widget.js itself (without a browser framework) for:
 - Per-facet provenance and notes (ok, not_read, failed, indeterminate, missing reads).
 - Timestamp and future-detection handling.
-- Constraint views, ratio clamping, and NaN handling.
+- Constraint views: out-of-range and NaN ratios refused (never clamped), unrounded
+  percents with display-only rounding, and the at-limit verdict.
 - Quota projection: fresh, stale, no-data, degraded facet, global exhaustion vs per-model caps.
 - Verification view tones and "last known" degradation.
 - Account and group structuring (native vs profile, next_up resolution, harness ordering).
@@ -41,6 +42,7 @@ from plugin import (
     _is_future,
     _constraint_view,
     _spent,
+    _used_text,
     quota_for,
     verification_view,
     build_groups,
@@ -138,36 +140,67 @@ class TestConstraintView:
         }
         view = _constraint_view(c)
         assert view["label"] == "5-hour window"
-        assert view["used_pct"] == 46
+        # The unrounded percent for bars and tones; the words round for the eye.
+        assert view["used_pct"] == 45.6
+        assert view["used_text"] == "45.6"
+        assert view["at_limit"] is False and view["ratio_problem"] == ""
         assert view["window_seconds"] == 18000
         assert view["scoped_models"] == ["claude-3-opus"]
 
-    def test_ratio_clamping(self):
-        assert _constraint_view({"used_ratio": 1.5})["used_pct"] == 100
-        assert _constraint_view({"used_ratio": -0.2})["used_pct"] == 0
+    def test_out_of_range_ratio_is_refused_never_clamped(self):
+        # The reserve refuses these (quota_summary.ratio_of); the account view
+        # used to clamp 1.5 into a "100%" nobody reported.
+        for bad, problem in ((1.5, "out_of_range"), (-0.2, "out_of_range"), ("0.5", "not_a_number"),
+                             (True, "not_a_number")):
+            view = _constraint_view({"used_ratio": bad}, at_limit=True)
+            assert view["used_pct"] is None and view["used_text"] is None, bad
+            assert view["ratio_problem"] == problem and view["at_limit"] is False, bad
 
     def test_missing_or_nan_ratio(self):
         assert _constraint_view({"used_ratio": None})["used_pct"] is None
+        assert _constraint_view({"used_ratio": None})["ratio_problem"] == ""
         assert _constraint_view({"used_ratio": float("nan")})["used_pct"] is None
+        assert _constraint_view({"used_ratio": float("nan")})["ratio_problem"] == "not_finite"
         assert _constraint_view({})["used_pct"] is None
+
+    @pytest.mark.parametrize(("ratio", "text"), [
+        (0.996, "99.6"), (1.0, "100"), (1 - 5e-10, "100"), (0.9999999, "<100"), (0.9996, "<100"),
+        (0.57, "57"), (0.0, "0"), (1e-9, ">0"), (0.0004, ">0"),
+        (0.456, "45.6"), (0.4, "40"), (0.004, "0.4"),
+    ])
+    def test_display_rounding_never_reads_as_full_or_empty(self, ratio, text):
+        assert _used_text(ratio) == text
+
+    def test_a_full_last_known_reading_still_reads_full_without_a_verdict(self):
+        # Stale or not current: the known fact is printed as reported, and
+        # carries no spent verdict (the caller gives none).
+        view = _constraint_view({"used_ratio": 1.0})
+        assert view["used_text"] == "100" and view["at_limit"] is False
 
 
 class TestSpentLogic:
-    def test_spent_when_used_pct_100_or_more(self):
-        assert _spent({"used_pct": 100, "cooldown_until": ""}) is True
-        assert _spent({"used_pct": 105, "cooldown_until": ""}) is True
-        assert _spent({"used_pct": 99, "cooldown_until": ""}) is False
+    def test_spent_only_on_the_at_limit_verdict_not_a_rounded_percent(self):
+        assert _spent({"used_pct": 100.0, "at_limit": True, "cooldown_until": ""}) is True
+        # 99.6% used rounds to "100" on a whole-percent screen; it is not spent.
+        assert _spent({"used_pct": 99.6, "at_limit": False, "cooldown_until": ""}) is False
+        assert _spent({"used_pct": 100, "cooldown_until": ""}) is False
 
-    def test_spent_when_cooldown_active(self):
+    def test_a_live_cooldown_is_not_a_spent_share(self):
+        # 0.6.1 account closure: a cooldown is carried as a cooldown of its
+        # own (quota["cooldowns"]), never as a window at its limit.
         future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=30)).isoformat()
-        assert _spent({"used_pct": 10, "cooldown_until": future}) is True
+        assert _spent({"used_pct": 10, "cooldown_until": future}) is False
 
     def test_not_spent_when_cooldown_in_past(self):
         past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=30)).isoformat()
         assert _spent({"used_pct": 50, "cooldown_until": past}) is False
 
-    def test_spent_when_cooldown_unparseable(self):
-        assert _spent({"used_pct": 20, "cooldown_until": "corrupt-date"}) is True
+    def test_an_unparseable_cooldown_is_not_a_spent_share(self):
+        assert _spent({"used_pct": 20, "cooldown_until": "corrupt-date"}) is False
+
+
+AUG_NOW = dt.datetime(2026, 8, 15, 12, 0, tzinfo=dt.timezone.utc).timestamp()
+AUG_OBSERVED = "2026-08-15T11:59:00Z"
 
 
 class TestQuotaFor:
@@ -205,6 +238,7 @@ class TestQuotaFor:
             {
                 "subject": {"harness": "claude", "subject_id": ""},
                 "freshness": "fresh",
+                "observed_at": AUG_OBSERVED,
                 "availability": {"state": "available"},
                 "constraints": [
                     {
@@ -222,7 +256,7 @@ class TestQuotaFor:
                 ],
             }
         ]
-        res = quota_for(snapshots, "claude", "", READ_OK)
+        res = quota_for(snapshots, "claude", "", READ_OK, now=AUG_NOW)
         assert res["state"] == "ok"
         assert "70% used" in res["label"]
         assert res["resets_at"] == "2026-08-16T00:00:00Z"
@@ -233,6 +267,7 @@ class TestQuotaFor:
             {
                 "subject": {"harness": "claude", "subject_id": "p1"},
                 "freshness": "fresh",
+                "observed_at": AUG_OBSERVED,
                 "constraints": [
                     {
                         "label": "5-Hour",
@@ -243,7 +278,7 @@ class TestQuotaFor:
                 ],
             }
         ]
-        res = quota_for(snapshots, "claude", "p1", READ_OK)
+        res = quota_for(snapshots, "claude", "p1", READ_OK, now=AUG_NOW)
         assert res["state"] == "exhausted"
         assert res["label"] == "Limit reached"
         assert res["resets_at"] == "2026-08-15T23:00:00Z"
@@ -253,6 +288,7 @@ class TestQuotaFor:
             {
                 "subject": {"harness": "claude", "subject_id": "p1"},
                 "freshness": "fresh",
+                "observed_at": AUG_OBSERVED,
                 "constraints": [
                     {
                         "label": "Opus Cap",
@@ -269,7 +305,7 @@ class TestQuotaFor:
                 ],
             }
         ]
-        res = quota_for(snapshots, "claude", "p1", READ_OK)
+        res = quota_for(snapshots, "claude", "p1", READ_OK, now=AUG_NOW)
         assert res["state"] == "ok"
         assert "40% used" in res["label"]
         assert "per-model caps spent: Opus Cap" in res["note"]
@@ -279,16 +315,18 @@ class TestQuotaFor:
             {
                 "subject": {"harness": "claude", "subject_id": None},
                 "freshness": "fresh",
+                "observed_at": AUG_OBSERVED,
                 "constraints": [{"label": "Native", "used_ratio": 0.99}],
             },
             {
                 "subject": {"harness": "claude", "subject_id": "profile_1"},
                 "freshness": "fresh",
+                "observed_at": AUG_OBSERVED,
                 "constraints": [{"label": "Profile", "used_ratio": 0.10}],
             },
         ]
-        native_res = quota_for(snapshots, "claude", "", READ_OK)
-        profile_res = quota_for(snapshots, "claude", "profile_1", READ_OK)
+        native_res = quota_for(snapshots, "claude", "", READ_OK, now=AUG_NOW)
+        profile_res = quota_for(snapshots, "claude", "profile_1", READ_OK, now=AUG_NOW)
         assert native_res["constraints"][0]["label"] == "Native"
         assert profile_res["constraints"][0]["label"] == "Profile"
 
@@ -348,7 +386,10 @@ class TestQuotaFor:
             }],
             [{"vendor": "claude", "not_before": "2099-09-01T08:05:00+00:00"}],
         )
-        assert result["state"] == "no_fresh_window"
+        # 0.6.1 account closure: the stale reading's live cooldown holds the
+        # account, as it does in the reserve's "cooling" restriction.
+        assert (result["state"], result["label"]) == ("cooling", "Cooling down")
+        assert [(c["freshness"], c["until"]) for c in result["cooldowns"]] == [("stale", "2099-09-01T09:00:00Z")]
         assert result["stale"][0]["constraints"][0]["used_pct"] == 83
         assert result["absence"]["action_kind"] == "retry"
         assert result["absence"]["retry_at"] == "2099-09-01T08:05:00+00:00"
@@ -409,6 +450,99 @@ class TestQuotaFor:
         assert result["absence"]["retry_at"] == ""
 
 
+def _fresh(sid, constraints, *, source="claude_oauth_usage", observed="2026-08-15T11:59:00Z"):
+    row = {"subject": {"harness": "claude", "subject_id": sid}, "freshness": "fresh",
+           "source": source, "constraints": constraints}
+    if observed is not None:
+        row["observed_at"] = observed
+    return row
+
+
+def _window(ratio, reset="2026-08-15T16:00:00Z", **extra):
+    return dict({"id": "five_hour", "label": "5 hour", "used_ratio": ratio,
+                 "window_seconds": 18000, "resets_at": reset}, **extra)
+
+
+class TestAccountViewUsesTheReserveRules:
+    """The account view draws a current window only for the reading the
+    reserve overview counts (quota_summary.reading_of / resolve_member):
+    the same validity, the same reset rule, the same source policy. Rounding
+    is for display; the spent verdict is taken on the unrounded share."""
+
+    def test_nearly_full_is_not_the_limit(self):
+        res = quota_for([_fresh("p", [_window(0.996)])], "claude", "p", READ_OK, now=AUG_NOW)
+        assert res["state"] == "ok" and res["label"] == "99.6% used"
+        view = res["constraints"][0]
+        assert view["used_text"] == "99.6" and view["at_limit"] is False
+        assert view["used_pct"] == pytest.approx(99.6)
+
+    def test_exactly_full_is_the_limit(self):
+        res = quota_for([_fresh("p", [_window(1.0)])], "claude", "p", READ_OK, now=AUG_NOW)
+        assert res["state"] == "exhausted" and res["label"] == "Limit reached"
+        assert res["constraints"][0]["at_limit"] is True and res["constraints"][0]["used_text"] == "100"
+
+    @pytest.mark.parametrize(("constraint", "observed", "why"), [
+        (_window(1.4), "2026-08-15T11:59:00Z", "ratio outside 0–100%"),
+        (_window("0.4"), "2026-08-15T11:59:00Z", "ratio not a number"),
+        (_window(0.3, reset="2026-08-15T11:00:00Z"), "2026-08-15T10:59:00Z", "its reported reset has passed"),
+        (_window(0.3), None, "no observation time"),
+        (_window(0.3), "2026-08-15T13:00:00Z", "observed in the future"),
+    ])
+    def test_a_reading_the_reserve_refuses_is_not_current(self, constraint, observed, why):
+        res = quota_for([_fresh("p", [constraint], observed=observed)], "claude", "p", READ_OK, now=AUG_NOW)
+        assert res["state"] == "not_current" and res["label"] == "No current reading — " + why
+        assert res["constraints"] == []  # no current bar, no spent verdict
+        assert "Limit reached" not in json.dumps(res)
+        aside = res["stale"][0]
+        assert aside["why"] == why and aside["freshness"] == "fresh"
+        # The known fact stays in view, as it was reported (never clamped).
+        view = aside["constraints"][0]
+        assert view["at_limit"] is False
+        if constraint["used_ratio"] == 1.4:
+            assert view["used_pct"] is None and view["ratio_problem"] == "out_of_range"
+        elif isinstance(constraint["used_ratio"], float):
+            assert view["used_pct"] == pytest.approx(30.0)
+
+    def test_sources_that_disagree_at_one_moment_draw_no_current_bar(self):
+        rows = [_fresh("p", [_window(0.2)], source="a"), _fresh("p", [_window(0.5)], source="b")]
+        res = quota_for(rows, "claude", "p", READ_OK, now=AUG_NOW)
+        assert res["state"] == "not_current" and res["label"] == "No current reading — its sources disagree"
+        assert res["constraints"] == []
+        assert sorted(v["used_pct"] for e in res["stale"] for v in e["constraints"]) == [20.0, 50.0]
+
+    def test_two_sources_of_one_limit_are_one_window_the_newest(self):
+        rows = [_fresh("p", [_window(0.2)], source="a", observed="2026-08-15T11:50:00Z"),
+                _fresh("p", [dict(_window(0.3), id="claude:five_hour")], source="b")]
+        res = quota_for(rows, "claude", "p", READ_OK, now=AUG_NOW)
+        assert res["state"] == "ok" and res["label"] == "30% used"
+        assert len(res["constraints"]) == 1 and res["stale"] == []
+
+    def test_a_window_with_no_ratio_stays_a_window_without_a_bar(self):
+        res = quota_for([_fresh("p", [_window(None), {"id": "reset_credits", "label": "1 reset credit"}])],
+                        "claude", "p", READ_OK, now=AUG_NOW)
+        assert res["state"] == "no_data"
+        assert [v["label"] for v in res["constraints"]] == ["5 hour", "1 reset credit"]
+        assert all(v["used_pct"] is None and v["ratio_problem"] == "" for v in res["constraints"])
+
+    def test_a_live_cooldown_still_counts_where_the_share_does_not(self):
+        future = (dt.datetime.fromtimestamp(AUG_NOW, dt.timezone.utc) + dt.timedelta(days=400)).isoformat()
+        res = quota_for([_fresh("p", [_window(1.4, cooldown_until=future)])], "claude", "p", READ_OK,
+                        now=AUG_NOW)
+        # The cooldown is its own reported fact with its own time; the share
+        # beside it is refused and never read as full. It is "Cooling down"
+        # until its end — not "Limit reached", and its end is not a reset.
+        assert (res["state"], res["label"], res["resets_at"]) == ("cooling", "Cooling down", "")
+        assert res["cooling_until"] == plugin.qs.iso(plugin.qs.parse_instant(future))
+        assert [(c["scope"], c["until_note"]) for c in res["cooldowns"]] == [("account", "")]
+        assert "Limit reached" not in json.dumps(res)
+        assert res["constraints"] == [] and res["stale"][0]["constraints"][0]["used_pct"] is None
+
+    def test_a_healthy_neighbour_is_unaffected(self):
+        rows = [_fresh("bad", [_window(1.4)]), _fresh("ok", [_window(0.3)])]
+        assert quota_for(rows, "claude", "ok", READ_OK, now=AUG_NOW)["label"] == "30% used"
+        assert quota_for(rows, "claude", "bad", READ_OK, now=AUG_NOW)["state"] == "not_current"
+
+
 class TestVerificationView:
     def test_vendor_live_passed(self):
         view = verification_view("passed", "vendor", READ_OK, signed_in=True)
@@ -424,6 +558,18 @@ class TestVerificationView:
         view = verification_view("failed", "vendor", READ_OK, signed_in=False)
         assert view["tone"] == "warn"
         assert view["label"] == "Verification failed"
+
+    def test_a_failed_check_projects_signed_out_and_failed_together(self):
+        """The shape the widget matrix's "both-one" stands on: a failed check
+        with the profile not available is signed_in false and tone warn at
+        once — two reasons on one account."""
+        row = {"profile": {"profile_id": "both", "harness_id": "claude", "enabled": True},
+               "status": {"verification": "failed", "verification_source": "vendor",
+                          "availability": "unavailable"}}
+        account = plugin._profile_account(row, [], [], "claude", READ_OK, READ_OK)
+        assert account["signed_in"] is False
+        assert account["verification_state"] == "failed"
+        assert account["verification"] == {"tone": "warn", "label": "Verification failed"}
 
     def test_degraded_accounts_facet_appends_last_known(self):
         view = verification_view("passed", "vendor", "failed", signed_in=True)
@@ -475,6 +621,7 @@ class TestBuildGroupsAndView:
                 {
                     "subject": {"harness": "claude", "subject_id": None},
                     "freshness": "fresh",
+                    "observed_at": "2026-09-01T08:00:00Z",
                     "constraints": [{"label": "Session", "used_ratio": 0.2}],
                 }
             ],
@@ -626,19 +773,44 @@ def test_foreground_update_rejects_malformed_success_envelope():
 
 
 class _MockAPI:
-    def __init__(self):
+    """A MOCKED host: it records registrations the way a worker process does
+    and never starts a supervised task. The real host lifecycle (publication,
+    cancellation on disable/unload) is exercised by the parent's live checks."""
+
+    def __init__(self, state_dir=None):
         self.routes = {}
         self.tabs = {}
+        self.tools = {}
+        self.tasks = []
+        self.unload = []
         self.logs = []
+        self._state_dir = state_dir
 
     def get_runtime_info(self):
         return {"server_port": 8765}
+
+    def get_state_dir(self):
+        if self._state_dir is None:
+            raise RuntimeError("no state dir in this mock")
+        return str(self._state_dir)
 
     def register_route(self, name, handler, methods=("GET",)):
         self.routes[name] = {"handler": handler, "methods": methods}
 
     def register_ui_tab(self, tab_id, title, icon=None, render=None):
         self.tabs[tab_id] = {"title": title, "icon": icon, "render": render}
+
+    def register_tool(self, name, handler, *, description, schema, timeout_sec=60):
+        self.tools[name] = {"handler": handler, "description": description,
+                            "schema": schema, "timeout_sec": timeout_sec}
+
+    def register_supervised_task(self, name, factory, *, restart_policy="on_failure",
+                                 max_restarts=5, backoff_seconds=2.0):
+        self.tasks.append({"name": name, "factory": factory, "restart_policy": restart_policy,
+                           "max_restarts": max_restarts, "backoff_seconds": backoff_seconds})
+
+    def on_unload(self, callback):
+        self.unload.append(callback)
 
     def log(self, level, message):
         self.logs.append((level, message))
@@ -704,7 +876,7 @@ const vm = require('node:vm');
 const widgetSource = fs.readFileSync(process.env.WIDGET_PATH, 'utf8');
 const instrumentedWidgetSource = widgetSource.replace(
   '    start();\n})();',
-  '    window.__quotaTest = { mergeQuotaFacet: mergeQuotaFacet };\n    start();\n})();',
+  '    window.__quotaTest = { keptView: keptView };\n    start();\n})();',
 );
 assert.notEqual(instrumentedWidgetSource, widgetSource, 'widget test hook insertion failed');
 
@@ -860,14 +1032,19 @@ async function boot(view, postValue) {
       const call = { url, method };
       if (options.body !== undefined) call.body = options.body;
       calls.push(call);
+      // A view may be a function of the request and every call so far, for
+      // a host whose answer changes (after a Refresh, a removed account).
       return Promise.resolve(method === 'POST'
         ? response(postValue || { ok: true, quota_updates: [] })
-        : response(view));
+        : response(typeof view === 'function' ? view(url, calls) : view));
     },
     setInterval(callback) { intervalCallback = callback; return 17; },
     clearInterval(id) { if (id === 17) intervalCleared = true; },
     addEventListener(name, handler) { (windowListeners[name] ||= []).push(handler); },
     setTimeout: (callback, ms) => setTimeout(callback, ms),
+    // 0.7.0: the widget bounds every request with a backstop timer and
+    // clears it when the request settles.
+    clearTimeout: (id) => clearTimeout(id),
     __ouroWidgetOnDispose(fn) { disposeHooks.push(fn); },
   };
   const context = vm.createContext({
@@ -936,22 +1113,45 @@ function view(accounts) {
 }
 
 (async () => {
-  // Fresh values keep normal bars, auth state, and quota age; auth age is not shown.
+  const click = (env, key) => {
+    const node = byFocus(env.root, key);
+    assert.ok(node, 'missing control ' + key);
+    node.listeners.click[0]({ stopPropagation() {} });
+  };
+  const inspector = (env) => classes(env.root, 'inspector')[0];
+  const winLines = (env) => classes(inspector(env), 'win-line').map((node) => node.textContent);
+  const stateOf = (env, key) => classes(byFocus(env.root, 'acct:' + key), 'acc-state')[0].textContent;
+
+  // 0.8.0: with no reserve overview the account list stands open on its own,
+  // nothing is selected until a row is clicked, and the selected account
+  // shows its windows, its check and the age of its quota reading.
   let env = await boot(view([account('p1', quota())]));
-  assert.match(env.root.textContent, /30% used/);
-  assert.match(env.root.textContent, /Quota observed .* ago/);
-  assert.match(env.root.textContent, /Verified live/);
+  assert.equal(inspector(env), undefined, 'no account selects itself');
+  assert.equal(classes(env.root, 'acc-row').length, 1);
+  assert.equal(byFocus(env.root, 'accounts'), undefined, 'with no overview the list is not folded away');
+  assert.equal(stateOf(env, 'claude:p1'), 'ready');
+  click(env, 'acct:claude:p1');
+  assert.match(inspector(env).textContent, /30% used/);
+  assert.match(inspector(env).textContent, /Quota observed .* ago/);
+  assert.match(inspector(env).textContent, /Verified live/);
+  assert.equal(byFocus(env.root, 'acct:claude:p1').getAttribute('aria-pressed'), 'true');
   assert.doesNotMatch(allSpoken(env.root), /Checked |checked /);
   assert.equal(classes(env.root, 'stale').length, 0);
+  click(env, 'inspector-clear');
+  assert.equal(inspector(env), undefined, 'Clear drops the selection');
+  assert.equal(byFocus(env.root, 'acct:claude:p1').getAttribute('aria-pressed'), 'false');
 
   env = await boot(view([account('p1', quota({
     state: 'no_data', label: 'No quota window reported', constraints: [],
   }))]));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.match(allSpoken(env.root), /quota observed .* ago/i);
+  click(env, 'acct:claude:p1');
+  assert.match(allSpoken(inspector(env)), /quota observed .* ago/i);
+  assert.match(inspector(env).textContent, /No quota window reported/);
   assert.doesNotMatch(allSpoken(env.root), /Checked |checked /);
 
-  // The same 100% constraint marked stale stays visible and amber, never exhaustion red.
+  // The same 100% constraint marked stale stays visible as a last-known
+  // reading — muted, with its reported cooldown — never exhaustion red and
+  // never a share held back now.
   const staleConstraint = {
     id: 'weekly', label: 'Weekly', used_pct: 100, resets_at: '',
     cooldown_until: new Date(Date.now() + 3600000).toISOString(),
@@ -966,23 +1166,33 @@ function view(accounts) {
       freshness: 'stale', source: 'claude_oauth_usage', constraints: [staleConstraint],
     }],
   }))]));
-  assert.match(env.root.textContent, /100% used/);
-  assert.match(env.root.textContent, /not used to grant routing/);
-  assert.match(env.root.textContent, /cooldown/);
-  assert.match(env.root.textContent, /cooldown evidence may still deny or rank/);
-  assert.ok(classes(env.root, 'quota-tile').some((node) => String(node.className).includes('stale')));
-  assert.equal(walk(env.root).filter((node) => String(node.className).includes('progress-fill bad')).length, 0);
-  assert.doesNotMatch(env.root.textContent, /Limit reached/);
+  assert.equal(stateOf(env, 'claude:p1'), 'no current reading');
+  click(env, 'acct:claude:p1');
+  const card = inspector(env).textContent;
+  assert.match(card, /100% used/);
+  assert.match(card, /not used to grant routing/);
+  assert.match(card, /cooldown reported/);
+  assert.match(card, /cooldown evidence may still deny or rank/);
+  assert.ok(classes(env.root, 'win-line').some((node) => /\bstale\b/.test(String(node.className))));
+  assert.equal(walk(env.root).filter((node) => /\bmeter\b.*\b(spent|restricted)\b/.test(String(node.className))).length, 0);
+  assert.ok(walk(env.root).some((node) => /\bmeter\b.*\bstale\b/.test(String(node.className))));
+  assert.doesNotMatch(env.root.textContent, /Limit reached|cooling down/);
 
-  // Fresh exhaustion remains the distinct red state.
+  // Fresh exhaustion remains the distinct red state, in the list and the card.
   env = await boot(view([account('p1', quota({
     state: 'exhausted', label: 'Limit reached',
     constraints: [Object.assign({}, staleConstraint, { cooldown_until: '' })], stale: [],
   }))]));
-  assert.match(env.root.textContent, /Limit reached/);
-  assert.ok(walk(env.root).some((node) => String(node.className).includes('progress-fill bad')));
+  assert.equal(stateOf(env, 'claude:p1'), 'limit reached');
+  click(env, 'acct:claude:p1');
+  assert.match(inspector(env).textContent, /Limit reached/);
+  // At the limit: no fill, only the red base — the reserve's own mark.
+  const spentBars = walk(env.root).filter((node) => /\bmeter\b.*\bspent\b/.test(String(node.className)));
+  assert.ok(spentBars.length);
+  spentBars.forEach((b) => assert.equal(b.childNodes.length, 0));
 
-  // Approved absence actions only, with raw diagnostics excluded from text, ARIA, and titles.
+  // Approved absence actions only — in the list's state and in the card —
+  // with raw diagnostics excluded from text, ARIA and titles.
   for (const item of [
     ['sign_in_if_unverified', false, 'Sign-in required'],
     ['sign_in_if_unverified', true, null],
@@ -998,11 +1208,14 @@ function view(accounts) {
     env = await boot(view([account('p1', quota({ absence }), {
       verified_live: item[1], detail: '/private/other/account/path vendor response body',
     })]));
+    assert.match(stateOf(env, 'claude:p1'), /^quota unavailable/);
+    if (item[2]) assert.match(stateOf(env, 'claude:p1'), new RegExp(item[2]));
+    click(env, 'acct:claude:p1');
     const spoken = allSpoken(env.root);
     assert.match(spoken, /Quota temporarily unavailable/);
     if (item[2]) assert.match(spoken, new RegExp(item[2]));
     if (!item[2]) assert.doesNotMatch(spoken, /Sign-in required|No live quota source|Retry after/);
-    assert.doesNotMatch(spoken, /auth_revoked|private\/secret|vendor body/);
+    assert.doesNotMatch(spoken, /auth_revoked|private\/secret|vendor body|private\/other/);
   }
 
   // A failed accounts facet makes a previous vendor pass last-known only, so
@@ -1019,8 +1232,10 @@ function view(accounts) {
     verification: { tone: 'muted', label: 'Verified live — last known' },
   })]);
   revokedAfterFailedAccountsRead.facets.accounts = 'failed';
+  revokedAfterFailedAccountsRead.facet_note = 'accounts: failed';
   env = await boot(revokedAfterFailedAccountsRead);
   assert.match(allSpoken(env.root), /Sign-in required/);
+  click(env, 'acct:claude:p1');
   assert.match(allSpoken(env.root), /Verified live — last known/);
 
   const degraded = view([account('p1', quota(), {
@@ -1033,67 +1248,58 @@ function view(accounts) {
     last_error: '/private/daemon/path raw provider response',
   };
   env = await boot(degraded);
+  click(env, 'acct:claude:p1');
+  click(env, 'about');
   assert.doesNotMatch(allSpoken(env.root), /private\/(account|transport|daemon)|vendor body|provider response/);
 
-  // Automatic polling stays GET-only. The explicit action is one POST, is disabled
-  // while in flight, and merges only the exact named subject's quota.
+  // Automatic polling stays GET-only. Refresh is one POST, disabled while in
+  // flight, and then one read of the whole projection: what is drawn is that
+  // read — every part of the screen from one reading made after the
+  // Refresh — never the POST's own quota merged into an older screen.
+  const named = (used) => quota({ label: used + '% used', constraints: [Object.assign({}, staleConstraint, {
+    used_pct: used, cooldown_until: '', scoped_models: [], label: 'Named',
+  })] });
   const base = view([
     account('', quota({ label: '10% used', constraints: [Object.assign({}, staleConstraint, {
       used_pct: 10, cooldown_until: '', scoped_models: [], label: 'Native',
     })] })),
-    account('p1', quota({ label: '20% used', constraints: [Object.assign({}, staleConstraint, {
-      used_pct: 20, cooldown_until: '', scoped_models: [], label: 'Named',
-    })] })),
+    account('p1', named(20)),
   ]);
-  const post = {
-    ok: true,
-    quota_updates: [{
-      harness: 'claude', subject_id: 'p1',
-      quota: quota({ label: '91% used', constraints: [Object.assign({}, staleConstraint, {
-        used_pct: 91, cooldown_until: '', scoped_models: [], label: 'Named refreshed',
-      })] }),
-    }],
-  };
-  env = await boot(base, post);
-  const mergedDirect = env.testHooks.mergeQuotaFacet(base, post);
-  function withoutQuota(value) {
-    return value.groups.map((group) => Object.assign({}, group, {
-      accounts: group.accounts.map((entry) => {
-        const copy = Object.assign({}, entry);
-        delete copy.quota;
-        return copy;
-      }),
-    }));
-  }
-  assert.deepEqual(withoutQuota(mergedDirect), withoutQuota(base));
-  assert.deepEqual(mergedDirect.daemon, base.daemon);
-  assert.equal(mergedDirect.facets.catalog, base.facets.catalog);
-  assert.equal(mergedDirect.facets.accounts, base.facets.accounts);
-  assert.equal(mergedDirect.groups[0].accounts[0].quota.label, '10% used');
-  assert.equal(mergedDirect.groups[0].accounts[1].quota.label, '91% used');
+  const after = JSON.parse(JSON.stringify(base));
+  after.groups[0].accounts[1].quota = named(91);
+  const post = { ok: true, quota_updates: [{ harness: 'claude', subject_id: 'p1', quota: named(55) }] };
+  env = await boot((url, calls) => (calls.some((call) => call.method === 'POST') ? after : base), post);
   const PREFIX = process.env.WIDGET_ROUTE_PREFIX;
-  assert.deepEqual(env.calls, [{ url: PREFIX + 'quotas', method: 'GET' }]);
+  assert.equal(env.calls.length, 1);
+  assert.equal(env.calls[0].method, 'GET');
+  assert.ok(env.calls[0].url.startsWith(PREFIX + 'quotas?'), env.calls[0].url);
   env.interval()();
   await settle();
   assert.equal(env.calls[1].method, 'GET');
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'opt:claude:p1').listeners.click[0]({ stopPropagation() {} });
+  click(env, 'acct:claude:p1');
+  assert.match(inspector(env).textContent, /20% used/);
   const refresh = byFocus(env.root, 'refresh');
   refresh.listeners.click[0]();
   refresh.listeners.click[0]();
   assert.equal(byFocus(env.root, 'refresh').disabled, true);
   await settle();
-  assert.equal(env.calls.filter((call) => call.method === 'POST').length, 1);
-  assert.equal(env.calls.at(-1).url, PREFIX + 'refresh');
-  assert.match(env.root.textContent, /91% used/);
+  const posts = env.calls.filter((call) => call.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].url, PREFIX + 'refresh');
+  const afterPost = env.calls.slice(env.calls.indexOf(posts[0]) + 1);
+  assert.equal(afterPost.length, 1, afterPost.map((c) => c.url).join());
+  assert.equal(afterPost[0].method, 'GET');
+  assert.doesNotMatch(afterPost[0].url, /reuse=1/, 'the read after a Refresh is a new status read');
+  assert.equal(byFocus(env.root, 'refresh').disabled, false);
+  assert.match(inspector(env).textContent, /91% used/);
+  assert.doesNotMatch(env.root.textContent, /55% used/, 'the POST answer is not merged in');
   assert.match(env.root.textContent, /named@example.com/);
   assert.match(env.root.textContent, /Verified live/);
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'opt:claude:native').listeners.click[0]({ stopPropagation() {} });
-  assert.match(env.root.textContent, /10% used/);
-  assert.doesNotMatch(env.root.textContent, /91% used/);
+  click(env, 'acct:claude:native');
+  assert.match(inspector(env).textContent, /10% used/);
+  assert.doesNotMatch(inspector(env).textContent, /91% used/);
 
-  // Old hosts fail honestly and never fall back to a second GET.
+  // Old hosts fail honestly and never fall back to a read of their own.
   env = await boot(view([account('p1', quota())]), {
     ok: false, compatibility_error: true,
     message: 'Live refresh requires a newer Ouroboros host',
@@ -1103,22 +1309,23 @@ function view(accounts) {
   assert.match(env.root.textContent, /Live refresh requires a newer Ouroboros host/);
   assert.deepEqual(env.calls.map((call) => call.method), ['GET', 'POST']);
 
-  // Each row-detail choice carries a picture of itself, and the pictures differ
-  // by the one thing the choices differ by: how many lines open under the bars.
-  env = await boot(view([account('p1', quota())]));
-  byFocus(env.root, 'settings').listeners.click[0]({ stopPropagation() {} });
-  // An svg's class lives in the attribute, not in className: in a browser the
-  // property is not a string there, so the widget sets the attribute.
-  const previews = walk(env.root).filter(
-    (node) => String(node.getAttribute('class') || '').includes('dens-pv'));
-  assert.equal(previews.length, 3);
-  const lineCounts = previews.map((pv) => pv.childNodes.filter(
-    (node) => String(node.getAttribute('class') || '').includes('pv-line')).length);
-  assert.deepEqual(lineCounts, [0, 2, 4]);
+  // 0.8.0: there is no settings panel. The skill's legacy display choices
+  // (row detail, model filter, folding) travel with each reading for older
+  // widgets; this one draws nothing from them and never saves any.
+  const withPrefs = Object.assign(view([account('p1', quota()), account('p2', quota(), { enabled: false })]), {
+    prefs: { density: 'compact', models: { claude: 'models' }, fold: { failed: false, disabled: false, signed_out: false } },
+  });
+  env = await boot(withPrefs);
+  assert.equal(byFocus(env.root, 'settings'), undefined);
+  const plain = await boot(view([account('p1', quota()), account('p2', quota(), { enabled: false })]));
+  assert.equal(env.root.textContent, plain.root.textContent);
+  click(env, 'acct:claude:p1');
+  env.interval()();
+  await settle();
+  assert.ok(env.calls.every((call) => !/\/prefs$/.test(call.url)), 'no display choice is posted');
 
-  // Every family is named with something in front of it — its own mark, or the
-  // ring with its initial. A family the widget has no mark for is the common
-  // case, not the rare one, and it must not start the row with bare text.
+  // Every family is named with something in front of it — its own mark, or
+  // the ring with its initial — and never somebody else's logo.
   const twoFamilies = view([account('p1', quota())]);
   twoFamilies.groups.push({
     harness_id: 'openrouter', family_label: 'OpenRouter', harness_status: 'ok',
@@ -1127,60 +1334,66 @@ function view(accounts) {
   });
   env = await boot(twoFamilies);
   assert.equal(classes(env.root, 'harness-initial').length, 1);
-  byFocus(env.root, 'settings').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'settings-tab:models').listeners.click[0]({ stopPropagation() {} });
-  const familyRows = classes(env.root, 'models-family');
-  assert.equal(familyRows.length, 2);
-  familyRows.forEach((row) => {
-    const marked = row.childNodes.some(
-      (node) => String(node.getAttribute('class') || node.className || '').includes('harness-initial')
-        || node.tagName === 'SVG');
-    assert.ok(marked, 'a family row starts with a mark or a ring');
-  });
+  assert.equal(classes(byFocus(env.root, 'harness:openrouter'), 'harness-initial').length, 1);
+  click(env, 'harness:openrouter');
+  assert.match(env.root.textContent, /No accounts in OpenRouter/);
 
-  // The family mark answers in three colours, not by appearing: green while the
-  // windows have room, amber once one is at its edge, red when nothing runs.
+  // 0.8.0: a family's button carries no colour for its worst account — one
+  // account at its limit is not the family's state. A harness that is down or
+  // switched off is, and says so. Each account's own state is its dot.
   const pipTone = (root) => {
-    const pip = classes(root, 'seg-pip')[0];
+    const pip = classes(byFocus(root, 'harness:claude'), 'seg-pip')[0];
     return pip ? String(pip.className).split(/\s+/).find((c) => ['ok', 'warn', 'bad', 'muted'].includes(c)) : null;
   };
+  const accountDot = (root) => String(classes(byFocus(root, 'acct:claude:p1'), 'state-dot')[0].className);
   env = await boot(view([account('p1', quota())]));
-  assert.equal(pipTone(env.root), 'ok');
+  assert.equal(pipTone(env.root), null);
+  assert.match(accountDot(env.root), /\bok\b/);
   env = await boot(view([account('p1', quota({
     label: '90% used',
     constraints: [{ id: 'weekly', label: 'Weekly', used_pct: 90, resets_at: '',
       cooldown_until: '', scoped_models: [], window_seconds: 604800 }],
   }))]));
-  assert.equal(pipTone(env.root), 'warn');
+  assert.equal(pipTone(env.root), null);
+  assert.equal(stateOf(env, 'claude:p1'), 'nearly used');
+  assert.match(accountDot(env.root), /\bwarn\b/);
   env = await boot(view([account('p1', quota({
     state: 'exhausted', label: 'Limit reached',
     constraints: [{ id: 'weekly', label: 'Weekly', used_pct: 100, resets_at: '',
       cooldown_until: '', scoped_models: [], window_seconds: 604800 }],
   }))]));
-  assert.equal(pipTone(env.root), 'bad');
-  // Every tone the mark can carry has a colour rule of its own; an unpainted
-  // pip would be an invisible answer.
+  assert.equal(pipTone(env.root), null, 'one spent account is not the family');
+  assert.match(accountDot(env.root), /\bbad\b/);
+  const down = view([account('p1', quota())]);
+  down.groups[0].harness_status = 'unavailable';
+  env = await boot(down);
+  assert.equal(pipTone(env.root), 'warn');
+  assert.match(byFocus(env.root, 'harness:claude').getAttribute('aria-label'), /harness unavailable/);
   ['ok', 'warn', 'bad', 'muted'].forEach((tone) => {
-    assert.ok(widgetSource.includes(`'.pip.${tone}{`), `.pip.${tone} has no colour`);
+    assert.match(widgetSource, new RegExp(`\\.pip\\.${tone}[^{}]*\\{background:`), `.pip.${tone} has no colour`);
   });
 
-  // A redraw arriving under the reader's hand must not throw them back to the
-  // first row: the tree is rebuilt whole, so the list's scroll is carried over.
+  // The 30-second redraw keeps the selection and the keyboard where they were.
   env = await boot(view([account('p1', quota()), account('p2', quota())]));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  const popBefore = classes(env.root, 'acct-pop')[0];
-  assert.ok(popBefore, 'the account list opens');
-  popBefore.scrollTop = 64;
+  click(env, 'acct:claude:p2');
+  byFocus(env.root, 'acct:claude:p2').focus();
   env.interval()();
   await settle();
-  const popAfter = classes(env.root, 'acct-pop')[0];
-  assert.ok(popAfter, 'the list is still open after a redraw');
-  assert.notEqual(popAfter, popBefore);
-  assert.equal(popAfter.scrollTop, 64);
+  assert.equal(byFocus(env.root, 'acct:claude:p2').getAttribute('aria-pressed'), 'true');
+  assert.ok(inspector(env));
+  assert.equal(env.document.activeElement.getAttribute('data-focus'), 'acct:claude:p2');
+  // An account that is gone takes its selection with it: nothing else is
+  // selected in its place.
+  const both = view([account('p1', quota()), account('p2', quota())]);
+  const gone = view([account('p1', quota())]);
+  env = await boot((url, calls) => (calls.length > 1 ? gone : both));
+  click(env, 'acct:claude:p2');
+  env.interval()();
+  await settle();
+  assert.equal(inspector(env), undefined);
+  assert.equal(byFocus(env.root, 'acct:claude:p1').getAttribute('aria-pressed'), 'false');
 
-  // A spent window's line in the list says once when it comes back. relTime
-  // already answers as a phrase ("in 6d"); the line used to put a second "in"
-  // in front of it, and the reader saw "in in 6d".
+  // A spent window's line says once when it comes back ("in 6d", never "in in 6d").
   const sixDays = new Date(Date.now() + 6 * 86400000).toISOString();
   env = await boot(view([
     account('p1', quota({
@@ -1191,14 +1404,16 @@ function view(accounts) {
       }],
     })),
   ]));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  const backIn = classes(env.root, 'acct-rl-in').map((node) => node.textContent);
-  assert.deepEqual(backIn, ['in 6d']);
+  click(env, 'acct:claude:p1');
+  const backIn = classes(inspector(env), 'rel-time').map((node) => node.textContent);
+  assert.ok(backIn.length >= 1 && backIn.every((t) => t === 'in 6d'), backIn.join('|'));
+  assert.match(winLines(env)[0], /^weekWeekly|^week/);
+  assert.match(winLines(env)[0], /spent.*in 6d$/);
 
-  // Codex keeps two pools, and the engine lists their windows in an order that
-  // changes from one reading to the next. The widget keeps none of it: windows
-  // are grouped by pool, the pool's chip stands once in front of its own bars,
-  // and the tiles follow the same order — whichever order came in.
+  // Codex keeps two pools, and the engine lists their windows in an order
+  // that changes from one reading to the next. The card keeps none of it:
+  // windows are grouped by pool, the pool's chip in front of each line, and
+  // the order is the same whichever order came in.
   const CODEX = {
     'codex-week': { id: 'cw', label: 'codex primary', used_pct: 100, resets_at: sixDays,
       cooldown_until: '', scoped_models: [], window_seconds: 604800 },
@@ -1212,52 +1427,41 @@ function view(accounts) {
       account('p1', quota({ state: 'exhausted', label: 'Limit reached', resets_at: sixDays,
         constraints: order.map((key) => CODEX[key]) })),
     ]));
-    byFocus(e.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
+    click(e, 'acct:claude:p1');
     return e;
   };
-  const groupsOf = (e) => classes(e.root, 'acct-grp').map((node) => node.textContent);
-  const tilesOf = (e) => classes(e.root, 'quota-tile').map((node) => node.title);
-  const linesOf = (e) => classes(e.root, 'acct-rl').map((node) => node.textContent);
+  const pools = (e) => classes(inspector(e), 'win-line').map((line) => {
+    const chip = classes(line, 'acct-pool')[0];
+    return classes(line, 'win-tag')[0].textContent + '|' + (chip ? chip.textContent : '');
+  });
   env = await openedWith(['spark-week', 'codex-week', 'spark-5h']);
-  assert.deepEqual(groupsOf(env), ['codexweek100%', 'GPT-5.3-Codex-Spark5 hours0%week0%']);
-  assert.deepEqual(tilesOf(env), ['codex primary', 'GPT-5.3-Codex-Spark primary', 'GPT-5.3-Codex-Spark secondary']);
-  // The line under the bars names the pool beside the length, so two "week"
-  // lines cannot read as one window twice; the old "windows:" footnote is gone.
-  assert.equal(linesOf(env).length, 2);
-  assert.match(linesOf(env)[0], /^weekcodexspent.*in 6d$/);
-  assert.equal(linesOf(env)[1], '5 hoursGPT-5.3-Codex-Spark0% usedavailable');
-  assert.doesNotMatch(env.root.textContent, /windows:/);
-  const seenOnce = groupsOf(env);
+  assert.deepEqual(pools(env), ['week|codex', '5 hours|GPT-5.3-Codex-Spark', 'week|GPT-5.3-Codex-Spark']);
+  assert.match(winLines(env)[0], /^weekcodex100% usedspent.*in 6d$/);
+  assert.match(winLines(env)[1], /^5 hoursGPT-5\.3-Codex-Spark0% used/);
+  const seenOnce = pools(env);
   env = await openedWith(['spark-5h', 'spark-week', 'codex-week']);
-  assert.deepEqual(groupsOf(env), seenOnce);
-  assert.deepEqual(tilesOf(env), ['codex primary', 'GPT-5.3-Codex-Spark primary', 'GPT-5.3-Codex-Spark secondary']);
+  assert.deepEqual(pools(env), seenOnce);
 
-  // Two spellings of one pool name are two pools, side by side, in an order of
-  // their own — never the order the engine happened to send them in.
-  // Both spellings carry a 5-hour and a week window, so merging them by
-  // case and then splitting the row by exact name would alternate the two
-  // and print four chips for two pools.
+  // Two spellings of one pool name are two pools, side by side, in an order
+  // of their own — never the order the engine happened to send them in.
   CODEX['codex-5h'] = { id: 'c5', label: 'codex secondary', used_pct: 0, resets_at: '',
     cooldown_until: '', scoped_models: [], window_seconds: 18000 };
   CODEX['Codex-5h'] = { id: 'C5', label: 'Codex primary', used_pct: 0, resets_at: '',
     cooldown_until: '', scoped_models: [], window_seconds: 18000 };
   CODEX['Codex-week'] = { id: 'Cw', label: 'Codex secondary', used_pct: 0, resets_at: '',
     cooldown_until: '', scoped_models: [], window_seconds: 604800 };
-  const spelled = ['Codex5 hours0%week0%', 'codex5 hours0%week100%'];
+  const spelled = ['5 hours|Codex', 'week|Codex', '5 hours|codex', 'week|codex'];
   env = await openedWith(['codex-week', 'Codex-5h', 'codex-5h', 'Codex-week']);
-  assert.deepEqual(groupsOf(env), spelled);
+  assert.deepEqual(pools(env), spelled);
   env = await openedWith(['Codex-week', 'codex-5h', 'Codex-5h', 'codex-week']);
-  assert.deepEqual(groupsOf(env), spelled);
+  assert.deepEqual(pools(env), spelled);
 
   // Two windows of one length inside one pool take their role word as well,
-  // and only then: the everyday row keeps "week" on its own.
+  // and only then: the everyday line keeps "week" on its own.
   CODEX['codex-week-2'] = { id: 'cw2', label: 'codex secondary', used_pct: 0, resets_at: '',
     cooldown_until: '', scoped_models: [], window_seconds: 604800 };
   env = await openedWith(['codex-week-2', 'codex-week']);
-  assert.deepEqual(groupsOf(env), ['codexweek primary100%week secondary0%']);
-  assert.equal(linesOf(env).length, 2);
-  assert.match(linesOf(env)[0], /^week primarycodexspent/);
-  assert.equal(linesOf(env)[1], 'week secondarycodex0% usedavailable');
+  assert.deepEqual(pools(env), ['week primary|codex', 'week secondary|codex']);
 
   // Claude names no pool for its plain windows; those stand first, and the
   // window scoped to a model follows under that model's chip.
@@ -1267,275 +1471,123 @@ function view(accounts) {
     { id: 'w', label: '7 day', used_pct: 40, resets_at: '', cooldown_until: '', scoped_models: [], window_seconds: 604800 },
     { id: 'h', label: '5 hour', used_pct: 20, resets_at: '', cooldown_until: '', scoped_models: [], window_seconds: 18000 },
   ] }))]));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.deepEqual(groupsOf(env), ['5 hours20%week40%', 'Fableweek100%']);
-  assert.deepEqual(tilesOf(env), ['5 hour', '7 day', '7 day (Fable)']);
+  click(env, 'acct:claude:p1');
+  assert.deepEqual(pools(env), ['5 hours|', 'week|', 'week|Fable']);
 
-  // One word for "spent": a model window cooling until a date the widget
-  // cannot read is spent everywhere at once — the tile's chip, the pool's chip
-  // in the row, the line under the bars, the family mark — the way plugin.py
-  // counts it. Each place used to ask its own way, and the card was red while
-  // the row stayed neutral.
+  // Two words and two colours, each the same everywhere at once — the pool's
+  // chip, the line's name, its words, the family mark. A model window cooling
+  // until a date nobody can read is held: amber, "cooling down", its end
+  // unreadable (not a reset). Red is the measured share at its limit only.
   env = await boot(view([account('p1', quota({ constraints: [
     { id: 'f', label: '7 day (Fable)', used_pct: 10, resets_at: '', cooldown_until: 'not-a-date',
       scoped_models: ['fable'], window_seconds: 604800 },
     { id: 'w', label: '7 day', used_pct: 40, resets_at: '', cooldown_until: '', scoped_models: [], window_seconds: 604800 },
   ] }))]));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.match(String(classes(env.root, 'tile-model')[0].className), /\bspent\b/);
-  assert.match(String(classes(env.root, 'acct-pool')[0].className), /\bexhausted\b/);
-  assert.equal(pipTone(env.root), 'warn');
-  assert.deepEqual(linesOf(env), ['weekFablecooling downno reset time', 'others40% usedavailable']);
+  click(env, 'acct:claude:p1');
+  const toneOf = (node) => String(node.className);
+  const fableLine = classes(inspector(env), 'win-line').find((n) => /Fable/.test(n.textContent));
+  assert.match(toneOf(classes(fableLine, 'acct-pool')[0]), /\bheld\b/);
+  assert.doesNotMatch(toneOf(classes(fableLine, 'acct-pool')[0]), /\bexhausted\b/);
+  assert.match(toneOf(classes(fableLine, 'win-tag')[0]), /\bwarn\b/);
+  assert.match(fableLine.textContent, /cooling downend time unreadable/);
+  // No cooldown list in this answer: the window's own cooldown says it.
+  assert.equal(stateOf(env, 'claude:p1'), 'a model held');
+  assert.equal(classes(env.root, 'exhausted').length, 0);
+  assert.equal(classes(env.root, 'bad').filter((n) => /win-/.test(n.className)).length, 0);
+  // The same window measured at its limit is spent: red, with its reset.
+  env = await boot(view([account('p1', quota({ constraints: [
+    { id: 'f', label: '7 day (Fable)', used_pct: 100, at_limit: true, resets_at: sixDays,
+      cooldown_until: '', scoped_models: ['fable'], window_seconds: 604800 },
+    { id: 'w', label: '7 day', used_pct: 40, resets_at: '', cooldown_until: '', scoped_models: [], window_seconds: 604800 },
+  ] }))]));
+  click(env, 'acct:claude:p1');
+  const spentLine = classes(inspector(env), 'win-line').find((n) => /Fable/.test(n.textContent));
+  assert.match(toneOf(classes(spentLine, 'acct-pool')[0]), /\bexhausted\b/);
+  assert.match(toneOf(classes(spentLine, 'win-tag')[0]), /\bbad\b/);
+  assert.match(spentLine.textContent, /spent.*in 6d$/);
+  assert.equal(stateOf(env, 'claude:p1'), 'a model at its limit');
+  assert.equal(classes(inspector(env), 'held').length, 0);
 
-  // All three display choices travel in one body. The skill writes what it is
-  // given, so a save that carried only the density would wipe the folds — and
-  // the reader would find them back on after touching an unrelated setting.
-  const folded = view([account('p1', quota())]);
-  folded.prefs = {
-    density: 'normal', models: {},
-    fold: { failed: false, disabled: true, signed_out: true },
-  };
-  env = await boot(folded);
-  byFocus(env.root, 'settings').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'density:compact').listeners.click[0]({ stopPropagation() {} });
-  await settle();
-  const savedBody = JSON.parse(
-    env.calls.filter((call) => call.url === PREFIX + 'prefs').at(-1).body);
-  assert.equal(savedBody.density, 'compact');
-  assert.deepEqual(savedBody.fold, { failed: false, disabled: true, signed_out: true });
-
-  // A value that is not a plain yes or no leaves the account folded away. The
-  // skill drops such a value too, so the two ends agree without asking.
-  const junkFold = view([account('p1', quota())]);
-  junkFold.prefs = { density: 'normal', models: {}, fold: { failed: 'no', disabled: null } };
-  env = await boot(junkFold);
-  byFocus(env.root, 'settings').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'density:compact').listeners.click[0]({ stopPropagation() {} });
-  await settle();
-  const cleanedBody = JSON.parse(
-    env.calls.filter((call) => call.url === PREFIX + 'prefs').at(-1).body);
-  assert.deepEqual(cleanedBody.fold, { failed: true, disabled: true, signed_out: true });
-
-  // The fold. Accounts that do not work go under one row at the bottom,
-  // gathered by reason; the live ones keep the order the engine sent them in.
+  // Accounts that cannot run anything stand at the bottom of the list under
+  // their reasons, in the engine's order, never as alarms: a switched-off or
+  // signed-out account is grey; a failed check stays red, as the fault it is.
   const mixedAccounts = () => [
     account('live1', quota(), { label: 'live-one' }),
     account('out1', quota(), { label: 'out-one', signed_in: false,
       verification: { tone: 'muted', label: 'Not verified' } }),
-    // A failed check arrives from the engine as tone 'warn' with the check
-    // itself marked failed; 'bad' is never emitted by verification_view.
+    // A failed check arrives from the engine as tone 'warn'.
     account('broken', quota(), { label: 'broken-one', verification_state: 'failed',
       verified_live: false, verification: { tone: 'warn', label: 'Verification failed' } }),
     account('off1', quota(), { label: 'off-one', enabled: false }),
     account('live2', quota(), { label: 'live-two' }),
-    account('out2', quota(), { label: 'out-two', signed_in: false,
-      verification: { tone: 'muted', label: 'Not verified' } }),
   ];
-  const namesOf = (root) => classes(root, 'acct-opt-name').map((node) => node.textContent);
-
+  const namesOf = (root) => classes(root, 'acc-name-text').map((node) => node.textContent);
+  const dotOf = (root, key) => String(classes(byFocus(root, 'acct:' + key), 'state-dot')[0].className);
   env = await boot(view(mixedAccounts()));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.deepEqual(namesOf(env.root), ['live-one', 'live-two']);
-  assert.equal(classes(env.root, 'acct-fold-count')[0].textContent, '4');
-  // Shut, the row still carries the colour of what is under it: a failed check
-  // and a switched-off account are red, an account nobody logged into is not.
-  assert.deepEqual(
-    classes(env.root, 'acct-fold-dots')[0].childNodes.map((dot) => String(dot.className)),
-    ['state-dot bad', 'state-dot bad', 'state-dot muted']);
-
-  byFocus(env.root, 'fold').listeners.click[0]({ stopPropagation() {} });
-  assert.deepEqual(classes(env.root, 'acct-sec-title').map((node) => node.textContent),
-    ['Verification failed', 'Disabled', 'Not signed in']);
-  assert.deepEqual(classes(env.root, 'acct-sec-count').map((node) => node.textContent),
-    ['1', '1', '2']);
-  assert.deepEqual(namesOf(env.root),
-    ['live-one', 'live-two', 'broken-one', 'off-one', 'out-one', 'out-two']);
-  assert.match(String(classes(env.root, 'acct-sec')[0].className), /\bbroken\b/);
-  assert.doesNotMatch(String(classes(env.root, 'acct-sec')[1].className), /\bbroken\b/);
-
-  // A reason switched off is not a reason here: those accounts stand upstairs
-  // again, in the engine's own order, and the fold counts what is left.
-  const partly = view(mixedAccounts());
-  partly.prefs = { density: 'normal', models: {},
-    fold: { failed: true, disabled: true, signed_out: false } };
-  env = await boot(partly);
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.deepEqual(namesOf(env.root), ['live-one', 'out-one', 'live-two', 'out-two']);
-  assert.equal(classes(env.root, 'acct-fold-count')[0].textContent, '2');
-
-  // Nothing works in this family: there is nothing to fold under, so the
-  // sections stand on their own and say why the list looks empty.
-  env = await boot(view([
-    account('out1', quota(), { label: 'out-one', signed_in: false,
-      verification: { tone: 'muted', label: 'Not verified' } }),
-    account('out2', quota(), { label: 'out-two', signed_in: false,
-      verification: { tone: 'muted', label: 'Not verified' } }),
-  ]));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.equal(classes(env.root, 'acct-fold').length, 0);
-  assert.deepEqual(classes(env.root, 'acct-sec-title').map((node) => node.textContent),
-    ['Not signed in']);
-  assert.deepEqual(namesOf(env.root), ['out-one', 'out-two']);
-
-  // The account on screen is inside the fold: the list opens with it open,
-  // because a shut fold would hide the very row that is selected.
-  env = await boot(view(mixedAccounts()));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'fold').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'opt:claude:out2').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.equal(byFocus(env.root, 'fold').getAttribute('aria-expanded'), 'true');
-  assert.equal(classes(env.root, 'acct-sec-title').length, 3);
+  assert.deepEqual(namesOf(env.root), ['live-one', 'live-two', 'out-one', 'broken-one', 'off-one']);
+  assert.match(classes(env.root, 'acc-sec')[0].textContent, /^Not running/);
+  assert.equal(stateOf(env, 'claude:out1'), 'not signed in');
+  assert.equal(stateOf(env, 'claude:broken'), 'verification failed');
+  assert.equal(stateOf(env, 'claude:off1'), 'switched off in Claudexor');
+  assert.match(dotOf(env.root, 'claude:out1'), /\bmuted\b/);
+  assert.match(dotOf(env.root, 'claude:off1'), /\bmuted\b/);
+  assert.match(dotOf(env.root, 'claude:broken'), /\bbad\b/);
+  assert.doesNotMatch(allSpoken(env.root), /need attention|needs attention/);
+  // The family's account count is of the accounts switched on.
+  assert.equal(classes(byFocus(env.root, 'harness:claude'), 'harness-count')[0].textContent, '4');
+  // A not-running account can still be selected and read.
+  click(env, 'acct:claude:off1');
+  assert.match(inspector(env).textContent, /switched off in Claudexor/);
 
   // Two reasons at once is a shape the engine really produces: plugin.py
-  // answers a failed check with signed_in false. foldReason takes the first of
-  // them, and the account is hidden for the missing login — pinned here because
-  // every order of those checks passed until this test existed.
+  // answers a failed check with signed_in false (TestVerificationView). The
+  // account stands under its first reason, not signed in, and the failed
+  // check is still said and still red in the list — before anyone selects it.
+  // A switched-off account whose check failed is said the same way.
   env = await boot(view([
     account('live1', quota(), { label: 'live-one' }),
     account('both', quota(), { label: 'both-one', signed_in: false,
       verification_state: 'failed', verified_live: false,
       verification: { tone: 'warn', label: 'Verification failed' } }),
+    account('offbad', quota(), { label: 'offbad-one', enabled: false,
+      verification_state: 'failed', verified_live: false,
+      verification: { tone: 'warn', label: 'Verification failed' } }),
   ]));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'fold').listeners.click[0]({ stopPropagation() {} });
-  assert.deepEqual(classes(env.root, 'acct-sec-title').map((node) => node.textContent),
-    ['Not signed in']);
-  assert.match(allSpoken(env.root), /both-one — not signed in/);
-  // Its dot still says alert: what hides it is the missing login, what colours
-  // it is the check that failed. Two different questions, two answers.
-  assert.equal(String(classes(env.root, 'acct-opt')[1].childNodes[0].className),
-    'state-dot bad');
+  assert.deepEqual(namesOf(env.root), ['live-one', 'both-one', 'offbad-one']);
+  assert.match(classes(env.root, 'acc-sec')[0].textContent, /^Not running/);
+  assert.equal(stateOf(env, 'claude:both'), 'not signed in · verification failed');
+  assert.equal(stateOf(env, 'claude:offbad'), 'switched off in Claudexor · verification failed');
+  assert.match(dotOf(env.root, 'claude:both'), /\bbad\b/);
+  assert.match(dotOf(env.root, 'claude:offbad'), /\bbad\b/);
+  assert.match(byFocus(env.root, 'acct:claude:both').getAttribute('aria-label'),
+    /^both-one · not signed in · verification failed/);
+  assert.equal(inspector(env), undefined, 'said before any selection');
 
-  // 'bad' never comes from the engine, but the widget takes it as a failed
-  // check all the same. This is the test that keeps that half of the condition
-  // honest now that the fixture above stands on 'warn'.
-  env = await boot(view([
-    account('live1', quota(), { label: 'live-one' }),
-    account('odd', quota(), { label: 'odd-one',
-      verification: { tone: 'bad', label: 'Verification failed' } }),
-  ]));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'fold').listeners.click[0]({ stopPropagation() {} });
-  assert.deepEqual(classes(env.root, 'acct-sec-title').map((node) => node.textContent),
-    ['Verification failed']);
-
-  // The button counts the accounts in trouble apart from the one on screen, and
-  // the fold counts those same accounts among the ones it hides — in the same
-  // pill the button wears. It does not open itself: an account switched off on
-  // purpose would then hold the fold open for good.
-  env = await boot(view(mixedAccounts()));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.deepEqual(classes(env.root, 'acct-alarm').map((node) => node.textContent),
-    ['2 need attention', '2 need attention']);
-  assert.equal(byFocus(env.root, 'fold').getAttribute('aria-expanded'), 'false');
-  assert.equal(byFocus(env.root, 'fold').title,
-    byFocus(env.root, 'fold').getAttribute('aria-label'));
-  assert.match(byFocus(env.root, 'fold').title, /4 hidden — 1 verification failed, 1 disabled, 2 not signed in · 2 need attention$/);
-  // Open or shut is said by aria-expanded alone: "shown" in this list names the
-  // account on screen.
-  assert.doesNotMatch(byFocus(env.root, 'fold').getAttribute('aria-label'), /shown|folded/);
-  // The words are a piece of their own: a list too narrow for the phrase drops
-  // them and keeps the number.
-  assert.deepEqual(classes(byFocus(env.root, 'fold'), 'acct-alarm-words').map((node) => node.textContent),
-    [' need attention']);
-
-  // The account on screen is one of the hidden: the button leaves it out of its
-  // count, and so does the fold — the same number twice, not two numbers.
-  byFocus(env.root, 'fold').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'opt:claude:off1').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.equal(byFocus(env.root, 'fold').getAttribute('aria-expanded'), 'true');
-  assert.deepEqual(classes(env.root, 'acct-alarm').map((node) => node.textContent),
-    ['1 needs attention', '1 needs attention']);
-
-  // A spent account does not fold: it stands upstairs with its red dot in plain
-  // sight, so the button counts it and the fold does not.
-  env = await boot(view([
-    account('live1', quota(), { label: 'live-one' }),
-    account('spent', quota({ state: 'exhausted', label: 'Limit reached' }), { label: 'spent-one' }),
-    account('off1', quota(), { label: 'off-one', enabled: false }),
-  ]));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.deepEqual(classes(env.root, 'acct-alarm').map((node) => node.textContent),
-    ['2 need attention', '1 needs attention']);
-
-  // Nothing but accounts nobody logged into: there is nothing to attend to, so
-  // the row carries no pill.
-  env = await boot(view([
-    account('live1', quota(), { label: 'live-one' }),
-    account('out1', quota(), { label: 'out-one', signed_in: false,
-      verification: { tone: 'muted', label: 'Not verified' } }),
-  ]));
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.equal(classes(env.root, 'acct-alarm').length, 0);
-
-  // The accounts facet did not answer: every state on screen is last known, and
-  // the engine answers a failed check with a muted tone then. Folding some
-  // reasons and not others under one "last known" banner is the contradiction;
-  // nothing folds at all until the facet answers.
+  // The accounts facet did not answer: every state on screen is last known,
+  // so no account is said not to run — the list keeps the engine's order.
   const unread = view(mixedAccounts());
   unread.facets = { catalog: 'ok', accounts: 'not_read', quota: 'ok' };
   unread.facet_note = 'accounts: not_read';
   env = await boot(unread);
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.equal(classes(env.root, 'acct-fold').length, 0);
-  assert.deepEqual(namesOf(env.root),
-    ['live-one', 'out-one', 'broken-one', 'off-one', 'live-two', 'out-two']);
-  // The Accounts tab says so too: its switches change nothing until the facet
-  // answers, the way the Models tab says when its choice changes nothing yet.
-  byFocus(env.root, 'settings').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'settings-tab:accounts').listeners.click[0]({ stopPropagation() {} });
-  assert.match(classes(env.root, 'settings-note').map((node) => node.textContent).join(' '),
-    /changes nothing yet: nothing folds until they are/);
+  assert.equal(classes(env.root, 'acc-sec').length, 0);
+  assert.deepEqual(namesOf(env.root), ['live-one', 'out-one', 'broken-one', 'off-one', 'live-two']);
 
-  // The three switches. Each folds its own reason away, the choice travels to
-  // the skill with the other two, and the list obeys without a second reading.
-  env = await boot(view(mixedAccounts()));
-  byFocus(env.root, 'settings').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'settings-tab:accounts').listeners.click[0]({ stopPropagation() {} });
-  assert.deepEqual(classes(env.root, 'fold-name').map((node) => node.textContent),
-    ['Verification failed', 'Disabled', 'Not signed in']);
-  assert.deepEqual(classes(env.root, 'switch').map((node) => node.getAttribute('aria-checked')),
-    ['true', 'true', 'true']);
-  // A tab in a narrow frame can be only its icon, so every tab names itself.
-  assert.deepEqual(classes(env.root, 'settings-tab').map((node) => node.title),
-    ['Row detail', 'Models', 'Accounts', 'System state']);
-  // Read accounts: the switches work, and the tab has nothing to excuse.
-  assert.doesNotMatch(classes(env.root, 'settings-note').map((node) => node.textContent).join(' '),
-    /changes nothing yet/);
-
-  byFocus(env.root, 'fold-pref:signed_out').listeners.click[0]({ stopPropagation() {} });
-  await settle();
-  assert.equal(byFocus(env.root, 'fold-pref:signed_out').getAttribute('aria-checked'), 'false');
-  const switched = JSON.parse(
-    env.calls.filter((call) => call.url === PREFIX + 'prefs').at(-1).body);
-  assert.deepEqual(switched.fold, { failed: true, disabled: true, signed_out: false });
-
-  byFocus(env.root, 'account-btn').listeners.click[0]({ stopPropagation() {} });
-  assert.deepEqual(namesOf(env.root), ['live-one', 'out-one', 'live-two', 'out-two']);
-  assert.equal(classes(env.root, 'acct-fold-count')[0].textContent, '2');
-
-  // The frame is disposable. The widget registers one dispose hook; with no
-  // save in the air it has nothing to wait for, and with one it hands the host
-  // a promise that settles once the save has landed.
+  // The frame is disposable: one dispose hook that stops polling at once.
   env = await boot(view([account('p1', quota())]));
   assert.equal(env.disposeHooks.length, 1);
   assert.equal(env.disposeHooks[0](), undefined);
-  byFocus(env.root, 'settings').listeners.click[0]({ stopPropagation() {} });
-  byFocus(env.root, 'density:compact').listeners.click[0]({ stopPropagation() {} });
-  const flushed = env.disposeHooks[0]();
-  assert.equal(typeof (flushed && flushed.then), 'function');
-  await flushed;
-  assert.equal(env.calls.filter((call) => call.url === PREFIX + 'prefs').length, 1);
+  assert.equal(env.intervalCleared(), true);
+  env.interval()();
   await settle();
-  assert.equal(env.disposeHooks[0](), undefined);
+  assert.equal(env.calls.length, 1, 'a disposed frame reads nothing more');
 
-  // Teardown owns the one poll timer and removes the named action listeners.
+  // Teardown owns the one poll timer and removes the document listeners.
+  env = await boot(view([account('p1', quota())]));
   env.windowListeners.pagehide[0]();
   assert.equal(env.intervalCleared(), true);
   assert.equal((env.document.listeners.click || []).length, 0);
   assert.equal((env.document.listeners.keydown || []).length, 0);
+  assert.equal((env.document.listeners.pointermove || []).length, 0);
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
   process.exitCode = 1;

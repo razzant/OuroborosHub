@@ -145,9 +145,12 @@ class TestNumericAggregation(LensTestCase):
         self.assertEqual(point["cached_tokens"], 90000)
         self.assertEqual(point["mode"], "max")
         self.assertEqual(point["capacity_total_tokens"], 200000)
-        self.assertEqual(point["states"], ["reserved", "dispatched", "settled"])
-        self.assertEqual(point["elapsed_sec"], 5.0)
-        self.assertEqual(snapshot["counters"]["physical_attempts"], 1)
+        self.assertEqual(point["state"], "settled")
+        # No elapsed time is derived: the gap between two accounting writes is
+        # not a latency, so the payload does not offer one.
+        self.assertNotIn("elapsed_sec", point)
+        self.assertEqual(snapshot["counters"]["registered_attempts"], 1)
+        self.assertEqual(snapshot["counters"]["sent_attempts"], 1)
         self.assertEqual(snapshot["counters"]["measured"], 1)
 
     def test_cached_tokens_are_never_added_to_prompt_tokens(self) -> None:
@@ -186,7 +189,7 @@ class TestMissingAndEmpty(LensTestCase):
         window.refresh()
         snapshot = window.snapshot()
         self.assertEqual(snapshot["points"], [])
-        self.assertEqual(snapshot["counters"]["physical_attempts"], 0)
+        self.assertEqual(snapshot["counters"]["registered_attempts"], 0)
         self.assertEqual(snapshot["facets"]["models"], [])
 
     def test_missing_tokens_are_not_zero(self) -> None:
@@ -293,8 +296,10 @@ class TestMissingAndEmpty(LensTestCase):
         self.assertEqual(counters["by_state"],
                          {"reserved": 1, "dispatched": 1, "settled": 1,
                           "unresolved": 1, "released": 1})
-        self.assertEqual(counters["in_flight"], 2)
-        self.assertEqual(counters["physical_attempts"], 5)
+        self.assertEqual(counters["registered_attempts"], 5)
+        # Reserved and released requests were never sent; the two counts differ.
+        self.assertEqual(counters["sent_attempts"], 3)
+        self.assertNotIn("in_flight", counters)
         self.assertEqual(counters["measured"], 1)
 
     def test_missing_ledger_file(self) -> None:
@@ -321,7 +326,7 @@ class TestMalformedInput(LensTestCase):
         window = lens_core.LedgerWindow(self.root)
         result = window.refresh()
         self.assertEqual(result["malformed_lines"], 1)
-        self.assertEqual(window.snapshot()["counters"]["physical_attempts"], 2)
+        self.assertEqual(window.snapshot()["counters"]["registered_attempts"], 2)
 
     def test_rows_without_identity_are_malformed(self) -> None:
         path = os.path.join(self.root, "state", "usage_attempts.jsonl")
@@ -335,7 +340,7 @@ class TestMalformedInput(LensTestCase):
         window = lens_core.LedgerWindow(self.root)
         result = window.refresh()
         self.assertEqual(result["malformed_lines"], 3)
-        self.assertEqual(window.snapshot()["counters"]["physical_attempts"], 1)
+        self.assertEqual(window.snapshot()["counters"]["registered_attempts"], 1)
 
     def test_torn_tail_row_is_left_for_the_next_refresh(self) -> None:
         ledger = Ledger()
@@ -347,7 +352,7 @@ class TestMalformedInput(LensTestCase):
         result = window.refresh()
         self.assertEqual(result["malformed_lines"], 0)
         self.assertGreater(result["pending_tail_bytes"], 0)
-        self.assertEqual(window.snapshot()["counters"]["physical_attempts"], 1)
+        self.assertEqual(window.snapshot()["counters"]["registered_attempts"], 1)
 
         # The writer finishes the row; the next refresh picks it up exactly once.
         with open(path, "a", encoding="utf-8") as handle:
@@ -356,7 +361,7 @@ class TestMalformedInput(LensTestCase):
         self.assertEqual(result["malformed_lines"], 0)
         self.assertEqual(result["pending_tail_bytes"], 0)
         snapshot = window.snapshot()
-        self.assertEqual(snapshot["counters"]["physical_attempts"], 2)
+        self.assertEqual(snapshot["counters"]["registered_attempts"], 2)
         self.assertEqual(snapshot["counters"]["measured"], 2)
 
     def test_non_utf8_bytes_are_malformed_not_fatal(self) -> None:
@@ -381,7 +386,7 @@ class TestUniquenessAndCache(LensTestCase):
         for _ in range(4):
             window.refresh()
         counters = window.snapshot()["counters"]
-        self.assertEqual(counters["physical_attempts"], 5)
+        self.assertEqual(counters["registered_attempts"], 5)
         self.assertEqual(counters["measured"], 5)
         self.assertEqual(len(window.snapshot()["points"]), 5)
 
@@ -403,7 +408,7 @@ class TestUniquenessAndCache(LensTestCase):
             ))
         second = window.refresh()
         self.assertEqual(second["lines_read"], 6)   # 3 old + 3 new, never re-read
-        self.assertEqual(window.snapshot()["counters"]["physical_attempts"], 2)
+        self.assertEqual(window.snapshot()["counters"]["registered_attempts"], 2)
 
     def test_one_attempt_chain_is_one_record(self) -> None:
         ledger = Ledger()
@@ -411,7 +416,7 @@ class TestUniquenessAndCache(LensTestCase):
         window = self.window(ledger)
         result = window.refresh()
         self.assertEqual(result["lines_read"], 3)
-        self.assertEqual(window.snapshot()["counters"]["physical_attempts"], 1)
+        self.assertEqual(window.snapshot()["counters"]["registered_attempts"], 1)
 
     def test_record_cache_is_bounded_and_discloses_eviction(self) -> None:
         ledger = Ledger()
@@ -423,7 +428,7 @@ class TestUniquenessAndCache(LensTestCase):
         self.assertEqual(result["max_records"], 5)
         self.assertEqual(result["evicted_records"], 7)
         snapshot = window.snapshot()
-        self.assertEqual(snapshot["counters"]["physical_attempts"], 5)
+        self.assertEqual(snapshot["counters"]["registered_attempts"], 5)
         self.assertEqual([point["prompt_tokens"] for point in snapshot["points"]],
                          [1007, 1008, 1009, 1010, 1011])
 
@@ -437,7 +442,7 @@ class TestUniquenessAndCache(LensTestCase):
         snapshot = window.snapshot(limit=4)
         self.assertEqual(len(snapshot["points"]), 4)
         self.assertEqual(snapshot["points_omitted"], 6)
-        self.assertEqual(snapshot["counters"]["physical_attempts"], 10)
+        self.assertEqual(snapshot["counters"]["registered_attempts"], 10)
 
 
 class TestBoundsAndRotation(LensTestCase):
@@ -449,7 +454,7 @@ class TestBoundsAndRotation(LensTestCase):
         window = self.window(ledger, max_bytes=4096)
         result = window.refresh()
         self.assertGreater(result["omitted_prefix_bytes"], 0)
-        self.assertLess(window.snapshot()["counters"]["physical_attempts"], 200)
+        self.assertLess(window.snapshot()["counters"]["registered_attempts"], 200)
         # A truncated leading line is never parsed as a row.
         self.assertEqual(result["malformed_lines"], 0)
 
@@ -481,7 +486,7 @@ class TestBoundsAndRotation(LensTestCase):
         self.assertEqual(result["malformed_lines"], 0)
         self.assertEqual(result["pending_tail_bytes"], 0)
         self.assertGreater(result["omitted_prefix_bytes"], 4096)
-        self.assertEqual(window.snapshot()["counters"]["physical_attempts"], 0)
+        self.assertEqual(window.snapshot()["counters"]["registered_attempts"], 0)
 
         # The rest of the discarded line arrives with its terminator, followed by
         # a good row. The discard does not become a malformed count, is not
@@ -494,7 +499,7 @@ class TestBoundsAndRotation(LensTestCase):
         self.assertEqual(result["malformed_lines"], 0)
         self.assertEqual(result["discarded_oversize_lines"], 1)
         snapshot = window.snapshot()
-        self.assertEqual(snapshot["counters"]["physical_attempts"], 1)
+        self.assertEqual(snapshot["counters"]["registered_attempts"], 1)
         self.assertEqual(snapshot["points"][0]["prompt_tokens"], 2000)
 
     def test_an_unterminated_line_is_retried_not_counted_malformed(self) -> None:
@@ -524,7 +529,7 @@ class TestBoundsAndRotation(LensTestCase):
         result = window.refresh()
         self.assertEqual(result["malformed_lines"], 0)
         self.assertEqual(result["pending_tail_bytes"], 0)
-        self.assertEqual(window.snapshot()["counters"]["physical_attempts"], 1)
+        self.assertEqual(window.snapshot()["counters"]["registered_attempts"], 1)
 
     def test_read_never_exceeds_the_per_refresh_bound(self) -> None:
         ledger = Ledger()
@@ -544,7 +549,7 @@ class TestBoundsAndRotation(LensTestCase):
         path = ledger.write(self.root)
         window = lens_core.LedgerWindow(self.root)
         window.refresh()
-        self.assertEqual(window.snapshot()["counters"]["physical_attempts"], 1)
+        self.assertEqual(window.snapshot()["counters"]["registered_attempts"], 1)
 
         # Compaction replaces the file atomically: a new inode at the same path.
         replacement = Ledger()
@@ -567,7 +572,7 @@ class TestBoundsAndRotation(LensTestCase):
         self.assertEqual(result["compaction_epoch"], 1)
         self.assertEqual(result["compaction_folded_attempts"], 41)
         snapshot = window.snapshot()
-        self.assertEqual(snapshot["counters"]["physical_attempts"], 1)
+        self.assertEqual(snapshot["counters"]["registered_attempts"], 1)
         self.assertEqual([point["prompt_tokens"] for point in snapshot["points"]], [5000])
 
     def test_truncated_file_under_the_same_inode_is_re_read(self) -> None:
@@ -578,7 +583,7 @@ class TestBoundsAndRotation(LensTestCase):
         path = ledger.write(self.root)
         window = lens_core.LedgerWindow(self.root)
         window.refresh()
-        self.assertEqual(window.snapshot()["counters"]["physical_attempts"], 6)
+        self.assertEqual(window.snapshot()["counters"]["registered_attempts"], 6)
 
         with open(path, "r+", encoding="utf-8") as handle:
             content = handle.read()
@@ -587,7 +592,7 @@ class TestBoundsAndRotation(LensTestCase):
             handle.write(content.split("\n")[0] + "\n")
         result = window.refresh()
         self.assertEqual(result["rotations_observed"], 1)
-        self.assertEqual(window.snapshot()["counters"]["physical_attempts"], 1)
+        self.assertEqual(window.snapshot()["counters"]["registered_attempts"], 1)
 
     def test_reader_never_mutates_the_ledger(self) -> None:
         ledger = Ledger()
@@ -646,7 +651,7 @@ class TestExclusions(LensTestCase):
         self.assertEqual(excluded["subscription_sessions"], 1)
         self.assertEqual(excluded["external_unmetered"], 1)
         self.assertEqual(excluded["legacy_rows"], 2)
-        self.assertEqual(snapshot["counters"]["physical_attempts"], 1)
+        self.assertEqual(snapshot["counters"]["registered_attempts"], 1)
 
     def test_folded_attempts_are_counted_once_not_header_plus_groups(self) -> None:
         # The header's folded_attempt_count (120) is the TOTAL for the same
@@ -725,7 +730,7 @@ class TestExclusions(LensTestCase):
         window.refresh()
         snapshot = window.snapshot()
         self.assertEqual(snapshot["counters"]["excluded"]["unknown_kind"], 2)
-        self.assertEqual(snapshot["counters"]["physical_attempts"], 1)
+        self.assertEqual(snapshot["counters"]["registered_attempts"], 1)
         self.assertEqual([point["prompt_tokens"] for point in snapshot["points"]], [1000])
 
     def test_a_row_with_no_recognised_state_is_not_an_ordinary_point(self) -> None:
@@ -737,7 +742,7 @@ class TestExclusions(LensTestCase):
         window.refresh()
         snapshot = window.snapshot()
         self.assertEqual(snapshot["counters"]["excluded"]["attempts_without_state"], 2)
-        self.assertEqual(snapshot["counters"]["physical_attempts"], 1)
+        self.assertEqual(snapshot["counters"]["registered_attempts"], 1)
         self.assertEqual([point["prompt_tokens"] for point in snapshot["points"]], [1000])
         self.assertEqual(snapshot["facets"]["models"], ["vendor/model-a"])
         self.assertEqual(lens_core.spread(snapshot["points"])["peak"], 1000)
@@ -798,11 +803,11 @@ class TestRedaction(LensTestCase):
         window.refresh()
         point = window.snapshot()["points"][0]
         self.assertEqual(set(point), {
-            "id", "seq", "t", "state", "states", "model", "provider", "category",
+            "id", "t", "state", "model", "provider", "category",
             "source", "task", "root", "parent", "prompt_tokens", "completion_tokens",
             "cached_tokens", "cache_write_tokens", "mode", "profile", "basis",
             "target_total_tokens", "capacity_total_tokens", "target_miss",
-            "auto_pass", "elapsed_sec",
+            "auto_pass", "late_receipt",
         })
         blob = json.dumps(window.snapshot())
         for leaked in ("cost_usd", "0.42", "reservation_upper_bound_usd",
@@ -862,7 +867,7 @@ class TestHostileValues(LensTestCase):
         window = lens_core.LedgerWindow(self.root)
         result = window.refresh()
         self.assertEqual(result["malformed_lines"], 1)
-        self.assertEqual(window.snapshot()["counters"]["physical_attempts"], 1)
+        self.assertEqual(window.snapshot()["counters"]["registered_attempts"], 1)
 
     def test_a_hostile_ts_cannot_raise_out_of_a_projection(self) -> None:
         for value in ("", "Z", "+", "9" * 200, "0000-00-00T00:00:00", None, 17, {"a": 1}):
@@ -1003,8 +1008,9 @@ class TestReadPathSafety(LensTestCase):
         finally:
             os.supports_dir_fd = real_support            # type: ignore[assignment]
         # Falling back to a by-name open would reopen the race; refusing is the
-        # only answer that keeps the promise this reader makes.
-        self.assertEqual(caught.exception.code, "ledger_not_confined")
+        # only answer that keeps the promise this reader makes. The platform
+        # limitation must not be reported as an unconfined owner path.
+        self.assertEqual(caught.exception.code, "ledger_platform_unsupported")
 
     def test_a_replacement_between_the_stat_and_the_open_merges_nothing(self) -> None:
         """The rotation race: two generations must never land in one window."""
@@ -1197,7 +1203,7 @@ class TestHorizon(LensTestCase):
                                   ("available", 5)):
             snapshot = self._snapshot(ledger, horizon)
             self.assertEqual(len(snapshot["points"]), expected, horizon)
-            self.assertEqual(snapshot["counters"]["physical_attempts"], expected, horizon)
+            self.assertEqual(snapshot["counters"]["registered_attempts"], expected, horizon)
 
     def test_the_settled_timestamp_decides_not_the_reserved_one(self) -> None:
         # Reserved well before the cutoff, settled inside it: the request is in.
@@ -1238,8 +1244,6 @@ class TestHorizon(LensTestCase):
 
     def test_the_limit_keeps_the_newest_of_the_selection_in_order(self) -> None:
         snapshot = self._snapshot(self._spaced([50, 40, 30, 20, 10]), "1h", limit=2)
-        seqs = [point["seq"] for point in snapshot["points"]]
-        self.assertEqual(seqs, sorted(seqs))                 # ledger order kept
         times = [point["t"] for point in snapshot["points"]]
         self.assertEqual(times, [self.ANCHOR - 20 * 60000, self.ANCHOR - 10 * 60000])
 
@@ -1254,7 +1258,7 @@ class TestHorizon(LensTestCase):
         snapshot = self._snapshot(ledger, "1h")
         self.assertEqual(snapshot["facets"]["models"], ["vendor/model-in"])
         self.assertEqual(snapshot["facets"]["categories"], ["task"])
-        self.assertEqual(snapshot["counters"]["physical_attempts"], 1)
+        self.assertEqual(snapshot["counters"]["registered_attempts"], 1)
         self.assertEqual(snapshot["counters"]["measured"], 1)
         self.assertEqual(len(snapshot["points"]), 1)
         self.assertNotIn("vendor/model-out", json.dumps(snapshot))
@@ -1271,7 +1275,7 @@ class TestHorizon(LensTestCase):
         self.assertEqual(len(bounded["points"]), 1)
         self.assertEqual(bounded["horizon"]["unknown_timestamp"], 1)
         self.assertEqual(bounded["horizon"]["unknown_timestamp_kept"], 0)
-        self.assertEqual(bounded["counters"]["physical_attempts"], 1)
+        self.assertEqual(bounded["counters"]["registered_attempts"], 1)
 
         # `available` keeps it — it is a real request — but it still has no time.
         every = self._snapshot(ledger, "available")
@@ -1286,19 +1290,19 @@ class TestHorizon(LensTestCase):
                        ts_reserved="", ts_final="")
         horizon = self._snapshot(ledger, "24h")["horizon"]
         self.assertIsNone(horizon["observed_from_ms"])
-        self.assertFalse(horizon["covers_selected_span"])
+        self.assertFalse(horizon["reaches_cutoff"])
 
     # -- what the span really covered ------------------------------------
 
     def test_a_span_inside_the_retained_tail_is_reported_as_covered(self) -> None:
         horizon = self._snapshot(self._spaced([5, 30, 200]), "1h")["horizon"]
-        self.assertTrue(horizon["covers_selected_span"])
+        self.assertTrue(horizon["reaches_cutoff"])
         self.assertEqual(horizon["observed_from_ms"], self.ANCHOR - 200 * 60000)
 
     def test_a_span_longer_than_the_retained_tail_is_never_claimed(self) -> None:
         # Only 40 minutes of data exists; a 7-day horizon must not imply 7 days.
         horizon = self._snapshot(self._spaced([5, 20, 40]), "7d")["horizon"]
-        self.assertFalse(horizon["covers_selected_span"])
+        self.assertFalse(horizon["reaches_cutoff"])
         self.assertEqual(horizon["observed_from_ms"], self.ANCHOR - 40 * 60000)
         self.assertEqual(horizon["observed_to_ms"], self.ANCHOR - 5 * 60000)
         self.assertEqual(horizon["excluded_older_than_cutoff"], 0)
@@ -1306,7 +1310,7 @@ class TestHorizon(LensTestCase):
     def test_available_answers_none_rather_than_claiming_all_history(self) -> None:
         snapshot = self._snapshot(self._spaced([5, 40]), "available")
         horizon = snapshot["horizon"]
-        self.assertIsNone(horizon["covers_selected_span"])
+        self.assertIsNone(horizon["reaches_cutoff"])
         self.assertIsNone(horizon["cutoff_ms"])
         self.assertIsNone(horizon["span_ms"])
         self.assertEqual(horizon["selected"], "available")
@@ -1323,7 +1327,7 @@ class TestHorizon(LensTestCase):
         snapshot = window.snapshot(horizon="7d", anchor_ms=self.ANCHOR)
         self.assertGreater(snapshot["window"]["omitted_prefix_bytes"], 0)
         self.assertTrue(snapshot["horizon"]["history_truncated_by_source"])
-        self.assertFalse(snapshot["horizon"]["covers_selected_span"])
+        self.assertFalse(snapshot["horizon"]["reaches_cutoff"])
 
     def test_a_record_after_the_anchor_is_kept_and_disclosed(self) -> None:
         ledger = Ledger()
@@ -1355,7 +1359,7 @@ class TestHorizon(LensTestCase):
         self.assertEqual(excluded["folded_attempts"], 42)
         self.assertEqual(len(snapshot["points"]), 1)
         self.assertEqual(snapshot["points"][0]["prompt_tokens"], 120000)
-        self.assertEqual(snapshot["counters"]["physical_attempts"], 1)
+        self.assertEqual(snapshot["counters"]["registered_attempts"], 1)
         # The whole-file facts stay whole-file facts.
         self.assertEqual(snapshot["window"]["compaction_epoch"], 4)
 
@@ -1369,8 +1373,8 @@ class TestHorizon(LensTestCase):
         window.refresh()
         window.refresh(force_cold=True)
         second = window.snapshot(horizon="1h", anchor_ms=self.ANCHOR)
-        self.assertEqual(first["counters"]["physical_attempts"],
-                         second["counters"]["physical_attempts"])
+        self.assertEqual(first["counters"]["registered_attempts"],
+                         second["counters"]["registered_attempts"])
         self.assertEqual([point["id"] for point in first["points"]],
                          [point["id"] for point in second["points"]])
         self.assertEqual(second["horizon"]["records_selected"], 3)
@@ -1420,19 +1424,22 @@ class TestHorizon(LensTestCase):
         window = self.window(ledger)
         window.refresh()
         key = lens_core._opaque("root", "t-")
-        bounded = lens_core.trajectory(window.records(), key, horizon="1h",
-                                       anchor_ms=self.ANCHOR)
+        snapshot = window.snapshot(horizon="1h", anchor_ms=self.ANCHOR)
+        bounded = lens_core.trajectory(snapshot["points"], key, snapshot="s-000000000001",
+                                       horizon=snapshot["horizon"])
         sizes = [point["prompt_tokens"] for group in bounded["groups"] for point in group["points"]]
         self.assertEqual(sizes, [3000, 4000])
-        self.assertEqual(bounded["own_outside_horizon"], 2)
+        # The answer is bounded to its snapshot: what lies outside is NOT
+        # counted, and says so with None rather than a false zero.
+        self.assertIsNone(bounded["own_outside_horizon"])
+        self.assertEqual(bounded["snapshot"], "s-000000000001")
         self.assertEqual(bounded["horizon"]["selected"], "1h")
         self.assertEqual(bounded["horizon"]["cutoff_ms"], self.ANCHOR - HOUR_MS)
 
-        every = lens_core.trajectory(window.records(), key, horizon="available",
-                                     anchor_ms=self.ANCHOR)
+        everything = window.snapshot(horizon="available", anchor_ms=self.ANCHOR)
+        every = lens_core.trajectory(everything["points"], key, horizon=everything["horizon"])
         sizes = [point["prompt_tokens"] for group in every["groups"] for point in group["points"]]
         self.assertEqual(sizes, [1000, 2000, 3000, 4000])
-        self.assertEqual(every["own_outside_horizon"], 0)
         self.assertIsNone(every["horizon"]["cutoff_ms"])
 
     def test_an_anchor_is_taken_when_none_is_supplied(self) -> None:
@@ -1469,22 +1476,25 @@ class TestTrajectory(LensTestCase):
     def test_groups_are_split_by_model_and_work_kind(self) -> None:
         window = self.window(self._tree())
         window.refresh()
-        records = window.records()
+        points = window.snapshot()["points"]
         task_key = lens_core._opaque("root", "t-")
-        result = lens_core.trajectory(records, task_key)
+        result = lens_core.trajectory(points, task_key)
         self.assertEqual(len(result["groups"]), 2)
         keys = sorted((group["model"], group["category"]) for group in result["groups"])
         self.assertEqual(keys, [("vendor/model-a", "task"),
                                 ("vendor/model-light", "consolidation")])
         main = [g for g in result["groups"] if g["model"] == "vendor/model-a"][0]
-        self.assertTrue(main["joined"])
+        # Grouped for reading, never joined: a shared task, model and work kind
+        # does not prove one growing context.
+        self.assertFalse(main["joined"])
+        self.assertFalse(result["joined"])
         self.assertEqual([point["prompt_tokens"] for point in main["points"]], [10000, 30000])
 
     def test_child_tasks_are_related_and_never_joined(self) -> None:
         window = self.window(self._tree())
         window.refresh()
         task_key = lens_core._opaque("root", "t-")
-        result = lens_core.trajectory(window.records(), task_key)
+        result = lens_core.trajectory(window.snapshot()["points"], task_key)
         self.assertEqual(len(result["related"]), 1)
         related = result["related"][0]
         self.assertFalse(related["joined"])
@@ -1494,7 +1504,7 @@ class TestTrajectory(LensTestCase):
     def test_unrelated_tasks_are_absent(self) -> None:
         window = self.window(self._tree())
         window.refresh()
-        result = lens_core.trajectory(window.records(), lens_core._opaque("root", "t-"))
+        result = lens_core.trajectory(window.snapshot()["points"], lens_core._opaque("root", "t-"))
         every = [point["prompt_tokens"] for group in result["groups"] + result["related"]
                  for point in group["points"]]
         self.assertNotIn(99000, every)
@@ -1505,25 +1515,26 @@ class TestTrajectory(LensTestCase):
         ledger.attempt("a2", task_id="root", root_task_id="root", final="unresolved")
         window = self.window(ledger)
         window.refresh()
-        result = lens_core.trajectory(window.records(), lens_core._opaque("root", "t-"))
+        result = lens_core.trajectory(window.snapshot()["points"], lens_core._opaque("root", "t-"))
         self.assertEqual(sum(len(g["points"]) for g in result["groups"]), 1)
 
     def test_unknown_task_returns_an_empty_shape(self) -> None:
         window = self.window(self._tree())
         window.refresh()
         self.assertEqual(
-            lens_core.trajectory(window.records(), ""),
-            {"task": "", "groups": [], "related": [], "root": None,
-             "horizon": None, "own_outside_horizon": 0},
+            lens_core.trajectory(window.snapshot()["points"], ""),
+            {"task": "", "root": None, "snapshot": None, "horizon": None,
+             "groups": [], "related": [], "joined": False,
+             "own_outside_horizon": None, "points_omitted_in_snapshot": 0},
         )
-        empty = lens_core.trajectory(window.records(), "t-000000000000")
+        empty = lens_core.trajectory(window.snapshot()["points"], "t-000000000000")
         self.assertEqual(empty["groups"], [])
         self.assertEqual(empty["related"], [])
 
     def test_an_invalid_key_is_answered_empty_and_never_reflected(self) -> None:
         window = self.window(self._tree())
         window.refresh()
-        records = window.records()
+        records = window.snapshot()["points"]
         for supplied in (
             "<script>alert(1)</script>",
             "t-not-hex-here",
@@ -1557,7 +1568,7 @@ class TestTrajectory(LensTestCase):
                        dispatched=False)
         window = self.window(ledger)
         window.refresh()
-        result = lens_core.trajectory(window.records(), lens_core._opaque("root", "t-"))
+        result = lens_core.trajectory(window.snapshot()["points"], lens_core._opaque("root", "t-"))
         sizes = [point["prompt_tokens"] for group in result["groups"] for point in group["points"]]
         self.assertEqual(sizes, [1000])
 
@@ -1572,7 +1583,7 @@ class TestTrajectory(LensTestCase):
                        ts_final="2026-09-07T10:01:30+00:00")
         window = self.window(ledger)
         window.refresh()
-        result = lens_core.trajectory(window.records(), lens_core._opaque("root", "t-"))
+        result = lens_core.trajectory(window.snapshot()["points"], lens_core._opaque("root", "t-"))
         points = result["groups"][0]["points"]
         self.assertEqual([point["prompt_tokens"] for point in points], [1000, 3000])
         self.assertLess(points[0]["t"], points[1]["t"])
@@ -1585,7 +1596,7 @@ class TestTrajectory(LensTestCase):
         ledger.attempt("a3", task_id="", root_task_id="root", prompt_tokens=3000)
         window = self.window(ledger)
         window.refresh()
-        result = lens_core.trajectory(window.records(), lens_core._opaque("root", "t-"))
+        result = lens_core.trajectory(window.snapshot()["points"], lens_core._opaque("root", "t-"))
         self.assertEqual(result["related"], [])
 
 

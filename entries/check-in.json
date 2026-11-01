@@ -1,0 +1,17 @@
+{
+  "category": [
+    "planning"
+  ],
+  "description": "Opt-in check-in agreement. If you miss a check-in you promised, Ouroboros first tells you; only if you armed it may it then write once to one consenting contact.",
+  "digest": "057c893797f8e752675aec7dfcc5f3e55a6c3ee55261064337b715907bab0b54",
+  "name": "check-in",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/check-in"
+  },
+  "type": "extension",
+  "version": "0.1.4",
+  "withdrawn": null
+}

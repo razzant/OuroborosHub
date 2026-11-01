@@ -1,0 +1,18 @@
+{
+  "category": [
+    "writing"
+  ],
+  "description": "Evidence-qualified code review adapted to the user's decision, project and risks.",
+  "digest": "5ff5a1e88045929ef34981fdce4b6dadd086c1d1abb9a330168705c98b49a64d",
+  "name": "adaptive-code-review",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/adaptive-code-review"
+  },
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "Review external code changes, assess a project or library for adoption, or check research and analysis code, including folders without Git.",
+  "withdrawn": null
+}

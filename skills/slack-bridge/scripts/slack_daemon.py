@@ -14,6 +14,7 @@ if str(SKILL_ROOT) not in sys.path:
 
 from lib.host_adapter import create_host_adapter  # noqa: E402
 from lib.local_settings import LocalSettingsError, load_local_settings  # noqa: E402
+from lib.presence import slack_identity  # noqa: E402
 from lib.runtime import BridgeRuntime  # noqa: E402
 from lib.slack_api import SlackClient  # noqa: E402
 from lib.store import BridgeStore  # noqa: E402
@@ -69,7 +70,7 @@ async def _run() -> None:
         runtime = BridgeRuntime(
             store=store,
             slack=slack,
-            host=create_host_adapter(str(settings.get("binding_id") or "").strip()),
+            host=create_host_adapter(str(settings.get("binding_id") or "").strip(), identity=slack_identity(auth)),
             bot_user_id=bot_user_id,
             bot_id=str(auth.get("bot_id") or ""),
             app_id=str(auth.get("app_id") or ""),

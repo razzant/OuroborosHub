@@ -1,0 +1,24 @@
+{
+  "category": [
+    "search"
+  ],
+  "description": "Search scholarly literature, preprints and open-access copies across public APIs, resolve a work by identifier, and read citation counts and links.",
+  "digest": "26c385392536450f0fefc92c8f5d0cceb5e4534cee7e36e503e140445814f658",
+  "install_specs": [
+    {
+      "kind": "pip",
+      "package": "httpx>=0.28.1,<0.29"
+    }
+  ],
+  "name": "science_search",
+  "owner": "kazzand",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/science_search"
+  },
+  "type": "extension",
+  "version": "0.1.0",
+  "when_to_use": "The user asks for papers, studies, preprints or open-access PDFs on a topic, wants a reference resolved from a DOI, PMID, PMCID, arXiv id or OpenAlex id, or asks how often a paper is cited and by whom. Not for general web search.",
+  "withdrawn": null
+}

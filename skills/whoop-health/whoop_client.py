@@ -303,12 +303,34 @@ def _collect_pages(path: str, state_dir: str, client_id: str,
     return items
 
 
+def recovery_zone(score) -> str | None:
+    """Map a recovery score to its color zone.
+
+    For numeric percentages in [0, 100]: red <=33, yellow <=66, else green.
+    Missing, non-numeric, non-finite and out-of-range values have no zone.
+    """
+    if (isinstance(score, (int, float)) and not isinstance(score, bool)
+            and 0 <= score <= 100):
+        if score <= 33:
+            return "red"
+        if score <= 66:
+            return "yellow"
+        return "green"
+    return None
+
+
 def fetch_recovery(state_dir: str, client_id: str, client_secret: str,
                    days: int = 1) -> list[dict]:
     end = _iso(_utc_now())
     start = _iso(_utc_now() - timedelta(days=days))
-    return _collect_pages(
+    records = _collect_pages(
         "/recovery", state_dir, client_id, client_secret, start, end)
+    for r in records:
+        score = r.get("score")
+        if score is not None:
+            score["recovery_zone"] = recovery_zone(
+                score.get("recovery_score"))
+    return records
 
 
 def fetch_sleep(state_dir: str, client_id: str, client_secret: str,
@@ -346,9 +368,12 @@ def summary(state_dir: str, client_id: str, client_secret: str,
 
     if recovery:
         r = recovery[0]
-        score = r.get("score", {})
+        score = r.get("score") or {}
+        recovery_score = score.get("recovery_score")
         result["recovery"] = {
-            "recovery_score": score.get("recovery_score"),
+            "recovery_score": recovery_score,
+            "recovery_zone": recovery_zone(recovery_score),
+            "user_calibrating": score.get("user_calibrating"),
             "hrv_rmssd_ms": score.get("hrv_rmssd_milli"),
             "resting_hr": score.get("resting_heart_rate"),
             "spo2_pct": score.get("spo2_percentage"),
@@ -357,7 +382,7 @@ def summary(state_dir: str, client_id: str, client_secret: str,
 
     if sleep:
         s = sleep[0]
-        score = s.get("score", {})
+        score = s.get("score") or {}
         stage = score.get("stage_summary", {})
         result["sleep"] = {
             "sleep_performance_pct": score.get(
@@ -376,7 +401,7 @@ def summary(state_dir: str, client_id: str, client_secret: str,
 
     if cycles:
         c = cycles[0]
-        sc = c.get("score", {})
+        sc = c.get("score") or {}
         result["strain"] = {
             "strain": sc.get("strain"),
             "kilojoule": sc.get("kilojoule"),

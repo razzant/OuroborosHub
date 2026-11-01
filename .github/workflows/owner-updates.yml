@@ -1,0 +1,39 @@
+name: Owner Updates
+
+on:
+  workflow_run:
+    workflows: [Validate Catalog]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: owner-updates
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: >-
+      github.repository == 'razzant/OuroborosHub' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    steps:
+      # Only trusted default-branch helpers are executed. No PR checkout,
+      # dependency install, cache restore, or execution of artifact contents.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Recheck owner update against main and merge its exact head
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -I scripts/owner_updates.py merge

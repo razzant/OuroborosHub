@@ -5,14 +5,16 @@ importable for verification and unit checks. ``plugin.py`` is the only place
 that talks to the host.
 
 Protocol, probed live against ``POST https://api.keenable.ai/mcp``:
-  1. ``initialize``                -> 200, ``mcp-session-id`` response header
+  1. ``initialize``                -> 200, optional ``mcp-session-id`` header
   2. ``notifications/initialized`` -> 202, empty body
   3. ``tools/call``                -> 200, ``result.content[0].text``
 
-The vendor returns one TEXT blob, never ``structuredContent``, so search results
-are parsed here. A tool-level failure arrives as HTTP 200 with
+The observed vendor responses carry text blocks, so search results are parsed
+here; a structured-only response is not claimed to be supported. A tool-level failure arrives as HTTP 200 with
 ``result.isError = true``. An expired session arrives as HTTP 404 with JSON-RPC
-``-32001``; we re-initialize once and retry once, never in a loop.
+``-32001``; when a session ID was sent, we re-initialize and retry once.
+Successful initialization without a session ID is cached too. Subsequent requests
+carry the negotiated protocol version in both modes.
 
 THE ONE ENVELOPE RULE (v0.2.0)
 ------------------------------
@@ -54,7 +56,7 @@ from urllib.parse import urlsplit
 MCP_URL = "https://api.keenable.ai/mcp"
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_NAME = "ouroboros-keenable-skill"
-CLIENT_VERSION = "0.3.1"
+CLIENT_VERSION = "0.4.0"
 
 #: Per-request vendor timeout. Named on purpose: the 600s outer tool timeout is far
 #: too coarse, and a route handler must not hold the event loop for minutes.
@@ -231,7 +233,7 @@ _ABSOLUTE_LINK = re.compile(r"https?://")
 _LABELLED_LINE = re.compile(r"^\s*[A-Za-z][A-Za-z ._-]{0,40}:", re.MULTILINE)
 
 _LOCK = threading.Lock()
-_SESSION: Dict[str, Optional[str]] = {"id": None, "key_fp": None}
+_SESSION: Dict[str, Optional[str]] = {"id": None, "key_fp": None, "protocol_version": None}
 
 
 class KeenableError(Exception):
@@ -280,6 +282,7 @@ def reset_session_cache() -> None:
     with _LOCK:
         _SESSION["id"] = None
         _SESSION["key_fp"] = None
+        _SESSION["protocol_version"] = None
 
 
 def _urllib_transport(
@@ -351,7 +354,7 @@ def _decode_body(text: str, status: int) -> Dict[str, Any]:
     raise KeenableError("keenable_protocol_error", "response body was neither JSON nor an SSE data frame", status)
 
 
-def _raise_for_status(status: int, text: str, has_key: bool) -> None:
+def _raise_for_status(status: int, text: str, has_key: bool, session_id: Optional[str] = None) -> None:
     if 200 <= status < 300:
         return
     detail = (text or "").strip()[:400]
@@ -369,7 +372,7 @@ def _raise_for_status(status: int, text: str, has_key: bool) -> None:
             f"Vendor said: {detail}",
             status,
         )
-    if status == 404:
+    if status == 404 and session_id:
         raise KeenableError("keenable_session_lost", f"MCP session not found (404): {detail}", status)
     if status == 429:
         raise KeenableError(
@@ -408,6 +411,7 @@ def _request(
     key: str,
     transport: Transport,
     deadline: Optional[float] = None,
+    protocol_version: Optional[str] = None,
 ) -> Dict[str, Any]:
     headers = {
         "Content-Type": "application/json",
@@ -416,6 +420,8 @@ def _request(
     }
     if session_id:
         headers["Mcp-Session-Id"] = session_id
+    if protocol_version:
+        headers["MCP-Protocol-Version"] = protocol_version
     if key:
         headers["X-API-Key"] = key
     body = json.dumps(payload).encode("utf-8")
@@ -434,16 +440,16 @@ def _request(
     except OSError as exc:
         raise KeenableError("keenable_transport_error", f"could not reach Keenable: {exc}") from exc
 
-    _raise_for_status(status, text, bool(key))
+    _raise_for_status(status, text, bool(key), session_id)
     decoded = _decode_body(text, status)
     error = decoded.get("error")
     if isinstance(error, dict):
         code = error.get("code")
         message = str(error.get("message") or "unknown JSON-RPC error")
-        if code == -32001:
+        if code == -32001 and session_id:
             raise KeenableError("keenable_session_lost", f"MCP session not found: {message}", status)
         raise KeenableError("keenable_protocol_error", f"JSON-RPC error {code}: {message}", status)
-    decoded["_headers"] = response_headers
+    decoded["_headers"] = _lower_headers(response_headers)
     return decoded
 
 
@@ -454,7 +460,9 @@ def _request(
 NOTIFY_BUDGET_SEC = 10.0
 
 
-def _initialize(key: str, transport: Transport, deadline: Optional[float] = None) -> str:
+def _initialize(
+    key: str, transport: Transport, deadline: Optional[float] = None,
+) -> Tuple[Optional[str], str]:
     decoded = _request(
         {
             "jsonrpc": "2.0",
@@ -471,9 +479,21 @@ def _initialize(key: str, transport: Transport, deadline: Optional[float] = None
         transport,
         deadline,
     )
-    session_id = str(decoded.get("_headers", {}).get("mcp-session-id") or "").strip()
-    if not session_id:
-        raise KeenableError("keenable_protocol_error", "initialize returned no mcp-session-id header")
+    result = decoded.get("result")
+    if (decoded.get("jsonrpc") != "2.0" or type(decoded.get("id")) is not int
+            or decoded["id"] != 1 or not isinstance(result, dict)):
+        raise KeenableError("keenable_protocol_error", "initialize returned an invalid JSON-RPC result")
+    protocol_version = result.get("protocolVersion")
+    if protocol_version != PROTOCOL_VERSION:
+        raise KeenableError(
+            "keenable_protocol_error", f"initialize returned unsupported protocol version: {protocol_version!r}",
+        )
+    server_info = result.get("serverInfo")
+    if (not isinstance(result.get("capabilities"), dict) or not isinstance(server_info, dict)
+            or not all(isinstance(server_info.get(field), str) and server_info[field]
+                       for field in ("name", "version"))):
+        raise KeenableError("keenable_protocol_error", "initialize returned an invalid InitializeResult")
+    session_id = str(decoded.get("_headers", {}).get("mcp-session-id") or "").strip() or None
     notify_deadline = time.monotonic() + NOTIFY_BUDGET_SEC
     if deadline is not None:
         notify_deadline = min(notify_deadline, deadline)
@@ -484,24 +504,28 @@ def _initialize(key: str, transport: Transport, deadline: Optional[float] = None
             key,
             transport,
             notify_deadline,
+            protocol_version,
         )
     except KeenableError:
         pass  # advisory notification; the session is already usable
-    return session_id
+    return session_id, protocol_version
 
 
-def _ensure_session(key: str, transport: Transport, deadline: Optional[float] = None) -> str:
+def _ensure_session(
+    key: str, transport: Transport, deadline: Optional[float] = None,
+) -> Tuple[Optional[str], str]:
     fingerprint = _key_fingerprint(key)
     with _LOCK:
-        cached = _SESSION["id"]
-        if cached and _SESSION["key_fp"] == fingerprint:
-            return cached
+        version = _SESSION["protocol_version"]
+        if version is not None and _SESSION["key_fp"] == fingerprint:
+            return _SESSION["id"], version
     # network I/O stays outside the lock
-    session_id = _initialize(key, transport, deadline)
+    session_id, version = _initialize(key, transport, deadline)
     with _LOCK:
         _SESSION["id"] = session_id
         _SESSION["key_fp"] = fingerprint
-    return session_id
+        _SESSION["protocol_version"] = version
+    return session_id, version
 
 
 def _call_once(
@@ -511,7 +535,7 @@ def _call_once(
     transport: Transport,
     deadline: Optional[float] = None,
 ) -> str:
-    session_id = _ensure_session(key, transport, deadline)
+    session_id, version = _ensure_session(key, transport, deadline)
     decoded = _request(
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
          "params": {"name": name, "arguments": arguments}},
@@ -519,6 +543,7 @@ def _call_once(
         key,
         transport,
         deadline,
+        version,
     )
     result = decoded.get("result")
     if not isinstance(result, dict):

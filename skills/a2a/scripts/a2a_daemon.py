@@ -9,11 +9,11 @@ import os
 import pathlib
 import inspect
 import ipaddress
-import re
 import threading
 import time
 import urllib.parse
 import uuid
+import sys
 import base64
 from typing import Any, Dict, List
 
@@ -25,6 +25,12 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+
+# Companion scripts are also loaded directly by the Hub's isolated tests.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from a2a_presence import (PresenceTransport, HostWaitExpired as _HostWaitExpired,
+                          HostWorkCancelled as _HostWorkCancelled,
+                          HostMessageConflict as _HostMessageConflict)
 
 try:
     from a2a.server.agent_execution.agent_executor import AgentExecutor
@@ -62,7 +68,7 @@ logger = logging.getLogger("a2a_daemon")
 STATE_DIR = pathlib.Path(os.environ.get("OUROBOROS_SKILL_STATE_DIR") or ".")
 
 # Card version — kept in step with the skill version (SKILL.md / catalog entry).
-A2A_CARD_VERSION = "1.4.0"
+A2A_CARD_VERSION = "1.5.0"
 
 # JSON-RPC error code the A2A spec assigns to TaskNotCancelableError.
 _JSONRPC_TASK_NOT_CANCELABLE = -32002
@@ -180,18 +186,6 @@ A2A_HOST = os.environ.get("A2A_HOST") or str(_SETTINGS.get("A2A_HOST") or "127.0
 # companion from starting at all.
 A2A_PORT = _setting_int("A2A_PORT", 18800, minimum=1, maximum=65535)
 
-# Read-only gateway log endpoints (documented for headless clients) provide the
-# progress notes streamed as working-status updates and the durable completion
-# fallback for host waits that outlive the response subscription. Loopback only —
-# same discipline as HOST_SERVICE_URL (no token is ever sent to the gateway).
-A2A_GATEWAY_URL = (
-    os.environ.get("A2A_GATEWAY_URL")
-    or str(_SETTINGS.get("A2A_GATEWAY_URL") or "")
-    or "http://127.0.0.1:8765"
-).rstrip("/")
-if not _is_loopback(_host_service_hostname(A2A_GATEWAY_URL)):
-    raise RuntimeError("A2A_GATEWAY_URL must be a loopback address")
-
 # Distinguish an OPERATOR-SET name/description from the built-in default. When the
 # operator explicitly configures A2A_AGENT_NAME / A2A_AGENT_DESCRIPTION (env or
 # settings), that value WINS over the live /identity value. When neither is set,
@@ -286,14 +280,14 @@ _CAPABILITY_LEAD = (
 
 
 A2A_MAX_CONCURRENT = _setting_int("A2A_MAX_CONCURRENT", 5, minimum=1, maximum=20)
-# Host-side /chat/inject clamps its wait at 1800s; stay under it (plus the httpx
+# The Presence turn wait is bounded at 1800s; stay under it (plus the httpx
 # margin) so the daemon, not a socket, always decides what a wait expiry means.
 A2A_RESPONSE_TIMEOUT_SEC = _setting_int("A2A_RESPONSE_TIMEOUT_SEC", 600, minimum=1, maximum=1740)
 # The old hardcoded 5s allocate timeout was the source of spurious "timed out"
 # stream errors on a busy host — allocation is cheap but the host polls at 1s.
 A2A_ALLOCATE_TIMEOUT_SEC = _setting_int("A2A_ALLOCATE_TIMEOUT_SEC", 30, minimum=1, maximum=120)
-# Total lifetime of one inbound message, including the chat-log completion
-# fallback after the inject wait expires. The host task itself is never cancelled.
+# Total wait for one inbound message including deferred work polling.
+# Closing this wait never cancels the Host task.
 A2A_STREAM_DEADLINE_SEC = _setting_int("A2A_STREAM_DEADLINE_SEC", 3600, minimum=60, maximum=21600)
 # Cross-validate the two independently-bounded waits. The deadline is only checked
 # AFTER _inject_sync returns, so a response timeout longer than the total deadline
@@ -312,12 +306,9 @@ if A2A_RESPONSE_TIMEOUT_SEC + 15 > A2A_STREAM_DEADLINE_SEC:
 
 A2A_PROGRESS_POLL_SEC = _setting_int("A2A_PROGRESS_POLL_SEC", 3, minimum=1, maximum=60)
 A2A_HEARTBEAT_SEC = _setting_int("A2A_HEARTBEAT_SEC", 25, minimum=5, maximum=300)
-# "1" (default): forward the host agent's own progress notes as working-status
-# updates; "0": heartbeats only (no gateway progress polling).
-A2A_PROGRESS_ENRICH = str(os.environ.get("A2A_PROGRESS_ENRICH") or _SETTINGS.get("A2A_PROGRESS_ENRICH") or "1").strip() != "0"
-_A2A_SEMAPHORE = None
-_SLASH_COMMAND_RE = re.compile(r"^\s*/[A-Za-z]")
 
+
+_A2A_SEMAPHORE = None
 
 def _get_semaphore() -> asyncio.Semaphore:
     global _A2A_SEMAPHORE
@@ -424,7 +415,7 @@ def _client_message_id(task_id: str, message_id: str) -> str:
 
 def _operation_ref(chat_id: int, client_message_id: str) -> str:
     """The host's documented ref spelling: the identity the caller supplied."""
-    return f"{int(chat_id)}:{client_message_id}" if client_message_id else ""
+    return client_message_id
 
 
 def _update_task_record(
@@ -452,6 +443,9 @@ def _update_task_record(
             seen = list(bound.get("message_ids") or ([current] if current else []))
             if incoming not in seen:
                 seen.append(incoming)
+                if binding.get("protocol") == "presence" and bound.get("chat_id"):
+                    bound["legacy_message_ids"] = list(seen[:-1])
+                    bound.pop("chat_id", None)
                 bound.update(binding)
                 bound["message_ids"] = seen
                 record["status"] = {"state": "working"}
@@ -473,14 +467,6 @@ def _bound_operation(task_id: str) -> Dict[str, Any]:
     return dict(bound) if isinstance(bound, dict) else {}
 
 
-class _HostWorkCancelled(RuntimeError):
-    """The host reports the bound work as cancelled (a ``tasks/cancel`` landed)."""
-
-
-class _HostMessageConflict(ValueError):
-    """A reused message id does not describe the host's accepted source."""
-
-
 class _HostCancelRefused(RuntimeError):
     """The host answered anything but ``cancelled``: the honest reason rides along."""
 
@@ -491,57 +477,14 @@ class _HostCancelRefused(RuntimeError):
 
 
 def _cancel_host_operation_sync(task_id: str) -> Dict[str, Any]:
-    """Ask the host to cancel the work bound to this A2A task; return the host's
-    typed outcome only when it is ``cancelled``, else raise ``_HostCancelRefused``.
-
-    The host's own cancellation owner decides (durable intent, custody): a
-    message with no addressable work yet, a message steered into a
-    pre-existing task, work that already finished, or custody that did not
-    settle are all refusals — never reported as a cancellation."""
-    bound = _bound_operation(task_id)
-    ref = str(bound.get("operation_ref") or "")
-    if not ref:
+    if not _bound_operation(task_id):
         raise _HostCancelRefused("unbound", "no host operation is bound to this task")
-    try:
-        response = httpx.post(
-            f"{HOST_SERVICE_URL}/chat/cancel",
-            headers=_host_headers(),
-            json={"operation_ref": ref, "reason": f"A2A tasks/cancel for {task_id}"},
-            timeout=A2A_ALLOCATE_TIMEOUT_SEC,
-        )
-    except Exception as exc:
-        raise _HostCancelRefused("unreachable", f"host cancel call failed: {exc}") from exc
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    outcome = str(payload.get("outcome") or "")
-    reason = str(payload.get("reason") or payload.get("error") or payload.get("status") or response.status_code)
-    if response.status_code == 200 and outcome == "cancelled":
-        payload["client_message_id"] = str(bound.get("client_message_id") or "")
-        return payload
-    raise _HostCancelRefused(outcome or f"http_{response.status_code}", reason)
+    raise _HostCancelRefused("cancel_unsupported",
+        "the Presence protocol has no cancellation endpoint; host work is unchanged")
 
 
-def _read_operation_sync(operation_ref: str) -> "Dict[str, Any] | None":
-    """The host's view of the bound operation, or None when it has none to give
-    (an older host without the route, an operation it does not know, a
-    transport failure). Absence never authorizes a chat-only answer."""
-    if not operation_ref:
-        return None
-    try:
-        response = httpx.get(
-            f"{HOST_SERVICE_URL}/chat/operations/{operation_ref}",
-            headers=_host_headers(),
-            timeout=_HOST_FETCH_TIMEOUT_SEC,
-        )
-        payload = response.json() if response.status_code == 200 else None
-    except Exception:
-        return None
-    return payload if (isinstance(payload, dict) and payload.get("ok")
-                       and payload.get("operation_ref") == operation_ref) else None
+def _read_operation_sync(operation_ref: str):
+    return _presence_transport().read(operation_ref) if operation_ref else None
 
 
 def _refresh_task_record(task_id: str) -> "Dict[str, Any] | None":
@@ -687,7 +630,7 @@ def _sdk_request_handler(card):
                 return task
             # An old message must never receive current M2's terminal answer.
             # Reconcile M1 through the same host operation; do not write M2.
-            view = await asyncio.to_thread(_read_operation_sync, _operation_ref(bound["chat_id"], expected))
+            view = await asyncio.to_thread(_read_operation_sync, expected)
             state = {"completed": TaskState.TASK_STATE_COMPLETED, "cancelled": TaskState.TASK_STATE_CANCELED,
                      "failed": TaskState.TASK_STATE_FAILED, "rejected_duplicate": TaskState.TASK_STATE_REJECTED,
                      "lost": TaskState.TASK_STATE_FAILED}.get((view or {}).get("status"))
@@ -718,14 +661,14 @@ def _sdk_request_handler(card):
             yield task
             bound = _bound_operation(task.id)
             expected = _client_message_id(task.id, params.message.message_id)
-            if not bound.get("chat_id"):
+            if bound.get("protocol") != "presence":
                 task.status.message.CopyFrom(Message(role=Role.ROLE_AGENT, message_id=uuid.uuid4().hex,
                                                      parts=[Part(text="The host operation binding is unavailable; delivery outcome is unknown.")]))
                 yield task
                 return
-            ref = _operation_ref(int(bound["chat_id"]), expected)
+            ref = expected
             try:
-                answer = await asyncio.to_thread(_wait_final_after_expiry_sync, int(bound["chat_id"]),
+                answer = await asyncio.to_thread(_wait_final_after_expiry_sync, bound.get("conversation_id", ""),
                                                 time.monotonic() + A2A_STREAM_DEADLINE_SEC, ref)
                 _update_task_record(task.id, state="completed", expected_message_id=expected,
                                     artifacts=[{"parts": [{"kind": "text", "text": answer}]}])
@@ -1205,15 +1148,12 @@ class OuroborosExecutor(AgentExecutor if _A2A_SDK_AVAILABLE else object):
             dispatch = asyncio.ensure_future(
                 asyncio.to_thread(_dispatch_after_allocate_sync, chat_id, text, deadline, client_message_id)
             )
-            seen_progress: set = set()
             last_emit = time.monotonic()
             while True:
                 done, _pending = await asyncio.wait({dispatch}, timeout=A2A_PROGRESS_POLL_SEC)
                 if done:
                     break
                 notes: List[str] = []
-                if A2A_PROGRESS_ENRICH:
-                    notes = await asyncio.to_thread(_fetch_progress_notes_sync, chat_id, seen_progress)
                 for note in notes:
                     await emit_working(note)
                     last_emit = time.monotonic()
@@ -1254,222 +1194,62 @@ class OuroborosExecutor(AgentExecutor if _A2A_SDK_AVAILABLE else object):
         ))
 
 
-class _HostWaitExpired(RuntimeError):
-    """The host accepted the message but the response wait closed before the
-    agent answered. The underlying task keeps running host-side; the durable
-    completion fallback below can still deliver its answer."""
-
-    def __init__(self, message: str, operation_ref: str = "") -> None:
-        super().__init__(message)
-        self.operation_ref = operation_ref
-
-
 def _guard_inbound_text(text: str) -> None:
-    if _SLASH_COMMAND_RE.match(text or ""):
-        raise ValueError("slash commands are reserved for direct owner input")
+    # Presence receives slash-prefixed peer text as ordinary conversation data.
+    if not isinstance(text, str):
+        raise ValueError("peer text must be a string")
 
 
-def _allocate_chat_id_sync() -> int:
-    last_exc: Exception | None = None
-    for attempt in range(2):
-        try:
-            alloc = httpx.post(
-                f"{HOST_SERVICE_URL}/chat/allocate-internal",
-                headers=_host_headers(),
-                json={"range_name": "a2a"},
-                timeout=A2A_ALLOCATE_TIMEOUT_SEC,
-            )
-            alloc.raise_for_status()
-            return int(alloc.json()["chat_id"])
-        except Exception as exc:
-            last_exc = exc
-            if attempt == 0:
-                time.sleep(1.0)
-    raise RuntimeError(f"host chat-id allocation failed: {last_exc}") from last_exc
+_PRESENCE_TRANSPORT = None
 
 
-def _bind_inbound_message_sync(task_id: str, context_id: str, message_id: str) -> "tuple[int, str]":
-    """Resolve the host chat and message identity for one inbound A2A message.
+def _presence_transport():
+    global _PRESENCE_TRANSPORT
+    if _PRESENCE_TRANSPORT is None:
+        _PRESENCE_TRANSPORT = PresenceTransport(STATE_DIR, HOST_SERVICE_URL, _host_headers,
+            timeout=A2A_RESPONSE_TIMEOUT_SEC, poll_interval=A2A_PROGRESS_POLL_SEC)
+    return _PRESENCE_TRANSPORT
 
-    A task already bound to a host chat keeps it (a re-delivered message
-    rejoins at the host; a NEW message in the same task continues the same
-    conversation), otherwise a fresh single-conversation chat is allocated. The
-    binding is written before the inject so ``tasks/cancel`` can find it while
-    the wait is still open."""
-    if not task_id:
-        return _allocate_chat_id_sync(), ""
-    bound = _bound_operation(task_id)
-    allocated = int(bound.get("chat_id") or 0) or _allocate_chat_id_sync()
-    client_message_id = _client_message_id(task_id, message_id)
+
+def _bind_inbound_message_sync(task_id: str, context_id: str, message_id: str):
+    task_id = task_id or uuid.uuid4().hex
+    client_id = _client_message_id(task_id, message_id)
     with _TASK_RECORD_LOCK:
-        # Allocation has no work side effect. A racing allocation may be unused,
-        # but every delivery reads the winner's binding before injecting work.
-        chat_id = int(_bound_operation(task_id).get("chat_id") or 0) or allocated
+        bound = _bound_operation(task_id)
+        if client_id in bound.get("legacy_message_ids", []) or (bound.get("chat_id") and client_id in bound.get("message_ids", [bound.get("client_message_id")])):
+            raise _HostMessageConflict("Legacy owner-chat message cannot be resubmitted as a place event; inspect its saved task")
+        if bound.get("conversation_id") and context_id and bound["conversation_id"] != context_id:
+            raise _HostMessageConflict("taskId was already accepted in another context")
+        conversation = str(bound.get("conversation_id") or context_id or task_id)
         _update_task_record(task_id, context_id, binding={
-            "chat_id": chat_id,
-            "client_message_id": client_message_id,
-            "operation_ref": _operation_ref(chat_id, client_message_id),
+            "conversation_id": conversation, "client_message_id": client_id,
+            "operation_ref": client_id, "protocol": "presence",
         })
-    return chat_id, client_message_id
+    return conversation, client_id
 
 
-def _inject_sync(chat_id: int, text: str, client_message_id: str = "") -> str:
-    """One /chat/inject with wait_for_response. Raises _HostWaitExpired (carrying
-    the operation_ref) when the wait window closed while the task is still
-    running (host 504, or a socket timeout on our side); other HTTP failures
-    propagate as hard errors."""
+def _inject_sync(conversation_id, text, client_message_id=""):
+    return _presence_transport().submit(conversation_id, text, client_message_id or uuid.uuid4().hex)
+
+
+def _wait_final_after_expiry_sync(conversation_id, deadline_monotonic, operation_ref=""):
+    return _presence_transport().wait(operation_ref, deadline_monotonic, read=_read_operation_sync)
+
+
+def _dispatch_after_allocate_sync(conversation_id, text, deadline_monotonic, client_message_id=""):
+    # Kept as the dispatch seam used by SDK and fallback callers; no chat allocation.
     try:
-        injected = httpx.post(
-            f"{HOST_SERVICE_URL}/chat/inject",
-            headers=_host_headers(),
-            json={
-                "text": text,
-                "chat_id": chat_id,
-                "source": "a2a",
-                "sender_label": "A2A",
-                "wait_for_response": True,
-                "timeout_sec": A2A_RESPONSE_TIMEOUT_SEC,
-                "transport": {
-                    "kind": "a2a",
-                    "conversation_id": str(chat_id),
-                    "sender_label": "A2A",
-                },
-                **({"client_message_id": client_message_id} if client_message_id else {}),
-            },
-            timeout=A2A_RESPONSE_TIMEOUT_SEC + 15,
-        )
-    except httpx.TimeoutException as exc:
-        raise _HostWaitExpired(
-            f"host response socket timed out after ~{A2A_RESPONSE_TIMEOUT_SEC}s ({exc})",
-            operation_ref=_operation_ref(chat_id, client_message_id),
-        ) from exc
-    if injected.status_code == 504:
-        # The host names the operation on the expiry too; prefer its spelling.
-        try:
-            ref = str((injected.json() or {}).get("operation_ref") or "")
-        except ValueError:
-            ref = ""
-        expected = _operation_ref(chat_id, client_message_id)
-        if ref and expected and ref != expected:
-            raise RuntimeError("host returned an operation_ref for a different message")
-        raise _HostWaitExpired(
-            f"host response wait expired after {A2A_RESPONSE_TIMEOUT_SEC}s",
-            operation_ref=ref or _operation_ref(chat_id, client_message_id),
-        )
-    if injected.status_code == 409 and client_message_id:
-        raise _HostMessageConflict("messageId conflicts with the host's already accepted message")
-    injected.raise_for_status()
-    try:
-        payload = injected.json()
-    except ValueError as exc:
-        raise RuntimeError(f"host chat injection returned a non-JSON body: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("host chat injection returned a non-object body")
-    if client_message_id and payload.get("operation_ref") not in (None, "", _operation_ref(chat_id, client_message_id)):
-        raise RuntimeError("host returned an operation_ref for a different message")
-    # HTTP 200 is not by itself success: the host reports a refusal in the body as
-    # {"ok": false, "error": ...}. Reading only "response" turned that into an
-    # EMPTY completed answer, hiding the real host-side error from the A2A caller.
-    if not payload.get("ok", True):
-        raise RuntimeError(str(payload.get("error") or "host rejected chat injection"))
-    status = str(payload.get("status") or "")
-    if status == "cancelled":
-        raise _HostWorkCancelled("host work was cancelled")
-    if status and status != "completed":
-        raise RuntimeError(f"host operation ended {status}: {payload.get('response') or payload.get('reason') or ''}")
-    return str(payload.get("response") or "")
-
-
-def _gateway_log_entries_sync(name: str, limit: int) -> List[Dict[str, Any]]:
-    resp = httpx.get(
-        f"{A2A_GATEWAY_URL}/api/logs/{name}",
-        params={"limit": limit},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    entries = resp.json().get("entries")
-    return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
-
-
-def _fetch_final_answer_sync(chat_id: int) -> "str | None":
-    """Durable completion fallback: the final answer of an injected turn is always
-    appended to the chat log under our single-use negative chat_id, even after the
-    response subscription is gone."""
-    try:
-        entries = _gateway_log_entries_sync("chat", 300)
-    except Exception:
-        return None
-    for entry in reversed(entries):
-        if entry.get("chat_id") == chat_id and str(entry.get("direction")) == "out":
-            return str(entry.get("text") or "")
-    return None
-
-
-def _fetch_progress_notes_sync(chat_id: int, seen: set) -> List[str]:
-    """New progress-log notes for our chat_id (the same narration the web UI
-    shows), deduplicated across polls via the caller-owned ``seen`` set."""
-    try:
-        entries = _gateway_log_entries_sync("progress", 200)
-    except Exception:
-        return []
-    notes: List[str] = []
-    for entry in entries:
-        if entry.get("chat_id") != chat_id:
-            continue
-        raw = str(entry.get("text") or entry.get("content") or "").strip()
-        if not raw:
-            continue
-        key = (str(entry.get("ts") or ""), str(entry.get("_line") or ""), raw[:80])
-        if key in seen:
-            continue
-        seen.add(key)
-        note = raw.lstrip("💬").strip()
-        notes.append(note[:400] + ("…" if len(note) > 400 else ""))
-    return notes
-
-
-def _wait_final_after_expiry_sync(chat_id: int, deadline_monotonic: float, operation_ref: str = "") -> str:
-    """After the response wait expired: read the host's operation view (the late
-    answer, a promoted task's terminal status, ``lost`` after a host restart);
-    use legacy chat-log polling only for unnamed, single-use chat dispatch."""
-    while time.monotonic() < deadline_monotonic:
-        view = _read_operation_sync(operation_ref)
-        if view is not None:
-            status = str(view.get("status") or "")
-            if status == "completed":
-                return str(view.get("text") or "")
-            if status == "cancelled":
-                raise _HostWorkCancelled("host work was cancelled")
-            if status in ("failed", "rejected_duplicate"):
-                raise RuntimeError(f"host work ended {status}: {view.get('text') or ''}".rstrip(": "))
-            if status == "lost":
-                raise RuntimeError(_HOST_LOST_MESSAGE)
-        elif not operation_ref:
-            answer = _fetch_final_answer_sync(chat_id)
-            if answer is not None:
-                return answer
-        time.sleep(max(1.0, float(A2A_PROGRESS_POLL_SEC)))
-    raise _HostWaitExpired(
-        f"no response within A2A_STREAM_DEADLINE_SEC={A2A_STREAM_DEADLINE_SEC}s; "
-        "the host task may still be running", operation_ref=operation_ref,
-    )
-
-
-def _dispatch_after_allocate_sync(
-    chat_id: int, text: str, deadline_monotonic: float, client_message_id: str = "",
-) -> str:
-    try:
-        return _inject_sync(chat_id, text, client_message_id)
+        return _inject_sync(conversation_id, text, client_message_id)
     except _HostWaitExpired as exc:
-        logger.warning("a2a dispatch: %s; recovering the answer after the wait", exc)
-        return _wait_final_after_expiry_sync(chat_id, deadline_monotonic, exc.operation_ref)
+        record = _presence_transport().load(exc.operation_ref)
+        if not record or not (record.get("turn_ref") or record.get("work_ref")):
+            raise
+        return _wait_final_after_expiry_sync(conversation_id, deadline_monotonic, exc.operation_ref)
 
 
 def _dispatch_to_host_sync(text: str, *, task_id: str = "", context_id: str = "", message_id: str = "") -> str:
-    chat_id, client_message_id = _bind_inbound_message_sync(task_id, context_id, message_id)
-    return _dispatch_after_allocate_sync(
-        chat_id, text, time.monotonic() + A2A_STREAM_DEADLINE_SEC, client_message_id,
-    )
+    conversation, client_id = _bind_inbound_message_sync(task_id, context_id, message_id)
+    return _dispatch_after_allocate_sync(conversation, text, time.monotonic() + A2A_STREAM_DEADLINE_SEC, client_id)
 
 
 async def _dispatch_to_host(text: str, *, task_id: str = "", context_id: str = "", message_id: str = "") -> str:

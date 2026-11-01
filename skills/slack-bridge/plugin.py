@@ -114,6 +114,12 @@ def _make_status(api: Any):
     async def status(_request: Any = None) -> JSONResponse:
         store = BridgeStore(_state_dir(api))
         payload = store.status()
+        identity = payload.pop("connector_identity", {})
+        if payload.get("presence_identity") == 1 and identity:
+            payload["identity"] = identity
+        held = payload.get("outbox_held", 0)
+        payload.update(text=f"{held} held" if held else str(payload.get("socket_state") or "Not connected"),
+                       tone="warn" if held else "muted", title="Slack transport")
         protected = api.get_settings(["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"])
         settings_error = ""
         try:
@@ -194,9 +200,10 @@ def _make_file_upload(api: Any):
         receipt = str(request_id or uuid.uuid4().hex)
         staged_root = _state_dir(api) / "outbound" / "files"
         staged_root.mkdir(parents=True, exist_ok=True)
-        # A caller retrying the same request_id must never overwrite bytes
+        # Request IDs are opaque outbox keys, never filesystem components.
+        # A fresh full UUID also prevents retries from overwriting bytes
         # already referenced by the first durable outbox row.
-        staged = staged_root / f"{receipt}-{uuid.uuid4().hex[:12]}-{_safe_name(source.name)}"
+        staged = staged_root / f"{uuid.uuid4().hex}-{_safe_name(source.name)}"
         temporary = staged.with_name(staged.name + f".part.{os.getpid()}")
         try:
             shutil.copyfile(source, temporary)
@@ -333,7 +340,9 @@ def _register_mutation_tools(api: Any) -> None:
         ("slack_bookmark_remove", "bookmark_remove", {"channel": {"type": "string"}, "bookmark_id": {"type": "string"}, "request_id": {"type": "string"}}, ["channel", "bookmark_id"]),
     ]
     for name, operation, properties, required in action_specs:
-        register_json_tool(api, name, _make_action(api, operation), description=f"Queue Slack {operation.replace('_', ' ')} and preserve its provider receipt.", schema={"type": "object", "properties": properties, "required": required, "additionalProperties": False}, timeout_sec=30)
+        note = (" A reaction can be the whole social response; it is not speech or proof of finished work."
+                " The provider outcome, including a no-op, is read with slack_receipt." if name.startswith("slack_reaction") else "")
+        register_json_tool(api, name, _make_action(api, operation), description=f"Queue Slack {operation.replace('_', ' ')} and preserve its provider receipt.{note}", schema={"type": "object", "properties": properties, "required": required, "additionalProperties": False}, timeout_sec=30)
     register_json_tool(
         api,
         "slack_join",
@@ -356,16 +365,27 @@ def _register_mutation_tools(api: Any) -> None:
     )
 
 
+_WORKER_SETTINGS = (
+    ("SLACK_INBOUND_WORKERS", 4, 1, 16),
+    ("SLACK_OUTBOUND_WORKERS", 2, 1, 8),
+)
+
+
 def _make_settings_save(api: Any):
     async def settings_save(request: Any) -> JSONResponse:
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        if not isinstance(body, dict):
-            return JSONResponse(
-                {"ok": False, "error": "Expected a JSON object"}, status_code=400
-            )
+        # The host hydrates the form with GET (and admits HEAD beside it):
+        # only POST saves, so reading the form never writes the file.
+        saving = request.method.upper() == "POST"
+        body: Any = {}
+        if saving:
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            if not isinstance(body, dict):
+                return JSONResponse(
+                    {"ok": False, "error": "Expected a JSON object"}, status_code=400
+                )
 
         try:
             current = _load_local_settings(api)
@@ -382,6 +402,13 @@ def _make_settings_save(api: Any):
                 },
                 status_code=409,
             )
+        if not saving:
+            # Exactly the form's fields, as strings; the number fields have
+            # placeholders, not defaults, so unset counts show the effective one.
+            values = {"binding_id": str(current.get("binding_id") or "")}
+            for key, default, _minimum, _maximum in _WORKER_SETTINGS:
+                values[key] = str(current.get(key) or default)
+            return JSONResponse(values)
         if "binding_id" in body:
             binding_id = str(body.get("binding_id") or "").strip()
             if binding_id:
@@ -392,10 +419,7 @@ def _make_settings_save(api: Any):
                         {"ok": False, "error": str(exc)}, status_code=400
                     )
             current["binding_id"] = binding_id
-        for key, default, minimum, maximum in (
-            ("SLACK_INBOUND_WORKERS", 4, 1, 16),
-            ("SLACK_OUTBOUND_WORKERS", 2, 1, 8),
-        ):
+        for key, default, minimum, maximum in _WORKER_SETTINGS:
             if key not in body:
                 continue
             try:
@@ -458,7 +482,7 @@ def register(api: Any) -> None:
     )
     api.register_route("status", handler=_make_status(api), methods=("GET",))
     api.register_route(
-        "settings/save", handler=_make_settings_save(api), methods=("POST",)
+        "settings/save", handler=_make_settings_save(api), methods=("GET", "POST")
     )
 
     api.register_ui_tab(
@@ -502,12 +526,6 @@ def register(api: Any) -> None:
                         },
                         {
                             "type": "metric",
-                            "label": "Presence binding",
-                            "path": "binding_state",
-                            "target": "status",
-                        },
-                        {
-                            "type": "metric",
                             "label": "Workspace",
                             "path": "workspace_name",
                             "tone": "info",
@@ -534,6 +552,7 @@ def register(api: Any) -> None:
                             "tone": "neutral",
                             "target": "status",
                         },
+                        {"type": "metric", "label": "Outbox held", "path": "outbox_held", "target": "status"},
                         {
                             "type": "metric",
                             "label": "Outbox delivered",
@@ -569,6 +588,12 @@ def register(api: Any) -> None:
                             "tone": "danger",
                             "target": "status",
                         },
+                        {
+                            "type": "metric",
+                            "label": "Reactions in Host context",
+                            "path": "reaction_context_state",
+                            "target": "status",
+                        },
                     ],
                     "target": "status",
                 },
@@ -591,8 +616,7 @@ def register(api: Any) -> None:
                     "type": "markdown",
                     "text": (
                         "Set and grant `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in Secrets. "
-                        "Select an owner-created Presence Binding ID for "
-                        "provider `slack`, the workspace Team ID, and an exact channel conversation ID or `*`. "
+                        "Connect Slack under Consciousness → Places. "
                         "The bridge receives messages from every DM, MPDM, public channel, "
                         "and private channel that the installed app can actually see."
                     ),
@@ -603,13 +627,6 @@ def register(api: Any) -> None:
                     "method": "POST",
                     "submit_label": "Save Slack settings",
                     "fields": [
-                        {
-                            "name": "binding_id",
-                            "label": "Presence Binding ID",
-                            "type": "text",
-                            "placeholder": "32 lowercase hexadecimal characters",
-                            "help": "Owner-created binding for provider slack, this workspace Team ID, and an exact channel conversation ID or *.",
-                        },
                         {
                             "name": "SLACK_INBOUND_WORKERS",
                             "label": "Inbound workers",

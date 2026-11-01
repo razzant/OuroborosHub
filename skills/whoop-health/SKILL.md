@@ -1,6 +1,6 @@
 ---
 name: whoop-health
-version: 0.3.0
+version: 0.3.1
 type: extension
 plugin_api: "2.0"
 runtime: python3
@@ -25,7 +25,7 @@ requested_keys:
 timeout_sec: 90
 ---
 
-# WHOOP Health v0.3.0
+# WHOOP Health v0.3.1
 
 Extension skill для Ouroboros — собирает данные со смарт-браслета WHOOP
 через [официальный API v2](https://developer.whoop.com/api)
@@ -58,8 +58,25 @@ Access token обновляется автоматически через refres
 | `whoop_auth_url` | Генерирует OAuth2 URL для авторизации в браузере |
 | `whoop_exchange_code` | Обменивает authorization code на access + refresh tokens |
 | `whoop_check` | Проверка подключения (GET /v2/user/profile/basic) |
-| `whoop_summary` | Сводка за последние N дней: recovery, сон, strain |
-| `whoop_fetch` | Детальные данные по типу: RECOVERY, SLEEP, WORKOUT, CYCLE |
+| `whoop_summary` | Сводка за последние N дней: recovery, сон, strain. |
+| `whoop_fetch` | Детальные данные по типу: RECOVERY, SLEEP, WORKOUT, CYCLE. |
+
+## Зоны восстановления
+
+`whoop_fetch(RECOVERY)` добавляет `score.recovery_zone` к записи с оценкой;
+`whoop_summary` возвращает ту же зону в `recovery.recovery_zone`.
+Исходный `recovery_score` и остальные измерения сохраняются.
+Для числового процента 0–100: red ≤33, yellow >33 и ≤66, green >66,
+без округления. [WHOOP](https://developer.whoop.com/docs/whoop-101) описывает
+зоны как 0–33%, 34–66% и 67–100%; [API](https://developer.whoop.com/api)
+задаёт число типа float, но не уточняет округление между целыми границами.
+Поэтому для дробных значений здесь явно указано правило этого навыка.
+Отсутствующее, нечисловое, бесконечное, NaN или выходящее за 0–100 значение
+даёт `null`, а не предполагаемый цвет. Записи без оценки сохраняют отсутствующий
+или null `score`; в сводке такие измерения равны `null`, пустая коллекция
+по-прежнему не добавляет раздел. Флаг `recovery.user_calibrating` в сводке
+сохраняет предупреждение WHOOP о недостаточных данных при калибровке;
+`null` означает, что флаг не получен. Зона — категория данных, не медицинский совет.
 
 ## Данные и права
 

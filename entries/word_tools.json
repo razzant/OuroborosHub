@@ -1,0 +1,24 @@
+{
+  "category": [
+    "documents"
+  ],
+  "description": "Read structured DOCX documents and build new Word documents from lightly structured text.",
+  "digest": "8250c81f2c6ccd2032fee27e3e1b0962bd22f9283e7d00d384a04e434b05a106",
+  "install_specs": [
+    {
+      "kind": "pip",
+      "package": "python-docx"
+    }
+  ],
+  "name": "word_tools",
+  "owner": "kazzand",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/word_tools"
+  },
+  "type": "script",
+  "version": "0.1.0",
+  "when_to_use": "The user attached a Word document and asks to read, summarize, search, compare, or revise its contents, or asks to create a Word or DOCX file.",
+  "withdrawn": null
+}

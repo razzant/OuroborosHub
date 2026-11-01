@@ -63,6 +63,8 @@ def test_provider_mock_through_worker_persists_context_before_host(tmp_path):
                 assert request.url.params["user"] == "U_TEST"
                 return httpx.Response(200, json={"ok": True, "user": user()})
             assert request.url.params["channel"] == "D_TEST"
+            if request.url.path.endswith("conversations.replies"):
+                return httpx.Response(200, json={"ok": True, "messages": [payload()["payload"]["event"]]})
             return httpx.Response(200, json={"ok": True, "channel": conversation()})
         events = []
         def host_handler(request):
@@ -95,7 +97,7 @@ def test_provider_mock_through_worker_persists_context_before_host(tmp_path):
         assert event["conversation"]["topic"] == {"value": "Current work"}
         assert event["conversation"]["is_im"] is True
         assert event["thread_id"] == "123.456" and event["text"] == "Hello"
-        assert sorted(calls) == ["/api/conversations.info", "/api/users.info"]
+        assert sorted(calls) == ["/api/conversations.info", "/api/conversations.replies", "/api/users.info"]
         assert store.status()["inbox_delivered"] == 1
     asyncio.run(run())
 
@@ -107,6 +109,8 @@ def test_failed_lookup_still_delivers_message_with_typed_gap(tmp_path, failure):
         value = payload()
         store.ingest_envelope(value, parse_socket_envelope(value))
         def slack_handler(request):
+            if request.url.path.endswith("conversations.replies"):
+                return httpx.Response(200, json={"ok": True, "messages": [payload()["payload"]["event"]]})
             if request.url.path.endswith("conversations.info"):
                 return httpx.Response(200, json={"ok": True, "channel": conversation()})
             if failure == "network":
@@ -149,7 +153,8 @@ def test_retry_after_restart_reuses_exact_snapshot_but_next_event_refreshes(tmp_
         name = "First name"
         def slack_handler(request):
             calls.append(request.url.path)
-            return httpx.Response(200, json={"ok": True, "user": user(name), "channel": conversation()})
+            return httpx.Response(200, json={"ok": True, "user": user(name), "channel": conversation(),
+                                             "messages": [payload()["payload"]["event"]]})
         def host_handler(request):
             if request.url.path == "/identity":
                 return httpx.Response(200, json={"ok": True})
@@ -171,11 +176,11 @@ def test_retry_after_restart_reuses_exact_snapshot_but_next_event_refreshes(tmp_
             worker = InboundWorker(reopened, slack, host, staged_root=tmp_path / "staged")
             await worker.process_once()
             assert events[0] == events[1]
-            assert context_row(reopened) == saved and len(calls) == 2
+            assert context_row(reopened) == saved and len(calls) == 3
             next_value = payload("event-2")
             reopened.ingest_envelope(next_value, parse_socket_envelope(next_value))
             await worker.process_once()
-        assert events[2]["actor"]["display_name"] == "Changed name" and len(calls) == 4
+        assert events[2]["actor"]["display_name"] == "Changed name" and len(calls) == 6
     asyncio.run(run())
 
 
@@ -187,6 +192,8 @@ def test_snapshot_write_failure_prevents_host_submission(tmp_path, monkeypatch):
         class Slack:
             async def user_info(self, _value): return user()
             async def conversation_info(self, _value): return conversation()
+            async def read_messages(self, **_kwargs):
+                return {"messages": [payload()["payload"]["event"]], "complete": True, "next_cursor": None}
         class Host:
             async def submit(self, _item): raise AssertionError("Must persist context first")
         def fail(*_args): raise sqlite3.OperationalError("disk unavailable")
@@ -243,7 +250,8 @@ def test_real_lookup_wait_expiry_still_submits_original_message(tmp_path, monkey
         async def slack_handler(request):
             if request.url.path.endswith(slow_method):
                 await asyncio.sleep(1)
-            return httpx.Response(200, json={"ok": True, "user": user(), "channel": conversation()})
+            return httpx.Response(200, json={"ok": True, "user": user(), "channel": conversation(),
+                                             "messages": [payload()["payload"]["event"]]})
 
         def host_handler(request):
             if request.url.path == "/identity":

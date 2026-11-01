@@ -12,6 +12,7 @@ class FakeApi:
         self.routes = []
         self.tools = []
         self.tabs = []
+        self.settings = []
         self.unload = None
 
     def get_state_dir(self):
@@ -41,6 +42,9 @@ class FakeApi:
     def register_ui_tab(self, tab_id, title, **kwargs):
         self.tabs.append((tab_id, title, kwargs))
 
+    def register_settings_section(self, section_id, **kwargs):
+        self.settings.append((section_id, kwargs))
+
     def on_unload(self, callback):
         self.unload = callback
 
@@ -49,8 +53,9 @@ class FakeApi:
 
 
 class FakeRequest:
-    def __init__(self, payload):
+    def __init__(self, payload=None, method="POST"):
         self.payload = payload
+        self.method = method
 
     async def json(self):
         return self.payload
@@ -76,12 +81,12 @@ def test_package_style_plugin_registration_and_status_route(tmp_path):
     assert api.routes[0][0] == "status"
     assert api.routes[0][2] == ("GET",)
     assert api.routes[1][0] == "settings/save"
-    assert api.routes[1][2] == ("POST",)
+    assert api.routes[1][2] == ("GET", "POST")
     assert api.tabs[0][0] == "transport"
     assert api.tools[0][0] == "telegram_send"
-    form = api.tabs[0][2]["render"]["components"][0]
+    form = next(c for c in api.tabs[0][2]["render"]["components"] if c["type"] == "form")
     assert form["type"] == "form" and form["route"] == "settings/save"
-    assert "conversation_id=*" in form["fields"][0]["help"]
+    assert all(field["name"] != "binding_id" for field in form["fields"])
     assert callable(api.unload)
 
     # Check the model-visible catalog, not only direct Python handler calls.
@@ -184,7 +189,7 @@ def test_telegram_operation_queues_edit_and_reaction_with_new_identity(tmp_path)
         request_id="op-edit-1",
     )
     reaction = operations["telegram_operation"](
-        method="setMessageReaction", chat_id="-10042", message_id=9,
+        method="setMessageReaction", chat_id="-10042", message_id=9, topic_id=7,
         reaction=[{"type": "emoji", "emoji": "👍"}], request_id="op-react-1",
     )
     assert edit["state"] == "queued" and reaction["state"] == "queued"
@@ -236,3 +241,26 @@ def test_binding_can_be_saved_and_read_through_widget_routes(tmp_path):
         json.loads((tmp_path / "settings.json").read_text())["binding_id"] == binding_id
     )
     api.unload()
+
+
+def test_manifest_widget_declaration_matches_registered_tab(tmp_path):
+    """Preflight reads the manifest tab; the live tab is registered by plugin.py."""
+    import yaml
+
+    skill_dir = __import__("pathlib").Path(__file__).resolve().parents[1]
+    front = yaml.safe_load((skill_dir / "SKILL.md").read_text(encoding="utf-8").split("---")[1])
+    spec = importlib.util.spec_from_file_location(
+        "telegram_bot_manifest_sync_test", skill_dir / "plugin.py",
+        submodule_search_locations=[str(skill_dir)],
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    api = FakeApi(tmp_path)
+    module.register(api)
+    registered = api.tabs[0][2]["render"]
+    assert registered == front["ui_tab"]["render"]
+    note = registered["components"][0]
+    assert note["type"] == "markdown"
+    assert "cannot read earlier chat history" in note["text"]
+    assert front["contributes"][0]["wakes"] == ["direct_message", "mention", "reply_to_me"]

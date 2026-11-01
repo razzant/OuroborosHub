@@ -203,6 +203,34 @@ def _request_params(request: Request):
     return dict(pairs)
 
 
+def usage_chip(payload):
+    """Format the existing 24-hour physical-call summary; unknown stays unknown."""
+    summary = payload["summary"]
+    coverage = payload.get("coverage") or {}
+    if coverage.get("status") in ("loading", "error"):
+        return {"text": "—", "tone": "muted", "title": "\n".join(coverage.get("issues") or ["Usage unavailable"])}
+    tokens = summary["reported_tokens"]
+    cost = summary["metrics"]["cost_confirmed_usd"]["value"]
+    calls = summary["physical_calls"]
+    if tokens is None:
+        token_text = "unknown"
+    else:
+        token_text = str(tokens)
+        for threshold, suffix in ((10**9, "B"), (10**6, "M"), (10**3, "k")):
+            if tokens >= threshold:
+                token_text = f"{tokens / threshold:.1f}{suffix}"
+                break
+    cost_text = "unknown" if cost is None else f"${cost:.2f}"
+    title = (f"24h physical calls: {calls}\nReported tokens: {tokens if tokens is not None else 'unknown'}"
+             f"\nConfirmed cost: {cost_text}"
+             f"\nFully reported calls: {summary['fully_reported_rows']}/{calls}"
+             f"\nCalls with unknown cost: {summary['unknown_cost_rows']}")
+    if coverage.get("issues"):
+        title += "\n" + "\n".join(coverage["issues"])
+    return {"text": f"{cost_text} · 24h" if cost is not None else f"24h · {token_text} tok",
+            "tone": "muted", "title": title}
+
+
 def register(api):
     """Register own relative routes; the host owns prefixing and widget lifecycle."""
     runtime = api.get_runtime_info()
@@ -218,6 +246,12 @@ def register(api):
             return _response({"error": str(exc)}, 400)
         except Exception as exc:
             return _response({"error": "Dashboard query failed (" + type(exc).__name__ + "). Retry or restart the widget."}, 500)
+
+    async def chip(_request: Request):
+        try:
+            return _response(usage_chip(await service.query({"period": "24h", "page_size": "1"})))
+        except Exception as exc:
+            return _response({"text": "—", "tone": "muted", "title": f"Usage unavailable ({type(exc).__name__})"})
 
     async def export(request: Request):
         try:
@@ -254,6 +288,7 @@ def register(api):
 
     try:
         api.register_route("data", data, methods=["GET"])
+        api.register_route("chip", chip, methods=["GET"])
         api.register_route("export", export, methods=["GET"])
         api.register_route("preferences", preferences, methods=["GET", "PUT"])
         api.register_ui_tab("observatory", "Token Observatory", icon="◉", render={

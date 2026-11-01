@@ -75,7 +75,10 @@ def _make_settings_save(api):
         current = _load_settings(api)
         for key in _SETTINGS_KEYS:
             if key in data:
-                current[key] = str(data[key] or "").strip()
+                value = str(data[key] or "").strip()
+                # Password fields are never pre-filled by the host.
+                if value:
+                    current[key] = value
         path = _settings_path(api)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -414,11 +417,12 @@ def register(api) -> None:
                             "name": "TWOGIS_MAP_API_KEY",
                             "label": "Ключ: карты и поиск",
                             "type": "password",
-                            "required": True,
+                            "required": False,
                             "placeholder": "Вставьте ключ 2ГИС",
                             "help": ("Ключ с доступом к Static API, Geocoder API и Places API. "
                                      "Получить можно в Менеджере Платформы 2ГИС: "
-                                     "platform.2gis.ru (есть бесплатный демо-ключ на 30 дней)."),
+                                     "platform.2gis.ru (есть бесплатный демо-ключ на 30 дней). "
+                                     "Оставьте поле пустым, чтобы сохранить прежний ключ."),
                             "description": "Ключ для карт и поиска (Static, Geocoder, Places).",
                         },
                         {
@@ -430,7 +434,8 @@ def register(api) -> None:
                             "help": ("Ключ с доступом к Routing API и Isochrone API. "
                                      "Если у вас один ключ на все сервисы — вставьте его "
                                      "и сюда, и в поле выше. После сохранения поле снова "
-                                     "станет пустым: ключ хранится скрыто."),
+                                     "станет пустым: ключ хранится скрыто. "
+                                     "Оставьте поле пустым, чтобы сохранить прежний ключ."),
                             "description": "Ключ для маршрутов и изохрон (Routing, Isochrone).",
                         },
                     ],

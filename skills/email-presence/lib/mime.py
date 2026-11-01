@@ -43,7 +43,7 @@ def _html_to_text(value: str) -> str:
     return html.unescape(re.sub(r"[ \t]+", " ", value)).strip()
 
 
-def extract_body(message: Message, max_chars: int = 100_000) -> str:
+def extract_body(message: Message, max_chars: int | None = 100_000) -> str:
     plain = ""
     html_body = ""
     if message.is_multipart():
@@ -62,7 +62,7 @@ def extract_body(message: Message, max_chars: int = 100_000) -> str:
         plain = value if kind == "text/plain" else ""
         html_body = value if kind == "text/html" else ""
     text = plain.strip() or _html_to_text(html_body)
-    return text if len(text) <= max_chars else text[:max_chars] + f"\n[Body truncated: {len(text)} characters total]"
+    return text if max_chars is None or len(text) <= max_chars else text[:max_chars] + f"\n[Body truncated: {len(text)} characters total]"
 
 
 def _message_ids(value: Any) -> list[str]:
@@ -132,7 +132,8 @@ def parse_message(
     }
     result["headers"] = {
         name.lower(): [decode_header_value(value) for value in msg.get_all(name, [])]
-        for name in ("From", "To", "Cc", "Reply-To")
+        for name in ("From", "To", "Cc", "Reply-To", "List-Id", "List-Unsubscribe", "Precedence", "Auto-Submitted")
+        if name in msg or name in ("From", "To", "Cc", "Reply-To")
     }
     html_parts = []
     for part in msg.walk():

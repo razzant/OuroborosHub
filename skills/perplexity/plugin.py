@@ -114,9 +114,11 @@ def _research(query: str, api_key: str, max_results: int = _DEFAULT_MAX_RESULTS)
     citations = []
     for ann in annotations:
         if ann.get("type") == "url_citation":
+            # OpenRouter nests the source under "url_citation"; a flat annotation is read as it is.
+            cite = ann.get("url_citation") if isinstance(ann.get("url_citation"), dict) else ann
             citations.append({
-                "title": ann.get("title", ""),
-                "url": ann.get("url", ""),
+                "title": cite.get("title", ""),
+                "url": cite.get("url", ""),
             })
 
     # Usage info
@@ -148,8 +150,18 @@ async def _route_research(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"error": "invalid JSON body"}, status_code=400)
 
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+    value = body.get("max_results", _DEFAULT_MAX_RESULTS)
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if value is not None and (isinstance(value, bool) or not isinstance(value, (str, int))):
+        return JSONResponse({"error": "max_results must be an integer"}, status_code=400)
+    try:
+        max_results = int(value or _DEFAULT_MAX_RESULTS)
+    except ValueError:
+        return JSONResponse({"error": "max_results must be an integer"}, status_code=400)
     query = str(body.get("query", "")).strip()
-    max_results = int(body.get("max_results", _DEFAULT_MAX_RESULTS) or _DEFAULT_MAX_RESULTS)
 
     api_key = _get_api_key()
 

@@ -1,0 +1,21 @@
+{
+  "category": [
+    "media"
+  ],
+  "description": "Hollywood-grade photorealistic video production with Gemini multimodal AV QC, parallel best-of-N candidate generation, effort-based quality control (low/regular/max), voice/dialogue synthesis, and Director cross-scene review",
+  "digest": "7da0b7706efe864fcc8167c684dc8f3bb248f462ab9711582fe125a05af2b45a",
+  "install_specs": [
+    "Pillow"
+  ],
+  "name": "video_studio",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/video_studio"
+  },
+  "type": "extension",
+  "version": "1.3.0",
+  "when_to_use": "User wants to generate a photorealistic cinematic video, film scene, documentary, live-action style video, or realistic narrative with consistent characters, Gemini multimodal quality control, and Hollywood-grade production quality. Separate from anime_studio which generates 2D anime cartoons.",
+  "withdrawn": null
+}

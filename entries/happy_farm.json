@@ -1,0 +1,18 @@
+{
+  "category": [
+    "games"
+  ],
+  "description": "Comprehensive, charming, and fully playable Happy Farm game widget with crops, livestock, economy, orders, day-night/weather cycles, and audio.",
+  "digest": "fa788787d5fc89599e998de4d602606f90712b58534d13273027bf4993dc7c16",
+  "name": "happy_farm",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/happy_farm"
+  },
+  "type": "extension",
+  "version": "0.1.0",
+  "when_to_use": "When the user wants to play a cozy farming simulation game in an Ouroboros widget with crops, livestock, crafting, progression, and rich audiovisuals.",
+  "withdrawn": null
+}

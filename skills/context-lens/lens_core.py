@@ -1,52 +1,48 @@
-"""Read-only reader/aggregator for the durable usage attempt ledger.
+"""Meaning, sanitizing and projection for Context Lens; plus the legacy journal reader.
 
 Pure module: no Ouroboros imports, no host imports, no network, no writes.
 Everything the widget can ever see is produced here and passes through
-``_point()`` / ``counters()``, which are allowlists — a field that is not
-named there cannot reach the browser.
+``_point()`` / ``counters()`` / ``assemble()``, which are allowlists — a field
+that is not named there cannot reach the browser.
 
-What this reads
----------------
-``<data_dir>/state/usage_attempts.jsonl`` only. That path is fixed by the
-core substrate (``ouroboros/usage_ledger.py``: ``LEDGER_REL =
-pathlib.Path("state/usage_attempts.jsonl")``). Nothing else is opened: no
-archive segment, no quarantine file, no prompt blob, no settings, no
-credential store. The file is opened ``"rb"`` and never written, renamed,
-truncated or locked.
+Two sources, one projection
+---------------------------
+* **The usage store** (``state/usage.sqlite``) is the live usage authority.
+  ``lens_store`` reads one bounded selection from it and returns plain column
+  values; ``store_record()`` turns each row into the record shape below and
+  ``store_snapshot()`` describes the selection exactly.
+* **The retired journal** (``state/usage_attempts.jsonl``) is read by
+  ``LedgerWindow`` ONLY when no store file exists at all. Core stopped appending
+  to it at the one-time import, so its answer is labelled historical and never
+  stands in for a store that exists but cannot be read.
 
-Row facts this module relies on (all verified against the system repo)
----------------------------------------------------------------------
-* Every row is one JSON object per line with a dense ``seq`` (1-based) and a
-  ``ts`` (``datetime.now(timezone.utc).isoformat()``), assigned in
-  ``usage_ledger._append_rows_locked``.
+Both sources become the same records, and ``assemble()`` builds one payload from
+them, so points, counters, facets and the selection facts always describe one
+population.
+
+Row facts this module relies on (verified against the system repo)
+------------------------------------------------------------------
 * ``kind`` is one of ``attempt`` (default), ``external_unmetered``,
   ``subscription_session``, ``legacy_metadata``, ``legacy_delta``,
-  ``usage_baseline``, ``usage_baseline_group``.
-* An ``attempt`` chain is several rows sharing one ``attempt_id``:
-  ``reserved`` → ``dispatched`` → ``settled`` / ``unresolved`` / ``released``
-  (``reserved`` may also go straight to ``released``).
-  ``usage_accounting._transition`` copies ``model``, ``provider``,
-  ``task_id``, ``root_task_id``, ``parent_task_id``, ``category``, ``source``
-  and the candidate/``physical_context`` fields onto every later row, so a
-  terminal row is self-describing even when its ``reserved`` row is outside
-  the read window.
-* Token counts appear ONLY on the terminal ``settled`` row
-  (``usage_accounting.settle_attempt``). A ``reserved`` row carries no token
-  estimate at all — see "Exact gaps" in SKILL.md.
-* ``prompt_tokens`` is the provider-reported input count normalized by
-  ``ouroboros/_usage_response.py::usage_from_response``. For Anthropic-native
-  responses that normalization ALREADY adds ``cache_read_input_tokens`` and
-  ``cache_creation_input_tokens`` into ``prompt_tokens``. ``cached_tokens`` is
-  therefore a SUBSET of ``prompt_tokens``, never an addend. This module never
-  adds them.
-* Missing is not zero: ``_reported_token_count`` returns ``None`` when the
-  provider reported nothing, and that stays ``None`` here.
-* A compaction pass (``ouroboros/usage_compaction.py``) rewrites the file with
-  a leading ``usage_baseline`` header plus ``usage_baseline_group`` rows whose
-  token fields are SUMS over many folded attempts. Those are excluded from
-  every plot and counted separately. The header's ``folded_attempt_count`` is
-  the TOTAL over the same attempts its group rows describe, so the two must
-  never be added together — see ``counters()``.
+  ``usage_baseline``, ``usage_baseline_group``. Only ``attempt`` is a physical
+  model request; the others are counted, never drawn.
+* An attempt moves ``reserved`` → ``dispatched`` → ``settled`` / ``unresolved``,
+  or ``released`` without being sent. The journal appends one row per
+  transition (folded here by ``attempt_id``); the store UPDATEs one row.
+* Token counts are read ONLY from a ``settled`` row. A missing count stays
+  ``None`` — never zero — and an explicit ``0`` is a real measurement.
+* ``cached_tokens`` / ``cache_write_tokens`` are what the provider reported.
+  For some providers the input count already includes them, for others the
+  relation is not established, so they are passed on separately and never
+  added to the input or turned into a share.
+* ``physical_context.rendered_mode`` (``max`` / ``low`` / ``nano``) is the only
+  exact mode fact; its absence is Unknown and is never guessed.
+* A compaction aggregate (``usage_baseline`` / ``usage_baseline_group``) sums
+  many folded attempts; in the store a group row carries that count as its
+  ``weight``. Aggregates are counted separately and never become points.
+* The store's ``ts_last`` is the time of the latest accounting write to the row;
+  a late receipt or a price refinement moves it. It is when usage was recorded
+  or updated — not when a request was sent, and not a latency.
 """
 
 from __future__ import annotations
@@ -55,6 +51,7 @@ import datetime as _dt
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import stat as _stat
@@ -67,8 +64,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 LEDGER_REL_PARTS = ("state", "usage_attempts.jsonl")
 MAX_BYTES_PER_REFRESH = 4 * 1024 * 1024          # <= 4 MiB read per refresh
-MAX_RECORDS = 5000                               # cached physical attempt rows
+MAX_RECORDS = 5000                               # cached journal attempt rows
 DEFAULT_POINT_LIMIT = 1500
+MAX_POINT_LIMIT = 4000                           # points sent in one answer
 MAX_LABEL_LEN = 80
 
 # A count larger than this cannot survive the browser's Number without silently
@@ -119,17 +117,20 @@ _KIND_BUCKETS = {
     "legacy_delta": BUCKET_LEGACY,
 }
 
-_LABEL_OK = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9 ._:/+@-]*\Z")
+_LABEL_OK = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9 ._:/+@=\[\]-]*\Z")
 # The exact shape ``_opaque`` produces for a task id. A route key that does not
 # match it is not echoed back in any form.
 _OPAQUE_TASK_KEY = re.compile(r"\At-[0-9a-f]{12}\Z")
-_MODES = ("max", "low")
+_MODES = ("max", "low", "nano")
 _BASES = ("fresh_route_usage", "fresh_model_usage", "cold_estimate")
-_PROFILES = ("owner_max", "owner_low", "task_local_low")
+_PROFILES = ("owner_max", "owner_low", "owner_nano", "task_local_low", "task_local_nano")
+
+SOURCE_STORE = "usage_store"
+SOURCE_JOURNAL = "legacy_journal"
 
 
 class LensUnavailable(Exception):
-    """The ledger cannot be read. Carries a typed code, never a path or a body."""
+    """The source cannot be read. Carries a typed code, never a path or a body."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -208,9 +209,9 @@ def _epoch_ms(ts: Any) -> Optional[int]:
 def _physical_context(raw: Any) -> Dict[str, Any]:
     """Allowlist the exact recorded fit metadata. Unknown values become None.
 
-    ``rendered_mode`` is the ONLY exact Low/Max fact in the ledger. It exists
-    only on rows whose round had a matching context-fit plan, so its absence is
-    reported as Unknown and never guessed.
+    ``rendered_mode`` is the ONLY exact Max/Low/Nano fact in the record. It
+    exists only on rows whose round had a matching context-fit plan, so its
+    absence is reported as Unknown and never guessed.
     """
     empty = {
         "mode": None, "profile": None, "basis": None,
@@ -249,13 +250,17 @@ def now_ms() -> int:
 
 
 def record_ms(record: Dict[str, Any]) -> Optional[int]:
-    """When the attempt SETTLED (its terminal row's ``ts``), or ``None``.
+    """When the record was last written, in epoch ms, or ``None``.
 
-    ``record["ts"]`` is the timestamp of the last row folded into the chain, so
-    for a settled attempt it is the settle time — the same instant ``_point()``
-    publishes as ``t``. A row whose timestamp is absent, unparsable or outside
-    the admitted band has no position in time and is never placed at one.
+    A store record carries ``t_ms`` from ``ts_last_epoch`` (the latest
+    accounting write to the row). A journal record's ``ts`` is the timestamp of
+    the last row folded into its chain, so for a settled attempt it is the
+    settle time. Either is the instant ``_point()`` publishes as ``t``. A row
+    whose timestamp is absent, unparsable or outside the admitted band has no
+    position in time and is never placed at one.
     """
+    if "t_ms" in record:
+        return record["t_ms"]
     return _epoch_ms(record["ts"])
 
 
@@ -265,9 +270,10 @@ def select_horizon(
     anchor_ms: int,
     window: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Cut the retained records down to one horizon and describe the cut exactly.
+    """Cut the journal's retained records down to one horizon and describe the cut.
 
-    Honesty rules, all of which the widget restates:
+    Used for the legacy journal only — the store's selection is cut by its own
+    indexed read. Honesty rules, all of which the widget restates:
 
     * The anchor is an explicit UTC instant, published as ``now_ms``; the cutoff
       is ``anchor - span`` and is published too. Nothing is "recent" by
@@ -275,16 +281,15 @@ def select_horizon(
     * Records whose timestamp is unusable cannot be placed inside or outside a
       bounded span, so a bounded horizon leaves them out and counts them under
       ``unknown_timestamp`` instead of quietly keeping or dropping them.
-    * ``covers_selected_span`` is true ONLY when the oldest record still retained
-      is at or before the cutoff — i.e. the selected span lies wholly inside what
-      this bounded reader holds. Otherwise the observed range
-      (``observed_from_ms`` … ``observed_to_ms``) is all that was ever seen, and
-      the widget must present the shorter range rather than the requested one.
-      Eviction and the cold-tail prefix both drop the OLDEST records first, so
-      what is retained is a contiguous suffix and that one comparison is
-      sufficient.
-    * ``available`` selects everything retained and answers ``None`` — it is a
-      statement about this reader's window, never a claim about all history.
+    * ``reaches_cutoff`` is true ONLY when the oldest record still retained is
+      at or before the cutoff. Eviction and the cold-tail prefix both drop the
+      OLDEST records first, so what is retained is a contiguous suffix and that
+      one comparison decides whether every journal row inside the span was read.
+      That is ``selection_complete`` — completeness relative to the journal. It
+      says nothing about whether the journal is still being written (it is not,
+      on a host with a usage store); the source block says that separately.
+    * ``available`` selects everything retained; it is complete only when the
+      reader dropped nothing older.
     """
     horizon = normalize_horizon(horizon)
     span = HORIZON_SPANS_MS.get(horizon)
@@ -315,14 +320,17 @@ def select_horizon(
                       if cutoff is None or moment >= cutoff]
     ahead = sum(1 for moment in selected_times if moment > anchor_ms)
 
-    if cutoff is None:
-        covers = None
-    else:
-        covers = observed_from is not None and observed_from <= cutoff
-
     truncated = bool(window and (window.get("omitted_prefix_bytes")
                                  or window.get("evicted_records")
                                  or window.get("compaction_epoch")))
+    if cutoff is None:
+        reaches = None
+        complete = not truncated
+        covered_from = None if complete else observed_from
+    else:
+        reaches = observed_from is not None and observed_from <= cutoff
+        complete = reaches
+        covered_from = cutoff if complete else observed_from
     return {
         "records": selected,
         "selected": horizon,
@@ -330,6 +338,9 @@ def select_horizon(
         "span_ms": span,
         "now_ms": anchor_ms,
         "cutoff_ms": cutoff,
+        "selection_complete": complete,
+        "partial_reasons": [] if complete else ["journal_tail"],
+        "covered_from_ms": covered_from,
         "observed_from_ms": observed_from,
         "observed_to_ms": observed_to,
         "selected_from_ms": min(selected_times) if selected_times else None,
@@ -339,8 +350,9 @@ def select_horizon(
         "excluded_older_than_cutoff": older,
         "unknown_timestamp": len(unknown),
         "unknown_timestamp_kept": kept_unknown,
+        "unknown_timestamp_capped": False,
         "ahead_of_anchor": ahead,
-        "covers_selected_span": covers,
+        "reaches_cutoff": reaches,
         "history_truncated_by_source": truncated,
     }
 
@@ -373,6 +385,8 @@ def _new_record(attempt_id: str, bucket: str, seq: int, ts: Any) -> Dict[str, An
         "folded_attempt_count": None,
         "baseline": None,           # which compaction baseline a folded row belongs to
         "baseline_header": False,   # True only for the one `usage_baseline` row
+        "weighted": False,          # a store aggregate whose weight IS its folded count
+        "late_receipt": False,      # settled by a late receipt after being unresolved
         "fit": _physical_context(None),
     }
 
@@ -426,6 +440,8 @@ def _absorb(record: Dict[str, Any], row: Dict[str, Any], seq: int) -> None:
     folded = _count(row.get("folded_attempt_count"))
     if folded is not None:
         record["folded_attempt_count"] = folded
+    if row.get("settle_reason") == "late_receipt":
+        record["late_receipt"] = True
     if isinstance(row.get("physical_context"), dict):
         record["fit"] = _physical_context(row.get("physical_context"))
 
@@ -516,7 +532,7 @@ class LedgerWindow:
             # Without dir_fd there is no way to open a child relative to a
             # verified parent, and the by-name fallback is exactly the race this
             # method exists to close. Refuse rather than read something else.
-            raise LensUnavailable("ledger_not_confined")
+            raise LensUnavailable("ledger_platform_unsupported")
         # O_NONBLOCK so a FIFO left at this path cannot park the request thread
         # before the regular-file check below can refuse it; it has no effect on
         # reads from a regular file.
@@ -793,35 +809,234 @@ class LedgerWindow:
         horizon: str = HORIZON_AVAILABLE,
         anchor_ms: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """The whole browser-visible payload. Everything here is allowlisted.
+        """The whole browser-visible payload from the journal. Allowlisted.
 
         One record copy is taken under the lock and everything below is derived
         from it, so the horizon cut, the counters, the facets, the points and the
-        coverage figures all describe exactly the same population. The horizon is
+        selection facts all describe exactly the same population. The horizon is
         applied to the retained records FIRST; the display limit then trims only
         which of the selected points are sent, and says how many it dropped.
         """
         with self._lock:
             records = self._copy_locked()
             window = self._window()
-        anchor = anchor_ms if isinstance(anchor_ms, int) and not isinstance(anchor_ms, bool) else now_ms()
+        anchor = _anchor(anchor_ms)
         selection = select_horizon(records, horizon, anchor, window)
         selected = selection.pop("records")
-        attempts = [record for record in selected if _is_attempt(record)]
-        bounded = max(1, min(int(limit or DEFAULT_POINT_LIMIT), self.max_records))
-        shown = attempts[-bounded:]
-        selection["attempts_selected"] = len(attempts)
-        selection["points_sent"] = len(shown)
-        return {
-            "ok": True,
-            "available": True,
-            "window": window,
-            "horizon": selection,
-            "counters": counters(selected),
-            "facets": facets(shown),
-            "points": [_point(record) for record in shown],
-            "points_omitted": max(0, len(attempts) - len(shown)),
+        source = {
+            "kind": SOURCE_JOURNAL,
+            # Core stopped appending to the journal at the one-time import, so
+            # its newest row says nothing about whether the install is idle.
+            "current": False,
+            "read_at_ms": anchor,
+            "newest_record_ms": selection["observed_to_ms"],
+            "schema_version": None,
+            "lock_tier": None,
+            "read_ms": None,
+            "transaction_ms": None,
+            "sql_steps": None,
+            "metadata_read": None,
+            "context_unread": 0,
         }
+        limits = {"max_rows": self.max_records, "max_points": MAX_POINT_LIMIT,
+                  "max_bytes_per_refresh": self.max_bytes}
+        payload = assemble(selected, selection, source, limit=limit, limits=limits)
+        payload["window"] = window
+        return payload
+
+
+def _anchor(anchor_ms: Any) -> int:
+    if isinstance(anchor_ms, int) and not isinstance(anchor_ms, bool):
+        return anchor_ms
+    return now_ms()
+
+
+# ---------------------------------------------------------------------------
+# The usage store: one row per attempt -> the same record shape
+# ---------------------------------------------------------------------------
+
+_TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens")
+
+
+def store_record(row: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """One store row as a record, plus how its ``extra`` metadata fared.
+
+    The store keeps ONE current row per attempt, so there is no chain to fold:
+    the row's own state is the attempt's state, and token counts are taken from
+    it only when that state is ``settled`` (the same single authority the
+    journal fold uses). Of the row's ``extra`` metadata ``lens_store`` keeps
+    exactly one key — ``physical_context`` — and it passes the same allowlist as
+    before; nothing else in ``extra`` (credential profiles, session digests,
+    failure evidence, reasons) reaches this function. The second value is the
+    metadata status: ``ok`` / ``absent`` when it was read, ``unread`` when it was
+    larger than the read bound and ``malformed`` when it was not a JSON object —
+    in both of those last cases the mode stays Unknown and the read says how many
+    rows that affected.
+    """
+    attempt_id = row.get("attempt_id")
+    raw_kind = row.get("kind")
+    if raw_kind is None:
+        kind: Optional[str] = "attempt"
+    elif isinstance(raw_kind, str):
+        kind = raw_kind.strip() or "attempt"
+    else:
+        kind = None
+    bucket = BUCKET_UNKNOWN if kind is None else _KIND_BUCKETS.get(kind, BUCKET_UNKNOWN)
+    record = _new_record(attempt_id if isinstance(attempt_id, str) else "", bucket, 0, row.get("ts_last"))
+    epoch = row.get("ts_last_epoch")
+    moment = None
+    if isinstance(epoch, (int, float)) and not isinstance(epoch, bool) and math.isfinite(epoch):
+        candidate = int(epoch * 1000)
+        if MIN_EPOCH_MS <= candidate <= MAX_EPOCH_MS:
+            moment = candidate
+    record["t_ms"] = moment
+    state = row.get("state")
+    if isinstance(state, str) and state in ATTEMPT_STATES:
+        record["state"] = state
+        record["states"] = [state]
+    for slot in ("model", "provider", "category", "source"):
+        record[slot] = _label(row.get(slot))
+    for slot, field, prefix in (("task", "task_id", "t-"), ("root", "root_task_id", "r-"),
+                                ("parent", "parent_task_id", "p-")):
+        record[slot] = _opaque(row.get(field), prefix)
+    if record["state"] == SETTLED_STATE:
+        for field in _TOKEN_FIELDS:
+            record[field] = _count(row.get(field))
+    if bucket == BUCKET_BASELINE:
+        # An imported compaction aggregate: its weight IS the number of attempts
+        # it folded (core `_derived`), and its token fields are sums.
+        record["folded_attempt_count"] = _count(row.get("weight"))
+        record["weighted"] = True
+    flag = row.get("late_receipt")
+    record["late_receipt"] = flag == 1 and not isinstance(flag, bool)
+    context = row.get("physical_context")
+    if isinstance(context, dict):
+        record["fit"] = _physical_context(context)
+    status = row.get("extra_status")
+    return record, status if status in ("ok", "absent", "unread", "malformed") else "absent"
+
+
+def store_snapshot(
+    read: Dict[str, Any],
+    *,
+    horizon: str,
+    anchor_ms: int,
+    limit: int = DEFAULT_POINT_LIMIT,
+    limits: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """The browser-visible payload for one bounded store read.
+
+    ``read`` is what ``lens_store.read_store`` returned: rows newest first and
+    the facts of that read. Completeness is relative to enumerated category
+    streams: legacy-only named categories can be absent. With core-maintained
+    summaries these streams cover every timestamp-eligible physical attempt.
+    No bound may bite for ``selection_complete`` to be true. Otherwise the
+    newest-first prefix is within the streams read (not globally when categories
+    are capped), and ``covered_from_ms`` is the oldest record in it.
+    Freshness is stated separately (``source.read_at_ms`` / ``newest_record_ms``)
+    because an idle install has an old newest record and is still current.
+    """
+    horizon = normalize_horizon(horizon)
+    facts = read.get("facts") or {}
+    records: List[Dict[str, Any]] = []
+    unread = 0
+    for row in reversed(read.get("rows") or []):          # oldest first, like the journal
+        record, context = store_record(row)
+        if context in ("unread", "malformed"):
+            unread += 1
+        records.append(record)
+    span = HORIZON_SPANS_MS.get(horizon)
+    cutoff = None if span is None else anchor_ms - span
+    times = [record["t_ms"] for record in records if record["t_ms"] is not None]
+    partial = [str(reason) for reason in facts.get("partial_reasons") or []]
+    complete = not partial
+    oldest = min(times) if times else None
+    newest_s = facts.get("newest_epoch_s")
+    newest = None
+    if isinstance(newest_s, (int, float)) and not isinstance(newest_s, bool) and math.isfinite(newest_s):
+        newest = int(newest_s * 1000)
+    selection = {
+        "selected": horizon,
+        "options": list(HORIZONS),
+        "span_ms": span,
+        "now_ms": anchor_ms,
+        "cutoff_ms": cutoff,
+        "selection_scope": "enumerated_categories",
+        "selection_complete": complete,
+        "partial_reasons": partial,
+        # Rows sharing that exact instant may sit on both sides of a row cap.
+        "covered_from_ms": cutoff if complete else oldest,
+        "observed_from_ms": None,
+        "observed_to_ms": None,
+        "selected_from_ms": oldest,
+        "selected_to_ms": max(times) if times else None,
+        "records_retained": None,
+        "records_selected": len(records),
+        "excluded_older_than_cutoff": None,
+        "unknown_timestamp": int(facts.get("unknown_timestamp") or 0),
+        "unknown_timestamp_kept": 0,
+        "unknown_timestamp_capped": bool(facts.get("unknown_timestamp_capped")),
+        "ahead_of_anchor": sum(1 for moment in times if moment > anchor_ms),
+        "reaches_cutoff": None,
+        "history_truncated_by_source": False,
+    }
+    source = {
+        "kind": SOURCE_STORE,
+        "current": True,
+        "read_at_ms": anchor_ms,
+        "newest_record_ms": newest,
+        "schema_version": facts.get("schema_version"),
+        "lock_tier": facts.get("lock_tier"),
+        "read_ms": facts.get("read_ms"),
+        "transaction_ms": facts.get("transaction_ms"),
+        "sql_steps": facts.get("sql_steps"),
+        "metadata_read": facts.get("metadata_read"),
+        "category_enumeration": facts.get("category_enumeration"),
+        "legacy_category_coverage": facts.get("legacy_category_coverage"),
+        "context_unread": unread,
+    }
+    return assemble(records, selection, source, limit=limit, limits=dict(limits or {}))
+
+
+# ---------------------------------------------------------------------------
+# One projection for both sources
+# ---------------------------------------------------------------------------
+
+def assemble(
+    records: List[Dict[str, Any]],
+    horizon: Dict[str, Any],
+    source: Dict[str, Any],
+    *,
+    limit: int,
+    limits: Dict[str, Any],
+) -> Dict[str, Any]:
+    """One payload from one selection; ``records`` run oldest to newest.
+
+    Counters cover every selected record; the display limit keeps the NEWEST
+    attempts and says how many it did not send; facets describe what was sent.
+    """
+    attempts = [record for record in records if _is_attempt(record)]
+    try:
+        wanted = int(limit or DEFAULT_POINT_LIMIT)
+    except (TypeError, ValueError):
+        wanted = DEFAULT_POINT_LIMIT
+    bounded = max(1, min(wanted, MAX_POINT_LIMIT))
+    shown = attempts[-bounded:]
+    horizon = dict(horizon)
+    horizon["attempts_selected"] = len(attempts)
+    horizon["points_sent"] = len(shown)
+    return {
+        "ok": True,
+        "available": True,
+        "source": source,
+        "horizon": horizon,
+        "limits": limits,
+        "window": None,
+        "counters": counters(records),
+        "facets": facets(shown),
+        "points": [_point(record) for record in shown],
+        "points_omitted": max(0, len(attempts) - len(shown)),
+    }
 
 
 def _is_attempt(record: Dict[str, Any]) -> bool:
@@ -835,22 +1050,21 @@ def _is_attempt(record: Dict[str, Any]) -> bool:
 
 
 def _point(record: Dict[str, Any]) -> Dict[str, Any]:
-    """The ONLY shape a physical attempt takes on its way to the browser."""
+    """The ONLY shape a physical attempt takes on its way to the browser.
+
+    ``t`` is when usage was recorded or last updated (see ``record_ms``) — not
+    when the request was sent. No elapsed time is derived: the gap between two
+    accounting writes includes queueing and late accounting, so it is not a
+    latency.
+    """
     fit = record["fit"]
-    started = _epoch_ms(record["first_ts"])
-    ended = _epoch_ms(record["ts"])
-    elapsed = None
-    if started is not None and ended is not None and ended >= started and "reserved" in record["states"]:
-        elapsed = round((ended - started) / 1000.0, 3)
     return {
         # A digest of the WHOLE attempt id: a raw prefix is neither sanitized
         # nor collision-safe, and two ids sharing 16 characters would become one
         # selectable request in the widget.
         "id": "a-" + hashlib.sha256(record["aid"].encode("utf-8")).hexdigest()[:16],
-        "seq": record["last_seq"],
-        "t": ended,
+        "t": record_ms(record),
         "state": record["state"],
-        "states": list(record["states"]),
         "model": record["model"] or "unknown",
         "provider": record["provider"] or "unknown",
         "category": record["category"] or "unknown",
@@ -869,32 +1083,39 @@ def _point(record: Dict[str, Any]) -> Dict[str, Any]:
         "capacity_total_tokens": fit["capacity_total_tokens"],
         "target_miss": fit["target_miss"],
         "auto_pass": fit["auto_pass"],
-        "elapsed_sec": elapsed,
+        "late_receipt": bool(record.get("late_receipt")),
     }
 
 
 def counters(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-    """Exact tallies over the retained window. Derived, so never double-counted.
+    """Exact tallies over one selection. Derived, so never double-counted.
 
-    Every number here is a count of DISTINCT ``attempt_id`` values held in the
-    cache, so an incremental refresh that re-folds an already-known chain
-    cannot inflate it.
+    Every number here is a count of DISTINCT attempt ids, so an incremental
+    journal refresh that re-folds a known chain, or a store row UPDATEd between
+    two reads, cannot inflate it.
 
-    Folded attempts are counted DISJOINTLY. One compaction writes a
-    ``usage_baseline`` header whose ``folded_attempt_count`` is the total for
-    that fold, plus ``usage_baseline_group`` rows whose counts partition the
-    same attempts. Adding both would report every folded attempt twice, so a
-    fold is counted from its header when the header is in the window and from
-    its group rows only when it is not. Which basis was used is disclosed:
-    ``folded_attempts_from_groups`` is a lower bound, because a window that
-    lost the header may have lost group rows too.
+    ``registered_attempts`` counts every attempt in a known state, including
+    ones that were only reserved or were released without being sent;
+    ``sent_attempts`` is the subset that was dispatched (``dispatched``,
+    ``settled``, ``unresolved`` — core's physical-call rule). The two must never
+    be shown under one label.
+
+    Folded attempts are counted DISJOINTLY. In the journal one compaction
+    writes a ``usage_baseline`` header whose ``folded_attempt_count`` is the
+    total for that fold, plus ``usage_baseline_group`` rows whose counts
+    partition the same attempts, so a fold is counted from its header when the
+    header is in the window and from its group rows only when it is not
+    (``folded_attempts_from_groups`` is then a lower bound). In the store the
+    header lives outside the attempts table and each group row's weight IS its
+    folded count (``folded_attempts_weighted``).
     """
     by_state = {state: 0 for state in ATTEMPT_STATES}
-    physical = measured = settled_without_tokens = 0
+    registered = measured = settled_without_tokens = weighted = 0
     excluded = {
         "baseline_rows": 0, "baseline_header_rows": 0, "baseline_group_rows": 0,
         "folded_attempts": 0, "folded_attempts_from_headers": 0,
-        "folded_attempts_from_groups": 0, "baselines_without_header": 0,
+        "folded_attempts_from_groups": 0, "folded_attempts_weighted": 0,
+        "baselines_without_header": 0,
         "subscription_sessions": 0, "external_unmetered": 0, "legacy_rows": 0,
         "unknown_kind": 0, "attempts_without_state": 0,
     }
@@ -906,7 +1127,7 @@ def counters(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
             if record["state"] not in by_state:
                 excluded["attempts_without_state"] += 1
                 continue
-            physical += 1
+            registered += 1
             by_state[record["state"]] += 1
             if record["state"] == SETTLED_STATE:
                 if record["prompt_tokens"] is None:
@@ -916,8 +1137,12 @@ def counters(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
             continue
         if bucket == BUCKET_BASELINE:
             excluded["baseline_rows"] += 1
-            key = record["baseline"] or record["aid"]
             folded = int(record["folded_attempt_count"] or 0)
+            if record.get("weighted"):
+                excluded["baseline_group_rows"] += 1
+                weighted += folded
+                continue
+            key = record["baseline"] or record["aid"]
             if record["baseline_header"]:
                 excluded["baseline_header_rows"] += 1
                 headers[key] = headers.get(key, 0) + folded
@@ -937,14 +1162,15 @@ def counters(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     from_groups = sum(groups[key] for key in orphaned)
     excluded["folded_attempts_from_headers"] = from_headers
     excluded["folded_attempts_from_groups"] = from_groups
+    excluded["folded_attempts_weighted"] = weighted
     excluded["baselines_without_header"] = len(orphaned)
-    excluded["folded_attempts"] = from_headers + from_groups
+    excluded["folded_attempts"] = from_headers + from_groups + weighted
     return {
-        "physical_attempts": physical,
+        "registered_attempts": registered,
+        "sent_attempts": by_state["dispatched"] + by_state["settled"] + by_state["unresolved"],
         "by_state": by_state,
         "measured": measured,
         "settled_without_tokens": settled_without_tokens,
-        "in_flight": by_state["reserved"] + by_state["dispatched"],
         "excluded": excluded,
     }
 
@@ -961,109 +1187,82 @@ def facets(records: Iterable[Dict[str, Any]]) -> Dict[str, List[str]]:
         "models": sorted(models),
         "categories": sorted(categories),
         "sources": sorted(sources),
-        "modes": [mode for mode in ("max", "low", "unknown") if mode in modes],
+        "modes": [mode for mode in _MODES + ("unknown",) if mode in modes],
     }
 
 
 # ---------------------------------------------------------------------------
-# Trajectory
+# Trajectory (compatibility route)
 # ---------------------------------------------------------------------------
 
 def trajectory(
-    records: Iterable[Dict[str, Any]],
+    points: Iterable[Dict[str, Any]],
     task_key: str,
     *,
-    horizon: str = HORIZON_AVAILABLE,
-    anchor_ms: Optional[int] = None,
+    snapshot: Optional[str] = None,
+    horizon: Optional[Dict[str, Any]] = None,
+    points_omitted: int = 0,
 ) -> Dict[str, Any]:
-    """Group one task's measured attempts by (model, category).
+    """One task's measured requests, taken from ONE snapshot's points.
 
-    A group is one homogeneous run of the same model doing the same kind of
-    work inside the same task, so joining its points in order is a real
-    sequence. Attempts from OTHER tasks under the same root (children, review
-    slots) are returned separately and are never joined into the same line —
-    they are independent runs that merely share an ancestor.
+    The widget derives its task focus from the overview it already holds; this
+    answer exists for compatibility and is bounded the same way: it groups the
+    snapshot's settled, measured, timed points of one task by (model, category)
+    and lists other tasks of the same tree separately. Nothing is ``joined``: a
+    shared task, model and category does not prove one growing context —
+    parallel review slots, providers and sources can share all three — so no
+    line is implied. Requests of this task outside the snapshot (before its
+    cutoff, or older than its point cap) are NOT counted here, and
+    ``own_outside_horizon`` says so with ``None`` rather than a false zero.
 
-    Only settled attempts that reported a size AND carry a usable timestamp take
-    part: a line is drawn along the time axis, so a point without a valid time
-    has no position on it. The route key must be an opaque key this module
-    itself produced; anything else answers with the empty shape and is never
-    echoed back.
-
-    The same horizon the overview is using is applied here, against the same
-    kind of explicit anchor, so the two charts never describe different spans of
-    time. How many of this task's own measured requests fall OUTSIDE the horizon
-    is reported (``own_outside_horizon``) rather than silently dropped, because
-    "this task is not growing" and "the growth happened before the cutoff" are
-    different answers.
+    The route key must be an opaque key this module itself produced; anything
+    else answers with the empty shape and is never echoed back.
     """
-    empty: Dict[str, Any] = {"task": "", "groups": [], "related": [], "root": None,
-                             "horizon": None, "own_outside_horizon": 0}
+    answer: Dict[str, Any] = {
+        "task": "", "root": None, "snapshot": snapshot, "horizon": horizon,
+        "groups": [], "related": [], "joined": False,
+        "own_outside_horizon": None,
+        "points_omitted_in_snapshot": int(points_omitted or 0),
+    }
     wanted = task_key.strip() if isinstance(task_key, str) else ""
     if not _OPAQUE_TASK_KEY.match(wanted):
-        return dict(empty)
+        return answer
+    plottable = [point for point in points
+                 if point.get("state") == SETTLED_STATE
+                 and isinstance(point.get("prompt_tokens"), int)
+                 and point.get("t") is not None]
     own: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-    related: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
     root = None
-
-    def _plottable(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if not _is_attempt(record) or record["state"] != SETTLED_STATE:
-            return None
-        if record["prompt_tokens"] is None:
-            return None
-        point = _point(record)
-        return point if point["t"] is not None else None
-
-    retained = list(records)
-    anchor = anchor_ms if isinstance(anchor_ms, int) and not isinstance(anchor_ms, bool) else now_ms()
-    selection = select_horizon(retained, horizon, anchor)
-    records = selection.pop("records")
-    outside = 0
-    if selection["cutoff_ms"] is not None:
-        inside = {record["aid"] for record in records}
-        for record in retained:
-            if record["task"] == wanted and record["aid"] not in inside and _plottable(record):
-                outside += 1
-
-    for record in records:
-        point = _plottable(record)
-        if point is None:
-            continue
-        if record["task"] == wanted:
-            root = root or record["root"]
+    for point in plottable:
+        if point["task"] == wanted:
+            root = root or point["root"]
             own.setdefault((point["model"], point["category"]), []).append(point)
+    related: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
     if root is not None:
-        for record in records:
-            # A record with no task id cannot be attributed to a sibling task,
-            # so it is left out rather than merged into one nameless group.
-            if record["task"] is None or record["task"] == wanted or record["root"] != root:
+        for point in plottable:
+            # A point with no task cannot be attributed to a sibling task, so it
+            # is left out rather than merged into one nameless group.
+            if point["task"] is None or point["task"] == wanted or point["root"] != root:
                 continue
-            point = _plottable(record)
-            if point is None:
-                continue
-            key = (record["task"], point["model"], point["category"])
-            related.setdefault(key, []).append(point)
+            related.setdefault((point["task"], point["model"], point["category"]), []).append(point)
 
     def _series(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        # Temporal order, because that is the order the line is drawn in; the
-        # ledger sequence only breaks ties within one millisecond.
-        return sorted(items, key=lambda point: (point["t"], point["seq"]))
+        return sorted(items, key=lambda point: (point["t"], point["id"]))
 
-    return {
+    answer.update({
         "task": wanted,
         "root": root,
-        "horizon": selection,
-        "own_outside_horizon": outside,
         "groups": [
-            {"model": model, "category": category, "joined": True, "points": _series(points)}
-            for (model, category), points in sorted(own.items())
+            {"model": model, "category": category, "joined": False, "points": _series(items)}
+            for (model, category), items in sorted(own.items())
         ],
         "related": [
             {"task": task, "model": model, "category": category, "joined": False,
-             "points": _series(points)}
-            for (task, model, category), points in sorted(related.items())
+             "points": _series(items)}
+            for (task, model, category), items in sorted(related.items())
         ],
-    }
+    })
+    return answer
 
 
 # ---------------------------------------------------------------------------

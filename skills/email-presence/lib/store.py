@@ -21,6 +21,14 @@ _MAX_ATTACHMENT_FILES = 10
 _MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
 
+def _delivery_state(state, error):
+    return "held" if state == "retry" and str(error).startswith("Held:") else state
+
+
+class RequestIdConflict(ValueError):
+    """A request id already names a different outgoing message."""
+
+
 def _safe_filename(value, fallback="attachment"):
     name = Path(str(value or "")).name.strip()
     name = re.sub(r"[\x00-\x1f\x7f/\\]+", "_", name)
@@ -91,7 +99,7 @@ class InboxItem:
 
     @property
     def provider_event_key(self):
-        return f"{self.folder}:{self.uidvalidity}:{self.uid}:{self.message_id}"
+        return self.context.get("provider_event_key") or f"{self.folder}:{self.uidvalidity}:{self.uid}:{self.message_id}"
 
 
 @dataclass(frozen=True)
@@ -345,7 +353,8 @@ class EmailStore:
                         for item in message["attachments"])):
             self.stage_inbound_attachments(message)
         context = {key: message[key] for key in (
-            "sender_name", "cc", "date", "reply_to", "headers", "attachments", "source_artifact", "attachment_stage_note"
+            "sender_name", "cc", "date", "reply_to", "headers", "attachments", "source_artifact", "attachment_stage_note",
+            "provider_id", "provider_thread_id", "provider_event_key", "message_ref", "labels"
         ) if key in message}
         staged = list(message.get("staged_files") or ())
         with self._connect() as db:
@@ -362,7 +371,7 @@ class EmailStore:
                 self._put(db, cursor_key, cursor)
             return int(cur.lastrowid or 0), bool(cur.rowcount)
 
-    def _claim(self, table, lease_seconds):
+    def _claim(self, table, lease_seconds, scope="", order="id"):
         now = time.time()
         token = uuid.uuid4().hex
         with self._connect() as db:
@@ -374,7 +383,7 @@ class EmailStore:
                     self._freeze_reports(db, row["id"], [report] if report else [])
                 db.execute("UPDATE outbox SET state='uncertain',last_error='Process lost during SMTP delivery; inspect Message-ID before retry',updated_at=? WHERE state='sending' AND lease_until<=?", (now, now))
             fifo = "AND NOT EXISTS (SELECT 1 FROM inbox earlier WHERE earlier.id < inbox.id AND earlier.thread_key = inbox.thread_key AND earlier.state IN ('pending','retry','processing') AND earlier.host_reference='')" if table == "inbox" else ""
-            row = db.execute(f"SELECT * FROM {table} WHERE ((state IN ('pending','retry') AND available_at<=?) OR (state='processing' AND lease_until<=?)) {fifo} ORDER BY id LIMIT 1", (now, now)).fetchone()
+            row = db.execute(f"SELECT * FROM {table} WHERE ((state IN ('pending','retry') AND available_at<=?) OR (state='processing' AND lease_until<=?)) {scope} {fifo} ORDER BY {order} LIMIT 1", (now, now)).fetchone()
             if not row:
                 return None
             db.execute(f"UPDATE {table} SET state='processing',lease_token=?,lease_until=?,attempts=attempts+1,updated_at=? WHERE id=?", (token, now + lease_seconds, now, row["id"]))
@@ -382,10 +391,24 @@ class EmailStore:
             result.update(lease_token=token, attempts=row["attempts"] + 1)
             return result
 
-    def claim_inbox(self, lease_seconds=2100):
-        r = self._claim("inbox", lease_seconds)
+    def claim_inbox(self, lease_seconds=2100, submitted=None):
+        """Lease claimable mail, keeping each thread's FIFO.
+
+        ``submitted=False`` claims only mail without a stored Host reference (new
+        input), oldest first; ``True`` only mail that has one (observation of
+        admitted work), earliest due first, so a reference released after its poll
+        never overtakes one already waiting; ``None`` new mail first, then either.
+        """
+        scope, order = {None: ("", "host_reference<>'', CASE WHEN host_reference<>'' THEN available_at END, id"),
+                        False: ("AND host_reference=''", "id"),
+                        True: ("AND host_reference<>''", "available_at, id")}[submitted]
+        r = self._claim("inbox", lease_seconds, scope, order)
         if not r:
             return None
+        return self._inbox_item(r)
+
+    @staticmethod
+    def _inbox_item(r):
         return InboxItem(r["id"], r["lease_token"], r["folder"], r["uid"], r["message_id"], r["in_reply_to"],
                          tuple(json.loads(r["references_json"])), r["sender"], r["subject"], r["body"],
                          tuple(json.loads(r["recipients_json"])), r["host_reference"], r["attempts"], r["uidvalidity"],
@@ -393,15 +416,26 @@ class EmailStore:
                          tuple(json.loads(r["reply_to_json"] or "[]")), tuple(json.loads(r["attachments_json"] or "[]")),
                          tuple(json.loads(r["staged_files_json"] or "[]")))
 
+    def inbox_event(self, folder, uidvalidity, uid):
+        """The captured message at this folder/UIDVALIDITY/UID (its unique key), or None (read-only)."""
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM inbox WHERE folder=? AND uidvalidity=? AND uid=?",
+                             (folder, uidvalidity, uid)).fetchone()
+        return self._inbox_item({**dict(row), "lease_token": ""}) if row else None
+
     def set_host_reference(self, row_id, token, reference):
         with self._connect() as db:
             db.execute("UPDATE inbox SET host_reference=?,updated_at=? WHERE id=? AND lease_token=?", (reference, time.time(), row_id, token))
 
-    def _update(self, table, row_id, token, state, error="", delay=0, reports=()):
+    def _update(self, table, row_id, token, state, error="", delay=0, reports=(), reporting=None):
         with self._connect() as db:
-            db.execute(f"UPDATE {table} SET state=?,last_error=?,lease_token='',lease_until=0,available_at=?,updated_at=? WHERE id=? AND lease_token=?",
-                       (state, error, time.time() + delay, time.time(), row_id, token))
+            changed = db.execute(f"UPDATE {table} SET state=?,last_error=?,lease_token='',lease_until=0,available_at=?,updated_at=? WHERE id=? AND lease_token=?",
+                                 (state, error, time.time() + delay, time.time(), row_id, token)).rowcount
+            if not changed:
+                return
             if table == "outbox":
+                if reporting is not None:
+                    db.execute("UPDATE outbox SET reporting_json=? WHERE id=?", (json.dumps(reporting), row_id))
                 self._freeze_reports(db, row_id, reports)
 
     def complete_inbox(self, row_id, token):
@@ -414,7 +448,7 @@ class EmailStore:
         self._update("inbox", row_id, token, "failed", error)
 
     def enqueue_outbox(self, *, request_id, recipients=(), subject="", body="", in_reply_to="", references=(), reporting=None,
-                       to=None, cc=(), bcc=(), attachments=(), html_body="", body_type="plain"):
+                       to=None, cc=(), bcc=(), attachments=(), html_body="", body_type="plain", hold_reason=""):
         now = time.time()
         def dedupe(values, seen=None):
             known = set(seen or ())
@@ -431,13 +465,33 @@ class EmailStore:
         # twice. Keep the complete envelope in recipients_json for SMTP delivery.
         visible_bcc, seen = dedupe(list(bcc or ()), seen)
         envelope = visible_to + visible_cc + visible_bcc
-        message_id = "<" + hashlib.sha256((str(self.path.resolve()) + ":" + request_id).encode()).hexdigest() + "@ouroboros.local>"
+        message_id = self.message_id_for(request_id)
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT * FROM outbox WHERE request_id=?", (request_id,)).fetchone()
+            if existing:
+                candidate = {"subject": subject, "body": body, "in_reply_to": in_reply_to,
+                             "html_body": str(html_body or ""), "body_type": str(body_type or "plain")}
+                groups = {"to_json": visible_to, "cc_json": visible_cc, "bcc_json": visible_bcc,
+                          "references_json": list(references), "attachments_json": list(attachments)}
+                if (any(existing[key] != value for key, value in candidate.items())
+                        or any(json.loads(existing[key]) != value for key, value in groups.items())):
+                    raise RequestIdConflict("This request_id already names a different email; use a new request_id for a new send")
+                previous = json.loads(existing["reporting_json"])
+                if previous.get("sender") and previous["sender"] != (reporting or {}).get("sender"):
+                    raise RequestIdConflict("This request_id already names a different sender")
+                return False
             cur = db.execute("""INSERT OR IGNORE INTO outbox(request_id,recipients_json,subject,body,in_reply_to,references_json,provider_message_id,created_at,updated_at,reporting_json,to_json,cc_json,bcc_json,attachments_json,html_body,body_type)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (request_id, json.dumps(envelope), subject, body,
                                                in_reply_to, json.dumps(list(references)), message_id, now, now, json.dumps(reporting or {}),
                                                json.dumps(visible_to), json.dumps(visible_cc), json.dumps(visible_bcc), json.dumps(list(attachments), ensure_ascii=False), str(html_body or ""), str(body_type or "plain")))
+            if cur.rowcount and hold_reason:
+                db.execute("UPDATE outbox SET state='retry',last_error=?,available_at=? WHERE id=?",
+                           ("Held: " + str(hold_reason).removeprefix("Held: "), now + 5, cur.lastrowid))
             return bool(cur.rowcount)
+
+    def message_id_for(self, request_id):
+        return "<" + hashlib.sha256((str(self.path.resolve()) + ":" + str(request_id)).encode()).hexdigest() + "@ouroboros.local>"
 
     def claim_outbox(self, lease_seconds=300):
         r = self._claim("outbox", lease_seconds)
@@ -503,11 +557,17 @@ class EmailStore:
             return bool(db.execute("UPDATE outbox SET state='sending',updated_at=? WHERE id=? AND lease_token=? AND state='processing'",
                                    (time.time(), item.row_id, item.lease_token)).rowcount)
 
-    def complete_outbox(self, row_id, token, *, reports=()):
-        self._update("outbox", row_id, token, "completed", reports=reports)
+    def complete_outbox(self, row_id, token, *, reports=(), reporting=None):
+        self._update("outbox", row_id, token, "completed", reports=reports, reporting=reporting)
 
     def retry_outbox(self, row_id, token, error, delay=5):
         self._update("outbox", row_id, token, "retry", error, delay)
+
+    def hold_outbox(self, item, reason):
+        with self._connect() as db:
+            db.execute("UPDATE outbox SET state='retry',last_error=?,lease_token='',lease_until=0,"
+                       "available_at=?,updated_at=?,attempts=MAX(0,attempts-1) WHERE id=? AND lease_token=?",
+                       (reason, time.time() + 5, time.time(), item.row_id, item.lease_token))
 
     def uncertain_outbox(self, row_id, token, error, *, reports=()):
         self._update("outbox", row_id, token, "uncertain", error, reports=reports)
@@ -530,7 +590,7 @@ class EmailStore:
         with self._connect() as db:
             row = db.execute("SELECT * FROM inbox WHERE message_id=? ORDER BY id DESC LIMIT 1", (str(message_id),)).fetchone()
         if not row:
-            return None
+            return self.get("read_message:" + str(message_id))
         context = json.loads(row["context_json"] or "{}")
         return {
             "message_id": row["message_id"], "sender": row["sender"], "recipients": json.loads(row["recipients_json"] or "[]"),
@@ -539,13 +599,23 @@ class EmailStore:
             **context,
         }
 
+    def remember_read(self, message):
+        """Keep reply headers for an explicitly read old mail without admitting it to Presence."""
+        keys = ("message_id", "sender", "recipients", "cc", "reply_to", "in_reply_to", "references", "provider_id",
+                "provider_thread_id", "message_ref", "folder", "uid", "uidvalidity", "source_artifact")
+        self.put("read_message:" + str(message["message_id"]), {key: message[key] for key in keys if key in message})
+
     def receipt(self, request_id):
         with self._connect() as db:
             r = db.execute("SELECT request_id,state,provider_message_id,attempts,last_error,updated_at,reporting_json,reports_json,accepted_json,refused_json FROM outbox WHERE request_id=?", (request_id,)).fetchone()
             if not r:
                 return None
             result = dict(r)
+            result["state"] = _delivery_state(result["state"], result["last_error"])
             result["delivery_reporting"] = json.loads(result.pop("reporting_json"))
+            result["account_id"] = result["delivery_reporting"].get("account_id", "")
+            result["sender"] = result["delivery_reporting"].get("sender", "")
+            result["provider_receipt"] = result["delivery_reporting"].get("provider_receipt")
             result["history_reports"] = json.loads(result.pop("reports_json"))
             result["accepted_recipients"] = json.loads(result.pop("accepted_json") or "[]")
             result["refused_recipients"] = json.loads(result.pop("refused_json") or "{}")
@@ -555,7 +625,11 @@ class EmailStore:
         with self._connect() as db:
             counts = {table: {r[0]: r[1] for r in db.execute(f"SELECT state,COUNT(*) FROM {table} GROUP BY state")} for table in ("inbox", "outbox")}
             counts["cursors"] = [json.loads(r[0]) for r in db.execute("SELECT value FROM runtime_state WHERE key LIKE 'cursor:%'")]
-            counts["receipts"] = [dict(r) for r in db.execute("SELECT request_id,state,provider_message_id,last_error FROM outbox ORDER BY id DESC LIMIT 20")]
+            counts["receipts"] = [{**dict(r), "state": _delivery_state(r["state"], r["last_error"])} for r in db.execute(
+                "SELECT request_id,state,provider_message_id,last_error FROM outbox ORDER BY id DESC LIMIT 20")]
             counts["delivery_reports_pending"] = db.execute("SELECT COUNT(*) FROM outbox WHERE report_due_at>0").fetchone()[0]
+            counts["outbox_held"] = db.execute("SELECT COUNT(*) FROM outbox WHERE state='retry' AND last_error LIKE 'Held:%'").fetchone()[0]
+            # Retained events still observing their original attempt or child (counted in their inbox state too).
+            counts["inbox_retained"] = db.execute("SELECT COUNT(*) FROM inbox WHERE host_reference LIKE 'retained:%' AND state NOT IN ('completed','failed')").fetchone()[0]
             counts["delivery_support"] = self.get("delivery_support")
         return counts

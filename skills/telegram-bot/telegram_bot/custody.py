@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Any, Dict, Iterator, Optional
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
+from typing import Sequence, Any, Dict, Iterator, List, Optional
 
+from . import discovery
 from .events import TelegramEvent
 from .formatting import prepare_text
 
@@ -26,6 +30,9 @@ class OutboxLease:
     delivery_id: str
     payload: Dict[str, Any]
     attempts: int
+    # An earlier attempt may have reached Telegram: it ended with no answer (stale lease, restart or cancel), or
+    # 0.9.0 made it and kept no proof that it did nothing.
+    previous_unanswered: bool = False
 
 
 @dataclass(frozen=True)
@@ -35,6 +42,159 @@ class WorkLease:
     work_ref: str
     event: Dict[str, Any]
     attempts: int
+    role: str = "deferred"
+
+
+# One row per observed Host reference. ``deferred`` is a successful handoff's
+# work; ``turn`` is a retained event's original attempt and ``child`` real
+# admitted work of that event. Each is leased, polled and settled on its own.
+_PRESENCE_WORK_TABLE = """
+CREATE TABLE IF NOT EXISTS {name}(
+    work_ref TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL,
+    binding_id TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'deferred' CHECK(role IN ('deferred','turn','child')),
+    event_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(
+        state IN ('pending','leased','completed','failed','cancelled')
+    ),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    available_at REAL NOT NULL,
+    lease_until REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    completed_at REAL,
+    last_error TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY(event_id) REFERENCES inbox(event_id)
+)"""
+
+
+# The retained answer to "which conversation is this message in, who wrote it and what did it
+# say", by exact account, chat and message. Own messages live only in outbox JSON, so nothing
+# else can answer it without scanning. Rows older than this table stay unknown, never guessed.
+_MESSAGES_TABLE = """
+CREATE TABLE IF NOT EXISTS telegram_messages(
+    account_id TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    topic_id TEXT NOT NULL DEFAULT '',
+    chat_forum INTEGER,
+    author_id TEXT NOT NULL DEFAULT '',
+    author_name TEXT NOT NULL DEFAULT '',
+    is_self INTEGER NOT NULL DEFAULT 0,
+    text TEXT NOT NULL DEFAULT '',
+    media_group_id TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(account_id, chat_id, message_id)
+)"""
+# A private message outside a topic records no forum fact, so the newest row that does is found without reading those.
+_MESSAGES_FORUM_INDEX = """
+CREATE INDEX IF NOT EXISTS telegram_messages_forum
+    ON telegram_messages(account_id, chat_id, message_id) WHERE chat_forum IS NOT NULL"""
+_REMEMBER_MESSAGE = """
+INSERT OR REPLACE INTO telegram_messages(
+    account_id, chat_id, message_id, topic_id, chat_forum, author_id, author_name, is_self, text, media_group_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+# Rows with an unacknowledged report always have a due time, so acknowledged history is not expanded.
+_HELD_REPORTS = (
+    "SELECT COUNT(*) FROM outbox, json_each(outbox.reports_json) AS entry WHERE outbox.report_due_at>0 "
+    "AND json_extract(entry.value,'$.acked')=0 AND json_extract(entry.value,'$.error') LIKE 'Held:%'"
+)
+# reaction.target.excerpt never exceeds this; the full words stay in message.target_lookup.
+_REACTION_EXCERPT_CHARS = 500
+# How an outbox attempt that got no answer is recorded; a provider refusal or a hold names itself instead.
+_UNANSWERED_ATTEMPT = frozenset({"released_at_runtime_start", "worker_cancelled"})
+# The attempts count a reaction row had when this version last wrote it. Each attempt of this version stores the send
+# marker before Telegram can be asked, so while the count is unchanged the row's own record says whether it was.
+# Attempts past it are another version's, such as 0.9.0 after a rollback, which stores no marker.
+REACTION_ATTEMPTS_MARKED = "_attempts_marked"
+_STAMP_PATH = "$." + REACTION_ATTEMPTS_MARKED
+# 0.9.0 stored no marker and kept only its newest attempt's error, in its client's words before Telegram's
+# description. Only these prove that attempt did nothing: Telegram's 400, 401, 403, 404 or 429 to this call,
+# or a failure before the call.
+_UNMARKED_NO_EFFECT = re.compile(
+    r"TelegramApiError: Telegram (?:setMessageReaction failed \((?:400|401|403|404|429)\)"
+    r"|(?:getMe|deleteWebhook) failed \(\w+\)): |RuntimeError: telegram token is unavailable\Z")
+# An inbox row kept on a Host that cannot hold it as context-only; it is never submitted later.
+REACTION_WITHHELD = "reaction_host_context_unavailable"
+# The bot getMe last confirmed, for tools in processes whose runtime does not poll: "<token digest>:<bot id>".
+# The digest ties it to that one token. The token itself is not stored, and this row is read only by confirmed_account.
+_CONFIRMED_BOT = "confirmed_bot"
+
+
+def _token_binding(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest() + ":"
+
+
+def _chat_forum(chat_type: Any, is_forum: Any, topic_id: Any = "") -> Optional[int]:
+    """1 has topics, 0 known not to, None when this record does not say.
+
+    A private chat can have topics too, so its message outside one says nothing either way.
+    """
+    if is_forum is True or topic_id not in ("", None):
+        return 1
+    return 0 if chat_type in {"group", "supergroup", "channel"} else None
+
+
+def _unmarked_reaction(payload: Dict[str, Any]) -> bool:
+    """A reaction row whose record holds no send marker or result; one that does decides by it."""
+    return (payload.get("kind") == "operation" and payload.get("method") == "setMessageReaction"
+            and not {"_provider_call_started", "_operation_result"} & set(payload))
+
+
+def _remember_event(conn: sqlite3.Connection, event: TelegramEvent) -> None:
+    actor = event.actor
+    name = " ".join(part for part in (str(actor.get("first_name") or ""), str(actor.get("last_name") or "")) if part)
+    conn.execute(_REMEMBER_MESSAGE, (
+        event.account_id, event.conversation_id, int(event.message["message_id"]), event.thread_id,
+        _chat_forum(event.conversation.get("chat_type"), event.conversation.get("is_forum"), event.thread_id),
+        str(actor.get("platform_actor_id") or ""),
+        name or str((actor.get("sender_chat") or {}).get("title") or ""), 0, event.text,
+        str(event.message.get("media_group_id") or ""),
+    ))
+
+
+def _retained_message(conn: sqlite3.Connection, account_id: str, chat_id: str, message_id: Any) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM telegram_messages WHERE account_id=? AND chat_id=? AND message_id=?",
+        (str(account_id), str(chat_id), int(message_id)),
+    ).fetchone()
+
+
+def _newest_chat_forum(conn: sqlite3.Connection, event: Any) -> Optional[int]:
+    newest = conn.execute(
+        "SELECT chat_forum FROM telegram_messages WHERE account_id=? AND chat_id=? "
+        "AND chat_forum IS NOT NULL ORDER BY message_id DESC LIMIT 1",
+        (str(event.account_id), str(event.conversation_id)),
+    ).fetchone()
+    return newest["chat_forum"] if newest else None
+
+
+def _with_reaction_target(conn: sqlite3.Connection, event: TelegramEvent) -> TelegramEvent:
+    """Add what an exact retained record proves about the target; a miss changes nothing."""
+    fact = event.message["reaction"]
+    row = _retained_message(conn, event.account_id, event.conversation_id, event.message["message_id"])
+    if row is None:
+        if fact["target"]["resolution"] == "resolved" and _newest_chat_forum(conn, event) == 1:
+            # The update named no forum, yet this chat has shown topics: the conversation is unproven.
+            return replace(event, message={**event.message, "reaction": {
+                **fact, "target": {**fact["target"], "resolution": "unresolved"}}})
+        return event
+    author = {**({"platform_actor_id": row["author_id"]} if row["author_id"] else {}),
+              **({"display_name": row["author_name"]} if row["author_name"] else {}),
+              "is_self": bool(row["is_self"])}
+    words = str(row["text"])
+    target = {**fact["target"], "resolution": "resolved", "author": author,
+              **({"excerpt": {"text": words[:_REACTION_EXCERPT_CHARS],
+                              "truncated": len(words) > _REACTION_EXCERPT_CHARS}} if words.strip() else {})}
+    topic = str(row["topic_id"])
+    return replace(
+        event, thread_id=topic,
+        conversation_key=f"telegram:{event.account_id}:{event.conversation_id}:{topic or '0'}",
+        conversation={**event.conversation, "topic_id": int(topic) if topic else None},
+        message={**event.message, "reaction": {**fact, "target": target},
+                 "target_lookup": {"source": "telegram-bot custody", "text": words, "topic_id": topic,
+                                   "author_id": row["author_id"], "author_name": row["author_name"],
+                                   "is_self": bool(row["is_self"])}},
+    )
 
 
 class CustodyStore:
@@ -45,13 +205,18 @@ class CustodyStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def commit_update(self, update_id: int, event: Optional[TelegramEvent]) -> bool:
-        """Atomically deduplicate an event and advance the provider offset."""
+    def commit_update(self, update_id: int, event: Optional[TelegramEvent],
+                      groups: Sequence[discovery.GroupSighting] = ()) -> bool:
+        """Atomically deduplicate an event, note its groups and advance the provider offset."""
         now = time.time()
         inserted = False
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if event is not None:
+                if "reaction" in event.message:
+                    event = _with_reaction_target(conn, event)
+                else:
+                    _remember_event(conn, event)
                 cursor = conn.execute(
                     """
                     INSERT OR IGNORE INTO inbox(
@@ -69,6 +234,7 @@ class CustodyStore:
                     ),
                 )
                 inserted = cursor.rowcount == 1
+            discovery.record_sightings(conn, int(update_id), groups)
             current = self._metadata_int(conn, "telegram_offset")
             next_offset = max(current, int(update_id) + 1)
             conn.execute(
@@ -82,6 +248,26 @@ class CustodyStore:
     def telegram_offset(self) -> int:
         with self._connect() as conn:
             return self._metadata_int(conn, "telegram_offset")
+
+    def record_confirmed_bot(self, token: str, account_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO metadata(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_CONFIRMED_BOT, _token_binding(token) + account_id),
+            )
+
+    def forget_confirmed_bot(self, token: str) -> None:
+        """getMe no longer confirms this token. A record of another token is not this answer's to remove."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM metadata WHERE key=? AND value LIKE ?", (_CONFIRMED_BOT, _token_binding(token) + "%"))
+
+    def confirmed_account(self, token: str) -> str:
+        """The bot getMe last confirmed for exactly this token; ``""`` for any other token or none."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM metadata WHERE key=?", (_CONFIRMED_BOT,)).fetchone()
+        binding = _token_binding(token)
+        return row["value"][len(binding):] if row is not None and row["value"].startswith(binding) else ""
 
     def claim_inbox(self, *, lease_sec: float = 90.0) -> Optional[InboxLease]:
         now = time.time()
@@ -143,6 +329,25 @@ class CustodyStore:
                 (time.time() + max(0.0, retry_after_sec), str(reason)[:500], event_id),
             )
 
+    def defer_inbox(
+        self, event_id: str, *, reason: str, retry_after_sec: float
+    ) -> None:
+        """Keep a busy-refused event first in its conversation; the attempt is not counted.
+
+        The Host admitted nothing, so this is neither custody nor a failure: the same
+        event retries after the Host's hint, while other conversations proceed.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE inbox
+                SET state='pending', available_at=?, lease_until=0, last_error=?,
+                    attempts=MAX(0, attempts-1)
+                WHERE event_id=? AND state='leased'
+                """,
+                (time.time() + max(0.0, retry_after_sec), str(reason)[:500], event_id),
+            )
+
     def release_own_leases(self) -> Dict[str, int]:
         """Return leases left by a stopped runtime to their queues at once.
 
@@ -173,16 +378,91 @@ class CustodyStore:
             conn.commit()
         return released
 
-    def mark_inbox_failed(self, event_id: str, *, reason: str) -> None:
+    def mark_inbox_failed(
+        self, event_id: str, *, reason: str, receipt: Optional[Dict[str, Any]] = None
+    ) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
                 UPDATE inbox
-                SET state='failed', lease_until=0, failed_at=?, last_error=?
+                SET state='failed', lease_until=0, failed_at=?, last_error=?,
+                    host_receipt_json=COALESCE(?, host_receipt_json)
                 WHERE event_id=? AND state='leased'
                 """,
-                (time.time(), str(reason)[:500], event_id),
+                (time.time(), str(reason)[:500], _json(receipt) if receipt else None, event_id),
             )
+
+    def record_retention(
+        self, event_id: str, *, binding_id: str, receipt: Dict[str, Any]
+    ) -> None:
+        """Release a retained event's conversation without resubmitting it.
+
+        The Host kept an admitted attempt it will not regenerate. The inbox row
+        keeps the source event and the complete typed receipt; the original
+        attempt and any real admitted child become separately observed work.
+        """
+        response = receipt.get("response") if isinstance(receipt.get("response"), dict) else {}
+        turn_ref = str(response.get("turn_ref") or "").strip()
+        if not turn_ref:
+            raise ValueError("retained receipt must name its original turn")
+        child_ref = str(response.get("work_ref") or "").strip()
+        mode = int(response.get("delivery_reporting_version") == 1)
+        now = time.time()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT payload_json FROM inbox WHERE event_id=? AND state='leased'",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                raise ValueError("inbox event is not leased")
+            event = json.loads(row["payload_json"])
+            self._add_work(conn, event_id, binding_id, turn_ref, "turn", event, mode, now)
+            if child_ref and child_ref != turn_ref:
+                self._add_work(conn, event_id, binding_id, child_ref, "child", event, mode, now)
+            updated = conn.execute(
+                """
+                UPDATE inbox
+                SET state='submitted', lease_until=0, submitted_at=?, submission_ref=?,
+                    host_receipt_json=?, last_error=''
+                WHERE event_id=? AND state='leased'
+                """,
+                (now, turn_ref[:500], _json(receipt), event_id),
+            )
+            if updated.rowcount != 1:
+                conn.rollback()
+                raise ValueError("inbox event lease changed")
+            conn.commit()
+
+    @staticmethod
+    def _add_work(
+        conn: sqlite3.Connection,
+        event_id: str,
+        binding_id: str,
+        work_ref: str,
+        role: str,
+        event: Dict[str, Any],
+        mode: int,
+        now: float,
+    ) -> None:
+        """Observe one more reference of an event; its late output names its own task."""
+        source = {key: value for key, value in event.items() if key != "_reporting"}
+        source["_reporting"] = {
+            "version": mode,
+            "account_id": event.get("account_id", ""),
+            "origin": {"kind": "automatic", "task_id": work_ref,
+                       "source_event_id": event.get("source_event_id", "")},
+        }
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO presence_work(
+                work_ref, event_id, binding_id, role, event_json, state,
+                attempts, available_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+            """,
+            (work_ref, event_id, binding_id, role, _json(source), now, now),
+        )
 
     def record_submission(
         self,
@@ -194,8 +474,16 @@ class CustodyStore:
         text: str,
         work_ref: str,
         delivery_reporting_version: int = 0,
+        continuation_ref: str = "",
+        output_ref: str = "",
+        reply_anchor: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Atomically retain Host custody, immediate text, and deferred work."""
+        """Atomically retain Host custody, immediate text, and deferred work.
+
+        A version-2 ``continuation_ref`` names this event's running author: it is
+        observed like deferred work, beside any promoted child ``work_ref``, and the
+        conversation's next event may go to the Host at once.
+        """
         now = time.time()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -214,16 +502,21 @@ class CustodyStore:
                            "source_event_id": event.get("source_event_id", "")},
             }
             if text and outcome in {"message", "deferred"}:
-                self._enqueue_outbox(
-                    conn,
-                    f"presence:{event_id}:turn",
-                    _reply_payload(event, text),
-                    now,
-                )
-            if outcome == "deferred":
-                if not work_ref:
-                    conn.rollback()
-                    raise ValueError("deferred submission requires work_ref")
+                if output_ref:
+                    self._enqueue_output(conn, event_id, turn_ref, event, {
+                        "output_ref": output_ref, "text": text, "reply_anchor": reply_anchor}, now)
+                else:
+                    self._enqueue_outbox(
+                        conn,
+                        f"presence:{event_id}:turn",
+                        _reply_payload(event, text, _anchor_message_id(conn, event, reply_anchor)),
+                        now,
+                    )
+            observed = continuation_ref or (work_ref if outcome == "deferred" else "")
+            if outcome == "deferred" and not observed:
+                conn.rollback()
+                raise ValueError("deferred submission requires work_ref")
+            if observed:
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO presence_work(
@@ -231,8 +524,11 @@ class CustodyStore:
                         attempts, available_at, created_at
                     ) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
                     """,
-                    (event_id, binding_id, work_ref, _json(event), now, now),
+                    (event_id, binding_id, observed, _json(event), now, now),
                 )
+            if continuation_ref and work_ref and work_ref != continuation_ref:
+                self._add_work(conn, event_id, binding_id, work_ref, "child", event,
+                               delivery_reporting_version, now)
             updated = conn.execute(
                 """
                 UPDATE inbox
@@ -272,13 +568,15 @@ class CustodyStore:
         now = time.time()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            # Due order: a reference released after its read is due again later
+            # than every one already waiting, so older work never takes every turn.
             row = conn.execute(
                 """
-                SELECT event_id, binding_id, work_ref, event_json, attempts
+                SELECT event_id, binding_id, work_ref, role, event_json, attempts
                 FROM presence_work
                 WHERE (state='pending' AND available_at<=?)
                    OR (state='leased' AND lease_until<=?)
-                ORDER BY created_at ASC
+                ORDER BY available_at ASC, created_at ASC
                 LIMIT 1
                 """,
                 (now, now),
@@ -290,12 +588,12 @@ class CustodyStore:
                 """
                 UPDATE presence_work
                 SET state='leased', lease_until=?, attempts=attempts+1, last_error=''
-                WHERE event_id=? AND (
+                WHERE work_ref=? AND (
                     (state='pending' AND available_at<=?)
                     OR (state='leased' AND lease_until<=?)
                 )
                 """,
-                (now + max(1.0, lease_sec), row["event_id"], now, now),
+                (now + max(1.0, lease_sec), row["work_ref"], now, now),
             )
             conn.commit()
             if updated.rowcount != 1:
@@ -306,53 +604,116 @@ class CustodyStore:
                 work_ref=str(row["work_ref"]),
                 event=json.loads(row["event_json"]),
                 attempts=int(row["attempts"]) + 1,
+                role=str(row["role"]),
             )
 
     def release_work(
-        self, event_id: str, *, reason: str, retry_after_sec: float
+        self, work_ref: str, *, reason: str, retry_after_sec: float, child_ref: str = ""
     ) -> None:
+        """Keep observing a reference; retain a newly named child in the same commit."""
+        now = time.time()
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT event_id, binding_id, event_json FROM presence_work "
+                "WHERE work_ref=? AND state='leased'",
+                (work_ref,),
+            ).fetchone()
+            if row is not None and child_ref and child_ref != work_ref:
+                event = json.loads(row["event_json"])
+                mode = int((event.get("_reporting") or {}).get("version") == 1)
+                self._add_work(conn, row["event_id"], row["binding_id"], child_ref, "child",
+                               event, mode, now)
             conn.execute(
                 """
                 UPDATE presence_work
                 SET state='pending', available_at=?, lease_until=0, last_error=?
-                WHERE event_id=? AND state='leased'
+                WHERE work_ref=? AND state='leased'
                 """,
-                (time.time() + max(0.0, retry_after_sec), str(reason)[:500], event_id),
+                (now + max(0.0, retry_after_sec), str(reason)[:500], work_ref),
             )
+            conn.commit()
 
-    def complete_work(self, event_id: str, *, status: str, text: str) -> None:
+    def record_work_outputs(self, work_ref: str, outputs: Sequence[Dict[str, Any]]) -> None:
+        """Checkpoint selected outputs before releasing or settling their observation."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT event_id, event_json FROM presence_work WHERE work_ref=?",
+                               (work_ref,)).fetchone()
+            if row is None:
+                raise ValueError("presence work reference is missing")
+            event = json.loads(row["event_json"])
+            for output in outputs:
+                self._enqueue_output(conn, str(row["event_id"]), work_ref, event, output, time.time())
+            conn.commit()
+
+    def _enqueue_output(
+        self,
+        conn: sqlite3.Connection,
+        event_id: str,
+        work_ref: str,
+        event: Dict[str, Any],
+        output: Dict[str, Any],
+        now: float,
+    ) -> None:
+        """Queue a Host-minted output once for its event, whichever reference names it.
+
+        The original turn, its continuation, a promoted child or a retained reference
+        can each repeat it: identity is the exact ``output_ref``, never text or the
+        polled reference. Its ``reply_anchor`` answers the covered message it names.
+        """
+        output_ref = str(output["output_ref"])
+        prefix = f"presence:{event_id}:output:"
+        queued = conn.execute(
+            "SELECT delivery_id FROM outbox WHERE delivery_id >= ? AND delivery_id < ?",
+            (prefix, prefix[:-1] + ";"),
+        ).fetchall()
+        if any(str(item[0]).endswith(":" + output_ref) for item in queued):
+            return
+        reply_to = _anchor_message_id(conn, event, output.get("reply_anchor"))
+        self._enqueue_outbox(conn, f"{prefix}{work_ref}:{output_ref}",
+                             _reply_payload(event, str(output["text"]), reply_to), now)
+
+    def complete_work(self, work_ref: str, *, status: str, text: str, child_ref: str = "",
+                      reply_anchor: Optional[Dict[str, Any]] = None) -> None:
+        """Settle a reference; retain a child its terminal view names in the same commit."""
         if status not in {"completed", "failed", "cancelled"}:
             raise ValueError("work status is not terminal")
         now = time.time()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT event_json FROM presence_work WHERE event_id=? AND state='leased'",
-                (event_id,),
+                "SELECT event_id, binding_id, role, event_json FROM presence_work "
+                "WHERE work_ref=? AND state='leased'",
+                (work_ref,),
             ).fetchone()
             if row is None:
                 conn.rollback()
                 raise ValueError("presence work is not leased")
+            if child_ref and child_ref != work_ref:
+                event = json.loads(row["event_json"])
+                mode = int((event.get("_reporting") or {}).get("version") == 1)
+                self._add_work(conn, row["event_id"], row["binding_id"], child_ref, "child", event, mode, now)
             updated = conn.execute(
                 """
                 UPDATE presence_work
                 SET state=?, lease_until=0, completed_at=?, last_error=''
-                WHERE event_id=? AND state='leased'
+                WHERE work_ref=? AND state='leased'
                 """,
-                (status, now, event_id),
+                (status, now, work_ref),
             )
             if updated.rowcount != 1:
                 conn.rollback()
                 raise ValueError("presence work lease changed")
             if text:
+                event_id, role = str(row["event_id"]), str(row["role"])
+                # A deferred handoff keeps its original identity; each retained
+                # reference speaks at most once under its own.
+                delivery_id = (f"presence:{event_id}:work" if role == "deferred"
+                               else f"presence:{event_id}:{role}:{work_ref}")
                 event = json.loads(row["event_json"])
-                self._enqueue_outbox(
-                    conn,
-                    f"presence:{event_id}:work",
-                    _reply_payload(event, text),
-                    now,
-                )
+                self._enqueue_outbox(conn, delivery_id, _reply_payload(
+                    event, text, _anchor_message_id(conn, event, reply_anchor)), now)
             conn.commit()
 
     def claim_outbox(self, *, lease_sec: float = 90.0) -> Optional[OutboxLease]:
@@ -361,7 +722,8 @@ class CustodyStore:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 """
-                SELECT candidate.delivery_id, candidate.payload_json, candidate.attempts
+                SELECT candidate.delivery_id, candidate.payload_json, candidate.attempts,
+                       candidate.state, candidate.last_error
                 FROM outbox AS candidate
                 WHERE ((candidate.state='pending' AND candidate.available_at<=?)
                    OR (candidate.state='leased' AND candidate.lease_until<=?))
@@ -380,24 +742,39 @@ class CustodyStore:
             if row is None:
                 conn.commit()
                 return None
+            payload = json.loads(row["payload_json"])
+            unanswered = row["state"] == "leased" or row["last_error"] in _UNANSWERED_ATTEMPT
+            marked = None
+            if _unmarked_reaction(payload):
+                # Attempts past the stamp were another version's, which kept only its newest error. Decided before
+                # this claim clears that error, so no later failure can overwrite it.
+                stamp = payload.get(REACTION_ATTEMPTS_MARKED)
+                other = row["attempts"] - (stamp if type(stamp) is int else 0)
+                unanswered = unanswered or not 0 <= other <= 1 or (
+                    other == 1 and not _UNMARKED_NO_EFFECT.match(row["last_error"]))
+                if not unanswered:
+                    payload = {**payload, REACTION_ATTEMPTS_MARKED: row["attempts"] + 1}
+                    marked = _json(payload)
             updated = conn.execute(
                 """
                 UPDATE outbox
-                SET state='leased', lease_until=?, attempts=attempts+1, last_error=''
+                SET state='leased', lease_until=?, attempts=attempts+1, last_error='',
+                    payload_json=COALESCE(?, payload_json)
                 WHERE delivery_id=? AND (
                     (state='pending' AND available_at<=?)
                     OR (state='leased' AND lease_until<=?)
                 )
                 """,
-                (now + max(1.0, lease_sec), row["delivery_id"], now, now),
+                (now + max(1.0, lease_sec), marked, row["delivery_id"], now, now),
             )
             conn.commit()
             if updated.rowcount != 1:
                 return None
             return OutboxLease(
                 delivery_id=str(row["delivery_id"]),
-                payload=json.loads(row["payload_json"]),
+                payload=payload,
                 attempts=int(row["attempts"]) + 1,
+                previous_unanswered=unanswered,
             )
 
     def release_outbox(
@@ -416,6 +793,15 @@ class CustodyStore:
                     delivery_id,
                 ),
             )
+
+    def hold_outbox(self, delivery_id: str, reason: str) -> None:
+        # A hold returns its attempt to the count; a reaction's stamp of that count moves with it.
+        with self._connect() as conn:
+            conn.execute("UPDATE outbox SET state='pending',available_at=?,lease_until=0,"
+                         "last_error=?,attempts=MAX(0,attempts-1),payload_json=CASE WHEN "
+                         "json_extract(payload_json,?)=attempts THEN json_set(payload_json,?,MAX(0,attempts-1)) "
+                         "ELSE payload_json END WHERE delivery_id=? AND state='leased'",
+                         (time.time() + 5, reason, _STAMP_PATH, _STAMP_PATH, delivery_id))
 
     def mark_outbox_failed(self, delivery_id: str, *, reason: str, report=None,
                            state: str = "failed") -> None:
@@ -441,14 +827,21 @@ class CustodyStore:
             self._add_reports(conn, delivery_id, [report] if report else [])
             conn.commit()
 
-    def checkpoint_outbox(self, delivery_id: str, payload: Dict[str, Any], *, report=None) -> None:
-        """Retain confirmed text chunks before attempting the next provider call."""
+    def checkpoint_outbox(self, delivery_id: str, payload: Dict[str, Any], *, report=None,
+                          sent: Optional[Sequence[Any]] = None) -> None:
+        """Retain confirmed text chunks before attempting the next provider call.
+
+        ``sent`` remembers a just-confirmed own message: its exact creation receipt is what
+        later identifies a reaction on it as a reaction on this bot's words.
+        """
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "UPDATE outbox SET payload_json=? WHERE delivery_id=? AND state='leased'",
                 (_json(payload), delivery_id),
             )
+            if sent:
+                conn.execute(_REMEMBER_MESSAGE, sent)
             self._add_reports(conn, delivery_id, [report] if report else [])
             conn.commit()
 
@@ -506,6 +899,20 @@ class CustodyStore:
             self._write_reports(conn, delivery_id, entries)
             conn.commit()
 
+    def reaction_target(self, account_id: str, chat_id: str, message_id: int) -> Dict[str, Any]:
+        """What retained records say about one message's conversation, from indexed rows only.
+
+        ``retained`` names the exact message and its topic. Otherwise ``forum`` is what the newest
+        retained message of this chat that says anything recorded (1, 0 or None). In a private chat
+        only a topic message says, so a later message outside a topic leaves its topics shown.
+        """
+        with self._connect() as conn:
+            row = _retained_message(conn, account_id, chat_id, message_id)
+            if row is not None:
+                return {"retained": True, "topic_id": str(row["topic_id"]), "media_group_id": str(row["media_group_id"])}
+            scope = SimpleNamespace(account_id=account_id, conversation_id=chat_id)
+            return {"retained": False, "forum": _newest_chat_forum(conn, scope)}
+
     def outbox_payload(self, delivery_id):
         with self._connect() as conn:
             row = conn.execute("SELECT payload_json FROM outbox WHERE delivery_id=?", (delivery_id,)).fetchone()
@@ -521,8 +928,15 @@ class CustodyStore:
         if row is None:
             return {"state": "not_found"}
         payload = json.loads(row["payload_json"])
+        reaction = payload.get("kind") == "operation" and payload.get("method") == "setMessageReaction"
+        reporting = payload.get("_reporting") or {}
         return {
-            "state": "uncertain" if payload.get("_terminal_outcome") == "uncertain" else str(row["state"]),
+            # -1: the outbox has not yet asked this Host.
+            **({"history_limitation": "Host history for reactions is unavailable: this receipt stays local."}
+               if reaction and (reporting.get("version") != -1 or row["state"] != "pending")
+               and reporting.get("explicit_completion") != 1
+               and not any(entry["acked"] for entry in json.loads(row["reports_json"])) else {}),
+            "state": "held" if row["state"] == "pending" and str(row["last_error"]).startswith("Held:") else "uncertain" if payload.get("_terminal_outcome") == "uncertain" else str(row["state"]),
             "attempts": int(row["attempts"]),
             "delivered_at": _timestamp(row["delivered_at"]),
             "provider_receipt": json.loads(row["provider_receipt_json"] or "{}"),
@@ -530,6 +944,11 @@ class CustodyStore:
             "delivery_reporting": payload.get("_reporting", {"version": 0, "status": "legacy_unconfirmed"}),
             "history_reports": json.loads(row["reports_json"]),
         }
+
+    def offered_groups(self, account_id: str) -> List[Dict[str, str]]:
+        """Connect choices of one bot; reads its groups, never the message history."""
+        with self._connect() as conn:
+            return discovery.offered_groups(conn, account_id)
 
     def status_snapshot(self) -> Dict[str, Any]:
         with self._connect() as conn:
@@ -562,8 +981,17 @@ class CustodyStore:
                 "inbox_waiting": inbox.get("pending", 0),
                 "inbox_leased": inbox.get("leased", 0),
                 "inbox_submitted": inbox.get("submitted", 0),
-                "inbox_failed": inbox.get("failed", 0),
+                # Retained events whose original attempt or child is still observed.
+                "inbox_retained": conn.execute(
+                    "SELECT COUNT(DISTINCT event_id) FROM presence_work "
+                    "WHERE role IN ('turn','child') AND state IN ('pending','leased')"
+                ).fetchone()[0],
+                "inbox_failed": inbox.get("failed", 0) - (withheld := conn.execute(
+                    "SELECT COUNT(*) FROM inbox WHERE state='failed' AND last_error=?", (REACTION_WITHHELD,)
+                ).fetchone()[0]),
+                "reactions_withheld": withheld,
                 "outbox_waiting": outbox.get("pending", 0),
+                "outbox_held": conn.execute("SELECT COUNT(*) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%'").fetchone()[0],
                 "outbox_leased": outbox.get("leased", 0),
                 "outbox_delivered": outbox.get("delivered", 0),
                 "outbox_failed": outbox.get("failed", 0) - conn.execute(
@@ -578,6 +1006,8 @@ class CustodyStore:
                     work.get(state, 0) for state in ("completed", "failed", "cancelled")
                 ),
                 "delivery_reports_pending": conn.execute("SELECT COUNT(*) FROM outbox WHERE report_due_at>0").fetchone()[0],
+                "delivery_reports_held": conn.execute(_HELD_REPORTS).fetchone()[0],
+                "group_backfill_unreadable": discovery.backfill_unreadable(conn),
                 "last_event_at": _timestamp(last_event),
                 "last_delivery_at": _timestamp(last_delivery),
             }
@@ -609,22 +1039,9 @@ class CustodyStore:
                 );
                 CREATE INDEX IF NOT EXISTS inbox_ready_idx
                     ON inbox(state, available_at, lease_until, update_id);
-                CREATE TABLE IF NOT EXISTS presence_work(
-                    event_id TEXT PRIMARY KEY,
-                    binding_id TEXT NOT NULL,
-                    work_ref TEXT NOT NULL UNIQUE,
-                    event_json TEXT NOT NULL,
-                    state TEXT NOT NULL CHECK(
-                        state IN ('pending','leased','completed','failed','cancelled')
-                    ),
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    available_at REAL NOT NULL,
-                    lease_until REAL NOT NULL DEFAULT 0,
-                    created_at REAL NOT NULL,
-                    completed_at REAL,
-                    last_error TEXT NOT NULL DEFAULT '',
-                    FOREIGN KEY(event_id) REFERENCES inbox(event_id)
-                );
+                """
+                + _PRESENCE_WORK_TABLE.format(name="presence_work")
+                + """;
                 CREATE INDEX IF NOT EXISTS presence_work_ready_idx
                     ON presence_work(state, available_at, lease_until, created_at);
                 CREATE TABLE IF NOT EXISTS outbox(
@@ -643,6 +1060,11 @@ class CustodyStore:
                 CREATE INDEX IF NOT EXISTS outbox_ready_idx
                     ON outbox(state, available_at, lease_until, created_at);
                 """
+                + discovery.GROUPS_TABLE
+                + ";"
+                + _MESSAGES_TABLE
+                + ";"
+                + _MESSAGES_FORUM_INDEX
             )
             conn.execute("BEGIN IMMEDIATE")
             columns = {r[1] for r in conn.execute("PRAGMA table_info(outbox)")}
@@ -650,8 +1072,39 @@ class CustodyStore:
                 conn.execute("ALTER TABLE outbox ADD COLUMN reports_json TEXT NOT NULL DEFAULT '[]'")
                 conn.execute("ALTER TABLE outbox ADD COLUMN report_due_at REAL NOT NULL DEFAULT 0")
             conn.execute("CREATE INDEX IF NOT EXISTS outbox_reports_due ON outbox(report_due_at)")
+            if "host_receipt_json" not in {r[1] for r in conn.execute("PRAGMA table_info(inbox)")}:
+                conn.execute("ALTER TABLE inbox ADD COLUMN host_receipt_json TEXT NOT NULL DEFAULT ''")
+            if "role" not in {r[1] for r in conn.execute("PRAGMA table_info(presence_work)")}:
+                self._key_work_by_reference(conn)
             conn.commit()
             self._import_legacy_offset(conn)
+        discovery.backfill_legacy(self._connect)
+
+    @staticmethod
+    def _key_work_by_reference(conn: sqlite3.Connection) -> None:
+        """Rebuild the 0.4 work table, keyed by event id, under its Host reference.
+
+        SQLite cannot change a primary key in place. Every row moves unchanged as a
+        ``deferred`` handoff, so its leases, attempts and delivery identity survive.
+        """
+        conn.execute(_PRESENCE_WORK_TABLE.format(name="presence_work_by_ref"))
+        conn.execute(
+            """
+            INSERT INTO presence_work_by_ref(
+                work_ref, event_id, binding_id, role, event_json, state, attempts,
+                available_at, lease_until, created_at, completed_at, last_error
+            )
+            SELECT work_ref, event_id, binding_id, 'deferred', event_json, state, attempts,
+                   available_at, lease_until, created_at, completed_at, last_error
+            FROM presence_work
+            """
+        )
+        conn.execute("DROP TABLE presence_work")
+        conn.execute("ALTER TABLE presence_work_by_ref RENAME TO presence_work")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS presence_work_ready_idx "
+            "ON presence_work(state, available_at, lease_until, created_at)"
+        )
 
     def _import_legacy_offset(self, conn: sqlite3.Connection) -> None:
         if self._metadata_int(conn, "telegram_offset") > 0:
@@ -701,7 +1154,31 @@ def _timestamp(value: Any) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(value)))
 
 
-def _reply_payload(event: Dict[str, Any], text: str) -> Dict[str, Any]:
+def _anchor_message_id(
+    conn: sqlite3.Connection, event: Dict[str, Any], anchor: Optional[Dict[str, Any]]
+) -> Any:
+    """The message a version-2 output answers when its anchor is one this chat captured.
+
+    The Host names the last covered input by ``source_event_id`` and its exact captured
+    ``message``. An anchor from another conversation, or unlike that capture, is not
+    used: the reply then answers the work's own event, as without an anchor.
+    """
+    if not isinstance(anchor, dict) or not isinstance(anchor.get("message"), dict):
+        return None
+    message_id = anchor["message"].get("message_id")
+    if isinstance(message_id, bool) or message_id in (None, ""):
+        return None
+    row = conn.execute(
+        "SELECT conversation_key, payload_json FROM inbox WHERE event_id=?",
+        (str(anchor.get("source_event_id") or ""),),
+    ).fetchone()
+    if row is None or row["conversation_key"] != event.get("conversation_key"):
+        return None
+    captured = (json.loads(row["payload_json"]).get("message") or {}).get("message_id")
+    return captured if str(captured) == str(message_id) else None
+
+
+def _reply_payload(event: Dict[str, Any], text: str, reply_to: Any = None) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "kind": "message",
         "chat_id": str(event.get("conversation_id") or ""),
@@ -714,7 +1191,7 @@ def _reply_payload(event: Dict[str, Any], text: str) -> Dict[str, Any]:
     if thread_id:
         payload["topic_id"] = thread_id
     message = event.get("message") if isinstance(event.get("message"), dict) else {}
-    reply_id = message.get("message_id")
+    reply_id = message.get("message_id") if reply_to in (None, "") else reply_to
     if reply_id not in (None, ""):
         payload["reply_to_message_id"] = reply_id
     return payload

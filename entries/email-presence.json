@@ -1,0 +1,25 @@
+{
+  "category": [
+    "messaging"
+  ],
+  "connects": [
+    "Email"
+  ],
+  "description": "Multi-account Gmail API and IMAP/SMTP mail, account settings, folders, drafts and durable delivery, with optional Presence intake.",
+  "digest": "92b7902abe89c18370fb0358009d05fa449015cc8a7f8e4fcc9f370e858d1d68",
+  "icon": "ui/icon.svg",
+  "install_specs": [
+    "httpx",
+    "starlette"
+  ],
+  "name": "email-presence",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/email-presence"
+  },
+  "type": "extension",
+  "version": "0.9.0",
+  "withdrawn": null
+}

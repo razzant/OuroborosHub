@@ -209,7 +209,7 @@ def test_automatic_and_deferred_rows_keep_original_echoed_mode(tmp_path, mode):
     assert early.payload["_reporting"]["version"] == mode
     store.mark_delivered(early.delivery_id, provider_receipt={})
     work = store.claim_work()
-    store.complete_work(work.event_id, status="completed", text="Final")
+    store.complete_work(work.work_ref, status="completed", text="Final")
     final = store.claim_outbox()
     assert final.payload["_reporting"] == early.payload["_reporting"]
 

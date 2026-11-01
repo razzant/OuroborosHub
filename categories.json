@@ -1,0 +1,53 @@
+{
+  "categories": [
+    {
+      "id": "messaging",
+      "label": "Messaging"
+    },
+    {
+      "id": "documents",
+      "label": "Documents"
+    },
+    {
+      "id": "search",
+      "label": "Search & research"
+    },
+    {
+      "id": "media",
+      "label": "Images, video & music"
+    },
+    {
+      "id": "planning",
+      "label": "Planning"
+    },
+    {
+      "id": "ouroboros",
+      "label": "About Ouroboros"
+    },
+    {
+      "id": "health",
+      "label": "Health"
+    },
+    {
+      "id": "city",
+      "label": "City & services"
+    },
+    {
+      "id": "writing",
+      "label": "Writing & review"
+    },
+    {
+      "id": "business",
+      "label": "Business & finance"
+    },
+    {
+      "id": "computer",
+      "label": "Computer control"
+    },
+    {
+      "id": "games",
+      "label": "Games"
+    }
+  ],
+  "schema_version": 1
+}

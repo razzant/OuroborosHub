@@ -1,0 +1,32 @@
+{
+  "category": [
+    "messaging"
+  ],
+  "connects": [
+    "A2A"
+  ],
+  "description": "Agent-to-Agent connector for peer places, with durable Presence requests, discovery, streaming status and retained task outcomes.",
+  "digest": "8ded2740818b0f4c288e87a6a3c847a43ecec3eed3d3b66b78f6f288d30bf3ca",
+  "icon": "ui/icon.svg",
+  "install_specs": [
+    {
+      "kind": "pip",
+      "package": "protobuf<6"
+    },
+    {
+      "kind": "pip",
+      "package": "a2a-sdk[http-server]>=1.0.0,<2.0.0"
+    }
+  ],
+  "name": "a2a",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/a2a"
+  },
+  "type": "extension",
+  "version": "1.5.0",
+  "when_to_use": "User asks to communicate with another A2A-compatible agent, discover an agent card, send an A2A message, check A2A task status, or expose this Ouroboros instance as an A2A peer.",
+  "withdrawn": null
+}

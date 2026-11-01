@@ -1,0 +1,18 @@
+{
+  "category": [
+    "games"
+  ],
+  "description": "Fully playable Classic Doom (1993) standalone 2.5D FPS raycaster extension widget with textured walls, procedural sprite enemies, authentic weapons, levels, HUD, Web Audio sound and heavy metal music synthesizer.",
+  "digest": "b4d885ac85aa4a1c0cbf7e60b42e858e3bc7da08e0d6a792dfea415dc360df57",
+  "name": "classic-doom",
+  "owner": "razzant",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/classic-doom"
+  },
+  "type": "extension",
+  "version": "1.0.0",
+  "when_to_use": "When the user wants to play an authentic Classic Doom (1993) 2.5D FPS raycaster game directly in an Ouroboros extension widget with monsters, weapons, sound effects, and heavy metal synth.",
+  "withdrawn": null
+}

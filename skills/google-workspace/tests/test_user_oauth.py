@@ -205,6 +205,88 @@ def test_workspace_request_plugin_loads_refresh_grants(monkeypatch):
     assert set(settings) <= set(api.requested)
 
 
+def test_slides_and_calendar_requests_reach_their_apis_with_user_oauth(monkeypatch):
+    settings = {"GOOGLE_OAUTH_" + key.upper(): value for key, value in OAUTH.items()}
+    seen = []
+    hide = {"requests": [{"updateSlideProperties": {
+        "objectId": "slide7", "slideProperties": {"isSkipped": True}, "fields": "isSkipped"}}]}
+    attach = {"attachments": [{"fileUrl": "https://drive.google.com/open?id=deck1", "title": "Deck",
+                               "mimeType": "application/vnd.google-apps.presentation"}]}
+
+    def respond(request):
+        if request.url.host == "oauth2.googleapis.com":
+            assert "scope" not in parse_qs(request.content.decode())
+            return httpx.Response(200, json={"access_token": "fresh", "expires_in": 3600})
+        seen.append((request.method, str(request.url), json.loads(request.content) if request.content else None))
+        return httpx.Response(200, json={"ok": True})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        monkeypatch.setattr(plugin, "GoogleWorkspaceClient", lambda **kwargs: GoogleWorkspaceClient(http_client=http, **kwargs))
+        handler = plugin._make_workspace_request(FakeAPI(settings))
+        handler("slides", "POST", "presentations/deck1:batchUpdate", json_body=hide, auth_mode="oauth")
+        handler("calendar", "PATCH", "calendars/primary/events/ev1_20261030T130000Z",
+                {"supportsAttachments": "true"}, attach, auth_mode="oauth")
+    assert seen == [
+        ("POST", "https://slides.googleapis.com/v1/presentations/deck1:batchUpdate", hide),
+        ("PATCH", "https://www.googleapis.com/calendar/v3/calendars/primary/events/ev1_20261030T130000Z"
+                  "?supportsAttachments=true", attach),
+    ]
+
+
+def test_service_account_asks_for_calendar_scope_only_on_calendar_calls(monkeypatch):
+    requested = []
+
+    def fake_token(**kwargs):
+        requested.append(kwargs.get("scopes"))
+        return "calendar-token" if kwargs.get("scopes") else "base-token"
+
+    monkeypatch.setattr(client_module, "get_access_token", fake_token)
+    tokens = []
+
+    def respond(request):
+        tokens.append((request.url.host, request.headers["Authorization"]))
+        return httpx.Response(200, json={})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        with GoogleWorkspaceClient(raw_sa_info="fixture", http_client=http) as client:
+            for service, path in (("drive", "about"), ("slides", "presentations/deck1"),
+                                  ("calendar", "calendars/primary/events"), ("docs", "documents/doc1")):
+                client.workspace_request(service, "GET", path)
+    assert requested == [None, None, auth.CALENDAR_SCOPES, None]
+    assert tokens == [("www.googleapis.com", "Bearer base-token"), ("slides.googleapis.com", "Bearer base-token"),
+                      ("www.googleapis.com", "Bearer calendar-token"), ("docs.googleapis.com", "Bearer base-token")]
+
+
+def test_service_account_calendar_401_refreshes_with_the_calendar_scope(monkeypatch):
+    requested = []
+
+    def fake_token(**kwargs):
+        requested.append((kwargs.get("scopes"), kwargs.get("force_refresh")))
+        return "fresh-calendar" if kwargs.get("force_refresh") else "stale-calendar"
+
+    monkeypatch.setattr(client_module, "get_access_token", fake_token)
+
+    def respond(request):
+        if request.headers["Authorization"] == "Bearer stale-calendar":
+            return httpx.Response(401, json={"error": {"message": "Expired"}})
+        return httpx.Response(200, json={"items": []})
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        with GoogleWorkspaceClient(raw_sa_info="fixture", http_client=http) as client:
+            assert client.workspace_request("calendar", "GET", "calendars/primary/events")["data"] == {"items": []}
+    assert requested == [(auth.CALENDAR_SCOPES, False), (auth.CALENDAR_SCOPES, True)]
+
+
+def test_unknown_service_is_rejected_before_any_request():
+    def respond(request):
+        raise AssertionError("no request expected")
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as http:
+        with GoogleWorkspaceClient(access_token="fixture", http_client=http) as client:
+            with pytest.raises(ValueError, match="drive, docs, sheets, slides or calendar"):
+                client.workspace_request("gmail", "GET", "users/me/messages")
+
+
 @pytest.mark.parametrize("link", ["file_123-abc", "https://docs.google.com/document/d/file_123-abc/edit",
     "https://docs.google.com/spreadsheets/d/file_123-abc/edit#gid=3", "https://drive.google.com/file/d/file_123-abc/view?usp=sharing",
     "https://drive.google.com/drive/u/0/folders/file_123-abc", "https://drive.google.com/open?id=file_123-abc"])

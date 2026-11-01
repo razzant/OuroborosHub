@@ -1,6 +1,6 @@
 # Google Workspace Skill (`google-workspace`)
 
-A universal, standalone, public extension skill for Ouroboros providing Google Sheets, Google Docs, and Google Drive integration via renewable user OAuth or Google Cloud Service Accounts.
+A universal, standalone, public extension skill for Ouroboros providing Google Sheets, Google Docs, Google Drive, Google Slides and Google Calendar integration via renewable user OAuth or Google Cloud Service Accounts.
 
 ---
 
@@ -9,7 +9,7 @@ A universal, standalone, public extension skill for Ouroboros providing Google S
 - **Google Sheets (`sheets_info`, `sheets_read`, `sheets_update`, `sheets_append`, `sheets_batch_update`)**: Discover tabs, read/update/append ranges, and apply structural requests.
 - **Google Docs (`docs_create`, `docs_read`, `docs_update`)**: Create blank/template documents, read structured body data, and batch-update with optional readback.
 - **Google Drive (`drive_list`, `drive_read_text`, `drive_download`, `drive_export`, `drive_upload`)**: Search and paginate across folders or Shared Drives, export text, and exchange bounded binary artifacts through skill state.
-- **General API (`workspace_request`)**: Send standard JSON requests across Drive v3, Docs v1 and Sheets v4 using the same selected identity.
+- **General API (`workspace_request`)**: Send standard JSON requests across Drive v3, Docs v1, Sheets v4, Slides v1 and Calendar v3 using the same selected identity.
 - **Preflight Check (`workspace_auth_status`)**: Verify the actual Google Drive actor without modifying Workspace data or returning credentials.
 - **Settings & UI Tab**: Configure default working folders and template name mappings.
 
@@ -29,7 +29,11 @@ This skill uses **pure REST via `httpx` and `cryptography`** rather than the off
 ## Setup & Configuration
 
 Enable Google Drive, Docs and Sheets APIs in the Google Cloud project used by
-your chosen credential route. Configure secrets under **Settings → Secrets** and
+your chosen credential route, plus Slides and Calendar when you call them. A
+disabled API returns a Google error that names the project and links to enabling
+the API. For
+user OAuth that is the OAuth client's project; for a service account, its own
+project. Configure secrets under **Settings → Secrets** and
 grant only the keys for that route to this skill. Secrets belong to the host's
 granted settings, never the skill's folder or template settings form.
 
@@ -37,7 +41,11 @@ granted settings, never the skill's folder or template settings form.
 
 1. Use an owner-approved Google OAuth client and consent flow with offline access
    to obtain a refresh token for the user and required scopes. The skill does not
-   launch consent, sign in, switch accounts or request new scopes.
+   launch consent, sign in, switch accounts or request new scopes. Grant the
+   scopes for the APIs you will call: `drive`, `documents` and `spreadsheets`
+   for the file tools, Slides calls work with `drive` or `presentations`, and
+   Calendar calls need a Calendar scope: `calendar.events` or `calendar` to change
+   events; read-only Calendar scopes are enough for reading.
 2. Configure and grant `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, and
    `GOOGLE_OAUTH_REFRESH_TOKEN`. These three optional manifest keys form the
    renewable route together. Updating a skill payload requires current review and
@@ -69,6 +77,14 @@ OAuth is selected explicitly and never falls back to the service account. The
 status probe's optional `subject` checks explicit domain-wide delegation only;
 operational tools do not infer delegation from an email address.
 
+A service account requests the `spreadsheets`, `documents` and `drive` scopes for
+Drive, Docs, Sheets and Slides calls, and only the `calendar` scope for Calendar
+calls, so a delegation entry authorized for the original scopes keeps working.
+Operational tools never use delegation, so a service account sees only calendars
+shared with its `client_email`, its own `calendars/primary` is an empty calendar
+of its own, and it cannot invite attendees. Use `auth_mode="oauth"` to work in a
+user's calendar.
+
 ---
 
 ## Tool Reference
@@ -78,9 +94,11 @@ operational tools do not infer delegation from an email address.
 - **Returns**: `status`, `auth_mode`, `configured`, `verified`, `actor`, `resource_access="not_checked"`, and a message. A configured but invalid token reports `verified=false`, never `ready`. Successful probes include `verification_scope="drive.about.user"`; service-account configuration metadata stays separate from the actual provider actor.
 
 ### `workspace_request(service, method, path, query=None, json_body=None, auth_mode="service_account")`
-- **Services**: `drive` starts at `https://www.googleapis.com/drive/v3`, `docs` at `https://docs.googleapis.com/v1`, and `sheets` at `https://sheets.googleapis.com/v4`.
-- **Parameters**: Standard HTTP method, API-relative path, query object, and optional JSON body. Provider operations and permissions are decided by the caller and Google; this tool adds no operation allowlist.
+- **Services**: `drive` starts at `https://www.googleapis.com/drive/v3`, `docs` at `https://docs.googleapis.com/v1`, `sheets` at `https://sheets.googleapis.com/v4`, `slides` at `https://slides.googleapis.com/v1`, and `calendar` at `https://www.googleapis.com/calendar/v3`.
+- **Parameters**: Standard HTTP method, API-relative path, query object, and optional JSON body. Provider operations and permissions are decided by the caller and Google; this tool adds no operation allowlist. Percent-encode calendar IDs that contain `#` or `/` (for example `calendars/team%23x%40group.calendar.google.com/events`); `primary` needs no encoding.
 - **Examples**: `service="drive", method="GET", path="files/ID", query={"fields":"id,name,capabilities"}`; `service="drive", method="POST", path="files/ID/permissions", json_body={"type":"user","role":"reader","emailAddress":"reader@example.com"}`; `service="docs", method="POST", path="documents/ID:batchUpdate", json_body={"requests":[...]}`.
+- **Slides**: read slide IDs and their skip state with `service="slides", method="GET", path="presentations/ID", query={"fields":"slides(objectId,slideProperties/isSkipped)"}`. Hide a slide in presentation mode with `method="POST", path="presentations/ID:batchUpdate", json_body={"requests":[{"updateSlideProperties":{"objectId":"SLIDE_ID","slideProperties":{"isSkipped":true},"fields":"isSkipped"}}]}`; send `false` to show it again.
+- **Calendar**: with `auth_mode="oauth"`, `calendars/primary` is the signed-in user's calendar; with a service account use the ID of a calendar shared with it, because its own `primary` is empty. List upcoming events with `service="calendar", method="GET", path="calendars/primary/events", query={"q":"Friday","timeMin":"2026-10-26T00:00:00Z","singleEvents":"true","orderBy":"startTime"}`. A meeting link is in `conferenceData.entryPoints`, `hangoutLink`, `location` or `description`, depending on how it was added. Attach a Drive file with `method="PATCH", path="calendars/primary/events/EVENT_ID", query={"supportsAttachments":"true"}, json_body={"attachments":[...existing attachments..., {"fileUrl":"<the file's webViewLink>","title":"Deck","mimeType":"application/vnd.google-apps.presentation"}]}`; the file tools return that link as `url`. PATCH replaces the whole `attachments` list, so read the event first and send the existing entries too. With `singleEvents=true` each occurrence of a recurring event has its own ID, so changing one occurrence leaves the series alone. Change an event only when the GET shows `organizer.self` or `guestsCanModify` true, or when you edit a calendar you can write to: a guest without that right may change only their own copy, which other guests never see. Read the event back after the PATCH to confirm. A file needs its own sharing for guests to open it.
 - **Returns**: `status_code` plus the provider `data` for JSON, `text` for a text response, or just the status for an empty response. Use the existing download/export/upload tools for binary artifacts. Query fields, pagination and write preconditions follow the provider API.
 
 All existing tool names remain available. Their resource ID parameters accept
@@ -195,6 +213,9 @@ payload and uploads it with an explicit MIME type.
 - [Sheets metadata without grid data](https://developers.google.com/workspace/sheets/api/reference/rest/v4/spreadsheets/get)
 - [Values rendering options](https://developers.google.com/workspace/sheets/api/reference/rest/v4/ValueRenderOption)
 - [Export formats and first-sheet CSV scope](https://developers.google.com/workspace/drive/api/guides/ref-export-formats)
+
+- [Slides batchUpdate and UpdateSlidePropertiesRequest](https://developers.google.com/workspace/slides/api/reference/rest/v1/presentations/request#UpdateSlidePropertiesRequest)
+- [Calendar events.patch and attachments](https://developers.google.com/workspace/calendar/api/v3/reference/events/patch)
 
 - [User OAuth offline access and refresh](https://developers.google.com/identity/protocols/oauth2/web-server#offline)
 - [Drive authenticated user](https://developers.google.com/workspace/drive/api/reference/rest/v3/about/get)

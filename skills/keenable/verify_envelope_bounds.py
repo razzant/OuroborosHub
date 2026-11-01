@@ -54,7 +54,10 @@ def _transport(text: str):
         method = payload.get("method")
         if method == "initialize":
             return 200, {"mcp-session-id": "verify"}, json.dumps(
-                {"jsonrpc": "2.0", "id": 1, "result": {}})
+                {"jsonrpc": "2.0", "id": 1, "result": {
+                    "protocolVersion": kc.PROTOCOL_VERSION, "capabilities": {},
+                    "serverInfo": {"name": "envelope-verifier", "version": "1"},
+                }})
         if method == "notifications/initialized":
             return 202, {}, ""
         return 200, {}, json.dumps({
@@ -187,7 +190,10 @@ def _tool_error_transport(text: str):
         method = payload.get("method")
         if method == "initialize":
             return 200, {"mcp-session-id": "verify"}, json.dumps(
-                {"jsonrpc": "2.0", "id": 1, "result": {}})
+                {"jsonrpc": "2.0", "id": 1, "result": {
+                    "protocolVersion": kc.PROTOCOL_VERSION, "capabilities": {},
+                    "serverInfo": {"name": "envelope-verifier", "version": "1"},
+                }})
         if method == "notifications/initialized":
             return 202, {}, ""
         return 200, {}, json.dumps({

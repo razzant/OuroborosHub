@@ -164,6 +164,48 @@ def test_token_cache_credential_key_and_subject_keyed():
     assert fp_key_2 != fp1
 
 
+def _jwt_scope(assertion: str) -> str:
+    import base64
+    payload = assertion.split(".")[1]
+    return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))["scope"]
+
+
+def test_calendar_scope_gets_its_own_token_and_base_fingerprint_is_unchanged():
+    try:
+        from .auth import CALENDAR_SCOPES, GOOGLE_SCOPES
+    except ImportError:
+        from auth import CALENDAR_SCOPES, GOOGLE_SCOPES
+    scopes_seen = []
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        assertion = dict(item.split("=", 1) for item in request.content.decode().split("&"))["assertion"]
+        scopes_seen.append(_jwt_scope(assertion))
+        return httpx.Response(200, json={"access_token": f"token-{len(scopes_seen)}", "expires_in": 3600})
+
+    import hashlib
+    base_fp = _compute_credential_fingerprint(VALID_SA_INFO_DICT, subject=None)
+    calendar_fp = _compute_credential_fingerprint(VALID_SA_INFO_DICT, subject=None, scopes=CALENDAR_SCOPES)
+    # The 0.2.x formula, spelled out: base-scope cache keys must not change.
+    key_sha = hashlib.sha256(VALID_SA_INFO_DICT["private_key"].encode("utf-8")).hexdigest()[:16]
+    legacy = (f"{VALID_SA_INFO_DICT['project_id']}:{VALID_SA_INFO_DICT['client_email']}:"
+              f"{VALID_SA_INFO_DICT['private_key_id']}:{key_sha}:")
+    assert base_fp == hashlib.sha256(legacy.encode("utf-8")).hexdigest()
+    assert _compute_credential_fingerprint(VALID_SA_INFO_DICT, subject=None, scopes=GOOGLE_SCOPES) == base_fp
+    assert calendar_fp != base_fp
+    _TOKEN_CACHE.pop(base_fp, None)
+    _TOKEN_CACHE.pop(calendar_fp, None)
+
+    mock_client = httpx.Client(transport=httpx.MockTransport(handle_request))
+    base = get_access_token(raw_info=VALID_SA_JSON_STR, http_client=mock_client)
+    calendar = get_access_token(raw_info=VALID_SA_JSON_STR, http_client=mock_client, scopes=CALENDAR_SCOPES)
+    assert (base, calendar) == ("token-1", "token-2")
+    assert get_access_token(raw_info=VALID_SA_JSON_STR, http_client=mock_client) == "token-1"
+    assert get_access_token(raw_info=VALID_SA_JSON_STR, http_client=mock_client, scopes=CALENDAR_SCOPES) == "token-2"
+    assert scopes_seen == [" ".join(GOOGLE_SCOPES), "https://www.googleapis.com/auth/calendar"]
+    _TOKEN_CACHE.pop(base_fp, None)
+    _TOKEN_CACHE.pop(calendar_fp, None)
+
+
 def test_sheets_read():
     def handle_request(request: httpx.Request) -> httpx.Response:
         url_str = str(request.url)
@@ -509,6 +551,8 @@ def test_plugin_registration_and_settings_save(tmp_path, monkeypatch):
     assert render_schema["enum"] == ["FORMATTED_VALUE", "UNFORMATTED_VALUE", "FORMULA"]
     assert render_schema["default"] == "FORMATTED_VALUE"
     assert mock_api.tools["sheets_info"]["schema"]["required"] == ["spreadsheet_id"]
+    service_schema = mock_api.tools["workspace_request"]["schema"]["properties"]["service"]
+    assert service_schema["enum"] == ["drive", "docs", "sheets", "slides", "calendar"]
 
     class FakeClient:
         def __init__(self, **kwargs):

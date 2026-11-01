@@ -174,7 +174,7 @@ def test_submission_and_deferred_result_enqueue_each_text_once(tmp_path):
     assert work.binding_id == "b" * 32
     assert work.work_ref == "work-40"
     store.complete_work(
-        work.event_id, status="completed", text="The follow-up is ready."
+        work.work_ref, status="completed", text="The follow-up is ready."
     )
 
     deliveries = []

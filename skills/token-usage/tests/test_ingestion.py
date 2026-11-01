@@ -22,7 +22,7 @@ def journal(*rows):
 
 class IngestionTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir=Path.cwd())
+        self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         (self.root / "state").mkdir()
         self.path = self.root / "state/usage_attempts.jsonl"
