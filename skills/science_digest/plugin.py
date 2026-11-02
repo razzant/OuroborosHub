@@ -9,20 +9,22 @@ recorded attempt does.
 from __future__ import annotations
 
 import email.utils
+import functools
 import hashlib
 import http.client
+import io
 import ipaddress
 import json
 import re
 import socket
 import sqlite3
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.parsers.expat
 import zlib
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
@@ -63,11 +65,16 @@ LOOKBACK_DAYS = 7
 # an unread feed tail could hold a newer item.
 FEED_ORDER_SLACK = timedelta(days=1)
 REQUEST_TIMEOUT = 6
-# Whole-body wall clock per source, so a slow trickle cannot hold the tool.
-READ_DEADLINE = 20
+# Absolute wall clock per source across connect, TLS, response headers and every
+# body read including chunk framing. REQUEST_TIMEOUT only limits silence, which a
+# slow trickle never lets happen.
+READ_DEADLINE = 30
 # Sources are fetched concurrently: 12 sequential slow sources could outlast
 # the 120 s tool timeout and lose every source's result.
 MAX_PARALLEL_SOURCES = 6
+# A call returns by this, below the 120 s tool timeout, whatever a source does:
+# DNS lookups, for one, cannot be interrupted.
+FETCH_DEADLINE = 80
 READABLE = ("recent_page_only", "feed_window")
 _USER_AGENT = "Ouroboros-ScienceDigest/0.4 (public preview; owner-chosen feeds)"
 _FEED_ACCEPT = ("application/rss+xml, application/atom+xml, application/rdf+xml;q=0.9, "
@@ -98,8 +105,11 @@ _SCHEMA = (
     "content_sha256 TEXT NOT NULL, recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"
     "CREATE TABLE IF NOT EXISTS seen (channel TEXT PRIMARY KEY, last_id INTEGER NOT NULL);"
     # Telegram IDs a fetch returned; text_extracted=0 rows were listed by link, never read.
+    # not_read=1 rows were recorded as attempted-not-read, the only posts below the
+    # cursor that include_attempted brings back: the cursor alone also passes baseline posts.
     "CREATE TABLE IF NOT EXISTS observed (channel TEXT NOT NULL, id INTEGER NOT NULL, "
-    "lost_reported INTEGER NOT NULL DEFAULT 0, text_extracted INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(channel,id));"
+    "lost_reported INTEGER NOT NULL DEFAULT 0, text_extracted INTEGER NOT NULL DEFAULT 1, "
+    "not_read INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(channel,id));"
     "CREATE TABLE IF NOT EXISTS telegram_reads (channel TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0, "
     "since TEXT NOT NULL DEFAULT '');"
     "CREATE TABLE IF NOT EXISTS gaps (channel TEXT PRIMARY KEY, lost_count INTEGER NOT NULL);"
@@ -110,12 +120,22 @@ _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS feed_items (source TEXT NOT NULL, key TEXT NOT NULL, published TEXT NOT NULL, "
     "attempted INTEGER NOT NULL DEFAULT 0, returned INTEGER NOT NULL DEFAULT 0, "
     "lost_reported INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source,key));"
+    # Per source, what its latest published fetch_posts call returned. An edition
+    # names these calls in record_attempt; nothing is derived from older reads.
+    "CREATE TABLE IF NOT EXISTS fetches (id INTEGER PRIMARY KEY AUTOINCREMENT);"
+    "CREATE TABLE IF NOT EXISTS fetch_receipts (source TEXT PRIMARY KEY, fetch_id INTEGER NOT NULL, "
+    "post_ids TEXT NOT NULL);"
 )
 # Columns later revisions added to tables an installed revision already has.
 _MIGRATIONS = (("observed", "lost_reported", "INTEGER NOT NULL DEFAULT 0"),
                ("observed", "text_extracted", "INTEGER NOT NULL DEFAULT 1"),
+               ("observed", "not_read", "INTEGER NOT NULL DEFAULT 0"),
                ("telegram_reads", "since", "TEXT NOT NULL DEFAULT ''"),
                ("feeds", "url", "TEXT NOT NULL DEFAULT ''"))
+# Until not_read existed, a textless post a fetch returned and the cursor passed
+# was what an edition recorded as attempted-not-read; it stays retryable.
+_BACKFILLS = {"not_read": "UPDATE observed SET not_read=1 WHERE text_extracted=0 AND "
+                          "id<=(SELECT last_id FROM seen WHERE seen.channel=observed.channel)"}
 
 
 @contextmanager
@@ -130,6 +150,8 @@ def _connect():
         for table, column, declaration in _MIGRATIONS:
             if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+                if column in _BACKFILLS:
+                    conn.execute(_BACKFILLS[column])
         conn.commit()
         with conn:
             yield conn
@@ -300,6 +322,7 @@ def _channels(action: str = "list", name: str = "") -> str:
                 known = stored.startswith("rss:") and conn.execute("SELECT 1 FROM channels WHERE name=?", (stored,)).fetchone()
                 source = stored if known else _source_name(name)[0]
                 conn.execute("DELETE FROM channels WHERE name=?", (source,))
+                conn.execute("DELETE FROM fetch_receipts WHERE source=?", (source,))
                 if source.startswith("rss:"):
                     # The window and attempted identities stay so a later
                     # re-add cannot replay what was already attempted.
@@ -321,7 +344,87 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise urllib.error.HTTPError(request.full_url, code, "redirect not followed", headers, fp)
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect())
+class _Deadline:
+    """One source's absolute wall clock. Every blocking transport operation takes
+    its socket timeout from here, so a peer that keeps REQUEST_TIMEOUT satisfied
+    cannot outlast it. A TLS read or handshake applies its timeout as a whole."""
+
+    def __init__(self) -> None:
+        self.at = time.monotonic() + READ_DEADLINE
+
+    def spent(self) -> bool:
+        return time.monotonic() >= self.at
+
+    def timeout(self) -> float:
+        left = self.at - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("read deadline exceeded")
+        return min(REQUEST_TIMEOUT, left)
+
+
+class _TimedReader(io.RawIOBase):
+    """The stream http.client parses status lines, headers, chunk framing and
+    bodies from; each underlying read is re-armed from the deadline."""
+
+    def __init__(self, sock: Any, deadline: _Deadline) -> None:
+        super().__init__()
+        self.sock, self.deadline = sock, deadline
+        # Unbuffered and counted by the socket, which urllib closes after the headers.
+        self.stream = sock.makefile("rb", buffering=0)
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int | None:
+        self.sock.settimeout(self.deadline.timeout())
+        return self.stream.readinto(buffer)
+
+    def close(self) -> None:
+        self.stream.close()
+        super().close()
+
+
+class _TimedSocket:
+    """All HTTPResponse asks of a socket, with the deadline on every read."""
+
+    def __init__(self, sock: Any, deadline: _Deadline) -> None:
+        self.sock, self.deadline = sock, deadline
+
+    def makefile(self, _mode: str = "rb") -> io.BufferedReader:
+        return io.BufferedReader(_TimedReader(self.sock, self.deadline))
+
+
+class _TimedConnection(http.client.HTTPSConnection):
+    def __init__(self, *args: Any, deadline: _Deadline, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.deadline = deadline
+        self._create_connection = self._dial
+        self.response_class = self._response
+
+    def _response(self, sock: Any, *args: Any, **kwargs: Any) -> http.client.HTTPResponse:
+        return http.client.HTTPResponse(_TimedSocket(sock, self.deadline), *args, **kwargs)
+
+    def _dial(self, address: tuple[str, int], _timeout: Any = None, source_address: Any = None) -> socket.socket:
+        """socket.create_connection would give every address the full timeout."""
+        failure: OSError | None = None
+        for *_, target in socket.getaddrinfo(address[0], address[1], type=socket.SOCK_STREAM):
+            timeout = self.deadline.timeout()
+            try:
+                sock = socket.create_connection(target[:2], timeout, source_address)
+            except OSError as exc:
+                failure = exc
+                continue
+            sock.settimeout(self.deadline.timeout())  # the TLS handshake that follows
+            return sock
+        raise failure or OSError("host lookup returned no address")
+
+
+class _TimedHTTPS(urllib.request.HTTPSHandler):
+    def https_open(self, req: Any) -> Any:
+        return self.do_open(functools.partial(_TimedConnection, deadline=req.deadline), req)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect(), _TimedHTTPS())
 
 
 class _Unavailable(Exception):
@@ -360,32 +463,69 @@ def _resolve(host: str, port: int) -> list[str]:
     return [info[4][0] for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
 
 
-def _read_bounded(response: Any, limit: int) -> tuple[bytes, bool]:
-    """Read at most limit+1 decoded bytes. False means READ_DEADLINE cut the
-    body short. A CDN may gzip a response nobody asked to compress (the
-    DeepMind feed does, intermittently); inflate it under the same bound."""
+class _Gunzip:
+    """A gzip body is a series of members (RFC 1952), each decoded in turn. Output
+    stops at the caller's room, so a bomb cannot expand; once there is no room the
+    caller stops reading, so input is held for one read at most."""
+
+    def __init__(self) -> None:
+        self.member = zlib.decompressobj(16 + zlib.MAX_WBITS)
+
+    def ended(self) -> bool:
+        return self.member.eof
+
+    def feed(self, data: bytes, room: int) -> bytes:
+        decoded = []
+        while data and room > 0:
+            if self.member.eof:
+                # As gzip itself: zero padding may follow; anything else must be a member.
+                data = data.lstrip(b"\0")
+                if not data:
+                    break
+                self.member = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            part = self.member.decompress(data, room)
+            decoded.append(part)
+            room -= len(part)
+            data = self.member.unused_data if self.member.eof else b""
+        return b"".join(decoded)
+
+
+def _read_bounded(response: Any, limit: int, deadline: _Deadline) -> tuple[bytes, bool]:
+    """Read at most limit+1 decoded bytes. False means the deadline cut the body
+    short. A CDN may gzip a response nobody asked to compress (the DeepMind feed
+    does, intermittently); inflate it under the same bound."""
     encoding = str(response.headers.get("Content-Encoding") or "identity").strip().lower()
     if encoding not in ("identity", "gzip", "x-gzip"):
         raise _BodyError(f"unsupported content encoding {encoding[:20]!r}")
-    inflate = None if encoding == "identity" else zlib.decompressobj(16 + zlib.MAX_WBITS)
-    deadline = time.monotonic() + READ_DEADLINE
+    gunzip = None if encoding == "identity" else _Gunzip()
     # read1 returns after one socket read, so the deadline is checked between
     # reads instead of after a long blocking read(n).
     read = getattr(response, "read1", None) or response.read
+    # Valid gzip is about the size of its content; tiny or empty members are not.
+    max_input = 2 * limit + 64 * 1024
+    received = 0
     chunks: list[bytes] = []
     size = 0
     while size <= limit:
-        if time.monotonic() >= deadline:
+        if deadline.spent():
             return b"".join(chunks), False
-        data = read(min(64 * 1024, limit + 1 - size))
+        try:
+            data = read(min(64 * 1024, limit + 1 - size))
+        except TimeoutError:
+            # The deadline, not silence, cut this read or its chunk framing.
+            if deadline.spent():
+                return b"".join(chunks), False
+            raise
         if not data:
-            if inflate is not None and not inflate.eof:
+            if gunzip is not None and not gunzip.ended():
                 raise _BodyError("truncated gzip body")
             break
-        if inflate is not None:
+        if gunzip is not None:
+            received += len(data)
+            if received > max_input:
+                raise _BodyError("compressed body exceeds its input bound")
             try:
-                # max_length bounds the output, so a gzip bomb cannot expand.
-                data = inflate.decompress(data, limit + 1 - size)
+                data = gunzip.feed(data, limit + 1 - size)
             except zlib.error:
                 raise _BodyError("corrupt gzip body") from None
         chunks.append(data)
@@ -397,10 +537,11 @@ def _get(url: str, accept: str, limit: int, *, html: bool) -> tuple[bytes, bool]
     """One GET of a public https URL: (body of at most limit+1 bytes, complete).
 
     The host must resolve only to public addresses. Redirects raise
-    _Redirected; nothing is followed. Residual risks: DNS can change between
-    this check and urllib's own connection, and a configured proxy resolves
-    the host itself.
+    _Redirected; nothing is followed. One deadline covers the whole exchange.
+    Residual risks: DNS can change between this check and urllib's own
+    connection, and a configured proxy resolves the host itself.
     """
+    deadline = _Deadline()
     parts = urllib.parse.urlsplit(url)
     host = parts.hostname or ""
     try:
@@ -413,13 +554,14 @@ def _get(url: str, accept: str, limit: int, *, html: bool) -> tuple[bytes, bool]
     if blocked:
         raise _Unavailable(f"refused: {host} resolves to non-public address {blocked}")
     request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": accept})
+    request.deadline = deadline  # type: ignore[attr-defined]
     try:
         with _OPENER.open(request, timeout=REQUEST_TIMEOUT) as response:
             if response.geturl() != url:
                 raise _Unavailable("unexpected URL in response")
             if ("text/html" in str(response.headers.get("Content-Type") or "").lower()) != html:
                 raise _Unavailable("response is not HTML" if html else "response is an HTML page, not a feed")
-            return _read_bounded(response, limit)
+            return _read_bounded(response, limit, deadline)
     except urllib.error.HTTPError as exc:
         # Name the status (rate limit, block, redirect) without reading the body.
         code = exc.code if isinstance(exc.code, int) else 0
@@ -434,7 +576,7 @@ def _get(url: str, accept: str, limit: int, *, html: bool) -> tuple[bytes, bool]
     except _BodyError as exc:
         raise _Unavailable(str(exc)) from None
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
-        raise _Unavailable(type(exc).__name__) from None
+        raise _Unavailable("read deadline exceeded" if deadline.spent() else type(exc).__name__) from None
 
 
 def _http_url(value: str) -> str:
@@ -857,13 +999,19 @@ def _telegram_source(channel: str, per_channel: int, include_attempted: bool, wa
         gap = conn.execute("SELECT lost_count FROM gaps WHERE channel=?", (channel,)).fetchone()
         returned = {row[0] for row in conn.execute("SELECT id FROM observed WHERE channel=? AND id>?",
                                                    (channel, watermark))}
+        not_read = {row[0] for row in conn.execute("SELECT id FROM observed WHERE channel=? AND not_read=1",
+                                                   (channel,))}
+    # Before the first attempt the page should reach back to the window start;
+    # one that begins later may have left in-window posts unread. Post 1 has no past.
+    short_page = bool(not watermark and oldest > 1
+                      and min((post["date"] for post in posts if post["date"]), default="") > since)
     row: dict[str, Any] = {
         "channel": channel, "kind": "telegram",
         "coverage": "redirected" if redirect is not None else "unavailable" if error else "recent_page_only",
         "error": error, "posts": [], "omitted_posts": 0, "first_omitted_id": "",
         # The page continues the attempted run only when its oldest post is
         # the very next ID; a contiguous next page is not a gap.
-        "possible_gap": bool(lost_now or (watermark and oldest > watermark + 1)),
+        "possible_gap": bool(lost_now or (watermark and oldest > watermark + 1) or short_page),
         "lost_unattempted_now": lost_now, "historical_lost_unattempted": gap[0] if gap else 0,
         "last_attempted_id": watermark, "stale_read": generation != latest, "_generation": generation}
     if redirect is not None:
@@ -880,8 +1028,10 @@ def _telegram_source(channel: str, per_channel: int, include_attempted: bool, wa
     # the window forward), as an observed feed item does.
     baseline = {_number(post["id"]) for post in posts if not watermark and post["date"] and post["date"] < since
                 and _number(post["id"]) not in returned}
+    # Below the cursor only posts recorded as attempted-not-read can come back:
+    # a read post needs no retry, and a post the cursor merely passed was never attempted.
     eligible = [post for post in posts if _number(post["id"]) not in baseline and (
-        include_attempted or _number(post["id"]) > watermark)]
+        _number(post["id"]) > watermark or (include_attempted and _number(post["id"]) in not_read))]
     # A portion is the oldest contiguous run holding at most per_channel
     # readable posts, with the text-not-extracted posts among them.
     portion: list[dict[str, Any]] = []
@@ -903,18 +1053,20 @@ def _telegram_source(channel: str, per_channel: int, include_attempted: bool, wa
         elif post.get("placeholder"):
             entry["preview_note"] = post["placeholder"]
         if include_attempted:
-            entry["already_attempted"] = _number(post["id"]) <= watermark
+            entry["already_attempted"] = _number(post["id"]) in not_read
         (row["posts"] if post["text"] else textless).append(entry)
     # Optional facts appear only when they say something, to keep the output budget for posts.
     if textless:
         row["text_not_extracted"] = textless
     if baseline:
         row.update(window_since=since, baseline_posts=len(baseline))
+    elif short_page:
+        row["window_since"] = since
     row.update(omitted_posts=len(rest), first_omitted_id=rest[0]["id"] if rest else "")
     return row
 
 
-def _feed_source(source: str, per_channel: int, include_attempted: bool) -> dict[str, Any]:
+def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
     with _connect() as conn:
         stored = conn.execute("SELECT since,url FROM feeds WHERE name=?", (source,)).fetchone()
         since, url = (stored[0], stored[1]) if stored else (_window_start(), "")
@@ -992,11 +1144,9 @@ def _feed_source(source: str, per_channel: int, include_attempted: bool) -> dict
         hidden_pending = any(not unattempted[key] for key in pending - present)
         truncation_gap = hidden_pending or not _date_ordered(dated)
     # No numeric watermark: every unattempted identity inside the subscription
-    # window stays eligible, oldest first, whatever order the feed uses.
-    pool = sorted((item for item in window if include_attempted or item["key"] in unseen),
-                  key=lambda item: (item["date"], item["key"]))
-    if include_attempted:
-        pool = pool[-MAX_POSTS_PER_CHANNEL:]
+    # window stays eligible, oldest first, whatever order the feed uses. An attempted
+    # item was returned with its title and excerpt, so include_attempted retries nothing here.
+    pool = sorted((item for item in window if item["key"] in unseen), key=lambda item: (item["date"], item["key"]))
     posts = []
     for item in [] if error else pool:
         # title and excerpt are the feed's own fields, never the read article.
@@ -1004,8 +1154,6 @@ def _feed_source(source: str, per_channel: int, include_attempted: bool) -> dict
                 "excerpt": item["excerpt"]}
         if item["excerpt_truncated"]:
             post["excerpt_truncated"] = True
-        if include_attempted:
-            post["already_attempted"] = item["key"] in attempted
         posts.append(post)
     row = {"channel": source, "kind": "rss", "format": facts.get("format", ""),
            "coverage": "redirected" if redirect is not None else "unavailable" if error else "feed_window",
@@ -1025,11 +1173,38 @@ def _feed_source(source: str, per_channel: int, include_attempted: bool) -> dict
     return row
 
 
-def _failed_source(name: str, exc: Exception) -> dict[str, Any]:
+def _failed_source(name: str, error: str, coverage: str = "unavailable") -> dict[str, Any]:
     """Any unexpected failure of one source becomes that source's own status."""
     return {"channel": name, "kind": "rss" if name.startswith("rss:") else "telegram",
-            "coverage": "unavailable", "error": f"source failed: {type(exc).__name__}: {str(exc)[:120]}",
+            "coverage": coverage, "error": error,
             "posts": [], "omitted_posts": 0, "first_omitted_id": "", "possible_gap": False}
+
+
+def _gather(names: list[str], read: Any) -> list[dict[str, Any]]:
+    """Every source's result in the given order, by FETCH_DEADLINE. Network waits
+    overlap, and each source keeps its own read generation and transactions. A
+    source still running at the deadline is reported and left behind: its thread
+    is a daemon, so it holds neither this call nor the interpreter's exit."""
+    slots = threading.Semaphore(MAX_PARALLEL_SOURCES)
+    late = threading.Event()
+    results: dict[str, dict[str, Any]] = {}
+
+    def work(name: str) -> None:
+        with slots:
+            if not late.is_set():
+                results[name] = read(name)
+
+    workers = [threading.Thread(target=work, args=(name,), name=f"science-digest-{name}", daemon=True)
+               for name in names]
+    stop = time.monotonic() + FETCH_DEADLINE
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(max(0.0, stop - time.monotonic()))
+    late.set()
+    return [results.get(name) or _failed_source(
+        name, f"no result within the {FETCH_DEADLINE} s fetch deadline; retry this source alone", "timeout")
+        for name in names]
 
 
 def _entries(row: dict[str, Any]) -> int:
@@ -1077,6 +1252,8 @@ def _fetch_posts(limit: int = 10, include_attempted: bool = False, channel: str 
         channels = [selected]
     attempts: list[dict[str, Any]] = []
     with _connect() as conn:
+        fetch_id = conn.execute("INSERT INTO fetches DEFAULT VALUES").lastrowid
+        conn.execute("DELETE FROM fetches WHERE id<?", (fetch_id,))
         for row in conn.execute("SELECT key,day,post_ids,recorded_at FROM attempts ORDER BY recorded_at DESC,key DESC LIMIT 7"):
             attempts.append({"key": row[0], "day": row[1], "post_count": len(json.loads(row[2])),
                              "recorded_at": row[3], "status": "attempted_not_delivered"})
@@ -1084,26 +1261,29 @@ def _fetch_posts(limit: int = 10, include_attempted: bool = False, channel: str 
     def read(name: str) -> dict[str, Any]:
         try:
             if name.startswith("rss:"):
-                return _feed_source(name, per_channel, bool(include_attempted))
+                return _feed_source(name, per_channel)
             return _telegram_source(name, per_channel, bool(include_attempted), seen.get(name, 0))
         except Exception as exc:  # one source's failure must never hide the others
-            return _failed_source(name, exc)
+            return _failed_source(name, f"source failed: {type(exc).__name__}: {str(exc)[:120]}")
 
-    if len(channels) == 1:
-        results = [read(channels[0])]
-    else:
-        # Network waits overlap. Each source keeps its own read generation and
-        # transactions; results keep the configured order.
-        with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_SOURCES, len(channels)),
-                                thread_name_prefix="science-digest") as pool:
-            results = list(pool.map(read, channels))
-    result = {"ok": any(x["coverage"] in READABLE for x in results),
+    results = _gather(channels, read)
+    timed_out = [row["channel"] for row in results if row["coverage"] == "timeout"]
+    if timed_out:
+        # A read left behind must not apply its late snapshot as the current one
+        # (it would use up a loss report the agent never saw): it is now stale.
+        with _connect() as conn:
+            for name in timed_out:
+                conn.execute("UPDATE feeds SET read_generation=read_generation+1 WHERE name=?"
+                             if name.startswith("rss:") else
+                             "UPDATE telegram_reads SET generation=generation+1 WHERE channel=?", (name,))
+    result = {"ok": any(x["coverage"] in READABLE for x in results), "fetch_id": fetch_id,
               "interests": interests[0] if interests else "", "channels": results,
               "recent_attempts": attempts, "archive_complete": False,
               "source_text_is_untrusted": True,
               "workflow": "Judge relevance to the owner's interests. A feed title/excerpt is the feed's text, not the "
                           "article: open its url before relying on it. List text_not_extracted by link and count, "
-                          "state coverage per source, then record_attempt (an attempt, not delivery).",
+                          "state coverage per source, then record_attempt with this fetch_id in fetch_ids "
+                          "(an attempt, not delivery).",
               "output_limited": False}
     if missing:
         # Sources exist but no interests: ask instead of inventing a profile.
@@ -1146,6 +1326,12 @@ def _fetch_posts(limit: int = 10, include_attempted: bool = False, channel: str 
                                "channel_count": len(results), "coverage": "unavailable"})
         # Only IDs in this exact returned JSON become eligible to record.
         for item in results:
+            # A stale read is not this source's latest; a newer call may have published.
+            if not item.get("stale_read"):
+                conn.execute("INSERT INTO fetch_receipts(source,fetch_id,post_ids) VALUES (?,?,?) ON CONFLICT(source) "
+                             "DO UPDATE SET fetch_id=excluded.fetch_id, post_ids=excluded.post_ids",
+                             (item["channel"], fetch_id, json.dumps(
+                                 [post["id"] for post in item["posts"] + (item.get("text_not_extracted") or [])])))
             if item["kind"] == "rss":
                 conn.executemany("UPDATE feed_items SET returned=1 WHERE source=? AND key=?",
                                  ((item["channel"], post["id"].rsplit("/", 1)[1]) for post in item["posts"]))
@@ -1177,7 +1363,8 @@ def _bound_feed_state(conn: sqlite3.Connection, source: str) -> None:
     conn.execute("DELETE FROM feed_items WHERE source=? AND attempted=1 AND published<?", (source, since))
 
 
-def _record_attempt(day: str, post_ids: list[str], edition: str = "daily") -> str:
+def _record_attempt(day: str, post_ids: list[str] | None = None, edition: str = "daily",
+                    fetch_ids: list[int] | None = None) -> str:
     try:
         normalized_day = date.fromisoformat(day)
         if normalized_day.isoformat() != day:
@@ -1186,16 +1373,30 @@ def _record_attempt(day: str, post_ids: list[str], edition: str = "daily") -> st
             edition = "daily"
         if not isinstance(edition, str) or not EDITION.fullmatch(edition):
             raise ValueError("edition must be 1–80 ASCII letters/digits/_.:-; default daily")
+        # Forgetting both must not spend the day's idempotency key on an empty attempt.
+        if post_ids is None and fetch_ids is None:
+            raise ValueError("record_attempt needs fetch_ids (the fetch_posts calls this edition used) or post_ids")
+        post_ids = [] if post_ids is None else post_ids
+        fetch_ids = [] if fetch_ids is None else fetch_ids
         if not isinstance(post_ids, list) or len(post_ids) > MAX_CHANNELS * MAX_POSTS_PER_CHANNEL or any(
                 not isinstance(x, str) or not (POST_ID.fullmatch(x) or FEED_ID.fullmatch(x.lower())) for x in post_ids):
             raise ValueError("post_ids must be at most 240 channel/id or rss:feed/key strings")
+        if not isinstance(fetch_ids, list) or len(fetch_ids) > 2 * MAX_CHANNELS or any(
+                not isinstance(x, int) or isinstance(x, bool) for x in fetch_ids):
+            raise ValueError("fetch_ids must be at most 24 fetch_id integers from fetch_posts results")
         key = f"{day}:{edition}"
-        unique = sorted(set(x.lower() for x in post_ids))
-        digest = hashlib.sha256(json.dumps(unique, separators=(",", ":")).encode()).hexdigest()
         with _connect() as conn:
             # Validate and publish the receipt under one write lease. A fetch
             # cannot change marker state between checking IDs and the attempt.
             conn.execute("BEGIN IMMEDIATE")
+            # A fetch_id stands for what that call returned from each source whose
+            # latest fetch it still is. Nothing else is implied: an older read,
+            # another source's or an unavailable page's, can advance nothing.
+            current: dict[int, list[str]] = {}
+            for fetch_id, returned in conn.execute("SELECT fetch_id,post_ids FROM fetch_receipts"):
+                current.setdefault(fetch_id, []).extend(json.loads(returned))
+            unique = sorted({x.lower() for x in post_ids} | {x for i in fetch_ids for x in current.get(i, [])})
+            digest = hashlib.sha256(json.dumps(unique, separators=(",", ":")).encode()).hexdigest()
             prior_receipt = conn.execute(
                 "SELECT key,day,post_ids,content_sha256,recorded_at FROM attempts WHERE key=?", (key,)
             ).fetchone()
@@ -1205,6 +1406,10 @@ def _record_attempt(day: str, post_ids: list[str], edition: str = "daily") -> st
                                    "recorded_at": prior_receipt[4], "new_attempt": False,
                                    "same_selection": prior_receipt[3] == digest,
                                    "status": "already_attempted_do_not_auto_publish"})
+            superseded = sorted({i for i in fetch_ids if i not in current})
+            if superseded:
+                raise ValueError(f"fetch_ids {superseded} are no source's latest fetch; "
+                                 "use the fetch_id of the latest fetch_posts result, or name the ids in post_ids")
             chosen: dict[str, set[int]] = {}
             feed_keys: list[tuple[str, str]] = []
             for post_id in unique:
@@ -1222,38 +1427,34 @@ def _record_attempt(day: str, post_ids: list[str], edition: str = "daily") -> st
                 else:
                     chosen.setdefault(channel, set()).add(int(identifier))
             marks: dict[str, int] = {}
+            flags: list[tuple[int, str, int]] = []
             not_read: list[str] = []
-            channels = {row[0] for row in conn.execute("SELECT name FROM channels WHERE name NOT LIKE 'rss:%'")}
-            for channel in sorted(channels | set(chosen)):
-                ids = chosen.get(channel, set())
+            for channel, ids in sorted(chosen.items()):
                 watermark = conn.execute("SELECT last_id FROM seen WHERE channel=?", (channel,)).fetchone()
                 prior = watermark[0] if watermark else 0
-                mark = max([prior, *ids])
-                unaccounted = conn.execute(
-                    "SELECT id FROM observed WHERE channel=? AND id>? AND id<=? AND lost_reported=0 "
-                    "AND text_extracted=1", (channel, prior, mark)).fetchall()
-                if any(row[0] not in ids for row in unaccounted):
-                    raise ValueError("post_ids must include every earlier returned post before advancing a channel")
-                # Text-not-extracted posts returned right after the recorded
-                # ones are attempted, not read: the next edition does not
-                # repeat them. A returned readable post not recorded stops this.
-                for identifier, extracted in conn.execute(
-                        "SELECT id,text_extracted FROM observed WHERE channel=? AND id>? ORDER BY id",
-                        (channel, mark)).fetchall():
-                    if extracted:
-                        break
-                    mark = identifier
+                mark = max(prior, *ids)
+                for identifier, extracted, lost in conn.execute(
+                        "SELECT id,text_extracted,lost_reported FROM observed WHERE channel=? AND id>=? AND id<=? ORDER BY id",
+                        (channel, min(prior + 1, *ids), mark)).fetchall():
+                    if identifier not in ids:
+                        # A returned post the cursor would pass without being named.
+                        if identifier <= prior or lost:
+                            continue
+                        if extracted:
+                            raise ValueError("post_ids must include every earlier returned post before advancing a channel")
+                    # Recorded with text it leaves the retry pool; without text it joins it.
+                    flags.append((0 if extracted else 1, channel, identifier))
+                    if not extracted:
+                        not_read.append(f"{channel}/{identifier}")
                 if mark > prior:
                     marks[channel] = mark
-                    not_read += [f"{channel}/{row[0]}" for row in conn.execute(
-                        "SELECT id FROM observed WHERE channel=? AND id>? AND id<=? AND text_extracted=0 ORDER BY id",
-                        (channel, prior, mark))]
             inserted = conn.execute("INSERT OR IGNORE INTO attempts(key,day,post_ids,content_sha256) VALUES (?,?,?,?)",
                                     (key, day, json.dumps(unique), digest)).rowcount
             if inserted:
                 for channel, mark in marks.items():
                     conn.execute("INSERT INTO seen(channel,last_id) VALUES (?,?) ON CONFLICT(channel) "
                                  "DO UPDATE SET last_id=MAX(last_id,excluded.last_id)", (channel, mark))
+                conn.executemany("UPDATE observed SET not_read=? WHERE channel=? AND id=?", flags)
                 updated = conn.executemany("UPDATE feed_items SET attempted=1 WHERE source=? AND key=?", feed_keys).rowcount
                 if updated != len(feed_keys):
                     raise ValueError("feed item changed before attempt could be recorded")
@@ -1282,14 +1483,15 @@ def register(api: Any) -> None:
                       schema={"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "add", "remove"]},
                                                                "name": {"type": "string"}}})
     api.register_tool("fetch_posts", _fetch_posts,
-                      description="Fetch bounded new items, oldest first, from every source or one (channel=name, rss:key or URL), with per-source coverage. Telegram posts carry preview text; text_not_extracted lists posts without text by link. Feed items carry the feed's own title/excerpt, not the article. include_attempted=true re-fetches attempted items still visible, for a requested revision or retry.",
+                      description="Fetch bounded new items, oldest first, from every source or one (channel=name, rss:key or URL), with per-source coverage and the fetch_id record_attempt takes. Telegram posts carry preview text; text_not_extracted lists posts without text by link. Feed items carry the feed's own title/excerpt, not the article. include_attempted=true also returns posts recorded as attempted-not-read that are still public, to retry them.",
                       schema={"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20},
                                                                "include_attempted": {"type": "boolean"},
                                                                "channel": {"type": "string"}}},
                       timeout_sec=120)
     api.register_tool("record_attempt", _record_attempt,
-                      description="After composing a digest, record every inspected returned post and feed item id as an ATTEMPT, never delivery. Text-not-extracted posts of that fetch are recorded as attempted-not-read automatically. day+edition (default daily) is the idempotency key; use a distinct edition for another same-day digest.",
+                      description="After composing a digest, record it as an ATTEMPT, never delivery. fetch_ids lists the fetch_id of each fetch_posts call the edition used: everything those calls returned is recorded, posts as inspected and text_not_extracted as attempted-not-read, for each source whose latest fetch that call still is. post_ids instead records only the ids named. day (YYYY-MM-DD) + edition (default daily) is the idempotency key; use a distinct edition for another same-day digest.",
                       schema={"type": "object", "properties": {"day": {"type": "string"},
                                                                "edition": {"type": "string"},
+                                                               "fetch_ids": {"type": "array", "items": {"type": "integer"}},
                                                                "post_ids": {"type": "array", "items": {"type": "string"}}},
-                              "required": ["day", "post_ids"]})
+                              "required": ["day"]})

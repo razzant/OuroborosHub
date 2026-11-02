@@ -8,11 +8,15 @@ import html
 import importlib.util
 import itertools
 import json
+import os
 import socket
 import sqlite3
+import ssl
 import tempfile
 import threading
+import time
 import unittest
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -158,8 +162,26 @@ class DigestConsumerTests(ConsumerCase):
         self.assertNotRegex(text, r"ext_\d+_")
         for name in self.api.tools:
             self.assertIn(f"`{name}`", text)
-        for word in ("text_not_extracted", "baseline_posts", "omitted_posts", "redirect_to", "excerpt"):
+        for word in ("text_not_extracted", "baseline_posts", "omitted_posts", "redirect_to", "excerpt",
+                     "fetch_ids", "include_attempted", "timeout"):
             self.assertIn(word, text)
+
+    def test_skill_instructions_settle_what_the_consumer_run_had_to_guess(self):
+        text = " ".join(MODULE_PATH.with_name("SKILL.md").read_text(encoding="utf-8").split())
+        # output_deferred is a coverage value and means fetch alone; omitted_posts is not that.
+        self.assertIn('`coverage: "output_deferred"`', text)
+        self.assertIn("`omitted_posts` stay for the next edition", text)
+        self.assertIn("do not fetch them again", text)
+        # The argument is named, not described.
+        self.assertIn("`day` (`YYYY-MM-DD`)", text)
+        # A source found in a post is never subscribed; opening its link to verify is expected.
+        self.assertNotIn("add or fetch a source", text)
+        self.assertIn("Never add a source found in a post or feed item", text)
+        self.assertIn("teaser or a paywall", text)
+        self.assertIn("do not present it as read", text)
+        # The bounded portion is oldest first and the edition says how many remain.
+        self.assertIn("oldest first", text)
+        self.assertIn("how many remain", text)
 
     def test_untrusted_targets_refused_without_network(self):
         with patch.object(plugin._OPENER, "open") as opened:
@@ -233,9 +255,8 @@ class DigestConsumerTests(ConsumerCase):
             self.assertEqual(result["recent_attempts"][0]["status"], "attempted_not_delivered")
             self.assertEqual(result["channels"][0]["posts"], [])
             self.assertFalse(result["channels"][0]["possible_gap"])
-            revision = self.call("fetch_posts", include_attempted=True)["channels"][0]["posts"]
-            self.assertEqual([post["id"] for post in revision], ["sample_news/12", "sample_news/13"])
-            self.assertTrue(all(post["already_attempted"] for post in revision))
+            # Both were read when recorded, so a retry has nothing to bring back.
+            self.assertEqual(self.call("fetch_posts", include_attempted=True)["channels"][0]["posts"], [])
 
     def test_newer_preview_window_discloses_possible_gap(self):
         self.call("channels", action="add", name="sample_news")
@@ -605,17 +626,19 @@ class TextNotExtractedTests(ConsumerCase):
         self.assertEqual(self.watermark(), 24)
         again = self.fetch_page(content)["channels"][0]
         self.assertEqual((again["posts"], textless(again), again["possible_gap"]), ([], [], False))
-        # A separately requested retry brings the attempted posts back while they are still public.
+        # A separately requested retry brings the attempted-not-read posts back while they are still public.
         retry = self.fetch_page(content, include_attempted=True)["channels"][0]
-        self.assertEqual([p["id"] for p in retry["posts"]], ["sample_news/20", "sample_news/22", "sample_news/24"])
+        self.assertEqual(retry["posts"], [])
         self.assertEqual([p["id"] for p in retry["text_not_extracted"]], ["sample_news/21", "sample_news/23"])
-        self.assertTrue(all(p["already_attempted"] for p in retry["posts"] + retry["text_not_extracted"]))
+        self.assertTrue(all(p["already_attempted"] for p in retry["text_not_extracted"]))
 
     def test_portion_of_only_text_not_extracted_posts_advances_without_model_ids(self):
         first = [post_html(30, "Readable"), post_html(31, extra=PHOTO), post_html(32, extra=PHOTO)]
-        source = self.fetch_page(page(*first))["channels"][0]
+        fetched = self.fetch_page(page(*first))
+        source = fetched["channels"][0]
         self.assertEqual([p["id"] for p in source["text_not_extracted"]], ["sample_news/31", "sample_news/32"])
-        receipt = self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/30"])
+        receipt = self.call("record_attempt", day="2026-09-27", fetch_ids=[fetched["fetch_id"]])
+        self.assertEqual(receipt["post_ids"], ["sample_news/30", "sample_news/31", "sample_news/32"])
         self.assertEqual(receipt["attempted_not_read"]["ids"], ["sample_news/31", "sample_news/32"])
         later = page(*first, post_html(33, extra=PHOTO), post_html(34, extra=PLACEHOLDER))
         result = self.fetch_page(later)
@@ -623,22 +646,26 @@ class TextNotExtractedTests(ConsumerCase):
         self.assertTrue(result["ok"])  # the page is readable; only its new portion has no text
         self.assertEqual((source["posts"], [p["id"] for p in source["text_not_extracted"]]),
                          ([], ["sample_news/33", "sample_news/34"]))
-        receipt = self.call("record_attempt", day="2026-09-28", post_ids=[])
+        receipt = self.call("record_attempt", day="2026-09-28", fetch_ids=[result["fetch_id"]])
         self.assertEqual(receipt["attempted_not_read"], {"count": 2, "ids": ["sample_news/33", "sample_news/34"]})
         self.assertEqual(self.watermark(), 34)
         self.assertEqual(textless(self.fetch_page(later)["channels"][0]), [])
 
-    def test_unrecorded_readable_post_stops_the_derived_advance(self):
+    def test_post_ids_record_what_they_name_and_never_skip_a_returned_readable_post(self):
         content = page(post_html(40, "A"), post_html(41, extra=PHOTO), post_html(42, "B"), post_html(43, extra=PHOTO))
         self.fetch_page(content)
         refused = self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/42"])
         self.assertIn("every earlier returned post", refused["error"])
         receipt = self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/40"])
-        self.assertEqual(receipt["attempted_not_read"]["ids"], ["sample_news/41"])
-        self.assertEqual(self.watermark(), 41)
+        self.assertEqual(receipt["attempted_not_read"], {"count": 0, "ids": []})
+        self.assertEqual(self.watermark(), 40)
         source = self.fetch_page(content)["channels"][0]
         self.assertEqual(([p["id"] for p in source["posts"]], [p["id"] for p in source["text_not_extracted"]]),
-                         (["sample_news/42"], ["sample_news/43"]))
+                         (["sample_news/42"], ["sample_news/41", "sample_news/43"]))
+        # A textless post the cursor passes on the way to a named one was attempted, not read.
+        receipt = self.call("record_attempt", day="2026-09-28", post_ids=["sample_news/42"])
+        self.assertEqual(receipt["attempted_not_read"], {"count": 1, "ids": ["sample_news/41"]})
+        self.assertEqual(self.watermark(), 42)
 
     def test_page_without_any_extracted_text_is_unavailable_and_not_recordable(self):
         cases = {"photo only": page(post_html(22, extra=PHOTO)),
@@ -758,8 +785,7 @@ class TextNotExtractedTests(ConsumerCase):
         self.assertTrue(result["ok"])
         self.assertLessEqual(len(json.dumps(result, ensure_ascii=False)), plugin.MAX_OUTPUT_CHARS)
         self.assertTrue(result["output_limited"])
-        ids = [p["id"] for row in result["channels"] for p in row["posts"]]
-        receipt = self.call("record_attempt", day="2026-09-27", post_ids=ids)
+        receipt = self.call("record_attempt", day="2026-09-27", fetch_ids=[result["fetch_id"]])
         self.assertTrue(receipt["ok"])
         self.assertGreater(receipt["attempted_not_read"]["count"], 0)
 
@@ -1291,9 +1317,9 @@ class FeedSourceTests(ConsumerCase):
         original_source = plugin._feed_source
         first = True
 
-        def overlapping(source, limit, attempted):
+        def overlapping(source, limit):
             nonlocal first
-            row = original_source(source, limit, attempted)
+            row = original_source(source, limit)
             if first:
                 first = False
                 with patch.object(plugin, "_fetch_feed", return_value=(new_feed.items, {}, "")):
@@ -1461,10 +1487,11 @@ class FeedSourceTests(ConsumerCase):
         ids = [p["id"] for p in self.source(self.fetch({OPENAI: feed})[0])["posts"]]
         with patch.object(plugin, "MAX_FEED_STATE", 2):
             self.assertTrue(self.call("record_attempt", day="2026-09-27", post_ids=ids)["ok"])
-        revision = self.source(self.fetch({OPENAI: feed}, include_attempted=True)[0])
         # A was pruned with the window moving past it; B and C are still attempted.
-        self.assertEqual([p["id"] for p in revision["posts"]], ids[1:])
-        self.assertTrue(all(p["already_attempted"] for p in revision["posts"]))
+        with plugin._connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM feed_items WHERE attempted=1").fetchone()[0], 2)
+        # A feed item has no attempted-not-read state: a retry replays none of them.
+        self.assertEqual(self.source(self.fetch({OPENAI: feed}, include_attempted=True)[0])["posts"], [])
         self.call("channels", action="remove", name=OPENAI)
         self.add(OPENAI)  # the same URL maps to the same key and keeps its attempted identities
         self.assertEqual(self.source(self.fetch({OPENAI: feed})[0])["posts"], [])
@@ -1599,6 +1626,752 @@ class FeedSourceTests(ConsumerCase):
                 patch.object(plugin._OPENER, "open", side_effect=route({SGLANG: atom_response(feed)})):
             _items, capped, _error = plugin._fetch_feed(SGLANG)
         self.assertTrue(capped["feed_truncated"])
+
+
+def telegram_pages(pages):
+    """An opener side effect serving each channel's own preview page."""
+    def opened(request, timeout):
+        return FakeResponse(content=pages[request.full_url.rsplit("/", 1)[1]], url=request.full_url)
+    return opened
+
+
+def join_left_behind():
+    """Wait for reads a fetch reported and left behind, so nothing outlives a test's patches."""
+    for thread in threading.enumerate():
+        if thread.name.startswith("science-digest"):
+            thread.join(10)
+
+
+class EditionBindingTests(ConsumerCase):
+    """Finding A: an edition advances a source only through a fetch it names or ids it supplies."""
+
+    # A readable pre-window post, then a post without text: a mixed page whose new portion has no readable post.
+    VERIFIED = page(post_html(1, "Old", hours_ago=24 * 30), post_html(2, extra=PHOTO))
+    # The same channel later, with no extractable text anywhere on the page.
+    WHOLLY_TEXTLESS = page(post_html(2, extra=PHOTO), post_html(3, extra=PLACEHOLDER))
+    OTHER = page(post_html(1, "Other news", channel="other_news"))
+
+    def setUp(self):
+        super().setUp()
+        for name in ("sample_news", "other_news"):
+            self.call("channels", action="add", name=name)
+
+    def fetch_pages(self, pages, **kwargs):
+        with patch.object(plugin._OPENER, "open", side_effect=telegram_pages(pages)):
+            return self.call("fetch_posts", **kwargs)
+
+    def verify(self):
+        source = self.fetch_pages({"sample_news": self.VERIFIED}, channel="sample_news")["channels"][0]
+        self.assertEqual([p["id"] for p in source["text_not_extracted"]], ["sample_news/2"])
+
+    def test_wholly_textless_page_does_not_advance_from_an_earlier_verification_fetch(self):
+        self.verify()
+        result = self.fetch_pages({"sample_news": self.WHOLLY_TEXTLESS, "other_news": self.OTHER})
+        rows = {row["channel"]: row for row in result["channels"]}
+        self.assertEqual(rows["sample_news"]["coverage"], "unavailable")
+        self.assertEqual([p["id"] for p in rows["other_news"]["posts"]], ["other_news/1"])
+        receipt = self.call("record_attempt", day="2026-09-27", post_ids=["other_news/1"])
+        self.assertEqual(receipt["attempted_not_read"], {"count": 0, "ids": []})
+        self.assertEqual((self.watermark("sample_news"), self.watermark("other_news")), (0, 1))
+        # The post was never skipped: it is listed again once the channel reads again.
+        again = self.fetch_pages({"sample_news": self.VERIFIED}, channel="sample_news")["channels"][0]
+        self.assertEqual([p["id"] for p in again["text_not_extracted"]], ["sample_news/2"])
+
+    def test_fetch_id_of_an_edition_with_a_wholly_textless_page_advances_only_the_readable_source(self):
+        self.verify()
+        result = self.fetch_pages({"sample_news": self.WHOLLY_TEXTLESS, "other_news": self.OTHER})
+        receipt = self.call("record_attempt", day="2026-09-27", fetch_ids=[result["fetch_id"]])
+        self.assertEqual(receipt["post_ids"], ["other_news/1"])
+        self.assertEqual(receipt["attempted_not_read"], {"count": 0, "ids": []})
+        self.assertEqual((self.watermark("sample_news"), self.watermark("other_news")), (0, 1))
+
+    def test_verification_of_one_source_is_not_bound_to_an_edition_of_another(self):
+        self.verify()
+        result = self.fetch_pages({"other_news": self.OTHER}, channel="other_news")
+        self.assertTrue(self.call("record_attempt", day="2026-09-27", post_ids=["other_news/1"])["ok"])
+        self.assertEqual(self.watermark("sample_news"), 0)
+        self.assertTrue(self.call("record_attempt", day="2026-09-27", edition="again",
+                                  fetch_ids=[result["fetch_id"]])["ok"])
+        self.assertEqual(self.watermark("sample_news"), 0)
+
+    def test_named_post_does_not_carry_its_textless_neighbour_past_an_unavailable_page(self):
+        self.fetch_pages({"sample_news": page(post_html(5, "Read"), post_html(6, extra=PHOTO))}, channel="sample_news")
+        self.fetch_pages({"sample_news": self.WHOLLY_TEXTLESS}, channel="sample_news")
+        receipt = self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/5"])
+        self.assertEqual(receipt["attempted_not_read"], {"count": 0, "ids": []})
+        self.assertEqual(self.watermark("sample_news"), 5)
+
+    def test_textless_rows_from_before_this_revision_advance_nothing(self):
+        # A state file an older revision wrote holds observations, but no fetch to bind them to.
+        with plugin._connect() as conn:
+            conn.execute("INSERT INTO observed(channel,id,text_extracted) VALUES ('sample_news',9,0)")
+        receipt = self.call("record_attempt", day="2026-09-27", post_ids=[])
+        self.assertEqual(receipt["attempted_not_read"], {"count": 0, "ids": []})
+        self.assertEqual(self.watermark("sample_news"), 0)
+
+    def test_fetch_id_records_a_mixed_portion_whose_new_part_is_only_textless(self):
+        read = [post_html(30, "Readable")]
+        self.fetch_pages({"sample_news": page(*read)}, channel="sample_news")
+        self.assertTrue(self.call("record_attempt", day="2026-09-26", post_ids=["sample_news/30"])["ok"])
+        mixed = page(*read, post_html(31, extra=PHOTO), post_html(32, extra=PLACEHOLDER))
+        result = self.fetch_pages({"sample_news": mixed, "other_news": self.OTHER})
+        rows = {row["channel"]: row for row in result["channels"]}
+        self.assertTrue(result["ok"])
+        self.assertEqual((rows["sample_news"]["coverage"], rows["sample_news"]["posts"]), ("recent_page_only", []))
+        receipt = self.call("record_attempt", day="2026-09-27", fetch_ids=[result["fetch_id"]])
+        self.assertEqual(receipt["attempted_not_read"], {"count": 2, "ids": ["sample_news/31", "sample_news/32"]})
+        self.assertEqual((self.watermark("sample_news"), self.watermark("other_news")), (32, 1))
+        self.assertEqual(textless(self.fetch_pages({"sample_news": mixed}, channel="sample_news")["channels"][0]), [])
+
+    def test_supplied_textless_id_is_recorded_from_any_returned_fetch(self):
+        self.verify()
+        self.fetch_pages({"other_news": self.OTHER}, channel="other_news")
+        receipt = self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/2", "other_news/1"])
+        self.assertEqual(receipt["attempted_not_read"], {"count": 1, "ids": ["sample_news/2"]})
+        self.assertEqual(self.watermark("sample_news"), 2)
+
+    def test_textless_post_that_left_the_page_is_not_claimed_as_attempted(self):
+        self.verify()
+        moved_on = page(post_html(3, "Next"))
+        source = self.fetch_pages({"sample_news": moved_on}, channel="sample_news")["channels"][0]
+        self.assertEqual(source["lost_unattempted_now"], 1)
+        receipt = self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/3"])
+        self.assertEqual(receipt["attempted_not_read"], {"count": 0, "ids": []})
+        self.assertEqual(self.watermark("sample_news"), 3)
+
+    def test_fetch_ids_of_a_call_and_its_deferred_follow_ups_record_the_edition_without_copying_ids(self):
+        for number in range(10):
+            self.call("channels", action="add", name=f"channel{number}")
+
+        def page_of(channel):
+            return ([{"id": f"{channel}/1", "url": f"https://t.me/{channel}/1", "text": "x" * 1200, "date": "",
+                      "links": ["https://example.org/" + "z" * 280] * 3},
+                     {"id": f"{channel}/2", "url": f"https://t.me/{channel}/2", "text": "", "date": "", "links": []}], "")
+
+        with patch.object(plugin, "_fetch_channel", side_effect=page_of):
+            result = self.call("fetch_posts", limit=20)
+            latest = {row["channel"]: row for row in result["channels"]}
+            deferred = [name for name, row in latest.items() if row["coverage"] == "output_deferred"]
+            self.assertTrue(deferred)
+            fetch_ids = [result["fetch_id"]]
+            for name in deferred:
+                alone = self.call("fetch_posts", channel=name)
+                self.assertEqual(alone["channels"][0]["coverage"], "recent_page_only")
+                latest[name] = alone["channels"][0]
+                fetch_ids.append(alone["fetch_id"])
+        self.assertEqual(len(set(fetch_ids)), len(fetch_ids))
+        receipt = self.call("record_attempt", day="2026-09-27", fetch_ids=fetch_ids)
+        returned = {name: [p["id"] for p in row["posts"] + textless(row)] for name, row in latest.items()}
+        self.assertEqual(receipt["post_ids"], sorted(x for ids in returned.values() for x in ids))
+        self.assertEqual(receipt["attempted_not_read"]["count"], sum(len(textless(row)) for row in latest.values()))
+        for name in deferred:
+            self.assertEqual(self.watermark(name), 2)  # the follow-up call's whole portion, textless post included
+        for name, ids in returned.items():
+            self.assertEqual(self.watermark(name), max((plugin._number(x) for x in ids), default=0))
+
+    def test_fetch_id_records_only_what_the_output_bound_kept(self):
+        content = page(*[post_html(n, extra=PHOTO) if n % 3 == 0 else post_html(n, "y" * 900) for n in range(1, 13)])
+        with patch.object(plugin, "MAX_OUTPUT_CHARS", 4500), \
+                patch.object(plugin._OPENER, "open", side_effect=telegram_pages({"sample_news": content})):
+            result = self.call("fetch_posts", channel="sample_news", limit=20)
+        source = result["channels"][0]
+        self.assertTrue(source["first_omitted_id"])
+        boundary = plugin._number(source["first_omitted_id"])
+        receipt = self.call("record_attempt", day="2026-09-27", fetch_ids=[result["fetch_id"]])
+        self.assertEqual(sorted(receipt["post_ids"]), sorted(p["id"] for p in source["posts"] + textless(source)))
+        self.assertLess(self.watermark("sample_news"), boundary)
+        following = self.fetch_pages({"sample_news": content}, channel="sample_news", limit=20)["channels"][0]
+        self.assertEqual(min(plugin._number(p["id"]) for p in following["posts"] + textless(following)), boundary)
+
+    def test_fetch_ids_and_post_ids_combine(self):
+        self.verify()
+        result = self.fetch_pages({"other_news": self.OTHER}, channel="other_news")
+        receipt = self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/2"], fetch_ids=[result["fetch_id"]])
+        self.assertEqual(receipt["post_ids"], ["other_news/1", "sample_news/2"])
+        self.assertEqual((self.watermark("sample_news"), self.watermark("other_news")), (2, 1))
+
+    def test_fetch_id_counts_only_while_it_is_the_sources_latest_fetch(self):
+        first = self.fetch_pages({"sample_news": page(post_html(5, "Read")), "other_news": self.OTHER})
+        refetch = self.fetch_pages({"sample_news": page(post_html(5, "Read"), post_html(6, "New"))}, channel="sample_news")
+        # other_news still has the first call as its latest; sample_news has moved on.
+        partial = self.call("record_attempt", day="2026-09-27", fetch_ids=[first["fetch_id"]])
+        self.assertEqual(partial["post_ids"], ["other_news/1"])
+        self.assertEqual(self.watermark("sample_news"), 0)
+        latest = self.call("record_attempt", day="2026-09-28", fetch_ids=[refetch["fetch_id"]])
+        self.assertEqual(latest["post_ids"], ["sample_news/5", "sample_news/6"])
+        self.assertEqual(self.watermark("sample_news"), 6)
+
+    def test_superseded_fetch_id_is_refused_without_spending_the_edition_and_replays_stay_idempotent(self):
+        first = self.fetch_pages({"sample_news": page(post_html(5, "Read"))}, channel="sample_news")
+        second = self.fetch_pages({"sample_news": page(post_html(5, "Read"))}, channel="sample_news")
+        refused = self.call("record_attempt", day="2026-09-27", fetch_ids=[first["fetch_id"]])
+        self.assertFalse(refused["ok"])
+        self.assertIn("latest", refused["error"])
+        recorded = self.call("record_attempt", day="2026-09-27", fetch_ids=[second["fetch_id"]])
+        self.assertTrue(recorded["new_attempt"])
+        replay = self.call("record_attempt", day="2026-09-27", fetch_ids=[second["fetch_id"]])
+        self.assertEqual((replay["new_attempt"], replay["same_selection"]), (False, True))
+        # A replay answers with the original even when its fetch has been superseded since.
+        replay = self.call("record_attempt", day="2026-09-27", fetch_ids=[first["fetch_id"]])
+        self.assertEqual((replay["ok"], replay["new_attempt"], replay["post_ids"]), (True, False, ["sample_news/5"]))
+
+    def test_argument_errors_do_not_spend_the_edition(self):
+        for kwargs in ({}, {"fetch_ids": ["7"]}, {"fetch_ids": [True]}, {"fetch_ids": 7},
+                       {"fetch_ids": list(range(25))}):
+            with self.subTest(kwargs=str(kwargs)[:40]):
+                self.assertFalse(self.call("record_attempt", day="2026-09-27", **kwargs)["ok"])
+        self.assertTrue(self.call("record_attempt", day="2026-09-27", post_ids=[])["new_attempt"])
+
+    def test_removed_source_leaves_its_fetch_behind(self):
+        result = self.fetch_pages({"sample_news": page(post_html(5, "Read"))}, channel="sample_news")
+        self.call("channels", action="remove", name="sample_news")
+        self.call("channels", action="add", name="sample_news")
+        self.assertFalse(self.call("record_attempt", day="2026-09-27", fetch_ids=[result["fetch_id"]])["ok"])
+
+    def test_feed_items_and_textless_posts_record_together_from_one_fetch_id(self):
+        self.call("channels", action="add", name=OPENAI)
+        self.call("channels", action="remove", name="other_news")
+        self.fetch_pages({"sample_news": page(post_html(5, "Read"))}, channel="sample_news")
+        self.call("record_attempt", day="2026-09-26", post_ids=["sample_news/5"])
+        pages = {"https://t.me/s/sample_news": FakeResponse(content=page(post_html(5, "Read"), post_html(6, extra=PHOTO))),
+                 OPENAI: feed_response(rss((article("a"), 1, "A")))}
+        with patch.object(plugin._OPENER, "open", side_effect=route(pages)):
+            result = self.call("fetch_posts")
+        receipt = self.call("record_attempt", day="2026-09-27", fetch_ids=[result["fetch_id"]])
+        self.assertEqual(sorted(receipt["post_ids"]), sorted([feed_id(article("a")), "sample_news/6"]))
+        self.assertEqual(receipt["attempted_not_read"]["ids"], ["sample_news/6"])
+        self.assertEqual(self.watermark("sample_news"), 6)
+        with patch.object(plugin._OPENER, "open", side_effect=route(pages)):
+            again = self.call("fetch_posts")
+        self.assertEqual([row["posts"] for row in again["channels"]], [[], []])
+
+
+class RetryTests(ConsumerCase):
+    """Finding B and the consumer run: include_attempted brings back what was attempted and not read, and new posts."""
+
+    def setUp(self):
+        super().setUp()
+        self.call("channels", action="add", name="sample_news")
+
+    def test_baseline_post_is_not_returned_as_attempted(self):
+        content = page(post_html(1, "Months old", hours_ago=24 * 90), post_html(2, "Fresh"))
+        first = self.fetch_page(content)["channels"][0]
+        self.assertEqual(([p["id"] for p in first["posts"]], first["baseline_posts"]), (["sample_news/2"], 1))
+        self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/2"])
+        retry = self.fetch_page(content, include_attempted=True)["channels"][0]
+        self.assertEqual(([p["id"] for p in retry["posts"]], textless(retry), retry["omitted_posts"]), ([], [], 0))
+
+    def test_retry_budget_goes_to_attempted_not_read_posts_and_new_ones(self):
+        # The consumer run's shape: baseline posts, read posts, many photo posts, then a new post.
+        self.call("channels", action="add", name=OPENAI)
+        attempted = [post_html(n, extra=PHOTO) for n in range(6, 22)]
+        old = [post_html(n, "Old " + "x" * 800, hours_ago=24 * 30) for n in range(1, 4)]
+        read = [post_html(n, "Read " + "y" * 800) for n in (4, 5)]
+        feed = feed_response(rss((article("read"), 2, "Read item")))
+        with patch.object(plugin._OPENER, "open", side_effect=route({
+                "https://t.me/s/sample_news": FakeResponse(content=page(*old, *read, *attempted)), OPENAI: feed})):
+            result = self.call("fetch_posts", limit=20)
+        returned = [p["id"] for row in result["channels"] for p in row["posts"] + textless(row)]
+        receipt = self.call("record_attempt", day="2026-09-27", post_ids=returned)
+        self.assertEqual(receipt["attempted_not_read"]["count"], 16)
+        new = post_html(22, "Brand new")
+        with patch.object(plugin._OPENER, "open", side_effect=route({
+                "https://t.me/s/sample_news": FakeResponse(content=page(*old, *read, *attempted, new)), OPENAI: feed})):
+            retry = self.call("fetch_posts", limit=20, include_attempted=True)
+        rows = {row["channel"]: row for row in retry["channels"]}
+        source = rows["sample_news"]
+        self.assertEqual([(p["id"], p["already_attempted"]) for p in source["posts"]], [("sample_news/22", False)])
+        self.assertEqual([p["id"] for p in source["text_not_extracted"]], [f"sample_news/{n}" for n in range(6, 22)])
+        self.assertTrue(all(p["already_attempted"] for p in source["text_not_extracted"]))
+        self.assertEqual(source["omitted_posts"], 0)
+        self.assertEqual(rows[key(OPENAI)]["posts"], [])  # the read feed item does not come back either
+
+    def test_retried_post_with_text_leaves_the_pool_once_recorded(self):
+        before = [post_html(1, "Read"), post_html(2, extra=PHOTO), post_html(3, extra=PHOTO)]
+        self.fetch_page(page(*before))
+        self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/1", "sample_news/2", "sample_news/3"])
+        after = [post_html(1, "Read"), post_html(2, "The text is back"), post_html(3, extra=PHOTO)]
+        retry = self.fetch_page(page(*after), include_attempted=True)
+        source = retry["channels"][0]
+        self.assertEqual([(p["id"], p["already_attempted"]) for p in source["posts"]], [("sample_news/2", True)])
+        self.assertEqual([p["id"] for p in source["text_not_extracted"]], ["sample_news/3"])
+        # Not recorded yet: it stays retryable, whichever fetch last saw its text.
+        self.assertEqual(self.fetch_page(page(*after), include_attempted=True)["channels"][0]["posts"][0]["id"],
+                         "sample_news/2")
+        receipt = self.call("record_attempt", day="2026-09-28", post_ids=["sample_news/2", "sample_news/3"])
+        self.assertEqual(receipt["attempted_not_read"], {"count": 1, "ids": ["sample_news/3"]})
+        again = self.fetch_page(page(*after), include_attempted=True)["channels"][0]
+        self.assertEqual((again["posts"], [p["id"] for p in again["text_not_extracted"]]), ([], ["sample_news/3"]))
+        self.assertEqual(self.watermark(), 3)
+
+    def test_normal_edition_stays_past_a_retried_post(self):
+        self.fetch_page(page(post_html(1, "Read"), post_html(2, extra=PHOTO)))
+        self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/1", "sample_news/2"])
+        self.fetch_page(page(post_html(1, "Read"), post_html(2, extra=PHOTO)), include_attempted=True)
+        normal = self.fetch_page(page(post_html(1, "Read"), post_html(2, extra=PHOTO)))["channels"][0]
+        self.assertEqual((normal["posts"], textless(normal)), ([], []))
+
+    def test_new_feed_item_is_returned_under_include_attempted_and_a_read_one_is_not(self):
+        self.call("channels", action="remove", name="sample_news")
+        self.call("channels", action="add", name=OPENAI)
+        with patch.object(plugin._OPENER, "open", side_effect=route({OPENAI: feed_response(rss((article("a"), 3, "A")))})):
+            self.call("fetch_posts")
+        self.call("record_attempt", day="2026-09-27", post_ids=[feed_id(article("a"))])
+        both = feed_response(rss((article("b"), 1, "B"), (article("a"), 3, "A")))
+        with patch.object(plugin._OPENER, "open", side_effect=route({OPENAI: both})):
+            retry = self.call("fetch_posts", include_attempted=True)
+        self.assertEqual([p["id"] for p in retry["channels"][0]["posts"]], [feed_id(article("b"))])
+
+    def test_state_from_before_this_revision_keeps_its_attempted_not_read_posts(self):
+        path = Path(self.api.root) / "digest.sqlite3"
+        path.unlink()
+        with sqlite3.connect(path) as db:
+            db.execute("CREATE TABLE observed (channel TEXT NOT NULL, id INTEGER NOT NULL, "
+                       "lost_reported INTEGER NOT NULL DEFAULT 0, text_extracted INTEGER NOT NULL DEFAULT 1, "
+                       "PRIMARY KEY(channel,id))")
+            db.executemany("INSERT INTO observed(channel,id,text_extracted) VALUES ('sample_news',?,?)",
+                           [(4, 1), (5, 0), (7, 0)])
+            db.execute("CREATE TABLE seen (channel TEXT PRIMARY KEY, last_id INTEGER NOT NULL)")
+            db.execute("INSERT INTO seen VALUES ('sample_news',5)")
+            db.execute("CREATE TABLE channels (name TEXT PRIMARY KEY COLLATE NOCASE)")
+            db.execute("INSERT INTO channels VALUES ('sample_news')")
+        content = page(post_html(3, "Never returned"), post_html(4, "Read"), post_html(5, extra=PHOTO),
+                       post_html(7, extra=PHOTO), post_html(8, "New"))
+        retry = self.fetch_page(content, include_attempted=True)["channels"][0]
+        self.assertEqual([(p["id"], p["already_attempted"]) for p in retry["posts"]], [("sample_news/8", False)])
+        self.assertEqual([(p["id"], p["already_attempted"]) for p in retry["text_not_extracted"]],
+                         [("sample_news/5", True), ("sample_news/7", False)])
+
+
+class FirstRunCoverageTests(ConsumerCase):
+    """The consumer run: a first page that does not reach back to the window start is a possible gap."""
+
+    def setUp(self):
+        super().setUp()
+        self.call("channels", action="add", name="sample_news")
+
+    def test_first_page_newer_than_the_window_start_discloses_a_possible_gap(self):
+        source = self.fetch_page(page(post_html(170, "Four days ago", hours_ago=96), post_html(171, "New")))["channels"][0]
+        self.assertTrue(source["possible_gap"])
+        self.assertEqual(source["window_since"], (NOW - timedelta(days=7)).isoformat())
+        self.assertNotIn("baseline_posts", source)
+
+    def test_first_page_reaching_past_the_window_start_has_no_gap(self):
+        source = self.fetch_page(page(post_html(169, "Old", hours_ago=24 * 8), post_html(170, "New")))["channels"][0]
+        self.assertFalse(source["possible_gap"])
+
+    def test_channel_page_starting_at_its_first_post_has_no_past_to_miss(self):
+        source = self.fetch_page(page(post_html(1, "Hello", hours_ago=5), post_html(2, "New")))["channels"][0]
+        self.assertFalse(source["possible_gap"])
+
+    def test_undated_page_makes_no_window_claim(self):
+        source = self.fetch_page(page(post_html(170, "No date", dated=False)))["channels"][0]
+        self.assertFalse(source["possible_gap"])
+
+    def test_attempted_channel_is_judged_by_its_cursor_instead(self):
+        content = page(post_html(170, "Four days ago", hours_ago=96), post_html(171, "New"))
+        self.fetch_page(content)
+        self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/170", "sample_news/171"])
+        source = self.fetch_page(content)["channels"][0]
+        self.assertFalse(source["possible_gap"])
+        self.assertNotIn("window_since", source)
+
+
+class ScriptedServer:
+    """One loopback HTTP exchange: after the request, each part is sent `gap` seconds apart."""
+
+    def __init__(self, parts, gap=0.0):
+        self.parts, self.gap = parts, gap
+        self.listener = socket.create_server(("127.0.0.1", 0))
+        self.listener.settimeout(15)
+        self.url = f"https://127.0.0.1:{self.listener.getsockname()[1]}/feed.xml"
+        self.thread = threading.Thread(target=self.serve, daemon=True)
+        self.thread.start()
+
+    def serve(self):
+        try:
+            connection, _ = self.listener.accept()
+            with connection:
+                connection.settimeout(15)
+                connection.recv(65536)
+                for part in self.parts:
+                    connection.sendall(part)
+                    if self.gap:
+                        time.sleep(self.gap)
+        except OSError:
+            pass  # the client hung up, which is what these tests want
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.listener.close()
+        self.thread.join(15)
+
+
+CHUNKED_HEAD = b"HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nTransfer-Encoding: chunked\r\n\r\n"
+
+
+def chunk(data):
+    return b"%x\r\n%s\r\n" % (len(data), data)
+
+
+class TransportDeadlineTests(ConsumerCase):
+    """Finding C: real urllib and http.client over real sockets; only TLS is left out."""
+
+    # Each script takes 6 s to send, far beyond the short deadline these tests set.
+    TRICKLE = [b"x"] * 80
+    GAP = 0.075
+    DEADLINE = 1.0
+    PROMPTLY = 4
+
+    def setUp(self):
+        super().setUp()
+        for patcher in (patch.object(ssl.SSLContext, "wrap_socket", lambda _self, sock, **_kwargs: sock),
+                        patch.dict(os.environ, {"no_proxy": "*"})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def get(self, server, limit=64 * 1024):
+        return plugin._get(server.url, plugin._FEED_ACCEPT, limit, html=False)
+
+    def test_slow_response_headers_hit_the_source_deadline(self):
+        headers = [b"HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\n"] + [b"X-Slow-%d: y\r\n" % n for n in range(80)]
+        with ScriptedServer(headers + [b"Content-Length: 2\r\n\r\nok"], self.GAP) as server, \
+                patch.object(plugin, "READ_DEADLINE", self.DEADLINE):
+            started = time.monotonic()
+            with self.assertRaises(plugin._Unavailable) as cut:
+                self.get(server)
+        self.assertLess(time.monotonic() - started, self.PROMPTLY)
+        self.assertEqual(str(cut.exception), "read deadline exceeded")
+
+    def test_slow_status_line_hits_the_source_deadline(self):
+        with ScriptedServer([b"HTTP/1.1 200 OK"] + self.TRICKLE, self.GAP) as server, \
+                patch.object(plugin, "READ_DEADLINE", self.DEADLINE):
+            started = time.monotonic()
+            with self.assertRaises(plugin._Unavailable):
+                self.get(server)
+        self.assertLess(time.monotonic() - started, self.PROMPTLY)
+
+    def test_slow_chunk_framing_hits_the_source_deadline_and_keeps_the_prefix(self):
+        parts = [CHUNKED_HEAD + chunk(b"hello"), b"5;ext="] + self.TRICKLE + [b"\r\nworld\r\n0\r\n\r\n"]
+        with ScriptedServer(parts, self.GAP) as server, patch.object(plugin, "READ_DEADLINE", self.DEADLINE):
+            started = time.monotonic()
+            body, complete = self.get(server)
+        self.assertLess(time.monotonic() - started, self.PROMPTLY)
+        self.assertEqual((body, complete), (b"hello", False))
+
+    def test_slow_trailer_hits_the_source_deadline_and_says_the_body_is_not_complete(self):
+        parts = [CHUNKED_HEAD + chunk(b"hello") + b"0\r\nX-Trailer: "] + self.TRICKLE
+        with ScriptedServer(parts, self.GAP) as server, patch.object(plugin, "READ_DEADLINE", self.DEADLINE):
+            started = time.monotonic()
+            body, complete = self.get(server)
+        self.assertLess(time.monotonic() - started, self.PROMPTLY)
+        self.assertEqual((body, complete), (b"hello", False))
+
+    def test_normal_responses_pass_through_the_timed_transport(self):
+        cases = {
+            "content length": ([b"HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: 10\r\n\r\nhelloworld"],
+                               b"helloworld"),
+            "no length": ([b"HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\n\r\nhello", b"world"], b"helloworld"),
+            "chunked": ([CHUNKED_HEAD, chunk(b"hello"), chunk(b"world"), b"0\r\n\r\n"], b"helloworld"),
+            "chunked with extension and trailer": (
+                [CHUNKED_HEAD + b"a;name=value\r\nhelloworld\r\n0\r\nX-Trailer: y\r\n\r\n"], b"helloworld"),
+            "gzip": ([b"HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Encoding: gzip\r\n"
+                      b"Transfer-Encoding: chunked\r\n\r\n", chunk(gzip.compress(b"helloworld")), b"0\r\n\r\n"], b"helloworld"),
+        }
+        for label, (parts, expected) in cases.items():
+            with self.subTest(label), ScriptedServer(parts, 0.01) as server:
+                self.assertEqual(self.get(server), (expected, True))
+
+    def test_status_errors_and_redirects_still_name_themselves(self):
+        with ScriptedServer([b"HTTP/1.1 503 Busy\r\nContent-Length: 0\r\n\r\n"]) as server, \
+                self.assertRaises(plugin._Unavailable) as failure:
+            self.get(server)
+        self.assertEqual(str(failure.exception), "HTTP 503")
+        with ScriptedServer([b"HTTP/1.1 302 Found\r\nLocation: /next.xml\r\nContent-Length: 0\r\n\r\n"]) as server, \
+                self.assertRaises(plugin._Redirected) as moved:
+            self.get(server)
+        self.assertTrue(moved.exception.target.endswith("/next.xml"))
+
+    def add_loopback_feed(self, name, url):
+        with plugin._connect() as conn:
+            conn.execute("INSERT INTO channels(name) VALUES (?)", (name,))
+            conn.execute("INSERT INTO feeds(name,since,url) VALUES (?,?,?)", (name, plugin._window_start(), url))
+
+    def test_slow_feed_keeps_its_complete_items_and_cannot_hold_the_other_source(self):
+        document = rss((article("first"), 1, "First"), (article("second"), 2, "Second"))
+        cut = document.index(b"</item>") + len(b"</item>")
+        slow = [CHUNKED_HEAD + chunk(document[:cut]), b"5;ext="] + self.TRICKLE + [
+            b"\r\n" + document[cut:cut + 5] + b"\r\n" + chunk(document[cut + 5:]) + b"0\r\n\r\n"]
+        fast = [b"HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: %d\r\n\r\n%s"
+                % (len(document), document)]
+        with ScriptedServer(slow, self.GAP) as slow_server, ScriptedServer(fast) as fast_server, \
+                patch.object(plugin, "READ_DEADLINE", self.DEADLINE):
+            self.add_loopback_feed("rss:slow_feed", slow_server.url)
+            self.add_loopback_feed("rss:fast_feed", fast_server.url)
+            started = time.monotonic()
+            result = self.call("fetch_posts")
+        self.assertLess(time.monotonic() - started, self.PROMPTLY)
+        rows = {row["channel"]: row for row in result["channels"]}
+        self.assertEqual(len(rows["rss:fast_feed"]["posts"]), 2)
+        self.assertFalse(rows["rss:fast_feed"]["feed_truncated"])
+        self.assertEqual((rows["rss:slow_feed"]["coverage"], rows["rss:slow_feed"]["feed_truncated"],
+                          [p["title"] for p in rows["rss:slow_feed"]["posts"]]), ("feed_window", True, ["First"]))
+
+    def test_source_stuck_where_no_socket_can_be_cut_is_reported_and_the_others_returned(self):
+        self.call("channels", action="add", name=OPENAI)
+        self.call("channels", action="add", name="sample_news")
+        release = threading.Event()
+        self.addCleanup(release.set)
+        unblock = threading.Timer(6, release.set)  # holds any fan-out that waits for every source
+        unblock.daemon = True
+        unblock.start()
+        self.addCleanup(unblock.cancel)
+
+        def lookup(host, _port):
+            if host == "openai.com":  # a DNS lookup cannot be interrupted
+                release.wait(15)
+                raise socket.gaierror(8, "released by the test")
+            return PUBLIC
+
+        self.resolve.side_effect = lookup
+        with patch.object(plugin, "FETCH_DEADLINE", 0.5, create=True), \
+                patch.object(plugin._OPENER, "open", return_value=FakeResponse()):
+            started = time.monotonic()
+            result = self.call("fetch_posts")
+            elapsed = time.monotonic() - started
+            release.set()
+            join_left_behind()
+        self.assertLess(elapsed, 4)
+        rows = {row["channel"]: row for row in result["channels"]}
+        self.assertTrue(result["ok"])
+        self.assertTrue(rows["sample_news"]["posts"])
+        self.assertEqual(rows[key(OPENAI)]["coverage"], "timeout")
+        self.assertIn("deadline", rows[key(OPENAI)]["error"])
+        self.assertEqual(rows[key(OPENAI)]["posts"], [])
+
+    def test_single_source_call_is_bounded_too(self):
+        self.call("channels", action="add", name="sample_news")
+        release = threading.Event()
+        self.addCleanup(release.set)
+        unblock = threading.Timer(6, release.set)
+        unblock.daemon = True
+        unblock.start()
+        self.addCleanup(unblock.cancel)
+
+        def stuck(_channel):
+            release.wait(15)
+            return [], "released by the test"
+
+        with patch.object(plugin, "FETCH_DEADLINE", 0.3, create=True), patch.object(plugin, "_fetch_channel", side_effect=stuck):
+            started = time.monotonic()
+            result = self.call("fetch_posts", channel="sample_news")
+            elapsed = time.monotonic() - started
+            release.set()
+            join_left_behind()
+        self.assertLess(elapsed, 4)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["channels"][0]["coverage"], "timeout")
+
+    def test_read_left_behind_cannot_use_up_a_loss_report_or_advance_anything(self):
+        self.call("channels", action="add", name="sample_news")
+
+        def page_of(*ids):
+            return ([{"id": f"sample_news/{n}", "url": f"https://t.me/sample_news/{n}",
+                      "text": str(n), "date": "", "links": []} for n in ids], "")
+
+        with patch.object(plugin, "_fetch_channel", return_value=page_of(1, 2)):
+            self.call("fetch_posts")
+        release = threading.Event()
+        self.addCleanup(release.set)
+        unblock = threading.Timer(6, release.set)
+        unblock.daemon = True
+        unblock.start()
+        self.addCleanup(unblock.cancel)
+
+        def stuck(_channel):
+            release.wait(15)
+            return page_of(2, 3)
+
+        with patch.object(plugin, "FETCH_DEADLINE", 0.3, create=True), patch.object(plugin, "_fetch_channel", side_effect=stuck):
+            left_behind = self.call("fetch_posts")["channels"][0]
+            release.set()
+            join_left_behind()
+        self.assertEqual(left_behind["coverage"], "timeout")
+        with plugin._connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM gaps").fetchone()[0], 0)
+        with patch.object(plugin, "_fetch_channel", return_value=page_of(2, 3)):
+            current = self.call("fetch_posts")["channels"][0]
+        self.assertEqual(current["lost_unattempted_now"], 1)
+        self.assertEqual(self.watermark(), 0)
+
+    def test_timed_out_source_cannot_be_recorded_from_that_fetch(self):
+        self.call("channels", action="add", name="sample_news")
+        with patch.object(plugin._OPENER, "open", return_value=FakeResponse()):
+            self.call("fetch_posts")
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def stuck(_channel):
+            release.wait(15)
+            return [], "released by the test"
+
+        with patch.object(plugin, "FETCH_DEADLINE", 0.3, create=True), patch.object(plugin, "_fetch_channel", side_effect=stuck):
+            result = self.call("fetch_posts")
+            release.set()
+            join_left_behind()
+        receipt = self.call("record_attempt", day="2026-09-27", fetch_ids=[result["fetch_id"]])
+        self.assertEqual(receipt["post_ids"], [])
+        self.assertEqual(self.watermark(), 0)
+
+    def test_simulated_trickle_of_valid_headers_cannot_outlast_the_deadline(self):
+        # The reviewer's probe: each byte arrives within the 6 s inactivity timeout, so silence never ends the read.
+        clock = [1000.0]
+        timeouts = []
+        script = b"HTTP/1.1 200 OK\r\n" + b"".join(b"X-Pad-%d: y\r\n" % n for n in range(90)) + b"\r\n"
+
+        class Trickle(plugin.io.RawIOBase):
+            offset = 0
+
+            def readable(self):
+                return True
+
+            def readinto(self, buffer):
+                clock[0] += 5.9
+                buffer[0] = script[self.offset]
+                self.offset += 1
+                return 1
+
+        class Socket:
+            def makefile(self, _mode, buffering=None):
+                return Trickle()
+
+            def settimeout(self, value):
+                timeouts.append(value)
+
+        self.assertGreater(len(script) * 5.9, 148)
+        with patch.object(plugin.time, "monotonic", side_effect=lambda: clock[0]):
+            deadline = plugin._Deadline()
+            response = plugin.http.client.HTTPResponse(plugin._TimedSocket(Socket(), deadline), method="GET")
+            with self.assertRaises(TimeoutError):
+                response.begin()
+        self.assertLessEqual(clock[0] - 1000.0, plugin.READ_DEADLINE + 5.9)
+        self.assertTrue(timeouts)
+        self.assertTrue(all(0 < value <= plugin.REQUEST_TIMEOUT for value in timeouts))
+        self.assertLess(min(timeouts), plugin.REQUEST_TIMEOUT)  # the last read is held to what is left
+
+    def test_every_address_draws_on_one_deadline(self):
+        clock = [1000.0]
+        attempts = []
+
+        def blackholed(target, timeout, _source):
+            attempts.append((target, timeout))
+            clock[0] += timeout
+            raise TimeoutError("timed out")
+
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"203.0.113.{n}", 443)) for n in range(1, 40)]
+        with patch.object(plugin.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(plugin.socket, "getaddrinfo", return_value=addresses), \
+                patch.object(plugin.socket, "create_connection", side_effect=blackholed):
+            connection = plugin._TimedConnection("example.org", timeout=plugin.REQUEST_TIMEOUT, deadline=plugin._Deadline())
+            with self.assertRaises(TimeoutError) as cut:
+                connection.connect()
+        self.assertEqual(str(cut.exception), "read deadline exceeded")
+        self.assertLessEqual(clock[0] - 1000.0, plugin.READ_DEADLINE)
+        self.assertEqual(len(attempts), plugin.READ_DEADLINE // plugin.REQUEST_TIMEOUT)
+
+
+class GzipBodyTests(ConsumerCase):
+    """Finding D: every gzip member is decoded or the body says it was not; input is never hoarded."""
+
+    URL = "https://feeds.example.org/feed.xml"
+
+    def get(self, body, limit):
+        with patch.object(plugin._OPENER, "open", return_value=FakeResponse(
+                content=body, url=self.URL, content_type="application/xml", encoding="gzip")) as opened:
+            try:
+                return plugin._get(self.URL, plugin._FEED_ACCEPT, limit, html=False)
+            finally:
+                self.bytes_read = opened.return_value.offset
+
+    def test_concatenated_feed_is_read_whole(self):
+        self.call("channels", action="add", name=OPENAI)
+        document = rss((article("a"), 1, "A"), (article("b"), 2, "B"), (article("c"), 3, "C"))
+        third = len(document) // 3
+        body = b"".join(gzip.compress(document[n:n + third]) for n in range(0, len(document), third))
+        with patch.object(plugin._OPENER, "open", side_effect=route(
+                {OPENAI: feed_response(body, encoding="gzip", chunk=97)})):
+            source = self.call("fetch_posts")["channels"][0]
+        self.assertEqual((source["coverage"], source["feed_truncated"], source["feed_items"]), ("feed_window", False, 3))
+        self.assertEqual(len(source["posts"]), 3)
+
+    def test_trailing_member_past_the_decoded_limit_is_reported_as_too_long(self):
+        # The reviewer's probe: 570 decoded bytes, then members that do not fit a 1,024-byte limit.
+        first = gzip.compress(b"a" * 570)
+        rest = gzip.compress(bytes(range(256)) * 40)
+        body, complete = self.get(first + rest, 1024)
+        self.assertTrue(complete)
+        self.assertEqual(len(body), 1025)  # limit+1 is how a caller learns the body did not fit
+        self.assertEqual(body[:570], b"a" * 570)
+        self.assertEqual(body[570:1025], (bytes(range(256)) * 40)[:455])
+        self.assertLessEqual(self.bytes_read, len(first) + 64 * 1024)
+
+    def test_retained_input_is_one_read_at_most(self):
+        document = b"<rss/>" * 100
+        body = gzip.compress(document) + gzip.compress(b"") * 15000
+        self.assertGreater(len(body), 256 * 1024)
+        retained = []
+        original = zlib.decompressobj
+
+        def tracked(*args):
+            real = original(*args)
+
+            class Probe:
+                eof = property(lambda _self: real.eof)
+                unused_data = property(lambda _self: real.unused_data)
+
+                def decompress(self, data, max_length=0):
+                    out = real.decompress(data, max_length)
+                    retained.append(len(real.unused_data))
+                    return out
+            return Probe()
+
+        with patch.object(plugin.zlib, "decompressobj", side_effect=tracked):
+            decoded, complete = self.get(body, plugin.MAX_FEED_BYTES)
+        self.assertEqual((decoded, complete), (document, True))
+        self.assertLessEqual(max(retained), 64 * 1024)
+
+    def test_compressed_input_past_its_bound_is_refused_without_reading_on(self):
+        body = gzip.compress(b"x") + gzip.compress(b"") * 20000
+        limit = 1024
+        self.assertGreater(len(body), 2 * limit + 128 * 1024)
+        with self.assertRaises(plugin._Unavailable) as refused:
+            self.get(body, limit)
+        self.assertEqual(str(refused.exception), "compressed body exceeds its input bound")
+        self.assertLessEqual(self.bytes_read, 2 * limit + 128 * 1024)
+
+    def test_zero_padding_is_not_data_and_other_trailing_bytes_are_not_a_member(self):
+        document = b"<rss></rss>"
+        self.assertEqual(self.get(gzip.compress(document) + b"\0" * 512, 1024), (document, True))
+        self.assertEqual(self.get(gzip.compress(document) + b"\0" * 64 + gzip.compress(document), 1024),
+                         (document + document, True))
+        with self.assertRaises(plugin._Unavailable) as corrupt:
+            self.get(gzip.compress(document) + b"not a gzip member", 1024)
+        self.assertEqual(str(corrupt.exception), "corrupt gzip body")
+
+    def test_truncated_later_member_is_not_a_complete_body(self):
+        second = gzip.compress(b"second member")
+        with self.assertRaises(plugin._Unavailable) as truncated:
+            self.get(gzip.compress(b"first member") + second[:len(second) // 2], 1024)
+        self.assertEqual(str(truncated.exception), "truncated gzip body")
+
+    def test_single_member_and_empty_members_keep_working(self):
+        document = b"<rss></rss>"
+        self.assertEqual(self.get(gzip.compress(document), 1024), (document, True))
+        self.assertEqual(self.get(gzip.compress(b"") + gzip.compress(document) + gzip.compress(b""), 1024), (document, True))
+        with self.assertRaises(plugin._Unavailable):  # a declared gzip body with no bytes at all
+            self.get(b"", 1024)
 
 
 if __name__ == "__main__":
