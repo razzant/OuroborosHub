@@ -40,13 +40,13 @@ window.ready=true;
 def loopback_only(monkeypatch):
     """The skill's own HTTP calls (the begin route probes this host's return page) may only reach loopback."""
     import urllib.request
-    real = urllib.request.urlopen
+    real = urllib.request.OpenerDirector.open
 
-    def guarded(request, *args, **kwargs):
+    def guarded(opener, request, *args, **kwargs):
         url = request.full_url if hasattr(request, 'full_url') else str(request)
         assert urlsplit(url).hostname in ('127.0.0.1', 'localhost'), f'outside network: {url}'
-        return real(request, *args, **kwargs)
-    monkeypatch.setattr(urllib.request, 'urlopen', guarded)
+        return real(opener, request, *args, **kwargs)
+    monkeypatch.setattr(urllib.request.OpenerDirector, 'open', guarded)
 
 
 def core_root():
@@ -62,8 +62,9 @@ def request_class():
     from test_calendar_round2 import Request
 
     class HostRequest(Request):
-        def __init__(self, body, query, headers):
+        def __init__(self, body, query, headers, method):
             super().__init__(body, query)
+            self.method = method
             self.headers = headers   # the real request's: the begin route reads the Origin the bridge sent
     return HostRequest
 
@@ -109,7 +110,7 @@ def serve(core, routes_api):
                 body = json.loads(raw or b'{}')
                 (state['posts'] if self.command == 'POST' else state['reads']).append((name, body) if self.command == 'POST' else name)
                 try:
-                    result = asyncio.run(routes_api.routes[name](request(body, {k: v[-1] for k, v in parse_qs(url.query).items()}, self.headers)))
+                    result = asyncio.run(routes_api.routes[name](request(body, {k: v[-1] for k, v in parse_qs(url.query).items()}, self.headers, self.command)))
                     state['responses'].append((name, result.status_code, result.body))
                     return self.send(result.body, status=result.status_code)
                 except Exception as exc:
@@ -139,9 +140,11 @@ def calendar_server():
     import routes
     import tools
     ctx, calendar_id, provider = google_context()
+    fixed_now = _day(0, 12)
+    ctx.now = lambda: fixed_now.astimezone(ctx.tz)
     api = RouteAPI()
     routes.register_routes(api, lambda: ctx)
-    event = json.loads(tools.cal_create(ctx, title='Notify meeting', start=_day(0).isoformat(),
+    event = json.loads(tools.cal_create(ctx, title='Notify meeting', start=fixed_now.replace(hour=9).isoformat(),
         calendars=[calendar_id], attendees=['guest@example.test'], confirm=True))['event']
     try:
         with serve(core, api) as (state, url, _):
@@ -293,8 +296,9 @@ def test_calendar_host_card(calendar_server, tmp_path, engine, scenario):
                 expect(frame.get_by_placeholder('Место или ссылка')).to_have_value('Unsaved location retained')
                 frame.get_by_role('button', name='Точно удалить?', exact=True).click()
                 expect(frame.locator('.card')).to_have_count(0)
-                assert state['posts'][-1][0] == 'event/delete'
-                assert state['posts'][-1][1]['send_updates'] is True
+                deletion = [item for item in state['posts'] if item[0] == 'event/delete']
+                assert len(deletion) == 1
+                assert deletion[0][1]['send_updates'] is True
                 assert [c for c in provider.calls if c[0] == 'DELETE'][-1][2]['sendUpdates'] == 'all'
             for theme in ('light', 'dark'):
                 page.evaluate(f"ouroTheme.set('{theme}')")

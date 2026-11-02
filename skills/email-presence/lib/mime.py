@@ -7,20 +7,29 @@ import mimetypes
 import re
 from email import message_from_bytes
 from email.header import decode_header, make_header
+from email.errors import HeaderParseError, InvalidHeaderDefect, MessageError
 from email.message import EmailMessage, Message
 from email.policy import default
 from email.utils import getaddresses, make_msgid, parseaddr
 from pathlib import Path
 from typing import Any
 
+_ADDRESS_PARSE_ERRORS = (ValueError, IndexError, AttributeError, TypeError, HeaderParseError)
+
 
 def decode_header_value(value: Any) -> str:
     if value is None:
         return ""
+    # Unfold the source syntax before decoding encoded words; their decoded
+    # content is not another header line to rewrite.
+    source = re.sub(r"\r?\n(?=[ \t])", "", str(value))
     try:
-        return str(make_header(decode_header(str(value))))
-    except (LookupError, UnicodeError, ValueError):
-        return str(value)
+        text = str(make_header(decode_header(source)))
+    except (LookupError, UnicodeError, ValueError, MessageError):
+        text = source
+    # raw_items uses surrogateescape for 8-bit wire bytes. Recover valid UTF-8,
+    # replace undecodable bytes for display, and retain the original MIME source.
+    return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
 def _plain_from_part(part: Message) -> str:
@@ -73,6 +82,36 @@ def _addresses(value: Any) -> list[str]:
     return [addr for _, addr in getaddresses([decode_header_value(value)]) if addr]
 
 
+class MailAddressError(ValueError):
+    """A deterministic mailbox-address failure, distinct from transport/Host errors."""
+
+
+def mailbox_addresses(value: Any) -> list[str]:
+    """Parse complete mailbox lists before grouping/deduplication or envelope use."""
+    values = value if isinstance(value, (list, tuple)) else [value]
+    text = ", ".join(str(item).strip() for item in values if item is not None and str(item).strip())
+    if not text:
+        return []
+    if "\r" in text or "\n" in text:
+        raise MailAddressError("Mailbox addresses must be one RFC address list, without line breaks")
+    try:
+        message = EmailMessage()
+        message['To'] = text
+        header = message['To']
+        parsed = header.addresses
+    except _ADDRESS_PARSE_ERRORS as exc:
+        raise MailAddressError("Invalid mailbox address list; use complete email addresses") from exc
+    if (any(isinstance(defect, InvalidHeaderDefect) for defect in header.defects)
+            or not parsed or any(not address.username or not address.domain for address in parsed)):
+        raise MailAddressError("Invalid mailbox address list; use complete email addresses")
+    return [str(address) for address in parsed]
+
+
+def conversation_root(*, references=(), in_reply_to="", message_id=""):
+    """The RFC root used by intake, preparation, queued bindings and delivery."""
+    return str(next(iter(references or ()), "") or in_reply_to or message_id).strip()
+
+
 def _attachment_metadata(part: Message, *, include_data: bool = False) -> dict[str, Any]:
     filename = decode_header_value(part.get_filename() or "")
     filename = Path(filename).name if filename else "attachment"
@@ -105,8 +144,15 @@ def parse_message(
     include_attachment_data: bool = False,
 ) -> dict[str, Any]:
     msg = message_from_bytes(raw, policy=default)
+    def header(name):
+        # A broken external address must remain readable without stopping later
+        # messages. Only stdlib header parsing falls back to its original value.
+        try:
+            return msg.get(name)
+        except _ADDRESS_PARSE_ERRORS:
+            return next((value for key, value in msg.raw_items() if key.lower() == name.lower()), None)
     message_id = str(msg.get("Message-ID") or "").strip() or f"<sha256-{hashlib.sha256(raw).hexdigest()}@ouroboros.local>"
-    sender_name, sender_addr = parseaddr(decode_header_value(msg.get("From")))
+    sender_name, sender_addr = parseaddr(decode_header_value(header("From")))
     attachments = []
     for part in msg.walk():
         if part.is_multipart() and not (part.get_filename() or part.get_content_disposition() == "attachment"):
@@ -121,17 +167,17 @@ def parse_message(
         "in_reply_to": str(msg.get("In-Reply-To") or "").strip(),
         "references": _message_ids(msg.get("References")),
         "subject": decode_header_value(msg.get("Subject")),
-        "sender": sender_addr or decode_header_value(msg.get("From")),
+        "sender": sender_addr or decode_header_value(header("From")),
         "sender_name": sender_name,
-        "recipients": _addresses(msg.get("To")),
-        "cc": _addresses(msg.get("Cc")),
-        "reply_to": _addresses(msg.get("Reply-To")),
+        "recipients": _addresses(header("To")),
+        "cc": _addresses(header("Cc")),
+        "reply_to": _addresses(header("Reply-To")),
         "date": str(msg.get("Date") or ""),
         "body": extract_body(msg, max_chars=max_body_chars),
         "attachments": attachments,
     }
     result["headers"] = {
-        name.lower(): [decode_header_value(value) for value in msg.get_all(name, [])]
+        name.lower(): [decode_header_value(value) for key, value in msg.raw_items() if key.lower() == name.lower()]
         for name in ("From", "To", "Cc", "Reply-To", "List-Id", "List-Unsubscribe", "Precedence", "Auto-Submitted")
         if name in msg or name in ("From", "To", "Cc", "Reply-To")
     }

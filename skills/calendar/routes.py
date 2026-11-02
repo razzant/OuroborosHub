@@ -14,7 +14,7 @@ import tools
 import accounts
 from model import (
     AVAIL_BUSY, AVAIL_SOFT, SCOPES, VISIBILITY_HIDDEN, VISIBILITY_SHOWN, WEEKDAY_LABELS, day_bounds, event_public, iso_local, iso_utc,
-    parse_input, tz_name, week_bounds,
+    parse_input, tz_name, week_bounds, has_recurrence,
 )
 
 
@@ -34,6 +34,8 @@ def _aggregate(assignments) -> str:
     statuses = {a.get("status") for a in assignments or []}
     if not statuses or statuses <= {"done"}:
         return "ok"
+    if "uncertain" in statuses:
+        return "uncertain"
     if "conflict" in statuses:
         return "conflict"
     if "pending" in statuses:
@@ -54,7 +56,8 @@ def agenda_payload(ctx: tools.Context, view: str, anchor: str, calendar_ids: Any
     visible_ids = [c["id"] for c in cals if c["role_visible"]]
     if calendar_ids:
         visible_ids = [c for c in visible_ids if c in calendar_ids]   # ["-"] (every chip unticked) leaves nothing
-    occs = ctx.occurrences(start, end, visible_ids, include_hidden=True) if visible_ids else []
+    failed = {}
+    occs = ctx.occurrences(start, end, visible_ids, include_hidden=True, strict=True, failed=failed) if visible_ids else []
     events, hatches, usual = [], [], []
     for occ in occs:
         if str(occ.get("status") or "") == "cancelled":
@@ -71,6 +74,14 @@ def agenda_payload(ctx: tools.Context, view: str, anchor: str, calendar_ids: Any
             continue
         events.append(pub)
     pending = ctx.store.intent_counts(active_only=True)
+    accounts = []
+    for account in ctx.store.list_accounts():
+        adapter_error = ''
+        if account['provider'] != 'local' and ctx.providers.adapter_for(account['id']) is None:
+            adapter_error = getattr(ctx.providers, 'errors', {}).get(account['id']) or 'Account adapter unavailable'
+        accounts.append({'id': account['id'], 'alias': account['alias'], 'provider': account['provider'],
+                         'status': 'unavailable' if adapter_error else account['status'],
+                         'adapter_error': adapter_error, 'last_sync': account.get('last_sync')})
     return {
         "status": "ok", "view": view, "anchor": day.isoformat(), "timezone": tz_name(ctx.tz), "now": now.replace(microsecond=0).isoformat(),
         "range": {"start": iso_local(start, ctx.tz), "end": iso_local(end, ctx.tz)},
@@ -78,13 +89,14 @@ def agenda_payload(ctx: tools.Context, view: str, anchor: str, calendar_ids: Any
                   "weekday": WEEKDAY_LABELS[(start.astimezone(ctx.tz).date() + timedelta(days=i)).weekday()]}
                  for i in range((end.astimezone(ctx.tz).date() - start.astimezone(ctx.tz).date()).days)],
         "calendars": [{"id": c["id"], "name": c["name"], "provider": c["provider"], "writable": bool(c["writable"]), "visible": bool(c["role_visible"]),
-                       "default": bool(c["is_default"])} for c in cals],
+                       "default": bool(c["is_default"]), 'sync_warning': ctx.store.get_sync_state(c['id']).get('last_error') or ''} for c in cals],
         "events": events, "hidden_busy": hatches, "usual": usual if show_hidden else [],
+        'events_complete': not failed, 'unexpanded_series': failed,
         "show_hidden": show_hidden, "working_hours": ctx.store.get_setting("working_hours") or "09:00-19:00",
         "sync": {"pending": pending.get("pending", 0), "conflict": pending.get("conflict", 0), "failed": pending.get("failed", 0),
                  'uncertain': pending.get('uncertain', 0), "companion": ctx.companion_health().get("state")},
         "link_issues": ctx.store.link_issues(),
-        "accounts": [{"id": a["id"], "alias": a["alias"], "provider": a["provider"], "status": a["status"], "last_sync": a.get("last_sync")} for a in ctx.store.list_accounts()],
+        "accounts": accounts,
     }
 
 
@@ -96,7 +108,29 @@ def register_routes(api, make_ctx) -> None:
         cal_ids = ["-"] if raw_cals == "-" else [c for c in raw_cals.split(",") if c]   # "-" = the owner unticked every calendar
         show_hidden = str(q.get("show_hidden") or "").lower() in ("1", "true")
         view = "week" if str(q.get("view") or "day") == "week" else "day"
-        return JSONResponse(agenda_payload(ctx, view, str(q.get("date") or ""), cal_ids, show_hidden))
+        try:
+            return JSONResponse(agenda_payload(ctx, view, str(q.get("date") or ""), cal_ids, show_hidden))
+        except ValueError as exc:
+            return _err(str(exc))
+
+    async def draft(request):
+        ctx = make_ctx()
+        if request.method == 'POST':
+            body = await _body(request)
+            value = body.get('draft')
+            if value is not None:
+                if not isinstance(value, dict) or not isinstance(value.get('event'), dict) or not isinstance(value.get('inputs'), dict):
+                    return _err('draft needs event and inputs objects, or null to clear it')
+                # Only card data, never an account form, credentials or a whole widget snapshot.
+                event_fields = ('id', 'title', 'start', 'end', 'all_day', 'calendars', 'primary_calendar', 'hidden',
+                                'availability', 'location', 'description', 'reminders', 'attendees', 'rrule', 'series',
+                                'grouped', 'linkState', 'readonly')
+                input_fields = ('title', 'start', 'end', 'all_day', 'calendars', 'hidden', 'availability', 'location',
+                                'description', 'reminders', 'attendees', 'rrule', 'scope', 'send_updates')
+                value = {'event': {k: value['event'][k] for k in event_fields if k in value['event']},
+                         'inputs': {k: value['inputs'][k] for k in input_fields if k in value['inputs']}}
+            ctx.store.set_setting('widget_draft', value)
+        return JSONResponse({'status': 'ok', 'draft': ctx.store.get_setting('widget_draft')})
 
     async def status(request):
         ctx = make_ctx()
@@ -108,7 +142,10 @@ def register_routes(api, make_ctx) -> None:
         title = str(body.get("title") or "").strip()
         if not title:
             return _err("Введите название")
-        spec, err = tools._spec_from_args(ctx, body.get("start"), body.get("end"), body.get("duration_min") or 60, body.get("all_day"))
+        try:
+            spec, err = tools._spec_from_args(ctx, body.get("start"), body.get("end"), body.get("duration_min") or 60, body.get("all_day"))
+        except ValueError as exc:
+            return _err(str(exc))
         if err:
             return _err(err)
         try:
@@ -148,7 +185,7 @@ def register_routes(api, make_ctx) -> None:
             ops.resolve_occurrence(ctx.store, current, occurrence)
         except ValueError as exc:
             return _err(str(exc))
-        if current.get("rrule") and not occurrence and scope == "this":
+        if has_recurrence(current) and not occurrence and scope == "this":
             return _err("для одной даты нужен id вхождения (…@дата); для серии выбери all или following")
         if scope == "following" and not occurrence and not current.get("master_id"):
             return _err("для following нужен id вхождения (…@дата)")
@@ -158,8 +195,11 @@ def register_routes(api, make_ctx) -> None:
                 return _err(err)
         changes: Dict[str, Any] = {}
         if body.get("start") or body.get("end"):
-            changes.update(tools._update_times(ctx, current, occurrence, start=body.get('start'), end=body.get('end'),
-                                               all_day=body.get('all_day'), scope=scope))
+            try:
+                changes.update(tools._update_times(ctx, current, occurrence, start=body.get('start'), end=body.get('end'),
+                                                   all_day=body.get('all_day'), scope=scope))
+            except ValueError as exc:
+                return _err(str(exc))
         if "all_day" in body and body.get("all_day") != bool(current.get("all_day")):
             changes["all_day"] = bool(body.get("all_day"))
         for key in ("title", "description", "location", "availability", "rrule"):
@@ -219,7 +259,7 @@ def register_routes(api, make_ctx) -> None:
             ops.resolve_occurrence(ctx.store, current, occurrence)
         except ValueError as exc:
             return _err(str(exc))
-        if current.get("rrule") and not occurrence and scope == "this":
+        if has_recurrence(current) and not occurrence and scope == "this":
             return _err("для одной даты нужен id вхождения (…@дата); для серии выбери all или following")
         if scope == "following" and not occurrence and not current.get("master_id"):
             return _err("для following нужен id вхождения (…@дата)")
@@ -303,6 +343,7 @@ def register_routes(api, make_ctx) -> None:
 
     api.register_route("agenda", agenda, methods=("GET",))
     api.register_route("status", status, methods=("GET",))
+    api.register_route('draft', draft, methods=('GET', 'POST'))
     api.register_route("event", event_create, methods=("POST",))
     api.register_route("event/get", event_get, methods=("GET",))
     api.register_route('event/link', event_link, methods=('POST',))

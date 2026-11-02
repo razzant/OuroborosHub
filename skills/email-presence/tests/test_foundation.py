@@ -142,6 +142,10 @@ def registered(tmp_path, monkeypatch):
             pass
         def close(self):
             pass
+        def find_message(self, message_id, *, folder="INBOX"):
+            calls.append('find_message')
+            return {'message_id': message_id, 'sender': 'alice@example.org', 'recipients': [ACCOUNT],
+                    'references': [], 'in_reply_to': '', 'folder': folder}
         def __getattr__(self, name):
             def call(**kwargs):
                 calls.append(name)
@@ -218,7 +222,19 @@ def test_request_id_reuse_checks_payload_and_returns_original_receipt(tmp_path, 
     assert different["ok"] is False and different["code"] == "request_id_conflict"
     assert EmailStore(tmp_path).receipt("stable") == first["receipt"]
     assert sum(EmailStore(tmp_path).status()["outbox"].values()) == 1
-    assert json.loads(tools["email_send"](**{**original, **change, "request_id": "new"}))["ok"]
+    requested = {**original, **change, "request_id": "new"}
+    next_result = json.loads(tools["email_send"](**requested))
+    if 'reply_to_message_id' in change or 'references' in change:
+        assert next_result['status'] == 'needs_arguments'
+        assert next_result['code'] == 'canonical_conversation_required'
+        assert EmailStore(tmp_path).receipt('new') is None
+        retry = next_result['retry_arguments']
+        assert retry['conversation_id'] == retry['thread_id'] == '<other>'
+        assert all(retry[key] == value for key, value in requested.items())
+        next_result = json.loads(tools['email_send'](**retry))
+    assert next_result['ok']
+    assert EmailStore(tmp_path).receipt('stable') == first['receipt']
+    assert sum(EmailStore(tmp_path).status()['outbox'].values()) == 2
 
 
 @pytest.mark.parametrize("body", ["An unsigned answer", "Thanks,\nAnton", "I am an assistant."])
@@ -233,7 +249,7 @@ def test_outgoing_body_is_authored_without_connector_marks(body):
 
 def test_manifest_offers_facts_without_default_wakes():
     manifest = yaml.safe_load((Path(__file__).resolve().parents[1] / "SKILL.md").read_text().split("---", 2)[1])
-    assert manifest["version"] == "0.9.0"
+    assert manifest["version"] == "0.9.1"
     place = manifest["contributes"][0]
     assert place["wakes"] == []
     assert place["settings"] == "email_presence"

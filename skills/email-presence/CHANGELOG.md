@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.1
+
+- Parse complete RFC mailbox lists before To/Cc/Bcc grouping and envelope delivery,
+  preserving quoted display names and rejecting malformed or empty destinations.
+- Expose canonical RFC conversation fields and prepare missing reply arguments
+  before the existing Host guard admits a send or draft. No new core seam or
+  mandatory Place is needed; existing queued requests retain their receipts.
+- Deliver selected terminal speech even when its task failed or was cancelled,
+  preserving output identity and releasing cached views after durable settlement.
+- Settle supported No-Place refusals once without replaying old inbox items when
+  a Place is later connected; transient and unsupported-Host refusals keep retry custody.
+- Create new mailbox state directories and databases with private permissions.
+- Keep malformed-recipient diagnostics from stopping the mailbox worker or
+  ending an active author before its later valid outputs can be delivered.
+- Use direct transport for the local Google return-page probe, preserving
+  public origins, deployment prefixes and injected transports.
+- Retain readable malformed incoming address headers without blocking later
+  mail, and normalize the remaining stdlib outgoing-address parser failures.
+- Decode ordinary raw UTF-8 and folded header views for capture and tool results;
+  keep undecodable words readable and preserve the original MIME bytes.
+
 ## 0.9.0
 
 - Add multiple independent Gmail API and IMAP/SMTP accounts, separate sender

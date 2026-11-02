@@ -27,7 +27,7 @@ LONG = "Очень длинное название рабочего календ
 # A scripted skill behind the widget bridge: every route is a function a test may replace in backend.routes.
 BRIDGE = r"""cfg => {
     const backend = {accounts: cfg.accounts || [], calendars: cfg.calendars || [], events: cfg.events || [], linkIssues: cfg.linkIssues || [],
-        eventGet: cfg.eventGet || {}, options: cfg.options, settings: cfg.settings, now: cfg.now, opened: [], hold: null, routes: {},
+        eventGet: cfg.eventGet || {}, draft: cfg.draft || null, options: cfg.options, settings: cfg.settings, now: cfg.now, opened: [], hold: null, routes: {},
         openResult: {ok: true, native: false, host: 'browser'}};
     const calls = [], disposers = [];
     const reply = (body, status = 200) => ({ok: status < 400, status, json: async () => body});
@@ -40,6 +40,7 @@ BRIDGE = r"""cfg => {
                 sync: {pending: 0, conflict: 0, failed: 0, companion: 'alive'},
                 accounts: backend.accounts.map(a => ({id: a.id, alias: a.alias, provider: a.provider, status: a.status, last_sync: a.last_sync}))});
         },
+        draft: async (query, body) => { if (body) backend.draft = body.draft; return reply({status:'ok', draft:backend.draft}); },
         status: async () => reply({status: 'ok', accounts: backend.accounts, calendars: backend.calendars,
             connection_options: backend.options, settings: backend.settings}),
         'event/get': async query => backend.eventGet[query.id] ? reply({status: 'ok', event: backend.eventGet[query.id]})
@@ -252,16 +253,16 @@ class CalendarWidgetBrowserTests(BrowserCase):
         self.page.get_by_role('button', name='Удалить', exact=True).click()
         self.assertEqual(self.page.locator('.card select').last.input_value(), 'all')
         self.page.get_by_role('button', name='Точно удалить (всё расписание)?', exact=True).click()
-        body = self.page.evaluate('posted[0].body')
+        body = self.page.evaluate("posted.find(p => p.path.includes('event/delete')).body")
         self.assertEqual(body['scope'], 'all')
-        self.assertIn('event/delete', self.page.evaluate('posted[0].path'))
+        self.assertEqual(self.page.evaluate("posted.filter(p => p.path.includes('event/delete')).length"), 1)
 
     def test_title_only_series_save_does_not_send_prefilled_times(self):
         self.mount_recurring_card()
         self.page.locator('.card select').last.select_option('following')
         self.page.get_by_placeholder('Название').fill('Renamed')
         self.page.get_by_role('button', name='Сохранить', exact=True).click()
-        body = self.page.evaluate('posted[0].body')
+        body = self.page.evaluate("posted.find(p => p.path.includes('event/update')).body")
         self.assertEqual(body['scope'], 'following')
         self.assertEqual(body['title'], 'Renamed')
         self.assertNotIn('start', body)

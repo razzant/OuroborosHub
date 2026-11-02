@@ -17,7 +17,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, BUSY_COPY_TITLE, INTENT_CONFLICT, INTENT_DONE, INTENT_FAILED, INTENT_PENDING,
     PROVIDER_LOCAL, CALDAV_PROVIDERS, PUBLISH_BUSY, PUBLISH_FULL, SCOPES, SCOPE_ALL, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_SHOWN,
-    get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time, calendar_time, event_field_value, normalize_rrule_until,
+    get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time, calendar_time, event_field_value, normalize_rrule_until, has_recurrence, event_time_kind, stage_event_times,
+    event_time_delta as _time_delta, shift_event_time as _shift_instant, recurrence_time_delta, shift_recurrence_time,
 )
 
 RETRY_BACKOFF_SEC = (30, 120, 600, 1800, 7200)
@@ -76,7 +77,7 @@ def resolve_occurrence(store, row: Dict[str, Any], occ_key: str) -> Tuple[Dict[s
     if not occ_key:
         return row, ""
     slot = _parse_occurrence_key(occ_key)
-    if slot is None or not row.get("rrule") or not row.get("id"):
+    if slot is None or not has_recurrence(row) or not row.get("id"):
         raise ValueError("invalid occurrence id")
     key = iso_utc(slot)
     if key in excluded_slots(row):
@@ -102,7 +103,7 @@ def expand(rows: Sequence[Dict[str, Any]], start: datetime, end: datetime, excep
     A local «обычно» (soft) routine follows the owner's CURRENT zone (16 A), everything else keeps its own zone.
     """
     out: List[Dict[str, Any]] = []
-    present = {row["id"] for row in rows if row.get("rrule") and not row.get("master_id")}
+    present = {row["id"] for row in rows if has_recurrence(row)}
     for row in rows:
         if row.get("master_id"):
             if row["master_id"] in present or str(row.get("status") or "") == "cancelled":
@@ -116,15 +117,14 @@ def expand(rows: Sequence[Dict[str, Any]], start: datetime, end: datetime, excep
                 item.update(start_utc=iso_utc(s), end_utc=iso_utc(e), _display_times=True)
                 out.append(item)
             continue
-        if not row.get("rrule"):
+        if not has_recurrence(row):
             s, e = calendar_time(row, row.get("start_utc"), owner_tz), calendar_time(row, row.get("end_utc"), owner_tz)
             if s and e and overlaps(s, e, start, end):
                 out.append({**row, 'start_utc': iso_utc(s), 'end_utc': iso_utc(e), '_display_times': True})
             continue
-        follow_owner = owner_tz is not None and (row.get('all_day') or row.get('time_kind') == 'floating'
-            or row.get("availability") == AVAIL_SOFT and row.get("origin", "local") == "local")
+        follow_owner = owner_tz is not None and event_time_kind(row) != 'absolute'
         try:
-            out.extend(_expand_master(row, start, end, exceptions_for(row["id"]), owner_tz if follow_owner else None, strict=strict))
+            out.extend(_expand_master(row, start, end, exceptions_for(row["id"]), owner_tz if follow_owner else None, strict=strict, owner_tz=owner_tz))
         except Exception as exc:
             if failed is None:
                 raise
@@ -153,7 +153,8 @@ def validate_rrule(rule: Any, start_utc: str, zone: str) -> str:
 
 
 def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, exceptions: List[Dict[str, Any]],
-                   force_tz=None, strict: bool = False) -> List[Dict[str, Any]]:
+                   force_tz=None, strict: bool = False, owner_tz=None) -> List[Dict[str, Any]]:
+    display_tz = owner_tz if owner_tz is not None else force_tz
     m_start, m_end = parse_stored(master.get("start_utc")), parse_stored(master.get("end_utc"))
     if m_start is None or m_end is None:
         if strict:
@@ -161,7 +162,7 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
         return []
     duration = m_end - m_start
     try:
-        from dateutil.rrule import rrulestr  # transitive dependency of icalendar
+        from dateutil.rrule import rrulestr, rruleset  # transitive dependency of icalendar
     except Exception:
         if strict:
             raise  # a partial recurrence projection must not authorize destructive queue reconciliation
@@ -184,7 +185,9 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
                     moved = routine_time(master, iso_utc(bound), force_tz)
                     parts[index] = 'UNTIL=' + moved.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
             rule_text = ';'.join(parts)
-        rule = rrulestr(normalize_rrule_until(rule_text, tz), dtstart=dtstart, forceset=True)
+        rule = rrulestr(normalize_rrule_until(rule_text, tz), dtstart=dtstart, forceset=True) if rule_text else rruleset()
+        if not rule_text:
+            rule.rdate(dtstart)
         for ex in _split_dates(master.get("exdates")):
             rule.exdate(routine_time(master, iso_utc(ex), force_tz).astimezone(tz))
         for rd in _split_dates(master.get("rdates")):
@@ -215,9 +218,8 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
             if own_reminders(exc.get("reminders_json")) is None:
                 row["reminders_json"] = master.get("reminders_json") or "[]"
             row["id"] = exc["id"]
-            if force_tz is not None:
-                for field in ('start_utc', 'end_utc'):
-                    row[field] = iso_utc(routine_time(master, row[field], force_tz))
+            for field in ('start_utc', 'end_utc'):
+                row[field] = iso_utc(calendar_time(row, row[field], display_tz))
         else:
             row = dict(master)
             row["id"] = f"{master['id']}@{key}"
@@ -237,7 +239,8 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
     for key, exc in by_recurrence.items():
         if key in visited or key in excluded or str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at"):
             continue
-        s, e = routine_time(master, exc.get("start_utc"), force_tz), routine_time(master, exc.get("end_utc"), force_tz)
+        effective = {**master, **{k: v for k, v in exc.items() if v is not None}}
+        s, e = calendar_time(effective, exc.get("start_utc"), display_tz), calendar_time(effective, exc.get("end_utc"), display_tz)
         if s and e and overlaps(s, e, start, end):
             row = dict(master)
             row.update({k: v for k, v in exc.items() if v is not None})
@@ -478,9 +481,11 @@ def _stage_create_event(store, spec: Dict[str, Any], owner: str = "") -> Dict[st
             "start_utc": spec["start_utc"], "end_utc": spec["end_utc"], "tz": spec.get("tz") or "", "all_day": bool(spec.get("all_day")),
             "rrule": spec.get("rrule") or "", "attendees_json": json.dumps([] if is_copy else spec.get("attendees") or [], ensure_ascii=False),
             "reminders_json": "[]" if is_copy or spec.get("reminders") is None else reminders_to_json(spec["reminders"]),
-            "origin": "local", "link_group_id": link_group,
+            "origin": "projection" if is_copy else "local", "link_group_id": link_group,
             "sync_state": "synced" if cal["provider"] == PROVIDER_LOCAL else "pending",
         }
+        if is_copy:
+            row['time_kind'] = links.projection_time_kind(primary_row, cal)
         saved = store.insert_event(row)
         if primary_row is None:
             primary_row = store.get_event(saved["id"]) or saved
@@ -508,31 +513,25 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
     if row is None or row.get("deleted_at"):
         return {"status": "not_found", "assignments": []}
     row, occ_key = resolve_occurrence(store, row, occ_key)
-    if owner_tz is not None and (row.get('time_kind') == 'floating'
-            or row.get('availability') == AVAIL_SOFT and row.get('origin', 'local') == 'local'):
-        changes = dict(changes)
-        for field in ('start_utc', 'end_utc'):
-            if changes.get(field):
-                changes[field] = iso_utc(parse_stored(changes[field]).astimezone(owner_tz).replace(tzinfo=get_tz(row.get('tz') or '')))
-    if row.get("rrule") and not occ_key and scope == SCOPE_THIS:
+    if from_source:
+        row = {**row, 'origin': 'projection', 'time_kind': links.projection_time_kind(row, store.get_calendar(row['calendar_id']) or {})}
+    exception = next((exc for exc in store.exceptions_for(row['id']) if exc.get('recurrence_id') == occ_key), None) if occ_key else None
+    effective = {**row, **exception} if exception else row
+    changes = stage_event_times(effective, changes, owner_tz)
+    if has_recurrence(row) and not occ_key and scope == SCOPE_THIS:
         raise ValueError("a recurring master needs an occurrence id or scope=all")
     if scope == SCOPE_FOLLOWING and not occ_key:
         raise ValueError("scope=following needs an occurrence id")
     changes = _shift_for_scope_all(store, row, occ_key, scope, changes)
-    if changes.get("all_day"):
-        zone = get_tz(changes.get("tz") or row.get("tz") or "")
-        first = parse_stored(changes.get("start_utc") or occ_key or row["start_utc"]).astimezone(zone)
-        last = parse_stored(changes.get("end_utc") or row["end_utc"]).astimezone(zone)
-        first = first.replace(hour=0, minute=0, second=0, microsecond=0)
-        midnight = last.replace(hour=0, minute=0, second=0, microsecond=0)
-        last = midnight + timedelta(days=1) if midnight != last else midnight
-        changes = {**changes, "start_utc": iso_utc(first), "end_utc": iso_utc(max(last, first + timedelta(days=1)))}
     op_id = new_id("op")
     members = [row] + (links.followers(store, row) if propagate else [])
     assignments: List[Dict[str, Any]] = []
     blocked = _read_only_preflight(store, members, assignments)   # refuse read-only targets BEFORE touching local rows
     if row["id"] in blocked:
         return {"status": "failed", "event": row, "assignments": assignments}
+    if from_source:
+        for derived in [row] + store.exceptions_for(row['id']):
+            store.update_event(derived['id'], {'origin': 'projection', 'time_kind': links.projection_time_kind(derived, store.get_calendar(derived['calendar_id']) or {})})
     before = {e['id']: e for master in members for e in [master] + store.exceptions_for(master['id'])}
     if not from_source and row.get('link_group_id') and not links.source_is(store, row) and set(changes) & set(links.COPY_FIELDS):
         store.update_event(row['id'], {'link_state': links.DIVERGED})
@@ -568,10 +567,16 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
         for sib in members[1:]:
             if sib["id"] in blocked or store.delete_requested(sib["id"]) or not sibling_changes:
                 continue
+            cal = store.get_calendar(sib['calendar_id']) or {}
+            for derived in [sib] + store.exceptions_for(sib['id']):
+                store.update_event(derived['id'], {'origin': 'projection', 'time_kind': links.projection_time_kind(derived, cal)})
+            sib = store.get_event(sib['id'])
             if sib.get("title") == BUSY_COPY_TITLE or sib.get("publish_mode") == PUBLISH_BUSY:
                 allowed = {k: v for k, v in sibling_changes.items() if k not in ('title', 'description', 'location')}
             else:
                 allowed = dict(sibling_changes)
+            source_result = targets[1] if occ_key and scope == SCOPE_FOLLOWING else targets[0]
+            allowed['time_kind'] = links.projection_time_kind(source_result, cal)
             if occ_key and scope == SCOPE_THIS:
                 exc_id = _ensure_exception(store, sib, occ_key, allowed)
                 targets.append(store.get_event(exc_id))
@@ -599,8 +604,8 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
         store.update_event(target["id"], {"sync_state": "pending"})
         write_kind = "create" if (not target.get("external_id") and not target.get("href") and not target.get("master_id")) else "update"
         birth = next((i for i in store.intents_for_event(target['id'])
-                      if i['kind'] == 'create' and i['state'] in (INTENT_PENDING, INTENT_FAILED, INTENT_CONFLICT)), None)
-        recover_birth = _recover_failed_create(store, birth) if birth else False
+                      if i['kind'] == 'create' and i['state'] in (INTENT_PENDING, INTENT_FAILED, INTENT_CONFLICT, 'uncertain')), None)
+        recover_birth = _recover_failed_create(store, birth, explicit_edit=not from_source) if birth else False
         if birth:
             write_kind = 'update'
         kinds: List[str] = []
@@ -614,6 +619,8 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
         for kind in kinds:
             payload = {"scope": scope, "changes": {k: v for k, v in changes.items() if k != "my_response"}, "send_updates": bool(send_updates)}
             payload['family_root_id'] = roots[cal['id']]
+            if occ_key and scope == SCOPE_FOLLOWING and target['id'] == roots[cal['id']]:
+                payload['truncate_before'] = occ_key
             previous = previous_by_calendar.get(cal['id'])
             if previous:
                 payload['after_intent_id'] = previous
@@ -666,7 +673,7 @@ def _stage_delete_event(store, event_id: str, scope: str = SCOPE_THIS, send_upda
     if row is None or row.get("deleted_at"):
         return {"status": "not_found", "assignments": []}
     row, occ_key = resolve_occurrence(store, row, occ_key)
-    if row.get("rrule") and not occ_key and scope == SCOPE_THIS:
+    if has_recurrence(row) and not occ_key and scope == SCOPE_THIS:
         raise ValueError("a recurring master needs an occurrence id or scope=all")
     if scope == SCOPE_FOLLOWING and not occ_key:
         raise ValueError("scope=following needs an occurrence id")
@@ -713,6 +720,8 @@ def _stage_delete_event(store, event_id: str, scope: str = SCOPE_THIS, send_upda
                    'baseline': _baseline_before(before, victim), 'family_root_id': target['id'],
                    'restore_rows': [{k: v for k, v in e.items() if k not in ('raw_payload','provider','account_id','calendar_name')}
                                     for e in before.values()]}
+        if occ_key and scope == SCOPE_FOLLOWING:
+            payload['truncate_before'] = occ_key
         intent = store.add_intent(kind, cal["account_id"], cal["id"], victim["id"], payload,
                                   scope=scope, expected_etag=_write_etag(store, cal, victim))
         result = {"status": INTENT_PENDING, "_intent_ids": [intent["id"]]}
@@ -751,7 +760,7 @@ def _apply_changes(store, row: Dict[str, Any], changes: Dict[str, Any]) -> None:
         if key in changes and changes[key] is not None:
             fields[key] = changes[key]
     if 'time_kind' in fields:
-        fields['time_kind'] = links.projection_time_kind(fields, store.get_calendar(row['calendar_id']) or {})
+        fields['time_kind'] = links.projection_time_kind({**row, **fields}, store.get_calendar(row['calendar_id']) or {})
     if "attendees" in changes and changes["attendees"] is not None:
         fields["attendees_json"] = json.dumps(changes["attendees"], ensure_ascii=False)
     if "reminders" in changes and changes["reminders"] is not None:
@@ -762,7 +771,7 @@ def _apply_changes(store, row: Dict[str, Any], changes: Dict[str, Any]) -> None:
             store.drop_reminders_for_occurrence(row["master_id"], str(row.get("start_utc") or ""))
     if fields:
         store.update_event(row["id"], fields)
-        if row.get("rrule") and fields.get("rrule") == "" and not row.get("master_id"):
+        if row.get("rrule") and fields.get("rrule") == "" and not (fields.get("rdates") or fields.get("exdates")) and not row.get("master_id"):
             store.update_event(row['id'], {'exdates': '', 'rdates': ''})
             from reminders import notice_id_for
             start_key = str(fields.get("start_utc") or row["start_utc"])
@@ -815,21 +824,12 @@ def _read_only_preflight(store, rows: List[Dict[str, Any]], assignments: List[Di
 
 def _series_delta(master: Dict[str, Any], changes: Dict[str, Any]) -> Optional[timedelta]:
     """How far a whole series moves when its master start changes (None when the start does not change)."""
-    if not master.get("rrule") or not changes.get("start_utc"):
+    if not has_recurrence(master) or not changes.get("start_utc"):
         return None
     old, new = parse_stored(master.get("start_utc")), parse_stored(changes.get("start_utc"))
     if old is None or new is None or old == new:
         return None
-    return new - old
-
-
-def _shift_instant(dt: datetime, delta: timedelta, all_day: bool, tz) -> datetime:
-    """Timed rows move by the exact delta; all-day rows move by whole calendar days in their zone (DST-safe)."""
-    if not all_day:
-        return dt + delta
-    days = int(round(delta.total_seconds() / 86400.0))
-    local = dt.astimezone(tz).date() + timedelta(days=days)
-    return datetime.combine(local, datetime.min.time(), tzinfo=tz)
+    return recurrence_time_delta(old, new, {**master, **changes})
 
 
 def _shift_series_rows(store, master: Dict[str, Any], delta: timedelta, changes=None) -> List[Dict[str, Any]]:
@@ -838,14 +838,12 @@ def _shift_series_rows(store, master: Dict[str, Any], delta: timedelta, changes=
     Provider snapshots may replace EXDATE/RDATE while moving the anchor. Owner
     moves that omit those sets still shift the existing sets with the series.
     """
-    from model import get_tz
-    tz = get_tz(master.get("tz") or "")
-    all_day = bool(master.get("all_day"))
+    target = {**master, **(changes or {})}
     def shifted(csv: str) -> str:
         out = []
         for x in str(csv or "").split(","):
             dt = parse_stored(x) if x else None
-            out.append(iso_utc(_shift_instant(dt, delta, all_day, tz)) if dt else x)
+            out.append(iso_utc(shift_recurrence_time(target, dt, delta)) if dt else x)
         return ",".join(v for v in out if v)
     fields = {}
     if master.get("exdates") and 'exdates' not in (changes or {}):
@@ -858,10 +856,14 @@ def _shift_series_rows(store, master: Dict[str, Any], delta: timedelta, changes=
     for exc in store.exceptions_for(master["id"]):
         rid, s, e = parse_stored(exc.get("recurrence_id")), parse_stored(exc.get("start_utc")), parse_stored(exc.get("end_utc"))
         upd = {}
+        effective_delta = delta
         if rid is not None:
-            upd["recurrence_id"] = iso_utc(_shift_instant(rid, delta, all_day, tz))
+            shifted_slot = shift_recurrence_time(target, rid, delta)
+            upd["recurrence_id"] = iso_utc(shifted_slot)
+            if event_time_kind(exc) == 'absolute':
+                effective_delta = shifted_slot.astimezone(timezone.utc) - rid.astimezone(timezone.utc)
         if s is not None and e is not None:
-            upd.update({"start_utc": iso_utc(_shift_instant(s, delta, all_day, tz)), "end_utc": iso_utc(_shift_instant(e, delta, all_day, tz))})
+            upd.update({"start_utc": iso_utc(_shift_instant(s, effective_delta, bool(exc.get('all_day')), get_tz(exc.get('tz') or master.get('tz') or ''), event_time_kind(exc) == 'floating')), "end_utc": iso_utc(_shift_instant(e, effective_delta, bool(exc.get('all_day')), get_tz(exc.get('tz') or master.get('tz') or ''), event_time_kind(exc) == 'floating'))})
         if upd:
             store.update_event(exc["id"], upd)
             fresh = store.get_event(exc["id"])
@@ -891,8 +893,8 @@ def _shift_for_scope_all(store, row: Dict[str, Any], occ_key: str, scope: str, c
         return {**changes, 'start_utc': iso_utc(datetime.combine(first, datetime.min.time(), tzinfo=zone)),
                 'end_utc': iso_utc(datetime.combine(first + timedelta(days=max(1, days)), datetime.min.time(), tzinfo=zone))}
     duration = (new_e - new_s) if new_e else ((m_e - m_s) if m_e else timedelta(hours=1))
-    delta = new_s - occ_s
-    return {**changes, "start_utc": iso_utc(m_s + delta), "end_utc": iso_utc(m_s + delta + duration)}
+    shifted = shift_recurrence_time(row, m_s, recurrence_time_delta(occ_s, new_s, row))
+    return {**changes, "start_utc": iso_utc(shifted), "end_utc": iso_utc(shifted + duration)}
 
 
 def _ensure_exception(store, master: Dict[str, Any], occ_key: str, changes: Dict[str, Any]) -> str:
@@ -956,9 +958,11 @@ def _truncate_series(store, master: Dict[str, Any], occ_key: str, keep_later_exc
     parts.append(f"UNTIL={until}")
     # A following-delete must also remove explicit extra dates past the cut;
     # RRULE truncation alone leaves RDATE occurrences live at the source.
-    fields = {"rrule": ";".join(parts)}
+    fields = {"rrule": ";".join(parts) if master.get('rrule') else ''}
     for field in ("rdates", "exdates"):
         fields[field] = ",".join(x for x in str(master.get(field) or "").split(",") if x and x < occ_key)
+    if not master.get('rrule') and str(master.get('start_utc') or '') >= occ_key:
+        fields['exdates'] = ','.join(sorted(set(filter(None, fields['exdates'].split(','))) | {master['start_utc']}))
     store.update_event(master["id"], fields)
     later = []
     for exc in store.exceptions_for(master["id"]):
@@ -989,18 +993,21 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     # only a change from the effective start moves the following series.
     cut_effective = cut_start or occ_start
     requested_start = parse_stored(changes.get("start_utc")) or cut_effective
-    shift = requested_start - cut_effective
-    zone = get_tz(master.get('tz') or '')
-    new_start = _shift_instant(occ_start, shift, bool(master.get('all_day')), zone)
+    elapsed_shift = requested_start - cut_effective
+    shift = _time_delta(cut_effective, requested_start, master)
+    target = {**master, **changes}
+    new_start = requested_start if cut_effective == occ_start else shift_recurrence_time(target, occ_start, recurrence_time_delta(cut_effective, requested_start, target))
+    slot_shift = recurrence_time_delta(occ_start, new_start, target)
     requested_end = parse_stored(changes.get("end_utc"))
     new_duration = (requested_end - requested_start) if requested_end else duration
-    span = {**master, 'start_utc': iso_utc(requested_start), 'end_utc': iso_utc(requested_end)} if requested_end else master
-    new_end = _occurrence_end(span, new_start) if master.get('all_day') else new_start + new_duration
-    new_cut_start = _shift_instant(cut_effective, shift, bool(master.get('all_day')), zone)
+    span = {**target, 'start_utc': iso_utc(requested_start), 'end_utc': iso_utc(requested_end)} if requested_end else target
+    new_end = _occurrence_end(span, new_start) if target.get('all_day') else new_start + new_duration
+    new_cut_start = requested_start
     cut_end = parse_stored(cut_exception.get("end_utc")) if cut_exception else None
-    new_cut_end = requested_end or ((cut_end + shift) if cut_end else (new_cut_start + duration))
-    if master.get('all_day'):
-        cut_span = span if requested_end or cut_end is None else {**master, 'start_utc': iso_utc(cut_effective), 'end_utc': iso_utc(cut_end)}
+    new_cut_end = requested_end or (cut_end + elapsed_shift if cut_end else new_cut_start + duration)
+    cut_basis = {**master, **(cut_exception or {}), **changes}
+    if cut_basis.get('all_day'):
+        cut_span = {**cut_basis, 'start_utc': iso_utc(requested_start if requested_end else cut_effective), 'end_utc': iso_utc(requested_end or cut_end or m_end)}
         new_cut_end = _occurrence_end(cut_span, new_cut_start)
     rule_parts = [p for p in original_rrule.split(";") if p and not p.upper().startswith(("UNTIL=", "COUNT="))]
     count_left = _count_remaining(master, original_rrule, occ_start)
@@ -1013,7 +1020,6 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     row = {k: master.get(k) for k in ("calendar_id", "visibility", "availability", "is_primary", "title", "description", "location", "tz", "time_kind",
                                        "all_day", "organizer", "attendees_json", "my_response", "reminders_json", "origin")}
     split_tz = get_tz(master.get("tz") or "")
-    split_all_day = bool(master.get("all_day"))
     if until_part:
         if shift:
             try:
@@ -1024,7 +1030,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
                 else:
                     stamp_format = "%Y%m%dT%H%M%SZ" if until_part.endswith("Z") else "%Y%m%dT%H%M%S"
                     until_dt = datetime.strptime(until_part, stamp_format)
-                    bound_shift = shift if until_part.endswith("Z") else (
+                    bound_shift = elapsed_shift if until_part.endswith("Z") else (
                         requested_start.astimezone(split_tz).replace(tzinfo=None) - cut_effective.astimezone(split_tz).replace(tzinfo=None))
                     until_part = (until_dt + bound_shift).strftime(stamp_format)
             except ValueError:
@@ -1035,7 +1041,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
         for x in str(csv or "").split(","):
             if x and x >= occ_key:
                 dt = parse_stored(x)
-                out.append(iso_utc(_shift_instant(dt, shift, split_all_day, split_tz)) if dt is not None else x)
+                out.append(iso_utc(shift_recurrence_time(target, dt, slot_shift)) if dt is not None else x)
         return ",".join(out)
     row.update({"uid": split_uid or new_uid(), "start_utc": iso_utc(new_start), "end_utc": iso_utc(new_end), "link_group_id": new_group,
                 "exdates": _shift_csv(master.get("exdates")), "rdates": _shift_csv(master.get("rdates")),
@@ -1078,14 +1084,14 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
                 effective = iso_utc(new_cut_start)
                 fire_at = iso_utc(new_cut_start - timedelta(minutes=int(previous["offset_min"])))
             else:
-                effective = iso_utc(_shift_instant(old_effective, shift, split_all_day, split_tz))
-                fire_at = iso_utc(_shift_instant(old_fire, shift, split_all_day, split_tz))
+                effective = iso_utc(shift_recurrence_time(target, old_effective, slot_shift))
+                fire_at = iso_utc(shift_recurrence_time(target, old_fire, slot_shift))
             # The owner chose a fresh reminder for a genuinely moved meeting.
             # A content-only split retains sent/unknown history; a changed effective
             # start has a new notification slot, not a retry of the old send.
             if effective != iso_utc(old_effective):
                 continue
-            original = iso_utc(_shift_instant(original_dt, shift, split_all_day, split_tz))
+            original = iso_utc(shift_recurrence_time(target, original_dt, slot_shift))
             store.carry_settled_reminder(previous, saved["id"], effective, original, fire_at,
                                         notice_id_for(saved["id"], effective, previous["offset_min"], original))
     _apply_changes(store, saved, {k: v for k, v in changes.items() if k not in ("start_utc", "end_utc", "rrule")})
@@ -1094,7 +1100,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
         old_key = parse_stored(exc.get("recurrence_id"))
         if old_key is None:
             continue
-        new_key = _shift_instant(old_key, shift, split_all_day, split_tz)
+        new_key = shift_recurrence_time(target, old_key, slot_shift)
         upd = {"master_id": saved["id"], "recurrence_id": iso_utc(new_key), "uid": saved["uid"], "link_group_id": new_group,
                "external_id": "", "href": "", "etag": "", "sync_state": "synced" if not master.get("external_id") and not master.get("href") else "pending"}
         if str(exc.get("recurrence_id") or "") == occ_key:
@@ -1103,7 +1109,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
             if changes.get("start_utc") or changes.get("end_utc"):
                 upd.update({"start_utc": iso_utc(new_cut_start), "end_utc": iso_utc(new_cut_end)})
             upd.update({k: v for k, v in changes.items() if k in
-                        ("title", "description", "location", "visibility", "availability") and v is not None})
+                        ("title", "description", "location", "visibility", "availability", "all_day", "time_kind", "tz") and v is not None})
         store.update_event(exc["id"], upd)
         moved.append(store.get_event(exc["id"]))
     # the moved exceptions are written to the provider after the new master exists (they resolve through it)
@@ -1112,7 +1118,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
 
 # ── intents ─────────────────────────────────────────────────────────
 
-def _recover_failed_create(store, birth) -> bool:
+def _recover_failed_create(store, birth, explicit_edit=False) -> bool:
     """A new owner edit may recover a retained, transient-unknown creation.
 
     Reuse the original desired snapshot and version, not the edited display row
@@ -1124,7 +1130,8 @@ def _recover_failed_create(store, birth) -> bool:
         return False
     payload = json.loads(birth.get('payload_json') or '{}')
     previous = json.loads(birth.get('result_json') or '{}')
-    if not payload.get('desired') or previous.get('kind') not in ('network', 'server', 'retry'):
+    recoverable = ('network', 'server', 'retry') + (('auth', 'forbidden', 'http') if explicit_edit else ())
+    if not payload.get('desired') or previous.get('kind') not in recoverable:
         return False
     store.settle_intent(birth['id'], INTENT_PENDING,
                         {'note': 'owner edit requests original creation recovery', 'previous': previous})
@@ -1275,6 +1282,8 @@ def _matches_unversioned_baseline(payload, remote, adapter):
         baselines.append(payload['baseline_after_predecessor'])
     for field in keys:
         def value(row):
+            if field == 'attendees_json':
+                return event_field_value(row, field, provider_observation=True)
             if field.endswith('_json'):
                 return json.loads(row.get(field) or '[]')
             if field == 'availability':
@@ -1323,7 +1332,8 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
     if event.get("master_id"):   # every exception write resolves through its master (CalDAV: the master's resource; Google: instance id)
         master = store.get_event(event["master_id"])
         event = {**event, "master_external_id": (master or {}).get("external_id") or "", "master_href": (master or {}).get("href") or "",
-                 "master_etag": (master or {}).get("etag") or ""}
+                 "master_etag": (master or {}).get("etag") or "",
+                 **{'master_' + key: (master or {}).get(key) for key in ('tz', 'all_day', 'time_kind')}}
     modes = store.get_setting("reminder_mode") or {}
     payload["mute_provider_reminders"] = bool(modes.get(str(cal["id"])))
     expected = intent.get('expected_etag') or ''
@@ -1407,7 +1417,9 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
                         return {'status': INTENT_PENDING, 'message': 'lease изменилась; удаление не отправлено'}
                     intent, expected = pinned, pinned.get('expected_etag') or ''
             adapter.delete(cal, event, expected, payload)
-            store.delete_event(event["id"], hard=True)
+            if not store.acknowledge_write(intent, event, {}, expected, delete=True):
+                return {'status': 'uncertain', 'message': 'Provider result no longer belongs to this attempt; compare before retrying'}
+            return {'status': INTENT_DONE}
         elif intent["kind"] == "rsvp":
             if not event.get("external_id") and not event.get("href") and not event.get("master_external_id") and not event.get("master_href"):
                 return _defer(store, intent, "ответ отправится после записи события у провайдера", kind="retry")
@@ -1416,44 +1428,50 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
             store.settle_intent(intent["id"], INTENT_FAILED, {"error": f"unknown intent kind {intent['kind']}"})
             return {"status": INTENT_FAILED, "message": "неизвестная операция"}
     except ProviderError as exc:
-        if exc.kind == "conflict":
-            # Conflict stays visible to the owner; the deletion intent, not this
-            # mutable display state, remains the source of deletion intent.
-            store.update_event(event["id"], {"sync_state": "conflict"})
-            store.settle_intent(intent["id"], INTENT_CONFLICT, {"error": exc.message})
-            return {"status": INTENT_CONFLICT, "message": exc.message}
-        if exc.kind in ("not_found", "gone") and intent["kind"] == "delete":
-            store.delete_event(event["id"], hard=True)
-            store.settle_intent(intent["id"], INTENT_DONE, {"note": "already gone"})
-            return {"status": INTENT_DONE, "message": "уже удалено на сервере"}
-        if exc.kind in ("network", "server", "retry"):
-            return _defer(store, intent, exc.message, kind=exc.kind)
-        store.update_event(event["id"], {"sync_state": "pending_delete" if intent["kind"] == "delete" else "failed"})
-        store.settle_intent(intent["id"], INTENT_FAILED, {"error": exc.message, "kind": exc.kind})
-        if exc.kind == "auth":
-            store.set_account_status(intent["account_id"], "auth_failed", exc.message)
-        return {"status": INTENT_FAILED, "message": exc.message}
+        with store.transaction() as receipt:
+            if receipt.current_leased_intent(intent, allow_uncertain=True) is None:
+                return {'status': 'uncertain', 'message': 'Provider result no longer belongs to this attempt; compare before retrying'}
+            if exc.kind == "conflict":
+                receipt.update_event(event["id"], {"sync_state": "conflict"})
+                receipt.settle_intent(intent["id"], INTENT_CONFLICT, {"error": exc.message})
+                return {"status": INTENT_CONFLICT, "message": exc.message}
+            if exc.kind in ("not_found", "gone") and intent["kind"] == "delete":
+                receipt.acknowledge_write(intent, event, {'note': 'already gone'}, expected, delete=True)
+                return {"status": INTENT_DONE, "message": "уже удалено на сервере"}
+            if exc.kind in ("network", "server", "retry"):
+                return _defer(receipt, intent, exc.message, kind=exc.kind)
+            receipt.update_event(event["id"], {"sync_state": "pending_delete" if intent["kind"] == "delete" else "failed"})
+            receipt.settle_intent(intent["id"], INTENT_FAILED, {"error": exc.message, "kind": exc.kind})
+            if exc.kind == "auth":
+                receipt.set_account_status(intent["account_id"], "auth_failed", exc.message)
+            return {"status": INTENT_FAILED, "message": exc.message}
     except Exception as exc:  # adapter bug: disclose, do not loop forever
-        store.update_event(event["id"], {"sync_state": "pending_delete" if intent["kind"] == "delete" else "failed"})
-        store.settle_intent(intent["id"], INTENT_FAILED, {"error": f"{type(exc).__name__}: {exc}"})
-        return {"status": INTENT_FAILED, "message": f"внутренняя ошибка адаптера: {type(exc).__name__}"}
+        result = _defer(store, intent, f"{type(exc).__name__}: {exc}", kind='adapter_error')
+        result['message'] = f"внутренняя ошибка адаптера: {type(exc).__name__}"
+        return result
     if intent['kind'] in ('create','update','rsvp'):
         if not store.acknowledge_write(intent, event, res, expected, shared_resource=cal['provider'] in CALDAV_PROVIDERS):
-            return {'status': INTENT_PENDING, 'message': 'ответ провайдера не привязан к текущей попытке; нужна сверка'}
-    else:
-        store.settle_intent(intent["id"], INTENT_DONE, {"ok": True})
+            return {'status': 'uncertain', 'message': 'ответ провайдера не привязан к текущей попытке; нужна сверка'}
     return {"status": INTENT_DONE}
 
 
 def _defer(store, intent: Dict[str, Any], message: str, kind: str = "network") -> Dict[str, Any]:
-    attempts = int(intent.get("attempts") or 1)
-    if kind == "retry" and attempts >= MAX_ATTEMPTS:
-        store.settle_intent(intent["id"], INTENT_FAILED, {"error": message, "kind": kind, "attempts": attempts})
-        store.update_event(intent["event_id"], {"sync_state": "pending_delete" if intent["kind"] == "delete" else "failed"})
-        return {"status": INTENT_FAILED, "message": f"{message} (попытки исчерпаны)"}
-    delay = RETRY_BACKOFF_SEC[min(max(attempts, 1), len(RETRY_BACKOFF_SEC)) - 1]
-    store.settle_intent(intent["id"], INTENT_PENDING, {"error": message, "kind": kind}, retry_in_sec=delay)
-    return {"status": INTENT_PENDING, "message": f"{message}; повтор через {delay} с"}
+    with store.transaction() as receipt:
+        current = receipt.current_leased_intent(intent, allow_uncertain=True)
+        if current is None:
+            return {'status': 'uncertain', 'message': 'Provider result no longer belongs to this attempt; compare before retrying'}
+        if current['state'] == 'uncertain':
+            receipt.settle_intent(intent['id'], 'uncertain', {'error': message, 'kind': kind,
+                'previous_result': json.loads(current.get('result_json') or '{}')})
+            return {'status': 'uncertain', 'message': message + '; disconnected attempt was not requeued'}
+        attempts = int(intent.get("attempts") or 1)
+        if kind == 'adapter_error' or kind == "retry" and attempts >= MAX_ATTEMPTS:
+            receipt.settle_intent(intent["id"], INTENT_FAILED, {"error": message, "kind": kind, "attempts": attempts})
+            receipt.update_event(intent["event_id"], {"sync_state": "pending_delete" if intent["kind"] == "delete" else "failed"})
+            return {"status": INTENT_FAILED, "message": message if kind == 'adapter_error' else f"{message} (попытки исчерпаны)"}
+        delay = RETRY_BACKOFF_SEC[min(max(attempts, 1), len(RETRY_BACKOFF_SEC)) - 1]
+        receipt.settle_intent(intent["id"], INTENT_PENDING, {"error": message, "kind": kind}, retry_in_sec=delay)
+        return {"status": INTENT_PENDING, "message": f"{message}; повтор через {delay} с"}
 
 
 def retry_due_intents(store, providers, owner: str = "companion", limit: int = 20) -> List[Dict[str, Any]]:
@@ -1518,7 +1536,7 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
                      "title": BUSY_COPY_TITLE if mode == PUBLISH_BUSY else row.get("title") or "",
                      "description": "" if mode == PUBLISH_BUSY else row.get("description") or "",
                      "location": "" if mode == PUBLISH_BUSY else row.get("location") or "",
-                     "attendees_json": "[]", "reminders_json": "[]", "origin": "local",
+                     "attendees_json": "[]", "reminders_json": "[]", "origin": "projection",
                      "sync_state": "synced" if cal["provider"] == PROVIDER_LOCAL else "pending"})
         saved = store.insert_event(copy)
         # a series copy carries the primary's exceptions (moved/cancelled dates), times only for busy copies
@@ -1530,7 +1548,7 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
                              "title": copy["title"] if mode == PUBLISH_BUSY else exc.get("title") or copy["title"],
                              "description": "" if mode == PUBLISH_BUSY else exc.get("description") or "",
                              "location": "" if mode == PUBLISH_BUSY else exc.get("location") or "",
-                             "attendees_json": "[]", "reminders_json": "[]", "origin": "local", "rrule": "",
+                             "attendees_json": "[]", "reminders_json": "[]", "origin": "projection", "rrule": "",
                              "sync_state": "synced" if cal["provider"] == PROVIDER_LOCAL else "pending"})
             exception_rows.append(store.insert_event(exc_copy))
         if cal["provider"] == PROVIDER_LOCAL:

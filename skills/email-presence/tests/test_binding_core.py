@@ -170,11 +170,11 @@ def test_ordinary_reply_preserves_known_thread_and_rejects_an_unknown_thread(tmp
                                  conversation_id="<thread>", state="active")
     places._write(drive, place.place_id, lambda row: replace(row, thread_id="<thread>"))
     good = service.send(account_id=account["id"], to="reader@example.invalid", body="answer", request_id="known",
-                        reply_to_message_id="<incoming>", references=["<thread>"])
+                        reply_to_message_id="<incoming>", references=["<thread>"], conversation_id='<thread>', thread_id='<thread>')
     assert good["state"] != "held"
     assert runtime.process_outbox() and len(delivery.sent) == 1
     wrong = service.send(account_id=account["id"], to="reader@example.invalid", body="wrong thread", request_id="unknown",
-                         reply_to_message_id="<other>", references=["<unknown-thread>"])
+                         reply_to_message_id="<other>", references=["<unknown-thread>"], conversation_id='<unknown-thread>', thread_id='<unknown-thread>')
     assert wrong["state"] == "held"
     assert wrong["receipt"]["delivery_reporting"]["place_binding"] is None
     release_hold(store)

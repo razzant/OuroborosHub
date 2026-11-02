@@ -3,7 +3,7 @@
     "planning"
   ],
   "description": "Local, Google and CalDAV calendars with account setup, event and calendar management, source-directed linked copies, recurrence, availability, reminders and a day/week widget.",
-  "digest": "1e5a29dc55f8ec11b5597e6b79f61f7622adb4008aa9e36895d4350bc44792ea",
+  "digest": "e9fa3996695f817d8abc93de7ed1786cff6b7299a889b9a24c00fbc6e9066a9f",
   "install_specs": [
     "icalendar",
     "python-dateutil",
@@ -17,6 +17,6 @@
     "path": "skills/calendar"
   },
   "type": "extension",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "withdrawn": null
 }

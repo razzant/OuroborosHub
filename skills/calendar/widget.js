@@ -20,9 +20,10 @@
     var DAY_START_H = 0;
 
     var state = {
-        view: 'day', date: null, data: null, error: '', loading: false, showHidden: false,
+        view: 'day', date: null, data: null, error: '', loading: false, loadSeq: 0, loadRequest: null, loadQuery: '', showHidden: false,
         selectedCals: null, editing: null, drag: null, disposed: false, theme: 'light', poll: null, dirty: false, notice: '',
-        hourScale: 1, gridScrollTop: 0, focusNow: true, zooming: false, linksOpen: false, linkError: ''
+        hourScale: 1, gridScrollTop: 0, focusNow: true, zooming: false, linksOpen: false, linkError: '',
+        savedDraft: null, draftLoaded: false, draftDirty: false, draftSaving: false, draftRequest: null, draftError: ''
 
     };
     var root = document.getElementById('root') || document.body;
@@ -141,16 +142,25 @@
     }
 
     /* ---------- data ---------- */
-    function load() {
+    function load(coalesce) {
         if (state.disposed) return Promise.resolve();
-        state.loading = true;
         var q = 'agenda?view=' + state.view + '&date=' + (state.date || '') + (state.showHidden ? '&show_hidden=1' : '') +
             (state.selectedCals ? '&calendars=' + encodeURIComponent(state.selectedCals.length ? state.selectedCals.join(',') : '-') : '');
-        return api(q).then(function (d) {
+        if (coalesce && state.loading && state.loadQuery === q) return state.loadRequest;
+        var seq = ++state.loadSeq;
+        state.loading = true; state.loadQuery = q;
+        state.loadRequest = api(q).then(function (d) {
+            if (state.disposed || seq !== state.loadSeq) return;
             if (!state.date && state.data && state.data.anchor !== d.anchor) state.focusNow = true;
             state.data = d; state.error = '';
             /* A null date follows the host's current day/week across midnight. Only arrows pin a date. */
-        }).catch(function (e) { state.error = e.message || String(e); }).then(function () { state.loading = false; render(); });
+        }).catch(function (e) {
+            if (!state.disposed && seq === state.loadSeq) state.error = e.message || String(e);
+        }).then(function () {
+            if (state.disposed || seq !== state.loadSeq) return;
+            state.loading = false; render();
+        });
+        return state.loadRequest;
     }
 
     /* ---------- rendering ---------- */
@@ -181,10 +191,19 @@
             el('button', { text: '+ Событие', class: 'primary', onclick: function () { openCard(null, defaultStart()); } })
         ]);
         root.appendChild(bar);
+        if (state.savedDraft && !state.editing) root.appendChild(el('div', { class: 'msg info' }, [
+            el('span', { text: 'Unfinished calendar edit: ' + (state.savedDraft.inputs.title || state.savedDraft.event.title || 'New event') }),
+            el('button', { text: 'Restore draft', onclick: restoreDraft }),
+            el('button', { text: 'Discard draft', onclick: function () { clearDraft(); render(); } })
+        ]));
         if (state.panel) root.appendChild(renderPanel());
-        if (acc.open) { root.appendChild(accNode()); accRestoreFocus(kept); }
+        if (acc.open) root.appendChild(accNode());
+        accRestoreFocus(kept);
         if (state.error) root.appendChild(el('div', { class: 'status err', text: 'Ошибка: ' + state.error }));
-        if (state.notice) root.appendChild(el('div', { class: 'status', text: state.notice }));
+        if (state.notice) root.appendChild(el('div', { class: 'status', role: 'status', text: state.notice }));
+        root.appendChild(draftErrorView());
+        if (d && d.events_complete === false) root.appendChild(el('div', { class: 'status err', text: 'Calendar list is incomplete: ' +
+            Object.keys(d.unexpanded_series || {}).map(function (id) { return id + ': ' + d.unexpanded_series[id]; }).join('; ') }));
         if (!d) { root.appendChild(el('div', { class: 'status', text: state.loading ? 'Загрузка…' : 'Нет данных' })); return; }
         var issues = renderLinkIssues(d);
         if (issues) root.appendChild(issues);
@@ -232,7 +251,7 @@
         days.forEach(function (day) {
             var lane = el('div', { class: 'allday' });
             d.events.filter(function (e) { return e.all_day && e.start.slice(0, 10) <= day.date && day.date < (e.end.slice(0, 10) || e.start.slice(0, 10)); })
-                .forEach(function (e) { lane.appendChild(el('span', { class: 'chip', text: e.title, onclick: function () { openCard(e); } })); });
+                .forEach(function (e) { lane.appendChild(el('span', { class: 'chip', text: e.title + syncNote(e), onclick: function () { openCard(e); } })); });
             grid.appendChild(lane);
         });
         var hours = el('div', { class: 'hours' });
@@ -261,7 +280,7 @@
             var cls = 'ev' + (e.visibility === 'hidden' ? ' hidden' : '') + ((e.sync_state || '').indexOf('pending') === 0 ? ' pending' : '') + (e.sync_state === 'conflict' ? ' conflict' : '');
             var node = el('div', { class: cls, title: e.title }, [
                 el('div', { class: 't', text: e.title }),
-                el('div', { class: 'm', text: fmtHM(parseISO(e.start)) + '–' + fmtHM(parseISO(e.end)) + (e.calendar_name ? ' · ' + e.calendar_name : '') + (e.sync_state === 'pending' ? ' · ожидает' : e.sync_state === 'pending_delete' ? ' · удаляется' : e.sync_state === 'conflict' ? ' · конфликт' : '') + linkNote(e) }),
+                el('div', { class: 'm', text: fmtHM(parseISO(e.start)) + '–' + fmtHM(parseISO(e.end)) + (e.calendar_name ? ' · ' + e.calendar_name : '') + syncNote(e) + linkNote(e) }),
                 el('div', { class: 'rs' })
             ]);
             node.style.left = 'calc(' + (item.left * 100) + '% + 3px)';
@@ -321,7 +340,7 @@
         upcoming.forEach(function (e) {
             box.appendChild(el('div', { class: 'row', onclick: function () { openCard(e); } }, [
                 el('span', { class: 'when', text: e.all_day ? 'весь день' : fmtHM(parseISO(e.start)) + '–' + fmtHM(parseISO(e.end)) }),
-                el('span', { text: e.title + (e.calendar_name ? ' · ' + e.calendar_name : '') + linkNote(e) })
+                el('span', { text: e.title + (e.calendar_name ? ' · ' + e.calendar_name : '') + syncNote(e) + linkNote(e) })
             ]));
         });
         return box;
@@ -333,6 +352,8 @@
         if (d.sync.pending) parts.push('ожидает синхронизации: ' + d.sync.pending);
         if (d.sync.conflict) parts.push('конфликтов: ' + d.sync.conflict);
         if (d.sync.failed) parts.push('не отправлено: ' + d.sync.failed);
+        if (d.sync.uncertain) parts.push('outcomes unconfirmed: ' + d.sync.uncertain);
+        (d.calendars || []).forEach(function (c) { if (c.sync_warning) parts.push(c.name + ': ' + c.sync_warning); });
         parts.push('фон: ' + (d.sync.companion || 'неизвестно'));
         return el('div', { class: 'status', text: parts.join(' · ') + ' · ' + d.timezone });
     }
@@ -379,17 +400,19 @@
         if (series) changes.scope = 'this';
         changes.id = e.id;
         return post('event/update', changes).then(function (r) {
-            state.notice = series ? 'Перенесено только это вхождение; всё расписание меняется в карточке события.' : '';
-            noteAssignments(r);
+            var outcome = noteAssignments(r);
+            state.notice = [series ? 'Change requested for this occurrence; edit the whole series from its card.' : '', outcome].filter(Boolean).join(' ');
             return load();
         }).catch(function (err) { state.error = err.message; render(); });
     }
 
     function noteAssignments(r) {
         var pend = (r && r.assignments || []).filter(function (a) { return a.status !== 'done'; });
-        state.error = pend.length ? (r.status === 'failed' || r.status === 'error' ? 'Не сохранено; ' : 'Сохранено локально; ') + pend.map(function (a) { return (a.calendar_name || a.calendar_id) + ': ' + (a.message || a.status); }).join('; ') : '';
-        if (r && r.warning) state.error = (state.error ? state.error + '; ' : '') + r.warning;
-        return state.error;
+        var text = pend.length ? (r.status === 'failed' || r.status === 'error' ? 'Не сохранено; ' : 'Сохранено локально; ') + pend.map(function (a) { return (a.calendar_name || a.calendar_id) + ': ' + (a.message || a.status); }).join('; ') : '';
+        if (!text && r && (r.status === 'failed' || r.status === 'error')) text = r.message || r.status;
+        if (r && r.warning) text = (text ? text + '; ' : '') + r.warning;
+        state.notice = text;
+        return text;
     }
 
     /* ---------- card ---------- */
@@ -401,6 +424,10 @@
     function defaultStart() { var d = ownerNow(); d.setUTCMinutes(Math.ceil(d.getUTCMinutes() / 30) * 30, 0, 0); if (state.date && state.date !== localDate(d)) { d = parseISO(state.date + 'T10:00:00'); } return d; }
 
     function openCard(ev, start) {
+        if (!state.draftLoaded || state.savedDraft) {
+            state.notice = state.draftLoaded ? 'Restore or discard the unfinished edit before opening another card.' : 'Loading the saved draft…';
+            render(); return;
+        }
         var s = ev ? parseISO(ev.start) : start;
         var e = ev ? parseISO(ev.end) : new Date(s.getTime() + 60 * 60000);
         var defaultCal = (state.data && (state.data.calendars.filter(function (c) { return c.default; })[0] || state.data.calendars[0]) || {}).id;
@@ -438,39 +465,98 @@
         }
     }
 
+    // One current draft in the skill's settings, shared across windows; last save wins.
+    function rememberDraft(f) {
+        var event = {};
+        ['id', 'title', 'start', 'end', 'all_day', 'calendars', 'primary_calendar', 'hidden', 'availability',
+            'location', 'description', 'reminders', 'attendees', 'rrule', 'series', 'grouped', 'linkState', 'readonly'].forEach(function (key) { event[key] = f[key]; });
+        state.savedDraft = { event: event, inputs: Object.assign({}, f.draft) };
+        state.draftDirty = true; saveDraft();
+    }
+    function draftErrorView() {
+        return el('div', { class: 'err draft-error', style: 'font-size:12px;margin-top:8px', role: 'alert', text: state.draftError, hidden: state.draftError ? null : 'hidden' });
+    }
+    function setDraftError(text) {
+        state.draftError = text;
+        root.querySelectorAll('.draft-error').forEach(function (node) { node.textContent = text; node.hidden = !text; });
+    }
+    function saveDraft() {
+        if (state.draftSaving) return state.draftRequest;
+        if (!state.draftDirty) return Promise.resolve();
+        var saved = state.savedDraft, failed = false;
+        state.draftDirty = false; state.draftSaving = true;
+        state.draftRequest = post('draft', { draft: saved }).then(function () { setDraftError(''); }).catch(function (e) {
+            failed = true; state.draftDirty = true;
+            setDraftError('Draft was not saved: ' + e.message);
+        }).then(function () {
+            state.draftSaving = false;
+            if (state.draftDirty && !failed) return saveDraft();
+        });
+        return state.draftRequest;
+    }
+    function clearDraft() {
+        if (!state.savedDraft) return Promise.resolve();
+        state.savedDraft = null; state.draftDirty = true;
+        return saveDraft();
+    }
+    function restoreDraft() {
+        if (!state.savedDraft) return;
+        var f = Object.assign({}, state.savedDraft.event, { draft: state.savedDraft.inputs, loading: false, armed: false, linkUi: {} });
+        state.editing = f; state.notice = ''; render();
+        if (f.id) api('event/get?id=' + encodeURIComponent(f.id)).then(function (r) {
+            if (state.editing !== f) return;
+            f.link = r.event.link || null; f.readonly = r.event.link_state === 'missing';
+            if (r.event.conflict && r.event.conflict.status !== 'not_conflicted') f.loadError = 'Resolve the provider conflict in chat before saving this draft.';
+            render();
+        }).catch(function (e) { if (state.editing === f) { f.loadError = e.message; render(); } });
+    }
+
     function renderCard() {
-        var f = state.editing;
+        var f = state.editing, draft = f.draft || {};
+        function value(key) { return Object.prototype.hasOwnProperty.call(draft, key) ? draft[key] : f[key]; }
         var form = el('form');
         function field(label, input) { var l = el('label', { text: label }); return el('div', {}, [l, input]); }
-        var title = el('input', { value: f.title, placeholder: 'Название', required: 'required' });
-        var start = el('input', { type: 'datetime-local', value: f.start });
-        var end = el('input', { type: 'datetime-local', value: f.end });
-        var allDay = el('input', { type: 'checkbox' }); allDay.checked = f.all_day;
+        var title = el('input', { value: value('title'), placeholder: 'Название', required: 'required' });
+        var start = el('input', { type: 'datetime-local', value: value('start') });
+        var end = el('input', { type: 'datetime-local', value: value('end') });
+        var allDay = el('input', { type: 'checkbox' }); allDay.checked = value('all_day');
         /* calendars: checkboxes; the first checked one (default calendar first) gets the full content, the rest get copies per their publish rule */
         var calBox = el('div', { class: 'cals' });
         var calInputs = [];
         var writable = (state.data ? state.data.calendars : []).filter(function (c) { return c.writable; })
             .sort(function (a, b) { return (a.id === f.primary_calendar ? -1 : b.id === f.primary_calendar ? 1 : 0) || (b.default ? 1 : 0) - (a.default ? 1 : 0); });
         writable.forEach(function (c) {
-            var cb = el('input', { type: 'checkbox', value: c.id }); cb.checked = f.calendars.indexOf(c.id) >= 0;
+            var cb = el('input', { type: 'checkbox', value: c.id }); cb.checked = value('calendars').indexOf(c.id) >= 0;
             calInputs.push(cb);
             calBox.appendChild(el('label', { style: 'display:inline-flex;align-items:center;gap:4px;margin:0 8px 4px 0;font-size:13px;color:var(--fg)' }, [cb, c.name + ' (' + c.provider + ')']));
         });
         function chosenCals() { return calInputs.filter(function (cb) { return cb.checked; }).map(function (cb) { return cb.value; }); }
-        var hidden = el('input', { type: 'checkbox' }); hidden.checked = f.hidden;
-        var avail = el('select'); [['busy', 'занято'], ['free', 'не занимает время'], ['soft', 'обычно (предпочтение)']].forEach(function (p) { var o = el('option', { value: p[0], text: p[1] }); if (p[0] === f.availability) o.selected = true; avail.appendChild(o); });
-        var loc = el('input', { value: f.location, placeholder: 'Место или ссылка' });
-        var desc = el('textarea', { rows: '2', placeholder: 'Описание' }); desc.value = f.description || '';
-        var rem = el('input', { value: (f.reminders || []).join(', '), placeholder: 'Напомнить за N минут (например 15, 60)' });
-        var remEdited = false; rem.addEventListener('input', function () { remEdited = true; });
-        var att = el('input', { value: (f.attendees || []).join(', '), placeholder: 'Участники: email через запятую' });
-        var attEdited = false; att.addEventListener('input', function () { attEdited = true; });
-        var notify = el('input', { type: 'checkbox' });
-        var rrule = el('input', { value: f.rrule, placeholder: 'Повторение RRULE, например FREQ=WEEKLY;BYDAY=MO,WE' });
-        var rruleEdited = false; rrule.addEventListener('input', function () { rruleEdited = true; });
+        var hidden = el('input', { type: 'checkbox' }); hidden.checked = value('hidden');
+        var avail = el('select'); [['busy', 'занято'], ['free', 'не занимает время'], ['soft', 'обычно (предпочтение)']].forEach(function (p) { var o = el('option', { value: p[0], text: p[1] }); if (p[0] === value('availability')) o.selected = true; avail.appendChild(o); });
+        var loc = el('input', { value: value('location'), placeholder: 'Место или ссылка' });
+        var desc = el('textarea', { rows: '2', placeholder: 'Описание' }); desc.value = value('description') || '';
+        var rem = el('input', { value: draft.reminders !== undefined ? draft.reminders : (f.reminders || []).join(', '), placeholder: 'Напомнить за N минут (например 15, 60)' });
+        var remEdited = draft.reminders !== undefined; rem.addEventListener('input', function () { remEdited = true; });
+        var att = el('input', { value: draft.attendees !== undefined ? draft.attendees : (f.attendees || []).join(', '), placeholder: 'Участники: email через запятую' });
+        var attEdited = draft.attendees !== undefined; att.addEventListener('input', function () { attEdited = true; });
+        var notify = el('input', { type: 'checkbox' }); notify.checked = !!draft.send_updates;
+        var rrule = el('input', { value: value('rrule'), placeholder: 'Повторение RRULE, например FREQ=WEEKLY;BYDAY=MO,WE' });
+        var rruleEdited = draft.rrule !== undefined; rrule.addEventListener('input', function () { rruleEdited = true; });
         var scopeSel = el('select'); [['this', 'только эта дата'], ['following', 'начиная с этой даты'], ['all', 'всё расписание']].forEach(function (p) { scopeSel.appendChild(el('option', { value: p[0], text: p[1] })); });
-        scopeSel.value = f.scope || 'this';
+        scopeSel.value = draft.scope || f.scope || 'this';
         scopeSel.addEventListener('change', function () { f.scope = scopeSel.value; f.armed = false; });
+        [[title, 'title'], [start, 'start'], [end, 'end'], [allDay, 'all_day'], [hidden, 'hidden'], [avail, 'availability'],
+            [loc, 'location'], [desc, 'description'], [rem, 'reminders'], [att, 'attendees'], [notify, 'send_updates'],
+            [rrule, 'rrule'], [scopeSel, 'scope']].forEach(function (pair) {
+            pair[0].addEventListener('input', function () {
+                f.draft = f.draft || {};
+                f.draft[pair[1]] = pair[0].type === 'checkbox' ? pair[0].checked : pair[0].value;
+                rememberDraft(f);
+            });
+        });
+        calInputs.forEach(function (cb) { cb.addEventListener('change', function () {
+            f.draft = f.draft || {}; f.draft.calendars = chosenCals(); rememberDraft(f);
+        }); });
         var status = el('div', { class: 'status', text: f.loading ? 'Загружаю событие…' : (f.loadError ? 'Не удалось загрузить детали: ' + f.loadError
             : f.readonly ? 'Эта копия удалена у провайдера и не редактируется; доступны только действия со связью.' : '') });
         if (f.loadError) status.className = 'status err';
@@ -487,13 +573,19 @@
                 }
                 del.disabled = true; status.textContent = 'Удаляю…'; status.className = 'status';
                 post('event/delete', { id: f.id, scope: f.series ? scopeSel.value : 'this', send_updates: notify.checked })
-                    .then(function (r) { state.editing = null; noteAssignments(r); return load(); })
+                    .then(function (r) {
+                        var outcome = noteAssignments(r);
+                        if (r.status === 'failed' || r.status === 'error') {
+                            del.disabled = false; f.armed = false; status.textContent = outcome || 'Deletion failed'; status.className = 'status err'; return;
+                        }
+                        state.editing = null; clearDraft(); return load();
+                    })
                     .catch(function (e) { del.disabled = false; f.armed = false; status.textContent = e.message; status.className = 'status err'; });
             });
             actions.appendChild(del);
         }
         actions.appendChild(el('span', { class: 'spacer' }));
-        actions.appendChild(el('button', { type: 'button', text: f.readonly ? 'Закрыть' : 'Отмена', onclick: function () { state.editing = null; render(); } }));
+        actions.appendChild(el('button', { type: 'button', text: f.readonly ? 'Закрыть' : 'Отмена', onclick: function () { state.editing = null; clearDraft(); render(); } }));
         var saveButton = el('button', { type: 'button', class: 'primary', text: f.id ? 'Сохранить' : 'Создать' });
         actions.appendChild(saveButton);
         // Module frames deliberately do not allow native form submission.
@@ -521,8 +613,9 @@
                 /* A card is a snapshot of one occurrence. Unedited times must never
                  * become a time-change command against its master series. */
                 if (body.title === f.title) delete body.title;
-                if (body.start === (f.all_day ? f.start.slice(0, 10) : f.start) && body.end === (f.all_day ? f.end.slice(0, 10) : f.end) && body.all_day === f.all_day) {
-                    delete body.start; delete body.end;
+                if (body.all_day === f.all_day) {
+                    if (body.start === (f.all_day ? f.start.slice(0, 10) : f.start)) delete body.start;
+                    if (body.end === (f.all_day ? f.end.slice(0, 10) : f.end)) delete body.end;
                 }
                 if (body.all_day === f.all_day) delete body.all_day;
                 if (body.hidden === f.hidden) delete body.hidden;
@@ -546,7 +639,7 @@
                     saveButton.disabled = false; status.textContent = outcome || r.message || 'Изменение не применено';
                     status.className = 'status err'; return;
                 }
-                state.editing = null; state.notice = outcome;
+                state.editing = null; state.notice = outcome; clearDraft();
                 return load();
             }).catch(function (e) { saveButton.disabled = false; status.textContent = e.message; status.className = 'status err'; });
         }
@@ -573,6 +666,7 @@
         form.appendChild(field('Повторение', rrule));
         if (f.series) form.appendChild(field('Охват изменения', scopeSel));
         form.appendChild(status);
+        form.appendChild(draftErrorView());
         form.appendChild(actions);
         var overlay = el('div', { class: 'card', onclick: function (ev) { if (ev.target === overlay) { state.editing = null; render(); } } }, [form]);
         setTimeout(function () { title.focus(); }, 0);
@@ -611,7 +705,9 @@
     }
 
     function renderPanel() {
-        var p = state.panel, box = el('div', { class: 'status', style: 'border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px;color:var(--fg)' });
+        var p = state.panel;
+        if (p.node) return p.node;
+        var box = el('div', { class: 'status', style: 'border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px;color:var(--fg)' });
         if (p.loading) { box.appendChild(el('span', { text: 'Загружаю…' })); return box; }
         var rules = (p.data && p.data.rules) || {}, ch = (p.data && p.data.channel) || {};
         var def = el('input', { value: (rules.default || []).join(', '), placeholder: 'напоминать за N минут, через запятую (пусто — не напоминать)',
@@ -619,7 +715,15 @@
         var msg = el('span', { style: 'margin-left:8px', text: p.msg || '' });
         var saveBtn = el('button', { text: 'Сохранить правило', onclick: function () {
             var mins = def.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean).map(Number).filter(function (n) { return !isNaN(n); });
-            post('reminders/save', { action: 'set_default', offsets: mins }).then(function (r) { msg.textContent = (r.status === 'ok' || r.status === 'updated') ? 'сохранено' : (r.message || r.status); })
+            var submitted = def.value;
+            post('reminders/save', { action: 'set_default', offsets: mins }).then(function (r) {
+                var saved = r.status === 'ok' || r.status === 'updated';
+                if (saved) {
+                    p.data = Object.assign({}, p.data, r);
+                    if (def.value === submitted) def.value = ((r.rules && r.rules.default) || mins).join(', ');
+                }
+                p.msg = saved ? 'сохранено' : (r.message || r.status); msg.textContent = p.msg;
+            })
                 .catch(function (e) { msg.textContent = e.message; });
         } });
         var syncBtn = el('button', { text: 'Синхронизировать сейчас', onclick: function () {
@@ -631,6 +735,7 @@
         var upcoming = (p.data && p.data.upcoming) || [];
         if (upcoming.length) box.appendChild(el('div', { style: 'margin-top:6px', text: 'Ближайшие: ' + upcoming.slice(0, 5).map(function (u) { return u.fire_at.slice(11, 16) + ' ' + u.title + (u.state !== 'scheduled' ? ' (' + u.state + ')' : ''); }).join(' · ') }));
         box.appendChild(el('div', { class: 'actions', style: 'margin-top:8px' }, [saveBtn, syncBtn, msg]));
+        p.node = box;
         return box;
     }
 
@@ -664,7 +769,8 @@
     function accKeepFocus() {
         var node = document.activeElement;
         /* only when this frame really has the focus: restoring it from the background would take it from the chat composer */
-        if (!acc.node || !node || !acc.node.contains(node) || !document.hasFocus()) return null;
+        var panel = state.panel && state.panel.node;
+        if (!node || !document.hasFocus() || !((acc.node && acc.node.contains(node)) || (panel && panel.contains(node)))) return null;
         var kept = { node: node, start: null, end: null };
         try { kept.start = node.selectionStart; kept.end = node.selectionEnd; } catch (e) { /* not a text field */ }
         return kept;
@@ -730,10 +836,14 @@
         r.submit = el('button', { type: 'button', class: 'primary', text: 'Подключить', onclick: accSubmit });
         var segCaldav = el('label', {}, [r.caldav, ' Другой CalDAV']), segYandex = el('label', {}, [r.yandex, ' Яндекс']);
         var urlRow = field('url', 'Адрес сервера CalDAV', r.url);
+        var transportNote = el('div', { class: 'hint err', hidden: 'hidden', text: 'HTTP sends your login and password without encryption.' });
+        urlRow.appendChild(transportNote);
+        function transport() { transportNote.hidden = r.yandex.checked || !/^http:\/\//i.test(r.url.value.trim()); }
+        r.url.addEventListener('input', transport);
         var passRow = field('pass', 'Пароль', r.pass, 'Пароль не показывается и хранится в зашифрованном хранилище навыка.');
         function preset() {
             var y = r.yandex.checked;
-            urlRow.hidden = y;
+            urlRow.hidden = y; transport();
             segCaldav.className = y ? '' : 'on'; segYandex.className = y ? 'on' : '';
             passRow.firstChild.textContent = y ? 'Пароль приложения Яндекса' : 'Пароль (лучше пароль приложения)';
         }
@@ -974,7 +1084,8 @@
         post('accounts/connect', body).then(function (res) {
             if (res.status !== 'connected') return accMsg('caldav', 'err', scrub(res.message || 'Сервер не подтвердил подключение', v.password));
             r.alias.value = ''; r.url.value = ''; r.login.value = '';
-            accMsg('caldav', 'ok', 'Подключено: ' + (res.label || v.login) + '. Календарей: ' + (res.calendars || []).length + '.');
+            accMsg('caldav', 'ok', 'Подключено: ' + (res.label || v.login) + '. Календарей: ' + (res.calendars || []).length + '.' +
+                (res.transport_warning ? ' ' + res.transport_warning : ''));
         }, function (e) {
             accMsg('caldav', 'err', 'Не подключено: ' + scrub(e.message, v.password)
                 + (e.body && e.body.saved ? ' Аккаунт сохранён с ошибкой: исправь данные и подключи снова либо отключи его в списке.' : ''));
@@ -999,6 +1110,10 @@
      * on its own stays «изменена», a copy the provider removed stays listed as removed, and every action says what
      * it will change (the copy, the original or the group) before the owner applies it. */
     var LINK_WORD = { diverged: 'копия изменена', missing: 'копия удалена у провайдера' };
+    function syncNote(e) {
+        var label = { pending: 'ожидает', pending_delete: 'удаляется', conflict: 'конфликт', failed: 'не отправлено' }[e.sync_state];
+        return label ? ' · ' + label : '';
+    }
     function linkNote(e) { return e.link_state === 'diverged' ? ' · ' + LINK_WORD.diverged : ''; }
 
     function renderLinkIssues(d) {
@@ -1157,8 +1272,14 @@
             document.removeEventListener('visibilitychange', accWake);
             window.removeEventListener('focus', accWake);
             if (typeof offTheme === 'function') offTheme();
+            return saveDraft();
         });
     }
-    state.poll = setInterval(function () { if (!state.editing && !accTyping() && !state.disposed) load(); }, POLL_MS);
+    state.poll = setInterval(function () { if (!state.editing && !accTyping() && !state.disposed) load(true); }, POLL_MS);
     load();
+    api('draft').then(function (r) {
+        if (!state.editing && !state.draftDirty) state.savedDraft = r.draft || null;
+    }).catch(function (e) { setDraftError('Saved draft could not be read: ' + e.message); }).then(function () {
+        state.draftLoaded = true; if (!state.disposed) render();
+    });
 })();

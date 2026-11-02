@@ -99,7 +99,7 @@ class AccountTests(unittest.TestCase):
     def test_denied_consent_closes_flow_and_remote_prefix_is_preserved(self):
         api = RouteAPI()
         routes.register_routes(api, lambda: self.ctx)
-        with patch.object(accounts.urllib.request, 'urlopen', return_value=Response()):
+        with patch.object(accounts.urllib.request.OpenerDirector, 'open', return_value=Response()):
             reply = asyncio.run(api.routes['oauth/begin'](Request({'public_base_url': 'https://host.example.test/my-ouro'})))
         begun = json.loads(reply.body)
         self.assertEqual(begun['redirect_uri'], 'https://host.example.test/my-ouro/onboarding/static/provider-return.html')

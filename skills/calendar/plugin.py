@@ -67,7 +67,7 @@ TOOL_DESCRIPTIONS = {
     'cal_calendars': ('Читать подключённые календари и возможности аккаунтов; account_id/calendar_id — точные ID. refresh=true обновляет список у провайдера. '
                       'include_acl=true читает права выбранного календаря. request_id читает сохранённый результат cal_manage, не повторяя действие.'),
     'cal_manage': ('Управлять календарями целиком: create/update/delete/share/unshare. changes: name/description/timezone; sharing: type(user/group/domain/default), '
-                   'value,role,rule_id,send_notifications. Результат preview без confirm; confirm=true применяет действие в рамках разового/постоянного поручения. '
+                   'role,send_notifications; grantee and rule_id are top-level destinations (required for share/unshare). Результат preview без confirm; confirm=true применяет действие в рамках разового/постоянного поручения. '
                    'request_id повторяет только receipt, не запрос. uncertain требует сверки через cal_calendars/провайдера, не слепого повтора. '
                    'Доступ CalDAV настраивается на сайте сервера, если API не поддерживает операцию.'),
 }
@@ -120,11 +120,13 @@ SCHEMAS = {
     'cal_manage': {'type': 'object', 'properties': {
         'action': {'type': 'string', 'enum': ['create', 'update', 'delete', 'share', 'unshare']},
         'account_id': {'type': 'string'}, 'calendar_id': {'type': 'string'}, 'request_id': {'type': 'string'},
+        'grantee': {'type': 'string', 'description': 'Share destination: email or domain. Use this top-level field for the recipient.'},
+        'rule_id': {'type': 'string', 'description': 'ACL rule to remove, from cal_calendars(include_acl=true).'},
         'changes': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'description': {'type': 'string'}, 'timezone': {'type': 'string'}}, 'additionalProperties': False},
         'sharing': {'type': 'object', 'properties': {
-            'type': {'type': 'string', 'enum': ['user', 'group', 'domain', 'default']}, 'value': {'type': 'string'},
+            'type': {'type': 'string', 'enum': ['user', 'group', 'domain', 'default']}, 'value': {'type': 'string', 'description': 'Legacy mirrored value; top-level grantee is required for a named recipient. Conflicting values are rejected.'},
             'role': {'type': 'string', 'enum': ['none', 'freeBusyReader', 'reader', 'writer', 'owner']},
-            'rule_id': {'type': 'string'}, 'send_notifications': {'type': 'boolean', 'default': False}}, 'additionalProperties': False},
+            'rule_id': {'type': 'string', 'description': 'Legacy mirrored value; top-level rule_id is required for unshare.'}, 'send_notifications': {'type': 'boolean', 'default': False}}, 'additionalProperties': False},
         'confirm': {'type': 'boolean', 'default': False}}, 'required': ['action']},
 }
 

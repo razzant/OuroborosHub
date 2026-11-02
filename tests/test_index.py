@@ -560,7 +560,7 @@ print(json.dumps([payload_digest(Path(c['path']), manifest_entry=c['front'].get(
             self.assertEqual(entries[name]['owner'], facts['owner'])
         categories = builder.read_json(ROOT / 'categories.json')['categories']
         self.assertEqual(len(categories), 12)
-        expected = set('a2a adaptive-code-review anti-slop cache_efficiency_snapshot claudexor_quotas confluence '
+        expected = set('a2a adaptive-code-review anti-slop cache_efficiency_snapshot calendar claudexor_quotas confluence '
                        'context-lens duckduckgo email email-presence github google-workspace keenable memory-atlas perplexity '
                        'slack-bridge telegram-bot pdf_tools word_tools'.split())
         self.assertEqual({r['name'] for r in official['endorsements']}, expected)

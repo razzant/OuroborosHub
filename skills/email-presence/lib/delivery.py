@@ -19,7 +19,9 @@ def email_report(item, state, *, recipients=None, error="", refused=None):
     references = list(item.references)
     if item.in_reply_to and item.in_reply_to not in references:
         references.append(item.in_reply_to)
-    targets = wire.get("recipients", item.envelope_recipients) if recipients is None else recipients
+    # A diagnostic is an observation, not another attempt to validate a legacy
+    # envelope that may be the very reason delivery failed.
+    targets = wire.get("recipients", item.recipients) if recipients is None else recipients
     message = {
         "message_id": item.message_id, "subject": wire.get("subject", item.subject),
         "recipients": list(targets),

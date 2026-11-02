@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Multi-account Gmail API and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.9.0
+version: 0.9.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -21,7 +21,8 @@ tools:
   - name: email_send
     effect: message
     target: [account_id,to,cc,bcc]
-    conversation: reply_to_message_id
+    conversation: conversation_id
+    thread: thread_id
     description: Queue a proactive email or threaded reply for durable delivery.
   - name: email_search
     effect: read
@@ -42,7 +43,8 @@ tools:
   - name: email_draft
     effect: write
     target: [account_id,to,cc,bcc]
-    conversation: reply_to_message_id
+    conversation: conversation_id
+    thread: thread_id
     description: Save a text draft without sending.
   - name: email_receipt
     effect: read
@@ -112,6 +114,16 @@ address. Host conversation identity remains RFC Message-ID/References; native
 Gmail message/thread ids remain explicit provider facts, and replies pass the
 native threadId to Gmail. No signature, footer or Auto-Submitted marker is added.
 
+Read/search results include canonical `conversation_id` and `thread_id` when the
+RFC source is known. Pass both for a threaded `email_send` or `email_draft`.
+If omitted, the tool resolves the reply source and returns `needs_arguments`
+with exact `retry_arguments` before enqueueing or saving anything; repeat that
+call so the existing Host guard sees the same conversation the mail will use.
+This is argument preparation, not another human approval. `References` and a
+Place are not mandatory. A new unthreaded mail still queues in one call, and a
+previous request's receipt remains replayable without another effect. Supplied
+conversation fields must match the resolved RFC source, never a Gmail thread id.
+
 ## Setup
 
 1. Open the Email accounts widget. Add an IMAP/SMTP account using its app password
@@ -167,6 +179,14 @@ remain readable by explicit account_id.
 - email_read only peeks and preserves flags. A local reply-header cache and exact
   raw source artifacts retain explicitly read historical mail without submitting
   it to Presence. email_mark_read is the separate write for Seen/UNREAD.
+  Incoming address headers keep a readable `headers` view and retained MIME source.
+  The view unfolds header continuations and recovers raw UTF-8 names; an undecodable
+  encoded word stays visible, and invalid unlabelled bytes display replacement
+  characters while the original MIME bytes remain unchanged. These reads stay
+  capturable and searchable. Parsed address fields are projections, not permission
+  to send to malformed text: outgoing validation and selected-output custody still
+  apply. Other pre-existing malformed-header parser failures, including unusual
+  Message-ID/Date values and exotic charsets, remain outside these recovery paths.
 - email_folders is a declared read and works in Silent/Advises. email_mailbox
   retains list/create/copy/move/flags, including the old list action. IMAP move
   requires UID MOVE, never a mailbox-wide expunge. Gmail adds label management,
@@ -224,9 +244,25 @@ stays observable. Canonical selected outputs keep their source and delivery
 identity across repeated polls and restarts; a retained receipt itself is never
 sent as speech. This does not claim exactly-once provider delivery after
 ambiguous network acceptance.
-`rejected` ends an event-specific refusal; before-admission `retry` and `blocked`
-retain retry custody, including after account or binding repair. Missing or unknown typed
-dispositions stay retryable, even on HTTP 403/404. Full queue recovery requires
+An invalid mailbox destination cannot turn a selected answer into a delivery.
+The transport records `invalid_recipient`, keeps observing an active author and
+still queues later outputs with valid reply anchors. Once the Host work is
+terminal, the inbox reports failure if a selected reply could not be queued;
+the original Host reference and its canonical selected text remain recoverable.
+This does not regenerate the answer or treat other Host/transport errors as a
+permanent address failure.
+`rejected` ends an event-specific refusal. A Host advertising Place binding may
+return `blocked` with `code: place_not_connected` before admission: retain that
+receipt and settle the inbox item without resubmitting it. Connecting a Place
+later does not replay those settled inbox items; ordinary account tools remain usable.
+Provider cursor catch-up is separate: if this account already has a cursor,
+polling without a Place leaves it unchanged, so mail arriving after that cursor
+can enter intake when a Place is connected again. A fresh account establishes
+its first baseline without backfilling earlier mail. No cursor reset or new
+automatic replay of settled inbox rows is performed.
+Other before-admission `retry` and `blocked` results retain retry custody, including
+after account or binding repair. Missing or unknown typed dispositions stay
+retryable, even on HTTP 403/404. Full queue recovery requires
 both an updated Host and this transport; older Hosts may still return a
 retry-only refusal. Existing completed delivery receipts remain unchanged.
 

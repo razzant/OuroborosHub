@@ -13,7 +13,7 @@ import httpx
 
 from .accounts import AccountError
 from .client import MailClient
-from .mime import build_message, parse_message
+from .mime import build_message, mailbox_addresses, parse_message
 
 BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 
@@ -235,10 +235,8 @@ class GmailClient(MailClient):
               cc=(), bcc=(), html_body="", body_type="plain", attachments=(), sender="", draft_id="", thread_id=""):
         if folder not in {"DRAFT", "Drafts", ""}:
             raise ValueError("Gmail drafts live in DRAFT; apply additional labels separately with email_mailbox")
-        def addresses(value):
-            return list(value) if isinstance(value, (list, tuple)) else [x.strip() for x in str(value or "").split(",") if x.strip()]
-        message = build_message(sender=sender or self.settings["EMAIL_USER"], recipients=addresses(to), subject=subject, body=body,
-                                in_reply_to=reply_to_message_id, references=references or [], cc=addresses(cc), bcc=addresses(bcc),
+        message = build_message(sender=sender or self.settings["EMAIL_USER"], recipients=mailbox_addresses(to), subject=subject, body=body,
+                                in_reply_to=reply_to_message_id, references=references or [], cc=mailbox_addresses(cc), bcc=mailbox_addresses(bcc),
                                 html_body=html_body, body_type=body_type, attachments=attachments, include_bcc_header=True)
         payload = {"message": {"raw": base64.urlsafe_b64encode(message.as_bytes(policy=SMTP)).decode().rstrip("=")}}
         if thread_id:

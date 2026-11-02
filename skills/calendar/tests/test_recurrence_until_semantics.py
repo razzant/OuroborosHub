@@ -95,7 +95,8 @@ def test_local_until_prunes_only_overrides_after_wall_cutoff(zone, kind):
     raw = '\r\n'.join(lines)
     row = providers.ics_to_rows(raw, 'cal', 'href', 'v1', tz)[0]
     row['rrule'] = 'FREQ=HOURLY;UNTIL=' + until
-    wire = providers.row_to_ics(row, changed_fields={'rrule'})
+    wire = providers.row_to_ics(row, changed_fields={'rrule'},
+                                truncate_before=model.iso_utc(datetime(2026, 11, 26, 9, tzinfo=tz)))
     exceptions = [event for event in icalendar.Calendar.from_ical(wire).walk('VEVENT') if event.get('RECURRENCE-ID')]
     assert [str(event['SUMMARY']) for event in exceptions] == ['Keep']
     assert strict_native_occurrences(wire)[-1].hour == 8

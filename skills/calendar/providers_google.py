@@ -554,8 +554,8 @@ class GoogleAdapter:
         occ = parse_stored(event.get("recurrence_id"))
         if not master_ext or occ is None:
             return ""
-        all_day = bool(event.get("all_day"))
-        local_date = occ.astimezone(get_tz(event.get("tz") or "")).date()
+        all_day = bool(event.get('master_all_day', event.get("all_day")))
+        local_date = occ.astimezone(get_tz(event.get('master_tz') or event.get("tz") or "")).date()
         stamp = local_date.strftime("%Y%m%d") if all_day else occ.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         candidate = f"{master_ext}_{stamp}"
         try:
@@ -623,10 +623,11 @@ def gevent_to_row(item: Dict[str, Any], calendar_id: str, default_tz) -> Optiona
     reminders = [int(o.get("minutes") or 0) for o in rem.get("overrides") or [] if o.get("method") in ("popup", "email", None)]
     rec_key = ""
     orig = item.get("originalStartTime") or {}
+    rec_tz = get_tz(orig['timeZone']) if orig.get('timeZone') else default_tz
     if item.get("recurringEventId"):
         try:
             if "date" in orig:
-                rec_key = iso_utc(datetime.fromisoformat(orig["date"]).replace(tzinfo=tz))
+                rec_key = iso_utc(datetime.fromisoformat(orig["date"]).replace(tzinfo=rec_tz))
             else:
                 rec_key = iso_utc(datetime.fromisoformat(str(orig.get("dateTime")).replace("Z", "+00:00")))
         except (ValueError, TypeError):
@@ -636,6 +637,7 @@ def gevent_to_row(item: Dict[str, Any], calendar_id: str, default_tz) -> Optiona
         "calendar_id": calendar_id, "uid": str(item.get("iCalUID") or ""), "external_id": str(item.get("id") or ""), "href": "",
         "etag": str(item.get("etag") or ""), "title": str(item.get("summary") or ""), "description": str(item.get("description") or ""),
         "location": str(item.get("location") or ""), "start_utc": iso_utc(s), "end_utc": iso_utc(e), "tz": tz_name, "all_day": all_day,
+        "_recurrence_tz": zone_name(rec_tz),
         "rrule": rrule, "exdates": exdates, "rdates": rdates, "recurrence_id": rec_key, "master_external_id": str(item.get("recurringEventId") or ""),
         "status": "cancelled" if str(item.get("status") or "") == "cancelled" else "confirmed",
         "organizer": str((item.get("organizer") or {}).get("email") or ""), "attendees_json": json.dumps(attendees, ensure_ascii=False),

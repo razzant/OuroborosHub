@@ -61,14 +61,14 @@ class NotifyContractTests(unittest.TestCase):
             return Reply({"notify_version": 1} if req.get_method() == "GET" else
                          {"ok": True, "ts": "2026-09-27T13:00:00Z", "chat_id": 1})
 
-        with patch("urllib.request.urlopen", side_effect=urlopen):
+        with patch("urllib.request.OpenerDirector.open", side_effect=urlopen):
             channel = rem.NotifyChannel("http://127.0.0.1:8767", "test-token")
             self.assertEqual(channel.state(), "ready")
             self.assertEqual(channel.send("cal:one", "Meeting")[0], "sent")
         self.assertEqual(sent[1], ("POST", "http://127.0.0.1:8767/notify", {"key": "cal:one", "text": "Meeting"}))
 
     def test_unknown_success_or_lost_response_is_not_retried(self):
-        event = self._event()
+        self._event()
         channel = rem.NotifyChannel("http://127.0.0.1:8767", "test-token")
         channel._state = "ready"
         with patch.object(channel, "_request", side_effect=TimeoutError("lost after send")) as request:
@@ -133,7 +133,7 @@ class NotifyContractTests(unittest.TestCase):
         channel = rem.NotifyChannel("http://127.0.0.1:8767", "test-token")
         channel._state = "ready"
         failure = urllib.error.HTTPError("http://127.0.0.1:8767/notify", 503, "Service Unavailable", {}, None)
-        with patch("urllib.request.urlopen", side_effect=failure) as urlopen:
+        with patch("urllib.request.OpenerDirector.open", side_effect=failure) as urlopen:
             stats = rem.deliver_due(self.store, channel, self.tz, now=self.now)
             channel._state = "ready"
             rem.deliver_due(self.store, channel, self.tz, now=self.now + timedelta(minutes=1))
@@ -226,7 +226,7 @@ class NotifyContractTests(unittest.TestCase):
         self.assertEqual(len(channel.sent), 1)
 
     def test_changed_stale_batch_sends_live_peers_without_waiting_a_tick(self):
-        fresh = self._event(title="Fresh")
+        self._event(title="Fresh")
         stale = []
         for n in range(10):
             event = self._event(title=f"Backlog {n}")

@@ -12,10 +12,11 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from email.utils import getaddresses, parseaddr
+from email.utils import parseaddr
 from pathlib import Path
 
 from .delivery import email_report
+from .mime import conversation_root, mailbox_addresses
 
 _MAX_ATTACHMENT_FILES = 10
 _MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -95,7 +96,7 @@ class InboxItem:
 
     @property
     def thread_key(self):
-        return self.references[0] if self.references else (self.in_reply_to or self.message_id)
+        return conversation_root(references=self.references, in_reply_to=self.in_reply_to, message_id=self.message_id)
 
     @property
     def provider_event_key(self):
@@ -124,14 +125,23 @@ class OutboxItem:
 
     @property
     def envelope_recipients(self):
-        return [address for _, address in getaddresses(list(self.recipients)) if address]
+        recipients = [parseaddr(value)[1] for value in mailbox_addresses(self.recipients)]
+        if not recipients:
+            raise ValueError("Mail delivery needs at least one valid envelope recipient")
+        return recipients
 
 
 class EmailStore:
     def __init__(self, state_dir):
         self.state_dir = Path(state_dir)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = self.state_dir / "email_presence.sqlite3"
+        try:
+            descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            pass  # Existing mail and its owner's access policy remain intact.
+        else:
+            os.close(descriptor)
         with self._connect() as db:
             # Migrate the unpublished prototype without dropping its receipts.
             old = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='inbox'").fetchone()
@@ -364,7 +374,7 @@ class EmailStore:
                     message.get("folder", "INBOX"), message.get("uidvalidity", 0), int(message["uid"]),
                     message["message_id"], message.get("in_reply_to", ""), json.dumps(message.get("references", [])),
                     message.get("sender", ""), message.get("subject", ""), message.get("body", ""),
-                    json.dumps(message.get("recipients", [])), (message.get("references") or [message.get("in_reply_to") or message["message_id"]])[0],
+                    json.dumps(message.get("recipients", [])), conversation_root(references=message.get("references"), in_reply_to=message.get("in_reply_to"), message_id=message["message_id"]),
                     json.dumps(context, ensure_ascii=False), json.dumps(message.get("cc", [])), json.dumps(message.get("reply_to", [])),
                     json.dumps(message.get("attachments", []), ensure_ascii=False), json.dumps(staged, ensure_ascii=False), now, now))
             if cursor_key:
@@ -432,20 +442,32 @@ class EmailStore:
             changed = db.execute(f"UPDATE {table} SET state=?,last_error=?,lease_token='',lease_until=0,available_at=?,updated_at=? WHERE id=? AND lease_token=?",
                                  (state, error, time.time() + delay, time.time(), row_id, token)).rowcount
             if not changed:
-                return
+                return False
             if table == "outbox":
                 if reporting is not None:
                     db.execute("UPDATE outbox SET reporting_json=? WHERE id=?", (json.dumps(reporting), row_id))
                 self._freeze_reports(db, row_id, reports)
+        return True
 
     def complete_inbox(self, row_id, token):
-        self._update("inbox", row_id, token, "completed")
+        return self._update("inbox", row_id, token, "completed")
 
     def retry_inbox(self, row_id, token, error, delay=5):
         self._update("inbox", row_id, token, "retry", error, delay)
 
     def fail_inbox(self, row_id, token, error):
-        self._update("inbox", row_id, token, "failed", error)
+        return self._update("inbox", row_id, token, "failed", error)
+
+    def active_host_references(self):
+        with self._connect() as db:
+            return [row[0] for row in db.execute("SELECT DISTINCT host_reference FROM inbox "
+                    "WHERE state IN ('pending','retry','processing') AND host_reference<>''")]
+
+    def queued_message(self, request_id):
+        """The original outgoing snapshot; replay does not need its provider source again."""
+        with self._connect() as db:
+            row = db.execute('SELECT * FROM outbox WHERE request_id=?', (str(request_id),)).fetchone()
+        return self._outbox_item(row) if row is not None else None
 
     def enqueue_outbox(self, *, request_id, recipients=(), subject="", body="", in_reply_to="", references=(), reporting=None,
                        to=None, cc=(), bcc=(), attachments=(), html_body="", body_type="plain", hold_reason=""):
@@ -459,12 +481,14 @@ class EmailStore:
                     known.add(key)
                     result.append(value)
             return result, known
-        visible_to, seen = dedupe(list(recipients if to is None else to))
-        visible_cc, seen = dedupe(list(cc or ()), seen)
+        visible_to, seen = dedupe(mailbox_addresses(recipients if to is None else to))
+        visible_cc, seen = dedupe(mailbox_addresses(cc), seen)
         # To/Cc take precedence over Bcc when callers supplied the same address
         # twice. Keep the complete envelope in recipients_json for SMTP delivery.
-        visible_bcc, seen = dedupe(list(bcc or ()), seen)
+        visible_bcc, seen = dedupe(mailbox_addresses(bcc), seen)
         envelope = visible_to + visible_cc + visible_bcc
+        if not envelope:
+            raise ValueError("Mail delivery needs at least one valid envelope recipient")
         message_id = self.message_id_for(request_id)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
