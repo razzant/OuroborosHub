@@ -246,16 +246,22 @@ def materialized_event_status(event, store, occurrence_key=None):
     a status inherited by every desired snapshot is not itself an authored choice.
     """
     status = event_status(event.get('status'))
-    raw = event.get('raw_payload')
-    if status == 'cancelled' or not raw or not event.get('uid') or event.get('deleted_at') or event.get('sync_state') == 'pending_delete':
+    if status == 'cancelled' or event.get('deleted_at') or event.get('sync_state') == 'pending_delete':
         return status
     try:
-        provider = event.get('provider')
+        source = store.native_cache_source(event)
+        if source is None:
+            return status
+        raw, provider = source['raw_payload'], source['provider']
         if provider == PROVIDER_GOOGLE:
             from providers_google import gevent_to_row
-            native = gevent_to_row(json.loads(raw), event['calendar_id'], get_tz(event.get('tz') or ''))
-            matches = [native] if native and native.get('external_id') == event.get('external_id') else []
+            native = gevent_to_row(json.loads(raw), event['calendar_id'], get_tz(source.get('tz') or ''))
+            # Google Events id is calendar-scoped. Its iCalUID need not equal
+            # the authored UID we keep across copies/retries.
+            matches = [native] if native and event.get('external_id') and native.get('external_id') == event['external_id'] else []
         elif provider in (PROVIDER_CALDAV, PROVIDER_YANDEX):
+            if not event.get('uid'):
+                return status
             # Select the exact UID/component before decoding: a resource may contain
             # another master or detached occurrence with a different event status.
             matches = []
@@ -265,10 +271,9 @@ def materialized_event_status(event, store, occurrence_key=None):
                 selected = _ical().Calendar()
                 selected.add_component(component)
                 matches.extend(ics_to_rows(selected.to_ical().decode('utf-8'), event['calendar_id'],
-                                           event.get('href') or '', event.get('etag') or '', get_tz(event.get('tz') or '')))
+                                           source.get('href') or '', source.get('etag') or '', get_tz(source.get('tz') or '')))
         else:
             return status
-        matches = [row for row in matches if row.get('uid') == event.get('uid')]
         if occurrence_key is not None:
             own = [row for row in matches if row.get('recurrence_id', '') == occurrence_key]
             if own:
@@ -284,21 +289,12 @@ def materialized_event_status(event, store, occurrence_key=None):
                 continue
             payload = json.loads(intent.get('payload_json') or '{}')
             result = json.loads(intent.get('result_json') or '{}')
-            if intent.get('kind') == 'delete' or 'status' in (payload.get('changes') or {}) or payload.get('_revive_cancelled'):
+            if intent.get('kind') == 'delete' or 'status' in (payload.get('changes') or {}):
                 explicit = (intent.get('state'), result.get('etag'))
         if explicit:
-            # A later provider observation supersedes an old status ACK. CalDAV
-            # raw ICS has no ETag: exclude ACKs addressed to its shared resource,
-            # even if an override has since moved to another segment.
-            observed = matches[0].get('etag')
-            if provider != PROVIDER_GOOGLE:
-                with store._conn() as connection:
-                    acknowledged = connection.execute(
-                        "SELECT 1 FROM intents WHERE calendar_id=? AND state='done' AND json_extract(result_json,'$.etag')=? "
-                        "AND COALESCE(NULLIF(json_extract(payload_json,'$.resource_id'),''),NULLIF(json_extract(payload_json,'$.desired.master_id'),''),event_id)=? LIMIT 1",
-                        (event['calendar_id'], event.get('etag') or '', event['id'])).fetchone()
-                observed = '' if acknowledged else event.get('etag')
-            if explicit[0] != 'done' or not explicit[1] or not observed or observed != event.get('etag') or observed == explicit[1]:
+            # Current explicit work wins; a later usable native snapshot can
+            # supersede a historical ACK without turning that ACK into a veto.
+            if explicit[0] != 'done' or not explicit[1] or not source.get('etag') or source['etag'] == explicit[1]:
                 return status
         return 'tentative'
     except (ProviderError, ValueError, TypeError, KeyError, AttributeError):
@@ -829,10 +825,10 @@ class CalDAVAdapter:
                 wanted_rows = ics_to_rows(ics, calendar['id'], href, etag, get_tz(event.get('tz') or ''))
                 actual_rows = ics_to_rows(observed, calendar['id'], href, etag, get_tz(event.get('tz') or ''))
                 matched = len(wanted_rows) == len(actual_rows) == 1 and created_content_matches(wanted_rows[0], actual_rows[0])
-                return {"external_id": uid, "href": href, "etag": etag, "existed": True, 'matches': matched}
+                return {"external_id": uid, "href": href, "etag": etag, "existed": True, 'matches': matched, '_native_payload': observed}
             raise
         etag = self._write_version(href, ics, headers)
-        return {"external_id": uid, "href": href, "etag": etag}
+        return {"external_id": uid, "href": href, "etag": etag, '_native_payload': ics}
 
     def _write_version(self, href, sent, headers):
         """A follow-up GET is not the PUT receipt: compare the complete body."""
@@ -878,7 +874,7 @@ class CalDAVAdapter:
                           removed_exdates=removed, cancelled_slots=payload.get('cancelled_slots'), changed_fields=changed_fields,
                           truncate_before=payload.get('truncate_before'), rsvp=payload.get('_rsvp'))
         _, resp_headers, _ = self._request("PUT", href, sent, headers)
-        return {"etag": self._write_version(href, sent, resp_headers)}
+        return {"etag": self._write_version(href, sent, resp_headers), '_native_payload': sent}
 
     def delete(self, calendar: Dict[str, Any], event: Dict[str, Any], expected_etag: str, payload: Optional[Dict[str, Any]] = None) -> None:
         href = str(event.get("href") or "")
@@ -1014,7 +1010,7 @@ class CalDAVAdapter:
         sent = cal.to_ical().decode("utf-8")
         _, resp_headers, _ = self._request("PUT", href, sent, headers)
         new_etag = self._write_version(href, sent, resp_headers)
-        return {"etag": new_etag, "external_id": str(event.get("uid") or ""), "href": href, "master_etag": new_etag}
+        return {"etag": new_etag, "external_id": str(event.get("uid") or ""), "href": href, "master_etag": new_etag, '_native_payload': sent}
 
 
 class YandexAdapter(CalDAVAdapter):

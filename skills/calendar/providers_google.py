@@ -422,10 +422,10 @@ class GoogleAdapter:
                 _, _, data = self._request("GET", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{body['id']}")
                 zone = get_tz(event.get('tz') or '')
                 matched = created_content_matches(gevent_to_row(body, calendar['id'], zone), gevent_to_row(data, calendar['id'], zone))
-                return {"external_id": data.get("id", body["id"]), "href": "", "etag": str(data.get("etag") or ""),
+                return {**_native_write_result(data, {}, body['id']), "href": "",
                         "existed": True, 'matches': matched, 'cancelled': str(data.get('status') or '') == 'cancelled'}
             raise
-        return {"external_id": str(data.get("id") or body["id"]), "href": "", "etag": str(data.get("etag") or headers.get("etag") or "")}
+        return {**_native_write_result(data, headers, body['id']), 'href': ''}
 
     def created_identity(self, calendar: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, str]:
         """The id a create of this event uses (stable from its UID), so a lost answer stays addressable."""
@@ -487,7 +487,7 @@ class GoogleAdapter:
         method = 'PUT' if payload.get('_revive_cancelled') else 'PATCH'
         _, resp_headers, data = self._request(method, f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{urllib.parse.quote(external_id, safe='')}",
                                               params, body, headers)
-        return {"etag": str(data.get("etag") or resp_headers.get("etag") or ""), "external_id": str(data.get("id") or external_id)}
+        return _native_write_result(data, resp_headers, external_id)
 
     def delete(self, calendar: Dict[str, Any], event: Dict[str, Any], expected_etag: str, payload: Optional[Dict[str, Any]] = None) -> None:
         external_id = str(event.get("external_id") or "")
@@ -537,8 +537,7 @@ class GoogleAdapter:
         body = {"attendees": [_attendee_to_google(a) for a in attendees if a.get("email")]}
         params = {"sendUpdates": "all" if payload.get("notify_organizer") else "none"}
         _, headers, data = self._request("PATCH", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{urllib.parse.quote(external_id, safe='')}", params, body, {'If-Match': expected})
-        return {"etag": str(data.get("etag") or headers.get("etag") or ""),
-                "external_id": str(data.get('id') or external_id)}
+        return _native_write_result(data, headers, external_id)
 
     def set_default_reminders(self, calendar: Dict[str, Any], overrides: List[Dict[str, Any]]) -> None:
         """calendarList.patch — the user's own default reminders for this calendar (20 A: silence provider duplicates)."""
@@ -580,6 +579,14 @@ class GoogleAdapter:
 
 
 # ── conversions ─────────────────────────────────────────────────────
+
+def _native_write_result(data, headers, external_id):
+    """Carry the returned native object to the accepted ACK, never into public outcomes."""
+    result = {'external_id': str(data.get('id') or external_id), 'etag': str(data.get('etag') or headers.get('etag') or '')}
+    if data.get('id') and data.get('status') in ('tentative', 'confirmed', 'cancelled'):
+        result['_native_payload'] = json.dumps(data, ensure_ascii=False)
+    return result
+
 
 def _google_id(event: Dict[str, Any]) -> str:
     """Stable per local event: uuid hex is inside Google's [a-v0-9]{5,1024} alphabet."""
@@ -645,7 +652,7 @@ def gevent_to_row(item: Dict[str, Any], calendar_id: str, default_tz) -> Optiona
         "organizer": str((item.get("organizer") or {}).get("email") or ""), "attendees_json": json.dumps(attendees, ensure_ascii=False),
         "my_response": my_response, "reminders_json": json.dumps("off" if rem.get("useDefault") is False and not reminders else sorted(set(reminders))), "origin": "external",
         "availability": "free" if transparency == "transparent" else AVAIL_BUSY, "sync_state": "synced",
-        "raw_payload": json.dumps(item, ensure_ascii=False) if not rec_key else "",
+        "raw_payload": json.dumps(item, ensure_ascii=False),
     }
 
 

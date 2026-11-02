@@ -654,11 +654,12 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
                 payload['previous_exdates'] = (old_target or {}).get('exdates') or ''
             if old_target and old_target.get('master_id') and old_target['master_id'] != current.get('master_id'):
                 payload['relocated_from_master'] = old_target['master_id']
-            if kind != 'create' and not _write_etag(store, cal, current):
+                parent = store.get_event(current['master_id'])
+                payload['baseline'] = _baseline_before({parent['id']: parent}, current)
+                if current['status'] != parent['status']:
+                    payload['changes']['status'] = current['status']
+            elif kind != 'create' and not _write_etag(store, cal, current):
                 payload['baseline'] = _baseline_before(before, target)
-                if payload.get('relocated_from_master'):
-                    parent = store.get_event(current['master_id'])
-                    payload['baseline'] = _baseline_before({parent['id']: parent}, current)
             expected = birth['expected_etag'] if recover_birth else _write_etag(store, cal, current)
             intent = store.add_intent(kind, cal["account_id"], cal["id"], target["id"], payload, scope=scope, expected_etag=expected, op_id=op_id)
             previous_by_calendar[cal['id']] = intent['id']
@@ -945,7 +946,6 @@ def _count_remaining(master: Dict[str, Any], rrule: str, cut: Optional[datetime]
         return None
     try:
         from dateutil.rrule import rrulestr
-        from model import get_tz
         validate_rrule_interval(rrule)
         tz = get_tz(master.get("tz") or "")
         rule = rrulestr(str(rrule), dtstart=m_start.astimezone(tz), forceset=True)
@@ -1119,6 +1119,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
             continue
         new_key = shift_recurrence_time(target, old_key, slot_shift)
         upd = {"master_id": saved["id"], "recurrence_id": iso_utc(new_key), "uid": saved["uid"], "link_group_id": new_group,
+               "status": materialized_event_status(exc, store),
                "external_id": "", "href": "", "etag": "", "sync_state": "synced" if not master.get("external_id") and not master.get("href") else "pending"}
         if str(exc.get("recurrence_id") or "") == occ_key:
             # Its recurrence key follows the segment, while its individual
@@ -1391,7 +1392,7 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
                     intent, expected = pinned, pinned.get('expected_etag') or ''
                     written = adapter.update(cal, {**event, **res}, expected,
                                              {**payload, '_revive_cancelled': True, 'send_updates': False})
-                    res = {**res, 'etag': written.get('etag') or ''}
+                    res = {**{k: v for k, v in res.items() if k != '_native_payload'}, **written}
                 elif not res.get('matches'):
                     raise ProviderError('conflict', 'прежнее создание найдено, но содержимое изменилось; нужна сверка')
         elif intent["kind"] == "update":
@@ -1565,7 +1566,7 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
         for exc in store.exceptions_for(row["id"]):
             exc_copy = {k: exc.get(k) for k in ("visibility", "availability", "start_utc", "end_utc", "tz", "all_day", "recurrence_id", "status")}
             exc_copy['time_kind'] = links.projection_time_kind(exc, cal)
-            exc_copy.update({"calendar_id": cid, "uid": saved["uid"], "master_id": saved["id"], "is_primary": 0, "link_group_id": group,
+            exc_copy.update({"status": materialized_event_status(exc, store), "calendar_id": cid, "uid": saved["uid"], "master_id": saved["id"], "is_primary": 0, "link_group_id": group,
                              "title": copy["title"] if mode == PUBLISH_BUSY else exc.get("title") or copy["title"],
                              "description": "" if mode == PUBLISH_BUSY else exc.get("description") or "",
                              "location": "" if mode == PUBLISH_BUSY else exc.get("location") or "",

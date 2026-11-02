@@ -639,7 +639,7 @@ def test_later_native_observation_supersedes_historical_status_ack(tmp_path, mon
 
 
 @pytest.mark.parametrize('provider', ['caldav', 'google'])
-@pytest.mark.parametrize('shape', ['matching', 'other_uid', 'other_occurrence', 'confirmed_rsvp', 'cancelled', 'malformed'])
+@pytest.mark.parametrize('shape', ['matching', 'other_identity', 'other_occurrence', 'confirmed_rsvp', 'cancelled', 'malformed'])
 def test_retained_status_selects_only_exact_native_event(tmp_path, provider, shape):
     ctx, eid, cid, adapter = legacy_status_source(tmp_path, provider)
     event = ctx.store.get_event(eid)
@@ -649,7 +649,7 @@ def test_retained_status_selects_only_exact_native_event(tmp_path, provider, sha
         event['raw_payload'] = 'not a native payload'
     elif provider == 'google':
         native = json.loads(event['raw_payload'])
-        if shape == 'other_uid':native['iCalUID'] = 'unrelated'
+        if shape == 'other_identity':native['id'] = 'unrelated'
         if shape == 'other_occurrence':
             native.update(recurringEventId='another-master', originalStartTime={'dateTime':'2026-12-14T09:00:00Z'})
         if shape == 'confirmed_rsvp':
@@ -658,7 +658,7 @@ def test_retained_status_selects_only_exact_native_event(tmp_path, provider, sha
     else:
         calendar = providers._ical().Calendar.from_ical(event['raw_payload'])
         component = calendar.walk('VEVENT')[0]
-        if shape == 'other_uid':component['UID'] = 'unrelated'
+        if shape == 'other_identity':component['UID'] = 'unrelated'
         if shape == 'other_occurrence':component.add('RECURRENCE-ID', model.parse_stored(event['start_utc']))
         if shape == 'confirmed_rsvp':
             component['STATUS'] = 'CONFIRMED'
