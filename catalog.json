@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/4b7a7e339f7e20894d3d0846c0cab84a517ba2b5",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/5c5795fa9fab2cfd81e6f8f18859fd570189a19c",
   "schema_version": 1,
   "skills": [
     {
@@ -369,8 +369,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "92f107e0628e584554a1a6a7ccc3cdc5e9c83d3780031adeb8fbca256aba8185",
-          "size": 46688
+          "sha256": "7592069062564ce0d87962c603eb87b0c597200e1214cf1ba0a3b01f29da3b7c",
+          "size": 47161
         },
         {
           "path": "accounts.py",
@@ -379,8 +379,8 @@
         },
         {
           "path": "conflicts.py",
-          "sha256": "374e49fff01d0811b8126e27fc67389d6b7d1faa57e2adf0b0b785e83acff457",
-          "size": 20143
+          "sha256": "9bc70d7b13f9e45af5ec5e7d7e718f58dc145b0b9bb236f8ea772019b8f3d801",
+          "size": 20426
         },
         {
           "path": "credentials.py",
@@ -399,8 +399,8 @@
         },
         {
           "path": "model.py",
-          "sha256": "e6636f8bd78360c9e66011777354dc00440cd870256646bdee66617efc7c3909",
-          "size": 23893
+          "sha256": "83949fa0c50d015ea2d705636c18c2561e8a8fb24a7ebe24be2f94a1168aefb8",
+          "size": 24114
         },
         {
           "path": "ops.py",
@@ -439,8 +439,8 @@
         },
         {
           "path": "store.py",
-          "sha256": "4ec93bf38c682fdc8bf54c081e0618fb3b9c399ad2d51f4380600c9fc0c73ea8",
-          "size": 68350
+          "sha256": "d2db169e04f5428d96a3797b5351ad7af44c2658640ad5a2ba6e4209c6e7810d",
+          "size": 68853
         },
         {
           "path": "tests/test_birth_recovery.py",
@@ -609,8 +609,8 @@
         },
         {
           "path": "tests/test_clock_consumer_consistency.py",
-          "sha256": "fadc278df813275ca6629a26c6b1d735cf76657b93fd7cf45f18c8452a9bc7a3",
-          "size": 5132
+          "sha256": "817faf1be58d40f804155ff277f8b57b5402916da98c0cf434b92ab26c824371",
+          "size": 10786
         },
         {
           "path": "tests/test_conflict_resolution.py",
@@ -694,8 +694,8 @@
         },
         {
           "path": "tests/test_withdrawn_calendar_family.py",
-          "sha256": "e0d7b40fd33768108ff3f680641b950278dc38e684857feae77738361f8eedf5",
-          "size": 10364
+          "sha256": "ea318b85c5b942cbd1dcf681e4118decc897d9ba1e560cc1034a3091f2479cc0",
+          "size": 16230
         },
         {
           "path": "tools.py",
@@ -1200,8 +1200,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "30fc06c4df93e4a35ce942dc978711c975fb7082c9d6d73f7f00f5d16dd62d06",
-          "size": 4182
+          "sha256": "af64579763a511ed56c2c23cdf36779872171880970e92ba27ffd35e87d86373",
+          "size": 4335
         },
         {
           "path": "README.md",
@@ -1210,8 +1210,8 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "37eb99964c5a5e233e0ecdd58e583d9274426f54b728869de58cae62de7e0c0c",
-          "size": 25388
+          "sha256": "b01a49119a6eac6d114f1e06bdae48b6ea7d6a3261dd1f212d82b0f52f13a721",
+          "size": 25760
         },
         {
           "path": "lib/accounts.py",
@@ -1250,8 +1250,8 @@
         },
         {
           "path": "lib/mime.py",
-          "sha256": "393cbddc1d0396e14672b946701a8746f0c39c36bf161b059fcabe331b197847",
-          "size": 11772
+          "sha256": "4d5e700c3fd8508d22fc8d5642aa7f8696c56621315a09b22e7dd95b65883596",
+          "size": 12242
         },
         {
           "path": "lib/runtime.py",
@@ -1369,14 +1369,19 @@
           "size": 1987
         },
         {
+          "path": "tests/test_inbound_address_headers.py",
+          "sha256": "74435ffcb7eace66996c09fca55da5d364d1ebd1444a7066eaad5af1e26018d8",
+          "size": 6615
+        },
+        {
           "path": "tests/test_intake_admission.py",
           "sha256": "dc9c4e964eb8dc8ab7558f81aa2aa8aa753b8855b4ac9fba35e097eeb77e066d",
           "size": 7050
         },
         {
           "path": "tests/test_mail_error_boundaries.py",
-          "sha256": "528bf4c114f5072a1c465d4179a36f1eda880b55196aeb2cdc50bdd8961cdfa8",
-          "size": 8301
+          "sha256": "80d584a0348a8f1e17d6760e65212ea966d273934e329a385b0eda5e42e0c407",
+          "size": 8474
         },
         {
           "path": "tests/test_mime.py",
