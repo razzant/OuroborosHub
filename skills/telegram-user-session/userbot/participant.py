@@ -14,7 +14,7 @@ from .participant_state import Journal, policy, digest, receiving_refusal, legac
 from .participant_ops import Operations, SPECS, validate
 from .presence import (_urllib_transport, EARLY_CONTINUATION, PresenceToken, anchored_message_id, build_event,
                        busy_delay, lists_early_continuation, retry_seconds)
-from .normalize import actor_facts, canonical_text, chat_facts, content_revision, iso, media_descriptor
+from .normalize import actor_facts, canonical_text, chat_facts, content_revision, iso, media_descriptor, staged_suffix
 
 @contextmanager
 def session_lock(root):
@@ -370,7 +370,7 @@ class Participant:
                 directory = self.root / 'incoming-media'
                 directory.mkdir(exist_ok=True)
                 if directory.is_symlink(): raise ValueError('media directory redirected')
-                name = digest([self.account,event.chat_id,m.id,kind,str(getattr(m,'edit_date',None)),getattr(getattr(m,'document',None),'id',None),hashlib.sha256(bytes(m.media)).hexdigest()]) + (m.file.ext or '.bin')
+                name = digest([self.account,event.chat_id,m.id,kind,str(getattr(m,'edit_date',None)),getattr(getattr(m,'document',None),'id',None),hashlib.sha256(bytes(m.media)).hexdigest()]) + staged_suffix(m, media)
                 path = directory / name
                 if path.is_symlink(): raise ValueError('media path redirected')
                 if not path.exists():

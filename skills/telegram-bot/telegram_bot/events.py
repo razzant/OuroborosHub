@@ -11,6 +11,16 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 
 # Chats a bot can be part of. A private chat is one person who started the bot.
 _PLACE_CHAT_TYPES = frozenset({"private", "group", "supergroup", "channel"})
+# getFile serves at most this much; a larger file can never be downloaded by a bot.
+BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+# The Host classifies a staged file by its bytes, but an MP3 without an ID3 tag or an
+# M4A under a generic MP4 brand is only recognized with its usual suffix.
+_AUDIO_SUFFIXES = {
+    "audio/ogg": ".ogg", "audio/opus": ".ogg", "audio/mpeg": ".mp3", "audio/mp3": ".mp3",
+    "audio/mp4": ".m4a", "audio/m4a": ".m4a", "audio/x-m4a": ".m4a", "audio/aac": ".aac",
+    "audio/flac": ".flac", "audio/x-flac": ".flac", "audio/wav": ".wav", "audio/x-wav": ".wav",
+    "audio/webm": ".webm",
+}
 
 @dataclass(frozen=True)
 class TelegramAttachment:
@@ -20,9 +30,15 @@ class TelegramAttachment:
     file_name: str
     mime_type: str
     file_size: int
+    # Voice and audio only; omitted from the dict when absent, so photo and
+    # document facts keep their exact earlier shape.
+    duration_sec: Optional[int] = None
+    status: Optional[str] = None
+    note: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        return {key: value for key, value in asdict(self).items()
+                if value is not None or key not in {"duration_sec", "status", "note"}}
 
 
 @dataclass(frozen=True)
@@ -345,7 +361,38 @@ def _attachments(message: Dict[str, Any]) -> Tuple[TelegramAttachment, ...]:
                 file_size=_integer(document.get("file_size")) or 0,
             )
         )
+    for kind in ("voice", "audio"):
+        item = message.get(kind)
+        if isinstance(item, dict) and item.get("file_id"):
+            result.append(_sound(kind, item))
     return tuple(result)
+
+
+def _sound(kind: str, item: Dict[str, Any]) -> TelegramAttachment:
+    """A voice message or audio file as an ordinary attachment: its bytes, never words."""
+    unique = str(item.get("file_unique_id") or "")
+    mime = str(item.get("mime_type") or ("audio/ogg" if kind == "voice" else "application/octet-stream"))
+    suffix = _AUDIO_SUFFIXES.get(mime.split(";", 1)[0].strip().lower(), "")
+    name = str(item.get("file_name") or "") if kind == "audio" else ""
+    if not name:
+        name = f"{kind}-{unique or item.get('file_id')}"
+    if suffix and not name.lower().endswith(suffix) and not (suffix == ".ogg" and name.lower().endswith((".oga", ".opus"))):
+        name += suffix
+    size = _integer(item.get("file_size")) or 0
+    duration = _integer(item.get("duration"))
+    too_large = size > BOT_API_DOWNLOAD_LIMIT
+    return TelegramAttachment(
+        kind=kind,
+        file_id=str(item.get("file_id")),
+        file_unique_id=unique,
+        file_name=name,
+        mime_type=mime,
+        file_size=size,
+        duration_sec=duration if duration is not None and duration >= 0 else None,
+        status="too_large" if too_large else None,
+        note=("Not staged: larger than the Bot API's 20 MiB download limit. "
+              "The Telegram message reference is retained.") if too_large else None,
+    )
 
 
 def _reply_message_id(message: Dict[str, Any]) -> Optional[int]:

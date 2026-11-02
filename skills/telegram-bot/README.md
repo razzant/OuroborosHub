@@ -1,4 +1,4 @@
-# Telegram Bot 0.10.0
+# Telegram Bot 0.10.1
 
 A public Telegram bot connector for private-chat, group and channel places,
 separate from the built-in owner-control Telegram bridge. It keeps incoming
@@ -26,6 +26,10 @@ message, and Telegram answers only True. Receipts therefore name the requested
 message, and which member took the reaction stays unknown. A missing `album` field
 does not prove that the message is outside an album. See
 [Reactions](SKILL.md#reactions-0100).
+
+Voice messages and audio files arrive as ordinary staged attachments, original
+bytes unchanged; this connector does not transcribe them. See
+[Voice and audio](SKILL.md#voice-and-audio-0101).
 
 See [SKILL.md](SKILL.md#connector-settings-and-facts-063) for the fact rules,
 setup, provider visibility and delivery behavior, and [CHANGELOG.md](CHANGELOG.md)
