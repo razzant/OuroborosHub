@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/70023f9527446bd99a91797850f1b510d9dbc9d9",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/64bf439bf4d974d3493c35ff7edac136360c4e16",
   "schema_version": 1,
   "skills": [
     {
@@ -2855,8 +2855,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "4e02c082518b20eb2daa76a32c407e493ad8d1d6bbb2a953751804c3ed9239e1",
-          "size": 6193
+          "sha256": "441781361e4c242d902db96306b9789dbf6d5d4bf3d3df0463dfcfc71687551b",
+          "size": 6813
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -2870,13 +2870,13 @@
         },
         {
           "path": "README.md",
-          "sha256": "c8aa6369b76788dcbc2b6d601987d507ca74ffcb92b8222b63048659adcb0308",
-          "size": 1998
+          "sha256": "561156a4a8c2fd2f39b75a9607beeddac3bcffe330b7f52ff1db95b26d452077",
+          "size": 2190
         },
         {
           "path": "SKILL.md",
-          "sha256": "4f3884ae50506e417993600e30c16865d111ff2e33c5ebe32b0c6ee8cf75c5e6",
-          "size": 40619
+          "sha256": "83cdab646eb6618201a73c47d87847da633f408b8205eacb3fdcf7d946d5b797",
+          "size": 42802
         },
         {
           "path": "plugin.py",
@@ -2910,8 +2910,8 @@
         },
         {
           "path": "telegram_bot/events.py",
-          "sha256": "8f02c7f5de3a60d3ea37a40db5c52175677b9f5dcda5e804273f1c2557e22e43",
-          "size": 16626
+          "sha256": "5d4ee5b7845af2a8f60a13e1bb5653ba15043be65c56902635686e2f1986388b",
+          "size": 19092
         },
         {
           "path": "telegram_bot/formatting.py",
@@ -2925,8 +2925,8 @@
         },
         {
           "path": "telegram_bot/runtime.py",
-          "sha256": "0a0dc7bea4f15c2e2aae87ce21b88086966c377863b12ac71d994aa3cef54cac",
-          "size": 38899
+          "sha256": "9829326bf4785a2983f3432557688ae0e7e99dae1bbee44a55be27f58fce5084",
+          "size": 39383
         },
         {
           "path": "telegram_bot/settings.py",
@@ -3029,6 +3029,11 @@
           "size": 23428
         },
         {
+          "path": "tests/test_voice_audio.py",
+          "sha256": "b987ef9c4f43b4a6ac3c851d68588b21b6fd81a0c379a12cdf6f863e3d879019",
+          "size": 7399
+        },
+        {
           "path": "tests/test_words.py",
           "sha256": "f561446e91946c4d17b7edb1a39db926ed47ae4e0a58af3c79e6bf7a262b3e2e",
           "size": 11431
@@ -3048,7 +3053,7 @@
       "name": "telegram-bot",
       "slug": "telegram-bot",
       "type": "extension",
-      "version": "0.10.0"
+      "version": "0.10.1"
     },
     {
       "connects": [
@@ -3058,8 +3063,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "9fb5b188e822e2dfe4119ea260a76d4c5e52c1e6d3b9d30d7c6ad7e9a590cf48",
-          "size": 37786
+          "sha256": "23199e2be4ac50b4542a1e5cd206fa9ad4ba608deb9c26c6adf3eff4695520bb",
+          "size": 39483
         },
         {
           "path": "plugin.py",
@@ -3127,6 +3132,11 @@
           "size": 18304
         },
         {
+          "path": "tests/test_voice_audio.py",
+          "sha256": "476d8912b52d6354c8e7ffcc396895021c09b152ea9de52f05f38d6ce974ee97",
+          "size": 4939
+        },
+        {
           "path": "ui/icon.svg",
           "sha256": "e02f3e17024bcbb581e6293e64888aac3e3b2a675173c9187bb9f527504f7dc7",
           "size": 217
@@ -3163,13 +3173,13 @@
         },
         {
           "path": "userbot/normalize.py",
-          "sha256": "abc0db1ec18a197d935d37869d6fb84a8134f7daba4145a03e156dfae3d50295",
-          "size": 7604
+          "sha256": "73294f0c99e9c190c887bfc660aefae9271f0dc49fa19f9243042d888248be35",
+          "size": 9069
         },
         {
           "path": "userbot/participant.py",
-          "sha256": "e2ddca04f3ac391a08921b087ba1f06fc9d46306e9614ffd6cdbe941a2ba7d9a",
-          "size": 49097
+          "sha256": "3b2fc078148413ac3124b8c3915fe1c9dc59cad5c22f4bc9791632edcac4e2b9",
+          "size": 49113
         },
         {
           "path": "userbot/participant_ops.py",
@@ -3236,7 +3246,7 @@
       "name": "telegram-user-session",
       "slug": "telegram-user-session",
       "type": "extension",
-      "version": "0.4.0"
+      "version": "0.4.1"
     },
     {
       "description": "Token Observatory — Liquid Glass dashboard for recorded Ouroboros token usage, tasks and models.",
