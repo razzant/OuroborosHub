@@ -1412,9 +1412,9 @@ class FeedSourceTests(ConsumerCase):
         original_source = plugin._feed_source
         first, newer = True, {}
 
-        def overlapping(source, limit):
+        def overlapping(source, limit, *rest):
             nonlocal first
-            row = original_source(source, limit)  # the older snapshot is applied: gone is counted lost
+            row = original_source(source, limit, *rest)  # the older snapshot is applied: gone is counted lost
             if first:
                 first = False
                 with patch.object(plugin, "_fetch_feed", return_value=(new_feed.items, {}, "")):
@@ -1543,7 +1543,7 @@ class FeedSourceTests(ConsumerCase):
                                 post_ids=[feed_id(article("a"))])
         self.assertTrue(receipt["new_attempt"])
         claim = next(i for i, sql in enumerate(statements) if sql == "BEGIN IMMEDIATE")
-        validation = next(i for i, sql in enumerate(statements) if "SELECT 1 FROM feed_items" in sql)
+        validation = next(i for i, sql in enumerate(statements) if "SELECT text_extracted FROM feed_items" in sql)
         self.assertLess(claim, validation)
 
     def test_malformed_hostile_or_unknown_documents_are_explicit_failures(self):
@@ -2281,6 +2281,117 @@ class FeedSourceTests(ConsumerCase):
                                  f"feed unavailable: refused: openai.com resolves to non-public address {address}")
 
 
+class FeedTextNotExtractedTests(FeedSourceTests.__base__):
+    """Finding C1: a feed item without title or excerpt is listed by link, as a textless Telegram post
+    is; a feed whose items all lack text is unavailable and advances nothing."""
+
+    IMAGE = '<p><img src="https://openai.com/images/cover.png"/></p>'
+    fetch, source, add = FeedSourceTests.fetch, FeedSourceTests.source, FeedSourceTests.add
+
+    def test_feed_whose_items_all_lack_title_and_excerpt_is_unavailable_and_advances_nothing(self):
+        self.add(OPENAI)
+        self.add(SGLANG)
+        cases = {OPENAI: (feed_response(rss((article("a"), 2, "", self.IMAGE), (article("b"), 1, "", ""))),
+                          [feed_id(article("a")), feed_id(article("b"))]),
+                 SGLANG: (atom_response(atom(("v1", 2, "", self.IMAGE))), [release_id("v1")])}
+        for edition, (url, (response, ids)) in enumerate(cases.items()):
+            with self.subTest(url):
+                result, _ = self.fetch({url: response}, channel=url)
+                source = self.source(result, url)
+                self.assertFalse(result["ok"])
+                self.assertEqual((source["coverage"], source["posts"], textless(source), source["possible_gap"]),
+                                 ("unavailable", [], [], False))
+                self.assertIn("text not extracted for any of the", source["error"])
+                with plugin._connect() as conn:  # no snapshot applied: nothing tracked, nothing returned
+                    self.assertEqual(conn.execute("SELECT COUNT(*) FROM feed_items WHERE source=?",
+                                                  (key(url),)).fetchone()[0], 0)
+                self.assertFalse(self.call("record_attempt", day="2026-09-27", edition=f"p{edition}",
+                                           post_ids=ids)["ok"])
+                receipt = self.call("record_attempt", day="2026-09-27", edition=f"e{edition}",
+                                    fetch_ids=[result["fetch_id"]])
+                self.assertEqual((receipt["ok"], receipt["post_ids"]), (True, []))
+        # Nothing was skipped: once the feed gives text, its items come back.
+        readable, _ = self.fetch({OPENAI: feed_response(rss((article("a"), 2, "Cover story", self.IMAGE),
+                                                            (article("b"), 1, "", "")))}, channel=OPENAI)
+        source = self.source(readable)
+        self.assertEqual(source["coverage"], "feed_window")
+        self.assertEqual([p["id"] for p in source["posts"]], [feed_id(article("a"))])
+        self.assertEqual([p["id"] for p in textless(source)], [feed_id(article("b"))])
+
+    def test_mixed_feed_lists_items_without_text_by_link_and_retries_them_as_attempted_not_read(self):
+        self.add(OPENAI)
+        photo, paper, chart, new = article("photo"), article("paper"), article("chart"), article("new")
+        before = feed_response(rss((photo, 3, "", self.IMAGE), (paper, 2, "A paper", "<p>Abstract</p>"),
+                                   (chart, 1, "", "")))
+        result, _ = self.fetch({OPENAI: before})
+        source = self.source(result)
+        self.assertTrue(result["ok"])
+        self.assertEqual(source["coverage"], "feed_window")
+        # No empty strings posing as read items: posts carry text, the rest are links with a count.
+        self.assertEqual([(p["id"], p["title"], p["excerpt"]) for p in source["posts"]],
+                         [(feed_id(paper), "A paper", "Abstract")])
+        self.assertEqual(source["text_not_extracted"], [{"id": feed_id(photo), "url": photo, "date": stamp(3)},
+                                                        {"id": feed_id(chart), "url": chart, "date": stamp(1)}])
+        receipt = self.call("record_attempt", day="2026-09-27", fetch_ids=[result["fetch_id"]])
+        self.assertEqual(receipt["post_ids"], sorted([feed_id(photo), feed_id(paper), feed_id(chart)]))
+        self.assertEqual(receipt["attempted_not_read"], {"count": 2, "ids": sorted([feed_id(photo), feed_id(chart)])})
+        # The next ordinary edition does not repeat them.
+        normal = self.source(self.fetch({OPENAI: before})[0])
+        self.assertEqual((normal["posts"], textless(normal)), ([], []))
+        # include_attempted retries them while the feed lists them; the read item stays read.
+        after = feed_response(rss((photo, 3, "Photo essay", self.IMAGE), (paper, 2, "A paper", "<p>Abstract</p>"),
+                                  (chart, 1, "", ""), (new, 0.5, "New")))
+        retry = self.source(self.fetch({OPENAI: after}, include_attempted=True)[0])
+        self.assertEqual([(p["id"], p["already_attempted"]) for p in retry["posts"]],
+                         [(feed_id(photo), True), (feed_id(new), False)])
+        self.assertEqual([(p["id"], p["already_attempted"]) for p in retry["text_not_extracted"]],
+                         [(feed_id(chart), True)])
+        receipt = self.call("record_attempt", day="2026-09-28", post_ids=[feed_id(photo), feed_id(chart)])
+        self.assertEqual(receipt["attempted_not_read"], {"count": 1, "ids": [feed_id(chart)]})
+        again = self.source(self.fetch({OPENAI: after}, include_attempted=True)[0])
+        self.assertEqual([p["id"] for p in again["posts"]], [feed_id(new)])
+        self.assertEqual([p["id"] for p in again["text_not_extracted"]], [feed_id(chart)])
+
+    def test_output_bound_defers_the_newest_feed_entries_with_or_without_text(self):
+        self.add(OPENAI)
+        # Every other item has no text; the readable ones carry long excerpts that outgrow the call's bound.
+        links = [article(f"item-{n:02d}") for n in range(12)]
+        items = [(link, 24 - n, "" if n % 2 else f"Item {n}", "" if n % 2 else "x" * 2500) for n, link in enumerate(links)]
+        result, _ = self.fetch({OPENAI: feed_response(rss(*items))}, limit=12)
+        source = self.source(result)
+        self.assertTrue(textless(source))
+        kept = sorted(source["posts"] + textless(source), key=lambda p: p["date"])
+        order = [feed_id(link) for link in links]
+        # What stays returned is the oldest run; the newest wait for the next portion.
+        self.assertTrue(result["output_limited"])
+        self.assertGreater(source["omitted_posts"], 0)
+        self.assertEqual(len(kept) + source["omitted_posts"], len(order))
+        self.assertEqual([p["id"] for p in kept], order[:len(kept)])
+        self.assertEqual(source["first_omitted_id"], order[len(kept)])
+        self.call("record_attempt", day="2026-09-27", fetch_ids=[result["fetch_id"]])
+        rest = self.source(self.fetch({OPENAI: feed_response(rss(*items))}, limit=12)[0])
+        self.assertEqual(sorted(p["id"] for p in rest["posts"] + textless(rest)), sorted(order[len(kept):]))
+
+    def test_output_limited_is_judged_after_a_source_turns_stale(self):
+        self.add(OPENAI)
+        content = feed_response(rss(*[(article(f"n{n}"), 5 - n, f"Item {n}") for n in range(3)]))
+        gather, newer = plugin._gather, {}
+
+        def newer_call_publishes_first(names, read):
+            selected = gather(names, read)
+            with patch.object(plugin, "_gather", gather):
+                newer.update(self.fetch({OPENAI: content}, limit=1)[0])
+            return selected
+
+        with patch.object(plugin, "_gather", side_effect=newer_call_publishes_first):
+            older = self.fetch({OPENAI: content}, limit=1)[0]
+        self.assertEqual((self.source(newer)["omitted_posts"], newer["output_limited"]), (2, True))
+        stale = self.source(older)
+        self.assertEqual((stale["stale_read"], stale["posts"], stale["omitted_posts"]), (True, [], 0))
+        # The stale source lists nothing, so nothing of this call was limited.
+        self.assertFalse(older["output_limited"])
+
+
 def telegram_pages(pages):
     """An opener side effect serving each channel's own preview page."""
     def opened(request, timeout):
@@ -2581,8 +2692,8 @@ class RetryTests(ConsumerCase):
         with patch.object(plugin._OPENER, "open", side_effect=route({OPENAI: both})):
             retry = self.call("fetch_posts", include_attempted=True)
         self.assertEqual([p["id"] for p in retry["channels"][0]["posts"]], [feed_id(article("b"))])
-        # A feed item has no attempted-not-read state, so it carries no already_attempted flag.
-        self.assertNotIn("already_attempted", retry["channels"][0]["posts"][0])
+        # A read feed item is not attempted-not-read: it does not come back, and the new one is flagged as new.
+        self.assertIs(retry["channels"][0]["posts"][0]["already_attempted"], False)
 
     def test_state_from_before_this_revision_keeps_its_attempted_not_read_posts(self):
         path = Path(self.api.root) / "digest.sqlite3"

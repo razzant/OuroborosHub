@@ -149,9 +149,12 @@ _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS feeds (name TEXT PRIMARY KEY, since TEXT NOT NULL, "
     "read_generation INTEGER NOT NULL DEFAULT 0, url TEXT NOT NULL DEFAULT '');"
     # lost_at: when a complete read last found an item missing; '' while it is listed.
+    # text_extracted=0: the latest publication listed the item by link, with neither
+    # title nor excerpt; not_read=1: recorded so, and include_attempted retries it.
     "CREATE TABLE IF NOT EXISTS feed_items (source TEXT NOT NULL, key TEXT NOT NULL, published TEXT NOT NULL, "
     "attempted INTEGER NOT NULL DEFAULT 0, returned INTEGER NOT NULL DEFAULT 0, "
-    "lost_reported INTEGER NOT NULL DEFAULT 0, lost_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(source,key));"
+    "lost_reported INTEGER NOT NULL DEFAULT 0, lost_at TEXT NOT NULL DEFAULT '', "
+    "text_extracted INTEGER NOT NULL DEFAULT 1, not_read INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source,key));"
     # Per source, what its latest published fetch_posts call returned. An edition
     # names these calls in record_attempt; nothing is derived from older reads.
     "CREATE TABLE IF NOT EXISTS fetches (id INTEGER PRIMARY KEY AUTOINCREMENT);"
@@ -165,6 +168,8 @@ _MIGRATIONS = (("observed", "lost_reported", "INTEGER NOT NULL DEFAULT 0"),
                ("telegram_reads", "since", "TEXT NOT NULL DEFAULT ''"),
                ("feeds", "url", "TEXT NOT NULL DEFAULT ''"),
                ("feed_items", "lost_at", "TEXT NOT NULL DEFAULT ''"),
+               ("feed_items", "text_extracted", "INTEGER NOT NULL DEFAULT 1"),
+               ("feed_items", "not_read", "INTEGER NOT NULL DEFAULT 0"),
                ("gaps", "dropped_count", "INTEGER NOT NULL DEFAULT 0"))
 # Until not_read existed, a textless post a fetch returned and the cursor passed
 # was what an edition recorded as attempted-not-read; it stays retryable.
@@ -1177,7 +1182,7 @@ def _telegram_source(channel: str, per_channel: int, include_attempted: bool, wa
     return row
 
 
-def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
+def _feed_source(source: str, per_channel: int, include_attempted: bool = False) -> dict[str, Any]:
     with _connect() as conn:
         stored = conn.execute("SELECT since,url FROM feeds WHERE name=?", (source,)).fetchone()
         since, url = (stored[0], stored[1]) if stored else (_window_start(), "")
@@ -1207,10 +1212,17 @@ def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
             "SELECT key,published FROM feed_items WHERE source=? AND attempted=1", (source,))}
         unattempted = dict(conn.execute(
             "SELECT key,lost_reported FROM feed_items WHERE source=? AND attempted=0", (source,)).fetchall())
+        not_read = {row[0] for row in conn.execute(
+            "SELECT key FROM feed_items WHERE source=? AND attempted=1 AND not_read=1", (source,))}
         pending = set(unattempted)
         dated = [item for item in items if item["date"]]
         if items and not dated:
             error = "feed items lack parseable publication dates"
+        elif dated and not any(item["title"] or item["excerpt"] for item in dated):
+            # As with a Telegram page: a feed whose items give no text at all is
+            # unknown coverage, never a quiet day, and nothing from it is recorded.
+            error = (f"text not extracted for any of the {len(dated)} dated feed items: "
+                     "none has a title or an excerpt")
         # An existing unattempted item remains eligible when its publisher
         # corrects its date to before the subscription's initial window.
         window = [item for item in dated if item["date"] >= since or item["key"] in pending]
@@ -1276,21 +1288,30 @@ def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
         hidden_pending = any(not unattempted[key] for key in pending - present)
         truncation_gap = hidden_pending or not _date_ordered(dated)
     # No numeric watermark: every unattempted identity inside the subscription
-    # window stays eligible, oldest first, whatever order the feed uses. An attempted
-    # item was returned with its title and excerpt, so include_attempted retries nothing here.
-    pool = sorted((item for item in window if item["key"] in unseen), key=lambda item: (item["date"], item["key"]))
-    posts = []
-    for item in [] if error else pool:
-        # title and excerpt are the feed's own fields, never the read article.
-        post = {"id": f"{source}/{item['key']}", "url": item["url"], "date": item["date"], "title": item["title"],
-                "excerpt": item["excerpt"]}
-        if item["excerpt_truncated"]:
-            post["excerpt_truncated"] = True
-        posts.append(post)
+    # window stays eligible, oldest first, whatever order the feed uses. An item
+    # attempted without title or excerpt is attempted-not-read: include_attempted
+    # brings it back while the feed still lists it in the window.
+    pool = sorted((item for item in window if item["key"] in unseen or (include_attempted and item["key"] in not_read)),
+                  key=lambda item: (item["date"], item["key"]))
+    # A feed portion is its oldest per_channel items, with or without text: a
+    # feed may list thousands, so items without text count toward the limit.
+    portion = [] if error else pool[:per_channel]
+    rest = [] if error else pool[per_channel:]
+    posts, textless = [], []
+    for item in portion:
+        entry = {"id": f"{source}/{item['key']}", "url": item["url"], "date": item["date"]}
+        if item["title"] or item["excerpt"]:
+            # title and excerpt are the feed's own fields, never the read article.
+            entry.update(title=item["title"], excerpt=item["excerpt"])
+            if item["excerpt_truncated"]:
+                entry["excerpt_truncated"] = True
+        if include_attempted:
+            entry["already_attempted"] = item["key"] in not_read
+        (posts if "title" in entry else textless).append(entry)
     row = {"channel": source, "kind": "rss", "format": facts.get("format", ""),
            "coverage": "redirected" if redirect is not None else "unavailable" if error else "feed_window",
-           "error": error, "posts": posts[:per_channel], "omitted_posts": max(0, len(posts) - per_channel),
-           "first_omitted_id": posts[per_channel]["id"] if len(posts) > per_channel else "",
+           "error": error, "posts": posts, "omitted_posts": len(rest),
+           "first_omitted_id": f"{source}/{rest[0]['key']}" if rest else "",
            "possible_gap": bool(not error and (generation != latest or truncation_gap or
                                                lost_now or undated_pending or
                                                (oldest and oldest > reference))),
@@ -1300,7 +1321,10 @@ def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
            "feed_truncated": truncated, "stale_read": generation != latest, "_generation": generation,
            "skipped_items": {"duplicate": facts.get("duplicate_items", 0), "undated": len(items) - len(dated),
                              "unidentified": facts.get("unidentified_items", 0)}}
-    # Present only once a feed has outgrown MAX_UNLISTED_FEED_ITEMS, to keep the output budget for posts.
+    # Optional facts appear only when they say something, to keep the output budget for posts.
+    if textless:
+        row["text_not_extracted"] = textless
+    # Present only once a feed has outgrown MAX_UNLISTED_FEED_ITEMS.
     if dropped_now:
         row["dropped_unattempted_now"] = dropped_now
     if gap and gap[1]:
@@ -1349,12 +1373,17 @@ def _entries(row: dict[str, Any]) -> int:
     return len(row["posts"]) + len(row.get("text_not_extracted") or [])
 
 
+def _position(row: dict[str, Any], entry: dict[str, Any]) -> Any:
+    """An entry's place in its source's oldest-first order."""
+    return (entry["date"], entry["id"]) if row["kind"] == "rss" else _number(entry["id"])
+
+
 def _defer_newest(row: dict[str, Any]) -> None:
     """Move a source's newest returned entry to its next portion. What stays
     returned remains one contiguous oldest-first run, so recording it can
     never pass over a post that was not shown."""
     textless = row.get("text_not_extracted") or []
-    if textless and (not row["posts"] or _number(textless[-1]["id"]) > _number(row["posts"][-1]["id"])):
+    if textless and (not row["posts"] or _position(row, textless[-1]) > _position(row, row["posts"][-1])):
         removed = textless.pop()
     else:
         removed = row["posts"].pop()
@@ -1399,7 +1428,7 @@ def _fetch_posts(limit: int = 10, include_attempted: bool = False, channel: str 
     def read(name: str) -> dict[str, Any]:
         try:
             if name.startswith("rss:"):
-                return _feed_source(name, per_channel)
+                return _feed_source(name, per_channel, bool(include_attempted))
             return _telegram_source(name, per_channel, bool(include_attempted), seen.get(name, 0))
         except Exception as exc:  # one source's failure must never hide the others
             return _failed_source(name, f"source failed: {type(exc).__name__}: {str(exc)[:120]}")
@@ -1438,9 +1467,6 @@ def _fetch_posts(limit: int = 10, include_attempted: bool = False, channel: str 
     if len(json.dumps(result, ensure_ascii=False)) > MAX_OUTPUT_CHARS:
         return json.dumps({"ok": False, "error": "output budget cannot represent all configured sources",
                            "channel_count": len(results), "coverage": "unavailable"})
-    result["output_limited"] = any(x["omitted_posts"] or any(
-        post.get("text_truncated") or post.get("excerpt_truncated") for post in x["posts"]
-    ) for x in results)
     # Final response and returned-ID eligibility are one write transaction.
     # A newer fetch of a channel or feed can start after its source checked its
     # generation; its write cannot interleave with this recheck and publication.
@@ -1456,6 +1482,10 @@ def _fetch_posts(limit: int = 10, include_attempted: bool = False, channel: str 
             if not current or current[0] != generation:
                 _stale(item)
         result["ok"] = any(x["coverage"] in READABLE for x in results)
+        # After the recheck: a source emptied as stale limits nothing.
+        result["output_limited"] = any(x["omitted_posts"] or any(
+            post.get("text_truncated") or post.get("excerpt_truncated") for post in x["posts"]
+        ) for x in results)
         serialized = json.dumps(result, ensure_ascii=False)
         if len(serialized) > MAX_OUTPUT_CHARS:
             return json.dumps({"ok": False, "error": "output budget cannot represent all configured sources",
@@ -1469,8 +1499,11 @@ def _fetch_posts(limit: int = 10, include_attempted: bool = False, channel: str 
                              (item["channel"], fetch_id, json.dumps(
                                  [post["id"] for post in item["posts"] + (item.get("text_not_extracted") or [])])))
             if item["kind"] == "rss":
-                conn.executemany("UPDATE feed_items SET returned=1 WHERE source=? AND key=?",
-                                 ((item["channel"], post["id"].rsplit("/", 1)[1]) for post in item["posts"]))
+                conn.executemany(
+                    "UPDATE feed_items SET returned=1, text_extracted=? WHERE source=? AND key=?",
+                    [(1, item["channel"], post["id"].rsplit("/", 1)[1]) for post in item["posts"]]
+                    + [(0, item["channel"], post["id"].rsplit("/", 1)[1])
+                       for post in item.get("text_not_extracted") or []])
                 continue
             conn.executemany(
                 "INSERT INTO observed(channel,id,text_extracted) VALUES (?,?,?) ON CONFLICT(channel,id) "
@@ -1548,24 +1581,28 @@ def _record_attempt(day: str, post_ids: list[str] | None = None, edition: str = 
                 raise ValueError(f"fetch_ids {superseded} are no source's latest fetch; "
                                  "use the fetch_id of the latest fetch_posts result, or name the ids in post_ids")
             chosen: dict[str, set[int]] = {}
-            feed_keys: list[tuple[str, str]] = []
+            feed_keys: list[tuple[int, str, str]] = []
+            not_read: list[str] = []
             for post_id in unique:
                 feed = FEED_ID.fullmatch(post_id)
                 channel, identifier = feed.groups() if feed else post_id.split("/")
                 observed = conn.execute(
-                    "SELECT 1 FROM feed_items WHERE source=? AND key=? AND returned=1" if feed else
-                    "SELECT 1 FROM observed WHERE channel=? AND id=?", (channel, identifier if feed else int(identifier)))
-                if not conn.execute("SELECT 1 FROM channels WHERE name=?", (channel,)).fetchone() or not observed.fetchone():
+                    "SELECT text_extracted FROM feed_items WHERE source=? AND key=? AND returned=1" if feed else
+                    "SELECT 1 FROM observed WHERE channel=? AND id=?",
+                    (channel, identifier if feed else int(identifier))).fetchone()
+                if not conn.execute("SELECT 1 FROM channels WHERE name=?", (channel,)).fetchone() or not observed:
                     raise ValueError("post_ids must come from a configured channel's returned fetch_posts result")
                 if feed:
                     # Feed items are independent identities: recording one never
                     # implies anything about another, so no ordering rule applies.
-                    feed_keys.append((channel, identifier))
+                    # One last returned without title or excerpt is attempted-not-read.
+                    feed_keys.append((0 if observed[0] else 1, channel, identifier))
+                    if not observed[0]:
+                        not_read.append(post_id)
                 else:
                     chosen.setdefault(channel, set()).add(int(identifier))
             marks: dict[str, int] = {}
             flags: list[tuple[int, str, int]] = []
-            not_read: list[str] = []
             for channel, ids in sorted(chosen.items()):
                 watermark = conn.execute("SELECT last_id FROM seen WHERE channel=?", (channel,)).fetchone()
                 prior = watermark[0] if watermark else 0
@@ -1592,10 +1629,11 @@ def _record_attempt(day: str, post_ids: list[str] | None = None, edition: str = 
                     conn.execute("INSERT INTO seen(channel,last_id) VALUES (?,?) ON CONFLICT(channel) "
                                  "DO UPDATE SET last_id=MAX(last_id,excluded.last_id)", (channel, mark))
                 conn.executemany("UPDATE observed SET not_read=? WHERE channel=? AND id=?", flags)
-                updated = conn.executemany("UPDATE feed_items SET attempted=1 WHERE source=? AND key=?", feed_keys).rowcount
+                updated = conn.executemany("UPDATE feed_items SET attempted=1, not_read=? WHERE source=? AND key=?",
+                                           feed_keys).rowcount
                 if updated != len(feed_keys):
                     raise ValueError("feed item changed before attempt could be recorded")
-                for source in sorted({source for source, _ in feed_keys}):
+                for source in sorted({source for _, source, _ in feed_keys}):
                     _bound_feed_state(conn, source)
             row = conn.execute("SELECT key,day,post_ids,content_sha256,recorded_at FROM attempts WHERE key=?", (key,)).fetchone()
         receipt = {"ok": True, "key": row[0], "day": row[1], "post_ids": json.loads(row[2]),
@@ -1620,7 +1658,7 @@ def register(api: Any) -> None:
                       schema={"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "add", "remove"]},
                                                                "name": {"type": "string"}}})
     api.register_tool("fetch_posts", _fetch_posts,
-                      description="Fetch bounded new items, oldest first, from every source or one (channel=name, rss:key or URL), with per-source coverage and the fetch_id record_attempt takes. Telegram posts carry preview text; text_not_extracted lists posts without text by link. Feed items carry the feed's own title/excerpt, not the article. include_attempted=true also returns posts recorded as attempted-not-read that the preview page still shows, to retry them.",
+                      description="Fetch bounded new items, oldest first, from every source or one (channel=name, rss:key or URL), with per-source coverage and the fetch_id record_attempt takes. Telegram posts carry preview text; text_not_extracted lists posts without text by link. Feed items carry the feed's own title/excerpt, not the article; feed items with neither are listed in text_not_extracted too. include_attempted=true also returns posts and feed items recorded as attempted-not-read that the preview page or feed still shows, to retry them.",
                       schema={"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20},
                                                                "include_attempted": {"type": "boolean"},
                                                                "channel": {"type": "string"}}},
