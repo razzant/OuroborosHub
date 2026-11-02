@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/666ae24bbad2e4b6118515147a575ebde17a51f0",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/2391baf53181a5d08462f6bc4e662c5d4b11c0b4",
   "schema_version": 1,
   "skills": [
     {
@@ -369,8 +369,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "46360b484d1db66af9d468666b9d99941a71dd2df6344d328348c6f0656619ca",
-          "size": 49190
+          "sha256": "81faa7e0812d34202610bf41c95548b06d25ccf6ec697cbcb4611dd816636abb",
+          "size": 50193
         },
         {
           "path": "accounts.py",
@@ -404,8 +404,8 @@
         },
         {
           "path": "ops.py",
-          "sha256": "dd99f57517ef2835eec3a4c617f5bd93a685e5ab1b08d29491cf0f9e23e91f85",
-          "size": 98828
+          "sha256": "e3bf11cf921d035aac220a7606c9d7e1484d9c96e2d4cbf16569930e479bafb8",
+          "size": 99001
         },
         {
           "path": "plugin.py",
@@ -414,13 +414,13 @@
         },
         {
           "path": "providers.py",
-          "sha256": "fa1ca29f139c878bed9a5f2fdffe4d502555fad4f747bd516c81007feaf65e2f",
-          "size": 59236
+          "sha256": "7eecb6e8aaef17244ebdcb3c853f92f685502a8ec2d3b9966d5755e78f7fcc06",
+          "size": 58761
         },
         {
           "path": "providers_google.py",
-          "sha256": "15f3472d4b37229aff5f2bba47d0df099d962af62d59788918623dd66fa5a032",
-          "size": 45907
+          "sha256": "f695fe39f1921b76b4916535759c5714e0628ebb2c808526478b6ecc5c2ef81d",
+          "size": 46102
         },
         {
           "path": "reminders.py",
@@ -434,13 +434,13 @@
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "db132fba945d443a4f14223378c086f6b59bd108b7783f719ca2f40cc0d4d3e0",
-          "size": 37326
+          "sha256": "8074a3d0984324c79196a0e46f455117df12a1057f89ce75ab7dc12038c45789",
+          "size": 37613
         },
         {
           "path": "store.py",
-          "sha256": "d7d14d6b2979f8a8564a7efe652cbfe252471c3a4763a9ead942eceda85709d3",
-          "size": 69042
+          "sha256": "c3cf760a5cfd5b314db4ac4573a11e4059d1c9a6a88fa733793b57c219bb255b",
+          "size": 70958
         },
         {
           "path": "tests/test_birth_recovery.py",
@@ -633,6 +633,11 @@
           "size": 23816
         },
         {
+          "path": "tests/test_native_cache_materialization.py",
+          "sha256": "7ede97cde147baf89660726395b31d666f0e0f4d0fe998996d7506be7d53dcdb",
+          "size": 23205
+        },
+        {
           "path": "tests/test_native_temporal_preservation.py",
           "sha256": "30001fa7d0ff442163373b75528822d91fdf89b12b55d203133f9d4d680bcd0e",
           "size": 20945
@@ -654,8 +659,8 @@
         },
         {
           "path": "tests/test_recurrence_edit_contracts.py",
-          "sha256": "47932ac7b2cf7ab3acbf7c4fb269a6bdc292db87bb1a5793fca2e5730abc4f42",
-          "size": 49834
+          "sha256": "ca4a1ecf504aec4e6f41babf8c40591f1676288430dd033b59467f9ec9d8ad1c",
+          "size": 49844
         },
         {
           "path": "tests/test_recurrence_intake.py",
