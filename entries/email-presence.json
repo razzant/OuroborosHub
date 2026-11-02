@@ -6,7 +6,7 @@
     "Email"
   ],
   "description": "Multi-account Gmail API and IMAP/SMTP mail, account settings, folders, drafts and durable delivery, with optional Presence intake.",
-  "digest": "7d91b4a51353da84dbafb5a0ddfd474a2e53ad0b2d7cf41c7c0b431003cdec48",
+  "digest": "37bd2df321cdd771b0afe4f283171fd8b5f212475fdbf70f9cb796a9e9372909",
   "icon": "ui/icon.svg",
   "install_specs": [
     "httpx",
@@ -20,6 +20,6 @@
     "path": "skills/email-presence"
   },
   "type": "extension",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "withdrawn": null
 }
