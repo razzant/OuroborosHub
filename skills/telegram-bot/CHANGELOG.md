@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.1 — unreleased
+
+- Deliver voice messages and audio files as ordinary attachments (`kind` `voice` or
+  `audio`, with `duration_sec` when Telegram gives it). A voice-only message without
+  a caption is no longer dropped. The original bytes are staged unchanged under a
+  name whose suffix matches their type, so the Host's byte classification can tell
+  the audio apart. No transcription, no new wake fact, no text is made up.
+- Mark a voice or audio file Telegram declares above the Bot API's 20 MiB download
+  limit `too_large` with a note and do not try to download it, so it cannot hold its
+  conversation.
+
 ## 0.10.0 — unreleased
 
 - Send incoming reactions as the typed `message.reaction` fact (schema version 1)

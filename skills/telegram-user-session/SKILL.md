@@ -1,7 +1,7 @@
 ---
 name: telegram-user-session
 description: Ouroboros as an independent Telegram participant through its own dedicated user account and shared Places memory.
-version: 0.4.0
+version: 0.4.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -146,6 +146,14 @@ Version 0.2 requires an explicit outgoing opt-in in both participant and retaine
 Retained legacy intake follows the current Host's Presence answers. A retained turn is observed through its original reference and never submitted again; a separately admitted child is observed until its own end, whatever its parent's outcome; each output the Host selected is sent once under its output identity, including the selected output of failed or cancelled work; their text without an output identity is never sent. Failed or cancelled work with nothing further to observe keeps its source held, as before. Replies without a Host output identity keep the earlier limit of one interim and one final reply per event. A reply queued before 0.3 stands, by its exact stored bytes, for the first selected output that matches it and for no other; its event records that match, and a further selection saying the same is still sent under its own identity. With a Host that lists continuation version 2, legacy intake asks for it too: an event the Host takes custody of (it answers `continuing`, keeps a retained turn, or ends naming a child) no longer holds its chat. The chat's next event is offered, and the held event's references are read apart, a child beside its parent, each until its own end; replies follow `reply_anchor` inside the chat and topic, as in participant mode. A busy answer keeps the event at its chat's head, without counting as an ingress failure, until the Host's `retry_after`. Each chat's next event is offered by a task of its own, up to three chats side by side and one chat's events in capture order, and events in Host custody are read in a pass of their own at the companion's three-second cadence: a slow work read, many held references or one chat's author that is still starting never hold another event, and replies, actions and receipts never wait for a Host answer. Without that list legacy keeps the version 0 request, which waits for the author's terminal, observes one reference at a time and keeps a chat's later incoming behind an admitted event it is still observing, so a long-running child delays them.
 
 Legacy custody observation cycles through bounded batches of at most 100 events. Each cycle fixes its newest event before reading, so both older pending work and later replies receive attention even when new events keep arriving; this is fairness, not a throughput guarantee. After restart the cycle begins oldest-first. When version 2 becomes available, previously admitted version-0 work moves into this custody path after its existing binding validation, without submitting that event again or changing queued replies.
+
+## Voice and audio (0.4.1)
+
+In participant mode a voice message or audio file is staged like any other media: its original bytes, unchanged and uncut, go to the Host as an ordinary attachment up to the 32 MiB capture bound (above it `media.status` is `too_large` and only the message reference goes on). Its text stays the descriptor `[Telegram voice message]` or `[Telegram audio: <title>]`, never words from the recording, and its wake facts are those of any message without text. The staged copy's suffix now follows Telegram's declared type (`.ogg`, `.mp3`, `.m4a`, …) rather than the host computer's MIME table, because the Host classifies a staged file by its bytes and recognizes some audio only with its usual suffix. This connector makes no speech-to-text claim. With the optional local `whisper-voice` skill enabled the answering model may call its `transcribe_attachment` tool with the manifest ordinal; on this path that tool currently takes Ogg, MP3 and MP4/M4A audio of at most 384 KiB and 60 seconds. Whisper also lists WebM, but the Host classifies staged WebM bytes as `video/webm` whatever the file name and the tool refuses that, so WebM from Telegram stays only a file (Telegram voice messages are Ogg). Telegram delivers far longer and larger recordings than the recognizer accepts; such a recording, like WAV, FLAC or AAC, is still staged whole, never cut, and stays only a file. Retained legacy mode still captures no media.
+
+## Upgrading to 0.4.1
+
+- Voice and audio staged in participant mode take their suffix from Telegram's declared type; an `audio/x-m4a` recording without a file name was staged as `.bin` and is now `.m4a`. Already captured files keep their names.
 
 ## Upgrading to 0.4.0
 
