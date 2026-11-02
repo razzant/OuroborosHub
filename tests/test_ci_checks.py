@@ -53,6 +53,7 @@ class SelectionTests(unittest.TestCase):
             'perplexity': {'perplexity'}, '2gis': {'2gis'}, 'whoop-health': {'whoop-health'}, 'claudexor_quotas': {'widgets'},
             'context-lens': {'widgets'}, 'memory-atlas': {'memory-atlas', 'widgets'}, 'token-usage': {'widgets'},
             'office_reader': {'office-reader'}, 'science_search': {'science-search'},
+            'science_digest': {'science-digest'},
             'github': {'github'},
             'telegram-user-session': {'telegram-user-session'},
             'email-presence': {'email-presence'}, 'agentrq-bridge': {'agentrq-bridge'},
