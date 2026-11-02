@@ -259,11 +259,6 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
                 temporal_gaps.append('Legacy floating event ' + existing['id'] + ' has no recorded parsing zone; stored times and pending work were retained.')
                 continue
         row = civil_in_basis(row, existing)
-        if (row.get('time_kind') == 'absolute' and not row.get('all_day') and '_start_tzid' in row and not row['_start_tzid']
-                and not has_recurrence(row) and existing.get('tz')):
-            # A native UTC one-off expresses an instant, not a replacement for
-            # its retained authoring zone (also on changed/missing ETags).
-            row = {**row, 'tz': existing['tz']}
         if existing.get("etag") == row["etag"] and existing.get("sync_state") == "synced" and not existing.get("deleted_at"):
             # Our acknowledged wire format may use UTC for a zoned one-off.
             # Equal ETags permit type enrichment, not replacing its authoring zone.

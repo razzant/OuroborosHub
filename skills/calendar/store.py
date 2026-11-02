@@ -694,21 +694,23 @@ class Store:
 
     def cancel_intents_for_account(self, account_id: str, reason: str = "account disconnected") -> int:
         """Withdraw waiting commands, preserving desired data and any owed provider outcome."""
-        cancelled, before, affected = 0, {}, set()
+        cancelled, before, affected, created, unknown = 0, {}, set(), set(), set()
         with self.transaction() as local:
             with local._conn() as c:
-                rows = [dict(row) for row in c.execute("SELECT * FROM intents WHERE account_id=? AND state IN ('pending','conflict') ORDER BY rowid", (account_id,))]
-                unknown = {row['event_id'] for row in c.execute("SELECT event_id FROM intents WHERE account_id=? AND state='uncertain'", (account_id,))}
+                rows = [dict(row) for row in c.execute("SELECT * FROM intents WHERE account_id=? AND state IN ('pending','conflict','uncertain') ORDER BY rowid", (account_id,))]
             for intent in rows:
                 previous = json.loads(intent.get('result_json') or '{}')
                 payload = json.loads(intent.get('payload_json') or '{}')
                 result = {'note': reason, 'previous_result': previous}
-                if intent['state'] == 'pending' and intent.get('lease_owner') and intent.get('lease_until'):
+                if intent['state'] == 'uncertain' or (intent['state'] == 'pending' and intent.get('lease_owner') and intent.get('lease_until')):
+                    unknown.update(value for value in [intent['event_id'], *payload.get('created_ids', []),
+                                    *(row['id'] for row in payload.get('restore_rows', []))] if value)
+                    if intent['state'] == 'uncertain':
+                        continue
                     # Expiry is not a physical completion receipt. Keep the attempt tuple for its late result.
                     result.update(kind='unknown', message='Account disconnected during a provider attempt; its outcome is not yet confirmed')
                     with local._conn() as c:
                         c.execute("UPDATE intents SET state='uncertain', result_json=?, updated_at=? WHERE id=?", (json.dumps(result), _ts(), intent['id']))
-                    unknown.add(intent['event_id'])
                     local.update_event(intent['event_id'], {'sync_state': 'conflict'})
                     continue
                 result['outcome'] = 'withdrawn'
@@ -718,13 +720,28 @@ class Store:
                 for row in payload.get('restore_rows', []):
                     if row.get('sync_state') == 'synced':
                         before.setdefault(row['id'], row)
-            for event_id in affected - unknown:
+                created.update(payload.get('created_ids', []))
+                desired = payload.get('desired') or {}
+                snapshots = {row['id'] for row in payload.get('restore_rows', [])}
+                if (desired.get('master_id') in snapshots and intent['event_id'] not in snapshots
+                        and (payload.get('changes') or {}).get('status') == 'cancelled'):
+                    created.add(intent['event_id'])  # This cancellation created a row whose preimage was absence.
+            for event_id in (affected | created | set(before)) - unknown:
                 row = local.get_event(event_id)
-                if row is None:
+                if row is None or row.get('master_id') in unknown or (before.get(event_id) or {}).get('master_id') in unknown:
                     continue
                 confirmed = before.get(event_id)
                 if confirmed:
-                    local.update_event(event_id, {key: value for key, value in confirmed.items() if key != 'id'})
+                    # Withdrawal, not a late ACK: restore the complete confirmed family,
+                    # including deletion state, without weakening update_event's guard.
+                    fields = {key: value for key, value in confirmed.items() if key in EVENT_COLUMNS and key != 'id'}
+                    fields['updated_at'] = _ts()
+                    with local._conn() as c:
+                        c.execute('UPDATE events SET ' + ', '.join(key + '=?' for key in fields) + ' WHERE id=?',
+                                  (*fields.values(), event_id))
+                elif event_id in created:
+                    local.drop_reminders_for(event_id)
+                    local.delete_event(event_id)  # Keep identity and desired/terminal history; withdraw the unsent structure.
                 else:
                     # No provider ACK is invented for a retained local create or missing preimage.
                     local.update_event(event_id, {'sync_state': 'failed'})

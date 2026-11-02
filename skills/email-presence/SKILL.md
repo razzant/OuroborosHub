@@ -236,10 +236,22 @@ stays observable. Canonical selected outputs keep their source and delivery
 identity across repeated polls and restarts; a retained receipt itself is never
 sent as speech. This does not claim exactly-once provider delivery after
 ambiguous network acceptance.
+An invalid mailbox destination cannot turn a selected answer into a delivery.
+The transport records `invalid_recipient`, keeps observing an active author and
+still queues later outputs with valid reply anchors. Once the Host work is
+terminal, the inbox reports failure if a selected reply could not be queued;
+the original Host reference and its canonical selected text remain recoverable.
+This does not regenerate the answer or treat other Host/transport errors as a
+permanent address failure.
 `rejected` ends an event-specific refusal. A Host advertising Place binding may
 return `blocked` with `code: place_not_connected` before admission: retain that
 receipt and settle the inbox item without resubmitting it. Connecting a Place
-later does not replay those historical inputs; ordinary account tools remain usable.
+later does not replay those settled inbox items; ordinary account tools remain usable.
+Provider cursor catch-up is separate: if this account already has a cursor,
+polling without a Place leaves it unchanged, so mail arriving after that cursor
+can enter intake when a Place is connected again. A fresh account establishes
+its first baseline without backfilling earlier mail. No cursor reset or new
+automatic replay of settled inbox rows is performed.
 Other before-admission `retry` and `blocked` results retain retry custody, including
 after account or binding repair. Missing or unknown typed dispositions stay
 retryable, even on HTTP 403/404. Full queue recovery requires

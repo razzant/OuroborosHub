@@ -8,7 +8,7 @@ import json
 
 import ops
 import links
-from model import event_public, new_id, now_utc, parse_stored
+from model import civil_in_basis, event_public, new_id, now_utc, parse_stored
 from store import EVENT_COLUMNS
 
 _UNFINISHED = ('pending', 'conflict', 'failed', 'uncertain')
@@ -285,12 +285,13 @@ def _accept_provider(local, state, current, templates):
             if observed is None:
                 local.delete_event(eid)
             else:
+                previous = before_rows.get(eid) or next(r for r in state['rows'] if r['id'] == eid)
+                observed = civil_in_basis(observed, previous)
                 fields = {k: observed[k] for k in _PROVIDER_FIELDS if k in observed}
                 fields.update(sync_state='synced', deleted_at=None)
                 local.update_event(eid, fields)
                 current_row = local.get_event(eid)
                 master = local.get_event(current_row.get('master_id')) if current_row.get('master_id') else current_row
-                previous = before_rows.get(eid) or next(r for r in state['rows'] if r['id'] == eid)
                 if master and master.get('link_group_id') and not links.source_is(local, master) and (current_row.get('link_state') == links.DIVERGED or links.changed(previous, observed, provider_observation=True)):
                     local.update_event(master['id'], {'link_state': links.DIVERGED})
                     local.update_event(eid, {'link_state': links.DIVERGED})

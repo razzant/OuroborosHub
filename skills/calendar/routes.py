@@ -34,6 +34,8 @@ def _aggregate(assignments) -> str:
     statuses = {a.get("status") for a in assignments or []}
     if not statuses or statuses <= {"done"}:
         return "ok"
+    if "uncertain" in statuses:
+        return "uncertain"
     if "conflict" in statuses:
         return "conflict"
     if "pending" in statuses:

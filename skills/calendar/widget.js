@@ -251,7 +251,7 @@
         days.forEach(function (day) {
             var lane = el('div', { class: 'allday' });
             d.events.filter(function (e) { return e.all_day && e.start.slice(0, 10) <= day.date && day.date < (e.end.slice(0, 10) || e.start.slice(0, 10)); })
-                .forEach(function (e) { lane.appendChild(el('span', { class: 'chip', text: e.title, onclick: function () { openCard(e); } })); });
+                .forEach(function (e) { lane.appendChild(el('span', { class: 'chip', text: e.title + syncNote(e), onclick: function () { openCard(e); } })); });
             grid.appendChild(lane);
         });
         var hours = el('div', { class: 'hours' });
@@ -280,7 +280,7 @@
             var cls = 'ev' + (e.visibility === 'hidden' ? ' hidden' : '') + ((e.sync_state || '').indexOf('pending') === 0 ? ' pending' : '') + (e.sync_state === 'conflict' ? ' conflict' : '');
             var node = el('div', { class: cls, title: e.title }, [
                 el('div', { class: 't', text: e.title }),
-                el('div', { class: 'm', text: fmtHM(parseISO(e.start)) + '–' + fmtHM(parseISO(e.end)) + (e.calendar_name ? ' · ' + e.calendar_name : '') + (e.sync_state === 'pending' ? ' · ожидает' : e.sync_state === 'pending_delete' ? ' · удаляется' : e.sync_state === 'conflict' ? ' · конфликт' : '') + linkNote(e) }),
+                el('div', { class: 'm', text: fmtHM(parseISO(e.start)) + '–' + fmtHM(parseISO(e.end)) + (e.calendar_name ? ' · ' + e.calendar_name : '') + syncNote(e) + linkNote(e) }),
                 el('div', { class: 'rs' })
             ]);
             node.style.left = 'calc(' + (item.left * 100) + '% + 3px)';
@@ -340,7 +340,7 @@
         upcoming.forEach(function (e) {
             box.appendChild(el('div', { class: 'row', onclick: function () { openCard(e); } }, [
                 el('span', { class: 'when', text: e.all_day ? 'весь день' : fmtHM(parseISO(e.start)) + '–' + fmtHM(parseISO(e.end)) }),
-                el('span', { text: e.title + (e.calendar_name ? ' · ' + e.calendar_name : '') + linkNote(e) })
+                el('span', { text: e.title + (e.calendar_name ? ' · ' + e.calendar_name : '') + syncNote(e) + linkNote(e) })
             ]));
         });
         return box;
@@ -1110,6 +1110,10 @@
      * on its own stays «изменена», a copy the provider removed stays listed as removed, and every action says what
      * it will change (the copy, the original or the group) before the owner applies it. */
     var LINK_WORD = { diverged: 'копия изменена', missing: 'копия удалена у провайдера' };
+    function syncNote(e) {
+        var label = { pending: 'ожидает', pending_delete: 'удаляется', conflict: 'конфликт', failed: 'не отправлено' }[e.sync_state];
+        return label ? ' · ' + label : '';
+    }
     function linkNote(e) { return e.link_state === 'diverged' ? ' · ' + LINK_WORD.diverged : ''; }
 
     function renderLinkIssues(d) {

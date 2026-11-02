@@ -7,7 +7,7 @@ import mimetypes
 import re
 from email import message_from_bytes
 from email.header import decode_header, make_header
-from email.errors import InvalidHeaderDefect
+from email.errors import HeaderParseError, InvalidHeaderDefect
 from email.message import EmailMessage, Message
 from email.policy import default
 from email.utils import getaddresses, make_msgid, parseaddr
@@ -74,6 +74,10 @@ def _addresses(value: Any) -> list[str]:
     return [addr for _, addr in getaddresses([decode_header_value(value)]) if addr]
 
 
+class MailAddressError(ValueError):
+    """A deterministic mailbox-address failure, distinct from transport/Host errors."""
+
+
 def mailbox_addresses(value: Any) -> list[str]:
     """Parse complete mailbox lists before grouping/deduplication or envelope use."""
     values = value if isinstance(value, (list, tuple)) else [value]
@@ -81,14 +85,17 @@ def mailbox_addresses(value: Any) -> list[str]:
     if not text:
         return []
     if "\r" in text or "\n" in text:
-        raise ValueError("Mailbox addresses must be one RFC address list, without line breaks")
-    message = EmailMessage()
-    message['To'] = text
-    header = message['To']
-    parsed = header.addresses
+        raise MailAddressError("Mailbox addresses must be one RFC address list, without line breaks")
+    try:
+        message = EmailMessage()
+        message['To'] = text
+        header = message['To']
+        parsed = header.addresses
+    except (ValueError, IndexError, HeaderParseError) as exc:
+        raise MailAddressError("Invalid mailbox address list; use complete email addresses") from exc
     if (any(isinstance(defect, InvalidHeaderDefect) for defect in header.defects)
             or not parsed or any(not address.username or not address.domain for address in parsed)):
-        raise ValueError("Invalid mailbox address list; use complete email addresses")
+        raise MailAddressError("Invalid mailbox address list; use complete email addresses")
     return [str(address) for address in parsed]
 
 

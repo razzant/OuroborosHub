@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import secrets
 import time
@@ -37,8 +38,12 @@ def begin(store, settings, *, origin, login_hint="", permanent_delete=False, htt
         raise AccountError("Use the application's public HTTP(S) address, including its deployment prefix if any")
     redirect = str(origin).rstrip("/") + RETURN_PAGE
     if verify_return:
-        request = http.request if http is not None else httpx.request
-        probe = request("HEAD", redirect, timeout=15)
+        try:
+            local = ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            local = parsed.hostname == 'localhost'
+        probe = (http.request("HEAD", redirect, timeout=15) if http is not None else
+                 httpx.request("HEAD", redirect, timeout=15, trust_env=not local))
         if probe.status_code not in {200, 401}:
             raise AccountError("This Ouroboros address does not serve the sign-in return page; update the host or correct its public address")
     verifier = secrets.token_urlsafe(48)

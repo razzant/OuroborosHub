@@ -25,6 +25,18 @@ class CalendarWidgetStateTests(SkillCase):
         self.calls_reach('event/get', 1)
         expect(self.page.locator('.card .status')).not_to_have_text('Загружаю событие…')
 
+    def test_unsent_drafts_are_visible_in_grid_all_day_and_list(self):
+        self.mount_state(events=[
+            event_row('draft', 'work', 'Work', title='Unsent timed', sync_state='failed'),
+            event_row('day', 'work', 'Work', title='Unsent date', sync_state='failed', all_day=True,
+                      start='2026-09-27T00:00:00+04:00', end='2026-09-28T00:00:00+04:00'),
+            event_row('confirmed', 'work', 'Work', title='Confirmed', sync_state='synced')])
+        expect(self.page.locator('.ev').filter(has_text='Unsent timed')).to_contain_text('не отправлено')
+        expect(self.page.locator('.allday .chip')).to_contain_text('не отправлено')
+        expect(self.page.locator('.list .row').filter(has_text='Unsent timed')).to_contain_text('не отправлено')
+        expect(self.page.locator('.ev').filter(has_text='Confirmed')).not_to_contain_text('не отправлено')
+        self.shot('calendar-unsent-drafts')
+
     def test_end_only_edit_does_not_resubmit_the_start(self):
         self.open_plain()
         self.route('event/update', {'status':'ok', 'assignments':[{'status':'done'}]})

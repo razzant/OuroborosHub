@@ -12,6 +12,10 @@
 - Settle supported No-Place refusals once without replaying old inbox items when
   a Place is later connected; transient and unsupported-Host refusals keep retry custody.
 - Create new mailbox state directories and databases with private permissions.
+- Keep malformed-recipient diagnostics from stopping the mailbox worker or
+  ending an active author before its later valid outputs can be delivered.
+- Use direct transport for the local Google return-page probe, preserving
+  public origins, deployment prefixes and injected transports.
 
 ## 0.9.0
 

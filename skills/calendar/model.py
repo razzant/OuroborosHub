@@ -421,7 +421,7 @@ def has_recurrence(row):
 
 
 def civil_in_basis(row, basis):
-    """Retain civil/floating anchors; the original slot and effective event have distinct kinds."""
+    """Retain recorded temporal coordinates when native transport carries no replacement zone."""
     if not basis.get('tz'):
         return row
     incoming_zone, stored_zone = get_tz(row.get('tz') or ''), get_tz(basis['tz'])
@@ -432,6 +432,10 @@ def civil_in_basis(row, basis):
         local = instant.astimezone(zone)
         return iso_utc(datetime.combine(local.date(), time(), tzinfo=stored_zone) if date_only else local.replace(tzinfo=stored_zone))
     result = dict(row)
+    if (row.get('time_kind') == 'absolute' and not row.get('all_day') and '_start_tzid' in row
+            and not row['_start_tzid'] and not has_recurrence(row)):
+        # A native UTC instant does not replace known authoring-zone metadata.
+        result['tz'] = basis['tz']
     if row.get('all_day') or row.get('time_kind') == 'floating':
         result['tz'] = basis['tz']
         for field in ('start_utc', 'end_utc'):

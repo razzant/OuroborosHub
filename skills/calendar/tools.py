@@ -378,9 +378,10 @@ def _update_times(ctx, row, occurrence, *, start='', end='', duration_min=None, 
     exception = next((e for e in ctx.store.exceptions_for(row['id']) if e.get('recurrence_id') == occurrence), None) if occurrence else None
     effective = exception or row
     original = effective['start_utc'] if exception else occurrence or row['start_utc']
-    civil = bool(effective.get('all_day')) and all_day is not False or all_day is True
+    new_start, is_date = parse_input(start, ctx.tz)
+    civil = bool(effective.get('all_day')) and all_day is not False or all_day is True or all_day is None and is_date
     old_start = parse_stored(original) if civil else ops.routine_time(effective, original, ctx.tz)
-    new_start, is_date = parse_input(start, ctx.tz, old_start)
+    new_start = new_start or old_start
     new_end, _ = parse_input(end, ctx.tz, None)
     if civil:
         zone = get_tz(effective.get('tz') or row.get('tz') or '')
