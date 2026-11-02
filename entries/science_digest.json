@@ -4,7 +4,7 @@
     "search"
   ],
   "description": "Research digest from public Telegram channels and public RSS/Atom feeds the owner chooses, filtered by the owner's own free-text interests; the agent reads, checks primary sources and writes the digest in its chat.",
-  "digest": "2886ba28ae5ec9a464850481606ab53272cf39989157f0086431ea9f1d419014",
+  "digest": "291044f3ff12aafb348ec6b0dc57e20e9ef30c7e047e81f5bc7773bdc28a20af",
   "name": "science_digest",
   "owner": "kazzand",
   "schema_version": 2,

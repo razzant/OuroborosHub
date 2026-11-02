@@ -58,6 +58,10 @@ MAX_FEED_BYTES = 2 * 1024 * 1024
 # URIs of at most 46 characters and use at most 41 names.
 MAX_NAMESPACE_URI = 256
 MAX_XML_NAMES = 4096
+# expat keeps every open element until it closes, about 150 bytes each: 2 MiB of
+# opening tags held about 100 MB. Real feeds, Atom xhtml content included, nest a
+# few dozen levels at most.
+MAX_XML_DEPTH = 256
 # A feed is parsed this many bytes at a time, with the source deadline checked
 # in between. A tag or comment still unfinished a whole piece after it began is
 # refused, so expat never completes one of two pieces or more. expat reports all
@@ -856,7 +860,8 @@ class _Feed:
     """Items of an RSS 1.0, RSS 2.0 or Atom feed, recognized by structure and
     namespace (any prefix) with expat. A DTD internal subset or an entity
     declaration is refused, never expanded; so are a namespace URI, a number of
-    distinct names or a single tag past the XML bounds. Only item fields are kept."""
+    distinct names, a nesting depth or a single tag past the XML bounds. Only
+    item fields are kept."""
 
     ROOTS = {"rss": "rss2.0", f"{RDF} RDF": "rss1.0", f"{ATOM} feed": "atom"}
     # Path from the root to an item, and the channel element RSS requires.
@@ -932,6 +937,8 @@ class _Feed:
         # namespace prefix and URI it has reported, for the whole parse.
         if len(self.parser.intern) > MAX_XML_NAMES:
             raise _FeedRefused(f"feed uses more than {MAX_XML_NAMES} distinct XML names; refused")
+        if len(self.path) >= MAX_XML_DEPTH:
+            raise _FeedRefused(f"feed nests elements deeper than {MAX_XML_DEPTH} levels; refused")
         if not self.path:
             self.format = self.ROOTS.get(tag, "")
             if not self.format:
@@ -1054,6 +1061,18 @@ def _fetch_feed(url: str) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
     return feed.items, facts, ""
 
 
+def _stale(row: dict[str, Any]) -> dict[str, Any]:
+    """A read that a newer read of the same source superseded, found when it
+    applied its snapshot or when its call published. The newer read decides:
+    this one returns nothing and leaves no receipt, so nothing from it can be
+    recorded. A loss or drop its own read already applied is still reported."""
+    row.pop("text_not_extracted", None)
+    row.update(coverage="unavailable", posts=[], omitted_posts=0, first_omitted_id="", possible_gap=True,
+               stale_read=True, error="stale read: a newer read of this source replaced it, so nothing from it "
+                                      "can be recorded; fetch this source again")
+    return row
+
+
 def _telegram_source(channel: str, per_channel: int, include_attempted: bool, watermark: int) -> dict[str, Any]:
     since = _window_start()
     with _connect() as conn:
@@ -1113,9 +1132,7 @@ def _telegram_source(channel: str, per_channel: int, include_attempted: bool, wa
     # A superseded network read must not insert older IDs into the current
     # acknowledgement ordering after a newer fetch has already returned.
     if generation != latest:
-        row.update(coverage="unavailable", error="stale preview; refetch this channel", possible_gap=True,
-                   lost_unattempted_now=0)
-        return row
+        return _stale(row)
     # Until the first attempt, posts dated before the subscription window are
     # its baseline: counted, never new, never required by record_attempt. A
     # post an earlier fetch already returned stays eligible (a re-add moves
@@ -1167,7 +1184,7 @@ def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
         if not stored:
             conn.execute("INSERT OR IGNORE INTO feeds(name,since) VALUES (?,?)", (source, since))
         # Claim a per-source read order BEFORE network I/O. An older request
-        # completing after a newer one may return its own items, but its stale
+        # completing after a newer one began is stale: it changes no state, so its
         # absence can never delete the newer request's pending identities.
         conn.execute("UPDATE feeds SET read_generation=read_generation+1 WHERE name=?", (source,))
         generation = conn.execute("SELECT read_generation FROM feeds WHERE name=?", (source,)).fetchone()[0]
@@ -1225,9 +1242,10 @@ def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
                                  ((lost_at, source, key) for key in missing))
                 conn.execute("INSERT INTO gaps(channel,lost_count) VALUES (?,?) ON CONFLICT(channel) "
                              "DO UPDATE SET lost_count=lost_count+excluded.lost_count", (source, lost_now))
-        if not error:
+        if generation == latest and not error:
             # Include eligible IDs omitted by the response limit. They are
             # tracked for gap reporting but are NOT recordable until returned.
+            # A stale snapshot adds none: the cap below never runs for it.
             conn.executemany("INSERT OR IGNORE INTO feed_items(source,key,published) VALUES (?,?,?)",
                              ((source, item["key"], item["date"]) for item in window if item["key"] in unseen))
         dropped_now = 0
@@ -1279,7 +1297,7 @@ def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
            "lost_unattempted_now": lost_now,
            "historical_lost_unattempted": gap[0] if gap else 0,
            "window_since": since, "attempted_through": attempted_through, "feed_items": len(items),
-           "feed_truncated": truncated, "stale_read": generation != latest,
+           "feed_truncated": truncated, "stale_read": generation != latest, "_generation": generation,
            "skipped_items": {"duplicate": facts.get("duplicate_items", 0), "undated": len(items) - len(dated),
                              "unidentified": facts.get("unidentified_items", 0)}}
     # Present only once a feed has outgrown MAX_UNLISTED_FEED_ITEMS, to keep the output budget for posts.
@@ -1289,7 +1307,8 @@ def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
         row["historical_dropped_unattempted"] = gap[1]
     if redirect is not None:
         row["redirect_to"] = redirect
-    return row
+    # A newer read of this feed began while this one was on the network.
+    return _stale(row) if generation != latest else row
 
 
 def _failed_source(name: str, error: str, coverage: str = "unavailable") -> dict[str, Any]:
@@ -1423,21 +1442,19 @@ def _fetch_posts(limit: int = 10, include_attempted: bool = False, channel: str 
         post.get("text_truncated") or post.get("excerpt_truncated") for post in x["posts"]
     ) for x in results)
     # Final response and returned-ID eligibility are one write transaction.
-    # A newer fetch can start after _telegram_source checked its generation;
-    # its write cannot interleave with this recheck and publication.
+    # A newer fetch of a channel or feed can start after its source checked its
+    # generation; its write cannot interleave with this recheck and publication.
     with _connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         for item in results:
             generation = item.pop("_generation", None)
-            if item["kind"] != "telegram" or generation is None:
+            if generation is None:
                 continue
-            current = conn.execute("SELECT generation FROM telegram_reads WHERE channel=?",
+            current = conn.execute("SELECT read_generation FROM feeds WHERE name=?" if item["kind"] == "rss" else
+                                   "SELECT generation FROM telegram_reads WHERE channel=?",
                                    (item["channel"],)).fetchone()
             if not current or current[0] != generation:
-                item.pop("text_not_extracted", None)
-                item.update(coverage="unavailable", error="stale preview; refetch this channel",
-                            posts=[], omitted_posts=0, first_omitted_id="",
-                            possible_gap=True, lost_unattempted_now=0, stale_read=True)
+                _stale(item)
         result["ok"] = any(x["coverage"] in READABLE for x in results)
         serialized = json.dumps(result, ensure_ascii=False)
         if len(serialized) > MAX_OUTPUT_CHARS:
@@ -1492,9 +1509,6 @@ def _record_attempt(day: str, post_ids: list[str] | None = None, edition: str = 
             edition = "daily"
         if not isinstance(edition, str) or not EDITION.fullmatch(edition):
             raise ValueError("edition must be 1–80 ASCII letters/digits/_.:-; default daily")
-        # Forgetting both must not spend the day's idempotency key on an empty attempt.
-        if post_ids is None and fetch_ids is None:
-            raise ValueError("record_attempt needs fetch_ids (the fetch_posts calls this edition used) or post_ids")
         post_ids = [] if post_ids is None else post_ids
         fetch_ids = [] if fetch_ids is None else fetch_ids
         if not isinstance(post_ids, list) or len(post_ids) > MAX_CHANNELS * MAX_POSTS_PER_CHANNEL or any(
@@ -1503,6 +1517,10 @@ def _record_attempt(day: str, post_ids: list[str] | None = None, edition: str = 
         if not isinstance(fetch_ids, list) or len(fetch_ids) > 2 * MAX_CHANNELS or any(
                 not isinstance(x, int) or isinstance(x, bool) for x in fetch_ids):
             raise ValueError("fetch_ids must be at most 24 fetch_id integers from fetch_posts results")
+        # Naming nothing, by omission or with empty lists, must not spend the day's
+        # idempotency key on an empty attempt that a real record would then replay.
+        if not post_ids and not fetch_ids:
+            raise ValueError("record_attempt needs fetch_ids (the fetch_posts calls this edition used) or post_ids")
         key = f"{day}:{edition}"
         with _connect() as conn:
             # Validate and publish the receipt under one write lease. A fetch
@@ -1602,7 +1620,7 @@ def register(api: Any) -> None:
                       schema={"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "add", "remove"]},
                                                                "name": {"type": "string"}}})
     api.register_tool("fetch_posts", _fetch_posts,
-                      description="Fetch bounded new items, oldest first, from every source or one (channel=name, rss:key or URL), with per-source coverage and the fetch_id record_attempt takes. Telegram posts carry preview text; text_not_extracted lists posts without text by link. Feed items carry the feed's own title/excerpt, not the article. include_attempted=true also returns posts recorded as attempted-not-read that are still public, to retry them.",
+                      description="Fetch bounded new items, oldest first, from every source or one (channel=name, rss:key or URL), with per-source coverage and the fetch_id record_attempt takes. Telegram posts carry preview text; text_not_extracted lists posts without text by link. Feed items carry the feed's own title/excerpt, not the article. include_attempted=true also returns posts recorded as attempted-not-read that the preview page still shows, to retry them.",
                       schema={"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20},
                                                                "include_attempted": {"type": "boolean"},
                                                                "channel": {"type": "string"}}},

@@ -61,7 +61,10 @@ the owner whether to add that URL instead. Up to 12 sources.
    it than a call for all. A source with `coverage: "output_deferred"` had new
    entries, but the budget left none of them in this call, neither a post nor a
    `text_not_extracted` link: fetch it alone with `channel=`. `omitted_posts`
-   stay for the next edition: do not fetch them again.
+   stay for the next edition: do not fetch them again. A source with
+   `stale_read: true` was read again by another `fetch_posts` call while this
+   one ran: it lists nothing, and nothing from this read can be recorded, so
+   fetch it again.
 2. Telegram `posts` carry the preview's own text (`text_truncated` means only
    partly read). `text_not_extracted` lists posts whose text the preview did
    not give: images, videos, polls, or Telegram's placeholder such as "Please
@@ -114,10 +117,12 @@ the owner whether to add that URL instead. Up to 12 sources.
    fetch that listed textless `/1` and readable `/2` and an unavailable
    refetch, naming only `/2` moves the cursor to 2 and records `/1` as
    attempted-not-read.
-7. To retry attempted-not-read Telegram posts that are still public, call
-   `fetch_posts` with `include_attempted=true`. They come back with
+7. To retry attempted-not-read Telegram posts that the preview page still
+   shows, call `fetch_posts` with `include_attempted=true`. They come back with
    `already_attempted: true` and new posts with `already_attempted: false`;
-   read and baseline posts do not come back. Feed items never carry
+   read and baseline posts do not come back. A post can be retried only while
+   it is among the newest 240 tracked for its channel; the page, about 20
+   posts, has normally dropped it long before. Feed items never carry
    `already_attempted`: a feed item has no attempted-not-read state, so an
    attempted one never returns and every feed item listed is still unattempted.
 
@@ -127,17 +132,19 @@ the owner whether to add that URL instead. Up to 12 sources.
   page on which no post has text is unavailable, and nothing from it is
   recorded. A page that ends before its closing `</html>` tag, as a dropped
   connection can leave it, is unavailable too, so posts after the cut never
-  look deleted. A new channel shows only posts from its last 7 days; a first page
-  that does not reach that far back reports `possible_gap` and `window_since`.
+  look deleted. A new channel shows only posts from its last 7 days, plus any
+  post without a date. A first page whose oldest dated post is newer than that
+  reports `possible_gap` and `window_since`; a first page without any dated post
+  reports no `possible_gap`.
 - Feeds: RSS 1.0, RSS 2.0 and Atom, recognized by structure. A new feed starts
   7 days back; every item keeps a stable id. A valid feed with no items is an
   empty list, not an error. A feed is unavailable, with the reason, when it
   declares an XML namespace URI longer than 256 characters, uses more than
   4,096 distinct XML names (element and attribute names, namespace prefixes
-  and URIs), or has a single tag or comment longer than 16 KiB (one of up to
-  32 KiB may still be read, depending on where it starts). Past these limits,
-  parsing would cost memory and time out of all proportion to the feed's size;
-  real feeds stay far below them.
+  and URIs), nests elements more than 256 levels deep, or has a single tag or
+  comment longer than 16 KiB (one of up to 32 KiB may still be read, depending
+  on where it starts). Past these limits, parsing would cost memory and time
+  out of all proportion to the feed's size; real feeds stay far below them.
 - Per call: `limit` readable posts or feed items per source (at most 20), 4,096
   characters per post and about 14,000 characters for the whole call; feeds up
   to 2 MiB, previews up to 768 KiB.
