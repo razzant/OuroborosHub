@@ -4,12 +4,12 @@ The event-level primary flag chooses one source for a relationship. A projection
 observed divergence survives provider ACKs; only an explicit link operation resumes
 following. This module writes no provider data and creates no delivery queue.
 """
-from model import BUSY_COPY_TITLE, event_field_value
+from model import BUSY_COPY_TITLE, PROVIDER_GOOGLE, event_field_value
 
 FOLLOWING = 'following'
 DIVERGED = 'diverged'
 MISSING = 'missing'
-COPY_FIELDS = ('title', 'description', 'location', 'start_utc', 'end_utc', 'tz', 'all_day',
+COPY_FIELDS = ('title', 'description', 'location', 'start_utc', 'end_utc', 'tz', 'time_kind', 'all_day',
                'rrule', 'rdates', 'exdates', 'status', 'availability')
 
 
@@ -36,9 +36,14 @@ def followers(store, row):
 
 def changed(previous, incoming, *, provider_observation=False):
     """Compare content meaning, without confusing provider normalization with an edit."""
+    fields = set(COPY_FIELDS) - {'tz'}
+    if provider_observation and not previous.get('time_kind') and incoming.get('time_kind') == 'absolute':
+        # A nonfloating readback enriches an old copy's unknown type without
+        # changing its effective times. Other field changes still diverge it.
+        fields.discard('time_kind')
     return any(event_field_value(previous, field, provider_observation=provider_observation)
                != event_field_value(incoming, field, provider_observation=provider_observation)
-               for field in COPY_FIELDS if field in incoming and field != 'tz')
+               for field in fields if field in incoming)
 
 
 def observe_projection(store, previous, incoming):
@@ -67,9 +72,17 @@ def inspect(store, row):
                         for member in members]}
 
 
+def projection_time_kind(row, calendar):
+    """Google copies use the existing zoned wire projection; local/CalDAV retain floating time."""
+    kind = row.get('time_kind') or ''
+    return 'absolute' if kind == 'floating' and calendar.get('provider') == PROVIDER_GOOGLE else kind
+
+
 def projection_changes(store, source_row, projection):
     fields = {key: source_row.get(key) for key in COPY_FIELDS if source_row.get(key) is not None}
     calendar = store.get_calendar(projection['calendar_id']) or {}
+    if 'time_kind' in fields:
+        fields['time_kind'] = projection_time_kind(source_row, calendar)
     if calendar.get('publish_mode') == 'busy':
         fields.update(title=BUSY_COPY_TITLE, description='', location='')
     return fields

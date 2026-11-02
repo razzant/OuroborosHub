@@ -28,7 +28,7 @@ if PAYLOAD not in sys.path:
 import ops  # noqa: E402
 import links  # noqa: E402
 import reminders as rem  # noqa: E402
-from model import PROVIDER_GOOGLE, PROVIDER_LOCAL, CALDAV_PROVIDERS, SCOPE_ALL, SECRET_KEYS, get_tz, iso_utc, now_utc, own_reminders, parse_stored  # noqa: E402
+from model import PROVIDER_GOOGLE, PROVIDER_LOCAL, CALDAV_PROVIDERS, SCOPE_ALL, SECRET_KEYS, get_tz, iso_utc, now_utc, own_reminders, parse_stored, floating_in_basis  # noqa: E402
 from providers import Providers, sync_window  # noqa: E402
 from store import Store  # noqa: E402
 
@@ -146,6 +146,8 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
     upserts, deleted, propagated = result['upserts'], result['deleted'], result['propagated']
     next_cursor = result['next_cursor']
     retry_required = result['retry_required']
+    if result.get('temporal_gaps'):
+        adapter.parse_errors = list(getattr(adapter, 'parse_errors', []) or []) + result['temporal_gaps']
     def confirmed(local):
         nonlocal retry_required
         count = _confirmed_deletion(store, providers, local, basis.get(local['id']), basis) if local['id'] in basis else 0
@@ -203,6 +205,7 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
     retry_required = False
     upserts = deleted = propagated = 0
     assignments = []
+    temporal_gaps = []
     masters: Dict[str, str] = {}
     copy_commands = {}  # all parts of this feed for one destination stage together
     refreshed: Dict[str, str] = {}   # CalDAV master id → UID, for series whose whole resource was re-read this pass
@@ -239,13 +242,25 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
             upserts += 1
             continue
         masters[row["uid"]] = existing["id"]
-        if existing.get("etag") == row["etag"] and existing.get("sync_state") == "synced" and not existing.get("deleted_at"):
-            continue
         if existing.get("sync_state") in ("pending", "conflict", "pending_delete", "failed"):
             protected_masters.add(existing['id'])
             next_cursor = ''
             continue  # our write is in flight; the intent path settles it
-        changes = {k: row[k] for k in ("title", "description", "location", "start_utc", "end_utc", "tz", "all_day", "rrule", "exdates", "rdates",
+        if row.get('time_kind') == 'floating':
+            if not existing.get('tz') and not existing.get('time_kind') and any(
+                    row.get(key) != existing.get(key) for key in ('start_utc', 'end_utc')):
+                # The old parser retained no interpretation zone. Do not guess
+                # one or rebase its authored/pending recurrence addresses.
+                protected_masters.add(existing['id'])
+                next_cursor = ''
+                retry_required = True
+                temporal_gaps.append('Legacy floating event ' + existing['id'] + ' has no recorded parsing zone; stored times and pending work were retained.')
+                continue
+            row = floating_in_basis(row, existing)
+        if existing.get("etag") == row["etag"] and existing.get("sync_state") == "synced" and not existing.get("deleted_at"):
+            if row.get('time_kind', '') == existing.get('time_kind', ''):
+                continue
+        changes = {k: row[k] for k in ("title", "description", "location", "start_utc", "end_utc", "tz", "time_kind", "all_day", "rrule", "exdates", "rdates",
                                         "status", "organizer", "attendees_json", "my_response", "etag", "raw_payload") if k in row}
         if existing.get("origin") == "external":
             changes["reminders_json"] = _imported_reminders(existing, row["reminders_json"], cal["provider"], bool((store.get_setting(rem.MODE_KEY) or {}).get(cal["id"])))
@@ -283,6 +298,7 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
         if master_id in protected_masters:
             continue
         master_row = store.get_event(master_id)
+        row = floating_in_basis(row, master_row or {})
         if row['recurrence_id'] in ops.excluded_slots(master_row or {}):
             continue  # a stale instance cannot undo the master's explicit EXDATE
         exc = next((e for e in store.exceptions_for(master_id) if e.get("recurrence_id") == row["recurrence_id"]), None)
@@ -290,7 +306,7 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
         payload.update({"master_id": master_id, "raw_payload": ""})
         if master_row:
             payload.update({key: master_row.get(key) for key in ('link_group_id', 'is_primary', 'link_state')})
-        changed = exc is None or exc.get("etag") != row["etag"]
+        changed = exc is None or exc.get("etag") != row["etag"] or exc.get('time_kind', '') != row.get('time_kind', '')
         materially = exc is None or links.changed(exc, row, provider_observation=True)
         if exc is None:
             if store.insert_provider_exception(master_id, payload) is None:
@@ -300,7 +316,7 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
             if exc.get("sync_state") in ("pending", "conflict", "pending_delete", "failed"):
                 continue   # our own write to this occurrence is in flight
             fields = {k: payload[k] for k in ("title", "description", "location", "start_utc", "end_utc", "status", "etag",
-                                              "attendees_json", "my_response", "tz", "all_day") if k in payload}
+                                              "attendees_json", "my_response", "tz", "time_kind", "all_day") if k in payload}
             if exc.get("origin") == "external":
                 fields['availability'] = payload.get('availability') or exc.get('availability')
                 fields["reminders_json"] = _imported_reminders(exc, payload.get("reminders_json") or "[]", cal["provider"], bool((store.get_setting(rem.MODE_KEY) or {}).get(cal["id"])))
@@ -341,7 +357,7 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
         retry_required |= result.get('status') != 'ok'
         assignments.extend(result.get('assignments', []))
     return {'upserts': upserts, 'deleted': deleted, 'propagated': propagated,
-            'next_cursor': next_cursor, 'assignments': assignments, 'retry_required': retry_required}
+            'next_cursor': next_cursor, 'assignments': assignments, 'retry_required': retry_required, 'temporal_gaps': temporal_gaps}
 
 
 def _awaiting_identity(store: Store, adapter, cal: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -529,7 +545,7 @@ def main() -> int:
                         last_sync[account["id"]] = time.time()
             health["intents"] = ops.retry_due_intents(store, providers, owner="companion")
             held: Dict[str, str] = {}
-            planned = rem.plan(store, lambda s, e: ops.expand(store.window(s, e, include_hidden=True), s, e,
+            planned = rem.plan(store, lambda s, e: ops.expand(store.window(s, e, include_hidden=True, owner_tz=tz), s, e,
                                  store.exceptions_for, owner_tz=tz, strict=True, failed=held), held=held)
             health["reminders"] = {"planned": planned, "held_series": held, **stats}
             health["channel"] = channel.state()

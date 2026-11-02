@@ -29,16 +29,16 @@
 
     /* ---------- utils ---------- */
     function pad(n) { return (n < 10 ? '0' : '') + n; }
-    function localDate(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
-    function parseISO(s) {   // wall-clock of the OWNER's zone as the server printed it; the browser zone is irrelevant here
+    function localDate(d) { return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()); }
+    function parseISO(s) {   // UTC-backed wall-clock coordinates, never normalized by the browser's DST rules.
         if (!s) return null;
         var m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/.exec(s);
-        return m ? new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), 0, 0) : new Date(s);
+        return m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0))) : new Date(s);
     }
-    function fmtHM(d) { return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+    function fmtHM(d) { return pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()); }
     function fmtLocalInput(d) { return localDate(d) + 'T' + fmtHM(d); }
-    function addDays(dateStr, n) { var d = new Date(dateStr + 'T00:00:00'); d.setDate(d.getDate() + n); return localDate(d); }
-    function minutesOf(d) { return d.getHours() * 60 + d.getMinutes(); }
+    function addDays(dateStr, n) { var d = parseISO(dateStr); d.setUTCDate(d.getUTCDate() + n); return localDate(d); }
+    function minutesOf(d) { return d.getUTCHours() * 60 + d.getUTCMinutes(); }
     function el(tag, attrs, children) {
         var node = document.createElement(tag);
         if (attrs) Object.keys(attrs).forEach(function (k) {
@@ -277,7 +277,7 @@
             var rect = col.getBoundingClientRect();
             if (ev.clientY - rect.top >= 24 * HOUR_PX) return; // breathing room below 23:55 is not another day
             var mins = Math.floor(((ev.clientY - rect.top) / HOUR_PX * 60) / SNAP_MIN) * SNAP_MIN;
-            var start = new Date(day.date + 'T00:00:00'); start.setMinutes(mins);
+            var start = parseISO(day.date); start.setUTCMinutes(mins);
             openCard(null, start);
         });
         return col;
@@ -359,10 +359,10 @@
                 if (resizing) {
                     var newDur = Math.max(SNAP_MIN, Math.round((parseFloat(node.style.height) + 2) / HOUR_PX * 60 / SNAP_MIN) * SNAP_MIN);
                     var ne = new Date(s.getTime() + newDur * 60000);
-                    save(e, { start: fmtLocalInput(s), end: fmtLocalInput(ne) });
+                    save(e, { end: fmtLocalInput(ne) });
                 } else {
                     var mins = Math.round(parseFloat(node.style.top) / HOUR_PX * 60 / SNAP_MIN) * SNAP_MIN;
-                    var ns = new Date(col.getAttribute('data-date') + 'T00:00:00'); ns.setMinutes(mins);
+                    var ns = parseISO(col.getAttribute('data-date')); ns.setUTCMinutes(mins);
                     var ne2 = new Date(ns.getTime() + dur * 60000);
                     save(e, { start: fmtLocalInput(ns), end: fmtLocalInput(ne2) });
                 }
@@ -393,8 +393,12 @@
     }
 
     /* ---------- card ---------- */
-    function ownerNow() { return state.data && state.data.now ? parseISO(state.data.now) : new Date(); }
-    function defaultStart() { var d = ownerNow(); d.setMinutes(Math.ceil(d.getMinutes() / 30) * 30, 0, 0); if (state.date && state.date !== localDate(d)) { d = new Date(state.date + 'T10:00:00'); } return d; }
+    function ownerNow() {
+        var now = new Date();
+        return state.data && state.data.now ? parseISO(state.data.now)
+            : new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes()));
+    }
+    function defaultStart() { var d = ownerNow(); d.setUTCMinutes(Math.ceil(d.getUTCMinutes() / 30) * 30, 0, 0); if (state.date && state.date !== localDate(d)) { d = parseISO(state.date + 'T10:00:00'); } return d; }
 
     function openCard(ev, start) {
         var s = ev ? parseISO(ev.start) : start;
@@ -517,7 +521,7 @@
                 /* A card is a snapshot of one occurrence. Unedited times must never
                  * become a time-change command against its master series. */
                 if (body.title === f.title) delete body.title;
-                if (body.start === f.start && body.end === f.end) {
+                if (body.start === (f.all_day ? f.start.slice(0, 10) : f.start) && body.end === (f.all_day ? f.end.slice(0, 10) : f.end) && body.all_day === f.all_day) {
                     delete body.start; delete body.end;
                 }
                 if (body.all_day === f.all_day) delete body.all_day;

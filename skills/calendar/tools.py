@@ -14,7 +14,7 @@ import reminders as rem
 from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, MAX_EVENTS, MAX_WINDOW_DAYS, PROVIDER_GOOGLE,
     PROVIDER_LOCAL, REMINDERS_DEFAULT, SCOPES, SECRET_KEYS, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_HIDDEN, VISIBILITY_SHOWN,
-    WEEKDAY_LABELS,
+    TOOL_RESULT_LIMIT, WEEKDAY_LABELS,
     bounded_result, day_bounds, event_public, get_tz, iso_local, iso_utc, json_dumps, label, new_id, now_utc, parse_input,
     parse_stored, parse_working_hours, tz_name,
 )
@@ -46,7 +46,7 @@ class Context:
 
     def occurrences(self, start: datetime, end: datetime, calendar_ids: Optional[Sequence[str]] = None,
                     include_hidden: bool = True, strict: bool = False, failed=None) -> List[Dict[str, Any]]:
-        rows = self.store.window(start, end, calendar_ids, include_hidden=include_hidden)
+        rows = self.store.window(start, end, calendar_ids, include_hidden=include_hidden, owner_tz=self.tz)
         return ops.expand(rows, start, end, self.store.exceptions_for, owner_tz=self.tz, strict=strict, failed=failed)
 
     def resolve_calendars(self, spec: Any) -> Tuple[List[str], str]:
@@ -282,7 +282,7 @@ def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = No
             # A shortened comparison must not carry an approval token.
             out['conflict'].pop('resolution_token', None)
             out['conflict']['comparison_incomplete'] = True
-        return bounded_result(result)
+        return bounded_result(result) if out.get('conflict') else json_dumps(result)
     s, e = ctx.parse_range(start, end)
     cal_ids: Optional[List[str]] = None
     if calendars:
@@ -297,12 +297,27 @@ def cal_events(ctx: Context, start: str = "", end: str = "", calendars: Any = No
     offset = max(0, _int(offset, 0))
     limit = max(1, min(_int(limit, MAX_EVENTS), MAX_EVENTS))
     page = occs[offset:offset + limit]
-    conflicts = _conflicts(page)
-    return bounded_result({
+    result = {
         "status": "ok", "timezone": tz_name(ctx.tz), "range": {"start": iso_local(s, ctx.tz), "end": iso_local(e, ctx.tz)},
-        "events": [event_public(o, ctx.tz) for o in page], "conflicts": conflicts, "total": total,
-        "next_offset": offset + limit if offset + limit < total else None,
-    })
+        "events": [event_public(o, ctx.tz) for o in page], "conflicts": _conflicts(page), "total": total,
+        "next_offset": offset + len(page) if offset + len(page) < total else None,
+    }
+    while True:
+        text = json_dumps(result)
+        if len(text) <= TOOL_RESULT_LIMIT:
+            return text
+        if len(page) <= 1:
+            return json_dumps({'status': 'error', 'message': 'Событие не помещается в страницу; прочитай его отдельно через cal_events(id=event_id).',
+                               'event_id': page[0]['id'] if page else '', 'total': total, 'next_offset': offset})
+        # Fit the complete envelope and only real row prefixes: generic nested
+        # shrinking can replace an event with a marker and advance past it.
+        result.setdefault('total_events', len(page))
+        page = page[:-1]
+        result['events'].pop()
+        result.update(truncated=True, truncated_key='events')
+        result['conflicts'] = _conflicts(page)
+        result['next_offset'] = offset + len(page) if offset + len(page) < total else None
+
 
 
 def _conflicts(occs: Sequence[Dict[str, Any]]) -> List[List[str]]:
@@ -335,6 +350,29 @@ def _spec_from_args(ctx: Context, start: Any, end: Any, duration_min: Any, all_d
     elif e is None or e <= s:
         e = s + timedelta(minutes=max(5, _int(duration_min, 60)))
     return {"start_utc": iso_utc(s), "end_utc": iso_utc(e), "all_day": all_day, "tz": tz_name(ctx.tz)}, ""
+
+
+def _update_times(ctx, row, occurrence, *, start='', end='', duration_min=None, all_day=None, scope=SCOPE_THIS):
+    """One temporal edit projection for tools and the widget, retaining civil dates."""
+    exception = next((e for e in ctx.store.exceptions_for(row['id']) if e.get('recurrence_id') == occurrence), None) if occurrence else None
+    effective = exception or row
+    original = effective['start_utc'] if exception else occurrence or row['start_utc']
+    civil = bool(row.get('all_day')) and all_day is not False
+    old_start = parse_stored(original) if civil else ops.routine_time(row, original, ctx.tz)
+    zone = get_tz(row.get('tz') or '') if civil or all_day is True else ctx.tz
+    new_start, is_date = parse_input(start, zone, old_start)
+    new_end, _ = parse_input(end, zone, None)
+    if duration_min is not None and new_end is None:
+        new_end = new_start + timedelta(minutes=max(5, _int(duration_min, 60)))
+    if new_end is None or new_end <= new_start:
+        new_end = ops._occurrence_end(effective, new_start) if civil else new_start + (
+            parse_stored(effective['end_utc']) - parse_stored(effective['start_utc']))
+    changes = {'end_utc': iso_utc(new_end)}
+    if start or scope != SCOPE_FOLLOWING:
+        changes['start_utc'] = iso_utc(new_start)
+    if all_day is not None or is_date:
+        changes['all_day'] = _bool(all_day, is_date)
+    return changes
 
 
 def cal_create(ctx: Context, title: str = "", start: str = "", end: str = "", duration_min: int = 60, all_day: bool = False,
@@ -426,21 +464,7 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
         return json_dumps({"status": "error", "message": "scope='following' требует id вхождения (…@дата): с какой даты менять"})
     changes: Dict[str, Any] = {}
     if start or end or duration_min is not None or all_day is not None:
-        exception = next((e for e in ctx.store.exceptions_for(row["id"]) if e.get("recurrence_id") == occ), None) if occ else None
-        effective = exception or row
-        old_s = ops.routine_time(row, effective["start_utc"] if exception else (occ or row["start_utc"]), ctx.tz)
-        old_dur = (parse_stored(effective["end_utc"]) - parse_stored(effective["start_utc"])) if effective.get("start_utc") and effective.get("end_utc") else timedelta(hours=1)
-        new_s, is_date = parse_input(start, ctx.tz, old_s)
-        new_e, _ = parse_input(end, ctx.tz, None)
-        if duration_min is not None and new_e is None:
-            new_e = new_s + timedelta(minutes=max(5, _int(duration_min, 60)))
-        if new_e is None or new_e <= new_s:
-            new_e = new_s + old_dur
-        if start or scope != SCOPE_FOLLOWING:
-            changes["start_utc"] = iso_utc(new_s)
-        changes["end_utc"] = iso_utc(new_e)
-        if all_day is not None or is_date:
-            changes["all_day"] = _bool(all_day, is_date)
+        changes.update(_update_times(ctx, row, occ, start=start, end=end, duration_min=duration_min, all_day=all_day, scope=scope))
     if title not in (None, ""):
         changes["title"] = str(title)
     for key, value in (("description", description), ("location", location)):

@@ -263,6 +263,39 @@ def bounded_result(obj: Dict[str, Any], limit: int = TOOL_RESULT_LIMIT, list_key
     return json_dumps({"status": trimmed.get("status") or "error", "message": "ответ слишком большой даже после сокращения", "truncated": True})
 
 
+def normalize_rrule_until(rule_text: str, tz, value_kind: str = "utc") -> str:
+    """Preserve the inclusive cutoff while rendering UNTIL as UTC, floating time or DATE.
+
+    Native writers choose the kind from the DTSTART they actually emit; aware
+    expansion/comparison uses UTC. ``tz`` is the record's existing time basis.
+    """
+    parts = rule_text.split(";")
+    for index, part in enumerate(parts):
+        if not part.upper().startswith("UNTIL="):
+            continue
+        value = part.split("=", 1)[1].strip()
+        try:
+            if len(value) == 8:
+                until = datetime.combine(datetime.strptime(value, "%Y%m%d").date() + timedelta(days=1),
+                                         datetime.min.time(), tzinfo=tz) - timedelta(seconds=1)
+            elif len(value) == 15 and value[8].upper() == "T":
+                until = datetime.strptime(value.upper(), "%Y%m%dT%H%M%S").replace(tzinfo=tz)
+            elif len(value) == 16 and value.upper().endswith("Z"):
+                until = datetime.strptime(value.upper(), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            else:
+                continue
+        except ValueError:
+            continue  # Keep malformed legacy text visible; validation still rejects it.
+        if value_kind == "date":
+            bound = until.astimezone(tz).strftime("%Y%m%d")
+        elif value_kind == "floating":
+            bound = until.astimezone(tz).strftime("%Y%m%dT%H%M%S")
+        else:
+            bound = until.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        parts[index] = "UNTIL=" + bound
+    return ";".join(parts)
+
+
 def event_field_value(row, field, *, provider_observation=False):
     """Comparable event meaning; provider wire formats cannot represent local soft preference."""
     value = row.get(field)
@@ -280,6 +313,8 @@ def event_field_value(row, field, *, provider_observation=False):
             return frozenset(value.astimezone(get_tz(row.get('tz') or '')).date() if isinstance(value, datetime) else value for value in instants)
         return frozenset(instants)
     if field == 'rrule':
+        value = normalize_rrule_until(str(value or ''), get_tz(row.get('tz') or ''),
+                                      'date' if row.get('all_day') else 'utc')
         parts = []
         for part in str(value or '').upper().split(';'):
             if not part:
@@ -290,8 +325,39 @@ def event_field_value(row, field, *, provider_observation=False):
     return value or ''
 
 
+def calendar_time(row, value, owner_tz):
+    """Project DATE/floating wall time; the stored anchor and its parsing zone stay intact."""
+    instant = parse_stored(value)
+    if instant is not None and owner_tz is not None:
+        if row.get('all_day'):
+            return datetime.combine(instant.astimezone(get_tz(row.get('tz') or '')).date(), time(), tzinfo=owner_tz)
+        if row.get('time_kind') == 'floating':
+            return instant.astimezone(get_tz(row.get('tz') or '')).replace(tzinfo=owner_tz)
+    return instant
+
+
+def floating_in_basis(row, basis):
+    """Keep a known floating record's canonical addresses across owner-zone changes."""
+    if row.get('time_kind') != 'floating' or not basis.get('tz'):
+        return row
+    incoming_zone, stored_zone = get_tz(row.get('tz') or ''), get_tz(basis['tz'])
+    def anchor(value):
+        instant = parse_stored(value)
+        return iso_utc(instant.astimezone(incoming_zone).replace(tzinfo=stored_zone)) if instant else value
+    result = {**row, 'tz': basis['tz']}
+    for field in ('start_utc', 'end_utc', 'recurrence_id'):
+        if result.get(field):
+            result[field] = anchor(result[field])
+    for field in ('exdates', 'rdates'):
+        if result.get(field):
+            result[field] = ','.join(anchor(value) for value in result[field].split(','))
+    return result
+
+
 def routine_time(row, value, owner_tz):
-    """Project a routine's wall time without changing its canonical recurrence address."""
+    """Project a civil date or routine's wall time without changing its recurrence address."""
+    if row.get('all_day') or row.get('time_kind') == 'floating':
+        return calendar_time(row, value, owner_tz)
     instant = parse_stored(value)
     if instant is not None and owner_tz is not None and row.get('availability') == AVAIL_SOFT and row.get('origin', 'local') == 'local':
         return instant.astimezone(get_tz(row.get('tz') or '')).replace(tzinfo=owner_tz)
@@ -301,11 +367,16 @@ def routine_time(row, value, owner_tz):
 def event_public(row: Dict[str, Any], tz, compact: bool = True) -> Dict[str, Any]:
     """Public projection of an event row for tools and the widget."""
     project = not row.get('display_occurrence_start_utc') and (row.get('rrule') or row.get('master_id'))
+    def displayed(field):
+        value = row.get(field)
+        if row.get('_display_times') or row.get('display_occurrence_start_utc'):
+            return value
+        return routine_time(row, value, tz) if project else calendar_time(row, value, tz)
     out: Dict[str, Any] = {
         "id": row.get("id"),
         "title": row.get("title") or "",
-        "start": iso_local(routine_time(row, row.get("start_utc"), tz) if project else row.get("start_utc"), tz),
-        "end": iso_local(routine_time(row, row.get("end_utc"), tz) if project else row.get("end_utc"), tz),
+        "start": iso_local(displayed('start_utc'), tz),
+        "end": iso_local(displayed('end_utc'), tz),
         "all_day": bool(row.get("all_day")),
         "calendar_id": row.get("calendar_id"),
         "calendar_name": row.get("calendar_name") or "",

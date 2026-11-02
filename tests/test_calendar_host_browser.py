@@ -221,11 +221,12 @@ def wait_until(page, condition, seconds=20):
     raise AssertionError('the browser did not reach the expected state')
 
 
-def widget_frame(browser, url, engine, height=720):
+def widget_frame(browser, url, engine, height=720, timezone_id=None):
     """The calendar inside its real module frame; the widths follow the existing cases (WebKit is the phone)."""
     from playwright.sync_api import expect
     expect.set_options(timeout=20_000)
-    context = browser.new_context(viewport={'width': 390 if engine == 'webkit' else 980, 'height': 900})
+    context = browser.new_context(viewport={'width': 390 if engine == 'webkit' else 980, 'height': 900},
+                                  **({'timezone_id': timezone_id} if timezone_id else {}))
     context.outside, context.consent = [], []
 
     def guard(route):
@@ -547,6 +548,100 @@ def test_calendar_reassign_failure_stays_visible_and_success_still_closes(link_h
                 frame.get_by_role('button', name='Сохранить', exact=True).click()
                 expect(frame.locator('.card')).to_have_count(0)
                 assert ctx.store.get_event(group['copy'])['deleted_at']
+            assert context.outside == []
+        finally:
+            browser.close()
+
+
+@pytest.fixture
+def temporal_host():
+    """Real calendar routes with a fixed owner day and independent browser timezone."""
+    from datetime import datetime
+    core = core_root()
+    sys.path.insert(0, TESTS)
+    from test_calendar_round2 import FakeAPI, RouteAPI
+    from model import get_tz
+    import routes
+    import tools
+    ctx = tools.Context(FakeAPI())
+    ctx.tz = get_tz('Europe/Moscow')
+    ctx.now = lambda: datetime(2026, 3, 8, 1, tzinfo=ctx.tz)
+    timed = json.loads(tools.cal_create(ctx, title='Owner clock', start='2026-03-08T02:30:00+03:00',
+                                      end='2026-03-08T03:30:00+03:00', confirm=True))['event']['id']
+    dated = json.loads(tools.cal_create(ctx, title='Calendar date', start='2026-03-08', end='2026-03-09',
+                                      all_day=True, confirm=True))['event']['id']
+    api = RouteAPI()
+    routes.register_routes(api, lambda: ctx)
+    try:
+        with serve(core, api) as (state, url, _):
+            yield ctx, timed, dated, state, url
+    finally:
+        shutil.rmtree(ctx.state_dir)
+        sys.path.remove(TESTS)
+    assert not state['errors'], state['errors']
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('browser_zone', ['America/New_York', 'UTC'])
+def test_owner_wall_clock_resize_ignores_browser_dst(temporal_host, tmp_path, engine, browser_zone):
+    from playwright.sync_api import sync_playwright, expect
+    from model import parse_stored
+    ctx, event_id, _, state, url = temporal_host
+    original = ctx.store.get_event(event_id)['start_utc']
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True, downloads_path=str(tmp_path / 'downloads'))
+        try:
+            context, page, frame = widget_frame(browser, url, engine, timezone_id=browser_zone)
+            event = frame.locator('.ev', has_text='Owner clock')
+            expect(event.locator('.m')).to_contain_text('02:30–03:30')
+            hour = frame.locator('.col .hline').first.bounding_box()['height']
+            assert abs(event.bounding_box()['y'] - frame.locator('.col').first.bounding_box()['y'] - 2.5 * hour) < 1
+            handle = event.locator('.rs').bounding_box()
+            page.mouse.move(handle['x'] + handle['width'] / 2, handle['y'] + handle['height'] / 2)
+            page.mouse.down()
+            page.mouse.move(handle['x'] + handle['width'] / 2, handle['y'] + handle['height'] / 2 + hour, steps=6)
+            page.mouse.up()
+            wait_until(page, lambda: any(name == 'event/update' for name, _ in state['posts']))
+            body = next(body for name, body in reversed(state['posts']) if name == 'event/update')
+            assert 'start' not in body and body['end'] == '2026-03-08T04:30'
+            expect(event.locator('.m')).to_contain_text('02:30–04:30')
+            saved = ctx.store.get_event(event_id)
+            assert saved['start_utc'] == original
+            assert parse_stored(saved['end_utc']).astimezone(ctx.tz).strftime('%H:%M') == '04:30'
+            shoot(page, frame, evidence_dir(tmp_path), f'calendar-{engine}-wall-resize-{browser_zone.replace("/", "-")}')
+            assert context.outside == []
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+@pytest.mark.parametrize('owner_zone', ['Europe/Moscow', 'America/New_York'])
+def test_all_day_title_card_keeps_dates_after_owner_zone_change(temporal_host, tmp_path, engine, owner_zone):
+    from playwright.sync_api import sync_playwright, expect
+    from model import get_tz
+    ctx, _, event_id, state, url = temporal_host
+    before = ctx.store.get_event(event_id)
+    ctx.tz = get_tz(owner_zone)
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True, downloads_path=str(tmp_path / 'downloads'))
+        try:
+            context, page, frame = widget_frame(browser, url, engine, timezone_id='America/New_York')
+            event = frame.locator('.allday .chip', has_text='Calendar date')
+            expect(event).to_be_visible()
+            event.click()
+            expect(frame.locator('.card .status')).not_to_have_text('Загружаю событие…')
+            inputs = frame.locator('.card input[type=datetime-local]')
+            expect(inputs.nth(0)).to_have_value('2026-03-08T00:00')
+            expect(inputs.nth(1)).to_have_value('2026-03-09T00:00')
+            frame.get_by_placeholder('Название', exact=True).fill('Date title changed')
+            frame.get_by_role('button', name='Сохранить', exact=True).click()
+            expect(frame.locator('.card')).to_have_count(0)
+            body = next(body for name, body in reversed(state['posts']) if name == 'event/update')
+            assert 'start' not in body and 'end' not in body
+            saved = ctx.store.get_event(event_id)
+            assert (saved['start_utc'], saved['end_utc'], saved['tz']) == (before['start_utc'], before['end_utc'], before['tz'])
+            expect(frame.locator('.allday .chip', has_text='Date title changed')).to_be_visible()
+            shoot(page, frame, evidence_dir(tmp_path), f'calendar-{engine}-all-day-{owner_zone.replace("/", "-")}')
             assert context.outside == []
         finally:
             browser.close()

@@ -59,6 +59,7 @@ SUITES = {
                                        'python-docx', 'python-pptx', 'xlwt']},
     'science-search': {'skills': ['science_search'], 'tests': ['skills/science_search/tests'],
                        'dependencies': ['httpx>=0.28.1,<0.29']},
+    'science-digest': {'skills': ['science_digest'], 'tests': ['skills/science_digest/test_digest.py']},
 }
 SHARED = {'.github/workflows/catalog-check.yml', 'scripts/ci_checks.py', 'tests/test_ci_checks.py',
           'scripts/build_index.py', 'scripts/release_digest.py',
