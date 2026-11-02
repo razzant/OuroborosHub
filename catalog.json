@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/2391baf53181a5d08462f6bc4e662c5d4b11c0b4",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/56e0fec45d62ce50eedf12f0309b1c51cdcc41f8",
   "schema_version": 1,
   "skills": [
     {
@@ -519,8 +519,8 @@
         },
         {
           "path": "tests/test_calendar_provider_preservation.py",
-          "sha256": "c50bf15e69d2c15f8151be2dd459a05c8eda035314952b67ba87920d67fed569",
-          "size": 29463
+          "sha256": "487308884c6824eeaa34accb775a2c3ea54de53073a9a6f6cb3eca2330add799",
+          "size": 30002
         },
         {
           "path": "tests/test_calendar_relation_recovery.py",
