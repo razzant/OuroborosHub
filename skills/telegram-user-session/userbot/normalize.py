@@ -59,6 +59,32 @@ def media_descriptor(message):
     return {'kind': kind, **({'media_id': str(media_id)} if media_id is not None else {}), **facts}
 
 
+# The Host classifies a staged file by its bytes, but an MP3 without an ID3 tag or an
+# M4A under a generic MP4 brand is recognized only with its usual suffix. Telethon's
+# ``file.ext`` comes from the host OS's MIME table, which differs between machines and
+# knows no ``audio/x-m4a``, so recordings take their suffix from Telegram's declared type.
+_AUDIO_SUFFIXES = {
+    'audio/ogg': '.ogg', 'audio/opus': '.ogg', 'audio/mpeg': '.mp3', 'audio/mp3': '.mp3',
+    'audio/mp4': '.m4a', 'audio/m4a': '.m4a', 'audio/x-m4a': '.m4a', 'audio/aac': '.aac',
+    'audio/flac': '.flac', 'audio/x-flac': '.flac', 'audio/wav': '.wav', 'audio/x-wav': '.wav',
+    'audio/webm': '.webm',
+}
+
+
+def staged_suffix(message, media):
+    """The suffix of a staged copy: never part of identity, only a hint for the Host's sniffing."""
+    if media is not None and media.get('kind') in ('voice', 'audio'):
+        suffix = _AUDIO_SUFFIXES.get(str(media.get('mime') or '').split(';', 1)[0].strip().lower())
+        if suffix:
+            return suffix
+        for candidate in (str(media.get('name') or ''), 'x' + str(getattr(getattr(message, 'file', None), 'ext', None) or '')):
+            dot = candidate.rfind('.')
+            if dot > 0 and 2 <= len(candidate) - dot <= 9 and candidate[dot + 1:].isascii() and candidate[dot + 1:].isalnum():
+                return candidate[dot:].lower()
+        return '.bin'
+    return getattr(getattr(message, 'file', None), 'ext', None) or '.bin'
+
+
 _LABELS = {'photo': 'photo', 'voice': 'voice message', 'video': 'video', 'video_message': 'video message',
            'animation': 'GIF', 'audio': 'audio'}
 

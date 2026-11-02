@@ -363,6 +363,10 @@ class TelegramTransportRuntime:
         for index, attachment in enumerate(attachments):
             if not isinstance(attachment, dict) or not attachment.get("file_id"):
                 continue
+            if attachment.get("status") == "too_large":
+                # Telegram will never serve it; retrying would hold the conversation.
+                # The event keeps the reference and says why nothing was staged.
+                continue
             name = _safe_filename(
                 str(attachment.get("file_name") or f"attachment-{index}")
             )

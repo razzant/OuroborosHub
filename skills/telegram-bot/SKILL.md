@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.10.0
+version: 0.10.1
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -174,7 +174,7 @@ It provides:
   to their queues when the runtime starts again, with attempts unchanged (this
   assumes one runtime per state dir: a reload that overlaps a still-running
   runtime can resend a row, as a lease expiry would, only sooner);
-- inbound photo/document staging through Telegram `getFile`;
+- inbound photo/document/voice/audio staging through Telegram `getFile`;
 - outbound text, photo, and document provider helpers with durable receipts;
 - a namespaced `telegram_send` tool for proactive text/photo/document delivery
   to exact numeric chat, topic, and message ids;
@@ -210,13 +210,42 @@ mutation the worker re-reads the place, including a private chat's place.
 Silent/Paused or an unavailable lookup holds the queued bytes and receipts
 without consuming retries; Active resumes.
 
-Supported v1 Telegram content is text/caption, photos, documents, edited
-messages, and message-reaction provider facts. Voice/audio bytes are still
-outside the interpreted content contract: this transport makes no
-speech-to-text claim. Reaction updates require the bot to be an administrator
+Supported v1 Telegram content is text/caption, photos, documents, voice
+messages, audio files, edited messages, and message-reaction provider facts. See
+[Voice and audio (0.10.1)](#voice-and-audio-0101). Reaction updates require the bot to be an administrator
 in the chat and an explicit Bot API `allowed_updates` subscription; Telegram
 does not deliver bot-authored reactions as user reactions. See
 [Reactions](#reactions-0100).
+
+## Voice and audio (0.10.1)
+
+A voice message or audio file arrives like a photo or document: its original
+bytes are downloaded unchanged and handed to the Host as an ordinary staged
+attachment, never cut, converted or transcribed here. A voice-only message with
+no caption is now delivered rather than dropped; its event text stays empty (or
+the caption), and `message.attachments` names `kind` `voice` or `audio`,
+Telegram's `mime_type`, `file_size` and, when Telegram gives it,
+`duration_sec`. The staged name keeps a suffix matching that type (`.ogg` for a
+voice message, the audio file's own name otherwise), because the Host classifies
+a staged file by its bytes and recognizes some audio only with its usual suffix.
+Wake facts are unchanged: a recording wakes exactly as the same message with no
+words would (`any_message`, `direct_message` in a private chat, `reply_to_me`).
+Nothing in a recording can be a mention or a word signal.
+
+This connector makes no speech-to-text claim. Whether anything listens is the
+answering model's choice: with the optional local `whisper-voice` skill enabled
+it can call `transcribe_attachment` with the attachment's manifest ordinal.
+On this path that tool currently takes Ogg, MP3 and MP4/M4A audio of at most
+384 KiB and 60 seconds. Whisper also lists WebM, but the Host classifies staged
+WebM bytes as `video/webm` whatever the file name and the tool refuses that, so
+WebM from Telegram stays only a file (Telegram voice messages are Ogg).
+Telegram delivers far longer and larger recordings than the recognizer accepts;
+such a recording, like WAV, FLAC or AAC, is still staged whole, never cut, and
+stays only a file, and the tool's error says so.
+
+A recording Telegram declares larger than the Bot API's 20 MiB download limit
+is not downloaded: its attachment carries `status` `too_large` and a note, and
+the event goes on with the message reference instead of retrying forever.
 
 ## Connecting groups (0.9.0)
 
@@ -385,8 +414,8 @@ the topic of its exact retained target and otherwise the chat's conversation (se
 Text and caption entities retain their original UTF-16 offsets, hidden link
 URLs, and text-mention user facts.
 When Telegram supplies a replied-to message, the event includes its text or
-caption, original author/chat/message IDs, date, entities, and photo/document
-descriptors. Selected quotes and forwarding origins remain separate source
+caption, original author/chat/message IDs, date, entities, and photo/document/
+voice/audio descriptors. Selected quotes and forwarding origins remain separate source
 facts; a forwarded author does not replace the current sender.
 
 Edits retain their original message id with `message.event_kind` set to
@@ -396,7 +425,7 @@ message text. These are observations for model judgment, not automatic replies.
 
 Reply context comes only from that incoming update. It does not fetch history,
 follow nested reply chains, or download the replied-to message's media. Direct
-photo/document attachments continue through the existing staging path.
+photo/document/voice/audio attachments continue through the existing staging path.
 
 ## Reactions (0.10.0)
 
