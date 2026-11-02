@@ -45,6 +45,8 @@ RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 RSS1 = "http://purl.org/rss/1.0/"
 DC = "http://purl.org/dc/elements/1.1/"
 CONTENT = "http://purl.org/rss/1.0/modules/content/"
+# How expat names the xml:base attribute, which may sit on any element.
+XML_BASE = "http://www.w3.org/XML/1998/namespace base"
 MAX_CHANNELS = 12
 MAX_INTERESTS = 4000
 MAX_RESPONSE_BYTES = 768 * 1024
@@ -641,7 +643,28 @@ def _http_url(value: str) -> str:
         valid = parsed.scheme in ("http", "https") and bool(parsed.hostname)
     except ValueError:
         valid = False
-    return value if valid and len(value) <= 300 else ""
+    return value if valid and len(value) <= MAX_URL else ""
+
+
+def _link_url(base: str, reference: str) -> str:
+    """The http(s) URL a feed's link or xml:base means, at most MAX_URL characters:
+    as written when absolute, else resolved against base; "" when none remains."""
+    reference = reference.strip()
+    if len(reference) > MAX_URL:
+        return ""
+    try:
+        return _http_url(reference) or _http_url(urllib.parse.urljoin(base, reference))
+    except ValueError:
+        return ""
+
+
+def _item_link(base: str, link: str) -> str:
+    """A feed item's own page. A relative link that resolves to the very document it
+    was resolved against (empty, #, #top, ?, https:) names that document, not the item."""
+    url = _link_url(base, link)
+    if url and not _http_url(link) and urllib.parse.urlsplit(url)[:4] == urllib.parse.urlsplit(base)[:4]:
+        return ""
+    return url
 
 
 def _parse_date(value: str) -> str:
@@ -844,6 +867,21 @@ def _plain_text(value: str) -> str:
     return " ".join(value.split())
 
 
+_DATA_URI = re.compile(r"data:(?:[\w.+-]+/[^ ,]*)?(?:;base64,[A-Za-z0-9+/= ]*|,[^ ]*)", re.IGNORECASE)
+_BASE64 = re.compile(r"[A-Za-z0-9+/]{40,}(?: [A-Za-z0-9+/]{40,})*(?: [A-Za-z0-9+/]*)?={0,2}")
+
+
+def _binary_body(text: str) -> bool:
+    """Whether a whole body, its whitespace normalized, has the shape of a data: URI
+    or of Base64 in one run or wrapped lines: then it is taken for media or a file,
+    whatever its element declares, and nothing is decoded to check. Base64 this long
+    mixes cases and digits and has few slashes; a long word, path or hex digest does
+    not. Anything else encoded stays text."""
+    return bool(_DATA_URI.fullmatch(text)) or bool(
+        _BASE64.fullmatch(text) and text.count("/") * 8 <= len(text)
+        and all(re.search(kind, text) for kind in ("[a-z]", "[A-Z]", "[0-9]")))
+
+
 def _shift(stamp: str, delta: timedelta) -> str:
     try:
         return (datetime.fromisoformat(stamp) + delta).isoformat(timespec="seconds")
@@ -866,7 +904,8 @@ class _Feed:
     namespace (any prefix) with expat. A DTD internal subset or an entity
     declaration is refused, never expanded; so are a namespace URI, a number of
     distinct names, a nesting depth or a single tag past the XML bounds. Only
-    item fields are kept."""
+    item fields are kept, and only text-bearing ones are read as text. url, the
+    feed's own address, resolves relative links."""
 
     ROOTS = {"rss": "rss2.0", f"{RDF} RDF": "rss1.0", f"{ATOM} feed": "atom"}
     # Path from the root to an item, and the channel element RSS requires.
@@ -877,11 +916,16 @@ class _Feed:
               f"{DC} date": "dc_date", f"{CONTENT} encoded": "content",
               f"{ATOM} id": "guid", f"{ATOM} title": "title", f"{ATOM} published": "published",
               f"{ATOM} updated": "updated", f"{ATOM} summary": "summary", f"{ATOM} content": "content"}
+    # The fields read as text, and the declared types that make them text. Any other
+    # type (RFC 4287 sends it as Base64) is media or a file and stays unread.
+    TEXT_FIELDS = ("title", "summary", "content")
+    TEXT_TYPES = ("text", "html", "xhtml", "application/xhtml+xml")
 
-    def __init__(self) -> None:
+    def __init__(self, url: str = "") -> None:
         self.format = ""
         self.channel = False
         self.path: list[str] = []
+        self.bases = [url]
         self.fields: dict[str, str] | None = None
         self.field = ""
         self.types: dict[str, str] = {}
@@ -949,6 +993,10 @@ class _Feed:
             if not self.format:
                 raise _FeedRefused("not an RSS 1.0, RSS 2.0 or Atom feed")
         self.path.append(tag)
+        # Each xml:base resolves against the one around it. Only a usable one is
+        # kept, so no level of this stack outgrows MAX_URL however bases nest.
+        declared = attrs.get(XML_BASE)
+        self.bases.append(_link_url(self.bases[-1], declared) if declared else self.bases[-1])
         item = self.ITEM[self.format]
         if self.fields is None:
             # Only an element at an item's own depth can be one. Comparing the
@@ -966,10 +1014,17 @@ class _Feed:
                 # The entry's page is its first rel=alternate (default) link.
                 if "link" not in self.fields and attrs.get("rel", "alternate") == "alternate":
                     self.fields["link"] = attrs.get("href") or ""
+                    self.fields["link_base"] = self.bases[-1]
             else:
                 self.field = self.FIELDS.get(tag, "")
-                if self.field:
-                    self.types[self.field] = attrs.get("type") or "text"
+                if self.field == "link":
+                    self.fields.setdefault("link_base", self.bases[-1])
+                elif self.field in self.TEXT_FIELDS:
+                    kind = (attrs.get("type") or "").split(";", 1)[0].strip().lower() or "text"
+                    if kind in self.TEXT_TYPES or kind.startswith("text/"):
+                        self.types[self.field] = kind
+                    else:
+                        self.field = ""
 
     def _data(self, data: str) -> None:
         # A field keeps the text of nested elements too (Atom xhtml).
@@ -991,14 +1046,17 @@ class _Feed:
                 self.fields = None
                 self.parsed += 1
         self.path.pop()
+        self.bases.pop()
 
     def _text(self, fields: dict[str, str], name: str) -> str:
         value = fields.get(name, "")
         # Atom text and xhtml constructs are already characters; RSS fields and
         # Atom html carry escaped markup (Nature even puts it in titles).
         if self.format == "atom" and self.types.get(name) not in ("html", "text/html"):
-            return " ".join(value.split())
-        return _plain_text(value)
+            text = " ".join(value.split())
+        else:
+            text = _plain_text(value)
+        return "" if _binary_body(text) else text
 
     def _item(self, fields: dict[str, str]) -> None:
         guid = fields.get("guid", "").strip() or fields.get("about", "").strip()
@@ -1013,9 +1071,11 @@ class _Feed:
         # Publisher identity, not position or date: reorders, retitles and
         # re-dated entries keep the same key.
         key = hashlib.sha256(identity.encode("utf-8", "replace")).hexdigest()[:20]
-        item = {"key": key, "url": _http_url(link) or _http_url(guid), "date": stamp,
+        # A guid is often opaque, so only one already absolute serves as the link.
+        item = {"key": key, "url": _item_link(fields.get("link_base", ""), link) or _http_url(guid),
+                "identifier": " ".join(identity.split())[:300], "date": stamp,
                 "title": self._text(fields, "title")[:300], "excerpt": excerpt[:MAX_POST_TEXT],
-                "excerpt_truncated": self.clipped or len(excerpt) > MAX_POST_TEXT}
+                "excerpt_truncated": bool(excerpt) and (self.clipped or len(excerpt) > MAX_POST_TEXT)}
         if key in self.keys:
             self.duplicate += 1
             position = self.keys[key]
@@ -1042,7 +1102,7 @@ def _fetch_feed(url: str) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
     # Parsing draws on the same deadline. A body the deadline itself cut short
     # would otherwise have no time left to yield the items it did deliver.
     deadline.at = max(deadline.at, time.monotonic() + MIN_PARSE_SECONDS)
-    feed = _Feed()
+    feed = _Feed(url)
     try:
         feed.parse(raw[:MAX_FEED_BYTES], not truncated, deadline)
     except _FeedFull:
@@ -1290,16 +1350,22 @@ def _feed_source(source: str, per_channel: int, include_attempted: bool = False)
     # No numeric watermark: every unattempted identity inside the subscription
     # window stays eligible, oldest first, whatever order the feed uses. An item
     # attempted without title or excerpt is attempted-not-read: include_attempted
-    # brings it back while the feed still lists it in the window.
-    pool = sorted((item for item in window if item["key"] in unseen or (include_attempted and item["key"] in not_read)),
-                  key=lambda item: (item["date"], item["key"]))
+    # brings it back while the skill tracks it and the feed lists it, whatever date
+    # the feed now gives it, earlier than the window or none: no date gate applies.
+    pool = [] if error else sorted(
+        (item for item in items if item["key"] in unseen or (include_attempted and item["key"] in not_read)),
+        key=lambda item: (item["date"], item["key"]))
     # A feed portion is its oldest per_channel items, with or without text: a
     # feed may list thousands, so items without text count toward the limit.
-    portion = [] if error else pool[:per_channel]
-    rest = [] if error else pool[per_channel:]
+    portion, rest = pool[:per_channel], pool[per_channel:]
     posts, textless = [], []
     for item in portion:
         entry = {"id": f"{source}/{item['key']}", "url": item["url"], "date": item["date"]}
+        if not item["url"]:
+            # Named by its title or, without one, by the publisher's own identifier.
+            entry["link_unavailable"] = True
+            if not item["title"]:
+                entry["identifier"] = item["identifier"]
         if item["title"] or item["excerpt"]:
             # title and excerpt are the feed's own fields, never the read article.
             entry.update(title=item["title"], excerpt=item["excerpt"])
@@ -1319,7 +1385,8 @@ def _feed_source(source: str, per_channel: int, include_attempted: bool = False)
            "historical_lost_unattempted": gap[0] if gap else 0,
            "window_since": since, "attempted_through": attempted_through, "feed_items": len(items),
            "feed_truncated": truncated, "stale_read": generation != latest, "_generation": generation,
-           "skipped_items": {"duplicate": facts.get("duplicate_items", 0), "undated": len(items) - len(dated),
+           "skipped_items": {"duplicate": facts.get("duplicate_items", 0),
+                             "undated": len(items) - len(dated) - sum(not item["date"] for item in pool),
                              "unidentified": facts.get("unidentified_items", 0)}}
     # Optional facts appear only when they say something, to keep the output budget for posts.
     if textless:
@@ -1448,7 +1515,8 @@ def _fetch_posts(limit: int = 10, include_attempted: bool = False, channel: str 
               "recent_attempts": attempts, "archive_complete": False,
               "source_text_is_untrusted": True,
               "workflow": "Judge relevance to the owner's interests. A feed title/excerpt is the feed's text, not the "
-                          "article: open its url before relying on it. List text_not_extracted by link and count, "
+                          "article: open its url before relying on it. List text_not_extracted by link and count "
+                          "(link_unavailable: by identifier), "
                           "state coverage per source, then record_attempt with this fetch_id in fetch_ids "
                           "(an attempt, not delivery).",
               "output_limited": False}
@@ -1565,7 +1633,9 @@ def _record_attempt(day: str, post_ids: list[str] | None = None, edition: str = 
             current: dict[int, list[str]] = {}
             for fetch_id, returned in conn.execute("SELECT fetch_id,post_ids FROM fetch_receipts"):
                 current.setdefault(fetch_id, []).extend(json.loads(returned))
-            unique = sorted({x.lower() for x in post_ids} | {x for i in fetch_ids for x in current.get(i, [])})
+            named = {x.lower() for x in post_ids}
+            unique = sorted(named | {x for i in fetch_ids for x in current.get(i, [])})
+            # The selection as asked, whatever is still tracked: a replay of a call matches it.
             digest = hashlib.sha256(json.dumps(unique, separators=(",", ":")).encode()).hexdigest()
             prior_receipt = conn.execute(
                 "SELECT key,day,post_ids,content_sha256,recorded_at FROM attempts WHERE key=?", (key,)
@@ -1583,6 +1653,7 @@ def _record_attempt(day: str, post_ids: list[str] | None = None, edition: str = 
             chosen: dict[str, set[int]] = {}
             feed_keys: list[tuple[int, str, str]] = []
             not_read: list[str] = []
+            untracked: list[str] = []
             for post_id in unique:
                 feed = FEED_ID.fullmatch(post_id)
                 channel, identifier = feed.groups() if feed else post_id.split("/")
@@ -1591,6 +1662,11 @@ def _record_attempt(day: str, post_ids: list[str] | None = None, edition: str = 
                     "SELECT 1 FROM observed WHERE channel=? AND id=?",
                     (channel, identifier if feed else int(identifier))).fetchone()
                 if not conn.execute("SELECT 1 FROM channels WHERE name=?", (channel,)).fetchone() or not observed:
+                    # A receipt outlives feed rows that a later record dropped from state:
+                    # the fetch records what remains. An id the caller named is refused.
+                    if feed and post_id not in named:
+                        untracked.append(post_id)
+                        continue
                     raise ValueError("post_ids must come from a configured channel's returned fetch_posts result")
                 if feed:
                     # Feed items are independent identities: recording one never
@@ -1622,8 +1698,9 @@ def _record_attempt(day: str, post_ids: list[str] | None = None, edition: str = 
                         not_read.append(f"{channel}/{identifier}")
                 if mark > prior:
                     marks[channel] = mark
+            recorded = [post_id for post_id in unique if post_id not in untracked]
             inserted = conn.execute("INSERT OR IGNORE INTO attempts(key,day,post_ids,content_sha256) VALUES (?,?,?,?)",
-                                    (key, day, json.dumps(unique), digest)).rowcount
+                                    (key, day, json.dumps(recorded), digest)).rowcount
             if inserted:
                 for channel, mark in marks.items():
                     conn.execute("INSERT INTO seen(channel,last_id) VALUES (?,?) ON CONFLICT(channel) "
@@ -1642,6 +1719,8 @@ def _record_attempt(day: str, post_ids: list[str] | None = None, edition: str = 
                    "status": "attempted_not_delivered" if inserted else "already_attempted_do_not_auto_publish"}
         if inserted:
             receipt["attempted_not_read"] = {"count": len(not_read), "ids": not_read[:MAX_CHANNELS * MAX_POSTS_PER_CHANNEL]}
+            if untracked:
+                receipt["no_longer_tracked"] = untracked
         return json.dumps(receipt)
     except (TypeError, ValueError) as exc:
         return json.dumps({"ok": False, "error": str(exc)})
@@ -1658,13 +1737,13 @@ def register(api: Any) -> None:
                       schema={"type": "object", "properties": {"action": {"type": "string", "enum": ["list", "add", "remove"]},
                                                                "name": {"type": "string"}}})
     api.register_tool("fetch_posts", _fetch_posts,
-                      description="Fetch bounded new items, oldest first, from every source or one (channel=name, rss:key or URL), with per-source coverage and the fetch_id record_attempt takes. Telegram posts carry preview text; text_not_extracted lists posts without text by link. Feed items carry the feed's own title/excerpt, not the article; feed items with neither are listed in text_not_extracted too. include_attempted=true also returns posts and feed items recorded as attempted-not-read that the preview page or feed still shows, to retry them.",
+                      description="Fetch bounded new items, oldest first, from every source or one (channel=name, rss:key or URL), with per-source coverage and the fetch_id record_attempt takes. Telegram posts carry preview text; text_not_extracted lists posts without text by link. Feed items carry the feed's own title/excerpt, not the article; feed items with neither are listed in text_not_extracted too. A feed item with link_unavailable has no usable http(s) link: name it by its title or identifier. include_attempted=true also returns posts and feed items recorded as attempted-not-read that the preview page or feed still shows, to retry them.",
                       schema={"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20},
                                                                "include_attempted": {"type": "boolean"},
                                                                "channel": {"type": "string"}}},
                       timeout_sec=120)
     api.register_tool("record_attempt", _record_attempt,
-                      description="After composing a digest, record it as an ATTEMPT, never delivery. fetch_ids lists the fetch_id of each fetch_posts call the edition used: everything those calls returned is recorded, posts as inspected and text_not_extracted as attempted-not-read, for each source whose latest fetch that call still is. post_ids instead records the ids named, from any fetch that returned them while the skill still tracks them, even after an unavailable refetch; on a Telegram channel every retained returned readable post not marked lost between the cursor and the newest named id must be named too, and the retained returned textless ones not marked lost there are recorded as attempted-not-read without being named. day (YYYY-MM-DD) + edition (default daily) is the idempotency key; use a distinct edition for another same-day digest.",
+                      description="After composing a digest, record it as an ATTEMPT, never delivery. fetch_ids lists the fetch_id of each fetch_posts call the edition used: everything those calls returned is recorded, posts as inspected and text_not_extracted as attempted-not-read, for each source whose latest fetch that call still is; feed items since dropped from state are skipped and listed in no_longer_tracked. post_ids instead records the ids named, from any fetch that returned them while the skill still tracks them, even after an unavailable refetch; on a Telegram channel every retained returned readable post not marked lost between the cursor and the newest named id must be named too, and the retained returned textless ones not marked lost there are recorded as attempted-not-read without being named. day (YYYY-MM-DD) + edition (default daily) is the idempotency key; use a distinct edition for another same-day digest.",
                       schema={"type": "object", "properties": {"day": {"type": "string"},
                                                                "edition": {"type": "string"},
                                                                "fetch_ids": {"type": "array", "items": {"type": "integer"}},
