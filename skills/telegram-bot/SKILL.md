@@ -246,6 +246,10 @@ stays only a file, and the tool's error says so.
 A recording Telegram declares larger than the Bot API's 20 MiB download limit
 is not downloaded: its attachment carries `status` `too_large` and a note, and
 the event goes on with the message reference instead of retrying forever.
+If the update omits the size and `getFile` later refuses an oversized file, the
+existing download retry path still holds that conversation; this version does
+not resolve that failure. Unknown-size recordings that download successfully
+remain supported.
 
 ## Connecting groups (0.9.0)
 

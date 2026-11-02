@@ -98,14 +98,20 @@ def _runtime(tmp_path):
     return runtime, submitter, clients
 
 
-def test_voice_is_staged_under_its_typed_name_and_submitted(tmp_path):
+@pytest.mark.parametrize("kind,mime,name,expected", [
+    ("voice", "audio/ogg", "", "voice-v-uniq.ogg"),
+    ("audio", "audio/mpeg", "a" * 180 + ".mp3", "a" * 156 + ".mp3"),
+    ("audio", "audio/x-m4a", "a" * 180 + ".m4a", "a" * 156 + ".m4a"),
+])
+def test_voice_is_staged_under_its_typed_name_and_submitted(tmp_path, kind, mime, name, expected):
     runtime, submitter, clients = _runtime(tmp_path)
-    runtime.store.commit_update(7, parse_telegram_update(_update(voice=VOICE), bot_account_id="9"))
+    sound = {**VOICE, "mime_type": mime, "file_name": name}
+    runtime.store.commit_update(7, parse_telegram_update(_update(**{kind: sound}), bot_account_id="9"))
     assert asyncio.run(runtime.process_one_inbox())
     event, staged = submitter.calls[0]
-    assert [path.name for path in staged] == ["0-voice-v-uniq.ogg"]
+    assert [path.name for path in staged] == ["0-" + expected]
     assert clients[0].downloads == [("v-id", staged[0])]
-    assert event["text"] == "" and event["message"]["attachments"][0]["kind"] == "voice"
+    assert event["text"] == "" and event["message"]["attachments"][0]["kind"] == kind
     assert runtime.store.status_snapshot()["inbox_submitted"] == 1
 
 

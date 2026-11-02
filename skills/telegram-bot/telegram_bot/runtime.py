@@ -814,7 +814,11 @@ def _safe_component(value: str) -> str:
 def _safe_filename(value: str) -> str:
     name = pathlib.PurePath(value.replace("\\", "/")).name
     clean = re.sub(r"[^A-Za-z0-9_. -]+", "_", name).strip(" .")
-    return clean[:160] or "attachment"
+    if len(clean) > 160:
+        # Byte sniffing uses this suffix for tagless MP3 and generic-brand M4A.
+        suffix = pathlib.PurePath(clean).suffix
+        clean = clean[:160 - len(suffix)] + suffix if len(suffix) < 160 else clean[:160]
+    return clean or "attachment"
 
 
 def _retry_delay(attempts: int) -> float:

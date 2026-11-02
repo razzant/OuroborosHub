@@ -90,7 +90,9 @@ def test_bot_voice_and_audio_reach_whisper_as_their_original_bytes(tmp_path):
 
     # An MP3 with no ID3 tag is audio to core only under its suffix, which the bot now supplies.
     mp3 = facts["turns"][f"telegram:{BOT}:2"]
-    assert [(r["label"], r["mime"]) for r in mp3["manifest"]] == [("0-recording.mp3", "audio/mpeg")]
+    # The display label is capped separately; the real staged path retains its suffix.
+    assert [(r["label"], r["mime"]) for r in mp3["manifest"]] == [("0-" + "a" * 118, "audio/mpeg")]
+    assert mp3["manifest"][0]["relpath"].endswith(".mp3")
     assert mp3["tool"][0]["ok"] is True and mp3["worker_calls"][0][2:] == [_sha(MP3), "audio/mpeg"]
     assert facts["unsuffixed_mp3_mime"] == "application/octet-stream"  # what 0.10.0's name would have meant
 
@@ -243,7 +245,7 @@ def _core(root, connector, account):
             world.turns[presence["event"]["source_event_id"]] = {
                 "text": task["text"], "observed_text": presence["observed_text"],
                 "facts": presence["event"].get("facts"),
-                "manifest": [{key: row.get(key) for key in ("status", "label", "mime", "sha256", "size", "ordinal")}
+                "manifest": [{key: row.get(key) for key in ("status", "label", "mime", "sha256", "size", "ordinal", "relpath")}
                              for row in manifest],
                 "context_attachments": message.get("attachments") or [], "context_media": message.get("media"),
                 "tool": tool, "worker_calls": calls, "identity": _identity(presence["event"]),
@@ -323,7 +325,7 @@ def _bot(root):
         update(1, voice={"file_id": "voice-1", "file_unique_id": "u1", "duration": 3, "mime_type": "audio/ogg",
                          "file_size": len(OGG)}),
         update(2, audio={"file_id": "audio-2", "file_unique_id": "u2", "duration": 5, "mime_type": "audio/mpeg",
-                         "file_name": "recording", "file_size": len(MP3)}),
+                         "file_name": "a" * 180 + ".mp3", "file_size": len(MP3)}),
         update(3, voice={"file_id": "voice-3", "file_unique_id": "u3", "duration": 200, "mime_type": "audio/ogg",
                          "file_size": len(LONG_OGG)}),
         update(4, audio={"file_id": "audio-4", "file_unique_id": "u4", "duration": 5, "mime_type": "audio/flac",
