@@ -2504,6 +2504,55 @@ class FeedRetryDateTests(FeedSourceTests.__base__):
         again = self.source(self.fetch({OPENAI: undated}, include_attempted=True)[0])
         self.assertEqual((again["posts"], [p["id"] for p in textless(again)]), ([], [feed_id(chart)]))
 
+    def test_retry_reaches_an_undated_item_whatever_text_the_dated_ones_give(self):
+        # Availability was judged on dated items alone: an item that gained text and lost its date never came back
+        # once no dated item had text, as when the read item beside it is gone or listed without text.
+        a, b = article("a"), article("b")
+        later = {OPENAI: rss((a, None, "Now titled")), DEEPMIND: rss((a, None, "Now titled"), (b, 1, "", ""))}
+        for n, (url, listed) in enumerate(later.items()):
+            with self.subTest(url):
+                self.add(url)
+                first = self.fetch({url: feed_response(rss((a, 2, "", ""), (b, 1, "Read")), url=url)}, channel=url)[0]
+                receipt = self.call("record_attempt", day="2026-09-27", edition=f"e{n}", fetch_ids=[first["fetch_id"]])
+                self.assertEqual(receipt["attempted_not_read"], {"count": 1, "ids": [feed_id(a, url)]})
+                # An ordinary edition returns nothing undated.
+                normal = self.source(self.fetch({url: feed_response(listed, url=url)}, channel=url)[0], url)
+                self.assertEqual((normal["posts"], textless(normal)), ([], []))
+                result = self.fetch({url: feed_response(listed, url=url)}, channel=url, include_attempted=True)[0]
+                retry = self.source(result, url)
+                self.assertEqual((retry["coverage"], retry["error"], textless(retry)), ("feed_window", "", []))
+                self.assertEqual([(p["id"], p["date"], p["title"], p["already_attempted"]) for p in retry["posts"]],
+                                 [(feed_id(a, url), "", "Now titled", True)])
+                # Read now, it leaves the retry pool.
+                receipt = self.call("record_attempt", day="2026-09-28", edition=f"r{n}", fetch_ids=[result["fetch_id"]])
+                self.assertEqual((receipt["post_ids"], receipt["attempted_not_read"]["count"]), ([feed_id(a, url)], 0))
+                again = self.source(self.fetch({url: feed_response(listed, url=url)}, channel=url,
+                                               include_attempted=True)[0], url)
+                self.assertEqual((again["posts"], textless(again)), ([], []))
+
+    def test_retried_undated_item_without_text_leaves_a_feed_without_text_unavailable(self):
+        self.add(OPENAI)
+        a, b, c = article("a"), article("b"), article("c")
+        first = self.fetch({OPENAI: feed_response(rss((a, 2, "", ""), (b, 1, "Read")))})[0]
+        self.call("record_attempt", day="2026-09-27", fetch_ids=[first["fetch_id"]])
+        # Still without text, beside nothing that has any: unavailable, and nothing from it is recorded.
+        for n, listed in enumerate((rss((a, None, "", "")), rss((a, None, "", ""), (b, 1, "", "")))):
+            with self.subTest(items=n + 1):
+                result = self.fetch({OPENAI: feed_response(listed)}, include_attempted=True)[0]
+                source = self.source(result)
+                self.assertEqual((source["coverage"], source["posts"], textless(source)), ("unavailable", [], []))
+                self.assertIn("or the 1 undated attempted-not-read ones: none has a title or an excerpt", source["error"])
+                receipt = self.call("record_attempt", day="2026-09-28", edition=f"u{n}", fetch_ids=[result["fetch_id"]])
+                self.assertEqual(receipt["post_ids"], [])
+        # Beside a new item with text it is listed by link again.
+        source = self.source(self.fetch({OPENAI: feed_response(rss((a, None, "", ""), (c, 1, "New")))},
+                                        include_attempted=True)[0])
+        self.assertEqual([(p["id"], p["already_attempted"]) for p in source["posts"]], [(feed_id(c), False)])
+        self.assertEqual(textless(source), [{"id": feed_id(a), "url": a, "date": "", "already_attempted": True}])
+        self.assertIn("A feed in which neither a dated item nor, with `include_attempted=true`, an attempted-not-read "
+                      "item it lists without a date has a title or an excerpt, as when all it holds is what step 3 of "
+                      "\"Writing a digest\" leaves unread, is unavailable, and nothing from it is recorded.", skill_text())
+
     def test_retry_lasts_as_long_as_the_skill_tracks_the_item(self):
         self.recorded_textless()
         photo, chart, new = article("photo"), article("chart"), article("new")
@@ -2873,6 +2922,37 @@ class FeedInlineMediaTests(FeedSourceTests.__base__):
         alone = self.source(self.fetch({SGLANG: atom_response(raw_atom(framed))}, channel=SGLANG)[0], SGLANG)
         self.assertEqual((alone["coverage"], alone["posts"], textless(alone)), ("unavailable", [], []))
 
+    def test_percent_escaped_data_uri_is_cut_whole(self):
+        # The cut stopped at a data: URI's first % escape and left the rest, AA%3D%3D leaving %3D%3D, as text.
+        escaped = PNG.replace("+", "%2B").replace("/", "%2F").replace("=", "%3D")
+        bodies = {"escaped padding": "data:application/octet-stream;base64,AA%3D%3D",
+                  "lower-case escapes": "data:application/octet-stream;base64,AA%3d%3d",
+                  "escaped alphabet": f"data:image/png;base64,{escaped}",
+                  "escape after padding": "data:text/plain;base64,SGk=%0A",
+                  "wrapped, escaped last line": f"data:image/png;base64,{wrap_lines(PNG, 64).replace('=', '%3D')}",
+                  # Escaped after wrapping: each line is 64 characters with an escape counted as one.
+                  "wrapped, escapes in its lines": "data:image/png;base64,"
+                                                   + wrap_lines(MEDIA, 64).replace("+", "%2B").replace("/", "%2F")}
+        forms = {"atom no type": lambda body: raw_atom(raw_entry("a", f"<content>{body}</content>")),
+                 "atom html": lambda body: raw_atom(raw_entry("a", f'<content type="html">&lt;p&gt;{body}&lt;/p&gt;</content>')),
+                 "rss": lambda body: raw_rss(raw_item("a", f"<description><![CDATA[{body}]]></description>"))}
+        for form, document in forms.items():
+            for name, body in bodies.items():
+                with self.subTest(form=form, body=name):
+                    self.assertEqual(self.parsed(document(body))["excerpt"], "")
+                    self.assertEqual(self.parsed(document(f"Cover {body} end"))["excerpt"], "Cover end")
+        # The cut still ends where the text does, and an escaped padded line takes no word after it into its run.
+        for body, expected in ((f"![Figure](data:image/png;base64,{escaped}) shows it", "![Figure]() shows it"),
+                               (f"data:image/png;base64,{MEDIA[:62]}%3D%3D caption", "caption")):
+            with self.subTest(body[-12:]):
+                self.assertEqual(self.parsed(raw_atom(raw_entry("a", f"<content>{body}</content>")))["excerpt"], expected)
+        # Through a fetch: a feed of nothing else is unavailable.
+        self.add(OPENAI)
+        source = self.source(self.fetch({OPENAI: feed_response(raw_rss(
+            raw_item("a", "<description>data:application/octet-stream;base64,AA%3D%3D</description>"),
+            raw_item("b", f"<title>(data:image/png;base64,{escaped})</title>", hours_ago=1)))})[0])
+        self.assertEqual((source["coverage"], source["posts"], textless(source)), ("unavailable", [], []))
+
     def test_skill_instructions_state_what_counts_as_text(self):
         text = skill_text()
         self.assertIn("Media is not read and nothing is decoded.", text)
@@ -2885,8 +2965,9 @@ class FeedInlineMediaTests(FeedSourceTests.__base__):
                       "characters, as PEM and MIME wrap Base64, with only whitespace between them and a last one no "
                       "longer, so a short word right after them joins the run. A run of at least 200 characters that "
                       "mixes both cases and digits, with at most one slash per eight characters, is cut, and so is "
-                      "every `data:` URI that carries data, with the run its Base64 begins. A cut that leaves no "
-                      "letter or digit leaves no text.", text)
+                      "every `data:` URI that carries data, with the run its Base64 begins, where a `%` escape counts "
+                      "as one Base64 character and `=` may stand anywhere. A cut that leaves no letter or digit leaves "
+                      "no text.", text)
         self.assertIn("Words, identifiers, model names and hashes stay unless they are part of such a run: they are "
                       "shorter or do not mix cases, though several of one width from 64 to 76 characters in a row form "
                       "one. URL-safe and shorter Base64 stay too: take such a string for noise, never for the media's "
@@ -3090,6 +3171,44 @@ class FeedItemLinkTests(FeedSourceTests.__base__):
         titled = source["posts"][0]
         self.assertEqual((titled["url"], titled["link_unavailable"], titled["title"]), ("", True, "Titled"))
         self.assertNotIn("identifier", titled)
+
+    def test_link_back_at_the_feed_or_its_base_is_none_however_its_host_is_cased_or_its_port_written(self):
+        # Host and port were compared as written, so //GitHub.com/... beat the item's absolute guid.
+        permalink = "https://example.org/post/1"
+        feed_base = 'xml:base="https://example.org/feed/"'
+        http_base = 'xml:base="http://example.org/feed/"'
+        # The feed is https://github.com/sgl-project/sglang/releases.atom.
+        placeholders = (("the feed, host in capitals", "", "//GitHub.com/sgl-project/sglang/releases.atom"),
+                        ("the feed, default port", "", "//github.com:443/sgl-project/sglang/releases.atom"),
+                        ("the feed, empty port", "", "//GITHUB.COM:/sgl-project/sglang/releases.atom#top"),
+                        ("the root, host in capitals", "", "//GITHUB.COM/"),
+                        ("a folder, default port", "", "//github.com:443/sgl-project/"),
+                        ("the base, host in capitals", feed_base, "//Example.ORG/feed/"),
+                        ("the base, default port", feed_base, "//example.org:443/feed/#top"),
+                        ("the base's root, default port", feed_base, "//EXAMPLE.org:443/"),
+                        ("an http base, its default port", http_base, "//example.org:80/feed/"))
+        for name, attributes, link in placeholders:
+            with self.subTest(name):
+                guided = raw_entry("a", link=f'<link href="{link}"/>', identity=permalink)
+                self.assertEqual(self.items(raw_atom(guided, attributes=attributes))[0]["url"], permalink)
+                opaque = raw_entry("a", link=f'<link href="{link}"/>')
+                self.assertEqual(self.items(raw_atom(opaque, attributes=attributes))[0]["url"], "")
+        # Another port is another server; a port that is no number leaves the link as written.
+        kept = (("another port", "", "//github.com:8443/sgl-project/sglang/releases.atom",
+                 "https://github.com:8443/sgl-project/sglang/releases.atom"),
+                ("the https port on an http base", http_base, "//example.org:443/feed/", "http://example.org:443/feed/"),
+                ("a port out of range", "", "//github.com:99999/sgl-project/sglang/releases.atom",
+                 "https://github.com:99999/sgl-project/sglang/releases.atom"))
+        for name, attributes, link, expected in kept:
+            with self.subTest(kept=name):
+                entry = raw_entry("a", link=f'<link href="{link}"/>', identity=permalink)
+                self.assertEqual(self.items(raw_atom(entry, attributes=attributes))[0]["url"], expected)
+        # Through a whole fetch: listed by the permalink.
+        self.add(SGLANG)
+        content = raw_atom(raw_entry("guided", link='<link href="//GitHub.com:443/sgl-project/sglang/releases.atom"/>',
+                                     identity=permalink, hours_ago=3), raw_entry("peer", self.PEER))
+        source = self.source(self.fetch({SGLANG: atom_response(content)}, channel=SGLANG)[0], SGLANG)
+        self.assertEqual(textless(source), [{"id": feed_id(permalink, SGLANG), "url": permalink, "date": stamp(3)}])
 
     def test_textless_atom_item_with_xml_base_lists_its_resolved_link(self):
         self.add(SGLANG)

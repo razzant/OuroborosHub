@@ -658,20 +658,33 @@ def _link_url(base: str, reference: str) -> str:
         return ""
 
 
+def _server(parts: urllib.parse.SplitResult) -> tuple[str, str, Any]:
+    """The server a URL names: scheme, host name in lower case and port, the scheme's
+    default when none is written. A port that cannot be read (no number, or out of
+    range) leaves host and port as written."""
+    try:
+        port = parts.port
+    except ValueError:
+        return parts.scheme, parts.netloc, None
+    return parts.scheme, parts.hostname or "", {"http": 80, "https": 443}.get(parts.scheme) if port is None else port
+
+
 def _item_link(base: str, link: str, feed: str = "") -> str:
     """A feed item's own page. A relative link that resolves to the very document it
     was resolved against (empty, #, #top, ?, https:), to the feed itself (feed is its
-    URL) or to a folder that holds its base (/, ., ../) is a placeholder, not the item.
+    URL) or to a folder that holds its base (/, ., ../) is a placeholder, not the item,
+    however its host name is cased and whether or not it writes the default port.
     One that resolves anywhere else (n/a) cannot be told from a page, and an absolute
     link counts as written."""
     url = _link_url(base, link)
     if not url or _http_url(link):
         return url
-    found, around = urllib.parse.urlsplit(url), urllib.parse.urlsplit(base)
-    if found[:4] in (around[:4], urllib.parse.urlsplit(feed)[:4]):
+    found, around, own = (urllib.parse.urlsplit(value) for value in (url, base, feed))
+    if any((_server(found), found.path, found.query) == (_server(other), other.path, other.query)
+           for other in (around, own)):
         return ""
     folder = found.path.rstrip("/") + "/"
-    if found[:2] == around[:2] and not found.query and (around.path or "/").startswith(folder):
+    if _server(found) == _server(around) and not found.query and (around.path or "/").startswith(folder):
         return ""
     return url
 
@@ -886,27 +899,41 @@ def _plain_text(value: str) -> str:
 MIN_ENCODED_RUN = 200
 WRAP_WIDTHS = range(64, 77)
 _DATA_URI = re.compile(r"(?<![\w+.-])data:(?:[\w.+-]+/[\w.+-]+)?((?:;[^\s;,]+)*),(?=\S)", re.IGNORECASE)
-# A Base64 string, the next one a single space on, and one that can begin a run
-# long enough to be data: every such run has a line of at least the narrowest width.
-_LINE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+# The next Base64 string a single space on, and one that can begin a run long enough
+# to be data: every such run has a line of at least the narrowest width.
 _NEXT_LINE = re.compile(r" [A-Za-z0-9+/]+={0,2}")
 _LONG_LINE = re.compile(r"[A-Za-z0-9+/]{%d,}={0,2}" % WRAP_WIDTHS[0])
+# A data: URI's data may be percent-escaped (%2B, %3D): a string of Base64, = and
+# escapes, and the next one a space on. Only another character ends one.
+_DATA_LINE = re.compile(r"(?:[A-Za-z0-9+/=]+|%[0-9A-Fa-f]{2})+")
+_NEXT_DATA_LINE = re.compile(" " + _DATA_LINE.pattern)
 _TOKEN_REST = re.compile(r"\S*")
 _LETTER_OR_DIGIT = re.compile(r"[^\W_]")
 
 
-def _run(text: str, line: re.Match[str]) -> tuple[int, int]:
+def _width(text: str, start: int, end: int) -> int:
+    """The characters from start to end, each %XX escape counted as the one it stands for."""
+    return end - start - 2 * text.count("%", start, end)
+
+
+def _padded(text: str, end: int) -> bool:
+    """Whether the line that ends at end ends in = padding, as written or escaped."""
+    return text.endswith(("=", "%3D", "%3d"), 0, end)
+
+
+def _run(text: str, line: re.Match[str], following: re.Pattern[str] = _NEXT_LINE) -> tuple[int, int]:
     """Where the Base64 run that begins with line ends, and where its last line begins:
     the line alone, or the lines that follow it at its width, when that is one Base64 is
-    wrapped at, and a last line no longer. Only a run's last line may end in = padding."""
-    width, end, last = line.end() - line.start(), line.end(), line.start()
-    if width in WRAP_WIDTHS and text[end - 1] != "=":
-        while following := _NEXT_LINE.match(text, end):
-            size = following.end() - end - 1
+    wrapped at, and a last line no longer. Only a run's last line may end in = padding.
+    following matches the next line: _NEXT_DATA_LINE inside a data: URI."""
+    width, end, last = _width(text, line.start(), line.end()), line.end(), line.start()
+    if width in WRAP_WIDTHS and not _padded(text, end):
+        while after := following.match(text, end):
+            size = _width(text, end + 1, after.end())
             if size > width:
                 break
-            last, end = end + 1, following.end()
-            if size < width or text[end - 1] == "=":
+            last, end = end + 1, after.end()
+            if size < width or _padded(text, end):
                 break
     return end, last
 
@@ -937,8 +964,8 @@ def _without_encoded(text: str) -> str:
         for match in _DATA_URI.finditer(text):
             if spans and match.start() < spans[-1][1]:
                 continue
-            line = _LINE.match(text, match.end()) if match.group(1).lower().endswith(";base64") else None
-            end = _run(text, line)[0] if line else _TOKEN_REST.match(text, match.end()).end()
+            line = _DATA_LINE.match(text, match.end()) if match.group(1).lower().endswith(";base64") else None
+            end = _run(text, line, _NEXT_DATA_LINE)[0] if line else _TOKEN_REST.match(text, match.end()).end()
             spans.append((match.start(), end))
     cut = bool(spans)
     text = _cut(text, spans)
@@ -1354,13 +1381,18 @@ def _feed_source(source: str, per_channel: int, include_attempted: bool = False)
             "SELECT key FROM feed_items WHERE source=? AND attempted=1 AND not_read=1", (source,))}
         pending = set(unattempted)
         dated = [item for item in items if item["date"]]
-        if items and not dated:
+        # Availability is judged on the dated items and, under include_attempted, on the
+        # attempted-not-read ones listed without a date, which it brings back too.
+        retried = [item for item in items if include_attempted and not item["date"] and item["key"] in not_read]
+        candidates = dated + retried
+        if items and not candidates:
             error = "feed items lack parseable publication dates"
-        elif dated and not any(item["title"] or item["excerpt"] for item in dated):
+        elif candidates and not any(item["title"] or item["excerpt"] for item in candidates):
             # As with a Telegram page: a feed whose items give no text at all is
             # unknown coverage, never a quiet day, and nothing from it is recorded.
-            error = (f"text not extracted for any of the {len(dated)} dated feed items: "
-                     "none has a title or an excerpt")
+            error = (f"text not extracted for any of the {len(dated)} dated feed items"
+                     + (f" or the {len(retried)} undated attempted-not-read ones" if retried else "")
+                     + ": none has a title or an excerpt")
         # An existing unattempted item remains eligible when its publisher
         # corrects its date to before the subscription's initial window.
         window = [item for item in dated if item["date"] >= since or item["key"] in pending]

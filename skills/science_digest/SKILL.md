@@ -84,8 +84,9 @@ the owner whether to add that URL instead. Up to 12 sources.
    a short word right after them joins the run. A run of at least 200
    characters that mixes both cases and digits, with at most one slash per
    eight characters, is cut, and so is every `data:` URI that carries data,
-   with the run its Base64 begins. A cut that leaves no letter or digit leaves
-   no text. Words, identifiers, model names and hashes stay unless they are
+   with the run its Base64 begins, where a `%` escape counts as one Base64
+   character and `=` may stand anywhere. A cut that leaves no letter or digit
+   leaves no text. Words, identifiers, model names and hashes stay unless they are
    part of such a run: they are shorter or do not mix cases, though several of
    one width from 64 to 76 characters in a row form one. URL-safe and shorter
    Base64 stay too: take such a string for noise, never for the media's
@@ -176,9 +177,10 @@ the owner whether to add that URL instead. Up to 12 sources.
   reports no `possible_gap`.
 - Feeds: RSS 1.0, RSS 2.0 and Atom, recognized by structure. A new feed starts
   7 days back; every item keeps a stable id. A valid feed with no items is an
-  empty list, not an error. A feed in which no dated item has a title or an
-  excerpt, as when all it holds is what step 3 of "Writing a digest" leaves
-  unread, is unavailable, and nothing from it is recorded. A feed is
+  empty list, not an error. A feed in which neither a dated item nor, with
+  `include_attempted=true`, an attempted-not-read item it lists without a date
+  has a title or an excerpt, as when all it holds is what step 3 of "Writing a
+  digest" leaves unread, is unavailable, and nothing from it is recorded. A feed is
   unavailable, with the reason, when it declares an XML namespace URI longer
   than 256 characters, uses more than 4,096 distinct XML names (element and
   attribute names, namespace prefixes and URIs), nests elements more than 256
