@@ -104,7 +104,11 @@ def test_registered_tools_and_status_share_durable_store(tmp_path):
     expected = {"email_send", "email_search", "email_read", "email_mark_read", "email_mailbox", "email_draft", "email_receipt",
                 "email_test_connection", "email_accounts", "email_folders", "email_settings_read", "email_settings"}
     assert set(api.tools) == expected
-    first = json.loads(api.tools["email_send"](to="a@example.org", body="Hello", request_id="stable"))
+    prepared = json.loads(api.tools["email_send"](to="a@example.org", body="Hello", request_id="stable"))
+    assert prepared['status'] == 'needs_arguments'
+    assert prepared['retry_arguments']['account_id'] == 'owner@example.org'
+    assert json.loads(api.tools['email_receipt']('stable')) is None
+    first = json.loads(api.tools['email_send'](**prepared['retry_arguments']))
     duplicate = json.loads(api.tools["email_send"](to="a@example.org", body="Hello", request_id="stable"))
     assert duplicate["deduplicated"]
     assert first["receipt"]["state"] == "pending"

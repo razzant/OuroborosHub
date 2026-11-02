@@ -261,11 +261,15 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
         row = civil_in_basis(row, existing)
         if existing.get("etag") == row["etag"] and existing.get("sync_state") == "synced" and not existing.get("deleted_at"):
             # Our acknowledged wire format may use UTC for a zoned one-off.
-            # Equal ETags permit type enrichment, not replacing its authoring zone.
+            # Equal ETags permit parser enrichment, not replacing its authoring zone.
+            enrichment = {}
             if row.get('time_kind') and row['time_kind'] != existing.get('time_kind'):
-                enrichment = {'time_kind': row['time_kind']}
+                enrichment['time_kind'] = row['time_kind']
                 if not existing.get('tz') and row.get('tz'):
                     enrichment['tz'] = row['tz']
+            if row.get('status') and row['status'] != existing.get('status'):
+                enrichment['status'] = row['status']
+            if enrichment:
                 if existing['id'] not in basis or not store.apply_provider_snapshot(existing['id'], enrichment, observed=basis[existing['id']]):
                     protected_masters.add(existing['id'])
                     next_cursor = ''
@@ -327,8 +331,9 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
         payload.update({"master_id": master_id, "raw_payload": ""})
         if master_row:
             payload.update({key: master_row.get(key) for key in ('link_group_id', 'is_primary', 'link_state')})
-        changed = exc is None or exc.get("etag") != row["etag"] or exc.get('recurrence_id') != row['recurrence_id'] or ('time_kind' in row and exc.get('time_kind', '') != row['time_kind'])
-        materially = exc is None or links.changed(exc, row, provider_observation=True)
+        status_enrichment = bool(exc and exc.get('etag') == row['etag'] and row.get('status') and exc.get('status') != row['status'])
+        changed = exc is None or exc.get("etag") != row["etag"] or exc.get('recurrence_id') != row['recurrence_id'] or ('time_kind' in row and exc.get('time_kind', '') != row['time_kind']) or status_enrichment
+        materially = exc is None or links.changed({**exc, **({'status': row['status']} if status_enrichment else {})}, row, provider_observation=True)
         if exc is None:
             saved = store.insert_provider_exception(master_id, payload)
             if saved is None:

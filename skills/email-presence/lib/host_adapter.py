@@ -471,14 +471,14 @@ class LoopbackPresenceHostAdapter:
                 if not isinstance(selected, dict) or not selected.get("output_ref"):
                     raise HostContractError("Released presence output omitted its identity")
                 if self._outcome(selected) in {"message", "deferred"} and str(selected.get("text") or "").strip():
-                    outputs.append(HostOutput(f"output:{selected['output_ref']}", str(selected["text"]), ref))
+                    outputs.append(HostOutput(f"output:{selected['output_ref']}", str(selected["text"]), ref, _anchor(selected)))
             if state in _OBSERVING:
                 if state == "unresolved": notes.append(f"work {ref} unresolved ({payload.get('code') or 'retained'})")
                 continue
             settled[ref] = state; text = str(payload.get("text") or "")
             if payload.get("outcome") in {"message", "deferred"} and text.strip():
                 identity = f"output:{payload['output_ref']}" if payload.get("output_ref") else f"work:{ref}"
-                outputs.append(HostOutput(identity, text, ref))
+                outputs.append(HostOutput(identity, text, ref, _anchor(payload)))
         state = "ready" if settled.get(turn_ref) == "completed" else "failed"
         if len(refs) != len(known) or len(settled) != len(refs): state = "pending"
         original = [f"original {turn_ref}: {settled[turn_ref]}"] if turn_ref in settled else []

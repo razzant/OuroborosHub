@@ -198,16 +198,17 @@ class MailService:
         return original, references, root
 
     @staticmethod
-    def _prepare_conversation(root, conversation_id, thread_id, retry_arguments, *, required):
+    def _prepare_conversation(root, conversation_id, thread_id, retry_arguments, *, required, missing_account=False):
         fields = {'conversation_id': root, 'thread_id': root}
         retry_arguments = {key: value for key, value in retry_arguments.items() if value is not None}
         if any(value and value != root for value in (conversation_id, thread_id)):
             return {'ok': False, 'status': 'error', 'code': 'conversation_identity_mismatch',
                     'error': 'Conversation fields must match the resolved RFC reply source.',
                     'retry_arguments': {**retry_arguments, **fields}}
-        if required and (not conversation_id or not thread_id):
-            return {'ok': False, 'status': 'needs_arguments', 'code': 'canonical_conversation_required',
-                    'message': 'Retry with the resolved conversation fields below; no message or draft was queued or saved.',
+        if missing_account or required and (not conversation_id or not thread_id):
+            return {'ok': False, 'status': 'needs_arguments',
+                    'code': 'canonical_account_required' if missing_account else 'canonical_conversation_required',
+                    'message': 'Retry with the resolved account and conversation fields below; no message or draft was queued or saved.',
                     'retry_arguments': {**retry_arguments, **fields}}
         return None
 
@@ -240,7 +241,8 @@ class MailService:
                 'account_id': account['id'], 'sender': chosen_sender, 'to': to, 'body': body, 'subject': subject,
                 'reply_to_message_id': reply_to_message_id, 'references': references, 'cc': cc, 'bcc': bcc,
                 'reply_all': reply_all, 'html_body': html_body, 'body_type': body_type, 'attachments': attachments,
-                'request_id': rid, 'reply_folder': reply_folder}, required=existing is None and bool(reply_to_message_id or references))
+                'request_id': rid, 'reply_folder': reply_folder}, required=existing is None and bool(reply_to_message_id or references),
+                missing_account=existing is None and not account_id)
             if preparation:
                 return preparation
             binding = self.capture_binding(account, thread) if existing is None else {}
@@ -276,7 +278,7 @@ class MailService:
             kwargs['references'] = references
             preparation = self._prepare_conversation(thread, conversation_id, thread_id,
                 {**kwargs, 'to': kwargs.get('to', ''), 'account_id': account['id'], 'sender': chosen_sender, 'reply_all': reply_all, 'reply_folder': reply_folder},
-                required=bool(kwargs.get('reply_to_message_id') or references))
+                required=bool(kwargs.get('reply_to_message_id') or references), missing_account=not account_id)
             if preparation:
                 return preparation
             if reply_all:
@@ -325,7 +327,7 @@ class MailService:
 def register_tools(api, service):
     string, integer = {"type": "string"}, {"type": "integer"}
     array = {"type": "array", "items": string}
-    account = {"account_id": {"type": "string", "description": "Exact canonical id from email_accounts; required when more than one account is connected."}}
+    account = {"account_id": {"type": "string", "description": "Exact canonical id from email_accounts; required for new sends/drafts and whenever more than one account is connected. An omitted sole account is prepared before a new send/draft effect."}}
     message = {"message_ref": string, "uid": integer, "uidvalidity": integer, "folder": string}
     compose = {"to": string, "body": string, "subject": string, "sender": string, "reply_to_message_id": string,
                'conversation_id': {'type': 'string', 'description': 'Canonical RFC conversation from email_read or retry_arguments; required for a threaded reply.'},
@@ -338,7 +340,7 @@ def register_tools(api, service):
                           schema={"type": "object", "properties": {**(account if select else {}), **properties}, "required": list(required)}, timeout_sec=120)
     tool("email_accounts", service.list_accounts, "List configured mailbox identities, sender addresses and granted scopes; no passwords or tokens are returned.", {}, select=False)
     # email_accounts has no selection argument: it is the discovery surface.
-    tool("email_send", service.send, "Queue a mail or RFC-threaded reply from an explicit account/sender. For replies use conversation_id/thread_id from email_read; needs_arguments returns exact retry_arguments before any effect. request_id is account-scoped. Queued is not sent; inspect email_receipt for held, accepted or uncertain outcomes.",
+    tool("email_send", service.send, "Queue a mail or RFC-threaded reply from an explicit account_id/sender. For replies use conversation_id/thread_id from email_read; an omitted account or reply identity returns needs_arguments with exact retry_arguments before any effect. request_id is account-scoped. Queued is not sent; inspect email_receipt for held, accepted or uncertain outcomes.",
          {**compose, "request_id": string}, ("body",))
     tool("email_search", service.search, "Search old/new mail without marking it read. Gmail uses query/page_token; IMAP uses criteria tokens. Returned message_ref is account-bound; a page reports its continuation.",
          {"folder": string, "criteria": array, "query": string, "limit": integer, "page_token": string})
@@ -348,7 +350,7 @@ def register_tools(api, service):
     tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP: list/create/copy/move/flags, no global expunge. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant.",
          {**message, "action": string, "destination": string, "flags": array, "remove_flags": {"type": "boolean"},
           "add_labels": array, "remove_labels": array, "label_id": string, "draft_id": string, "properties": {"type": "object"}})
-    tool("email_draft", service.draft, "Save a draft without sending. For replies use canonical conversation_id/thread_id; needs_arguments returns exact retry_arguments before saving. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP appends to its selected folder.",
+    tool("email_draft", service.draft, "Save a draft without sending. Supply account_id and, for replies, canonical conversation_id/thread_id; needs_arguments returns exact retry_arguments before saving when identity is missing. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP appends to its selected folder.",
          {**compose, "folder": string, "draft_id": string}, ("to", "subject"))
     tool("email_receipt", service.receipt, "Read the exact account-scoped delivery receipt. Uncertain acceptance must be inspected, never blindly sent again.", {"request_id": string}, ("request_id",))
     tool("email_test_connection", service.test_connection, "Check the selected account's authentication/TLS without sending mail or admitting historical messages.", {})

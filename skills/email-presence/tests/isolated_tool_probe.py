@@ -121,11 +121,18 @@ def register(api):
         assert invoke("email_mark_read", uid=4, uidvalidity=7) == {"ok": True, "uid": 4, "uidvalidity": 7, "folder": "INBOX", "account_id": "mail@example.invalid"}
         assert invoke("email_mailbox", action="list") == {"folders": [
             {"name": "INBOX", "selectable": True}, {"name": "Архив", "optional": None}], "account_id": "mail@example.invalid"}
-        assert invoke("email_draft", to="reader@example.invalid", subject="Draft", body="Черновик") == {
+        prepared_draft = invoke("email_draft", to="reader@example.invalid", subject="Draft", body="Черновик")
+        assert prepared_draft['status'] == 'needs_arguments'
+        assert prepared_draft['retry_arguments']['account_id'] == 'mail@example.invalid'
+        assert invoke("email_draft", **prepared_draft['retry_arguments']) == {
             "ok": True, "saved": "Черновик", "sent": False, "uid": None, "account_id": "mail@example.invalid", "sender": "mail@example.invalid"}
         assert invoke("email_test_connection") == {"ok": True, "imap": True, "smtp": True, "error": None, "account_id": "mail@example.invalid"}
         assert invoke("email_receipt", request_id="missing") is None
-        sent = invoke("email_send", to="reader@example.invalid", body="Hello 📬", request_id="stable")
+        prepared_send = invoke("email_send", to="reader@example.invalid", body="Hello 📬", request_id="stable")
+        assert prepared_send['status'] == 'needs_arguments'
+        assert prepared_send['retry_arguments']['account_id'] == 'mail@example.invalid'
+        assert invoke('email_receipt', request_id='stable') is None
+        sent = invoke("email_send", **prepared_send['retry_arguments'])
         again = invoke("email_send", to="reader@example.invalid", body="Hello 📬", request_id="stable")
         assert sent["ok"] and not sent["deduplicated"] and again["deduplicated"]
         receipt = invoke("email_receipt", request_id="stable")

@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from model import (
     AVAIL_BUSY, AVAIL_FREE, PROVIDER_GOOGLE, PROVIDER_LOCAL, PROVIDER_YANDEX, PROVIDER_CALDAV, account_id as make_account_id, calendar_id as make_calendar_id,
-    get_tz, tz_name as zone_name, iso_utc, now_utc, own_reminders, parse_stored, normalize_rrule_until, has_recurrence,
+    get_tz, tz_name as zone_name, iso_utc, now_utc, own_reminders, parse_stored, normalize_rrule_until, has_recurrence, event_status,
 )
 from ops import ProviderError
 from xml.sax.saxutils import escape
@@ -222,7 +222,7 @@ def ics_to_rows(ics_text: str, calendar_id: str, href: str, etag: str, default_t
             "all_day": all_day, "rrule": rrule_text, "exdates": ",".join(_dt_list(comp.get("EXDATE"), tz_hint)) if comp.get("EXDATE") else "",
             "rdates": ",".join(_dt_list(comp.get("RDATE"), tz_hint)) if comp.get("RDATE") else "",
             "recurrence_id": rec_key, "_recurrence_tz": zone_name(rec_tz),
-            "status": "cancelled" if status == "cancelled" else "confirmed",
+            "status": event_status(status),
             "organizer": organizer, "attendees_json": json.dumps(attendees, ensure_ascii=False),
             "reminders_json": json.dumps(sorted(set(reminders))), "origin": "external",
             "availability": AVAIL_FREE if str(comp.get("TRANSP") or "OPAQUE").upper() == "TRANSPARENT" else AVAIL_BUSY,
@@ -321,6 +321,8 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
     live_exdates = [value for value in live_exdates if value not in (removed_exdates or [])]
     floating = event['time_kind'] == 'floating' if event.get('time_kind') else _floating_start(vevent)
     kept = ({'DTSTART'} if keep_start else set()) | ({'DTEND', 'DURATION'} if keep_end else set())
+    if changed_fields is not None and 'status' not in changed_fields and vevent.get('STATUS') is not None:
+        kept.add('STATUS')  # A legacy cached row may predate preservation of native TENTATIVE.
     for key in ("DTSTART", "DTEND", "DURATION", "SUMMARY", "DESCRIPTION", "LOCATION", "RRULE", "STATUS", "LAST-MODIFIED", "DTSTAMP", "SEQUENCE",
                 "EXDATE", "RDATE", "TRANSP"):
         if key in vevent and key not in kept:
@@ -363,7 +365,8 @@ def row_to_ics(event: Dict[str, Any], prodid: str = "-//Ouroboros//calendar//RU"
         rd = [x.astimezone(tz).date() if all_day else x.astimezone(tz).replace(tzinfo=None) if floating else x.astimezone(tz) for x in rd if x]
         if rd:
             vevent.add("RDATE", rd)
-    vevent.add("STATUS", "CANCELLED" if str(event.get("status") or "") == "cancelled" else "CONFIRMED")
+    if 'STATUS' not in kept:
+        vevent.add("STATUS", event_status(event.get("status")).upper())
     vevent.add("TRANSP", "TRANSPARENT" if event.get("availability") == AVAIL_FREE else "OPAQUE")
     vevent.add("DTSTAMP", now)
     vevent.add("LAST-MODIFIED", now)
@@ -924,7 +927,9 @@ class CalDAVAdapter:
                 retained_event.pop('RECURRENCE-ID', None)
                 retained_calendar.add_component(retained_event)
                 retained = retained_calendar.to_ical().decode('utf-8')
-            exc_cal = icalendar.Calendar.from_ical(row_to_ics({**event, "raw_payload": retained, "rrule": "", "exdates": "", "rdates": "", "uid": str(master.get("UID") or event.get("uid") or "")},
+            status = (event_status(alarm_source.get('STATUS')) if changed_fields is not None and 'status' not in changed_fields
+                      else event_status(event.get('status')))
+            exc_cal = icalendar.Calendar.from_ical(row_to_ics({**event, "raw_payload": retained, "rrule": "", "exdates": "", "rdates": "", 'status': status, "uid": str(master.get("UID") or event.get("uid") or "")},
                                                               mute_alarms=bool(payload.get("mute_provider_reminders")),
                                                               changed_fields=changed_fields, rsvp=payload.get('_rsvp')))
             vevent = next(c for c in exc_cal.walk("VEVENT"))

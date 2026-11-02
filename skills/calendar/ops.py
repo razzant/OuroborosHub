@@ -19,6 +19,7 @@ from model import (
     PROVIDER_LOCAL, CALDAV_PROVIDERS, PUBLISH_BUSY, PUBLISH_FULL, SCOPES, SCOPE_ALL, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_SHOWN,
     get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time, calendar_time, event_field_value, normalize_rrule_until, has_recurrence, event_time_kind, stage_event_times,
     event_time_delta as _time_delta, shift_event_time as _shift_instant, recurrence_time_delta, shift_recurrence_time,
+    validate_rrule_interval, shifted_rrule_selectors, following_series_start, series_move_changes,
 )
 
 RETRY_BACKOFF_SEC = (30, 120, 600, 1800, 7200)
@@ -144,6 +145,7 @@ def validate_rrule(rule: Any, start_utc: str, zone: str) -> str:
     if any(c in text for c in ":\r\n"):
         raise ValueError("rrule: требуется одно RRULE без дополнительных строк")
     try:
+        validate_rrule_interval(text)
         tz = get_tz(zone)
         start = parse_stored(start_utc).astimezone(tz)
         rrulestr(normalize_rrule_until(text, tz), dtstart=start, forceset=True)
@@ -177,6 +179,7 @@ def _expand_master(master: Dict[str, Any], start: datetime, end: datetime, excep
             local_src = m_start.astimezone(get_tz(master.get("tz") or ""))
             dtstart = local_src.replace(tzinfo=tz)
         rule_text = str(master['rrule'])
+        validate_rrule_interval(rule_text)
         if force_tz is not None:
             parts = rule_text.split(';')
             for index, part in enumerate(parts):
@@ -523,6 +526,12 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
     if scope == SCOPE_FOLLOWING and not occ_key:
         raise ValueError("scope=following needs an occurrence id")
     changes = _shift_for_scope_all(store, row, occ_key, scope, changes)
+    if not from_source and scope != SCOPE_THIS and 'rrule' not in changes and changes.get('start_utc') and has_recurrence(row):
+        try:
+            changes = series_move_changes(row, exception, occ_key, scope, changes)
+        except ValueError as exc:
+            return {'status': 'argument_required', 'argument': 'rrule', 'message': str(exc),
+                    'event': row, 'assignments': []}
     op_id = new_id("op")
     members = [row] + (links.followers(store, row) if propagate else [])
     assignments: List[Dict[str, Any]] = []
@@ -905,7 +914,7 @@ def _ensure_exception(store, master: Dict[str, Any], occ_key: str, changes: Dict
             _apply_changes(store, exc, changes)
             return exc["id"]
     occ_start = parse_stored(occ_key) or parse_stored(master['start_utc'])
-    row = {k: master.get(k) for k in ("calendar_id", "uid", "visibility", "availability", "is_primary", "title", "description",
+    row = {k: master.get(k) for k in ("calendar_id", "uid", "visibility", "availability", "is_primary", "title", "description", "status",
                                        "location", "tz", "time_kind", "all_day", "organizer", "attendees_json", "my_response", "origin", "link_group_id", "link_state")}
     row["reminders_json"] = "[]"  # no own override: later whole-series reminder edits remain effective
     # The exception has NO provider identity of its own: Google resolves the instance id from the master + recurrence key,
@@ -935,6 +944,7 @@ def _count_remaining(master: Dict[str, Any], rrule: str, cut: Optional[datetime]
     try:
         from dateutil.rrule import rrulestr
         from model import get_tz
+        validate_rrule_interval(rrule)
         tz = get_tz(master.get("tz") or "")
         rule = rrulestr(str(rrule), dtstart=m_start.astimezone(tz), forceset=True)
         before = sum(1 for occ in rule if occ.astimezone(timezone.utc) < cut.astimezone(timezone.utc))
@@ -996,7 +1006,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     elapsed_shift = requested_start - cut_effective
     shift = _time_delta(cut_effective, requested_start, master)
     target = {**master, **changes}
-    new_start = requested_start if cut_effective == occ_start else shift_recurrence_time(target, occ_start, recurrence_time_delta(cut_effective, requested_start, target))
+    new_start = following_series_start(target, occ_start, cut_effective, requested_start)
     slot_shift = recurrence_time_delta(occ_start, new_start, target)
     requested_end = parse_stored(changes.get("end_utc"))
     new_duration = (requested_end - requested_start) if requested_end else duration
@@ -1018,7 +1028,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     until_part = next((p.split("=", 1)[1] for p in original_rrule.split(";") if p.upper().startswith("UNTIL=")), "")
     # EXDATE/RDATE at/after the cut belong to the new series (shifted with it); the old one keeps only the earlier ones
     row = {k: master.get(k) for k in ("calendar_id", "visibility", "availability", "is_primary", "title", "description", "location", "tz", "time_kind",
-                                       "all_day", "organizer", "attendees_json", "my_response", "reminders_json", "origin")}
+                                       "all_day", "organizer", "attendees_json", "my_response", "reminders_json", "origin", "status")}
     split_tz = get_tz(master.get("tz") or "")
     if until_part:
         if shift:
@@ -1036,6 +1046,9 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
             except ValueError:
                 pass  # retain a malformed legacy bound; never turn a finite rule into an endless one
         rule_parts.append(f"UNTIL={until_part}")
+    next_rule = changes.get('rrule', ';'.join(rule_parts))
+    if 'rrule' not in changes and slot_shift:
+        next_rule = shifted_rrule_selectors({**master, 'start_utc': occ_key, 'rrule': next_rule}, new_start)
     def _shift_csv(csv: str) -> str:
         out = []
         for x in str(csv or "").split(","):
@@ -1045,7 +1058,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
         return ",".join(out)
     row.update({"uid": split_uid or new_uid(), "start_utc": iso_utc(new_start), "end_utc": iso_utc(new_end), "link_group_id": new_group,
                 "exdates": _shift_csv(master.get("exdates")), "rdates": _shift_csv(master.get("rdates")),
-                "rrule": changes.get("rrule") or ";".join(rule_parts), "sync_state": "synced"})
+                "rrule": next_rule, "sync_state": "synced"})
     saved = store.insert_event(row)
     # A following edit replaces the series ID, not the occurrence's history.
     # Carry already sent/uncertain notices into the new identity before the
@@ -1282,6 +1295,8 @@ def _matches_unversioned_baseline(payload, remote, adapter):
         baselines.append(payload['baseline_after_predecessor'])
     for field in keys:
         def value(row):
+            if field == 'status' and 'status' not in changes:
+                return row.get('status') == 'cancelled'  # Sparse edits preserve tentative/confirmed, never revive a cancellation.
             if field == 'attendees_json':
                 return event_field_value(row, field, provider_observation=True)
             if field.endswith('_json'):
@@ -1530,7 +1545,7 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
             added.append({"calendar_id": cid, "calendar_name": cal["name"], "status": INTENT_FAILED, "message": "календарь только для чтения"})
             continue
         mode = cal.get("publish_mode") or PUBLISH_BUSY
-        copy = {k: row.get(k) for k in ("uid", "visibility", "availability", "start_utc", "end_utc", "tz", "all_day", "rrule", "exdates", "rdates")}
+        copy = {k: row.get(k) for k in ("uid", "visibility", "availability", "status", "start_utc", "end_utc", "tz", "all_day", "rrule", "exdates", "rdates")}
         copy['time_kind'] = links.projection_time_kind(row, cal)
         copy.update({"calendar_id": cid, "is_primary": 0, "link_group_id": group,
                      "title": BUSY_COPY_TITLE if mode == PUBLISH_BUSY else row.get("title") or "",

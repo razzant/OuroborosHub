@@ -1,9 +1,11 @@
 """Preparation gives the existing Host guard the exact RFC conversation before effects."""
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import httpx
 import yaml
 
 from lib.accounts import AccountStore
@@ -68,16 +70,22 @@ def test_wrong_supplied_identity_is_refused_and_new_mail_needs_no_preparation(tm
     assert calls[-1] == ('binding', store.message_id_for('new'))
 
 
-def test_legacy_queued_reply_replays_without_source_lookup_or_new_binding(tmp_path):
+@pytest.mark.parametrize('explicit_account', [False, True])
+def test_legacy_queued_reply_replays_without_source_lookup_or_new_binding(tmp_path, explicit_account):
     account, service, store, calls = context(tmp_path, None)
     store.enqueue_outbox(request_id='legacy', to=['reader@example.invalid'], body='Answer', in_reply_to='<gone>',
                          reporting={'sender': account['address']})
-    result = service.send(account_id=account['id'], to='reader@example.invalid', body='Answer',
+    account_args = {'account_id': account['id']} if explicit_account else {}
+    result = service.send(**account_args, to='reader@example.invalid', body='Answer',
                           reply_to_message_id='<gone>', request_id='legacy')
     assert result['deduplicated'] and calls == []
+    changed = service.send(**account_args, to='reader@example.invalid', body='Changed',
+                           reply_to_message_id='<gone>', request_id='legacy')
+    assert changed['code'] == 'request_id_conflict' and calls == []
 
 
-def test_prepared_reply_reaches_real_author_guard_without_reference_cartesian_product(tmp_path, monkeypatch):
+@pytest.mark.parametrize('implicit_account', [False, True])
+def test_prepared_reply_reaches_real_author_guard_without_reference_cartesian_product(tmp_path, monkeypatch, implicit_account):
     core = os.environ.get('OUROBOROS_SOURCE_DIR')
     if not core: pytest.skip('Set OUROBOROS_SOURCE_DIR for the real host author guard')
     monkeypatch.syspath_prepend(core)
@@ -87,8 +95,6 @@ def test_prepared_reply_reaches_real_author_guard_without_reference_cartesian_pr
     from ouroboros.presence_bindings import conversation_key
     source = {'message_id': '<incoming>', 'references': ['<root>', '<parent>'], 'in_reply_to': '<parent>', 'sender': 'reader@example.invalid'}
     account, service, store, calls = context(tmp_path / 'mail', source)
-    prepared = service.send(account_id=account['id'], to='reader@example.invalid', body='Answer', reply_to_message_id='<incoming>')
-    assert prepared['status'] == 'needs_arguments' and store.status()['outbox'] == {}
     manifest = yaml.safe_load(Path(__file__).resolve().parents[1].joinpath('SKILL.md').read_text(encoding='utf-8').split('---', 2)[1])
     name = extension_surface_name('email-presence', 'email_send')
     descriptor = {'skill': 'email-presence', 'extension_generation': 'mail-test'}
@@ -96,17 +102,30 @@ def test_prepared_reply_reaches_real_author_guard_without_reference_cartesian_pr
     monkeypatch.setitem(registry._extensions, 'email-presence', bundle)
     monkeypatch.setitem(registry._tools, name, descriptor)
     drive = tmp_path / 'host'
-    places.connect_place(drive, connector='email-presence', provider='email', account_id=account['id'], state='active')
+    places.connect_place(drive, connector='email-presence', provider='email', state='active')
     key = conversation_key('email', account['id'], '<root>', '<root>')
     lease = PresenceTurnGate(state_root=drive / 'state').acquire(key)
     lease.bind_author('actual-author')
     try:
         ctx = SimpleNamespace(drive_root=drive, task_id='competitor', task_metadata={})
+        args = {'to': 'reader@example.invalid', 'body': 'Answer', 'reply_to_message_id': '<incoming>'}
+        args.update({'conversation_id': '<root>', 'thread_id': '<root>'} if implicit_account else {'account_id': account['id']})
+        assert place_guard.dispatch_refusal(ctx, name, args, ext_tool=descriptor) == ''
+        handlers = {}
+        register_tools(SimpleNamespace(register_tool=lambda name, handler, **kw: handlers.update({name: handler})), service)
+        prepared = json.loads(handlers['email_send'](ctx=ctx, **args))
+        assert prepared['status'] == 'needs_arguments' and store.status()['outbox'] == {}
+        assert not any(call[0] == 'binding' for call in calls)
         retry = prepared['retry_arguments']
+        assert retry['account_id'] == account['id']
         refusal = place_guard.dispatch_refusal(ctx, name, retry, ext_tool=descriptor)
         assert 'actual-author' in refusal
         facts = place_guard.call_place_facts(ctx, name, retry, ext_tool=descriptor)
         assert facts['places'][0]['conversation_keys'] == [key]
+        draft_name = extension_surface_name('email-presence', 'email_draft')
+        monkeypatch.setitem(registry._tools, draft_name, descriptor)
+        assert place_guard.dispatch_refusal(ctx, draft_name, retry, ext_tool=descriptor) == ''
+        assert place_guard.call_place_facts(ctx, draft_name, retry, ext_tool=descriptor)['effect'] == 'write'
         ctx.task_id = 'actual-author'
         assert place_guard.dispatch_refusal(ctx, name, retry, ext_tool=descriptor) == ''
         result = service.send(**retry)
@@ -114,3 +133,62 @@ def test_prepared_reply_reaches_real_author_guard_without_reference_cartesian_pr
         assert calls[-1] == ('binding', '<root>')
     finally:
         lease.release()
+
+
+@pytest.mark.parametrize('operation', ['send', 'draft'])
+@pytest.mark.parametrize('threaded', [False, True])
+def test_omitted_sole_account_prepares_before_staging_or_effect_even_with_thread(tmp_path, monkeypatch, operation, threaded):
+    source = {'message_id': '<incoming>', 'sender': 'reader@example.invalid', 'references': ['<root>']}
+    account, service, store, calls = context(tmp_path, source)
+    args = {'to': 'reader@example.invalid', 'body': 'Message', 'subject': 'Subject',
+            'attachments': [{'filename': 'note.txt', 'data': 'Complete attachment'}]}
+    if threaded:
+        args.update(reply_to_message_id='<incoming>', references=['<root>'], conversation_id='<root>', thread_id='<root>')
+    staged = []
+    original = EmailStore.stage_outbound_attachments
+    def stage(self, *args, **kwargs):
+        staged.append(True)
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(EmailStore, 'stage_outbound_attachments', stage)
+    response = getattr(service, operation)(**args)
+    assert response['status'] == 'needs_arguments' and response['code'] == 'canonical_account_required'
+    assert staged == [] and calls == [] and store.status()['outbox'] == {}
+    retry = response['retry_arguments']
+    assert retry['account_id'] == account['id']
+    for key, value in args.items():
+        assert retry[key] == value
+    schemas = {}
+    register_tools(SimpleNamespace(register_tool=lambda name, handler, **kw: schemas.update({name: kw['schema']})), service)
+    import jsonschema
+    jsonschema.validate(retry, schemas['email_' + operation])
+    result = getattr(service, operation)(**retry)
+    assert result['ok'] and staged == [True]
+    assert calls[-1][0] == ('binding' if operation == 'send' else 'draft')
+    if operation == 'send':
+        assert retry['request_id'] == result['request_id']
+        if not threaded:
+            assert calls[-1][1] == store.message_id_for(retry['request_id'])
+
+
+def test_prepared_account_keeps_sender_alias_and_binding_outage_retry_identity(tmp_path):
+    account, service, store, calls = context(tmp_path, None)
+    account['senders'].append('alias@example.invalid')
+    AccountStore(tmp_path).save(account)
+    prepared = service.send(sender='alias@example.invalid', to='reader@example.invalid', body='Message')
+    retry = prepared['retry_arguments']
+    assert retry['account_id'] == account['id'] and retry['sender'] == 'alias@example.invalid'
+    captured = []
+    def binding(selected, root):
+        captured.append((selected['id'], root))
+        if len(captured) == 1:
+            raise httpx.ReadTimeout('Synthetic binding outage')
+        return {'supported': False}
+    service.capture_binding = binding
+    with pytest.raises(httpx.ReadTimeout):
+        service.send(**retry)
+    assert store.receipt(retry['request_id']) is None
+    sent = service.send(**retry)
+    assert sent['ok'] and sent['sender'] == 'alias@example.invalid'
+    assert captured[0] == captured[1] == (account['id'], store.message_id_for(retry['request_id']))
+    repeated = service.send(**retry)
+    assert repeated['deduplicated'] and len(captured) == 2

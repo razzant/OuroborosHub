@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Multi-account Gmail API and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.9.1
+version: 0.9.2
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -114,15 +114,17 @@ address. Host conversation identity remains RFC Message-ID/References; native
 Gmail message/thread ids remain explicit provider facts, and replies pass the
 native threadId to Gmail. No signature, footer or Auto-Submitted marker is added.
 
-Read/search results include canonical `conversation_id` and `thread_id` when the
-RFC source is known. Pass both for a threaded `email_send` or `email_draft`.
-If omitted, the tool resolves the reply source and returns `needs_arguments`
-with exact `retry_arguments` before enqueueing or saving anything; repeat that
-call so the existing Host guard sees the same conversation the mail will use.
+Supply canonical `account_id` for a new `email_send` or `email_draft`, including
+a sole mailbox. Read/search results also include canonical `conversation_id`
+and `thread_id` when the RFC source is known; pass both for a threaded reply.
+An omitted account or reply identity returns `needs_arguments` with exact
+`retry_arguments` before enqueueing or saving anything. Repeat that call so the
+existing Host guard sees the same account and conversation the mail will use.
 This is argument preparation, not another human approval. `References` and a
-Place are not mandatory. A new unthreaded mail still queues in one call, and a
-previous request's receipt remains replayable without another effect. Supplied
-conversation fields must match the resolved RFC source, never a Gmail thread id.
+Place are not mandatory. A new unthreaded mail with an explicit account still
+queues in one call, and a queued request's receipt remains replayable without
+another effect. Supplied conversation fields must match the resolved RFC source,
+never a Gmail thread id. Draft attribution remains a write, not a speaking turn.
 
 ## Setup
 
@@ -244,6 +246,11 @@ stays observable. Canonical selected outputs keep their source and delivery
 identity across repeated polls and restarts; a retained receipt itself is never
 sent as speech. This does not claim exactly-once provider delivery after
 ambiguous network acceptance.
+Retained work carries `reply_anchor` on both released and terminal selected
+outputs, just as a continuing author does. The existing captured-message and
+same-thread checks select the recipient; absent or invalid anchors keep the
+legacy fallback. Recovering an anchor never changes an already queued receipt's
+recipient or repeats its send.
 An invalid mailbox destination cannot turn a selected answer into a delivery.
 The transport records `invalid_recipient`, keeps observing an active author and
 still queues later outputs with valid reply anchors. Once the Host work is

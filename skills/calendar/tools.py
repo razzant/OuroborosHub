@@ -535,6 +535,8 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
     result = {"status": "ok", "event": None, "assignments": []}
     if changes:
         result = ops.update_event(ctx.store, ctx.providers, str(id), changes, scope=scope, send_updates=_bool(send_updates), owner_tz=ctx.tz)
+        if result.get('status') == 'argument_required':
+            return json_dumps({key: result[key] for key in ('status', 'argument', 'message')})
     if cal_ids is not None:
         target_row = ctx.store.get_event(result.get("split_master_id") or base) or row
         result["reassign"] = ops.reassign_event(ctx.store, ctx.providers, target_row, cal_ids)
