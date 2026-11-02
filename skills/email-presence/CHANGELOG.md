@@ -16,6 +16,8 @@
   ending an active author before its later valid outputs can be delivered.
 - Use direct transport for the local Google return-page probe, preserving
   public origins, deployment prefixes and injected transports.
+- Retain readable malformed incoming address headers without blocking later
+  mail, and normalize the remaining stdlib outgoing-address parser failures.
 
 ## 0.9.0
 

@@ -14,6 +14,8 @@ from email.utils import getaddresses, make_msgid, parseaddr
 from pathlib import Path
 from typing import Any
 
+_ADDRESS_PARSE_ERRORS = (ValueError, IndexError, AttributeError, TypeError, HeaderParseError)
+
 
 def decode_header_value(value: Any) -> str:
     if value is None:
@@ -91,7 +93,7 @@ def mailbox_addresses(value: Any) -> list[str]:
         message['To'] = text
         header = message['To']
         parsed = header.addresses
-    except (ValueError, IndexError, HeaderParseError) as exc:
+    except _ADDRESS_PARSE_ERRORS as exc:
         raise MailAddressError("Invalid mailbox address list; use complete email addresses") from exc
     if (any(isinstance(defect, InvalidHeaderDefect) for defect in header.defects)
             or not parsed or any(not address.username or not address.domain for address in parsed)):
@@ -136,8 +138,15 @@ def parse_message(
     include_attachment_data: bool = False,
 ) -> dict[str, Any]:
     msg = message_from_bytes(raw, policy=default)
+    def header(name):
+        # A broken external address must remain readable without stopping later
+        # messages. Only stdlib header parsing falls back to its original value.
+        try:
+            return msg.get(name)
+        except _ADDRESS_PARSE_ERRORS:
+            return next((value for key, value in msg.raw_items() if key.lower() == name.lower()), None)
     message_id = str(msg.get("Message-ID") or "").strip() or f"<sha256-{hashlib.sha256(raw).hexdigest()}@ouroboros.local>"
-    sender_name, sender_addr = parseaddr(decode_header_value(msg.get("From")))
+    sender_name, sender_addr = parseaddr(decode_header_value(header("From")))
     attachments = []
     for part in msg.walk():
         if part.is_multipart() and not (part.get_filename() or part.get_content_disposition() == "attachment"):
@@ -152,17 +161,17 @@ def parse_message(
         "in_reply_to": str(msg.get("In-Reply-To") or "").strip(),
         "references": _message_ids(msg.get("References")),
         "subject": decode_header_value(msg.get("Subject")),
-        "sender": sender_addr or decode_header_value(msg.get("From")),
+        "sender": sender_addr or decode_header_value(header("From")),
         "sender_name": sender_name,
-        "recipients": _addresses(msg.get("To")),
-        "cc": _addresses(msg.get("Cc")),
-        "reply_to": _addresses(msg.get("Reply-To")),
+        "recipients": _addresses(header("To")),
+        "cc": _addresses(header("Cc")),
+        "reply_to": _addresses(header("Reply-To")),
         "date": str(msg.get("Date") or ""),
         "body": extract_body(msg, max_chars=max_body_chars),
         "attachments": attachments,
     }
     result["headers"] = {
-        name.lower(): [decode_header_value(value) for value in msg.get_all(name, [])]
+        name.lower(): [decode_header_value(value) for key, value in msg.raw_items() if key.lower() == name.lower()]
         for name in ("From", "To", "Cc", "Reply-To", "List-Id", "List-Unsubscribe", "Precedence", "Auto-Submitted")
         if name in msg or name in ("From", "To", "Cc", "Reply-To")
     }

@@ -179,6 +179,11 @@ remain readable by explicit account_id.
 - email_read only peeks and preserves flags. A local reply-header cache and exact
   raw source artifacts retain explicitly read historical mail without submitting
   it to Presence. email_mark_read is the separate write for Seen/UNREAD.
+  A malformed incoming address header remains readable in the decoded original
+  `headers` values and retained MIME source; it does not discard that message or
+  stop later mail and metadata search. Parsed address fields are projections,
+  not permission to send to malformed text: outgoing validation and the existing
+  selected-output failure/custody rules still apply.
 - email_folders is a declared read and works in Silent/Advises. email_mailbox
   retains list/create/copy/move/flags, including the old list action. IMAP move
   requires UID MOVE, never a mailbox-wide expunge. Gmail adds label management,

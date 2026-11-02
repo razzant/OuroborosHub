@@ -420,17 +420,17 @@ def has_recurrence(row):
     return not row.get('master_id') and any(row.get(field) for field in ('rrule', 'rdates', 'exdates'))
 
 
-def civil_in_basis(row, basis):
-    """Retain recorded temporal coordinates when native transport carries no replacement zone."""
+def civil_in_basis(row, basis, *, recurrence_basis=None):
+    """Retain effective coordinates; an exception's original slot uses its master's basis."""
     if not basis.get('tz'):
         return row
     incoming_zone, stored_zone = get_tz(row.get('tz') or ''), get_tz(basis['tz'])
-    def anchor(value, zone, date_only=False):
+    def anchor(value, zone, date_only=False, target_zone=stored_zone):
         instant = parse_stored(value)
         if instant is None:
             return value
         local = instant.astimezone(zone)
-        return iso_utc(datetime.combine(local.date(), time(), tzinfo=stored_zone) if date_only else local.replace(tzinfo=stored_zone))
+        return iso_utc(datetime.combine(local.date(), time(), tzinfo=target_zone) if date_only else local.replace(tzinfo=target_zone))
     result = dict(row)
     if (row.get('time_kind') == 'absolute' and not row.get('all_day') and '_start_tzid' in row
             and not row['_start_tzid'] and not has_recurrence(row)):
@@ -444,8 +444,10 @@ def civil_in_basis(row, basis):
         for field in ('exdates', 'rdates'):
             if result.get(field):
                 result[field] = ','.join(anchor(value, incoming_zone, bool(row.get('all_day'))) for value in result[field].split(','))
-    if result.get('recurrence_id') and (basis.get('all_day') or basis.get('time_kind') == 'floating'):
-        result['recurrence_id'] = anchor(result['recurrence_id'], get_tz(row.get('_recurrence_tz') or row.get('tz') or ''), bool(basis.get('all_day')))
+    slot_basis = basis if recurrence_basis is None else recurrence_basis
+    if result.get('recurrence_id') and (slot_basis.get('all_day') or slot_basis.get('time_kind') == 'floating'):
+        result['recurrence_id'] = anchor(result['recurrence_id'], get_tz(row.get('_recurrence_tz') or row.get('tz') or ''),
+                                         bool(slot_basis.get('all_day')), get_tz(slot_basis.get('tz') or basis['tz']))
     return result
 
 

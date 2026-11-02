@@ -14,7 +14,8 @@ from lib.runtime import EmailRuntime
 from lib.store import EmailStore, OutboxItem
 
 
-@pytest.mark.parametrize('value', ['a@', '"x"@', 'MAILER-DAEMON', '<>', 'broken\nheader'])
+@pytest.mark.parametrize('value', ['a@', '"x"@', 'a@[', 'user@[10.0.0.1', 'x <a@[>',
+                                  'a@b.example, c@[', '?a _, .,', 'MAILER-DAEMON', '<>', 'broken\nheader'])
 def test_malformed_mailbox_has_only_the_typed_input_failure(value):
     with pytest.raises(MailAddressError) as caught:
         mailbox_addresses(value)
@@ -32,13 +33,14 @@ def test_delivery_report_uses_recorded_facts_without_revalidating_legacy_input(w
 
 
 @pytest.mark.parametrize('version', [0, 1])
-def test_invalid_legacy_row_cannot_stop_later_mail_in_the_same_worker(tmp_path, version):
+@pytest.mark.parametrize('address', ['MAILER-DAEMON', 'a@['])
+def test_invalid_legacy_row_cannot_stop_later_mail_in_the_same_worker(tmp_path, version, address):
     store = EmailStore(tmp_path)
     store.enqueue_outbox(request_id='legacy', to=['reader@example.invalid'], body='Old body',
                          reporting={'version': version, 'account_id': 'mailbox'})
     with store._connect() as db:
         db.execute('UPDATE outbox SET recipients_json=?,to_json=?,attempts=4 WHERE request_id=?',
-                   (json.dumps(['MAILER-DAEMON']), json.dumps(['MAILER-DAEMON']), 'legacy'))
+                   (json.dumps([address]), json.dumps([address]), 'legacy'))
     store.enqueue_outbox(request_id='good', to=['reader@example.invalid'], body='Later body')
     sent = []
     client = MailClient({'EMAIL_USER': 'owner@example.invalid'})
@@ -65,7 +67,7 @@ def persisted(store):
         return dict(db.execute('SELECT state,last_error,host_reference FROM inbox WHERE uid=1').fetchone())
 
 
-@pytest.mark.parametrize('sender', ['MAILER-DAEMON', 'reader@example.invalid'])
+@pytest.mark.parametrize('sender', ['MAILER-DAEMON', 'a@[', 'reader@example.invalid'])
 @pytest.mark.parametrize('reference_kind', ['completed', 'deferred'])
 def test_terminal_invalid_recipient_keeps_exact_paid_selection_without_resubmission(tmp_path, sender, reference_kind):
     store = EmailStore(tmp_path)
@@ -93,7 +95,7 @@ def test_terminal_invalid_recipient_keeps_exact_paid_selection_without_resubmiss
         if reference_kind == 'deferred':
             assert reads == ['work-one', 'work-one']  # recoverable after the terminal cache was released
         assert not await runtime.process_inbox('observe')
-        if sender == 'MAILER-DAEMON':
+        if sender != 'reader@example.invalid':
             assert saved['state'] == 'failed' and 'invalid_recipient' in saved['last_error']
             assert store.status()['outbox'] == {}
         else:

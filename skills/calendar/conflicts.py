@@ -286,7 +286,9 @@ def _accept_provider(local, state, current, templates):
                 local.delete_event(eid)
             else:
                 previous = before_rows.get(eid) or next(r for r in state['rows'] if r['id'] == eid)
-                observed = civil_in_basis(observed, previous)
+                master_id = current['targets'][eid].get('source_master_id') or previous.get('master_id')
+                slot_basis = (before_rows.get(master_id) or next((r for r in state['rows'] if r['id'] == master_id), {})) if master_id else previous
+                observed = civil_in_basis(observed, previous, recurrence_basis=slot_basis)
                 fields = {k: observed[k] for k in _PROVIDER_FIELDS if k in observed}
                 fields.update(sync_state='synced', deleted_at=None)
                 local.update_event(eid, fields)

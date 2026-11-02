@@ -170,3 +170,95 @@ def test_withdrawal_protects_unknown_compound_snapshot_and_created_family(state)
         assert ctx.store.acknowledge_write(leased, ctx.store.get_event(eid), {'etag': 'synthetic-late-ack'}, leased['expected_etag'], shared_resource=True)
         assert ctx.store.get_intent(first['id'])['state'] == 'done'
     else: assert json.loads(ctx.store.get_intent(first['id'])['result_json'])['message'] == 'Existing unknown outcome'
+
+
+@pytest.mark.parametrize('shape', ['following', 'this', 'following_then_this'])
+@pytest.mark.parametrize('reserved_identity', [False, True])
+def test_unpublished_draft_retains_its_complete_split_and_override(shape, reserved_identity):
+    ctx, cid, server = caldav_context()
+    server.down = True
+    made = json.loads(tools.cal_create(ctx, title='Draft', start=_day(2).isoformat(), duration_min=60,
+                                      rrule='FREQ=DAILY;COUNT=5', calendars=[cid], confirm=True))
+    eid = made['event']['id']; uid = ctx.store.get_event(eid)['uid']
+    assert made['status'] == 'pending'
+    if reserved_identity:
+        # An address may be reserved before publication; it is not a provider ACK.
+        ctx.store.update_event(eid, {'external_id': 'reserved-' + uid, 'href': 'https://calendar.example.test/reserved.ics'})
+    if shape in ('following', 'following_then_this'):
+        changed = json.loads(tools.cal_update(ctx, id=eid + '@' + _day(4).isoformat(), scope='following', title='Draft later', confirm=True))
+        assert changed['status'] == 'pending'
+        segment = next(row for row in ctx.store.window(_day(2), _day(8)) if row['id'] != eid and not row['master_id'])
+        if shape == 'following_then_this':
+            assert json.loads(tools.cal_update(ctx, id=segment['id'] + '@' + _day(5).isoformat(), title='Draft override', confirm=True))['status'] == 'pending'
+    else:
+        assert json.loads(tools.cal_update(ctx, id=eid + '@' + _day(4).isoformat(), title='Draft override', confirm=True))['status'] == 'pending'
+    before = [(row['id'], row['title'], row['start'], row['end']) for row in visible(ctx, cid)]
+    assert len(before) == 5 and server.resources == {}
+    assert not any(intent['state'] == 'done' for intent in ctx.store.intents_for_event(eid))
+    count, account, calendar = disconnect(ctx, cid)
+    assert count
+    server.down = False; reconnect(ctx, account, calendar); calls = len(server.calls)
+    run_open_intents(ctx, 2)
+    after = visible(ctx, cid)
+    assert [(row['id'], row['title'], row['start'], row['end']) for row in after] == before
+    assert all(row.get('sync_state') == 'failed' for row in after)
+    assert ctx.store.get_event(eid)['uid'] == uid
+    assert server.resources == {} and len(server.calls) == calls
+
+
+def test_restored_provider_view_invalidates_existing_ctag_before_normal_sync():
+    from scripts.worker import sync_account
+    ctx, cid, server = caldav_context(); eid = series(ctx, cid, override=False)
+    calendar = ctx.store.get_calendar(cid); account = ctx.store.get_account(calendar['account_id'])
+    adapter = ctx.providers.adapter_for(account['id'])
+    adapter.list_calendars = lambda: [{**calendar, 'ctag': 'same-provider-generation'}]
+    server.down = True
+    assert json.loads(tools.cal_delete(ctx, id=eid + '@' + _day(4).isoformat(), scope='this', confirm=True))['status'] == 'pending'
+    server.down = False
+    row = ctx.store.get_event(eid); raw, _ = server.resources[row['href']]
+    server.resources[row['href']] = (raw.replace('SUMMARY:Series', 'SUMMARY:Provider newer'), '"external-v2"')
+    sync_account(ctx.store, ctx.providers, account, ctx.tz)
+    assert ctx.store.get_event(eid)['title'] == 'Provider newer'
+    assert ctx.store.get_sync_state(cid)['cursor'] == 'same-provider-generation'
+    count, account, calendar = disconnect(ctx, cid)
+    assert count == 1 and ctx.store.get_event(eid)['title'] == 'Series'
+    assert ctx.store.get_sync_state(cid)['cursor'] == ''
+    reconnect(ctx, account, calendar); calls = len(server.calls)
+    sync_account(ctx.store, ctx.providers, account, ctx.tz)
+    sync_account(ctx.store, ctx.providers, account, ctx.tz)
+    assert ctx.store.get_event(eid)['title'] == 'Provider newer'
+    assert ctx.store.get_sync_state(cid)['cursor'] == 'same-provider-generation'
+    assert not [call for call in server.calls[calls:] if call[0] in ('PUT', 'DELETE')]
+
+
+def test_restored_google_view_requests_full_listing_instead_of_consumed_sync_token():
+    from test_calendar_provider_divergence import google_context
+    from scripts.worker import sync_account
+    ctx, cid, server = google_context(); eid = series(ctx, cid, override=False)
+    calendar = ctx.store.get_calendar(cid); account = ctx.store.get_account(calendar['account_id'])
+    adapter = ctx.providers.adapter_for(account['id'])
+    adapter.list_calendars = lambda: [calendar]
+    fetch = adapter.fetch; cursors = []
+    def observed_fetch(calendar, cursor='', tz=None):
+        cursors.append(cursor)
+        return fetch(calendar, cursor, tz)
+    adapter.fetch = observed_fetch
+    server.down = True
+    assert json.loads(tools.cal_delete(ctx, id=eid + '@' + _day(4).isoformat(), scope='this', confirm=True))['status'] == 'pending'
+    server.down = False
+    external_id = ctx.store.get_event(eid)['external_id']
+    server.events[external_id].update(summary='Provider newer', etag=server._etag())
+    sync_account(ctx.store, ctx.providers, account, ctx.tz)
+    assert ctx.store.get_event(eid)['title'] == 'Provider newer'
+    assert ctx.store.get_sync_state(cid)['cursor']
+    count, account, calendar = disconnect(ctx, cid)
+    assert count == 1 and ctx.store.get_event(eid)['title'] == 'Series'
+    assert ctx.store.get_sync_state(cid)['cursor'] == ''
+    reconnect(ctx, account, calendar); fetched = len(cursors); calls = len(server.calls)
+    sync_account(ctx.store, ctx.providers, account, ctx.tz)
+    assert cursors[fetched] == ''
+    listing = [call for call in server.calls[calls:] if call[0] == 'GET' and call[1].endswith('/events')]
+    assert listing and 'syncToken' not in listing[0][2]
+    assert 'timeMin' in listing[0][2] and listing[0][2]['showDeleted'] == 'false'
+    assert ctx.store.get_event(eid)['title'] == 'Provider newer'
+    assert not [call for call in server.calls[calls:] if call[0] in ('POST', 'PATCH', 'DELETE')]

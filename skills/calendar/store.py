@@ -720,8 +720,12 @@ class Store:
                 for row in payload.get('restore_rows', []):
                     if row.get('sync_state') == 'synced':
                         before.setdefault(row['id'], row)
-                created.update(payload.get('created_ids', []))
                 desired = payload.get('desired') or {}
+                root_id = payload.get('family_root_id') or desired.get('master_id') or intent['event_id']
+                family = before.get(root_id) or local.get_event(root_id) or {}
+                if family.get('sync_state') != 'synced' or not (family.get('external_id') or family.get('href')):
+                    continue  # No confirmed family to restore: keep the whole unpublished draft, not only its first segment.
+                created.update(payload.get('created_ids', []))
                 snapshots = {row['id'] for row in payload.get('restore_rows', [])}
                 if (desired.get('master_id') in snapshots and intent['event_id'] not in snapshots
                         and (payload.get('changes') or {}).get('status') == 'cancelled'):
@@ -739,6 +743,7 @@ class Store:
                     with local._conn() as c:
                         c.execute('UPDATE events SET ' + ', '.join(key + '=?' for key in fields) + ' WHERE id=?',
                                   (*fields.values(), event_id))
+                    local.set_sync_state(confirmed['calendar_id'], cursor='')
                 elif event_id in created:
                     local.drop_reminders_for(event_id)
                     local.delete_event(event_id)  # Keep identity and desired/terminal history; withdraw the unsent structure.

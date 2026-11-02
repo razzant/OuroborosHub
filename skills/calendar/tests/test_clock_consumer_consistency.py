@@ -87,3 +87,85 @@ def test_provider_choice_retains_author_zone_unless_native_tzid_replaces_it(expl
     (['done'], 'ok'), (['pending'], 'pending'), (['conflict'], 'conflict')])
 def test_widget_route_preserves_unconfirmed_outcome(assignments, expected):
     assert routes._aggregate([{'status': state} for state in assignments]) == expected
+
+
+@pytest.mark.parametrize('master_kind,child_kind', [
+    ('tzid', 'date'), ('tzid', 'floating'), ('tzid', 'absolute'), ('floating', 'date'),
+    ('floating', 'absolute'), ('date', 'absolute'), ('date', 'floating')])
+@pytest.mark.parametrize('owner_zone', ['Europe/Berlin', 'America/New_York'])
+def test_provider_choice_preserves_original_slot_through_next_sync(tmp_path, master_kind, child_kind, owner_zone):
+    from test_effective_event_clock import mixed_context
+    from scripts.worker import reconcile_calendar
+    ctx, master, child, server = mixed_context(tmp_path, master_kind, child_kind)
+    ctx.tz = model.get_tz(owner_zone)
+    def visible():
+        return json.loads(tools.cal_events(ctx, start='2026-12-09', end='2026-12-14'))['events']
+    before = visible()
+    raw, _ = server.resources[master['href']]
+    server.resources[master['href']] = (raw.replace('SUMMARY:Override', 'SUMMARY:Remote override'), '"provider-v2"')
+    assert json.loads(tools.cal_update(ctx, id=child['id'], title='Local conflict', confirm=True))['status'] == 'conflict'
+    comparison = json.loads(tools.cal_events(ctx, id=child['id']))['event']['conflict']
+    assert json.loads(tools.cal_update(ctx, id=child['id'], resolution='provider',
+                                      resolution_token=comparison['resolution_token'], confirm=True))['status'] == 'resolved'
+    saved = ctx.store.get_event(child['id'])
+    assert saved['recurrence_id'] == child['recurrence_id']
+    assert len(visible()) == len(before)
+    assert sum(row['title'] == 'Remote override' for row in visible()) == 1
+    calendar = ctx.store.get_calendar(master['calendar_id'])
+    reconcile_calendar(ctx.store, ctx.providers, ctx.providers.adapter_for(calendar['account_id']), calendar, ctx.tz)
+    current, = ctx.store.exceptions_for(master['id'])
+    assert (current['id'], current['recurrence_id']) == (child['id'], child['recurrence_id'])
+    assert len(visible()) == len(before)
+
+
+@pytest.mark.parametrize('master_kind', ['tzid', 'floating', 'date'])
+def test_provider_choice_keeps_exception_author_zone_distinct_from_master(tmp_path, master_kind):
+    from test_effective_event_clock import mixed_context
+    ctx, master, child, server = mixed_context(tmp_path, master_kind, 'absolute')
+    # A retained absolute exception may have been authored in a different zone;
+    # its instant and master-owned recurrence address do not change with that metadata.
+    ctx.store.update_event(child['id'], {'tz': 'America/Los_Angeles'})
+    raw, _ = server.resources[master['href']]
+    server.resources[master['href']] = (raw.replace('SUMMARY:Override', 'SUMMARY:Remote override'), '"provider-v2"')
+    assert json.loads(tools.cal_update(ctx, id=child['id'], title='Local conflict', confirm=True))['status'] == 'conflict'
+    comparison = json.loads(tools.cal_events(ctx, id=child['id']))['event']['conflict']
+    assert json.loads(tools.cal_update(ctx, id=child['id'], resolution='provider',
+                                      resolution_token=comparison['resolution_token'], confirm=True))['status'] == 'resolved'
+    saved = ctx.store.get_event(child['id'])
+    assert saved['tz'] == 'America/Los_Angeles'
+    assert saved['start_utc'] == child['start_utc']
+    assert saved['recurrence_id'] == child['recurrence_id']
+
+
+@pytest.mark.parametrize('master_all_day', [False, True])
+def test_google_mixed_provider_choice_preserves_original_instance_after_travel(master_all_day):
+    from test_calendar_provider_divergence import google_context, sync
+    ctx, cid, server = google_context()
+    ctx.tz = model.get_tz('Europe/Berlin')
+    def edge(day, all_day, hour=9):
+        return {'date': day} if all_day else {'dateTime': day+f'T{hour:02d}:00:00+01:00', 'timeZone': 'Europe/Berlin'}
+    master = {'id': 'mixed-master', 'iCalUID': 'mixed-series', 'etag': 'v1', 'summary': 'Master',
+              'start': edge('2026-12-10', master_all_day),
+              'end': edge('2026-12-11' if master_all_day else '2026-12-10', master_all_day, 10),
+              'recurrence': ['RRULE:FREQ=DAILY;COUNT=3'], 'status': 'confirmed'}
+    child = {'id': 'mixed-exception', 'iCalUID': 'mixed-series', 'etag': 'v1', 'summary': 'Override',
+             'start': edge('2026-12-11', not master_all_day),
+             'end': edge('2026-12-11' if master_all_day else '2026-12-12', not master_all_day, 10),
+             'originalStartTime': edge('2026-12-11', master_all_day), 'recurringEventId': master['id'], 'status': 'confirmed'}
+    server.events.update({master['id']: master, child['id']: child})
+    sync(ctx, cid)
+    source = ctx.store.find_by_external(cid, external_id=master['id'])
+    original, = ctx.store.exceptions_for(source['id'])
+    ctx.tz = model.get_tz('America/New_York')
+    server.events[child['id']].update(summary='Remote override', etag='v2')
+    assert json.loads(tools.cal_update(ctx, id=original['id'], title='Local conflict', confirm=True))['status'] == 'conflict'
+    comparison = json.loads(tools.cal_events(ctx, id=original['id']))['event']['conflict']
+    assert json.loads(tools.cal_update(ctx, id=original['id'], resolution='provider',
+                                      resolution_token=comparison['resolution_token'], confirm=True))['status'] == 'resolved'
+    for after_sync in (False, True):
+        if after_sync:
+            sync(ctx, cid)
+        saved, = ctx.store.exceptions_for(source['id'])
+        assert (saved['id'], saved['recurrence_id']) == (original['id'], original['recurrence_id'])
+        rows = json.loads(tools.cal_events(ctx, start='2026-12-11', end='2026-12-12'))['events']
+        assert len(rows) == 1 and rows[0]['title'] == 'Remote override'
