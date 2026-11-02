@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/5c5795fa9fab2cfd81e6f8f18859fd570189a19c",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/ad2e0b9e3565ed4ad87e90fbf51318df9f90f8fa",
   "schema_version": 1,
   "skills": [
     {
@@ -439,8 +439,8 @@
         },
         {
           "path": "store.py",
-          "sha256": "d2db169e04f5428d96a3797b5351ad7af44c2658640ad5a2ba6e4209c6e7810d",
-          "size": 68853
+          "sha256": "d7d14d6b2979f8a8564a7efe652cbfe252471c3a4763a9ead942eceda85709d3",
+          "size": 69042
         },
         {
           "path": "tests/test_birth_recovery.py",
@@ -694,8 +694,8 @@
         },
         {
           "path": "tests/test_withdrawn_calendar_family.py",
-          "sha256": "ea318b85c5b942cbd1dcf681e4118decc897d9ba1e560cc1034a3091f2479cc0",
-          "size": 16230
+          "sha256": "405d9bc9dfbca11080e80efef66fbcffb6a2ab38c3ea5e92b278f7925cd61ea8",
+          "size": 23853
         },
         {
           "path": "tools.py",
@@ -1200,8 +1200,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "af64579763a511ed56c2c23cdf36779872171880970e92ba27ffd35e87d86373",
-          "size": 4335
+          "sha256": "3d012c40fe4cc58f591848383bd350b65a0a38aa22f51bbd0bfaa4348a1dfddf",
+          "size": 4489
         },
         {
           "path": "README.md",
@@ -1210,8 +1210,8 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "b01a49119a6eac6d114f1e06bdae48b6ea7d6a3261dd1f212d82b0f52f13a721",
-          "size": 25760
+          "sha256": "f482f9b5fcfe9fc0cdf12a0c1d3772c0d9a2941ee090603ce733da92fcb86957",
+          "size": 26043
         },
         {
           "path": "lib/accounts.py",
@@ -1250,8 +1250,8 @@
         },
         {
           "path": "lib/mime.py",
-          "sha256": "4d5e700c3fd8508d22fc8d5642aa7f8696c56621315a09b22e7dd95b65883596",
-          "size": 12242
+          "sha256": "5dc834a8f64669b548901d4826518676ba3804418b55b7463502c5f0eac5300c",
+          "size": 12676
         },
         {
           "path": "lib/runtime.py",
@@ -1362,6 +1362,11 @@
           "path": "tests/test_gmail.py",
           "sha256": "38650629e9625c6d7e9d9e1a24782a68223745ae598b4b19ad3ee4c105256b7d",
           "size": 13703
+        },
+        {
+          "path": "tests/test_header_text_consumers.py",
+          "sha256": "84310c6604c7dec29f36613760c78b284cb90a6e48317a07726db34086c31a74",
+          "size": 9740
         },
         {
           "path": "tests/test_host_adapter.py",
