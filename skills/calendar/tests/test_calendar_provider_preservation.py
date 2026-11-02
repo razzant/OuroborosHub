@@ -470,9 +470,17 @@ def test_caldav_rename_after_own_reminder_ack_uses_current_resource(track):
     sync(ctx, cid)
     row = ctx.store.find_by_external(cid, href=href)
     assert json.loads(tools.cal_update(ctx, id=row['id'], reminders=[15], confirm=True))['status'] == 'updated'
-    # ACK advances the row's ETag; its old imported raw text still has EMAIL/absolute alarms.
-    assert 'ACTION:EMAIL' in ctx.store.get_event(row['id'])['raw_payload']
+    current = ctx.store.get_event(row['id'])
+    assert (current['raw_payload'], current['etag']) == server.resources[href]
     before = alarm_values(server.resources[href][0])
+    ack = ctx.store.intents_for_event(row['id'])[-1]
+    assert json.loads(ack['result_json'])['native_cache'] is True
+    # Reopen the older supported state explicitly: current identity/ACK, stale imported
+    # EMAIL/absolute alarm bytes. Rename must still read the current native resource.
+    ctx.store.update_event(row['id'], {'raw_payload': row['raw_payload']})
+    ctx.store.settle_intent(ack['id'], 'done', {'ok': True, 'etag': current['etag']})
+    stale = ctx.store.get_event(row['id'])
+    assert stale['etag'] == current['etag'] and 'ACTION:EMAIL' in stale['raw_payload']
     assert json.loads(tools.cal_update(ctx, id=row['id'], title='After reminder change', confirm=True))['status'] == 'updated'
     assert alarm_values(server.resources[href][0]) == before == [{'action': 'DISPLAY', 'trigger': -900.0}]
 

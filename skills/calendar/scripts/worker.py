@@ -261,11 +261,17 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
         row = civil_in_basis(row, existing)
         if existing.get("etag") == row["etag"] and existing.get("sync_state") == "synced" and not existing.get("deleted_at"):
             # Our acknowledged wire format may use UTC for a zoned one-off.
-            # Equal ETags permit type enrichment, not replacing its authoring zone.
+            # Equal ETags permit parser enrichment, not replacing its authoring zone.
+            enrichment = {}
             if row.get('time_kind') and row['time_kind'] != existing.get('time_kind'):
-                enrichment = {'time_kind': row['time_kind']}
+                enrichment['time_kind'] = row['time_kind']
                 if not existing.get('tz') and row.get('tz'):
                     enrichment['tz'] = row['tz']
+            if row.get('status') and row['status'] != existing.get('status'):
+                enrichment['status'] = row['status']
+            if row.get('raw_payload') and row['raw_payload'] != existing.get('raw_payload'):
+                enrichment['raw_payload'] = row['raw_payload']
+            if enrichment:
                 if existing['id'] not in basis or not store.apply_provider_snapshot(existing['id'], enrichment, observed=basis[existing['id']]):
                     protected_masters.add(existing['id'])
                     next_cursor = ''
@@ -324,11 +330,13 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
         if exc is None and same_identity:
             exc = min(same_identity, key=lambda e: (e.get('created_at') or '', e['id']))
         payload = {k: v for k, v in row.items() if k != "master_external_id"}
-        payload.update({"master_id": master_id, "raw_payload": ""})
+        payload.update({"master_id": master_id})
         if master_row:
             payload.update({key: master_row.get(key) for key in ('link_group_id', 'is_primary', 'link_state')})
-        changed = exc is None or exc.get("etag") != row["etag"] or exc.get('recurrence_id') != row['recurrence_id'] or ('time_kind' in row and exc.get('time_kind', '') != row['time_kind'])
-        materially = exc is None or links.changed(exc, row, provider_observation=True)
+        status_enrichment = bool(exc and exc.get('etag') == row['etag'] and row.get('status') and exc.get('status') != row['status'])
+        native_enrichment = bool(exc and row.get('raw_payload') and row['raw_payload'] != exc.get('raw_payload'))
+        changed = exc is None or exc.get("etag") != row["etag"] or exc.get('recurrence_id') != row['recurrence_id'] or ('time_kind' in row and exc.get('time_kind', '') != row['time_kind']) or status_enrichment or native_enrichment
+        materially = exc is None or links.changed({**exc, **({'status': row['status']} if status_enrichment else {})}, row, provider_observation=True)
         if exc is None:
             saved = store.insert_provider_exception(master_id, payload)
             if saved is None:
@@ -342,7 +350,7 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
                     next_cursor = ''
                 continue   # our own write to this occurrence is in flight
             fields = {k: payload[k] for k in ("title", "description", "location", "start_utc", "end_utc", "status", "etag",
-                                              "attendees_json", "my_response", "tz", "time_kind", "all_day", "recurrence_id") if k in payload}
+                                              "attendees_json", "my_response", "tz", "time_kind", "all_day", "recurrence_id", "raw_payload") if k in payload}
             if exc.get("origin") == "external":
                 fields['availability'] = payload.get('availability') or exc.get('availability')
                 fields["reminders_json"] = _imported_reminders(exc, payload.get("reminders_json") or "[]", cal["provider"], bool((store.get_setting(rem.MODE_KEY) or {}).get(cal["id"])))

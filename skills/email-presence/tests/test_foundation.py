@@ -165,7 +165,7 @@ def test_sending_setting_defaults_roundtrips_and_leaves_other_tools_working(tmp_
     tools, calls = registered(tmp_path, monkeypatch)
     with TestClient(_settings_app(tmp_path, {"EMAIL_USER": ACCOUNT})) as client:
         assert client.get("/settings/save").json()["sending"] == "on"
-        assert json.loads(tools["email_send"](to=ACCOUNT, body="one", request_id="one"))["ok"]
+        assert json.loads(tools["email_send"](account_id=ACCOUNT, to=ACCOUNT, body="one", request_id="one"))["ok"]
         assert client.post("/settings/save", json={"sending": "off", "words": ["invoice", "счёт"]}).status_code == 200
         assert json.loads((tmp_path / "settings.json").read_text())["words"] == ["invoice", "счёт"]
         assert client.get("/settings/save").json()["words"] == "invoice\nсчёт"
@@ -176,7 +176,7 @@ def test_sending_setting_defaults_roundtrips_and_leaves_other_tools_working(tmp_
         assert EmailStore(tmp_path).receipt("two") is None
         for name, kwargs in (("email_search", {}), ("email_read", {"uid": 1, "uidvalidity": 7}),
                              ("email_mark_read", {"uid": 1, "uidvalidity": 7}),
-                             ("email_draft", {"to": ACCOUNT, "subject": "draft", "body": "text"}),
+                             ("email_draft", {"account_id": ACCOUNT, "to": ACCOUNT, "subject": "draft", "body": "text"}),
                              ("email_mailbox", {"action": "list"})):
             assert json.loads(tools[name](**kwargs))["ok"]
         assert calls == ["search", "read", "mark_read", "draft", "mailbox"]
@@ -185,7 +185,7 @@ def test_sending_setting_defaults_roundtrips_and_leaves_other_tools_working(tmp_
         assert client.post("/settings/save", json={"sending": "on", "words": "a+b\n\n invoice "}).status_code == 200
         assert json.loads((tmp_path / "settings.json").read_text())["words"] == ["a+b", "invoice"]
         assert client.get("/status").json()["readiness"]["sending"] == "on"
-        assert json.loads(tools["email_send"](to=ACCOUNT, body="two", request_id="two"))["ok"]
+        assert json.loads(tools["email_send"](account_id=ACCOUNT, to=ACCOUNT, body="two", request_id="two"))["ok"]
 
 
 def test_sending_off_holds_automatic_and_queued_mail_then_resumes(rig):
@@ -213,7 +213,7 @@ def test_sending_off_holds_automatic_and_queued_mail_then_resumes(rig):
 ])
 def test_request_id_reuse_checks_payload_and_returns_original_receipt(tmp_path, monkeypatch, change):
     tools, _ = registered(tmp_path, monkeypatch)
-    original = {"to": ACCOUNT, "body": "Hello", "subject": "Subject", "request_id": "stable",
+    original = {"account_id": ACCOUNT, "to": ACCOUNT, "body": "Hello", "subject": "Subject", "request_id": "stable",
                 "attachments": [{"filename": "note.txt", "data": "original"}]}
     first = json.loads(tools["email_send"](**original))
     same = json.loads(tools["email_send"](**original))
@@ -249,7 +249,7 @@ def test_outgoing_body_is_authored_without_connector_marks(body):
 
 def test_manifest_offers_facts_without_default_wakes():
     manifest = yaml.safe_load((Path(__file__).resolve().parents[1] / "SKILL.md").read_text().split("---", 2)[1])
-    assert manifest["version"] == "0.9.1"
+    assert manifest["version"] == "0.9.2"
     place = manifest["contributes"][0]
     assert place["wakes"] == []
     assert place["settings"] == "email_presence"

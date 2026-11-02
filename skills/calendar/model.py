@@ -10,6 +10,7 @@ import json
 import re
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
+from itertools import product
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:  # zoneinfo is stdlib since 3.9; tzdata may be missing on exotic hosts.
@@ -263,6 +264,74 @@ def bounded_result(obj: Dict[str, Any], limit: int = TOOL_RESULT_LIMIT, list_key
     return json_dumps({"status": trimmed.get("status") or "error", "message": "ответ слишком большой даже после сокращения", "truncated": True})
 
 
+def validate_rrule_interval(rule_text: str) -> None:
+    """RFC 5545 INTERVAL is positive; omission means one, never a work quota."""
+    for part in str(rule_text).split(';'):
+        key, _, value = part.partition('=')
+        if key.strip().upper() == 'INTERVAL' and int(value) <= 0:
+            raise ValueError('rrule INTERVAL must be a positive integer; omit it for the default 1')
+
+
+def shifted_rrule_selectors(master, new_start):
+    """Translate explicit clock/weekday selectors with the series' wall-calendar move.
+
+    Keep factored selector sets and their period meaning. A caller can supply an
+    explicit replacement rule for a calendar pattern this translation cannot infer.
+    """
+    text = str(master.get('rrule') or '')
+    validate_rrule_interval(text)
+    parts = [part.partition('=') for part in text.split(';') if part]
+    values = {key.upper(): value for key, _, value in parts}
+    if not any(key.startswith('BY') for key in values):
+        return text
+    zone = get_tz(master.get('tz') or '')
+    old, new = parse_stored(master['start_utc']).astimezone(zone), parse_stored(new_start).astimezone(zone)
+    date_shift = (new.date() - old.date()).days
+    clock_shift = (new.hour - old.hour) * 3600 + (new.minute - old.minute) * 60 + new.second - old.second
+    if not date_shift and not clock_shift:
+        return text
+    def explicit_rule():
+        raise ValueError('This move needs an explicit replacement rrule to preserve its selectors. '
+                         'Pass rrule together with the requested start; no changes were made.')
+    calendar_keys = {'BYDAY', 'BYMONTHDAY', 'BYYEARDAY', 'BYWEEKNO', 'BYMONTH', 'BYSETPOS'}
+    frequency = values.get('FREQ', '').upper()
+    if clock_shift and frequency in ('SECONDLY', 'MINUTELY', 'HOURLY') and calendar_keys.intersection(values):
+        explicit_rule()
+    names = ('BYHOUR', 'BYMINUTE', 'BYSECOND')
+    clocks = [tuple(map(int, values[key].split(','))) if key in values else (default,)
+              for key, default in zip(names, (old.hour, old.minute, old.second))]
+    if any(second == 60 for second in clocks[2]):
+        explicit_rule()  # A leap-second selector is not an ordinary wall-clock coordinate.
+    shifted = {divmod(hour * 3600 + minute * 60 + second + clock_shift, 86400)
+               for hour, minute, second in product(*clocks)}
+    days = {date_shift + day for day, _ in shifted}
+    if len(days) != 1 and (frequency != 'DAILY' or int(values.get('INTERVAL', '1')) != 1
+                           or calendar_keys.intersection(values)):
+        explicit_rule()
+    times = {(stamp // 3600, stamp // 60 % 60, stamp % 60) for _, stamp in shifted}
+    axes = [sorted({value[index] for value in times}) for index in range(3)]
+    if len(axes[0]) * len(axes[1]) * len(axes[2]) != len(times):
+        explicit_rule()  # Independent BY fields cannot encode the translated correlated pairs.
+    updates = {key: ','.join(map(str, axis)) for key, axis in zip(names, axes) if key in values}
+    if any(len(axis) != 1 for key, axis in zip(names, axes) if key not in values):
+        explicit_rule()
+    day_shift = next(iter(days)) if len(days) == 1 else 0
+    if day_shift and calendar_keys.intersection(values):
+        if frequency not in ('DAILY', 'WEEKLY') or (calendar_keys - {'BYDAY'}).intersection(values):
+            explicit_rule()
+        weekdays = ('MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU')
+        selected = values.get('BYDAY', '').upper().split(',')
+        if any(day not in weekdays for day in selected):
+            explicit_rule()
+        positions = [weekdays.index(day) for day in selected]
+        week_start = weekdays.index(values.get('WKST', 'MO').upper())
+        if frequency == 'WEEKLY' and int(values.get('INTERVAL', '1')) != 1 and len({
+                ((day - week_start) % 7 + day_shift) // 7 for day in positions}) != 1:
+            explicit_rule()
+        updates['BYDAY'] = ','.join(weekdays[(day + day_shift) % 7] for day in positions)
+    return ';'.join(key + '=' + updates.get(key.upper(), value) for key, _, value in parts)
+
+
 def normalize_rrule_until(rule_text: str, tz, value_kind: str = "utc") -> str:
     """Preserve the inclusive cutoff while rendering UNTIL as UTC, floating time or DATE.
 
@@ -294,6 +363,12 @@ def normalize_rrule_until(rule_text: str, tz, value_kind: str = "utc") -> str:
             bound = until.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         parts[index] = "UNTIL=" + bound
     return ";".join(parts)
+
+
+def event_status(value):
+    """Native event status is separate from each attendee's participation response."""
+    value = str(value or '').lower()
+    return value if value in ('tentative', 'cancelled') else 'confirmed'
 
 
 def event_field_value(row, field, *, provider_observation=False):
@@ -413,6 +488,28 @@ def shift_event_time(value, delta, all_day, zone, floating=False):
 
 def shift_recurrence_time(master, value, delta):
     return shift_event_time(value, delta, bool(master.get('all_day')), get_tz(master.get('tz') or ''), True)
+
+
+def following_series_start(target, original_slot, effective_start, requested_start):
+    """A moved override changes the new segment by its displayed delta, not its original displacement."""
+    if effective_start == original_slot:
+        return requested_start
+    return shift_recurrence_time(target, original_slot, recurrence_time_delta(effective_start, requested_start, target))
+
+
+def series_move_changes(master, exception, occ_key, scope, changes):
+    """Preflight a series move without writing or replacing the following segment's remaining bound."""
+    new_start = parse_stored(changes['start_utc'])
+    if scope == SCOPE_ALL and new_start == parse_stored(master['start_utc']):
+        return changes
+    basis = master
+    if scope == SCOPE_FOLLOWING:
+        slot = parse_stored(occ_key)
+        effective = parse_stored((exception or {}).get('start_utc')) or slot
+        new_start = following_series_start({**master, **changes}, slot, effective, new_start)
+        basis = {**master, 'start_utc': occ_key}
+    rule = shifted_rrule_selectors(basis, new_start)
+    return {**changes, 'rrule': rule} if scope == SCOPE_ALL else changes
 
 
 def has_recurrence(row):

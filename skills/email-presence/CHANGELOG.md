@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.2
+
+- Prepare the canonical mailbox account before new sends and drafts so the Host
+  checks the actual reply author. Explicit-account sends remain one call, and
+  replaying an existing receipt does not enqueue another message.
+- Preserve reply anchors on retained released and terminal outputs so selected
+  speech targets the captured message the Host named. Existing queued mail keeps
+  its original recipient.
+
 ## 0.9.1
 
 - Parse complete RFC mailbox lists before To/Cc/Bcc grouping and envelope delivery,

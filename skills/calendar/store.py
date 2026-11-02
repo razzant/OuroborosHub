@@ -797,12 +797,15 @@ class Store:
                 return False
             if delete:
                 local.delete_event(event['id'], hard=True)
-                local.settle_intent(intent['id'], INTENT_DONE, {'ok': True, **result})
+                local.settle_intent(intent['id'], INTENT_DONE, {'ok': True, **{k: v for k, v in result.items() if k != '_native_payload'}})
                 return True
             etag = result.get('master_etag') or result.get('etag') or ''
             payload = json.loads(current['payload_json'])
-            resource_id = payload.get('resource_id') or ((event.get('master_id') or event['id']) if shared_resource else event['id'])
+            resource_id = self._write_resource_id(payload, event, shared_resource)
             with local._conn() as c:
+                native = result.get('_native_payload')
+                cached = bool(etag and isinstance(native, str) and native and c.execute(
+                    'UPDATE events SET raw_payload=? WHERE id=?', (native, resource_id)).rowcount)
                 if etag:
                     # A queued write may predate this ACK, and its row may have
                     # moved to another segment. Match the staged resource, not
@@ -815,12 +818,40 @@ class Store:
                 fields = {k: result[k] for k in ('external_id','href','etag') if result.get(k)}
                 fields['sync_state'] = 'synced'
                 local.update_event(event['id'], fields)
-                local.settle_intent(intent['id'], INTENT_DONE, {'ok': True, 'etag': etag})
+                local.settle_intent(intent['id'], INTENT_DONE, {'ok': True, 'etag': etag, **({'native_cache': True} if cached else {})})
                 waiting = c.execute("SELECT kind FROM intents WHERE event_id=? AND state IN ('pending','conflict') ORDER BY rowid DESC LIMIT 1",
                                     (event['id'],)).fetchone()
                 if waiting:
                     local.update_event(event['id'], {'sync_state': 'pending_delete' if waiting[0]=='delete' else 'pending'})
         return True
+
+    @staticmethod
+    def _write_resource_id(payload, event, shared_resource):
+        return payload.get('resource_id') or ((event.get('master_id') or event['id']) if shared_resource else event['id'])
+
+    def native_cache_source(self, event):
+        """Return the existing native snapshot only when an own ACK has not left it stale.
+
+        The semantic subject may be a child of a shared CalDAV resource. Receipt
+        matching uses its staged resource, not an override's current parent.
+        """
+        calendar = self.get_calendar(event['calendar_id']) or {}
+        shared = calendar.get('provider') in CALDAV_PROVIDERS
+        source = (self.get_event(event['master_id']) or {}) if shared and event.get('master_id') else event
+        if not source.get('raw_payload'):
+            return None
+        resource = "COALESCE(NULLIF(json_extract(payload_json,'$.resource_id'),''),"
+        resource += "NULLIF(json_extract(payload_json,'$.desired.master_id'),'')," if shared else ''
+        resource += 'event_id)'
+        with self._conn() as connection:
+            row = connection.execute("SELECT result_json FROM intents WHERE calendar_id=? AND state='done' AND "
+                                     + resource + "=? ORDER BY rowid DESC LIMIT 1",
+                                     (event['calendar_id'], source['id'])).fetchone()
+        if row:
+            result = json.loads(row['result_json'])
+            if not result.get('etag') or result['etag'] == source.get('etag') and not result.get('native_cache'):
+                return None
+        return {**source, 'provider': calendar.get('provider')}
 
     def add_intent(self, kind: str, account_id: str, calendar_id: str, event_id: str, payload: Dict[str, Any],
                    scope: str = "this", expected_etag: str = "", op_id: str = "", intent_id: str = '') -> Dict[str, Any]:

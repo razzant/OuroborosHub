@@ -220,6 +220,8 @@ def register_routes(api, make_ctx) -> None:
         result = {"status": "ok", "event": None, "assignments": []}
         if changes:
             result = ops.update_event(ctx.store, ctx.providers, event_id, changes, scope=scope, send_updates=bool(body.get("send_updates")), owner_tz=ctx.tz)
+            if result.get('status') == 'argument_required':
+                return JSONResponse({key: result[key] for key in ('status', 'argument', 'message')}, status_code=400)
             if result.get("status") == "not_found":
                 return _err("событие не найдено", 404)
         if body.get("calendars"):

@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from model import AVAIL_BUSY, PROVIDER_GOOGLE, account_id as make_account_id, calendar_id as make_calendar_id, get_tz, iso_utc, now_utc, own_reminders, parse_stored
-from model import tz_name as zone_name, normalize_rrule_until
+from model import tz_name as zone_name, normalize_rrule_until, event_status
 from ops import ProviderError, created_content_matches
 from credentials import (
     TOKENS_FILE as TOKENS_FILE, SALT_FILE as SALT_FILE, KEY_FILE as KEY_FILE,
@@ -422,10 +422,10 @@ class GoogleAdapter:
                 _, _, data = self._request("GET", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{body['id']}")
                 zone = get_tz(event.get('tz') or '')
                 matched = created_content_matches(gevent_to_row(body, calendar['id'], zone), gevent_to_row(data, calendar['id'], zone))
-                return {"external_id": data.get("id", body["id"]), "href": "", "etag": str(data.get("etag") or ""),
+                return {**_native_write_result(data, {}, body['id']), "href": "",
                         "existed": True, 'matches': matched, 'cancelled': str(data.get('status') or '') == 'cancelled'}
             raise
-        return {"external_id": str(data.get("id") or body["id"]), "href": "", "etag": str(data.get("etag") or headers.get("etag") or "")}
+        return {**_native_write_result(data, headers, body['id']), 'href': ''}
 
     def created_identity(self, calendar: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, str]:
         """The id a create of this event uses (stable from its UID), so a lost answer stays addressable."""
@@ -476,6 +476,8 @@ class GoogleAdapter:
             # Sparse PATCHes leave provider alarms intact. Full revival/legacy
             # master replacement still owns the requested complete reminder value.
             body.pop("reminders", None)
+        if isinstance(payload.get('changes'), dict) and 'status' not in changes and not payload.get('_revive_cancelled'):
+            body.pop('status', None)  # Preserve native status even when a legacy cache had flattened it.
         # Removing the last guest is still an update for which the caller may
         # request notifications. The remaining guest count is not that choice.
         params = {"sendUpdates": "all" if payload.get("send_updates") else "none"}
@@ -485,7 +487,7 @@ class GoogleAdapter:
         method = 'PUT' if payload.get('_revive_cancelled') else 'PATCH'
         _, resp_headers, data = self._request(method, f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{urllib.parse.quote(external_id, safe='')}",
                                               params, body, headers)
-        return {"etag": str(data.get("etag") or resp_headers.get("etag") or ""), "external_id": str(data.get("id") or external_id)}
+        return _native_write_result(data, resp_headers, external_id)
 
     def delete(self, calendar: Dict[str, Any], event: Dict[str, Any], expected_etag: str, payload: Optional[Dict[str, Any]] = None) -> None:
         external_id = str(event.get("external_id") or "")
@@ -535,8 +537,7 @@ class GoogleAdapter:
         body = {"attendees": [_attendee_to_google(a) for a in attendees if a.get("email")]}
         params = {"sendUpdates": "all" if payload.get("notify_organizer") else "none"}
         _, headers, data = self._request("PATCH", f"/calendars/{urllib.parse.quote(calendar['external_id'], safe='')}/events/{urllib.parse.quote(external_id, safe='')}", params, body, {'If-Match': expected})
-        return {"etag": str(data.get("etag") or headers.get("etag") or ""),
-                "external_id": str(data.get('id') or external_id)}
+        return _native_write_result(data, headers, external_id)
 
     def set_default_reminders(self, calendar: Dict[str, Any], overrides: List[Dict[str, Any]]) -> None:
         """calendarList.patch — the user's own default reminders for this calendar (20 A: silence provider duplicates)."""
@@ -578,6 +579,14 @@ class GoogleAdapter:
 
 
 # ── conversions ─────────────────────────────────────────────────────
+
+def _native_write_result(data, headers, external_id):
+    """Carry the returned native object to the accepted ACK, never into public outcomes."""
+    result = {'external_id': str(data.get('id') or external_id), 'etag': str(data.get('etag') or headers.get('etag') or '')}
+    if data.get('id') and data.get('status') in ('tentative', 'confirmed', 'cancelled'):
+        result['_native_payload'] = json.dumps(data, ensure_ascii=False)
+    return result
+
 
 def _google_id(event: Dict[str, Any]) -> str:
     """Stable per local event: uuid hex is inside Google's [a-v0-9]{5,1024} alphabet."""
@@ -639,11 +648,11 @@ def gevent_to_row(item: Dict[str, Any], calendar_id: str, default_tz) -> Optiona
         "location": str(item.get("location") or ""), "start_utc": iso_utc(s), "end_utc": iso_utc(e), "tz": tz_name, "all_day": all_day,
         "_recurrence_tz": zone_name(rec_tz),
         "rrule": rrule, "exdates": exdates, "rdates": rdates, "recurrence_id": rec_key, "master_external_id": str(item.get("recurringEventId") or ""),
-        "status": "cancelled" if str(item.get("status") or "") == "cancelled" else "confirmed",
+        "status": event_status(item.get("status")),
         "organizer": str((item.get("organizer") or {}).get("email") or ""), "attendees_json": json.dumps(attendees, ensure_ascii=False),
         "my_response": my_response, "reminders_json": json.dumps("off" if rem.get("useDefault") is False and not reminders else sorted(set(reminders))), "origin": "external",
         "availability": "free" if transparency == "transparent" else AVAIL_BUSY, "sync_state": "synced",
-        "raw_payload": json.dumps(item, ensure_ascii=False) if not rec_key else "",
+        "raw_payload": json.dumps(item, ensure_ascii=False),
     }
 
 
@@ -726,7 +735,7 @@ def row_to_gevent(event: Dict[str, Any], mute: bool = False) -> Dict[str, Any]:
                 recurrence.append("RDATE:" + ",".join(vals))
     if not event.get("master_id") and (recurrence or event.get("rrule") == ""):
         body["recurrence"] = recurrence   # instances (exceptions) never carry recurrence: Google rejects it
-    body["status"] = "cancelled" if str(event.get("status") or "") == "cancelled" else "confirmed"
+    body["status"] = event_status(event.get("status"))
     body["transparency"] = "transparent" if event.get("availability") == "free" else "opaque"
     offsets = own_reminders(event.get("reminders_json"))   # None = the calendar's defaults, [] = explicitly none
     if mute or offsets == []:
