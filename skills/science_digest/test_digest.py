@@ -1,6 +1,7 @@
 """Consumer-facing, offline tests for the public preview and owner-chosen feed extension."""
 from __future__ import annotations
 
+import base64
 import email.utils
 import gzip
 import hashlib
@@ -2394,8 +2395,15 @@ class FeedTextNotExtractedTests(FeedSourceTests.__base__):
 
 # A real 1x1 PNG, as a feed inlines one.
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+# Base64 of 450 pseudo-random bytes: 600 characters, no padding, the shape of a small inlined image.
+MEDIA = base64.b64encode(hashlib.shake_256(b"inline media").digest(450)).decode()
 MARKUP = "&lt;p&gt;Read &lt;b&gt;me&lt;/b&gt;&lt;/p&gt;"
 XHTML = '<div xmlns="http://www.w3.org/1999/xhtml"><p>Read <b>me</b></p></div>'
+
+
+def wrap_lines(data, width):
+    """Base64 broken into lines as PEM (64) or MIME (76) writes it."""
+    return "\n".join(data[start:start + width] for start in range(0, len(data), width))
 
 
 def raw_atom(*entries, attributes=""):
@@ -2724,13 +2732,16 @@ class FeedInlineMediaTests(FeedSourceTests.__base__):
                 self.assertEqual(self.parsed(raw_atom(raw_entry("a", content)))["excerpt"], "")
 
     def test_base64_or_data_uri_body_is_not_text_whatever_it_declares(self):
-        wrapped = "\n".join(PNG[start:start + 64] for start in range(0, len(PNG), 64))
-        # The smallest real GIF and JPEG too: their slashes run denser than in long media.
-        gif = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+        # The smallest real JPEG, 212 characters, already runs past the bound, though its slashes run denser than in
+        # long media.
         jpeg = ("/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUV"
                 "DA8XGBYUGBIUFRT/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAB//EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AN//Z")
-        bodies = (PNG, gif, jpeg, wrapped, f"  {PNG}\n", PNG[:-2] * 200, f"data:image/png;base64,{PNG}",
-                  f"DATA:image/png;base64,{wrapped}", "data:image/gif;base64,R0lGODlhAQABAAAAACw=", "data:,hello")
+        padded =base64.b64encode(hashlib.shake_256(b"padded media").digest(449)).decode()
+        bodies = {"unbroken": MEDIA, "jpeg": jpeg, "padded": padded, "pem": wrap_lines(MEDIA, 64),
+                  "pem padded": wrap_lines(padded, 64), "mime": wrap_lines(MEDIA, 76), "spaced": f"  {MEDIA}\n",
+                  "past the field's clip": PNG[:-2] * 200, "data uri": f"data:image/png;base64,{PNG}",
+                  "wrapped data uri": f"DATA:image/png;base64,{wrap_lines(PNG, 64)}",
+                  "short data uri": "data:image/gif;base64,R0lGODlhAQABAAAAACw=", "plain data uri": "data:,hello"}
         cover = "<title>Cover</title>"
         forms = {"atom no type": lambda body: raw_atom(raw_entry("a", f"{cover}<content>{body}</content>")),
                  "atom text": lambda body: raw_atom(raw_entry("a", f'{cover}<content type="text">{body}</content>')),
@@ -2738,14 +2749,14 @@ class FeedInlineMediaTests(FeedSourceTests.__base__):
                  "atom html": lambda body: raw_atom(raw_entry("a", f'{cover}<content type="html">&lt;p&gt;{body}&lt;/p&gt;</content>')),
                  "rss": lambda body: raw_rss(raw_item("a", f"{cover}<description><![CDATA[{body}]]></description>"))}
         for form, document in forms.items():
-            for body in bodies:
-                with self.subTest(form=form, body=body[:24]):
+            for name, body in bodies.items():
+                with self.subTest(form=form, body=name):
                     item = self.parsed(document(body))
                     self.assertEqual((item["title"], item["excerpt"], item["excerpt_truncated"]), ("Cover", "", False))
         # With nothing else the item has no text at all, so a feed of such items is unavailable.
         self.add(OPENAI)
         source = self.source(self.fetch({OPENAI: feed_response(raw_rss(
-            raw_item("a", f"<description>{PNG}</description>"),
+            raw_item("a", f"<description>{MEDIA}</description>"),
             raw_item("b", f"<description>data:image/png;base64,{PNG}</description>")))})[0])
         self.assertEqual((source["coverage"], source["posts"], textless(source)), ("unavailable", [], []))
 
@@ -2761,15 +2772,106 @@ class FeedInlineMediaTests(FeedSourceTests.__base__):
                 self.assertEqual(self.parsed(document)["excerpt"], body)
 
     def test_base64_is_judged_by_shape_alone_as_the_instructions_say(self):
-        url_safe = PNG.replace("+", "-").replace("=", "")
-        self.assertNotEqual(url_safe, PNG.replace("=", ""))
-        for body in (url_safe, PNG[:39], f"Cover image: {PNG}", f"{PNG} is the cover"):
-            with self.subTest(read=body[:24]):
+        def excerpt(body):
+            return self.parsed(raw_atom(raw_entry("a", f"<content>{body}</content>")))["excerpt"]
+
+        bound = 200  # MIN_ENCODED_RUN, as the instructions state it
+        # URL-safe Base64 is another alphabet: its pieces between - and _ stay short of the bound.
+        url_safe = MEDIA.replace("+", "-").replace("/", "_")
+        self.assertLess(max(map(len, url_safe.replace("_", "-").split("-"))), bound)
+        plain = MEDIA.replace("/", "")
+        kept = {"url-safe": url_safe, "one short of the bound": MEDIA[:bound - 1],
+                "no digits": "".join(ch for ch in MEDIA if not ch.isdigit()), "no capitals": MEDIA.lower(),
+                "no small letters": MEDIA.upper(),
+                "a slash in seven": "/".join(plain[start:start + 6] for start in range(0, 300, 6)),
+                "lines too narrow": wrap_lines(MEDIA, 63), "lines too wide": wrap_lines(MEDIA, 77),
+                "lines of mixed widths": " ".join((MEDIA[:70], MEDIA[70:136], MEDIA[136:206])),
+                "a tiny png": PNG, "a tiny png wrapped": wrap_lines(PNG, 64)}
+        for name, body in kept.items():
+            with self.subTest(kept=name):
+                self.assertEqual(excerpt(body), " ".join(body.split()))
+        cut = {"at the bound": MEDIA[:bound], "a slash in eight": "/".join(plain[start:start + 7] for start in range(0, 280, 7)),
+               "lines of 64": wrap_lines(MEDIA, 64), "lines of 70": wrap_lines(MEDIA, 70), "lines of 76": wrap_lines(MEDIA, 76)}
+        for name, body in cut.items():
+            with self.subTest(cut=name):
+                self.assertEqual(excerpt(f"Cover {body} end"), "Cover end")
+        # A short word right after whole lines is read as their last one; after a shorter last line it stays.
+        self.assertEqual(excerpt(f"{wrap_lines(MEDIA[:256], 64)} merged"), "")
+        self.assertEqual(excerpt(f"{wrap_lines(MEDIA[:250], 64)} merged"), "merged")
+        # A line that ends a shorter run of another width can still begin one that is data.
+        name = "Ab1" * 23 + "A"  # 70 characters, a width Base64 may be wrapped at
+        self.assertEqual(excerpt(f"{name} {wrap_lines(MEDIA[:212], 64)} end"), f"{name} end")
+
+    def test_words_identifiers_and_hashes_are_read_whatever_base64_they_resemble(self):
+        sha1 = hashlib.sha1(b"commit").hexdigest()
+        cid = "QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco"  # an IPFS CIDv0: 46 characters of both cases and digits
+        address = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"  # an EIP-55 checksummed address
+        bodies = ("Qwen2VLForConditionalGenerationWithLoRAAdapters released", f"{sha1} merged", f"{sha1.upper()} merged",
+                  f"Merged {sha1.upper()} into main", "Transformer2DModelWithLearnedPositionalEmbeddingAndLayerNorm",
+                  "AbCd1234" * 5,
+                  # Hex digests never mix cases, alone, in a row or one a line; Base64 ones are short and padded.
+                  " ".join([sha1.upper()] * 8), "\n".join([hashlib.sha256(b"x").hexdigest().upper()] * 4),
+                  hashlib.sha512(b"x").hexdigest() * 3,
+                  " ".join(base64.b64encode(hashlib.sha512(bytes([n])).digest()).decode() for n in range(4)),
+                  "sha384-" + base64.b64encode(hashlib.sha384(b"x").digest()).decode(),
+                  " ".join([cid] * 6), " ".join([address] * 6), "ACGT" * 100,
+                  # A scheme only begins a URI after a character no scheme holds.
+                  "fields metadata:,raw and x-data:,y",
+                  # Real but tiny media cannot be told from such names by its shape: it is read, as noise.
+                  PNG, "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", wrap_lines(PNG, 64))
+        forms = {"atom": lambda body: raw_atom(raw_entry("a", f"<title>{body}</title><content>{body}</content>")),
+                 "rss": lambda body: raw_rss(raw_item("a", f"<title>{body}</title><description><![CDATA[{body}]]></description>"))}
+        for form, document in forms.items():
+            for body in bodies:
+                with self.subTest(form=form, body=body[:24]):
+                    item = self.parsed(document(body))
+                    expected = " ".join(body.split())
+                    self.assertEqual((item["title"], item["excerpt"]), (expected[:300], expected))
+
+    def test_encoded_data_among_words_is_cut_and_the_words_stay(self):
+        cases = {"before": (f"cover {MEDIA}", "cover"), "after": (f"{MEDIA} is the cover", "is the cover"),
+                 "twice": (f"Before {MEDIA} between {wrap_lines(MEDIA, 76)} after", "Before between after"),
+                 "pem block": (f"-----BEGIN PGP SIGNATURE-----\n{wrap_lines(MEDIA, 64)}\n-----END PGP SIGNATURE-----",
+                               "-----BEGIN PGP SIGNATURE----- -----END PGP SIGNATURE-----"),
+                 "quoted": (f'src="{MEDIA}" kept', 'src="" kept'),
+                 "data uri": (f"Cover: data:image/png;base64,{PNG} (1x1)", "Cover: (1x1)"),
+                 "wrapped data uri": (f"Cover data:image/png;base64,{wrap_lines(PNG, 64)} below", "Cover below"),
+                 "markdown image": (f"![Figure 1](data:image/png;base64,{MEDIA}) shows it", "![Figure 1]() shows it"),
+                 "text data uri": ("Note data:text/plain;charset=utf-8,Hello%2C%20World! ends", "Note ends")}
+        forms = {"atom no type": lambda body: raw_atom(raw_entry("a", f"<content>{body}</content>")),
+                 "atom html": lambda body: raw_atom(raw_entry("a", f'<content type="html">&lt;p&gt;{body}&lt;/p&gt;</content>')),
+                 "rss": lambda body: raw_rss(raw_item("a", f"<description><![CDATA[{body}]]></description>"))}
+        for form, document in forms.items():
+            for name, (body, expected) in cases.items():
+                with self.subTest(form=form, body=name):
+                    item = self.parsed(document(body))
+                    self.assertEqual((item["excerpt"], item["excerpt_truncated"]), (expected, False))
+        # A title is held to the same rule.
+        item = self.parsed(raw_atom(raw_entry("a", f"<title>Release notes {MEDIA}</title>")))
+        self.assertEqual(item["title"], "Release notes")
+        # Data past the field's clip is cut as far as it was kept, and the excerpt says it was cut short.
+        item = self.parsed(raw_atom(raw_entry("a", f"<content>cover {MEDIA * 40}</content>")))
+        self.assertEqual((item["excerpt"], item["excerpt_truncated"]), ("cover", True))
+
+    def test_text_left_with_only_the_frame_of_cut_data_is_no_text(self):
+        for body in (f"({MEDIA})", f'"{wrap_lines(MEDIA, 76)}"', f"![](data:image/png;base64,{PNG})",
+                     f"— {MEDIA} — {MEDIA} —", "[data:,hello]"):
+            with self.subTest(body[:24]):
+                item = self.parsed(raw_atom(raw_entry("a", f"<title>Cover</title><content>{body}</content>")))
+                self.assertEqual((item["title"], item["excerpt"]), ("Cover", ""))
+        # Text that held no data keeps its punctuation.
+        for body in ("—", "(…)", "***"):
+            with self.subTest(body):
                 self.assertEqual(self.parsed(raw_atom(raw_entry("a", f"<content>{body}</content>")))["excerpt"], body)
-        # One unbroken token of that shape is dropped as media, even though it is not.
-        for body in ("Transformer2DModelWithLearnedPositionalEmbeddingAndLayerNorm", "AbCd1234" * 5):
-            with self.subTest(dropped=body[:24]):
-                self.assertEqual(self.parsed(raw_atom(raw_entry("a", f"<content>{body}</content>")))["excerpt"], "")
+        # Through a fetch: such an item is listed by link, and a feed of nothing else is unavailable.
+        self.add(SGLANG)
+        framed = raw_entry("framed", f"<title>({MEDIA})</title><content>[{MEDIA}]</content>", hours_ago=3)
+        captioned = raw_entry("caption", f"<content>Caption {MEDIA}</content>")
+        source = self.source(self.fetch({SGLANG: atom_response(raw_atom(framed, captioned))}, channel=SGLANG)[0], SGLANG)
+        self.assertEqual([(p["id"], p["title"], p["excerpt"]) for p in source["posts"]], [(entry_id("caption"), "", "Caption")])
+        self.assertEqual(textless(source), [{"id": entry_id("framed"), "url": "https://example.org/framed", "date": stamp(3)}])
+        alone = self.source(self.fetch({SGLANG: atom_response(raw_atom(framed))}, channel=SGLANG)[0], SGLANG)
+        self.assertEqual((alone["coverage"], alone["posts"], textless(alone)), ("unavailable", [], []))
 
     def test_skill_instructions_state_what_counts_as_text(self):
         text = skill_text()
@@ -2777,13 +2879,22 @@ class FeedInlineMediaTests(FeedSourceTests.__base__):
         self.assertIn("Only an element that declares text is read: Atom `text`, `html` or `xhtml`, or a `text/*` or "
                       "`application/xhtml+xml` type; none declared means text", text)
         self.assertIn("Inline images, audio, video and other binary types and `src`-only content give no text", text)
-        # Base64 is recognized by its shape; the instructions promise that and no more.
-        self.assertNotIn("Base64 bodies and `data:` URIs give no text", text)
-        self.assertIn("is judged by its shape alone: a whole body of standard-alphabet Base64 in runs of 40 or more "
-                      "characters (wrapped lines included) that mix both cases and digits with few slashes, or a whole "
-                      "`data:` URI without spaces (its Base64 may wrap), gives no text", text)
-        self.assertIn("One unbroken token of that shape is dropped even if it was not media", text)
-        self.assertIn("URL-safe Base64, shorter bodies and Base64 among other words are read as text", text)
+        # The cut as the code makes it, its bound and wrap widths included.
+        self.assertIn("Encoded data in a title or excerpt is recognized by its shape alone and cut out. A run of "
+                      "standard-alphabet Base64 is one unbroken string, or strings of one width from 64 to 76 "
+                      "characters, as PEM and MIME wrap Base64, with only whitespace between them and a last one no "
+                      "longer, so a short word right after them joins the run. A run of at least 200 characters that "
+                      "mixes both cases and digits, with at most one slash per eight characters, is cut, and so is "
+                      "every `data:` URI that carries data, with the run its Base64 begins. A cut that leaves no "
+                      "letter or digit leaves no text.", text)
+        self.assertIn("Words, identifiers, model names and hashes stay unless they are part of such a run: they are "
+                      "shorter or do not mix cases, though several of one width from 64 to 76 characters in a row form "
+                      "one. URL-safe and shorter Base64 stay too: take such a string for noise, never for the media's "
+                      "content", text)
+        for stale in ("a whole body of standard-alphabet Base64", "One unbroken token of that shape is dropped",
+                      "Base64 among other words are read as text"):
+            self.assertNotIn(stale, text)
+        self.assertEqual((plugin.MIN_ENCODED_RUN, plugin.WRAP_WIDTHS), (200, range(64, 77)))
 
 
 class FeedItemLinkTests(FeedSourceTests.__base__):
@@ -2927,6 +3038,59 @@ class FeedItemLinkTests(FeedSourceTests.__base__):
         self.assertEqual((titled["url"], titled["link_unavailable"], titled["title"]), ("", True, "Titled"))
         self.assertNotIn("identifier", titled)
 
+    def test_link_to_the_feed_a_folder_holding_its_base_or_the_site_root_is_no_link(self):
+        permalink = "https://example.org/post/1"
+        feed_base = 'xml:base="https://example.org/feed/"'
+        folder_base = 'xml:base="https://github.com/sgl-project/sglang/"'
+        # The feed is https://github.com/sgl-project/sglang/releases.atom.
+        placeholders = (("root", "", "/"), ("root with a fragment", "", "/#top"), ("root with an empty query", "", "/?"),
+                        ("own folder", "", "."), ("own folder with a slash", "", "./"), ("parent", "", ".."),
+                        ("parent with a slash", "", "../"), ("above the root", "", "../../../../"),
+                        ("root by host", "", "//github.com/"), ("folder by path", "", "/sgl-project/sglang/"),
+                        ("folder without its slash", "", "../sglang"), ("root under a base", feed_base, "/"),
+                        ("base folder", feed_base, "."), ("above a base", feed_base, "../"),
+                        ("the feed under a folder base", folder_base, "releases.atom"),
+                        ("the feed by host under another base", feed_base, "//github.com/sgl-project/sglang/releases.atom"))
+        for name, attributes, link in placeholders:
+            with self.subTest(name):
+                guided = raw_entry("a", link=f'<link href="{link}"/>', identity=permalink)
+                self.assertEqual(self.items(raw_atom(guided, attributes=attributes))[0]["url"], permalink)
+                opaque = raw_entry("a", link=f'<link href="{link}"/>')
+                self.assertEqual(self.items(raw_atom(opaque, attributes=attributes))[0]["url"], "")
+        # RSS links are text, under the same rule; that feed is https://openai.com/news/rss.xml.
+        for link in ("/", ".", "./", "../", "/news/"):
+            with self.subTest(rss=link):
+                self.assertEqual(self.items(raw_rss(raw_item("a", f"<link>{link}</link>", permalink=permalink)), OPENAI)[0]["url"],
+                                 permalink)
+                self.assertEqual(self.items(raw_rss(raw_item("a", f"<link>{link}</link>")), OPENAI)[0]["url"], "")
+        # Anything else still counts: a page, a folder below or beside the base, a query, another host, an absolute link.
+        kept = (("a placeholder below the base", "", "n/a", "https://github.com/sgl-project/sglang/n/a"),
+                ("a page", "", "releases/tag/v1", "https://github.com/sgl-project/sglang/releases/tag/v1"),
+                ("a subfolder", feed_base, "sub/", "https://example.org/feed/sub/"),
+                ("a sibling folder", feed_base, "../other/", "https://example.org/other/"),
+                ("a name the base only starts like", feed_base, "/fee", "https://example.org/fee"),
+                ("a folder with a query", "", "/?page=2", "https://github.com/?page=2"),
+                ("another host's root", "", "//other.example/", "https://other.example/"),
+                ("an absolute root", "", "https://github.com/", "https://github.com/"),
+                ("the feed, absolute", "", SGLANG, SGLANG))
+        for name, attributes, link, expected in kept:
+            with self.subTest(kept=name):
+                entry = raw_entry("a", link=f'<link href="{link}"/>', identity=permalink)
+                self.assertEqual(self.items(raw_atom(entry, attributes=attributes))[0]["url"], expected)
+        # Through a whole fetch: listed by the permalink, or marked and named when there is none.
+        self.add(SGLANG)
+        content = raw_atom(raw_entry("guided", link='<link href="/"/>', identity=permalink, hours_ago=4),
+                           raw_entry("bare", link='<link href="releases.atom"/>', hours_ago=3),
+                           raw_entry("titled", "<title>Titled</title>", link='<link href="../"/>'),
+                           attributes=folder_base)
+        source = self.source(self.fetch({SGLANG: atom_response(content)}, channel=SGLANG)[0], SGLANG)
+        self.assertEqual(textless(source), [{"id": feed_id(permalink, SGLANG), "url": permalink, "date": stamp(4)},
+                                            {"id": entry_id("bare"), "url": "", "date": stamp(3), "link_unavailable": True,
+                                             "identifier": "tag:example.org,2026:bare"}])
+        titled = source["posts"][0]
+        self.assertEqual((titled["url"], titled["link_unavailable"], titled["title"]), ("", True, "Titled"))
+        self.assertNotIn("identifier", titled)
+
     def test_textless_atom_item_with_xml_base_lists_its_resolved_link(self):
         self.add(SGLANG)
         result = self.fetch({SGLANG: atom_response(raw_atom(
@@ -3020,8 +3184,12 @@ class FeedItemLinkTests(FeedSourceTests.__base__):
         text = skill_text()
         self.assertIn(f"A feed link may run to {plugin.MAX_URL:,} characters", text)
         self.assertIn("resolved against `xml:base` or the feed's URL, and only an `http` or `https` result counts", text)
-        self.assertIn("not one that only points back at what it was resolved against (`#`, `#top`, `?`). An absolute "
-                      "`http` or `https` guid or id then serves as the link", text)
+        self.assertIn("not one that only points back at what it was resolved against (`#`, `#top`, `?`), at the feed "
+                      "itself, or at a folder holding what it was resolved against, up to the site's root (`.`, `../`, "
+                      "`/`). An absolute `http` or `https` guid or id then serves as the link", text)
+        # What the skill cannot tell from a page is named.
+        self.assertIn("A relative placeholder that resolves anywhere else, such as `n/a` to a path below its base, "
+                      "cannot be told from a real page and counts as the link, as does every absolute link", text)
         self.assertIn("an empty `url` and `link_unavailable: true`", text)
         self.assertIn("name it by its title or, when it has none, by its `identifier`", text)
         for wording in (self.api.tools["fetch_posts"][1]["description"], text):

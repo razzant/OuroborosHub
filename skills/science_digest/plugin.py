@@ -658,11 +658,20 @@ def _link_url(base: str, reference: str) -> str:
         return ""
 
 
-def _item_link(base: str, link: str) -> str:
+def _item_link(base: str, link: str, feed: str = "") -> str:
     """A feed item's own page. A relative link that resolves to the very document it
-    was resolved against (empty, #, #top, ?, https:) names that document, not the item."""
+    was resolved against (empty, #, #top, ?, https:), to the feed itself (feed is its
+    URL) or to a folder that holds its base (/, ., ../) is a placeholder, not the item.
+    One that resolves anywhere else (n/a) cannot be told from a page, and an absolute
+    link counts as written."""
     url = _link_url(base, link)
-    if url and not _http_url(link) and urllib.parse.urlsplit(url)[:4] == urllib.parse.urlsplit(base)[:4]:
+    if not url or _http_url(link):
+        return url
+    found, around = urllib.parse.urlsplit(url), urllib.parse.urlsplit(base)
+    if found[:4] in (around[:4], urllib.parse.urlsplit(feed)[:4]):
+        return ""
+    folder = found.path.rstrip("/") + "/"
+    if found[:2] == around[:2] and not found.query and (around.path or "/").startswith(folder):
         return ""
     return url
 
@@ -867,19 +876,88 @@ def _plain_text(value: str) -> str:
     return " ".join(value.split())
 
 
-_DATA_URI = re.compile(r"data:(?:[\w.+-]+/[^ ,]*)?(?:;base64,[A-Za-z0-9+/= ]*|,[^ ]*)", re.IGNORECASE)
-_BASE64 = re.compile(r"[A-Za-z0-9+/]{40,}(?: [A-Za-z0-9+/]{40,})*(?: [A-Za-z0-9+/]*)?={0,2}")
+# Encoded data is cut out of feed text by its shape alone; nothing is decoded. A data:
+# URI that carries data always goes. Bare standard-alphabet Base64 goes from 200
+# characters on: the longest identifiers and digests text carries stay far below that
+# (a SHA-512 has 128 hex characters, all of one case, or 88 in Base64; a Hugging Face
+# model name has at most 96), while 200 characters hold only 150 bytes, less than
+# almost any image or file. Wrapped Base64 is one run when its lines share one width
+# from 64 (PEM) to 76 (MIME) characters and its last line is no longer.
+MIN_ENCODED_RUN = 200
+WRAP_WIDTHS = range(64, 77)
+_DATA_URI = re.compile(r"(?<![\w+.-])data:(?:[\w.+-]+/[\w.+-]+)?((?:;[^\s;,]+)*),(?=\S)", re.IGNORECASE)
+# A Base64 string, the next one a single space on, and one that can begin a run
+# long enough to be data: every such run has a line of at least the narrowest width.
+_LINE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+_NEXT_LINE = re.compile(r" [A-Za-z0-9+/]+={0,2}")
+_LONG_LINE = re.compile(r"[A-Za-z0-9+/]{%d,}={0,2}" % WRAP_WIDTHS[0])
+_TOKEN_REST = re.compile(r"\S*")
+_LETTER_OR_DIGIT = re.compile(r"[^\W_]")
 
 
-def _binary_body(text: str) -> bool:
-    """Whether a whole body, its whitespace normalized, has the shape of a data: URI
-    or of Base64 in one run or wrapped lines: then it is taken for media or a file,
-    whatever its element declares, and nothing is decoded to check. Base64 this long
-    mixes cases and digits and has few slashes; a long word, path or hex digest does
-    not. Anything else encoded stays text."""
-    return bool(_DATA_URI.fullmatch(text)) or bool(
-        _BASE64.fullmatch(text) and text.count("/") * 8 <= len(text)
-        and all(re.search(kind, text) for kind in ("[a-z]", "[A-Z]", "[0-9]")))
+def _run(text: str, line: re.Match[str]) -> tuple[int, int]:
+    """Where the Base64 run that begins with line ends, and where its last line begins:
+    the line alone, or the lines that follow it at its width, when that is one Base64 is
+    wrapped at, and a last line no longer. Only a run's last line may end in = padding."""
+    width, end, last = line.end() - line.start(), line.end(), line.start()
+    if width in WRAP_WIDTHS and text[end - 1] != "=":
+        while following := _NEXT_LINE.match(text, end):
+            size = following.end() - end - 1
+            if size > width:
+                break
+            last, end = end + 1, following.end()
+            if size < width or text[end - 1] == "=":
+                break
+    return end, last
+
+
+def _encoded(run: str) -> bool:
+    """Whether a Base64 run is data rather than a word, name or digest: long, and mixing
+    both cases and digits with few slashes, as a long word, path or hex digest does not."""
+    return (len(run) >= MIN_ENCODED_RUN and run.count("/") * 8 <= len(run)
+            and all(re.search(kind, run) for kind in ("[a-z]", "[A-Z]", "[0-9]")))
+
+
+def _cut(text: str, spans: list[tuple[int, int]]) -> str:
+    pieces, position = [], 0
+    for start, end in spans:
+        pieces.append(text[position:start])
+        position = end
+    return "".join(pieces) + text[position:]
+
+
+def _without_encoded(text: str) -> str:
+    """text, its whitespace already normalized, with the encoded data in it cut out:
+    every data: URI that carries data, with the Base64 lines it wraps onto, and every
+    Base64 run _encoded takes for data, whatever the element declares. Nothing else is
+    cut, so words, identifiers, model names and digests stay. When a cut leaves no
+    letter or digit, the rest was only the data's frame: ""."""
+    spans: list[tuple[int, int]] = []
+    if "data:" in text.lower():
+        for match in _DATA_URI.finditer(text):
+            if spans and match.start() < spans[-1][1]:
+                continue
+            line = _LINE.match(text, match.end()) if match.group(1).lower().endswith(";base64") else None
+            end = _run(text, line)[0] if line else _TOKEN_REST.match(text, match.end()).end()
+            spans.append((match.start(), end))
+    cut = bool(spans)
+    text = _cut(text, spans)
+    # A run that is not data may still end in the first line of one; the lines
+    # before its last are not looked at again, so this stays linear.
+    spans, resume = [], 0
+    for line in _LONG_LINE.finditer(text):
+        if line.start() < resume:
+            continue
+        end, last = _run(text, line)
+        if _encoded(text[line.start():end].replace(" ", "")):
+            spans.append((line.start(), end))
+            resume = end
+        else:
+            resume = last
+    if not (cut or spans):
+        return text
+    text = " ".join(_cut(text, spans).split())
+    return text if _LETTER_OR_DIGIT.search(text) else ""
 
 
 def _shift(stamp: str, delta: timedelta) -> str:
@@ -1056,7 +1134,7 @@ class _Feed:
             text = " ".join(value.split())
         else:
             text = _plain_text(value)
-        return "" if _binary_body(text) else text
+        return _without_encoded(text)
 
     def _item(self, fields: dict[str, str]) -> None:
         guid = fields.get("guid", "").strip() or fields.get("about", "").strip()
@@ -1072,7 +1150,7 @@ class _Feed:
         # re-dated entries keep the same key.
         key = hashlib.sha256(identity.encode("utf-8", "replace")).hexdigest()[:20]
         # A guid is often opaque, so only one already absolute serves as the link.
-        item = {"key": key, "url": _item_link(fields.get("link_base", ""), link) or _http_url(guid),
+        item = {"key": key, "url": _item_link(fields.get("link_base", ""), link, self.bases[0]) or _http_url(guid),
                 "identifier": " ".join(identity.split())[:300], "date": stamp,
                 "title": self._text(fields, "title")[:300], "excerpt": excerpt[:MAX_POST_TEXT],
                 "excerpt_truncated": bool(excerpt) and (self.clipped or len(excerpt) > MAX_POST_TEXT)}
