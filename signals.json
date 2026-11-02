@@ -1,6 +1,6 @@
 {
   "author_repos": {},
-  "generated_at": "2026-11-01T11:21:07.161494Z",
+  "generated_at": "2026-11-02T12:34:55.993685Z",
   "schema_version": 1,
   "skills": {
     "2gis": {
@@ -206,6 +206,11 @@
     "scholion": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/186",
+      "votes": 0
+    },
+    "science_digest": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/250",
       "votes": 0
     },
     "science_search": {
