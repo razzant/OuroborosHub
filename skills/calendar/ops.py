@@ -908,6 +908,7 @@ def _shift_for_scope_all(store, row: Dict[str, Any], occ_key: str, scope: str, c
 
 def _ensure_exception(store, master: Dict[str, Any], occ_key: str, changes: Dict[str, Any]) -> str:
     """One stored row per changed occurrence (RECURRENCE-ID); create it on first change."""
+    from providers import materialized_event_status
     changes = {k: v for k, v in changes.items() if k != "rrule"}   # a single occurrence has no rule of its own
     for exc in store.exceptions_for(master["id"]):
         if str(exc.get("recurrence_id") or "") == occ_key:
@@ -916,6 +917,7 @@ def _ensure_exception(store, master: Dict[str, Any], occ_key: str, changes: Dict
     occ_start = parse_stored(occ_key) or parse_stored(master['start_utc'])
     row = {k: master.get(k) for k in ("calendar_id", "uid", "visibility", "availability", "is_primary", "title", "description", "status",
                                        "location", "tz", "time_kind", "all_day", "organizer", "attendees_json", "my_response", "origin", "link_group_id", "link_state")}
+    row['status'] = materialized_event_status(master, store, occurrence_key=occ_key)
     row["reminders_json"] = "[]"  # no own override: later whole-series reminder edits remain effective
     # The exception has NO provider identity of its own: Google resolves the instance id from the master + recurrence key,
     # CalDAV writes it inside the master's resource (roast/triad F01).
@@ -991,6 +993,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     Later exceptions move to the new series (their date keeps the edit, the slot follows the new wall time);
     linked copies split together under one new link group.
     """
+    from providers import materialized_event_status
     original_rrule = str(master.get("rrule") or "")
     later = _truncate_series(store, master, occ_key, keep_later_exceptions=True)
     m_start, m_end = parse_stored(master["start_utc"]), parse_stored(master["end_utc"])
@@ -1029,6 +1032,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     # EXDATE/RDATE at/after the cut belong to the new series (shifted with it); the old one keeps only the earlier ones
     row = {k: master.get(k) for k in ("calendar_id", "visibility", "availability", "is_primary", "title", "description", "location", "tz", "time_kind",
                                        "all_day", "organizer", "attendees_json", "my_response", "reminders_json", "origin", "status")}
+    row['status'] = materialized_event_status(master, store)
     split_tz = get_tz(master.get("tz") or "")
     if until_part:
         if shift:
@@ -1502,6 +1506,7 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
     Copies are added/removed per the target calendars' ``publish_mode``; the primary row stays where it is —
     moving the primary itself is a delete + create the owner asks for explicitly.
     """
+    from providers import materialized_event_status
     row = store.get_event(row["id"]) or row
     if row.get("master_id"):
         row = store.get_event(row["master_id"]) or row   # an occurrence id means its whole series
@@ -1546,6 +1551,7 @@ def _stage_reassign_event(store, row: Dict[str, Any], calendar_ids: List[str]) -
             continue
         mode = cal.get("publish_mode") or PUBLISH_BUSY
         copy = {k: row.get(k) for k in ("uid", "visibility", "availability", "status", "start_utc", "end_utc", "tz", "all_day", "rrule", "exdates", "rdates")}
+        copy['status'] = materialized_event_status(row, store)
         copy['time_kind'] = links.projection_time_kind(row, cal)
         copy.update({"calendar_id": cid, "is_primary": 0, "link_group_id": group,
                      "title": BUSY_COPY_TITLE if mode == PUBLISH_BUSY else row.get("title") or "",

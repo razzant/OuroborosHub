@@ -238,6 +238,73 @@ def ics_to_rows(ics_text: str, calendar_id: str, href: str, etag: str, default_t
     return rows
 
 
+def materialized_event_status(event, store, occurrence_key=None):
+    """Recover a legacy flattened field for a new derived event, without changing old commands.
+
+    The retained native object is a cached observation, not a fresh provider read.
+    Explicit status work (including an acknowledged choice) outranks that cache;
+    a status inherited by every desired snapshot is not itself an authored choice.
+    """
+    status = event_status(event.get('status'))
+    raw = event.get('raw_payload')
+    if status == 'cancelled' or not raw or not event.get('uid') or event.get('deleted_at') or event.get('sync_state') == 'pending_delete':
+        return status
+    try:
+        provider = event.get('provider')
+        if provider == PROVIDER_GOOGLE:
+            from providers_google import gevent_to_row
+            native = gevent_to_row(json.loads(raw), event['calendar_id'], get_tz(event.get('tz') or ''))
+            matches = [native] if native and native.get('external_id') == event.get('external_id') else []
+        elif provider in (PROVIDER_CALDAV, PROVIDER_YANDEX):
+            # Select the exact UID/component before decoding: a resource may contain
+            # another master or detached occurrence with a different event status.
+            matches = []
+            for component in _ical().Calendar.from_ical(raw).walk('VEVENT'):
+                if str(component.get('UID') or '') != event.get('uid'):
+                    continue
+                selected = _ical().Calendar()
+                selected.add_component(component)
+                matches.extend(ics_to_rows(selected.to_ical().decode('utf-8'), event['calendar_id'],
+                                           event.get('href') or '', event.get('etag') or '', get_tz(event.get('tz') or '')))
+        else:
+            return status
+        matches = [row for row in matches if row.get('uid') == event.get('uid')]
+        if occurrence_key is not None:
+            own = [row for row in matches if row.get('recurrence_id', '') == occurrence_key]
+            if own:
+                return own[0]['status'] if len(own) == 1 else status
+        if status != 'confirmed':
+            return status
+        matches = [row for row in matches if row.get('recurrence_id', '') == event.get('recurrence_id', '')]
+        if len(matches) != 1 or matches[0]['status'] != 'tentative':
+            return status
+        explicit = None
+        for intent in store.intents_for_event(event['id']):
+            if intent.get('state') == 'resolved':
+                continue
+            payload = json.loads(intent.get('payload_json') or '{}')
+            result = json.loads(intent.get('result_json') or '{}')
+            if intent.get('kind') == 'delete' or 'status' in (payload.get('changes') or {}) or payload.get('_revive_cancelled'):
+                explicit = (intent.get('state'), result.get('etag'))
+        if explicit:
+            # A later provider observation supersedes an old status ACK. CalDAV
+            # raw ICS has no ETag: exclude ACKs addressed to its shared resource,
+            # even if an override has since moved to another segment.
+            observed = matches[0].get('etag')
+            if provider != PROVIDER_GOOGLE:
+                with store._conn() as connection:
+                    acknowledged = connection.execute(
+                        "SELECT 1 FROM intents WHERE calendar_id=? AND state='done' AND json_extract(result_json,'$.etag')=? "
+                        "AND COALESCE(NULLIF(json_extract(payload_json,'$.resource_id'),''),NULLIF(json_extract(payload_json,'$.desired.master_id'),''),event_id)=? LIMIT 1",
+                        (event['calendar_id'], event.get('etag') or '', event['id'])).fetchone()
+                observed = '' if acknowledged else event.get('etag')
+            if explicit[0] != 'done' or not explicit[1] or not observed or observed != event.get('etag') or observed == explicit[1]:
+                return status
+        return 'tentative'
+    except (ProviderError, ValueError, TypeError, KeyError, AttributeError):
+        return status  # Missing usable native/command facts cannot justify a different status.
+
+
 def _listify(value: Any) -> List[Any]:
     if value is None:
         return []

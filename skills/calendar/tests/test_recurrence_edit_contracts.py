@@ -250,7 +250,9 @@ def test_tentative_series_first_override_and_copy_keep_event_status(tmp_path,pro
     result=json.loads(tools.cal_update(ctx,id=row['id']+'@'+slot,title='Only this title',confirm=True))
     assert result['status']=='updated',result
     child=next(e for e in ctx.store.exceptions_for(row['id']) if e['recurrence_id']==slot)
-    if not legacy_master:assert child['status']=='tentative'
+    assert child['status']=='tentative'
+    assert all(json.loads(intent['payload_json'])['desired']['status']=='tentative'
+               for intent in ctx.store.intents_for_event(child['id']))
     if provider=='caldav':
         native_child=next(e for e in providers._ical().Calendar.from_ical(server.resources[row['href']][0]).walk('VEVENT') if str(e.get('SUMMARY'))=='Only this title')
         assert str(native_child['STATUS'])=='TENTATIVE'
@@ -393,3 +395,377 @@ def test_following_split_retains_tentative_status(tmp_path):
     assert result['status']=='updated'
     rows=listed(ctx)
     assert len(rows)==4 and all(row['status']=='tentative' for row in rows)
+
+
+@pytest.mark.parametrize('provider', ['caldav', 'google'])
+@pytest.mark.parametrize('legacy', [False, True])
+@pytest.mark.parametrize('operation', ['copy', 'following'])
+@pytest.mark.parametrize('offline', [False, True])
+def test_first_materialization_keeps_native_tentative(tmp_path, provider, legacy, operation, offline):
+    ctx = tools.Context(SimpleNamespace(get_state_dir=lambda: str(tmp_path), get_settings=lambda keys: {}))
+    ctx.tz = model.get_tz('UTC')
+    if provider == 'caldav':
+        aid, cid = 'caldav:fixture', 'caldav:fixture:work'
+        href = 'https://dav.example.test/work/native.ics'
+        ctx.store.upsert_account({'id': aid, 'provider': 'caldav', 'login': 'fixture'})
+        ctx.store.upsert_calendar({'id': cid, 'account_id': aid, 'provider': 'caldav', 'name': 'Work',
+                                   'href': 'https://dav.example.test/work/', 'writable': True, 'publish_mode': 'full'})
+        wire = '\r\n'.join(['BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT', 'UID:native-status',
+            'DTSTART:20261214T090000Z', 'DTEND:20261214T100000Z', 'RRULE:FREQ=DAILY;COUNT=4',
+            'STATUS:TENTATIVE', 'SUMMARY:Before', 'END:VEVENT', 'END:VCALENDAR', ''])
+        server = FakeCalDAV()
+        server.resources[href] = (wire, 'v1')
+        adapter = server.attach(providers.CalDAVAdapter('fixture@example.test', 'synthetic', 'https://dav.example.test'))
+        incoming = providers.ics_to_rows(wire, cid, href, 'v1', ctx.tz)[0]
+    else:
+        cid = add_google_calendar(ctx.store)
+        native = {'id': 'native-status', 'iCalUID': 'native-status', 'etag': 'v1', 'summary': 'Before',
+            'start': {'dateTime': '2026-12-14T09:00:00Z'}, 'end': {'dateTime': '2026-12-14T10:00:00Z'},
+            'recurrence': ['RRULE:FREQ=DAILY;COUNT=4'], 'status': 'tentative'}
+        server = FakeGoogle()
+        server.events[native['id']] = dict(native)
+        adapter = server.attach(providers_google.GoogleAdapter('fixture@example.test', 'synthetic', '', model.now_utc(), 'client', '', None))
+        incoming = providers_google.gevent_to_row(native, cid, ctx.tz)
+    ctx.providers = SimpleNamespace(errors={}, adapter_for=lambda _: adapter)
+    assert incoming['status'] == 'tentative'
+    # v2.0.2 flattened this field while retaining the native payload and ETag.
+    if legacy:
+        incoming['status'] = 'confirmed'
+    row = ctx.store.insert_event(incoming)
+    # Independently exercise a real reopened private SQLite cache, not just a dict mutation.
+    ctx = tools.Context(SimpleNamespace(get_state_dir=lambda: str(tmp_path), get_settings=lambda keys: {}))
+    ctx.tz = model.get_tz('UTC')
+    ctx.providers = SimpleNamespace(errors={}, adapter_for=lambda _: adapter)
+    row = ctx.store.get_event(row['id'])
+    assert row['raw_payload'] == incoming['raw_payload'] and row['etag'] == 'v1'
+    assert row['status'] == ('confirmed' if legacy else 'tentative')
+    if provider == 'google':
+        # An unchanged event need not be returned by the next incremental feed.
+        from scripts.worker import reconcile_calendar
+        real_request = adapter._request
+        feed_calls = []
+        def empty_delta(method, path, params=None, *args, **kwargs):
+            if method == 'GET' and path.endswith('/events') and (params or {}).get('syncToken'):
+                feed_calls.append(dict(params))
+                return 200, {}, {'items': [], 'nextSyncToken': 'still-current'}
+            return real_request(method, path, params, *args, **kwargs)
+        adapter._request = empty_delta
+        observed = reconcile_calendar(ctx.store, ctx.providers, adapter, ctx.store.get_calendar(cid), ctx.tz, cursor='previous-token')
+        assert feed_calls and observed == (0, 0, 0, 'still-current', 'google_sync_token')
+        assert ctx.store.get_event(row['id']) == row
+    print('PERSISTENCE_AND_FEED', json.dumps({'provider': provider, 'legacy': legacy,
+        'operation': operation, 'status_after_reopen': row['status'], 'raw_payload_bytes': len(row['raw_payload']),
+        'empty_incremental_feed': provider == 'google'}))
+    server.down = offline
+    if operation == 'copy':
+        destination = {**ctx.store.get_calendar(cid), 'id': cid + ':copy', 'name': 'Copy',
+                       'external_id': 'copy', 'href': 'https://dav.example.test/copy/'}
+        ctx.store.upsert_calendar(destination)
+        result = json.loads(tools.cal_update(ctx, id=row['id'], scope='all', calendars=[cid, destination['id']], confirm=True))
+        assert result['status'] == ('pending' if offline else 'updated'), result
+        created = ctx.store.get_event(result['reassign']['added'][0]['event_id'])
+    else:
+        result = json.loads(tools.cal_update(ctx, id=row['id'] + '@2026-12-16T09:00:00+00:00',
+                                            scope='following', title='Suffix', confirm=True))
+        assert result['status'] == ('pending' if offline else 'updated'), result
+        with ctx.store._conn() as connection:
+            suffix_ids = [item[0] for item in connection.execute(
+                "SELECT id FROM events WHERE calendar_id=? AND master_id='' AND id<>? AND deleted_at IS NULL",
+                (cid, row['id']))]
+        assert len(suffix_ids) == 1
+        created = ctx.store.get_event(suffix_ids[0])
+        assert created['start_utc'] == '2026-12-16T09:00:00+00:00'
+    assert created['status'] == 'tentative'
+    intents = ctx.store.intents_for_event(created['id'])
+    assert intents and all(json.loads(item['payload_json'])['desired']['status'] == 'tentative' for item in intents)
+    if offline:
+        from test_calendar_provider_divergence import run_open_intents
+        server.down = False
+        run_open_intents(ctx, rounds=2)
+        created = ctx.store.get_event(created['id'])
+        assert all(item['state'] == 'done' for item in ctx.store.intents_for_event(created['id']))
+    if provider == 'caldav':
+        after = str(providers._ical().Calendar.from_ical(server.resources[created['href']][0]).walk('VEVENT')[0]['STATUS']).lower()
+        original = str(providers._ical().Calendar.from_ical(server.resources[row['href']][0]).walk('VEVENT')[0]['STATUS']).lower()
+    else:
+        after = server.events[created['external_id']]['status']
+        original = server.events[row['external_id']]['status']
+    print('LEGACY_MATERIALIZATION', json.dumps({'provider': provider, 'legacy': legacy, 'operation': operation,
+        'offline': offline, 'result': result['status'], 'original_native': original, 'created_native': after, 'created_local': created['status']}))
+    assert original == 'tentative'
+    assert after == 'tentative', 'First copy/split materializes legacy confirmed over native TENTATIVE'
+    assert created['status'] == 'tentative'
+
+
+def legacy_status_source(tmp_path, provider):
+    api = SimpleNamespace(get_state_dir=lambda: str(tmp_path), get_settings=lambda keys: {})
+    ctx = tools.Context(api)
+    ctx.tz = model.get_tz('UTC')
+    if provider == 'caldav':
+        aid, cid = 'caldav:fixture', 'caldav:fixture:work'
+        href = 'https://dav.example.test/work/native.ics'
+        ctx.store.upsert_account({'id': aid, 'provider': 'caldav', 'login': 'fixture'})
+        ctx.store.upsert_calendar({'id': cid, 'account_id': aid, 'provider': 'caldav',
+            'name': 'Work', 'href': 'https://dav.example.test/work/', 'writable': True, 'publish_mode': 'full'})
+        wire = '\r\n'.join(['BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT', 'UID:native-status',
+            'DTSTART:20261214T090000Z', 'DTEND:20261214T100000Z', 'RRULE:FREQ=DAILY;COUNT=4',
+            'STATUS:TENTATIVE', 'SUMMARY:Before', 'END:VEVENT', 'END:VCALENDAR', ''])
+        server = FakeCalDAV()
+        server.resources[href] = (wire, 'v1')
+        adapter = server.attach(providers.CalDAVAdapter('fixture@example.test', 'synthetic', 'https://dav.example.test'))
+        native = providers.ics_to_rows(wire, cid, href, 'v1', ctx.tz)[0]
+    else:
+        cid = add_google_calendar(ctx.store)
+        wire = {'id': 'native-status', 'iCalUID': 'native-status', 'etag': 'v1',
+            'summary': 'Before', 'start': {'dateTime': '2026-12-14T09:00:00Z'},
+            'end': {'dateTime': '2026-12-14T10:00:00Z'},
+            'recurrence': ['RRULE:FREQ=DAILY;COUNT=4'], 'status': 'tentative'}
+        server = FakeGoogle()
+        server.events[wire['id']] = dict(wire)
+        adapter = server.attach(providers_google.GoogleAdapter('fixture@example.test', 'synthetic', '',
+            model.now_utc(), 'client', '', None))
+        native = providers_google.gevent_to_row(wire, cid, ctx.tz)
+    assert native['status'] == 'tentative'
+    row = ctx.store.insert_event({**native, 'status': 'confirmed'})
+    ctx = tools.Context(api)  # State and native observation really survive a new reader.
+    ctx.tz = model.get_tz('UTC')
+    ctx.providers = SimpleNamespace(errors={}, adapter_for=lambda _: adapter)
+    assert ctx.store.get_event(row['id'])['raw_payload'] == native['raw_payload']
+    return ctx, row['id'], cid, adapter
+
+
+@pytest.mark.parametrize('provider', ['caldav', 'google'])
+@pytest.mark.parametrize('operation', ['copy', 'following'])
+@pytest.mark.parametrize('previous', ['title_pending', 'status_pending', 'status_acknowledged'])
+def test_status_precedence_is_field_specific_before_offline_materialization(tmp_path, provider, operation, previous):
+    ctx, eid, cid, adapter = legacy_status_source(tmp_path, provider)
+    changes = {'title': 'Locally accepted title'} if previous == 'title_pending' else {'status': 'confirmed'}
+    if previous == 'status_acknowledged':
+        result = ops.update_event(ctx.store, ctx.providers, eid, changes, scope='all')
+        assert all(item['status'] == 'done' for item in result['assignments'])
+    else:
+        with ctx.store.transaction() as view:
+            ops._stage_update_event(view, eid, changes, scope='all')
+    old_intents = {item['id']: dict(item) for item in ctx.store.intents_for_event(eid)}
+    assert len(old_intents) == 1
+    old = next(iter(old_intents.values()))
+    old_payload = json.loads(old['payload_json'])
+    assert old_payload['changes'] == changes
+    # A future helper may enrich the inherited status before a title write; it
+    # still must not subsequently mutate this frozen prior snapshot.
+    expected = 'tentative' if previous == 'title_pending' else 'confirmed'
+    network = []
+    def offline(method, path, *args, **kwargs):
+        # Normal dispatch is after staging. A new source GET before local
+        # materialization cannot be a prerequisite of the repair.
+        with ctx.store._conn() as connection:
+            created = [dict(row) for row in connection.execute(
+                "SELECT id,status FROM events WHERE master_id='' AND id<>? AND deleted_at IS NULL", (eid,))]
+        network.append({'method': method, 'path': path, 'materialized': created})
+        assert created and all(row['status'] == expected for row in created)
+        raise ops.ProviderError('network', 'Synthetic offline transport')
+    adapter._request = offline
+    if operation == 'copy':
+        destination = {**ctx.store.get_calendar(cid), 'id': cid + ':copy', 'name': 'Copy',
+            'external_id': 'copy', 'href': 'https://dav.example.test/copy/'}
+        ctx.store.upsert_calendar(destination)
+        result = json.loads(tools.cal_update(ctx, id=eid, scope='all',
+            calendars=[cid, destination['id']], confirm=True))
+        created_id = result['reassign']['added'][0]['event_id']
+    else:
+        result = json.loads(tools.cal_update(ctx, id=eid + '@2026-12-16T09:00:00+00:00',
+            scope='following', title='Suffix', confirm=True))
+        with ctx.store._conn() as connection:
+            new_ids = [row[0] for row in connection.execute(
+                "SELECT id FROM events WHERE master_id='' AND id<>? AND deleted_at IS NULL", (eid,))]
+        assert len(new_ids) == 1
+        created_id = new_ids[0]
+    created = ctx.store.get_event(created_id)
+    intents = ctx.store.intents_for_event(created_id)
+    print('C4_PRECEDENCE', json.dumps({'provider': provider, 'operation': operation, 'previous': previous,
+        'expected': expected, 'local': created['status'], 'result': result['status'], 'network': network}))
+    assert created['status'] == expected
+    assert intents and all(json.loads(item['payload_json'])['desired']['status'] == expected for item in intents)
+    assert result['status'] == 'pending', result
+    assert {key: ctx.store.get_intent(key) for key in old_intents} == old_intents
+
+
+@pytest.mark.parametrize('provider', ['caldav', 'google'])
+@pytest.mark.parametrize('operation', ['copy', 'following'])
+def test_later_native_observation_supersedes_historical_status_ack(tmp_path, monkeypatch, provider, operation):
+    from scripts.worker import reconcile_calendar
+    ctx, eid, cid, adapter = legacy_status_source(tmp_path, provider)
+    result = ops.update_event(ctx.store, ctx.providers, eid, {'status': 'confirmed'}, scope='all')
+    assert all(item['status'] == 'done' for item in result['assignments'])
+    receipt = ctx.store.intents_for_event(eid)[0]
+    source = ctx.store.get_event(eid)
+    server = adapter._request.__self__
+    if provider == 'caldav':
+        def remote_edit(calendar):
+            component = calendar.walk('VEVENT')[0]
+            component.pop('STATUS')
+            component.add('STATUS', 'TENTATIVE')
+        server.edit(source['href'], remote_edit)
+    else:
+        server.events[source['external_id']].update(status='tentative', etag='remote-after-status-ack')
+    fetch = adapter.fetch
+    def legacy_fetch(*args, **kwargs):
+        rows, cursor, kind, extra = fetch(*args, **kwargs)
+        return [{**row, 'status': 'confirmed'} for row in rows], cursor, kind, extra
+    # A later pre-upgrade parser observation retained new raw facts but flattened status.
+    monkeypatch.setattr(adapter, 'fetch', legacy_fetch)
+    reconcile_calendar(ctx.store, ctx.providers, adapter, ctx.store.get_calendar(cid), ctx.tz)
+    source = ctx.store.get_event(eid)
+    assert source['status'] == 'confirmed'
+    assert source['etag'] != json.loads(receipt['result_json'])['etag']
+    assert ctx.store.get_intent(receipt['id']) == receipt
+    if operation == 'copy':
+        destination = {**ctx.store.get_calendar(cid), 'id': cid + ':copy', 'name': 'Copy',
+                       'external_id': 'copy', 'href': 'https://dav.example.test/copy/'}
+        ctx.store.upsert_calendar(destination)
+        result = json.loads(tools.cal_update(ctx, id=eid, scope='all', calendars=[cid, destination['id']], confirm=True))
+        created = ctx.store.get_event(result['reassign']['added'][0]['event_id'])
+    else:
+        result = json.loads(tools.cal_update(ctx, id=eid + '@2026-12-16T09:00:00+00:00', scope='following', title='Suffix', confirm=True))
+        with ctx.store._conn() as connection:
+            created = dict(connection.execute("SELECT * FROM events WHERE master_id='' AND id<>?", (eid,)).fetchone())
+    assert result['status'] == 'updated'
+    assert created['status'] == 'tentative'
+    assert ctx.store.get_intent(receipt['id']) == receipt
+    if provider == 'caldav':
+        assert str(providers._ical().Calendar.from_ical(server.resources[created['href']][0]).walk('VEVENT')[0]['STATUS']) == 'TENTATIVE'
+    else:
+        assert server.events[created['external_id']]['status'] == 'tentative'
+
+
+@pytest.mark.parametrize('provider', ['caldav', 'google'])
+@pytest.mark.parametrize('shape', ['matching', 'other_uid', 'other_occurrence', 'confirmed_rsvp', 'cancelled', 'malformed'])
+def test_retained_status_selects_only_exact_native_event(tmp_path, provider, shape):
+    ctx, eid, cid, adapter = legacy_status_source(tmp_path, provider)
+    event = ctx.store.get_event(eid)
+    if shape == 'cancelled':
+        event['status'] = 'cancelled'
+    elif shape == 'malformed':
+        event['raw_payload'] = 'not a native payload'
+    elif provider == 'google':
+        native = json.loads(event['raw_payload'])
+        if shape == 'other_uid':native['iCalUID'] = 'unrelated'
+        if shape == 'other_occurrence':
+            native.update(recurringEventId='another-master', originalStartTime={'dateTime':'2026-12-14T09:00:00Z'})
+        if shape == 'confirmed_rsvp':
+            native.update(status='confirmed', attendees=[{'email':'guest@example.test','responseStatus':'tentative'}])
+        event['raw_payload'] = json.dumps(native)
+    else:
+        calendar = providers._ical().Calendar.from_ical(event['raw_payload'])
+        component = calendar.walk('VEVENT')[0]
+        if shape == 'other_uid':component['UID'] = 'unrelated'
+        if shape == 'other_occurrence':component.add('RECURRENCE-ID', model.parse_stored(event['start_utc']))
+        if shape == 'confirmed_rsvp':
+            component['STATUS'] = 'CONFIRMED'
+            component.add('ATTENDEE', 'mailto:guest@example.test', parameters={'PARTSTAT':'TENTATIVE'})
+        if shape == 'matching':
+            # The wrong master and a detached component must not supply the selected master status.
+            unrelated = providers._ical().Event()
+            unrelated.add('UID','unrelated')
+            unrelated.add('DTSTART', model.parse_stored(event['start_utc']))
+            unrelated.add('STATUS','CONFIRMED')
+            calendar.add_component(unrelated)
+            detached = providers._ical().Event()
+            detached.add('UID',event['uid'])
+            detached.add('DTSTART', model.parse_stored(event['start_utc']))
+            detached.add('RECURRENCE-ID', model.parse_stored(event['start_utc']))
+            detached.add('STATUS','CANCELLED')
+            calendar.add_component(detached)
+        event['raw_payload'] = calendar.to_ical().decode('utf-8')
+    expected = 'tentative' if shape == 'matching' else 'cancelled' if shape == 'cancelled' else 'confirmed'
+    assert providers.materialized_event_status(event, ctx.store) == expected
+
+
+def test_caldav_shared_resource_ack_does_not_look_like_a_new_observation(tmp_path):
+    ctx, eid, cid, adapter = legacy_status_source(tmp_path, 'caldav')
+    ops.update_event(ctx.store, ctx.providers, eid, {'status':'confirmed'}, scope='all')
+    result = json.loads(tools.cal_update(ctx,id=eid+'@2026-12-16T09:00:00+00:00',title='Override',confirm=True))
+    assert result['status'] == 'updated'
+    source = ctx.store.get_event(eid)
+    source_status_ack = ctx.store.intents_for_event(eid)[0]
+    assert source['etag'] != json.loads(source_status_ack['result_json'])['etag']
+    child = ctx.store.exceptions_for(eid)[0]
+    child_ack = ctx.store.intents_for_event(child['id'])[0]
+    assert json.loads(child_ack['payload_json'])['resource_id'] == eid
+    # Its recorded shared-resource ACK remains applicable after topology changes.
+    ctx.store.update_event(child['id'], {'master_id':'later-segment'})
+    assert providers.materialized_event_status(source, ctx.store) == 'confirmed'
+    ctx.store.update_event(child['id'], {'master_id':eid})
+    destination = {**ctx.store.get_calendar(cid), 'id':cid+':copy', 'name':'Copy', 'href':'https://dav.example.test/copy/'}
+    ctx.store.upsert_calendar(destination)
+    copied = json.loads(tools.cal_update(ctx,id=eid,scope='all',calendars=[cid,destination['id']],confirm=True))
+    assert copied['status'] == 'updated'
+    created = ctx.store.get_event(copied['reassign']['added'][0]['event_id'])
+    assert created['status'] == 'confirmed'
+    assert str(providers._ical().Calendar.from_ical(adapter._request.__self__.resources[created['href']][0]).walk('VEVENT')[0]['STATUS']) == 'CONFIRMED'
+
+
+def test_legacy_master_ack_binding_does_not_invent_a_native_observation(tmp_path):
+    ctx, eid, cid, adapter = legacy_status_source(tmp_path, 'caldav')
+    ops.update_event(ctx.store, ctx.providers, eid, {'status':'confirmed'}, scope='all')
+    ops.update_event(ctx.store, ctx.providers, eid, {'title':'Later title'}, scope='all')
+    latest = ctx.store.intents_for_event(eid)[-1]
+    payload = json.loads(latest['payload_json'])
+    payload.pop('resource_id')
+    assert payload['desired']['master_id'] == ''
+    with ctx.store._conn() as connection:
+        connection.execute('UPDATE intents SET payload_json=? WHERE id=?', (json.dumps(payload), latest['id']))
+    assert providers.materialized_event_status(ctx.store.get_event(eid), ctx.store) == 'confirmed'
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_first_caldav_override_uses_its_own_retained_component_status(tmp_path, legacy):
+    ctx, eid, cid, adapter = legacy_status_source(tmp_path, 'caldav')
+    source = ctx.store.get_event(eid)
+    native = providers._ical().Calendar.from_ical(source['raw_payload'])
+    child = providers._ical().Event()
+    child.add('UID',source['uid'])
+    child.add('RECURRENCE-ID',model.parse_stored('2026-12-16T09:00:00+00:00'))
+    child.add('DTSTART',model.parse_stored('2026-12-16T09:00:00+00:00'))
+    child.add('DTEND',model.parse_stored('2026-12-16T10:00:00+00:00'))
+    child.add('SUMMARY','Native override')
+    child.add('STATUS','CONFIRMED')
+    native.add_component(child)
+    raw = native.to_ical().decode('utf-8')
+    adapter._request.__self__.resources[source['href']] = (raw, source['etag'])
+    ctx.store.update_event(eid, {'raw_payload':raw, 'status':'confirmed' if legacy else 'tentative'})
+    assert ctx.store.exceptions_for(eid) == []
+    result = json.loads(tools.cal_update(ctx,id=eid+'@2026-12-16T09:00:00+00:00',title='Edited override',confirm=True))
+    assert result['status'] == 'updated'
+    saved = ctx.store.exceptions_for(eid)[0]
+    assert saved['status'] == 'confirmed'
+    assert all(json.loads(item['payload_json'])['desired']['status'] == 'confirmed' for item in ctx.store.intents_for_event(saved['id']))
+    written = providers._ical().Calendar.from_ical(adapter._request.__self__.resources[source['href']][0]).walk('VEVENT')
+    assert [str(item['STATUS']) for item in written] == ['TENTATIVE','CONFIRMED']
+
+
+def test_c4_google_confirmed_instance_of_tentative_master_keeps_both(tmp_path):
+    from test_calendar_provider_divergence import google_context, sync, run_open_intents
+    ctx, cid, server = google_context()
+    native = {'id': 'tm', 'iCalUID': 'tm-series', 'etag': '"e1"', 'summary': 'Master', 'status': 'tentative',
+              'start': {'dateTime': '2026-12-10T09:00:00Z', 'timeZone': 'UTC'}, 'end': {'dateTime': '2026-12-10T10:00:00Z', 'timeZone': 'UTC'},
+              'recurrence': ['RRULE:FREQ=DAILY;COUNT=3']}
+    instance = {**native, 'id': 'tm_20261211T090000Z', 'etag': '"e2"', 'status': 'confirmed', 'recurringEventId': 'tm',
+                'originalStartTime': {'dateTime': '2026-12-11T09:00:00Z'},
+                'start': {'dateTime': '2026-12-11T09:00:00Z', 'timeZone': 'UTC'}, 'end': {'dateTime': '2026-12-11T10:00:00Z', 'timeZone': 'UTC'}}
+    instance.pop('recurrence')
+    server.events.update({'tm': native, instance['id']: instance})
+    sync(ctx, cid)
+    master = ctx.store.find_by_external(cid, external_id='tm')
+    child = next(e for e in ctx.store.exceptions_for(master['id']) if e['recurrence_id'] == '2026-12-11T09:00:00+00:00')
+    assert (master['status'], child['status']) == ('tentative', 'confirmed')
+    edited = json.loads(tools.cal_update(ctx, id=master['id'] + '@2026-12-11T09:00:00+00:00', title='Instance title', confirm=True))
+    run_open_intents(ctx, 3)
+    whole = json.loads(tools.cal_update(ctx, id=master['id'], scope='all', title='Series title', confirm=True))
+    run_open_intents(ctx, 3)
+    print('C4_GOOGLE', json.dumps({'edited': edited['status'], 'whole': whole['status'],
+          'native_master': server.events['tm']['status'], 'native_instance': server.events[instance['id']]['status'],
+          'local': (ctx.store.get_event(master['id'])['status'], ctx.store.get_event(child['id'])['status'])}))
+    assert edited['status'] == 'updated' and whole['status'] == 'updated'
+    assert server.events['tm']['status'] == 'tentative' and server.events[instance['id']]['status'] == 'confirmed'
+    assert server.events['tm']['summary'] == 'Series title'
