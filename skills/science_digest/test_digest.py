@@ -5,7 +5,9 @@ import email.utils
 import gzip
 import hashlib
 import html
+import http.client
 import importlib.util
+import inspect
 import itertools
 import json
 import os
@@ -19,7 +21,7 @@ import unittest
 import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 
 MODULE_PATH = Path(__file__).with_name("plugin.py")
@@ -182,6 +184,17 @@ class DigestConsumerTests(ConsumerCase):
         # The bounded portion is oldest first and the edition says how many remain.
         self.assertIn("oldest first", text)
         self.assertIn("how many remain", text)
+
+    def test_skill_instructions_state_the_limits_the_code_applies(self):
+        text = " ".join(MODULE_PATH.with_name("SKILL.md").read_text(encoding="utf-8").split())
+        default = inspect.signature(plugin._fetch_posts).parameters["limit"].default
+        schema = self.api.tools["fetch_posts"][1]["schema"]["properties"]["limit"]
+        self.assertEqual((schema["minimum"], schema["maximum"]), (1, plugin.MAX_POSTS_PER_CHANNEL))
+        self.assertIn(f"up to `limit` readable posts or feed items per source (1–{plugin.MAX_POSTS_PER_CHANNEL}, "
+                      f"default {default})", text)
+        self.assertIn(f"share about {plugin.MAX_OUTPUT_CHARS:,} characters", text)
+        self.assertIn(f"reads up to {plugin.MAX_PARALLEL_SOURCES} sources at a time", text)
+        self.assertIn(f"dropped from state {plugin.LOOKBACK_DAYS} days after it was found missing", text)
 
     def test_untrusted_targets_refused_without_network(self):
         with patch.object(plugin._OPENER, "open") as opened:
@@ -769,6 +782,21 @@ class TextNotExtractedTests(ConsumerCase):
             following = self.fetch_page(content, limit=20)["channels"][0]
         entries = following["posts"] + textless(following)
         self.assertEqual(min(int(p["id"].split("/")[1]) for p in entries), boundary)
+
+    def test_source_keeping_only_a_textless_link_is_not_output_deferred(self):
+        content = page(post_html(1, extra=PHOTO), post_html(2, "x" * 3000), post_html(3, "y" * 3000))
+        with patch.object(plugin, "MAX_OUTPUT_CHARS", 2500):
+            kept = self.fetch_page(content)
+        source = kept["channels"][0]
+        # The budget moved both readable posts to the next portion; the link it kept is an entry.
+        self.assertEqual((source["coverage"], source["posts"], [p["id"] for p in textless(source)]),
+                         ("recent_page_only", [], ["sample_news/1"]))
+        self.assertEqual((source["omitted_posts"], source["first_omitted_id"]), (2, "sample_news/2"))
+        # One character less and the link has to wait as well: only then is the source deferred.
+        with patch.object(plugin, "MAX_OUTPUT_CHARS", len(json.dumps(kept, ensure_ascii=False)) - 1):
+            deferred = self.fetch_page(content)["channels"][0]
+        self.assertEqual((deferred["coverage"], deferred["posts"], textless(deferred), deferred["omitted_posts"]),
+                         ("output_deferred", [], [], 3))
 
     def test_many_text_not_extracted_lists_fit_the_output_bound(self):
         names = [f"channel{number}" for number in range(11)]
@@ -1627,6 +1655,110 @@ class FeedSourceTests(ConsumerCase):
             _items, capped, _error = plugin._fetch_feed(SGLANG)
         self.assertTrue(capped["feed_truncated"])
 
+    def test_deeply_nested_feed_parses_in_linear_time(self):
+        # Well-formed, below MAX_FEED_BYTES, with elements outside any item nested
+        # about 300,000 deep: comparing the whole path per element took minutes.
+        item = (b"<item><guid>urn:deep</guid><link>https://example.org/deep</link><title>Deep</title>"
+                b"<x><title>Nested, not the item's own</title></x>"
+                b"<pubDate>Sun, 27 Sep 2026 10:00:00 GMT</pubDate></item>")
+        head, tail = b'<?xml version="1.0"?><rss version="2.0"><channel><title>T</title>', item + b"</channel></rss>"
+        copied = []
+
+        class CountedPath(list):
+            def __getitem__(self, index):
+                part = super().__getitem__(index)
+                if isinstance(index, slice):
+                    copied.append(len(part))
+                return part
+
+            def __iter__(self):
+                copied.append(len(self))
+                return super().__iter__()
+
+        depth = 2000
+        feed = plugin._Feed()
+        feed.path = CountedPath()
+        feed.parser.Parse(head + b"<a>" * depth + b"</a>" * depth + tail, True)
+        self.assertEqual([entry["title"] for entry in feed.items], ["Deep"])
+        # An element looks at most at the few path entries an item spans, never at the whole path.
+        self.assertLessEqual(sum(copied), 2 * (depth + 10))
+        depth = (plugin.MAX_FEED_BYTES - len(head) - len(tail)) // len(b"<a></a>")
+        document = head + b"<a>" * depth + b"</a>" * depth + tail
+        self.assertGreater(len(document), plugin.MAX_FEED_BYTES - 16)
+        with patch.object(plugin._OPENER, "open", side_effect=route({OPENAI: feed_response(document)})):
+            started = time.monotonic()
+            items, facts, error = plugin._fetch_feed(OPENAI)
+            elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 15)  # about 0.3 s here; the quadratic parser needed minutes
+        self.assertEqual((error, facts["feed_truncated"]), ("", False))
+        self.assertEqual([(entry["url"], entry["title"], entry["date"]) for entry in items],
+                         [("https://example.org/deep", "Deep", "2026-09-27T10:00:00+00:00")])
+
+    def test_unattempted_items_gone_from_the_feed_are_forgotten_after_the_window(self):
+        # A busy feed nobody records: each day lists only that day's 30 items, and one pinned item.
+        self.add(OPENAI)
+        pinned = (article("pinned"), 2, "Still listed")
+        returned = {}
+        for day in range(30):
+            self.utcnow.return_value = NOW + timedelta(days=day)
+            items = [(article(f"d{day}-{n}"), 1 - 24 * day, f"Day {day} item {n}") for n in range(30)]
+            source = self.source(self.fetch({OPENAI: feed_response(rss(pinned, *items))}, limit=2)[0])
+            returned[day] = [p["id"] for p in source["posts"]]
+        with plugin._connect() as conn:
+            rows = conn.execute("SELECT COUNT(*) FROM feed_items").fetchone()[0]
+        # The 31 listed items, plus those that vanished within the last LOOKBACK_DAYS + 1 reads;
+        # without pruning, every vanished item of the 30 days (901 rows) stays.
+        self.assertEqual(rows, 31 + 30 * (plugin.LOOKBACK_DAYS + 1))
+        self.assertEqual((source["historical_lost_unattempted"], source["lost_unattempted_now"]), (29 * 30, 30))
+        self.assertEqual(returned[29][0], feed_id(article("pinned")))  # still listed, so kept and offered
+        recent, old = returned[25][1], returned[5][1]
+        # Gone for 4 days, an item that was returned can still be recorded; gone for 24, it is forgotten.
+        self.assertTrue(self.call("record_attempt", day="2026-10-26", post_ids=[recent])["ok"])
+        self.assertFalse(self.call("record_attempt", day="2026-10-26", edition="old", post_ids=[old])["ok"])
+        # Pruning never touches attempted identities: the recorded one stays after it would have expired.
+        self.utcnow.return_value = NOW + timedelta(days=40)
+        self.fetch({OPENAI: feed_response(rss(pinned))})
+        with plugin._connect() as conn:
+            self.assertEqual([tuple(row) for row in conn.execute("SELECT attempted FROM feed_items WHERE key=?",
+                                                                 (recent.rsplit("/", 1)[1],))], [(1,)])
+
+    def test_item_missing_before_lost_at_existed_keeps_a_full_window_from_the_upgrade(self):
+        path = Path(self.api.root) / "digest.sqlite3"
+        path.unlink(missing_ok=True)
+        gone = feed_id(article("gone")).rsplit("/", 1)[1]
+        with sqlite3.connect(path) as db:  # feed_items as the previous revision wrote it, one item already missing
+            db.execute("CREATE TABLE feed_items (source TEXT NOT NULL, key TEXT NOT NULL, published TEXT NOT NULL, "
+                       "attempted INTEGER NOT NULL DEFAULT 0, returned INTEGER NOT NULL DEFAULT 0, "
+                       "lost_reported INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source,key))")
+            db.execute("INSERT INTO feed_items VALUES (?,?,?,0,1,1)", (key(OPENAI), gone, stamp(30)))
+        upgraded = datetime.now(timezone.utc)  # the backfill stamps SQLite's own clock
+        self.add(OPENAI)
+        feed = {OPENAI: feed_response(rss((article("listed"), 1, "Listed")))}
+        for days, kept in ((plugin.LOOKBACK_DAYS - 1, True), (plugin.LOOKBACK_DAYS + 1, False)):
+            with self.subTest(days=days):
+                self.utcnow.return_value = upgraded + timedelta(days=days)
+                self.fetch(feed)
+                with plugin._connect() as conn:
+                    stamps = [row[0] for row in conn.execute("SELECT lost_at FROM feed_items WHERE key=?", (gone,))]
+                self.assertEqual(len(stamps), int(kept))
+                if kept:
+                    self.assertLess(abs(datetime.fromisoformat(stamps[0]) - upgraded), timedelta(minutes=1))
+
+    def test_possible_gap_is_judged_by_the_window_until_a_record_then_by_the_attempted_position(self):
+        self.add(OPENAI)
+        recent = feed_response(rss((article("b"), 20, "B"), (article("a"), 30, "A")))
+        before, _ = self.fetch({OPENAI: recent})
+        # Nothing older than 30 h is listed, so earlier items of the 7-day window may be missing.
+        self.assertEqual((self.source(before)["possible_gap"], self.source(before)["attempted_through"]), (True, ""))
+        self.assertTrue(self.call("record_attempt", day="2026-09-27", fetch_ids=[before["fetch_id"]])["ok"])
+        # The same feed after the record: it reaches back to the newest attempted item.
+        after = self.source(self.fetch({OPENAI: recent})[0])
+        self.assertEqual((after["possible_gap"], after["attempted_through"], after["posts"]), (False, stamp(20), []))
+        # A feed that no longer reaches back to the attempted position is a gap again, though nothing unattempted was lost.
+        moved = self.source(self.fetch({OPENAI: feed_response(rss((article("c"), 1, "C")))})[0])
+        self.assertEqual((moved["possible_gap"], moved["lost_unattempted_now"], [p["id"] for p in moved["posts"]]),
+                         (True, 0, [feed_id(article("c"))]))
+
 
 def telegram_pages(pages):
     """An opener side effect serving each channel's own preview page."""
@@ -1921,6 +2053,8 @@ class RetryTests(ConsumerCase):
         with patch.object(plugin._OPENER, "open", side_effect=route({OPENAI: both})):
             retry = self.call("fetch_posts", include_attempted=True)
         self.assertEqual([p["id"] for p in retry["channels"][0]["posts"]], [feed_id(article("b"))])
+        # A feed item has no attempted-not-read state, so it carries no already_attempted flag.
+        self.assertNotIn("already_attempted", retry["channels"][0]["posts"][0])
 
     def test_state_from_before_this_revision_keeps_its_attempted_not_read_posts(self):
         path = Path(self.api.root) / "digest.sqlite3"
@@ -1984,7 +2118,8 @@ class ScriptedServer:
         self.parts, self.gap = parts, gap
         self.listener = socket.create_server(("127.0.0.1", 0))
         self.listener.settimeout(15)
-        self.url = f"https://127.0.0.1:{self.listener.getsockname()[1]}/feed.xml"
+        self.port = self.listener.getsockname()[1]
+        self.url = f"https://127.0.0.1:{self.port}/feed.xml"
         self.thread = threading.Thread(target=self.serve, daemon=True)
         self.thread.start()
 
@@ -2027,7 +2162,19 @@ class TransportDeadlineTests(ConsumerCase):
 
     def setUp(self):
         super().setUp()
+        # The loopback server stands in for a public host: the address check admits
+        # it, and the connection goes to the address that check vetted.
+        self.resolve.return_value = ["127.0.0.1"]
+        is_public, connect = plugin._is_public, socket.create_connection
+
+        def loopback_only(address, *args, **kwargs):
+            if address[0] != "127.0.0.1":
+                raise AssertionError(f"an offline test tried to connect to {address}")
+            return connect(address, *args, **kwargs)
+
         for patcher in (patch.object(ssl.SSLContext, "wrap_socket", lambda _self, sock, **_kwargs: sock),
+                        patch.object(plugin, "_is_public", lambda value: value == "127.0.0.1" or is_public(value)),
+                        patch.object(plugin.socket, "create_connection", loopback_only),
                         patch.dict(os.environ, {"no_proxy": "*"})):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -2079,10 +2226,114 @@ class TransportDeadlineTests(ConsumerCase):
                 [CHUNKED_HEAD + b"a;name=value\r\nhelloworld\r\n0\r\nX-Trailer: y\r\n\r\n"], b"helloworld"),
             "gzip": ([b"HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Encoding: gzip\r\n"
                       b"Transfer-Encoding: chunked\r\n\r\n", chunk(gzip.compress(b"helloworld")), b"0\r\n\r\n"], b"helloworld"),
+            "gzip with content length": ([b"HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Encoding: gzip\r\n"
+                                          b"Content-Length: %d\r\n\r\n" % len(gzip.compress(b"helloworld")),
+                                          gzip.compress(b"helloworld")], b"helloworld"),
         }
         for label, (parts, expected) in cases.items():
             with self.subTest(label), ScriptedServer(parts, 0.01) as server:
                 self.assertEqual(self.get(server), (expected, True))
+
+    def test_body_cut_before_its_declared_length_is_refused(self):
+        # http.client's read1 returns b"" instead of raising IncompleteRead when the peer closes early.
+        member = gzip.compress(b"<rss/>")
+        cases = {
+            "content length 500, 50 bytes, then FIN":
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: 500\r\n\r\n" + b"x" * 50,
+            "complete gzip member, shorter than its content length":
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Encoding: gzip\r\n"
+                b"Content-Length: %d\r\n\r\n%s" % (len(member) + 100, member),
+        }
+        for label, response in cases.items():
+            with self.subTest(label), ScriptedServer([response]) as server:
+                with self.assertRaises(plugin._Unavailable) as cut:
+                    self.get(server)
+                self.assertEqual(str(cut.exception), "body ended before its declared length")
+
+    def test_preview_cut_before_its_declared_length_does_not_make_unread_posts_look_lost(self):
+        self.call("channels", action="add", name="sample_news")
+        full = page(*[post_html(n, f"Post {n}") for n in (1, 2, 3, 4)])
+        with patch.object(plugin._OPENER, "open", return_value=FakeResponse(content=full)):
+            self.call("fetch_posts")  # four posts returned, none attempted yet
+        cut = full[:full.index(b'data-post="sample_news/2"')]  # post 1 whole, then the connection closes
+        head = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %d\r\n\r\n" % len(full)
+        with ScriptedServer([head + cut]) as server:
+            # The very response object urllib hands over, read from a real socket.
+            connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+            self.addCleanup(connection.close)
+            connection.request("GET", "/s/sample_news")
+            response = connection.getresponse()
+            response.url = "https://t.me/s/sample_news"
+            with patch.object(plugin._OPENER, "open", return_value=response):
+                source = self.call("fetch_posts")["channels"][0]
+        self.assertEqual((source["coverage"], source["error"]),
+                         ("unavailable", "preview unavailable: body ended before its declared length"))
+        self.assertEqual((source["lost_unattempted_now"], source["historical_lost_unattempted"]), (0, 0))
+        with plugin._connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM observed WHERE lost_reported=1").fetchone()[0], 0)
+        # Nothing was marked lost, so naming a later returned post cannot pass over the unread ones.
+        refused = self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/1", "sample_news/4"])
+        self.assertIn("every earlier returned post", refused["error"])
+        self.assertEqual(self.watermark(), 0)
+        with patch.object(plugin._OPENER, "open", return_value=FakeResponse(content=full)):
+            whole = self.call("fetch_posts")["channels"][0]
+        self.assertEqual(([p["id"] for p in whole["posts"]], whole["lost_unattempted_now"]),
+                         ([f"sample_news/{n}" for n in (1, 2, 3, 4)], 0))
+
+    def test_connection_goes_to_the_checked_address_and_tls_verifies_the_url_host(self):
+        # DNS rebinding: the check saw the public stand-in; a second lookup would now name another host.
+        internal = socket.create_server(("127.0.0.1", 0))
+        self.addCleanup(internal.close)
+        lookup = socket.getaddrinfo
+
+        def rebinding(host, port, *args, **kwargs):
+            if host == "feed.example":
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", internal.getsockname())]
+            return lookup(host, port, *args, **kwargs)
+
+        hostnames = []
+
+        def handshake(_context, sock, server_hostname=None, **_kwargs):
+            hostnames.append(server_hostname)
+            return sock
+
+        body = b"<rss/>"
+        with ScriptedServer([b"HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: %d\r\n\r\n%s"
+                             % (len(body), body)]) as server, \
+                patch.object(plugin.socket, "getaddrinfo", side_effect=rebinding), \
+                patch.object(ssl.SSLContext, "wrap_socket", handshake):
+            url = f"https://feed.example:{server.port}/feed.xml"
+            self.assertEqual(plugin._get(url, plugin._FEED_ACCEPT, 1024, html=False), (body, True))
+        self.resolve.assert_called_once_with("feed.example", server.port)
+        self.assertEqual(hostnames, ["feed.example"])  # SNI and certificate checks use the URL's host
+        internal.setblocking(False)
+        with self.assertRaises(BlockingIOError):
+            internal.accept()  # the rebound address was never contacted
+
+    def test_only_a_proxy_tunnel_is_dialled_by_name(self):
+        dialled = []
+
+        def refuse(target, _timeout, _source):
+            dialled.append(target)
+            raise ConnectionRefusedError("refused by the test")
+
+        proxy = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.80", 3128))]
+        for tunnel, expected in ((None, [("203.0.113.9", 443), ("203.0.113.10", 443)]), ("feed.example", [("192.0.2.80", 3128)])):
+            with self.subTest(tunnel=tunnel), \
+                    patch.object(plugin.socket, "getaddrinfo", return_value=proxy) as resolved, \
+                    patch.object(plugin.socket, "create_connection", side_effect=refuse):
+                dialled.clear()
+                connection = plugin._TimedConnection("proxy.example" if tunnel else "feed.example",
+                                                     3128 if tunnel else 443, timeout=plugin.REQUEST_TIMEOUT,
+                                                     deadline=plugin._Deadline(), addresses=["203.0.113.9", "203.0.113.10"])
+                if tunnel:
+                    connection.set_tunnel(tunnel, 443)
+                with self.assertRaises(ConnectionRefusedError):
+                    connection.connect()
+                self.assertEqual(dialled, expected)
+                # Direct connections never look the name up again; a proxy is found by its own name.
+                self.assertEqual(resolved.call_args_list,
+                                 [call("proxy.example", 3128, type=socket.SOCK_STREAM)] if tunnel else [])
 
     def test_status_errors_and_redirects_still_name_themselves(self):
         with ScriptedServer([b"HTTP/1.1 503 Busy\r\nContent-Length: 0\r\n\r\n"]) as server, \
@@ -2270,11 +2521,12 @@ class TransportDeadlineTests(ConsumerCase):
             clock[0] += timeout
             raise TimeoutError("timed out")
 
-        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"203.0.113.{n}", 443)) for n in range(1, 40)]
+        addresses = [f"203.0.113.{n}" for n in range(1, 40)]
         with patch.object(plugin.time, "monotonic", side_effect=lambda: clock[0]), \
-                patch.object(plugin.socket, "getaddrinfo", return_value=addresses), \
+                patch.object(plugin.socket, "getaddrinfo", side_effect=AssertionError("looked up again")), \
                 patch.object(plugin.socket, "create_connection", side_effect=blackholed):
-            connection = plugin._TimedConnection("example.org", timeout=plugin.REQUEST_TIMEOUT, deadline=plugin._Deadline())
+            connection = plugin._TimedConnection("example.org", timeout=plugin.REQUEST_TIMEOUT, deadline=plugin._Deadline(),
+                                                 addresses=addresses)
             with self.assertRaises(TimeoutError) as cut:
                 connection.connect()
         self.assertEqual(str(cut.exception), "read deadline exceeded")

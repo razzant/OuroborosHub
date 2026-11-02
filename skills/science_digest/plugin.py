@@ -117,9 +117,10 @@ _SCHEMA = (
     # instead of the Telegram numeric watermark.
     "CREATE TABLE IF NOT EXISTS feeds (name TEXT PRIMARY KEY, since TEXT NOT NULL, "
     "read_generation INTEGER NOT NULL DEFAULT 0, url TEXT NOT NULL DEFAULT '');"
+    # lost_at: when a complete read last found an item missing; '' while it is listed.
     "CREATE TABLE IF NOT EXISTS feed_items (source TEXT NOT NULL, key TEXT NOT NULL, published TEXT NOT NULL, "
     "attempted INTEGER NOT NULL DEFAULT 0, returned INTEGER NOT NULL DEFAULT 0, "
-    "lost_reported INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source,key));"
+    "lost_reported INTEGER NOT NULL DEFAULT 0, lost_at TEXT NOT NULL DEFAULT '', PRIMARY KEY(source,key));"
     # Per source, what its latest published fetch_posts call returned. An edition
     # names these calls in record_attempt; nothing is derived from older reads.
     "CREATE TABLE IF NOT EXISTS fetches (id INTEGER PRIMARY KEY AUTOINCREMENT);"
@@ -131,11 +132,15 @@ _MIGRATIONS = (("observed", "lost_reported", "INTEGER NOT NULL DEFAULT 0"),
                ("observed", "text_extracted", "INTEGER NOT NULL DEFAULT 1"),
                ("observed", "not_read", "INTEGER NOT NULL DEFAULT 0"),
                ("telegram_reads", "since", "TEXT NOT NULL DEFAULT ''"),
-               ("feeds", "url", "TEXT NOT NULL DEFAULT ''"))
+               ("feeds", "url", "TEXT NOT NULL DEFAULT ''"),
+               ("feed_items", "lost_at", "TEXT NOT NULL DEFAULT ''"))
 # Until not_read existed, a textless post a fetch returned and the cursor passed
 # was what an edition recorded as attempted-not-read; it stays retryable.
+# A feed item already missing when lost_at arrives is stamped then: it keeps a full window.
 _BACKFILLS = {"not_read": "UPDATE observed SET not_read=1 WHERE text_extracted=0 AND "
-                          "id<=(SELECT last_id FROM seen WHERE seen.channel=observed.channel)"}
+                          "id<=(SELECT last_id FROM seen WHERE seen.channel=observed.channel)",
+              "lost_at": "UPDATE feed_items SET lost_at=strftime('%Y-%m-%dT%H:%M:%S+00:00','now') "
+                         "WHERE lost_reported=1"}
 
 
 @contextmanager
@@ -395,9 +400,9 @@ class _TimedSocket:
 
 
 class _TimedConnection(http.client.HTTPSConnection):
-    def __init__(self, *args: Any, deadline: _Deadline, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, deadline: _Deadline, addresses: list[str], **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.deadline = deadline
+        self.deadline, self.addresses = deadline, addresses
         self._create_connection = self._dial
         self.response_class = self._response
 
@@ -405,12 +410,19 @@ class _TimedConnection(http.client.HTTPSConnection):
         return http.client.HTTPResponse(_TimedSocket(sock, self.deadline), *args, **kwargs)
 
     def _dial(self, address: tuple[str, int], _timeout: Any = None, source_address: Any = None) -> socket.socket:
-        """socket.create_connection would give every address the full timeout."""
+        """Connect to the addresses _get checked, never to a second lookup that
+        DNS could answer differently; TLS still verifies the URL's host name. A
+        proxy tunnel dials the proxy by its own name. socket.create_connection
+        would give every address the full timeout."""
+        if self._tunnel_host:
+            targets = [info[4][:2] for info in socket.getaddrinfo(address[0], address[1], type=socket.SOCK_STREAM)]
+        else:
+            targets = [(host, address[1]) for host in self.addresses]
         failure: OSError | None = None
-        for *_, target in socket.getaddrinfo(address[0], address[1], type=socket.SOCK_STREAM):
+        for target in targets:
             timeout = self.deadline.timeout()
             try:
-                sock = socket.create_connection(target[:2], timeout, source_address)
+                sock = socket.create_connection(target, timeout, source_address)
             except OSError as exc:
                 failure = exc
                 continue
@@ -421,7 +433,7 @@ class _TimedConnection(http.client.HTTPSConnection):
 
 class _TimedHTTPS(urllib.request.HTTPSHandler):
     def https_open(self, req: Any) -> Any:
-        return self.do_open(functools.partial(_TimedConnection, deadline=req.deadline), req)
+        return self.do_open(functools.partial(_TimedConnection, deadline=req.deadline, addresses=req.addresses), req)
 
 
 _OPENER = urllib.request.build_opener(_NoRedirect(), _TimedHTTPS())
@@ -517,6 +529,11 @@ def _read_bounded(response: Any, limit: int, deadline: _Deadline) -> tuple[bytes
                 return b"".join(chunks), False
             raise
         if not data:
+            # read1 ends a Content-Length body the peer cut short without
+            # IncompleteRead; the bytes http.client still expects say so.
+            expected = getattr(response, "length", None)
+            if isinstance(expected, int) and expected > 0:
+                raise _BodyError("body ended before its declared length")
             if gunzip is not None and not gunzip.ended():
                 raise _BodyError("truncated gzip body")
             break
@@ -536,10 +553,10 @@ def _read_bounded(response: Any, limit: int, deadline: _Deadline) -> tuple[bytes
 def _get(url: str, accept: str, limit: int, *, html: bool) -> tuple[bytes, bool]:
     """One GET of a public https URL: (body of at most limit+1 bytes, complete).
 
-    The host must resolve only to public addresses. Redirects raise
-    _Redirected; nothing is followed. One deadline covers the whole exchange.
-    Residual risks: DNS can change between this check and urllib's own
-    connection, and a configured proxy resolves the host itself.
+    The host must resolve only to public addresses, and the connection goes to
+    those very addresses. Redirects raise _Redirected; nothing is followed. One
+    deadline covers the whole exchange. Residual risk: a configured proxy
+    resolves the host itself, so the check does not bind a proxied connection.
     """
     deadline = _Deadline()
     parts = urllib.parse.urlsplit(url)
@@ -555,6 +572,7 @@ def _get(url: str, accept: str, limit: int, *, html: bool) -> tuple[bytes, bool]
         raise _Unavailable(f"refused: {host} resolves to non-public address {blocked}")
     request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, "Accept": accept})
     request.deadline = deadline  # type: ignore[attr-defined]
+    request.addresses = addresses  # type: ignore[attr-defined]
     try:
         with _OPENER.open(request, timeout=REQUEST_TIMEOUT) as response:
             if response.geturl() != url:
@@ -853,7 +871,9 @@ class _Feed:
         self.path.append(tag)
         item = self.ITEM[self.format]
         if self.fields is None:
-            if tuple(self.path[1:]) == item:
+            # Only an element at an item's own depth can be one. Comparing the
+            # whole path at every depth made deep nesting cost quadratic time.
+            if len(self.path) == len(item) + 1 and tuple(self.path[1:]) == item:
                 if self.parsed >= MAX_FEED_ITEMS:
                     raise _FeedFull()
                 self.fields, self.clipped, self.types, self.field = {}, False, {}, ""
@@ -1107,11 +1127,17 @@ def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
         present = {item["key"] for item in items}
         undated_pending = bool(pending & (present - {item["key"] for item in dated}))
         # Reappearance ends one absence episode; a later disappearance can be
-        # counted again. Retain the row so an ID actually returned to the agent
-        # remains acknowledgeable even if another fetch completes meanwhile.
+        # counted again. Retain the row for LOOKBACK_DAYS so an ID actually
+        # returned to the agent remains acknowledgeable even if another fetch
+        # completes meanwhile.
         if generation == latest and not error:
-            conn.executemany("UPDATE feed_items SET lost_reported=0 WHERE source=? AND key=?",
+            conn.executemany("UPDATE feed_items SET lost_reported=0, lost_at='' WHERE source=? AND key=?",
                              ((source, key) for key in present))
+            # After that window the unattempted identity is forgotten (gaps keeps
+            # its loss); otherwise a busy feed's state, and every read of it, grows
+            # without bound.
+            conn.execute("DELETE FROM feed_items WHERE source=? AND attempted=0 AND lost_reported=1 AND lost_at<?",
+                         (source, _window_start()))
         if generation == latest and not error and not facts.get("feed_truncated"):
             # Only a complete readable feed proves an observed unattempted
             # item disappeared. A byte/item-limited prefix may simply omit it.
@@ -1120,8 +1146,9 @@ def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
                 (source,)) if row[0] not in present]
             lost_now = len(missing)
             if lost_now:
-                conn.executemany("UPDATE feed_items SET lost_reported=1 WHERE source=? AND key=?",
-                                 ((source, key) for key in missing))
+                lost_at = _utcnow().isoformat(timespec="seconds")
+                conn.executemany("UPDATE feed_items SET lost_reported=1, lost_at=? WHERE source=? AND key=?",
+                                 ((lost_at, source, key) for key in missing))
                 conn.execute("INSERT INTO gaps(channel,lost_count) VALUES (?,?) ON CONFLICT(channel) "
                              "DO UPDATE SET lost_count=lost_count+excluded.lost_count", (source, lost_now))
         if not error:
@@ -1489,7 +1516,7 @@ def register(api: Any) -> None:
                                                                "channel": {"type": "string"}}},
                       timeout_sec=120)
     api.register_tool("record_attempt", _record_attempt,
-                      description="After composing a digest, record it as an ATTEMPT, never delivery. fetch_ids lists the fetch_id of each fetch_posts call the edition used: everything those calls returned is recorded, posts as inspected and text_not_extracted as attempted-not-read, for each source whose latest fetch that call still is. post_ids instead records only the ids named. day (YYYY-MM-DD) + edition (default daily) is the idempotency key; use a distinct edition for another same-day digest.",
+                      description="After composing a digest, record it as an ATTEMPT, never delivery. fetch_ids lists the fetch_id of each fetch_posts call the edition used: everything those calls returned is recorded, posts as inspected and text_not_extracted as attempted-not-read, for each source whose latest fetch that call still is. post_ids instead records the ids named, from any fetch that returned them, even after an unavailable refetch; on a Telegram channel every readable post returned between the cursor and the newest named id must be named too, and the textless ones there are recorded as attempted-not-read without being named. day (YYYY-MM-DD) + edition (default daily) is the idempotency key; use a distinct edition for another same-day digest.",
                       schema={"type": "object", "properties": {"day": {"type": "string"},
                                                                "edition": {"type": "string"},
                                                                "fetch_ids": {"type": "array", "items": {"type": "integer"}},

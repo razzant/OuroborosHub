@@ -53,9 +53,15 @@ the owner whether to add that URL instead. Up to 12 sources.
 ## Writing a digest
 
 1. Call `fetch_posts`. It returns a bounded portion of each source, oldest
-   first. A source with `coverage: "output_deferred"` had no post fit in this
-   call: fetch it alone with `channel=`. `omitted_posts` stay for the next
-   edition: do not fetch them again.
+   first: up to `limit` readable posts or feed items per source (1–20, default
+   10). Telegram posts without text in that run are listed too and do not
+   count toward `limit`. All sources of one call share about 14,000 characters
+   of output; past that, the newest entries of the longest listings wait as
+   `omitted_posts`, so a call for one source with `channel=` can return more of
+   it than a call for all. A source with `coverage: "output_deferred"` had new
+   entries, but the budget left none of them in this call, neither a post nor a
+   `text_not_extracted` link: fetch it alone with `channel=`. `omitted_posts`
+   stay for the next edition: do not fetch them again.
 2. Telegram `posts` carry the preview's own text (`text_truncated` means only
    partly read). `text_not_extracted` lists posts whose text the preview did
    not give: images, videos, polls, or Telegram's placeholder such as "Please
@@ -76,6 +82,16 @@ the owner whether to add that URL instead. Up to 12 sources.
    `window_since` that were not shown as new.
    `possible_gap`, `lost_unattempted_now` and `stale_read` are gaps to mention.
    Unknown coverage is never "no news".
+   `possible_gap` describes this fetch only. Until a source's first recorded
+   attempt it is true when the page or feed does not reach back to
+   `window_since` (its oldest dated item is newer), so earlier items of that
+   window may be missing. After a record it compares with the attempted
+   position instead: a Telegram page must reach back to the post after
+   `last_attempted_id`, a feed to `attempted_through`. An unchanged source can
+   therefore show `true` before a record and `false` after it; that earlier gap
+   was reported once, in the edition that recorded it. Vanished items
+   (`lost_unattempted_now`), stale reads and cut feeds that may hide items also
+   set it.
 6. After composing, call `record_attempt` with `day` (`YYYY-MM-DD`) and
    `fetch_ids`, the `fetch_id` of every `fetch_posts` call the edition used.
    Everything those calls returned is recorded: `posts` as inspected, including
@@ -84,9 +100,19 @@ the owner whether to add that URL instead. Up to 12 sources.
    found unavailable does not advance. To record only some items, pass their ids
    as `post_ids` instead. An attempt is not delivery. Another edition on the same
    day needs its own `edition` name.
-7. To retry attempted-not-read posts that are still public, call `fetch_posts`
-   with `include_attempted=true`. They come back with `already_attempted: true`,
-   along with new posts; read and baseline posts do not.
+   `post_ids` follows other rules. An id counts when any earlier fetch returned
+   it, even if the source's latest fetch was unavailable. On a Telegram channel,
+   every readable post returned between the cursor and the newest named id must
+   be named too, and the textless posts in that range are recorded as
+   attempted-not-read without being named. After a fetch that listed textless
+   `/1` and readable `/2` and an unavailable refetch, naming only `/2` moves the
+   cursor to 2 and records `/1` as attempted-not-read.
+7. To retry attempted-not-read Telegram posts that are still public, call
+   `fetch_posts` with `include_attempted=true`. They come back with
+   `already_attempted: true` and new posts with `already_attempted: false`;
+   read and baseline posts do not come back. Feed items never carry
+   `already_attempted`: a feed item has no attempted-not-read state, so an
+   attempted one never returns and every feed item listed is still unattempted.
 
 ## Limits
 
@@ -97,13 +123,22 @@ the owner whether to add that URL instead. Up to 12 sources.
 - Feeds: RSS 1.0, RSS 2.0 and Atom, recognized by structure. A new feed starts
   7 days back; every item keeps a stable id. A valid feed with no items is an
   empty list, not an error.
-- Per call: at most 20 readable posts per source, 4,096 characters per post and
-  about 14,000 characters in total; feeds up to 2 MiB, previews up to 768 KiB.
+- Per call: `limit` readable posts or feed items per source (at most 20), 4,096
+  characters per post and about 14,000 characters for the whole call; feeds up
+  to 2 MiB, previews up to 768 KiB.
 - Time: one source gets 30 seconds in all, for connection, headers and body; a
   slow feed keeps its complete items and reports `feed_truncated`. A call returns
   within 80 seconds: a source with no result by then reports
-  `coverage: "timeout"`, and the others are returned.
+  `coverage: "timeout"`, and the others are returned. Each `fetch_posts` call
+  reads up to 6 sources at a time; that limit counts only the call's own
+  sources. A host-name lookup cannot be interrupted: a source stuck in one keeps
+  its worker thread until the system resolver answers or gives up, and a retry
+  meanwhile may leave one more waiting.
 - Post text and the owner's interests enter the model's context. Skill state
-  keeps preferences, sources and item ids, not the posts.
-- The address check is not complete SSRF protection: DNS can change between the
-  check and the connection, and a configured proxy resolves hosts itself.
+  keeps preferences, sources and item ids, not the posts. An unattempted feed
+  item that leaves its feed is dropped from state 7 days after it was found
+  missing; `post_ids` can no longer record it, and
+  `historical_lost_unattempted` keeps counting it.
+- The connection goes only to the addresses that passed the public-address
+  check, and TLS verifies the host name. A configured proxy resolves hosts
+  itself, so a proxied connection is not bound to the checked addresses.
