@@ -195,6 +195,17 @@ class DigestConsumerTests(ConsumerCase):
         self.assertIn(f"share about {plugin.MAX_OUTPUT_CHARS:,} characters", text)
         self.assertIn(f"reads up to {plugin.MAX_PARALLEL_SOURCES} sources at a time", text)
         self.assertIn(f"dropped from state {plugin.LOOKBACK_DAYS} days after it was found missing", text)
+        self.assertIn(f"XML namespace URI longer than {plugin.MAX_NAMESPACE_URI} characters", text)
+        self.assertIn(f"more than {plugin.MAX_XML_NAMES:,} distinct XML names", text)
+        self.assertIn(f"a single tag or comment longer than {plugin.XML_PIECE // 1024} KiB", text)
+        self.assertIn(f"at least {plugin.MIN_PARSE_SECONDS} seconds for a body", text)
+        self.assertIn(f"at most {plugin.MAX_UNLISTED_FEED_ITEMS:,} unattempted items", text)
+        self.assertIn("closing `</html>` tag", text)
+        # post_ids: an id counts while it is tracked; lost posts are outside the naming rule.
+        self.assertIn("while it is among the newest 240 tracked for the channel", text)
+        description = self.api.tools["record_attempt"][1]["description"]
+        for wording in (text, description):
+            self.assertIn("retained returned readable post not marked lost", wording)
 
     def test_untrusted_targets_refused_without_network(self):
         with patch.object(plugin._OPENER, "open") as opened:
@@ -305,14 +316,14 @@ class DigestConsumerTests(ConsumerCase):
 
     def test_page_order_duplicates_and_reply_quotes_do_not_corrupt_posts(self):
         self.call("channels", action="add", name="sample_news")
-        content = (b'<div class="tgme_widget_message" data-post="sample_news/31">'
+        content = (b'<html><body><div class="tgme_widget_message" data-post="sample_news/31">'
                    b'<a class="tgme_widget_message_reply" href="https://t.me/sample_news/5">'
                    b'<div class="tgme_widget_message_text js-message_reply_text">quoted older post</div></a>'
                    b'<div class="tgme_widget_message_text js-message_text">Own words</div></div>'
                    b'<div class="tgme_widget_message" data-post="sample_news/30">'
                    b'<div class="tgme_widget_message_text">Earlier</div></div>'
                    b'<div class="tgme_widget_message" data-post="sample_news/31">'
-                   b'<div class="tgme_widget_message_text">Duplicate render</div></div>')
+                   b'<div class="tgme_widget_message_text">Duplicate render</div></div></body></html>')
         posts = self.fetch_page(content)["channels"][0]["posts"]
         self.assertEqual([(p["id"], p["text"]) for p in posts],
                          [("sample_news/30", "Earlier"), ("sample_news/31", "Own words")])
@@ -461,9 +472,9 @@ class DigestConsumerTests(ConsumerCase):
 
     def test_twenty_one_parsed_posts_are_not_falsely_lost(self):
         self.call("channels", action="add", name="sample_news")
-        content = b"".join((f'<div class="tgme_widget_message" data-post="sample_news/{n}">'
-                            f'<div class="tgme_widget_message_text">Post {n}</div></div>').encode()
-                           for n in range(1, 22))
+        content = b"<html><body>%s</body></html>" % b"".join((
+            f'<div class="tgme_widget_message" data-post="sample_news/{n}">'
+            f'<div class="tgme_widget_message_text">Post {n}</div></div>').encode() for n in range(1, 22))
         with patch.object(plugin._OPENER, "open", return_value=FakeResponse(content=content)):
             first = self.call("fetch_posts", limit=20)["channels"][0]
             self.assertEqual(first["posts"][0]["id"], "sample_news/1")
@@ -850,11 +861,15 @@ class TextNotExtractedTests(ConsumerCase):
             db.execute("INSERT INTO feeds VALUES ('rss:openai_news','2026-09-01T00:00:00+00:00',0)")
             db.execute("CREATE TABLE channels (name TEXT PRIMARY KEY COLLATE NOCASE)")
             db.execute("INSERT INTO channels VALUES ('sample_news'),('rss:openai_news')")
+            db.execute("CREATE TABLE gaps (channel TEXT PRIMARY KEY, lost_count INTEGER NOT NULL)")
+            db.execute("INSERT INTO gaps VALUES ('rss:openai_news',3)")
         listed = self.call("channels")
         self.assertEqual(listed["feed_urls"], {"rss:openai_news": ""})
         with sqlite3.connect(path) as db:
             columns = {table: {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
                        for table in ("observed", "telegram_reads", "feeds")}
+            self.assertEqual(db.execute("SELECT channel,lost_count,dropped_count FROM gaps").fetchall(),
+                             [("rss:openai_news", 3, 0)])
             self.assertTrue({"lost_reported", "text_extracted"} <= columns["observed"])
             self.assertIn("since", columns["telegram_reads"])
             self.assertIn("url", columns["feeds"])
@@ -862,7 +877,7 @@ class TextNotExtractedTests(ConsumerCase):
         with patch.object(plugin._OPENER, "open", return_value=FakeResponse()):
             result = self.call("fetch_posts")
         legacy = next(row for row in result["channels"] if row["channel"] == "rss:openai_news")
-        self.assertEqual(legacy["coverage"], "unavailable")
+        self.assertEqual((legacy["coverage"], legacy["historical_lost_unattempted"]), ("unavailable", 3))
         self.assertIn("add its https:// URL", legacy["error"])
         self.assertEqual(next(row for row in result["channels"] if row["channel"] == "sample_news")["coverage"],
                          "recent_page_only")
@@ -1759,6 +1774,280 @@ class FeedSourceTests(ConsumerCase):
         self.assertEqual((moved["possible_gap"], moved["lost_unattempted_now"], [p["id"] for p in moved["posts"]]),
                          (True, 0, [feed_id(article("c"))]))
 
+    def feed_rows(self):
+        with plugin._connect() as conn:
+            return (conn.execute("SELECT key,attempted,returned,lost_reported,lost_at FROM feed_items "
+                                 "ORDER BY key").fetchall(),
+                    conn.execute("SELECT * FROM gaps").fetchall())
+
+    def test_namespace_uri_past_its_cap_is_refused_before_any_name_carries_it(self):
+        # The reviewers' shape: one long URI, then many small names in it. Each name used
+        # to carry the whole URI: a 1 MiB feed held 134 million characters of names.
+        self.add(OPENAI)
+        self.fetch({OPENAI: feed_response(rss((article("a"), 2, "A")))})
+        before = self.feed_rows()
+
+        def feed(uri):
+            names = b'<x xmlns:q="%s">%s</x>' % (uri, b"".join(b"<q:n%d/>" % n for n in range(128)))
+            return rss((article("b"), 1, "B")).replace(b"<channel>", b"<channel>" + names, 1)
+
+        for size in (plugin.MAX_NAMESPACE_URI + 1, 8 * 1024):
+            with self.subTest(uri_characters=size):
+                body = feed(b"u" * size)
+                parsed = plugin._Feed()
+                started = time.monotonic()
+                with self.assertRaises(plugin._FeedRefused) as refused:
+                    parsed.parse(body, True, plugin._Deadline())
+                self.assertLess(time.monotonic() - started, 1)
+                self.assertEqual(str(refused.exception),
+                                 f"feed declares an XML namespace longer than {plugin.MAX_NAMESPACE_URI} characters; refused")
+                # The parser met the URI once, as its declaration; no name was built from it.
+                self.assertLess(sum(map(len, parsed.parser.intern)), size + 200)
+                source = self.source(self.fetch({OPENAI: feed_response(body)})[0])
+                self.assertEqual((source["coverage"], source["posts"], source["lost_unattempted_now"]),
+                                 ("unavailable", [], 0))
+                self.assertEqual(self.feed_rows(), before)  # a is not lost, b not tracked
+        at_cap = b"https://example.org/" + b"u" * (plugin.MAX_NAMESPACE_URI - 20)
+        readable = self.source(self.fetch({OPENAI: feed_response(feed(at_cap))})[0])
+        self.assertEqual((readable["coverage"], [p["title"] for p in readable["posts"]]), ("feed_window", ["B"]))
+
+    def test_more_distinct_xml_names_than_the_cap_are_refused(self):
+        self.add(OPENAI)
+        self.fetch({OPENAI: feed_response(rss((article("a"), 2, "A")))})
+        before = self.feed_rows()
+        names = [b"n%d" % n for n in range(plugin.MAX_XML_NAMES + 1)]
+
+        def feed(extra):
+            return rss((article("b"), 1, "B")).replace(b"<channel>", b"<channel>" + extra, 1)
+
+        cases = {
+            "element names": b"".join(b"<%s/>" % name for name in names),
+            # Each tag well within one parse piece, so only the names bound applies.
+            "attribute names": b"".join(b"<x %s/>" % b" ".join(b'%s=""' % name for name in names[n:n + 500])
+                                        for n in range(0, len(names), 500)),
+            "namespace prefixes": b"".join(b'<x xmlns:%s="urn:x"/>' % name for name in names),
+        }
+        for label, extra in cases.items():
+            with self.subTest(label):
+                parsed = plugin._Feed()
+                with self.assertRaises(plugin._FeedRefused) as refused:
+                    parsed.parse(feed(extra), True, plugin._Deadline())
+                self.assertEqual(str(refused.exception), f"feed uses more than {plugin.MAX_XML_NAMES} distinct XML names; refused")
+                # Checked at every tag: the parser holds at most one tag's names past the cap.
+                self.assertLessEqual(len(parsed.parser.intern), plugin.MAX_XML_NAMES + 520)
+                source = self.source(self.fetch({OPENAI: feed_response(feed(extra))})[0])
+                self.assertEqual((source["coverage"], source["posts"]), ("unavailable", []))
+                self.assertEqual(self.feed_rows(), before)
+        under = b"".join(b"<%s/>" % name for name in names[:plugin.MAX_XML_NAMES // 2])
+        self.assertEqual(self.source(self.fetch({OPENAI: feed_response(feed(under))})[0])["coverage"], "feed_window")
+
+    def test_a_tag_or_comment_longer_than_a_parse_piece_is_refused(self):
+        # expat reports every name of a tag at once, and expands each prefixed attribute of
+        # a tag that declares a long URI with that URI before any check can run.
+        self.add(OPENAI)
+
+        def feed(extra):
+            return rss((article("b"), 1, "B")).replace(b"<channel>", b"<channel>" + extra, 1)
+
+        long = 2 * plugin.XML_PIECE
+        cases = {
+            "comment": b"<!--" + b"c" * long + b"-->",
+            "one tag of many attributes": b"<x " + b" ".join(b'a%d=""' % n for n in range(long // 7)) + b"/>",
+            "one tag declaring a long URI for its own attributes":
+                b'<x xmlns:p="' + b"u" * (long // 2) + b'" ' + b" ".join(b'p:a%d=""' % n for n in range(long // 20)) + b"/>",
+        }
+        for label, extra in cases.items():
+            with self.subTest(label):
+                parsed = plugin._Feed()
+                with self.assertRaises(plugin._FeedRefused) as refused:
+                    parsed.parse(feed(extra), True, plugin._Deadline())
+                self.assertEqual(str(refused.exception),
+                                 f"feed has a tag or comment longer than {plugin.XML_PIECE // 1024} KiB; refused")
+                self.assertLess(len(parsed.parser.intern), 20)  # the tag never reached the handlers
+                self.assertEqual(self.source(self.fetch({OPENAI: feed_response(feed(extra))})[0])["coverage"],
+                                 "unavailable")
+        shorter = b"<!--" + b"c" * (plugin.XML_PIECE // 2) + b"-->"
+        self.assertEqual(self.source(self.fetch({OPENAI: feed_response(feed(shorter))})[0])["coverage"], "feed_window")
+        def straddling(tag_bytes):
+            """An item whose enclosure tag starts at a piece boundary and ends in a shorter last piece."""
+            head = b'<?xml version="1.0"?><rss version="2.0"><channel><title>T</title>'
+            item = (b"<item><guid>urn:straddle</guid><title>Straddle</title><pubDate>%s</pubDate>"
+                    % email.utils.format_datetime(NOW - timedelta(hours=1), usegmt=True).encode())
+            filler = b"p" * (plugin.XML_PIECE - len(head) - len(item) - len(b"<description></description>"))
+            tag = b'<enclosure url="https://example.org/' + b"e" * (tag_bytes - 39) + b'"/>'
+            body = head + b"<description>" + filler + b"</description>" + item + tag + b"</item></channel></rss>"
+            self.assertEqual((body.index(b"<enclosure"), len(tag)), (plugin.XML_PIECE, tag_bytes))
+            return body
+
+        # Pending one whole piece, then finished: within the bound, so read. expat 2.6+ would
+        # defer such a last piece and keep reporting the tag as pending; the skill turns that off.
+        for size in (plugin.XML_PIECE + 100, 2 * plugin.XML_PIECE - 260):
+            with self.subTest(tag_bytes=size):
+                parsed = plugin._Feed()
+                parsed.parse(straddling(size), True, plugin._Deadline())
+                self.assertEqual([entry["title"] for entry in parsed.items], ["Straddle"])
+        source = self.source(self.fetch({OPENAI: feed_response(straddling(plugin.XML_PIECE + 100))})[0])
+        self.assertEqual((source["coverage"], [p["title"] for p in source["posts"]]), ("feed_window", ["Straddle"]))
+        # Where deferral stays on, expat reports no position (-1) for a held-back piece; that is
+        # not taken for an oversized tag.
+        parsed = plugin._Feed()
+        if hasattr(parsed.parser, "SetReparseDeferralEnabled"):
+            parsed.parser.SetReparseDeferralEnabled(True)
+            parsed.parse(straddling(2 * plugin.XML_PIECE - 260), True, plugin._Deadline())
+            self.assertEqual([entry["title"] for entry in parsed.items], ["Straddle"])
+
+    def test_parsing_that_outlasts_the_source_deadline_is_unavailable_and_records_nothing(self):
+        self.add(OPENAI)
+        self.fetch({OPENAI: feed_response(rss((article("a"), 2, "A"), (article("b"), 1, "B")))})
+        before = self.feed_rows()
+        # The next read lists b without a, behind markup spanning several parse pieces. Every
+        # element costs a quarter second of this clock: parsing it all would take a minute.
+        slow = rss(*[(article(f"s{n}"), 3, f"S{n}", "z" * 2000) for n in range(40)], (article("b"), 1, "B"))
+        self.assertGreater(len(slow), 4 * plugin.XML_PIECE)
+        clock = [1000.0]
+        start = plugin._Feed._start
+
+        def costly(feed, tag, attrs):
+            clock[0] += 0.25
+            start(feed, tag, attrs)
+
+        with patch.object(plugin.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(plugin._Feed, "_start", costly):
+            source = self.source(self.fetch({OPENAI: feed_response(slow)})[0])
+        self.assertEqual((source["coverage"], source["error"]),
+                         ("unavailable", "feed unavailable: parsing did not finish within the source deadline"))
+        self.assertEqual((source["posts"], source["lost_unattempted_now"]), ([], 0))
+        self.assertEqual(self.feed_rows(), before)  # a is not lost, the s items are not tracked
+        # Stopped about one piece past the deadline (about 41 s here), not run to the end (62 s).
+        whole = 0.25 * (slow.count(b"<") - slow.count(b"</") - slow.count(b"<![CDATA[") - slow.count(b"<?"))
+        self.assertGreater(whole, plugin.READ_DEADLINE + 25)
+        self.assertLess(clock[0] - 1000.0, plugin.READ_DEADLINE + 15)
+
+    def test_unlisted_items_of_an_always_cut_feed_are_capped_and_counted(self):
+        # An archive feed cut at its bound on every read: each day the readable part holds only
+        # that day's ten items, and what leaves it is never proven gone.
+        self.add(OPENAI)
+        archive = []
+        returned = {}
+        with patch.object(plugin, "MAX_UNLISTED_FEED_ITEMS", 25), patch.object(plugin, "MAX_FEED_ITEMS", 10):
+            for day in range(8):
+                self.utcnow.return_value = NOW + timedelta(days=day)
+                today = [(article(f"d{day}-{n}"), 1 - 24 * day + n / 10, f"Day {day} item {n}") for n in range(10)]
+                archive = today + archive
+                source = self.source(self.fetch({OPENAI: feed_response(rss(*archive))})[0])
+                returned[day] = [p["id"] for p in source["posts"]]
+                if day == 2:
+                    self.assertTrue(self.call("record_attempt", day="2026-09-29", post_ids=returned[2][:1])["ok"])
+            with plugin._connect() as conn:
+                unattempted = [row[0] for row in conn.execute("SELECT key FROM feed_items WHERE attempted=0")]
+        self.assertTrue(source["feed_truncated"])
+        # Ten listed plus the 25 newest unlisted; 80 - 1 recorded - 10 - 25 = 44 dropped, the last ten now.
+        self.assertEqual(len(unattempted), 10 + 25)
+        self.assertEqual((source["dropped_unattempted_now"], source["historical_dropped_unattempted"],
+                          source["possible_gap"], source["lost_unattempted_now"]), (10, 44, True, 0))
+        # A failed read lists nothing, which proves nothing: it drops nothing.
+        with patch.object(plugin, "MAX_UNLISTED_FEED_ITEMS", 25):
+            failed = self.source(self.fetch({OPENAI: plugin.urllib.error.HTTPError(OPENAI, 503, "Busy", {}, None)})[0])
+        self.assertEqual((failed["coverage"], failed.get("historical_dropped_unattempted")), ("unavailable", 44))
+        with plugin._connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM feed_items WHERE attempted=0").fetchone()[0], 10 + 25)
+        # Oldest first: day 6's returned items are still recordable, day 0's are gone, the recorded one stays.
+        self.assertTrue(self.call("record_attempt", day="2026-10-04", post_ids=returned[6][:2])["ok"])
+        self.assertFalse(self.call("record_attempt", day="2026-10-04", edition="old", post_ids=returned[0][:1])["ok"])
+        with plugin._connect() as conn:
+            self.assertEqual(conn.execute("SELECT attempted FROM feed_items WHERE key=?",
+                                          (returned[2][0].rsplit("/", 1)[1],)).fetchone()[0], 1)
+
+    def test_items_already_counted_lost_are_not_counted_again_when_the_cap_drops_them(self):
+        self.add(OPENAI)
+        with patch.object(plugin, "MAX_UNLISTED_FEED_ITEMS", 25):
+            for day in range(5):  # complete reads: each day's ten items replace the last
+                self.utcnow.return_value = NOW + timedelta(days=day)
+                today = [(article(f"d{day}-{n}"), 1 - 24 * day + n / 10, f"Day {day} item {n}") for n in range(10)]
+                source = self.source(self.fetch({OPENAI: feed_response(rss(*today))})[0])
+        self.assertFalse(source["feed_truncated"])
+        self.assertEqual((source["historical_lost_unattempted"], source["lost_unattempted_now"]), (40, 10))
+        self.assertNotIn("historical_dropped_unattempted", source)
+        with plugin._connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM feed_items WHERE attempted=0").fetchone()[0], 10 + 25)
+
+    def lose_item_a(self):
+        """a is returned on day 0 and missing from a complete read on day 1."""
+        self.add(OPENAI)
+        self.fetch({OPENAI: feed_response(rss((article("a"), 2, "A")))})
+        self.utcnow.return_value = NOW + timedelta(days=1)
+        lost = self.source(self.fetch({OPENAI: feed_response(rss((article("b"), 1 - 24, "B")))})[0])
+        self.assertEqual(lost["lost_unattempted_now"], 1)
+        self.utcnow.return_value = NOW + timedelta(days=plugin.LOOKBACK_DAYS + 2)  # past a's prune window
+
+    def test_item_back_in_the_feed_keeps_the_row_the_agent_saw(self):
+        self.lose_item_a()
+        # a is listed again, behind an older item that takes the single returned slot. The read
+        # ends a's absence before pruning, so a stays the returned, recordable row it was.
+        back = rss((article("a"), 2, "A"), (article("older"), 3, "Older"), (article("b"), 1 - 24, "B"))
+        source = self.source(self.fetch({OPENAI: feed_response(back)}, limit=1)[0])
+        self.assertEqual([p["id"] for p in source["posts"]], [feed_id(article("older"))])
+        self.assertTrue(self.call("record_attempt", day="2026-10-06", post_ids=[feed_id(article("a"))])["ok"])
+
+    def test_failed_read_prunes_nothing(self):
+        self.lose_item_a()
+        failed = self.source(self.fetch({OPENAI: plugin.urllib.error.HTTPError(OPENAI, 503, "Busy", {}, None)})[0])
+        self.assertEqual(failed["coverage"], "unavailable")
+        # Only a current successful read forgets a lost item; until then it stays recordable.
+        self.assertTrue(self.call("record_attempt", day="2026-10-06", post_ids=[feed_id(article("a"))])["ok"])
+
+    def test_stale_read_neither_resets_a_loss_nor_prunes(self):
+        self.add(OPENAI)
+        both = rss((article("a"), 2, "A"), (article("b"), 1, "B"))
+        self.fetch({OPENAI: feed_response(both)})
+        older, newer = plugin._Feed(), plugin._Feed()
+        older.parser.Parse(both, True)
+        newer.parser.Parse(rss((article("b"), 1, "B")), True)
+        calls = 0
+
+        def overlapping(_url):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                # A newer read completes while this one waits and finds a gone.
+                found = self.source(self.call("fetch_posts"))
+                self.assertEqual((found["lost_unattempted_now"], found["historical_lost_unattempted"]), (1, 1))
+                return older.items, {"feed_truncated": False}, ""  # this older snapshot still lists a
+            return newer.items, {"feed_truncated": False}, ""
+
+        with patch.object(plugin, "_fetch_feed", side_effect=overlapping):
+            self.assertTrue(self.source(self.call("fetch_posts"))["stale_read"])
+            later = self.source(self.call("fetch_posts"))
+        # a is still gone and was counted once: the stale snapshot did not reset its loss.
+        self.assertEqual((later["lost_unattempted_now"], later["historical_lost_unattempted"]), (0, 1))
+
+    def test_ipv6_forms_carrying_a_non_public_ipv4_address_are_refused(self):
+        refused = {
+            "IPv4-mapped": ["::ffff:10.0.0.1", "::ffff:127.0.0.1"],
+            "IPv4-compatible": ["::127.0.0.1", "::169.254.169.254", "::a00:1"],
+            "IPv4-translated": ["::ffff:0:a00:1", "::ffff:0:7f00:1"],
+            "6to4": ["2002:a00:1::", "2002:7f00:1::1"],
+            "Teredo, client 10.0.0.1": ["2001:0:4136:e378:8000:63bf:f5ff:fffe"],
+            "NAT64": ["64:ff9b::a00:1", "64:ff9b::7f00:1"],
+            "local-use NAT64": ["64:ff9b:1::a00:1", "64:ff9b:1::7f00:1"],
+        }
+        for form, addresses in refused.items():
+            for address in addresses:
+                with self.subTest(form=form, address=address):
+                    self.assertFalse(plugin._is_public(address))
+        # Only the embedded address decides: the same forms around a public one stay usable.
+        for address in ("::ffff:8.8.8.8", "::808:808", "::ffff:0:808:808", "64:ff9b::808:808"):
+            with self.subTest(public=address):
+                self.assertTrue(plugin._is_public(address))
+        self.add(OPENAI)
+        for address in ("::127.0.0.1", "::ffff:0:a00:1"):
+            with self.subTest(resolved=address):
+                self.resolve.return_value = [address]
+                result, urls = self.fetch({})
+                self.assertEqual(urls, [])
+                self.assertEqual(self.source(result)["error"],
+                                 f"feed unavailable: refused: openai.com resolves to non-public address {address}")
+
 
 def telegram_pages(pages):
     """An opener side effect serving each channel's own preview page."""
@@ -2276,6 +2565,36 @@ class TransportDeadlineTests(ConsumerCase):
         self.assertIn("every earlier returned post", refused["error"])
         self.assertEqual(self.watermark(), 0)
         with patch.object(plugin._OPENER, "open", return_value=FakeResponse(content=full)):
+            whole = self.call("fetch_posts")["channels"][0]
+        self.assertEqual(([p["id"] for p in whole["posts"]], whole["lost_unattempted_now"]),
+                         ([f"sample_news/{n}" for n in (1, 2, 3, 4)], 0))
+
+    def test_preview_cut_without_any_declared_length_does_not_make_unread_posts_look_lost(self):
+        self.call("channels", action="add", name="sample_news")
+        full = page(*[post_html(n, f"Post {n}") for n in (1, 2, 3, 4)])
+        with patch.object(plugin._OPENER, "open", return_value=FakeResponse(content=full)):
+            self.call("fetch_posts")  # four posts returned, none attempted yet
+        cut = full[:full.index(b'data-post="sample_news/2"')]  # post 1 whole, then the connection closes
+        # Neither Content-Length nor chunked: HTTP lets the close itself end the body.
+        head = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n"
+        with ScriptedServer([head + cut]) as server:
+            connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=5)
+            self.addCleanup(connection.close)
+            connection.request("GET", "/s/sample_news")
+            response = connection.getresponse()
+            response.url = "https://t.me/s/sample_news"
+            with patch.object(plugin._OPENER, "open", return_value=response):
+                source = self.call("fetch_posts")["channels"][0]
+        self.assertEqual((source["coverage"], source["error"]),
+                         ("unavailable", "preview unavailable: the page ended before its closing </html> tag"))
+        self.assertEqual((source["lost_unattempted_now"], source["historical_lost_unattempted"]), (0, 0))
+        with plugin._connect() as conn:
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM observed WHERE lost_reported=1").fetchone()[0], 0)
+        refused = self.call("record_attempt", day="2026-09-27", post_ids=["sample_news/1", "sample_news/4"])
+        self.assertIn("every earlier returned post", refused["error"])
+        # A whole page is read; Telegram follows </html> with a comment (t.me/s/durov, 2026-11-02).
+        whole_page = full + b"\n<!-- page generated in 50.8ms -->\n"
+        with patch.object(plugin._OPENER, "open", return_value=FakeResponse(content=whole_page)):
             whole = self.call("fetch_posts")["channels"][0]
         self.assertEqual(([p["id"] for p in whole["posts"]], whole["lost_unattempted_now"]),
                          ([f"sample_news/{n}" for n in (1, 2, 3, 4)], 0))

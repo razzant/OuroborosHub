@@ -80,7 +80,8 @@ the owner whether to add that URL instead. Up to 12 sources.
    feeds with no new items; how many remain for the next edition
    (`omitted_posts`); and, on a first fetch, `baseline_posts` older than
    `window_since` that were not shown as new.
-   `possible_gap`, `lost_unattempted_now` and `stale_read` are gaps to mention.
+   `possible_gap`, `lost_unattempted_now`, `dropped_unattempted_now` and
+   `stale_read` are gaps to mention.
    Unknown coverage is never "no news".
    `possible_gap` describes this fetch only. Until a source's first recorded
    attempt it is true when the page or feed does not reach back to
@@ -90,8 +91,9 @@ the owner whether to add that URL instead. Up to 12 sources.
    `last_attempted_id`, a feed to `attempted_through`. An unchanged source can
    therefore show `true` before a record and `false` after it; that earlier gap
    was reported once, in the edition that recorded it. Vanished items
-   (`lost_unattempted_now`), stale reads and cut feeds that may hide items also
-   set it.
+   (`lost_unattempted_now`), feed items dropped from state
+   (`dropped_unattempted_now`), stale reads and cut feeds that may hide items
+   also set it.
 6. After composing, call `record_attempt` with `day` (`YYYY-MM-DD`) and
    `fetch_ids`, the `fetch_id` of every `fetch_posts` call the edition used.
    Everything those calls returned is recorded: `posts` as inspected, including
@@ -101,12 +103,17 @@ the owner whether to add that URL instead. Up to 12 sources.
    as `post_ids` instead. An attempt is not delivery. Another edition on the same
    day needs its own `edition` name.
    `post_ids` follows other rules. An id counts when any earlier fetch returned
-   it, even if the source's latest fetch was unavailable. On a Telegram channel,
-   every readable post returned between the cursor and the newest named id must
-   be named too, and the textless posts in that range are recorded as
-   attempted-not-read without being named. After a fetch that listed textless
-   `/1` and readable `/2` and an unavailable refetch, naming only `/2` moves the
-   cursor to 2 and records `/1` as attempted-not-read.
+   it, even if the source's latest fetch was unavailable, as long as the skill
+   still tracks it: a Telegram post while it is among the newest 240 tracked for
+   the channel, a feed item until it is dropped from state (see Limits). On a
+   Telegram channel, every retained returned readable post not marked lost
+   between the cursor and the newest named id must be named too, and the
+   retained returned textless posts not marked lost in that range are recorded
+   as attempted-not-read without being named. A lost readable post need not be
+   named; a lost textless post is not recorded as attempted-not-read. After a
+   fetch that listed textless `/1` and readable `/2` and an unavailable
+   refetch, naming only `/2` moves the cursor to 2 and records `/1` as
+   attempted-not-read.
 7. To retry attempted-not-read Telegram posts that are still public, call
    `fetch_posts` with `include_attempted=true`. They come back with
    `already_attempted: true` and new posts with `already_attempted: false`;
@@ -118,16 +125,27 @@ the owner whether to add that URL instead. Up to 12 sources.
 
 - Telegram: only the latest preview page (about 20 posts), never an archive. A
   page on which no post has text is unavailable, and nothing from it is
-  recorded. A new channel shows only posts from its last 7 days; a first page
+  recorded. A page that ends before its closing `</html>` tag, as a dropped
+  connection can leave it, is unavailable too, so posts after the cut never
+  look deleted. A new channel shows only posts from its last 7 days; a first page
   that does not reach that far back reports `possible_gap` and `window_since`.
 - Feeds: RSS 1.0, RSS 2.0 and Atom, recognized by structure. A new feed starts
   7 days back; every item keeps a stable id. A valid feed with no items is an
-  empty list, not an error.
+  empty list, not an error. A feed is unavailable, with the reason, when it
+  declares an XML namespace URI longer than 256 characters, uses more than
+  4,096 distinct XML names (element and attribute names, namespace prefixes
+  and URIs), or has a single tag or comment longer than 16 KiB (one of up to
+  32 KiB may still be read, depending on where it starts). Past these limits,
+  parsing would cost memory and time out of all proportion to the feed's size;
+  real feeds stay far below them.
 - Per call: `limit` readable posts or feed items per source (at most 20), 4,096
   characters per post and about 14,000 characters for the whole call; feeds up
   to 2 MiB, previews up to 768 KiB.
 - Time: one source gets 30 seconds in all, for connection, headers and body; a
-  slow feed keeps its complete items and reports `feed_truncated`. A call returns
+  slow feed keeps its complete items and reports `feed_truncated`. Parsing a
+  feed counts toward the same 30 seconds, with at least 10 seconds for a body
+  that arrives as they run out; a feed whose parsing does not finish by then is
+  unavailable, and nothing from that read is recorded. A call returns
   within 80 seconds: a source with no result by then reports
   `coverage: "timeout"`, and the others are returned. Each `fetch_posts` call
   reads up to 6 sources at a time; that limit counts only the call's own
@@ -138,7 +156,12 @@ the owner whether to add that URL instead. Up to 12 sources.
   keeps preferences, sources and item ids, not the posts. An unattempted feed
   item that leaves its feed is dropped from state 7 days after it was found
   missing; `post_ids` can no longer record it, and
-  `historical_lost_unattempted` keeps counting it.
+  `historical_lost_unattempted` keeps counting it. A feed cut short on every
+  read never proves an item gone, so a feed keeps at most 1,000 unattempted
+  items that its latest read no longer lists. Past that the oldest
+  are dropped from state, and `post_ids` can no longer record them; those not
+  already counted lost are counted in `dropped_unattempted_now` and
+  `historical_dropped_unattempted`, which appear once nonzero.
 - The connection goes only to the addresses that passed the public-address
   check, and TLS verifies the host name. A configured proxy resolves hosts
   itself, so a proxied connection is not bound to the checked addresses.

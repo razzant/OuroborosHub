@@ -51,11 +51,31 @@ MAX_RESPONSE_BYTES = 768 * 1024
 # One bound for every feed (the largest former per-publisher pin): release
 # notes and daily listings are read whole, long archives by their prefix.
 MAX_FEED_BYTES = 2 * 1024 * 1024
+# expat reports every name with its namespace URI attached, and pyexpat keeps
+# one copy of each distinct name until the parse ends. A long URI or a mass of
+# distinct names would cost memory and CPU far beyond the body's own size. Real
+# feeds stay far below both: Nature's and a GitHub release feed (2026-11) declare
+# URIs of at most 46 characters and use at most 41 names.
+MAX_NAMESPACE_URI = 256
+MAX_XML_NAMES = 4096
+# A feed is parsed this many bytes at a time, with the source deadline checked
+# in between. A tag or comment still unfinished a whole piece after it began is
+# refused, so expat never completes one of two pieces or more. expat reports all
+# names of a tag at once, and a tag declaring a long URI has its own prefixed
+# attributes expanded with it before any handler can refuse it: up to 230 MB for
+# a 128 KiB tag, 33 MB for one of 32 KiB. Whether a tag of 16 to 32 KiB is read
+# depends on where it starts.
+XML_PIECE = 16 * 1024
+# A body that arrives as the deadline runs out still gets this long to be parsed.
+MIN_PARSE_SECONDS = 10
 MAX_POST_TEXT = 4096
 MAX_POSTS_PER_CHANNEL = 20
 MAX_OUTPUT_CHARS = 14000
 MAX_FEED_ITEMS = 2000
 MAX_FEED_STATE = 5000
+# Unattempted identities a feed's latest read no longer lists. An always-cut
+# feed never proves them gone, so past this many the oldest are dropped and counted.
+MAX_UNLISTED_FEED_ITEMS = 1000
 MAX_URL = 2048
 MAX_REDIRECT_TARGET = 300
 # A new source starts this far back, so neither a publisher's archive nor a
@@ -79,7 +99,11 @@ READABLE = ("recent_page_only", "feed_window")
 _USER_AGENT = "Ouroboros-ScienceDigest/0.4 (public preview; owner-chosen feeds)"
 _FEED_ACCEPT = ("application/rss+xml, application/atom+xml, application/rdf+xml;q=0.9, "
                 "application/xml;q=0.8, text/xml;q=0.8")
-_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+# IPv6 forms that carry an IPv4 address in their last 32 bits: IPv4-compatible,
+# IPv4-mapped, IPv4-translated (SIIT) and the two NAT64 prefixes. 6to4 and Teredo
+# carry theirs elsewhere and have their own properties.
+_EMBEDS_IPV4 = tuple(ipaddress.ip_network(network) for network in
+                     ("::/96", "::ffff:0:0/96", "::ffff:0:0:0/96", "64:ff9b::/96", "64:ff9b:1::/48"))
 _STATE_DIR: Path | None = None
 
 
@@ -112,7 +136,10 @@ _SCHEMA = (
     "not_read INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(channel,id));"
     "CREATE TABLE IF NOT EXISTS telegram_reads (channel TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0, "
     "since TEXT NOT NULL DEFAULT '');"
-    "CREATE TABLE IF NOT EXISTS gaps (channel TEXT PRIMARY KEY, lost_count INTEGER NOT NULL);"
+    # lost_count: unattempted items a complete read found gone; dropped_count:
+    # unlisted feed identities forgotten at MAX_UNLISTED_FEED_ITEMS, never proven gone.
+    "CREATE TABLE IF NOT EXISTS gaps (channel TEXT PRIMARY KEY, lost_count INTEGER NOT NULL, "
+    "dropped_count INTEGER NOT NULL DEFAULT 0);"
     # Feed identities are hashes, so feeds keep a per-item attempted set
     # instead of the Telegram numeric watermark.
     "CREATE TABLE IF NOT EXISTS feeds (name TEXT PRIMARY KEY, since TEXT NOT NULL, "
@@ -133,7 +160,8 @@ _MIGRATIONS = (("observed", "lost_reported", "INTEGER NOT NULL DEFAULT 0"),
                ("observed", "not_read", "INTEGER NOT NULL DEFAULT 0"),
                ("telegram_reads", "since", "TEXT NOT NULL DEFAULT ''"),
                ("feeds", "url", "TEXT NOT NULL DEFAULT ''"),
-               ("feed_items", "lost_at", "TEXT NOT NULL DEFAULT ''"))
+               ("feed_items", "lost_at", "TEXT NOT NULL DEFAULT ''"),
+               ("gaps", "dropped_count", "INTEGER NOT NULL DEFAULT 0"))
 # Until not_read existed, a textless post a fetch returned and the cursor passed
 # was what an edition recorded as attempted-not-read; it stays retryable.
 # A feed item already missing when lost_at arrives is stamped then: it keeps a full window.
@@ -185,8 +213,8 @@ def _is_public(value: Any) -> bool:
         return False
     embedded = []
     if address.version == 6:
-        embedded = [address.ipv4_mapped, address.sixtofour, *(address.teredo or ())]
-        if address in _NAT64:
+        embedded = [address.sixtofour, *(address.teredo or ())]
+        if any(address in network for network in _EMBEDS_IPV4):
             embedded.append(ipaddress.IPv4Address(int(address) & 0xFFFFFFFF))
     return address.is_global and not address.is_multicast and all(
         ip.is_global and not ip.is_multicast for ip in embedded if ip is not None)
@@ -550,15 +578,16 @@ def _read_bounded(response: Any, limit: int, deadline: _Deadline) -> tuple[bytes
     return b"".join(chunks), True
 
 
-def _get(url: str, accept: str, limit: int, *, html: bool) -> tuple[bytes, bool]:
+def _get(url: str, accept: str, limit: int, *, html: bool, deadline: _Deadline | None = None) -> tuple[bytes, bool]:
     """One GET of a public https URL: (body of at most limit+1 bytes, complete).
 
     The host must resolve only to public addresses, and the connection goes to
     those very addresses. Redirects raise _Redirected; nothing is followed. One
-    deadline covers the whole exchange. Residual risk: a configured proxy
-    resolves the host itself, so the check does not bind a proxied connection.
+    deadline covers the whole exchange; a caller that goes on to parse the body
+    passes its own. Residual risk: a configured proxy resolves the host itself,
+    so the check does not bind a proxied connection.
     """
-    deadline = _Deadline()
+    deadline = deadline or _Deadline()
     parts = urllib.parse.urlsplit(url)
     host = parts.hostname or ""
     try:
@@ -735,6 +764,11 @@ def _fetch_channel(channel: str) -> tuple[list[dict[str, Any]], str]:
         return [], "preview unavailable: read deadline exceeded"
     if len(raw) > MAX_RESPONSE_BYTES:
         return [], "preview exceeds byte limit"
+    # A body sent without length or chunking ends wherever the connection closes,
+    # so only the page's own end proves it whole. Telegram follows </html> with a
+    # comment, so the tag is found, not required last.
+    if not re.search(rb"</html\s*>", raw, re.IGNORECASE):
+        return [], "preview unavailable: the page ended before its closing </html> tag"
     parser = _Posts(channel)
     try:
         parser.feed(raw.decode("utf-8", errors="replace"))
@@ -821,7 +855,8 @@ def _date_ordered(items: list[dict[str, Any]]) -> bool:
 class _Feed:
     """Items of an RSS 1.0, RSS 2.0 or Atom feed, recognized by structure and
     namespace (any prefix) with expat. A DTD internal subset or an entity
-    declaration is refused, never expanded; only item fields are kept."""
+    declaration is refused, never expanded; so are a namespace URI, a number of
+    distinct names or a single tag past the XML bounds. Only item fields are kept."""
 
     ROOTS = {"rss": "rss2.0", f"{RDF} RDF": "rss1.0", f"{ATOM} feed": "atom"}
     # Path from the root to an item, and the channel element RSS requires.
@@ -848,11 +883,33 @@ class _Feed:
         self.unidentified = 0
         self.parser = xml.parsers.expat.ParserCreate(namespace_separator=" ")
         self.parser.buffer_text = True
+        # expat 2.6+ may defer a piece behind a pending token and so hide where it
+        # stopped; with tokens bounded by the piece size, reading on costs little.
+        if hasattr(self.parser, "SetReparseDeferralEnabled"):
+            self.parser.SetReparseDeferralEnabled(False)
         self.parser.StartDoctypeDeclHandler = self._doctype
         self.parser.EntityDeclHandler = self._refuse
+        self.parser.StartNamespaceDeclHandler = self._namespace
         self.parser.StartElementHandler = self._start
         self.parser.EndElementHandler = self._end
         self.parser.CharacterDataHandler = self._data
+
+    def parse(self, body: bytes, final: bool, deadline: _Deadline) -> None:
+        """Feed body to the parser a piece at a time; the deadline ends the parse
+        as it ends a transfer, and no tag or comment may outgrow one piece."""
+        for start in range(0, len(body), XML_PIECE):
+            if deadline.spent():
+                raise _Unavailable("parsing did not finish within the source deadline")
+            end = min(start + XML_PIECE, len(body))
+            self.parser.Parse(body[start:end], False)
+            # CurrentByteIndex is where expat stopped: the start of a token it
+            # has not seen the end of. Text and CDATA are reported as they come.
+            # It is -1 when deferral, on where pyexpat cannot turn it off, holds
+            # back a last piece shorter than the token pending before it.
+            stopped = self.parser.CurrentByteIndex
+            if stopped >= 0 and end - stopped > XML_PIECE:
+                raise _FeedRefused(f"feed has a tag or comment longer than {XML_PIECE // 1024} KiB; refused")
+        self.parser.Parse(b"", final)
 
     def _refuse(self, *_args: Any) -> None:
         raise _FeedRefused("feed declares a DTD or entity; refused")
@@ -863,7 +920,18 @@ class _Feed:
         if internal_subset:
             self._refuse()
 
+    def _namespace(self, _prefix: Any, uri: Any) -> None:
+        # expat calls this before it reports the declaring tag. Refused here, the
+        # URI reaches no later name; only that tag's own prefixed attributes are
+        # expanded with it inside expat, and XML_PIECE bounds that tag.
+        if uri and len(uri) > MAX_NAMESPACE_URI:
+            raise _FeedRefused(f"feed declares an XML namespace longer than {MAX_NAMESPACE_URI} characters; refused")
+
     def _start(self, tag: str, attrs: dict[str, str]) -> None:
+        # pyexpat's intern dict holds each distinct element and attribute name,
+        # namespace prefix and URI it has reported, for the whole parse.
+        if len(self.parser.intern) > MAX_XML_NAMES:
+            raise _FeedRefused(f"feed uses more than {MAX_XML_NAMES} distinct XML names; refused")
         if not self.path:
             self.format = self.ROOTS.get(tag, "")
             if not self.format:
@@ -950,21 +1018,27 @@ class _Feed:
 
 def _fetch_feed(url: str) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
     """Parsed items of one feed. A redirect raises _Redirected."""
+    deadline = _Deadline()
     try:
-        raw, complete = _get(url, _FEED_ACCEPT, MAX_FEED_BYTES, html=False)
+        raw, complete = _get(url, _FEED_ACCEPT, MAX_FEED_BYTES, html=False, deadline=deadline)
     except _Unavailable as exc:
         return [], {}, f"feed unavailable: {exc}"
     # Feeds may carry a whole archive, newest first. Past the byte bound or
     # read deadline we keep the complete items of the prefix and say so;
     # truncation never counts an unread item as lost.
     truncated = len(raw) > MAX_FEED_BYTES or not complete
+    # Parsing draws on the same deadline. A body the deadline itself cut short
+    # would otherwise have no time left to yield the items it did deliver.
+    deadline.at = max(deadline.at, time.monotonic() + MIN_PARSE_SECONDS)
     feed = _Feed()
     try:
-        feed.parser.Parse(raw[:MAX_FEED_BYTES], not truncated)
+        feed.parse(raw[:MAX_FEED_BYTES], not truncated, deadline)
     except _FeedFull:
         truncated = True
     except _FeedRefused as exc:
         return [], {}, str(exc)
+    except _Unavailable as exc:
+        return [], {}, f"feed unavailable: {exc}"
     except (xml.parsers.expat.ExpatError, LookupError, ValueError):
         return [], {}, "feed XML could not be parsed"
     facts = {"format": feed.format, "feed_truncated": truncated, "duplicate_items": feed.duplicate,
@@ -1156,7 +1230,20 @@ def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
             # tracked for gap reporting but are NOT recordable until returned.
             conn.executemany("INSERT OR IGNORE INTO feed_items(source,key,published) VALUES (?,?,?)",
                              ((source, item["key"], item["date"]) for item in window if item["key"] in unseen))
-        gap = conn.execute("SELECT lost_count FROM gaps WHERE channel=?", (source,)).fetchone()
+        dropped_now = 0
+        if generation == latest and not error:
+            # A feed cut at every read never proves an unlisted item gone, so its
+            # unattempted identities would pile up. Past the cap the oldest are
+            # forgotten; one not yet counted lost is counted dropped, never silent.
+            unlisted = [row for row in conn.execute(
+                "SELECT key,lost_reported FROM feed_items WHERE source=? AND attempted=0 "
+                "ORDER BY published DESC, key DESC", (source,)) if row[0] not in present][MAX_UNLISTED_FEED_ITEMS:]
+            conn.executemany("DELETE FROM feed_items WHERE source=? AND key=?", ((source, row[0]) for row in unlisted))
+            dropped_now = sum(not row[1] for row in unlisted)
+            if dropped_now:
+                conn.execute("INSERT INTO gaps(channel,lost_count,dropped_count) VALUES (?,0,?) ON CONFLICT(channel) "
+                             "DO UPDATE SET dropped_count=dropped_count+excluded.dropped_count", (source, dropped_now))
+        gap = conn.execute("SELECT lost_count,dropped_count FROM gaps WHERE channel=?", (source,)).fetchone()
     attempted_through = max(attempted.values(), default="")
     oldest = min((item["date"] for item in dated), default="")
     truncated = bool(facts.get("feed_truncated"))
@@ -1195,6 +1282,11 @@ def _feed_source(source: str, per_channel: int) -> dict[str, Any]:
            "feed_truncated": truncated, "stale_read": generation != latest,
            "skipped_items": {"duplicate": facts.get("duplicate_items", 0), "undated": len(items) - len(dated),
                              "unidentified": facts.get("unidentified_items", 0)}}
+    # Present only once a feed has outgrown MAX_UNLISTED_FEED_ITEMS, to keep the output budget for posts.
+    if dropped_now:
+        row["dropped_unattempted_now"] = dropped_now
+    if gap and gap[1]:
+        row["historical_dropped_unattempted"] = gap[1]
     if redirect is not None:
         row["redirect_to"] = redirect
     return row
@@ -1516,7 +1608,7 @@ def register(api: Any) -> None:
                                                                "channel": {"type": "string"}}},
                       timeout_sec=120)
     api.register_tool("record_attempt", _record_attempt,
-                      description="After composing a digest, record it as an ATTEMPT, never delivery. fetch_ids lists the fetch_id of each fetch_posts call the edition used: everything those calls returned is recorded, posts as inspected and text_not_extracted as attempted-not-read, for each source whose latest fetch that call still is. post_ids instead records the ids named, from any fetch that returned them, even after an unavailable refetch; on a Telegram channel every readable post returned between the cursor and the newest named id must be named too, and the textless ones there are recorded as attempted-not-read without being named. day (YYYY-MM-DD) + edition (default daily) is the idempotency key; use a distinct edition for another same-day digest.",
+                      description="After composing a digest, record it as an ATTEMPT, never delivery. fetch_ids lists the fetch_id of each fetch_posts call the edition used: everything those calls returned is recorded, posts as inspected and text_not_extracted as attempted-not-read, for each source whose latest fetch that call still is. post_ids instead records the ids named, from any fetch that returned them while the skill still tracks them, even after an unavailable refetch; on a Telegram channel every retained returned readable post not marked lost between the cursor and the newest named id must be named too, and the retained returned textless ones not marked lost there are recorded as attempted-not-read without being named. day (YYYY-MM-DD) + edition (default daily) is the idempotency key; use a distinct edition for another same-day digest.",
                       schema={"type": "object", "properties": {"day": {"type": "string"},
                                                                "edition": {"type": "string"},
                                                                "fetch_ids": {"type": "array", "items": {"type": "integer"}},
