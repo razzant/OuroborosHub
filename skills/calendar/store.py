@@ -723,7 +723,9 @@ class Store:
                 desired = payload.get('desired') or {}
                 root_id = payload.get('family_root_id') or desired.get('master_id') or intent['event_id']
                 family = before.get(root_id) or local.get_event(root_id) or {}
-                if family.get('sync_state') != 'synced' or not (family.get('external_id') or family.get('href')):
+                # Admission order carries a withdrawn confirmed family's provenance through later splits.
+                if not (root_id in created and root_id not in unknown) and (
+                        family.get('sync_state') != 'synced' or not (family.get('external_id') or family.get('href'))):
                     continue  # No confirmed family to restore: keep the whole unpublished draft, not only its first segment.
                 created.update(payload.get('created_ids', []))
                 snapshots = {row['id'] for row in payload.get('restore_rows', [])}

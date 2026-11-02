@@ -20,10 +20,16 @@ _ADDRESS_PARSE_ERRORS = (ValueError, IndexError, AttributeError, TypeError, Head
 def decode_header_value(value: Any) -> str:
     if value is None:
         return ""
+    # Unfold the source syntax before decoding encoded words; their decoded
+    # content is not another header line to rewrite.
+    source = re.sub(r"\r?\n(?=[ \t])", "", str(value))
     try:
-        return str(make_header(decode_header(str(value))))
-    except (LookupError, UnicodeError, ValueError):
-        return str(value)
+        text = str(make_header(decode_header(source)))
+    except (LookupError, UnicodeError, ValueError, HeaderParseError):
+        text = source
+    # raw_items uses surrogateescape for 8-bit wire bytes. Recover valid UTF-8,
+    # replace undecodable bytes for display, and retain the original MIME source.
+    return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
 def _plain_from_part(part: Message) -> str:

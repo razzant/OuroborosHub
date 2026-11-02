@@ -18,6 +18,8 @@
   public origins, deployment prefixes and injected transports.
 - Retain readable malformed incoming address headers without blocking later
   mail, and normalize the remaining stdlib outgoing-address parser failures.
+- Decode ordinary raw UTF-8 and folded header views for capture and tool results;
+  keep undecodable words readable and preserve the original MIME bytes.
 
 ## 0.9.0
 

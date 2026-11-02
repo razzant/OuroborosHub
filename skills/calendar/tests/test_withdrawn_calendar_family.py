@@ -262,3 +262,131 @@ def test_restored_google_view_requests_full_listing_instead_of_consumed_sync_tok
     assert 'timeMin' in listing[0][2] and listing[0][2]['showDeleted'] == 'false'
     assert ctx.store.get_event(eid)['title'] == 'Provider newer'
     assert not [call for call in server.calls[calls:] if call[0] in ('POST', 'PATCH', 'DELETE')]
+
+
+def _chain_rows(ctx, cid):
+    with ctx.store._conn() as connection:
+        return {row['id']: dict(row) for row in connection.execute('SELECT * FROM events WHERE calendar_id=?', (cid,))}
+
+
+def _chain_visible(ctx, cid):
+    events = json.loads(tools.cal_events(ctx, start=_day(2, 0).isoformat(), end=_day(11, 0).isoformat(), calendars=[cid]))['events']
+    return [(row['id'], row['title'], row['start'], row['end']) for row in events]
+
+
+def _successive_splits(ctx, cid, root_id, count):
+    roots = [root_id]
+    for index, day in enumerate((4, 6, 8)[:count], 1):
+        known = set(_chain_rows(ctx, cid))
+        changed = json.loads(tools.cal_update(ctx, id=roots[-1] + '@' + _day(day).isoformat(),
+                                             scope='following', title=f'Unsent segment {index}', confirm=True))
+        assert changed['status'] == 'pending'
+        new_roots = [row['id'] for row in _chain_rows(ctx, cid).values() if row['id'] not in known and not row['master_id']]
+        assert len(new_roots) == 1
+        roots.append(new_roots[0])
+    # The same order consumed by withdrawal is the actual admission order, not timestamp/UUID ordering.
+    with ctx.store._conn() as connection:
+        admitted = [dict(row) for row in connection.execute('SELECT * FROM intents WHERE calendar_id=? ORDER BY rowid', (cid,))]
+    for child in roots[1:-1]:
+        made_at = next(i for i, row in enumerate(admitted) if child in json.loads(row['payload_json']).get('created_ids', []))
+        used_at = next(i for i, row in enumerate(admitted) if json.loads(row['payload_json']).get('family_root_id') == child
+                      and json.loads(row['payload_json']).get('created_ids'))
+        assert made_at < used_at
+    return roots
+
+
+@pytest.mark.parametrize('provider', ['caldav', 'google'])
+@pytest.mark.parametrize('split_count', [2, 3])
+@pytest.mark.parametrize('origin', ['confirmed', 'draft', 'completed_prefix'])
+def test_successive_split_withdrawal_inherits_confirmed_origin_only(provider, split_count, origin):
+    from test_calendar_provider_divergence import google_context
+    import ops
+    ctx, cid, server = (caldav_context if provider == 'caldav' else google_context)()
+    server.down = origin == 'draft'
+    made = json.loads(tools.cal_create(ctx, title='Series', start=_day(2).isoformat(), duration_min=60,
+                                      rrule='FREQ=DAILY;COUNT=8', calendars=[cid], confirm=True))
+    eid = made['event']['id']
+    assert made['status'] == ('pending' if origin == 'draft' else 'created')
+    if origin != 'draft' and provider == 'caldav':
+        for day, title in ((3, 'Confirmed early'), (9, 'Confirmed late')):
+            assert json.loads(tools.cal_update(ctx, id=eid + '@' + _day(day).isoformat(), title=title, confirm=True))['status'] == 'updated'
+        sync(ctx, cid)
+    original_rows = _chain_rows(ctx, cid)
+    original_view = _chain_visible(ctx, cid)
+    assert len(original_view) == 8
+    adapter = ctx.providers.adapter_for(ctx.store.get_calendar(cid)['account_id'])
+    create = adapter.create
+    if origin == 'completed_prefix':
+        def unavailable(*args, **kwargs):
+            raise ops.ProviderError('network', 'new segment endpoint unavailable')
+        adapter.create = unavailable
+    else:
+        server.down = True
+    roots = _successive_splits(ctx, cid, eid, split_count)
+    if origin == 'completed_prefix':
+        assert ctx.store.intents_for_event(eid)[-1]['state'] == 'done'
+    override_day = 7 if split_count == 2 else 8
+    known = set(_chain_rows(ctx, cid))
+    assert json.loads(tools.cal_update(ctx, id=roots[-1] + '@' + _day(override_day).isoformat(),
+                                      title='Unsent descendant override', confirm=True))['status'] == 'pending'
+    descendant = next(row['id'] for row in _chain_rows(ctx, cid).values() if row['id'] not in known)
+    staged_view = _chain_visible(ctx, cid)
+    committed_prefix = stable(ctx.store.get_event(eid))
+    queued = ctx.store.open_intents()
+    count, account, calendar = disconnect(ctx, cid)
+    assert count == len(queued)
+    adapter.create = create; server.down = False
+    reconnect(ctx, account, calendar); calls = len(server.calls)
+    run_open_intents(ctx, 2)
+    if origin == 'confirmed':
+        assert _chain_visible(ctx, cid) == original_view
+        for row_id, row in original_rows.items():
+            assert stable(ctx.store.get_event(row_id)) == stable(row)
+        for row_id in {*roots[1:], descendant}:
+            assert ctx.store.get_event(row_id)['deleted_at']
+        sync(ctx, cid)
+        assert _chain_visible(ctx, cid) == original_view
+        assert set(row['id'] for row in _chain_rows(ctx, cid).values() if not row['deleted_at']) == set(original_rows)
+    else:
+        assert _chain_visible(ctx, cid) == staged_view
+        assert all(not ctx.store.get_event(row_id)['deleted_at'] for row_id in {*roots, descendant})
+        for row_id in roots[1:] + [descendant]:
+            assert ctx.store.get_event(row_id)['sync_state'] == 'failed'
+        if origin == 'draft': assert ctx.store.get_event(eid)['sync_state'] == 'failed'
+        else:
+            assert stable(ctx.store.get_event(eid)) == committed_prefix
+            assert ctx.store.get_event(eid)['sync_state'] == 'synced'
+    for row in queued:
+        retained = ctx.store.get_intent(row['id'])
+        assert retained['state'] == 'resolved' and retained['payload_json'] == row['payload_json']
+    assert not [call for call in server.calls[calls:] if call[0] in ('POST', 'PUT', 'PATCH', 'DELETE')]
+
+
+@pytest.mark.parametrize('provider', ['caldav', 'google'])
+@pytest.mark.parametrize('head', ['original', 'segment_birth'])
+@pytest.mark.parametrize('state', ['leased', 'uncertain'])
+def test_unknown_split_root_never_grants_retirement_authority_to_descendants(provider, head, state):
+    from test_calendar_provider_divergence import google_context
+    ctx, cid, server = (caldav_context if provider == 'caldav' else google_context)()
+    eid = json.loads(tools.cal_create(ctx, title='Series', start=_day(2).isoformat(), duration_min=60,
+                                     rrule='FREQ=DAILY;COUNT=8', calendars=[cid], confirm=True))['event']['id']
+    server.down = True
+    roots = _successive_splits(ctx, cid, eid, 3)
+    selected = ctx.store.intents_for_event(eid)[-1] if head == 'original' else next(
+        row for row in ctx.store.intents_for_event(roots[1]) if row['kind'] == 'create')
+    leased = ctx.store.lease_intent(selected['id'], 'synthetic-provider-worker')
+    assert leased
+    if state == 'uncertain': ctx.store.settle_intent(selected['id'], 'uncertain', {'message': 'Existing unknown outcome'})
+    snapshots = {row_id: stable(ctx.store.get_event(row_id)) for row_id in roots[1:]}
+    disconnect(ctx, cid)
+    assert {row_id: stable(ctx.store.get_event(row_id)) for row_id in roots[1:]} == snapshots
+    assert ctx.store.get_intent(selected['id'])['state'] == 'uncertain'
+    if state == 'leased':
+        assert ctx.store.current_leased_intent(leased) is None
+        assert ctx.store.current_leased_intent(leased, allow_uncertain=True)
+        assert ctx.store.acknowledge_write(leased, ctx.store.get_event(selected['event_id']),
+            {'etag': 'synthetic-late-ack'}, leased['expected_etag'], shared_resource=provider == 'caldav')
+        assert ctx.store.get_intent(selected['id'])['state'] == 'done'
+    else:
+        assert json.loads(ctx.store.get_intent(selected['id'])['result_json'])['message'] == 'Existing unknown outcome'
+    # Consistent post-ACK recovery of withdrawn dependents is the disclosed A1 boundary, not this repair.
