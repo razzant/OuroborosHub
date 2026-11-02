@@ -7,7 +7,7 @@ import mimetypes
 import re
 from email import message_from_bytes
 from email.header import decode_header, make_header
-from email.errors import HeaderParseError, InvalidHeaderDefect
+from email.errors import HeaderParseError, InvalidHeaderDefect, MessageError
 from email.message import EmailMessage, Message
 from email.policy import default
 from email.utils import getaddresses, make_msgid, parseaddr
@@ -25,7 +25,7 @@ def decode_header_value(value: Any) -> str:
     source = re.sub(r"\r?\n(?=[ \t])", "", str(value))
     try:
         text = str(make_header(decode_header(source)))
-    except (LookupError, UnicodeError, ValueError, HeaderParseError):
+    except (LookupError, UnicodeError, ValueError, MessageError):
         text = source
     # raw_items uses surrogateescape for 8-bit wire bytes. Recover valid UTF-8,
     # replace undecodable bytes for display, and retain the original MIME source.

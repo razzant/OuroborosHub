@@ -24,6 +24,7 @@ from test_transport import FakeClient, FakeIMAP
 
 UTF8 = 'Иван Петров'.encode('utf-8')
 BAD_WORD = b'=?utf-8?b?QUJDR?='
+LABEL_WORD = '=?кои8?B?QUJD?='.encode()
 FROM = b'From: reader@example.invalid'
 TO = b'To: owner@example.invalid'
 SHAPES = {
@@ -36,6 +37,8 @@ SHAPES = {
     'word_from': [b'From: ' + BAD_WORD + b' <reader@example.invalid>', TO],
     'word_to': [FROM, b'To: ' + BAD_WORD + b' <owner@example.invalid>'],
     'valid_word': [b'From: =?UTF-8?B?0J/RgNC40LLQtdGC?= <reader@example.invalid>', TO],
+    'label_word': [b'From: ' + LABEL_WORD + b' <reader@example.invalid>', TO],
+    'label_list': [FROM, b'List-Id: ' + LABEL_WORD + b' <list.example.invalid>'],
     'folded': [FROM, b'To: Alpha <a@example.invalid>,\r\n Beta <b@example.invalid>'],
     'plain': [FROM, TO],
 }
@@ -98,6 +101,7 @@ def mailbox(tmp_path, provider, shape):
     (b'Jos\xe9'.decode('ascii', 'surrogateescape'), 'Jos\ufffd'),
     ('=?UTF-8?B?0J/RgNC40LLQtdGC?=', 'Привет'),
     (BAD_WORD.decode(), BAD_WORD.decode()),
+    (LABEL_WORD.decode('ascii', 'surrogateescape'), '=?кои8?B?QUJD?='),
     ('"Doe,\r\n John" <reader@example.invalid>', '"Doe, John" <reader@example.invalid>'),
     ('=?utf-8?b?0J/RgNC40LLQtdGC?=\r\n =?utf-8?b?0J/RgNC40LLQtdGC?=', 'ПриветПривет'),
 ])
