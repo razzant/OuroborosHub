@@ -4,7 +4,7 @@ The event-level primary flag chooses one source for a relationship. A projection
 observed divergence survives provider ACKs; only an explicit link operation resumes
 following. This module writes no provider data and creates no delivery queue.
 """
-from model import BUSY_COPY_TITLE, PROVIDER_GOOGLE, event_field_value
+from model import BUSY_COPY_TITLE, PROVIDER_GOOGLE, event_field_value, event_time_kind
 
 FOLLOWING = 'following'
 DIVERGED = 'diverged'
@@ -74,7 +74,7 @@ def inspect(store, row):
 
 def projection_time_kind(row, calendar):
     """Google copies use the existing zoned wire projection; local/CalDAV retain floating time."""
-    kind = row.get('time_kind') or ''
+    kind = 'floating' if event_time_kind(row) == 'floating' else row.get('time_kind') or ''
     return 'absolute' if kind == 'floating' and calendar.get('provider') == PROVIDER_GOOGLE else kind
 
 

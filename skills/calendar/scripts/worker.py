@@ -86,7 +86,7 @@ def sync_account(store: Store, providers: Providers, account: Dict[str, Any], tz
                                    "role_publish": existing["role_publish"] if existing else False,
                                    "publish_mode": existing["publish_mode"] if existing else "busy"})
             stored = store.get_calendar(cal["id"])
-            if stored is None:
+            if stored is None or stored.get('deleted_at'):
                 continue  # disconnected while discovery was in flight
             report["calendars"] += 1
             state = store.get_sync_state(cal["id"])
@@ -259,6 +259,11 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
                 temporal_gaps.append('Legacy floating event ' + existing['id'] + ' has no recorded parsing zone; stored times and pending work were retained.')
                 continue
         row = civil_in_basis(row, existing)
+        if (row.get('time_kind') == 'absolute' and not row.get('all_day') and '_start_tzid' in row and not row['_start_tzid']
+                and not has_recurrence(row) and existing.get('tz')):
+            # A native UTC one-off expresses an instant, not a replacement for
+            # its retained authoring zone (also on changed/missing ETags).
+            row = {**row, 'tz': existing['tz']}
         if existing.get("etag") == row["etag"] and existing.get("sync_state") == "synced" and not existing.get("deleted_at"):
             # Our acknowledged wire format may use UTC for a zoned one-off.
             # Equal ETags permit type enrichment, not replacing its authoring zone.
@@ -383,7 +388,8 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
         # cancelled by EXDATE, or the move undone) is not a local exception any more. Our own unsent writes stay.
         master = store.get_event(master_id) or {}
         present = {civil_in_basis(r, master)["recurrence_id"] for r in rows if r.get("recurrence_id") and r.get("uid") == uid}
-        excluded = ops.excluded_slots(master)
+        feed_master = next((row for row in rows if row.get('uid') == uid and not row.get('recurrence_id')), {})
+        excluded = ops.excluded_slots(master) | ops.excluded_slots(civil_in_basis(feed_master, master))
         for exc in store.exceptions_for(master_id):
             if exc.get('status') == 'cancelled' and exc.get('recurrence_id') in excluded:
                 continue  # CalDAV confirms a cancelled slot with EXDATE, not an override VEVENT.
@@ -482,6 +488,7 @@ def _stage_sync_copy(view, basis, root, commands):
             c.execute('ROLLBACK TO calendar_copy')
             row = view.get_event(root)
             if row:
+                view.update_event(root, {'link_state': links.DIVERGED})
                 view.set_sync_state(row['calendar_id'], last_error='Linked copy not propagated: ' + str(exc))
             result = {'status': 'protected', 'assignments': [], 'message': str(exc)}
         finally:

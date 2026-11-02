@@ -218,6 +218,7 @@ def ics_to_rows(ics_text: str, calendar_id: str, href: str, etag: str, default_t
             "title": str(comp.get("SUMMARY") or ""), "description": str(comp.get("DESCRIPTION") or ""),
             "location": str(comp.get("LOCATION") or ""), "start_utc": start_utc, "end_utc": end_utc, "tz": tz_name or (zone_name(tz_hint) if all_day or floating else ""),
             "time_kind": "floating" if floating else "absolute",
+            "_start_tzid": str(getattr(comp.get('DTSTART'), 'params', {}).get('TZID') or ''),
             "all_day": all_day, "rrule": rrule_text, "exdates": ",".join(_dt_list(comp.get("EXDATE"), tz_hint)) if comp.get("EXDATE") else "",
             "rdates": ",".join(_dt_list(comp.get("RDATE"), tz_hint)) if comp.get("RDATE") else "",
             "recurrence_id": rec_key, "_recurrence_tz": zone_name(rec_tz),
@@ -454,12 +455,16 @@ def _check_yandex_address(url: str) -> None:
 
 
 class _YandexRedirect(urllib.request.HTTPRedirectHandler):
+    http_error_308 = urllib.request.HTTPRedirectHandler.http_error_302
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         _check_yandex_address(newurl)
         return _redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class _CalDAVRedirect(urllib.request.HTTPRedirectHandler):
+    http_error_308 = urllib.request.HTTPRedirectHandler.http_error_302
+
     def __init__(self, check):
         self.check = check
 

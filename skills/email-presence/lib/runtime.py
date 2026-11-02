@@ -13,7 +13,7 @@ from .delivery import email_report
 from .accounts import AccountError
 from .gmail import DeliveryRejected
 from .host_adapter import HostBindingTerminalError, HostRetryError, HostTurnStatus
-from .mime import extract_body
+from .mime import conversation_root, extract_body
 from .settings import SENDING_OFF, load_settings
 from .store import RequestIdConflict
 
@@ -29,10 +29,16 @@ _ROLE_CLAIMS = {None: {}, "intake": {"submitted": False}, "observe": {"submitted
 
 def _retry(exc, attempts):
     """The inbox note and delay for a retryable failure of one claim."""
+    note = type(exc).__name__
+    if isinstance(exc, HostRetryError):
+        # Protocol diagnostics, never the Host's arbitrary error text or mail body.
+        fields = [value for value in (exc.code, exc.disposition, exc.field) if value]
+        if fields:
+            note += ': ' + ' / '.join(fields)
     if isinstance(exc, HostRetryError) and exc.code == "presence_capacity_full":
         backoff = min(_CAPACITY_BACKOFF_MAX_SECONDS, 2 ** min(max(attempts - 1, 0), 5))
-        return str(exc), backoff if exc.retry_after is None else max(exc.retry_after, backoff)
-    return type(exc).__name__, min(60, 2 ** min(attempts, 5))
+        return note, backoff if exc.retry_after is None else max(exc.retry_after, backoff)
+    return note, min(60, 2 ** min(attempts, 5))
 
 
 def _wire_text(message):
@@ -66,7 +72,7 @@ class EmailRuntime:
         def accepts(message):
             if not target_check:
                 return True
-            conversation = (message.get("references") or [message.get("in_reply_to") or message["message_id"]])[0]
+            conversation = conversation_root(references=message.get("references"), in_reply_to=message.get("in_reply_to"), message_id=message["message_id"])
             facts = capture(self.account, conversation, thread_id=conversation, require_place=True)
             return not facts.get("supported") or bool((facts.get("binding") or {}).get("place_id"))
         provider_poll = getattr(self.client, "poll", None)
@@ -222,7 +228,12 @@ class EmailRuntime:
                 self.store.set_host_reference(item.row_id, item.lease_token, status.host_reference)
             await asyncio.to_thread(self._reply, item, status.texts, "immediate", status.delivery_reporting_version, status.turn_ref)
             for output in status.outputs:
-                await asyncio.to_thread(self._reply, item, (output.text,), output.identity, status.delivery_reporting_version, output.turn_ref,
+                identity = output.identity
+                if ref.startswith("deferred:") and self.store.receipt(f"presence:{item.provider_event_key}:final"):
+                    # An older worker may have queued this immutable terminal selection
+                    # before a crash. Its existing final receipt wins over a new output id.
+                    identity = "final"
+                await asyncio.to_thread(self._reply, item, (output.text,), identity, status.delivery_reporting_version, output.turn_ref,
                                         getattr(output, "anchor", None))
             if status.state == "pending" and not observe:
                 # Released at once: the thread's next mail may follow, and the work
@@ -233,11 +244,13 @@ class EmailRuntime:
                 self.store.retry_inbox(item.row_id, item.lease_token, status.error or "Host turn pending",
                                        min(60, 2 ** min(item.attempts, 5)) if status.error else 5)
             elif status.state == "failed":
-                self.store.fail_inbox(item.row_id, item.lease_token, status.error)
+                if self.store.fail_inbox(item.row_id, item.lease_token, status.error):
+                    self._release_host_reference(status.host_reference or ref)
             else:
                 delivery = await self.host.deliver(ref)
                 await asyncio.to_thread(self._reply, item, delivery.texts, "final", delivery.delivery_reporting_version, delivery.turn_ref)
-                self.store.complete_inbox(item.row_id, item.lease_token)
+                if self.store.complete_inbox(item.row_id, item.lease_token):
+                    self._release_host_reference(status.host_reference or ref)
         except HostBindingTerminalError as exc:
             self.store.fail_inbox(item.row_id, item.lease_token, str(exc))
         except Exception as exc:
@@ -247,8 +260,13 @@ class EmailRuntime:
             self.store.retry_inbox(item.row_id, item.lease_token, note, delay)
         return True
 
+    def _release_host_reference(self, reference):
+        release = getattr(self.host, "release", None)
+        if release:
+            release(reference, self.store.active_host_references())
+
     def _delivery_hold(self, item):
-        conversation = item.references[0] if item.references else item.in_reply_to or item.message_id
+        conversation = conversation_root(references=item.references, in_reply_to=item.in_reply_to, message_id=item.message_id)
         if "place_binding" in item.reporting:
             check = getattr(self.host, "binding_hold", None)
             binding = item.reporting["place_binding"]

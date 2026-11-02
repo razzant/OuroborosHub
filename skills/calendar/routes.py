@@ -72,6 +72,14 @@ def agenda_payload(ctx: tools.Context, view: str, anchor: str, calendar_ids: Any
             continue
         events.append(pub)
     pending = ctx.store.intent_counts(active_only=True)
+    accounts = []
+    for account in ctx.store.list_accounts():
+        adapter_error = ''
+        if account['provider'] != 'local' and ctx.providers.adapter_for(account['id']) is None:
+            adapter_error = getattr(ctx.providers, 'errors', {}).get(account['id']) or 'Account adapter unavailable'
+        accounts.append({'id': account['id'], 'alias': account['alias'], 'provider': account['provider'],
+                         'status': 'unavailable' if adapter_error else account['status'],
+                         'adapter_error': adapter_error, 'last_sync': account.get('last_sync')})
     return {
         "status": "ok", "view": view, "anchor": day.isoformat(), "timezone": tz_name(ctx.tz), "now": now.replace(microsecond=0).isoformat(),
         "range": {"start": iso_local(start, ctx.tz), "end": iso_local(end, ctx.tz)},
@@ -79,14 +87,14 @@ def agenda_payload(ctx: tools.Context, view: str, anchor: str, calendar_ids: Any
                   "weekday": WEEKDAY_LABELS[(start.astimezone(ctx.tz).date() + timedelta(days=i)).weekday()]}
                  for i in range((end.astimezone(ctx.tz).date() - start.astimezone(ctx.tz).date()).days)],
         "calendars": [{"id": c["id"], "name": c["name"], "provider": c["provider"], "writable": bool(c["writable"]), "visible": bool(c["role_visible"]),
-                       "default": bool(c["is_default"])} for c in cals],
+                       "default": bool(c["is_default"]), 'sync_warning': ctx.store.get_sync_state(c['id']).get('last_error') or ''} for c in cals],
         "events": events, "hidden_busy": hatches, "usual": usual if show_hidden else [],
         'events_complete': not failed, 'unexpanded_series': failed,
         "show_hidden": show_hidden, "working_hours": ctx.store.get_setting("working_hours") or "09:00-19:00",
         "sync": {"pending": pending.get("pending", 0), "conflict": pending.get("conflict", 0), "failed": pending.get("failed", 0),
                  'uncertain': pending.get('uncertain', 0), "companion": ctx.companion_health().get("state")},
         "link_issues": ctx.store.link_issues(),
-        "accounts": [{"id": a["id"], "alias": a["alias"], "provider": a["provider"], "status": a["status"], "last_sync": a.get("last_sync")} for a in ctx.store.list_accounts()],
+        "accounts": accounts,
     }
 
 

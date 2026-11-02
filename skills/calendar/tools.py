@@ -110,7 +110,9 @@ class Context:
         today_start, _ = day_bounds(self.now().date(), self.tz)
         s, _ = parse_input(start, self.tz, today_start)
         e, _ = parse_input(end, self.tz, None)
-        if e is None or e <= s:
+        if e is not None and e <= s:
+            raise ValueError('The range end must be after its start')
+        if e is None:
             e = s + timedelta(days=default_days)
         if (e - s).days > MAX_WINDOW_DAYS:
             e = s + timedelta(days=MAX_WINDOW_DAYS)
@@ -436,6 +438,8 @@ def cal_create(ctx: Context, title: str = "", start: str = "", end: str = "", du
     warning = _plan_reminders(ctx)
     statuses = {a["status"] for a in result["assignments"]}
     status = "created" if statuses <= {"done"} else ("pending" if "pending" in statuses else ("conflict" if "conflict" in statuses else "created_partially" if 'done' in statuses else "failed"))
+    if 'uncertain' in statuses:
+        status = 'created_partially' if 'done' in statuses else 'uncertain'
     return bounded_result({"status": status, "message": _assignment_message("Не создано" if status == 'failed' else "Создано", ev, result["assignments"], ctx.tz),
                            "event": event_public(ev, ctx.tz, compact=False), "assignments": result["assignments"], "overlaps": overlaps, 'overlaps_complete': not overlap_failed, 'unexpanded_series': overlap_failed,
                            **({"warning": warning} if warning else {})})
@@ -541,6 +545,8 @@ def cal_update(ctx: Context, id: str = "", start: str = "", end: str = "", durat
     if (result.get('reassign') or {}).get('failed'):
         statuses.add('failed')
     status = "updated" if statuses <= {"done"} else ("pending" if "pending" in statuses else "conflict" if "conflict" in statuses else "updated_partially" if 'done' in statuses else 'failed')
+    if 'uncertain' in statuses:
+        status = 'updated_partially' if 'done' in statuses else 'uncertain'
     return bounded_result({"status": status, "message": _assignment_message("Не изменено" if status == 'failed' else "Обновлено", ev, result["assignments"], ctx.tz),
                            "event": event_public(ev, ctx.tz, compact=False) if ev else None, "assignments": result["assignments"],
                            "reassign": result.get("reassign"), 'link': result.get('link'), **({"warning": warning} if warning else {})})
@@ -574,6 +580,8 @@ def cal_delete(ctx: Context, id: str = "", scope: str = SCOPE_THIS, send_updates
     result = ops.delete_event(ctx.store, ctx.providers, str(id), scope=scope, send_updates=_bool(send_updates))
     statuses = {a["status"] for a in result["assignments"]}
     status = "deleted" if statuses <= {"done"} else ("pending" if "pending" in statuses else "conflict" if "conflict" in statuses else "deleted_partially" if 'done' in statuses else 'failed')
+    if 'uncertain' in statuses:
+        status = 'deleted_partially' if 'done' in statuses else 'uncertain'
     return bounded_result({"status": status, "message": _assignment_message("Не удалено" if status == 'failed' else "Удалено", row, result["assignments"], ctx.tz), "assignments": result["assignments"]})
 
 
@@ -830,8 +838,11 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
         acc = accounts[0]
         if acc['provider'] == PROVIDER_LOCAL:
             return json_dumps({'status': 'error', 'message': 'Локальный календарь не является внешним подключением; события и настройки сохранены'})
-        cancelled = st.cancel_intents_for_account(acc["id"])
-        st.delete_account(acc["id"])
+        with st.transaction() as view:
+            cancelled = view.cancel_intents_for_account(acc["id"])
+            view.delete_account(acc["id"])
+            with view._conn() as conn:
+                uncertain = conn.execute("SELECT COUNT(*) FROM intents WHERE account_id=? AND state='uncertain'", (acc['id'],)).fetchone()[0]
         forgot = False
         if acc["provider"] == PROVIDER_GOOGLE:
             import providers_google as gp
@@ -842,8 +853,8 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
                 return vault.pop(acc['id'], None) is not None
             forgot = _mutate_tokens(ctx.state_dir, str(ctx.secrets.get('CALENDAR_TOKEN_KEY') or ''), forget)
         ctx.providers = Providers(ctx.secrets, ctx.state_dir)
-        return json_dumps({"status": "updated", "cancelled_intents": cancelled, "tokens_dropped": forgot,
-                           "message": f"аккаунт {acc['id']} отключён; локальные события не тронуты, незавершённых записей отменено: {cancelled};"
+        return json_dumps({"status": "updated", "cancelled_intents": cancelled, "uncertain_intents": uncertain, "tokens_dropped": forgot,
+                           "message": f"аккаунт {acc['id']} отключён; ожидавшие команды отозваны: {cancelled}; сохранены черновики и последние подтверждённые снимки; неизвестных результатов: {uncertain};"
                                       + (" сохранённые токены Google удалены" if forgot else " секрет удаляет владелец")})
     if action == "sync_now":
         st.set_setting("sync_requested_at", iso_utc(now_utc()))
@@ -866,6 +877,9 @@ def _assignment_message(verb: str, ev: Dict[str, Any], assignments: List[Dict[st
     ok = [a.get("calendar_name") or a.get("calendar_id") for a in assignments if a.get("status") == "done"]
     pending = [a.get("calendar_name") or a.get("calendar_id") for a in assignments if a.get("status") == "pending"]
     bad = [f"{a.get('calendar_name') or a.get('calendar_id')}: {a.get('message') or a.get('status')}" for a in assignments if a.get("status") in ("failed", "conflict")]
+    unknown = [a.get('calendar_name') or a.get('calendar_id') for a in assignments if a.get('status') == 'uncertain']
+    if unknown:
+        verb = 'Изменение не полностью подтверждено'
     parts = [f"{verb}: {when}"]
     if ok:
         parts.append("в: " + ", ".join(str(x) for x in ok))
@@ -873,4 +887,6 @@ def _assignment_message(verb: str, ev: Dict[str, Any], assignments: List[Dict[st
         parts.append("ожидает синхронизации: " + ", ".join(str(x) for x in pending))
     if bad:
         parts.append("не удалось: " + "; ".join(bad))
+    if unknown:
+        parts.append('результат требует сверки: ' + ', '.join(str(item) for item in unknown))
     return " · ".join(parts)

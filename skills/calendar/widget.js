@@ -23,7 +23,7 @@
         view: 'day', date: null, data: null, error: '', loading: false, loadSeq: 0, loadRequest: null, loadQuery: '', showHidden: false,
         selectedCals: null, editing: null, drag: null, disposed: false, theme: 'light', poll: null, dirty: false, notice: '',
         hourScale: 1, gridScrollTop: 0, focusNow: true, zooming: false, linksOpen: false, linkError: '',
-        savedDraft: null, draftLoaded: false, draftDirty: false, draftSaving: false, draftRequest: null
+        savedDraft: null, draftLoaded: false, draftDirty: false, draftSaving: false, draftRequest: null, draftError: ''
 
     };
     var root = document.getElementById('root') || document.body;
@@ -201,6 +201,7 @@
         accRestoreFocus(kept);
         if (state.error) root.appendChild(el('div', { class: 'status err', text: 'Ошибка: ' + state.error }));
         if (state.notice) root.appendChild(el('div', { class: 'status', role: 'status', text: state.notice }));
+        root.appendChild(draftErrorView());
         if (d && d.events_complete === false) root.appendChild(el('div', { class: 'status err', text: 'Calendar list is incomplete: ' +
             Object.keys(d.unexpanded_series || {}).map(function (id) { return id + ': ' + d.unexpanded_series[id]; }).join('; ') }));
         if (!d) { root.appendChild(el('div', { class: 'status', text: state.loading ? 'Загрузка…' : 'Нет данных' })); return; }
@@ -351,6 +352,8 @@
         if (d.sync.pending) parts.push('ожидает синхронизации: ' + d.sync.pending);
         if (d.sync.conflict) parts.push('конфликтов: ' + d.sync.conflict);
         if (d.sync.failed) parts.push('не отправлено: ' + d.sync.failed);
+        if (d.sync.uncertain) parts.push('outcomes unconfirmed: ' + d.sync.uncertain);
+        (d.calendars || []).forEach(function (c) { if (c.sync_warning) parts.push(c.name + ': ' + c.sync_warning); });
         parts.push('фон: ' + (d.sync.companion || 'неизвестно'));
         return el('div', { class: 'status', text: parts.join(' · ') + ' · ' + d.timezone });
     }
@@ -470,16 +473,21 @@
         state.savedDraft = { event: event, inputs: Object.assign({}, f.draft) };
         state.draftDirty = true; saveDraft();
     }
+    function draftErrorView() {
+        return el('div', { class: 'err draft-error', style: 'font-size:12px;margin-top:8px', role: 'alert', text: state.draftError, hidden: state.draftError ? null : 'hidden' });
+    }
+    function setDraftError(text) {
+        state.draftError = text;
+        root.querySelectorAll('.draft-error').forEach(function (node) { node.textContent = text; node.hidden = !text; });
+    }
     function saveDraft() {
         if (state.draftSaving) return state.draftRequest;
         if (!state.draftDirty) return Promise.resolve();
         var saved = state.savedDraft, failed = false;
         state.draftDirty = false; state.draftSaving = true;
-        state.draftRequest = post('draft', { draft: saved }).catch(function (e) {
+        state.draftRequest = post('draft', { draft: saved }).then(function () { setDraftError(''); }).catch(function (e) {
             failed = true; state.draftDirty = true;
-            state.notice = 'Draft was not saved: ' + e.message;
-            var status = root.querySelector('.card .status');
-            if (status) { status.textContent = state.notice; status.className = 'status err'; }
+            setDraftError('Draft was not saved: ' + e.message);
         }).then(function () {
             state.draftSaving = false;
             if (state.draftDirty && !failed) return saveDraft();
@@ -658,6 +666,7 @@
         form.appendChild(field('Повторение', rrule));
         if (f.series) form.appendChild(field('Охват изменения', scopeSel));
         form.appendChild(status);
+        form.appendChild(draftErrorView());
         form.appendChild(actions);
         var overlay = el('div', { class: 'card', onclick: function (ev) { if (ev.target === overlay) { state.editing = null; render(); } } }, [form]);
         setTimeout(function () { title.focus(); }, 0);
@@ -1266,7 +1275,7 @@
     load();
     api('draft').then(function (r) {
         if (!state.editing && !state.draftDirty) state.savedDraft = r.draft || null;
-    }).catch(function (e) { state.notice = 'Saved draft could not be read: ' + e.message; }).then(function () {
+    }).catch(function (e) { setDraftError('Saved draft could not be read: ' + e.message); }).then(function () {
         state.draftLoaded = true; if (!state.disposed) render();
     });
 })();

@@ -7,6 +7,7 @@ import mimetypes
 import re
 from email import message_from_bytes
 from email.header import decode_header, make_header
+from email.errors import InvalidHeaderDefect
 from email.message import EmailMessage, Message
 from email.policy import default
 from email.utils import getaddresses, make_msgid, parseaddr
@@ -71,6 +72,29 @@ def _message_ids(value: Any) -> list[str]:
 
 def _addresses(value: Any) -> list[str]:
     return [addr for _, addr in getaddresses([decode_header_value(value)]) if addr]
+
+
+def mailbox_addresses(value: Any) -> list[str]:
+    """Parse complete mailbox lists before grouping/deduplication or envelope use."""
+    values = value if isinstance(value, (list, tuple)) else [value]
+    text = ", ".join(str(item).strip() for item in values if item is not None and str(item).strip())
+    if not text:
+        return []
+    if "\r" in text or "\n" in text:
+        raise ValueError("Mailbox addresses must be one RFC address list, without line breaks")
+    message = EmailMessage()
+    message['To'] = text
+    header = message['To']
+    parsed = header.addresses
+    if (any(isinstance(defect, InvalidHeaderDefect) for defect in header.defects)
+            or not parsed or any(not address.username or not address.domain for address in parsed)):
+        raise ValueError("Invalid mailbox address list; use complete email addresses")
+    return [str(address) for address in parsed]
+
+
+def conversation_root(*, references=(), in_reply_to="", message_id=""):
+    """The RFC root used by intake, preparation, queued bindings and delivery."""
+    return str(next(iter(references or ()), "") or in_reply_to or message_id).strip()
 
 
 def _attachment_metadata(part: Message, *, include_data: bool = False) -> dict[str, Any]:

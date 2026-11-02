@@ -19,7 +19,7 @@ from test_calendar_round2 import OneAdapterProviders, RecordingAdapter, add_exte
 import ops  # noqa: E402
 import routes  # noqa: E402
 import tools  # noqa: E402
-from model import DEFAULT_LOCAL_CALENDAR_ID, get_tz, iso_utc, parse_stored  # noqa: E402
+from model import get_tz, iso_utc, parse_stored  # noqa: E402
 from providers_google import row_to_gevent  # noqa: E402
 
 
@@ -211,15 +211,17 @@ class Round3FixTests(unittest.TestCase):
             adapter.update({}, {**event, "master_href": ""}, "", {})
         self.assertEqual(ctx_err.exception.kind, "retry")
 
-    def test_truncated_master_drops_exceptions_beyond_until(self):
+    def test_explicit_cut_drops_later_exceptions_without_inferring_it_from_until(self):
         from providers import row_to_ics
         raw = ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:x\r\nBEGIN:VEVENT\r\nUID:s1\r\nSUMMARY:Серия\r\nDTSTART:20261001T090000Z\r\n"
                "DTEND:20261001T100000Z\r\nRRULE:FREQ=DAILY\r\nEND:VEVENT\r\n"
                "BEGIN:VEVENT\r\nUID:s1\r\nRECURRENCE-ID:20261003T090000Z\r\nSUMMARY:Ранняя\r\nDTSTART:20261003T110000Z\r\nDTEND:20261003T120000Z\r\nEND:VEVENT\r\n"
                "BEGIN:VEVENT\r\nUID:s1\r\nRECURRENCE-ID:20261010T090000Z\r\nSUMMARY:Поздняя\r\nDTSTART:20261010T110000Z\r\nDTEND:20261010T120000Z\r\nEND:VEVENT\r\n"
                "END:VCALENDAR\r\n")
-        out = row_to_ics({"uid": "s1", "title": "Серия", "start_utc": "2026-10-01T09:00:00+00:00", "end_utc": "2026-10-01T10:00:00+00:00", "tz": "UTC",
-                          "all_day": 0, "rrule": "FREQ=DAILY;UNTIL=20261005T085959Z", "raw_payload": raw, "attendees_json": "[]", "reminders_json": "[]"})
+        event = {"uid": "s1", "title": "Серия", "start_utc": "2026-10-01T09:00:00+00:00", "end_utc": "2026-10-01T10:00:00+00:00", "tz": "UTC",
+                 "all_day": 0, "rrule": "FREQ=DAILY;UNTIL=20261005T085959Z", "raw_payload": raw, "attendees_json": "[]", "reminders_json": "[]"}
+        self.assertIn("Поздняя", row_to_ics(event))
+        out = row_to_ics(event, truncate_before='2026-10-05T09:00:00+00:00')
         self.assertIn("Ранняя", out)
         self.assertNotIn("Поздняя", out)
 

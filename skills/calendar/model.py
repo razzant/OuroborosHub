@@ -341,15 +341,78 @@ def event_field_value(row, field, *, provider_observation=False):
     return value or ''
 
 
+def event_time_kind(row):
+    """One effective clock: DATE first, owner-wall floating/local routines, otherwise an instant."""
+    if row.get('all_day'):
+        return 'date'
+    if row.get('time_kind') == 'floating' or row.get('availability') == AVAIL_SOFT and row.get('origin', 'local') == 'local':
+        return 'floating'
+    return 'absolute'
+
+
 def calendar_time(row, value, owner_tz):
-    """Project DATE/floating wall time; the stored anchor and its parsing zone stay intact."""
+    """Project the effective event's clock, without moving its canonical stored anchor."""
     instant = parse_stored(value)
     if instant is not None and owner_tz is not None:
-        if row.get('all_day'):
+        kind = event_time_kind(row)
+        if kind == 'date':
             return datetime.combine(instant.astimezone(get_tz(row.get('tz') or '')).date(), time(), tzinfo=owner_tz)
-        if row.get('time_kind') == 'floating':
+        if kind == 'floating':
             return instant.astimezone(get_tz(row.get('tz') or '')).replace(tzinfo=owner_tz)
     return instant
+
+
+def stage_event_times(effective, changes, owner_tz):
+    """Translate owner-wall timed inputs once; DATE edits already use the recorded civil basis.
+
+    The addressed exception owns effective time. Its master owns only the
+    original recurrence slot and subsequent whole-series transformations.
+    """
+    edited = {**effective, **changes}
+    staged = dict(changes)
+    zone = get_tz(edited.get('tz') or '')
+    kind = event_time_kind(edited)
+    if kind == 'date':
+        for field in ('start_utc', 'end_utc'):
+            if staged.get(field):
+                value = parse_stored(staged[field]).astimezone(zone)
+                midnight = datetime.combine(value.date(), time(), tzinfo=zone)
+                staged[field] = iso_utc(midnight + timedelta(days=1) if field == 'end_utc' and value != midnight else midnight)
+        if staged.get('start_utc'):
+            start = parse_stored(staged['start_utc']).astimezone(zone)
+            end = parse_stored(staged.get('end_utc') or effective['end_utc'])
+            staged['end_utc'] = iso_utc(max(end, start + timedelta(days=1)))
+    elif kind == 'floating' and owner_tz is not None:
+        for field in ('start_utc', 'end_utc'):
+            if staged.get(field):
+                staged[field] = iso_utc(parse_stored(staged[field]).astimezone(owner_tz).replace(tzinfo=zone))
+    return staged
+
+
+def recurrence_time_delta(old, new, master):
+    """Original slots move in the recurrence calendar, independently of effective override clocks."""
+    zone = get_tz(master.get('tz') or '')
+    if master.get('all_day'):
+        return timedelta(days=(new.astimezone(zone).date() - old.astimezone(zone).date()).days)
+    return new.astimezone(zone).replace(tzinfo=None) - old.astimezone(zone).replace(tzinfo=None)
+
+
+def event_time_delta(old, new, row):
+    return recurrence_time_delta(old, new, row) if event_time_kind(row) == 'floating' else new - old
+
+
+def shift_event_time(value, delta, all_day, zone, floating=False):
+    """Move a value in its effective clock; an absolute value retains elapsed-time semantics."""
+    if all_day:
+        day = value.astimezone(zone).date() + timedelta(days=round(delta.total_seconds() / 86400))
+        return datetime.combine(day, time(), tzinfo=zone)
+    if floating:
+        return (value.astimezone(zone).replace(tzinfo=None) + delta).replace(tzinfo=zone)
+    return value + delta
+
+
+def shift_recurrence_time(master, value, delta):
+    return shift_event_time(value, delta, bool(master.get('all_day')), get_tz(master.get('tz') or ''), True)
 
 
 def has_recurrence(row):
@@ -383,23 +446,17 @@ def civil_in_basis(row, basis):
 
 
 def routine_time(row, value, owner_tz):
-    """Project a civil date or routine's wall time without changing its recurrence address."""
-    if row.get('all_day') or row.get('time_kind') == 'floating':
-        return calendar_time(row, value, owner_tz)
-    instant = parse_stored(value)
-    if instant is not None and owner_tz is not None and row.get('availability') == AVAIL_SOFT and row.get('origin', 'local') == 'local':
-        return instant.astimezone(get_tz(row.get('tz') or '')).replace(tzinfo=owner_tz)
-    return instant
+    """Compatibility entrypoint for the shared effective-event clock projection."""
+    return calendar_time(row, value, owner_tz)
 
 
 def event_public(row: Dict[str, Any], tz, compact: bool = True) -> Dict[str, Any]:
     """Public projection of an event row for tools and the widget."""
-    project = not row.get('display_occurrence_start_utc') and (has_recurrence(row) or row.get('master_id'))
     def displayed(field):
         value = row.get(field)
         if row.get('_display_times') or row.get('display_occurrence_start_utc'):
             return value
-        return routine_time(row, value, tz) if project else calendar_time(row, value, tz)
+        return calendar_time(row, value, tz)
     out: Dict[str, Any] = {
         "id": row.get("id"),
         "title": row.get("title") or "",

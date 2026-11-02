@@ -444,10 +444,10 @@ def _occurrence_state(store, event: Dict[str, Any], start: Optional[datetime], n
         if str(exc.get("status") or "") == "cancelled" or exc.get("deleted_at") or original in _ops.excluded_slots(event):
             return "вхождение отменено", event
         effective = _occurrence_overlay(event, exc)
-        effective_start = _ops.routine_time(effective, exc.get('start_utc'), owner_tz)
+        effective_start = calendar_time(effective, exc.get('start_utc'), owner_tz)
         if effective_start != start:
             return "вхождение перенесено; напоминание перепланировано", event
-        end_at = _ops.routine_time(effective, exc.get('end_utc'), owner_tz) or start + duration
+        end_at = calendar_time(effective, exc.get('end_utc'), owner_tz) or start + duration
         live_row = {**_occurrence_overlay(event, exc), 'start_utc': iso_utc(start), 'end_utc': iso_utc(end_at)}
     else:
         # A legacy row with no original-slot identity must not impersonate a

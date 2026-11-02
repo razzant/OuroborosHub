@@ -33,6 +33,7 @@ def cal_calendars(ctx, account_id='', calendar_id='', include_acl=False, refresh
             adapter.calendar_capabilities() if adapter is not None and hasattr(adapter, 'calendar_capabilities') else None)
         report = {'account_id': account['id'], 'label': account['alias'] or account['login'], 'provider': account['provider'], 'status': account['status'], 'capabilities': capabilities}
         if account['provider'] != PROVIDER_LOCAL and adapter is None:
+            report['status'] = 'unavailable'
             report['error'] = {'kind': 'not_connected', 'message': ctx.providers.errors.get(account['id'], 'Account credentials unavailable')}
         if refresh and adapter is not None:
             try:
@@ -40,7 +41,8 @@ def cal_calendars(ctx, account_id='', calendar_id='', include_acl=False, refresh
                     ctx.store.upsert_calendar(calendar)
             except ProviderError as exc:
                 report['error'] = {'kind': exc.kind, 'message': exc.message}
-        report['calendars'] = ctx.store.list_calendars(account_id=account['id'])
+        report['calendars'] = [{**calendar, 'sync_warning': ctx.store.get_sync_state(calendar['id']).get('last_error') or ''}
+                               for calendar in ctx.store.list_calendars(account_id=account['id'])]
         reports.append(report)
     result = {'status': 'ok', 'accounts': reports}
     if include_acl:

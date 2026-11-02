@@ -124,3 +124,42 @@ class CalendarWidgetStateTests(SkillCase):
         self.page.wait_for_function('backend.draft === null')
         self.assertEqual(self.page.get_by_role('button', name='Restore draft').count(), 0)
         self.shot('calendar-state-draft-cleared')
+
+
+    def test_draft_clear_error_never_replaces_uncertain_operation_outcome(self):
+        self.open_plain()
+        self.page.get_by_placeholder('Название', exact=True).fill('Edited title')
+        self.page.wait_for_function('backend.draft && backend.draft.inputs.title === "Edited title"')
+        self.route('event/update', {'status':'partial','assignments':[
+            {'calendar_id':'work','status':'done'},
+            {'calendar_id':'copy','status':'uncertain','message':'Remote copy outcome UNKNOWN'}]})
+        self.page.evaluate("""() => { backend.routes.draft = async (q, body) => {
+            if (body && body.draft === null) return reply({status:'error',message:'Draft storage unavailable'},500);
+            if (body) backend.draft=body.draft;
+            return reply({status:'ok',draft:backend.draft});
+        }; }""")
+        self.page.get_by_role('button', name='Сохранить', exact=True).click()
+        expect(self.page.locator('.card')).to_have_count(0)
+        expect(self.page.get_by_role('status')).to_contain_text('Remote copy outcome UNKNOWN')
+        expect(self.page.locator('.draft-error')).to_contain_text('Draft storage unavailable')
+        self.page.get_by_role('button',name='Сегодня',exact=True).click()
+        expect(self.page.get_by_role('status')).to_contain_text('Remote copy outcome UNKNOWN')
+        expect(self.page.locator('.draft-error')).to_be_visible()
+        self.shot('calendar-independent-operation-and-draft-errors')
+
+
+    def test_persistent_sync_warning_and_unavailable_account_reach_footer(self):
+        self.mount_state(clock=True, accounts=[{'id':'yandex:fixture','provider':'yandex','alias':'Test account','status':'unavailable'}],
+            calendars=[{'id':'work','name':'Work','provider':'yandex','writable':True,'visible':True,'default':True,
+                        'sync_warning':'Linked copy copy-1 remains diverged'}])
+        expect(self.page.get_by_text(re.compile('Test account: unavailable'))).to_be_visible()
+        expect(self.page.get_by_text(re.compile('Linked copy copy-1 remains diverged'))).to_be_visible()
+        expect(self.page.get_by_role('button',name='Аккаунты',exact=True)).to_have_class(re.compile('attn'))
+        self.page.evaluate("""async () => {
+            const data = await (await OuroborosWidget.fetch('/api/extensions/calendar/agenda')).json();
+            data.sync.uncertain = 1; backend.routes.agenda = async () => reply(data);
+        }""")
+        self.page.clock.fast_forward(31_000)
+        expect(self.page.get_by_text(re.compile('Linked copy copy-1 remains diverged'))).to_be_visible()
+        expect(self.page.get_by_text(re.compile('outcomes unconfirmed: 1'))).to_be_visible()
+        self.shot('calendar-persistent-sync-warning')

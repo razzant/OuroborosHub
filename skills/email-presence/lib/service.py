@@ -15,7 +15,7 @@ from .client import MailClient
 from .delivery import tool_origin
 from .gmail import GmailClient
 from .host_adapter import LoopbackPresenceHostAdapter
-from .mime import reply_all_recipients
+from .mime import conversation_root, mailbox_addresses, reply_all_recipients
 from .settings import SENDING_OFF
 from .store import EmailStore, RequestIdConflict
 
@@ -33,7 +33,13 @@ def json_tool(handler):
 
 
 def addresses(value):
-    return [str(x).strip() for x in (value if isinstance(value, (list, tuple)) else str(value or "").split(",")) if str(x).strip()]
+    return mailbox_addresses(value)
+
+
+def conversation_fields(message):
+    root = conversation_root(references=message.get('references'), in_reply_to=message.get('in_reply_to'),
+                             message_id=message.get('message_id'))
+    return {'conversation_id': root, 'thread_id': root} if root else {}
 
 
 class MailService:
@@ -131,6 +137,7 @@ class MailService:
             for message in result.get("messages", []):
                 message["message_ref"] = self.wrap_ref(account, message)
                 message["account_id"] = account["id"]
+                message.update(conversation_fields(message))
             return {**result, "account_id": account["id"]}
 
     def read(self, *, account_id="", message_ref="", uid=None, uidvalidity=None, folder=None):
@@ -145,6 +152,7 @@ class MailService:
             if message.get("message_id"):
                 store.remember_read(message)
             message.update(account_id=account["id"], message_ref=self.wrap_ref(account, {**kwargs, **message}))
+            message.update(conversation_fields(message))
             return message
 
     def mark_read(self, *, account_id="", message_ref="", uid=None, uidvalidity=None, folder=None):
@@ -173,23 +181,50 @@ class MailService:
                 store.remember_read(original)
         return original
 
+    def _reply_context(self, account, store, client, message_id, references, reply_all, folder, replaying=False):
+        original = store.message_by_id(message_id) if message_id else None
+        if message_id and original is None and (reply_all or not replaying and (references is None or account['provider'] == 'gmail')):
+            original = self._reply_source(store, client, message_id,
+                    folder or ('ALL' if account['provider'] == 'gmail' else account.get('folder', 'INBOX')))
+            if original is None:
+                raise ValueError('Reply source was not found; read it first or select its folder with reply_folder')
+        if reply_all and not message_id:
+            raise ValueError('reply_to_message_id is required for reply_all')
+        if references is None and original:
+            references = original.get('references') or ([original['in_reply_to']] if original.get('in_reply_to') else [])
+        root = conversation_root(references=references, in_reply_to=message_id)
+        if original and not replaying and root != conversation_fields(original).get('conversation_id'):
+            raise ValueError('references names another RFC conversation; use the reply source references from email_read')
+        return original, references, root
+
+    @staticmethod
+    def _prepare_conversation(root, conversation_id, thread_id, retry_arguments, *, required):
+        fields = {'conversation_id': root, 'thread_id': root}
+        retry_arguments = {key: value for key, value in retry_arguments.items() if value is not None}
+        if any(value and value != root for value in (conversation_id, thread_id)):
+            return {'ok': False, 'status': 'error', 'code': 'conversation_identity_mismatch',
+                    'error': 'Conversation fields must match the resolved RFC reply source.',
+                    'retry_arguments': {**retry_arguments, **fields}}
+        if required and (not conversation_id or not thread_id):
+            return {'ok': False, 'status': 'needs_arguments', 'code': 'canonical_conversation_required',
+                    'message': 'Retry with the resolved conversation fields below; no message or draft was queued or saved.',
+                    'retry_arguments': {**retry_arguments, **fields}}
+        return None
+
     def send(self, ctx=None, *, account_id="", sender="", to="", body="", subject="", reply_to_message_id="", references=None,
-             cc=None, bcc=None, reply_all=False, html_body="", body_type="plain", attachments=None, request_id="", reply_folder=""):
+             cc=None, bcc=None, reply_all=False, html_body="", body_type="plain", attachments=None, request_id="", reply_folder="",
+             conversation_id="", thread_id=""):
         with self.target(account_id) as (account, store, client):
             if account.get("sending", "on") == "off":
                 return {"ok": False, "account_id": account["id"], "code": "sending_off", "error": SENDING_OFF}
             chosen_sender = self._sender(account, sender)
             recipients, visible_cc, visible_bcc = addresses(to), addresses(cc), addresses(bcc)
-            original = None
-            if reply_all or (reply_to_message_id and account["provider"] == "gmail"):
-                if not reply_to_message_id:
-                    raise ValueError("reply_to_message_id is required for reply_all")
-                original = self._reply_source(store, client, reply_to_message_id,
-                                              reply_folder or ("ALL" if account["provider"] == "gmail" else account.get("folder", "INBOX")))
-                if not original:
-                    raise ValueError("Reply source was not found; read it first or select its folder with reply_folder")
-                if references is None:
-                    references = original.get("references") or ([original["in_reply_to"]] if original.get("in_reply_to") else [])
+            rid = str(request_id or uuid.uuid4().hex)
+            queued = store.queued_message(rid)
+            if queued is not None and references is None:
+                references = list(queued.references)
+            original, references, thread = self._reply_context(account, store, client, reply_to_message_id,
+                                                               references, reply_all, reply_folder, replaying=queued is not None)
             if reply_all:
                 derived = reply_all_recipients(original, chosen_sender)
                 own = {value.casefold() for value in account["senders"]}
@@ -197,11 +232,17 @@ class MailService:
                 visible_cc = [value for value in derived["cc"] if value.casefold() not in own] + visible_cc
             if not recipients or (not str(body).strip() and not str(html_body).strip()):
                 raise ValueError("to (or reply_all source) and body are required")
-            rid = str(request_id or uuid.uuid4().hex)
-            thread = (references or [reply_to_message_id or store.message_id_for(rid)])[0]
+            thread = thread or store.message_id_for(rid)
             # Identical retries keep the first row's binding, including an unknown
             # or disconnected one. The store still compares payload and sender.
             existing = store.receipt(rid)
+            preparation = self._prepare_conversation(thread, conversation_id, thread_id, {
+                'account_id': account['id'], 'sender': chosen_sender, 'to': to, 'body': body, 'subject': subject,
+                'reply_to_message_id': reply_to_message_id, 'references': references, 'cc': cc, 'bcc': bcc,
+                'reply_all': reply_all, 'html_body': html_body, 'body_type': body_type, 'attachments': attachments,
+                'request_id': rid, 'reply_folder': reply_folder}, required=existing is None and bool(reply_to_message_id or references))
+            if preparation:
+                return preparation
             binding = self.capture_binding(account, thread) if existing is None else {}
             reporting = {"version": -1, "account_id": account["id"], "sender": chosen_sender, "origin": tool_origin(ctx)}
             if original and original.get("provider_thread_id"):
@@ -227,20 +268,17 @@ class MailService:
                     "deduplicated": not inserted, "receipt": receipt,
                     "message": "Queued is not sent. email_receipt reports the provider outcome; held/uncertain items are not blindly resent."}
 
-    def draft(self, *, account_id="", sender="", reply_all=False, reply_folder="", **kwargs):
+    def draft(self, *, account_id="", sender="", reply_all=False, reply_folder="", conversation_id="", thread_id="", **kwargs):
         with self.target(account_id) as (account, store, client):
             chosen_sender = self._sender(account, sender)
-            original = None
-            if reply_all or (kwargs.get("reply_to_message_id") and account["provider"] == "gmail"):
-                source_id = kwargs.get("reply_to_message_id")
-                if not source_id:
-                    raise ValueError("reply_to_message_id is required for reply_all")
-                original = self._reply_source(store, client, source_id,
-                                              reply_folder or ("ALL" if account["provider"] == "gmail" else account.get("folder", "INBOX")))
-                if not original:
-                    raise ValueError("Read the reply source first or choose reply_folder")
-                if kwargs.get("references") is None:
-                    kwargs["references"] = original.get("references") or ([original["in_reply_to"]] if original.get("in_reply_to") else [])
+            original, references, thread = self._reply_context(account, store, client, kwargs.get('reply_to_message_id'),
+                                                               kwargs.get('references'), reply_all, reply_folder)
+            kwargs['references'] = references
+            preparation = self._prepare_conversation(thread, conversation_id, thread_id,
+                {**kwargs, 'to': kwargs.get('to', ''), 'account_id': account['id'], 'sender': chosen_sender, 'reply_all': reply_all, 'reply_folder': reply_folder},
+                required=bool(kwargs.get('reply_to_message_id') or references))
+            if preparation:
+                return preparation
             if reply_all:
                 derived = reply_all_recipients(original, chosen_sender)
                 own = {value.casefold() for value in account["senders"]}
@@ -290,6 +328,8 @@ def register_tools(api, service):
     account = {"account_id": {"type": "string", "description": "Exact canonical id from email_accounts; required when more than one account is connected."}}
     message = {"message_ref": string, "uid": integer, "uidvalidity": integer, "folder": string}
     compose = {"to": string, "body": string, "subject": string, "sender": string, "reply_to_message_id": string,
+               'conversation_id': {'type': 'string', 'description': 'Canonical RFC conversation from email_read or retry_arguments; required for a threaded reply.'},
+               'thread_id': {'type': 'string', 'description': 'The same canonical RFC root, so the existing host guard checks the actual conversation.'},
                "reply_folder": string, "references": array, "cc": array, "bcc": array, "reply_all": {"type": "boolean"},
                "html_body": string, "body_type": {"type": "string", "enum": ["plain", "html"]},
                "attachments": {"type": "array", "items": {"type": "object"}}}
@@ -298,17 +338,17 @@ def register_tools(api, service):
                           schema={"type": "object", "properties": {**(account if select else {}), **properties}, "required": list(required)}, timeout_sec=120)
     tool("email_accounts", service.list_accounts, "List configured mailbox identities, sender addresses and granted scopes; no passwords or tokens are returned.", {}, select=False)
     # email_accounts has no selection argument: it is the discovery surface.
-    tool("email_send", service.send, "Queue a mail or RFC-threaded reply from an explicit account/sender. request_id is account-scoped. Queued is not sent; inspect email_receipt for held, accepted or uncertain outcomes.",
+    tool("email_send", service.send, "Queue a mail or RFC-threaded reply from an explicit account/sender. For replies use conversation_id/thread_id from email_read; needs_arguments returns exact retry_arguments before any effect. request_id is account-scoped. Queued is not sent; inspect email_receipt for held, accepted or uncertain outcomes.",
          {**compose, "request_id": string}, ("body",))
     tool("email_search", service.search, "Search old/new mail without marking it read. Gmail uses query/page_token; IMAP uses criteria tokens. Returned message_ref is account-bound; a page reports its continuation.",
          {"folder": string, "criteria": array, "query": string, "limit": integer, "page_token": string})
-    tool("email_read", service.read, "Read exact message_ref, or legacy uid+uidvalidity+folder. Peeks only; use email_mark_read for Seen. Historical reads do not enter Presence.", message)
+    tool("email_read", service.read, "Read exact message_ref, or legacy uid+uidvalidity+folder, including canonical conversation_id/thread_id for replies. Peeks only; use email_mark_read for Seen. Historical reads do not enter Presence.", message)
     tool("email_mark_read", service.mark_read, "Mark this account's selected message read; accepts message_ref or legacy uid+uidvalidity+folder.", message)
     tool("email_folders", service.folders, "Read folders/labels without changing anything, including while a Place is Silent or consciousness Advises.", {})
     tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP: list/create/copy/move/flags, no global expunge. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant.",
          {**message, "action": string, "destination": string, "flags": array, "remove_flags": {"type": "boolean"},
           "add_labels": array, "remove_labels": array, "label_id": string, "draft_id": string, "properties": {"type": "object"}})
-    tool("email_draft", service.draft, "Save a draft without sending. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP appends to its selected folder.",
+    tool("email_draft", service.draft, "Save a draft without sending. For replies use canonical conversation_id/thread_id; needs_arguments returns exact retry_arguments before saving. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP appends to its selected folder.",
          {**compose, "folder": string, "draft_id": string}, ("to", "subject"))
     tool("email_receipt", service.receipt, "Read the exact account-scoped delivery receipt. Uncertain acceptance must be inspected, never blindly sent again.", {"request_id": string}, ("request_id",))
     tool("email_test_connection", service.test_connection, "Check the selected account's authentication/TLS without sending mail or admitting historical messages.", {})

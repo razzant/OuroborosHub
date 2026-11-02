@@ -1,6 +1,9 @@
 """Calendar meaning survives native serialization, sync and explicit conflict choice."""
 import json
+import io
 import urllib.request
+import urllib.response
+from email.message import Message
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -257,3 +260,92 @@ def test_old_date_instance_addresses_reconcile_without_rearming_settled_notices(
         with ctx.store._conn() as conn:
             record = conn.execute('SELECT state FROM reminders WHERE notice_id=?', (carried,)).fetchone()
         assert record and record['state'] == 'unknown'
+
+
+@pytest.mark.parametrize('kind', ['date', 'floating', 'tzid', 'utc'])
+@pytest.mark.parametrize('travel', [False, True])
+def test_acknowledged_native_cancellation_survives_equal_version_sync_and_later_rule_edit(tmp_path, kind, travel):
+    ctx, source, server = native_context(tmp_path, kind)
+    initial = listed(ctx, '2026-10-24', '2026-10-29', source['calendar_id'])
+    selected = initial[1]
+    key = selected['id'].split('@', 1)[1]
+    result = json.loads(tools.cal_delete(ctx, id=selected['id'], scope='this', confirm=True))
+    assert result['status'] == 'deleted', result
+    if travel:
+        ctx.tz = model.get_tz('America/New_York')
+    sync(ctx, source)
+    assert selected['id'] not in {event['id'] for event in listed(ctx, '2026-10-23', '2026-10-30', source['calendar_id'])}
+    cancelled = [row for row in ctx.store.exceptions_for(source['id']) if row['recurrence_id'] == key]
+    assert len(cancelled) == 1 and cancelled[0]['status'] == 'cancelled'
+    changed = json.loads(tools.cal_update(ctx, id=source['id'], rrule='FREQ=DAILY;COUNT=5', scope='all', confirm=True))
+    assert changed['status'] == 'updated', changed
+    wire, etag = server.resources[source['href']]
+    parsed = providers.ics_to_rows(wire, source['calendar_id'], source['href'], etag, ctx.tz)[0]
+    canonical = model.civil_in_basis(parsed, ctx.store.get_event(source['id']))
+    assert key in canonical['exdates'].split(',')
+
+
+@pytest.mark.parametrize('change', ['external_title', 'missing_ack_etag'])
+def test_utc_transport_of_one_off_does_not_replace_authoring_zone(tmp_path, change, monkeypatch):
+    ctx, source, server = native_context(tmp_path, 'tzid')
+    adapter = ctx.providers.adapter_for('fixture')
+    if change == 'missing_ack_etag':
+        monkeypatch.setattr(adapter, '_write_version', lambda *args: '')
+    result = json.loads(tools.cal_create(ctx, title='Author zone', start='2026-10-14T09:00', end='2026-10-14T10:00',
+                                       calendars=source['calendar_id'], confirm=True))
+    assert result['status'] == 'created', result
+    row = ctx.store.get_event(result['event']['id'])
+    if change == 'external_title':
+        def rename(cal):
+            event = cal.walk('VEVENT')[0]
+            event['SUMMARY'] = 'External title'
+        server.edit(row['href'], rename)
+    sync(ctx, source)
+    assert ctx.store.get_event(row['id'])['tz'] == 'Europe/Berlin'
+    edited = json.loads(tools.cal_update(ctx, id=row['id'], rrule='FREQ=WEEKLY;COUNT=4', scope='all', confirm=True))
+    assert edited['status'] == 'updated', edited
+    native = master_component(server.resources[row['href']][0])
+    occurrences = list(rrulestr(native['RRULE'].to_ical().decode(), dtstart=native.decoded('DTSTART')))
+    assert [value.astimezone(model.get_tz('Europe/Berlin')).hour for value in occurrences] == [9] * 4
+
+
+def test_native_utc_tzid_is_an_explicit_zone_change(tmp_path):
+    ctx, source, server = native_context(tmp_path, 'tzid')
+    result = json.loads(tools.cal_create(ctx, title='Explicit UTC', start='2026-12-10T09:00', calendars=source['calendar_id'], confirm=True))
+    row = ctx.store.get_event(result['event']['id'])
+    raw, _ = server.resources[row['href']]
+    raw = raw.replace('DTSTART:20261210T080000Z', 'DTSTART;TZID=UTC:20261210T080000')
+    raw = raw.replace('DTEND:20261210T090000Z', 'DTEND;TZID=UTC:20261210T090000')
+    server.resources[row['href']] = (raw, 'explicit-utc')
+    sync(ctx, source)
+    assert ctx.store.get_event(row['id'])['tz'] == 'UTC'
+
+
+def test_dav_308_dispatches_through_the_real_urllib_opener(monkeypatch):
+    seen = []
+    def reply(handler, request):
+        seen.append((request.full_url, request.get_method(), request.data, request.get_header('If-match')))
+        headers = Message()
+        code = 308 if request.full_url.endswith('/old') else 200
+        if code == 308:
+            headers['Location'] = 'http://calendar.example.test/new'
+        result = urllib.response.addinfourl(io.BytesIO(b'result'), headers, request.full_url, code=code)
+        result.msg = 'Redirect' if code == 308 else 'OK'
+        return result
+    monkeypatch.setattr(urllib.request.HTTPHandler, 'http_open', reply)
+    monkeypatch.setattr(urllib.request, 'getproxies', lambda: {})
+    adapter = providers.CalDAVAdapter('fixture', 'fixture', 'http://calendar.example.test')
+    status, _, body = adapter._request('REPORT', 'http://calendar.example.test/old', '<query/>', {'If-Match': 'v1'})
+    assert (status, body) == (200, 'result')
+    assert seen == [('http://calendar.example.test/old', 'REPORT', b'<query/>', 'v1'),
+                    ('http://calendar.example.test/new', 'REPORT', b'<query/>', 'v1')]
+
+
+@pytest.mark.parametrize('end', ['2026-12-10T08:00Z', '2026-12-10T09:00Z'])
+def test_explicit_reversed_or_empty_ranges_are_not_silently_replaced(tmp_path, end):
+    ctx, _, _ = native_context(tmp_path, 'utc')
+    for operation in (tools.cal_events, tools.cal_free):
+        result = json.loads(operation(ctx, start='2026-12-10T09:00Z', end=end))
+        assert result['status'] == 'error'
+    omitted = json.loads(tools.cal_events(ctx, start='2026-12-10T09:00Z'))
+    assert omitted['status'] == 'ok' and omitted['range']['end'] > omitted['range']['start']

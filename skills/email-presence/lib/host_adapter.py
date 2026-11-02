@@ -30,9 +30,9 @@ class HostAdapterUnavailable(RuntimeError): pass
 
 class HostRetryError(HostContractError):
     """Typed retry or blocked: the event stays queued, keeping the Host's hint."""
-    def __init__(self, message="", *, code="", field="", retry_after=None):
+    def __init__(self, message="", *, code="", field="", retry_after=None, disposition=""):
         super().__init__(message)
-        self.code, self.field, self.retry_after = code, field, retry_after
+        self.code, self.field, self.retry_after, self.disposition = code, field, retry_after, disposition
 
 @dataclass(frozen=True)
 class HostOutput:
@@ -346,11 +346,16 @@ class LoopbackPresenceHostAdapter:
                 if not str(payload.get("turn_ref") or "").strip(): raise HostContractError("Retained presence refusal omitted its original turn_ref")
                 receipt.update(delivery_reporting_version=int(payload.get("delivery_reporting_version") == 1) if "delivery_reporting_version" in payload else mode, work_refs=[])
                 return _ref("retained", receipt)
-            if disposition == "rejected": return _ref("rejected", receipt)
+            if disposition == "rejected" or (disposition == "blocked" and self.presence_place_binding_version
+                                              and payload.get("code") == "place_not_connected"):
+                # Supported No-Place declines this unadmitted input, rather than
+                # asking the connector to resubmit it forever. Preserve the Host's
+                # actual blocked receipt; later connecting a Place does not replay history.
+                return _ref("rejected", receipt)
             # A busy conversation or full capacity (v2 429) wrote no task row: the same
             # event stays first in its thread and is resubmitted after the Host's hint.
             raise HostRetryError(_summary(receipt), code=str(payload.get("code") or ""),
-                                 field=str(payload.get("field") or ""), retry_after=_retry_after(payload))
+                                 field=str(payload.get("field") or ""), retry_after=_retry_after(payload), disposition=disposition)
         status = str(payload.get("status") or "")
         continuation_ref = str(payload.get("continuation_ref") or "").strip()
         if version == 2 and (status == "continuing" or (status == "completed" and continuation_ref)):
@@ -525,9 +530,13 @@ class LoopbackPresenceHostAdapter:
             return await self._continuing_status(reference)
         receipt=_decode(reference,"deferred"); work_ref=str(receipt.get("work_ref") or ""); immediate=(str(receipt.get("text") or ""),) if receipt.get("text") else ()
         payload=self._terminal.get(work_ref) or await self._poll(work_ref); state=str(payload.get("status") or "").lower()
+        outputs = ()
+        if state not in _OBSERVING and payload.get("outcome") in _SPEECH and str(payload.get("text") or "").strip():
+            outputs = (HostOutput(_output_identity(str(payload.get("output_ref") or ""), "final"), str(payload["text"]),
+                                  str(payload.get("turn_ref") or receipt.get("turn_ref") or work_ref), _anchor(payload)),)
         return HostTurnStatus("ready" if state == "completed" else "failed" if state in {"failed", "cancelled"} else "pending",
                               str(payload.get("error") or state) if state in {"failed", "cancelled"} else "", immediate,
-                              int(receipt.get("delivery_reporting_version") == 1), str(receipt.get("turn_ref") or ""))
+                              int(receipt.get("delivery_reporting_version") == 1), str(receipt.get("turn_ref") or ""), outputs)
     async def deliver(self, reference: str) -> HostDelivery:
         if reference.startswith("retained:"):  # each reference's output was already reported by status
             receipt = _decode(reference, "retained")
@@ -535,15 +544,36 @@ class LoopbackPresenceHostAdapter:
         if reference.startswith("continuing:"):  # every output was already reported by status
             receipt = _decode(reference, "continuing")
             return HostDelivery((), int(receipt.get("delivery_reporting_version") == 1), str(receipt.get("continuation_ref") or ""))
-        receipt = _decode(reference, "completed" if reference.startswith("completed:") else "deferred")
+        if reference.startswith("deferred:"):  # selected terminal speech, including failure, was reported by status
+            receipt = _decode(reference, "deferred")
+            return HostDelivery((), int(receipt.get("delivery_reporting_version") == 1), str(receipt.get("turn_ref") or ""))
+        receipt = _decode(reference, "completed")
         if receipt.get("continuation_version") == 2:  # its selection was reported by status
             return HostDelivery((), int(receipt.get("delivery_reporting_version") == 1), str(receipt.get("turn_ref") or ""))
-        if reference.startswith("completed:"): payload=receipt
-        else:
-            work_ref=str(_decode(reference,"deferred").get("work_ref") or ""); payload=self._terminal.get(work_ref) or await self._poll(work_ref)
-            if str(payload.get("status") or "").lower()!="completed": raise HostContractError("Presence work is not completed")
+        payload = receipt
         text=str(payload.get("text") or "") if payload.get("outcome", "message") == "message" else ""
         return HostDelivery((text,) if text.strip() else (), int(receipt.get("delivery_reporting_version") == 1), str(receipt.get("turn_ref") or ""))
+
+    @staticmethod
+    def _reference_work_refs(reference):
+        kind = reference.split(":", 1)[0]
+        if kind not in {"deferred", "retained", "continuing"}:
+            return set()
+        receipt = _decode(reference, kind)
+        source = (receipt.get("response") or {}) if kind == "retained" else receipt
+        keys = [source.get("work_ref"), source.get("turn_ref") if kind == "retained" else source.get("continuation_ref")]
+        keys.extend(receipt.get("work_refs") or [])
+        return {str(key) for key in keys if key}
+
+    def release(self, reference, keep_references=()):
+        """Forget settled in-memory views only after durable delivery/inbox settlement."""
+        try:
+            candidates = self._reference_work_refs(reference)
+            kept = {key for other in keep_references for key in self._reference_work_refs(other)}
+        except HostContractError:
+            return  # An unreadable retained reference does not authorize dropping its evidence.
+        for key in candidates - kept:
+            self._terminal.pop(key, None)
     async def aclose(self):
         if self._owns: await self._http.aclose()
         if self._place_http is not None: self._place_http.close()

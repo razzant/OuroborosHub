@@ -137,7 +137,8 @@ def connect_google(ctx, public_base_url="") -> Dict[str, Any]:
         local_base = f'http://127.0.0.1:{port}'
         page = '/onboarding/static/provider-return.html'
         request = urllib.request.Request(local_base + page, method='HEAD')
-        with urllib.request.urlopen(request, timeout=5) as response:
+        # This probe always targets the local host, independently of the public OAuth redirect base.
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=5) as response:
             if response.status != 200:
                 raise ValueError('Host return page is unavailable')
         base = _public_base(public_base_url or ctx.store.get_setting('public_base_url') or local_base)

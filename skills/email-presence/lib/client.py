@@ -14,7 +14,7 @@ from email.policy import SMTP
 
 import httpx
 
-from .mime import build_message, parse_message
+from .mime import build_message, mailbox_addresses, parse_message
 
 
 class MailClient:
@@ -276,9 +276,7 @@ class MailClient:
 
     def draft(self, *, to, subject, body="", folder="Drafts", reply_to_message_id="", references=None,
               cc=(), bcc=(), html_body="", body_type="plain", attachments=(), sender=""):
-        recipients = [x.strip() for x in (to if isinstance(to, (list, tuple)) else str(to).split(",")) if str(x).strip()]
-        cc = [x.strip() for x in (cc if isinstance(cc, (list, tuple)) else str(cc or "").split(",")) if str(x).strip()]
-        bcc = [x.strip() for x in (bcc if isinstance(bcc, (list, tuple)) else str(bcc or "").split(",")) if str(x).strip()]
+        recipients, cc, bcc = mailbox_addresses(to), mailbox_addresses(cc), mailbox_addresses(bcc)
         message = build_message(sender=sender or self._get("EMAIL_USER"), recipients=recipients,
                                 subject=subject, body=body, in_reply_to=reply_to_message_id,
                                 references=references or [], cc=list(cc or ()), bcc=list(bcc or ()),

@@ -38,8 +38,8 @@ import ops  # noqa: E402
 import reminders as rem  # noqa: E402
 import routes  # noqa: E402
 import tools  # noqa: E402
-from model import DEFAULT_LOCAL_CALENDAR_ID, get_tz, iso_utc, now_utc  # noqa: E402
-from providers import YandexAdapter, row_to_ics  # noqa: E402
+from model import DEFAULT_LOCAL_CALENDAR_ID, get_tz, iso_utc  # noqa: E402
+from providers import YandexAdapter  # noqa: E402
 from providers_google import GoogleAdapter, gevent_to_row, row_to_gevent  # noqa: E402
 from store import Store  # noqa: E402
 
@@ -417,7 +417,7 @@ class YandexRound4Tests(unittest.TestCase):
         self.assertEqual(caught.exception.kind, "conflict")
         self.assertEqual(puts, [])
 
-    def test_series_update_uses_live_matching_etag_and_prunes_exceptions_after_until(self):
+    def test_series_update_uses_live_matching_etag_and_explicit_cut(self):
         raw = self.series_ics()
         adapter = YandexAdapter("owner@yandex.test", "password")
         puts = []
@@ -426,7 +426,9 @@ class YandexRound4Tests(unittest.TestCase):
             puts.append((method, url, body, headers)) or (204, {"etag": '"new"'}, "")
         )
 
-        result = adapter.update({}, self.master_row(raw), '"cached"', {})
+        adapter.update({}, self.master_row(raw), '"cached"', {})
+        self.assertIn("SUMMARY:Late", puts.pop()[2])
+        result = adapter.update({}, self.master_row(raw), '"cached"', {'truncate_before': '2026-10-05T09:00:00+00:00'})
         self.assertEqual(result["etag"], '"new"')
         self.assertEqual(puts[0][3]["If-Match"], '"cached"')
         self.assertIn("SUMMARY:Early", puts[0][2])

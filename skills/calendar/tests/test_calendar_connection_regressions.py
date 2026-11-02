@@ -107,10 +107,18 @@ class ProviderConnectionTests(SyncCase):
         self.ctx.store.update_event(override['id'], {'availability': 'free', 'tz': 'UTC', 'all_day': 0})
         master = self.ctx.store.get_event(master['id'])
         event = self.provider_override(master, slot)
-        event.update({'availability': 'busy', 'tz': 'Europe/Berlin', 'all_day': 1, 'etag': 'changed'})
+        day = datetime.fromisoformat(slot).astimezone(get_tz('Europe/Berlin')).date()
+        midnight = datetime.combine(day, datetime.min.time(), tzinfo=get_tz('Europe/Berlin'))
+        event.update({'availability': 'busy', 'tz': 'Europe/Berlin', 'all_day': 1, 'etag': 'changed',
+                      'start_utc': iso_utc(midnight), 'end_utc': iso_utc(midnight + timedelta(days=1)),
+                      '_recurrence_tz': master['tz']})
         self.sync(FeedAdapter([self.feed_row(master), event], seen=[master['href']]))
         current = self.ctx.store.get_event(override['id'])
-        self.assertEqual((current['availability'], current['tz'], current['all_day']), ('busy', 'Europe/Berlin', 1))
+        self.assertEqual((current['availability'], current['tz'], current['all_day']), ('busy', master['tz'], 1))
+        shown = json.loads(tools.cal_events(self.ctx, id=override['id']))['event']
+        self.assertEqual(datetime.fromisoformat(shown['start']).date(), day)
+        self.assertEqual(datetime.fromisoformat(shown['end']).date(), day + timedelta(days=1))
+        self.assertEqual((datetime.fromisoformat(shown['start']).hour, datetime.fromisoformat(shown['end']).hour), (0, 0))
 
     def test_unchanged_ctag_only_skips_the_same_query_window(self):
         cal = self.ctx.store.get_calendar(self.external)

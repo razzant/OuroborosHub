@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Multi-account Gmail API and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.9.0
+version: 0.9.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -21,7 +21,8 @@ tools:
   - name: email_send
     effect: message
     target: [account_id,to,cc,bcc]
-    conversation: reply_to_message_id
+    conversation: conversation_id
+    thread: thread_id
     description: Queue a proactive email or threaded reply for durable delivery.
   - name: email_search
     effect: read
@@ -42,7 +43,8 @@ tools:
   - name: email_draft
     effect: write
     target: [account_id,to,cc,bcc]
-    conversation: reply_to_message_id
+    conversation: conversation_id
+    thread: thread_id
     description: Save a text draft without sending.
   - name: email_receipt
     effect: read
@@ -111,6 +113,16 @@ inboxes, outboxes and cursors. Account identity is distinct from the chosen From
 address. Host conversation identity remains RFC Message-ID/References; native
 Gmail message/thread ids remain explicit provider facts, and replies pass the
 native threadId to Gmail. No signature, footer or Auto-Submitted marker is added.
+
+Read/search results include canonical `conversation_id` and `thread_id` when the
+RFC source is known. Pass both for a threaded `email_send` or `email_draft`.
+If omitted, the tool resolves the reply source and returns `needs_arguments`
+with exact `retry_arguments` before enqueueing or saving anything; repeat that
+call so the existing Host guard sees the same conversation the mail will use.
+This is argument preparation, not another human approval. `References` and a
+Place are not mandatory. A new unthreaded mail still queues in one call, and a
+previous request's receipt remains replayable without another effect. Supplied
+conversation fields must match the resolved RFC source, never a Gmail thread id.
 
 ## Setup
 
@@ -224,9 +236,13 @@ stays observable. Canonical selected outputs keep their source and delivery
 identity across repeated polls and restarts; a retained receipt itself is never
 sent as speech. This does not claim exactly-once provider delivery after
 ambiguous network acceptance.
-`rejected` ends an event-specific refusal; before-admission `retry` and `blocked`
-retain retry custody, including after account or binding repair. Missing or unknown typed
-dispositions stay retryable, even on HTTP 403/404. Full queue recovery requires
+`rejected` ends an event-specific refusal. A Host advertising Place binding may
+return `blocked` with `code: place_not_connected` before admission: retain that
+receipt and settle the inbox item without resubmitting it. Connecting a Place
+later does not replay those historical inputs; ordinary account tools remain usable.
+Other before-admission `retry` and `blocked` results retain retry custody, including
+after account or binding repair. Missing or unknown typed dispositions stay
+retryable, even on HTTP 403/404. Full queue recovery requires
 both an updated Host and this transport; older Hosts may still return a
 retry-only refusal. Existing completed delivery receipts remain unchanged.
 
