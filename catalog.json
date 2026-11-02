@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/8ba311b8bdcb8f9a28649e4b1d049160227bef69",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/cda09ab8b369bbb654bcc3c97d491823cf68343b",
   "schema_version": 1,
   "skills": [
     {
@@ -369,8 +369,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "c04e46791d37be3c42685d2c879e6fa75605459ec79d2386f45b23559fb1e503",
-          "size": 48672
+          "sha256": "46360b484d1db66af9d468666b9d99941a71dd2df6344d328348c6f0656619ca",
+          "size": 49190
         },
         {
           "path": "accounts.py",
@@ -404,8 +404,8 @@
         },
         {
           "path": "ops.py",
-          "sha256": "61178d6640c24ed9678fb18d14d1c671565e10d0c686a26ee96cc6cf4a80ffab",
-          "size": 98463
+          "sha256": "dd99f57517ef2835eec3a4c617f5bd93a685e5ab1b08d29491cf0f9e23e91f85",
+          "size": 98828
         },
         {
           "path": "plugin.py",
@@ -414,8 +414,8 @@
         },
         {
           "path": "providers.py",
-          "sha256": "0d8b631368beae74d13afcdb2f34946fa90cd92ae86cde3794e08c9b2cac695c",
-          "size": 55085
+          "sha256": "fa1ca29f139c878bed9a5f2fdffe4d502555fad4f747bd516c81007feaf65e2f",
+          "size": 59236
         },
         {
           "path": "providers_google.py",
@@ -654,8 +654,8 @@
         },
         {
           "path": "tests/test_recurrence_edit_contracts.py",
-          "sha256": "f81bf6c6b03515df94adaa32be411dfe4489bf408b2dbccbdf21f7e75f156f7b",
-          "size": 25695
+          "sha256": "47932ac7b2cf7ab3acbf7c4fb269a6bdc292db87bb1a5793fca2e5730abc4f42",
+          "size": 49834
         },
         {
           "path": "tests/test_recurrence_intake.py",
