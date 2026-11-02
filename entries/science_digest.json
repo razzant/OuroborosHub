@@ -1,0 +1,19 @@
+{
+  "author": "kazzand",
+  "category": [
+    "search"
+  ],
+  "description": "Research digest from public Telegram channels and public RSS/Atom feeds the owner chooses, filtered by the owner's own free-text interests; the agent reads, checks primary sources and writes the digest in its chat.",
+  "digest": "b2eed9952115bdb0f33cdff702b0f3c88e642ece55ba0401420ad90e4fa26a96",
+  "name": "science_digest",
+  "owner": "kazzand",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/science_digest"
+  },
+  "type": "extension",
+  "version": "0.4.0",
+  "when_to_use": "The owner asks to follow public Telegram channels or RSS/Atom feeds, to set or change digest interests, to see recent posts, or for a digest of research and technology news matching their interests.",
+  "withdrawn": null
+}
