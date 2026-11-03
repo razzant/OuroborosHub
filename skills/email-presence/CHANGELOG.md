@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.3
+
+- Keep already-admitted deferred replies in custody across unreadable work polls;
+  canonical terminal results still settle once without resubmitting the turn.
+- Declare actual mailbox and filter-forwarding destinations before effects.
+  Canonical argument preparation preserves label properties and filter data,
+  with ordinary matching calls remaining one call and no additional approval.
+
 ## 0.9.2
 
 - Prepare the canonical mailbox account before new sends and drafts so the Host

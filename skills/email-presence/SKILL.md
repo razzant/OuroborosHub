@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Multi-account Gmail API and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.9.2
+version: 0.9.3
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -38,7 +38,7 @@ tools:
     description: Mark one message read by stable UID and UIDVALIDITY.
   - name: email_mailbox
     effect: write
-    target: [account_id]
+    target: [account_id,destination]
     description: List/create folders, copy/move messages and update flags.
   - name: email_draft
     effect: write
@@ -68,7 +68,7 @@ tools:
     description: Read supported provider settings, filters and sender configuration.
   - name: email_settings
     effect: write
-    target: [account_id]
+    target: [account_id,forward_to]
     description: Change supported provider settings; website-only operations are reported explicitly.
 ui_tab:
   tab_id: email_presence
@@ -193,6 +193,10 @@ remain readable by explicit account_id.
   retains list/create/copy/move/flags, including the old list action. IMAP move
   requires UID MOVE, never a mailbox-wide expunge. Gmail adds label management,
   archive, trash/untrash, delete_draft and explicitly granted permanent deletion.
+  Its destination is declared before effects. For Gmail label creation,
+  properties.name keeps its existing precedence; a different or omitted top-level
+  destination returns exact retry_arguments naming that actual label without
+  dropping any properties. A matching canonical call remains one call.
 - email_draft saves or updates a Gmail draft by draft_id, or appends an IMAP
   draft. Search Gmail folder DRAFT to obtain stable draft ids. Sending captured
   draft content with email_send does not silently delete the original draft;
@@ -220,6 +224,12 @@ remain readable by explicit account_id.
   independent workers of this one companion.
 - email_settings_read inspects supported Gmail settings; email_settings changes
   supported filters, vacation, language, IMAP/POP and existing send-as properties.
+  A forwarding filter uses canonical forward_to alongside values.action.forward.
+  Nested-only or mismatched destinations return needs_arguments and exact
+  retry_arguments before a provider change. Matching destinations execute in one
+  call; forward_to alone fills that nested field while preserving other filter
+  data. Non-forwarding filters and other settings need no additional argument.
+  This is argument preparation, not another human approval or forwarding limit.
   Administrative forwarding or additional send-as management requiring domain
   delegation is reported as website_required for personal accounts. Other
   providers' account settings use their own websites, not invented IMAP features.
@@ -327,6 +337,9 @@ as `delivery_support.presence_continuation_version`.
 
 A promoted child named by a later poll is stored with the receipt before it is
 polled. An unreadable poll, including HTTP 403/404, keeps custody and backs off.
+The same rule applies to an admitted deferred work reference: a blocked read
+does not fail the inbox or resubmit the original turn. Canonical terminal work
+status still settles the reference and retains any selected speech.
 References stored as version 2 cannot be read by an older transport that is
 rolled back. They keep their custody until this version runs again.
 

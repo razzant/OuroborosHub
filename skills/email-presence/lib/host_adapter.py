@@ -529,7 +529,14 @@ class LoopbackPresenceHostAdapter:
         if reference.startswith("continuing:"):
             return await self._continuing_status(reference)
         receipt=_decode(reference,"deferred"); work_ref=str(receipt.get("work_ref") or ""); immediate=(str(receipt.get("text") or ""),) if receipt.get("text") else ()
-        payload=self._terminal.get(work_ref) or await self._poll(work_ref); state=str(payload.get("status") or "").lower()
+        try:
+            payload = self._terminal.get(work_ref) or await self._poll(work_ref)
+        except (HostContractError, httpx.HTTPError) as exc:
+            # An unreadable observation does not settle already-admitted work.
+            error = str(exc) if isinstance(exc, HostContractError) else type(exc).__name__
+            return HostTurnStatus("pending", f"work {work_ref}: {error}", immediate,
+                                  int(receipt.get("delivery_reporting_version") == 1), str(receipt.get("turn_ref") or ""))
+        state=str(payload.get("status") or "").lower()
         outputs = ()
         if state not in _OBSERVING and payload.get("outcome") in _SPEECH and str(payload.get("text") or "").strip():
             outputs = (HostOutput(_output_identity(str(payload.get("output_ref") or ""), "final"), str(payload["text"]),

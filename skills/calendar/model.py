@@ -497,19 +497,38 @@ def following_series_start(target, original_slot, effective_start, requested_sta
     return shift_recurrence_time(target, original_slot, recurrence_time_delta(effective_start, requested_start, target))
 
 
-def series_move_changes(master, exception, occ_key, scope, changes):
-    """Preflight a series move without writing or replacing the following segment's remaining bound."""
-    new_start = parse_stored(changes['start_utc'])
-    if scope == SCOPE_ALL and new_start == parse_stored(master['start_utc']):
+def shifted_rrule(master, new_start):
+    """Move inherited selectors and the inclusive end in the recurrence clock.
+
+    A UTC UNTIL is a wire spelling, not elapsed-time semantics for zoned slots.
+    """
+    text = shifted_rrule_selectors(master, new_start)
+    delta = recurrence_time_delta(parse_stored(master['start_utc']), parse_stored(new_start), master)
+    if not delta:
+        return text
+    zone = get_tz(master.get('tz') or '')
+    kind = 'date' if master.get('all_day') else 'floating' if event_time_kind(master) == 'floating' else 'utc'
+    parts = normalize_rrule_until(text, zone, kind).split(';')
+    for index, part in enumerate(parts):
+        key, _, value = part.partition('=')
+        if key.upper() != 'UNTIL':
+            continue
+        fmt = '%Y%m%d' if len(value) == 8 else '%Y%m%dT%H%M%SZ' if value.endswith('Z') else '%Y%m%dT%H%M%S'
+        try:
+            bound = datetime.strptime(value, fmt).replace(tzinfo=timezone.utc if value.endswith('Z') else zone)
+            moved = shift_recurrence_time(master, bound, delta)
+            parts[index] = key + '=' + (moved.astimezone(timezone.utc) if value.endswith('Z') else moved).strftime(fmt)
+        except ValueError:
+            pass  # Keep malformed legacy evidence; never turn a finite rule into an endless one.
+    return ';'.join(parts)
+
+
+def series_move_changes(master, changes):
+    """Preflight a whole-series move using the same time basis as its moved slots."""
+    if parse_stored(changes['start_utc']) == parse_stored(master['start_utc']):
         return changes
-    basis = master
-    if scope == SCOPE_FOLLOWING:
-        slot = parse_stored(occ_key)
-        effective = parse_stored((exception or {}).get('start_utc')) or slot
-        new_start = following_series_start({**master, **changes}, slot, effective, new_start)
-        basis = {**master, 'start_utc': occ_key}
-    rule = shifted_rrule_selectors(basis, new_start)
-    return {**changes, 'rrule': rule} if scope == SCOPE_ALL else changes
+    basis = {**master, **changes, 'start_utc': master['start_utc']}
+    return {**changes, 'rrule': shifted_rrule(basis, changes['start_utc'])}
 
 
 def has_recurrence(row):

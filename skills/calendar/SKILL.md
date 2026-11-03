@@ -1,7 +1,7 @@
 ---
 name: calendar
 description: Единый календарь владельца — локальные календари, CalDAV (включая Яндекс) и Google с личным OAuth-клиентом; события, повторения, доступ, связанные копии, свободные окна, напоминания и виджет День/Неделя.
-version: 2.0.3
+version: 2.0.4
 type: extension
 runtime: python3
 entry: plugin.py
@@ -21,8 +21,8 @@ tools:
   - {name: cal_events, effect: read, target: [id, calendars]}
   - {name: cal_free, effect: read, target: [sources]}
   - {name: cal_calendars, effect: read, target: [account_id, calendar_id]}
-  - {name: cal_create, effect: write, target: [calendars, attendees]}
-  - {name: cal_update, effect: write, target: [id, calendars, attendees]}
+  - {name: cal_create, effect: write, target: [calendars, attendees, attendee_addresses]}
+  - {name: cal_update, effect: write, target: [id, calendars, attendees, attendee_addresses]}
   - {name: cal_delete, effect: write, target: [id]}
   - {name: cal_reminders, effect: write, target: [calendar_id]}
   - {name: cal_settings, effect: write, target: [calendar_id]}
@@ -49,6 +49,8 @@ ui_tab:
 ---
 
 # Календарь Уробороса
+
+Registered create/update calls accept plain attendee address arrays directly. Rich attendee objects and encoded lists keep their provider metadata and use `attendee_addresses` for the Host destination projection. A missing or mismatched projection returns `needs_arguments` with complete `retry_arguments` before any event write; retry those arguments without asking for another owner approval. A sparse edit without `attendees` preserves native guest metadata.
 
 Один календарь **пользователя**: локальные календари Уробороса, аккаунты Яндекса (CalDAV) и Google (личный Cloud-проект владельца).
 Собственные действия агента в календарь не попадают — для них есть Activity. Композиция с другими скиллами — только через агента:
@@ -164,6 +166,12 @@ CalDAV notification control is provider-dependent for existing invitations. Fres
 
 The widget retains one current unfinished event card in the skill's settings, shared across windows with the last save winning. Only non-secret card fields are saved. A normal draft is a few kilobytes, depending on its text; no draft history accumulates. Successful save/delete, Cancel or Discard clears it. An interrupted draft is offered for restoration before another card opens.
 
+Following edits partition the original recurrence set: extra dates do not re-anchor its generator or extend an already-ended series. Inherited UNTIL boundaries move in the same calendar clock as their slots; an explicit replacement RRULE remains authoritative.
+
 Disconnect withdraws known unsubmitted writes and restores their whole confirmed event family with original identities; receipt history stays available. Wholly unpublished creations remain visible as complete drafts, including their later split segments and exception edits. New segments or exceptions introduced only by a withdrawn edit of a confirmed family leave the active view, while their desired snapshots remain in the receipts. A request already in flight remains uncertain, with its original attempt identity, until its actual outcome is known. Reconnecting credentials does not resend it. For an uncertain creation, conflict inspection checks the original stable provider identity, including confirmed absence; an explicit local resolution may retry that same creation, while a provider resolution accepts the observed record or absence.
 
 If disconnect interrupts the first network step of a compound edit, retained dependent drafts can still need explicit comparison and cleanup after the late outcome is known. A pending event marker alone does not prove that a write is queued; compare the current sync/operation facts and provider view before acting. No reconnect or late receipt blindly republishes those drafts.
+
+Disconnect also withdraws waiting writes derived from that account's provider observations, including copies on another account, and waiting reminders. Independent edits, explicit link choices and actual in-flight outcomes retain their custody. Older queued projection writes without recorded source provenance retain their target-account custody and can still execute after source disconnection; inspect their operation receipts before relying on that withdrawal. The skill does not infer their past source from today's links. A source reference uses the existing account creation timestamp, whose second precision is not a unique connection epoch.
+
+Each new observation-derived intent retains one source-connection reference, typically 150–300 bytes. At 100 such writes per day that adds roughly 15–30 KB/day to the existing intent history. It shares that history's lifetime and skill-state removal, with no separate cache, cleaner or automatic history expiry.
