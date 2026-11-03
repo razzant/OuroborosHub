@@ -13,9 +13,6 @@ if __package__ in {None, ''}:
 from scripts.build_index import refresh_legacy_entries, run_git
 
 SUITES = {
-    'chrome-browser': {'skills': ['chrome_browser', 'playwright_extension'],
-                       'tests': ['tests/test_chrome_browser.py'],
-                       'shared': ['tests/chrome_browser/']},
     'perplexity': {'skills': ['perplexity'], 'tests': ['tests/test_perplexity.py'],
                    'dependencies': ['httpx', 'starlette']},
     'smart-lists': {'skills': ['smart_lists'], 'tests': ['skills/smart_lists/tests', 'tests/test_smart_lists_browser.py'],
@@ -27,17 +24,32 @@ SUITES = {
                            'token-usage', 'smart_lists', 'calendar'],
                 'tests': ['tests/test_widget_theme_contracts.py', 'tests/test_dashboard_theme_browser.py'],
                 'shared': ['tests/fixtures/dashboard_theme_responses.json']},
+    # The whole suite, real host and browsers included: catalog-check.yml gives this suite the pinned core (ATLAS_CORE),
+    # its runtime and Playwright's browsers. Without them the suite stops with an error; it never skips.
+    'memory-atlas': {'skills': ['memory-atlas'], 'tests': ['tests/memory_atlas'], 'dependencies': ['starlette']},
     'calendar-skill': {'skills': ['calendar'],
                        'tests': ['skills/calendar/tests', 'tests/test_calendar_skill.py',
                                  'tests/test_calendar_host_browser.py'],
-                       'dependencies': ['icalendar', 'python-dateutil', 'cryptography']},
+                       'dependencies': ['icalendar', 'python-dateutil', 'cryptography'],
+                       'core_env': 'OUROBOROS_THEME_CORE_ROOT'},
     'slack-bridge': {'skills': ['slack-bridge'],
-                     'tests': ['skills/slack-bridge/tests', 'tests/test_slack_presence_core_consumer.py'],
+                     'tests': ['skills/slack-bridge/tests', 'tests/test_slack_presence_core_consumer.py',
+                               'tests/test_reaction_core_consumer.py'],
                      'dependencies': ['httpx', 'starlette', 'websockets']},
-    'github-presence': {'skills': ['github-presence'], 'tests': ['skills/github-presence/tests'],
-                        'dependencies': ['PyJWT[crypto]>=2.13,<3', 'httpx', 'starlette']},
-    'telegram-bot': {'skills': ['telegram-bot'], 'tests': ['skills/telegram-bot/tests'],
-                     'dependencies': ['httpx', 'starlette', 'websockets']},
+    'email-presence': {'skills': ['email-presence'], 'tests': ['skills/email-presence/tests'],
+                       'dependencies': ['httpx', 'starlette'], 'cwd': 'skills/email-presence',
+                       'core_env': 'OUROBOROS_SOURCE_DIR', 'env': {'OUROBOROS_RUN_MAIL_BROWSER': '1'}},
+    'agentrq-bridge': {'skills': ['agentrq-bridge'], 'tests': ['skills/agentrq-bridge/tests'],
+                      'dependencies': ['starlette']},
+    'github': {'skills': ['github'], 'tests': ['skills/github/tests'],
+               'dependencies': ['PyJWT[crypto]>=2.13,<3', 'httpx', 'starlette']},
+    'telegram-bot': {'skills': ['telegram-bot'], 'tests': ['skills/telegram-bot/tests', 'tests/test_reaction_core_consumer.py',
+                                                           'tests/test_voice_attachment_core_consumer.py'],
+                     'dependencies': ['httpx', 'starlette', 'websockets', 'telethon>=1.45,<2', 'PySocks>=1.7.1']},
+    'telegram-user-session': {'skills': ['telegram-user-session'],
+                              'tests': ['skills/telegram-user-session/tests', 'tests/test_telegram_participant_widget_browser.py',
+                                        'tests/test_voice_attachment_core_consumer.py'],
+                              'dependencies': ['telethon>=1.45,<2', 'PySocks>=1.7.1', 'httpx', 'starlette']},
     '2gis': {'skills': ['2gis'], 'tests': ['tests/test_2gis.py']},
     'keenable': {'skills': ['keenable'], 'tests': ['tests/test_keenable_transport.py', 'tests/test_keenable_widget.py'],
                  'shared': ['tests/fixtures/keenable/']},
@@ -47,6 +59,11 @@ SUITES = {
                                        'python-docx', 'python-pptx', 'xlwt']},
     'science-search': {'skills': ['science_search'], 'tests': ['skills/science_search/tests'],
                        'dependencies': ['httpx>=0.28.1,<0.29']},
+    'science-digest': {'skills': ['science_digest'], 'tests': ['skills/science_digest/test_digest.py']},
+    # Node's own tests (node --test) behind one pytest wrapper, no browser. catalog-check.yml gives this suite Node and
+    # the exact npm closure skills/chrome_browser/pins.json records (OUROBOROS_CHROME_NODE_MODULES). Without them the
+    # files that need them fail and say what is missing; they never skip.
+    'chrome-browser': {'skills': ['chrome_browser'], 'tests': ['tests/chrome_browser']},
 }
 SHARED = {'.github/workflows/catalog-check.yml', 'scripts/ci_checks.py', 'tests/test_ci_checks.py',
           'scripts/build_index.py', 'scripts/release_digest.py',
@@ -78,11 +95,25 @@ def prepare(root, event_name, event):
 
 def run_suite(name):
     suite = SUITES[name]
+    env = {**os.environ, **suite.get('env', {}), 'PYTHONDONTWRITEBYTECODE': '1'}
+    if core_env := suite.get('core_env'):
+        configured = env.get(core_env)
+        core = Path(configured).resolve() if configured else None
+        if core is None or not all((core / path).is_file() for path in (
+                'ouroboros/gateway/host_service.py', 'web/provider-return.html')):
+            raise RuntimeError(f'{name} requires {core_env} to name the coordinated core checkout; '
+                               'its host and provider return consumers must run, not skip')
+        env[core_env] = str(core)
     subprocess.run([sys.executable, '-B', '-m', 'pip', 'install', 'PyYAML', 'pytest',
                     *suite.get('dependencies', [])], check=True)
+    # Selection paths stay repository-relative; some suites import from their own payload.
+    root = Path(__file__).resolve().parents[1]
+    cwd = root / suite['cwd'] if 'cwd' in suite else None
+    tests = [str(root / path) for path in suite['tests']] if cwd else suite['tests']
     # Each skill gets its own interpreter; sibling test imports cannot collide.
     subprocess.run([sys.executable, '-B', '-m', 'pytest', '-p', 'no:cacheprovider', '-q', '-rs',
-                    *suite['tests']], check=True, env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+                    *tests], check=True, cwd=cwd,
+                   env=env)
 
 
 def main():

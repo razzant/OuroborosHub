@@ -1,7 +1,7 @@
 ---
 name: agentrq-bridge
 description: "AgentRQ integration: structured HITL task board, permission gating, and real-time workspace bridge via MCP Streamable HTTP"
-version: 0.2.0
+version: 0.3.0
 type: extension
 runtime: python3
 entry: plugin.py
@@ -141,9 +141,31 @@ tasks and human replies carry `direct_message`; other updates are captured
 without inventing addressing. Place notes and wakes govern participation.
 A places-capable Host is required; events never enter owner chat.
 
-Notifications are persisted before submission. Provider event/message IDs are
-preferred; when absent, the complete notification supplies a stable digest.
-Host receipts and deferred references survive restart. Automatic replies use
-the task's `reply` operation and a live place check: Silent/Paused holds them.
-Uncertain physical delivery is recorded and never retried automatically. Events
-without a task ID are heard at the workspace; a reply without a task is held.
+Notifications are persisted before submission, with their capture order.
+Provider event/message IDs are preferred; when absent, the complete notification
+supplies a stable digest. Host receipts and deferred references survive restart.
+Automatic replies use the task's `reply` operation and a live place check:
+Silent/Paused holds them. Uncertain physical delivery is recorded and never
+retried automatically. Events without a task ID are heard at the workspace; a
+reply without a task is held.
+
+A task's events reach the Host in capture order: the next one goes once the Host
+has answered the one before, while up to three tasks go side by side. A Host that
+lists continuation version 2 in `presence_continuation_versions` is asked for it:
+it answers an event `continuing` as soon as the task's author takes later events,
+so the task's next event reaches that author as context. A busy conversation or
+full capacity (`presence_capacity_full`) keeps the event at its task's head; the
+same event goes again after the Host's `retry_after`, a floor used as it is (1 s
+for a conversation, 5 s for capacity and for the older in-flight refusal), while
+other tasks go on. Without that list the earlier request stays, which waits for
+the author's end. Host intake and the reading of Host references
+are separate loops: each reference (the turn, its continuation, each child) is
+read until its own end, and each selected output is replied once by its output
+identity. Failed, cancelled or still-running work speaks only through an output
+identity, so a stop sends nothing. A `reply_anchor` of the same task is recorded
+with its output; the reply always goes to the event's task.
+
+When the listener stops, nothing new is submitted, read or replied; submissions
+already in flight finish and their answers are kept. An event that got no answer
+is offered again, unchanged, at the next start, and a reply already sending stays
+`sending`, then `uncertain`, and is never sent again.

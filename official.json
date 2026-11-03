@@ -21,7 +21,12 @@
       "recommended": false
     },
     {
-      "digest": "d224877f696f7df1277baab67d0c058216b04fee399cd23341f4aad8158f56dc",
+      "digest": "47825f8126a250e01e7afa067663888bb3315b2967a3c64dee021d2c602a9560",
+      "name": "calendar",
+      "recommended": false
+    },
+    {
+      "digest": "9ebc010de160df6706d57e1a751a832f712f2eedb595db31400ae1e2c1297331",
       "name": "claudexor_quotas",
       "recommended": false
     },
@@ -41,18 +46,18 @@
       "recommended": true
     },
     {
-      "digest": "b8e4f80860aaf9b3bfbd9c5953dbe7ba88cf7a3eca0c7b79f3ac4c24b7efea56",
+      "digest": "0e56122071ec4f9d21c83b9835e7423c7c4cebd8e513d012778c65c49db1e351",
       "name": "email",
       "recommended": false
     },
     {
-      "digest": "830bfc6494d6d3ef3a8b6d99210d67034d84cd551c7bfa7283d359f421d9ea32",
+      "digest": "65492d25a3a05fc2e0be6b157552937731d3da68b79d85636362559e8025a1ba",
       "name": "email-presence",
       "recommended": false
     },
     {
-      "digest": "9c4d3bb79e9c39dbff035e95eeff09c9bb83a102632c474987a1bfefd341c892",
-      "name": "github-presence",
+      "digest": "5c1af3f64088ebd88cc1e64bbaf1562c47eb3d4b1dd90802c73ef98c61fa3802",
+      "name": "github",
       "recommended": false
     },
     {
@@ -66,7 +71,7 @@
       "recommended": false
     },
     {
-      "digest": "5ecfd106676eb0c697e78f6beb8bea56faeca9c7074feee97299333754558de8",
+      "digest": "02af7b5a3ded32550bb3655a33d0570bf17a1d05da6ceca7bba9d6335d3412b2",
       "name": "memory-atlas",
       "recommended": true
     },
@@ -76,17 +81,17 @@
       "recommended": true
     },
     {
-      "digest": "386c89147d19a4443b56e042ee5e216903989461bad4a8b2d800f53c07d6fd95",
+      "digest": "2088c52c1a76ec363b67129270152761b22350080f5dd16575f4298814e85fa5",
       "name": "perplexity",
       "recommended": false
     },
     {
-      "digest": "e49b193556f65a2cd972ad45f194f544bea2618be4098e9388fcf068dbabf989",
+      "digest": "927dff6f659045ce92499f50fae0083fe5aa0992521a9c87b6551010848d39bc",
       "name": "slack-bridge",
       "recommended": false
     },
     {
-      "digest": "9e258b56d390786a5ac0fd68120af0b270b684d402a51068b99eab9ed058e90c",
+      "digest": "08b51f9332a95fd25c350646ccc930eb06fd084881837fa37390aeccb08d1888",
       "name": "telegram-bot",
       "recommended": false
     },

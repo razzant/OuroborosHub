@@ -17,7 +17,7 @@ class ReviewR8Tests(unittest.TestCase):
     def test_accepted_cancel_survives_rule_growth_and_overlapping_source_exdate(self):
         for mode in ('rule-growth','overlap-removal'):
             with self.subTest(mode=mode):
-                ctx,cid,caldav,google,left,eid,copy=r5.ReviewR5Tests().linked()
+                ctx,cid,caldav,google,left,eid,copy=r5.ReviewR5Tests().linked(source_provider="google")
                 ext,_=instance(ctx,google,copy['id'],3)
                 out=json.loads(tools.cal_delete(ctx,id=f"{copy['id']}@{iso_utc(_day(3))}",scope='this',confirm=True))
                 self.assertEqual(out['status'],'deleted',out)
@@ -36,7 +36,7 @@ class ReviewR8Tests(unittest.TestCase):
     def test_cancellation_survives_caldav_refresh_and_offline_restart_before_rule_change(self):
         from test_calendar_atomic_replay import reopen
         from test_calendar_provider_divergence import run_open_intents
-        ctx,cid,caldav,google,left,eid,copy=r5.ReviewR5Tests().linked()
+        ctx,cid,caldav,google,left,eid,copy=r5.ReviewR5Tests().linked(source_provider="google")
         instance(ctx,google,copy['id'],3)
         tools.cal_delete(ctx,id=f"{copy['id']}@{iso_utc(_day(3))}",confirm=True)
         caldav.edit(ctx.store.get_event(eid)['href'],lambda c: next(x for x in c.walk() if x.name=='VEVENT').__setitem__('LOCATION','Other room'))
@@ -50,7 +50,7 @@ class ReviewR8Tests(unittest.TestCase):
         self.assertIn(iso_utc(_day(3)),caldav_row(ctx,cid,caldav,eid)['exdates'].split(','))
 
     def test_source_only_exclusion_still_clears_without_a_cancelled_override(self):
-        ctx,cid,caldav,google,left,eid,copy=r5.ReviewR5Tests().linked()
+        ctx,cid,caldav,google,left,eid,copy=r5.ReviewR5Tests().linked(source_provider="google")
         for add in (True,False):
             remote=google.events[copy['external_id']]
             remote.update(recurrence=['RRULE:FREQ=DAILY;COUNT=5']+(['EXDATE:'+_day(3).strftime('%Y%m%dT%H%M%SZ')] if add else []),etag=google._etag())

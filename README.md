@@ -8,7 +8,8 @@ The app presents this repository as two sources: **Ouroboros** contains Official
 releases and defaults to Trusted; **Ouroboros Community** contains the other releases
 and defaults to Review each. Each source has its own switch. Built-in skills ship
 with the app and use a separate source. The hub's `telegram-bot` is a public bot for
-presences; the built-in `telegram` is the owner's connection to their own Ouroboros.
+presences and `telegram-user-session` is a dedicated ordinary account for the same purpose;
+the built-in `telegram` is the owner's connection to their own Ouroboros.
 
 ## Repository format
 
@@ -27,7 +28,13 @@ a source, a release digest and a withdrawal status. Optional `withdrawn_releases
 records withdrawn versions by digest. Optional `icon` names a host icon or a
 local `ui/*.svg` geometry asset. `connects` is derived from `provides: place`
 contributions in the reviewed manifest; older consumers can ignore both fields.
-Optional `when_to_use` supplies additional discovery text. `install_specs` is
+Optional `title` is the human name the manifest gives a skill (for example
+`Email tools`); the canonical name stays its identity. A connector needs none:
+its place `label` already names the service.
+Connector marks are monochrome `currentColor` geometry: the Slack and GitHub
+marks use Lucide geometry (ISC License) and the Telegram mark uses Tabler Icons
+geometry (MIT License); product names and marks remain the property of their
+owners. Optional `when_to_use` supplies additional discovery text. `install_specs` is
 generated from the manifest's first
 nonempty `install_specs`, `install` or `dependencies` value, without normalization.
 
@@ -57,7 +64,7 @@ Membership in the hub alone does not confer Official status.
 
 The initial Official set is: `a2a`, `adaptive-code-review`, `anti-slop`,
 `cache_efficiency_snapshot`, `claudexor_quotas`, `confluence`, `context-lens`,
-`duckduckgo`, `email`, `email-presence`, `github-presence`, `google-workspace`, `keenable`,
+`duckduckgo`, `email`, `email-presence`, `github`, `google-workspace`, `keenable`,
 `memory-atlas`, `perplexity`, `slack-bridge`, `telegram-bot`, `pdf_tools`, `word_tools`.
 The recommended hub starters are `duckduckgo`, `pdf_tools`, `word_tools`,
 `anti-slop` and `memory-atlas`. The app manages recommendations for its built-ins.
@@ -113,7 +120,7 @@ identity along with code and instructions.
    included in an entry PR.
 
 `--refresh` updates only the named entry's version, raw dependency declaration,
-release digest, and manifest-derived `icon`/`connects` fields. `--digest NAME`
+release digest, and manifest-derived `icon`/`connects`/`title` fields. `--digest NAME`
 prints the digest without changing files. Neither command renews Official
 endorsements. `scripts/build_catalog.py` remains a
 compatible alias for the generator and its `--check` mode.
@@ -246,22 +253,66 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/sla
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/telegram-bot/tests
 ```
 
-Calendar's offline job installs its runtime dependencies and uses fake providers:
+Telegram's opt-in real-host/browser qualification lives in
+[`tests/telegram_group_discovery`](tests/telegram_group_discovery/README.md).
+Set `TG_DISCOVERY_CORE`, `TG_DISCOVERY_VENV` and `PLAYWRIGHT_BROWSERS_PATH`, then
+run its `run.sh` with an evidence directory. It checks the existing Places picker
+against synthetic Bot API updates and an upgrade from 0.8, without live credentials.
+
+The selected `calendar-skill` and `email-presence` CI jobs check out the exact core
+pinned in `catalog-check.yml`, install its Python runtime requirements and
+Chromium/WebKit, and exercise the real Host Service and widget bridge with fake
+providers. Missing core or browsers fail those jobs. For local backend-only
+calendar checks, which do not qualify its widget or sign-in return:
 
 ```bash
 python -m pip install icalendar python-dateutil cryptography pytest
-PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q skills/calendar/tests
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q skills/calendar/tests --ignore=skills/calendar/tests/test_widget_browser.py
 ```
+
+For the complete selected consumers, use Python 3.10 with the pinned core's
+requirements and browsers installed, set `OUROBOROS_SOURCE_DIR` and
+`OUROBOROS_THEME_CORE_ROOT` to that checkout, then run
+`python -B scripts/ci_checks.py run email-presence` and
+`python -B scripts/ci_checks.py run calendar-skill` separately. The mail runner
+enables its browser cases and real child-tool/Place-binding checks.
+
+Chrome (`chrome_browser`) keeps its tests outside the payload, in
+[`tests/chrome_browser`](tests/chrome_browser/README.md). They need no browser, but they need Node 24 and
+the exact npm packages `skills/chrome_browser/pins.json` records, named by `OUROBOROS_CHROME_NODE_MODULES`.
+Nothing there skips: without them, a run says what to install.
+
+Memory Atlas keeps its tests outside the payload, in `tests/memory_atlas`. Most of them start one
+isolated Ouroboros from the core checkout named by `ATLAS_CORE`, which must provide PluginAPI 2.1
+`read_memory` (`ouroboros/memory_reader.py`): they copy it into a new directory under `/tmp`, write
+synthetic memory there through Ouroboros's own producers, install the payload into that data root
+only and drive the card in Chromium and WebKit. The test runner's Python needs the core's runtime
+requirements, which include Playwright, and Playwright's Chromium and WebKit. Nothing in this suite
+is skipped: without `ATLAS_CORE`, a compatible core, Playwright or starlette, a run that selects
+these tests stops before the first one and says what is missing. CI runs the whole suite on macOS
+against the `razzant/ouroboros` commit pinned in `.github/workflows/catalog-check.yml`. Locally:
+
+```bash
+ATLAS_CORE=/path/to/ouroboros PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs tests/memory_atlas
+```
+
+`python tests/memory_atlas/dev/realhost.py --core /path/to/ouroboros --root /tmp/<new directory>`
+starts the same host to look at and prints `READY <url>`; open `<url>/#widgets` and press Start on
+Memory Atlas.
 
 The hub tests include mocked GitHub APIs for owner authorization, signals and
 catalog-to-mirror sequencing. The release-identity test compares all hosted skills
 with the core checkout selected by `OUROBOROS_IDENTITY_CORE_ROOT`, using the test
 runner's Python with core requirements installed. Without that variable the
-cross-repository check is reported as skipped.
+cross-repository check is reported as skipped. Every hosted skill that contributes
+a place is checked as a connector: declared tool effects, the place contract,
+wake facts, its status route and a bounded monochrome `ui/icon.svg`. The hub keeps
+a mirror of the core rules for this; the same checkout also runs every connector
+through the core's manifest, contribution and icon validators.
 
 Module widgets can declare `render.appearance: host` and feature-detect
 `OuroborosWidget.onTheme`. Preserve state while applying Light/Dark, unsubscribe
-on disposal, and retain a usable palette on older hosts. The optional real-bridge
+on disposal, and retain a usable palette on older hosts. The real-bridge
 browser suites require a local core checkout with git history, Playwright,
 Chromium and WebKit:
 
@@ -269,8 +320,9 @@ Chromium and WebKit:
 OUROBOROS_THEME_CORE_ROOT=/path/to/ouroboros python -m pytest -p no:cacheprovider -q tests/test_dashboard_theme_browser.py tests/test_calendar_host_browser.py tests/test_smart_lists_browser.py
 ```
 
-These browser suites are opt-in. Smart Lists' optional manifest probe separately
-uses `OUROBOROS_CORE_ROOT`. Missing external dependencies are disclosed as skips.
+These standalone invocations are local opt-ins; Calendar's selected CI job requires
+its browser suite. Smart Lists' optional manifest probe separately uses
+`OUROBOROS_CORE_ROOT`. Skips in optional suites do not qualify missing consumers.
 
 ## License
 

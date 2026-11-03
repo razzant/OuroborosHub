@@ -19,13 +19,19 @@ def email_report(item, state, *, recipients=None, error="", refused=None):
     references = list(item.references)
     if item.in_reply_to and item.in_reply_to not in references:
         references.append(item.in_reply_to)
-    targets = wire.get("recipients", item.envelope_recipients) if recipients is None else recipients
+    # A diagnostic is an observation, not another attempt to validate a legacy
+    # envelope that may be the very reason delivery failed.
+    targets = wire.get("recipients", item.recipients) if recipients is None else recipients
     message = {
         "message_id": item.message_id, "subject": wire.get("subject", item.subject),
         "recipients": list(targets),
         "in_reply_to": item.in_reply_to, "references": references,
-        "smtp_accepted": state == "accepted",
+        "smtp_accepted": state == "accepted" and (info.get("provider_receipt") or {}).get("transport", "smtp") == "smtp",
     }
+    if info.get("provider_receipt"):
+        message["provider_receipt"] = info["provider_receipt"]
+    if info.get("sender"):
+        message["from"] = info["sender"]
     if "to" in wire:
         message["to"] = wire["to"]
     if "cc" in wire:

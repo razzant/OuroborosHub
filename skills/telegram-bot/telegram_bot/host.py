@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import pathlib
 import urllib.error
 import urllib.parse
@@ -15,6 +16,10 @@ from typing import Any, Callable, Dict, Optional, Protocol, Sequence
 _OUTCOMES = {"message", "silent", "tool_delivered", "deferred"}
 _TERMINAL_WORK_STATES = {"completed", "failed", "cancelled"}
 _DISPOSITIONS = {"retained", "rejected", "blocked", "retry"}
+# Continuation version 2: an early custody answer once the event's author takes mail.
+_EARLY_CONTINUATION = 2
+# The Host's documented hint for each busy admission resource, when its own is unusable.
+_BUSY_RETRY_SEC = {"conversation": 1.0, "capacity": 5.0}
 _EVENT_KEYS = {
     "source_event_id",
     "provider",
@@ -57,6 +62,23 @@ class PresenceHostHTTPError(PresenceHostError):
             return ""
         return disposition
 
+    @property
+    def busy_retry_after(self) -> Optional[float]:
+        """Seconds until the same event retries after a busy admission, else ``None``.
+
+        Version 2 answers ``presence_capacity_full`` for a held ``conversation`` or full
+        ``capacity`` at once instead of queueing: nothing was admitted, so it is not
+        custody. The Host's finite ``retry_after`` is a minimum delay; it is never shortened.
+        """
+        field = self.payload.get("field")
+        if (self.disposition != "retry" or self.payload.get("code") != "presence_capacity_full"
+                or field not in _BUSY_RETRY_SEC):
+            return None
+        hint = self.payload.get("retry_after")
+        if isinstance(hint, bool) or not isinstance(hint, (int, float)) or not math.isfinite(hint):
+            hint = _BUSY_RETRY_SEC[field]
+        return max(1.0, float(hint))
+
 
 @dataclass(frozen=True)
 class PresenceSubmission:
@@ -67,6 +89,11 @@ class PresenceSubmission:
     work_ref: str
     binding_id: str
     delivery_reporting_version: int = 0
+    # Version 2: the author's own reference while it runs (``continuing``), the Host-minted
+    # identity of any text, and the covered message that text answers.
+    continuation_ref: str = ""
+    output_ref: str = ""
+    reply_anchor: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +108,7 @@ class PresenceWorkResult:
     child_work_ref: str = ""
     outputs: tuple[Dict[str, Any], ...] = ()
     output_ref: str = ""
+    reply_anchor: Optional[Dict[str, Any]] = None
 
     @property
     def terminal(self) -> bool:
@@ -176,6 +204,13 @@ class PresenceHostClient:
         self.delivery_reporting_status = "unknown"
         self.delivery_reporting_version = 0
         self.places_version = 0
+        self.presence_wake_signals = 0
+        self.presence_identity = 0
+        self.connector_identity = {}
+        self.presence_reaction_context = 0
+        self.presence_explicit_completion = 0
+        # 2 only when ``/identity`` lists it; otherwise each turn waits for its terminal (0).
+        self.continuation_version = 0
 
     async def discover_delivery_support(self) -> int:
         if self.delivery_reporting_status in {"supported", "unsupported"}:
@@ -188,21 +223,35 @@ class PresenceHostClient:
             self.delivery_reporting_version = int(response.get("presence_delivery_version") == 1)
             version = response.get("places_version")
             self.places_version = int(type(version) is int and version >= 1)
+            self.presence_wake_signals = int(response.get("presence_wake_signals") == 1)
+            self.presence_identity = int(response.get("presence_identity") == 1)
+            # A JSON true is not the capability; bool compares equal to 1 in Python.
+            self.presence_reaction_context = int(type(response.get("presence_reaction_context")) is int
+                                                 and response["presence_reaction_context"] == 1)
+            self.presence_explicit_completion = int(type(response.get("presence_explicit_completion")) is int
+                                                    and response["presence_explicit_completion"] == 1)
+            # The scalar ``presence_continuation_version`` stays 1 for deployed consumers; the list decides.
+            versions = response.get("presence_continuation_versions")
+            self.continuation_version = _EARLY_CONTINUATION if isinstance(versions, list) and any(
+                type(item) is int and item == _EARLY_CONTINUATION for item in versions) else 0
             self.delivery_reporting_status = "supported" if self.delivery_reporting_version else "unsupported"
         except (PresenceHostError, OSError, TimeoutError, asyncio.TimeoutError):
             self.delivery_reporting_status = "unavailable"
             self.delivery_reporting_version = 0
+            self.continuation_version = 0
+            self.presence_reaction_context = 0
+            self.presence_explicit_completion = 0
         return self.delivery_reporting_version
 
-    async def place_hold(self, account_id: str, conversation_id: str) -> str:
+    async def place_hold(self, account_id: str, conversation_id: str, thread_id: str = "") -> str:
         await self.discover_delivery_support()
         if not self.places_version:
             return "Held: place policy unavailable" if self.delivery_reporting_status == "unavailable" else ""
-        if str(conversation_id).isdigit():
-            return "Held: Telegram places support groups and channels only"
         try:
+            # Host excludes a thread's own place from a lookup that names no thread; one without asks as before.
             query = urllib.parse.urlencode({"provider": "telegram", "account_id": account_id,
-                                            "conversation_id": conversation_id})
+                                            "conversation_id": conversation_id,
+                                            **({"thread_id": thread_id} if thread_id else {})})
             place = await self.transport.request_json(
                 "GET", f"{self.host_base}/presence/place?{query}", headers=self._headers(),
                 payload=None, timeout_sec=10.0,
@@ -232,6 +281,11 @@ class PresenceHostClient:
         event = dict(event)
         if not self.places_version:
             event.pop("facts", None)
+        elif not self.presence_wake_signals and "facts" in event:
+            event["facts"] = [fact for fact in event["facts"] if fact != "signal.words"]
+        if self.presence_identity and self.connector_identity:
+            event["identity"] = self.connector_identity
+        early = self.continuation_version == _EARLY_CONTINUATION
         try:
             response = await self.transport.request_json(
                 "POST",
@@ -242,28 +296,41 @@ class PresenceHostClient:
                     "event": dict(event),
                     "staged_files": [str(path) for path in staged_files],
                     **({"delivery_reporting_version": 1} if mode else {}),
+                    **({"continuation_version": _EARLY_CONTINUATION} if early else {}),
                 },
                 timeout_sec=1800.0,
             )
         except PresenceHostHTTPError as exc:
             exc.binding_id = binding_id  # retained references are polled under this binding
             raise
-        if str(response.get("status") or "") != "completed":
+        status = str(response.get("status") or "")
+        continuation_ref = ""
+        if status == "continuing" and early:
+            # Custody, not a reply: this event's own author runs and takes the conversation's
+            # later events as context. Only its real reference releases the input queue.
+            continuation_ref = str(response.get("continuation_ref") or "").strip()
+            if (response.get("continuation_version") != _EARLY_CONTINUATION or not continuation_ref
+                    or continuation_ref != str(response.get("turn_ref") or "").strip()):
+                raise PresenceHostError("continuing presence answer lacks its version-2 continuation_ref")
+        elif status != "completed":
             raise PresenceHostError("presence Host did not complete the turn request")
         outcome = str(response.get("outcome") or "")
         if outcome not in _OUTCOMES:
             raise PresenceHostError("presence Host returned an invalid outcome")
         work_ref = str(response.get("work_ref") or "").strip()
-        if outcome == "deferred" and not work_ref:
+        if outcome == "deferred" and not work_ref and not continuation_ref:
             raise PresenceHostError("deferred presence result is missing work_ref")
         return PresenceSubmission(
-            status="completed",
+            status=status,
             outcome=outcome,
             text=str(response.get("text") or ""),
             turn_ref=str(response.get("turn_ref") or "").strip(),
             work_ref=work_ref,
             binding_id=binding_id,
             delivery_reporting_version=int(response.get("delivery_reporting_version") == 1),
+            continuation_ref=continuation_ref,
+            output_ref=str(response.get("output_ref") or "").strip(),
+            reply_anchor=_reply_anchor(response.get("reply_anchor")),
         )
 
     async def poll(self, work_ref: str, binding_id: str) -> PresenceWorkResult:
@@ -301,6 +368,7 @@ class PresenceHostClient:
             work_ref=str(work_ref),
             delivery_reporting_version=int(response.get("delivery_reporting_version") == 1),
             child_work_ref=child, outputs=outputs, output_ref=str(response.get("output_ref") or ""),
+            reply_anchor=_reply_anchor(response.get("reply_anchor")),
         )
 
     def _headers(self) -> Dict[str, str]:
@@ -329,14 +397,26 @@ def _selected_outputs(response: Dict[str, Any]) -> tuple[Dict[str, Any], ...]:
     """Already selected speech keeps its identity even while the author is unresolved."""
     outputs = list(response.get("outputs") or [])
     if response.get("output_ref") and response.get("text"):
-        outputs.append({key: response.get(key) for key in ("output_ref", "outcome", "text")})
+        outputs.append({key: response.get(key) for key in ("output_ref", "outcome", "text", "reply_anchor")})
     selected = []
     for output in outputs:
         if not isinstance(output, dict) or not output.get("output_ref") or output.get("outcome") not in _OUTCOMES:
             raise PresenceHostError("invalid released presence output")
         if output["outcome"] in {"message", "deferred"} and str(output.get("text") or "").strip():
-            selected.append(dict(output))
+            selected.append({**output, "reply_anchor": _reply_anchor(output.get("reply_anchor"))})
     return tuple(selected)
+
+
+def _reply_anchor(value: Any) -> Optional[Dict[str, Any]]:
+    """A version-2 output's last covered input: ``{source_event_id, message}``, else ``None``.
+
+    Promoted children, retained refusals and older Hosts name none; their speech keeps
+    answering the original event.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("message"), dict):
+        return None
+    source = str(value.get("source_event_id") or "").strip()
+    return {"source_event_id": source, "message": dict(value["message"])} if source else None
 
 
 def _child_ref(response: Dict[str, Any], polled: str) -> str:

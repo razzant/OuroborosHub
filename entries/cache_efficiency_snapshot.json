@@ -11,6 +11,7 @@
     "kind": "hosted",
     "path": "skills/cache_efficiency_snapshot"
   },
+  "title": "Cache Efficiency Snapshot",
   "type": "extension",
   "version": "0.6.1",
   "withdrawn": null

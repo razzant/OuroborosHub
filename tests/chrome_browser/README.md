@@ -1,0 +1,53 @@
+# chrome_browser regression tests
+
+Tests for the Playwright-based `skills/chrome_browser` adapter that need no browser, no Chrome profile and no network.
+They are Node's own tests (`node:test`). `test_chrome_browser.py` runs each file under pytest, so the Hub's
+`chrome-browser` suite (`scripts/ci_checks.py`, `.github/workflows/catalog-check.yml`) selects and reports them like any
+other hosted suite. A change under `skills/chrome_browser/` or `tests/chrome_browser/` selects the suite.
+
+## Run
+
+```sh
+npm install --ignore-scripts --no-audit --no-fund --prefix "$DIR" @playwright/mcp@<version in skills/chrome_browser/pins.json>
+OUROBOROS_CHROME_NODE_MODULES="$DIR/node_modules" python -B -m pytest -p no:cacheprovider -q tests/chrome_browser
+```
+
+Node on `PATH` with `--test-force-exit` and `--test-timeout` (verified on 24, also used in CI). `unit_guard` and `unit_input` need
+nothing else. `unit_click_once`, `unit_patch_pinned` and `unit_server` load the Playwright bundle, so they need the exact npm
+closure that `pins.json` records, and they check every pinned file by sha256. Without it they fail and print what to install;
+the suite never skips. Run on macOS (Node 24.16); the hosted run is Ubuntu; other platforms are untested. `unit_server` listens
+and connects on loopback only (its mock guard and Playwright's own relay).
+
+## What they check
+
+| file | failure family |
+| --- | --- |
+| `unit_guard.test.mjs` | the request guard's wire bytes and endpoint rules, body facts, owner-control refusals, arming only on `{"armed": true}`, and failing closed on a refused connection, silence, malformed or oversized answers |
+| `unit_input.test.mjs` | trusted-input preparation: a moving box is "not stable", a detached element is reported, one discarded frame per document, no frame means no input, delivery verdicts (confirmed, denied, unreadable) recorded rather than thrown |
+| `unit_click_once.test.mjs` | the patched Playwright's own pointer path with a fake page: a click of unknown effect (denied, probe unavailable or unreadable) goes out once through its locator retry; a click that never went out is not reported as sent; nothing is dispatched to a moving, hidden or disabled target, and every upstream state but "stable" is still checked, after the settling wait (a target disabled during it is not clicked); a second click in one call is refused |
+| `unit_patch_pinned.test.mjs` | the pinned patch turns the pinned preimage into the pinned postimage; a changed, shifted or malformed patch input is refused; stock-versus-patched controls (background tabs, no profile discovery, no spawn, the real CORS preflight); missing or different installs are named |
+| `unit_server.test.mjs` | the real `BrowserConnection`, `createServerCore` and route handler over the real relay and Playwright's own Chromium consumers and MCP tools, with a stand-in Chrome (`helpers/fake_chrome.mjs`): the route is in place before arming and a request follows the host's answer; an approval with no tab is not ready and the next link says why; a refused address is not opened; a page the task may not read gets nothing done before and its output withheld after, and can be left; a listed tab's title; a page tool acts only in the tab it was judged for (closed while the host answers, the call stops with nothing done, and the next call is judged afresh), navigation keeps that same tab without trapping a refused page, while explicit tab selection, creation and closure stay available, and a result is judged with the tab it worked in and a listed tab even if they closed before it was returned; a redirect hop stays with its document until a new one commits (a 204, a failed hop, a download and a same-document navigation retire nothing; a fresh document does), per frame; console records and requests kept from earlier documents are judged by the document and chain they came from, and the allowed rest is returned, a request record being read from the tab it was checked in even if another tab becomes current while the host decides; a document is forgotten once Playwright can hold none of its console messages or page errors (200 of each kind), each kind judged apart so that a kind which rarely or never occurs keeps no other kind's documents, while the first document (it answers for records from before the connection counted) and the one shown stay and every held record keeps the document that made it; a request from before the connection was watching stays the first document's after that document is forgotten, in both directions; one decision per address in a call and none carried to the next; binary bodies as images or described; generated file lines; refused arguments (including upstream's unadvertised `_meta` output options, which would JSON-escape a tab title out of the title check); the navigation bound |
+
+They do not drive a browser or the extension. Browser and SDK integration is separate evidence: in `unit_server` what Chrome does is the test's statement of it. A covered target is stopped inside the page by upstream's hit-target interceptor, which a fake page cannot reproduce; no test here covers it beyond the pinned patch leaving that code unchanged.
+
+## Where they came from
+
+They were written while integrating OuroborosHub PR #119 and Ouroboros PR #1401 for the Playwright-based design, to
+check the rewritten code in `skills/chrome_browser/lib`. They are new tests, not PR #119's: its extension, protocol and
+executor tests target a design that was removed and are not revived. The ideas they protect (host-timed stability,
+a frame before first input, never resending an input of unknown effect) are credited to Andrei Kaznacheev (`kazzand`)
+in `skills/chrome_browser/ATTRIBUTION.md`. Comments that name the "core lane" refer to the wire contract agreed with
+the Ouroboros core; the contract itself is written in `lib/guard.mjs`.
+
+| here | reused from (sha256 of the original) | changed |
+| --- | --- | --- |
+| `unit_guard.test.mjs` | `unit_guard.test.mjs` (`8ef7f2b8…`) | the Unix-socket test takes a short directory from `socketDir()` |
+| `unit_input.test.mjs` | `unit_input.test.mjs` (`640d7fa1…`) | one comment points at `unit_click_once.test.mjs` |
+| `unit_patch_pinned.test.mjs` | `unit_patch_pinned.test.mjs` (`339bf9a5…`) | env imports, `requirePinnedInstall()`, the instrument path |
+| `unit_click_once.test.mjs` | the two locator-retry tests and their fixture from the integration's repairs test file (`43a4c9fd…`) | evidence-file writes and task labels removed; the fake progress ends a call at its deadline (a regression there used to spin forever); **three new tests** (the moving, hidden and disabled controls, the target disabled during the settling wait, and the second click in one call) |
+| `helpers/mock_guard.mjs`, `helpers/instrument.cjs` | same names (`2c1e59aa…`, `ada7daad…`) | none, byte for byte |
+| `helpers/env.mjs` | `env.mjs` (`bc6f38d0…`) | rewritten: Hub-relative paths, per-process scratch removed on success, short socket directory, a Chrome profile layout for macOS and Linux |
+| `helpers/fake_chrome.mjs` | `connectRelayExtension` in `helpers/mock_extension.mjs` of the integration's QA | extended with what Playwright's Chromium consumers need to run end to end: evaluation answers, requests with pauses, responses and failures, commits, frames, console records, a closed tab, and what a page does on receiving a command |
+| `unit_server.test.mjs` | new; its route, connect, output and title cases follow the integration's repairs test file and the whole-Hub review's probes | runs Playwright's real consumers instead of a fake backend |
+
+Left out on purpose: the headless browser stand, and the stdio tests of the integration's repairs and stdio test files.

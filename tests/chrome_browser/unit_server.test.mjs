@@ -1,0 +1,1034 @@
+// The skill's connection, server and route handler, over the real relay and Playwright's own consumers and
+// MCP tools (the pinned patch applied in memory). Only Chrome is a stand-in (helpers/fake_chrome.mjs) and the
+// host's policy a table: no browser, extension, profile or external address. What Chrome does here is the
+// test's statement of it. These tests hold the adapter's decisions against what upstream really delivers.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { NODE_MODULES, requirePinnedInstall } from './helpers/env.mjs';
+import { startMockGuard } from './helpers/mock_guard.mjs';
+import { connectFakeChrome } from './helpers/fake_chrome.mjs';
+import { parseGuardEndpoint } from '../../skills/chrome_browser/lib/guard.mjs';
+import { loadPinnedPlaywright, PINS } from '../../skills/chrome_browser/lib/pinned.mjs';
+import { argumentRefusal, createServerCore, describePrivateFiles, describeSavedBody, imageTypeOf, upstreamConfig, MAX_RESPONSE_IMAGE_BYTES, NAVIGATION_TIMEOUT_MS } from '../../skills/chrome_browser/lib/server.mjs';
+import { MAX_DOCUMENT_ADDRESSES } from '../../skills/chrome_browser/lib/connection.mjs';
+
+requirePinnedInstall();
+const TOKEN = 'e'.repeat(64);
+const TAB = 7;
+const ALLOWED = 'https://allowed.example';
+const FORBIDDEN = 'https://forbidden.example';
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+
+const runtime = { ...loadPinnedPlaywright(NODE_MODULES), extension: PINS.extension };
+const textOf = (result) => (result.content || []).filter((part) => part.type === 'text').map((part) => part.text).join('\n');
+const refuseForbidden = (message) => {
+  if ('armed' in message)
+    return { armed: true };
+  if (message.action)
+    return { block: '' };
+  return { block: message.url.includes('forbidden.example') ? `REFUSED_BY_HOST: ${new URL(message.url).origin}` : '' };
+};
+
+async function waitFor(predicate, what) {
+  const deadline = Date.now() + 20_000;
+  for (;;) {
+    const value = await predicate();
+    if (value)
+      return value;
+    if (Date.now() > deadline)
+      throw new Error(`not in time: ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+const cleanups = [];
+test.afterEach(async () => {
+  while (cleanups.length)
+    await cleanups.pop()().catch(() => {});
+});
+
+// A server with the host's guard (the mock's table) and an owner who approved in a stand-in Chrome.
+async function connected({ decide = refuseForbidden, tabs = [{ id: TAB, url: `${ALLOWED}/start`, title: 'Start', windowId: 1, index: 0, active: true }], refuseAttach, guardDelayMs = 0, prepare, onCommand } = {}) {
+  const world = {};
+  const guard = await startMockGuard({ token: TOKEN, decide: (message) => decide(message, world), delayMs: guardDelayMs });
+  cleanups.push(() => guard.close());
+  const core = createServerCore({
+    loadRuntime: () => runtime,
+    guardEnvironment: { configured: true, endpoint: parseGuardEndpoint(guard.endpoint), token: TOKEN },
+    framePreparer: { prepare: async (page) => { await prepare?.(page, world); return { prepared: false }; } },
+  });
+  cleanups.push(() => core.shutdown());
+  const link = textOf(await core.callTool('browser_connect')).split('\n').find((line) => line.startsWith('chrome-extension://'));
+  const chrome = await connectFakeChrome(runtime.utils.ws, new URL(link).searchParams.get('mcpRelayUrl'), { tabs, refuseAttach, onCommand: onCommand && ((...command) => onCommand(world, ...command)) });
+  cleanups.push(async () => chrome.close());
+  Object.assign(world, {
+    guard, core, chrome, link,
+    call: async (name, args = {}) => await core.callTool(name, args),
+    page: () => core.connection.backend()._context.currentTab().page,
+    // A round trip through Playwright and the stand-in: everything Chrome said before it has been delivered.
+    settle: async () => await world.page().context().cookies(),
+    questions: () => guard.messages().filter((message) => message && 'url' in message).map((message) => message.url),
+  });
+  await waitFor(() => ['ready', 'closed'].includes(core.connection.state), 'connection state');
+  return world;
+}
+
+test('the route is in place before the guard is armed, and each routed request follows the host\'s answer', async () => {
+  let enabledAtArm;
+  const raw = 'not an answer\n';
+  const world = await connected({
+    decide: (message, w) => {
+      if ('armed' in message)
+        enabledAtArm = w.chrome.cdp('Fetch.enable').length;
+      if (message.url?.includes('silent.example'))
+        return raw;
+      return refuseForbidden(message);
+    },
+  });
+  assert.equal(world.core.connection.state, 'ready');
+  assert.ok(enabledAtArm >= 1, 'Playwright asked Chrome to pause requests before the host was told the guard is armed');
+  const { chrome, guard } = world;
+  const answered = async (count) => await waitFor(() => chrome.fetchAnswers.length >= count && chrome.fetchAnswers, 'Fetch answers');
+  chrome.requestChain(TAB, [`${ALLOWED}/api`]);
+  assert.deepEqual((await answered(1)).map((a) => a.method), ['Fetch.continueRequest'], 'an empty answer lets the request go');
+  chrome.requestChain(TAB, [`${FORBIDDEN}/api`]);
+  const refused = (await answered(2))[1];
+  assert.deepEqual([refused.method, refused.errorReason], ['Fetch.failRequest', 'BlockedByClient'], 'a refusal fails it as blocked by client');
+  chrome.requestChain(TAB, ['https://silent.example/api']);
+  const unanswered = (await answered(3))[2];
+  assert.deepEqual([unanswered.method, unanswered.errorReason], ['Fetch.failRequest', 'BlockedByClient'], 'no usable answer fails closed');
+  chrome.requestChain(TAB, [{ url: `${ALLOWED}/form`, method: 'POST', postData: 'a=1' }]);
+  await answered(4);
+  const form = guard.messages().find((message) => message?.url === `${ALLOWED}/form`);
+  assert.deepEqual([form.method, form.post_data, form.body_present, form.resource_type], ['POST', 'a=1', true, 'fetch'], 'the host sees the request as it is');
+  assert.deepEqual(world.core.guard.counters, { allowed: 2, blocked: 1, failed_closed: 1 });
+});
+
+test('requests the guard refused while a call ran are reported with it', async () => {
+  const { chrome, call } = await connected();
+  chrome.onNextNavigate(TAB, ({ url, loaderId }) => {
+    chrome.requestChain(TAB, [`${FORBIDDEN}/beacon`]);
+    chrome.navigation(TAB, [url], { loaderId });
+  });
+  const result = await call('browser_navigate', { url: `${ALLOWED}/next` });
+  assert.match(textOf(result), /### Requests the guard refused while this call ran\n- GET https:\/\/forbidden\.example\/beacon: REFUSED_BY_HOST/);
+});
+
+test('an approval with no tab attached is not ready; nothing replaces the tab, and the next link says why', async () => {
+  const chromeAnswer = 'Another debugger is already attached to the tab with id: 7.';
+  const { core, chrome, call, link } = await connected({ refuseAttach: new Map([[TAB, chromeAnswer]]) });
+  assert.equal(core.connection.state, 'closed');
+  assert.match(core.connection.reason, /^BROWSER_TAB_NOT_ATTACHED: .*Another debugger is already attached/);
+  const tool = await call('browser_snapshot');
+  assert.equal(tool.isError, true);
+  assert.match(textOf(tool), /^### Error\nBROWSER_TAB_NOT_ATTACHED/);
+  assert.equal(chrome.commands.filter((command) => command.method === 'chrome.tabs.create').length, 0, 'no tab was opened in its place');
+  const next = textOf(await call('browser_connect'));
+  assert.match(next, /^### Approval needed\nThe previous connection ended: BROWSER_TAB_NOT_ATTACHED/);
+  assert.notEqual(next.split('\n').find((line) => line.startsWith('chrome-extension://')), link, 'a new link');
+});
+
+test('a host that does not confirm the guard leaves no working connection', async () => {
+  const { core, call } = await connected({
+    decide: (message) => ('armed' in message ? { armed: false, block: 'BROWSER_SESSION_CLOSED: closing' } : { block: '' }),
+  });
+  assert.equal(core.connection.state, 'closed');
+  assert.match(core.connection.reason, /^BROWSER_GUARD_NOT_ARMED: .*BROWSER_SESSION_CLOSED/);
+  assert.match(textOf(await call('browser_snapshot')), /BROWSER_GUARD_NOT_ARMED/);
+});
+
+test('an address the host refuses is not opened, by either tool; an allowed one is', async () => {
+  const { chrome, call, questions } = await connected();
+  const navigate = await call('browser_navigate', { url: 'forbidden.example/x' });
+  assert.equal(navigate.isError, true);
+  assert.match(textOf(navigate), /^### Error\nREFUSED_BY_HOST.*\nThe address was not opened; the tab was left as it was\./);
+  assert.ok(questions().includes(`${FORBIDDEN}/x`), 'judged as upstream would open it');
+  assert.deepEqual(chrome.cdp('Page.navigate'), []);
+  const opened = await call('browser_tabs', { action: 'new', url: `${FORBIDDEN}/y` });
+  assert.equal(opened.isError, true);
+  assert.match(textOf(opened), /No tab was opened\./);
+  assert.equal(chrome.commands.filter((command) => command.method === 'chrome.tabs.create').length, 0);
+  // Positive controls: the same paths reach upstream for an address the host allows.
+  chrome.onNextNavigate(TAB, ({ url, loaderId }) => chrome.navigation(TAB, [url], { loaderId }));
+  const allowed = await call('browser_navigate', { url: `${ALLOWED}/next` });
+  assert.equal(allowed.isError, undefined, textOf(allowed));
+  assert.deepEqual(chrome.cdp('Page.navigate').map((params) => params.url), [`${ALLOWED}/next`]);
+  await call('browser_tabs', { action: 'new' });
+  const created = chrome.commands.filter((command) => command.method === 'chrome.tabs.create');
+  assert.equal(created.length, 1);
+  assert.equal(created[0].params[0].active, false, 'an agent tab is created inactive');
+});
+
+test('a page the task may not read: nothing is done before, output is withheld after, and it can be left', async () => {
+  const { chrome, call, settle } = await connected();
+  const start = await call('browser_snapshot');
+  assert.equal(start.isError, undefined);
+  assert.match(textOf(start), /Start page content/, 'the positive control reads the page');
+  // The agent's own navigation ends on a page the task may not read, through a redirect.
+  chrome.tab(TAB).title = 'SECRET';
+  chrome.onNextNavigate(TAB, ({ loaderId, url }) => chrome.navigation(TAB, [url, `${FORBIDDEN}/landing`], { loaderId }));
+  const landed = await call('browser_navigate', { url: `${ALLOWED}/go` });
+  assert.equal(landed.isError, true);
+  assert.match(textOf(landed), /^### Error\nREFUSED_BY_HOST.*\nThe call ran, but its output is withheld: this task may not read https:\/\/forbidden\.example\/landing/);
+  assert.doesNotMatch(textOf(landed), /SECRET/);
+  // A page tool does nothing there; the check asks about the address and never reads the page.
+  const pageCalls = chrome.cdp('Runtime.callFunctionOn').length;
+  const click = await call('browser_click', { target: 'e1' });
+  assert.equal(click.isError, true);
+  assert.match(textOf(click), /Nothing was done: this task may not read https:\/\/forbidden\.example\/landing/);
+  assert.equal(chrome.cdp('Runtime.callFunctionOn').length, pageCalls, 'the tool did not run');
+  // Going elsewhere is never refused because of the page being left.
+  chrome.tab(TAB).title = 'Clean';
+  chrome.onNextNavigate(TAB, ({ loaderId, url }) => chrome.navigation(TAB, [url], { loaderId }));
+  const left = await call('browser_navigate', { url: `${ALLOWED}/elsewhere` });
+  assert.equal(left.isError, undefined, textOf(left));
+  await settle();
+  assert.match(textOf(await call('browser_snapshot')), /Clean page content/);
+});
+
+test('another tab\'s title is judged with its tab; a tab the task may read is listed as before', async () => {
+  const shared = { id: TAB, url: `${ALLOWED}/start`, title: 'Shared', windowId: 1, index: 0, active: true };
+  const one = await connected({ tabs: [shared, { id: 8, url: `${FORBIDDEN}/private`, title: 'SECRET TITLE', windowId: 1, index: 1 }] });
+  await waitFor(() => one.core.connection.backend()._context.tabs().length === 2, 'both tabs');
+  const listed = await one.call('browser_tabs', { action: 'list' });
+  assert.equal(listed.isError, true);
+  assert.doesNotMatch(textOf(listed), /SECRET TITLE/);
+  assert.match(textOf(listed), /this task may not read https:\/\/forbidden\.example\/private/);
+  const two = await connected({ tabs: [shared, { id: 8, url: `${ALLOWED}/two`, title: 'Second tab', windowId: 1, index: 1 }] });
+  await waitFor(() => two.core.connection.backend()._context.tabs().length === 2, 'both tabs');
+  const fine = await two.call('browser_tabs', { action: 'list' });
+  assert.equal(fine.isError, undefined, textOf(fine));
+  assert.match(textOf(fine), /Second tab/);
+});
+
+test('a tab title is judged with its tab however the result is formatted: upstream\'s output options are refused, not followed', async () => {
+  // JSON escapes a quote and a backslash, so a title looked for in the text of a JSON result would not be found there.
+  const shared = { id: TAB, url: `${ALLOWED}/start`, title: 'Shared', windowId: 1, index: 0, active: true };
+  const { core, call } = await connected({ tabs: [shared, { id: 8, url: `${FORBIDDEN}/private`, title: 'SECRET "QUOTED" \\ TITLE', windowId: 1, index: 1 }] });
+  await waitFor(() => core.connection.backend()._context.tabs().length === 2, 'both tabs');
+  const plain = await call('browser_tabs', { action: 'list' });
+  assert.equal(plain.isError, true);
+  assert.doesNotMatch(textOf(plain), /SECRET/);
+  assert.match(textOf(plain), /this task may not read https:\/\/forbidden\.example\/private/);
+  const json = await call('browser_tabs', { action: 'list', _meta: { json: true } });
+  assert.equal(json.isError, true);
+  assert.match(textOf(json), /^### Error\nBROWSER_ARGUMENT_REFUSED: .*"_meta"/);
+  assert.doesNotMatch(textOf(json), /SECRET/);
+});
+
+// The document that shows is the one the hop produced until another really replaces it.
+test('a forbidden hop stays with its document until a new document commits: a response alone retires nothing', async () => {
+  const { chrome, call, settle } = await connected();
+  const snapshot = async () => {
+    await settle();
+    return await call('browser_snapshot');
+  };
+  chrome.navigation(TAB, [`${ALLOWED}/from`, `${FORBIDDEN}/bounce`, `${ALLOWED}/landing`]);
+  assert.match(textOf(await snapshot()), /this task may not read https:\/\/forbidden\.example\/bounce/, 'the hop is judged');
+  const stillThere = (result, what) => {
+    assert.equal(result.isError, true, what);
+    assert.match(textOf(result), /https:\/\/forbidden\.example\/bounce/, what);
+  };
+  // A 204 keeps the old document.
+  const noContent = chrome.requestChain(TAB, [`${ALLOWED}/no-content`], { navigation: true });
+  chrome.respond(TAB, noContent.requestId, `${ALLOWED}/no-content`, { status: 204 });
+  stillThere(await snapshot(), '204 response');
+  chrome.failRequest(TAB, noContent.requestId);
+  stillThere(await snapshot(), '204 finished');
+  // A redirect whose next hop fails never commits.
+  const failed = chrome.requestChain(TAB, [`${ALLOWED}/one`, `${ALLOWED}/two`], { navigation: true });
+  stillThere(await snapshot(), 'redirect in flight');
+  chrome.failRequest(TAB, failed.requestId, 'net::ERR_CONNECTION_REFUSED');
+  stillThere(await snapshot(), 'failed redirect');
+  // A download is a response with no document.
+  const download = chrome.requestChain(TAB, [`${ALLOWED}/file.zip`], { navigation: true });
+  chrome.respond(TAB, download.requestId, `${ALLOWED}/file.zip`, { headers: { 'content-disposition': 'attachment' }, mimeType: 'application/zip' });
+  chrome.failRequest(TAB, download.requestId, 'net::ERR_ABORTED', { canceled: true });
+  stillThere(await snapshot(), 'download');
+  // A same-document navigation keeps the document as well.
+  chrome.navigatedWithinDocument(TAB, `${ALLOWED}/landing#part`);
+  stillThere(await snapshot(), 'same-document navigation');
+  // A fresh document that commits clears it: no eternal refusal.
+  chrome.navigation(TAB, [`${ALLOWED}/fresh`]);
+  const fresh = await snapshot();
+  assert.equal(fresh.isError, undefined, textOf(fresh));
+});
+
+test('a commit that names no request still carries the hops of the navigation it finished', async () => {
+  const { chrome, call, settle, page } = await connected();
+  const loaderId = 'L-RACED';
+  chrome.requestChain(TAB, [`${ALLOWED}/from`, `${FORBIDDEN}/bounce`, `${ALLOWED}/landing`], { navigation: true, requestId: loaderId });
+  chrome.respond(TAB, loaderId, `${ALLOWED}/landing`, { status: 200 });
+  // Another navigation requested just before the commit: Playwright then commits with no request known.
+  chrome.emit(TAB, 'Page.frameRequestedNavigation', { frameId: `TARGET-${TAB}`, reason: 'scriptInitiated', url: `${ALLOWED}/later`, disposition: 'currentTab' });
+  chrome.commit(TAB, `${ALLOWED}/landing`, { loaderId });
+  await settle();
+  assert.equal(page().url(), `${ALLOWED}/landing`);
+  assert.match(textOf(await call('browser_snapshot')), /this task may not read https:\/\/forbidden\.example\/bounce/);
+});
+
+test('a subframe\'s hop counts while its document shows, and is gone when the frame moves on or leaves', async () => {
+  const { chrome, call, settle } = await connected();
+  const frame = 'FRAME-1';
+  const attach = () => chrome.attachFrame(TAB, frame);
+  const hopInFrame = () => chrome.navigation(TAB, [`${ALLOWED}/ad`, `${FORBIDDEN}/track`, `${ALLOWED}/ad2`], { frameId: frame, parentId: `TARGET-${TAB}` });
+  const snapshot = async () => {
+    await settle();
+    return await call('browser_snapshot');
+  };
+  attach();
+  hopInFrame();
+  assert.match(textOf(await snapshot()), /https:\/\/forbidden\.example\/track/, 'shown');
+  chrome.navigation(TAB, [`${ALLOWED}/ad3`], { frameId: frame, parentId: `TARGET-${TAB}` });
+  assert.equal((await snapshot()).isError, undefined, 'the frame moved on');
+  hopInFrame();
+  assert.equal((await snapshot()).isError, true, 'shown again');
+  chrome.detachFrame(TAB, frame);
+  assert.equal((await snapshot()).isError, undefined, 'the frame left');
+  attach();
+  hopInFrame();
+  assert.equal((await snapshot()).isError, true, 'shown in a new frame');
+  chrome.navigation(TAB, [`${ALLOWED}/next-document`]);
+  assert.equal((await snapshot()).isError, undefined, 'a new main document takes its frames with it');
+});
+
+// A console message's script location is not its document, in either direction.
+test('history: console messages and page errors are judged by the document that made them', async () => {
+  const { chrome, call, settle, questions } = await connected();
+  chrome.consoleCall(TAB, 'ALLOWED-ONE', { url: `${ALLOWED}/app.js` });
+  chrome.navigation(TAB, [`${ALLOWED}/from`, `${FORBIDDEN}/bounce`, `${ALLOWED}/secret-doc`]);
+  chrome.consoleCall(TAB, 'FORBIDDEN-MESSAGE', { url: `${ALLOWED}/app.js` });
+  chrome.pageError(TAB, 'FORBIDDEN-ERROR');
+  chrome.navigation(TAB, [`${ALLOWED}/public`]);
+  chrome.consoleCall(TAB, 'ALLOWED-THREE', { url: `${FORBIDDEN}/library.js` });
+  chrome.pageError(TAB, 'ALLOWED-ERROR');
+  await settle();
+  const before = questions().length;
+  const all = await call('browser_console_messages', { all: true });
+  const text = textOf(all);
+  assert.equal(all.isError, undefined, text);
+  for (const kept of ['ALLOWED-ONE', 'ALLOWED-THREE', 'ALLOWED-ERROR'])
+    assert.ok(text.includes(kept), `${kept} is allowed history: ${text}`);
+  for (const gone of ['FORBIDDEN-MESSAGE', 'FORBIDDEN-ERROR'])
+    assert.ok(!text.includes(gone), `${gone} leaked: ${text}`);
+  assert.match(text, /Total messages: 3 \(Errors: 1, Warnings: 0\)/, 'upstream counts only what it returns');
+  assert.match(text, /Withheld 2 records here: this task may not read https:\/\/forbidden\.example\/bounce .*REFUSED_BY_HOST/);
+  const asked = questions().slice(before);
+  assert.equal(asked.length, new Set(asked).size, `one decision per address in one call: ${asked}`);
+  assert.ok(asked.includes(`${FORBIDDEN}/bounce`), 'the original hop was the question');
+  // The current document's messages alone contain nothing to withhold.
+  const current = textOf(await call('browser_console_messages'));
+  assert.ok(current.includes('ALLOWED-THREE'));
+  assert.ok(!current.includes('ALLOWED-ONE'));
+  assert.ok(!current.includes('Withheld'));
+});
+
+test('history: a message arriving while the host is being asked does not move older records into a later document', async () => {
+  let reading = false;
+  let arrived = false;
+  const { chrome, call, settle } = await connected({
+    guardDelayMs: 20,
+    decide: (message, world) => {
+      // The first question about the records: more messages come while it is being answered.
+      if (reading && !arrived && message.url === `${ALLOWED}/start`) {
+        arrived = true;
+        for (const text of ['LATE-1', 'LATE-2', 'LATE-3', 'LATE-4'])
+          world.chrome.consoleCall(TAB, text);
+      }
+      return refuseForbidden(message);
+    },
+  });
+  chrome.consoleCall(TAB, 'FIRST');
+  chrome.navigation(TAB, [`${ALLOWED}/from`, `${FORBIDDEN}/bounce`, `${ALLOWED}/secret-doc`]);
+  for (const text of ['FORBIDDEN-A', 'FORBIDDEN-B', 'FORBIDDEN-C'])
+    chrome.consoleCall(TAB, text);
+  chrome.navigation(TAB, [`${ALLOWED}/public`]);
+  chrome.consoleCall(TAB, 'LAST');
+  await settle();
+  reading = true;
+  const text = textOf(await call('browser_console_messages', { all: true }));
+  assert.ok(arrived, 'the messages arrived during the check');
+  assert.doesNotMatch(text, /FORBIDDEN-/);
+  // Upstream counts first, then reads again: the count is the read the late messages came in the middle of.
+  assert.match(text, /Total messages: 2 /);
+  assert.match(text, /FIRST/);
+  assert.match(text, /LAST/);
+  assert.match(text, /LATE-4/);
+});
+
+test('history: requests are judged by their own chain and the document that made them; the rest stays readable', async () => {
+  const { chrome, call, settle, core } = await connected();
+  const text = 'text/plain';
+  const fetched = (url, body) => {
+    const { requestId } = chrome.requestChain(TAB, [url]);
+    chrome.respond(TAB, requestId, url, { mimeType: text, headers: { 'content-type': text }, body, type: 'Fetch' });
+  };
+  fetched(`${ALLOWED}/early`, 'ALLOWED-EARLY-BODY');
+  // A document reached through a forbidden hop, and what it fetched from an allowed address.
+  chrome.navigation(TAB, [`${ALLOWED}/from`, `${FORBIDDEN}/bounce`, `${ALLOWED}/secret-doc`]);
+  fetched(`${ALLOWED}/made-by-secret-doc`, 'MADE-BY-FORBIDDEN-DOCUMENT');
+  // Moved on: the document request of the page now shown is its own, whatever preceded it.
+  chrome.navigation(TAB, [`${ALLOWED}/public`], { body: 'PUBLIC-DOCUMENT-BODY' });
+  // A subresource that went through a forbidden hop on an allowed page.
+  const via = chrome.requestChain(TAB, [`${ALLOWED}/redirector`, `${FORBIDDEN}/hop`, `${ALLOWED}/after-hop`]);
+  chrome.respond(TAB, via.requestId, `${ALLOWED}/after-hop`, { mimeType: text, headers: { 'content-type': text }, body: 'VIA-FORBIDDEN-HOP', type: 'Fetch' });
+  fetched(`${ALLOWED}/late`, 'ALLOWED-LATE-BODY');
+  await settle();
+  const list = textOf(await call('browser_network_requests', { all: true, static: true }));
+  const lines = Object.fromEntries(list.split('\n').filter((line) => /^\d+\. /.test(line)).map((line) => [new URL(line.split(' ')[2]).pathname, Number(line.split('.')[0])]));
+  for (const gone of ['/made-by-secret-doc', '/hop', '/after-hop', '/bounce', '/secret-doc'])
+    assert.ok(!(gone in lines), `${gone} is listed: ${list}`);
+  for (const kept of ['/early', '/public', '/redirector', '/late'])
+    assert.ok(kept in lines, `${kept} is missing: ${list}`);
+  assert.match(list, /Withheld \d+ records here: this task may not read https:\/\/forbidden\.example\//);
+  assert.equal(textOf(await call('browser_network_request', { index: lines['/early'], part: 'response-body' })), '### Result\nALLOWED-EARLY-BODY');
+  const docBody = await call('browser_network_request', { index: lines['/public'], part: 'response-body' });
+  assert.match(textOf(docBody), /PUBLIC-DOCUMENT-BODY/);
+  // Every record upstream kept, including those the list above no longer shows.
+  const records = await core.connection.backend()._context.currentTab().requests(true);
+  const refusedRecords = records.filter(({ request }) => /\/(made-by-secret-doc|after-hop|hop|bounce|secret-doc)$/.test(request.url()));
+  assert.equal(refusedRecords.length, 5);
+  for (const { index, request } of refusedRecords) {
+    for (const args of [{ index, part: 'response-body' }, { index }]) {
+      const result = await call('browser_network_request', args);
+      assert.equal(result.isError, true, `${request.url()} ${JSON.stringify(args)}`);
+      assert.doesNotMatch(textOf(result), /MADE-BY-FORBIDDEN-DOCUMENT|VIA-FORBIDDEN-HOP/);
+      assert.match(textOf(result), /REFUSED_BY_HOST.*\nThis request's record is withheld: this task may not read https:\/\/forbidden\.example\//);
+    }
+  }
+});
+
+test('history: a request record is read from the tab it was checked in, even if another tab becomes current while the host decides', async () => {
+  const second = { id: 8, url: `${ALLOWED}/second`, title: 'Second', windowId: 1, index: 1 };
+  const { chrome, call, core, settle } = await connected({ tabs: [{ id: TAB, url: `${ALLOWED}/start`, title: 'Start', windowId: 1, index: 0, active: true }, second] });
+  const context = core.connection.backend()._context;
+  const routed = (id) => chrome.commands.some((command) => command.params?.[1] === 'Fetch.enable' && command.params?.[0]?.tabId === id);
+  await waitFor(() => context.tabs().length === 2 && routed(TAB) && routed(second.id), 'both tabs, routed');
+  const fetched = (tabId, hops, body) => {
+    const { requestId } = chrome.requestChain(tabId, hops);
+    chrome.respond(tabId, requestId, hops.at(-1), { mimeType: 'text/plain', headers: { 'content-type': 'text/plain' }, body, type: 'Fetch' });
+  };
+  // Record 3 of the first tab is allowed. Record 3 of the second is the end of a redirect through a refused hop.
+  for (const n of [1, 2, 3])
+    fetched(TAB, [`${ALLOWED}/a-${n}`], `A-BODY-${n}`);
+  fetched(second.id, [`${ALLOWED}/redirector`, `${FORBIDDEN}/hop`, `${ALLOWED}/after-hop`], 'B-VIA-FORBIDDEN-HOP');
+  await settle();
+  const read = async () => textOf(await call('browser_network_request', { index: 3, part: 'response-body' }));
+  assert.match(await read(), /^### Result\nA-BODY-3(\n|$)/, 'the allowed record is read as before');
+  // The host's answer about the first tab's record is on its way when someone makes the other tab current.
+  let switching = true;
+  const decideTarget = core.guard.decideTarget.bind(core.guard);
+  core.guard.decideTarget = async (url) => {
+    const block = await decideTarget(url);
+    if (switching && url === `${ALLOWED}/a-3`) {
+      switching = false;
+      await context.selectTab(1);
+    }
+    return block;
+  };
+  const raced = await read();
+  assert.equal(switching, false, 'the host was asked about the record');
+  assert.equal(context.currentTab().page.url(), second.url, 'the other tab became current meanwhile');
+  assert.doesNotMatch(raced, /B-VIA-FORBIDDEN-HOP/, 'the record of the other tab, which came through a refused hop, is not returned');
+  assert.match(raced, /^### Result\nA-BODY-3(\n|$)/, 'the record that was checked is the one returned');
+});
+
+// A second tab in the session, which upstream makes current when the first one closes.
+async function withNeighbour(url, options = {}) {
+  const world = await connected({ ...options, tabs: [{ id: TAB, url: `${ALLOWED}/start`, title: 'Start', windowId: 1, index: 0, active: true }, { id: 8, url, title: 'NEIGHBOUR', windowId: 1, index: 1 }] });
+  const routed = (id) => world.chrome.commands.some((command) => command.params?.[1] === 'Fetch.enable' && command.params?.[0]?.tabId === id);
+  await waitFor(() => world.core.connection.backend()._context.tabs().length === 2 && routed(TAB) && routed(8), 'both tabs, routed');
+  return world;
+}
+
+// Someone closes a tab. When this returns, upstream has heard of it: it left the list, and a neighbour is current.
+async function closeTab({ chrome, core }, id) {
+  const tabs = () => core.connection.backend()._context.tabs();
+  const before = tabs().length;
+  chrome.removeTab(id);
+  await waitFor(() => tabs().length === before - 1, 'the tab to leave upstream\'s list');
+}
+
+// `meanwhile` happens while the host is answering this question, once: its answer arrives only after that.
+function whileAsked(guard, method, question, meanwhile) {
+  const ask = guard[method].bind(guard);
+  let pending = true;
+  guard[method] = async (url) => {
+    const block = await ask(url);
+    if (pending && question(url)) {
+      pending = false;
+      await meanwhile();
+    }
+    return block;
+  };
+}
+
+// The tabs that received any of these CDP commands since a mark.
+const reachedSince = ({ chrome }, mark, ...methods) => [...new Set(chrome.commands.slice(mark).filter((command) => methods.includes(command.params?.[1])).map((command) => command.params[0].tabId))];
+const KEY = 'Input.dispatchKeyEvent';
+const SCRIPT = ['Runtime.evaluate', 'Runtime.callFunctionOn'];
+
+// The agent's new tabs land, through a redirect, on a page the task may not read.
+const newTabsLandRefused = (title) => ({ chrome }, method, params) => {
+  const id = params?.[0]?.tabId;
+  if (method !== 'chrome.debugger.attach' || id < 900)
+    return;
+  chrome.onNextNavigate(id, ({ url, loaderId }) => {
+    chrome.tab(id).title = title;
+    chrome.navigation(id, [url, `${FORBIDDEN}/landing`], { loaderId });
+  });
+};
+
+test('a page tool acts in the tab it was judged for: if that tab closes while the host answers, the call stops there', async () => {
+  const isStart = (url) => url === `${ALLOWED}/start`;
+  const stopped = (result, what) => {
+    assert.equal(result.isError, true, what);
+    assert.match(textOf(result), /^### Error\nBROWSER_TAB_CHANGED: .*Nothing was done/, what);
+  };
+  // The control: nothing closes, and the key reaches the tab that was judged.
+  const calm = await withNeighbour(`${ALLOWED}/neighbour`);
+  let mark = calm.chrome.commands.length;
+  const pressed = await calm.call('browser_press_key', { key: 'a' });
+  assert.equal(pressed.isError, undefined, textOf(pressed));
+  assert.deepEqual(reachedSince(calm, mark, KEY), [TAB]);
+
+  // A key, while the host answers about the page. The neighbour is one nobody asked about, and the host would refuse it.
+  const framedForKey = [];
+  const closedForKey = await withNeighbour(`${FORBIDDEN}/private`, { prepare: async (page) => framedForKey.push(page.url()) });
+  whileAsked(closedForKey.core.guard, 'decideTarget', isStart, () => closeTab(closedForKey, TAB));
+  mark = closedForKey.chrome.commands.length;
+  stopped(await closedForKey.call('browser_press_key', { key: 'a' }), 'a key');
+  assert.deepEqual(reachedSince(closedForKey, mark, KEY), [], 'the key reached no tab');
+  assert.deepEqual(framedForKey, [`${ALLOWED}/start`], 'no frame of the neighbour was captured');
+  // The next call is judged for the tab current now, as any call is.
+  assert.match(textOf(await closedForKey.call('browser_press_key', { key: 'a' })), /Nothing was done: this task may not read https:\/\/forbidden\.example\/private/);
+  assert.deepEqual(reachedSince(closedForKey, mark, KEY), []);
+
+  // A script, while the host answers about running it there.
+  const closedForScript = await withNeighbour(`${FORBIDDEN}/private`);
+  whileAsked(closedForScript.core.guard, 'checkEvaluate', isStart, () => closeTab(closedForScript, TAB));
+  mark = closedForScript.chrome.commands.length;
+  stopped(await closedForScript.call('browser_evaluate', { function: '() => document.title' }), 'a script');
+  assert.deepEqual(reachedSince(closedForScript, mark, ...SCRIPT), [], 'the script ran in no tab');
+
+  // A key, during the frame captured before input, which can take seconds. A closed tab gives no frame, and that failure's
+  // advice is to retry, which would act in the neighbour: the agent is told what really happened.
+  const framed = [];
+  const closedForFrame = await withNeighbour(`${ALLOWED}/neighbour`, {
+    prepare: async (page, world) => {
+      framed.push(page.url());
+      if (framed.length === 1) {
+        await closeTab(world, TAB);
+        throw new Error('BROWSER_INPUT_NOT_READY: no frame');
+      }
+    },
+  });
+  mark = closedForFrame.chrome.commands.length;
+  stopped(await closedForFrame.call('browser_press_key', { key: 'a' }), 'a key after its frame');
+  assert.deepEqual(reachedSince(closedForFrame, mark, KEY), []);
+  assert.deepEqual(framed, [`${ALLOWED}/start`]);
+  // A neighbour the host allows: the next call acts there. The tool is not lost, and nothing is locked.
+  const next = await closedForFrame.call('browser_press_key', { key: 'a' });
+  assert.equal(next.isError, undefined, textOf(next));
+  assert.deepEqual(reachedSince(closedForFrame, mark, KEY), [8]);
+  // The control: a frame that fails with the tab still there is still that failure, and no key goes out.
+  const noFrame = await withNeighbour(`${ALLOWED}/neighbour`, { prepare: async () => { throw new Error('BROWSER_INPUT_NOT_READY: no frame'); } });
+  mark = noFrame.chrome.commands.length;
+  assert.match(textOf(await noFrame.call('browser_press_key', { key: 'a' })), /^### Error\nBROWSER_INPUT_NOT_READY: no frame/);
+  assert.deepEqual(reachedSince(noFrame, mark, KEY), []);
+
+  // A read, even though the check after the call would withhold it: nothing is read from the neighbour at all.
+  const closedForRead = await withNeighbour(`${FORBIDDEN}/private`);
+  whileAsked(closedForRead.core.guard, 'decideTarget', isStart, () => closeTab(closedForRead, TAB));
+  mark = closedForRead.chrome.commands.length;
+  stopped(await closedForRead.call('browser_snapshot'), 'a read');
+  assert.deepEqual(reachedSince(closedForRead, mark, ...SCRIPT), []);
+
+  // The same stop for another call that selects a tab meanwhile. Only a client without the host's one-call-at-a-time holder can do this.
+  const raced = await withNeighbour(`${FORBIDDEN}/private`);
+  whileAsked(raced.core.guard, 'decideTarget', isStart, () => raced.call('browser_tabs', { action: 'select', index: 1 }));
+  mark = raced.chrome.commands.length;
+  stopped(await raced.call('browser_press_key', { key: 'a' }), 'a concurrent select');
+  assert.deepEqual(reachedSince(raced, mark, KEY), []);
+});
+
+test('navigation stays in its chosen tab, while leaving a refused page and explicit tab management remain available', async () => {
+  // Permission to leave a page does not retarget an already requested navigation when that tab closes.
+  const racing = await withNeighbour(`${ALLOWED}/neighbour`);
+  whileAsked(racing.core.guard, 'decideTarget', (url) => url === `${ALLOWED}/next`, () => closeTab(racing, TAB));
+  racing.chrome.onNextNavigate(8, ({ url, loaderId }) => racing.chrome.navigation(8, [url], { loaderId }));
+  let mark = racing.chrome.commands.length;
+  const moved = await racing.call('browser_navigate', { url: `${ALLOWED}/next` });
+  assert.equal(moved.isError, true, textOf(moved));
+  assert.match(textOf(moved), /BROWSER_TAB_CHANGED/);
+  assert.deepEqual(reachedSince(racing, mark, 'Page.navigate'), []);
+  // A stable tab on a refused page can still navigate away; its old address is not a reason to trap it.
+  const escaping = await connected({ tabs: [{ id: TAB, url: `${FORBIDDEN}/old`, title: 'Old', windowId: 1, index: 0, active: true }] });
+  escaping.chrome.onNextNavigate(TAB, ({ url, loaderId }) => escaping.chrome.navigation(TAB, [url], { loaderId }));
+  mark = escaping.chrome.commands.length;
+  const escaped = await escaping.call('browser_navigate', { url: `${ALLOWED}/escaped` });
+  assert.equal(escaped.isError, undefined, textOf(escaped));
+  assert.deepEqual(reachedSince(escaping, mark, 'Page.navigate'), [TAB]);
+  // A page tool acts where the agent went.
+  const { chrome, call } = await withNeighbour(`${ALLOWED}/neighbour`);
+  await call('browser_tabs', { action: 'select', index: 1 });
+  mark = chrome.commands.length;
+  assert.equal((await call('browser_press_key', { key: 'a' })).isError, undefined);
+  assert.deepEqual(reachedSince({ chrome }, mark, KEY), [8]);
+  await call('browser_tabs', { action: 'new' });
+  const created = chrome.commands.filter((command) => command.method === 'chrome.debugger.attach').at(-1).params[0].tabId;
+  mark = chrome.commands.length;
+  assert.equal((await call('browser_press_key', { key: 'b' })).isError, undefined);
+  assert.deepEqual(reachedSince({ chrome }, mark, KEY), [created]);
+  // Closing its own tab on a page the task may not read is the way out the refusal itself offers: that result is returned.
+  const leaving = await withNeighbour(`${ALLOWED}/neighbour`, { onCommand: newTabsLandRefused('LEFT-TITLE') });
+  assert.equal((await leaving.call('browser_tabs', { action: 'new', url: `${ALLOWED}/go` })).isError, true, 'withheld while it is current');
+  const closed = await leaving.call('browser_tabs', { action: 'close', index: 2 });
+  assert.equal(closed.isError, undefined, textOf(closed));
+  assert.doesNotMatch(textOf(closed), /LEFT-TITLE/);
+});
+
+test('a result is judged with the tabs it came from, also those that closed before it was returned', async () => {
+  // A listed tab the task may not read closes once its title is in the result, while the host answers about the current page.
+  const listing = await withNeighbour(`${FORBIDDEN}/private`);
+  whileAsked(listing.core.guard, 'decideTarget', (url) => url === `${ALLOWED}/start`, () => closeTab(listing, 8));
+  const listed = await listing.call('browser_tabs', { action: 'list' });
+  assert.equal(listing.core.connection.backend()._context.tabs().length, 1, 'it closed during the call');
+  assert.equal(listed.isError, true);
+  assert.doesNotMatch(textOf(listed), /NEIGHBOUR/);
+  assert.match(textOf(listed), /this task may not read https:\/\/forbidden\.example\/private/);
+  // The control: one the task may read is returned as usual, closed or not.
+  const allowed = await withNeighbour(`${ALLOWED}/neighbour`);
+  whileAsked(allowed.core.guard, 'decideTarget', (url) => url === `${ALLOWED}/start`, () => closeTab(allowed, 8));
+  const fine = await allowed.call('browser_tabs', { action: 'list' });
+  assert.equal(fine.isError, undefined, textOf(fine));
+  assert.match(textOf(fine), /NEIGHBOUR/);
+
+  // The former neighbour becomes current while the host judges A: its rendered title still needs its own check.
+  for (const [url, refused] of [[`${FORBIDDEN}/private`, true], [`${ALLOWED}/neighbour`, false]]) {
+    const shifted = await withNeighbour(url);
+    whileAsked(shifted.core.guard, 'decideTarget', (asked) => asked === `${ALLOWED}/start`, () => closeTab(shifted, TAB));
+    const result = await shifted.call('browser_tabs', { action: 'list' });
+    assert.equal(shifted.core.connection.backend()._context.tabs().length, 1, 'A closed while its post-check awaited the host');
+    assert.equal(result.isError, refused ? true : undefined, textOf(result));
+    if (refused) assert.doesNotMatch(textOf(result), /NEIGHBOUR/);
+    else assert.match(textOf(result), /NEIGHBOUR/);
+  }
+
+  // Closed before the call, it has no part in it, even if another tab now has the same title.
+  const earlier = await withNeighbour(`${FORBIDDEN}/private`);
+  assert.equal((await earlier.call('browser_tabs', { action: 'list' })).isError, true, 'listed while it was open');
+  await closeTab(earlier, 8);
+  earlier.chrome.tab(TAB).title = 'NEIGHBOUR';
+  const later = await earlier.call('browser_tabs', { action: 'list' });
+  assert.equal(later.isError, undefined, textOf(later));
+  assert.match(textOf(later), /NEIGHBOUR/);
+
+  // One both opened and closed within the call: the agent's new tab lands on such a page and closes once upstream has listed it.
+  const fleeting = await withNeighbour(`${ALLOWED}/neighbour`, { onCommand: newTabsLandRefused('FLEETING-TITLE') });
+  const { Tab } = runtime.bundle.tools;
+  const headerOfTab = Tab.prototype.headerSnapshot;
+  Tab.prototype.headerSnapshot = async function() {
+    const header = await headerOfTab.call(this);
+    if (this.page.url() === `${FORBIDDEN}/landing`)
+      await closeTab(fleeting, fleeting.chrome.commands.filter((command) => command.method === 'chrome.debugger.attach').at(-1).params[0].tabId);
+    return header;
+  };
+  let opened;
+  try {
+    opened = await fleeting.call('browser_tabs', { action: 'new', url: `${ALLOWED}/go` });
+  } finally {
+    Tab.prototype.headerSnapshot = headerOfTab;
+  }
+  assert.equal(fleeting.core.connection.backend()._context.tabs().length, 2, 'it closed during the call');
+  assert.equal(opened.isError, true, textOf(opened));
+  assert.doesNotMatch(textOf(opened), /FLEETING-TITLE/);
+  assert.match(textOf(opened), /this task may not read https:\/\/forbidden\.example\/landing/);
+
+  // The tab a read worked in: its document changes while the host answers, and it closes once upstream has read it. Upstream reads
+  // the tabs' headers last and in order (Response._build), so this tab's content and header are in hand when the other header starts.
+  const world = await withNeighbour(`${ALLOWED}/neighbour`);
+  const [worked, other] = world.core.connection.backend()._context.tabs();
+  whileAsked(world.core.guard, 'decideTarget', (url) => url === `${ALLOWED}/start`, async () => {
+    world.chrome.tab(TAB).title = '';
+    world.chrome.navigation(TAB, [`${ALLOWED}/from`, `${FORBIDDEN}/bounce`, `${ALLOWED}/landing`]);
+    await world.settle();
+  });
+  const workedHeader = worked.headerSnapshot.bind(worked);
+  const otherHeader = other.headerSnapshot.bind(other);
+  let headerRead;
+  const read = new Promise((resolve) => {
+    headerRead = resolve;
+  });
+  worked.headerSnapshot = async () => {
+    const header = await workedHeader();
+    headerRead();
+    return header;
+  };
+  other.headerSnapshot = async () => {
+    await read;
+    await closeTab(world, TAB);
+    return await otherHeader();
+  };
+  const snapshot = await world.call('browser_snapshot');
+  assert.equal(world.core.connection.backend()._context.currentTab(), other, 'another tab is current when the check runs');
+  assert.equal(snapshot.isError, true, textOf(snapshot));
+  assert.doesNotMatch(textOf(snapshot), /page content/);
+  assert.match(textOf(snapshot), /The call ran, but its output is withheld: this task may not read https:\/\/forbidden\.example\/bounce/);
+});
+
+test('a navigation result is judged by its destination even when that tab closes before the result returns', async () => {
+  const world = await withNeighbour(`${ALLOWED}/neighbour`);
+  const [worked, other] = world.core.connection.backend()._context.tabs();
+  world.chrome.onNextNavigate(TAB, ({ url, loaderId }) => {
+    world.chrome.tab(TAB).title = '';
+    world.chrome.navigation(TAB, [url, `${FORBIDDEN}/bounce`, `${ALLOWED}/landing`], { loaderId });
+  });
+  const header = worked.headerSnapshot.bind(worked);
+  const neighbourHeader = other.headerSnapshot.bind(other);
+  let destinationRead;
+  const read = new Promise((resolve) => { destinationRead = resolve; });
+  worked.headerSnapshot = async () => {
+    const result = await header();
+    destinationRead();
+    return result;
+  };
+  other.headerSnapshot = async () => {
+    await read;
+    await closeTab(world, TAB);
+    return await neighbourHeader();
+  };
+  const result = await world.call('browser_navigate', { url: `${ALLOWED}/next` });
+  assert.equal(world.core.connection.backend()._context.currentTab(), other);
+  assert.equal(result.isError, true, textOf(result));
+  assert.match(textOf(result), /The call ran, but its output is withheld: this task may not read https:\/\/forbidden\.example\/bounce/);
+});
+
+// What the connection keeps of a page's documents. A scripted history is what Chrome reports, in its order: each
+// document commits, then makes its records, named for it ("d7#2" is the second record of the document at /d7).
+// `via` puts a refused address among a document's redirect hops.
+function play(chrome, documents) {
+  for (const { name, via, console: logs = 0, errors = 0 } of documents) {
+    chrome.navigation(TAB, via ? [`${ALLOWED}/from`, `${FORBIDDEN}/${via}`, `${ALLOWED}/${name}`] : [`${ALLOWED}/${name}`]);
+    for (let n = 1; n <= logs; n += 1)
+      chrome.consoleCall(TAB, `${name}#${n}`);
+    for (let n = 1; n <= errors; n += 1)
+      chrome.pageError(TAB, `${name}#${n}`);
+  }
+}
+const series = (from, to, records = {}) => Array.from({ length: to - from + 1 }, (_, index) => ({ name: `d${from + index}`, ...records }));
+const namesOf = (documents) => documents.map(({ name }) => name);
+const list = (...names) => names.flat().join(' ');
+const shortName = (url) => url.slice(ALLOWED.length + 1);
+
+// The documents the connection keeps for the page, and what Playwright still holds with the document each record is
+// attributed to, asked as the server asks (by its place from the newest). However much was forgotten, every held record
+// keeps the document that made it, and the document shown is kept.
+async function bookkeeping({ core, page, settle }) {
+  await settle();
+  const state = core.connection._provenance(page());
+  const held = {
+    console: (await page().consoleMessages({ filter: 'all' })).map((message) => message.text()),
+    errors: (await page().pageErrors({ filter: 'all' })).map((error) => error.message),
+  };
+  for (const [kind, records] of Object.entries(held)) {
+    const attributed = records.map((_, index) => shortName(core.connection.recordDocument(page(), kind, records.length - 1 - index).own[0]));
+    assert.equal(list(attributed), list(records.map((record) => record.split('#')[0])), `${kind}: each held record is attributed to the document that made it`);
+  }
+  assert.equal(state.documents.at(-1), state.document, 'the document shown is kept');
+  return { documents: state.documents.map((document) => shortName(document.own[0])), held };
+}
+
+test('history: a document leaves once Playwright holds none of its records, whichever kind they were', async () => {
+  // One record of one kind per navigation, 300 navigations: Playwright holds the last 200. Their documents stay, and the
+  // first (it answers for records from before) and the one shown; the other kind never moves.
+  for (const kind of ['console', 'errors']) {
+    const world = await connected();
+    play(world.chrome, [...series(1, 300, { [kind]: 1 }), { name: 'end' }]);
+    const { documents, held } = await bookkeeping(world);
+    assert.equal(held[kind].length, 200, `Playwright holds 200 ${kind} records`);
+    assert.equal(list(documents), list('start', namesOf(series(101, 300)), 'end'), `${kind} only`);
+  }
+  // No records at all.
+  const quiet = await connected();
+  play(quiet.chrome, series(1, 30));
+  assert.equal(list((await bookkeeping(quiet)).documents), 'start d30');
+  // Both kinds at the same pace: the records from before are past as well, so the first goes too.
+  const both = await connected();
+  play(both.chrome, [...series(1, 300, { console: 1, errors: 1 }), { name: 'end' }]);
+  assert.equal(list((await bookkeeping(both)).documents), list(namesOf(series(101, 300)), 'end'));
+});
+
+test('history: a document is kept while Playwright can still hold its record: 200 records, and not one more', async () => {
+  const world = await connected();
+  // `a` made the oldest record. With 199 after it Playwright holds all 200; with one more it drops the oldest (twenty at
+  // a time, so it may hold fewer than 200, never more).
+  play(world.chrome, [{ name: 'a', console: 1 }, { name: 'f', console: 199 }, { name: 'g' }]);
+  let account = await bookkeeping(world);
+  assert.equal(account.held.console[0], 'a#1', 'Playwright holds the oldest of 200');
+  assert.equal(list(account.documents), 'start a f g');
+  world.chrome.consoleCall(TAB, 'g#1');
+  play(world.chrome, [{ name: 'h' }]);
+  account = await bookkeeping(world);
+  assert.ok(!account.held.console.includes('a#1'), 'Playwright dropped the oldest of 201');
+  assert.equal(list(account.documents), 'start f g h');
+});
+
+test('history: a document stays while either kind of its records is held, however far the other kind has run on', async () => {
+  const world = await connected();
+  const { chrome, call } = world;
+  // f1 made one console message and f2 one page error, each through a refused hop. Then 250 page errors and nothing else:
+  // f2's error is no longer held but f1's message is, and a quiet kind keeps its own documents, not those of the other.
+  play(chrome, [{ name: 'f1', via: 'bounce1', console: 1 }, { name: 'f2', via: 'bounce2', errors: 1 }, ...series(1, 10, { errors: 25 }), { name: 'x1' }]);
+  let account = await bookkeeping(world);
+  assert.equal(list(account.documents), list('start', 'f1', namesOf(series(3, 10)), 'x1'));
+  let read = textOf(await call('browser_console_messages', { all: true }));
+  assert.doesNotMatch(read, /f1#1/, 'the message of the document reached through a refused hop stays withheld');
+  assert.match(read, /Withheld 1 record here: this task may not read https:\/\/forbidden\.example\/bounce1/);
+  assert.match(read, new RegExp(`Total messages: ${account.held.errors.length} `), 'every other record held is returned');
+  // Now 250 console messages: f1's is not held either, and the page errors, quiet from here, keep their documents.
+  play(chrome, [...series(11, 20, { console: 25 }), { name: 'x2' }]);
+  account = await bookkeeping(world);
+  assert.equal(list(account.documents), list(namesOf(series(3, 10)), namesOf(series(13, 20)), 'x2'));
+  read = textOf(await call('browser_console_messages', { all: true }));
+  assert.doesNotMatch(read, /Withheld/);
+  assert.match(read, new RegExp(`Total messages: ${account.held.console.length + account.held.errors.length} `), 'nothing allowed was dropped');
+});
+
+test('history: the first document answers for records from before the connection counted, until both kinds are past them', async () => {
+  const world = await connected();
+  const { core, chrome, page } = world;
+  // The stand-in cannot make Playwright hold a record this connection never counted, so one is asked about as the server
+  // would ask: its place from the newest is beyond everything counted.
+  const fromBefore = (kind, fromNewest) => shortName(core.connection.recordDocument(page(), kind, fromNewest).own[0]);
+  // 210 console messages and no page error: the console records from before are past, a page error from before is not.
+  play(chrome, [{ name: 'a', console: 210 }, { name: 'b' }]);
+  let account = await bookkeeping(world);
+  assert.equal(list(account.documents), 'start a b');
+  assert.equal(fromBefore('errors', 0), 'start');
+  // 199 page errors counted: the newest one from before could still be held (it and the 199 make 200). One more, and none.
+  play(chrome, [{ name: 'c', errors: 199 }, { name: 'd' }]);
+  account = await bookkeeping(world);
+  assert.equal(list(account.documents), 'start a c d');
+  assert.equal(fromBefore('errors', 199), 'start');
+  chrome.pageError(TAB, 'd#1');
+  play(chrome, [{ name: 'e' }]);
+  account = await bookkeeping(world);
+  assert.equal(list(account.documents), 'a c d e');
+});
+
+test('history: a request from before the connection was watching stays the first document\'s, also after that document is forgotten', async () => {
+  // The page makes it as Chrome starts reporting the tab's network, while Playwright is still connecting: Playwright keeps it,
+  // and this connection, which starts watching once Playwright has connected, never hears of it.
+  const seenBeforeWatching = async (first, url, body) => {
+    let made = false;
+    const world = await connected({
+      tabs: [{ id: TAB, url: first, title: 'First', windowId: 1, index: 0, active: true }],
+      onCommand: ({ chrome }, method, params) => {
+        if (made || method !== 'chrome.debugger.sendCommand' || params?.[1] !== 'Network.enable')
+          return;
+        made = true;
+        const { requestId } = chrome.requestChain(TAB, [url]);
+        chrome.respond(TAB, requestId, url, { mimeType: 'text/plain', headers: { 'content-type': 'text/plain' }, body, type: 'Fetch' });
+      },
+    });
+    await world.settle();
+    const entry = (await world.core.connection.backend()._context.currentTab().requests(true)).find(({ request }) => request.url() === url);
+    assert.ok(entry, 'Playwright keeps it');
+    assert.equal(world.core.connection._requests.has(entry.request), false, 'the connection did not see it made');
+    return { world, index: entry.index };
+  };
+  const records = async ({ call }, index) => ({
+    list: textOf(await call('browser_network_requests', { all: true, static: true })),
+    one: await call('browser_network_request', { index, part: 'response-body' }),
+  });
+
+  // The first document may not be read. What it fetched from an allowed address stays withheld when later documents, which may be
+  // read, have taken its place: 200 of both kinds of record retire a document, and say nothing of the requests Playwright keeps.
+  const made = `${ALLOWED}/made-by-first-document`;
+  const forbidden = await seenBeforeWatching(`${FORBIDDEN}/first`, made, 'BODY-OF-THE-FORBIDDEN-DOCUMENT');
+  for (const history of [[{ name: 'second' }], [{ name: 'third', console: 200, errors: 200 }, { name: 'fourth' }]]) {
+    play(forbidden.world.chrome, history);
+    await forbidden.world.settle();
+    const { list: listed, one } = await records(forbidden.world, forbidden.index);
+    assert.ok(!listed.includes(made), `${history[0].name}: ${listed}`);
+    assert.match(listed, /Withheld 1 record here: this task may not read https:\/\/forbidden\.example\/first/);
+    assert.equal(one.isError, true, history[0].name);
+    assert.doesNotMatch(textOf(one), /BODY-OF-THE-FORBIDDEN-DOCUMENT/);
+  }
+  assert.equal(list((await bookkeeping(forbidden.world)).documents), 'third fourth', 'the first document was forgotten');
+
+  // The first document may be read, and the one after it may not. It keeps its allowed history, with no authority of the later one.
+  const fetched = `${ALLOWED}/fetched-by-first-document`;
+  const allowed = await seenBeforeWatching(`${ALLOWED}/first`, fetched, 'BODY-OF-THE-ALLOWED-DOCUMENT');
+  play(allowed.world.chrome, [{ name: 'second', via: 'bounce', console: 200, errors: 200 }, { name: 'third' }]);
+  assert.equal(list((await bookkeeping(allowed.world)).documents), 'second third', 'the first document was forgotten');
+  const { list: listed, one } = await records(allowed.world, allowed.index);
+  assert.ok(listed.includes(fetched), listed);
+  assert.equal(one.isError, undefined, textOf(one));
+  assert.match(textOf(one), /BODY-OF-THE-ALLOWED-DOCUMENT/);
+});
+
+test('decisions: one question per address in a call, asked again by the next call, so a changed answer counts', async () => {
+  let refuse = false;
+  const { chrome, call, settle, questions } = await connected({
+    decide: (message) => {
+      if ('armed' in message)
+        return { armed: true };
+      return { block: refuse && message.url === `${ALLOWED}/start` ? 'REFUSED_NOW: policy changed' : '' };
+    },
+  });
+  chrome.consoleCall(TAB, 'FIRST-DOC');
+  chrome.navigation(TAB, [`${ALLOWED}/second`]);
+  await settle();
+  const before = questions().length;
+  const first = await call('browser_console_messages', { all: true });
+  assert.match(textOf(first), /FIRST-DOC/);
+  const asked = questions().slice(before);
+  assert.deepEqual([...asked].sort(), [`${ALLOWED}/second`, `${ALLOWED}/start`].sort(), 'each address exactly once, across before, record and after checks');
+  refuse = true;
+  const second = await call('browser_console_messages', { all: true });
+  assert.doesNotMatch(textOf(second), /FIRST-DOC/, 'no answer from the earlier call was kept');
+  assert.match(textOf(second), /REFUSED_NOW/);
+});
+
+test('a document with too many addresses to check has its console records refused, not guessed at', async () => {
+  const { chrome, call, settle, core, page } = await connected();
+  chrome.consoleCall(TAB, 'BEFORE-THE-FLOOD');
+  await settle();
+  // The bound itself, reached through the real frame event: one chain past it is enough here.
+  const state = core.connection._provenance(page());
+  for (let index = 0; state.document.addresses.size < MAX_DOCUMENT_ADDRESSES; index += 1)
+    state.document.addresses.add(`${ALLOWED}/filler-${index}`);
+  chrome.attachFrame(TAB, 'FRAME-1');
+  chrome.navigation(TAB, [`${ALLOWED}/a`, `${ALLOWED}/b`], { frameId: 'FRAME-1', parentId: `TARGET-${TAB}` });
+  await settle();
+  assert.equal(state.document.truncated, true);
+  const result = textOf(await call('browser_console_messages'));
+  assert.doesNotMatch(result, /BEFORE-THE-FLOOD/);
+  assert.match(result, /BROWSER_RECORD_ORIGIN_UNKNOWN/);
+});
+
+test('bodies: an image arrives as an image, other binary is described, text stays text, and no bare path remains', async () => {
+  const { chrome, call, settle, core } = await connected();
+  const bodies = [
+    { path: '/picture.png', headers: { 'content-type': 'image/png' }, body: PNG },
+    { path: '/mislabelled', headers: { 'content-type': 'application/octet-stream' }, body: PNG },
+    { path: '/report.pdf', headers: { 'content-type': 'application/pdf; version=1' }, body: Buffer.from('%PDF-1.7 binary') },
+    { path: '/not-really.png', headers: { 'content-type': 'image/png' }, body: Buffer.from('not an image') },
+    { path: '/plain.txt', headers: { 'content-type': 'text/plain' }, body: Buffer.from('READABLE TEXT BODY') },
+    { path: '/looks-like-a-path.txt', headers: { 'content-type': 'text/plain' }, body: Buffer.from('output/response-page-text.png') },
+  ];
+  for (const { path: where, headers, body } of bodies) {
+    const { requestId } = chrome.requestChain(TAB, [`${ALLOWED}${where}`]);
+    chrome.respond(TAB, requestId, `${ALLOWED}${where}`, { headers, mimeType: headers['content-type'].split(';')[0], body, type: 'Fetch' });
+  }
+  await settle();
+  const results = [];
+  for (let index = 1; index <= bodies.length; index += 1)
+    results.push(await call('browser_network_request', { index, part: 'response-body' }));
+  const [picture, mislabelled, pdf, notReally, plain, looksLike] = results;
+  for (const [what, result] of [['picture', picture], ['mislabelled', mislabelled]]) {
+    assert.equal(result.isError, undefined, what);
+    const image = result.content.find((part) => part.type === 'image');
+    assert.deepEqual([image?.mimeType, image?.data], ['image/png', PNG.toString('base64')], `${what}: exact bytes in the protocol's image part`);
+    assert.match(textOf(result), /- Response body: the image is attached to this result/, what);
+  }
+  assert.match(textOf(pdf), /- Response body: 15 bytes \(application\/pdf\), not text or a supported image\./);
+  assert.match(textOf(notReally), /- Response body: 12 bytes \(image\/png\), not text or a supported image\./);
+  assert.ok(pdf.content.every((part) => part.type === 'text'));
+  for (const [what, result] of [['picture', picture], ['pdf', pdf], ['notReally', notReally]])
+    assert.doesNotMatch(textOf(result), /output\/response-/, `${what}: no bare private path`);
+  assert.equal(textOf(plain), '### Result\nREADABLE TEXT BODY');
+  assert.equal(textOf(looksLike), '### Result\noutput/response-page-text.png', 'a text body that looks like a path is page text');
+  const saved = fs.readdirSync(core.connection.outputDir());
+  assert.ok(saved.some((name) => name.startsWith('response-') && name.endsWith('.png')), 'the raw originals stay where upstream put them');
+});
+
+test('saved bodies: formats by content, and an image too large to return is described', () => {
+  assert.equal(imageTypeOf(PNG), 'png');
+  assert.equal(imageTypeOf(Buffer.from([0xff, 0xd8, 0xff, 0xe0])), 'jpeg');
+  assert.equal(imageTypeOf(Buffer.from('GIF89a..')), 'gif');
+  assert.equal(imageTypeOf(Buffer.from('RIFF....WEBPVP8 ')), 'webp');
+  for (const other of [Buffer.alloc(0), Buffer.from('<svg/>'), Buffer.from('%PDF'), PNG.subarray(0, 4)])
+    assert.equal(imageTypeOf(other), '');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cb-body-'));
+  cleanups.push(async () => fs.rmSync(dir, { recursive: true, force: true }));
+  const big = path.join(dir, 'big.png');
+  fs.writeFileSync(big, Buffer.concat([PNG, Buffer.alloc(MAX_RESPONSE_IMAGE_BYTES)]));
+  const described = describeSavedBody(big, 'image/png');
+  assert.equal(described.image, undefined);
+  assert.match(described.text, /larger than the 20971520 bytes returned as an image/);
+});
+
+test('file lines: only generated lines naming a file really in the folder change, and the folder is not listed', (t) => {
+  const session = fs.mkdtempSync(path.join(os.tmpdir(), 'cb-output-'));
+  cleanups.push(async () => fs.rmSync(session, { recursive: true, force: true }));
+  const dir = path.join(session, 'output');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'page-1.png'), 'x');
+  fs.writeFileSync(path.join(dir, 'console-1.log'), 'x');
+  fs.writeFileSync(path.join(dir, 'dl.bin'), 'x');
+  fs.writeFileSync(path.join(session, 'outside-secret.png'), 'x');
+  const listing = t.mock.method(fs, 'readdirSync');
+  const lookups = t.mock.method(fs, 'existsSync');
+  const rewritten = (lines, extra = []) => describePrivateFiles({ content: [{ type: 'text', text: lines.join('\n') }, ...extra] }, dir).content[0].text.split('\n');
+  const image = [{ type: 'image', data: 'AA==', mimeType: 'image/png' }];
+  assert.deepEqual(rewritten(['### Result', '- [Screenshot of viewport](output/page-1.png)'], image), ['### Result', '- Screenshot of viewport: the image is attached to this result']);
+  assert.deepEqual(rewritten(['### Result', '- [Report](output/page-1.png)']), ['### Result', '- Report: kept in this server\'s private folder, which cannot be opened from here']);
+  assert.deepEqual(rewritten(['### Events', '- New console entries: output/console-1.log#L3', '- Downloaded file a.zip to "output/dl.bin"']), ['### Events', '- New console entries: read them with browser_console_messages', '- Downloaded file a.zip: kept in this server\'s private folder, which cannot be opened from here']);
+  assert.deepEqual(rewritten(['### Ran Playwright code', '// Screenshot viewport and save it as output/page-1.png', "  path: 'output/page-1.png',"]), ['### Ran Playwright code', '// Screenshot viewport and save it as <server-private file>', "  path: '<server-private file>',"]);
+  // Left as they are: a file not in the folder, a path out of it, and page text outside generated sections.
+  for (const lines of [
+    ['### Result', '- [Report](output/gone.png)'],
+    ['### Result', '- [Report](output/../outside-secret.png)'],
+    ['### Result', '- [Report](output/..)'],
+    ['### Snapshot', '- [Report](output/page-1.png)'],
+  ])
+    assert.deepEqual(rewritten(lines), lines);
+  assert.equal(listing.mock.callCount(), 0, 'the folder is never enumerated');
+  const looked = lookups.mock.calls.length;
+  // A long result with no generated file line asks the filesystem nothing.
+  rewritten(['### Result', ...Array.from({ length: 2000 }, (_, index) => `line ${index} output/page-1.png`)]);
+  assert.equal(lookups.mock.calls.length, looked, 'work follows references in the result');
+  assert.deepEqual(describePrivateFiles({ content: [{ type: 'text', text: 'x' }] }, ''), { content: [{ type: 'text', text: 'x' }] });
+});
+
+test('the tools stay offered, and arguments the server does not take are refused before anything happens', async () => {
+  const { chrome, call, core } = await connected();
+  const { tools } = await core.listTools();
+  assert.equal(tools.length, 25);
+  for (const name of ['browser_console_messages', 'browser_network_requests', 'browser_network_request', 'browser_take_screenshot'])
+    assert.ok(tools.some((tool) => tool.name === name), `${name} is offered`);
+  assert.ok(tools.every((tool) => !tool.inputSchema.properties?.filename), 'no tool advertises a filename');
+  assert.ok(tools.every((tool) => !tool.inputSchema.properties?._meta), 'no tool advertises _meta');
+  // Refusing an argument never takes an advertised one.
+  for (const tool of tools) {
+    for (const property of Object.keys(tool.inputSchema.properties ?? {}))
+      assert.equal(argumentRefusal(tool.name, { [property]: 'x' }), '', `${tool.name} still takes ${property}`);
+  }
+  const pageCalls = chrome.cdp('Runtime.callFunctionOn').length;
+  for (const [name, args] of [
+    ['browser_snapshot', { filename: 'x.md' }], ['browser_take_screenshot', { filename: 'x.png' }], ['browser_tabs', { action: 'new', isolatedContext: 'other' }],
+    // Not advertised, but upstream reads these from the raw arguments: json, raw and cwd change how a result is formatted.
+    ['browser_snapshot', { _meta: { raw: true } }], ['browser_take_screenshot', { _meta: { cwd: '/' } }], ['browser_tabs', { action: 'list', _meta: { json: true } }],
+  ]) {
+    const result = await call(name, args);
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /^### Error\nBROWSER_ARGUMENT_REFUSED/, name);
+  }
+  assert.equal(chrome.cdp('Runtime.callFunctionOn').length, pageCalls);
+  assert.equal(chrome.commands.filter((command) => command.method === 'chrome.tabs.create').length, 0);
+});
+
+test('navigation is bounded under the host\'s default tool timeout, and upstream\'s other timeouts stay', async () => {
+  assert.ok(NAVIGATION_TIMEOUT_MS + 5000 < 60_000, 'the wait for "load" included, with room for the guard');
+  const config = await upstreamConfig(runtime.bundle.tools);
+  assert.equal(config.timeouts.navigation, NAVIGATION_TIMEOUT_MS);
+  assert.equal(config.timeouts.action, 5000);
+  const { core } = await connected();
+  assert.equal(core.connection.backend()._context.currentTab().navigationTimeoutOptions.timeout, NAVIGATION_TIMEOUT_MS, 'the tab uses it');
+});

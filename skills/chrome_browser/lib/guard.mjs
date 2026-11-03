@@ -1,37 +1,257 @@
-// The host's verdict over its private Unix socket: one JSON line out, one JSON
-// line back, one connection per question. Only {"block": ""} grants.
-
+// Client of the host's private browser-request guard (Ouroboros `browser_policy: true`).
+//
+// Wire contract with ouroboros/mcp_browser_guard.py: one connection per message,
+// one JSON line out, one JSON line back.
+//   arm:      {"armed": true, "token": T}                                   -> {"armed": true}
+//   request:  {"url", "method", "post_data", "resource_type", "body_present", "token"} -> {"block": ""} or {"block": "<reason>"}
+//   evaluate: {"action": "evaluate", "url", "token"}                          -> {"block": ""} or {"block": "<reason>"}
+// A request is allowed only when the answer's block is exactly "", and arming succeeds only
+// when armed is exactly true. Every other outcome fails closed. Neither the token nor a
+// request body is ever logged, echoed in an error or passed to another process.
+//
+// The request message also carries the host's target decision for an address no route sees:
+// a navigation target before it is opened, and a page's address and redirect hops before its
+// content is returned. It is sent as the GET of a document with no body, the same line the
+// route sends for a navigation, so the host answers with the same predicate either way.
 import net from 'node:net';
+import path from 'node:path';
 
-const ANSWER_TIMEOUT_MS = 30000;
+export const GUARD_ENV = 'OUROBOROS_BROWSER_GUARD';
+export const GUARD_TOKEN_ENV = 'OUROBOROS_BROWSER_GUARD_TOKEN';
+// The host issues secrets.token_hex(32) for every browser_policy session.
+const GUARD_TOKEN_FORM = /^[0-9a-f]{64}$/;
+export const GUARD_TIMEOUT_MS = 10_000;
+export const GUARD_MAX_RESPONSE_BYTES = 64 * 1024;
+// The host reads at most this many bytes per line; a larger body is described, not sent.
+export const GUARD_MAX_LINE_BYTES = 32 * 1024 * 1024;
 
-/** Resolves '' for a grant, otherwise the refusal text. Never rejects. */
-export function askGuard(socketPath, facts, timeoutMs = ANSWER_TIMEOUT_MS) {
-  if (!socketPath) return Promise.resolve('BROWSER_REQUEST_GUARD_UNAVAILABLE: the host gave no guard socket');
-  return new Promise((resolve) => {
-    const chunks = [];
+export class GuardError extends Error {
+  constructor(code, message) {
+    super(`${code}: ${message}`);
+    this.name = 'GuardError';
+    this.code = code;
+  }
+}
+
+export function parseGuardEndpoint(value) {
+  const text = String(value ?? '');
+  const tcp = /^127\.0\.0\.1:(\d{1,5})$/.exec(text);
+  if (tcp) {
+    const port = Number(tcp[1]);
+    if (port >= 1 && port <= 65535)
+      return { kind: 'tcp', host: '127.0.0.1', port };
+    throw new GuardError('BROWSER_GUARD_INVALID', 'the guard port is out of range');
+  }
+  if (/^\\\\[.?]\\pipe\\[^\\/:*?"<>|]+$/.test(text))
+    return { kind: 'path', path: text };
+  if (text.startsWith('/') && path.posix.isAbsolute(text) && !text.includes('\0'))
+    return { kind: 'path', path: text };
+  throw new GuardError('BROWSER_GUARD_INVALID', `${GUARD_ENV} must be 127.0.0.1:<port>, an absolute Unix socket path or a \\\\.\\pipe\\ name`);
+}
+
+// Reads the guard settings once and removes them from this process's environment. The host
+// always sets both together; one without the other, or a token not in the host's form, is a
+// host setup fault reported before anything is started. `detail` never contains the token.
+export function takeGuardEnvironment(env = process.env) {
+  const rawEndpoint = env[GUARD_ENV];
+  const rawToken = env[GUARD_TOKEN_ENV];
+  delete env[GUARD_ENV];
+  delete env[GUARD_TOKEN_ENV];
+  const hasToken = rawToken !== undefined && rawToken !== '';
+  if (rawEndpoint === undefined || rawEndpoint === '') {
+    if (hasToken)
+      return { configured: false, problem: 'BROWSER_GUARD_INVALID', detail: `${GUARD_TOKEN_ENV} is set but ${GUARD_ENV} is not` };
+    return { configured: false, problem: 'BROWSER_GUARD_REQUIRED' };
+  }
+  let endpoint;
+  try {
+    endpoint = parseGuardEndpoint(rawEndpoint);
+  } catch (error) {
+    return { configured: false, problem: error.code || 'BROWSER_GUARD_INVALID', detail: `${GUARD_ENV} is not a guard address this server can use` };
+  }
+  if (!hasToken)
+    return { configured: false, problem: 'BROWSER_GUARD_INVALID', detail: `${GUARD_ENV} is set but ${GUARD_TOKEN_ENV} is missing` };
+  if (!GUARD_TOKEN_FORM.test(rawToken))
+    return { configured: false, problem: 'BROWSER_GUARD_INVALID', detail: `${GUARD_TOKEN_ENV} is not the 64 lowercase hex characters the host issues` };
+  return { configured: true, endpoint, token: rawToken };
+}
+
+export function encodeLine(message) {
+  return JSON.stringify(message) + '\n';
+}
+
+// One message, one answer. Rejects on any transport or framing problem.
+export function exchange(endpoint, message, { timeoutMs = GUARD_TIMEOUT_MS, maxResponseBytes = GUARD_MAX_RESPONSE_BYTES } = {}) {
+  const line = typeof message === 'string' ? message : encodeLine(message);
+  return new Promise((resolve, reject) => {
     let settled = false;
-    const finish = (reason) => {
-      if (settled) return;
+    const chunks = [];
+    let received = 0;
+    const socket = endpoint.kind === 'tcp' ? net.connect({ host: endpoint.host, port: endpoint.port }) : net.connect({ path: endpoint.path });
+    const finish = (error, value) => {
+      if (settled)
+        return;
       settled = true;
+      clearTimeout(timer);
       socket.destroy();
-      resolve(reason);
+      if (error)
+        reject(error);
+      else
+        resolve(value);
     };
-    const socket = net.createConnection(socketPath);
-    socket.setTimeout(timeoutMs, () => finish('BROWSER_REQUEST_GUARD_UNAVAILABLE: the host did not answer'));
-    socket.on('connect', () => socket.end(`${JSON.stringify(facts)}\n`));
-    socket.on('data', (chunk) => chunks.push(chunk));
-    socket.on('error', (error) => finish(`BROWSER_REQUEST_GUARD_UNAVAILABLE: guard socket ${error.code || 'error'}`));
-    socket.on('end', () => {
-      let answer = null;
+    const timer = setTimeout(() => finish(new GuardError('BROWSER_GUARD_TIMEOUT', `no answer within ${timeoutMs} ms`)), timeoutMs);
+    socket.setNoDelay?.(true);
+    socket.on('connect', () => socket.write(line));
+    socket.on('data', (chunk) => {
+      const newline = chunk.indexOf(0x0a);
+      const part = newline === -1 ? chunk : chunk.subarray(0, newline);
+      received += part.length;
+      if (received > maxResponseBytes)
+        return finish(new GuardError('BROWSER_GUARD_PROTOCOL', 'the answer is larger than allowed'));
+      chunks.push(part);
+      if (newline === -1)
+        return;
+      let parsed;
       try {
-        answer = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      } catch (error) {
-        answer = null;
+        parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      } catch {
+        return finish(new GuardError('BROWSER_GUARD_PROTOCOL', 'the answer is not one JSON line'));
       }
-      if (answer && answer.block === '') finish('');
-      else if (answer && typeof answer.block === 'string') finish(answer.block);
-      else finish('BROWSER_POLICY_UNAVAILABLE: the host gave no allowance');
+      finish(null, parsed);
     });
+    socket.on('error', (error) => finish(new GuardError('BROWSER_GUARD_UNAVAILABLE', error.code || 'connection failed')));
+    socket.on('close', () => finish(new GuardError('BROWSER_GUARD_UNAVAILABLE', 'the guard closed the connection without an answer')));
   });
+}
+
+function blockOf(answer) {
+  if (answer && typeof answer === 'object' && !Array.isArray(answer) && typeof answer.block === 'string')
+    return answer.block;
+  throw new GuardError('BROWSER_GUARD_PROTOCOL', 'the answer has no block string');
+}
+
+export class BrowserGuard {
+  constructor({ endpoint, token, timeoutMs = GUARD_TIMEOUT_MS, exchangeImpl = exchange }) {
+    this._endpoint = endpoint;
+    this._token = token ?? '';
+    this._timeoutMs = timeoutMs;
+    this._exchange = exchangeImpl;
+    this.counters = { allowed: 0, blocked: 0, failed_closed: 0 };
+    // Browser contexts whose route is installed AND whose arming the host acknowledged.
+    this._armedContexts = new WeakSet();
+  }
+
+  isArmed(context) {
+    return !!context && this._armedContexts.has(context);
+  }
+
+  async _send(message) {
+    return await this._exchange(this._endpoint, message, { timeoutMs: this._timeoutMs });
+  }
+
+  // Call after the context's route is installed. Resolves only on {"armed": true}, and only then
+  // records that context as armed; anything else throws with the host's reason if it gave one.
+  async arm(context) {
+    let answer;
+    try {
+      answer = await this._send({ armed: true, token: this._token });
+    } catch (error) {
+      throw new GuardError('BROWSER_GUARD_NOT_ARMED', error.message);
+    }
+    if (answer && typeof answer === 'object' && answer.armed === true) {
+      if (context)
+        this._armedContexts.add(context);
+      return true;
+    }
+    const reason = answer && typeof answer.block === 'string' && answer.block ? answer.block : 'the guard did not confirm arming';
+    throw new GuardError('BROWSER_GUARD_NOT_ARMED', reason);
+  }
+
+  static requestMessage({ url, method, postData, resourceType, bodyPresent }, token) {
+    const message = { url, method, post_data: postData ?? null, resource_type: resourceType, body_present: !!bodyPresent, token };
+    const line = encodeLine(message);
+    if (Buffer.byteLength(line, 'utf8') <= GUARD_MAX_LINE_BYTES)
+      return line;
+    // Agreed with the host: an oversized body is announced, not sent.
+    return encodeLine({ url, method, post_data: null, resource_type: resourceType, body_present: true, token });
+  }
+
+  // '' allows; any other string is the reason. Never throws: an unanswered request is blocked.
+  async decideRequest(facts) {
+    try {
+      const block = blockOf(await this._send(BrowserGuard.requestMessage(facts, this._token)));
+      if (block === '')
+        this.counters.allowed += 1;
+      else
+        this.counters.blocked += 1;
+      return block;
+    } catch (error) {
+      this.counters.failed_closed += 1;
+      return error.code ? `${error.code}: the request guard did not answer, so the request was blocked` : 'BROWSER_GUARD_UNAVAILABLE';
+    }
+  }
+
+  async checkEvaluate(url) {
+    try {
+      return blockOf(await this._send({ action: 'evaluate', url: String(url ?? ''), token: this._token }));
+    } catch (error) {
+      return `${error.code || 'BROWSER_GUARD_UNAVAILABLE'}: the request guard did not answer, so the script was not run`;
+    }
+  }
+
+  // The host's decision for an address no route will see (see the header). '' allows; an
+  // unanswered question blocks. Not counted or listed with the routed requests: nothing was sent.
+  async decideTarget(url) {
+    try {
+      return blockOf(await this._send(BrowserGuard.requestMessage({ url: String(url ?? ''), method: 'GET', postData: null, resourceType: 'document', bodyPresent: false }, this._token)));
+    } catch (error) {
+      return `${error.code || 'BROWSER_GUARD_UNAVAILABLE'}: the request guard did not answer, so the address was treated as refused`;
+    }
+  }
+
+  // Body facts for the request message, as agreed with the host:
+  //   no body, or an empty one                      -> post_data null,  body_present false
+  //   a complete body that is valid UTF-8           -> post_data exact, body_present true
+  //   a body that exists but cannot be sent as text -> post_data null,  body_present true
+  //     (not valid UTF-8; or the headers announce more bytes than Playwright exposes, as when
+  //     Chrome withholds an upload's file parts; or a body announced by headers but not exposed)
+  // A line over 32 MiB is reduced to null/true by requestMessage.
+  static bodyFacts(buffer, headers = {}) {
+    const declaredLength = Number(headers['content-length']);
+    const chunked = headers['transfer-encoding'] !== undefined;
+    const exposed = buffer ? buffer.length : 0;
+    if (exposed === 0) {
+      if ((Number.isFinite(declaredLength) && declaredLength > 0) || chunked)
+        return { postData: null, bodyPresent: true };
+      return { postData: null, bodyPresent: false };
+    }
+    if (Number.isFinite(declaredLength) && declaredLength > exposed)
+      return { postData: null, bodyPresent: true };
+    try {
+      return { postData: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer), bodyPresent: true };
+    } catch {
+      return { postData: null, bodyPresent: true };
+    }
+  }
+
+  // Playwright route handler: every request Playwright routes for the attached tabs, the owner's included.
+  routeHandler() {
+    return async (route, request) => {
+      let block;
+      try {
+        block = await this.decideRequest({
+          url: request.url(),
+          method: request.method(),
+          resourceType: request.resourceType(),
+          ...BrowserGuard.bodyFacts(request.postDataBuffer(), request.headers()),
+        });
+      } catch {
+        block = 'BROWSER_GUARD_UNAVAILABLE';
+      }
+      if (block)
+        await route.abort('blockedbyclient').catch(() => {});
+      else
+        await route.fallback().catch(() => {});
+    };
+  }
 }

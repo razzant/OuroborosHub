@@ -1,0 +1,24 @@
+{
+  "category": [
+    "messaging"
+  ],
+  "connects": [
+    "GitHub"
+  ],
+  "description": "GitHub places for issues, pull requests, reviews and Discussions, with separate Notifications readers, owner questions in Main and durable reply receipts.",
+  "digest": "5c1af3f64088ebd88cc1e64bbaf1562c47eb3d4b1dd90802c73ef98c61fa3802",
+  "icon": "ui/icon.svg",
+  "install_specs": [
+    "PyJWT[crypto]>=2.13,<3"
+  ],
+  "name": "github",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/github"
+  },
+  "type": "extension",
+  "version": "0.1.4",
+  "withdrawn": null
+}

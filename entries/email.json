@@ -2,8 +2,8 @@
   "category": [
     "messaging"
   ],
-  "description": "Public universal skill for reading and sending email via IMAP and SMTP with secure defaults.",
-  "digest": "b8e4f80860aaf9b3bfbd9c5953dbe7ba88cf7a3eca0c7b79f3ac4c24b7efea56",
+  "description": "Email tools for tasks: read and send mail through IMAP/SMTP. Not a place: to let Ouroboros live in a mailbox use the Email connector (email-presence).",
+  "digest": "0e56122071ec4f9d21c83b9835e7423c7c4cebd8e513d012778c65c49db1e351",
   "name": "email",
   "owner": "razzant",
   "schema_version": 2,
@@ -11,8 +11,9 @@
     "kind": "hosted",
     "path": "skills/email"
   },
+  "title": "Email tools",
   "type": "extension",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "when_to_use": "When the user wants to list unread emails, read email message contents, compose and send emails via standard IMAP/SMTP protocols, or test email server connectivity.",
   "withdrawn": null
 }

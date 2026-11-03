@@ -114,9 +114,11 @@ def _research(query: str, api_key: str, max_results: int = _DEFAULT_MAX_RESULTS)
     citations = []
     for ann in annotations:
         if ann.get("type") == "url_citation":
+            # OpenRouter nests the source under "url_citation"; a flat annotation is read as it is.
+            cite = ann.get("url_citation") if isinstance(ann.get("url_citation"), dict) else ann
             citations.append({
-                "title": ann.get("title", ""),
-                "url": ann.get("url", ""),
+                "title": cite.get("title", ""),
+                "url": cite.get("url", ""),
             })
 
     # Usage info

@@ -124,7 +124,8 @@ def test_new_only_intake_does_not_disable_historical_mail_tools(rig):
     box.add(2, "<new>", arrived=clock[0])
     assert runtime.poll() == 1
     assert runtime.poll() == 0
-    assert all("BODY.PEEK[]" in args[1] for op, args in box.commands if op == "FETCH")
+    assert all("BODY.PEEK[" in args[1] for op, args in box.commands if op == "FETCH")
+    assert any("BODY.PEEK[HEADER]" in args[1] for op, args in box.commands if op == "FETCH")
     asyncio.run(runtime.process_inbox())
     assert [x.message_id for x in host.submissions] == ["<new>"]
     assert runtime.process_outbox()
@@ -134,6 +135,32 @@ def test_new_only_intake_does_not_disable_historical_mail_tools(rig):
     assert receipt["provider_message_id"] == client.sent[0]["Message-ID"]
     assert client.sent[0]["In-Reply-To"] == "<new>"
     assert not runtime.process_outbox()
+
+
+def test_read_only_peeks_and_mark_read_is_the_separate_flag_write(rig):
+    clock, box, client, store, host, runtime = rig
+    box.add(1, "<peek>")
+    sessions = []
+    opened = client.imap
+
+    @contextmanager
+    def recording(folder=None, readonly=True):
+        sessions.append(readonly)
+        with opened(folder, readonly) as handle:
+            yield handle
+
+    client.imap = recording
+    assert client.read(uid=1, uidvalidity=box.validity)["message_id"] == "<peek>"
+    assert sessions == [True]
+    assert [op for op, _ in box.commands] == ["FETCH"] and "BODY.PEEK[]" in box.commands[0][1][1]
+    with pytest.raises(TypeError):
+        client.read(uid=1, uidvalidity=box.validity, mark_as_read=True)
+    assert client.mark_read(uid=1, uidvalidity=box.validity) == {"ok": True, "uid": 1, "uidvalidity": box.validity}
+    assert sessions[-1] is False
+    assert box.commands[-1] == ("STORE", ("1", "+FLAGS.SILENT", "(\\Seen)"))
+    with pytest.raises(ValueError, match="UIDVALIDITY"):
+        client.mark_read(uid=1, uidvalidity=box.validity - 1)
+    assert [op for op, _ in box.commands].count("STORE") == 1
 
 
 def test_uidvalidity_reset_deduplicates_and_keeps_new_arrivals(rig):

@@ -16,6 +16,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import tools  # noqa: E402
+import management  # noqa: E402
 from routes import register_routes  # noqa: E402
 
 TOOL_DESCRIPTIONS = {
@@ -34,34 +35,50 @@ TOOL_DESCRIPTIONS = {
         "публикации занятости (не все календари подряд); список id/имён — конкретные (первый получает полное содержание, остальные — копии по правилу календаря, "
         "обычно «Занят»). hidden=true — служебное событие (распорядок/заметка планировщика, в виджете по переключателю); "
         "availability: busy | free | soft (soft = «обычно», гибкое предпочтение). reminders — минуты до начала. rrule — RFC 5545 "
-        "(FREQ=WEEKLY;BYDAY=MO). Только по явной команде владельца или после его выбора — confirm=true. Приглашения участникам — send_invites."
+        "(FREQ=WEEKLY;BYDAY=MO). Разовое или постоянное поручение задаёт основание действия; confirm=true применяет предварительно выбранное действие. Приглашения участникам — send_invites."
     ),
     "cal_update": (
         "Изменить событие: перенос (start/end/duration_min), название, описание, место, скрытость, availability, "
         "напоминания (reminders: минуты до начала; [] — у этого события без напоминаний; 'default' — снова по общим правилам), участники, "
         "ответ на приглашение (response: accepted|declined|tentative), набор календарей (calendars — явная смена назначений). "
-        "Для повторяющихся: id вхождения (…@дата) + scope=this — только эта дата; scope=all — всё расписание; scope=following — начиная "
-        "с этой даты. Если владелец не уточнил охват — спроси его. При конфликте сначала cal_events(id), покажи обе версии; после выбора resolution=local|provider и resolution_token из снимка без других правок. confirm=true обязателен."
+        "link_action=source|detach|follow — отдельно выбрать источник связи, отделить выбранную запись или явно вернуть копию к источнику. "
+        "Правка копии не изменяет источник; источник обновляет только following-копии. Для повторяющихся: id вхождения (…@дата) + scope=this — только эта дата; scope=all — всё расписание; scope=following — начиная "
+        "с этой даты. Определи охват по поручению; при неясности уточни. При конфликте сначала cal_events(id), затем обоснованный поручением/ответом владельца выбор resolution=local|provider и resolution_token из снимка без других правок. confirm=true применяет действие."
     ),
     "cal_delete": (
-        "Удалить событие (и его связанные копии в других календарях). Для повторяющихся — scope как у cal_update; при сомнении спроси "
+        "Удалить выбранное событие: только источник удаляет его following-копии; удаление копии не затрагивает источник. Для повторяющихся — scope как у cal_update; при сомнении спроси "
         "владельца: удалить одну дату или всё расписание. confirm=true обязателен."
     ),
     "cal_free": (
         "Свободные окна не короче duration_min в рабочие часы по календарям-источникам занятости (sources — иначе все с ролью «источник»). "
-        "Возвращает slots и soft_overlaps (пересечения с «обычно», это предпочтение, не бронь). Потом предложи владельцу варианты."
+        "Возвращает slots и soft_overlaps (пересечения с «обычно», это предпочтение, не бронь). Выбирай окно в рамках разового или постоянного поручения; предложи варианты, когда выбор нужен владельцу."
     ),
     "cal_reminders": (
         "Правила напоминаний Уробороса (без модели): list; set_default/set_hidden/set_calendar/clear_calendar с offsets (минуты); "
         "enable_calendar/disable_calendar — режим «напоминает Уроборос» для внешнего календаря (переносит времена провайдера, глушит его дубли). "
-        "Изменения — confirm=true. Напоминания конкретного события — через cal_update(reminders=…)."
+        "Изменения — confirm=true. disable_calendar по умолчанию восстанавливает Google defaults; restore_provider=false выключает только местные уведомления. Напоминания конкретного события — через cal_update(reminders=…)."
     ),
     "cal_settings": (
         "Настройки и источники: get; set (working_hours '09:00-19:00', timezone IANA, preferences — текстовые пожелания владельца); "
         "set_calendar (visible / busy_source / publish_busy / publish_mode full|busy / default / name); new_local_calendar; reload_yandex "
-        "(перечитать аккаунты из YANDEX_CALDAV_ACCOUNTS); connect_google (ссылка для входа в системном браузере); reload_google; disconnect; sync_now. Изменения — confirm=true."
+        "(прежний YANDEX_CALDAV_ACCOUNTS); connect_google (ссылка для входа в браузере, public_base_url для удалённой установки/префикса); reload_google; disconnect; sync_now. "
+        "Обычная форма аккаунтов находится в виджете. Изменения — confirm=true; для чтения в Advises доступны cal_status/cal_calendars."
     ),
+    'cal_calendars': ('Читать подключённые календари и возможности аккаунтов; account_id/calendar_id — точные ID. refresh=true обновляет список у провайдера. '
+                      'include_acl=true читает права выбранного календаря. request_id читает сохранённый результат cal_manage, не повторяя действие.'),
+    'cal_manage': ('Управлять календарями целиком: create/update/delete/share/unshare. changes: name/description/timezone; sharing: type(user/group/domain/default), '
+                   'role,send_notifications; grantee and rule_id are top-level destinations (required for share/unshare). Результат preview без confirm; confirm=true применяет действие в рамках разового/постоянного поручения. '
+                   'request_id повторяет только receipt, не запрос. uncertain требует сверки через cal_calendars/провайдера, не слепого повтора. '
+                   'Доступ CalDAV настраивается на сайте сервера, если API не поддерживает операцию.'),
 }
+
+_ATTENDEE = {'type': 'object', 'properties': {'email': {'type': 'string'}}, 'required': ['email']}
+_ATTENDEES = {'anyOf': [
+    {'type': 'array', 'items': {'anyOf': [{'type': 'string'}, _ATTENDEE]}},
+    {'type': 'string'}, _ATTENDEE]}
+_ATTENDEE_ADDRESSES = {
+    'type': 'array', 'items': {'type': 'string'},
+    'description': 'Exact email addresses for rich/encoded attendees; use retry_arguments when preparation is needed.'}
 
 SCHEMAS = {
     "cal_status": {"type": "object", "properties": {}},
@@ -73,16 +90,17 @@ SCHEMAS = {
         "title": {"type": "string"}, "start": {"type": "string"}, "end": {"type": "string"}, "duration_min": {"type": "integer", "default": 60},
         "all_day": {"type": "boolean", "default": False}, "calendars": {"type": "string"}, "hidden": {"type": "boolean", "default": False},
         "availability": {"type": "string", "enum": ["busy", "free", "soft"]}, "description": {"type": "string"}, "location": {"type": "string"},
-        "attendees": {"type": "array", "items": {"type": "string"}}, "send_invites": {"type": "boolean", "default": False},
+        "attendees": _ATTENDEES, "attendee_addresses": _ATTENDEE_ADDRESSES, "send_invites": {"type": "boolean", "default": False},
         "reminders": {"type": "array", "items": {"type": "integer"}}, "rrule": {"type": "string"},
         "confirm": {"type": "boolean", "default": False}}, "required": ["title", "start", "confirm"]},
     "cal_update": {"type": "object", "properties": {
         "id": {"type": "string"}, "start": {"type": "string"}, "end": {"type": "string"}, "duration_min": {"type": "integer"},
         "all_day": {"type": "boolean"}, "title": {"type": "string"}, "description": {"type": "string"}, "location": {"type": "string"},
         "hidden": {"type": "boolean"}, "availability": {"type": "string", "enum": ["busy", "free", "soft"]}, "calendars": {"type": "string"},
-        "attendees": {"type": "array", "items": {"type": "string"}},
+        "attendees": _ATTENDEES, "attendee_addresses": _ATTENDEE_ADDRESSES,
         "reminders": {"anyOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "string", "enum": ["default"]}]},
         "resolution": {"type": "string", "enum": ["local", "provider"]}, "resolution_token": {"type": "string"},
+        'link_action': {'type': 'string', 'enum': ['source', 'detach', 'follow']},
         "rrule": {"type": "string"}, "response": {"type": "string", "enum": ["accepted", "declined", "tentative"]},
         "scope": {"type": "string", "enum": ["this", "following", "all"], "default": "this"},
         "send_updates": {"type": "boolean", "default": False}, "confirm": {"type": "boolean", "default": False}}, "required": ["id", "confirm"]},
@@ -95,16 +113,54 @@ SCHEMAS = {
     "cal_reminders": {"type": "object", "properties": {
         "action": {"type": "string", "enum": ["list", "set_default", "set_hidden", "set_calendar", "clear_calendar", "enable_calendar", "disable_calendar"], "default": "list"},
         "offsets": {"type": "array", "items": {"type": "integer"}}, "calendar_id": {"type": "string"},
+        'restore_provider': {'type': 'boolean', 'default': True},
         "confirm": {"type": "boolean", "default": False}}},
     "cal_settings": {"type": "object", "properties": {
         "action": {"type": "string", "enum": ["get", "set", "set_calendar", "new_local_calendar", "reload_yandex", "connect_google", "reload_google", "disconnect", "sync_now"], "default": "get"},
         "calendar_id": {"type": "string"}, "visible": {"type": "boolean"}, "busy_source": {"type": "boolean"}, "publish_busy": {"type": "boolean"},
         "publish_mode": {"type": "string", "enum": ["full", "busy"]}, "default": {"type": "boolean"}, "name": {"type": "string"},
         "working_hours": {"type": "string"}, "timezone": {"type": "string"}, "preferences": {"type": "string"},
+        'public_base_url': {'type': 'string'},
         "confirm": {"type": "boolean", "default": False}}},
+    'cal_calendars': {'type': 'object', 'properties': {
+        'account_id': {'type': 'string'}, 'calendar_id': {'type': 'string'}, 'include_acl': {'type': 'boolean', 'default': False},
+        'refresh': {'type': 'boolean', 'default': False}, 'request_id': {'type': 'string'}}},
+    'cal_manage': {'type': 'object', 'properties': {
+        'action': {'type': 'string', 'enum': ['create', 'update', 'delete', 'share', 'unshare']},
+        'account_id': {'type': 'string'}, 'calendar_id': {'type': 'string'}, 'request_id': {'type': 'string'},
+        'grantee': {'type': 'string', 'description': 'Share destination: email or domain. Use this top-level field for the recipient.'},
+        'rule_id': {'type': 'string', 'description': 'ACL rule to remove, from cal_calendars(include_acl=true).'},
+        'changes': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'description': {'type': 'string'}, 'timezone': {'type': 'string'}}, 'additionalProperties': False},
+        'sharing': {'type': 'object', 'properties': {
+            'type': {'type': 'string', 'enum': ['user', 'group', 'domain', 'default']}, 'value': {'type': 'string', 'description': 'Legacy mirrored value; top-level grantee is required for a named recipient. Conflicting values are rejected.'},
+            'role': {'type': 'string', 'enum': ['none', 'freeBusyReader', 'reader', 'writer', 'owner']},
+            'rule_id': {'type': 'string', 'description': 'Legacy mirrored value; top-level rule_id is required for unshare.'}, 'send_notifications': {'type': 'boolean', 'default': False}}, 'additionalProperties': False},
+        'confirm': {'type': 'boolean', 'default': False}}, 'required': ['action']},
 }
 
 WIDGET_RENDER = {"kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host", "span": 2}
+
+
+def _attendee_arguments(arguments):
+    """Expose rich guest destinations on the caller's next Host-checked invocation.
+
+    Plain address arrays already carry the target. Preserve provider metadata
+    and legacy encoded lists instead of dropping them during preparation.
+    """
+    value = arguments.get('attendees')
+    if value is None:
+        return None
+    people = tools._list(value)
+    addresses = [str(person.get('email') or '').strip() if isinstance(person, dict)
+                 else str(person).strip() for person in people]
+    addresses = [address for address in addresses if address]
+    plain = isinstance(value, list) and all(isinstance(person, str) for person in value)
+    supplied = arguments.get('attendee_addresses')
+    if (plain and supplied is None) or supplied == addresses:
+        return None
+    return {'status': 'needs_arguments', 'code': 'canonical_attendee_addresses_required',
+            'message': 'Retry with the exact attendee_addresses below; no event was changed or invitation sent.',
+            'retry_arguments': {**arguments, 'attendee_addresses': addresses}}
 
 
 def register(api):
@@ -113,16 +169,21 @@ def register(api):
 
     def bind(fn):
         def handler(**kwargs):
-            ctx = make_ctx()
             try:
+                if fn in (tools.cal_create, tools.cal_update):
+                    preparation = _attendee_arguments(kwargs)
+                    if preparation:
+                        return tools.json_dumps(preparation)
+                ctx = make_ctx()
                 return fn(ctx, **kwargs)
             except Exception as exc:  # never raise into the agent; disclose
                 return tools.json_dumps({"status": "error", "message": f"{type(exc).__name__}: {exc}"})
         handler.__name__ = fn.__name__
         return handler
 
-    for name in ("cal_status", "cal_events", "cal_create", "cal_update", "cal_delete", "cal_free", "cal_reminders", "cal_settings"):
-        api.register_tool(name=name, description=TOOL_DESCRIPTIONS[name], schema=SCHEMAS[name], handler=bind(getattr(tools, name)))
+    for name in TOOL_DESCRIPTIONS:
+        module = management if name in ('cal_calendars', 'cal_manage') else tools
+        api.register_tool(name=name, description=TOOL_DESCRIPTIONS[name], schema=SCHEMAS[name], handler=bind(getattr(module, name)))
 
     register_routes(api, make_ctx)
     api.register_ui_tab("calendar", "Календарь", icon="📅", render=WIDGET_RENDER)

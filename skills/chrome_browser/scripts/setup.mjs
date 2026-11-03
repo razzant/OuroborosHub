@@ -1,145 +1,71 @@
 #!/usr/bin/env node
-// Owner setup for the chrome_browser skill.
-//
-//   setup.mjs status            what is configured (no secret)
-//   setup.mjs init [--port N]   create the pairing credential file if it is missing
-//   setup.mjs pair [--wait S]   wait for the extension to prove the credential; pin its origin
-//   setup.mjs rotate            replace the credential and forget the pinned extension
-//   setup.mjs install-native --browser chrome|chrome-for-testing|chromium [--user-data-dir D]
-//                               register the one-shot pairing bootstrap for that browser (macOS/Linux)
-//   setup.mjs recover --confirm move malformed pairing aside unchanged and create a new credential
-//
-// The credential is written to a private file and never printed: this
-// command's output is read by the model.
-
-import fs from 'node:fs';
+// `setup.mjs status`: checks the pinned dependency and the patch, and prints the document for this
+// skill's server to paste into Settings → Advanced → MCP Servers → Import mcp.json. It writes
+// nothing, starts no browser and contacts no service.
 import path from 'node:path';
+import { verifyDependencies, loadPinnedPlaywright, nodeModulesDir, describeProblems, PINS, SKILL_ROOT } from '../lib/pinned.mjs';
 
-import { DEFAULT_PORT } from '../extension/bridge_protocol.mjs';
-import {
-  EXTENSION_DIR, Listener, SKILL_DIR, newCredential, packageBuild, packageOrigin, pairingPath, readPairing, stateDir,
-  writePairing,
-} from '../lib/pairing.mjs';
-import { installNativeHost } from '../lib/native_setup.mjs';
-
-const SKILL_NAME = 'chrome_browser';
-const [command = 'status', ...rest] = process.argv.slice(2);
-const option = (name, fallback) => {
-  const index = rest.indexOf(`--${name}`);
-  return index >= 0 && rest[index + 1] !== undefined ? rest[index + 1] : fallback;
-};
-const print = (value) => process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-const fail = (message) => { print({ ok: false, error: message }); process.exit(1); };
-
-const dir = stateDir();
-if (!dir) fail('No state directory: set OUROBOROS_SKILL_STATE_DIR (skill_exec does) or OUROBOROS_CHROME_STATE_DIR.');
-
-function facts(pairing) {
-  return {
-    ok: true,
-    credential_file: pairingPath(dir),
-    credential_present: Boolean(pairing),
-    extension_paired: Boolean(pairing && pairing.pinned_origin),
-    port: pairing ? pairing.port : DEFAULT_PORT,
-    extension_folder: EXTENSION_DIR,
-    extension_id: packageOrigin().slice('chrome-extension://'.length),
-    mcp_server: {
-      id: SKILL_NAME, name: SKILL_NAME, enabled: true,
-      // The Node that ran this script (20 or newer), by path: a `node` found on PATH may be another one, or none.
-      transport: 'stdio', command: process.execPath, args: [path.join(SKILL_DIR, 'scripts', 'mcp_server.mjs')],
-      browser_bridge: true, browser_protocol: 'ouroboros_chrome',
-      browser_skill_binding: { skill_name: path.basename(SKILL_DIR), script_path: 'scripts/mcp_server.mjs' },
-      env: { OUROBOROS_CHROME_STATE_DIR: dir },
-    },
-  };
+const command = process.argv[2] || 'status';
+if (command !== 'status') {
+  process.stderr.write('usage: setup.mjs status\n');
+  process.exit(2);
 }
 
-function parsePort(text) {
-  const port = Number(text);
-  if (!Number.isInteger(port) || port < 1024 || port > 65535) fail('--port must be an integer between 1024 and 65535.');
-  return port;
-}
-
-let pairing;
-let pairingError;
-try {
-  pairing = readPairing(dir);
-} catch (error) {
-  pairingError = error;
-  if (command !== 'recover') fail(String(error.message || error));
-}
-
-if (command === 'recover') {
-  if (!pairingError) fail(pairing ? 'Pairing is valid; use "rotate" if you intend to replace it.' : 'No pairing file to recover; use "init".');
-  if (!rest.includes('--confirm'))
-    fail(`${pairingError.message || pairingError}. Nothing was changed. "recover --confirm" moves that file aside unchanged and creates a new credential.`);
-  const port = parsePort(option('port', DEFAULT_PORT));
-  const quarantined = `${pairingPath(dir)}.invalid-${Date.now()}-${process.pid}`;
+const root = nodeModulesDir();
+const dependencies = verifyDependencies(root);
+let patch = { ok: false, detail: 'not checked: the dependency is not ready' };
+if (dependencies.ok) {
   try {
-    // A rename keeps the malformed bytes and their mode for the owner to inspect.
-    fs.renameSync(pairingPath(dir), quarantined);
-    pairing = { credential: newCredential(), port, pinned_origin: null };
-    writePairing(dir, pairing);
-  } catch (error) { fail(String(error.message || error)); }
-  print({ ...facts(pairing), quarantined_file: quarantined, next: 'Run "pair"; while it waits, the owner chooses Forget pairing and then Connect in the extension popup.' });
-} else if (command === 'status') {
-  print(facts(pairing));
-} else if (command === 'init' || command === 'rotate') {
-  const port = parsePort(option('port', pairing ? pairing.port : DEFAULT_PORT));
-  const created = command === 'rotate' || !pairing;
-  const changedExistingPairing = Boolean(pairing && (command === 'rotate' || port !== pairing.port));
-  if (created) pairing = { credential: newCredential(), port, pinned_origin: null };
-  else pairing = { ...pairing, port };
-  writePairing(dir, pairing);
-  print({
-    ...facts(pairing), credential_created: created,
-    next: [
-      'Run this script with "install-native --browser chrome" (or chrome-for-testing, chromium) to register the local helper.',
-      `The owner enables Developer mode in chrome://extensions and chooses "Load unpacked": ${EXTENSION_DIR}`,
-      `Run this script with "pair"; while it waits, the owner clicks the extension icon and chooses ${changedExistingPairing ? '"Forget pairing", then "Connect"' : '"Connect"'}.`,
-    ],
-  });
-} else if (command === 'install-native') {
-  if (!pairing) fail('No credential yet: run "init" first.');
-  const browser = option('browser', undefined);
-  const userDataDir = option('user-data-dir', undefined);
-  try {
-    const native = installNativeHost(dir, { browser, userDataDir: userDataDir && path.resolve(userDataDir) });
-    print({
-      ...facts(pairing), browser, native_host: native.registration,
-      next: 'Run this script with "pair"; while it waits, the owner opens the extension popup and chooses "Connect". If "Connect" is disabled by an existing pairing, choose "Forget pairing" first.',
-    });
-  } catch (error) { fail(String(error.message || error)); }
-} else if (command === 'pair') {
-  if (!pairing) fail('No credential yet: run "init" first.');
-  const wait = Math.min(Math.max(Number(option('wait', 120)) || 120, 5), 280);
-  let origin = null;
-  let listener;
-  let status;
-  try {
-    listener = new Listener({
-      port: pairing.port, credential: pairing.credential, origin: null, build: await packageBuild(), executorGeneration: 0,
-      onPaired: (socket, from) => { origin = from; socket.close(); },
-    });
-    status = await listener.start();
+    const loaded = loadPinnedPlaywright(root);
+    patch = { ok: true, postimage_sha256: loaded.identity.coreBundle_postimage_sha256 };
   } catch (error) {
-    // For example the ws dependency is not installed: one JSON object, like every other answer of this script.
-    fail(String((error && error.message) || error));
+    patch = { ok: false, detail: error.message };
   }
-  if (status === 'busy') fail(`Port ${pairing.port} is in use, probably by a running task's browser. Try again when it has finished.`);
-  const deadline = Date.now() + wait * 1000;
-  while (!origin && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 200));
-  const refusal = listener.lastRefusal;
-  await listener.close();
-  if (!origin) {
-    fail(refusal === 'build_mismatch'
-      ? `The loaded extension is not this skill's build. Reload it from ${EXTENSION_DIR} in chrome://extensions.`
-        : refusal === 'bad_proof' ? 'An extension answered with another credential. Choose "Forget pairing", then "Connect" in its popup, or check the manual pairing.'
-        : `No extension proved the credential within ${wait} s. Open its popup and choose "Connect"; if disabled by an existing pairing, choose "Forget pairing" first.`);
-  }
-  writePairing(dir, { ...pairing, pinned_origin: origin });
-  print({ ...facts(readPairing(dir)), paired_origin: origin, is_package_extension: origin === packageOrigin() });
-  process.exit(0);
-} else {
-  fail(`Unknown command ${command}. Use status, init, install-native, pair, rotate or recover.`);
 }
+
+const ready = dependencies.ok && patch.ok;
+const server = { command: process.execPath, args: [path.join(SKILL_ROOT, 'scripts', 'server.mjs')] };
+const report = {
+  skill: 'chrome_browser',
+  ready,
+  dependencies: {
+    ok: dependencies.ok,
+    node_modules: root,
+    expected: `@playwright/mcp ${PINS.npm['@playwright/mcp'].version}, playwright-core ${PINS.npm['playwright-core'].version}`,
+    problems: dependencies.ok ? '' : describeProblems(dependencies.problems),
+  },
+  patch,
+  node: { path: process.execPath, version: process.version },
+  // What the owner pastes into Import mcp.json. The key is the server ID, which names every tool
+  // (mcp_chrome_browser__*); the import takes it as the identity, so it is not this skill's title.
+  mcp_import_document: {
+    mcpServers: {
+      chrome_browser: { type: 'stdio', ...server, task_session: true, browser_policy: true },
+    },
+  },
+  // The same server as one saved MCP_SERVERS row, for a tool that writes settings itself. Import refuses this shape.
+  mcp_server_entry: {
+    id: 'chrome_browser',
+    name: 'Chrome (shared tab)',
+    transport: 'stdio',
+    ...server,
+    enabled: true,
+    task_session: true,
+    browser_policy: true,
+  },
+  extension: {
+    name: PINS.extension.name,
+    id: PINS.extension.id,
+    install_from: PINS.extension.store_url,
+    tested_version: PINS.extension.tested_version,
+    relay_protocol_version: PINS.extension.relay_protocol_version,
+  },
+  owner_steps: [
+    `In the Chrome profile to share, install "${PINS.extension.name}" by Microsoft from the Chrome Web Store (${PINS.extension.store_url}). This skill was tested with version ${PINS.extension.tested_version}.`,
+    'In Ouroboros open Settings → Advanced → MCP Servers and choose "Import mcp.json". Paste mcp_import_document (the whole object, its outer braces included), choose "Preview", then "Apply 1 to draft". If the preview says "Not imported: browser_policy, task_session", this Ouroboros cannot run the server yet: stop here and tell Ouroboros what it says.',
+    'The server arrives switched off. Turn on its "Enabled" box and "Enable MCP client", then choose "Save Settings". Ouroboros lists its tools by itself; that opens no browser.',
+    'When a task needs your browser, Ouroboros gives you a one-time link. Open your Chrome, paste it into a new tab, pick the tab to share and choose "Allow & select".',
+  ],
+};
+process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+process.exit(ready ? 0 : 1);

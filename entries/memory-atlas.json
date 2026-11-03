@@ -2,8 +2,8 @@
   "category": [
     "ouroboros"
   ],
-  "description": "Read-only atlas, document reader, authentic history browser, literal search, and evidence graph for allowlisted Ouroboros core memory, consolidated dialogue chronicles, and project knowledge. Opens on global memory; every link it draws is proven from stored bytes, with no model calls at runtime. Use to inspect memory provenance without modifying serving-process data.",
-  "digest": "5ecfd106676eb0c697e78f6beb8bea56faeca9c7074feee97299333754558de8",
+  "description": "Read Ouroboros's memory room by room, beside the record you open, with corrections, drafts and decisions, knowledge notes, marks and identity, and copy an exact address to paste into a chat. Long lists and texts continue where they stopped; Refresh shows what changed. Read-only, no model calls.",
+  "digest": "02af7b5a3ded32550bb3655a33d0570bf17a1d05da6ceca7bba9d6335d3412b2",
   "name": "memory-atlas",
   "owner": "razzant",
   "schema_version": 2,
@@ -11,7 +11,8 @@
     "kind": "hosted",
     "path": "skills/memory-atlas"
   },
+  "title": "Memory Atlas",
   "type": "extension",
-  "version": "0.2.12",
+  "version": "0.3.0",
   "withdrawn": null
 }

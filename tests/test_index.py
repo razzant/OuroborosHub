@@ -1,6 +1,6 @@
 """Canonical hub inputs, release bytes and old-client projection.
 
-Set OUROBOROS_IDENTITY_CORE_ROOT to opt into digest parity with a core checkout.
+Set OUROBOROS_IDENTITY_CORE_ROOT to opt into digest and connector-contract parity with a core checkout.
 """
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import ast
 import contextlib
 import copy
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -112,6 +113,7 @@ class IndexTests(unittest.TestCase):
             {'withdrawn': {'reason': 'why', 'at': '2026-01-01', 'extra': True}},
             {'source': {'kind': 'hosted', 'path': 'skills/another'}},
             {'source': {'kind': 'hosted', 'path': '../demo'}}, {'source': {}},
+            {'title': ''}, {'title': 7}, {'title': 'Two\nlines'}, {'title': ' Padded'},
         ]
         for changes in mutations:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -164,6 +166,25 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(builder.main(['--refresh', 'demo'], root=self.root), 0)
         self.assertNotIn('connects', builder.read_json(self.root / 'entries/demo.json'))
         self.assertNotIn('icon', builder.build_catalog(self.root)['skills'][0])
+
+    def test_title_derives_from_the_manifest_into_entries_and_v1_rows(self):
+        manifest = self.root / 'skills/demo/SKILL.md'
+        manifest.write_text('---\nversion: v2\ntitle: Demo tools\n---\nBody\n', encoding='utf-8')
+        self.assertEqual(builder.main(['--refresh', 'demo'], root=self.root), 0)
+        entry = builder.read_json(self.root / 'entries/demo.json')
+        self.assertEqual(entry['title'], 'Demo tools')
+        builder.validate_entry(entry, {'search'})
+        self.assertEqual(builder.build_catalog(self.root)['skills'][0]['title'], 'Demo tools')
+        self.write('entries/demo.json', {**entry, 'title': 'Something else'})
+        with self.assertRaisesRegex(ValueError, 'title must derive'):
+            builder.build_catalog(self.root)
+        # An entry may omit the field; the manifest still names the v1 row.
+        self.write('entries/demo.json', {k: v for k, v in entry.items() if k != 'title'})
+        self.assertEqual(builder.build_catalog(self.root)['skills'][0]['title'], 'Demo tools')
+        manifest.write_text('---\nversion: v3\n---\nBody\n', encoding='utf-8')
+        self.assertEqual(builder.main(['--refresh', 'demo'], root=self.root), 0)
+        self.assertNotIn('title', builder.read_json(self.root / 'entries/demo.json'))
+        self.assertNotIn('title', builder.build_catalog(self.root)['skills'][0])
 
     def test_endorsements_bind_exact_release_and_recommendations_are_boolean(self):
         endorsement = {'name': 'demo', 'digest': self.entry['digest'], 'recommended': True}
@@ -539,8 +560,8 @@ print(json.dumps([payload_digest(Path(c['path']), manifest_entry=c['front'].get(
             self.assertEqual(entries[name]['owner'], facts['owner'])
         categories = builder.read_json(ROOT / 'categories.json')['categories']
         self.assertEqual(len(categories), 12)
-        expected = set('a2a adaptive-code-review anti-slop cache_efficiency_snapshot claudexor_quotas confluence '
-                       'context-lens duckduckgo email email-presence github-presence google-workspace keenable memory-atlas perplexity '
+        expected = set('a2a adaptive-code-review anti-slop cache_efficiency_snapshot calendar claudexor_quotas confluence '
+                       'context-lens duckduckgo email email-presence github google-workspace keenable memory-atlas perplexity '
                        'slack-bridge telegram-bot pdf_tools word_tools'.split())
         self.assertEqual({r['name'] for r in official['endorsements']}, expected)
         self.assertEqual({r['name'] for r in official['endorsements'] if r.get('recommended')},
@@ -553,63 +574,222 @@ print(json.dumps([payload_digest(Path(c['path']), manifest_entry=c['front'].get(
                                  declaration_json(manifest_declaration(builder.read_manifest(directory))))
 
 
-CONNECTORS = {"slack-bridge": ("Slack", "slack_"), "telegram-bot": ("Telegram", "telegram_"),
-              "email-presence": ("Email", "email_"), "a2a": ("A2A", "a2a_"), "agentrq-bridge": ("AgentRQ", "rq_")}
+def place_contributions(manifest):
+    return [row for row in manifest.get("contributes") or [] if isinstance(row, dict) and row.get("provides") == "place"]
+
+
+# Every hosted payload that contributes a place is a connector: a new one cannot skip the checks below.
+CONNECTORS = sorted(directory.name for directory in (ROOT / "skills").iterdir()
+                    if (directory / "SKILL.md").is_file() and place_contributions(builder.read_manifest(directory)))
+# Mirrors of the core contract, compared with a core checkout by the opt-in parity test below:
+# ouroboros/places.py WAKE_FACTS, ouroboros/extension_ui_validation.py _validate_contribution (common and
+# place keys) and ouroboros/icon_geometry.py (geometry and paint). The hub also refuses g and ellipse.
+CORE_WAKE_FACTS = ("direct_message", "group_dm", "mention", "reply_to_me", "my_thread", "new_issue",
+                   "new_pull_request", "review_requested", "assigned", "any_message", "from_bot")
+CORE_PLACE_KEYS = {"id", "label", "title", "icon", "order", "render",
+                   "provides", "destination", "scope", "wakes", "source", "settings", "read_only", "facts"}
+ICON_GEOMETRY = {"svg": {"viewBox", "width", "height"}, "path": {"d"}, "circle": {"cx", "cy", "r"},
+                 "line": {"x1", "y1", "x2", "y2"}, "polyline": {"points"}, "polygon": {"points"},
+                 "rect": {"x", "y", "width", "height", "rx", "ry"}}
+ICON_PAINT = {"fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "fill-rule", "clip-rule"}
+# Connectors whose plugin.py hands registration to a package module that builds tool names from an
+# operation table. Reading plugin.py cannot see those names, so the hub records what plugin.register
+# actually registers; their registration path imports only the standard library.
+RECORDED_REGISTRATION = ("telegram-user-session",)
+
+
+class RecordingApi:
+    """Records the tool and route names a plugin registers; every other call does nothing."""
+
+    def __init__(self, state_dir):
+        self.state_dir, self.tools, self.routes = state_dir, set(), set()
+
+    def get_state_dir(self):
+        return self.state_dir
+
+    def register_tool(self, name, *_args, **_kwargs):
+        self.tools.add(name)
+
+    def register_route(self, path, *_args, **_kwargs):
+        self.routes.add(path)
+
+    def __getattr__(self, _name):
+        return lambda *_args, **_kwargs: None
+
+
+def recorded_registration(directory):
+    """Tool and route names from one plugin.register call, with the payload loaded as an isolated package."""
+    package = "hub_connector_" + re.sub(r"\W", "_", directory.name)
+    spec = importlib.util.spec_from_file_location(package, directory / "plugin.py",
+                                                  submodule_search_locations=[str(directory)])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[package] = module
+    try:
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory(prefix="hub-connector-") as state:
+            api = RecordingApi(state)
+            module.register(api)
+    finally:
+        for key in [key for key in sys.modules if key == package or key.startswith(package + ".")]:
+            del sys.modules[key]
+    return api.tools, api.routes
+
+
+def tool_prefix(names):
+    """The `<service>_` prefix that dynamic registration tuples share, or None when the names share none."""
+    heads = {name.partition("_")[0] for name in names}
+    return heads.pop() + "_" if len(heads) == 1 and all("_" in name for name in names) else None
+
+
+def plugin_calls(functions, paths):
+    for path in paths:
+        if path.is_file():
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Call):
+                    function = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+                    if function in functions:
+                        yield function, node
+                elif isinstance(node, ast.Tuple):
+                    yield "", node
 
 
 def exported_names(directory, prefix):
+    if directory.name in RECORDED_REGISTRATION:
+        return recorded_registration(directory)[0]
     names = set()
-    for path in [directory / "plugin.py", *directory.glob("lib/read_tools.py")]:
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                function = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
-                index = 1 if function == "register_json_tool" else 0
-                if function in {"tool", "register_tool", "register_json_tool"} and len(node.args) > index:
-                    arg = node.args[index]
-                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                        names.add(arg.value)
-            # Dynamic registration descriptors enumerate the same tool names.
-            if isinstance(node, ast.Tuple) and node.elts and isinstance(node.elts[0], ast.Constant):
-                name = node.elts[0].value
-                if isinstance(name, str) and name.startswith(prefix):
-                    names.add(name)
+    for function, node in plugin_calls({"tool", "register_tool", "register_json_tool"},
+                                       [directory / "plugin.py", *directory.glob("lib/read_tools.py"),
+                                        *directory.glob("lib/service.py")]):
+        if function:
+            index = 1 if function == "register_json_tool" else 0
+            arg = node.args[index] if len(node.args) > index else None
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                names.add(arg.value)
+        # Dynamic registration descriptors enumerate the same tool names.
+        elif prefix and node.elts and isinstance(node.elts[0], ast.Constant):
+            name = node.elts[0].value
+            if isinstance(name, str) and name.startswith(prefix):
+                names.add(name)
     return names
+
+
+def registered_routes(directory):
+    if directory.name in RECORDED_REGISTRATION:
+        return recorded_registration(directory)[1]
+    return {node.args[0].value for function, node in plugin_calls(
+                {"register_route"}, [directory / "plugin.py", *sorted(directory.glob("lib/*.py"))])
+            if function and node.args and isinstance(node.args[0], ast.Constant)}
 
 
 @pytest.mark.parametrize("name", CONNECTORS)
 def test_every_exported_tool_has_an_effect_and_destination(name):
     directory = ROOT / "skills" / name
-    manifest = builder.read_manifest(directory)
-    service, prefix = CONNECTORS[name]
-    rows = manifest["tools"]
-    assert {row["name"] for row in rows} == exported_names(directory, prefix)
-    assert len(rows) == len({row["name"] for row in rows})
+    rows = builder.read_manifest(directory)["tools"]
+    names = [row["name"] for row in rows]
+    assert set(names) == exported_names(directory, tool_prefix(names))
+    assert len(names) == len(set(names))
     for row in rows:
         assert row["effect"] in {"read", "message", "write"}
         target = row["target"]
         assert isinstance(target, (str, list))
         for argument in ([target] if isinstance(target, str) else target):
             assert re.fullmatch(r"[a-z][a-z0-9_]*", argument)
-    places = [row for row in manifest["contributes"] if row["provides"] == "place"]
+
+
+@pytest.mark.parametrize("name", CONNECTORS)
+def test_place_contribution_meets_the_core_contract(name):
+    directory = ROOT / "skills" / name
+    manifest = builder.read_manifest(directory)
+    places = place_contributions(manifest)
     assert len(places) == 1
     place = places[0]
-    assert place["label"] == service and place["destination"] == "vendor:" + service
-    assert place["scope"] == "account" and place["wakes"]
+    assert set(place) <= CORE_PLACE_KEYS
+    service = place["destination"].removeprefix("vendor:")
+    assert place["destination"].startswith("vendor:") and service.strip() and place["label"] == service
+    assert place["scope"] == "account"
+    wakes = place["wakes"]
+    assert isinstance(wakes, list) and len(wakes) == len(set(wakes)) and set(wakes) <= set(CORE_WAKE_FACTS)
+    assert manifest["type"] == "extension"
     assert "presence" in manifest["permissions"] and "inject_chat" not in manifest["permissions"]
-    assert manifest["icon"] == place["icon"] == "ui/icon.svg"
-    icon = ET.parse(directory / place["icon"]).getroot()
-    assert icon.attrib["viewBox"] == "0 0 24 24"
-    assert "currentColor" in icon.attrib.values()
-    assert all(element.tag.rsplit("}", 1)[-1] in {"svg", "path", "rect", "circle", "line", "polyline", "polygon"} for element in icon.iter())
-    assert not any(key.startswith("on") or key in {"href", "style"} for element in icon.iter() for key in element.attrib)
+    if "source" in place:
+        source = place["source"]
+        assert set(source) <= {"route", "refresh_s"} and source["route"] in registered_routes(directory)
+        assert type(source["refresh_s"]) is int and 15 <= source["refresh_s"] <= 3600
+
+
+@pytest.mark.parametrize("name", CONNECTORS)
+def test_connector_icon_is_bounded_monochrome_geometry(name):
+    directory = ROOT / "skills" / name
+    manifest = builder.read_manifest(directory)
+    assert manifest["icon"] == place_contributions(manifest)[0]["icon"] == "ui/icon.svg"
+    raw = (directory / "ui/icon.svg").read_bytes()
+    # No comments, declarations or entities, and a small asset: what the core sanitizer accepts.
+    assert len(raw) <= 8192 and b"<!" not in raw
+    icon = ET.fromstring(raw)
+    assert icon.tag.rsplit("}", 1)[-1] == "svg"
+    assert icon.attrib["viewBox"] == "0 0 24 24" and "currentColor" in icon.attrib.values()
+    for element in icon.iter():
+        tag = element.tag.rsplit("}", 1)[-1]
+        # Geometry only: no script, style, link, image, use or event attribute can reach the host.
+        assert tag in ICON_GEOMETRY and set(element.attrib) <= ICON_GEOMETRY[tag] | ICON_PAINT | {"transform"}
+        assert all(element.attrib[key] in {"none", "currentColor"} for key in ("fill", "stroke") if key in element.attrib)
+        assert not (element.text or "").strip() and not (element.tail or "").strip()
+
+
+def test_connector_checks_cover_every_catalog_connector():
+    _hub, entries, _official = builder.load_hub(ROOT)
+    listed = {name for name, entry in entries.items() if entry["source"]["kind"] == "hosted" and entry.get("connects")}
+    assert listed and listed <= set(CONNECTORS)
+
+
+def test_recorded_registration_covers_only_connectors_and_sees_dynamic_tools():
+    assert set(RECORDED_REGISTRATION) <= set(CONNECTORS)
+    tools, routes = recorded_registration(ROOT / "skills" / "telegram-user-session")
+    # The operation-table tools are absent from plugin.py; its retained legacy registrations are never called.
+    assert {"tg_send_text", "tg_history", "tg_status", "tg_stage_asset"} <= tools
+    assert not tools & {"send_text", "send_status", "action_status", "dossier_add"}
+    assert "participant/status" in routes
+
+
+def test_connectors_pass_the_core_validators_when_a_checkout_is_configured():
+    configured = os.environ.get("OUROBOROS_IDENTITY_CORE_ROOT", "").strip()
+    if not configured:
+        pytest.skip("set OUROBOROS_IDENTITY_CORE_ROOT to run the connectors through the core validators")
+    code = """import json,sys
+from pathlib import Path
+from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
+from ouroboros.extension_ui_validation import validate_contributions
+from ouroboros.icon_geometry import sanitize_svg, validate_icon
+from ouroboros.places import WAKE_FACTS
+report = {"wake_facts": list(WAKE_FACTS), "skills": {}}
+for path in json.load(sys.stdin):
+    root = Path(path)
+    manifest = parse_skill_manifest_text((root / "SKILL.md").read_text(encoding="utf-8"))
+    entries, problems = validate_contributions(manifest, skill_dir=root)
+    sanitize_svg((root / validate_icon(manifest.raw_extra.get("icon", ""))).read_bytes())
+    report["skills"][root.name] = {"provides": [e.get("provides") for e in entries], "problems": problems}
+print(json.dumps(report))
+"""
+    with tempfile.TemporaryDirectory(prefix="hub-core-connectors-") as tmp:
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": tmp, "PYTHONPATH": str(Path(configured).resolve()),
+               "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
+               "OUROBOROS_APP_ROOT": tmp, "OUROBOROS_DATA_DIR": tmp + "/data",
+               "OUROBOROS_REPO_DIR": tmp + "/repo", "OUROBOROS_SETTINGS_PATH": tmp + "/settings.json"}
+        run = subprocess.run([sys.executable, "-B", "-c", code], input=json.dumps([str(ROOT / "skills" / n) for n in CONNECTORS]),
+                             text=True, encoding="utf-8", capture_output=True, cwd=tmp, env=env, timeout=90)
+    assert run.returncode == 0, run.stderr
+    report = json.loads(run.stdout.strip().splitlines()[-1])
+    assert tuple(report["wake_facts"]) == CORE_WAKE_FACTS
+    assert report["skills"] == {name: {"provides": ["place"], "problems": []} for name in CONNECTORS}
 
 
 def test_mixed_tools_remain_write_and_email_covers_all_recipients():
     manifests = {name: {row["name"]: row for row in builder.read_manifest(ROOT / "skills" / name)["tools"]} for name in CONNECTORS}
-    for connector, name in [("slack-bridge", "slack_api"), ("email-presence", "email_read"),
+    for connector, name in [("slack-bridge", "slack_api"), ("email-presence", "email_mark_read"),
                             ("email-presence", "email_mailbox"), ("telegram-bot", "telegram_operation")]:
         assert manifests[connector][name]["effect"] == "write"
-    assert manifests["slack-bridge"]["slack_history"]["effect"] == "read"
+    # Reading mail only peeks, so a Silent or Advises place can read it.
+    for connector, name in [("slack-bridge", "slack_history"), ("email-presence", "email_read")]:
+        assert manifests[connector][name]["effect"] == "read"
     assert manifests["email-presence"]["email_send"]["effect"] == "message"
-    assert manifests["email-presence"]["email_send"]["target"] == ["to", "cc", "bcc"]
+    assert manifests["email-presence"]["email_send"]["target"] == ["account_id", "to", "cc", "bcc"]

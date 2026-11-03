@@ -150,8 +150,10 @@ class TelegramClient:
                 "timeout": max(1, min(50, int(timeout_sec))),
                 # Keep ordinary messages while opting into provider facts that
                 # the parser can preserve. The bot must be an admin for reaction
-                # updates; Telegram simply omits them otherwise.
-                "allowed_updates": ["message", "edited_message", "message_reaction", "channel_post", "edited_channel_post"],
+                # updates; Telegram simply omits them otherwise. my_chat_member,
+                # the bot's own membership in a chat, needs no admin right.
+                "allowed_updates": ["message", "edited_message", "message_reaction", "message_reaction_count",
+                                    "channel_post", "edited_channel_post", "my_chat_member"],
             },
             timeout_sec=float(timeout_sec) + 15.0,
         )
@@ -312,7 +314,7 @@ class TelegramClient:
         return bool(await self._call("setMessageReaction", parameters))
 
     async def operation(self, method: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
-        """Run one explicitly supported model-selected own-message operation."""
+        """Run one explicitly supported model-selected message operation."""
         if method == "editMessageText":
             result = await self.edit_message_text(
                 str(parameters["chat_id"]), int(parameters["message_id"]),
@@ -409,10 +411,14 @@ class TelegramClient:
     def _result(endpoint: str, response: Dict[str, Any]) -> Any:
         if not isinstance(response, dict) or not response.get("ok"):
             payload = response if isinstance(response, dict) else {}
+            try:
+                code = int(payload.get("error_code") or 0)
+            except (TypeError, ValueError, OverflowError):
+                code = 0  # An unreadable code says nothing, so it is no code.
             raise TelegramApiError(
                 endpoint,
                 str(payload.get("description") or "invalid provider response"),
-                int(payload.get("error_code") or 0),
+                code,
             )
         return response.get("result")
 

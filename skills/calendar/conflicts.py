@@ -7,11 +7,12 @@ import hashlib
 import json
 
 import ops
-from model import event_public, iso_utc, new_id, now_utc, parse_stored
+import links
+from model import civil_in_basis, event_public, new_id, now_utc, parse_stored
 from store import EVENT_COLUMNS
 
-_UNFINISHED = ('pending', 'conflict', 'failed')
-_PROVIDER_FIELDS = ('title', 'description', 'location', 'start_utc', 'end_utc', 'tz',
+_UNFINISHED = ('pending', 'conflict', 'failed', 'uncertain')
+_PROVIDER_FIELDS = ('title', 'description', 'location', 'start_utc', 'end_utc', 'tz', 'time_kind',
                     'all_day', 'rrule', 'rdates', 'exdates', 'recurrence_id', 'status',
                     'organizer', 'attendees_json', 'my_response', 'availability',
                     'external_id', 'href', 'etag', 'raw_payload')
@@ -27,7 +28,7 @@ def _snapshot(c, event_id):
         return None
     row = dict(found)
     selected = [dict(i) for i in c.execute('SELECT * FROM intents WHERE event_id=? ORDER BY rowid', (event_id,))]
-    anchor = next((i for i in selected if i['state'] == 'conflict'), None)
+    anchor = next((i for i in selected if i['state'] in ('conflict', 'uncertain')), None)
     if anchor is None:
         anchor = next((i for i in reversed(selected) if i['state'] in _UNFINISHED), None)
     op_id = _payload(anchor).get('op_id') if anchor else None
@@ -86,6 +87,23 @@ def _meaning(state):
                         for i in state['intents']]}
 
 
+def _read_provider_state(adapter, calendar, row, master, payload):
+    address = {**row, 'master_external_id': master.get('external_id') or '',
+               'master_href': master.get('href') or '', 'master_etag': master.get('etag') or '',
+               'master_tz': master.get('tz') or '', 'master_all_day': master.get('all_day', row.get('all_day'))}
+    if not row.get('master_id') and not (row.get('external_id') or row.get('href')):
+        identity = getattr(adapter, 'created_identity', None)
+        if not callable(identity):
+            raise ops.ProviderError('unsupported', 'The original creation has no recoverable provider address')
+        address.update(identity(calendar, row))
+    try:
+        return adapter.read_current(calendar, address, payload)
+    except ops.ProviderError as exc:
+        if exc.kind not in ('not_found', 'gone'):
+            raise
+        return {'event': None, 'etag': '', 'absence_confirmed': True}
+
+
 def _load(ctx, event_id):
     base, occurrence = ops._series_id(str(event_id))
     row = ctx.store.get_event(base)
@@ -103,7 +121,7 @@ def _load(ctx, event_id):
         intent = ctx.store.get_intent(iid)
         if not intent:
             continue
-        if intent['state'] == 'conflict' and intent['event_id'] != row['id']:
+        if intent['state'] in ('conflict', 'uncertain') and intent['event_id'] != row['id']:
             return _load(ctx, intent['event_id'])
         p = _payload(intent)
         queue.extend(p.get('prior_intent_ids', []))
@@ -118,16 +136,17 @@ def _load(ctx, event_id):
     if state is None:
         return None, None, {'status': 'not_found'}
     templates = _templates(state)
-    if row.get('sync_state') != 'conflict' and not any(i['state'] == 'conflict' for i in templates):
+    if row.get('sync_state') != 'conflict' and not any(i['state'] in ('conflict', 'uncertain') for i in templates):
         return state, None, {'status': 'not_conflicted'}
     # A failed dependent points to the actionable head, not a nonexistent remote segment.
-    head = next((i for i in templates if i['state'] == 'conflict'), None)
+    head = next((i for i in templates if i['state'] in ('conflict', 'uncertain')), None)
     if head and head['event_id'] != row['id']:
         return _load(ctx, head['event_id'])
     row = state['event']
     affected = {i['event_id'] for i in templates}
     independent = [i for i in state['intents'] if i['state'] in _UNFINISHED and i not in templates]
     body = {'status': 'conflict', 'event_id': row['id'], 'local': event_public(row, ctx.tz, compact=False),
+            'delivery_outcome_unknown': any(i['state'] == 'uncertain' for i in templates),
             'operations': [{'id': i['id'], 'event_id': i['event_id'], 'kind': i['kind'], 'state': i['state']}
                            for i in templates],
             'affected_events': [event_public(r, ctx.tz, compact=False) for r in state['rows'] if r['id'] in affected and r['id'] != row['id']],
@@ -138,18 +157,14 @@ def _load(ctx, event_id):
     if adapter is None:
         return state, None, {**body, 'status': 'unavailable', 'message': 'аккаунт не подключён; выбор не применён'}
     master = next((r for r in state['rows'] if r['id'] == row.get('master_id')), {})
-    address = {**row, 'master_external_id': master.get('external_id') or '',
-               'master_href': master.get('href') or '', 'master_etag': master.get('etag') or ''}
-    chosen = next((i for i in templates if i['event_id'] == row['id'] and i['state'] == 'conflict'), None)
+    chosen = next((i for i in templates if i['event_id'] == row['id'] and i['state'] in ('conflict', 'uncertain')), None)
     try:
-        current = adapter.read_current(cal, address, _payload(chosen) if chosen else {})
+        current = _read_provider_state(adapter, cal, row, master, _payload(chosen) if chosen else {})
     except ops.ProviderError as exc:
-        if exc.kind not in ('not_found', 'gone'):
-            return state, None, {**body, 'status': 'unavailable', 'message': exc.message}
-        current = {'event': None, 'etag': ''}
+        return state, None, {**body, 'status': 'unavailable', 'message': exc.message}
     remote = current.get('event')
     body['provider'] = event_public(remote, ctx.tz, compact=False) if remote else None
-    if remote is None or not current.get('etag'):
+    if (remote is None or not current.get('etag')) and not current.get('absence_confirmed'):
         return state, current, {**body, 'message': 'у провайдера нет выбранного события или ETag; '
                                'локальное намерение сохранено, пересоздание требует отдельного выбора'}
     try:
@@ -199,21 +214,13 @@ def _read_targets(state, adapter, current, templates):
             targets[eid] = {'event': None, 'etag': '', 'never_sent': True}
             continue
         master = before.get(row.get('master_id')) or rows.get(row.get('master_id'), {})
-        address = {**row, 'master_external_id': master.get('external_id') or '',
-                   'master_href': master.get('href') or '', 'master_etag': master.get('etag') or ''}
-        try:
-            targets[eid] = adapter.read_current(state['calendar'], address, _payload(intent))
-        except ops.ProviderError as exc:
-            if exc.kind not in ('not_found', 'gone'):
-                raise
-            targets[eid] = {'event': None, 'etag': ''}
+        targets[eid] = _read_provider_state(adapter, state['calendar'], row, master, _payload(intent))
         targets[eid]['source_master_id'] = row.get('master_id') or ''
     return targets
 
 
 def _clones(state, current, templates, new_op):
     ids = {i['id']: new_id('int') for i in templates}
-    row = state['event']
     clones = []
     for original in templates:
         payload = {**_payload(original), 'op_id': new_op}
@@ -271,16 +278,25 @@ def _accept_provider(local, state, current, templates):
             # The before-image contains independently accepted unsent content.
             before = before_rows.get(eid)
             if before:
-                local.update_event(eid, {k: v for k, v in before.items() if k not in ('id','external_id','href','etag')})
+                local.update_event(eid, {k: v for k, v in before.items() if k not in ('id','external_id','href','etag','link_state')})
             local.update_event(eid, {'sync_state': 'pending'})
         else:
             observed = current['targets'][eid]['event']
             if observed is None:
                 local.delete_event(eid)
             else:
+                previous = before_rows.get(eid) or next(r for r in state['rows'] if r['id'] == eid)
+                master_id = current['targets'][eid].get('source_master_id') or previous.get('master_id')
+                slot_basis = (before_rows.get(master_id) or next((r for r in state['rows'] if r['id'] == master_id), {})) if master_id else previous
+                observed = civil_in_basis(observed, previous, recurrence_basis=slot_basis)
                 fields = {k: observed[k] for k in _PROVIDER_FIELDS if k in observed}
                 fields.update(sync_state='synced', deleted_at=None)
                 local.update_event(eid, fields)
+                current_row = local.get_event(eid)
+                master = local.get_event(current_row.get('master_id')) if current_row.get('master_id') else current_row
+                if master and master.get('link_group_id') and not links.source_is(local, master) and (current_row.get('link_state') == links.DIVERGED or links.changed(previous, observed, provider_observation=True)):
+                    local.update_event(master['id'], {'link_state': links.DIVERGED})
+                    local.update_event(eid, {'link_state': links.DIVERGED})
         local.drop_reminders_for(eid)
     local.set_sync_state(row['calendar_id'], cursor='')
 
@@ -293,8 +309,9 @@ def resolve(ctx, event_id, choice, token):
         return {**body, 'snapshot_changed': True, 'message': 'снимок изменился или недоступен; покажи обе версии заново'}
     row = state['event']
     templates = _templates(state)
-    if choice == 'local' and (not templates or current['event'].get('status') == 'cancelled'
-                              or any(i['kind'] == 'create' and i['event_id'] == row['id'] for i in templates)):
+    if choice == 'local' and (not templates or (current['event'] or {}).get('status') == 'cancelled'
+                              or any(i['kind'] == 'create' and i['event_id'] == row['id'] and i['state'] != 'uncertain' for i in templates)
+                              or current['event'] is None and not any(i['kind'] == 'create' and i['state'] == 'uncertain' for i in templates)):
         return {**body, 'message': 'нет однозначной прежней операции для повтора; можно выбрать provider и задать новое изменение'}
     if choice == 'local' and not state['calendar'].get('writable', True):
         return {**body, 'status': 'error', 'message': 'календарь только для чтения'}
@@ -320,7 +337,7 @@ def resolve(ctx, event_id, choice, token):
                         c.execute('INSERT INTO intents (' + ','.join(columns) + ') VALUES (' +
                                   ','.join('?' for _ in columns) + ')', tuple(clone[k] for k in columns))
                         local.update_event(clone['event_id'], {'sync_state': 'pending_delete' if clone['kind'] == 'delete' else 'pending'})
-                    local.update_event(row['id'], {'raw_payload': current['event'].get('raw_payload') or ''})
+                    local.update_event(row['id'], {'raw_payload': (current['event'] or {}).get('raw_payload') or ''})
     if changed:
         return {**inspect(ctx, event_id), 'snapshot_changed': True, 'message': 'локальный снимок изменился; выбор не применён'}
     return {'status': 'pending' if clones else 'resolved', 'event_id': row['id'], 'resolution': choice,

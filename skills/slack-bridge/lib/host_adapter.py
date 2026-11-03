@@ -13,9 +13,8 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from .events import DECLARED_FILE_KEYS, file_facts, provider_facts
 from .store import InboxItem
-from .provider_context import enrich_event
+from .presence import _staged_path, slack_presence_event as slack_presence_event, slack_wake_facts as slack_wake_facts
 
 try:
     # The host's own opaque-credential wrapper. It is importable in the
@@ -98,7 +97,16 @@ class HostBindingTerminalError(HostContractError):
 
 
 class HostRetryError(HostContractError):
-    """Host explicitly permits retry of a turn that has no admitted work ref."""
+    """Host explicitly permits retry of a turn that has no admitted work ref.
+
+    ``code``, ``field`` and ``retry_after`` (seconds, when the Host supplied a
+    number) keep the typed hint, such as ``presence_capacity_full``.
+    """
+
+    def __init__(self, message: str, *, code: str = "", field: str = "",
+                 retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.code, self.field, self.retry_after = code, field, retry_after
 
 
 def normalize_binding_id(value: Any) -> str:
@@ -200,123 +208,6 @@ def _is_loopback_url(url: str) -> bool:
         return False
 
 
-def _staged_path(record: Mapping[str, Any]) -> str:
-    """The one predicate for bytes the bridge staged and submits to Host.
-
-    A nonblank path is the name the bridge wrote and is kept byte-for-byte;
-    whitespace only decides whether there is a path at all.
-    """
-    path = str(record.get("path") or "")
-    return path if path.strip() else ""
-
-
-def _attachments(item: InboxItem) -> list[dict[str, Any]]:
-    """Describe every declared file and what this bridge's staging observed.
-
-    ``content_available`` means the bridge staged bytes; the Host attachment
-    manifest remains authoritative for what the model can actually open.
-    """
-    attachments = []
-    for index, file in enumerate(item.files):
-        outcome = item.staged_files[index] if index < len(item.staged_files) else {}
-        path = _staged_path(outcome)
-        entry = {
-            "file_id": str(file.get("file_id") or ""),
-            "file_name": str(file.get("name") or ""),
-            "mime_type": str(file.get("mimetype") or ""),
-            "file_size": int(file.get("size") or 0),
-            **{key: value for key, value in file_facts(file).items() if key not in DECLARED_FILE_KEYS},
-            "content_available": bool(path),
-        }
-        if path:
-            # The staged basename; Host derives its attachment label from it
-            # and may shorten or normalize that label.
-            entry["staged_as"] = os.path.basename(path)
-        if outcome.get("stage_error"):
-            entry["stage_error"] = str(outcome["stage_error"])
-            details = outcome.get("stage_error_details")
-            entry["stage_error_details"] = dict(details) if isinstance(details, Mapping) else {}
-        attachments.append(entry)
-    return attachments
-
-
-def slack_presence_event(item: InboxItem, *, transport_queue: bool = False, places: bool = False) -> dict[str, Any]:
-    """Map exact Slack facts into the frozen provider-neutral event shape.
-
-    ``transport_queue`` adds the inbox snapshot taken before the event's first
-    submission attempt (``BridgeStore.conversation_queue``) to
-    ``event.conversation``; only a continuation-capable Host is sent it.
-    """
-
-    thread_id = item.thread_ts or item.message_ts
-    event = {
-        "source_event_id": item.provider_event_key,
-        "provider": "slack",
-        "account_id": item.team_id,
-        "conversation_id": item.channel_id,
-        "thread_id": thread_id,
-        "conversation_key": f"slack:{item.ordering_key}",
-        "actor": {
-            "platform": "slack",
-            "platform_actor_id": item.actor_user_id,
-            "actor_team_id": item.actor_team_id or item.team_id,
-        },
-        "conversation": {
-            "platform": "slack",
-            "workspace_id": item.team_id,
-            "enterprise_id": item.enterprise_id,
-            "channel_id": item.channel_id,
-            "channel_type": item.channel_type,
-            "thread_ts": thread_id,
-        },
-        "message": {
-            "message_id": item.message_ts,
-            "thread_id": item.thread_ts,
-            "event_id": item.event_id,
-            "envelope_id": item.envelope_id,
-            "event_ts": item.event_ts,
-            "client_msg_id": item.client_msg_id,
-            "event_type": item.event_type,
-            "subtype": item.subtype,
-            "attachments": _attachments(item),
-            "blocks": list(item.structured.get("blocks") or []),
-            "provider_facts": provider_facts(item.structured),
-        },
-        "text": item.text,
-    }
-    event = enrich_event(event, item.provider_context)
-    if places:
-        event["facts"] = slack_wake_facts(event)
-    if transport_queue and item.transport_queue is not None:
-        event["conversation"]["transport_queue"] = dict(item.transport_queue)
-    return event
-
-
-def slack_wake_facts(event: Mapping[str, Any]) -> list[str]:
-    """Match only provider identities/relationships, never the meaning of speech."""
-    conversation, message = event["conversation"], event["message"]
-    provider = message.get("provider_facts") or {}
-    own = provider.get("self_user_id")
-    facts = []
-    if message.get("event_type") in {"message", "app_mention"} and message.get("subtype") != "message_deleted":
-        facts.append("any_message")
-        if conversation.get("channel_type") == "im" or conversation.get("is_im"):
-            facts.append("direct_message")
-        if conversation.get("channel_type") == "mpim" or conversation.get("is_mpim"):
-            facts.append("group_dm")
-        if own and own in provider.get("mentioned_user_ids", []):
-            facts.append("mention")
-        if message.get("thread_id"):
-            if own and provider.get("parent_user_id") == own:
-                facts.extend(["reply_to_me", "my_thread"])
-            history = (conversation.get("thread_history") or {}).get("data") or {}
-            if own and "my_thread" not in facts and any(row.get("user") == own for row in history.get("messages", [])):
-                facts.append("my_thread")
-    if event["actor"].get("is_bot") or provider.get("actor_is_bot"):
-        facts.append("from_bot")
-    return facts
-
-
 def _encode_receipt(status: str, receipt: Mapping[str, Any]) -> str:
     raw = json.dumps(dict(receipt), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
@@ -335,6 +226,27 @@ def _decode_receipt(reference: str, status: str, label: str) -> dict[str, Any]:
     return value
 
 
+def _continuation_version(identity: Mapping[str, Any]) -> int:
+    """Version 2 only when listed; the scalar stays the v1 fact older bridges compare."""
+    listed = identity.get("presence_continuation_versions")
+    versions = {value for value in listed if type(value) is int} if isinstance(listed, list) else set()
+    if 2 in versions:
+        return 2
+    return 1 if identity.get("presence_continuation_version") == 1 or 1 in versions else 0
+
+
+def _echoed_continuation(payload: Mapping[str, Any]) -> int:
+    value = payload.get("continuation_version")
+    return value if type(value) is int and value in (1, 2) else 0
+
+
+def _retry_after(payload: Mapping[str, Any]) -> float | None:
+    value = payload.get("retry_after")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value < float("inf"):
+        return None
+    return float(value)
+
+
 def _completed_reference(payload: Mapping[str, Any]) -> str:
     return _encode_receipt("completed", {
         "status": "completed",
@@ -343,7 +255,7 @@ def _completed_reference(payload: Mapping[str, Any]) -> str:
         "turn_ref": str(payload.get("turn_ref") or ""),
         "work_ref": str(payload.get("work_ref") or ""),
         "delivery_reporting_version": _reporting_version(payload),
-        "continuation_version": 1 if payload.get("continuation_version") == 1 else 0,
+        "continuation_version": _echoed_continuation(payload),
         "output_ref": str(payload.get("output_ref") or ""),
     })
 
@@ -359,7 +271,7 @@ def _deferred_reference(payload: Mapping[str, Any]) -> str:
         "turn_ref": str(payload.get("turn_ref") or ""),
         "work_ref": str(payload.get("work_ref") or ""),
         "delivery_reporting_version": _reporting_version(payload),
-        "continuation_version": 1 if payload.get("continuation_version") == 1 else 0,
+        "continuation_version": _echoed_continuation(payload),
         "output_ref": str(payload.get("output_ref") or ""),
     })
 
@@ -372,7 +284,11 @@ def _decode_deferred_reference(reference: str) -> dict[str, Any]:
 
 
 def _continuing_reference(payload: Mapping[str, Any]) -> str:
-    """The write-once initial envelope of a live author, and its promoted child's ref."""
+    """The write-once initial envelope of a live author, and its promoted child's ref.
+
+    A version 2 envelope records its version; a version 1 receipt keeps its
+    original fields, so its polls are still checked against version 1.
+    """
     return _encode_receipt("continuing", {
         "status": "continuing",
         "continuation_ref": str(payload.get("continuation_ref") or "").strip(),
@@ -382,7 +298,13 @@ def _continuing_reference(payload: Mapping[str, Any]) -> str:
         "output_ref": str(payload.get("output_ref") or ""),
         "work_ref": str(payload.get("work_ref") or "").strip(),
         "delivery_reporting_version": _reporting_version(payload),
+        **({"continuation_version": 2} if _echoed_continuation(payload) == 2 else {}),
     })
+
+
+def _receipt_continuation(receipt: Mapping[str, Any]) -> int:
+    """The version an existing continuing receipt is observed under (1 when unrecorded)."""
+    return 2 if receipt.get("continuation_version") == 2 else 1
 
 
 def _decode_continuing_reference(reference: str) -> dict[str, Any]:
@@ -470,6 +392,15 @@ def _released_outputs(payload: Mapping[str, Any]) -> list[dict[str, str]]:
     return outputs
 
 
+def _initial_outputs(receipt: Mapping[str, Any]) -> tuple[HostOutput, ...]:
+    """A continuing receipt's own selection, known before any poll."""
+    ref, text = str(receipt.get("continuation_ref") or ""), str(receipt.get("text") or "")
+    if str(receipt.get("outcome") or "") not in _SPEECH or not text.strip():
+        return ()
+    output_ref = str(receipt.get("output_ref") or "")
+    return (HostOutput(_output_identity(output_ref, f"initial:{ref}"), text, ref, output_ref),)
+
+
 class LoopbackPresenceHostAdapter:
     def __init__(
         self,
@@ -478,6 +409,7 @@ class LoopbackPresenceHostAdapter:
         host_service_url: str,
         skill_token: "SkillToken | str | None",
         http_client: httpx.AsyncClient | None = None,
+        identity: dict | None = None,
     ) -> None:
         raw_binding_id = str(binding_id or "").strip()
         self.binding_id = normalize_binding_id(raw_binding_id) if raw_binding_id else ""
@@ -496,9 +428,14 @@ class LoopbackPresenceHostAdapter:
         self._terminal_work: dict[str, dict[str, Any]] = {}
         self.delivery_reporting_version = 0
         self.delivery_reporting_status = "unknown"
-        # Discovered with delivery reporting from the same /identity answer.
+        # Discovered with delivery reporting from the same /identity answer:
+        # 2 when ``presence_continuation_versions`` lists it, else the scalar 1, else 0.
         self.continuation_version = 0
         self.places_version = 0
+        self.presence_identity = 0
+        self.reaction_context = 0
+        self.explicit_completion = 0
+        self.connector_identity = dict(identity or {})
 
     async def discover_delivery_support(self) -> int:
         if self.delivery_reporting_status in {"supported", "unsupported"}:
@@ -521,19 +458,30 @@ class LoopbackPresenceHostAdapter:
             payload = await self._json_response(response)
             version = payload.get("places_version")
             self.places_version = int(type(version) is int and version >= 1)
+            self.presence_identity = int(payload.get("presence_identity") == 1)
+            # A JSON true is not the capability; bool compares equal to 1 in Python.
+            self.reaction_context = int(type(payload.get("presence_reaction_context")) is int
+                                        and payload["presence_reaction_context"] == 1)
+            self.explicit_completion = int(type(payload.get("presence_explicit_completion")) is int
+                                           and payload["presence_explicit_completion"] == 1)
             self.available = bool(self._skill_token and (self.binding_id or self.places_version))
             self.delivery_reporting_version = 1 if payload.get("presence_delivery_version") == 1 else 0
-            self.continuation_version = 1 if payload.get("presence_continuation_version") == 1 else 0
+            self.continuation_version = _continuation_version(payload)
             self.delivery_reporting_status = "supported" if self.delivery_reporting_version else "unsupported"
         except (HostContractError, httpx.HTTPError):
             # Failed discovery can retry. The outbox holds until policy is known.
             self.delivery_reporting_version = 0
             self.continuation_version = 0
+            self.reaction_context = 0
+            self.explicit_completion = 0
             self.delivery_reporting_status = "unavailable"
         return self.delivery_reporting_version
 
-    async def place_hold(self, account_id: str, conversation_id: str) -> str:
-        """Recheck live policy immediately before a queued physical effect."""
+    async def place_hold(self, account_id: str, conversation_id: str, thread_id: str = "") -> str:
+        """Recheck live policy immediately before a queued physical effect.
+
+        Host excludes a thread's own place from a lookup that names no thread; one without asks as before.
+        """
         await self.discover_delivery_support()
         if not self.places_version:
             return "Held: place policy unavailable" if self.delivery_reporting_status == "unavailable" else ""
@@ -541,7 +489,8 @@ class LoopbackPresenceHostAdapter:
             response = await self._http.get(
                 f"{self.host_service_url}/presence/place",
                 headers={"X-Skill-Token": self._skill_token.use_in_request()},
-                params={"provider": "slack", "account_id": account_id, "conversation_id": conversation_id}, timeout=10,
+                params={"provider": "slack", "account_id": account_id, "conversation_id": conversation_id,
+                        **({"thread_id": thread_id} if thread_id else {})}, timeout=10,
             )
             place = await self._json_response(response)
         except (HostContractError, httpx.HTTPError):
@@ -608,7 +557,8 @@ class LoopbackPresenceHostAdapter:
             raise HostAdapterUnavailable("binding_id is not configured")
         if self._skill_token is None:
             raise HostContractError("HOST_SERVICE_TOKEN is missing")
-        continuing = self.continuation_version == 1
+        version = self.continuation_version
+        continuing = version in (1, 2)
         response = await self._http.post(
             f"{self.host_service_url}/presence/turn",
             headers={
@@ -617,12 +567,13 @@ class LoopbackPresenceHostAdapter:
             },
             json={
                 **({"binding_id": self.binding_id} if not self.places_version else {}),
-                "event": slack_presence_event(event, transport_queue=continuing, places=bool(self.places_version)),
+                "event": {**slack_presence_event(event, transport_queue=continuing, places=bool(self.places_version)),
+                          **({"identity": self.connector_identity} if self.presence_identity and self.connector_identity else {})},
                 "staged_files": [
                     _staged_path(file) for file in event.staged_files if _staged_path(file)
                 ],
                 **({"delivery_reporting_version": 1} if mode else {}),
-                **({"continuation_version": 1} if continuing else {}),
+                **({"continuation_version": version} if continuing else {}),
             },
             timeout=1800.0,
         )
@@ -635,15 +586,23 @@ class LoopbackPresenceHostAdapter:
                     raise HostContractError("Retained presence refusal omitted its original turn_ref")
                 return _retained_reference(payload, response.status_code, mode)
             # Blocked needs repair and retry needs time; both keep the event queued.
+            # A busy conversation or full capacity (v2 429) is such a retry: no
+            # task row was written, so the same event stays this thread's head.
             if disposition in {"retry", "blocked"} and not str(payload.get("work_ref") or "").strip():
-                raise HostRetryError(_refusal_error(payload, response.status_code))
+                raise HostRetryError(_refusal_error(payload, response.status_code),
+                                     code=str(payload.get("code") or ""), field=str(payload.get("field") or ""),
+                                     retry_after=_retry_after(payload))
             return _refused_reference(payload, response.status_code, mode)
         if continuing and (status == "continuing" or (
                 status == "completed" and str(payload.get("continuation_ref") or "").strip())):
             # The author answered early and lives on (or ended after releasing outputs):
             # its released outputs, terminal and child are all read from its poll.
-            if payload.get("continuation_version") != 1 or not str(payload.get("continuation_ref") or "").strip():
-                raise HostContractError("Continuing presence turn omitted its continuation reference")
+            # Version 2 is custody once intake is open; a replayed envelope keeps
+            # the version it was stored under, which can be 1 after an upgrade.
+            if (_echoed_continuation(payload) not in ((1, 2) if version == 2 else (1,))
+                    or not str(payload.get("continuation_ref") or "").strip()):
+                raise HostContractError(
+                    "Continuing presence turn omitted its continuation reference or a negotiated version")
             self._outcome(payload)
             return _continuing_reference(payload)
         if status != "completed":
@@ -671,12 +630,16 @@ class LoopbackPresenceHostAdapter:
         )
         return await self._json_response(response)
 
-    async def _poll_continuation(self, continuation_ref: str) -> dict[str, Any]:
-        """One continuing author's poll; a legacy-shaped answer is refused, never guessed."""
+    async def _poll_continuation(self, continuation_ref: str, version: int = 1) -> dict[str, Any]:
+        """One continuing author's poll; a legacy-shaped answer is refused, never guessed.
+
+        The view must echo the version its receipt was stored under.
+        """
         payload = await self._get_work(continuation_ref)
         status = str(payload.get("status") or "").strip().lower()
-        if payload.get("continuation_version") != 1:
-            raise HostContractError("Presence Host answered a continuation poll without continuation_version 1")
+        if payload.get("continuation_version") != version:
+            raise HostContractError(
+                f"Presence Host answered a continuation poll without continuation_version {version}")
         returned_ref = str(payload.get("continuation_ref") or payload.get("work_ref") or "").strip()
         if returned_ref and returned_ref != continuation_ref:
             raise HostContractError("Presence Host returned a different continuation_ref")
@@ -716,7 +679,8 @@ class LoopbackPresenceHostAdapter:
         """
         ref = str(receipt["continuation_ref"])
         mode = _reporting_version(receipt)
-        outputs: dict[str, HostOutput] = {}
+        version = _receipt_continuation(receipt)
+        outputs: dict[str, HostOutput] = {output.identity: output for output in _initial_outputs(receipt)}
         transient: list[str] = []
         unresolved: list[str] = []
         rejected: list[str] = []
@@ -751,7 +715,7 @@ class LoopbackPresenceHostAdapter:
             if author and transport_queue is not None:
                 await self.refresh_transport_queue(source, transport_queue)
                 queue_recorded = True
-            return await (self._poll_continuation(source) if author else self._poll_work(source))
+            return await (self._poll_continuation(source, version) if author else self._poll_work(source))
 
         def start(source: str, *, author: bool = False) -> None:
             source = source.strip()
@@ -759,9 +723,6 @@ class LoopbackPresenceHostAdapter:
                 seen.add(source)
                 tasks[asyncio.create_task(poll(source, author))] = (source, author)
 
-        if str(receipt.get("outcome") or "") in _SPEECH:
-            output_ref = str(receipt.get("output_ref") or "")
-            add(_output_identity(output_ref, f"initial:{ref}"), str(receipt.get("text") or ""), ref, output_ref)
         # This yield precedes even starting an HTTP poll. Runtime commits these
         # outputs before it requests the next update.
         yield snapshot()
@@ -973,11 +934,40 @@ class LoopbackPresenceHostAdapter:
                 yield self._initial_status(receipt, "pending")
             yield await self.status(reference)
 
+    def initial_status(self, reference: str) -> HostTurnStatus:
+        """What a stored reference already says, without any Host request.
+
+        ``completed:`` is final. A refusal without admitted work is terminal.
+        Every other reference names work still to be observed: its state stays
+        ``pending`` with only the speech its envelope already carries (a
+        continuing author's initial selection or a deferred acknowledgement).
+        """
+        if reference.startswith("completed:"):
+            return self._initial_status(_decode_completed_reference(reference), "ready")
+        if reference.startswith("deferred:"):
+            return self._initial_status(_decode_deferred_reference(reference), "pending")
+        if reference.startswith("continuing:"):
+            receipt = _decode_continuing_reference(reference)
+            return HostTurnStatus("pending", "", (), _reporting_version(receipt), str(receipt["continuation_ref"]),
+                                  _initial_outputs(receipt), False, reference)
+        if reference.startswith("refused:"):
+            receipt = _decode_refused_reference(reference)
+            response = receipt["response"]
+            admitted = bool(str(response.get("work_ref") or "").strip())
+            return HostTurnStatus("pending" if admitted else "failed",
+                                  _refusal_error(response, receipt["http_status"]))
+        if reference.startswith("retained:"):
+            receipt = _decode_retained_reference(reference)
+            response = receipt["response"]
+            return HostTurnStatus("pending", _refusal_error(response, int(receipt.get("http_status") or 0)), (),
+                                  _reporting_version(receipt), str(response["turn_ref"]))
+        raise HostContractError("Unknown presence reference type")
+
     @staticmethod
     def _initial_status(receipt: Mapping[str, Any], state: str, error: str = "") -> HostTurnStatus:
         text, ref = str(receipt.get("text") or ""), str(receipt.get("turn_ref") or "")
         mode = _reporting_version(receipt)
-        if receipt.get("continuation_version") == 1:
+        if receipt.get("continuation_version") in (1, 2):
             output_ref = str(receipt.get("output_ref") or "")
             speech = receipt.get("status") == "deferred" or receipt.get("outcome") in _SPEECH
             outputs = (HostOutput(_output_identity(output_ref, f"initial:{ref}"), text, ref, output_ref),) if speech and text.strip() else ()
@@ -1017,7 +1007,7 @@ class LoopbackPresenceHostAdapter:
         if reference.startswith("completed:"):
             payload = _decode_completed_reference(reference)
             receipt = payload
-            if receipt.get("continuation_version") == 1:
+            if receipt.get("continuation_version") in (1, 2):
                 # Its selected identity was already emitted by status_updates.
                 return HostDelivery((), _reporting_version(receipt), str(receipt.get("turn_ref") or ""))
         elif reference.startswith("deferred:"):
@@ -1036,7 +1026,7 @@ class LoopbackPresenceHostAdapter:
             else ""
         )
         turn_ref = str(payload.get("turn_ref") or receipt.get("work_ref") or receipt.get("turn_ref") or "")
-        if receipt.get("continuation_version") == 1:
+        if receipt.get("continuation_version") in (1, 2):
             output_ref = str(payload.get("output_ref") or "")
             output = HostOutput(_output_identity(output_ref, f"work:{receipt.get('work_ref')}"), text, turn_ref, output_ref)
             return HostDelivery((), _reporting_version(receipt), turn_ref, (output,) if text.strip() else ())
@@ -1054,6 +1044,7 @@ def create_host_adapter(
     binding_id: str,
     *,
     http_client: httpx.AsyncClient | None = None,
+    identity: dict | None = None,
 ) -> PresenceHostAdapter:
     try:
         # The host injects HOST_SERVICE_TOKEN into this companion's environment;
@@ -1066,4 +1057,5 @@ def create_host_adapter(
         host_service_url=os.environ.get("HOST_SERVICE_URL", "http://127.0.0.1:8767"),
         skill_token=skill_token,
         http_client=http_client,
+        identity=identity,
     )

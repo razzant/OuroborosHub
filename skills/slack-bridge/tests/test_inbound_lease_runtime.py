@@ -1,9 +1,11 @@
-"""Finite continuation lease budgets through the actual companion consumers.
+"""Finite inbox lease budgets through the actual companion consumers.
 
-BridgeRuntime's ordinary four inbound/two outbound loops, the SQLite store,
-SlackClient and LoopbackPresenceHostAdapter are real. Only Socket Mode and HTTP
-providers are synthetic; store time is a logical clock. These schedules do not
-claim a total HTTP deadline or protection from arbitrary suspension.
+BridgeRuntime's ordinary loops (four intake, four observation and two outbound
+workers), the SQLite store, SlackClient and LoopbackPresenceHostAdapter are real.
+Only Socket Mode and HTTP providers are synthetic; store time is a logical clock.
+The intake claim ends at the durable Host reference; the observation claim that
+polls it has its own budget. These schedules do not claim a total HTTP deadline
+or protection from arbitrary suspension.
 """
 from __future__ import annotations
 
@@ -53,6 +55,8 @@ class _Consumer:
         self.clock_step, self.reporting = clock_step, reporting
         self.claims, self.retries, self.submits, self.posts = [], [], [], []
         self.queue_reports, self.delivery_reports = [], []
+        # Host requests and inbox claims in the order they happened.
+        self.timeline: list[str] = []
         self.polls, self.file_requests = 0, 0
         self.poll_started, self.takeover = asyncio.Event(), asyncio.Event()
         self.release_first, self.release_second = asyncio.Event(), asyncio.Event()
@@ -63,12 +67,15 @@ class _Consumer:
         retry = self.store.retry_inbox
         checkpoint = self.store.set_transport_queue_report
 
-        def observed_claim(*, lease_seconds):
-            item = claim(lease_seconds=lease_seconds)
+        def observed_claim(*, lease_seconds, submitted=None):
+            item = claim(lease_seconds=lease_seconds, submitted=submitted)
             if item is not None:
+                role = {None: "any", False: "intake", True: "observe"}[submitted]
                 self.claims.append({"event_id": item.event_id, "token": item.lease_token,
-                                    "at": self.clock.now, "lease_seconds": lease_seconds,
-                                    "task": asyncio.current_task().get_name()})
+                                    "at": self.clock.now, "lease_seconds": lease_seconds, "role": role,
+                                    "task": asyncio.current_task().get_name(),
+                                    "outbox_rows": len(self.outbox())})
+                self.timeline.append(f"claim:{role}:{item.event_id}")
             return item
 
         def observed_retry(row_id, token, *args, **kwargs):
@@ -79,8 +86,9 @@ class _Consumer:
             try:
                 return checkpoint(row_id, token, snapshot)
             finally:
-                if (self.clock_step and snapshot is None and len(self.claims) >= 2
-                        and token == self.claims[0]["token"]):
+                observers = [claim for claim in self.claims if claim["role"] == "observe"]
+                if (self.clock_step and snapshot is None and len(observers) >= 2
+                        and token == observers[0]["token"]):
                     self.stale_checkpoint.set()
 
         monkeypatch.setattr(self.store, "claim_inbox", observed_claim)
@@ -144,6 +152,7 @@ class _Consumer:
         if path == "/presence/turn":
             body = json.loads(request.content)
             self.submits.append(body)
+            self.timeline.append(f"turn:{body['event']['source_event_id']}")
             if body["event"]["source_event_id"] == "Ev2":
                 return httpx.Response(200, json={"ok": True, "status": "completed", "outcome": "silent",
                                                "turn_ref": "other", "text": "", "work_ref": ""})
@@ -156,10 +165,12 @@ class _Consumer:
         assert path == "/presence/work/author"
         if request.method == "POST":
             self.queue_reports.append(json.loads(request.content))
+            self.timeline.append("report:author")
             if not self.clock_step:
                 self.clock.now += 9
             return httpx.Response(200, json={"ok": True, "status": "recorded"})
         self.polls += 1
+        self.timeline.append("poll:author")
         if self.polls == 1:
             self.clock.now += 2101 if self.clock_step else 5
             self.poll_started.set()
@@ -199,7 +210,7 @@ class _Consumer:
 
 
 @pytest.mark.parametrize("reporting", [0, 1])
-def test_finite_overhead_refreshes_owned_budget_and_delivers_early_output(tmp_path, monkeypatch, reporting):
+def test_input_claim_ends_at_durable_reference_and_observer_owns_finite_poll(tmp_path, monkeypatch, reporting):
     async def run():
         bridge = _Consumer(tmp_path, monkeypatch, reporting=reporting)
         bridge.ingest(file=True)
@@ -208,10 +219,19 @@ def test_finite_overhead_refreshes_owned_budget_and_delivers_early_output(tmp_pa
             await asyncio.wait_for(bridge.poll_started.wait(), 5)
             # All real idle peers get a normal 250ms worker-loop claim opportunity.
             await asyncio.sleep(0.35)
-            assert len(bridge.claims) == 1, bridge.claims
+            intake, observer = bridge.claims
+            # Staging and submission fit the input claim's budget. It stores the
+            # reference, queues the envelope's speech and releases the row; it
+            # never reports the queue or polls. A separate observer polls.
+            assert (intake["role"], observer["role"]) == ("intake", "observe"), bridge.claims
+            assert intake["task"].startswith("slack-inbound-") and observer["task"].startswith("slack-observe-")
+            assert bridge.timeline == ["claim:intake:Ev1", "turn:Ev1", "claim:observe:Ev1",
+                                       "report:author", "poll:author"]
+            assert observer["outbox_rows"] == 1 and observer["at"] - intake["at"] == 297 + 1790
             assert bridge.clock.now - 10000 == 297 + 1790 + 9 + 5 == 2101
             assert _INBOUND_LEASE_SECONDS == 2100
-            assert bridge.row()["lease_until"] == 10000 + 297 + 1790 + 2100
+            assert bridge.row()["lease_until"] == observer["at"] + 2100 == 10000 + 297 + 1790 + 2100
+            assert bridge.row()["lease_token"] == observer["token"] != intake["token"]
             assert not bridge.task.done() and not bridge.socket_closed
             await _until(lambda: len(bridge.posts) == 1)
             assert bridge.posts[0]["markdown_text"] == "Early output"
@@ -224,7 +244,7 @@ def test_finite_overhead_refreshes_owned_budget_and_delivers_early_output(tmp_pa
             assert final["lease_token"] == "" and final["lease_until"] == 0
             assert final["host_reference"] == durable["host_reference"]
             assert final["staged_files_json"] == durable["staged_files_json"]
-            assert final["attempts"] == 1 and bridge.polls == 1
+            assert final["attempts"] == 2 and bridge.polls == 1
             assert bridge.file_requests == len(bridge.submits) == len(bridge.queue_reports) == 1
             assert len(bridge.outbox()) == 1
             assert bridge.outbox()[0]["output_ref"] == "released-output"
@@ -240,34 +260,38 @@ def test_finite_overhead_refreshes_owned_budget_and_delivers_early_output(tmp_pa
     asyncio.run(run())
 
 
-def test_post_renewal_takeover_preserves_new_owner_and_companion_workers(tmp_path, monkeypatch):
+def test_observer_takeover_preserves_new_owner_and_companion_workers(tmp_path, monkeypatch):
     async def run():
         bridge = _Consumer(tmp_path, monkeypatch, clock_step=True)
         bridge.ingest()
         bridge.start()
         try:
             await asyncio.wait_for(bridge.takeover.wait(), 5)
-            old, new = bridge.claims
+            intake, old, new = bridge.claims
+            assert intake["role"] == "intake" and old["role"] == new["role"] == "observe"
             assert new["at"] - old["at"] == 2101
             assert new["token"] != old["token"] and new["task"] != old["task"]
+            assert new["task"].startswith("slack-observe-")
             owned = bridge.row()
-            assert owned["lease_token"] == new["token"] and owned["attempts"] == 2
+            assert owned["lease_token"] == new["token"] and owned["attempts"] == 3
             bridge.release_first.set()
             await asyncio.wait_for(bridge.stale_checkpoint.wait(), 5)
             await asyncio.sleep(0)
             assert old["token"] not in bridge.retries
             assert not bridge.task.done() and not bridge.socket_closed and not bridge.runtime._stop.is_set()
-            # A real companion inbound loop must process a new conversation turn
+            # A real companion input loop must process a new conversation turn
             # while the new owner is still blocked inside its one finite GET.
             bridge.ingest("Ev2")
             await _until(lambda: bridge.row("Ev2")["state"] == "delivered")
             assert bridge.row() == owned
             assert not bridge.task.done() and not bridge.socket_closed
             assert [item["event"]["source_event_id"] for item in bridge.submits] == ["Ev1", "Ev2"]
+            assert [claim["role"] for claim in bridge.claims if claim["event_id"] == "Ev2"] == ["intake"]
             assert bridge.polls == 2
             bridge.release_second.set()
             await _until(lambda: bridge.row()["state"] == "pending")
-            assert bridge.retries == [new["token"]]
+            # The input claim's release of Ev1 and the new owner's pending retry.
+            assert bridge.retries == [intake["token"], new["token"]]
             await _until(lambda: len(bridge.posts) == 1)
             assert len(bridge.outbox()) == 1
         finally:

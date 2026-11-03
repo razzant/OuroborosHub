@@ -2,4 +2,3 @@ __pycache__/
 *.pyc
 graphify-out
 .DS_Store
-.chrome_browser_evidence/

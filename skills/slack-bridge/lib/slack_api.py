@@ -523,6 +523,17 @@ class SlackClient:
             )
         return result
 
+    async def read_reactions(self, channel_id: str, *, ts: str) -> dict[str, Any]:
+        """One message's current reactions; ``full`` asks Slack for the complete list."""
+        channel_id, ts = str(channel_id or "").strip(), str(ts or "").strip()
+        if not channel_id or not ts:
+            raise SlackConfigurationError("channel_id and ts are required")
+        response = await self._get("reactions.get", {"channel": channel_id, "timestamp": ts, "full": True},
+                                   token=self.bot_token)
+        if not isinstance(response.get("message"), dict):
+            raise SlackApiError("missing_message")
+        return response
+
     async def open_socket_url(self) -> str:
         data = await self._post("apps.connections.open", {}, token=self.app_token)
         url = str(data.get("url") or "").strip()

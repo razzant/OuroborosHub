@@ -215,7 +215,7 @@ def test_cursorless_partial_names_range_continuation_instead_of_repeating_first_
     asyncio.run(run())
 
 
-def test_reaction_without_known_thread_does_not_fetch_channel_history(tmp_path):
+def test_reaction_on_unretained_message_reads_only_that_message_never_channel_history(tmp_path):
     async def run():
         store, events, reads = BridgeStore(tmp_path), [], []
         value = envelope(thread_ts="")
@@ -226,15 +226,25 @@ def test_reaction_without_known_thread_does_not_fetch_channel_history(tmp_path):
         def provider(request):
             reads.append(request.url.path)
             response = metadata_response(request)
-            assert response is not None, "A reaction without a known thread must not issue a history read"
+            if response is None:
+                assert request.url.path.endswith("conversations.replies"), "never a history read"
+                response = page([{"ts": "100.000000", "user": "U2", "text": "Yes, that one."}])
             return response
 
+        def identity_aware(request):
+            if request.url.path == "/identity":
+                return httpx.Response(200, json={"ok": True, "presence_reaction_context": 1})
+            events.append(json.loads(request.content)["event"])
+            return httpx.Response(200, json={"status": "completed", "outcome": "silent", "text": "",
+                                             "turn_ref": "turn-1", "work_ref": ""})
+
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as slack_http, \
-                host_client(store, events) as host_http:
+                httpx.AsyncClient(transport=httpx.MockTransport(identity_aware)) as host_http:
             assert await worker(store, SlackClient("xoxb-test", "xapp-test", http_client=slack_http),
                                 host_http, tmp_path).process_once()
         assert "thread" not in snapshot(store) and "thread_history" not in events[0]["conversation"]
-        assert sorted(reads) == ["/api/conversations.info", "/api/users.info"]
+        assert sorted(reads) == ["/api/conversations.info", "/api/conversations.replies", "/api/users.info"]
+        assert events[0]["thread_id"] == "100.000000"
         assert store.status()["inbox_delivered"] == 1
     asyncio.run(run())
 

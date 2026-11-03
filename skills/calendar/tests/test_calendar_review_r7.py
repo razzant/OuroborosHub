@@ -32,10 +32,12 @@ class ReviewR7Tests(unittest.TestCase):
         for direction in ('caldav-google', 'google-caldav'):
             with self.subTest(direction=direction):
                 ctx,cid,caldav,google,left,eid,copy = r5.ReviewR5Tests().linked()
-                for target in (eid, copy['id']):
-                    result=ops.update_event(ctx.store,ctx.providers,target,
-                        {'exdates':iso_utc(_day(3)), 'rdates':iso_utc(_day(9))},scope='all',propagate=False)
-                    self.assertTrue(all(a['status']=='done' for a in result['assignments']),result)
+                if direction == 'google-caldav':
+                    self.assertEqual(ops.link_event(ctx.store, ctx.providers, copy['id'], 'source')['source_id'], copy['id'])
+                source_id = eid if direction == 'caldav-google' else copy['id']
+                result=ops.update_event(ctx.store,ctx.providers,source_id,
+                    {'exdates':iso_utc(_day(3)), 'rdates':iso_utc(_day(9))},scope='all')
+                self.assertTrue(all(a['status']=='done' for a in result['assignments']),result)
                 if direction == 'caldav-google':
                     def edit(cal):
                         event=next(c for c in cal.walk() if c.name=='VEVENT')
@@ -79,7 +81,7 @@ class ReviewR7Tests(unittest.TestCase):
         self.assertEqual(google.events[copy['external_id']]['status'],'cancelled')
 
     def test_source_exdate_add_and_remove_preserve_a_separate_accepted_cancellation(self):
-        ctx,cid,caldav,google,left,eid,copy=r5.ReviewR5Tests().linked()
+        ctx,cid,caldav,google,left,eid,copy=r5.ReviewR5Tests().linked(source_provider="google")
         instance(ctx,google,copy['id'],3)
         deleted=json.loads(tools.cal_delete(ctx,id=f"{copy['id']}@{iso_utc(_day(3))}",scope='this',confirm=True))
         self.assertEqual(deleted['status'],'deleted',deleted)

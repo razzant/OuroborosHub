@@ -8,7 +8,7 @@ from typing import Any, Awaitable, Callable, Mapping
 
 import httpx
 
-from .events import provider_facts
+from .events import REACTION_EVENTS, provider_facts
 from .slack_api import SlackApiError
 
 
@@ -40,20 +40,54 @@ async def observe(source: str, call: Callable[[], Awaitable[dict[str, Any]]]) ->
         return {"status": "unavailable", "source": source, "observed_at": observed_at, "error": lookup_error(exc)}
 
 
-async def capture_context(slack: Any, item: Any, workspace_name: str) -> dict[str, Any]:
+async def capture_context(slack: Any, item: Any, workspace_name: str,
+                          retained_target: Mapping[str, Any] | None = None) -> dict[str, Any]:
     lookups = [
         observe("users.info", lambda: slack.user_info(item.actor_user_id)),
         observe("conversations.info", lambda: slack.conversation_info(item.channel_id)),
     ]
-    has_thread = bool(item.thread_ts or item.event_type in {"message", "app_mention"})
+    reaction = item.event_type in REACTION_EVENTS
+    has_thread = not reaction and bool(item.thread_ts or item.event_type in {"message", "app_mention"})
     if has_thread:
         lookups.append(capture_thread(slack, item))
+    if reaction:
+        lookups.append(capture_reaction_target(slack, item, retained_target))
     results = await asyncio.gather(*lookups)
     snapshot = {"user": results[0], "conversation": results[1],
                 "workspace": {"name": workspace_name, "source": "auth.test"}}
     if has_thread:
         snapshot["thread"] = results[2]
+    if reaction:
+        snapshot["reaction_target"] = results[2]
     return snapshot
+
+
+async def capture_reaction_target(slack: Any, item: Any, retained: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Prove which conversation a reacted message belongs to, or say that it is unknown.
+
+    An exact retained record costs no request. Otherwise one conversations.replies read
+    narrowed to the target's timestamp: Slack accepts a reply's ts and returns the thread's
+    parent beside it, so the page holds at most those two. No retry and no history scan;
+    only the exact message counts as proof. Refused, empty or foreign pages stay unknown.
+    """
+    if retained is not None:
+        return {"status": "available", "observed_at": datetime.now(timezone.utc).isoformat(), **retained}
+
+    async def read() -> dict[str, Any]:
+        page = await slack.read_messages(item.channel_id, thread_ts=item.message_ts, oldest=item.message_ts,
+                                         latest=item.message_ts, inclusive=True, limit=2)
+        message = next((row for row in page["messages"]
+                        if isinstance(row, Mapping) and row.get("ts") == item.message_ts), None)
+        if message is None:
+            raise SlackApiError("reacted_message_not_returned")
+        return {"message": dict(message)}
+
+    observation = await observe("conversations.replies", read)
+    message = (observation.pop("data", None) or {}).get("message")
+    if message is not None:
+        # A reply names its proved root; a top-level message is its own conversation.
+        observation.update(message=message, thread_ts=str(message.get("thread_ts") or message["ts"]))
+    return observation
 
 
 async def capture_thread(slack: Any, item: Any) -> dict[str, Any]:

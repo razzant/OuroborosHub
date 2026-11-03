@@ -392,7 +392,11 @@ class ReassignAndLinkedSeriesRound2Tests(unittest.TestCase):
         primary = created["event"]
         copy = next(m for m in ctx.store.group_masters(primary["link_group_id"]) if m["id"] != primary["id"])
         preview = json.loads(tools.cal_delete(ctx, id=copy["id"], scope="all", confirm=False))
-        self.assertEqual({m["event_id"] for m in preview["affected"]}, {primary["id"], copy["id"]})
+        self.assertEqual({m["event_id"] for m in preview["affected"]}, {copy["id"]})
+        source_preview = json.loads(tools.cal_delete(ctx, id=primary["id"], scope="all", confirm=False))
+        self.assertEqual({m["event_id"] for m in source_preview["affected"]}, {primary["id"], copy["id"]})
+        applied = json.loads(tools.cal_delete(ctx, id=copy["id"], scope="all", confirm=True))
+        self.assertEqual({m["event_id"] for m in applied["assignments"]}, {copy["id"]})
         self.assertIsNotNone(ctx.store.get_event(primary["id"]))
 
 

@@ -59,6 +59,23 @@ def test_places_host_accepts_unbound_events_and_checks_state_each_time():
     asyncio.run(run())
 
 
+def test_place_lookup_names_a_thread_only_when_one_is_given():
+    async def run():
+        lookups = []
+        def handler(request):
+            if request.url.path == "/identity":
+                return httpx.Response(200, json={"places_version": 1})
+            lookups.append(dict(request.url.params))
+            return httpx.Response(200, json={"place_id": "p", "label": "Slack", "state": "active"})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            host = LoopbackPresenceHostAdapter(binding_id="", host_service_url="http://127.0.0.1:8767", skill_token="test", http_client=http)
+            assert await host.place_hold("T1", "C1", thread_id="1.0") == ""
+            assert await host.place_hold("T1", "C1") == ""
+        assert lookups == [{"provider": "slack", "account_id": "T1", "conversation_id": "C1", "thread_id": "1.0"},
+                           {"provider": "slack", "account_id": "T1", "conversation_id": "C1"}]
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("state", ["silent", "paused"])
 def test_held_outbox_resumes_without_losing_identity_or_attempts(tmp_path, monkeypatch, state):
     async def run():

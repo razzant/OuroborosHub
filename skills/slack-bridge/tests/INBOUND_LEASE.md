@@ -1,18 +1,25 @@
 # Inbound continuation lease boundary
 
-An inbox claim has a 2,100-second budget. A newly submitted continuing turn
-persists its Host reference, then refreshes that budget with the same row/token
-check used for inbox checkpoints. This occurs once, before the finite
-queue-observation/poll phase. A retry already obtains a fresh claim and does not
-renew again. Initial output still enters the outbox before either HTTP poll;
-staged files, source identity, Host references and output identities are unchanged.
+An inbox claim has a 2,100-second budget. The companion splits inbound work
+into input and observation claims. An input claim covers staging and
+submission. Once the Host reference is durable, it queues any speech the
+envelope already carries and releases the row. An observation claim then
+gets its own budget for the finite queue-observation/poll phase. A worker
+constructed without a role, as direct callers and older fixtures use it,
+still does both in one claim. Such a worker refreshes the budget once, after
+persisting a continuing reference, with the same row/token check used for
+inbox checkpoints. A retry already obtains a fresh claim and does not renew
+again. Initial output still enters the outbox before either HTTP poll. Staged
+files, source identity, Host references and output identities are unchanged.
 
 The regression used 297 logical seconds of file staging, 1,790 of submit, and
 5 of GET. The legacy deferred consumer released its row at 2,092 seconds. The
 continuing consumer's additional 9-second queue report pushed it to 2,101,
-allowing another worker to claim the row before its next checkpoint. Refreshing
-the owned lease at the durable reference boundary gives that finite phase its
-own budget without a timer, extra queue or a change to author lifetime.
+allowing another worker to claim the row before its next checkpoint. In the
+companion the input claim now ends at 2,087 seconds, and the observer's claim
+starts a new budget for the remaining 14 seconds. The single-claim worker
+instead refreshes its budget at the durable reference boundary. Neither path
+adds a timer, an extra queue or a change to author lifetime.
 
 Inbox checkpoint, terminal and retry token mismatches raise `InboxLeaseLost`.
 The inbound attempt contains only this typed condition, including when it arises
@@ -24,13 +31,18 @@ Host/transport failures is retained, and unrelated errors raised by the failure
 or retry handlers still propagate. Outbound lease handling is unchanged.
 
 `test_inbound_lease.py` checks current/stale ownership, mutation preservation,
-handler boundaries and genuine-error propagation. `test_inbound_lease_runtime.py`
-uses the actual store, adapter, Slack client and four inbound worker loops with
-synthetic HTTP transports and a logical store clock. It checks the finite-overhead
-case, immediate output and continued processing after a permitted takeover.
-Existing continuation tests cover independent author/child polls, replay,
-corrections, reporting modes and delivery identity. The separate Host fixture is
-described in [PRESENCE_PROCESS_CONSUMER.md](PRESENCE_PROCESS_CONSUMER.md).
+handler boundaries and genuine-error propagation for the single-claim worker.
+`test_inbound_lease_runtime.py` uses the actual store, adapter, Slack client and
+the companion's four input, four observation and two outbound loops, with
+synthetic HTTP transports and a logical store clock. It checks the
+finite-overhead case: the input claim never reports the queue or polls, and the
+early output is durable before the observer claims the row. It also checks
+immediate output and an observer takeover after a lease expires inside a GET.
+The stale observer's checkpoint is contained while an input loop still admits a
+new conversation. Existing continuation tests cover independent author/child
+polls, replay, corrections, reporting modes and delivery identity. The separate
+Host fixture is described in
+[PRESENCE_PROCESS_CONSUMER.md](PRESENCE_PROCESS_CONSUMER.md).
 
 The poll is finite: one author and at most two distinct child GETs per iterator,
 plus the queue-observation POST. A pending result releases the inbox for a later

@@ -5,6 +5,8 @@ merged theme bridge and the historical ref below, then run this file explicitly.
 The host uses the real mount, document CSP, fetch relay and disposal handshake.
 Only skill API responses are synthetic. No installed runtime is read or changed.
 OUROBOROS_THEME_EVIDENCE_DIR optionally retains screenshots.
+This harness mounts classic widget.js entries. memory-atlas is an ES module entry
+that only PluginAPI 2.1 hosts load; tests/memory_atlas checks its theme in a real host.
 """
 from __future__ import annotations
 
@@ -28,14 +30,12 @@ READY = {
     "cache_efficiency_snapshot": "#kpiRate",
     "claudexor_quotas": ".quota-tile",
     "context-lens": ".row",
-    "memory-atlas": ".ma-row",
     "token-usage": ".to-total",
 }
 FOCUS = {
     "cache_efficiency_snapshot": "#chartCanvas",
     "claudexor_quotas": "button",
     "context-lens": "select",
-    "memory-atlas": "#ma-search",
     "token-usage": "select",
 }
 HOST = """<!doctype html><html><head><script src="/static/theme.js"></script>
@@ -80,7 +80,6 @@ def theme_server():
     core = Path(configured).resolve()
     assert (core / "web/modules/widget_module.js").is_file()
     responses = json.loads((ROOT / "tests/fixtures/dashboard_theme_responses.json").read_text(encoding="utf-8"))
-    memory = _load("_theme_memory_fixtures", ROOT / "skills/memory-atlas/tests/ui_fixtures.py").fixtures()
     cache = _load("_theme_cache_plugin", ROOT / "skills/cache_efficiency_snapshot/plugin.py")
     accounting = _load("_theme_token_accounting", ROOT / "skills/token-usage/accounting.py")
     snapshot = json.loads((ROOT / "skills/token-usage/fixtures/numeric_snapshot.json").read_text(encoding="utf-8"))
@@ -122,11 +121,7 @@ def theme_server():
                 skill, tail = parts[3], "/" + "/".join(parts[4:])
                 if tail == "/module/widget.js":
                     return self.send((ROOT / "skills" / skill / "widget.js").read_bytes(), "text/javascript")
-                if skill == "memory-atlas":
-                    for row in memory:
-                        if row["path"] == tail and row["query"] == query:
-                            return self.send(row["body"], status=row["status"])
-                elif skill == "cache_efficiency_snapshot" and tail == "/data":
+                if skill == "cache_efficiency_snapshot" and tail == "/data":
                     return self.send(cache_data)
                 elif skill == "claudexor_quotas" and tail == "/quotas":
                     return self.send(responses["quota"])
@@ -175,12 +170,6 @@ def _exercise_selection(frame, skill):
         frame.locator('[data-focus="filter-model"]').select_option("vendor/model-a")
         frame.locator(".row").first.click()
         frame.wait_for_function('() => document.querySelectorAll("canvas").length === 2')
-    elif skill == "memory-atlas":
-        frame.locator('.ma-row:has(.ma-row-title:text-is("patterns"))').click()
-        frame.wait_for_selector(".md h1")
-        frame.locator('.ma-tab[data-tab="relations"]').click()
-        frame.wait_for_selector("li[data-edge-kind]")
-        frame.locator("#ma-search").fill("unsubmitted search")
     elif skill == "token-usage":
         frame.locator('select[data-pref="model"]').select_option("native-test")
         frame.wait_for_function('() => !document.querySelector(".to-content").matches("[aria-busy=true]")')

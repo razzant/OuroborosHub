@@ -1,7 +1,7 @@
 ---
 name: perplexity
 description: Deep web research via OpenRouter web_search server tool. Uses any model + grounded search with citations.
-version: 0.1.2
+version: 0.1.3
 type: extension
 runtime: python3
 entry: plugin.py

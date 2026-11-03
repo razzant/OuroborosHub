@@ -18,7 +18,7 @@ import sys
 import time
 import traceback
 from datetime import timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PAYLOAD = os.path.dirname(HERE)
@@ -26,9 +26,10 @@ if PAYLOAD not in sys.path:
     sys.path.insert(0, PAYLOAD)
 
 import ops  # noqa: E402
+import links  # noqa: E402
 import reminders as rem  # noqa: E402
-from model import PROVIDER_GOOGLE, PROVIDER_YANDEX, SCOPE_ALL, SECRET_KEYS, get_tz, iso_utc, now_utc, own_reminders, parse_stored  # noqa: E402
-from providers import Providers  # noqa: E402
+from model import PROVIDER_GOOGLE, PROVIDER_LOCAL, CALDAV_PROVIDERS, SCOPE_ALL, SECRET_KEYS, get_tz, iso_utc, now_utc, own_reminders, parse_stored, civil_in_basis, has_recurrence  # noqa: E402
+from providers import Providers, sync_window  # noqa: E402
 from store import Store  # noqa: E402
 
 TICK_SEC = 60
@@ -84,12 +85,16 @@ def sync_account(store: Store, providers: Providers, account: Dict[str, Any], tz
                                    "role_busy": existing["role_busy"] if existing else True,
                                    "role_publish": existing["role_publish"] if existing else False,
                                    "publish_mode": existing["publish_mode"] if existing else "busy"})
-            report["calendars"] += 1
             stored = store.get_calendar(cal["id"])
+            if stored is None or stored.get('deleted_at'):
+                continue  # disconnected while discovery was in flight
+            report["calendars"] += 1
             state = store.get_sync_state(cal["id"])
             ctag = cal.get("ctag") or ""
-            if ctag and state.get("cursor") == ctag and state.get("cursor_kind") == "ctag" and state.get("last_ok_at"):
-                continue  # CalDAV: nothing changed on the server since the last pass
+            window_start, window_end = map(iso_utc, sync_window(now_utc()))
+            if (ctag and state.get("cursor") == ctag and state.get("cursor_kind") == "ctag"
+                    and state.get("window_start") == window_start and state.get("window_end") == window_end):
+                continue  # unchanged server AND unchanged query: a moving horizon still needs a fetch
             cursor = state.get("cursor") if state.get("cursor_kind") == "google_sync_token" else ""
             try:
                 n, d, p, next_cursor, kind = reconcile_calendar(store, providers, adapter, stored, tz, cursor)
@@ -100,6 +105,8 @@ def sync_account(store: Store, providers: Providers, account: Dict[str, Any], tz
                 wipe_external_cache(store, stored["id"])
                 report["resynced"] += 1
                 n, d, p, next_cursor, kind = reconcile_calendar(store, providers, adapter, stored, tz, "")
+            if kind == 'disconnected':
+                continue  # The observation belongs to a connection withdrawn during I/O.
             report["events"] += n
             report["deleted"] += d
             report["propagated"] += p
@@ -110,7 +117,8 @@ def sync_account(store: Store, providers: Providers, account: Dict[str, Any], tz
             if kind == "google_sync_token":
                 store.set_sync_state(cal["id"], cursor=next_cursor, cursor_kind=kind, last_ok_at=iso_utc(now_utc()), last_error=parse_note)
             else:
-                store.set_sync_state(cal["id"], cursor=ctag if next_cursor is not None else '', cursor_kind="ctag" if ctag else "window", last_ok_at=iso_utc(now_utc()), last_error=parse_note)
+                store.set_sync_state(cal["id"], cursor=ctag if next_cursor is not None else '', cursor_kind="ctag" if ctag else "window",
+                                     window_start=window_start, window_end=window_end, last_ok_at=iso_utc(now_utc()), last_error=parse_note)
         parse_total = len(report.get("parse_errors") or [])
         store.set_account_status(account["id"], "ok", f"не разобрано событий: {parse_total}" if parse_total else "", synced=True)
     except ops.ProviderError as exc:
@@ -129,22 +137,29 @@ def wipe_external_cache(store: Store, calendar_id: str) -> None:
 
 
 def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[str, Any], tz, cursor: str = ""):
-    """Server → local rows. Our own linked copies get external edits propagated; confirmed deletions cascade (28 A).
+    """Server → local rows. Only the chosen source changes its following projections.
 
     Returns (upserts, deletions, propagations, next_cursor, cursor_kind). For Google the cancelled ids in an
     incremental feed ARE the confirmed deletions; for CalDAV a window read plus HEAD 404 on the known href is.
     """
+    connection = store.calendar_connection(cal['id'])
+    if connection is None:
+        return 0, 0, 0, None, 'disconnected'
     basis = store.sync_basis(cal['id'])
     rows, next_cursor, kind, extra = adapter.fetch(cal, cursor, tz=tz)
     awaiting = _awaiting_identity(store, adapter, cal)
     result = ops._finish_command(store, providers, _stage_feed, 'companion',
-                                 cal, rows, basis, awaiting, kind, next_cursor)
+                                 cal, rows, basis, awaiting, kind, next_cursor, connection)
+    if result.get('disconnected'):
+        return 0, 0, 0, None, 'disconnected'
     upserts, deleted, propagated = result['upserts'], result['deleted'], result['propagated']
     next_cursor = result['next_cursor']
     retry_required = result['retry_required']
+    if result.get('temporal_gaps'):
+        adapter.parse_errors = list(getattr(adapter, 'parse_errors', []) or []) + result['temporal_gaps']
     def confirmed(local):
         nonlocal retry_required
-        count = _confirmed_deletion(store, providers, local, basis.get(local['id']), basis) if local['id'] in basis else 0
+        count = _confirmed_deletion(store, providers, local, basis.get(local['id']), basis, connection) if local['id'] in basis else 0
         if not count:
             retry_required = True
         return count
@@ -184,21 +199,26 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
             if still_there:
                 continue
             deleted += confirmed(local)
+    if not store.connection_is_current(connection):
+        return upserts, deleted, propagated, None, 'disconnected'
     if retry_required:
         next_cursor = '' if kind == 'google_sync_token' else None
     return upserts, deleted, propagated, next_cursor, kind
 
 
-def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
+def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor, connection):
     """Commit accepted source snapshots and their copy intents together, with no network.
 
     A failure anywhere before commit retains the old source ETag, so the next
     fetch can replay the observation. After commit, durable intents own delivery.
     """
+    if not store.connection_is_current(connection):
+        return {'disconnected': True, 'assignments': []}
     protected_masters = set()
     retry_required = False
     upserts = deleted = propagated = 0
     assignments = []
+    temporal_gaps = []
     masters: Dict[str, str] = {}
     copy_commands = {}  # all parts of this feed for one destination stage together
     refreshed: Dict[str, str] = {}   # CalDAV master id → UID, for series whose whole resource was re-read this pass
@@ -219,7 +239,7 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
                     deleted += int(store.confirm_pending_delete(existing["id"], basis[existing['id']])) if existing['id'] in basis else 0
                 elif existing.get("sync_state") not in ("pending", "conflict", "failed"):
                     if existing['id'] in basis:
-                        result = _stage_absent_cascade(store, existing['id'], basis[existing['id']], basis)
+                        result = _stage_absent_cascade(store, existing['id'], basis[existing['id']], basis, connection)
                         deleted += int(result.get('status') == 'ok')
                         retry_required |= result.get('status') != 'ok'
                         assignments.extend(result.get('assignments', []))
@@ -235,13 +255,43 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
             upserts += 1
             continue
         masters[row["uid"]] = existing["id"]
-        if existing.get("etag") == row["etag"] and existing.get("sync_state") == "synced" and not existing.get("deleted_at"):
-            continue
         if existing.get("sync_state") in ("pending", "conflict", "pending_delete", "failed"):
             protected_masters.add(existing['id'])
             next_cursor = ''
             continue  # our write is in flight; the intent path settles it
-        changes = {k: row[k] for k in ("title", "description", "location", "start_utc", "end_utc", "tz", "all_day", "rrule", "exdates", "rdates",
+        if row.get('time_kind') == 'floating':
+            if not existing.get('tz') and not existing.get('time_kind') and any(
+                    row.get(key) != existing.get(key) for key in ('start_utc', 'end_utc')):
+                # The old parser retained no interpretation zone. Do not guess
+                # one or rebase its authored/pending recurrence addresses.
+                protected_masters.add(existing['id'])
+                next_cursor = ''
+                retry_required = True
+                temporal_gaps.append('Legacy floating event ' + existing['id'] + ' has no recorded parsing zone; stored times and pending work were retained.')
+                continue
+        row = civil_in_basis(row, existing)
+        if existing.get("etag") == row["etag"] and existing.get("sync_state") == "synced" and not existing.get("deleted_at"):
+            # Our acknowledged wire format may use UTC for a zoned one-off.
+            # Equal ETags permit parser enrichment, not replacing its authoring zone.
+            enrichment = {}
+            if row.get('time_kind') and row['time_kind'] != existing.get('time_kind'):
+                enrichment['time_kind'] = row['time_kind']
+                if not existing.get('tz') and row.get('tz'):
+                    enrichment['tz'] = row['tz']
+            if row.get('status') and row['status'] != existing.get('status'):
+                enrichment['status'] = row['status']
+            if row.get('raw_payload') and row['raw_payload'] != existing.get('raw_payload'):
+                enrichment['raw_payload'] = row['raw_payload']
+            if enrichment:
+                if existing['id'] not in basis or not store.apply_provider_snapshot(existing['id'], enrichment, observed=basis[existing['id']]):
+                    protected_masters.add(existing['id'])
+                    next_cursor = ''
+                    continue
+                upserts += 1
+            if kind != 'google_sync_token' and has_recurrence(row):
+                refreshed[existing['id']] = row['uid']
+            continue
+        changes = {k: row[k] for k in ("title", "description", "location", "start_utc", "end_utc", "tz", "time_kind", "all_day", "rrule", "exdates", "rdates",
                                         "status", "organizer", "attendees_json", "my_response", "etag", "raw_payload") if k in row}
         if existing.get("origin") == "external":
             changes["reminders_json"] = _imported_reminders(existing, row["reminders_json"], cal["provider"], bool((store.get_setting(rem.MODE_KEY) or {}).get(cal["id"])))
@@ -250,22 +300,21 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
             protected_masters.add(existing['id'])
             next_cursor = ''
             continue
+        links.observe_projection(store, existing, row)
         upserts += 1
-        if kind != "google_sync_token" and row.get("rrule"):
+        if kind != "google_sync_token" and has_recurrence(row):
             refreshed[existing["id"]] = row["uid"]
-        if existing.get("link_group_id"):
+        if existing.get("link_group_id") and links.source_is(store, existing):
             # One observation is one complete master change. Splitting time,
             # title and exclusions into separate sends loses the later parts
             # as soon as the first send becomes pending during an outage.
-            delta = {k: row.get(k) or '' for k in ('start_utc', 'end_utc', 'tz', 'all_day',
-                     'rrule', 'rdates', 'exdates', 'title') if existing.get(k) != row.get(k)}
+            delta = {k: row.get(k) or '' for k in links.COPY_FIELDS
+                     if k in row and existing.get(k) != row.get(k)}
             if 'start_utc' in delta:
                 # Provider dates are absolute, even when unchanged beside a new anchor.
                 delta.update({key: row.get(key) or '' for key in ('exdates', 'rdates')})
-            for sib in store.group_masters(existing['link_group_id']):
-                if sib['id'] == existing['id']:
-                    continue
-                changes = {k: v for k, v in delta.items() if k != 'title' or sib.get('publish_mode') != 'busy'}
+            for sib in links.followers(store, existing):
+                changes = {k: v for k, v in delta.items() if k not in ('title', 'description', 'location') or sib.get('publish_mode') != 'busy'}
                 if changes:
                     copy_commands.setdefault(sib['id'], []).append(('update', sib['id'], changes, 'all'))
     for row in rows:
@@ -280,58 +329,113 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
         if master_id in protected_masters:
             continue
         master_row = store.get_event(master_id)
+        row = civil_in_basis(row, master_row or {})
         if row['recurrence_id'] in ops.excluded_slots(master_row or {}):
             continue  # a stale instance cannot undo the master's explicit EXDATE
-        exc = next((e for e in store.exceptions_for(master_id) if e.get("recurrence_id") == row["recurrence_id"]), None)
+        exceptions = store.exceptions_for(master_id)
+        exc = next((e for e in exceptions if e.get("recurrence_id") == row["recurrence_id"]), None)
+        # Google has one stable external identity per exception; older imports
+        # could file that same instance under the owner's then-current zone.
+        same_identity = [e for e in exceptions if kind == 'google_sync_token' and row.get('external_id')
+                         and e.get('external_id') == row['external_id']]
+        if exc is None and same_identity:
+            exc = min(same_identity, key=lambda e: (e.get('created_at') or '', e['id']))
         payload = {k: v for k, v in row.items() if k != "master_external_id"}
-        payload.update({"master_id": master_id, "raw_payload": ""})
-        changed = exc is None or exc.get("etag") != row["etag"]
-        materially = exc is None or any(str(exc.get(k) or "") != str(row.get(k) or "") for k in ("start_utc", "end_utc", "status"))
+        payload.update({"master_id": master_id})
+        if master_row:
+            payload.update({key: master_row.get(key) for key in ('link_group_id', 'is_primary', 'link_state')})
+        status_enrichment = bool(exc and exc.get('etag') == row['etag'] and row.get('status') and exc.get('status') != row['status'])
+        native_enrichment = bool(exc and row.get('raw_payload') and row['raw_payload'] != exc.get('raw_payload'))
+        changed = exc is None or exc.get("etag") != row["etag"] or exc.get('recurrence_id') != row['recurrence_id'] or ('time_kind' in row and exc.get('time_kind', '') != row['time_kind']) or status_enrichment or native_enrichment
+        materially = exc is None or links.changed({**exc, **({'status': row['status']} if status_enrichment else {})}, row, provider_observation=True)
         if exc is None:
-            if store.insert_provider_exception(master_id, payload) is None:
+            saved = store.insert_provider_exception(master_id, payload)
+            if saved is None:
                 next_cursor = ''
                 continue   # the slot was taken by an owner write, or the series closed, since we looked: the next pass decides
+            observed_id = saved['id']
         elif changed:
             if exc.get("sync_state") in ("pending", "conflict", "pending_delete", "failed"):
+                if exc.get('recurrence_id') != row['recurrence_id']:
+                    temporal_gaps.append('Provider instance ' + exc['id'] + ' retains an older recurrence address while its owner write is unsettled.')
+                    next_cursor = ''
                 continue   # our own write to this occurrence is in flight
             fields = {k: payload[k] for k in ("title", "description", "location", "start_utc", "end_utc", "status", "etag",
-                                              "attendees_json", "my_response") if k in payload}
+                                              "attendees_json", "my_response", "tz", "time_kind", "all_day", "recurrence_id", "raw_payload") if k in payload}
             if exc.get("origin") == "external":
+                fields['availability'] = payload.get('availability') or exc.get('availability')
                 fields["reminders_json"] = _imported_reminders(exc, payload.get("reminders_json") or "[]", cal["provider"], bool((store.get_setting(rem.MODE_KEY) or {}).get(cal["id"])))
             if exc['id'] not in basis or not store.apply_provider_snapshot(exc["id"], fields, observed=basis[exc['id']]):
                 next_cursor = ''
                 continue
+            _carry_readdressed_notices(store, master_id, exc.get('recurrence_id'), row['recurrence_id'])
+            observed_id = exc['id']
+        else:
+            observed_id = exc['id']
+        for duplicate in same_identity:
+            if duplicate['id'] != observed_id and duplicate['id'] in basis:
+                if store.retire_synced_exception(duplicate['id'], observed=basis[duplicate['id']]):
+                    _carry_readdressed_notices(store, master_id, duplicate.get('recurrence_id'), row['recurrence_id'])
+                else:
+                    temporal_gaps.append('Duplicate provider instance ' + duplicate['id'] + ' was retained because its owner write is unsettled.')
+                    next_cursor = ''
         upserts += 1
         if changed and materially:   # a mere resource etag bump (any PUT of the series) is not a change of this occurrence
-            # 6 A / 22: an unambiguous external change of one occurrence follows to the linked copies
             master_row = store.get_event(master_id)
-            if master_row and master_row.get("link_group_id"):
+            if master_row and master_row.get('link_group_id') and not links.source_is(store, master_row):
+                store.update_event(master_id, {'link_state': links.DIVERGED})
+                child = next((event for event in store.exceptions_for(master_id) if event['recurrence_id'] == row['recurrence_id']), None)
+                if child:
+                    store.update_event(child['id'], {'link_state': links.DIVERGED})
+            if master_row and master_row.get("link_group_id") and links.source_is(store, master_row):
                 key = row["recurrence_id"]
-                for sib in store.group_masters(master_row["link_group_id"]):
-                    if sib["id"] == master_id:
-                        continue
+                for sib in links.followers(store, master_row):
                     if str(row.get("status") or "") == "cancelled":
                         copy_commands.setdefault(sib['id'], []).append(('delete', f"{sib['id']}@{key}", {}, 'this'))
                     else:
-                        moved = {"start_utc": row["start_utc"], "end_utc": row["end_utc"], "all_day": row.get("all_day")}
-                        copy_commands.setdefault(sib['id'], []).append(('update', f"{sib['id']}@{key}", moved, 'this'))
+                        projected = links.projection_changes(store, row, sib)
+                        for field in ('rrule', 'rdates', 'exdates'):
+                            projected.pop(field, None)
+                        copy_commands.setdefault(sib['id'], []).append(('update', f"{sib['id']}@{key}", projected, 'this'))
     for master_id, uid in refreshed.items():
         # A CalDAV series is one resource read whole: an override VEVENT the server no longer holds (its date
         # cancelled by EXDATE, or the move undone) is not a local exception any more. Our own unsent writes stay.
-        present = {r["recurrence_id"] for r in rows if r.get("recurrence_id") and r.get("uid") == uid}
-        excluded = ops.excluded_slots(store.get_event(master_id) or {})
+        master = store.get_event(master_id) or {}
+        present = {civil_in_basis(r, master)["recurrence_id"] for r in rows if r.get("recurrence_id") and r.get("uid") == uid}
+        feed_master = next((row for row in rows if row.get('uid') == uid and not row.get('recurrence_id')), {})
+        excluded = ops.excluded_slots(master) | ops.excluded_slots(civil_in_basis(feed_master, master))
         for exc in store.exceptions_for(master_id):
             if exc.get('status') == 'cancelled' and exc.get('recurrence_id') in excluded:
                 continue  # CalDAV confirms a cancelled slot with EXDATE, not an override VEVENT.
             if exc.get("recurrence_id") not in present and exc['id'] in basis:
-                store.retire_synced_exception(exc["id"], observed=basis[exc['id']])
+                canonical = civil_in_basis(exc, master).get('recurrence_id')
+                if store.retire_synced_exception(exc["id"], observed=basis[exc['id']]):
+                    if canonical in present:
+                        _carry_readdressed_notices(store, master_id, exc.get('recurrence_id'), canonical)
+                elif canonical in present and canonical != exc.get('recurrence_id'):
+                    temporal_gaps.append('Duplicate provider instance ' + exc['id'] + ' retains unsettled owner work.')
+                    next_cursor = ''
     for root, commands in copy_commands.items():
         result = _stage_sync_copy(store, basis, root, commands)
         propagated += int(result.get('status') == 'ok')
         retry_required |= result.get('status') != 'ok'
+        _bind_source_intents(store, result.get('assignments', []), connection)
         assignments.extend(result.get('assignments', []))
+        if result.get('message'):
+            temporal_gaps.append('Linked copy ' + root + ' not propagated: ' + result['message'])
     return {'upserts': upserts, 'deleted': deleted, 'propagated': propagated,
-            'next_cursor': next_cursor, 'assignments': assignments, 'retry_required': retry_required}
+            'next_cursor': next_cursor, 'assignments': assignments, 'retry_required': retry_required, 'temporal_gaps': temporal_gaps}
+
+
+def _carry_readdressed_notices(store, master_id, before, after):
+    """A repaired original-slot address must not resend a settled notice for the same effective meeting."""
+    if not before or not after or before == after:
+        return
+    for previous in store.settled_reminders_for_split(master_id, before):
+        if previous.get('recurrence_id') == before:
+            effective = previous['occurrence_start_utc']
+            store.carry_settled_reminder(previous, master_id, effective, after, previous['fire_at_utc'],
+                                        rem.notice_id_for(master_id, effective, previous['offset_min'], after))
 
 
 def _awaiting_identity(store: Store, adapter, cal: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -363,7 +467,7 @@ def _imported_reminders(local: Dict[str, Any], incoming: str, provider: str, mod
     incoming_value = own_reminders(incoming)
     if provider == PROVIDER_GOOGLE and mode_on and incoming_value == []:
         return str(local.get("reminders_json") or "[]")
-    if provider == PROVIDER_YANDEX and incoming_value is None and (mode_on or local_value == []):
+    if provider in CALDAV_PROVIDERS and incoming_value is None and (mode_on or local_value == []):
         # CalDAV has no useDefault bit. In calendar-owned mode the host itself mutes VALARM;
         # its subsequent echo must not erase a selected local offset (or an explicit off).
         return str(local.get("reminders_json") or "[]")
@@ -375,7 +479,7 @@ def _copy_unchanged(view, event_id, basis):
     with view._conn() as c:
         for row in rows:
             before = basis.get(row['id']) if row else None
-            if before is None or view._unsettled_owner_write(c, row['id'], row['sync_state']):
+            if before is None or row.get('link_state') in (links.DIVERGED, links.MISSING) or view._unsettled_owner_write(c, row['id'], row['sync_state']):
                 return False
             # Own ACK bookkeeping can change between propagation parts; a
             # different owner edit must still win over the old observation.
@@ -399,6 +503,7 @@ def _stage_sync_copy(view, basis, root, commands):
             c.execute('ROLLBACK TO calendar_copy')
             row = view.get_event(root)
             if row:
+                view.update_event(root, {'link_state': links.DIVERGED})
                 view.set_sync_state(row['calendar_id'], last_error='Linked copy not propagated: ' + str(exc))
             result = {'status': 'protected', 'assignments': [], 'message': str(exc)}
         finally:
@@ -416,14 +521,21 @@ def _stage_sync_copy_commands(view, basis, root, commands):
         return {'status': 'protected', 'assignments': []}
     assignments, previous = [], None
     for kind, address, changes, scope in commands:
-        result = (ops._stage_update_event(view, address, changes, scope=scope, propagate=False)
-                  if kind == 'update' else ops._stage_delete_event(view, address, scope=scope, cascade=False))
+        result = (ops._stage_update_event(view, address, changes, scope=scope, propagate=False, from_source=True)
+                  if kind == 'update' else ops._stage_delete_event(view, address, scope=scope, cascade=False, from_source=True))
         for assignment in result.get('assignments', []):
             for iid in assignment.get('_intent_ids', []):
                 intent = view.get_intent(iid)
                 payload = json.loads(intent['payload_json'])
-                if previous and not payload.get('after_intent_id'):
-                    payload['after_intent_id'] = previous
+                if previous:
+                    payload.setdefault('after_intent_id', previous)
+                    if payload.get('baseline'):
+                        observed = ops._baseline_before(basis, view.get_event(intent['event_id']))
+                        if observed and links.changed(observed, payload['baseline']):
+                            # An instance may inherit the acknowledged master change or
+                            # keep its own prior content. Keep both addressed facts.
+                            payload['baseline_after_predecessor'] = payload['baseline']
+                            payload['baseline'] = observed
                     with view._conn() as c:
                         c.execute('UPDATE intents SET payload_json=? WHERE id=?', (json.dumps(payload), iid))
                 previous = iid
@@ -431,27 +543,43 @@ def _stage_sync_copy_commands(view, basis, root, commands):
     return {'status': 'ok', 'assignments': assignments}
 
 
-def _confirmed_deletion(store: Store, providers: Providers, local: Dict[str, Any], observed=None, basis=None) -> int:
+def _bind_source_intents(store, assignments, connection):
+    """The staged observation's connection owns propagation, even if a link later chooses another source."""
+    with store._conn() as c:
+        for assignment in assignments:
+            for iid in assignment.get('_intent_ids', []):
+                intent = store.get_intent(iid)
+                payload = json.loads(intent['payload_json'])
+                payload['source_connection'] = connection
+                c.execute('UPDATE intents SET payload_json=? WHERE id=?', (json.dumps(payload), iid))
+
+
+def _confirmed_deletion(store: Store, providers: Providers, local: Dict[str, Any], observed=None, basis=None, connection=None) -> int:
     """The provider answered that this resource is gone; apply it only if no accepted owner write says otherwise *now*.
 
     ``local`` is the caller's earlier snapshot: it names the row and the identity the answer was about, nothing more.
     The provider call already happened outside SQLite; every protection check is repeated inside the write transaction."""
+    connection = connection or store.calendar_connection(local['calendar_id'])
+    if not store.connection_is_current(connection):
+        return 0
     if local.get("sync_state") == "pending_delete" or store.delete_requested(local["id"]):
         # This row was selected for deletion by an earlier scoped operation.
         # Its siblings already have their own intents if the owner requested a cascade.
         return int(store.confirm_pending_delete(local["id"], observed))
     observed = observed if observed is not None else local
     basis = basis if basis is not None else store.sync_basis(local['calendar_id'])
-    staged = ops._finish_command(store, providers, _stage_absent_cascade, "companion", local["id"], observed, basis)
+    staged = ops._finish_command(store, providers, _stage_absent_cascade, "companion", local["id"], observed, basis, connection)
     return int(staged.get("status") == "ok")
 
 
-def _stage_absent_cascade(view, event_id: str, observed: Dict[str, Any], basis) -> Dict[str, Any]:
+def _stage_absent_cascade(view, event_id: str, observed: Dict[str, Any], basis, connection=None) -> Dict[str, Any]:
     """Runs inside ops._finish_command's write transaction: the guard and the linked-copy cascade commit together or not at all."""
-    if view.provider_absence_blocker(event_id, observed):
-        return {"status": "protected", "assignments": []}
     row = view.get_event(event_id)
-    siblings = [sibling for sibling in view.group_masters(row['link_group_id']) if sibling['id'] != event_id] if row.get('link_group_id') else []
+    connection = connection or (view.calendar_connection(row['calendar_id']) if row else None)
+    if not view.connection_is_current(connection) or view.provider_absence_blocker(event_id, observed):
+        return {"status": "protected", "assignments": []}
+    was_source = links.source_is(view, row)
+    siblings = links.followers(view, row)
     if any(not _copy_unchanged(view, sibling['id'], basis)
            for sibling in siblings):
         return {'status': 'protected', 'assignments': []}
@@ -459,9 +587,12 @@ def _stage_absent_cascade(view, event_id: str, observed: Dict[str, Any], basis) 
     # observation locally; only the still-existing copies need remote writes.
     if not view.retire_provider_absent(event_id, observed):
         return {'status': 'protected', 'assignments': []}
+    if row.get('link_group_id') and not was_source:
+        view.update_event(event_id, {'link_state': links.MISSING})
     assignments = []
     for sibling in siblings:
-        assignments.extend(ops._stage_delete_event(view, sibling['id'], scope=SCOPE_ALL, cascade=False).get('assignments', []))
+        assignments.extend(ops._stage_delete_event(view, sibling['id'], scope=SCOPE_ALL, cascade=False, from_source=True).get('assignments', []))
+    _bind_source_intents(view, assignments, connection)
     return {'status': 'ok', 'assignments': assignments}
 
 
@@ -488,11 +619,14 @@ def main() -> int:
         tz = get_tz(store.get_setting("timezone") or "")
         health: Dict[str, Any] = {"deps": deps, "secrets_present": secrets_present, "tick": tick, "sync": [], "intents": None, "reminders": None, "channel": None}
         try:
+            providers = Providers(secrets, state_dir)  # reconnect/disconnect applies on the next pass, not after a process restart
             # reminders first: a slow provider must not delay a due notice
             channel.state(refresh=(tick % 10 == 1 or channel.state() != "ready"))
             stats = rem.deliver_due(store, channel, tz)
             requested = parse_stored(store.get_setting("sync_requested_at") or "")
-            for account in [*store.list_accounts(provider=PROVIDER_YANDEX), *store.list_accounts(provider=PROVIDER_GOOGLE)]:
+            for account in store.list_accounts():
+                if account['provider'] == PROVIDER_LOCAL:
+                    continue
                 due = time.time() - last_sync.get(account["id"], 0) >= SYNC_INTERVAL_SEC
                 forced = requested is not None and (requested.timestamp() > last_sync.get(account["id"], 0))
                 if due or forced:
@@ -506,7 +640,7 @@ def main() -> int:
                         last_sync[account["id"]] = time.time()
             health["intents"] = ops.retry_due_intents(store, providers, owner="companion")
             held: Dict[str, str] = {}
-            planned = rem.plan(store, lambda s, e: ops.expand(store.window(s, e, include_hidden=True), s, e,
+            planned = rem.plan(store, lambda s, e: ops.expand(store.window(s, e, include_hidden=True, owner_tz=tz), s, e,
                                  store.exceptions_for, owner_tz=tz, strict=True, failed=held), held=held)
             health["reminders"] = {"planned": planned, "held_series": held, **stats}
             health["channel"] = channel.state()

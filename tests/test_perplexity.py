@@ -43,6 +43,8 @@ class API:
 
 
 class Reply:
+    body = b'{"choices":[{"message":{"content":"Grounded fixture"}}]}'
+
     def __enter__(self):
         return self
 
@@ -50,7 +52,7 @@ class Reply:
         pass
 
     def read(self, _limit):
-        return b'{"choices":[{"message":{"content":"Grounded fixture"}}]}'
+        return self.body
 
 
 class PerplexityInputTests(unittest.IsolatedAsyncioTestCase):
@@ -111,6 +113,21 @@ class PerplexityInputTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.json()["answer"], "Grounded fixture")
                 self.assertEqual(self.sent[-1]["tools"][0]["parameters"]["max_results"], expected)
         self.assertEqual(len(self.sent), len(inputs))
+
+    async def test_citations_come_from_the_nested_openrouter_annotation(self):
+        """OpenRouter's web_search returns each source under "url_citation"; a flat annotation still reads."""
+        message = {"content": "Grounded fixture", "annotations": [
+            {"type": "url_citation",
+             "url_citation": {"url": "https://example.invalid/a", "title": "A", "content": "snippet"}},
+            {"type": "url_citation", "url": "https://example.invalid/b", "title": "B"},
+        ]}
+        with patch.object(Reply, "body", json.dumps({"choices": [{"message": message}]}).encode()):
+            response = await self.client.post("/research", json={"query": "test"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["citations"], [
+            {"title": "A", "url": "https://example.invalid/a"},
+            {"title": "B", "url": "https://example.invalid/b"},
+        ])
 
 
 if __name__ == "__main__":

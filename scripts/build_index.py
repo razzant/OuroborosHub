@@ -172,7 +172,8 @@ def relative_path(value, *, allow_root=False):
 
 def validate_entry(entry, categories):
     object_fields(entry, ('schema_version', 'name', 'description', 'category', 'owner', 'version', 'source', 'digest', 'withdrawn'),
-                  ('install_specs', 'when_to_use', 'author', 'type', 'withdrawn_releases', 'icon', 'connects'), label='entry')
+                  ('install_specs', 'when_to_use', 'author', 'type', 'withdrawn_releases', 'icon', 'connects', 'title'),
+                  label='entry')
     schema(entry, 2, 'entry')
     for field in ('name', 'description', 'version'):
         text_field(entry[field], field)
@@ -189,6 +190,10 @@ def validate_entry(entry, categories):
     for field in ('when_to_use', 'author'):
         if field in entry:
             text_field(entry[field], field)
+    if 'title' in entry:
+        text_field(entry['title'], 'title')
+        if entry['title'] != entry['title'].strip() or any(ch in entry['title'] for ch in '\r\n'):
+            raise ValueError('title must be one line without surrounding spaces')
     if 'type' in entry and entry['type'] not in ('instruction', 'script', 'extension'):
         raise ValueError(f'{name}: invalid type')
     if 'icon' in entry:
@@ -341,11 +346,15 @@ def release_digest(directory, entry):
     return payload_digest(directory, manifest_entry=front.get('entry', ''), manifest_scripts=front.get('scripts'))
 
 
-def connector_metadata(front):
+DISCOVERY_FACTS = ('icon', 'connects', 'title')
+
+
+def discovery_facts(front):
     """Discovery facts derive from the reviewed manifest, never a second tag list."""
     facts = {}
-    if front.get('icon'):
-        facts['icon'] = front['icon']
+    for key in ('icon', 'title'):
+        if front.get(key):
+            facts[key] = front[key]
     services = set()
     for contribution in front.get('contributes') or []:
         if isinstance(contribution, dict) and contribution.get('provides') == 'place':
@@ -368,9 +377,9 @@ def refresh_entry(root, entry):
             entry['install_specs'] = json.loads(declaration_json(declaration))
         entry['version'] = str(front.get('version', '0.1.0'))
         entry['digest'] = release_digest(directory, entry)
-        for key in ('icon', 'connects'):
+        for key in DISCOVERY_FACTS:
             entry.pop(key, None)
-        entry.update(connector_metadata(front))
+        entry.update(discovery_facts(front))
     return entry
 
 
@@ -412,7 +421,7 @@ def catalog_row(directory, entry=None):
     for field in ('description', 'version', 'type', 'install_specs', 'when_to_use', 'author'):
         if field in metadata:
             row[field] = metadata[field]
-    row.update(connector_metadata(front))
+    row.update(discovery_facts(front))
     row['files'] = []
     for path in payload_files(directory, manifest_entry=front.get('entry', ''), manifest_scripts=front.get('scripts')):
         digest, size = _file_facts(path)
@@ -445,9 +454,9 @@ def build_catalog(root: Path) -> dict:
                 raise ValueError(f"{entry['name']}: release digest mismatch; update the entry and any endorsement")
             if str(read_manifest(directory).get('version', '0.1.0')) != entry['version']:
                 raise ValueError(f"{entry['name']}: entry version must match SKILL.md")
-            facts = connector_metadata(read_manifest(directory))
+            facts = discovery_facts(read_manifest(directory))
             # Optional for older schema-2 publishers; supplied facts must be truthful.
-            for key in ('icon', 'connects'):
+            for key in DISCOVERY_FACTS:
                 if key in entry and entry[key] != facts.get(key):
                     raise ValueError(f"{entry['name']}: {key} must derive from SKILL.md; use --refresh")
     # Retained hosted copies remain deliverable to old clients if a v2 entry is

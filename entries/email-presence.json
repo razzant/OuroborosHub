@@ -5,8 +5,8 @@
   "connects": [
     "Email"
   ],
-  "description": "Email connector for IMAP/SMTP places, with threaded conversations, durable receipts and attachments, and live place-state delivery holds.",
-  "digest": "830bfc6494d6d3ef3a8b6d99210d67034d84cd551c7bfa7283d359f421d9ea32",
+  "description": "Multi-account Gmail API and IMAP/SMTP mail, account settings, folders, drafts and durable delivery, with optional Presence intake.",
+  "digest": "65492d25a3a05fc2e0be6b157552937731d3da68b79d85636362559e8025a1ba",
   "icon": "ui/icon.svg",
   "install_specs": [
     "httpx",
@@ -20,6 +20,6 @@
     "path": "skills/email-presence"
   },
   "type": "extension",
-  "version": "0.5.0",
+  "version": "0.9.3",
   "withdrawn": null
 }

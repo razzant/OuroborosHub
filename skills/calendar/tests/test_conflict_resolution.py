@@ -5,8 +5,6 @@ import unittest
 from datetime import timedelta
 from unittest.mock import patch
 from test_calendar_provider_divergence import (caldav_context, google_context, _day, run_open_intents, sync, RouteAPI, Request)
-import conflicts
-import ops
 import routes
 import tools
 from model import iso_utc, now_utc
@@ -133,8 +131,16 @@ class ConflictTests(unittest.TestCase):
         ctx,cid,server=google_context(); eid=create(ctx,cid); remote_edit(ctx,server,eid)
         tools.cal_update(ctx,id=eid,title='Mine',confirm=True)
         server.events.clear(); before=ctx.store.get_event(eid)
-        self.assertNotIn('resolution_token',inspection(ctx,eid))
+        info=inspection(ctx,eid)
+        self.assertIsNone(info['provider'])
+        self.assertIn('resolution_token',info)
         self.assertEqual(ctx.store.get_event(eid),before)
+        calls=len(server.calls)
+        self.assertEqual(resolve(ctx,eid,info,'local')['status'],'conflict')
+        self.assertEqual(ctx.store.get_event(eid),before)
+        self.assertEqual(resolve(ctx,eid,info,'provider')['status'],'resolved')
+        self.assertTrue(ctx.store.get_event(eid)['deleted_at'])
+        self.assertFalse([call for call in server.calls[calls:] if call[0] in ('POST','PUT','PATCH','DELETE')])
 
     def test_caldav_exception_resolves_with_resource_etag_without_losing_siblings(self):
         ctx,cid,server=caldav_context(); eid=create(ctx,cid,rrule='FREQ=DAILY')

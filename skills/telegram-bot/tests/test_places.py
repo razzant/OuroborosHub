@@ -9,7 +9,7 @@ from test_host import _event
 from test_runtime import AcceptingSubmitter, Logger, RuntimeClient
 
 
-def test_groups_channels_and_explicit_addressing_only():
+def test_private_chats_groups_channels_and_explicit_addressing_only():
     message = {"message_id": 1, "chat": {"id": -1, "type": "supergroup"}, "from": {"id": 3},
                "text": "😀 @presence_bot", "entities": [{"type": "mention", "offset": 3, "length": 13}],
                "reply_to_message": {"message_id": 2, "from": {"id": 9}}}
@@ -24,9 +24,55 @@ def test_groups_channels_and_explicit_addressing_only():
     message["chat"]["type"] = "channel"
     assert parse("channel_post") is not None
     message["chat"]["type"] = "private"
-    assert parse() is None
+    message["chat"]["id"] = 3
     message["from"]["is_bot"] = False
+    private = parse()
+    assert private is not None and private.conversation_id == "3"
+    assert private.facts == ["any_message", "direct_message"]
+    assert private.actor["platform_actor_id"] == "3"
     assert "facts" not in parse(places=False).to_dict()
+    message["from"]["id"] = 9  # the bot's own echo in its private chat
+    assert parse() is None
+    message["chat"]["type"] = "unknown"
+    message["from"]["id"] = 3
+    assert parse() is None
+
+
+def test_private_reply_from_bot_place_is_checked_not_refused(tmp_path):
+    async def run():
+        class Transport:
+            lookups = []
+            async def request_json(self, method, url, **kwargs):
+                if url.endswith("/identity"):
+                    return {"places_version": 1}
+                assert "/presence/place?" in url
+                self.lookups.append(url)
+                return {"state": "active", "label": "Telegram"}
+        transport = Transport()
+        host = PresenceHostClient(state_dir=tmp_path, token_provider=lambda: "token",
+                                  host_base="http://127.0.0.1:8767", transport=transport)
+        assert await host.place_hold("9", "3") == ""
+        assert "conversation_id=3" in transport.lookups[-1]
+    asyncio.run(run())
+
+
+def test_place_lookup_names_a_thread_only_when_one_is_given(tmp_path):
+    async def run():
+        class Transport:
+            lookups = []
+            async def request_json(self, method, url, **kwargs):
+                if url.endswith("/identity"):
+                    return {"places_version": 1}
+                self.lookups.append(url.split("?", 1)[1])
+                return {"state": "active", "label": "Telegram"}
+        transport = Transport()
+        host = PresenceHostClient(state_dir=tmp_path, token_provider=lambda: "token",
+                                  host_base="http://127.0.0.1:8767", transport=transport)
+        assert await host.place_hold("9", "-100", thread_id="5") == ""
+        assert await host.place_hold("9", "-100") == ""
+        assert transport.lookups == ["provider=telegram&account_id=9&conversation_id=-100&thread_id=5",
+                                     "provider=telegram&account_id=9&conversation_id=-100"]
+    asyncio.run(run())
 
 
 def test_unbound_submission_negotiates_and_live_checks_do_not_cache_state(tmp_path):

@@ -16,6 +16,7 @@ _FILE_TEXT_FACTS = (
 _FILE_FLAG_FACTS = ("is_external", "is_deleted", "is_tombstoned", "is_hidden_by_limit")
 # Already carried by the stored declaration and the frozen attachment keys.
 DECLARED_FILE_KEYS = frozenset({"id", "name", "mimetype", "size"})
+REACTION_EVENTS = frozenset({"reaction_added", "reaction_removed"})
 
 
 def file_facts(raw: Any) -> dict[str, Any]:
@@ -243,14 +244,15 @@ def parse_socket_envelope(
         structured.update({"change": "edited", "message": dict(message), "previous_message": dict(previous)})
     elif subtype == "message_deleted":
         structured.update({"change": "deleted", "deleted_ts": _text(event.get("deleted_ts")), "previous_message": dict(previous)})
-    if event_type in {"reaction_added", "reaction_removed"}:
+    if event_type in REACTION_EVENTS:
         structured["reaction"] = {
             "kind": "added" if event_type == "reaction_added" else "removed",
             "name": _text(event.get("reaction")),
             "user_id": actor_user_id,
             "item": dict(event.get("item")) if isinstance(event.get("item"), Mapping) else {},
+            **({"item_user": _text(event.get("item_user"))} if _text(event.get("item_user")) else {}),
         }
-    if event_type not in {"message", "app_mention", "reaction_added", "reaction_removed"}:
+    if event_type not in {"message", "app_mention", *REACTION_EVENTS}:
         return ParsedEnvelope(envelope_id, event_id, False, "unsupported_event", None)
     if ((bot_id and bot_event_id == bot_id) or (app_id and app_event_id == app_id)
             or (bot_user_id and actor_user_id == bot_user_id)):
@@ -264,6 +266,9 @@ def parse_socket_envelope(
     if subtype == "message_changed" and _message_content_unchanged(nested, previous):
         return ParsedEnvelope(envelope_id, event_id, False, "message_content_unchanged", None)
     text = str(message.get("text") or event.get("text") or "")
+    if event_type in REACTION_EVENTS:
+        # A gesture carries no speech or files of its own, whatever else the payload holds.
+        text, files = "", ()
     if not text and not files and not structured:
         return ParsedEnvelope(envelope_id, event_id, False, "empty_message", None)
 

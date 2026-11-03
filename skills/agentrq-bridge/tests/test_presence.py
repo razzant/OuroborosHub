@@ -34,6 +34,8 @@ def test_held_reply_survives_restart_and_active_delivers_once(tmp_path, state):
         calls.append((method, route, payload))
         if route.startswith("/presence/place?"):
             return {"state": place_state[0], "label": "AgentRQ"}
+        if route == "/identity":  # a Host without continuation version 2: the request bytes stay
+            return {"ok": True, "presence_continuation_version": 1}
         assert route == "/presence/turn" and payload == {"event": event}
         return {"status": "completed", "outcome": "message", "text": "answer", "turn_ref": "turn"}
     inbox._request = request
@@ -57,12 +59,19 @@ def test_retained_and_deferred_work_keep_original_references(tmp_path):
         {"ok": False, "disposition": "retained", "turn_ref": "turn/1"},
         {"status": "unresolved", "turn_ref": "turn/1", "child_work_ref": "child/2"},
         {"status": "completed", "outcome": "silent"},
+        {"status": "completed", "outcome": "silent"},
     ])
     routes = []
-    inbox._request = lambda method, route, payload=None: routes.append(route) or next(replies)
+    def request(method, route, payload=None):
+        if route == "/identity":
+            return {"ok": True, "presence_continuation_version": 1}
+        routes.append(route)
+        return next(replies)
+    inbox._request = request
     for _ in range(3):
         inbox.process(path)
-    assert routes == ["/presence/turn", "/presence/work/turn%2F1", "/presence/work/child%2F2"]
+    # The original turn keeps being read beside the child it named, each until its own end.
+    assert routes == ["/presence/turn", "/presence/work/turn%2F1", "/presence/work/turn%2F1", "/presence/work/child%2F2"]
     assert json.loads(path.read_text())["state"] == "completed"
 
 
@@ -74,7 +83,7 @@ def test_ambiguous_reply_is_not_replayed(tmp_path):
     inbox = module.PresenceInbox(tmp_path, "http://127.0.0.1:8767", "token", reply)
     path = inbox.enqueue(module.provider_event({"taskId": "task", "text": "hello"}, "https://workspace.example"))
     inbox._request = lambda method, route, payload=None: {"state": "active"} if route.startswith("/presence/place?") else {
-        "status": "completed", "outcome": "message", "text": "answer"}
+        "ok": True} if route == "/identity" else {"status": "completed", "outcome": "message", "text": "answer"}
     inbox.process(path)
     inbox.process(path)
     assert len(sent) == 1 and json.loads(path.read_text())["state"] == "uncertain"

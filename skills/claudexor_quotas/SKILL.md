@@ -1,7 +1,7 @@
 ---
 name: claudexor_quotas
 description: "Claudexor quota dashboard and read-only quota_summary: sorted account bars, per-window and calibrated joint timelines, reported resets, measured pace, dated account resources and reversible row visibility. The optional granted context snapshot supplies the same figures at eligible host context tails; no routing, account changes or automatic provider refresh."
-version: 0.12.1
+version: 0.12.2
 type: extension
 runtime: python3
 entry: plugin.py
@@ -12,8 +12,8 @@ context_snapshot:
 env_from_settings: []
 when_to_use: "The owner wants quota windows, resets and remaining reserve of the authorized Claudexor accounts; or, before choosing executors, the model wants measured reserve by family and limit. Advisory only: never a dispatch guarantee or a pin change."
 model_experience:
-  what_model_sees: "One read-only quota_summary tool with a fixed schema returns reserve, coverage, resets, measured pace, joint metrics and individually dated resources. Separately, when the host grants context_snapshot, the collector publishes a deterministic local snapshot for eligible integrating contexts; the host appends it at the tail, expires or withdraws it, without provider calls or dispatch authority."
-  token_effect: "Fixed tool schema/description while enabled; voluntary calls add JSON, smaller per family. The optional granted local snapshot adds changed text at the eligible host context tail, with validity/withdrawal; unchanged valid content is not duplicated. No automatic tool call or prompt-cache benefit is promised."
+  what_model_sees: "One read-only quota_summary tool with a fixed schema returns reserve, coverage, resets, measured pace, joint metrics and individually dated resources. Separately, when the host grants context_snapshot, the collector publishes a deterministic local snapshot for eligible integrating contexts: the host shows its full text once, adds one outdated note when it changes or its validity ends (current figures then come from quota_summary or the host's snapshot reader), shows the current text in full again when the conversation is next rebuilt, and withdraws it when unavailable; no provider calls or dispatch authority."
+  token_effect: "Fixed tool schema/description while enabled; voluntary calls add JSON, smaller per family. The optional granted snapshot costs its full text once per context build plus at most one short outdated note until the next rebuild, however often the figures change; validity and withdrawal are honored. No automatic tool call or prompt-cache benefit is promised."
 timeout_sec: 180
 contributes:
   - id: quota
@@ -145,7 +145,11 @@ it (`api.get_state_dir()`):
   row without unhiding it, so the timeline and Combined remain reachable.
   "Show all rows" undoes this family's hides only. Saves use the legacy prefs'
   frame/sequence ordering; the newest 64 hidden keys are retained.
-- **Context snapshot.** This version declares the `context_snapshot` permission:
+- **Context snapshot.** A host that bounds passive snapshots (Ouroboros #2333) shows
+  the full text once per context build; a changed text or an ended validity adds one
+  outdated note naming where the current text is read, and later changes add nothing
+  until the conversation is next rebuilt. `quota_summary` gives the current figures at
+  any moment. This version declares the `context_snapshot` permission:
   it requires a host supporting that declaration and its grant before the whole
   extension can be enabled. The skill remains optional; installing it does not
   offer a separate ungranted widget-only mode. After a successful sweep the collector writes

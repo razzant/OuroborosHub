@@ -88,12 +88,12 @@ class Review33bCounterexamples(unittest.TestCase):
         self.assertEqual(remote, local, f'local(after sync)={local}\nprovider={remote}\n'
                          f'resource EXDATE lines={[l for l in server.resources[href][0].splitlines() if l.startswith("EXDATE")]}')
 
-    def test_A2_linked_copy_delete_following_keeps_cascaded_cancellation_on_caldav(self):
+    def test_A2_linked_source_delete_following_keeps_cascaded_cancellation_on_caldav(self):
         ctx, cid, caldav, google, left, eid, copy = r5.ReviewR5Tests().linked()
         instance(ctx, google, copy['id'], 3)
-        out = json.loads(tools.cal_delete(ctx, id=f"{copy['id']}@{iso_utc(_day(3))}", scope='this', confirm=True))
+        out = json.loads(tools.cal_delete(ctx, id=f"{eid}@{iso_utc(_day(3))}", scope='this', confirm=True))
         self.assertEqual(out['status'], 'deleted', out)
-        out = json.loads(tools.cal_delete(ctx, id=f"{copy['id']}@{iso_utc(_day(5))}", scope='following', confirm=True))
+        out = json.loads(tools.cal_delete(ctx, id=f"{eid}@{iso_utc(_day(5))}", scope='following', confirm=True))
         self.assertIn(out['status'], ('deleted', 'pending'), out)
         run_open_intents(ctx, 3)
         href = ctx.store.get_event(eid)['href']
@@ -170,7 +170,7 @@ class Review33bCounterexamples(unittest.TestCase):
         self.assertEqual(len(imported), 1, imported)
         return ctx, cid, caldav, google, left, eid, copy, imported[0]
 
-    def test_D1_caldav_source_cancellation_retires_after_copy_has_imported_override(self):
+    def test_D1_source_retires_without_deleting_diverged_imported_copy(self):
         ctx, cid, caldav, google, left, eid, copy, imported = self._imported_override()
         caldav.edit(ctx.store.get_event(eid)['href'],
                     lambda c: next(x for x in c.walk() if x.name == 'VEVENT' and not x.get('RECURRENCE-ID')).__setitem__('STATUS', 'CANCELLED'))
@@ -180,17 +180,21 @@ class Review33bCounterexamples(unittest.TestCase):
         self.assertTrue(ctx.store.get_event(eid)['deleted_at'],
                         f"source still live; imported override link_group_id={imported['link_group_id']!r}, "
                         f"in CalDAV basis={imported['id'] in ctx.store.sync_basis(cid)}")
-        self.assertEqual(google.events[copy['external_id']]['status'], 'cancelled')
+        self.assertEqual(google.events[copy['external_id']]['status'], 'confirmed')
+        self.assertEqual(ctx.store.get_event(copy['id'])['link_state'], 'diverged')
+        self.assertIsNone(ctx.store.get_event(imported['id'])['deleted_at'])
 
-    def test_D2_caldav_source_title_reaches_copy_after_copy_has_imported_override(self):
+    def test_D2_source_title_keeps_diverged_imported_copy_independent(self):
         ctx, cid, caldav, google, left, eid, copy, imported = self._imported_override()
         def retitle(c):
             next(x for x in c.walk() if x.name == 'VEVENT' and not x.get('RECURRENCE-ID'))['SUMMARY'] = 'After'
         caldav.edit(ctx.store.get_event(eid)['href'], retitle)
         reconcile_calendar(ctx.store, ctx.providers, left, ctx.store.get_calendar(cid), ctx.tz)
         run_open_intents(ctx, 3)
-        self.assertEqual(google.events[copy['external_id']]['summary'], 'After',
-                         f"imported override link_group_id={imported['link_group_id']!r}")
+        self.assertEqual(ctx.store.get_event(eid)['title'], 'After')
+        self.assertEqual(google.events[copy['external_id']]['summary'], 'Before')
+        self.assertEqual(ctx.store.get_event(copy['id'])['link_state'], 'diverged')
+        self.assertEqual(ctx.store.get_event(imported['id'])['title'], 'Moved at Google')
 
 
 if __name__ == '__main__':

@@ -71,9 +71,27 @@ def _presence_inbox():
 
 
 def _presence_loop(stop):
+    """Observation and replies: reading Host references and replying never holds intake."""
     while not stop.is_set():
-        _presence_inbox().process_pending()
+        _presence_inbox().observe_pending()
         stop.wait(5)  # transport retry interval, independent of SSE delivery
+
+
+def _intake_loop(stop):
+    """Host intake: each task's oldest event the Host has not taken, tasks side by side.
+
+    A capture or a finished submission wakes it, so a task's next event follows the Host's
+    answer to the one before; a busy or retried head is offered again when it is due.
+    """
+    inbox = _presence_inbox()
+    while not stop.is_set():
+        inbox.wake.clear()
+        try:
+            delay = inbox.intake_pending()
+        except Exception as exc:
+            print(f"[listener] Presence intake retry: {type(exc).__name__}", flush=True)
+            delay = 5
+        inbox.wake.wait(timeout=delay)
 
 
 # ── SSE parser ──────────────────────────────────────────────────────
@@ -301,13 +319,21 @@ def main():
         sys.exit(1)
 
     stop = threading.Event()
-    worker = threading.Thread(target=_presence_loop, args=(stop,), name="agentrq-presence", daemon=True)
-    worker.start()
+    inbox = _presence_inbox()  # one inbox for the SSE capture and both loops, before they start
+    workers = [threading.Thread(target=_presence_loop, args=(stop,), name="agentrq-presence", daemon=True),
+               threading.Thread(target=_intake_loop, args=(stop,), name="agentrq-presence-intake", daemon=True)]
     try:
+        for worker in workers:
+            worker.start()
         listen_loop()
     finally:
+        # Every way out (the SIGTERM exit, an error, the stream ending): nothing new starts,
+        # queued submissions are cancelled and running ones joined, then the loops end.
         stop.set()
-        worker.join(timeout=2)
+        inbox.close()
+        for worker in workers:
+            if worker.ident is not None:
+                worker.join(timeout=2)
 
 
 if __name__ == "__main__":

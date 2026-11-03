@@ -1,8 +1,9 @@
 ---
 name: email
-version: 0.1.1
+version: 0.1.2
+title: Email tools
 type: extension
-description: Public universal skill for reading and sending email via IMAP and SMTP with secure defaults.
+description: "Email tools for tasks: read and send mail through IMAP/SMTP. Not a place: to let Ouroboros live in a mailbox use the Email connector (email-presence)."
 runtime: python3
 entry: plugin.py
 plugin_api: "2.0"
