@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/f10380882a199e2ad549ba439bbc16d6f610f5ad",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/169d9d08c14ecca2f309570e79060646b682f13c",
   "schema_version": 1,
   "skills": [
     {
@@ -369,8 +369,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "97dd32cbf7ca6ae749bdaa7606e4dcceac5df8cf312d2087d3f2479deeaf548f",
-          "size": 51926
+          "sha256": "5448f18c06206b6a3558ac021effedfc5847c190448758badecbfe20bcc4a2a6",
+          "size": 52347
         },
         {
           "path": "accounts.py",
@@ -404,8 +404,8 @@
         },
         {
           "path": "ops.py",
-          "sha256": "28990b0de782a7bb177f41f468829d656e789ea265b3faad824d3957a7a3df67",
-          "size": 98615
+          "sha256": "917d334c4502c308ee6d6c571edd909473b61beebca2af667666678f14103af3",
+          "size": 98996
         },
         {
           "path": "plugin.py",
@@ -439,8 +439,8 @@
         },
         {
           "path": "store.py",
-          "sha256": "b9d0bf4f5a3eabf4700f03f1303c445bb086023c317594f2802d5c6e55ff6d46",
-          "size": 73746
+          "sha256": "205b56298aac02ad24001baea862e7eec6584baeb678f65eb9b576fc5d89cc3d",
+          "size": 73499
         },
         {
           "path": "tests/test_attendee_destinations.py",
@@ -721,6 +721,11 @@
           "path": "tests/test_withdrawn_calendar_family.py",
           "sha256": "405d9bc9dfbca11080e80efef66fbcffb6a2ab38c3ea5e92b278f7925cd61ea8",
           "size": 23853
+        },
+        {
+          "path": "tests/test_withdrawn_observation_ordering.py",
+          "sha256": "b48b5e202034c7617c3152188459bf649ae6a227b35959672fbedc7832b9c52d",
+          "size": 10180
         },
         {
           "path": "tools.py",
@@ -1225,8 +1230,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "02b275a90c8098e481725c46912be786376f209e76fcf913ed9e1fcc29e772e7",
-          "size": 5312
+          "sha256": "9e9d5ae37aaf8c8738282f384cc8231c212750cf91047bd493bb3b3213beee36",
+          "size": 5339
         },
         {
           "path": "README.md",
@@ -1285,7 +1290,7 @@
         },
         {
           "path": "lib/service.py",
-          "sha256": "ba354525d33f1ddf75afd410b8676b6dc9880061af98fa26a1b86966d9d802dd",
+          "sha256": "bc4ef85864e988d6f4f30ca7269a3275c3bbfa9d94bfc4d89efcc4496340291b",
           "size": 26012
         },
         {
@@ -1370,8 +1375,8 @@
         },
         {
           "path": "tests/test_declared_target_preparation.py",
-          "sha256": "254d812cbf96af8df38c17b159bee0dac769a7461dab085194faca7885631f61",
-          "size": 10919
+          "sha256": "2608d128ebdf2729c60d512e5eddc4dbbf44fbf7de90484de1d620c61d53a05f",
+          "size": 12085
         },
         {
           "path": "tests/test_deferred_observation_custody.py",
