@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/22e726f9a15bfd89d598d3e0afa595a32cc1f269",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/e80611d4c0fe89af2c68fc4a333acc5787ec9c04",
   "schema_version": 1,
   "skills": [
     {
@@ -796,6 +796,98 @@
       "slug": "check-in",
       "type": "extension",
       "version": "0.1.4"
+    },
+    {
+      "description": "Work in the owner's own Chrome through Microsoft's official Playwright Extension - the tab they share plus background tabs for the same work, trusted input in background tabs, and handback by plain conversation.",
+      "files": [
+        {
+          "path": "ATTRIBUTION.md",
+          "sha256": "2ad3fed1b3fcfe235d1454b11396bf17fd717f2473635712199edd53d6333a5e",
+          "size": 4818
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "4fa73a81facccd2b68f5392afb2f531bfd88772abff7fc240cbf240d56c13201",
+          "size": 24132
+        },
+        {
+          "path": "lib/connection.mjs",
+          "sha256": "4511ce6c4ab2c8586b3ab434668f85dceb1271b1149c627a22ee9af12fe9f674",
+          "size": 21275
+        },
+        {
+          "path": "lib/guard.mjs",
+          "sha256": "b620565135ba283335fdd55e161118bba17c7da447aacc6a8ee9c97850491aaf",
+          "size": 11728
+        },
+        {
+          "path": "lib/input.mjs",
+          "sha256": "f856217ff42d63194bd6943f9512b13369e92c1043b3aaab3f9f344429a44b9c",
+          "size": 11527
+        },
+        {
+          "path": "lib/main.mjs",
+          "sha256": "da23ecd8d790d3dc7bd350bb4383b406203fb7a0712caeaac917e45c3bdf778f",
+          "size": 4104
+        },
+        {
+          "path": "lib/patch.mjs",
+          "sha256": "ddc7daff88dc4a4290f91ef4886626ea47911a874c9de37790e9eed2ccbfc5f3",
+          "size": 4667
+        },
+        {
+          "path": "lib/pinned.mjs",
+          "sha256": "c1ab1b99d206265c488e824f2f5e352f954eb84814bd7ddaca64da3ac2666513",
+          "size": 8049
+        },
+        {
+          "path": "lib/server.mjs",
+          "sha256": "9ca56a7b2b9f9157760b254c2fc0d5a9a9e20d4047c30968d2c29ceea5870b71",
+          "size": 36962
+        },
+        {
+          "path": "patches/LICENSE-Apache-2.0.txt",
+          "sha256": "45873d00a0dd243596deb4aa23b2493b3d1f0671921bf2538ea431d7380220eb",
+          "size": 11601
+        },
+        {
+          "path": "patches/NOTICE-playwright.txt",
+          "sha256": "6d602191187b35b9b01d2cffa01c8469c2c8d9de8a96f1bf868e0f264f51c81d",
+          "size": 254
+        },
+        {
+          "path": "patches/playwright-core@1.65.0-alpha-2026-10-30.patch",
+          "sha256": "ce6456578328f9b2deb7bbdffd9ae14f7103dc138cbfc570f7679d04cb3fc0f1",
+          "size": 16400
+        },
+        {
+          "path": "pins.json",
+          "sha256": "6fa3b74520d8a6602f1c820a92650c726da9c344ff21df6bf58434a5f3fbed6a",
+          "size": 3489
+        },
+        {
+          "path": "scripts/server.mjs",
+          "sha256": "6d4ec72a82f59d5e5ee1caaba94aefc5cc9be39ff577e56e417c3ee17866d35c",
+          "size": 380
+        },
+        {
+          "path": "scripts/setup.mjs",
+          "sha256": "cc6ca1b56c929848b741dbcb2da06e6de5f4dc41c1b73c7794cfa15f11eb88b1",
+          "size": 3469
+        }
+      ],
+      "install_specs": [
+        {
+          "kind": "npm",
+          "package": "@playwright/mcp@0.0.84"
+        }
+      ],
+      "name": "chrome_browser",
+      "slug": "chrome_browser",
+      "title": "Chrome (shared tab)",
+      "type": "script",
+      "version": "0.2.0",
+      "when_to_use": "The owner wants work done in their own signed-in Chrome - in a tab they share and in background tabs for the same work - while they keep using the browser, and takes the page over by saying so when a login, a code or a decision is theirs."
     },
     {
       "description": "Fully playable Classic Doom (1993) standalone 2.5D FPS raycaster extension widget with textured walls, procedural sprite enemies, authentic weapons, levels, HUD, Web Audio sound and heavy metal music synthesizer.",
