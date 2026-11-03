@@ -18,8 +18,8 @@ from model import (
     AVAIL_BUSY, AVAIL_FREE, AVAIL_SOFT, BUSY_COPY_TITLE, INTENT_CONFLICT, INTENT_DONE, INTENT_FAILED, INTENT_PENDING,
     PROVIDER_LOCAL, CALDAV_PROVIDERS, PUBLISH_BUSY, PUBLISH_FULL, SCOPES, SCOPE_ALL, SCOPE_FOLLOWING, SCOPE_THIS, VISIBILITY_SHOWN,
     get_tz, iso_utc, new_id, new_uid, overlaps, own_reminders, parse_stored, reminders_to_json, routine_time, calendar_time, event_field_value, normalize_rrule_until, has_recurrence, event_time_kind, stage_event_times,
-    event_time_delta as _time_delta, shift_event_time as _shift_instant, recurrence_time_delta, shift_recurrence_time,
-    validate_rrule_interval, shifted_rrule_selectors, following_series_start, series_move_changes,
+    shift_event_time as _shift_instant, recurrence_time_delta, shift_recurrence_time,
+    validate_rrule_interval, shifted_rrule, following_series_start, series_move_changes,
 )
 
 RETRY_BACKOFF_SEC = (30, 120, 600, 1800, 7200)
@@ -526,12 +526,15 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
     if scope == SCOPE_FOLLOWING and not occ_key:
         raise ValueError("scope=following needs an occurrence id")
     changes = _shift_for_scope_all(store, row, occ_key, scope, changes)
-    if not from_source and scope != SCOPE_THIS and 'rrule' not in changes and changes.get('start_utc') and has_recurrence(row):
-        try:
-            changes = series_move_changes(row, exception, occ_key, scope, changes)
-        except ValueError as exc:
-            return {'status': 'argument_required', 'argument': 'rrule', 'message': str(exc),
-                    'event': row, 'assignments': []}
+    recurrence = None
+    try:
+        if not from_source and scope == SCOPE_ALL and 'rrule' not in changes and changes.get('start_utc') and has_recurrence(row):
+            changes = series_move_changes(row, changes)
+        if occ_key and scope == SCOPE_FOLLOWING:
+            recurrence = _following_recurrence(row, occ_key, changes, exception)
+    except ValueError as exc:
+        return {'status': 'argument_required', 'argument': 'rrule', 'message': str(exc),
+                'event': row, 'assignments': []}
     op_id = new_id("op")
     members = [row] + (links.followers(store, row) if propagate else [])
     assignments: List[Dict[str, Any]] = []
@@ -560,7 +563,7 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
     elif occ_key and scope == SCOPE_FOLLOWING:
         new_group = (new_id("lg") if links.source_is(store, row) else row['link_group_id']) if row.get("link_group_id") else ""
         split_uid = new_uid()
-        targets.extend(_split_series(store, row, occ_key, changes, new_group, split_uid))
+        targets.extend(_split_series(store, row, occ_key, changes, recurrence, new_group, split_uid))
     else:
         series_delta = _series_delta(row, changes)
         _apply_changes(store, row, changes)
@@ -590,7 +593,7 @@ def _stage_update_event(store, event_id: str, changes: Dict[str, Any], scope: st
                 exc_id = _ensure_exception(store, sib, occ_key, allowed)
                 targets.append(store.get_event(exc_id))
             elif occ_key and scope == SCOPE_FOLLOWING:
-                targets.extend(_split_series(store, sib, occ_key, allowed, new_group, split_uid))
+                targets.extend(_split_series(store, sib, occ_key, allowed, recurrence, new_group, split_uid))
             else:
                 sib_delta = _series_delta(sib, allowed)
                 _apply_changes(store, sib, allowed)
@@ -930,47 +933,65 @@ def _ensure_exception(store, master: Dict[str, Any], occ_key: str, changes: Dict
     return saved["id"]
 
 
-def _count_remaining(master: Dict[str, Any], rrule: str, cut: Optional[datetime]) -> Optional[int]:
-    """For a COUNT series: how many occurrences remain from ``cut`` on (None when the rule has no COUNT)."""
-    count = None
-    for part in str(rrule or "").split(";"):
-        if part.upper().startswith("COUNT="):
-            try:
-                count = int(part.split("=", 1)[1])
-            except ValueError:
-                return None
-    if count is None or cut is None:
-        return None
-    m_start = parse_stored(master.get("start_utc"))
-    if m_start is None:
-        return None
-    try:
+def _partition_recurrence(master, cut):
+    """Partition generated slots; COUNT includes EXDATE'd slots and excludes extra RDATEs."""
+    first = parse_stored(master['start_utc'])
+    text = str(master.get('rrule') or '')
+    zone = get_tz(master.get('tz') or '')
+    prefix = ''
+    if text:
         from dateutil.rrule import rrulestr
-        validate_rrule_interval(rrule)
-        tz = get_tz(master.get("tz") or "")
-        rule = rrulestr(str(rrule), dtstart=m_start.astimezone(tz), forceset=True)
-        before = sum(1 for occ in rule if occ.astimezone(timezone.utc) < cut.astimezone(timezone.utc))
-    except Exception:
-        return None
-    return count - before
+        validate_rrule_interval(text)
+        rule = rrulestr(normalize_rrule_until(text, zone), dtstart=first.astimezone(zone), forceset=True)
+        first, before = None, 0
+        for slot in rule:
+            if slot >= cut:
+                first = slot
+                break
+            before += 1
+        parts = [part for part in text.split(';') if part and not part.upper().startswith(('UNTIL=', 'COUNT='))]
+        if before and first is None and any(part.upper().startswith('COUNT=') for part in text.split(';')):
+            parts.append('COUNT=' + str(before))
+        else:
+            kind = 'date' if master.get('all_day') else 'floating' if event_time_kind(master) == 'floating' else 'utc'
+            bound = cut - timedelta(seconds=1)
+            until = (bound.astimezone(zone).strftime('%Y%m%d' if kind == 'date' else '%Y%m%dT%H%M%S')
+                     if kind != 'utc' else bound.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
+            previous = next((p.split('=', 1)[1] for p in normalize_rrule_until(text, zone, kind).split(';')
+                             if p.upper().startswith('UNTIL=')), '')
+            parts.append('UNTIL=' + min(until, previous or until))
+        prefix = ';'.join(parts)
+        text = ';'.join('COUNT=' + str(int(part.split('=', 1)[1]) - before)
+                        if part.upper().startswith('COUNT=') else part for part in text.split(';')) if first else ''
+    elif first < cut:
+        first = None
+    return first, text, prefix
 
 
-def _truncate_series(store, master: Dict[str, Any], occ_key: str, keep_later_exceptions: bool = False) -> List[Dict[str, Any]]:
+def _following_recurrence(master, occ_key, changes, exception):
+    """Preflight the suffix; the selected union member need not be its generator anchor."""
+    cut = parse_stored(occ_key)
+    first, text, prefix = _partition_recurrence(master, cut)
+    effective = parse_stored((exception or {}).get('start_utc')) or cut
+    requested = parse_stored(changes.get('start_utc')) or effective
+    target = {**master, **changes}
+    new_cut = following_series_start(target, cut, effective, requested)
+    delta = recurrence_time_delta(cut, new_cut, target)
+    if 'rrule' in changes:
+        return {'start': new_cut, 'delta': delta, 'rrule': changes['rrule'], 'prefix': prefix}
+    anchor = shift_recurrence_time(target, first, delta) if first else new_cut
+    basis = {**target, 'start_utc': iso_utc(first or cut), 'rrule': text}
+    return {'start': anchor, 'delta': delta, 'rrule': shifted_rrule(basis, anchor), 'prefix': prefix}
+
+
+def _truncate_series(store, master: Dict[str, Any], occ_key: str, keep_later_exceptions: bool = False, recurrence=None) -> List[Dict[str, Any]]:
     """End before the canonical slot, keeping UNTIL in the DTSTART value kind (RFC 5545)."""
     occ = parse_stored(occ_key)
     if occ is None:
         return []
-    if master.get("all_day"):
-        until = (occ.astimezone(get_tz(master.get("tz") or "")).date() - timedelta(days=1)).strftime("%Y%m%d")
-    elif master.get("time_kind") == "floating":
-        until = (occ.astimezone(get_tz(master.get("tz") or "")).replace(tzinfo=None) - timedelta(seconds=1)).strftime("%Y%m%dT%H%M%S")
-    else:
-        until = (occ - timedelta(seconds=1)).astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    parts = [p for p in str(master.get("rrule") or "").split(";") if p and not p.upper().startswith(("UNTIL=", "COUNT="))]
-    parts.append(f"UNTIL={until}")
     # A following-delete must also remove explicit extra dates past the cut;
     # RRULE truncation alone leaves RDATE occurrences live at the source.
-    fields = {"rrule": ";".join(parts) if master.get('rrule') else ''}
+    fields = {'rrule': recurrence['prefix'] if recurrence is not None else _partition_recurrence(master, occ)[2]}
     for field in ("rdates", "exdates"):
         fields[field] = ",".join(x for x in str(master.get(field) or "").split(",") if x and x < occ_key)
     if not master.get('rrule') and str(master.get('start_utc') or '') >= occ_key:
@@ -987,15 +1008,14 @@ def _truncate_series(store, master: Dict[str, Any], occ_key: str, keep_later_exc
     return later
 
 
-def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str, Any], new_group: str = "", split_uid: str = "") -> List[Dict[str, Any]]:
+def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str, Any], recurrence, new_group: str = "", split_uid: str = "") -> List[Dict[str, Any]]:
     """«Starting from this date»: truncate the old series, start a new one carrying the changes.
 
     Later exceptions move to the new series (their date keeps the edit, the slot follows the new wall time);
     linked copies split together under one new link group.
     """
     from providers import materialized_event_status
-    original_rrule = str(master.get("rrule") or "")
-    later = _truncate_series(store, master, occ_key, keep_later_exceptions=True)
+    later = _truncate_series(store, master, occ_key, keep_later_exceptions=True, recurrence=recurrence)
     m_start, m_end = parse_stored(master["start_utc"]), parse_stored(master["end_utc"])
     occ_start = parse_stored(occ_key) or m_start
     duration = (m_end - m_start) if (m_start and m_end) else timedelta(hours=1)
@@ -1007,10 +1027,8 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     cut_effective = cut_start or occ_start
     requested_start = parse_stored(changes.get("start_utc")) or cut_effective
     elapsed_shift = requested_start - cut_effective
-    shift = _time_delta(cut_effective, requested_start, master)
     target = {**master, **changes}
-    new_start = following_series_start(target, occ_start, cut_effective, requested_start)
-    slot_shift = recurrence_time_delta(occ_start, new_start, target)
+    new_start, slot_shift = recurrence['start'], recurrence['delta']
     requested_end = parse_stored(changes.get("end_utc"))
     new_duration = (requested_end - requested_start) if requested_end else duration
     span = {**target, 'start_utc': iso_utc(requested_start), 'end_utc': iso_utc(requested_end)} if requested_end else target
@@ -1022,37 +1040,10 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
     if cut_basis.get('all_day'):
         cut_span = {**cut_basis, 'start_utc': iso_utc(requested_start if requested_end else cut_effective), 'end_utc': iso_utc(requested_end or cut_end or m_end)}
         new_cut_end = _occurrence_end(cut_span, new_cut_start)
-    rule_parts = [p for p in original_rrule.split(";") if p and not p.upper().startswith(("UNTIL=", "COUNT="))]
-    count_left = _count_remaining(master, original_rrule, occ_start)
-    if count_left is not None:
-        rule_parts.append(f"COUNT={max(1, count_left)}")   # a COUNT series keeps its remaining occurrences, it does not become endless
-    # An UNTIL series also has a finite end. Keep its original bound for a
-    # content-only split; shift that bound with an explicit time move.
-    until_part = next((p.split("=", 1)[1] for p in original_rrule.split(";") if p.upper().startswith("UNTIL=")), "")
     # EXDATE/RDATE at/after the cut belong to the new series (shifted with it); the old one keeps only the earlier ones
     row = {k: master.get(k) for k in ("calendar_id", "visibility", "availability", "is_primary", "title", "description", "location", "tz", "time_kind",
                                        "all_day", "organizer", "attendees_json", "my_response", "reminders_json", "origin", "status")}
     row['status'] = materialized_event_status(master, store)
-    split_tz = get_tz(master.get("tz") or "")
-    if until_part:
-        if shift:
-            try:
-                if len(until_part) == 8:
-                    until_day = datetime.strptime(until_part, "%Y%m%d").date()
-                    moved_day = until_day + timedelta(days=round(shift.total_seconds() / 86400))
-                    until_part = moved_day.strftime("%Y%m%d")
-                else:
-                    stamp_format = "%Y%m%dT%H%M%SZ" if until_part.endswith("Z") else "%Y%m%dT%H%M%S"
-                    until_dt = datetime.strptime(until_part, stamp_format)
-                    bound_shift = elapsed_shift if until_part.endswith("Z") else (
-                        requested_start.astimezone(split_tz).replace(tzinfo=None) - cut_effective.astimezone(split_tz).replace(tzinfo=None))
-                    until_part = (until_dt + bound_shift).strftime(stamp_format)
-            except ValueError:
-                pass  # retain a malformed legacy bound; never turn a finite rule into an endless one
-        rule_parts.append(f"UNTIL={until_part}")
-    next_rule = changes.get('rrule', ';'.join(rule_parts))
-    if 'rrule' not in changes and slot_shift:
-        next_rule = shifted_rrule_selectors({**master, 'start_utc': occ_key, 'rrule': next_rule}, new_start)
     def _shift_csv(csv: str) -> str:
         out = []
         for x in str(csv or "").split(","):
@@ -1062,7 +1053,7 @@ def _split_series(store, master: Dict[str, Any], occ_key: str, changes: Dict[str
         return ",".join(out)
     row.update({"uid": split_uid or new_uid(), "start_utc": iso_utc(new_start), "end_utc": iso_utc(new_end), "link_group_id": new_group,
                 "exdates": _shift_csv(master.get("exdates")), "rdates": _shift_csv(master.get("rdates")),
-                "rrule": next_rule, "sync_state": "synced"})
+                "rrule": recurrence['rrule'], "sync_state": "synced"})
     saved = store.insert_event(row)
     # A following edit replaces the series ID, not the occurrence's history.
     # Carry already sent/uncertain notices into the new identity before the
@@ -1182,6 +1173,11 @@ def _blocked_by(store, intent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     dependency = payload.get('after_intent_id')
     for earlier in payload.get('prior_intent_ids', []):
         predecessor = store.get_intent(earlier)
+        if (predecessor and predecessor['state'] == 'resolved' and predecessor['kind'] != 'create'
+                and not payload.get('source_connection')
+                and json.loads(predecessor.get('result_json') or '{}').get('outcome') == 'withdrawn'
+                and json.loads(predecessor.get('payload_json') or '{}').get('source_connection')):
+            continue
         if predecessor is None or predecessor['state'] != INTENT_DONE:
             return predecessor or {'id': earlier, 'state': INTENT_FAILED}
     if dependency:
@@ -1379,6 +1375,10 @@ def run_leased_intent(store, providers, intent: Dict[str, Any]) -> Dict[str, Any
                 expected = intent['expected_etag']
                 event['external_id'] = payload.get('_provider_external_id') or event.get('external_id')
             payload['_expected_etag'] = expected
+        if store.current_leased_intent(intent) is None:
+            current = store.get_intent(intent['id']) or {}
+            return {'status': current.get('state') or INTENT_PENDING,
+                    'message': 'операция отозвана до записи; сохранён её текущий исход'}
         if intent["kind"] == "create":
             res = adapter.create(cal, event, payload)
             # The provider may answer after an owner delete. CAS the new identity

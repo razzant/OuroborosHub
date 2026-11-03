@@ -312,7 +312,8 @@ def _reserve(store, channel: NotifyChannel, reminder_ids: List[str]) -> List[str
 
 def _live_reminder(store, rem: Dict[str, Any], tz, now: datetime, stats: Dict[str, int]) -> Optional[Dict[str, Any]]:
     event = store.get_event(rem["event_id"])
-    if (event is None or event.get("deleted_at") or str(event.get("status") or "") == "cancelled"
+    if (event is None or not store.calendar_connection(event['calendar_id'])
+            or event.get("deleted_at") or str(event.get("status") or "") == "cancelled"
             or event.get("sync_state") == "pending_delete"
             or store.delete_requested(rem["event_id"])):
         reason, live = "событие отменено или удалено", event
@@ -328,7 +329,7 @@ def _live_reminder(store, rem: Dict[str, Any], tz, now: datetime, stats: Dict[st
         if not reason and int(rem["offset_min"]) not in offsets_for(live, get_rules(store), store.get_setting(MODE_KEY) or {}):
             reason = "это напоминание снято: у события сейчас другие времена напоминаний"
     if reason:
-        store.mark_reminder(rem["id"], "skipped", reason)
+        store.mark_reminder(rem["id"], "skipped", reason, only_waiting=True)
         stats["skipped"] += 1
         return None
     return live

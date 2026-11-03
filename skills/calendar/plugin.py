@@ -72,6 +72,14 @@ TOOL_DESCRIPTIONS = {
                    'Доступ CalDAV настраивается на сайте сервера, если API не поддерживает операцию.'),
 }
 
+_ATTENDEE = {'type': 'object', 'properties': {'email': {'type': 'string'}}, 'required': ['email']}
+_ATTENDEES = {'anyOf': [
+    {'type': 'array', 'items': {'anyOf': [{'type': 'string'}, _ATTENDEE]}},
+    {'type': 'string'}, _ATTENDEE]}
+_ATTENDEE_ADDRESSES = {
+    'type': 'array', 'items': {'type': 'string'},
+    'description': 'Exact email addresses for rich/encoded attendees; use retry_arguments when preparation is needed.'}
+
 SCHEMAS = {
     "cal_status": {"type": "object", "properties": {}},
     "cal_events": {"type": "object", "properties": {
@@ -82,14 +90,14 @@ SCHEMAS = {
         "title": {"type": "string"}, "start": {"type": "string"}, "end": {"type": "string"}, "duration_min": {"type": "integer", "default": 60},
         "all_day": {"type": "boolean", "default": False}, "calendars": {"type": "string"}, "hidden": {"type": "boolean", "default": False},
         "availability": {"type": "string", "enum": ["busy", "free", "soft"]}, "description": {"type": "string"}, "location": {"type": "string"},
-        "attendees": {"type": "array", "items": {"type": "string"}}, "send_invites": {"type": "boolean", "default": False},
+        "attendees": _ATTENDEES, "attendee_addresses": _ATTENDEE_ADDRESSES, "send_invites": {"type": "boolean", "default": False},
         "reminders": {"type": "array", "items": {"type": "integer"}}, "rrule": {"type": "string"},
         "confirm": {"type": "boolean", "default": False}}, "required": ["title", "start", "confirm"]},
     "cal_update": {"type": "object", "properties": {
         "id": {"type": "string"}, "start": {"type": "string"}, "end": {"type": "string"}, "duration_min": {"type": "integer"},
         "all_day": {"type": "boolean"}, "title": {"type": "string"}, "description": {"type": "string"}, "location": {"type": "string"},
         "hidden": {"type": "boolean"}, "availability": {"type": "string", "enum": ["busy", "free", "soft"]}, "calendars": {"type": "string"},
-        "attendees": {"type": "array", "items": {"type": "string"}},
+        "attendees": _ATTENDEES, "attendee_addresses": _ATTENDEE_ADDRESSES,
         "reminders": {"anyOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "string", "enum": ["default"]}]},
         "resolution": {"type": "string", "enum": ["local", "provider"]}, "resolution_token": {"type": "string"},
         'link_action': {'type': 'string', 'enum': ['source', 'detach', 'follow']},
@@ -133,14 +141,40 @@ SCHEMAS = {
 WIDGET_RENDER = {"kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host", "span": 2}
 
 
+def _attendee_arguments(arguments):
+    """Expose rich guest destinations on the caller's next Host-checked invocation.
+
+    Plain address arrays already carry the target. Preserve provider metadata
+    and legacy encoded lists instead of dropping them during preparation.
+    """
+    value = arguments.get('attendees')
+    if value is None:
+        return None
+    people = tools._list(value)
+    addresses = [str(person.get('email') or '').strip() if isinstance(person, dict)
+                 else str(person).strip() for person in people]
+    addresses = [address for address in addresses if address]
+    plain = isinstance(value, list) and all(isinstance(person, str) for person in value)
+    supplied = arguments.get('attendee_addresses')
+    if (plain and supplied is None) or supplied == addresses:
+        return None
+    return {'status': 'needs_arguments', 'code': 'canonical_attendee_addresses_required',
+            'message': 'Retry with the exact attendee_addresses below; no event was changed or invitation sent.',
+            'retry_arguments': {**arguments, 'attendee_addresses': addresses}}
+
+
 def register(api):
     def make_ctx():
         return tools.Context(api)
 
     def bind(fn):
         def handler(**kwargs):
-            ctx = make_ctx()
             try:
+                if fn in (tools.cal_create, tools.cal_update):
+                    preparation = _attendee_arguments(kwargs)
+                    if preparation:
+                        return tools.json_dumps(preparation)
+                ctx = make_ctx()
                 return fn(ctx, **kwargs)
             except Exception as exc:  # never raise into the agent; disclose
                 return tools.json_dumps({"status": "error", "message": f"{type(exc).__name__}: {exc}"})

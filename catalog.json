@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/bd9f1000524c0391664a446ac0290f4ca6ea4b09",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/169d9d08c14ecca2f309570e79060646b682f13c",
   "schema_version": 1,
   "skills": [
     {
@@ -369,8 +369,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "81faa7e0812d34202610bf41c95548b06d25ccf6ec697cbcb4611dd816636abb",
-          "size": 50193
+          "sha256": "5448f18c06206b6a3558ac021effedfc5847c190448758badecbfe20bcc4a2a6",
+          "size": 52347
         },
         {
           "path": "accounts.py",
@@ -399,18 +399,18 @@
         },
         {
           "path": "model.py",
-          "sha256": "f618584367bbc446696c8cf9d75a1ff6c05cfb20373542325625cb463d76e6b1",
-          "size": 29586
+          "sha256": "932ded73f1096f9d6f72d31e72fe7d190c57aec2e76c4391b431757ed8a0cc14",
+          "size": 30529
         },
         {
           "path": "ops.py",
-          "sha256": "e3bf11cf921d035aac220a7606c9d7e1484d9c96e2d4cbf16569930e479bafb8",
-          "size": 99001
+          "sha256": "917d334c4502c308ee6d6c571edd909473b61beebca2af667666678f14103af3",
+          "size": 98996
         },
         {
           "path": "plugin.py",
-          "sha256": "208604078b5ffd28840c24f45e5023c2072532b236c9be53b04ef9354b0d274e",
-          "size": 15982
+          "sha256": "883e124d71e0f880466519294ddfb95ec6b727ff4360339de243998b8c88e585",
+          "size": 17764
         },
         {
           "path": "providers.py",
@@ -424,8 +424,8 @@
         },
         {
           "path": "reminders.py",
-          "sha256": "0d24a4667a5693c6576b3b33c0dc58b3a5b6859b320a2745e079a539512c5ce0",
-          "size": 25667
+          "sha256": "e885e12e182d947b0f3762623856ee296431c43bd09f715bba65d7727b743ea3",
+          "size": 25753
         },
         {
           "path": "routes.py",
@@ -434,13 +434,18 @@
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "8074a3d0984324c79196a0e46f455117df12a1057f89ce75ab7dc12038c45789",
-          "size": 37613
+          "sha256": "cfdb72d6b5b4a5f25a60aa39335de5a69b78d8e09a2b008efddd92bb9805724d",
+          "size": 39256
         },
         {
           "path": "store.py",
-          "sha256": "c3cf760a5cfd5b314db4ac4573a11e4059d1c9a6a88fa733793b57c219bb255b",
-          "size": 70958
+          "sha256": "205b56298aac02ad24001baea862e7eec6584baeb678f65eb9b576fc5d89cc3d",
+          "size": 73499
+        },
+        {
+          "path": "tests/test_attendee_destinations.py",
+          "sha256": "95290b6f4dc67fc5c97e867f9913bf86f80e58cb47e0e81a65f7a8d6f770cd04",
+          "size": 5064
         },
         {
           "path": "tests/test_birth_recovery.py",
@@ -496,6 +501,11 @@
           "path": "tests/test_calendar_control_truth.py",
           "sha256": "d1a398a537e2d096bf34e7f674542bea737596b9c96acf4d327a2d536f89b00a",
           "size": 11859
+        },
+        {
+          "path": "tests/test_calendar_disconnect_effects.py",
+          "sha256": "9e539d6c0ca4abfbbe36bfa0390546b5de21f37f413f078c71eff393dca405c4",
+          "size": 15480
         },
         {
           "path": "tests/test_calendar_lifecycle_custody.py",
@@ -668,6 +678,11 @@
           "size": 6136
         },
         {
+          "path": "tests/test_recurrence_suffix_clock.py",
+          "sha256": "3da9bac26fe3cad91791aa1fe5d8abf8279c94d0d6d05f8f5b871d41e696a5ea",
+          "size": 12867
+        },
+        {
           "path": "tests/test_recurrence_until_semantics.py",
           "sha256": "c643f4d09e5cf0f6bca49498881f2f5c7f07df86f505095fa36e4a1c9a9a56b7",
           "size": 14497
@@ -708,9 +723,14 @@
           "size": 23853
         },
         {
+          "path": "tests/test_withdrawn_observation_ordering.py",
+          "sha256": "b48b5e202034c7617c3152188459bf649ae6a227b35959672fbedc7832b9c52d",
+          "size": 10180
+        },
+        {
           "path": "tools.py",
-          "sha256": "e89077519d45eba58d16122dea8e796a6d65e3a6c0d9bd0d8fe3438e778b1233",
-          "size": 59865
+          "sha256": "7c493128efc0f6cb8d396de0ecc820037cdb0bdf3c2cb3ca1aa842aed3e67186",
+          "size": 59794
         },
         {
           "path": "widget.js",
@@ -726,7 +746,7 @@
       "name": "calendar",
       "slug": "calendar",
       "type": "extension",
-      "version": "2.0.3"
+      "version": "2.0.4"
     },
     {
       "description": "Opt-in check-in agreement. If you miss a check-in you promised, Ouroboros first tells you; only if you armed it may it then write once to one consenting contact.",
@@ -1210,18 +1230,18 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "eedc2ea4a986ab71ff67842185ec99d55fd3afcbbd06ec22a2c5dd76f676892a",
-          "size": 4910
+          "sha256": "9e9d5ae37aaf8c8738282f384cc8231c212750cf91047bd493bb3b3213beee36",
+          "size": 5339
         },
         {
           "path": "README.md",
-          "sha256": "7e14696e8dfeda71bfe2b38a84063a0cc71bb521075cdd13f60cfcd6e551fdcf",
+          "sha256": "29c1b473c158678a48b4c22d3b41ad3929885ef3e36525d1bc89b9cae5f2e127",
           "size": 1564
         },
         {
           "path": "SKILL.md",
-          "sha256": "9143cf6b9f55edc736951228dfefaeb2edc57d98a4b330419bfd90acb774f878",
-          "size": 26538
+          "sha256": "cb807b26ff363777da4858fbf511df7a122e26c2f14f0187cd68fbb7f4396bd6",
+          "size": 27561
         },
         {
           "path": "lib/accounts.py",
@@ -1255,8 +1275,8 @@
         },
         {
           "path": "lib/host_adapter.py",
-          "sha256": "16976414b8ebe10da34265edc0dc3e73fe8681fbb4420e17f949dd3fac3d8154",
-          "size": 38762
+          "sha256": "ce2ea0f1bcff41446143880a499190456721db2145ad427bf0c2871e20d0b999",
+          "size": 39226
         },
         {
           "path": "lib/mime.py",
@@ -1270,8 +1290,8 @@
         },
         {
           "path": "lib/service.py",
-          "sha256": "e30eeb1743dbd55b862455b59437571d7c25efb92d28598da57bbdeee5ee49ba",
-          "size": 23921
+          "sha256": "bc4ef85864e988d6f4f30ca7269a3275c3bbfa9d94bfc4d89efcc4496340291b",
+          "size": 26012
         },
         {
           "path": "lib/settings.py",
@@ -1354,6 +1374,16 @@
           "size": 11201
         },
         {
+          "path": "tests/test_declared_target_preparation.py",
+          "sha256": "2608d128ebdf2729c60d512e5eddc4dbbf44fbf7de90484de1d620c61d53a05f",
+          "size": 12085
+        },
+        {
+          "path": "tests/test_deferred_observation_custody.py",
+          "sha256": "b73690ebbc007fa3ddf1061b879542f656097c2b3361c98d01e39b98260256da",
+          "size": 5171
+        },
+        {
           "path": "tests/test_delivery_custody_contracts.py",
           "sha256": "ec9d12e12fb111235ecb5728ddf64e164a9833a870c856dac6b43cdf1c2ca477",
           "size": 9328
@@ -1365,7 +1395,7 @@
         },
         {
           "path": "tests/test_foundation.py",
-          "sha256": "aa557452f7235c57ed6fefc9346c5924ef67bf525c7035bf21c56455eff288f9",
+          "sha256": "7d53fc5a74eac0237327d4533ed4f8e0336343b6965e7fbb5d3263f3513c2704",
           "size": 13835
         },
         {
@@ -1477,7 +1507,7 @@
       "name": "email-presence",
       "slug": "email-presence",
       "type": "extension",
-      "version": "0.9.2"
+      "version": "0.9.3"
     },
     {
       "description": "GDELT Cloud geopolitical intelligence: conflict events, news stories, entity graph, energy infrastructure, macro-finance, prediction markets, and web research via MCP Progressive Discovery.",

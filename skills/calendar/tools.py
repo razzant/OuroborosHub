@@ -844,8 +844,7 @@ def cal_settings(ctx: Context, action: str = "get", calendar_id: str = "", visib
         with st.transaction() as view:
             cancelled = view.cancel_intents_for_account(acc["id"])
             view.delete_account(acc["id"])
-            with view._conn() as conn:
-                uncertain = conn.execute("SELECT COUNT(*) FROM intents WHERE account_id=? AND state='uncertain'", (acc['id'],)).fetchone()[0]
+            uncertain = sum(row['state'] == 'uncertain' for row in view.unsettled_account_intents(acc['id']))
         forgot = False
         if acc["provider"] == PROVIDER_GOOGLE:
             import providers_google as gp

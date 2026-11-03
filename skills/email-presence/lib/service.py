@@ -165,7 +165,20 @@ class MailService:
         with self.target(account_id) as (account, _store, client):
             if message_ref:
                 kwargs.update(self.unwrap_ref(account, message_ref))
+            if account['provider'] == 'gmail' and kwargs.get('action') == 'create':
+                properties = kwargs.get('properties') or {}
+                if 'name' in properties and properties['name'] != str(kwargs.get('destination') or ''):
+                    return self._prepare_target('destination', properties['name'],
+                        {**kwargs, 'account_id': account['id'], 'message_ref': message_ref})
             return {**client.mailbox(**kwargs), "account_id": account["id"]}
+
+    @staticmethod
+    def _prepare_target(argument, value, retry_arguments):
+        if not isinstance(value, str):
+            raise ValueError(f"The canonical {argument} must be a string")
+        return {'ok': False, 'status': 'needs_arguments', 'code': 'canonical_target_required',
+                'message': f'Retry with the actual {argument} below; no provider change was made.',
+                'retry_arguments': {**retry_arguments, argument: value}}
 
     def folders(self, *, account_id=""):
         return self.mailbox(account_id=account_id, action="list")
@@ -317,10 +330,20 @@ class MailService:
                 return {"ok": False, "code": "website_required", "message": "This provider exposes account settings on its website; IMAP/SMTP manage messages and folders."}
             return client.settings_read(**kwargs)
 
-    def settings_write(self, *, account_id="", **kwargs):
+    def settings_write(self, *, account_id="", forward_to="", **kwargs):
         with self.target(account_id) as (account, _store, client):
             if account["provider"] != "gmail":
                 return {"ok": False, "code": "website_required", "message": "Configure filters, forwarding and account settings on this provider's website."}
+            if kwargs.get('resource') == 'filters' and kwargs.get('action', 'update') == 'create':
+                values = dict(kwargs.get('values') or {})
+                action = values.get('action') or {}
+                nested = action.get('forward')
+                if nested and nested != forward_to:
+                    return self._prepare_target('forward_to', nested, {'account_id': account['id'], **kwargs})
+                if forward_to and not nested:
+                    kwargs['values'] = {**values, 'action': {**action, 'forward': forward_to}}
+            elif forward_to:
+                raise ValueError('forward_to applies to creating a Gmail filter')
             return client.settings_write(**kwargs)
 
 
@@ -347,7 +370,7 @@ def register_tools(api, service):
     tool("email_read", service.read, "Read exact message_ref, or legacy uid+uidvalidity+folder, including canonical conversation_id/thread_id for replies. Peeks only; use email_mark_read for Seen. Historical reads do not enter Presence.", message)
     tool("email_mark_read", service.mark_read, "Mark this account's selected message read; accepts message_ref or legacy uid+uidvalidity+folder.", message)
     tool("email_folders", service.folders, "Read folders/labels without changing anything, including while a Place is Silent or consciousness Advises.", {})
-    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP: list/create/copy/move/flags, no global expunge. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant.",
+    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP: list/create/copy/move/flags, no global expunge. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. destination must name the actual create/copy/move target; Gmail properties.name overrides prepare exact retry_arguments before creation.",
          {**message, "action": string, "destination": string, "flags": array, "remove_flags": {"type": "boolean"},
           "add_labels": array, "remove_labels": array, "label_id": string, "draft_id": string, "properties": {"type": "object"}})
     tool("email_draft", service.draft, "Save a draft without sending. Supply account_id and, for replies, canonical conversation_id/thread_id; needs_arguments returns exact retry_arguments before saving when identity is missing. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP appends to its selected folder.",
@@ -356,5 +379,6 @@ def register_tools(api, service):
     tool("email_test_connection", service.test_connection, "Check the selected account's authentication/TLS without sending mail or admitting historical messages.", {})
     settings = {"resource": string, "identifier": string}
     tool("email_settings_read", service.settings_read, "Read Gmail filters, send-as, vacation, language, IMAP/POP or forwarding settings. Other providers return website_required.", settings)
-    tool("email_settings", service.settings_write, "Change provider-supported Gmail settings: filters create/delete, vacation, language, IMAP/POP and existing send-as properties. Unsupported administrative forwarding actions name the website path.",
-         {**settings, "action": string, "values": {"type": "object"}}, ("resource",))
+    tool("email_settings", service.settings_write, "Change provider-supported Gmail settings: filters create/delete, vacation, language, IMAP/POP and existing send-as properties. For a forwarding filter supply forward_to matching values.action.forward; nested-only or mismatched targets return exact retry_arguments before any effect. Unsupported administrative forwarding actions name the website path.",
+         {**settings, "action": string, "values": {"type": "object"},
+          "forward_to": {"type": "string", "description": "Canonical forwarding destination for filters/create. Matches values.action.forward; when given alone it fills that provider field without changing other filter data."}}, ("resource",))

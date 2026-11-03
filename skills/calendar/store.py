@@ -305,6 +305,8 @@ class Store:
 
     def delete_account(self, account_id: str) -> None:
         with self._conn() as c:
+            c.execute("DELETE FROM reminders WHERE state IN ('scheduled','no_channel') AND event_id IN"
+                      " (SELECT e.id FROM events e JOIN calendars c ON c.id=e.calendar_id WHERE c.account_id=?)", (account_id,))
             c.execute("UPDATE calendars SET deleted_at=? WHERE account_id=? AND deleted_at IS NULL", (_ts(), account_id))
             c.execute("DELETE FROM accounts WHERE id=?", (account_id,))
 
@@ -364,6 +366,17 @@ class Store:
         with self._conn() as c:
             row = c.execute("SELECT * FROM calendars WHERE id=?", (calendar_id,)).fetchone()
         return dict(row) if row else None
+
+    def calendar_connection(self, calendar_id):
+        """The current source account record, independent of visibility, auth errors or sync status."""
+        with self._conn() as c:
+            row = c.execute("SELECT c.id AS calendar_id, a.id AS account_id, a.created_at"
+                            " FROM calendars c JOIN accounts a ON a.id=c.account_id"
+                            " WHERE c.id=? AND c.deleted_at IS NULL", (calendar_id,)).fetchone()
+        return dict(row) if row else None
+
+    def connection_is_current(self, connection):
+        return bool(connection) and self.calendar_connection(connection['calendar_id']) == connection
 
     def default_calendar(self) -> Optional[Dict[str, Any]]:
         with self._conn() as c:
@@ -692,15 +705,26 @@ class Store:
         """Group members that are events in their own right (no exception rows): the targets of propagation and reassignment."""
         return [m for m in self.group_members(link_group_id) if not m.get("master_id")]
 
+    def unsettled_account_intents(self, account_id):
+        """Own commands and pending effects derived from this account's observations."""
+        with self._conn() as c:
+            rows = [dict(row) for row in c.execute("SELECT rowid AS admission_order, * FROM intents"
+                        " WHERE state IN ('pending','conflict','uncertain') ORDER BY rowid")]
+        return [row for row in rows if row['account_id'] == account_id or
+                (json.loads(row['payload_json']).get('source_connection') or {}).get('account_id') == account_id]
+
     def cancel_intents_for_account(self, account_id: str, reason: str = "account disconnected") -> int:
         """Withdraw waiting commands, preserving desired data and any owed provider outcome."""
         cancelled, before, affected, created, unknown = 0, {}, set(), set(), set()
+        withdrawal_order, derived_rows = {}, set()
         with self.transaction() as local:
-            with local._conn() as c:
-                rows = [dict(row) for row in c.execute("SELECT * FROM intents WHERE account_id=? AND state IN ('pending','conflict','uncertain') ORDER BY rowid", (account_id,))]
-            for intent in rows:
-                previous = json.loads(intent.get('result_json') or '{}')
+            for intent in local.unsettled_account_intents(account_id):
                 payload = json.loads(intent.get('payload_json') or '{}')
+                previous = json.loads(intent.get('result_json') or '{}')
+                for event_id in [intent['event_id'], *payload.get('created_ids', []), *(row['id'] for row in payload.get('restore_rows', []))]:
+                    withdrawal_order.setdefault(event_id, intent['admission_order'])
+                    if payload.get('source_connection'):
+                        derived_rows.add(event_id)
                 result = {'note': reason, 'previous_result': previous}
                 if intent['state'] == 'uncertain' or (intent['state'] == 'pending' and intent.get('lease_owner') and intent.get('lease_until')):
                     unknown.update(value for value in [intent['event_id'], *payload.get('created_ids', []),
@@ -736,11 +760,17 @@ class Store:
                 row = local.get_event(event_id)
                 if row is None or row.get('master_id') in unknown or (before.get(event_id) or {}).get('master_id') in unknown:
                     continue
+                with local._conn() as c:
+                    if c.execute("SELECT 1 FROM intents WHERE event_id=? AND rowid>? AND state!='resolved' LIMIT 1",
+                                 (event_id, withdrawal_order[event_id])).fetchone():
+                        continue  # A later independent command still owns this row; keep its desired data intact.
                 confirmed = before.get(event_id)
                 if confirmed:
                     # Withdrawal, not a late ACK: restore the complete confirmed family,
                     # including deletion state, without weakening update_event's guard.
                     fields = {key: value for key, value in confirmed.items() if key in EVENT_COLUMNS and key != 'id'}
+                    if event_id in derived_rows:
+                        fields.update({key: row[key] for key in ('is_primary', 'link_group_id', 'link_state')})
                     fields['updated_at'] = _ts()
                     with local._conn() as c:
                         c.execute('UPDATE events SET ' + ', '.join(key + '=?' for key in fields) + ' WHERE id=?',
@@ -1040,7 +1070,9 @@ class Store:
         with self._conn() as c:
             c.execute("BEGIN IMMEDIATE")
             for reminder_id in reminder_ids:
-                result = c.execute("UPDATE reminders SET state='unknown', updated_at=? WHERE id=? AND state IN ('scheduled', 'no_channel')",
+                result = c.execute("UPDATE reminders SET state='unknown', updated_at=? WHERE id=? AND state IN ('scheduled', 'no_channel')"
+                                   " AND EXISTS (SELECT 1 FROM events e JOIN calendars c ON c.id=e.calendar_id"
+                                   " JOIN accounts a ON a.id=c.account_id WHERE e.id=reminders.event_id AND c.deleted_at IS NULL)",
                                    (_ts(), reminder_id))
                 if result.rowcount == 1:
                     reserved.append(reminder_id)
@@ -1065,10 +1097,11 @@ class Store:
         with self._conn() as c:
             return int(c.execute("SELECT COUNT(*) FROM reminders WHERE state='unknown'").fetchone()[0])
 
-    def mark_reminder(self, reminder_id: str, state: str, detail: str = "") -> None:
+    def mark_reminder(self, reminder_id: str, state: str, detail: str = "", *, only_waiting: bool = False) -> None:
         ts = _ts()
         with self._conn() as c:
-            c.execute("UPDATE reminders SET state=?, detail=?, sent_at=CASE WHEN ?='sent' THEN ? ELSE sent_at END, updated_at=? WHERE id=?",
+            c.execute("UPDATE reminders SET state=?, detail=?, sent_at=CASE WHEN ?='sent' THEN ? ELSE sent_at END, updated_at=? WHERE id=?"
+                      + (" AND state IN ('scheduled','no_channel')" if only_waiting else ""),
                       (state, detail[:500], state, ts, ts, reminder_id))
 
     def withdraw_waiting_reminders(self, after: datetime, until: datetime, keep: Set[str], keep_events: Iterable[str] = ()) -> int:

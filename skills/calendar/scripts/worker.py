@@ -105,6 +105,8 @@ def sync_account(store: Store, providers: Providers, account: Dict[str, Any], tz
                 wipe_external_cache(store, stored["id"])
                 report["resynced"] += 1
                 n, d, p, next_cursor, kind = reconcile_calendar(store, providers, adapter, stored, tz, "")
+            if kind == 'disconnected':
+                continue  # The observation belongs to a connection withdrawn during I/O.
             report["events"] += n
             report["deleted"] += d
             report["propagated"] += p
@@ -140,11 +142,16 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
     Returns (upserts, deletions, propagations, next_cursor, cursor_kind). For Google the cancelled ids in an
     incremental feed ARE the confirmed deletions; for CalDAV a window read plus HEAD 404 on the known href is.
     """
+    connection = store.calendar_connection(cal['id'])
+    if connection is None:
+        return 0, 0, 0, None, 'disconnected'
     basis = store.sync_basis(cal['id'])
     rows, next_cursor, kind, extra = adapter.fetch(cal, cursor, tz=tz)
     awaiting = _awaiting_identity(store, adapter, cal)
     result = ops._finish_command(store, providers, _stage_feed, 'companion',
-                                 cal, rows, basis, awaiting, kind, next_cursor)
+                                 cal, rows, basis, awaiting, kind, next_cursor, connection)
+    if result.get('disconnected'):
+        return 0, 0, 0, None, 'disconnected'
     upserts, deleted, propagated = result['upserts'], result['deleted'], result['propagated']
     next_cursor = result['next_cursor']
     retry_required = result['retry_required']
@@ -152,7 +159,7 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
         adapter.parse_errors = list(getattr(adapter, 'parse_errors', []) or []) + result['temporal_gaps']
     def confirmed(local):
         nonlocal retry_required
-        count = _confirmed_deletion(store, providers, local, basis.get(local['id']), basis) if local['id'] in basis else 0
+        count = _confirmed_deletion(store, providers, local, basis.get(local['id']), basis, connection) if local['id'] in basis else 0
         if not count:
             retry_required = True
         return count
@@ -192,17 +199,21 @@ def reconcile_calendar(store: Store, providers: Providers, adapter, cal: Dict[st
             if still_there:
                 continue
             deleted += confirmed(local)
+    if not store.connection_is_current(connection):
+        return upserts, deleted, propagated, None, 'disconnected'
     if retry_required:
         next_cursor = '' if kind == 'google_sync_token' else None
     return upserts, deleted, propagated, next_cursor, kind
 
 
-def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
+def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor, connection):
     """Commit accepted source snapshots and their copy intents together, with no network.
 
     A failure anywhere before commit retains the old source ETag, so the next
     fetch can replay the observation. After commit, durable intents own delivery.
     """
+    if not store.connection_is_current(connection):
+        return {'disconnected': True, 'assignments': []}
     protected_masters = set()
     retry_required = False
     upserts = deleted = propagated = 0
@@ -228,7 +239,7 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
                     deleted += int(store.confirm_pending_delete(existing["id"], basis[existing['id']])) if existing['id'] in basis else 0
                 elif existing.get("sync_state") not in ("pending", "conflict", "failed"):
                     if existing['id'] in basis:
-                        result = _stage_absent_cascade(store, existing['id'], basis[existing['id']], basis)
+                        result = _stage_absent_cascade(store, existing['id'], basis[existing['id']], basis, connection)
                         deleted += int(result.get('status') == 'ok')
                         retry_required |= result.get('status') != 'ok'
                         assignments.extend(result.get('assignments', []))
@@ -408,6 +419,7 @@ def _stage_feed(store, cal, rows, basis, awaiting, kind, next_cursor):
         result = _stage_sync_copy(store, basis, root, commands)
         propagated += int(result.get('status') == 'ok')
         retry_required |= result.get('status') != 'ok'
+        _bind_source_intents(store, result.get('assignments', []), connection)
         assignments.extend(result.get('assignments', []))
         if result.get('message'):
             temporal_gaps.append('Linked copy ' + root + ' not propagated: ' + result['message'])
@@ -531,26 +543,41 @@ def _stage_sync_copy_commands(view, basis, root, commands):
     return {'status': 'ok', 'assignments': assignments}
 
 
-def _confirmed_deletion(store: Store, providers: Providers, local: Dict[str, Any], observed=None, basis=None) -> int:
+def _bind_source_intents(store, assignments, connection):
+    """The staged observation's connection owns propagation, even if a link later chooses another source."""
+    with store._conn() as c:
+        for assignment in assignments:
+            for iid in assignment.get('_intent_ids', []):
+                intent = store.get_intent(iid)
+                payload = json.loads(intent['payload_json'])
+                payload['source_connection'] = connection
+                c.execute('UPDATE intents SET payload_json=? WHERE id=?', (json.dumps(payload), iid))
+
+
+def _confirmed_deletion(store: Store, providers: Providers, local: Dict[str, Any], observed=None, basis=None, connection=None) -> int:
     """The provider answered that this resource is gone; apply it only if no accepted owner write says otherwise *now*.
 
     ``local`` is the caller's earlier snapshot: it names the row and the identity the answer was about, nothing more.
     The provider call already happened outside SQLite; every protection check is repeated inside the write transaction."""
+    connection = connection or store.calendar_connection(local['calendar_id'])
+    if not store.connection_is_current(connection):
+        return 0
     if local.get("sync_state") == "pending_delete" or store.delete_requested(local["id"]):
         # This row was selected for deletion by an earlier scoped operation.
         # Its siblings already have their own intents if the owner requested a cascade.
         return int(store.confirm_pending_delete(local["id"], observed))
     observed = observed if observed is not None else local
     basis = basis if basis is not None else store.sync_basis(local['calendar_id'])
-    staged = ops._finish_command(store, providers, _stage_absent_cascade, "companion", local["id"], observed, basis)
+    staged = ops._finish_command(store, providers, _stage_absent_cascade, "companion", local["id"], observed, basis, connection)
     return int(staged.get("status") == "ok")
 
 
-def _stage_absent_cascade(view, event_id: str, observed: Dict[str, Any], basis) -> Dict[str, Any]:
+def _stage_absent_cascade(view, event_id: str, observed: Dict[str, Any], basis, connection=None) -> Dict[str, Any]:
     """Runs inside ops._finish_command's write transaction: the guard and the linked-copy cascade commit together or not at all."""
-    if view.provider_absence_blocker(event_id, observed):
-        return {"status": "protected", "assignments": []}
     row = view.get_event(event_id)
+    connection = connection or (view.calendar_connection(row['calendar_id']) if row else None)
+    if not view.connection_is_current(connection) or view.provider_absence_blocker(event_id, observed):
+        return {"status": "protected", "assignments": []}
     was_source = links.source_is(view, row)
     siblings = links.followers(view, row)
     if any(not _copy_unchanged(view, sibling['id'], basis)
@@ -565,6 +592,7 @@ def _stage_absent_cascade(view, event_id: str, observed: Dict[str, Any], basis) 
     assignments = []
     for sibling in siblings:
         assignments.extend(ops._stage_delete_event(view, sibling['id'], scope=SCOPE_ALL, cascade=False, from_source=True).get('assignments', []))
+    _bind_source_intents(view, assignments, connection)
     return {'status': 'ok', 'assignments': assignments}
 
 
