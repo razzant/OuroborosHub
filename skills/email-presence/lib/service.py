@@ -169,7 +169,7 @@ class MailService:
                 properties = kwargs.get('properties') or {}
                 if 'name' in properties and properties['name'] != str(kwargs.get('destination') or ''):
                     return self._prepare_target('destination', properties['name'],
-                        {'account_id': account['id'], 'message_ref': message_ref, **kwargs})
+                        {**kwargs, 'account_id': account['id'], 'message_ref': message_ref})
             return {**client.mailbox(**kwargs), "account_id": account["id"]}
 
     @staticmethod

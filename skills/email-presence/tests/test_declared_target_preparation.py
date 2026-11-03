@@ -186,3 +186,23 @@ def test_canonical_target_metadata_preserves_real_host_write_modes(tmp_path,monk
     if place_state!='no_place':
         assert facts['effect']=='write' and facts['declared']
         assert facts['targets']=={key:[value] for key,value in args.items()}
+
+
+@pytest.mark.parametrize('prepare', [False, True])
+def test_mailbox_destination_retry_keeps_the_public_message_reference(prepare):
+    account, registered, requests, schemas = harness('gmail')
+    reference = MailService.wrap_ref(account, {'message_ref': 'gmail:message-one'})
+    properties = {'name': 'Actual label', 'labelListVisibility': 'labelShow'}
+    args = {'account_id': account['id'], 'action': 'create', 'message_ref': reference,
+            'destination': 'Initial label' if prepare else 'Actual label', 'properties': properties}
+    result = json.loads(registered['email_mailbox'](**args))
+    if prepare:
+        assert result['status'] == 'needs_arguments' and requests == []
+        retry = result['retry_arguments']
+        assert retry['message_ref'] == reference
+        assert retry['properties'] == properties and retry['destination'] == properties['name']
+        import jsonschema
+        jsonschema.validate(retry, schemas['email_mailbox'])
+        result = json.loads(registered['email_mailbox'](**retry))
+    assert result['account_id'] == account['id']
+    assert requests == [{'method': 'POST', 'path': '/labels', 'body': properties}]

@@ -799,9 +799,6 @@ class Store:
             return None
         if allow_uncertain:
             return row  # Actual post-I/O evidence survives expiry if no new attempt took over.
-        source = json.loads(row.get('payload_json') or '{}').get('source_connection')
-        if source and not self.connection_is_current(source):
-            return None  # A new effect cannot outlive the connection whose observation caused it.
         expiry = parse_stored(row['lease_until'])
         return row if expiry and expiry > now_utc() else None
 

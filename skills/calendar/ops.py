@@ -934,7 +934,7 @@ def _ensure_exception(store, master: Dict[str, Any], occ_key: str, changes: Dict
 
 
 def _partition_recurrence(master, cut):
-    """Partition generated slots once; extra/excluded dates never consume RRULE COUNT."""
+    """Partition generated slots; COUNT includes EXDATE'd slots and excludes extra RDATEs."""
     first = parse_stored(master['start_utc'])
     text = str(master.get('rrule') or '')
     zone = get_tz(master.get('tz') or '')
@@ -1173,6 +1173,11 @@ def _blocked_by(store, intent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     dependency = payload.get('after_intent_id')
     for earlier in payload.get('prior_intent_ids', []):
         predecessor = store.get_intent(earlier)
+        if (predecessor and predecessor['state'] == 'resolved' and predecessor['kind'] != 'create'
+                and not payload.get('source_connection')
+                and json.loads(predecessor.get('result_json') or '{}').get('outcome') == 'withdrawn'
+                and json.loads(predecessor.get('payload_json') or '{}').get('source_connection')):
+            continue
         if predecessor is None or predecessor['state'] != INTENT_DONE:
             return predecessor or {'id': earlier, 'state': INTENT_FAILED}
     if dependency:
