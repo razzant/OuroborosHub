@@ -82,6 +82,9 @@ _CONTINUATION_TERMINAL = _TERMINAL_WORK_STATES | {"interrupted"}
 _OBSERVING = frozenset({"pending", "unresolved"})
 _DISPOSITIONS = frozenset({"retained", "rejected", "blocked", "retry"})
 _BINDING_ID_RE = re.compile(r"[0-9a-f]{32}")
+# The Host did not say whether this place allows sending. The outbox counts a hold by its prefix.
+PLACE_POLICY_UNREAD = ("Held: Ouroboros did not answer whether this place allows sending. "
+                       "Nothing was sent yet; it retries by itself and no approval is needed.")
 
 
 class HostAdapterUnavailable(RuntimeError):
@@ -484,7 +487,7 @@ class LoopbackPresenceHostAdapter:
         """
         await self.discover_delivery_support()
         if not self.places_version:
-            return "Held: place policy unavailable" if self.delivery_reporting_status == "unavailable" else ""
+            return PLACE_POLICY_UNREAD if self.delivery_reporting_status == "unavailable" else ""
         try:
             response = await self._http.get(
                 f"{self.host_service_url}/presence/place",
@@ -493,10 +496,20 @@ class LoopbackPresenceHostAdapter:
                         **({"thread_id": thread_id} if thread_id else {})}, timeout=10,
             )
             place = await self._json_response(response)
+        except HostBindingTerminalError:
+            # "Not connected" is the Host's answer, not an unread policy: its own words say what to do.
+            try:
+                refusal = response.json()
+                words = refusal.get("error") if refusal.get("code") == "place_not_connected" else ""
+            except (ValueError, AttributeError):
+                words = ""
+            return f"Held: {words}" if words else PLACE_POLICY_UNREAD
         except (HostContractError, httpx.HTTPError):
-            return "Held: place policy unavailable"
+            return PLACE_POLICY_UNREAD
         state = place.get("state")
-        return "" if state == "active" else f"Held: {place.get('label') or 'Slack'} is {state or 'unavailable'}"
+        if not state:
+            return PLACE_POLICY_UNREAD
+        return "" if state == "active" else f"Held: {place.get('label') or 'Slack'} is {state}"
 
     async def report_delivery(self, payload: Mapping[str, Any]) -> None:
         if self._skill_token is None:

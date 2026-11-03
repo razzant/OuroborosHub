@@ -14,7 +14,7 @@ from .accounts import AccountError, AccountStore, SETTING_KEYS
 from .client import MailClient
 from .delivery import tool_origin
 from .gmail import GmailClient
-from .host_adapter import LoopbackPresenceHostAdapter
+from .host_adapter import LoopbackPresenceHostAdapter, place_refusal_hold
 from .mime import conversation_root, mailbox_addresses, reply_all_recipients
 from .settings import SENDING_OFF
 from .store import EmailStore, RequestIdConflict
@@ -266,7 +266,7 @@ class MailService:
             if binding.get("supported"):
                 reporting["place_binding"] = binding.get("binding")
                 if not binding.get("allowed"):
-                    hold = str(binding.get("code") or binding.get("state") or "Place unavailable")
+                    hold = place_refusal_hold(binding)
             else:
                 reporting["binding_support"] = "unsupported"
             staged = store.stage_outbound_attachments(rid, attachments or [])

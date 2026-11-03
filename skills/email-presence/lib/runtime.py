@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from .delivery import email_report
 from .accounts import AccountError
 from .gmail import DeliveryRejected
-from .host_adapter import HostBindingTerminalError, HostRetryError, HostTurnStatus
+from .host_adapter import HostBindingTerminalError, HostRetryError, HostTurnStatus, place_refusal_hold
 from .mime import MailAddressError, conversation_root, extract_body, mailbox_addresses
 from .settings import SENDING_OFF, load_settings
 from .store import RequestIdConflict
@@ -181,7 +181,7 @@ class EmailRuntime:
                 if facts.get("supported"):
                     reporting["place_binding"] = facts.get("binding")
                     if not facts.get("allowed"):
-                        hold = str(facts.get("code") or facts.get("state") or "place policy unavailable")
+                        hold = place_refusal_hold(facts)
             try:
                 self.store.enqueue_outbox(request_id=request_id,
                                           recipients=recipients, subject=subject,

@@ -1,6 +1,6 @@
 # Email Presence
 
-Version 0.9.3 connects multiple Gmail API and IMAP/SMTP mailboxes, including
+Version 0.9.4 connects multiple Gmail API and IMAP/SMTP mailboxes, including
 Yandex and Proton Mail Bridge. Each account has its own credentials, inbox,
 outbox and receipts; sender addresses are separate from mailbox identity.
 The Email accounts widget manages connections and shows queue counts and the

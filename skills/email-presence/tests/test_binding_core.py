@@ -109,7 +109,7 @@ def test_disconnect_never_reclassifies_held_bound_send_or_automatic_reply_as_unb
     for _ in range(2):
         assert runtime.process_outbox()
     assert not delivery.sent
-    assert "place_disconnected" in store.receipt("held")["last_error"]
+    assert store.receipt("held")["last_error"].endswith(" is disconnected")
     assert store.receipt("held")["delivery_reporting"]["place_binding"] == bound
     assert store.receipt(automatic_id)["state"] == "held"
     # A newly requested operation binds the new Place and remains usable.

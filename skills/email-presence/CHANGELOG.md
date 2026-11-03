@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.4
+
+- Say what a hold means when the Host did not say whether a Place allows sending:
+  `Held: Ouroboros did not answer whether this place allows sending. Nothing was sent
+  yet; it retries by itself and no approval is needed.` `Held: place policy unavailable`
+  and a printed Host code read like a pending approval.
+- Name the Place's state in a Host's refusal (`Held: Work mail is paused`), not its code
+  (`Held: place_paused`). A send no connected Place covers says so. The code stays in the
+  debug log (`LOG_LEVEL=DEBUG`).
+
 ## 0.9.3
 
 - Keep already-admitted deferred replies in custody across unreadable work polls;

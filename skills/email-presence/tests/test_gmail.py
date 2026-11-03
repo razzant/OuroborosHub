@@ -124,7 +124,7 @@ class BindingHost:
         self.calls = []
     def binding_hold(self, binding, account, conversation, *, thread_id=""):
         self.calls.append((binding, account, conversation, thread_id))
-        return "Held: place_disconnected" if self.disconnected else ""
+        return "Held: Email is disconnected" if self.disconnected else ""
 
 
 @pytest.mark.parametrize("outcome,state", [("accepted", "completed"), ("timeout", "uncertain"), ("missing_id", "uncertain"), ("denied", "failed"), ("quota", "retry")])
