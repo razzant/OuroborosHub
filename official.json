@@ -21,7 +21,7 @@
       "recommended": false
     },
     {
-      "digest": "2fde400b995a550d8e4d7331163b7e842d8759d27f5d5e3c127599a73d1966dd",
+      "digest": "ba83aff76cab74a709cc4240a8c0868690afa95d175c52fd824276edadecec36",
       "name": "calendar",
       "recommended": false
     },
@@ -51,7 +51,7 @@
       "recommended": false
     },
     {
-      "digest": "37bd2df321cdd771b0afe4f283171fd8b5f212475fdbf70f9cb796a9e9372909",
+      "digest": "dcc08fb065a9811626dd5258be55f9be53053d3e63ed81f128c65fec235c60c5",
       "name": "email-presence",
       "recommended": false
     },
