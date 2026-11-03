@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "note": "Exact upstream identities this skill was written and tested against. The server refuses to start a browser session with anything else.",
+  "npm": {
+    "@playwright/mcp": {
+      "version": "0.0.84",
+      "tarball": "https://registry.npmjs.org/@playwright/mcp/-/mcp-0.0.84.tgz",
+      "integrity": "sha512-weqLrA7/D8MJzNV9/t3Hnjp100tS2sxFXKeb2gH6Nhktqmdfvx5qRA9AZ5Mhjnre1jY0wltsrRK5VZS5NBgcvw==",
+      "shasum": "7ea2d7f1be08fcbf8d8473dffa8b6a0814116f51",
+      "git_head": "be26c080edfae7c761db1e757c4aff9f6453b4d7",
+      "repository": "https://github.com/microsoft/playwright-mcp",
+      "license": "Apache-2.0",
+      "files_sha256": {
+        "package.json": "d060ffefae5e5e4ecff63f3b75d462ae352a24791d42055308955429f6d896d8",
+        "cli.js": "70dab09ab9a5bc1943fb78e2655f00af7349f9931073833919f19c5d7d786ad6",
+        "index.js": "28c639173fb79f5cae1ed44519995cea0dd2aee2f4a48a2511f06f153802b946"
+      }
+    },
+    "playwright-core": {
+      "version": "1.65.0-alpha-2026-10-30",
+      "tarball": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.65.0-alpha-2026-10-30.tgz",
+      "integrity": "sha512-LPMw8B/HRQKMcJeXTqWSrkB/AfCKKmbDQMbu0p7zg8MgibOWaKMjZWR/StAtrQkOxvOmZEju1o1TnPgdoOCwrg==",
+      "shasum": "3385edf853480fabf99cafd8aa3a65012bf4d29f",
+      "git_head": "018adb570c757898e7035f23e29ebb689d1d6ead",
+      "repository": "https://github.com/microsoft/playwright",
+      "license": "Apache-2.0",
+      "files_sha256": {
+        "package.json": "29b0cb546167aafa439b2a62e4af8caad9f61fce428d34a43b144ce07d69070f",
+        "browsers.json": "ed512fe6f05034a35e9459453415d6f304379793757d7b072b90021252c7b76f",
+        "lib/bootstrap.js": "39dd64cc9472275d1b25c170fefa2a98353bcca598b741788faac2e6e15fc737",
+        "lib/utilsBundle.js": "3d4a637b583b2d3feca1cd479bb5ba36eed977ac1999f3d4d8afd9fec02c5e12",
+        "lib/coreBundle.js": "3c1b6ff9aa60fdf720ab73f8cdcdd647841eb3a266cfc1263a300664dd9a3fae"
+      }
+    },
+    "playwright": {
+      "version": "1.65.0-alpha-2026-10-30",
+      "tarball": "https://registry.npmjs.org/playwright/-/playwright-1.65.0-alpha-2026-10-30.tgz",
+      "integrity": "sha512-dmAJMVHKzHvMQjn+XDcaq/pxaZ0W6n8i78rwTM+VGRtQ3WBF5ZiSdB1yL/cyoYUGUMwg3jxN65KqC9cERaCbIg==",
+      "shasum": "ca0f47b1a8b8db5b1c52a5608c55a9536ed6697b",
+      "git_head": "018adb570c757898e7035f23e29ebb689d1d6ead",
+      "license": "Apache-2.0",
+      "used_by_this_skill": "No. It is a declared dependency of @playwright/mcp and is installed with it; this skill never loads it."
+    }
+  },
+  "patch": {
+    "file": "patches/playwright-core@1.65.0-alpha-2026-10-30.patch",
+    "package": "playwright-core",
+    "target": "lib/coreBundle.js",
+    "preimage_sha256": "3c1b6ff9aa60fdf720ab73f8cdcdd647841eb3a266cfc1263a300664dd9a3fae",
+    "postimage_sha256": "c3942019f6122ed0733b7fe19e80ded6a2113f3e8f124a408e8c2e65da997690",
+    "applied": "in memory at server start; installed package files are never modified"
+  },
+  "extension": {
+    "name": "Playwright Extension",
+    "id": "mmlmfjhmonkocbjadbfplnigmagldckm",
+    "store_url": "https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm",
+    "tested_version": "0.4.0",
+    "source_commit": "018adb570c757898e7035f23e29ebb689d1d6ead",
+    "relay_protocol_version": 2,
+    "background_mjs_sha256_of_build_examined": "1bdd5116275d6066dcb668f908ed0ea2daeeee4bd8e26905191f7967466c77ac",
+    "modified_by_this_skill": false
+  }
+}

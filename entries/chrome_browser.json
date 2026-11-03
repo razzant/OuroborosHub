@@ -1,0 +1,25 @@
+{
+  "category": [
+    "computer"
+  ],
+  "description": "Work in the owner's own Chrome through Microsoft's official Playwright Extension - the tab they share plus background tabs for the same work, trusted input in background tabs, and handback by plain conversation.",
+  "digest": "d853fe070533292222a43ca1092fea7f30e4e1482b3e64a10a72d1362d5cfe6e",
+  "install_specs": [
+    {
+      "kind": "npm",
+      "package": "@playwright/mcp@0.0.84"
+    }
+  ],
+  "name": "chrome_browser",
+  "owner": "kazzand",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/chrome_browser"
+  },
+  "title": "Chrome (shared tab)",
+  "type": "script",
+  "version": "0.2.0",
+  "when_to_use": "The owner wants work done in their own signed-in Chrome - in a tab they share and in background tabs for the same work - while they keep using the browser, and takes the page over by saying so when a login, a code or a decision is theirs.",
+  "withdrawn": null
+}

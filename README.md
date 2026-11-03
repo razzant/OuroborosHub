@@ -277,6 +277,11 @@ requirements and browsers installed, set `OUROBOROS_SOURCE_DIR` and
 `python -B scripts/ci_checks.py run calendar-skill` separately. The mail runner
 enables its browser cases and real child-tool/Place-binding checks.
 
+Chrome (`chrome_browser`) keeps its tests outside the payload, in
+[`tests/chrome_browser`](tests/chrome_browser/README.md). They need no browser, but they need Node 24 and
+the exact npm packages `skills/chrome_browser/pins.json` records, named by `OUROBOROS_CHROME_NODE_MODULES`.
+Nothing there skips: without them, a run says what to install.
+
 Memory Atlas keeps its tests outside the payload, in `tests/memory_atlas`. Most of them start one
 isolated Ouroboros from the core checkout named by `ATLAS_CORE`, which must provide PluginAPI 2.1
 `read_memory` (`ouroboros/memory_reader.py`): they copy it into a new directory under `/tmp`, write

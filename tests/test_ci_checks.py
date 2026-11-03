@@ -57,6 +57,7 @@ class SelectionTests(unittest.TestCase):
             'github': {'github'},
             'telegram-user-session': {'telegram-user-session'},
             'email-presence': {'email-presence'}, 'agentrq-bridge': {'agentrq-bridge'},
+            'chrome_browser': {'chrome-browser'},
         }
         for skill, expected in consumers.items():
             with self.subTest(skill=skill):

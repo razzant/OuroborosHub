@@ -266,6 +266,32 @@ class WorkflowTests(unittest.TestCase):
                              ['-m pip install -r mail-calendar-core/requirements.txt',
                               '-m playwright install --with-deps chromium webkit'])
 
+    def test_chrome_browser_workflow_installs_node_and_the_npm_closure_its_pins_record(self):
+        hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']
+        node = next(step for step in hosted['steps'] if step.get('uses') == 'actions/setup-node@v4')
+        install = next(step for step in hosted['steps'] if step.get('name') == 'Install the npm closure that chrome_browser pins')
+        self.assertEqual((node['if'], install['if']), ("matrix.suite == 'chrome-browser'",) * 2)
+        self.assertEqual(node['with'], {'node-version': '24'})
+        self.assertEqual(ci_checks.SUITES['chrome-browser'], {'skills': ['chrome_browser'], 'tests': ['tests/chrome_browser']})
+        steps = hosted['steps']
+        self.assertLess(steps.index(node), steps.index(install))
+        self.assertLess(steps.index(install), len(steps) - 1)  # both precede the suite run
+        self.assertEqual(steps[-1]['run'], 'python -B scripts/ci_checks.py run "$SUITE"')
+        version = json.loads((ROOT / 'skills/chrome_browser/pins.json').read_text(encoding='utf-8'))['npm']['@playwright/mcp']['version']
+        with tempfile.TemporaryDirectory(prefix='hub chrome workflow ') as tmp:
+            root = Path(tmp)
+            output = root / 'environment'
+            # Execute the actual shell step; substitute only the download (one argument per line shows its quoting).
+            # Python is the real one, so the version comes from the real pins file.
+            prelude = f'python() {{ {shlex.quote(sys.executable)} "$@"; }}\nnpm() {{ printf "%s\\n" "$@" >> "$PROBES"; }}\n'
+            subprocess.run(['/bin/sh', '-c', prelude + install['run']], check=True, cwd=ROOT, capture_output=True, text=True,
+                           env={**os.environ, 'RUNNER_TEMP': str(root), 'GITHUB_ENV': str(output), 'PROBES': str(root / 'probes')})
+            closure = root / 'chrome-browser-npm'
+            self.assertEqual(output.read_text(encoding='utf-8'), f'OUROBOROS_CHROME_NODE_MODULES={closure / "node_modules"}\n')
+            self.assertEqual((root / 'probes').read_text(encoding='utf-8').splitlines(),
+                             ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', str(closure),
+                              f'@playwright/mcp@{version}'])
+
     def test_owner_write_job_uses_only_main_helpers_and_data_artifacts(self):
         workflow = self.workflow('owner-updates.yml')
         self.assertEqual(workflow['on'], {'workflow_run': {'workflows': ['Validate Catalog'], 'types': ['completed']}})

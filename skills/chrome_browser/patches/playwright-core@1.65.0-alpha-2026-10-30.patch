@@ -1,0 +1,297 @@
+Patch to playwright-core 1.65.0-alpha-2026-10-30, file lib/coreBundle.js
+  sha256 before: 3c1b6ff9aa60fdf720ab73f8cdcdd647841eb3a266cfc1263a300664dd9a3fae
+  sha256 after:  c3942019f6122ed0733b7fe19e80ded6a2113f3e8f124a408e8c2e65da997690
+
+Playwright is Copyright (c) Microsoft Corporation and licensed under the Apache
+License, Version 2.0: see LICENSE-Apache-2.0.txt and NOTICE-playwright.txt next
+to this file. The hunks below state every change made for the Ouroboros
+chrome_browser skill (Ouroboros contributors, 2026). The skill applies them in
+memory when its server starts; the installed package files are not modified.
+
+What changes, by hunk:
+  1-5  Pointer actions: an optional hook (off unless the skill installs it)
+       replaces the page's requestAnimationFrame "stable" wait with host-timed
+       sampling, and records whether a trusted event reached the target.
+       Visible, enabled, non-inert and hit-target checks are unchanged, and the
+       states are still read after the target has settled.
+  6    Request interception: the real CORS preflight is continued instead of
+       being answered with a permissive 204.
+  7-8  MCP tabs: tabs the agent opens are marked; selecting a tab does not bring
+       it to front; a lost or crashed tab is never replaced by a new one; only
+       tabs the agent opened can be closed.
+  9    Extension relay: new tabs are created with active:false.
+  10-11 Extension relay: no token or protocol override from the environment;
+       the connect-page URL is returned to the caller instead of a browser being
+       located and spawned with it.
+  12-13 Browser factories: profile discovery, launching and attaching are
+       disabled; the skill connects only through its own browser_connect.
+  14   Exports: the relay class and the hook setter for the skill adapter.
+
+--- a/lib/coreBundle.js
++++ b/lib/coreBundle.js
+@@ -21668,13 +21668,20 @@
+         if (options.__testHookBeforeStable)
+           await progress2.race(options.__testHookBeforeStable());
+         if (!force) {
+-          const elementStates = action.waitForEnabled ? ["visible", "enabled", "stable", "non-inert"] : ["visible", "stable"];
++          // ouroboros chrome_browser: a hidden tab runs no animation frames; host-timed sampling replaces "stable", first, as upstream settles before it reads the other states.
++          const hostStability = pointerActionHooks?.stability;
++          const elementStates = (action.waitForEnabled ? ["visible", "enabled", "stable", "non-inert"] : ["visible", "stable"]).filter((state) => !hostStability || state !== "stable");
+           progress2.log(`  waiting for element to be ${action.waitForEnabled ? "visible, enabled and stable" : "visible and stable"}`);
++          if (hostStability) {
++            const stableResult = await hostStability(this, progress2, action);
++            if (stableResult !== "done")
++              return stableResult;
++          }
+           const result2 = await progress2.race(this.evaluateInUtility(async ([injected, node, { elementStates: elementStates2, frameVisible: frameVisible2 }]) => {
+             return await injected.checkElementStates(node, elementStates2, frameVisible2);
+           }, { elementStates, frameVisible }));
+           if (result2)
+             return result2;
+           progress2.log(`  element is ${action.waitForEnabled ? "visible, enabled and stable" : "visible and stable"}`);
+         }
+         if (options.__testHookAfterStable)
+@@ -21711,6 +21718,7 @@
+           }
+           hitTargetInterceptionHandle = handle;
+         }
++        let deliveryProbe;
+         const actionResult = await this._page.frameManager.waitForSignalsCreatedBy(progress2, action.waitAfter === true, async (progress3) => {
+           if (options.__testHookBeforePointerAction)
+             await progress3.race(options.__testHookBeforePointerAction());
+@@ -21718,6 +21726,9 @@
+           if (options && options.modifiers)
+             restoreModifiers = await this._page.keyboard.ensureModifiers(progress3, options.modifiers);
+           progress3.log(`  performing ${action.name} action`);
++          // ouroboros chrome_browser: record whether a trusted event actually reached the target.
++          if (hitTargetInterceptionHandle && !options.trial && pointerActionHooks?.beforePerform)
++            deliveryProbe = await pointerActionHooks.beforePerform(this, progress3, action);
+           await action.perform(progress3, point);
+           if (restoreModifiers)
+             await this._page.keyboard.ensureModifiers(progress3, restoreModifiers);
+@@ -21733,6 +21744,8 @@
+                 return hitTargetResult;
+             }
+           }
++          if (deliveryProbe !== void 0)
++            await pointerActionHooks?.afterPerform?.(this, progress3, action, deliveryProbe);
+           progress3.log(`  ${options.trial ? "trial " : ""}${action.name} action done`);
+           progress3.log("  waiting for scheduled navigations to finish");
+           if (options.__testHookAfterPointerAction)
+@@ -21742,6 +21755,8 @@
+           const stopPromise = hitTargetInterceptionHandle?.evaluate((h) => h.stop()).catch(() => {
+           });
+           stopPromise?.then(() => hitTargetInterceptionHandle?.dispose());
++          if (deliveryProbe !== void 0)
++            pointerActionHooks?.releaseProbe?.(deliveryProbe);
+         });
+         if (actionResult !== "done")
+           return actionResult;
+@@ -37940,21 +37955,8 @@
+         }
+         const isInterceptedOptionsPreflight = !!requestPausedEvent && requestPausedEvent.request.method === "OPTIONS" && requestWillBeSentEvent.initiator.type === "preflight";
+         if (isInterceptedOptionsPreflight && (this._page || this._serviceWorker).needsRequestInterception()) {
+-          const requestHeaders = requestPausedEvent.request.headers;
+-          const responseHeaders = [
+-            { name: "Access-Control-Allow-Origin", value: requestHeaders["Origin"] || "*" },
+-            { name: "Access-Control-Allow-Methods", value: requestHeaders["Access-Control-Request-Method"] || "GET, POST, OPTIONS, DELETE" },
+-            { name: "Access-Control-Allow-Credentials", value: "true" }
+-          ];
+-          if (requestHeaders["Access-Control-Request-Headers"])
+-            responseHeaders.push({ name: "Access-Control-Allow-Headers", value: requestHeaders["Access-Control-Request-Headers"] });
+-          requestPausedSessionInfo.session._sendMayFail("Fetch.fulfillRequest", {
+-            requestId: requestPausedEvent.requestId,
+-            responseCode: 204,
+-            responsePhrase: statusText(204),
+-            responseHeaders,
+-            body: ""
+-          });
++          // ouroboros chrome_browser: the server answers its own preflight; the actual request is still routed.
++          requestPausedSessionInfo.session._sendMayFail("Fetch.continueRequest", { requestId: requestPausedEvent.requestId });
+           return;
+         }
+         if (!frame && !this._serviceWorker) {
+@@ -67567,29 +67569,24 @@
+         const browserContext = await this.ensureBrowserContext(isolatedContext);
+         const page = await browserContext.newPage();
+         this._setCurrentTab(this._tabs.find((t) => t.page === page));
++        if (this._currentTab?.page === page)
++          this._currentTab.openedByAgent = true;
+         return this._currentTab;
+       }
+       async selectTab(index) {
+         const tab2 = this._tabs[index];
+         if (!tab2)
+           throw new Error(`Tab ${index} not found`);
+-        await tab2.page.bringToFront();
+         await tab2.updateWebMCPTools();
+         this._setCurrentTab(tab2);
+         return tab2;
+       }
+       async ensureTab() {
+         await this.ensureBrowserContext();
+-        const crashed = this._currentTab?.crashed;
+-        if (crashed) {
+-          await this._currentTab.page.close().catch(() => {
+-          });
+-          this._setCurrentTab(void 0);
+-        }
++        if (this._currentTab?.crashed)
++          throw new Error(`The current tab crashed. It was not closed, reloaded or replaced. Tell the owner; to keep working, open a background tab with browser_tabs action "new".`);
+         if (!this._currentTab)
+-          await this.newTab();
+-        if (crashed)
+-          this._currentTab.logErrorMessage("Page crashed and was reset to about:blank.");
++          throw new Error("No connected tab is left, and nothing was opened in its place. Call browser_connect to ask the owner for a new approval.");
+         await this._currentTab.waitForInitialized();
+         return this._currentTab;
+       }
+@@ -67597,6 +67594,8 @@
+         const tab2 = index === void 0 ? this._currentTab : this._tabs[index];
+         if (!tab2)
+           throw new Error(`Tab ${index} not found`);
++        if (!tab2.openedByAgent)
++          throw new Error(`Only tabs opened with browser_tabs action "new" can be closed here. The owner's shared tab and tabs a page opened stay open.`);
+         const url3 = tab2.page.url();
+         await tab2.page.close();
+         return url3;
+@@ -75614,7 +75613,7 @@
+         await Promise.all(tabIds.map((tabId) => this._attachTab(tabId).catch(logUnhandledError)));
+       }
+       async createTarget(url3) {
+-        const tab2 = await this._sendToExtension("chrome.tabs.create", [{ url: url3 }]);
++        const tab2 = await this._sendToExtension("chrome.tabs.create", [{ url: url3, active: false }]);
+         if (tab2?.id === void 0)
+           throw new Error("Failed to create tab");
+         this._knownTabs.set(tab2.id, tab2);
+@@ -75836,8 +75835,8 @@
+         this._executablePath = executablePath;
+         this._customUserDataDir = customUserDataDir;
+         this._profileDirectory = profileDirectory;
+-        this._protocolVersion = parseInt(process.env.PWTEST_EXTENSION_PROTOCOL ?? VERSION.toString(), 10);
+-        this._token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
++        this._protocolVersion = VERSION;
++        this._token = void 0;
+         const sendCommand = (method2, params2) => {
+           if (!this._extensionConnection)
+             throw new Error("Extension not connected");
+@@ -75877,59 +75876,20 @@
+         return `${this._wsHost}${this._extensionPath}`;
+       }
+       async establishExtensionConnection(clientName) {
+-        debugLogger2("Establishing extension connection");
+-        await this._openConnectPageInBrowser(clientName);
+-        debugLogger2("Waiting for incoming extension connection");
+-        const deadline = this._token ? monotonicTime() + extensionConnectionTimeout : 0;
+-        const { timedOut } = await raceAgainstDeadline(async () => {
+-          await this._extensionConnectionPromise;
+-          await this._handler.ready();
+-        }, deadline);
+-        if (timedOut) {
+-          const profile = this._profileDirectory ? ` "${this._profileDirectory}"` : "";
+-          throw new Error(`Playwright extension did not connect within ${extensionConnectionTimeout / 1e3}s after opening the connect page. Make sure the extension is installed in the Chrome profile${profile} and PLAYWRIGHT_MCP_EXTENSION_TOKEN matches its token.`);
+-        }
+-        debugLogger2("Extension connection established");
+-      }
+-      async _openConnectPageInBrowser(clientName) {
+-        const mcpRelayEndpoint = `${this._wsHost}${this._extensionPath}`;
++        throw new Error("The owner opens the Playwright extension connect page. This server never starts, opens or looks for a browser.");
++      }
++      // ouroboros chrome_browser: the caller hands this URL to the owner; nothing is spawned.
++      connectPageUrl(clientName) {
+         const url3 = new URL(`chrome-extension://${playwrightExtensionId}/connect.html`);
+-        url3.searchParams.set("mcpRelayUrl", mcpRelayEndpoint);
+-        const client = {
+-          name: clientName,
+-          // Not used anymore.
+-          version: void 0
+-        };
+-        url3.searchParams.set("client", JSON.stringify(client));
++        url3.searchParams.set("mcpRelayUrl", `${this._wsHost}${this._extensionPath}`);
++        url3.searchParams.set("client", JSON.stringify({ name: clientName, version: void 0 }));
+         url3.searchParams.set("protocolVersion", this._protocolVersion.toString());
+-        if (this._token)
+-          url3.searchParams.set("token", this._token);
+-        const href = url3.toString();
+-        const channel = registry.isChromiumAlias(this._browserChannel) ? "chromium" : this._browserChannel;
+-        let executablePath = this._executablePath;
+-        if (!executablePath) {
+-          const executableInfo = registry.findExecutable(channel);
+-          if (!executableInfo)
+-            throw new Error(`Unsupported channel: "${this._browserChannel}"`);
+-          executablePath = executableInfo.executablePath();
+-          if (!executablePath)
+-            throw new Error(`"${this._browserChannel}" executable not found. Make sure it is installed at a standard location.`);
+-        }
+-        const args = [];
+-        if (this._customUserDataDir)
+-          args.push(`--user-data-dir=${this._customUserDataDir}`);
+-        if (this._profileDirectory)
+-          args.push(`--profile-directory=${this._profileDirectory}`);
+-        if (import_os26.default.platform() === "linux" && channel === "chromium")
+-          args.push("--no-sandbox");
+-        args.push(href);
+-        (0, import_child_process5.spawn)(executablePath, args, {
+-          windowsHide: true,
+-          detached: true,
+-          shell: false,
+-          stdio: "ignore"
+-        });
++        return url3.toString();
+       }
++      async waitForExtension() {
++        await this._extensionConnectionPromise;
++        await this._handler.ready();
++      }
+       stop() {
+         this._closeConnections("Server stopped");
+         void this._wsServer.close().catch(logUnhandledError);
+@@ -76109,23 +76069,7 @@
+ 
+ // packages/playwright-core/src/tools/mcp/extensionContextFactory.ts
+ async function createExtensionBrowser(channel, executablePath, customUserDataDir, profileDirName, clientName) {
+-  customUserDataDir ??= process.env.PWTEST_EXTENSION_USER_DATA_DIR;
+-  const userDataDir = customUserDataDir ?? (executablePath ? void 0 : defaultUserDataDirForChannel(channel));
+-  const profileDirectory = profileDirName ?? (userDataDir ? await findPlaywrightExtensionProfile(userDataDir) : void 0);
+-  if (userDataDir && !executablePath && (!profileDirectory || !await isExtensionInstalledInProfile(import_path59.default.join(userDataDir, profileDirectory))))
+-    throw new Error(`Playwright Extension not found in "${profileDirectory ? import_path59.default.join(userDataDir, profileDirectory) : userDataDir}". Install it from ${playwrightExtensionInstallUrl}, or set the PLAYWRIGHT_MCP_EXECUTABLE_PATH environment variable to use a browser at a custom location.`);
+-  const relay = new CDPRelayServer(channel, executablePath, customUserDataDir, profileDirectory);
+-  await relay.start();
+-  debugLogger3(`CDP relay server started, extension endpoint: ${relay.extensionEndpoint()}.`);
+-  try {
+-    await relay.establishExtensionConnection(clientName);
+-    const browser = await playwright.chromium.connectOverCDP(relay.cdpEndpoint(), { isLocal: true, timeout: 0, noDefaults: true });
+-    browser.on("disconnected", () => relay.stop());
+-    return browser;
+-  } catch (error) {
+-    relay.stop();
+-    throw error;
+-  }
++  throw new Error("Browser and profile discovery is disabled in this server. Use browser_connect.");
+ }
+ var import_path59, debug16, debugLogger3;
+ var init_extensionContextFactory = __esm({
+@@ -76169,6 +76113,7 @@
+   return idleTimeout ? new IdleTimer(idleTimeout, onIdle) : void 0;
+ }
+ async function createBrowser(config, clientInfo, cliOptions, bindOptions) {
++  throw new Error("Launching, discovering or attaching to a browser is disabled in this server. Use browser_connect.");
+   if (config.browser.remoteEndpoint)
+     return await createRemoteBrowser(config);
+   let browser;
+@@ -78581,9 +78526,15 @@
+ });
+ 
+ // packages/playwright-core/src/tools/index.ts
++var pointerActionHooks;
++function setPointerActionHooks(hooks) {
++  pointerActionHooks = hooks;
++}
+ var tools_exports = {};
+ __export(tools_exports, {
+   BrowserBackend: () => BrowserBackend,
++  CDPRelayServer: () => CDPRelayServer,
++  setPointerActionHooks: () => setPointerActionHooks,
+   DirTraceLoaderBackend: () => DirTraceLoaderBackend,
+   Tab: () => Tab,
+   allSkills: () => allSkills,

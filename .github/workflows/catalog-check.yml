@@ -99,6 +99,20 @@ jobs:
           python -m playwright install --with-deps chromium webkit
           echo "OUROBOROS_SOURCE_DIR=$GITHUB_WORKSPACE/mail-calendar-core" >> "$GITHUB_ENV"
           echo "OUROBOROS_THEME_CORE_ROOT=$GITHUB_WORKSPACE/mail-calendar-core" >> "$GITHUB_ENV"
+      # The Chrome adapter's tests are Node's own. They need Node and the exact npm closure skills/chrome_browser/pins.json
+      # records; the version is read from that file, and the tests verify every pinned file by hash. A different closure
+      # fails them; they never skip.
+      - uses: actions/setup-node@v4
+        if: matrix.suite == 'chrome-browser'
+        with:
+          node-version: '24'
+      - name: Install the npm closure that chrome_browser pins
+        if: matrix.suite == 'chrome-browser'
+        run: |
+          mkdir -p "$RUNNER_TEMP/chrome-browser-npm"
+          version=$(python -c "import json; print(json.load(open('skills/chrome_browser/pins.json'))['npm']['@playwright/mcp']['version'])")
+          npm install --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/chrome-browser-npm" "@playwright/mcp@$version"
+          echo "OUROBOROS_CHROME_NODE_MODULES=$RUNNER_TEMP/chrome-browser-npm/node_modules" >> "$GITHUB_ENV"
       - name: Run the selected hosted suite with its runtime dependencies
         env:
           SUITE: ${{ matrix.suite }}

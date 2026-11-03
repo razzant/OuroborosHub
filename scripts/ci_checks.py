@@ -60,6 +60,10 @@ SUITES = {
     'science-search': {'skills': ['science_search'], 'tests': ['skills/science_search/tests'],
                        'dependencies': ['httpx>=0.28.1,<0.29']},
     'science-digest': {'skills': ['science_digest'], 'tests': ['skills/science_digest/test_digest.py']},
+    # Node's own tests (node --test) behind one pytest wrapper, no browser. catalog-check.yml gives this suite Node and
+    # the exact npm closure skills/chrome_browser/pins.json records (OUROBOROS_CHROME_NODE_MODULES). Without them the
+    # files that need them fail and say what is missing; they never skip.
+    'chrome-browser': {'skills': ['chrome_browser'], 'tests': ['tests/chrome_browser']},
 }
 SHARED = {'.github/workflows/catalog-check.yml', 'scripts/ci_checks.py', 'tests/test_ci_checks.py',
           'scripts/build_index.py', 'scripts/release_digest.py',
