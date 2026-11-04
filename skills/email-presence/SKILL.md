@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.10.6
+version: 0.10.7
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -260,12 +260,20 @@ remain readable by explicit account_id.
 - For IMAP and Exchange, folder_names identifies the actual folders changed.
   A move changes source and destination; a copy writes only the destination.
   Marking a message read or changing its flags writes its actual source folder.
-  Creating a child also affects its parent. IMAP asks the server for its hierarchy
-  delimiter before CREATE; if the server omits the response, Mail leaves the folder unchanged.
+  Before IMAP CREATE, Mail checks the server's hierarchy delimiter. For a nested
+  path it declares any missing intermediate folders and the nearest existing
+  parent that would gain a child. Mail checks the spelling you selected and the
+  spelling returned by the server when they differ. An existing active parent stays writable when
+  a more distant ancestor is paused. A flat namespace treats the name literally.
   Exchange trash moves to Deleted Items. Exchange writes check the affected folder
   identities and require read access to their metadata; ordinary message reads still work
   under the existing account and item permissions.
   Gmail delete_draft checks both DRAFT and Drafts before deleting the selected draft.
+  Permanent deletion by message reference checks the message's current labels too,
+  including both names for Drafts and the current names of custom labels. Follow
+  retry_arguments if the labels change. The usual full-mail grant is still required.
+  Gmail and IMAP read the current targets before writing; another client may
+  change the mailbox between that last read and the provider command.
 - For Reply All, follow retry_arguments: Mail expands the original visible
   recipients before sending or saving. You may edit the explicit To/Cc/Bcc;
   leaving reply_all false keeps that choice. A permitted group thread remains
