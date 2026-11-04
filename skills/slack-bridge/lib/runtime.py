@@ -44,8 +44,8 @@ _REACTION_REFUSALS = frozenset({
     "not_allowed_token_type", "not_authed", "not_reactable", "team_access_not_granted", "thread_locked",
     "token_expired", "token_revoked", "too_many_emoji", "too_many_reactions", "two_factor_setup_required",
 })
-_REACTION_HISTORY_UNAVAILABLE = ("Held: Host history for reactions is unavailable until the Host is updated; "
-                                 "the provider receipt stays here")
+# A Host without explicit completion could count the report as speech; the provider receipt stays local.
+_REACTION_HISTORY_UNAVAILABLE = "Held: Ouroboros records this reaction after an update."
 # Provider observations, not new effects: the requested state already held.
 _REACTION_NO_OPS = {("reaction_add", "already_reacted"): "already_present",
                     ("reaction_remove", "no_reaction"): "already_absent"}

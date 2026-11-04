@@ -516,8 +516,10 @@ observed `facts`, without a binding ID. Older hosts receive the saved
 legacy binding and event shape. Existing Message-IDs, UIDVALIDITY epochs,
 staged attachments, work references and delivery reports are preserved.
 The SMTP worker re-reads the place immediately before sending. Silent/Paused
-or an unavailable lookup holds the same queue item with a visible reason;
-Active resumes it without spending the retry budget on policy holds.
+or an unavailable lookup holds the same queue item; Active resumes it without
+spending the retry budget on policy holds, and an unavailable lookup clears once
+Ouroboros answers. When Ouroboros refuses the skill itself (its grant,
+enablement, review or token), the hold lasts until its access is fixed in Skills.
 
 `email_read` and `email_folders` are declared read, so a Silent or Advises place can read mail;
 `email_mark_read` and the mixed `email_mailbox` (it can mutate) are declared

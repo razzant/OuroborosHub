@@ -21,6 +21,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from lib.accounts import AccountStore
+from lib.host_adapter import place_refusal_hold
 from test_plugin import _settings_app
 
 SKILL = Path(__file__).resolve().parents[1]
@@ -36,8 +37,7 @@ window.disposeWidget=await mountModuleWidget(document.getElementById('mount'),
 window.ready=true;
 </script></body></html>'''
 # The adapter's words for mail whose bound Place went away after it was queued.
-HELD_AFTER_PLACE_DISCONNECT = ("Held: Email was disconnected after this send was queued, so it will not be sent; "
-                               "send it again if it is still needed.")
+HELD_AFTER_PLACE_DISCONNECT = place_refusal_hold({"state": "disconnected", "code": "place_disconnected"})
 
 
 def core_path():

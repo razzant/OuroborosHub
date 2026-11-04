@@ -6,6 +6,7 @@ from pathlib import Path
 from starlette.testclient import TestClient
 
 from lib.accounts import AccountStore
+from lib.host_adapter import place_refusal_hold
 from test_plugin import _settings_app
 
 
@@ -107,8 +108,7 @@ def test_account_discovery_retains_counts_and_addressable_receipts_after_disconn
     account = accounts.save_imap(imap_values())
     store = EmailStore(accounts.mail_dir(account))
     store.enqueue_outbox(request_id="held-before-disconnect", to=["reader@example.invalid"], body="owed",
-                         hold_reason="Email was disconnected after this send was queued, "
-                                     "so it will not be sent; send it again if it is still needed.")
+                         hold_reason=place_refusal_hold({"state": "disconnected", "code": "place_disconnected"}))
     store.enqueue_outbox(request_id="unknown-acceptance", to=["reader@example.invalid"], body="uncertain")
     item = store.claim_outbox()
     store.uncertain_outbox(item.row_id, item.lease_token, "Provider acceptance unknown")

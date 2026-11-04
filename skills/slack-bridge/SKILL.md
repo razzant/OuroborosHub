@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.9.2
+version: 1.9.3
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -174,8 +174,10 @@ token is opaque and revealed only at authenticated loopback requests.
 
 Queued sends re-read the place immediately before delivery. Silent or Paused
 keeps the item held with its original identity and bytes; Active allows it to
-resume. An unavailable policy lookup also holds with a visible reason. Holds
-do not consume the transport retry budget.
+resume. An unavailable policy lookup also holds until Ouroboros answers. When
+Ouroboros refuses the skill itself (its grant, enablement, review or token), the
+hold lasts until its access is fixed in Skills. Holds do not consume the
+transport retry budget.
 
 ## Slack app setup
 
@@ -500,9 +502,9 @@ text, `message.kind: "operation"` and a typed `message.reaction`
 (`operation`, `new` or `old`, `target`, and `effect` when it took effect); other
 Hosts keep only this local receipt, and `reaction_history_limitation` says so. A
 report frozen for a Host that no longer advertises it stays pending and is not sent;
-`history_report_error` says why. Because the bridge keeps its last `/identity` answer
-until it restarts, a Host's capability change reaches a running bridge at its next
-restart, and the report is sent then if the Host advertises it.
+`history_report_error` says an update records it. Because the bridge keeps its last
+`/identity` answer until it restarts, a Host's capability change reaches a running
+bridge at its next restart, and the report is sent then if the Host advertises it.
 `slack_api` writes to `reactions.add` remain generic operations.
 
 Queued rows from an earlier version become this event shape when they are claimed.

@@ -6,21 +6,17 @@ import json
 import httpx
 import pytest
 
-from lib.host_adapter import LoopbackPresenceHostAdapter, slack_presence_event
+from lib.host_adapter import PLACE_POLICY_UNREAD, SKILL_ACCESS_REFUSED, LoopbackPresenceHostAdapter, slack_presence_event
 from lib.runtime import OutboundWorker
 from lib.store import BridgeStore
 from test_host_adapter import _item
 from test_workers_plugin import _Slack
 
-PLACE_POLICY_WORDS = ("Held: Ouroboros did not answer whether this place allows sending. "
-                      "Nothing was sent yet; it retries by itself and no approval is needed.")
 NOT_CONNECTED = {"ok": False, "error": "Connect this place in Consciousness > Places.",
                  "code": "place_not_connected", "disposition": "blocked"}
 # The Host's 403 carries a diagnostic, not words for a person; only the owner can lift it in Skills.
 ACCESS_REFUSED = {"ok": False, "error": "skill 'slack-bridge' lacks grant 'presence'",
                   "code": "presence_auth_blocked", "disposition": "blocked"}
-ACCESS_REFUSED_WORDS = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
-                        "check the skill's access in Skills.")
 
 
 def _place_hold(place, identity=None):
@@ -46,11 +42,11 @@ def _place_hold(place, identity=None):
     httpx.Response(200, json={"place_id": "p", "label": "Slack"}),  # an answer that names no state says nothing about sending
 ])
 def test_unread_place_policy_is_held_in_words_that_ask_nothing(place):
-    assert _place_hold(place) == PLACE_POLICY_WORDS
+    assert _place_hold(place) == PLACE_POLICY_UNREAD
 
 
 def test_host_that_cannot_answer_identity_holds_in_the_same_words_and_older_hosts_do_not_hold():
-    assert _place_hold(httpx.Response(200, json={}), identity=httpx.ConnectError("refused")) == PLACE_POLICY_WORDS
+    assert _place_hold(httpx.Response(200, json={}), identity=httpx.ConnectError("refused")) == PLACE_POLICY_UNREAD
     assert _place_hold(httpx.Response(200, json={}), identity=httpx.Response(200, json={"ok": True})) == ""
 
 
@@ -62,11 +58,21 @@ def test_place_state_reads_as_before_and_not_connected_keeps_the_hosts_words():
 
 
 @pytest.mark.parametrize("place,words", [
-    (httpx.Response(403, json=ACCESS_REFUSED), ACCESS_REFUSED_WORDS),
-    (httpx.Response(503, json={"ok": False, "code": "places_unavailable", "disposition": "retry"}), PLACE_POLICY_WORDS),
+    (httpx.Response(403, json=ACCESS_REFUSED), SKILL_ACCESS_REFUSED),
+    (httpx.Response(503, json={"ok": False, "code": "places_unavailable", "disposition": "retry"}), PLACE_POLICY_UNREAD),
 ])
 def test_a_refused_skill_sends_its_owner_to_skills_and_an_unread_place_still_retries(place, words):
     assert _place_hold(place) == words
+
+
+@pytest.mark.parametrize("line,by_itself,in_skills,cause", [
+    (PLACE_POLICY_UNREAD, True, False, "did not answer"),
+    (SKILL_ACCESS_REFUSED, False, True, "refused"),
+])
+def test_a_hold_says_whether_its_reader_acts_and_leaves_the_hosts_answer_out(line, by_itself, in_skills, cause):
+    assert line.startswith("Held: ")  # the outbox counts a hold by its prefix
+    assert ("by itself" in line) is by_itself and ("in Skills" in line) is in_skills
+    assert cause not in line  # which answer the Host gave changes nothing the reader does
 
 
 def test_slack_addressing_is_structured_and_legacy_payload_is_unchanged():
@@ -132,7 +138,7 @@ def test_place_lookup_names_a_thread_only_when_one_is_given():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("reason", ["Held: Slack is silent", "Held: Slack is paused", PLACE_POLICY_WORDS])
+@pytest.mark.parametrize("reason", ["Held: Slack is silent", "Held: Slack is paused", PLACE_POLICY_UNREAD])
 def test_held_outbox_resumes_without_losing_identity_or_attempts(tmp_path, monkeypatch, reason):
     async def run():
         clock = [1000.0]

@@ -3,20 +3,17 @@ import asyncio
 import pytest
 
 from telegram_bot.events import parse_telegram_update
-from telegram_bot.host import PresenceHostClient, PresenceHostError, PresenceHostHTTPError
+from telegram_bot.host import (PLACE_POLICY_UNREAD, SKILL_ACCESS_REFUSED, PresenceHostClient, PresenceHostError,
+                               PresenceHostHTTPError)
 from telegram_bot.runtime import TelegramTransportRuntime
 from test_host import _event
 from test_runtime import AcceptingSubmitter, Logger, RuntimeClient
 
-PLACE_POLICY_WORDS = ("Held: Ouroboros did not answer whether this place allows sending. "
-                      "Nothing was sent yet; it retries by itself and no approval is needed.")
 NOT_CONNECTED = {"ok": False, "error": "Connect this place in Consciousness > Places.",
                  "code": "place_not_connected", "disposition": "blocked"}
 # The Host's 403 carries a diagnostic, not words for a person; only the owner can lift it in Skills.
 ACCESS_REFUSED = {"ok": False, "error": "skill 'telegram-bot' lacks grant 'presence'",
                   "code": "presence_auth_blocked", "disposition": "blocked"}
-ACCESS_REFUSED_WORDS = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
-                        "check the skill's access in Skills.")
 
 
 def _place_host(tmp_path, place, identity=None):
@@ -38,11 +35,11 @@ def _place_host(tmp_path, place, identity=None):
     {"place_id": "p", "label": "Telegram"},  # an answer that names no state says nothing about sending
 ])
 def test_unread_place_policy_is_held_in_words_that_ask_nothing(tmp_path, place):
-    assert asyncio.run(_place_host(tmp_path, place).place_hold("9", "-1")) == PLACE_POLICY_WORDS
+    assert asyncio.run(_place_host(tmp_path, place).place_hold("9", "-1")) == PLACE_POLICY_UNREAD
 
 
 def test_host_that_cannot_answer_identity_holds_in_the_same_words_and_older_hosts_do_not_hold(tmp_path):
-    assert asyncio.run(_place_host(tmp_path, {}, identity=OSError("refused")).place_hold("9", "-1")) == PLACE_POLICY_WORDS
+    assert asyncio.run(_place_host(tmp_path, {}, identity=OSError("refused")).place_hold("9", "-1")) == PLACE_POLICY_UNREAD
     assert asyncio.run(_place_host(tmp_path, {}, identity={"ok": True}).place_hold("9", "-1")) == ""
 
 
@@ -56,11 +53,21 @@ def test_place_state_reads_as_before_and_not_connected_keeps_the_hosts_words(tmp
 
 
 @pytest.mark.parametrize("place,words", [
-    (PresenceHostHTTPError(403, "refused", ACCESS_REFUSED), ACCESS_REFUSED_WORDS),
-    (PresenceHostHTTPError(503, "disk", {"code": "places_unavailable", "disposition": "retry"}), PLACE_POLICY_WORDS),
+    (PresenceHostHTTPError(403, "refused", ACCESS_REFUSED), SKILL_ACCESS_REFUSED),
+    (PresenceHostHTTPError(503, "disk", {"code": "places_unavailable", "disposition": "retry"}), PLACE_POLICY_UNREAD),
 ])
 def test_a_refused_skill_sends_its_owner_to_skills_and_an_unread_place_still_retries(tmp_path, place, words):
     assert asyncio.run(_place_host(tmp_path, place).place_hold("9", "-1")) == words
+
+
+@pytest.mark.parametrize("line,by_itself,in_skills,cause", [
+    (PLACE_POLICY_UNREAD, True, False, "did not answer"),
+    (SKILL_ACCESS_REFUSED, False, True, "refused"),
+])
+def test_a_hold_says_whether_its_reader_acts_and_leaves_the_hosts_answer_out(line, by_itself, in_skills, cause):
+    assert line.startswith("Held: ")  # the outbox counts a hold by its prefix
+    assert ("by itself" in line) is by_itself and ("in Skills" in line) is in_skills
+    assert cause not in line  # which answer the Host gave changes nothing the reader does
 
 
 def test_private_chats_groups_channels_and_explicit_addressing_only():
@@ -159,7 +166,7 @@ def test_unbound_submission_negotiates_and_live_checks_do_not_cache_state(tmp_pa
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("reason", ["Held: Telegram is silent", "Held: Telegram is paused", PLACE_POLICY_WORDS])
+@pytest.mark.parametrize("reason", ["Held: Telegram is silent", "Held: Telegram is paused", PLACE_POLICY_UNREAD])
 def test_live_hold_preserves_parts_and_resumes_once(tmp_path, monkeypatch, reason):
     async def run():
         clock = [1000.0]
