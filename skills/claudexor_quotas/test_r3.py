@@ -1008,7 +1008,7 @@ const calls = [];
     // The real widget's requests go to the real registered handlers.
     fetch(url, options = {}) {
       const method = options.method || 'GET';
-      calls.push({ url, method });
+      if (!isI18n(url)) calls.push({ url, method });
       return fetch(BASE + url, { method, body: options.body }).then(async (r) => {
         const body = await r.text();
         return { ok: r.ok, status: r.status, text: async () => body };
@@ -1026,11 +1026,15 @@ const calls = [];
   const context = vm.createContext({
     window, document: made.document, console, Date, Math, Object, Array, String,
     Number, RegExp, Promise, setImmediate,
+    // The widget calls the bare setTimeout/clearTimeout too (the card of the plate resets its leave timers in cardReset), as it does in a browser frame;
+    // the sandbox hands them to the window's own.
+    setTimeout: (callback, ms) => window.setTimeout(callback, ms), clearTimeout: (id) => window.clearTimeout(id),
   });
   vm.runInContext(instrumentedWidgetSource, context, { filename: 'widget.js' });
   const root = made.root;
   const text = () => root.textContent;
-  const chartReady = () => !/Loading the chart for this limit/.test(text())
+  // (the place of a chart still being read holds an empty canvas of the same class and says what it waits for: that is not a chart yet)
+  const chartReady = () => !/Loading the timeline for this limit/.test(text())
     && walk(root).some((n) => n.getAttribute('class') === 'chart-svg');
 
   await waitFor(() => /0\.70 of 1/.test(text()) && chartReady(), 'first reading with its timeline');
@@ -1041,7 +1045,10 @@ const calls = [];
   assert.match(calls[1].url, /reuse=1/);
   assert.match(calls[1].url, /horizon=7d/);
   byFocus(root, 'accounts').listeners.click[0]({ stopPropagation() {} });
-  byFocus(root, 'acct:codex:c1').listeners.click[0]({ stopPropagation() {} });
+  // The top account of the row is picked from the first drawing, so
+  // its bar is already pressed and its card (with Diagnostics) already stands;
+  // a second press would unpick it, hence no click on the bar here.
+  assert.equal(byFocus(root, 'acct:codex:c1').getAttribute('aria-pressed'), 'true');
   byFocus(root, 'inspector-diag').listeners.click[0]({ stopPropagation() {} });
   assert.match(text(), /30% used/);
 
@@ -1105,6 +1112,8 @@ def test_real_widget_refresh_then_chart_switch_over_registered_handlers(tmp_path
 
         def do_GET(self):
             parts = urlsplit(self.path)
+            if parts.path == prefix + 'i18n':  # the widget's text table, from the registered handler
+                return self._answer(host.routes['i18n']({'query_params': dict(parse_qsl(parts.query))}))
             assert parts.path == prefix + 'quotas', parts.path
             self._answer(host.routes['quotas']({'query_params': dict(parse_qsl(parts.query))}))
 
@@ -1237,22 +1246,22 @@ NODE_ADVISORY_MATRIX = r"""
   // are; the scope words say how many are not listed. Two scopes whose
   // listed names are the same still get two names on screen.
   assert.match(text, /m00 \+24/);
-  // 0.8.0: one .lrow per limit; its whole spoken summary is on the row's one
-  // control (0.8.1: the chart toggle, .l-chart), which shows the limit in
-  // the timeline.
-  const rows = classes(env.root, 'lrow');
-  const names = rows.map((r) => classes(r, 'l-name-text')[0].textContent);
-  assert.equal(new Set(names).size, names.length, names.join(' | '));
-  const heard = rows.map((r) => classes(r, 'l-chart')[0].getAttribute('aria-label')).join(' ');
-  assert.match(heard, /models: m00, m01, .*m23 \+1 more/);
-  // With a restriction present, the unrestricted account-windows stand beside it.
-  assert.match(heard, /1 cooldown reported \(0\.70\)/);
-  assert.match(heard, /0\.50 unrestricted/);
+  // 0.8.0: one .lrow per limit; its whole spoken summary is the note the row's one
+  // control (the word Chart, .l-chart, which shows the limit in the timeline) is described by.
   // The limit in the timeline says the same in its details.
   const details = classes(env.root, 'chart-table')[0];
   assert.ok(details, 'the timeline carries the limit details');
   assert.match(details.textContent, /1 cooldown reported \(0\.70\)/);
   assert.match(details.textContent, /0\.50 unrestricted/);
+  // One plate at a time: every limit in turn, each plate's control with its whole spoken summary.
+  const rows = plates(env);
+  const names = rows.map((r) => describedBy(r, classes(r, 'l-chart')[0]).split(' — ')[0]);
+  assert.equal(new Set(names).size, names.length, names.join(' | '));
+  const heard = rows.map((r) => describedBy(r, classes(r, 'l-chart')[0])).join(' ');
+  assert.match(heard, /models: m00, m01, .*m23 \+1 more/);
+  // With a restriction present, the unrestricted account-windows stand beside it.
+  assert.match(heard, /1 cooldown reported \(0\.70\)/);
+  assert.match(heard, /0\.50 unrestricted/);
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
   process.exitCode = 1;

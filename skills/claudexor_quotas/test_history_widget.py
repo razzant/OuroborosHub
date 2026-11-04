@@ -52,7 +52,7 @@ NODE_HISTORY = r"""
   assert.ok((solid.match(/M/g)||[]).length >= 2,solid);
   assert.equal(svgNodes('line-scenario').length,1);
   assert.match(classes(env.root,'chart-legend')[0].textContent,/solid: recorded; dashed: carried/);
-  assert.match(classes(env.root,'family-credits')[0].textContent,/Manual reset credits · 0 reported across 1 account/);
+  assert.match(classes(env.root,'family-credits')[0].textContent,/Manual resets · 0 on 1 account/);
   assert.match(classes(env.root,'family-credits')[0].textContent,/last known 2 across 1 account.*1 unreadable/);
 
   const plot = byFocus(env.root,'chart-plot');
@@ -60,10 +60,13 @@ NODE_HISTORY = r"""
   const tip = classes(env.root,'chart-tip')[0];
   plot.listeners.focus[0]();
   assert.match(readout.textContent,/recorded 0.90 of 2 accounts, no new use 0.30 of 1 current account/);
-  assert.match(tip.textContent,/last-known history/);
-  assert.match(tip.textContent,/2 accounts · 0 recorded, 2 carried/);
-  assert.match(tip.textContent,/Oldest carried reading 10 min old at this moment/);
-  assert.match(tip.textContent,/from the local history.*Source: synthetic-source/);
+  // rule: the tip over the chart is one line (the moment, the figure, "of N", the short name), no more;
+  // the counts, the age of the reading and the source stay in the read-out for the screen reader, with the words they had.
+  assert.match(tip.textContent,/^\d\d:\d\d.*0\.90.*of \d+.*carried/);
+  assert.doesNotMatch(tip.textContent,/last-known|accounts · |Oldest|Source|local history|scale/);
+  assert.match(readout.textContent,/2 accounts · 0 recorded, 2 carried/);
+  assert.match(readout.textContent,/Oldest carried reading 10 min old at this moment/);
+  assert.match(readout.textContent,/from the local history.*Source: synthetic-source/);
   plot.listeners.keydown[0]({key:'Home',preventDefault(){}});
   assert.match(readout.textContent,/recorded 0.80 of 1 account/);
   assert.match(readout.textContent,/First recorded value/);
@@ -76,17 +79,23 @@ NODE_HISTORY = r"""
   const t1=t0+Math.ceil((chart.end-t0)/3600)*3600;
   const hover=(t)=>hit.listeners.pointermove[0]({clientX:30+(t-t0)/(t1-t0)*(width-42)});
   hover(now-5700);
-  assert.match(tip.textContent,/15 min old at this moment/,'age advances from source observation at hovered time');
+  // rule: these words are in the read-out, not in the tip
+  assert.match(readout.textContent,/15 min old at this moment/,'age advances from source observation at hovered time');
   hover(now-5300);
-  assert.match(tip.textContent,/First recorded value of 1 account/);
-  assert.match(tip.textContent,/Membership changed · not consumption/);
+  assert.match(readout.textContent,/First recorded value of 1 account/);
+  assert.match(readout.textContent,/Membership changed · not consumption/);
   hover(now-4000);
-  assert.match(tip.textContent,/pre-reset reading retained; refill not measured/);
-  assert.doesNotMatch(tip.textContent,/1\.00.*last-known history/,'past reset keeps 1.2, never a fabricated full quota');
+  assert.match(readout.textContent,/pre-reset reading retained; refill not measured/);
+  assert.doesNotMatch(tip.textContent,/1\.00.*carried/,'past reset keeps 1.2, never a fabricated full quota');
   assert.match(classes(env.root,'chart-table')[0].textContent,/History.*Carried|Carried.*History/);
 
-  byFocus(env.root,'accounts').listeners.click[0]({stopPropagation(){}});
-  const select=(i)=>byFocus(env.root,'acct:'+family.accounts[i].key).listeners.click[0]({stopPropagation(){}});
+  // rule: the word "Accounts" opens the list and a press on a row picks its account and shuts the list, so every
+  // pick opens the list again with the word first (the pick still shows the card of the row's account).
+  const press=(node)=>node.listeners.click[0]({stopPropagation(){}});
+  const openList=()=>{ if (byFocus(env.root,'accounts').getAttribute('aria-pressed')!=='true') press(byFocus(env.root,'accounts')); };
+  const pick=(key)=>{ openList(); press(byFocus(env.root,'acct:'+key));
+    assert.equal(byFocus(env.root,'accounts').getAttribute('aria-pressed'),'false','a press on a row shuts the list'); };
+  const select=(i)=>pick(family.accounts[i].key);
   select(0);
   assert.match(classes(env.root,'account-credits')[0].textContent,/Manual reset credits · 0 · observed/);
   assert.match(classes(env.root,'account-credits')[0].title,/source synthetic-source.*0 reset credits/);
@@ -118,10 +127,9 @@ NODE_HISTORY = r"""
   env=await boot(unknown);
   assert.match(classes(env.root,'family-credits')[0].textContent,/1 with sources disagreeing · 2 unknown/);
   assert.doesNotMatch(classes(env.root,'family-credits')[0].textContent,/0 reported/);
-  byFocus(env.root,'accounts').listeners.click[0]({stopPropagation(){}});
-  byFocus(env.root,'acct:'+family.accounts[0].key).listeners.click[0]({stopPropagation(){}});
+  pick(family.accounts[0].key);
   assert.equal(classes(env.root,'account-credits').length,0,'unreported counter adds no empty row');
-  byFocus(env.root,'acct:'+family.accounts[1].key).listeners.click[0]({stopPropagation(){}});
+  pick(family.accounts[1].key);
   assert.match(classes(env.root,'account-credits')[0].textContent,/unknown · sources disagree/);
   const unreported=JSON.parse(JSON.stringify(unknown));
   unreported.groups[0].reset_credits.conflict_accounts=0;
@@ -131,8 +139,7 @@ NODE_HISTORY = r"""
   const dated=JSON.parse(JSON.stringify(unknown));
   dated.groups[0].accounts[0].quota.reset_credits={state:'unknown',count:null,reason:'no_current_reading',observed_at:observed};
   env=await boot(dated);
-  byFocus(env.root,'accounts').listeners.click[0]({stopPropagation(){}});
-  byFocus(env.root,'acct:'+family.accounts[0].key).listeners.click[0]({stopPropagation(){}});
+  pick(family.accounts[0].key);
   assert.match(classes(env.root,'account-credits')[0].textContent,/unknown · no current reading/);
 })().catch(error=>{console.error(error.stack||error);process.exitCode=1;});
 """

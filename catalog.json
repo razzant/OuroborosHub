@@ -919,13 +919,18 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "94d5d91268ae349f4a8df694f006a5b02dec022e509188cd58650f81631ba18e",
-          "size": 79807
+          "sha256": "a5da18cb8ab94c86ce047a1371bd7cb2f622e895407fbbc499fe7e4038c81ed6",
+          "size": 90721
+        },
+        {
+          "path": "conftest.py",
+          "sha256": "f107a4f71f67b382fcb723aba58552e7502a2e41097786bd90b04ce87eba6202",
+          "size": 6186
         },
         {
           "path": "plugin.py",
-          "sha256": "05adffa1108c178506c685594ced4a0fcfa509fd30f038574f6d7528008c74a6",
-          "size": 96330
+          "sha256": "5a16174338742df246adae4bd80404ae8f301856eae35671c7e2d94a8b3957f3",
+          "size": 105341
         },
         {
           "path": "quota_analytics.py",
@@ -934,8 +939,8 @@
         },
         {
           "path": "quota_chip.py",
-          "sha256": "cc91359851dfe49c7857e99e33ba7a806f8ecb0aeebe343788bd4b74a409664c",
-          "size": 2213
+          "sha256": "71645b880e4f14f83f2acab6558c4f7d00c2b84231cb25bee5775c11fb63c958",
+          "size": 2864
         },
         {
           "path": "quota_context.py",
@@ -968,24 +973,49 @@
           "size": 159900
         },
         {
+          "path": "strings_en.json",
+          "sha256": "53e7e3532b8643f3b58fb78bfb2a464589f00d06f40c36f345fec9b2b1f9169b",
+          "size": 33823
+        },
+        {
+          "path": "test_account_list.py",
+          "sha256": "cbf23cf6a8581f22e89b3f4e2ce8f6ac678a5193623bed01c5116de6fde25013",
+          "size": 23408
+        },
+        {
           "path": "test_backend_repair.py",
           "sha256": "ea95c7200cf887c8eb65d9fedd18b1988fcf123c61a7c95c1951d8f22b5cb127",
           "size": 9447
         },
         {
+          "path": "test_bar_pick.py",
+          "sha256": "4b9b036c8bef4397bb4b561a32d6a586c1d55a969b364afc6b61d0befd371b49",
+          "size": 58515
+        },
+        {
           "path": "test_bars.py",
-          "sha256": "87d109aeb7af9ea272af8f72911e5e0514f8a1b5c13968653cdcea0169b6f2ad",
-          "size": 16053
+          "sha256": "f3682af67fa38632fe708fc97ed00214ae4c93d609b95a149b1e485304977486",
+          "size": 56668
+        },
+        {
+          "path": "test_card.py",
+          "sha256": "c891d8a3baa51412c82472763ad389bdc664dd61c63eb4d9d98672c2109589cd",
+          "size": 94578
+        },
+        {
+          "path": "test_chart_polish.py",
+          "sha256": "b89837f8e80c46e0a7663a46cbb838444f3c3945dc0e657b0ea9a1c04e7dc8ee",
+          "size": 21115
         },
         {
           "path": "test_chip.py",
-          "sha256": "c2e89e8ad4e8b487330cff5867accefcc91577742c34f27e5488d0912f713c2d",
-          "size": 2779
+          "sha256": "fd5925b3ee6c951bd1f95628718def2629c62c027fb57138e70e2625c4935af8",
+          "size": 3597
         },
         {
           "path": "test_clarity.py",
-          "sha256": "862779db2ff2cd524cb42c28ec9a4db26c0a5a1aa0ea613ebd1c38140ffd6839",
-          "size": 9288
+          "sha256": "92ea4c296ee56739c290af6ba99b7998315c8f8715748ab3d374bc022a8a9ec0",
+          "size": 11585
         },
         {
           "path": "test_coherent_history.py",
@@ -994,8 +1024,13 @@
         },
         {
           "path": "test_constraint_freshness.py",
-          "sha256": "eaae58f46675c46dace5aa8a222397102731d5c5c04d96ea30af85b8ff2430ce",
-          "size": 21302
+          "sha256": "353e105c9552e68a48523e45fb8ad23a94c97c794ed3d9fd0b729f10f9cd59c6",
+          "size": 22173
+        },
+        {
+          "path": "test_family_tabs.py",
+          "sha256": "c6ad54b6692c53bfb0b085c9af4584b7696493f9130fdb6b001d0230221fe27a",
+          "size": 152576
         },
         {
           "path": "test_history_boundaries.py",
@@ -1004,13 +1039,18 @@
         },
         {
           "path": "test_history_widget.py",
-          "sha256": "110c5e5a6e838bccb933b81d1e7ab10d13f25ad733c26208d837eeffc68a5171",
-          "size": 9511
+          "sha256": "5bb5972c519b9f19f82846505864b346d5dfc972423cec26dc09c92368aec51c",
+          "size": 10060
+        },
+        {
+          "path": "test_i18n.py",
+          "sha256": "5e81136bb238c630c2a349a39a27931ef3af398309909988278f98dc5bc0baf6",
+          "size": 40743
         },
         {
           "path": "test_inspector_placement.py",
-          "sha256": "751f1e484ffd110acedcd28c77f445886dc71aea3e5206677f23ea7210eb9267",
-          "size": 18120
+          "sha256": "1ad27b3dc771ec656a2d9532749fef9389fb86e6906768ca42a77925f59c85d3",
+          "size": 29580
         },
         {
           "path": "test_joint_math.py",
@@ -1034,13 +1074,13 @@
         },
         {
           "path": "test_model_holds.py",
-          "sha256": "fa990bec4a31fdcccaff519a653abfb989114116c3e27ee42b0904d4188a2b2a",
-          "size": 35641
+          "sha256": "edcdf7c997adc0cc2438f4ead88dd3de590862b7d976365d411974437c6eae67",
+          "size": 36880
         },
         {
           "path": "test_order_focus.py",
-          "sha256": "1e6e5c5d615909433713a09d1a99a16426ead83a77668db618b3f3d04ce47406",
-          "size": 29138
+          "sha256": "eb9f89ec439e6bff849f62822d00ac776a56a0accb61223d1b2a5cb5d8462696",
+          "size": 34459
         },
         {
           "path": "test_passive_quota_read.py",
@@ -1049,38 +1089,38 @@
         },
         {
           "path": "test_passive_widget.py",
-          "sha256": "8b257a2f67881d0b7dd35cfa0a7160e90691c37a11f6afadeffd6d94c5a35652",
-          "size": 6674
+          "sha256": "b8b7d08208210315f95b56f09c640cf2dc33810581664b50470ea076c7959ed8",
+          "size": 7816
         },
         {
           "path": "test_quotas.py",
-          "sha256": "537f4a089cb83c8b4b94bf6ccb9242e5821ebd9f16273f60bfb679e1ec9d3859",
-          "size": 79320
+          "sha256": "5c28c70a41457497977c685c06ce28fc1242ef74076dee06dd51fc5a167861e7",
+          "size": 83486
         },
         {
           "path": "test_r3.py",
-          "sha256": "583afa577d3d7094694058f049717826a5b5eda0646fbc350794d6e983e55b99",
-          "size": 67059
+          "sha256": "c570e92832fd070572d6d5f89932a3ed69ade348fb735032425e9c9980b57af5",
+          "size": 68067
         },
         {
           "path": "test_repair_r2.py",
-          "sha256": "552c6353282c973456fca3ac20390adf9a197583441b8b959e132334933a062d",
-          "size": 18211
+          "sha256": "0f469298cbe21912115c099def471fbff0810c635e3d71aee1a1876e94558f45",
+          "size": 18202
         },
         {
           "path": "test_repair_r3.py",
-          "sha256": "0d74640f493fdd7e250a8bdfc9f3dded3338b7f4587de498213885a19d052d58",
-          "size": 25357
+          "sha256": "78d02ed8966e7b1978940de4e6e657f4851a253d73229dfff968d7a3f1fabf35",
+          "size": 25920
         },
         {
           "path": "test_repair_r4.py",
-          "sha256": "b39de1ef67ecd4a9f6c700fdd7636f7de2a4355fc623b374dd9e0e52571d5bf3",
-          "size": 20205
+          "sha256": "8c636e9f70d1cd99d9f0a73d8ab1876d03cb4161625135a6f69d2272f2b01c5d",
+          "size": 20848
         },
         {
           "path": "test_reserve.py",
-          "sha256": "cad6099a564584a90b8c79238f41e70b1865eaf5a3c9d1635bf622ef8a891f77",
-          "size": 223000
+          "sha256": "f6cd3e0b8000fccc3a7597936d01e757e5acfdedf07e3983601a9deadae7d747",
+          "size": 232049
         },
         {
           "path": "test_reset_credits.py",
@@ -1089,13 +1129,13 @@
         },
         {
           "path": "test_robust_widget.py",
-          "sha256": "fd7d7d755463be75283ed92648ea00bbebc956a7056c9be987e02c5d8fd34487",
-          "size": 13449
+          "sha256": "fb165dfef6fcd0443adfb78ac2ae4aae30458e9d196cb503159a967e4df6e202",
+          "size": 13871
         },
         {
           "path": "test_scope_identity.py",
-          "sha256": "f84d33ccee5d45533ede85a17afe6c77f3c57b5e7e2797472aead402b2f52a42",
-          "size": 10297
+          "sha256": "951eb422fc47ae7de40de3b031090f04a79d3629260fd28ea1fe70e9af5d0a7e",
+          "size": 11169
         },
         {
           "path": "test_scope_resources_context.py",
@@ -1104,8 +1144,13 @@
         },
         {
           "path": "test_semantic_repair.py",
-          "sha256": "4038885dd60251517795b74c694b654e839369dad47525ce33edefe37da8c56e",
-          "size": 14348
+          "sha256": "c65d2b961845a0d46701b3ce8505f2d26120b4bf0ed54bdc0850dfa1e96aad4a",
+          "size": 14350
+        },
+        {
+          "path": "test_shell_card.py",
+          "sha256": "6fc2f2f3262a3b6e7bd7bb1c56e9d1a95adb60ae2a6bfd599e64f7e3088fc19a",
+          "size": 8146
         },
         {
           "path": "test_steady_snapshot_text.py",
@@ -1113,20 +1158,35 @@
           "size": 3840
         },
         {
+          "path": "test_style_canons.py",
+          "sha256": "e2b09c0dc4a600cc8d1e250750ca75d1e38d1ae6f063aaed7d54e9fa7c584bd5",
+          "size": 81913
+        },
+        {
+          "path": "test_text_actions.py",
+          "sha256": "defb797f4099f42480bc8bdaac13e72f363b268ba02c3d554180131dc7ae79fc",
+          "size": 66594
+        },
+        {
           "path": "test_ui_timeline.py",
-          "sha256": "7cd9a8121f0e098738e6da7fda6fb06fc6c93e9ba16c5f37b6496c82b1c44498",
-          "size": 16448
+          "sha256": "e20696055007d8a947f94ffb757c45dd64dfb0ba9295f7f057587da104ae0d2b",
+          "size": 32180
+        },
+        {
+          "path": "test_window_tabs.py",
+          "sha256": "1213282df06b37ea5f1ba5b53c9c58fb996674a312485339f227c629ee5592df",
+          "size": 659514
         },
         {
           "path": "widget.js",
-          "sha256": "0e6d43b9745d50307c75f33d78be4c3f32150413eca0cce812d9c0f4fd698266",
-          "size": 289731
+          "sha256": "8bdb45cf34c33c8e627bbd73f93ba76c9df88c7b228b6bb75e64d2d5ed280478",
+          "size": 737588
         }
       ],
       "name": "claudexor_quotas",
       "slug": "claudexor_quotas",
       "type": "extension",
-      "version": "0.12.2",
+      "version": "0.13.0",
       "when_to_use": "The owner wants quota windows, resets and remaining reserve of the authorized Claudexor accounts; or, before choosing executors, the model wants measured reserve by family and limit. Advisory only: never a dispatch guarantee or a pin change."
     },
     {

@@ -86,7 +86,7 @@ function deferredFetch(env) {
     const other = fx.summary.reserve.summary.groups.find((g) => !g.tightest);
     for (const terminal of [false, true]) {
       const env = await boot(fx.summary); const count = env.calls.length;
-      click(env, 'limit:' + other.key);
+      showKey(env, other.key);
       if (terminal) env.disposeHooks[0](); else env.windowListeners.pagehide[0]();
       await settle();
       assert.equal(env.calls.length, count, 'deferred chart request after stop');
@@ -107,16 +107,29 @@ function deferredFetch(env) {
     pending[2].resolve(response(fx.summary)); await settle(); env.disposeHooks[0]();
   } else if (mode === 'clarity') {
     const env = await boot(fx.summary);
-    assert.ok(classes(env.root, 'harness-name').every((n) => n.textContent));
-    assert.equal(byFocus(env.root, 'refresh').textContent, 'Refresh');
-    assert.equal(byFocus(env.root, 'about').textContent, 'About');
+    assert.ok(classes(env.root, 'tab-mark-name').every((n) => n.textContent));
+    // Both are text actions (the kit's .btn-word): the name of each is the word that is seen, with no label and no title. Refresh has
+    // the one word, busy or idle; what a reader hears leaves out a node that is aria-hidden (the dot between the two).
+    const heard = (node) => (node.getAttribute('aria-hidden') === 'true' ? '' : (node._text || '') + node.childNodes.map(heard).join(''));
+    assert.equal(heard(byFocus(env.root, 'refresh')), 'Refresh');
+    assert.equal(heard(byFocus(env.root, 'about')), 'About');
+    for (const key of ['refresh', 'about']) {
+      assert.equal(byFocus(env.root, key).getAttribute('aria-label'), null);
+      assert.equal(byFocus(env.root, key).getAttribute('title'), null);
+    }
     // One screen: rows, the timeline open on its own, the account list folded;
-    // no account selected and no settings panel.
-    assert.equal(classes(env.root, 'lrow').length, fx.summary.reserve.summary.groups.length);
+    // the top account of the row picked on its own (its card stands under the plate) and no settings panel.
+    assert.equal(classes(env.root, 'lrow').length, 1, 'one plate, of the picked window');
     assert.ok(walk(env.root).some((n) => n.getAttribute('class') === 'chart-svg'), 'the timeline is open');
-    assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-expanded'), 'false');
-    assert.equal(classes(env.root, 'inspector').length, 0);
-    assert.equal(byFocus(env.root, 'settings'), undefined);
+    // The word "Accounts" is a pressed/unpressed word now (aria-pressed), not an expander.
+    assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'false');
+    assert.equal(classes(env.root, 'inspector').length, 1, 'the top account is picked by default');
+    // The top is the first bar with today's reading and room left, not the held one (c1) nor the first by place.
+    const picked = classes(env.root, 'bar').filter((b) => b.getAttribute('aria-pressed') === 'true');
+    assert.equal(picked.length, 1);
+    assert.match(picked[0].getAttribute('data-focus'), /:codex:c2$/);
+    assert.match(classes(env.root, 'inspector')[0].textContent, /c2/);
+    assert.ok(byFocus(env.root, 'settings') === undefined);
     // The cooling account says it once, with its scope and end.
     click(env, 'accounts');
     click(env, 'acct:codex:c1');
@@ -171,7 +184,20 @@ def test_clarity_has_one_readable_style_system():
     source = Path(__file__).with_name('widget.js').read_text()
     css = source.split('var STYLE = [',1)[1].split("].join('');",1)[0]
     import re
-    assert not re.search(r'gradient\(|backdrop-filter|glass|font-size:(?:[0-9]|1[01])(?:\.\d+)?px', css)
+    # (no gradient and no mask anywhere except the haze at the edge of a run that scrolls: the six --ladder-haze-* tokens are the only gradients, and
+    # the masks that wear them are all under `.rail-scroll*`: the opened ladder window (.rail-scroll-start / -end, top and bottom) and the row of
+    # the bars that goes sideways (.rail-scroll-x*, left and right); the narrow rail's row still wraps onto the next line, it does not fade)
+    haze = re.findall(r'\.rail-scroll[^{]*\{[^}]*\}', css)
+    assert haze and any('mask-image' in rule and 'var(--ladder-haze-y)' in rule for rule in haze)
+    masks = re.findall(r'(?:-webkit-)?mask-image:([^;}]*)', ''.join(haze))
+    assert masks and all(re.fullmatch(r'none|var\(--ladder-haze-[xy](?:-start|-end)?\)', value) for value in masks)
+    tokens = re.findall(r'--ladder-haze-[xy](?:-start|-end)?:linear-gradient\([^;]*\);?', css)
+    assert len(tokens) == 6, 'the haze is written once, as six tokens'
+    rest = css
+    for rule in haze + tokens:
+        rest = rest.replace(rule, '')
+    assert not re.search(r'gradient\(|mask-image|backdrop-filter|glass|font-size:(?:[0-9]|1[01])(?:\.\d+)?px', rest)
+    assert not re.search(r'backdrop-filter|glass|font-size:(?:[0-9]|1[01])(?:\.\d+)?px', css)
     assert all(f'--type-{role}:{size}px' in css for role,size in [('meta',12),('body',14),('section',16)])
     assert '--row-h:32px' in css
     assert 'focus-visible' in css and 'prefers-reduced-motion' in css

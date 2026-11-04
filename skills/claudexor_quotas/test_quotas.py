@@ -879,13 +879,29 @@ const instrumentedWidgetSource = widgetSource.replace(
   '    window.__quotaTest = { keptView: keptView };\n    start();\n})();',
 );
 assert.notEqual(instrumentedWidgetSource, widgetSource, 'widget test hook insertion failed');
+// The widget's text table is its i18n route's answer: the English of the skill's own strings_en.json and no
+// translation. The fake fetches answer it at once and leave it out of the calls the tests look at.
+const I18N_ANSWER = (() => {
+  const path = require('node:path');
+  for (const dir of [path.dirname(process.env.WIDGET_PATH), process.cwd()]) {
+    try {
+      return { language: '', revision: 0, plural_select: null, strings: {},
+        en: JSON.parse(fs.readFileSync(path.join(dir, 'strings_en.json'), 'utf8')) };
+    } catch (err) { /* the next place */ }
+  }
+  return { language: '', revision: 0, plural_select: null, strings: {}, en: {} };
+})();
+const isI18n = (url) => String(url).indexOf('/i18n') >= 0;
 
 class Element {
   constructor(tag, document) {
     this.tagName = String(tag).toUpperCase();
-    this.ownerDocument = document;
+    // The two back references are not enumerable: util.inspect (the print of a node in a failed assert, depth 1000, and myersDiff over
+    // it) walks only enumerable keys, so it goes down the tree and never up it through the document to the whole page (a
+    // failed assert.equal(node, node) would print the whole page without end). They stay readable and writable as before (appendChild sets parentNode).
+    Object.defineProperty(this, 'ownerDocument', { value: document, enumerable: false, writable: true, configurable: true });
     this.childNodes = [];
-    this.parentNode = null;
+    Object.defineProperty(this, 'parentNode', { value: null, enumerable: false, writable: true, configurable: true });
     this.className = '';
     this.attributes = {};
     this.listeners = {};
@@ -946,6 +962,12 @@ class Element {
     this.childNodes.splice(at < 0 ? this.childNodes.length : at, 0, child);
     return child;
   }
+  removeChild(child) {
+    const at = this.childNodes.indexOf(child);
+    if (at >= 0) this.childNodes.splice(at, 1);
+    child.parentNode = null;
+    return child;
+  }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   getAttribute(name) { return this.attributes[name] === undefined ? null : this.attributes[name]; }
   addEventListener(name, handler) { (this.listeners[name] ||= []).push(handler); }
@@ -1001,6 +1023,40 @@ function byFocus(root, key) {
   return walk(root).find((node) => node.getAttribute('data-focus') === key);
 }
 
+// What a control is described by: the text of the node its aria-describedby names ('' when it names none). The plate's word Chart has no
+// label of its own (it is a word and its own name); the plate's whole spoken summary is the note it is described by.
+function describedBy(root, node) {
+  const id = node && node.getAttribute('aria-describedby');
+  const hit = id ? walk(root).find((n) => n.getAttribute('id') === id) : null;
+  return hit ? hit.textContent : '';
+}
+
+// The window row shows one limit at a time (the plate): pick its window — a tab, by its length — then its
+// scope; returns the plate's chart control, where the old stack had one row for every limit.
+function showKey(env, key) {
+  const [harness, , seconds] = key.split('|');
+  const tab = byFocus(env.root, 'win:' + harness + ':' + seconds);
+  if (tab && tab.getAttribute('aria-selected') !== 'true') tab.listeners.click[0]({ stopPropagation() {} });
+  const scope = byFocus(env.root, 'scope:' + key);
+  if (scope && scope.getAttribute('aria-pressed') !== 'true') scope.listeners.click[0]({ stopPropagation() {} });
+  return byFocus(env.root, 'limit:' + key);
+}
+// Every limit of the family in turn, as the plates the window row shows: each enabled tab, then each scope.
+function plates(env) {
+  const out = [];
+  const tabs = classes(env.root, 'wt-tab').filter((t) => t.getAttribute('aria-disabled') !== 'true');
+  tabs.forEach((t) => {
+    byFocus(env.root, t.getAttribute('data-focus')).listeners.click[0]({ stopPropagation() {} });
+    const scopes = classes(env.root, 'wt-scope-opt').map((b) => b.getAttribute('data-focus'));
+    if (!scopes.length) out.push(classes(env.root, 'lrow')[0]);
+    scopes.forEach((key) => {
+      byFocus(env.root, key).listeners.click[0]({ stopPropagation() {} });
+      out.push(classes(env.root, 'lrow')[0]);
+    });
+  });
+  return out;
+}
+
 function classes(root, name) {
   return walk(root).filter((node) => String(node.className || '').split(/\s+/).includes(name));
 }
@@ -1047,6 +1103,15 @@ async function boot(view, postValue) {
     clearTimeout: (id) => clearTimeout(id),
     __ouroWidgetOnDispose(fn) { disposeHooks.push(fn); },
   };
+  // The text table is answered whatever fetch a test puts in place (and is not one of its calls).
+  const first = window.fetch;
+  let current = first;
+  const wrapper = (url, options) => (isI18n(url) ? Promise.resolve(response(I18N_ANSWER)) : current.call(window, url, options));
+  Object.defineProperty(window, 'fetch', {
+    configurable: true, enumerable: true,
+    get() { return wrapper; },
+    set(fn) { current = fn === wrapper ? first : fn; },
+  });
   const context = vm.createContext({
     window,
     document: made.document,
@@ -1060,6 +1125,10 @@ async function boot(view, postValue) {
     RegExp,
     Promise,
     setImmediate,
+    // The widget calls the bare setTimeout/clearTimeout too (the card's pin and leave timers, the landing hold), as it does
+    // in a browser frame; the sandbox hands them to the window's own, so a test that swaps window.setTimeout still steers them.
+    setTimeout: (callback, ms) => window.setTimeout(callback, ms),
+    clearTimeout: (id) => window.clearTimeout(id),
   });
   vm.runInContext(instrumentedWidgetSource, context, { filename: 'widget.js' });
   await settle();
@@ -1128,7 +1197,7 @@ function view(accounts) {
   let env = await boot(view([account('p1', quota())]));
   assert.equal(inspector(env), undefined, 'no account selects itself');
   assert.equal(classes(env.root, 'acc-row').length, 1);
-  assert.equal(byFocus(env.root, 'accounts'), undefined, 'with no overview the list is not folded away');
+  assert.ok(byFocus(env.root, 'accounts') === undefined, 'with no overview the list is not folded away');
   assert.equal(stateOf(env, 'claude:p1'), 'ready');
   click(env, 'acct:claude:p1');
   assert.match(inspector(env).textContent, /30% used/);
@@ -1316,7 +1385,7 @@ function view(accounts) {
     prefs: { density: 'compact', models: { claude: 'models' }, fold: { failed: false, disabled: false, signed_out: false } },
   });
   env = await boot(withPrefs);
-  assert.equal(byFocus(env.root, 'settings'), undefined);
+  assert.ok(byFocus(env.root, 'settings') === undefined);
   const plain = await boot(view([account('p1', quota()), account('p2', quota(), { enabled: false })]));
   assert.equal(env.root.textContent, plain.root.textContent);
   click(env, 'acct:claude:p1');
@@ -1534,7 +1603,7 @@ function view(accounts) {
   assert.match(dotOf(env.root, 'claude:broken'), /\bbad\b/);
   assert.doesNotMatch(allSpoken(env.root), /need attention|needs attention/);
   // The family's account count is of the accounts switched on.
-  assert.equal(classes(byFocus(env.root, 'harness:claude'), 'harness-count')[0].textContent, '4');
+  assert.equal(classes(byFocus(env.root, 'harness:claude'), 'tab-mark-count')[0].textContent, '4');
   // A not-running account can still be selected and read.
   click(env, 'acct:claude:off1');
   assert.match(inspector(env).textContent, /switched off in Claudexor/);

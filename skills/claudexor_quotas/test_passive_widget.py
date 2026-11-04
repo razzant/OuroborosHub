@@ -18,12 +18,14 @@ NODE_PASSIVE = r"""
   const fixtures = JSON.parse(process.env.PASSIVE_WIDGET_FIXTURE);
   const dedicated = fixtures.dedicated;
   const click=(env,key)=>byFocus(env.root,key).listeners.click[0]({stopPropagation(){}});
-  const problem=env=>/\bhas-problem\b/.test(byFocus(env.root,'about').className);
+  // About wears no pip and no colour (the kit's text action): the system's trouble is the note About's panel opens with, said
+  // only when the system is in trouble. Opened and closed again, the screen is as it was.
+  const problem=env=>{ click(env,'about'); const said=/Each facet the daemon did not answer/.test(env.root.textContent); click(env,'about'); return said; };
   let env = await boot(dedicated);
   assert.equal(problem(env),false,'catalog was intentionally not requested');
   assert.equal(classes(env.root,'banner').length,0);
   assert.ok(classes(env.root,'lrow').length,'the complete quota reading is rendered');
-  assert.equal(classes(env.root,'harness-name')[0].textContent,'Codex');
+  assert.equal(classes(env.root,'tab-mark-name')[0].textContent,'Codex');
   assert.doesNotMatch(env.root.textContent,/Claudexor daemon is|Readings below are last known/);
   assert.ok(classes(env.root,'l-fig').some(n=>!n.textContent.startsWith('—')));
   click(env,'about');
@@ -35,7 +37,15 @@ NODE_PASSIVE = r"""
   assert.ok(classes(omitted,'state-dot').some(n=>/\bmuted\b/.test(n.className)));
   click(env,'about');
   click(env,'accounts');
-  click(env,'acct:'+dedicated.groups[0].accounts[0].key);
+  // The top account of the window is picked on its own (the widget's default pick): its card already stands, and it names no catalog failure.
+  // Rule: a press on a row of the list picks that row's account (as its bar does) and shuts the list; the row no longer
+  // lets the pick go. So a press on the picked row keeps its card, again without a catalog failure, and the list is shut.
+  const topKey='acct:'+dedicated.groups[0].accounts[0].key;
+  assert.equal(classes(env.root,'inspector').length,1,'the top account is picked by default and its card stands');
+  assert.doesNotMatch(classes(env.root,'inspector')[0].textContent,/catalog not read/);
+  click(env,topKey);
+  assert.equal(byFocus(env.root,'accounts').getAttribute('aria-pressed'),'false','a press on a row shuts the list');
+  assert.equal(classes(env.root,'inspector').length,1,'a press on the picked row keeps the pick and its card');
   assert.doesNotMatch(classes(env.root,'inspector')[0].textContent,/catalog not read/);
 
   for (const state of ['unknown','stopped']) {
@@ -55,7 +65,7 @@ NODE_PASSIVE = r"""
     const named=JSON.parse(JSON.stringify(dedicated));
     named.groups=[Object.assign({},named.groups[0],{harness_id:id,family_label:label})];
     env=await boot(named);
-    assert.equal(classes(env.root,'harness-name')[0].textContent,expected);
+    assert.equal(classes(env.root,'tab-mark-name')[0].textContent,expected);
     assert.equal(classes(env.root,'harness-initial').length,id==='constructor'?1:0,
       'known families retain their own SVG marks; unknown ids keep initials');
   }
@@ -91,7 +101,7 @@ NODE_PASSIVE = r"""
   assert.ok(classes(env.root,'lrow').length);
   assert.equal(problem(env),true);
   assert.match(env.root.textContent,/Reading could not be refreshed/);
-  assert.match(classes(env.root,'l-fig')[0].textContent,/— of/);
+  assert.match(classes(env.root,'l-fig')[0].textContent,/— left of/);
   const kept= (await boot(dedicated)).testHooks.keptView(dedicated);
   assert.equal(kept.cached.catalog,undefined,'omission never becomes a dated catalog read');
   assert.equal(kept.passive_read.mode,'unavailable');
