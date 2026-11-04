@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.9.2
+version: 1.9.3
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -174,8 +174,10 @@ token is opaque and revealed only at authenticated loopback requests.
 
 Queued sends re-read the place immediately before delivery. Silent or Paused
 keeps the item held with its original identity and bytes; Active allows it to
-resume. An unavailable policy lookup also holds with a visible reason. Holds
-do not consume the transport retry budget.
+resume. An unavailable policy lookup also holds until Ouroboros answers. When
+Ouroboros refuses the skill itself (its grant, enablement, review or token), the
+hold lasts until its access is fixed in Skills. Holds do not consume the
+transport retry budget.
 
 ## Slack app setup
 
