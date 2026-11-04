@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/b0d3c303ac47133b7639f60f311f6d531bfc9875",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/fcac74863a1c415a0c4445cb8a53190a1bd0180b",
   "schema_version": 1,
   "skills": [
     {
