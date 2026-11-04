@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.10.4
+version: 0.10.5
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -34,11 +34,11 @@ tools:
     description: Read an account-bound message reference or legacy UID and UIDVALIDITY without changing flags.
   - name: email_mark_read
     effect: write
-    target: [account_id,remove_labels]
+    target: [account_id,remove_labels,folder_names]
     description: Mark one message read by its account-bound reference, or a legacy IMAP UID and UIDVALIDITY.
   - name: email_mailbox
     effect: write
-    target: [account_id,destination,add_labels,remove_labels,label_id,label_names]
+    target: [account_id,destination,add_labels,remove_labels,label_id,label_names,folder_names]
     description: List/create folders, copy/move messages and update flags.
   - name: email_draft
     effect: write
@@ -245,11 +245,6 @@ remain readable by explicit account_id.
   retains list/create/copy/move/flags, including the old list action. IMAP move
   requires UID MOVE, never a mailbox-wide expunge. Gmail adds label management,
   archive, trash/untrash, delete_draft and explicitly granted permanent deletion.
-  For general IMAP mailbox actions the source folder inside a message reference
-  is not a separate Host target. Within the same Exchange mailbox, copy/move
-  declares the destination as supplied; use the same folder spelling as its Place.
-  The parent of an Exchange folder creation is not a separate Host target either.
-  Drafts check the resolved storage folder independently (below).
   For Gmail label creation,
   properties.name keeps its existing precedence; a different or omitted top-level
   destination returns exact retry_arguments naming that actual label without
@@ -262,6 +257,23 @@ remain readable by explicit account_id.
   and Gmail mark-read exposes its fixed removal of UNREAD. Follow returned
   retry_arguments; label_names describes checked targets and never changes a
   label. A matching canonical call remains one call.
+- For IMAP and Exchange, folder_names identifies the actual folders changed.
+  A move changes source and destination; a copy writes only the destination.
+  Marking a message read or changing its flags writes its actual source folder.
+  Creating a child also affects its parent. IMAP asks the server for its hierarchy
+  delimiter before CREATE; if the server omits the response, Mail leaves the folder unchanged.
+  Exchange trash moves to Deleted Items. Exchange writes check the affected folder
+  identities and require read access to their metadata; ordinary message reads still work
+  under the existing account and item permissions.
+  Gmail delete_draft checks both DRAFT and Drafts before deleting the selected draft.
+- For Reply All, follow retry_arguments: Mail expands the original visible
+  recipients before sending or saving. You may edit the explicit To/Cc/Bcc;
+  leaving reply_all false keeps that choice. A permitted group thread remains
+  permitted if a separate conversation with one recipient is paused. Bcc from
+  the original message is never copied into a reply. Keep the opaque reply_all_fingerprint
+  returned by a prepared send. An exact repeat works even after the source disappears;
+  if you edit the recipient list, replay the explicit accepted arguments. For an older
+  send without a fingerprint, use its explicit arguments or inspect email_receipt.
 - email_draft saves or updates a Gmail draft by draft_id, or appends an IMAP
   draft. The selected draft folder is an explicit Host target. Omit the folder
   to receive retry_arguments with the provider default (Gmail DRAFT, IMAP Drafts,
@@ -275,7 +287,7 @@ remain readable by explicit account_id.
   deleting it is a separate explicit mailbox operation.
 - email_send accepts sender, To/Cc/Bcc, MIME attachments and reply-all. Read a
   historical source first, or use reply_folder when it is outside the intake
-  folder. Reply-all removes all configured own sender addresses. The same
+  folder. Reply-all excludes configured own sender addresses from its automatic additions. The same
   account_id/request_id returns its original receipt; changed sender/content
   conflicts. The same request_id in another explicitly selected account is a
   different operation.
@@ -476,7 +488,7 @@ attachments are copied into immutable, skill-owned staged files before a
 Presence turn; the Host receives their metadata and staged paths separately.
 Outbound sends and drafts accept staged file attachments, To/Cc/Bcc envelopes,
 and optional multipart/alternative HTML. `reply_all` derives Reply-To/From plus
-original To/Cc recipients, removes the sending mailbox and de-duplicates
+original To/Cc recipients, excludes configured sender identities from automatic additions and de-duplicates
 addresses. SMTP sends keep Bcc envelope-only; drafts retain a Bcc header for
 later manual sending. Partial SMTP
 recipient acceptance is retained in the receipt alongside accepted/refused

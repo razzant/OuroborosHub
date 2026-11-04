@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.5
+
+- Check the actual folders changed by IMAP and Exchange mailbox actions.
+  Copying from a folder still requires only read access to the source.
+- Check the Gmail Drafts folder before deleting a draft by its draft ID.
+- Return the complete Reply All recipient list before queuing a send or saving
+  a draft. The mailbox and RFC thread continue to govern group replies.
+
 ## 0.10.4
 
 - Keep one connection per mailbox store open instead of opening one for every call. An

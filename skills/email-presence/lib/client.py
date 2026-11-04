@@ -243,17 +243,61 @@ class MailClient:
                 raise ValueError("Mailbox UIDVALIDITY changed; search again before addressing a message")
             return self.fetch(box, folder, uid, validity, include_attachment_data=include_attachment_data)
 
-    def mark_read(self, *, uid, uidvalidity, folder="INBOX"):
+    def mark_read(self, *, uid, uidvalidity, folder="INBOX", prepare_targets=None):
         """Add \\Seen to one message: the explicit write that read() never performs."""
-        return self.mailbox(action="flags", folder=folder, uid=uid, uidvalidity=uidvalidity, flags=["\\Seen"])
+        return self.mailbox(action="flags", folder=folder, uid=uid, uidvalidity=uidvalidity,
+                            flags=["\\Seen"], prepare_targets=prepare_targets)
+
+    @staticmethod
+    def _canonical_folder(name):
+        # INBOX is the only IMAP name with protocol-defined case insensitivity.
+        return "INBOX" if name.isascii() and name.upper() == "INBOX" else name
+
+    def _create_names(self, box, destination):
+        # LIST <reference> "" asks for this namespace's delimiter, even when
+        # the new mailbox does not exist (RFC 3501 section 6.3.8).
+        rows = self._ok(box.list(self.folder_name(destination), '""'), "hierarchy lookup")
+        for row in rows:
+            header = row[0] if isinstance(row, tuple) else row
+            match = re.match(rb'^\([^)]*\) (?:NIL|"(\\[\\"]|[^\\"])") ', header or b"", re.I)
+            if match:
+                if match[1] is None:
+                    return []
+                delimiter = match[1][-1:].decode("ascii")
+                # CREATE may end in the delimiter when requesting a mailbox
+                # that can have children. The created name excludes that suffix.
+                name = destination.removesuffix(delimiter)
+                parent = name.rpartition(delimiter)[0]
+                return [self._canonical_folder(n) for n in (name, parent) if n]
+        raise RuntimeError("IMAP LIST omitted the hierarchy delimiter for the new folder")
 
     def mailbox(self, *, action="list", folder="INBOX", uid=None, uidvalidity=None,
-                destination="", flags=None, remove_flags=False):
-        with self.imap(None if action in {"list", "create"} else folder, readonly=False) as box:
+                destination="", flags=None, remove_flags=False, prepare_targets=None):
+        addressed = action in {"copy", "move", "create"}
+        if addressed and not destination:
+            raise ValueError("A destination folder is required")
+        destination = self._canonical_folder(destination) if addressed else ""
+        if action not in {"list", "create"}:
+            folder = self._canonical_folder(folder)
+
+        def prepare(names):
+            targets = {"destination": destination} if addressed else {}
+            additional = sorted(set(names) - {destination})
+            if additional:
+                targets["folder_names"] = additional
+            return prepare_targets(targets)
+
+        if prepare_targets and action in {"copy", "move", "flags"}:
+            if needed := prepare([] if action == "copy" else [folder]):
+                return needed
+        with self.imap(None if action in {"list", "create"} else folder,
+                       readonly=action not in {"move", "flags"}) as box:
             if action == "list":
                 rows = [x.decode("ascii", errors="replace") for x in self._ok(box.list(), "list") if x]
                 return {"folders": [self.decode_folder(row) for row in rows]}
             if action == "create":
+                if prepare_targets and (needed := prepare(self._create_names(box, destination))):
+                    return needed
                 self._ok(box.create(self.folder_name(destination)), "create")
                 return {"ok": True}
             validity, _ = self.metadata(box)

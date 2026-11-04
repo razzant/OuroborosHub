@@ -232,9 +232,9 @@ class GmailClient(MailClient):
             return write("PATCH" if action == "update_label" else "DELETE", "/labels/" + selected,
                          properties if action == "update_label" else None, targets, [selected])
         if action == "delete_draft":
-            if not re.fullmatch(r"[A-Za-z0-9_-]+", str(draft_id)):
+            if not isinstance(draft_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", draft_id):
                 raise ValueError("Choose draft_id from email_search(folder='DRAFT')")
-            return write("DELETE", "/drafts/" + str(draft_id), None, {})
+            return write("DELETE", "/drafts/" + draft_id, None, {"remove_labels": ["DRAFT"]}, fixed_names=["Drafts"])
         native = self.native_id(message_ref or (format(int(uid) % (2 ** 64), "x") if uid is not None and uidvalidity == 1 else ""))
         if action in {"trash", "untrash"}:
             return write("POST", f"/messages/{native}/{action}", {}, {}, fixed_names=["TRASH"])

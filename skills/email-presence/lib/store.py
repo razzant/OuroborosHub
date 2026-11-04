@@ -17,7 +17,7 @@ from email.utils import parseaddr
 from pathlib import Path
 
 from .delivery import email_report
-from .mime import conversation_root, mailbox_addresses, prior_imap_capture
+from .mime import conversation_root, mailbox_addresses, prior_imap_capture, recipient_groups
 
 _MAX_ATTACHMENT_FILES = 10
 _MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -565,20 +565,7 @@ class EmailStore:
     def enqueue_outbox(self, *, request_id, recipients=(), subject="", body="", in_reply_to="", references=(), reporting=None,
                        to=None, cc=(), bcc=(), attachments=(), html_body="", body_type="plain", hold_reason=""):
         now = time.time()
-        def dedupe(values, seen=None):
-            known = set(seen or ())
-            result = []
-            for value in values:
-                key = parseaddr(str(value))[1].casefold() or str(value).casefold()
-                if key and key not in known:
-                    known.add(key)
-                    result.append(value)
-            return result, known
-        visible_to, seen = dedupe(mailbox_addresses(recipients if to is None else to))
-        visible_cc, seen = dedupe(mailbox_addresses(cc), seen)
-        # To/Cc take precedence over Bcc when callers supplied the same address
-        # twice. Keep the complete envelope in recipients_json for SMTP delivery.
-        visible_bcc, seen = dedupe(mailbox_addresses(bcc), seen)
+        visible_to, visible_cc, visible_bcc = recipient_groups(recipients if to is None else to, cc, bcc)
         envelope = visible_to + visible_cc + visible_bcc
         if not envelope:
             raise ValueError("Mail delivery needs at least one valid envelope recipient")
@@ -730,6 +717,7 @@ class EmailStore:
             result = dict(r)
             result["state"] = _delivery_state(result["state"], result["last_error"])
             result["delivery_reporting"] = json.loads(result.pop("reporting_json"))
+            result["delivery_reporting"].pop("reply_all_fingerprint", None)
             result["account_id"] = result["delivery_reporting"].get("account_id", "")
             result["sender"] = result["delivery_reporting"].get("sender", "")
             result["provider_receipt"] = result["delivery_reporting"].get("provider_receipt")

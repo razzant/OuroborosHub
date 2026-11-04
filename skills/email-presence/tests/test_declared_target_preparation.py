@@ -35,6 +35,7 @@ def harness(provider='gmail'):
         client=MailClient.__new__(MailClient)
         class Box:
             capabilities=(b'IMAP4rev1',b'MOVE')
+            def list(self,reference,pattern):return 'OK',[b'(\\Noselect) "/" ""']
             def create(self,target):requests.append({'create':target});return 'OK',[b'created']
             def uid(self,*args):requests.append({'uid':args});return 'OK',[b'done']
         @contextmanager
@@ -147,7 +148,7 @@ def test_existing_copy_move_targets_stay_one_call(provider,action):
     result,used,calls,targets=invoke(registered,requests,'email_mailbox',{
         'account_id':account['id'],'action':action,'folder':'INBOX','uid':4,
         'uidvalidity':1 if provider=='gmail' else 7,'destination':destination,
-        **({'remove_labels':['INBOX']} if provider=='gmail' and action=='move' else {})},schemas)
+        **({('remove_labels' if provider=='gmail' else 'folder_names'):['INBOX']} if action=='move' else {})},schemas)
     assert calls==1 and targets['destination']==[destination]
     if provider=='gmail':
         assert requests[0]=={'method':'POST','path':'/messages/4/modify','body':{

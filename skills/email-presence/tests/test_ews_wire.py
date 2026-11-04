@@ -17,9 +17,14 @@ def envelope(body):
             + f'><s:Body>{body}</s:Body></s:Envelope>')
 
 
-def response(operation, inner='', *, klass='Success', code='NoError'):
-    msg = f'<m:{operation}ResponseMessage ResponseClass="{klass}"><m:ResponseCode>{code}</m:ResponseCode>{inner}</m:{operation}ResponseMessage>'
+def batch_response(operation, rows):
+    msg = ''.join(f'<m:{operation}ResponseMessage ResponseClass="{klass}"><m:ResponseCode>{code}</m:ResponseCode>'
+                  f'{inner}</m:{operation}ResponseMessage>' for klass, code, inner in rows)
     return envelope(f'<m:{operation}Response><m:ResponseMessages>{msg}</m:ResponseMessages></m:{operation}Response>')
+
+
+def response(operation, inner='', *, klass='Success', code='NoError'):
+    return batch_response(operation, [(klass, code, inner)])
 
 
 class FakeResponse:
@@ -54,6 +59,15 @@ class Session:
 
     def close(self):
         self.closed = True
+
+
+def test_writes_still_require_exactly_one_response_and_cannot_ignore_permission_errors():
+    denied, ok = ('Error', 'ErrorAccessDenied', ''), ('Success', 'NoError', '')
+    wire = EwsWire(CONFIG, Session(batch_response('MoveItem', [ok, denied]), batch_response('MoveItem', [denied])))
+    with pytest.raises(EwsError, match='UnexpectedResponse'):
+        wire.call(m('MoveItem'))
+    with pytest.raises(EwsError, match='ErrorAccessDenied'):
+        wire.call(m('MoveItem'))
 
 
 @pytest.mark.parametrize(('value', 'code', 'proven'), [

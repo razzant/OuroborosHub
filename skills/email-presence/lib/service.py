@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import inspect
 import json
 import os
+import re
 import uuid
 from contextlib import contextmanager
 from functools import wraps
@@ -15,7 +17,7 @@ from .client import MailClient
 from .delivery import tool_origin
 from .gmail import GmailClient
 from .host_adapter import LoopbackPresenceHostAdapter, place_refusal_hold
-from .mime import conversation_root, mailbox_addresses, reply_all_recipients
+from .mime import conversation_root, mailbox_addresses, recipient_groups, reply_all_recipients
 from .settings import SENDING_OFF
 from .store import EmailStore, RequestIdConflict
 
@@ -174,11 +176,11 @@ class MailService:
         return {**result, "account_id": account["id"]}
 
     @staticmethod
-    def _write_target_preparer(public, account_id):
+    def _write_target_preparer(public, account_id, *, clear_unused=()):
         # Compare what Host actually saw with the selected mailbox and the
         # provider's final targets. One retry exposes all missing facts.
         def prepare(targets):
-            actual = {**targets, 'account_id': account_id}
+            actual = {**{k: [] for k in clear_unused if public.get(k)}, **targets, 'account_id': account_id}
             missing = {key: value for key, value in actual.items() if public.get(key) != value}
             if missing:
                 return {'ok': False, 'status': 'needs_arguments',
@@ -187,38 +189,39 @@ class MailService:
                         'retry_arguments': {**public, **missing}}
         return prepare
 
-    def mark_read(self, *, account_id="", message_ref="", uid=None, uidvalidity=None, folder=None, remove_labels=None):
+    def mark_read(self, *, account_id="", message_ref="", uid=None, uidvalidity=None, folder=None, remove_labels=None, folder_names=None):
         with self.target(account_id) as (account, _store, client):
             kwargs = self.unwrap_ref(account, message_ref) if message_ref else {
                 "uid": uid, "uidvalidity": uidvalidity, "folder": folder or account.get("folder") or "INBOX"}
-            public = {k:v for k,v in dict(account_id=account_id, message_ref=message_ref, uid=uid,
-                      uidvalidity=uidvalidity, folder=folder, remove_labels=remove_labels).items() if v is not None}
-            prepare = self._write_target_preparer(public, account['id'])
-            if account['provider'] == 'gmail':
-                # The caller cannot apply arbitrary labels through this shortcut.
-                kwargs['prepare_targets'] = prepare
-            else:
-                if remove_labels not in (None, []):
-                    raise ValueError("remove_labels on email_mark_read applies only to Gmail")
-                if needed := prepare({}):
-                    return needed
-            return self._account_result(account, client.mark_read(**kwargs))
+            public = {k: v for k, v in dict(account_id=account_id, message_ref=message_ref, uid=uid,
+                      uidvalidity=uidvalidity, folder=folder, remove_labels=remove_labels, folder_names=folder_names).items()
+                      if v is not None}
+            if account['provider'] == 'gmail' and folder_names:
+                raise ValueError("folder_names on email_mark_read applies only to IMAP and Exchange")
+            if account['provider'] != 'gmail' and remove_labels:
+                raise ValueError("remove_labels on email_mark_read applies only to Gmail")
+            return self._account_result(account, client.mark_read(**kwargs, prepare_targets=self._write_target_preparer(
+                public, account['id'], clear_unused=('folder_names',))))
 
-    def mailbox(self, *, account_id="", message_ref="", **kwargs):
+    def mailbox(self, *, account_id="", message_ref="", folder_names=None, **kwargs):
         with self.target(account_id) as (account, _store, client):
             public = {k: v for k, v in kwargs.items() if v is not None}
             public.update(account_id=account_id, message_ref=message_ref)
-            prepare = self._write_target_preparer(public, account['id'])
+            if folder_names is not None:
+                public['folder_names'] = folder_names
+            prepare = self._write_target_preparer(public, account['id'], clear_unused=('folder_names',))
             if message_ref:
                 kwargs.update(self.unwrap_ref(account, message_ref))
             if account['provider'] == 'gmail':
+                if folder_names:
+                    raise ValueError("folder_names on email_mailbox applies only to IMAP and Exchange")
                 return self._account_result(account, client.mailbox(**kwargs, prepare_targets=prepare))
             for key in ('label_id', 'label_names', 'add_labels', 'remove_labels'):
                 if kwargs.pop(key, None) not in (None, '', []):
                     raise ValueError(f"{key} on email_mailbox applies only to Gmail")
                 public.pop(key, None)
-            if kwargs.get('action', 'list') != 'list' and (needed := prepare({})):
-                return needed
+            if kwargs.get('action', 'list') != 'list':
+                kwargs['prepare_targets'] = prepare
             return self._account_result(account, client.mailbox(**kwargs))
 
     @staticmethod
@@ -244,8 +247,8 @@ class MailService:
         return original
 
     def _reply_context(self, account, store, client, message_id, references, reply_all, folder, replaying=False):
-        original = store.message_by_id(message_id) if message_id else None
-        if message_id and original is None and (reply_all or not replaying and (references is None or account['provider'] == 'gmail')):
+        original = store.message_by_id(message_id) if message_id and not replaying else None
+        if message_id and not replaying and original is None and (reply_all or references is None or account['provider'] == 'gmail'):
             original = self._reply_source(store, client, message_id,
                     folder or ('ALL' if account['provider'] == 'gmail' else account.get('folder', 'INBOX')))
             if original is None:
@@ -255,28 +258,43 @@ class MailService:
         if references is None and original:
             references = original.get('references') or ([original['in_reply_to']] if original.get('in_reply_to') else [])
         root = conversation_root(references=references, in_reply_to=message_id)
-        if original and not replaying and root != conversation_fields(original).get('conversation_id'):
+        if original and root != conversation_fields(original).get('conversation_id'):
             raise ValueError('references names another RFC conversation; use the reply source references from email_read')
         return original, references, root
 
     @staticmethod
-    def _prepare_conversation(root, conversation_id, thread_id, retry_arguments, *, required, missing_account=False):
+    def _reply_groups(account, original, to, cc, bcc):
+        derived = reply_all_recipients(original, [account["address"], *account["senders"]])
+        return recipient_groups([*derived["to"], *to], [*derived["cc"], *cc], bcc)
+
+    @staticmethod
+    def _reply_fingerprint(account_id, request_id, message_id, supplied, envelope):
+        # The explicit inputs and the disclosed envelope must BOTH match. The queue
+        # alone cannot distinguish automatically included copies from manual ones.
+        data = ["reply-all:1", account_id, request_id, message_id, supplied, envelope]
+        return hashlib.sha256(json.dumps(data, separators=(",", ":")).encode("ascii")).hexdigest()
+
+    @staticmethod
+    def _prepare_conversation(root, conversation_id, thread_id, retry_arguments, *, required,
+                              missing_account=False, expanded=False):
         fields = {'conversation_id': root, 'thread_id': root}
         retry_arguments = {key: value for key, value in retry_arguments.items() if value is not None}
         if any(value and value != root for value in (conversation_id, thread_id)):
             return {'ok': False, 'status': 'error', 'code': 'conversation_identity_mismatch',
                     'error': 'Conversation fields must match the resolved RFC reply source.',
                     'retry_arguments': {**retry_arguments, **fields}}
-        if missing_account or required and (not conversation_id or not thread_id):
+        missing_thread = required and (not conversation_id or not thread_id)
+        if missing_account or missing_thread or expanded:
             return {'ok': False, 'status': 'needs_arguments',
-                    'code': 'canonical_account_required' if missing_account else 'canonical_conversation_required',
-                    'message': 'Retry with the resolved account and conversation fields below; no message or draft was queued or saved.',
+                    'code': ('canonical_account_required' if missing_account else
+                             'canonical_conversation_required' if missing_thread else 'canonical_recipients_required'),
+                    'message': 'Retry with the resolved mail arguments below; no message or draft was queued or saved.',
                     'retry_arguments': {**retry_arguments, **fields}}
         return None
 
     def send(self, ctx=None, *, account_id="", sender="", to="", body="", subject="", reply_to_message_id="", references=None,
              cc=None, bcc=None, reply_all=False, html_body="", body_type="plain", attachments=None, request_id="", reply_folder="",
-             conversation_id="", thread_id=""):
+             conversation_id="", thread_id="", reply_all_fingerprint=""):
         with self.target(account_id) as (account, store, client):
             if account.get("sending", "on") == "off":
                 return {"ok": False, "account_id": account["id"], "code": "sending_off", "error": SENDING_OFF}
@@ -289,26 +307,39 @@ class MailService:
             original, references, thread = self._reply_context(account, store, client, reply_to_message_id,
                                                                references, reply_all, reply_folder, replaying=queued is not None)
             if reply_all:
-                derived = reply_all_recipients(original, chosen_sender)
-                own = {value.casefold() for value in account["senders"]}
-                recipients = [value for value in derived["to"] if value.casefold() not in own] + recipients
-                visible_cc = [value for value in derived["cc"] if value.casefold() not in own] + visible_cc
+                supplied = (recipients, visible_cc, visible_bcc)
+                groups = ((queued.to, queued.cc, queued.bcc) if queued is not None
+                          else self._reply_groups(account, original, *supplied))
+                reply_all_fingerprint = self._reply_fingerprint(account['id'], rid, reply_to_message_id, supplied, groups)
+                if queued is not None and queued.reporting.get('reply_all_fingerprint') != reply_all_fingerprint:
+                    known = bool(queued.reporting.get('reply_all_fingerprint'))
+                    return {'ok': False, 'account_id': account['id'], 'request_id': rid,
+                            'code': 'request_id_conflict' if known else 'reply_all_replay_unverifiable',
+                            'error': ('The Reply All arguments differ from the accepted send.' if known else
+                                      'The queued email has no record of the original Reply All expansion.')
+                                     + ' Use its accepted explicit arguments to replay, or check email_receipt.'}
+                recipients, visible_cc, visible_bcc = groups
+                to, cc, bcc = ", ".join(recipients), visible_cc, visible_bcc
             if not recipients or (not str(body).strip() and not str(html_body).strip()):
                 raise ValueError("to (or reply_all source) and body are required")
             thread = thread or store.message_id_for(rid)
             # Identical retries keep the first row's binding, including an unknown
             # or disconnected one. The store still compares payload and sender.
-            existing = store.receipt(rid)
             preparation = self._prepare_conversation(thread, conversation_id, thread_id, {
                 'account_id': account['id'], 'sender': chosen_sender, 'to': to, 'body': body, 'subject': subject,
                 'reply_to_message_id': reply_to_message_id, 'references': references, 'cc': cc, 'bcc': bcc,
-                'reply_all': reply_all, 'html_body': html_body, 'body_type': body_type, 'attachments': attachments,
-                'request_id': rid, 'reply_folder': reply_folder}, required=existing is None and bool(reply_to_message_id or references),
-                missing_account=existing is None and not account_id)
+                'reply_all': False, 'html_body': html_body, 'body_type': body_type, 'attachments': attachments,
+                'request_id': rid, 'reply_folder': reply_folder, 'reply_all_fingerprint': reply_all_fingerprint or None},
+                required=queued is None and bool(reply_to_message_id or references),
+                missing_account=queued is None and not account_id, expanded=queued is None and reply_all)
             if preparation:
                 return preparation
-            binding = self.capture_binding(account, thread) if existing is None else {}
+            binding = self.capture_binding(account, thread) if queued is None else {}
             reporting = {"version": -1, "account_id": account["id"], "sender": chosen_sender, "origin": tool_origin(ctx)}
+            # This optional round-trip value only recognizes a later implicit replay.
+            # A missing or modified value never selects recipients or authorizes a send.
+            if reply_to_message_id and isinstance(reply_all_fingerprint, str) and re.fullmatch(r"[0-9a-f]{64}", reply_all_fingerprint):
+                reporting["reply_all_fingerprint"] = reply_all_fingerprint
             if account["provider"] == "gmail" and original and original.get("provider_thread_id"):
                 reporting["gmail_thread_id"] = original["provider_thread_id"]
             hold = ""
@@ -357,8 +388,12 @@ class MailService:
             retry = {**kwargs, 'to': kwargs.get('to', ''), 'account_id': account['id'], 'sender': chosen_sender,
                      'reply_all': reply_all, 'reply_folder': reply_folder, 'folder': folder,
                      **({'folder_names': names} if names else {})}
+            if reply_all:
+                to, cc, bcc = self._reply_groups(account, original, addresses(kwargs.get("to")),
+                                                 addresses(kwargs.get("cc")), addresses(kwargs.get("bcc")))
+                retry.update(to=", ".join(to), cc=cc, bcc=bcc, reply_all=False)
             preparation = self._prepare_conversation(thread, conversation_id, thread_id, retry,
-                required=bool(kwargs.get('reply_to_message_id') or references), missing_account=not account_id)
+                required=bool(kwargs.get('reply_to_message_id') or references), missing_account=not account_id, expanded=reply_all)
             if not preparation and (folder != supplied_folder or names != (folder_names or [])):
                 retry.update(conversation_id=thread, thread_id=thread)
                 preparation = self._prepare_target('folder', folder, {k: v for k, v in retry.items() if v is not None})
@@ -378,11 +413,6 @@ class MailService:
             if preparation:
                 return preparation
             kwargs["folder"] = folder
-            if reply_all:
-                derived = reply_all_recipients(original, chosen_sender)
-                own = {value.casefold() for value in account["senders"]}
-                kwargs["to"] = [value for value in derived["to"] if value.casefold() not in own] + addresses(kwargs.get("to"))
-                kwargs["cc"] = [value for value in derived["cc"] if value.casefold() not in own] + addresses(kwargs.get("cc"))
             kwargs["sender"] = chosen_sender
             kwargs["attachments"] = store.stage_outbound_attachments("draft:" + uuid.uuid4().hex, kwargs.pop("attachments", None) or [])
             for key in ("cc", "bcc"):
@@ -444,18 +474,19 @@ def register_tools(api, service):
                           schema={"type": "object", "properties": {**(account if select else {}), **properties}, "required": list(required)}, timeout_sec=120)
     tool("email_accounts", service.list_accounts, "List configured mailbox identities, sender addresses and granted scopes; no passwords or tokens are returned.", {}, select=False)
     # email_accounts has no selection argument: it is the discovery surface.
-    tool("email_send", service.send, "Queue a mail or RFC-threaded reply from an explicit account_id/sender. For replies use conversation_id/thread_id from email_read; an omitted account or reply identity returns needs_arguments with exact retry_arguments before any effect. request_id is account-scoped. Queued is not sent; inspect email_receipt for held, accepted or uncertain outcomes.",
-         {**compose, "request_id": string}, ("body",))
+    tool("email_send", service.send, "Queue a mail or RFC-threaded reply from an explicit account_id/sender. For replies use conversation_id/thread_id from email_read. Reply All first returns the actual recipients; submit the returned arguments before sending. request_id is account-scoped. Queued is not sent; inspect email_receipt for held, accepted or uncertain outcomes.",
+         {**compose, "request_id": string, "reply_all_fingerprint": {"type": "string", "description":
+              "Opaque replay value from Reply All retry_arguments. Pass it back unchanged when submitting the explicit recipients."}}, ("body",))
     tool("email_search", service.search, "Search old/new mail without marking it read. Gmail and Exchange accept provider-native query/page_token; IMAP uses criteria tokens. Returned message_ref is account-bound; a page reports its continuation.",
          {"folder": string, "criteria": array, "query": string, "limit": integer, "page_token": string})
     tool("email_read", service.read, "Read exact message_ref, or legacy uid+uidvalidity+folder, including canonical conversation_id/thread_id for replies. Peeks only; use email_mark_read for Seen. Historical reads do not enter Presence.", message)
-    tool("email_mark_read", service.mark_read, "Mark this account's selected message read; accepts message_ref or legacy uid+uidvalidity+folder. Follow retry_arguments for Gmail's fixed UNREAD removal.",
-         {**message, "remove_labels": array})
+    tool("email_mark_read", service.mark_read, "Mark this account's selected message read; accepts message_ref or legacy uid+uidvalidity+folder. Follow retry_arguments for the actual source folder or Gmail UNREAD label.",
+         {**message, "remove_labels": array, "folder_names": array})
     tool("email_folders", service.folders, "Read folders/labels without changing anything, including while a Place is Silent or consciousness Advises.", {})
-    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags; Exchange also supports trash. After an Exchange move/copy, use the returned account-bound message_ref, or search the destination if no reference was supplied. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. destination must name the actual create/copy/move target; For Gmail, resolved label IDs and implicit label changes can return exact retry_arguments before any write.",
-         {**message, "action": string, "destination": string, "flags": array, "remove_flags": {"type": "boolean"},
+    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags; Exchange also supports trash. After an Exchange move/copy, use the returned account-bound message_ref, or search the destination if no reference was supplied. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. Follow retry_arguments to expose all affected folders, folder names or labels before a write.",
+         {**message, "action": string, "destination": string, "folder_names": array, "flags": array, "remove_flags": {"type": "boolean"},
           "add_labels": array, "remove_labels": array, "label_names": array, "label_id": string, "draft_id": string, "properties": {"type": "object"}})
-    tool("email_draft", service.draft, "Save a draft without sending. Supply account_id and, for replies, canonical conversation_id/thread_id; needs_arguments returns exact retry_arguments before saving when identity or the effective folder is missing. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP and Exchange save new drafts in the selected folder.",
+    tool("email_draft", service.draft, "Save a draft without sending. Supply account_id and, for replies, canonical conversation_id/thread_id; needs_arguments returns exact retry_arguments before saving when identity, Reply All recipients or the effective folder need preparation. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP and Exchange save new drafts in the selected folder.",
          {**compose, "folder": string, "folder_names": {"type": "array", "items": string, "description": "Names of the actual draft destination from retry_arguments. Do not invent folder aliases."}, "draft_id": string}, ("to", "subject"))
     tool("email_receipt", service.receipt, "Read the exact account-scoped delivery receipt. Uncertain acceptance must be inspected, never blindly sent again.", {"request_id": string}, ("request_id",))
     tool("email_test_connection", service.test_connection, "Check the selected account's authentication/TLS without sending mail or admitting historical messages.", {})
