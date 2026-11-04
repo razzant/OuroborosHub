@@ -46,9 +46,10 @@ def register(api):
                                                 sender=account.get("sender") or account["address"])
         text = "Disconnected" if not account["connected"] else (
             "Worker stopped: " + account["runtime_error"] if account.get("runtime_error") else
-            f"{held} held" if held else "Tools account; no automatic intake" if (health or {}).get("intake") == "no_place"
+            f"{held} held" if held else "Mail intake failed: " + str(health.get("error") or "test the connection")
+            if health and health.get("ok") is False else "Tools account; no automatic intake" if (health or {}).get("intake") == "no_place"
             else "Authenticated intake" if (health or {}).get("ok") else "Configured; test connection")
-        payload.update(text=text, tone="warn" if held or not account["connected"] or account.get("runtime_error") else "ok" if (health or {}).get("ok") else "muted",
+        payload.update(text=text, tone="warn" if held or not account["connected"] or account.get("runtime_error") or (health or {}).get("ok") is False else "ok" if (health or {}).get("ok") else "muted",
                        title="Email transport")
         return payload
 

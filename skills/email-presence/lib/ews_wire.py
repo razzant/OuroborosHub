@@ -40,7 +40,9 @@ class EwsError(RuntimeError):
     def __init__(self, code, *, http_status=None, retry_after=None, proven=False):
         self.code, self.http_status = code, http_status
         self.retry_after, self.proven = retry_after, proven
-        super().__init__(f'Exchange: {code}' + (f' (HTTP {http_status})' if http_status else ''))
+        hint = '. Check your Exchange login and save the connection to retry background mail.' if http_status == 401 else ''
+        self.mail_diagnostic = f'Exchange: {code}' + (f' (HTTP {http_status})' if http_status else '')
+        super().__init__(self.mail_diagnostic + hint)
 
 
 def ews_timestamp(value):
@@ -75,6 +77,7 @@ class EwsWire:
         self.session = session if session is not None else requests.Session()
         self.session.auth = HttpNtlmAuth(config['EMAIL_USER'], config['EMAIL_PASSWORD'])
         self.lock = threading.Lock()  # One NTLM connection pool for this account, shared by its workers.
+        self._auth_rejected = False
         self._local = threading.local()
 
     @property
@@ -95,12 +98,19 @@ class EwsWire:
         # Requests' stock HTTPAdapter does not retry POSTs. NTLM's 401 handshake
         # precedes execution; a lost application response must never replay a send.
         with self.lock:
+            if self._auth_rejected:
+                raise EwsError('HttpFailure', http_status=401)
             try:
                 response = self.session.post(self.endpoint, data=data, timeout=(12, 30), verify=True,
                     allow_redirects=False, headers={'Content-Type': 'text/xml; charset=utf-8',
                                                    'SOAPAction': NS['m'] + '/' + name})
+            except requests.exceptions.SSLError:
+                raise EwsError('TlsFailure') from None
             except requests.RequestException:
                 raise EwsError('TransportFailure') from None
+            # A final 401 after NTLM negotiation rejects this client's login. Rechecking a
+            # held send must not lock out the account; a new configuration gets a fresh client.
+            self._auth_rejected = response.status_code == 401
         with response:
             self._local.date = response.headers.get('Date')
             status = response.status_code

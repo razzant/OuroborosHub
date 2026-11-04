@@ -117,7 +117,7 @@ function connectionForm(provider, account) {
     const form = node('form');
     form.append(node('h3', {text:account ? 'Edit mail connection' : exchange ? 'Connect Exchange' : 'Connect IMAP / SMTP'}));
     form.append(node('p', {class:'note', text:exchange
-        ? 'For Exchange Server with NTLM sign-in, enter the HTTPS Exchange Web Services (EWS) address. Mail stores the password in its private, unencrypted local database.'
+        ? 'For Exchange Server with NTLM sign-in, enter an HTTPS EWS address whose certificate this installation trusts. Mail stores the password in its private, unencrypted local database.'
         : 'For Yandex use an app password. For Proton use the local Bridge credentials and its certificate, not your Proton login password. Passwords already saved are never returned to this page.'}));
     const fields = node('div', {class:'fields'});
     const address = field(fields, 'address', 'Mailbox email address', account?.address, exchange ? 'email' : 'text');
@@ -203,6 +203,7 @@ function queueView(account) {
         node('p', {text:`Inbox: ${counts(queue.inbox) || 'no captured mail'}`}),
         node('p', {text:`Outbox: ${counts(outgoing) || 'no queued mail'}`}),
     ]);
+    if (queue.poll_health?.ok === false) view.append(node('p', {class:'note', text:`Mail intake failed: ${queue.poll_health.error || 'test the connection'}`}));
     if (queue.delivery_reports_pending) view.append(node('p', {class:'note', text:`${queue.delivery_reports_pending} delivery reports waiting for host acknowledgement`}));
     const rows = queue.receipts || [];
     if (rows.length) {

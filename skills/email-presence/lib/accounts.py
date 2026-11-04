@@ -6,6 +6,7 @@ Legacy EMAIL_* settings remain a live, single-account source without copying sec
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -30,6 +31,12 @@ SETTING_KEYS = [
 _SECRET_KEYS = {"EMAIL_PASSWORD", "EMAIL_SMTP_PASSWORD", "EMAIL_OAUTH_ACCESS_TOKEN", "EMAIL_OAUTH_REFRESH_TOKEN",
                 "EMAIL_OAUTH_CLIENT_SECRET"}
 _CONNECTION_KEYS = set(SETTING_KEYS) - {"GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"}
+
+
+def public_message_ref(account_id, native_ref):
+    """Use the same account-bound locator in tool results and incoming Place events."""
+    payload = json.dumps({"account_id": account_id, "ref": native_ref}, separators=(",", ":")).encode()
+    return "mail:" + base64.urlsafe_b64encode(payload).decode().rstrip("=")
 
 
 class AccountError(ValueError):

@@ -298,6 +298,13 @@ def test_exchange_widget_add_edit_disconnect_and_reconnect(tmp_path, monkeypatch
             expect(frame.get_by_role("status")).to_contain_text("Authentication check succeeded")
             assert calls == [endpoint]
             screenshot(page, f"exchange-account-{width}.png")
+            from lib.store import EmailStore
+            mailbox_state = EmailStore(store.mail_dir(saved))
+            mailbox_state.put("poll_health", {"ok": False, "error": "Exchange: TlsFailure"})
+            frame.get_by_role("button", name="Refresh", exact=True).click()
+            expect(card).to_contain_text("Mail intake failed: Exchange: TlsFailure")
+            screenshot(page, f"exchange-intake-error-{width}.png")
+            mailbox_state.put("poll_health", {"ok": True})
             card.get_by_role("button", name="Edit connection").click()
             password = frame.get_by_label("Password (blank keeps saved for the same login)", exact=True)
             assert password.input_value() == ""

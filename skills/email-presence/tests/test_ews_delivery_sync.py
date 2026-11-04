@@ -109,7 +109,7 @@ def test_idless_send_acceptance_preserves_envelope_thread_mime_and_receipt(tmp_p
     assert next(msg.iter_attachments()).get_payload(decode=True) == b"attachment"
     receipt = store.receipt("one")
     assert receipt["state"] == "completed"
-    assert receipt["provider_receipt"] == {"transport": "ews", "internet_message_id": str(msg["Message-ID"])}
+    assert receipt["provider_receipt"] == {"transport": "ews", "submitted_message_id": str(msg["Message-ID"])}
     assert receipt["history_reports"][0]["payload"]["message"]["smtp_accepted"] is False
 
 
@@ -135,14 +135,16 @@ def test_sending_off_never_authenticates_or_submits(tmp_path):
     assert store.receipt("one")["state"] == "held" and not client.ops and not client.connection_checks
 
 
-def test_draft_is_save_only_and_returns_server_ref_without_sending():
+@pytest.mark.parametrize('selection,expected', [({}, 'drafts'), ({'folder': ''}, 'drafts'),
+                                                 ({'folder': 'Custom'}, 'custom')])
+def test_draft_is_save_only_and_returns_server_ref_without_sending(selection, expected):
     client = Exchange(xml('<m:Items><t:Message><t:ItemId Id="Case/+="/></t:Message></m:Items>'))
     result = client.draft(to="reader@example.invalid", bcc=['"Hidden, Reader" <private@example.invalid>'],
-                          subject="draft", body="text")
+                          subject="draft", body="text", **selection)
     assert result["message_ref"] == "ews:Case/+="
     op, = client.ops
     assert op.get("MessageDisposition") == "SaveOnly"
-    assert op.find("m:SavedItemFolderId/t:DistinguishedFolderId", N).get("Id") == "drafts"
+    assert op.find("m:SavedItemFolderId/t:DistinguishedFolderId", N).get("Id") == expected
     assert op.findtext(".//t:BccRecipients/t:Mailbox/t:EmailAddress", namespaces=N) == "private@example.invalid"
     with pytest.raises(ValueError, match="updating"):
         client.draft(to="reader@example.invalid", subject="edit", draft_id="existing")
@@ -153,12 +155,16 @@ def test_staged_bootstrap_keeps_new_arrivals_and_folder_specific_cursor(tmp_path
     store = EmailStore(tmp_path)
     client = Exchange(page(change("historical", OLD), state="s1", last="false"))
     assert client.poll(store) == 0 and not client.reads
-    # A process restart between baseline pages cannot move the activation boundary.
-    client = Exchange(page(change("historical-two", OLD) + change("Aa/+=", FRESH) +
+    assert store.get("ews_sync:inbox")["state"] == ""
+    # A process restart between baseline pages re-enumerates the unfinished
+    # cut from its original activation. No IDs are exposed prematurely.
+    client = Exchange(page(change("historical", OLD), state="s1", last="false"),
+                      page(change("historical-two", OLD) + change("Aa/+=", FRESH) +
                            change("ignored", FRESH, kind="Update"), state="s2"))
+    assert client.poll(EmailStore(tmp_path), folder="ews-folder:inbox") == 0
     assert client.poll(EmailStore(tmp_path), folder="ews-folder:inbox") == 1 and client.connection_checks == 1
     assert client.reads == ["ews:Aa/+="]
-    assert client.ops[0].findtext("m:SyncState", namespaces=N) == "s1"
+    assert [op.findtext("m:SyncState", namespaces=N) for op in client.ops] == [None, "s1"]
     first = store.claim_inbox()
     assert first and first.provider_event_key == "ews:Aa/+=" and first.uidvalidity == -1
     event = email_presence_event(first, account_id="ews:fixture")
@@ -175,16 +181,18 @@ def test_staged_bootstrap_keeps_new_arrivals_and_folder_specific_cursor(tmp_path
 
 def test_failed_second_capture_replays_prior_page_and_deduplicates_first_item(tmp_path):
     store = EmailStore(tmp_path)
-    both = page(change("first", None) + change("second", None), state="next")
-    client = Exchange(page(state="baseline"), both, both)
+    both = page(change("second", None) + change("first", None), state="next")
+    client = Exchange(page(state="baseline"), both)
     assert client.poll(store) == 0
     client.read_errors["ews:second"] = ConnectionError("temporary")
     with pytest.raises(ConnectionError):
         client.poll(store)
     assert store.status()["inbox"] == {"pending": 1}
-    client.read_errors.clear()
-    assert client.poll(EmailStore(tmp_path)) == 1
-    assert [op.findtext("m:SyncState", namespaces=N) for op in client.ops] == [None, "baseline", "baseline"]
+    assert store.get("ews_sync:inbox")["state"] == "baseline"
+    restarted = Exchange(both)
+    assert restarted.poll(EmailStore(tmp_path)) == 1
+    assert restarted.ops[0].findtext("m:SyncState", namespaces=N) == "baseline"
+    assert restarted.reads == ["ews:second"]  # Exact native lookup precedes GetItem.
     assert store.status()["inbox"] == {"pending": 2}
 
 
@@ -197,7 +205,8 @@ def test_invalid_state_rescans_since_original_activation_and_records_reset(tmp_p
     assert client.poll(store) == 1
     assert [op.findtext("m:SyncState", namespaces=N) for op in client.ops] == [None, "stale", None]
     assert store.get("poll_health")["last_sync_reset_at"] > 0
-    assert store.status()["inbox"] == {"pending": 2} and "ews:old" not in client.reads
+    assert store.status()["inbox"] == {"pending": 2}
+    assert client.reads == ["ews:one", "ews:new"]
 
 
 def test_malformed_page_never_advances_or_ingests(tmp_path):
@@ -273,14 +282,62 @@ def test_actual_sync_aliases_share_folder_identity_and_keep_mail_from_bootstrap(
     mime = base64.b64encode(b"From: a@example.invalid\r\nMessage-ID: <fresh@example.invalid>\r\n\r\nfresh").decode()
     get = (f'<m:Items><t:Message><t:MimeContent>{mime}</t:MimeContent><t:ItemId Id="Ab/+"/><t:ParentFolderId Id="folder-id"/>'
            '<t:DateTimeReceived>2024-01-01T00:00:03.0000001Z</t:DateTimeReceived></t:Message></m:Items>')
-    client, initial = soap_client([("GetFolder", _FOLDER_RESPONSE), ("SyncFolderItems", sync), ("GetItem", get)])
+    end = '<m:SyncState>last</m:SyncState><m:IncludesLastItemInRange>true</m:IncludesLastItemInRange><m:Changes/>'
+    client, initial = soap_client([("GetFolder", _FOLDER_RESPONSE), ("SyncFolderItems", sync),
+                                   ("SyncFolderItems", end), ("GetItem", get)])
     store = EmailStore(tmp_path)
+    assert client.poll(store, folder="INBOX") == 0 and store.claim_inbox() is None
     assert client.poll(store, folder="INBOX") == 1
     assert initial[1].find("m:SyncFolderId/t:FolderId", N).get("Id") == "folder-id"
     event = store.claim_inbox()
     assert event.message_id == "<fresh@example.invalid>" and event.provider_event_key == "ews:Ab/+"
-    end = '<m:SyncState>last</m:SyncState><m:IncludesLastItemInRange>true</m:IncludesLastItemInRange><m:Changes/>'
     restarted, final = soap_client([("GetFolder", _FOLDER_RESPONSE), ("SyncFolderItems", end)])
     assert restarted.poll(EmailStore(tmp_path), folder=event.folder) == 0
-    assert final[-1].findtext("m:SyncState", namespaces=N) == "first"
+    assert final[-1].findtext("m:SyncState", namespaces=N) == "last"
     assert not store.get("poll_health")["more_changes"]
+
+
+@pytest.mark.parametrize("stamps", [False, True])
+def test_sync_cut_delivers_one_thread_oldest_first_across_pages(tmp_path, stamps):
+    store = EmailStore(tmp_path)
+    stamp = lambda order: f"2025-01-01T00:00:0{order}Z" if stamps else None
+    # When a later arrival appears while paging, its native timestamp places
+    # it last. Without timestamps Exchange's native newest-first order wins.
+    changes1 = change("newest", stamp(3)) + change("middle", stamp(2))
+    changes2 = change("earliest", stamp(1))
+    if stamps:
+        changes2 = change("arrived-while-paging", stamp(4)) + changes2
+    client = Exchange(page(state="initial"), page(changes1, state="partial", last="false"),
+                      page(changes2, state="terminal"))
+    def same_thread(*, message_ref, include_attachment_data):
+        value = Exchange.read(client, message_ref=message_ref, include_attachment_data=include_attachment_data)
+        value["references"] = ["<one-thread@example.invalid>"]
+        return value
+    client.read = same_thread
+    assert client.poll(store) == 0 and client.poll(store) == 0
+    assert store.get("poll_health")["more_changes"] and store.get("ews_sync:inbox")["state"] == "initial"
+    assert not client.reads and store.claim_inbox(submitted=False) is None
+    expected = ["earliest", "middle", "newest"] + (["arrived-while-paging"] if stamps else [])
+    assert client.poll(store) == len(expected)
+    got = []
+    while (event := store.claim_inbox(submitted=False)):
+        assert event.thread_key == "<one-thread@example.invalid>"
+        got.append(event.provider_event_key)
+        store.complete_inbox(event.row_id, event.lease_token)
+    assert got == ["ews:" + key for key in expected] and store.get("ews_sync:inbox")["state"] == "terminal"
+
+
+def test_metadata_only_attachment_not_fabricated_and_source_facts_survive_intake(tmp_path):
+    store = EmailStore(tmp_path)
+    message = {"provider_event_key": "ews:wrapped", "message_id": "<protected>",
+               "source_format": "ews_properties", "source_note": "Provider-supplied text only; partially truncated",
+               "attachments": [{"file_name": "hidden.pdf", "size": 111, "content_available": False},
+                               {"filename": "empty.txt", "data": b"", "content_available": False},
+                               {"filename": "failed.bin", "mime_type": "message/rfc822", "data": b"text"}]}
+    assert store.ingest(message)[1]
+    event = store.claim_inbox()
+    assert event.context["source_format"] == "ews_properties" and "truncated" in event.context["source_note"]
+    hidden, empty, failed = event.attachments
+    assert hidden == {"file_name": "hidden.pdf", "size": 111, "content_available": False}
+    assert empty["size"] == 0 and empty["content_available"] and len(event.staged_files) == 1
+    assert failed["stage_error"] and "no raw RFC822 source" in event.context["attachment_stage_note"]

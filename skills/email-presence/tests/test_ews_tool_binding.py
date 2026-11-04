@@ -109,3 +109,50 @@ def test_companion_drains_known_pages_and_returns_to_normal_idle_wait(tmp_path):
             stop.set()
             await asyncio.wait_for(task, 5)
     asyncio.run(exercise())
+
+
+def test_place_message_can_be_opened_by_registered_mail_tool(tmp_path, monkeypatch):
+    from lib.host_adapter import email_presence_event
+    from test_ews_mailbox import client, item, listing, NATIVE
+    from test_ews_wire import response
+    from test_ews_delivery_sync import change
+
+    registry = AccountStore(tmp_path)
+    account = registry.save_ews({'address': 'fixture@example.invalid', 'password': 'fixture-only',
+                                 'endpoint': 'https://fixture.example.invalid/EWS/Exchange.asmx'})
+    store = EmailStore(registry.mail_dir(account))
+    folder = response('GetFolder', '<m:Folders><t:Folder><t:FolderId Id="F"/></t:Folder></m:Folders>')
+    sync = response('SyncFolderItems', '<m:SyncState>s1</m:SyncState>'
+                    '<m:IncludesLastItemInRange>true</m:IncludesLastItemInRange><m:Changes>'
+                    + change(NATIVE, '2099-01-01T00:00:00Z') + '</m:Changes>')
+    contents = response('GetItem', '<m:Items>' + item(mime=True) + '</m:Items>')
+    exchange, _ = client(folder, sync, contents, listing(item()), contents)
+    exchange.account = account
+    for _ in range(3):  # One synthetic sync page and one capture in this fixture.
+        exchange.poll(store)
+        if not store.get('poll_health')['more_changes']:
+            break
+    captured = store.claim_inbox()
+    event = email_presence_event(captured, account_id=account['id'], places=True)
+    service = MailService(SimpleNamespace(get_state_dir=lambda: tmp_path, get_settings=lambda _: {}))
+    monkeypatch.setattr('lib.service.account_client', lambda *_, **__: exchange)
+    handlers = {}
+    register_tools(SimpleNamespace(register_tool=lambda name, handler, **_: handlers.update({name: handler})), service)
+    def invoke(name, **kwargs):
+        return json.loads(handlers[name](account_id=account['id'], **kwargs))
+    found = invoke('email_search', limit=1)['messages'][0]
+    assert event['source_event_id'] == 'ews:' + NATIVE
+    assert event['message']['imap_uid'] == captured.uid and event['message']['uidvalidity'] == -1
+    assert event['message']['message_ref'] == found['message_ref']
+    assert invoke('email_read', message_ref=event['message']['message_ref'])['provider_id'] == NATIVE
+
+
+def test_gmail_place_also_exposes_public_ref_without_changing_native_source(tmp_path):
+    from lib.host_adapter import email_presence_event
+    store = EmailStore(tmp_path)
+    store.ingest({'uid': 5, 'uidvalidity': 1, 'folder': 'INBOX', 'message_id': '<source@example.invalid>',
+                  'provider_event_key': 'gmail:a5', 'message_ref': 'gmail:a5'})
+    account = {'id': 'google:fixture', 'provider': 'gmail'}
+    event = email_presence_event(store.claim_inbox(), account_id=account['id'])
+    assert event['source_event_id'] == 'gmail:a5' and event['message']['imap_uid'] == 5
+    assert MailService.unwrap_ref(account, event['message']['message_ref']) == {'message_ref': 'gmail:a5'}

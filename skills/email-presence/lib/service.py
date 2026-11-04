@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 
-from .accounts import AccountError, AccountStore, SETTING_KEYS
+from .accounts import AccountError, AccountStore, SETTING_KEYS, public_message_ref
 from .client import MailClient
 from .delivery import tool_origin
 from .gmail import GmailClient
@@ -100,8 +100,7 @@ class MailService:
     @staticmethod
     def wrap_ref(account, message):
         native = message.get("message_ref") or {"uid": message["uid"], "uidvalidity": message["uidvalidity"], "folder": message["folder"]}
-        payload = {"account_id": account["id"], "ref": native}
-        return "mail:" + base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+        return public_message_ref(account["id"], native)
 
     @staticmethod
     def unwrap_ref(account, reference):
@@ -381,7 +380,7 @@ def register_tools(api, service):
     tool("email_read", service.read, "Read exact message_ref, or legacy uid+uidvalidity+folder, including canonical conversation_id/thread_id for replies. Peeks only; use email_mark_read for Seen. Historical reads do not enter Presence.", message)
     tool("email_mark_read", service.mark_read, "Mark this account's selected message read; accepts message_ref or legacy uid+uidvalidity+folder.", message)
     tool("email_folders", service.folders, "Read folders/labels without changing anything, including while a Place is Silent or consciousness Advises.", {})
-    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags. Use the returned account-bound message_ref after moving or copying an Exchange item. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. destination must name the actual create/copy/move target; Gmail properties.name overrides prepare exact retry_arguments before creation.",
+    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags; Exchange also supports trash. After an Exchange move/copy, use the returned account-bound message_ref, or search the destination if no reference was supplied. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. destination must name the actual create/copy/move target; Gmail properties.name overrides prepare exact retry_arguments before creation.",
          {**message, "action": string, "destination": string, "flags": array, "remove_flags": {"type": "boolean"},
           "add_labels": array, "remove_labels": array, "label_id": string, "draft_id": string, "properties": {"type": "object"}})
     tool("email_draft", service.draft, "Save a draft without sending. Supply account_id and, for replies, canonical conversation_id/thread_id; needs_arguments returns exact retry_arguments before saving when identity is missing. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP and Exchange save new drafts in the selected folder.",

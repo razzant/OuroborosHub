@@ -385,7 +385,7 @@ class EmailRuntime:
         except Exception as exc:
             if sending:
                 self.store.uncertain_outbox(item.row_id, item.lease_token,
-                                           f"{type(exc).__name__} during SMTP delivery; inspect Message-ID before retry",
+                                           f"{type(exc).__name__} during mail submission; inspect Sent before retry",
                                            reports=[email_report(item, "uncertain", error=type(exc).__name__)])
             elif item.attempts >= 5:
                 self.store.fail_outbox(item.row_id, item.lease_token, type(exc).__name__, reports=[email_report(item, "failed", error=type(exc).__name__)])
@@ -430,8 +430,9 @@ class EmailRuntime:
                         continue  # Re-check stop and Place authority before draining another page.
                     interval = 5 if count else min(self.poll_interval, interval * 2)
                 except Exception as exc:
-                    self.store.put("poll_health", {"ok": False, "checked_at": time.time(), "error": type(exc).__name__})
-                    log.warning("Mail poll failed: %s", type(exc).__name__)
+                    reason = getattr(exc, "mail_diagnostic", None) or type(exc).__name__
+                    self.store.put("poll_health", {"ok": False, "checked_at": time.time(), "error": reason})
+                    log.warning("Mail poll failed: %s", reason)
                     interval = self.poll_interval
                 await wait(interval)
 

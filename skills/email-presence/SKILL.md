@@ -35,7 +35,7 @@ tools:
   - name: email_mark_read
     effect: write
     target: [account_id]
-    description: Mark one message read by stable UID and UIDVALIDITY.
+    description: Mark one message read by its account-bound reference, or a legacy IMAP UID and UIDVALIDITY.
   - name: email_mailbox
     effect: write
     target: [account_id,destination]
@@ -140,8 +140,15 @@ never a Gmail thread id. Draft attribution remains a write, not a speaking turn.
    address), and the NTLM login/password accepted by that server. The login may
    differ from the mailbox address. Obtain the EWS URL from the provider or its
    Autodiscover settings; this form does not discover hosts or import browser
-   sessions. Test connection reads the configured Inbox without sending mail.
+   sessions. Exchange verifies TLS with the CA bundle available to Requests in
+   this installation; the form has no per-account CA or certificate-pin override.
+   Test connection reads the configured Inbox without sending mail.
    The ordinary mail tools and optional intake work with the browser closed.
+   After Exchange rejects a login (HTTP 401), that background connection stops
+   presenting the rejected credential. Edit and save the connection to resume
+   with fresh credentials. Testing it explicitly makes a fresh connection;
+   a refused operation such as sending as a particular address does not disable
+   the whole mailbox.
 2. For Gmail, configure and grant the installation's GOOGLE_OAUTH_CLIENT_ID and
    GOOGLE_OAUTH_CLIENT_SECRET where required. The existing EMAIL_OAUTH_CLIENT_*
    keys are accepted as fallback. The widget prepares a PKCE sign-in link; Google
@@ -170,10 +177,14 @@ no mail or receipt is moved. New account stores live under hashed account direct
 The private accounts.sqlite3 registry (mode0600) contains configuration and tokens;
 it is not an encrypted backup. The skill's normal source package contains no credentials.
 Exchange keeps the latest sync state per intake folder in that same account store.
-The native-event index prevents a replay after a partially processed page. With
+The native-event index prevents duplicate capture when an unfinished sync is replayed. With
 160-byte folder handles and 144-byte event keys its measured SQLite cost is
 about 34 KiB per 100 captured messages, in addition to ordinary retained mail.
-These rows, index and cursors follow the existing retained mailbox lifetime;
+To give a conversation its arrivals oldest first, a running sync temporarily keeps
+eligible native IDs and timestamps until it has seen the last change page (about
+29 KiB per 100 pending 150-character IDs). That working set contains no mail
+bodies and is released when drained or when the account client stops.
+The retained rows, index and cursors follow the existing mailbox lifetime;
 disconnect preserves them, removing the skill's local data removes them.
 
 Settings changes reload account workers cooperatively; changing environment-granted
@@ -194,11 +205,20 @@ remain readable by explicit account_id.
   An Exchange message_ref contains a case-sensitive native item ID. Use the
   new reference returned by a move or copy when available; otherwise search
   its destination again. A local intake row number is never an EWS item ID.
+  Exchange search may expose only a sender name; read the message for SMTP address details.
+  For Exchange and Gmail, a Place event carries the same public message_ref as the tools; its
+  native source_event_id and local queue anchor remain separate.
   Gmail search is not identical to its website's alias-expanded/thread-wide search.
 - email_read only peeks and preserves flags. A local reply-header cache and exact
   raw source artifacts retain explicitly read historical mail without submitting
   it to Presence. email_mark_read is the separate write for Seen/UNREAD.
   Incoming address headers keep a readable `headers` view and retained MIME source.
+  If Exchange specifically cannot generate MIME, GetItem may instead supply the
+  same item's native body, RFC headers and recipient/attachment metadata. The
+  result identifies this fallback, marks missing raw MIME and attachment bytes,
+  and reports a missing or server-truncated body. An unrelated provider error is
+  not converted into a successful read; if the alternate read fails, intake
+  keeps its committed position and reports the failure.
   The view unfolds header continuations and recovers raw UTF-8 names; an undecodable
   encoded word stays visible, and invalid unlabelled bytes display replacement
   characters while the original MIME bytes remain unchanged. These reads stay
@@ -236,12 +256,17 @@ remain readable by explicit account_id.
 - Exchange saves new drafts (`draft_id` replacement is not implemented), sends with
   an explicit To/Cc/Bcc envelope, and uses its native sync cursor for optional
   inbox intake. The first pass skips historical messages and keeps eligible mail
-  arriving during that pass. A page is checkpointed after all captures. If Exchange
-  invalidates the cursor, recovery starts at the original activation boundary;
+  arriving during that pass. It discovers eligible IDs through the final change
+  page, captures them oldest first and commits the new sync state only after the
+  captures are durable. A restart replays the unfinished range; already captured
+  native events are not downloaded again. If Exchange invalidates the cursor,
+  recovery starts at the original activation boundary;
   items already removed from the server may no longer be available. Automatic
   capture retains Mail's per-folder RFC Message-ID deduplication; ordinary tools
   can read physical copies separately by their native refs. Exchange acceptance
   is a successful response to SendAndSaveCopy, which need not return an item ID.
+  The receipt's submitted_message_id is the locally authored RFC identifier;
+  it is not a provider-assigned identifier or proof of recipient delivery.
   A lost or ambiguous response is recorded as uncertain, not retried automatically.
 - Gmail intake stores native message identity once across labels, follows history
   pagination, and explicitly reports history_reset when an expired history cursor

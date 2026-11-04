@@ -303,6 +303,12 @@ class EmailStore:
         identity = message.get("message_id") or message.get("uid")
         staged, descriptors = [], []
         for index, item in enumerate(message.get("attachments") or ()):
+            if (item.get("content_available") is False and not item.get("path") and
+                    not any(isinstance(item.get(k), (bytes, str)) for k in ("data", "content", "data_base64", "content_base64"))):
+                # A provider may describe an attachment without yielding its
+                # bytes. An explicitly supplied b"" below is a real empty file.
+                descriptors.append(dict(item))
+                continue
             if str(item.get("content_type") or item.get("mime_type") or "").lower() == "message/rfc822":
                 descriptor = {key: value for key, value in dict(item).items() if key not in {"data", "path"}}
                 descriptor.update(content_available=False, stage_error="unsupported_mime_type", error="unsupported_mime_type")
@@ -328,7 +334,8 @@ class EmailStore:
         message["staged_files"] = staged
         message["attachments"] = descriptors
         if any(item.get("stage_error") for item in descriptors if isinstance(item, dict)):
-            message["attachment_stage_note"] = "Some attachment bytes were not staged; the full RFC822 source artifact is available."
+            message["attachment_stage_note"] = ("Some attachment bytes were not staged; the full RFC822 source artifact is available."
+                                                if source else "Some attachment bytes were not staged; no raw RFC822 source was supplied.")
         return staged
 
     def stage_outbound_attachments(self, request_id, attachments):
@@ -355,6 +362,13 @@ class EmailStore:
             self._put(db, key, cursor)
         return cursor
 
+    def has_native_event(self, folder, event_key):
+        """The exact opaque event is already in this folder's durable inbox."""
+        with self._connect() as db:
+            return db.execute("""SELECT 1 FROM inbox WHERE uidvalidity=-1 AND folder=?
+                              AND json_extract(context_json,'$.provider_event_key')=? LIMIT 1""",
+                              (folder, event_key)).fetchone() is not None
+
     def ingest(self, message, *, cursor_key=None, cursor=None):
         now = time.time()
         if message.get("_raw_source") is not None or (
@@ -364,7 +378,7 @@ class EmailStore:
             self.stage_inbound_attachments(message)
         context = {key: message[key] for key in (
             "sender_name", "cc", "date", "reply_to", "headers", "attachments", "source_artifact", "attachment_stage_note",
-            "provider_id", "provider_thread_id", "provider_event_key", "message_ref", "labels"
+            "provider_id", "provider_thread_id", "provider_event_key", "message_ref", "labels", "source_format", "source_note"
         ) if key in message}
         staged = list(message.get("staged_files") or ())
         with self._connect() as db:

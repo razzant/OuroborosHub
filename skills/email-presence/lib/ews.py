@@ -4,12 +4,12 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
-from email.utils import parsedate_to_datetime
+from email.utils import getaddresses, parsedate_to_datetime
 
 from .client import MailClient
 from .ews_operations import EwsOperations
 from .ews_wire import EwsError, EwsWire, NS, ews_timestamp, m, t
-from .mime import _message_ids, parse_message
+from .mime import _html_to_text, _message_ids, decode_header_value, parse_message
 
 
 # These are EWS distinguished folder IDs, not localized mailbox display names.
@@ -19,10 +19,16 @@ _KNOWN = {'inbox': 'inbox', 'draft': 'drafts', 'drafts': 'drafts', 'sent': 'sent
           'outbox': 'outbox', 'msgfolderroot': 'msgfolderroot'}
 
 
-def _shape(kind, properties=(), *, mime=False):
+_METADATA = ('item:Subject', 'item:DateTimeReceived', 'item:ParentFolderId', 'item:InReplyTo',
+             'item:Flag', 'message:From', 'message:InternetMessageId', 'message:References', 'message:IsRead')
+
+
+def _shape(kind, properties=(), *, mime=False, text_body=False):
     values = [t('BaseShape', text='IdOnly')]
     if mime:
         values.append(t('IncludeMimeContent', text='true'))
+    if text_body:
+        values.append(t('BodyType', text='Text'))
     if properties:
         values.append(t('AdditionalProperties', *(t('FieldURI', FieldURI=p) for p in properties)))
     return m(kind + 'Shape', *values)
@@ -156,9 +162,16 @@ class EwsClient(EwsOperations, MailClient):
             result['internal_date'] = ews_timestamp(received)
         return result
 
+    def _metadata(self, item):
+        facts = self._facts(item)
+        return {**facts, 'subject': item.findtext('t:Subject', '', NS), 'sender': item.findtext('t:From/t:Mailbox/t:EmailAddress', '', NS),
+                'sender_name': item.findtext('t:From/t:Mailbox/t:Name', '', NS),
+                'message_id': item.findtext('t:InternetMessageId', '', NS) or _fallback_id(facts['provider_id']),
+                'references': _message_ids(item.findtext('t:References', '', NS)), 'in_reply_to': item.findtext('t:InReplyTo', '', NS),
+                'date': item.findtext('t:DateTimeReceived', '', NS)}
+
     def _find(self, folder, limit, offset, *, restriction=None, query=''):
-        shape = _shape('Item', ('item:Subject', 'item:DateTimeReceived', 'item:ParentFolderId', 'item:InReplyTo',
-                                'item:Flag', 'message:From', 'message:InternetMessageId', 'message:References', 'message:IsRead'))
+        shape = _shape('Item', _METADATA)
         op = m('FindItem', shape, m('IndexedPageItemView', MaxEntriesReturned=limit, Offset=offset, BasePoint='Beginning'),
                Traversal='Shallow')
         if restriction is not None:
@@ -168,15 +181,7 @@ class EwsClient(EwsOperations, MailClient):
         if query:
             op.append(m('QueryString', text=query))
         root = _child(self._call(op), 'm:RootFolder')
-        results = []
-        for item in _child(root, 't:Items'):
-            msg = self._facts(item)
-            msg.update(subject=item.findtext('t:Subject', '', NS), sender=item.findtext('t:From/t:Mailbox/t:EmailAddress', '', NS),
-                       sender_name=item.findtext('t:From/t:Mailbox/t:Name', '', NS),
-                       message_id=item.findtext('t:InternetMessageId', '', NS) or _fallback_id(msg['provider_id']),
-                       references=_message_ids(item.findtext('t:References', '', NS)),
-                       in_reply_to=item.findtext('t:InReplyTo', '', NS), date=item.findtext('t:DateTimeReceived', '', NS))
-            results.append(msg)
+        results = [self._metadata(item) for item in _child(root, 't:Items')]
         return {'folder': folder, 'messages': results, 'next_page_token': _page(root, offset),
                 'result_size_estimate': int(root.get('TotalItemsInView')) if root.get('TotalItemsInView') else None}
 
@@ -188,15 +193,70 @@ class EwsClient(EwsOperations, MailClient):
             raise ValueError('Use the continuation page_token from Exchange search')
         return self._find(folder, max(1, min(200, int(limit))), int(token), query=query)
 
+    def _get_item(self, native, shape):
+        reply = self._call(m('GetItem', shape, m('ItemIds', t('ItemId', Id=native))))
+        item = _only(reply, 'm:Items')
+        if _child(item, 't:ItemId').get('Id') != native:
+            raise EwsError('ItemIdentityMismatch')
+        return item
+
+    def _structured_read(self, native):
+        # A GetItem MIME conversion error says Exchange could not *generate*
+        # MIME. The original stored properties are a distinct readable format.
+        fields = _METADATA + ('item:Body', 'item:InternetMessageHeaders', 'item:Attachments',
+                              'message:ToRecipients', 'message:CcRecipients', 'message:ReplyTo')
+        item = self._get_item(native, _shape('Item', fields, text_body=True))
+        msg = self._metadata(item)
+        headers = {}
+        for row in item.findall('t:InternetMessageHeaders/t:InternetMessageHeader', NS):
+            name = (row.get('HeaderName') or '').casefold()
+            if name:
+                headers.setdefault(name, []).append(decode_header_value(row.text or ''))
+
+        def addresses(prop, header):
+            values = [(box.findtext('t:Name', '', NS), box.findtext('t:EmailAddress', '', NS))
+                      for box in item.findall('t:' + prop + '/t:Mailbox', NS)
+                      if box.findtext('t:RoutingType', 'SMTP', NS).upper() == 'SMTP']
+            # Native recipients can mix SMTP addresses and Exchange legacy DNs.
+            # Prefer a supplied RFC list just as the normal MIME reader does.
+            rfc = [(name, address) for name, address in getaddresses(headers.get(header, [])) if '@' in address]
+            return rfc or [(name, address) for name, address in values if '@' in address]
+
+        sender = addresses('From', 'from')
+        msg.update(sender=sender[0][1] if sender else '', sender_name=(sender[0][0] if sender else '') or msg['sender_name'],
+                   recipients=[v for _, v in addresses('ToRecipients', 'to')], cc=[v for _, v in addresses('CcRecipients', 'cc')],
+                   reply_to=[v for _, v in addresses('ReplyTo', 'reply-to')], headers=headers,
+                   message_id=item.findtext('t:InternetMessageId', '', NS) or next(iter(headers.get('message-id', [])), '') or msg['message_id'],
+                   in_reply_to=msg['in_reply_to'] or next(iter(headers.get('in-reply-to', [])), ''),
+                   references=msg['references'] or _message_ids(' '.join(headers.get('references', []))))
+        body = item.find('t:Body', NS)
+        msg['body'] = (body.text or '') if body is not None else ''
+        if body is not None and body.get('BodyType', '').lower() == 'html':
+            msg['body_html'], msg['body'] = msg['body'], _html_to_text(msg['body'])
+        msg['source_format'] = 'ews_properties'
+        msg['source_note'] = 'Exchange could not generate MIME; raw MIME is unavailable. Attachments are metadata only.'
+        if body is None or body.get('IsTruncated') in {'1', 'true'}:
+            msg['source_note'] += ' Exchange omitted the body.' if body is None else ' Exchange marked the returned body truncated.'
+        msg['attachments'] = []
+        for node in item.findall('t:Attachments/*', NS):
+            aid = node.find('t:AttachmentId', NS)
+            size = node.findtext('t:Size', '', NS)
+            msg['attachments'].append({'file_name': node.findtext('t:Name', '', NS), 'mime_type': node.findtext('t:ContentType', '', NS),
+                                       'content_available': False, **({'size': int(size)} if size.isdecimal() else {}),
+                                       **({'provider_attachment_id': aid.get('Id')} if aid is not None and aid.get('Id') else {})})
+        return msg
+
     def read(self, *, message_ref='', include_attachment_data=False, **_legacy):
         native = self.native_id(message_ref)
         shape = _shape('Item', ('item:DateTimeReceived', 'item:ParentFolderId', 'item:Flag',
                                 'message:IsRead', 'message:InternetMessageId'), mime=True)
-        reply = self._call(m('GetItem', shape, m('ItemIds', t('ItemId', Id=native))))
-        item = _only(reply, 'm:Items')
+        try:
+            item = self._get_item(native, shape)
+        except EwsError as exc:
+            if exc.proven and exc.code == 'ErrorMimeContentConversionFailed':
+                return self._structured_read(native)
+            raise
         facts = self._facts(item)
-        if facts['provider_id'] != native:
-            raise EwsError('ItemIdentityMismatch')
         try:
             encoded = _child(item, 't:MimeContent').text or ''
             raw = base64.b64decode(''.join(encoded.split()), validate=True)

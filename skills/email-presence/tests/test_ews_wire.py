@@ -65,6 +65,7 @@ class Session:
     (response('GetFolder', klass='Error', code='Sensitive HTML from the proxy'), 'UnknownResponse', False),
     (envelope('<m:GetFolderResponse/>'), 'UnexpectedResponse', False),
     ('<!DOCTYPE a [<!ENTITY x "bad">]>' + response('GetFolder'), 'InvalidXml', False),
+    (requests.exceptions.SSLError('Sensitive private certificate path'), 'TlsFailure', False),
     (requests.ConnectionError('Sensitive HTML from the proxy'), 'TransportFailure', False),
 ])
 def test_one_attempt_typed_private_failures(value, code, proven):
