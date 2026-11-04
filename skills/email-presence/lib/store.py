@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -132,10 +133,21 @@ class OutboxItem:
 
 
 class EmailStore:
+    """One mailbox's durable queues over one kept SQLite connection.
+
+    The connection opens on first use and stays open until ``close`` (a later call opens
+    it again); callers take turns on it under the store's lock, whatever thread they run
+    on. A loop with nothing to claim only reads: it takes no write lock and writes
+    nothing. Every commit is synchronous=FULL: a ``sending`` mark must survive a power
+    loss, or a message could go out twice from the owner's mailbox.
+    """
+
     def __init__(self, state_dir):
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = self.state_dir / "email_presence.sqlite3"
+        self._lock = threading.Lock()
+        self._db = None
         try:
             descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
@@ -211,21 +223,54 @@ class EmailStore:
                     db.execute("UPDATE inbox SET thread_key=? WHERE id=?", (key, r["id"]))
                 db.execute("DROP TABLE prototype_inbox")
 
-    @contextmanager
-    def _connect(self):
-        db = sqlite3.connect(self.path, timeout=15)
-        db.row_factory = sqlite3.Row
+    def __del__(self):
+        # Short-lived tool callers may drop the store without an explicit stop.
+        db = getattr(self, "_db", None)
+        if db is not None:
+            db.close()
+
+    def close(self):
+        """Close the kept connection once its current user is done."""
+        with self._lock:
+            db, self._db = self._db, None
+            if db is not None:
+                db.close()
+
+    def _open(self):
+        db = sqlite3.connect(self.path, timeout=15, check_same_thread=False)
         try:
+            db.row_factory = sqlite3.Row
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=FULL")
-            with db:
-                yield db
-        finally:
+        except BaseException:
             db.close()
+            raise
+        return db
+
+    @contextmanager
+    def _connect(self):
+        """The kept connection for one caller at a time: committed on success, rolled back on error."""
+        with self._lock:
+            if self._db is None:
+                self._db = self._open()
+            db = self._db
+            try:
+                with db:
+                    yield db
+            finally:
+                if db.in_transaction:
+                    # Its commit and rollback both failed. Closing discards the transaction, as it
+                    # did for a per-call connection; the next call opens a fresh one.
+                    self._db = None
+                    db.close()
 
     def get(self, key):
         with self._connect() as db:
-            row = db.execute("SELECT value FROM runtime_state WHERE key=?", (key,)).fetchone()
+            return self._get(db, key)
+
+    @staticmethod
+    def _get(db, key):
+        row = db.execute("SELECT value FROM runtime_state WHERE key=?", (key,)).fetchone()
         return json.loads(row[0]) if row else None
 
     def put(self, key, value):
@@ -407,12 +452,20 @@ class EmailStore:
                     json.dumps(message.get("attachments", []), ensure_ascii=False), json.dumps(staged, ensure_ascii=False), now, now))
             if cursor_key:
                 self._put(db, cursor_key, cursor)
-            return int(cur.lastrowid or 0), bool(cur.rowcount)
+            # lastrowid is the connection's newest insert: an ignored duplicate has none of its own.
+            return (int(cur.lastrowid or 0) if cur.rowcount else 0), bool(cur.rowcount)
 
     def _claim(self, table, lease_seconds, scope="", order="id"):
         now = time.time()
         token = uuid.uuid4().hex
+        fifo = "AND NOT EXISTS (SELECT 1 FROM inbox earlier WHERE earlier.id < inbox.id AND earlier.thread_key = inbox.thread_key AND earlier.state IN ('pending','retry','processing') AND earlier.host_reference='')" if table == "inbox" else ""
+        claimable = f"((state IN ('pending','retry') AND available_at<=?) OR (state='processing' AND lease_until<=?)) {scope} {fifo}"
         with self._connect() as db:
+            # Plain reads first: with no lost send to settle and nothing claimable, no write lock is taken.
+            if not ((table == "outbox" and db.execute(
+                    "SELECT 1 FROM outbox WHERE state='sending' AND lease_until<=? LIMIT 1", (now,)).fetchone())
+                    or db.execute(f"SELECT 1 FROM {table} WHERE {claimable} LIMIT 1", (now, now)).fetchone()):
+                return None
             db.execute("BEGIN IMMEDIATE")
             # SMTP DATA can have been accepted before a process disappears.
             if table == "outbox":
@@ -420,8 +473,7 @@ class EmailStore:
                     report = email_report(self._outbox_item(row), "uncertain", error="Process lost during provider acceptance")
                     self._freeze_reports(db, row["id"], [report] if report else [])
                 db.execute("UPDATE outbox SET state='uncertain',last_error='Process lost during mail delivery; inspect Message-ID before retry',updated_at=? WHERE state='sending' AND lease_until<=?", (now, now))
-            fifo = "AND NOT EXISTS (SELECT 1 FROM inbox earlier WHERE earlier.id < inbox.id AND earlier.thread_key = inbox.thread_key AND earlier.state IN ('pending','retry','processing') AND earlier.host_reference='')" if table == "inbox" else ""
-            row = db.execute(f"SELECT * FROM {table} WHERE ((state IN ('pending','retry') AND available_at<=?) OR (state='processing' AND lease_until<=?)) {scope} {fifo} ORDER BY {order} LIMIT 1", (now, now)).fetchone()
+            row = db.execute(f"SELECT * FROM {table} WHERE {claimable} ORDER BY {order} LIMIT 1", (now, now)).fetchone()
             if not row:
                 return None
             db.execute(f"UPDATE {table} SET state='processing',lease_token=?,lease_until=?,attempts=attempts+1,updated_at=? WHERE id=?", (token, now + lease_seconds, now, row["id"]))
@@ -683,5 +735,5 @@ class EmailStore:
             counts["outbox_held"] = db.execute("SELECT COUNT(*) FROM outbox WHERE state='retry' AND last_error LIKE 'Held:%'").fetchone()[0]
             # Retained events still observing their original attempt or child (counted in their inbox state too).
             counts["inbox_retained"] = db.execute("SELECT COUNT(*) FROM inbox WHERE host_reference LIKE 'retained:%' AND state NOT IN ('completed','failed')").fetchone()[0]
-            counts["delivery_support"] = self.get("delivery_support")
+            counts["delivery_support"] = self._get(db, "delivery_support")
         return counts

@@ -37,7 +37,7 @@ async def manage_accounts(state, stop, *, refresh_seconds=1):
     legacy = {key: os.environ[key] for key in SETTING_KEYS if key in os.environ}
 
     async def worker(accounts, account, own_stop):
-        client = host = None
+        client = host = store = None
         try:
             directory = accounts.mail_dir(account)
             client = account_client(accounts, account, imap_client=MailClient)
@@ -45,16 +45,24 @@ async def manage_accounts(state, stop, *, refresh_seconds=1):
             host = create_host_adapter(str(root_settings.get("binding_id") or "") if account.get("legacy") else "",
                                        words=account.get("words", []), account_id=account["id"], address=account["address"],
                                        senders=account["senders"], sender=account.get("sender") or account["address"])
-            runtime = EmailRuntime(EmailStore(directory), client, host, folder=account.get("folder") or "INBOX",
+            store = EmailStore(directory)
+            runtime = EmailRuntime(store, client, host, folder=account.get("folder") or "INBOX",
                                    account=account["id"], poll_interval=account.get("poll_interval_sec") or 30,
                                    account_loader=lambda: AccountStore(state, legacy).resolve(account["id"]))
             await runtime.run(own_stop)
         finally:
-            if host is not None:
-                await host.aclose()
-            close = getattr(client, "close", None)
-            if close:
-                close()
+            try:
+                if host is not None:
+                    await host.aclose()
+            finally:
+                try:
+                    close = getattr(client, "close", None)
+                    if close:
+                        close()
+                finally:
+                    if store is not None:
+                        # After its loops and their threads ended: the mailbox's one connection.
+                        store.close()
 
     try:
         while not stop.is_set():

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.3
+
+- Keep one connection per mailbox store open instead of opening one for every call. An
+  inbox or outbox loop with nothing to claim now only reads: it takes no write lock and
+  writes nothing. A claim with work still settles a send whose SMTP acceptance is unknown
+  as `uncertain` first and is never sent again; which messages are leased, in what order,
+  is unchanged. Every commit stays `synchronous=FULL`. The companion closes a mailbox's
+  connection when its worker stops, including host/client cleanup failures. Discarding
+  a temporary tool store closes its connection too.
+
 ## 0.10.2
 
 - Preserve existing Exchange message and folder references while verifying their
