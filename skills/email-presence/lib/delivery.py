@@ -1,4 +1,12 @@
-"""SMTP observations, separate from recipient delivery or read claims."""
+"""Provider observations, separate from recipient delivery or read claims."""
+
+
+class DeliveryRejected(RuntimeError):
+    """The transport knows the provider rejected this submission before accepting it."""
+    def __init__(self, cause, *, retryable=False, retry_after=None):
+        self.retryable = retryable
+        self.retry_after = retry_after
+        super().__init__(str(cause))
 
 
 def tool_origin(ctx):

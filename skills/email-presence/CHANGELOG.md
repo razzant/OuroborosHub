@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.0
+
+- Connect on-premises Exchange mailboxes over HTTPS with NTLM. Exchange uses
+  the existing account widget, mail tools, optional Place intake and outbox.
+  Mailbox addresses and credentials belong to the local installation.
+- Preserve native Exchange item references alongside RFC reply identity.
+  Reads do not mark messages read. A successful Exchange send can have no item
+  ID; an ambiguous response stays uncertain without an automatic resend.
+
 ## 0.9.3
 
 - Keep already-admitted deferred replies in custody across unreadable work polls;

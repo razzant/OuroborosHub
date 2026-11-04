@@ -4,6 +4,7 @@ import smtplib
 
 import httpx
 import pytest
+import requests
 
 
 @pytest.fixture(autouse=True)
@@ -12,6 +13,7 @@ def no_provider_network(monkeypatch):
         raise AssertionError("This offline test attempted an unmocked network connection")
     async def refused_async(*_args, **_kwargs):
         refused()
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", refused)
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", refused)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refused_async)
     monkeypatch.setattr(imaplib.IMAP4, "open", refused)

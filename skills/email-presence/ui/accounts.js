@@ -111,36 +111,56 @@ function googleForm() {
     return form;
 }
 
-function imapForm(account) {
+function connectionForm(provider, account) {
+    const exchange = provider === 'ews';
     const config = account?.connection || {};
     const form = node('form');
-    form.append(node('h3', {text:account ? 'Edit mail connection' : 'Connect IMAP / SMTP'}));
-    form.append(node('p', {class:'note', text:'For Yandex use an app password. For Proton use the local Bridge credentials and its certificate, not your Proton login password. Passwords already saved are never returned to this page.'}));
+    form.append(node('h3', {text:account ? 'Edit mail connection' : exchange ? 'Connect Exchange' : 'Connect IMAP / SMTP'}));
+    form.append(node('p', {class:'note', text:exchange
+        ? 'For Exchange Server with NTLM sign-in, enter an HTTPS EWS address whose certificate this installation trusts. Mail stores the password in its private, unencrypted local database.'
+        : 'For Yandex use an app password. For Proton use the local Bridge credentials and its certificate, not your Proton login password. Passwords already saved are never returned to this page.'}));
     const fields = node('div', {class:'fields'});
-    field(fields, 'address', 'Mailbox email address', account?.address);
+    const address = field(fields, 'address', 'Mailbox email address', account?.address, exchange ? 'email' : 'text');
     field(fields, 'label', 'Display label', account?.label);
-    field(fields, 'username', 'IMAP login (blank means email address)', config.EMAIL_USER);
-    field(fields, 'password', account?.password_configured ? 'App / Bridge password (blank keeps saved)' : 'App / Bridge password', '', 'password');
-    field(fields, 'imap_host', 'IMAP host', config.EMAIL_IMAP_HOST);
-    field(fields, 'imap_port', 'IMAP port', config.EMAIL_IMAP_PORT || 993, 'number');
-    field(fields, 'imap_security', 'IMAP TLS', config.EMAIL_IMAP_SECURITY || 'ssl', 'select', ['ssl','starttls']);
-    field(fields, 'smtp_host', 'SMTP host', config.EMAIL_SMTP_HOST);
-    field(fields, 'smtp_port', 'SMTP port', config.EMAIL_SMTP_PORT || 587, 'number');
-    field(fields, 'smtp_security', 'SMTP TLS', config.EMAIL_SMTP_SECURITY || 'starttls', 'select', ['ssl','starttls']);
-    field(fields, 'smtp_username', 'SMTP login (blank means IMAP login)', config.EMAIL_SMTP_USER);
-    field(fields, 'smtp_password', 'Separate SMTP password (optional)', '', 'password');
+    if (exchange) {
+        const endpoint = field(fields, 'endpoint', 'EWS service URL', config.EWS_ENDPOINT, 'url');
+        endpoint.placeholder = 'https://mail.example.org/EWS/Exchange.asmx';
+        address.required = endpoint.required = true;
+        address.readOnly = endpoint.readOnly = !!account;
+        if (account) form.append(node('p', {class:'note', text:'To use a different mailbox or server address, add a separate account.'}));
+        const login = field(fields, 'username', 'Exchange login (blank means email address)', config.EMAIL_USER);
+        const password = field(fields, 'password', account?.password_configured ? 'Password (blank keeps saved for the same login)' : 'Password', '', 'password');
+        const requirePassword = () => { password.required = !account?.password_configured || (login.value.trim() || address.value) !== config.EMAIL_USER; };
+        requirePassword();
+        login.addEventListener('input', requirePassword);
+    } else {
+        field(fields, 'username', 'IMAP login (blank means email address)', config.EMAIL_USER);
+        field(fields, 'password', account?.password_configured ? 'App / Bridge password (blank keeps saved)' : 'App / Bridge password', '', 'password');
+        field(fields, 'imap_host', 'IMAP host', config.EMAIL_IMAP_HOST);
+        field(fields, 'imap_port', 'IMAP port', config.EMAIL_IMAP_PORT || 993, 'number');
+        field(fields, 'imap_security', 'IMAP TLS', config.EMAIL_IMAP_SECURITY || 'ssl', 'select', ['ssl','starttls']);
+        field(fields, 'smtp_host', 'SMTP host', config.EMAIL_SMTP_HOST);
+        field(fields, 'smtp_port', 'SMTP port', config.EMAIL_SMTP_PORT || 587, 'number');
+        field(fields, 'smtp_security', 'SMTP TLS', config.EMAIL_SMTP_SECURITY || 'starttls', 'select', ['ssl','starttls']);
+        field(fields, 'smtp_username', 'SMTP login (blank means IMAP login)', config.EMAIL_SMTP_USER);
+        field(fields, 'smtp_password', 'Separate SMTP password (optional)', '', 'password');
+    }
     form.append(fields);
-    field(form, 'senders', 'Sender addresses (one per line)', (account?.senders || []).join('\n'), 'textarea');
-    field(form, 'sender', 'Default sender (blank means mailbox address)', account?.sender);
-    const trust = node('details', {}, [node('summary', {text:'Certificate trust for Proton Bridge or private servers'})]);
-    field(trust, 'tls_fingerprint', 'Exact server certificate SHA-256 (optional)', config.EMAIL_TLS_FINGERPRINT);
-    field(trust, 'tls_ca', 'Trusted certificate PEM or local CA file (optional)', config.EMAIL_TLS_CA, 'textarea');
-    trust.append(node('p', {class:'note', text:'Use a certificate or fingerprint obtained from the server/Bridge you trust. A configured fingerprint is checked before authentication; certificate verification is never silently disabled.'}));
-    form.append(trust);
+    const senderFields = exchange ? node('details', {}, [node('summary', {text:'Sender addresses (optional)'})]) : form;
+    if (exchange) form.append(senderFields);
+    field(senderFields, 'senders', 'Sender addresses (one per line)', (account?.senders || []).join('\n'), 'textarea');
+    field(senderFields, 'sender', 'Default sender (blank means mailbox address)', account?.sender);
+    if (!exchange) {
+        const trust = node('details', {}, [node('summary', {text:'Certificate trust for Proton Bridge or private servers'})]);
+        field(trust, 'tls_fingerprint', 'Exact server certificate SHA-256 (optional)', config.EMAIL_TLS_FINGERPRINT);
+        field(trust, 'tls_ca', 'Trusted certificate PEM or local CA file (optional)', config.EMAIL_TLS_CA, 'textarea');
+        trust.append(node('p', {class:'note', text:'Use a certificate or fingerprint obtained from the server/Bridge you trust. A configured fingerprint is checked before authentication; certificate verification is never silently disabled.'}));
+        form.append(trust);
+    }
     const submit = node('button', {type:'button', text:account ? 'Save connection' : 'Add account', class:'primary'});
     form.append(node('div', {class:'actions'}, [submit, button('Cancel', async () => { selectedForm = null; })]));
     formAction(form, submit, async () => {
-            const data = formData(form);
+            const data = {...formData(form), provider};
             if (account) data.account_id = account.id;
             const value = await request('accounts/save', data);
             notice = `Saved ${value.account.address}. Test the connection before relying on it.`;
@@ -183,6 +203,7 @@ function queueView(account) {
         node('p', {text:`Inbox: ${counts(queue.inbox) || 'no captured mail'}`}),
         node('p', {text:`Outbox: ${counts(outgoing) || 'no queued mail'}`}),
     ]);
+    if (queue.poll_health?.ok === false) view.append(node('p', {class:'note', text:`Mail intake failed: ${queue.poll_health.error || 'test the connection'}`}));
     if (queue.delivery_reports_pending) view.append(node('p', {class:'note', text:`${queue.delivery_reports_pending} delivery reports waiting for host acknowledgement`}));
     const rows = queue.receipts || [];
     if (rows.length) {
@@ -203,7 +224,7 @@ function card(account) {
     const card = node('section', {class:'account'});
     card.append(node('div', {class:'address', text:account.label || account.address}),
                 node('div', {text:account.address}),
-                node('p', {class:'secondary', text:`${account.provider === 'gmail' ? 'Gmail API' : 'IMAP / SMTP'} · ${account.connected ? 'Configured' : 'Disconnected'} · sends as ${account.sender || account.address}` }));
+                node('p', {class:'secondary', text:`${account.provider === 'gmail' ? 'Gmail API' : account.provider === 'ews' ? 'Exchange (EWS)' : 'IMAP / SMTP'} · ${account.connected ? 'Configured' : 'Disconnected'} · sends as ${account.sender || account.address}` }));
     if (account.runtime_error) card.append(node('p', {class:'notice error', text:`Worker stopped: ${account.runtime_error}. Check the connection or update its configuration.`}));
     const controls = node('div', {class:'actions'});
     if (account.runtime_error && account.connected) controls.append(button('Retry worker', async () => {
@@ -216,7 +237,7 @@ function card(account) {
         if (result.account?.address && result.account.address !== account.address) throw new Error('Provider reported a different address; inspect this account.');
     }));
     if (!account.environment_config) controls.append(button('Preferences', async () => { selectedForm = {kind:'preferences', account}; }));
-    if (account.provider === 'imap' && !account.environment_config) controls.append(button(account.connected ? 'Edit connection' : 'Reconnect', async () => { selectedForm = {kind:'imap', account}; }));
+    if (['imap', 'ews'].includes(account.provider) && !account.environment_config) controls.append(button(account.connected ? 'Edit connection' : 'Reconnect', async () => { selectedForm = {kind:account.provider, account}; }));
     if (account.provider === 'gmail') controls.append(button(account.connected ? 'Refresh sender addresses' : 'Reconnect Google', async () => {
         if (!account.connected) { selectedForm = {kind:'google'}; return; }
         await request('accounts/refresh-senders', {account_id:account.id}); notice = 'Sender addresses refreshed.'; noticeError = false; await refresh();
@@ -246,8 +267,9 @@ function render() {
     if (notice) root.append(node('div', {class:`notice${noticeError ? ' error' : ''}`, role:'status', text:notice}));
     if (authLink) root.append(button('Continue in Google', async () => { await window.OuroborosWidget.openExternal(authLink); }, 'primary'));
     root.append(node('div', {class:'actions'}, [button('Add Google mail', async () => { selectedForm = {kind:'google'}; authLink = ''; }),
-                                              button('Add IMAP / Proton Bridge', async () => { selectedForm = {kind:'imap'}; })]));
-    if (selectedForm) root.append(selectedForm.kind === 'google' ? googleForm() : selectedForm.kind === 'preferences' ? preferences(selectedForm.account) : imapForm(selectedForm.account));
+                                              button('Add IMAP / Proton Bridge', async () => { selectedForm = {kind:'imap'}; }),
+                                              button('Add Exchange', async () => { selectedForm = {kind:'ews'}; })]));
+    if (selectedForm) root.append(selectedForm.kind === 'google' ? googleForm() : selectedForm.kind === 'preferences' ? preferences(selectedForm.account) : connectionForm(selectedForm.kind, selectedForm.account));
     if (!accounts.length) root.append(node('p', {class:'note', text:'No mail accounts configured yet.'}));
     for (const account of accounts) root.append(card(account));
     root.append(node('p', {class:'note', text:'Credentials stay in this skill’s private local state. Disconnect preserves captured mail and delivery receipts. Removing the skill or explicitly deleting its local data is different.'}));

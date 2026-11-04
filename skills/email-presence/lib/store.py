@@ -303,6 +303,12 @@ class EmailStore:
         identity = message.get("message_id") or message.get("uid")
         staged, descriptors = [], []
         for index, item in enumerate(message.get("attachments") or ()):
+            if (item.get("content_available") is False and not item.get("path") and
+                    not any(isinstance(item.get(k), (bytes, str)) for k in ("data", "content", "data_base64", "content_base64"))):
+                # A provider may describe an attachment without yielding its
+                # bytes. An explicitly supplied b"" below is a real empty file.
+                descriptors.append(dict(item))
+                continue
             if str(item.get("content_type") or item.get("mime_type") or "").lower() == "message/rfc822":
                 descriptor = {key: value for key, value in dict(item).items() if key not in {"data", "path"}}
                 descriptor.update(content_available=False, stage_error="unsupported_mime_type", error="unsupported_mime_type")
@@ -328,7 +334,8 @@ class EmailStore:
         message["staged_files"] = staged
         message["attachments"] = descriptors
         if any(item.get("stage_error") for item in descriptors if isinstance(item, dict)):
-            message["attachment_stage_note"] = "Some attachment bytes were not staged; the full RFC822 source artifact is available."
+            message["attachment_stage_note"] = ("Some attachment bytes were not staged; the full RFC822 source artifact is available."
+                                                if source else "Some attachment bytes were not staged; no raw RFC822 source was supplied.")
         return staged
 
     def stage_outbound_attachments(self, request_id, attachments):
@@ -355,6 +362,13 @@ class EmailStore:
             self._put(db, key, cursor)
         return cursor
 
+    def has_native_event(self, folder, event_key):
+        """The exact opaque event is already in this folder's durable inbox."""
+        with self._connect() as db:
+            return db.execute("""SELECT 1 FROM inbox WHERE uidvalidity=-1 AND folder=?
+                              AND json_extract(context_json,'$.provider_event_key')=? LIMIT 1""",
+                              (folder, event_key)).fetchone() is not None
+
     def ingest(self, message, *, cursor_key=None, cursor=None):
         now = time.time()
         if message.get("_raw_source") is not None or (
@@ -364,14 +378,28 @@ class EmailStore:
             self.stage_inbound_attachments(message)
         context = {key: message[key] for key in (
             "sender_name", "cc", "date", "reply_to", "headers", "attachments", "source_artifact", "attachment_stage_note",
-            "provider_id", "provider_thread_id", "provider_event_key", "message_ref", "labels"
+            "provider_id", "provider_thread_id", "provider_event_key", "message_ref", "labels", "source_format", "source_note"
         ) if key in message}
         staged = list(message.get("staged_files") or ())
         with self._connect() as db:
+            uid = message.get("uid")
+            validity = message.get("uidvalidity", 0)
+            if uid is None:
+                # Native opaque IDs cannot be truncated to an IMAP UID. Use
+                # the next local inbox address only when actually capturing;
+                # retain the exact provider key so replay remains idempotent.
+                if not context.get("provider_event_key"):
+                    raise ValueError("A native event key or a numeric UID is required")
+                db.execute("BEGIN IMMEDIATE")
+                validity = -1  # Local address space, never an IMAP generation.
+                db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS inbox_native_event
+                           ON inbox(folder,json_extract(context_json,'$.provider_event_key'))
+                           WHERE uidvalidity=-1""")
+                uid = db.execute("SELECT COALESCE(MAX(id),0)+1 FROM inbox").fetchone()[0]
             cur = db.execute("""INSERT OR IGNORE INTO inbox
                 (folder,uidvalidity,uid,message_id,in_reply_to,references_json,sender,subject,body,recipients_json,thread_key,context_json,cc_json,reply_to_json,attachments_json,staged_files_json,created_at,updated_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                    message.get("folder", "INBOX"), message.get("uidvalidity", 0), int(message["uid"]),
+                    message.get("folder", "INBOX"), validity, int(uid),
                     message["message_id"], message.get("in_reply_to", ""), json.dumps(message.get("references", [])),
                     message.get("sender", ""), message.get("subject", ""), message.get("body", ""),
                     json.dumps(message.get("recipients", [])), conversation_root(references=message.get("references"), in_reply_to=message.get("in_reply_to"), message_id=message["message_id"]),
@@ -389,9 +417,9 @@ class EmailStore:
             # SMTP DATA can have been accepted before a process disappears.
             if table == "outbox":
                 for row in db.execute("SELECT * FROM outbox WHERE state='sending' AND lease_until<=?", (now,)).fetchall():
-                    report = email_report(self._outbox_item(row), "uncertain", error="Process lost during SMTP acceptance")
+                    report = email_report(self._outbox_item(row), "uncertain", error="Process lost during provider acceptance")
                     self._freeze_reports(db, row["id"], [report] if report else [])
-                db.execute("UPDATE outbox SET state='uncertain',last_error='Process lost during SMTP delivery; inspect Message-ID before retry',updated_at=? WHERE state='sending' AND lease_until<=?", (now, now))
+                db.execute("UPDATE outbox SET state='uncertain',last_error='Process lost during mail delivery; inspect Message-ID before retry',updated_at=? WHERE state='sending' AND lease_until<=?", (now, now))
             fifo = "AND NOT EXISTS (SELECT 1 FROM inbox earlier WHERE earlier.id < inbox.id AND earlier.thread_key = inbox.thread_key AND earlier.state IN ('pending','retry','processing') AND earlier.host_reference='')" if table == "inbox" else ""
             row = db.execute(f"SELECT * FROM {table} WHERE ((state IN ('pending','retry') AND available_at<=?) OR (state='processing' AND lease_until<=?)) {scope} {fifo} ORDER BY {order} LIMIT 1", (now, now)).fetchone()
             if not row:

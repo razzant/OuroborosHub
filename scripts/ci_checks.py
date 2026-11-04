@@ -37,7 +37,7 @@ SUITES = {
                                'tests/test_reaction_core_consumer.py'],
                      'dependencies': ['httpx', 'starlette', 'websockets']},
     'email-presence': {'skills': ['email-presence'], 'tests': ['skills/email-presence/tests'],
-                       'dependencies': ['httpx', 'starlette'], 'cwd': 'skills/email-presence',
+                       'dependencies': ['httpx', 'starlette', 'requests', 'requests-ntlm', 'defusedxml'], 'cwd': 'skills/email-presence',
                        'core_env': 'OUROBOROS_SOURCE_DIR', 'env': {'OUROBOROS_RUN_MAIL_BROWSER': '1'}},
     'agentrq-bridge': {'skills': ['agentrq-bridge'], 'tests': ['skills/agentrq-bridge/tests'],
                       'dependencies': ['starlette']},
