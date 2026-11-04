@@ -3,10 +3,64 @@ import asyncio
 import pytest
 
 from telegram_bot.events import parse_telegram_update
-from telegram_bot.host import PresenceHostClient
+from telegram_bot.host import PresenceHostClient, PresenceHostError, PresenceHostHTTPError
 from telegram_bot.runtime import TelegramTransportRuntime
 from test_host import _event
 from test_runtime import AcceptingSubmitter, Logger, RuntimeClient
+
+PLACE_POLICY_WORDS = ("Held: Ouroboros did not answer whether this place allows sending. "
+                      "Nothing was sent yet; it retries by itself and no approval is needed.")
+NOT_CONNECTED = {"ok": False, "error": "Connect this place in Consciousness > Places.",
+                 "code": "place_not_connected", "disposition": "blocked"}
+# The Host's 403 carries a diagnostic, not words for a person; only the owner can lift it in Skills.
+ACCESS_REFUSED = {"ok": False, "error": "skill 'telegram-bot' lacks grant 'presence'",
+                  "code": "presence_auth_blocked", "disposition": "blocked"}
+ACCESS_REFUSED_WORDS = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
+                        "check the skill's access in Skills.")
+
+
+def _place_host(tmp_path, place, identity=None):
+    """A real client whose Host answers /identity and /presence/place as told; an exception is raised."""
+    class Transport:
+        async def request_json(self, method, url, **kwargs):
+            answer = identity if url.endswith("/identity") else place
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer if answer is not None else {"places_version": 1}
+    return PresenceHostClient(state_dir=tmp_path, token_provider=lambda: "token",
+                              host_base="http://127.0.0.1:8767", transport=Transport())
+
+
+@pytest.mark.parametrize("place", [
+    OSError("refused"), TimeoutError(), PresenceHostError("presence Host returned invalid JSON"),
+    PresenceHostHTTPError(503, "disk", {"code": "places_unavailable", "disposition": "retry"}),
+    PresenceHostHTTPError(404, "not found"),  # a route that is not the Host's refusal
+    {"place_id": "p", "label": "Telegram"},  # an answer that names no state says nothing about sending
+])
+def test_unread_place_policy_is_held_in_words_that_ask_nothing(tmp_path, place):
+    assert asyncio.run(_place_host(tmp_path, place).place_hold("9", "-1")) == PLACE_POLICY_WORDS
+
+
+def test_host_that_cannot_answer_identity_holds_in_the_same_words_and_older_hosts_do_not_hold(tmp_path):
+    assert asyncio.run(_place_host(tmp_path, {}, identity=OSError("refused")).place_hold("9", "-1")) == PLACE_POLICY_WORDS
+    assert asyncio.run(_place_host(tmp_path, {}, identity={"ok": True}).place_hold("9", "-1")) == ""
+
+
+def test_place_state_reads_as_before_and_not_connected_keeps_the_hosts_words(tmp_path):
+    def hold(place):
+        return asyncio.run(_place_host(tmp_path, place).place_hold("9", "-1"))
+    assert hold({"state": "silent", "label": "Team chat"}) == "Held: Team chat is silent"
+    assert hold({"state": "paused"}) == "Held: Telegram is paused"
+    assert hold({"state": "active"}) == ""
+    assert hold(PresenceHostHTTPError(404, "not connected", NOT_CONNECTED)) == "Held: Connect this place in Consciousness > Places."
+
+
+@pytest.mark.parametrize("place,words", [
+    (PresenceHostHTTPError(403, "refused", ACCESS_REFUSED), ACCESS_REFUSED_WORDS),
+    (PresenceHostHTTPError(503, "disk", {"code": "places_unavailable", "disposition": "retry"}), PLACE_POLICY_WORDS),
+])
+def test_a_refused_skill_sends_its_owner_to_skills_and_an_unread_place_still_retries(tmp_path, place, words):
+    assert asyncio.run(_place_host(tmp_path, place).place_hold("9", "-1")) == words
 
 
 def test_private_chats_groups_channels_and_explicit_addressing_only():
@@ -105,8 +159,8 @@ def test_unbound_submission_negotiates_and_live_checks_do_not_cache_state(tmp_pa
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("state", ["silent", "paused"])
-def test_live_hold_preserves_parts_and_resumes_once(tmp_path, monkeypatch, state):
+@pytest.mark.parametrize("reason", ["Held: Telegram is silent", "Held: Telegram is paused", PLACE_POLICY_WORDS])
+def test_live_hold_preserves_parts_and_resumes_once(tmp_path, monkeypatch, reason):
     async def run():
         clock = [1000.0]
         monkeypatch.setattr("time.time", lambda: clock[0])
@@ -114,14 +168,14 @@ def test_live_hold_preserves_parts_and_resumes_once(tmp_path, monkeypatch, state
             held = True
             async def place_hold(self, account, conversation):
                 assert (account, conversation) == ("9", "-1")
-                return f"Held: Telegram is {state}" if self.held else ""
+                return reason if self.held else ""
         client, host = RuntimeClient("token"), Host()
         runtime = TelegramTransportRuntime(state_dir=tmp_path, token_provider=lambda: "token", logger=Logger(), submitter=host, client_factory=lambda token: client)
         runtime.store.enqueue_outbox("stable", {"kind": "message", "chat_id": "-1", "text": "unchanged"})
         assert await runtime.process_one_outbox()
         assert not client.sent
         receipt = runtime.store.delivery_receipt("stable")
-        assert receipt["attempts"] == 0 and receipt["error"].startswith("Held:")
+        assert receipt["attempts"] == 0 and receipt["error"] == reason and receipt["state"] == "held"
         assert runtime.store.status_snapshot()["outbox_held"] == 1
         host.held = False
         clock[0] += 6

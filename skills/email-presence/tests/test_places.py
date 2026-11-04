@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from lib.host_adapter import LoopbackPresenceHostAdapter
+from lib.host_adapter import PLACE_POLICY_UNREAD, LoopbackPresenceHostAdapter
 from lib.store import InboxItem
 from test_transport import rig as _transport_rig
 
@@ -41,20 +41,20 @@ def test_unbound_host_negotiates_facts_and_queries_current_state(monkeypatch):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("state", ["silent", "paused"])
-def test_hold_keeps_message_id_bytes_and_retry_budget(rig, state):
+@pytest.mark.parametrize("reason", ["Held: Email is silent", "Held: Email is paused", PLACE_POLICY_UNREAD])
+def test_hold_keeps_message_id_bytes_and_retry_budget(rig, reason):
     clock, _, client, store, host, runtime = rig
     held = [True]
     def check(account, conversation):
         assert account == "bot@example.org" and conversation == "<root>"
-        return f"Held: Email is {state}" if held[0] else ""
+        return reason if held[0] else ""
     host.place_hold = check
     store.enqueue_outbox(request_id="stable", recipients=["a@example.org"], subject="subject", body="body", references=["<root>"])
     original = store.receipt("stable")["provider_message_id"]
     assert runtime.process_outbox()
     assert not client.sent
     receipt = store.receipt("stable")
-    assert receipt["attempts"] == 0 and receipt["last_error"].startswith("Held:")
+    assert receipt["attempts"] == 0 and receipt["last_error"] == reason and receipt["state"] == "held"
     assert store.status()["outbox_held"] == 1
     held[0] = False
     clock[0] += 6

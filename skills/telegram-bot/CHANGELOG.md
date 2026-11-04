@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.2 — unreleased
+
+- Say what a hold means when the Host did not say whether a place allows sending:
+  `Held: Ouroboros did not answer whether this place allows sending. Nothing was sent
+  yet; it retries by itself and no approval is needed.` `Held: place policy unavailable`
+  read like a pending approval. A Host's answer that the place is not connected keeps
+  its own words, which say what to do. A place's state reads as before.
+- A Host that refuses the skill itself (no grant, turned off, unreviewed or a stale
+  token) waits for its owner, not for a retry: `Held: Ouroboros refused this skill's
+  request, so nothing was sent; check the skill's access in Skills.`
+
 ## 0.10.1 — unreleased
 
 - Deliver voice messages and audio files as ordinary attachments (`kind` `voice` or

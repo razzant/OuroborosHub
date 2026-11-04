@@ -19,6 +19,12 @@ import uuid
 EARLY_CONTINUATION = 2
 TERMINAL = frozenset({"completed", "failed", "cancelled", "interrupted"})
 SETTLED = frozenset({"completed", "failed", "uncertain"})
+# The Host did not say whether this place allows sending.
+PLACE_POLICY_UNREAD = ("Held: Ouroboros did not answer whether this place allows sending. "
+                       "Nothing was sent yet; it retries by itself and no approval is needed.")
+# The Host refused this skill itself (no grant, turned off, unreviewed or a stale token): only its owner can change that.
+SKILL_ACCESS_REFUSED = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
+                        "check the skill's access in Skills.")
 
 
 def provider_event(params, mcp_url):
@@ -79,6 +85,17 @@ def busy_delay(field, retry_after):
 
 def _unique(refs):
     return list(dict.fromkeys(str(ref) for ref in refs if ref))
+
+
+def _place_hold(place):
+    """A place's real state, the Host's "not connected" in its own words or a refused skill; anything else read no policy."""
+    if place.get("state"):
+        return f"Held: {place.get('label') or 'AgentRQ'} is {place['state']}"
+    if place.get("code") == "place_not_connected" and place.get("error"):
+        return f"Held: {place['error']}"
+    if place.get("code") == "presence_auth_blocked":
+        return SKILL_ACCESS_REFUSED  # it waits for the owner in Skills, not for a retry
+    return PLACE_POLICY_UNREAD
 
 
 class PresenceInbox:
@@ -406,7 +423,7 @@ class PresenceInbox:
             query = urllib.parse.urlencode({key: event[key] for key in ("provider", "account_id", "conversation_id")})
             place = self._request("GET", "/presence/place?" + query)
             if place.get("state") != "active":
-                record.update(state="held", error=f"Held: {place.get('label') or 'AgentRQ'} is {place.get('state') or 'unavailable'}")
+                record.update(state="held", error=_place_hold(place))
                 self._save(path, record)
                 return
             task = event["conversation"]["task_id"]

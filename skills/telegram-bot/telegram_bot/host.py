@@ -20,6 +20,12 @@ _DISPOSITIONS = {"retained", "rejected", "blocked", "retry"}
 _EARLY_CONTINUATION = 2
 # The Host's documented hint for each busy admission resource, when its own is unusable.
 _BUSY_RETRY_SEC = {"conversation": 1.0, "capacity": 5.0}
+# The Host did not say whether this place allows sending. The outbox counts a hold by its prefix.
+PLACE_POLICY_UNREAD = ("Held: Ouroboros did not answer whether this place allows sending. "
+                       "Nothing was sent yet; it retries by itself and no approval is needed.")
+# The Host refused this skill itself (no grant, turned off, unreviewed or a stale token): only its owner can change that.
+SKILL_ACCESS_REFUSED = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
+                        "check the skill's access in Skills.")
 _EVENT_KEYS = {
     "source_event_id",
     "provider",
@@ -246,7 +252,7 @@ class PresenceHostClient:
     async def place_hold(self, account_id: str, conversation_id: str, thread_id: str = "") -> str:
         await self.discover_delivery_support()
         if not self.places_version:
-            return "Held: place policy unavailable" if self.delivery_reporting_status == "unavailable" else ""
+            return PLACE_POLICY_UNREAD if self.delivery_reporting_status == "unavailable" else ""
         try:
             # Host excludes a thread's own place from a lookup that names no thread; one without asks as before.
             query = urllib.parse.urlencode({"provider": "telegram", "account_id": account_id,
@@ -256,10 +262,19 @@ class PresenceHostClient:
                 "GET", f"{self.host_base}/presence/place?{query}", headers=self._headers(),
                 payload=None, timeout_sec=10.0,
             )
+        except PresenceHostHTTPError as exc:
+            # "Not connected" and a refused skill are the Host's answers, not an unread policy:
+            # the first says what to do in its own words; the second waits for the owner, not for a retry.
+            if exc.payload.get("code") == "presence_auth_blocked":
+                return SKILL_ACCESS_REFUSED
+            words = exc.payload.get("error") if exc.payload.get("code") == "place_not_connected" else ""
+            return f"Held: {words}" if words else PLACE_POLICY_UNREAD
         except (PresenceHostError, OSError, TimeoutError):
-            return "Held: place policy unavailable"
+            return PLACE_POLICY_UNREAD
         state = place.get("state")
-        return "" if state == "active" else f"Held: {place.get('label') or 'Telegram'} is {state or 'unavailable'}"
+        if not state:
+            return PLACE_POLICY_UNREAD
+        return "" if state == "active" else f"Held: {place.get('label') or 'Telegram'} is {state}"
 
     async def report_delivery(self, payload: Dict[str, Any]) -> None:
         response = await self.transport.request_json(

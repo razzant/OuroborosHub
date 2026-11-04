@@ -2,12 +2,24 @@
 
 ## 0.10.1
 
-- Preserve existing Exchange message and folder references while verifying their
-  actual mailbox with the server before using native identifiers.
-- Expose draft folders and the Gmail labels a mailbox action changes to the
-  Host before writing, including when a caller uses an alternate argument.
-  Calls with an implicit draft folder or incomplete Gmail label targets can
-  return `needs_arguments` without writing; replay the returned `retry_arguments`.
+- Say what a hold means when the Host did not say whether a Place allows sending:
+  `Held: Ouroboros did not answer whether this place allows sending. Nothing was sent
+  yet; it retries by itself and no approval is needed.` `Held: place policy unavailable`
+  and a printed Host code read like a pending approval.
+- Name the Place's state in a Host's refusal (`Held: Work mail is paused`), not its code
+  (`Held: place_paused`). A send no connected Place covers says so. The code stays in the
+  debug log (`LOG_LEVEL=DEBUG`).
+- A send whose Place was disconnected after it was queued says that it will not be sent
+  and should be sent again if it is still needed. Connecting the Place again does not
+  release it, so `Held: Work mail is disconnected` was wrong once Work mail was back.
+- A send no connected Place covered when it was queued says once that it will not be
+  sent and should be sent again once a Place covers it. The tool's answer and the
+  receipt after the outbox's next pass used to say this fact in two different sentences.
+- A Host that refuses the skill itself (no grant, turned off, unreviewed or a stale
+  token) waits for its owner, not for a retry: `Held: Ouroboros refused this skill's
+  request, so nothing was sent; check the skill's access in Skills.` It replaces
+  `Held: host authorization blocked` and, for sends queued before Place bindings,
+  the words that promised a retry without approval.
 
 ## 0.10.0
 
