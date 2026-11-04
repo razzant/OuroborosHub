@@ -261,7 +261,7 @@ class MailService:
         return original, references, root
 
     @staticmethod
-    def _expanded_reply(account, original, to, cc, bcc, *, queued=None):
+    def _reply_groups(account, original, to, cc, bcc, *, queued=None):
         if queued is None:
             derived = reply_all_recipients(original, [account["address"], *account["senders"]])
             derived_to, derived_cc = derived["to"], derived["cc"]
@@ -269,8 +269,7 @@ class MailService:
             # A repeated high-level request compares against the first send. Only the
             # queue can supply its automatic members, never the current source headers.
             derived_to, derived_cc = queued.to, queued.cc
-        to, cc, bcc = recipient_groups([*derived_to, *addresses(to)], [*derived_cc, *addresses(cc)], bcc)
-        return {"to": ", ".join(to), "cc": cc, "bcc": bcc, "reply_all": False}
+        return recipient_groups([*derived_to, *to], [*derived_cc, *cc], bcc)
 
     @staticmethod
     def _prepare_conversation(root, conversation_id, thread_id, retry_arguments, *, required,
@@ -297,6 +296,7 @@ class MailService:
             if account.get("sending", "on") == "off":
                 return {"ok": False, "account_id": account["id"], "code": "sending_off", "error": SENDING_OFF}
             chosen_sender = self._sender(account, sender)
+            recipients, visible_cc, visible_bcc = addresses(to), addresses(cc), addresses(bcc)
             rid = str(request_id or uuid.uuid4().hex)
             queued = store.queued_message(rid)
             if queued is not None and references is None:
@@ -304,9 +304,8 @@ class MailService:
             original, references, thread = self._reply_context(account, store, client, reply_to_message_id,
                                                                references, reply_all, reply_folder, replaying=queued is not None)
             if reply_all:
-                expanded = self._expanded_reply(account, original, to, cc, bcc, queued=queued)
-                to, cc, bcc = expanded["to"], expanded["cc"], expanded["bcc"]
-            recipients, visible_cc, visible_bcc = addresses(to), addresses(cc), addresses(bcc)
+                recipients, visible_cc, visible_bcc = self._reply_groups(account, original, recipients, visible_cc, visible_bcc, queued=queued)
+                to, cc, bcc = ", ".join(recipients), visible_cc, visible_bcc
             if not recipients or (not str(body).strip() and not str(html_body).strip()):
                 raise ValueError("to (or reply_all source) and body are required")
             thread = thread or store.message_id_for(rid)
@@ -371,7 +370,9 @@ class MailService:
                      'reply_all': reply_all, 'reply_folder': reply_folder, 'folder': folder,
                      **({'folder_names': names} if names else {})}
             if reply_all:
-                retry.update(self._expanded_reply(account, original, kwargs.get("to"), kwargs.get("cc"), kwargs.get("bcc")))
+                to, cc, bcc = self._reply_groups(account, original, addresses(kwargs.get("to")),
+                                                 addresses(kwargs.get("cc")), addresses(kwargs.get("bcc")))
+                retry.update(to=", ".join(to), cc=cc, bcc=bcc, reply_all=False)
             preparation = self._prepare_conversation(thread, conversation_id, thread_id, retry,
                 required=bool(kwargs.get('reply_to_message_id') or references), missing_account=not account_id, expanded=reply_all)
             if not preparation and (folder != supplied_folder or names != (folder_names or [])):
