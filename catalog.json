@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/aa4bf4f4a28cf9b020dbe7f4373e6c5618ccaca9",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/7a01e43ec88169036f5258054cc75a91c2678513",
   "schema_version": 1,
   "skills": [
     {
@@ -1322,8 +1322,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "9a808db24c4d5a631b27d06335bea8de8a13cf6c42023c69ede3963897389a2b",
-          "size": 9585
+          "sha256": "a8983660b9ef7deb62fb57a3a46e257408e7d87f3843781237907a5dfcfb435d",
+          "size": 9681
         },
         {
           "path": "README.md",
@@ -1382,8 +1382,8 @@
         },
         {
           "path": "lib/host_adapter.py",
-          "sha256": "7bc5bdc55f8c7df816dfc959e44ec5328c5447b288f297cefcf2589a1c096c74",
-          "size": 42968
+          "sha256": "6b8acc07c0004a5e8f9ba7cfb1e3369587c8cdb8a08eb2b96a6d35f0df2afe9d",
+          "size": 43122
         },
         {
           "path": "lib/mime.py",
@@ -1457,13 +1457,13 @@
         },
         {
           "path": "tests/test_binding.py",
-          "sha256": "9d3cbbdc22ca9055dae320884f711e2da750daf1aadbcc78c2cf846d00d63b4b",
-          "size": 13367
+          "sha256": "dfd649829ef0f040df40ab4a7744d7fa8dc68c2146e78be46ef485be6c55ea5a",
+          "size": 13610
         },
         {
           "path": "tests/test_binding_core.py",
-          "sha256": "fcfd798e1cae84c3d1df62472f600a78e5a97e46e2119b713bcb652e7ddfb484",
-          "size": 15831
+          "sha256": "14df50d266b864ff0259c386d8c3485b33a0160d7c1ff859d4ea8994f6ed6d6c",
+          "size": 15856
         },
         {
           "path": "tests/test_capabilities.py",
@@ -2708,8 +2708,8 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "056e6db821d0972c18219feec9945eeb9621e56199ccb8835622ca77ea660cfb",
-          "size": 51842
+          "sha256": "472a6697161b7b8b9b31675da488490a92288dfe8181f02e8bb75cf8ea8e16c5",
+          "size": 51859
         },
         {
           "path": "lib/__init__.py",
