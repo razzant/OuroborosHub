@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.6
+
+- Before permanently deleting a Gmail message, check its actual label IDs and
+  names, including Drafts when the message is a draft. Recheck on retry.
+- Before creating a nested IMAP mailbox, include missing intermediate folders
+  and their nearest existing parent in the write targets.
+
 ## 0.10.5
 
 - Check the actual folders changed by IMAP and Exchange mailbox actions.

@@ -39,12 +39,13 @@ class RecordingBox:
         return "OK", [b"done"]
 
 
-def guarded_calls(tmp_path, monkeypatch, tool, scopes, *, delimiter=b'"/"'):
-    box = RecordingBox(delimiter)
+def guarded_calls(tmp_path, monkeypatch, tool, scopes, *, delimiter=b'"/"', box=None):
+    box = box or RecordingBox(delimiter)
     client = MailClient({})
     client.imap = box.open
     account, call = tools_for(tmp_path, "imap", client)
-    guard = host_guard(tmp_path, monkeypatch, tool, account, [("", "active"), *scopes])
+    bindings = [("", "active"), *scopes] if scopes is not None else []
+    guard = host_guard(tmp_path, monkeypatch, tool, account, bindings)
 
     def run(args):
         args = {"account_id": account, **args}
@@ -114,6 +115,98 @@ def test_create_declares_parent_only_in_the_reported_hierarchy(tmp_path, monkeyp
         assert box.list_calls and set(box.list_calls) == {(MailClient.folder_name(child), '""')}
     if delimiter == b"NIL":
         assert not used.get("folder_names")
+
+
+class HierarchyBox(RecordingBox):
+    def __init__(self, responses, delimiter=b'"/"'):
+        super().__init__(delimiter)
+        self.responses = responses
+
+    def list(self, reference, pattern):
+        if pattern == '""':
+            return super().list(reference, pattern)
+        assert reference == '""'
+        self.list_calls.append((reference, pattern))
+        return self.responses.get(pattern, ("OK", [None]))
+
+
+@pytest.mark.parametrize(("scopes", "parent_exists", "denied"), [
+    ([("Legal", "paused")], False, True),
+    ([("Legal", "paused"), ("Legal/2026", "active")], True, False),
+    ([("Legal/2026", "paused")], True, True),
+    ([("Legal/2026", "silent")], False, True),
+    (None, False, False),
+])
+def test_create_checks_only_materialized_names_and_their_parent(tmp_path, monkeypatch, scopes, parent_exists, denied):
+    # RFC 3501 6.3.3: one CREATE can add every missing intermediate name.
+    box = HierarchyBox({'"Legal/2026"': ("OK", [b'() "/" Legal/2026'])} if parent_exists else {})
+    _, _, run = guarded_calls(tmp_path, monkeypatch, "email_mailbox", scopes, box=box)
+    used, refusal = run({"action": "create", "destination": "Legal/2026/Q4"})
+    assert bool(refusal) == denied
+    assert used["folder_names"] == (["Legal/2026"] if parent_exists else ["Legal", "Legal/2026"])
+    assert box.writes == ([] if denied else [("CREATE", '"Legal/2026/Q4"')])
+
+
+def test_create_stops_at_first_existing_ancestor_with_provider_delimiter(tmp_path, monkeypatch):
+    box = HierarchyBox({'"Projects.2026"': ("OK", [b'() "." "Projects.2026"'])}, b'"."')
+    _, _, run = guarded_calls(tmp_path, monkeypatch, "email_mailbox", [("Projects", "paused")], box=box)
+    child = "Projects.2026.Q4.Week1."
+    used, refusal = run({"action": "create", "destination": child})
+    assert not refusal and used["folder_names"] == ["Projects.2026", "Projects.2026.Q4", child[:-1]]
+    assert box.writes == [("CREATE", MailClient.folder_name(child))]
+
+
+@pytest.mark.parametrize(("parent", "rows", "exists"), [
+    ("Legal/20%", [b'() "/" "Legal/2026"'], False),  # LIST patterns can match another mailbox.
+    ("Legal/20*", [b'() "/" Legal/2026', b'() "/" "Legal/20*"'], True),
+    ("Legal/2026", [b'(\\Noselect) "/" Legal/2026'], True),  # Existing hierarchy node can have children.
+    ("Legal/2026", [b'(\\Noselect \\NonExistent) "/" "Legal/2026"'], False),
+    ('Legal/台北 & "Q"\\R', [(b'() "/" {23}', b'Legal/&U,BTFw- &- "Q"\\R'), b''], True),
+    ('Legal/台北 & "Q"\\R', [b'() "/" "Legal/&U,BTFw- &- \\"Q\\"\\\\R"'], True),
+])
+def test_exact_parent_identity_in_list_replies(tmp_path, monkeypatch, parent, rows, exists):
+    box = HierarchyBox({MailClient.folder_name(parent): ("OK", rows)})
+    _, _, run = guarded_calls(tmp_path, monkeypatch, "email_mailbox", [("Legal", "paused")], box=box)
+    child = parent + "/Q4"
+    used, refusal = run({"action": "create", "destination": child})
+    assert bool(refusal) != exists
+    assert ("Legal" in used["folder_names"]) != exists
+    assert box.writes == ([("CREATE", MailClient.folder_name(child))] if exists else [])
+
+
+@pytest.mark.parametrize("status", ["NO", "BAD"])
+def test_failed_parent_list_is_not_an_absent_mailbox(tmp_path, monkeypatch, status):
+    box = HierarchyBox({'"Legal/2026"': (status, [b"cannot list this parent"])})
+    _, _, run = guarded_calls(tmp_path, monkeypatch, "email_mailbox", None, box=box)
+    with pytest.raises(RuntimeError, match=f"parent lookup failed \\({status}\\)"):
+        run({"action": "create", "destination": "Legal/2026/Q4"})
+    assert not box.writes
+
+
+def test_inconsistent_parent_delimiter_cannot_hide_the_affected_parent(tmp_path, monkeypatch):
+    box = HierarchyBox({'"Legal/2026"': ("OK", [b'() NIL "Legal/2026"'])})
+    _, _, run = guarded_calls(tmp_path, monkeypatch, "email_mailbox", None, box=box)
+    with pytest.raises(RuntimeError, match="inconsistent hierarchy delimiters"):
+        run({"action": "create", "destination": "Legal/2026/Q4"})
+    assert not box.writes
+
+
+def test_retry_checks_again_if_parent_was_removed(tmp_path, monkeypatch):
+    box = HierarchyBox({'"Legal/2026"': ("OK", [b'() "/" Legal/2026'])})
+    client = MailClient({})
+    client.imap = box.open
+    account, call = tools_for(tmp_path, "imap", client)
+    tool = "email_mailbox"
+    guard = host_guard(tmp_path, monkeypatch, tool, account, [("", "active"), ("Legal", "paused")])
+    args = {"account_id": account, "action": "create", "destination": "Legal/2026/Q4"}
+    assert not guard(args)
+    args = call(tool, args)["retry_arguments"]
+    assert args["folder_names"] == ["Legal/2026"] and not box.writes
+    box.responses.clear()
+    assert not guard(args)
+    args = call(tool, args)["retry_arguments"]
+    assert args["folder_names"] == ["Legal", "Legal/2026"] and "Paused" in guard(args)
+    assert not box.writes
 
 
 @pytest.mark.parametrize(("source", "restricted", "deny"), [

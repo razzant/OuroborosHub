@@ -17,6 +17,9 @@ import httpx
 from .mime import build_message, mailbox_addresses, parse_message
 
 
+_LIST_HEADER = re.compile(rb'^\(([^)]*)\) (?:NIL|"(\\[\\"]|[^\\"])") ', re.I)
+
+
 class MailClient:
     def __init__(self, settings=None):
         self.settings = settings if settings is not None else os.environ
@@ -253,22 +256,56 @@ class MailClient:
         # INBOX is the only IMAP name with protocol-defined case insensitivity.
         return "INBOX" if name.isascii() and name.upper() == "INBOX" else name
 
+    def _listed_parent(self, box, parent, delimiter):
+        pattern = self.folder_name(parent)
+        quoted = pattern.encode("ascii")
+        raw = re.sub(rb'\\([\\"])', rb'\1', quoted[1:-1])
+        for row in self._ok(box.list('""', pattern), "parent lookup"):
+            header = row[0] if isinstance(row, tuple) else row
+            match = _LIST_HEADER.match(header or b"")
+            if not match:
+                continue
+            # LIST interprets * and % as wildcards even inside a quoted pattern.
+            # Match the mailbox itself (as a quoted string, literal or atom).
+            name = header[match.end():]
+            if name.startswith(b'"'):
+                exact = name == quoted or name.startswith(quoted + b" ")
+            elif isinstance(row, tuple) and name.startswith(b"{"):
+                exact = row[1] == raw
+            else:
+                exact = name.partition(b" ")[0] == raw
+            if exact:
+                if match[2] != delimiter:
+                    raise RuntimeError("IMAP LIST returned inconsistent hierarchy delimiters")
+                if b"\\nonexistent" not in match[1].lower().split():
+                    return True  # \Noselect alone can still be a real hierarchy node.
+        return False
+
     def _create_names(self, box, destination):
         # LIST <reference> "" asks for this namespace's delimiter, even when
         # the new mailbox does not exist (RFC 3501 section 6.3.8).
         rows = self._ok(box.list(self.folder_name(destination), '""'), "hierarchy lookup")
         for row in rows:
             header = row[0] if isinstance(row, tuple) else row
-            match = re.match(rb'^\([^)]*\) (?:NIL|"(\\[\\"]|[^\\"])") ', header or b"", re.I)
+            match = _LIST_HEADER.match(header or b"")
             if match:
-                if match[1] is None:
+                if match[2] is None:
                     return []
-                delimiter = match[1][-1:].decode("ascii")
+                delimiter = match[2][-1:].decode("ascii")
                 # CREATE may end in the delimiter when requesting a mailbox
                 # that can have children. The created name excludes that suffix.
                 name = destination.removesuffix(delimiter)
+                names = [name] if name else []
                 parent = name.rpartition(delimiter)[0]
-                return [self._canonical_folder(n) for n in (name, parent) if n]
+                # CREATE can materialize missing parents. Stop at the first
+                # existing parent: nothing above it is being changed.
+                while parent:
+                    names.append(parent)
+                    higher = parent.rpartition(delimiter)[0]
+                    if not higher or self._listed_parent(box, parent, match[2]):
+                        break
+                    parent = higher
+                return [self._canonical_folder(n) for n in names]
         raise RuntimeError("IMAP LIST omitted the hierarchy delimiter for the new folder")
 
     def mailbox(self, *, action="list", folder="INBOX", uid=None, uidvalidity=None,

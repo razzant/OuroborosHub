@@ -188,8 +188,8 @@ class GmailClient(MailClient):
         if not custom:
             return set()
         labels = snapshot() if snapshot else self._request("GET", "/labels").get("labels", [])
-        by_id = {row["id"]: row["name"] for row in labels}
-        if not custom <= by_id.keys():
+        by_id = {row["id"]: row.get("name") for row in labels}
+        if any(not isinstance(by_id.get(key), str) or not by_id[key].strip() for key in custom):
             raise ValueError("Choose current Gmail label IDs from email_folders")
         return {by_id[key] for key in custom if by_id[key] != key}
 
@@ -242,7 +242,23 @@ class GmailClient(MailClient):
             scopes = self.account.get("scopes")
             if scopes is not None and "https://mail.google.com/" not in scopes:
                 raise AccountError("Permanent deletion requires a new Google consent with the full mail scope; trash is available with gmail.modify")
-            return write("DELETE", "/messages/" + native, None, {})
+            path = "/messages/" + native
+            message = self._request("GET", path, params={"format": "minimal", "fields": "id,labelIds"})
+            if not isinstance(message, dict) or message.get("id") != native:
+                raise ValueError("Gmail did not confirm the selected message; nothing was deleted")
+            # Empty repeated fields can be absent even in a requested minimal response.
+            labels = message.get("labelIds", [])
+            if not isinstance(labels, list) or any(not isinstance(value, str) or not value.strip() for value in labels):
+                raise ValueError("Gmail did not return the message's label IDs; nothing was deleted")
+            labels = sorted(set(labels))
+            targets = {"remove_labels": labels} if labels or remove_labels else {}
+            if add_labels:
+                targets["add_labels"] = []
+            if label_id:
+                targets["label_id"] = ""
+            if destination:
+                targets["destination"] = ""
+            return write("DELETE", path, None, targets, labels, ["Drafts"] if "DRAFT" in labels else [])
         for labels in (add_labels, remove_labels):
             if labels is not None and (not isinstance(labels, (list, tuple))
                                       or any(not isinstance(label, str) or not label.strip() for label in labels)):

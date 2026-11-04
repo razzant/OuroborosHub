@@ -382,6 +382,9 @@ def sole_gmail(tmp_path,monkeypatch):
         assert request.url.host == 'gmail.googleapis.com'
         path = request.url.path.removeprefix('/gmail/v1/users/me')
         if request.method == 'GET':
+            if path == '/messages/b':
+                assert dict(request.url.params) == {'format':'minimal','fields':'id,labelIds'}
+                return httpx.Response(200,json={'id':'b','labelIds':['Label_1']})
             assert path == '/labels'
             return httpx.Response(200,json={'labels':[{'id':'Label_1','name':'Filed'}]})
         writes.append((request.method,path,json.loads(request.content) if request.content else None))
@@ -427,7 +430,7 @@ def test_implicit_account_cannot_borrow_another_active_target(tmp_path,monkeypat
      {'folder':'Label_1','label_names':['Filed'],'remove_labels':['Label_1']},'POST','/messages/b/modify',
      {'addLabelIds':['STARRED'],'removeLabelIds':['Label_1']}),
     ('email_mailbox',{'action':'create','properties':{'name':'New'}},{'destination':'New'},'POST','/labels',{'name':'New'}),
-    ('email_mailbox',{'action':'delete','uid':11,'uidvalidity':1},{},'DELETE','/messages/b',None),
+    ('email_mailbox',{'action':'delete','uid':11,'uidvalidity':1},{'remove_labels':['Label_1'],'label_names':['Filed']},'DELETE','/messages/b',None),
     ('email_mailbox',{'action':'delete_draft','draft_id':'draft-one'},{'remove_labels':['DRAFT'],'label_names':['Drafts']},'DELETE','/drafts/draft-one',None),
 ])
 def test_sole_active_account_prepares_all_targets_once(tmp_path,monkeypatch,sole_gmail,tool,args,targets,method,path,body):
