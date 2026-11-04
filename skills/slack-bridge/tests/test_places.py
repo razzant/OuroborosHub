@@ -16,6 +16,11 @@ PLACE_POLICY_WORDS = ("Held: Ouroboros did not answer whether this place allows 
                       "Nothing was sent yet; it retries by itself and no approval is needed.")
 NOT_CONNECTED = {"ok": False, "error": "Connect this place in Consciousness > Places.",
                  "code": "place_not_connected", "disposition": "blocked"}
+# The Host's 403 carries a diagnostic, not words for a person; only the owner can lift it in Skills.
+ACCESS_REFUSED = {"ok": False, "error": "skill 'slack-bridge' lacks grant 'presence'",
+                  "code": "presence_auth_blocked", "disposition": "blocked"}
+ACCESS_REFUSED_WORDS = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
+                        "check the skill's access in Skills.")
 
 
 def _place_hold(place, identity=None):
@@ -35,7 +40,6 @@ def _place_hold(place, identity=None):
 @pytest.mark.parametrize("place", [
     httpx.ConnectError("refused"), httpx.ReadTimeout("slow"),
     httpx.Response(503, json={"ok": False, "code": "places_unavailable", "disposition": "retry"}),
-    httpx.Response(403, json={"ok": False, "code": "presence_auth_blocked", "disposition": "blocked"}),
     httpx.Response(404, text="not this Host's refusal"),
     httpx.Response(404, json=["not an object"]),
     httpx.Response(200, text="not JSON"),
@@ -55,6 +59,14 @@ def test_place_state_reads_as_before_and_not_connected_keeps_the_hosts_words():
     assert _place_hold(httpx.Response(200, json={"state": "paused"})) == "Held: Slack is paused"
     assert _place_hold(httpx.Response(200, json={"state": "active"})) == ""
     assert _place_hold(httpx.Response(404, json=NOT_CONNECTED)) == "Held: Connect this place in Consciousness > Places."
+
+
+@pytest.mark.parametrize("place,words", [
+    (httpx.Response(403, json=ACCESS_REFUSED), ACCESS_REFUSED_WORDS),
+    (httpx.Response(503, json={"ok": False, "code": "places_unavailable", "disposition": "retry"}), PLACE_POLICY_WORDS),
+])
+def test_a_refused_skill_sends_its_owner_to_skills_and_an_unread_place_still_retries(place, words):
+    assert _place_hold(place) == words
 
 
 def test_slack_addressing_is_structured_and_legacy_payload_is_unchanged():

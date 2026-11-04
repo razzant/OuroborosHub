@@ -23,6 +23,9 @@ _BUSY_RETRY_SEC = {"conversation": 1.0, "capacity": 5.0}
 # The Host did not say whether this place allows sending. The outbox counts a hold by its prefix.
 PLACE_POLICY_UNREAD = ("Held: Ouroboros did not answer whether this place allows sending. "
                        "Nothing was sent yet; it retries by itself and no approval is needed.")
+# The Host refused this skill itself (no grant, turned off, unreviewed or a stale token): only its owner can change that.
+SKILL_ACCESS_REFUSED = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
+                        "check the skill's access in Skills.")
 _EVENT_KEYS = {
     "source_event_id",
     "provider",
@@ -260,7 +263,10 @@ class PresenceHostClient:
                 payload=None, timeout_sec=10.0,
             )
         except PresenceHostHTTPError as exc:
-            # "Not connected" is the Host's answer, not an unread policy: its own words say what to do.
+            # "Not connected" and a refused skill are the Host's answers, not an unread policy:
+            # the first says what to do in its own words; the second waits for the owner, not for a retry.
+            if exc.payload.get("code") == "presence_auth_blocked":
+                return SKILL_ACCESS_REFUSED
             words = exc.payload.get("error") if exc.payload.get("code") == "place_not_connected" else ""
             return f"Held: {words}" if words else PLACE_POLICY_UNREAD
         except (PresenceHostError, OSError, TimeoutError):

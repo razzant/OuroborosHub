@@ -23,6 +23,9 @@ log = logging.getLogger("email_presence")
 # The Host did not say whether this Place allows sending. The outbox counts a hold by its prefix.
 PLACE_POLICY_UNREAD = ("Held: Ouroboros did not answer whether this place allows sending. "
                        "Nothing was sent yet; it retries by itself and no approval is needed.")
+# The Host refused this skill itself (no grant, turned off, unreviewed or a stale token): only its owner can change that.
+SKILL_ACCESS_REFUSED = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
+                        "check the skill's access in Skills.")
 _NO_PLACE_COVERS = "Held: no connected place covers this send; nothing was sent."
 # No binding was captured when the send was queued, so the outbox never sends it.
 _NO_PLACE_WHEN_QUEUED = ("Held: no connected place covered this send when it was queued, so it will not be sent; "
@@ -257,6 +260,8 @@ class LoopbackPresenceHostAdapter:
             response = self._place_http.get(f"{self.host_service_url}/presence/place", headers=self._headers(),
                                             params={"provider": "email", "account_id": account_id,
                                                     "conversation_id": conversation_id})
+            if response.status_code == 403 and response.json().get("code") == "presence_auth_blocked":
+                return SKILL_ACCESS_REFUSED
             if response.status_code == 404:
                 payload = response.json()
                 if payload.get("code") == "place_not_connected":
@@ -301,8 +306,8 @@ class LoopbackPresenceHostAdapter:
                 "conversation_id": conversation_id, "thread_id": thread_id,
                 "binding": json.dumps(binding, separators=(",", ":"))})
             payload = response.json()
-            if response.status_code == 403:
-                return "Held: host authorization blocked"
+            if response.status_code == 403 and payload.get("code") == "presence_auth_blocked":
+                return SKILL_ACCESS_REFUSED
             if response.status_code >= 400:
                 log.debug("Host could not check this send's Place binding: HTTP %s, %s", response.status_code, payload.get("code"))
                 return PLACE_POLICY_UNREAD

@@ -101,8 +101,21 @@ def test_a_refusal_names_the_place_and_never_its_code(facts, words):
     assert _hold(httpx.Response(200, json={"ok": True, "allowed": False, "binding": BINDING, **facts})) == words
 
 
-def test_refused_authorization_keeps_its_own_words():
-    assert _hold(httpx.Response(403, json={"code": "presence_auth_blocked"})) == "Held: host authorization blocked"
+# The Host's 403 carries a diagnostic, not words for a person; only the owner can lift it in Skills.
+ACCESS_REFUSED = {"ok": False, "error": "skill 'email-presence' lacks grant 'presence'",
+                  "code": "presence_auth_blocked", "disposition": "blocked"}
+ACCESS_REFUSED_WORDS = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
+                        "check the skill's access in Skills.")
+
+
+@pytest.mark.parametrize("check", [lambda host: host.binding_hold(BINDING, "account", "<thread>"),
+                                   lambda host: host.place_hold("account", "<thread>")], ids=["bound", "legacy"])
+@pytest.mark.parametrize("answer,words", [
+    (httpx.Response(403, json=ACCESS_REFUSED), ACCESS_REFUSED_WORDS),
+    (httpx.Response(503, json={"ok": False, "code": "places_unavailable", "disposition": "retry"}), PLACE_POLICY_WORDS),
+])
+def test_a_refused_skill_sends_its_owner_to_skills_and_an_unread_place_still_retries(check, answer, words):
+    assert _hold(answer, check) == words
 
 
 @pytest.mark.parametrize("answer,words", [

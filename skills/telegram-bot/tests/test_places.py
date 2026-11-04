@@ -12,6 +12,11 @@ PLACE_POLICY_WORDS = ("Held: Ouroboros did not answer whether this place allows 
                       "Nothing was sent yet; it retries by itself and no approval is needed.")
 NOT_CONNECTED = {"ok": False, "error": "Connect this place in Consciousness > Places.",
                  "code": "place_not_connected", "disposition": "blocked"}
+# The Host's 403 carries a diagnostic, not words for a person; only the owner can lift it in Skills.
+ACCESS_REFUSED = {"ok": False, "error": "skill 'telegram-bot' lacks grant 'presence'",
+                  "code": "presence_auth_blocked", "disposition": "blocked"}
+ACCESS_REFUSED_WORDS = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
+                        "check the skill's access in Skills.")
 
 
 def _place_host(tmp_path, place, identity=None):
@@ -29,7 +34,6 @@ def _place_host(tmp_path, place, identity=None):
 @pytest.mark.parametrize("place", [
     OSError("refused"), TimeoutError(), PresenceHostError("presence Host returned invalid JSON"),
     PresenceHostHTTPError(503, "disk", {"code": "places_unavailable", "disposition": "retry"}),
-    PresenceHostHTTPError(403, "stale", {"code": "presence_auth_blocked", "disposition": "blocked"}),
     PresenceHostHTTPError(404, "not found"),  # a route that is not the Host's refusal
     {"place_id": "p", "label": "Telegram"},  # an answer that names no state says nothing about sending
 ])
@@ -49,6 +53,14 @@ def test_place_state_reads_as_before_and_not_connected_keeps_the_hosts_words(tmp
     assert hold({"state": "paused"}) == "Held: Telegram is paused"
     assert hold({"state": "active"}) == ""
     assert hold(PresenceHostHTTPError(404, "not connected", NOT_CONNECTED)) == "Held: Connect this place in Consciousness > Places."
+
+
+@pytest.mark.parametrize("place,words", [
+    (PresenceHostHTTPError(403, "refused", ACCESS_REFUSED), ACCESS_REFUSED_WORDS),
+    (PresenceHostHTTPError(503, "disk", {"code": "places_unavailable", "disposition": "retry"}), PLACE_POLICY_WORDS),
+])
+def test_a_refused_skill_sends_its_owner_to_skills_and_an_unread_place_still_retries(tmp_path, place, words):
+    assert asyncio.run(_place_host(tmp_path, place).place_hold("9", "-1")) == words
 
 
 def test_private_chats_groups_channels_and_explicit_addressing_only():

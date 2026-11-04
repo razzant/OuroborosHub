@@ -7,6 +7,9 @@
   yet; it retries by itself and no approval is needed.` `Held: place policy unavailable`
   read like a pending approval. A Host's answer that the place is not connected keeps
   its own words, which say what to do. A place's state reads as before.
+- A Host that refuses the skill itself (no grant, turned off, unreviewed or a stale
+  token) waits for its owner, not for a retry: `Held: Ouroboros refused this skill's
+  request, so nothing was sent; check the skill's access in Skills.`
 
 ## 0.10.1 — unreleased
 

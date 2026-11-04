@@ -15,6 +15,11 @@
 - A send no connected Place covered when it was queued says once that it will not be
   sent and should be sent again once a Place covers it. The tool's answer and the
   receipt after the outbox's next pass used to say this fact in two different sentences.
+- A Host that refuses the skill itself (no grant, turned off, unreviewed or a stale
+  token) waits for its owner, not for a retry: `Held: Ouroboros refused this skill's
+  request, so nothing was sent; check the skill's access in Skills.` It replaces
+  `Held: host authorization blocked` and, for sends queued before Place bindings,
+  the words that promised a retry without approval.
 
 ## 0.10.0
 
