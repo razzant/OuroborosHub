@@ -174,13 +174,15 @@ class MailService:
         return {**result, "account_id": account["id"]}
 
     @staticmethod
-    def _gmail_target_preparer(public):
-        # The provider describes the exact request just before writing. Prepare
-        # a new Host dispatch if a physical label or its current name was hidden.
+    def _mailbox_target_preparer(public, account_id):
+        # Compare what Host actually saw with the selected mailbox and the
+        # provider's final targets. One retry exposes all missing facts.
         def prepare(targets):
-            missing = {key: value for key, value in targets.items() if public.get(key) != value}
+            actual = {**targets, 'account_id': account_id}
+            missing = {key: value for key, value in actual.items() if public.get(key) != value}
             if missing:
-                return {'ok': False, 'status': 'needs_arguments', 'code': 'canonical_target_required',
+                return {'ok': False, 'status': 'needs_arguments',
+                        'code': 'canonical_account_required' if 'account_id' in missing else 'canonical_target_required',
                         'message': 'Retry with the actual mail targets below; no provider change was made.',
                         'retry_arguments': {**public, **missing}}
         return prepare
@@ -189,23 +191,34 @@ class MailService:
         with self.target(account_id) as (account, _store, client):
             kwargs = self.unwrap_ref(account, message_ref) if message_ref else {
                 "uid": uid, "uidvalidity": uidvalidity, "folder": folder or account.get("folder") or "INBOX"}
+            public = {k:v for k,v in dict(account_id=account_id, message_ref=message_ref, uid=uid,
+                      uidvalidity=uidvalidity, folder=folder, remove_labels=remove_labels).items() if v is not None}
+            prepare = self._mailbox_target_preparer(public, account['id'])
             if account['provider'] == 'gmail':
-                # remove_labels attests the single fixed effect. It is never
-                # forwarded: this tool cannot apply arbitrary label mutations.
-                public = {k:v for k,v in dict(account_id=account['id'], message_ref=message_ref, uid=uid,
-                          uidvalidity=uidvalidity, folder=folder, remove_labels=remove_labels).items() if v is not None}
-                kwargs['prepare_targets'] = self._gmail_target_preparer(public)
-            elif remove_labels:
-                raise ValueError("remove_labels on email_mark_read applies only to Gmail")
+                # The caller cannot apply arbitrary labels through this shortcut.
+                kwargs['prepare_targets'] = prepare
+            else:
+                if remove_labels not in (None, []):
+                    raise ValueError("remove_labels on email_mark_read applies only to Gmail")
+                if needed := prepare({}):
+                    return needed
             return self._account_result(account, client.mark_read(**kwargs))
 
     def mailbox(self, *, account_id="", message_ref="", **kwargs):
         with self.target(account_id) as (account, _store, client):
+            public = {k: v for k, v in kwargs.items() if v is not None}
+            public.update(account_id=account_id, message_ref=message_ref)
+            prepare = self._mailbox_target_preparer(public, account['id'])
             if message_ref:
                 kwargs.update(self.unwrap_ref(account, message_ref))
             if account['provider'] == 'gmail':
-                public = {**kwargs, 'account_id': account['id'], 'message_ref': message_ref}
-                return self._account_result(account, client.mailbox(**kwargs, prepare_targets=self._gmail_target_preparer(public)))
+                return self._account_result(account, client.mailbox(**kwargs, prepare_targets=prepare))
+            for key in ('label_id', 'label_names', 'add_labels', 'remove_labels'):
+                if kwargs.pop(key, None) not in (None, '', []):
+                    raise ValueError(f"{key} on email_mailbox applies only to Gmail")
+                public.pop(key, None)
+            if kwargs.get('action', 'list') != 'list' and (needed := prepare({})):
+                return needed
             return self._account_result(account, client.mailbox(**kwargs))
 
     @staticmethod
@@ -419,7 +432,7 @@ class MailService:
 def register_tools(api, service):
     string, integer = {"type": "string"}, {"type": "integer"}
     array = {"type": "array", "items": string}
-    account = {"account_id": {"type": "string", "description": "Exact canonical id from email_accounts; required for new sends/drafts and whenever more than one account is connected. An omitted sole account is prepared before a new send/draft effect."}}
+    account = {"account_id": {"type": "string", "description": "Exact canonical id from email_accounts; required for writes with email_send, email_draft, email_mailbox or email_mark_read and whenever more than one account is connected. An omitted sole account can be prepared before the effect."}}
     message = {"message_ref": string, "uid": integer, "uidvalidity": integer, "folder": string}
     compose = {"to": string, "body": string, "subject": string, "sender": string, "reply_to_message_id": string,
                'conversation_id': {'type': 'string', 'description': 'Canonical RFC conversation from email_read or retry_arguments; required for a threaded reply.'},

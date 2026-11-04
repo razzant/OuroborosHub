@@ -114,8 +114,10 @@ address. Host conversation identity remains RFC Message-ID/References; native
 Gmail message/thread ids remain explicit provider facts, and replies pass the
 native threadId to Gmail. No signature, footer or Auto-Submitted marker is added.
 
-Supply canonical `account_id` for a new `email_send` or `email_draft`, including
-a sole mailbox. Read/search results also include canonical `conversation_id`
+Supply canonical `account_id` for new sends, drafts, marking read, and mailbox
+writes, even with a sole connected mailbox. Reads and folder listing may still
+select that sole mailbox implicitly. A write with an implicit account returns
+the canonical account and its resolved targets in one `retry_arguments`. Read/search results also include canonical `conversation_id`
 and `thread_id` when the RFC source is known; pass both for a threaded reply.
 An omitted account or reply identity returns `needs_arguments` with exact
 `retry_arguments` before enqueueing or saving anything. Repeat that call so the
@@ -233,6 +235,7 @@ remain readable by explicit account_id.
   For general IMAP mailbox actions the source folder inside a message reference
   is not a separate Host target. Within the same Exchange mailbox, copy/move
   declares the destination as supplied; use the same folder spelling as its Place.
+  The parent of an Exchange folder creation is not a separate Host target either.
   Drafts check the resolved storage folder independently (below).
   For Gmail label creation,
   properties.name keeps its existing precedence; a different or omitted top-level

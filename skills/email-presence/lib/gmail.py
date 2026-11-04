@@ -227,7 +227,7 @@ class GmailClient(MailClient):
         if action == "delete_draft":
             if not re.fullmatch(r"[A-Za-z0-9_-]+", str(draft_id)):
                 raise ValueError("Choose draft_id from email_search(folder='DRAFT')")
-            return self._request("DELETE", "/drafts/" + str(draft_id))
+            return write("DELETE", "/drafts/" + str(draft_id), None, {})
         native = self.native_id(message_ref or (format(int(uid) % (2 ** 64), "x") if uid is not None and uidvalidity == 1 else ""))
         if action in {"trash", "untrash"}:
             return write("POST", f"/messages/{native}/{action}", {}, {}, fixed_names=["TRASH"])
@@ -235,7 +235,7 @@ class GmailClient(MailClient):
             scopes = self.account.get("scopes")
             if scopes is not None and "https://mail.google.com/" not in scopes:
                 raise AccountError("Permanent deletion requires a new Google consent with the full mail scope; trash is available with gmail.modify")
-            return self._request("DELETE", "/messages/" + native)
+            return write("DELETE", "/messages/" + native, None, {})
         for labels in (add_labels, remove_labels):
             if labels is not None and (not isinstance(labels, (list, tuple))
                                       or any(not isinstance(label, str) or not label.strip() for label in labels)):

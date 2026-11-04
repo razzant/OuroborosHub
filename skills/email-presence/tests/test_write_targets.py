@@ -360,3 +360,107 @@ def test_imap_mailbox_does_not_report_a_folder_overridden_by_its_authentic_refer
     assert published_targets('email_mailbox',args)=={'account_id':[account]}
     assert call('email_mailbox',args)['ok']
     assert writes==[('Private',False),('STORE','3','+FLAGS.SILENT',r'(\Seen)')]
+
+
+@pytest.fixture
+def sole_gmail(tmp_path,monkeypatch):
+    import httpx
+    import time
+    from lib.accounts import AccountStore
+    directory = tmp_path / 'skill'
+    account = 'google:fixture'
+    registry = AccountStore(directory)
+    registry.save({'id':account, 'provider':'gmail', 'address':'owner@example.invalid',
+        'sender':'owner@example.invalid', 'senders':['owner@example.invalid'], 'scopes':['https://mail.google.com/'],
+        'tokens':{'access_token':'fixture-only','expires_at':time.time()+3600}})
+    writes = []
+    def exchange(request):
+        assert request.url.host == 'gmail.googleapis.com'
+        path = request.url.path.removeprefix('/gmail/v1/users/me')
+        if request.method == 'GET':
+            assert path == '/labels'
+            return httpx.Response(200,json={'labels':[{'id':'Label_1','name':'Filed'}]})
+        writes.append((request.method,path,json.loads(request.content) if request.content else None))
+        return httpx.Response(200,json={})
+    with httpx.Client(transport=httpx.MockTransport(exchange)) as http:
+        monkeypatch.setattr('lib.service.account_client',
+                            lambda store, row, **_: GmailClient(store, row['id'], http=http))
+        svc = MailService(SimpleNamespace(get_state_dir=lambda:directory,get_settings=lambda _:{}))
+        handlers = {}
+        register_tools(SimpleNamespace(register_tool=lambda name,h,**_:handlers.update({name:h})),svc)
+        yield account,lambda tool,args:json.loads(handlers[tool](**args)),writes
+
+
+@pytest.mark.parametrize('cross_account',[False,True])
+@pytest.mark.parametrize('tool,args,marker',[
+    ('email_mark_read',{'uid':11,'uidvalidity':1,'remove_labels':['UNREAD']},'UNREAD'),
+    ('email_mailbox',{'action':'labels','uid':11,'uidvalidity':1,'add_labels':['Label_1'],'label_names':['Filed']},'Label_1'),
+    ('email_mailbox',{'action':'trash','uid':11,'uidvalidity':1,'label_names':['TRASH']},'TRASH'),
+    ('email_mailbox',{'action':'delete','uid':11,'uidvalidity':1,'label_names':['decoy']},'decoy'),
+    ('email_mailbox',{'action':'delete_draft','draft_id':'draft-one','label_names':['decoy']},'decoy'),
+])
+def test_implicit_account_cannot_borrow_another_active_target(tmp_path,monkeypatch,sole_gmail,cross_account,tool,args,marker):
+    account,call,writes=sole_gmail
+    guard=host_guard(tmp_path,monkeypatch,tool,account,[('','paused')])
+    from ouroboros import places
+    for active in set([marker, *args.get('label_names', [])]):
+        places.connect_place(tmp_path/'host',connector='email-presence',provider='email',
+                             account_id='google:other' if cross_account else account,
+                             conversation_id=active,state='active')
+    # Unqualified targets alone can resolve Active. The selected account must
+    # be returned to the Host before the skill reaches any provider mutation.
+    assert not guard(args)
+    result=call(tool,args)
+    assert result['status']=='needs_arguments' and not writes
+    retry=result['retry_arguments']
+    assert retry['account_id']==account and 'Paused' in guard(retry) and not writes
+
+
+@pytest.mark.parametrize('tool,args,targets,method,path,body',[
+    ('email_mark_read',{'uid':11,'uidvalidity':1},{'remove_labels':['UNREAD']},'POST','/messages/b/modify',
+                      {'addLabelIds':[],'removeLabelIds':['UNREAD']}),
+    ('email_mailbox',{'action':'move','folder':'Filed','destination':'STARRED','uid':11,'uidvalidity':1},
+     {'folder':'Label_1','label_names':['Filed'],'remove_labels':['Label_1']},'POST','/messages/b/modify',
+     {'addLabelIds':['STARRED'],'removeLabelIds':['Label_1']}),
+    ('email_mailbox',{'action':'create','properties':{'name':'New'}},{'destination':'New'},'POST','/labels',{'name':'New'}),
+    ('email_mailbox',{'action':'delete','uid':11,'uidvalidity':1},{},'DELETE','/messages/b',None),
+    ('email_mailbox',{'action':'delete_draft','draft_id':'draft-one'},{},'DELETE','/drafts/draft-one',None),
+])
+def test_sole_active_account_prepares_all_targets_once(tmp_path,monkeypatch,sole_gmail,tool,args,targets,method,path,body):
+    account,call,writes=sole_gmail
+    guard=host_guard(tmp_path,monkeypatch,tool,account,[('','active')])
+    result=call(tool,args)
+    assert result['status']=='needs_arguments' and result['code']=='canonical_account_required' and not writes
+    retry=result['retry_arguments']
+    assert retry['account_id']==account
+    assert all(retry[k]==v for k,v in targets.items())
+    assert not guard(retry)
+    assert call(tool,retry)['account_id']==account and writes==[(method,path,body)]
+
+
+def test_implicit_folder_lists_remain_reads(sole_gmail):
+    account,call,writes=sole_gmail
+    for tool,args in [('email_folders',{}),('email_mailbox',{}),('email_mailbox',{'action':'list'})]:
+        assert call(tool,args)=={'account_id':account,'folders':[{'id':'Label_1','name':'Filed'}]}
+    assert not writes
+
+
+@pytest.mark.parametrize('provider',['ews','imap'])
+@pytest.mark.parametrize('key,value',[('label_names',['decoy']),('add_labels',['decoy']),('remove_labels',['decoy']),('label_id','decoy')])
+def test_non_gmail_cannot_advertise_unused_label_targets(tmp_path,provider,key,value):
+    class Client:
+        def mailbox(self, **args):
+            pytest.fail('No provider call may use an unrelated Gmail target')
+    account,call=tools_for(tmp_path,provider,Client())
+    with pytest.raises(ValueError,match='only to Gmail'):
+        call('email_mailbox',{'account_id':account,'action':'create','destination':'New',key:value})
+
+
+def test_implicit_gmail_retry_preserves_opaque_public_reference(sole_gmail):
+    account,call,writes=sole_gmail
+    ref=MailService.wrap_ref({'id':account},{'message_ref':'gmail:abcdef'})
+    args={'action':'labels','message_ref':ref,'add_labels':['Label_1']}
+    retry=call('email_mailbox',args)['retry_arguments']
+    assert retry['message_ref']==ref and retry['account_id']==account and retry['label_names']==['Filed'] and not writes
+    assert call('email_mailbox',retry)['account_id']==account
+    assert writes==[('POST','/messages/abcdef/modify',{'addLabelIds':['Label_1'],'removeLabelIds':[]})]

@@ -175,7 +175,7 @@ def test_sending_setting_defaults_roundtrips_and_leaves_other_tools_working(tmp_
                            "Sending is off for this mailbox in its connector settings; reading, drafts and tidying keep working"}
         assert EmailStore(tmp_path).receipt("two") is None
         for name, kwargs in (("email_search", {}), ("email_read", {"uid": 1, "uidvalidity": 7}),
-                             ("email_mark_read", {"uid": 1, "uidvalidity": 7}),
+                             ("email_mark_read", {"account_id": ACCOUNT, "uid": 1, "uidvalidity": 7}),
                              ("email_draft", {"account_id": ACCOUNT, "to": ACCOUNT, "subject": "draft", "body": "text", "folder": "Drafts"}),
                              ("email_mailbox", {"action": "list"})):
             assert json.loads(tools[name](**kwargs))["ok"]

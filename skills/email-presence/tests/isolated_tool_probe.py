@@ -119,7 +119,9 @@ def register(api):
         assert message["body"] == "Unicode 📬 and 'quoted' text"
         assert "_raw_source" not in message
         assert Path(message["source_artifact"]["path"]).read_bytes() == b"Subject: fixture\r\n\r\nbody"
-        assert invoke("email_mark_read", uid=4, uidvalidity=7) == {"ok": True, "uid": 4, "uidvalidity": 7, "folder": "INBOX", "account_id": "mail@example.invalid"}
+        prepared_mark = invoke("email_mark_read", uid=4, uidvalidity=7)
+        assert prepared_mark["status"] == "needs_arguments"
+        assert invoke("email_mark_read", **prepared_mark["retry_arguments"]) == {"ok": True, "uid": 4, "uidvalidity": 7, "folder": "INBOX", "account_id": "mail@example.invalid"}
         assert invoke("email_mailbox", action="list") == {"folders": [
             {"name": "INBOX", "selectable": True}, {"name": "Архив", "optional": None}], "account_id": "mail@example.invalid"}
         prepared_draft = invoke("email_draft", to="reader@example.invalid", subject="Draft", body="Черновик")
