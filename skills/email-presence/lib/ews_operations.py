@@ -121,16 +121,21 @@ class EwsOperations:
         # acknowledgment. There is no remote item id to invent.
         return {}, {"transport": "ews", "submitted_message_id": str(message["Message-ID"])}
 
-    def draft(self, *, to, subject, body="", folder="drafts", reply_to_message_id="", references=None,
-              cc=(), bcc=(), html_body="", body_type="plain", attachments=(), sender="", draft_id=""):
-        if draft_id:
+    def draft(self, *, folder="drafts", **content):
+        if content.get("draft_id"):
             raise ValueError("Exchange email_draft saves a new draft; updating an existing draft is not supported")
         folder = folder or "drafts"
+        return self._save_draft(self._folder(folder), folder=folder, **content)
+
+    def _save_draft(self, selected, *, to, subject, body="", folder, reply_to_message_id="", references=None,
+                    cc=(), bcc=(), html_body="", body_type="plain", attachments=(), sender="", draft_id=""):
+        if draft_id:
+            raise ValueError("Exchange email_draft saves a new draft; updating an existing draft is not supported")
         message = build_message(sender=sender or self.account["address"], recipients=mailbox_addresses(to),
                                 subject=subject, body=body, in_reply_to=reply_to_message_id,
                                 references=references or [], cc=mailbox_addresses(cc),
                                 html_body=html_body, body_type=body_type, attachments=attachments)
-        reply = self._call(_create(self._folder(folder), _message_item(message, mailbox_addresses(bcc)), "SaveOnly"))
+        reply = self._call(_create(selected, _message_item(message, mailbox_addresses(bcc)), "SaveOnly"))
         identifier = reply.find("m:Items/t:Message/t:ItemId", NS)
         if identifier is None or not identifier.get("Id"):
             raise RuntimeError("Exchange acknowledged saving a draft but returned no item id; inspect Drafts before retrying")
@@ -151,7 +156,7 @@ class EwsOperations:
         if store.has_native_event(source, reference):
             return 0  # Rescans and restarted cuts do not redownload the MIME or attachments.
         try:
-            message = self.read(message_ref=reference, include_attachment_data=True)
+            message = self._read_scoped(message_ref=reference, include_attachment_data=True)
         except EwsError as exc:
             if exc.proven and exc.code == "ErrorItemNotFound":
                 return 0  # Removed before this notification could be captured.

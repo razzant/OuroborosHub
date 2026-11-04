@@ -23,14 +23,17 @@ _METADATA = ('item:Subject', 'item:DateTimeReceived', 'item:ParentFolderId', 'it
              'item:Flag', 'message:From', 'message:InternetMessageId', 'message:References', 'message:IsRead')
 
 
-def _shape(kind, properties=(), *, mime=False, text_body=False):
+def _shape(kind, properties=(), *, mime=False, text_body=False, store_key=False):
     values = [t('BaseShape', text='IdOnly')]
     if mime:
         values.append(t('IncludeMimeContent', text='true'))
     if text_body:
         values.append(t('BodyType', text='Text'))
-    if properties:
-        values.append(t('AdditionalProperties', *(t('FieldURI', FieldURI=p) for p in properties)))
+    fields = [t('FieldURI', FieldURI=p) for p in properties]
+    if store_key:  # PidTagStoreRecordKey: binary-comparable identity of an object's message store.
+        fields.append(t('ExtendedFieldURI', PropertyTag='0x0FFA', PropertyType='Binary'))
+    if fields:
+        values.append(t('AdditionalProperties', *fields))
     return m(kind + 'Shape', *values)
 
 
@@ -102,15 +105,20 @@ class EwsClient(EwsOperations, MailClient):
             prefix = f'ews-folder:{self.account["id"]}:'
             if not value.startswith(prefix):
                 raise ValueError('This Exchange folder handle belongs to a different account')
-            return t('FolderId', Id=_opaque(value[len(prefix):]))
+            native = _opaque(value[len(prefix):])
+            self._checked_native('Folder', native)
+            return t('FolderId', Id=native)
         matches = [entry for entry in self._folders() if entry['name'] == value]
         if len(matches) != 1:
             raise ValueError('Choose an exact Exchange folder id or a unique name from email_folders')
-        return self._folder(matches[0]['id'])
+        # FindFolder was rooted in the explicit mailbox; this ID has server provenance already.
+        return t('FolderId', Id=matches[0]['id'].removeprefix(f'ews-folder:{self.account["id"]}:'))
 
     def _folders(self):
+        return list(self._folder_rows())
+
+    def _folder_rows(self):
         offset = 0
-        rows = []
         while True:
             reply = self._call(m('FindFolder', _shape('Folder', ('folder:DisplayName', 'folder:ParentFolderId', 'folder:FolderClass')),
                                  m('IndexedPageFolderView', MaxEntriesReturned=200, Offset=offset, BasePoint='Beginning'),
@@ -124,18 +132,103 @@ class EwsClient(EwsOperations, MailClient):
                     continue
                 native = _opaque(_child(item, 't:FolderId').get('Id'))
                 parent = item.find('t:ParentFolderId', NS)
-                rows.append({'id': self._folder_ref(native), 'name': item.findtext('t:DisplayName', '', NS),
-                             'parent_id': self._folder_ref(parent.get('Id')) if parent is not None and parent.get('Id') else ''})
+                yield {'id': self._folder_ref(native), 'name': item.findtext('t:DisplayName', '', NS),
+                       'parent_id': self._folder_ref(parent.get('Id')) if parent is not None and parent.get('Id') else ''}
             token = _page(root, offset)
             if not token:
-                return rows
+                return
             offset = int(token)
 
+    def _scope_record(self, kind, ref):
+        """Read identity only: a possibly foreign object's content must never be requested as proof."""
+        def fetch(store_key):
+            shape = _shape(kind, (kind.lower() + ':ParentFolderId',), store_key=store_key)
+            return _only(self._call(m('Get' + kind, shape, m(kind + 'Ids', ref))), 'm:' + kind + 's')
+        try:
+            node = fetch(True)
+        except EwsError as exc:
+            if not exc.proven or exc.code not in {'ErrorInvalidPropertyRequest', 'ErrorInvalidPropertyForOperation'}:
+                raise
+            node = fetch(False)  # Server rejected this projection. Its scoped folder tree can still prove ownership.
+        identity = _opaque(_child(node, 't:' + kind + 'Id').get('Id'))
+        if ref.tag == f'{{{NS["t"]}}}{kind}Id' and ref.get('Id') != identity:
+            raise EwsError(kind + 'IdentityMismatch')
+        parent_node = node.find('t:ParentFolderId', NS)
+        parent = parent_node.get('Id') if parent_node is not None else None
+        key = None
+        for prop in node.findall('t:ExtendedProperty', NS):
+            field = prop.find('t:ExtendedFieldURI', NS)
+            if field is not None and field.get('PropertyTag', '').lower() in {'0x0ffa', '0xffa', '4090'}:
+                try:
+                    if key is not None or field.get('PropertyType') != 'Binary':
+                        raise ValueError()
+                    key = base64.b64decode(''.join(prop.findtext('t:Value', '', NS).split()), validate=True)
+                    if not key:
+                        raise ValueError()
+                except (ValueError, binascii.Error):
+                    raise EwsError('InvalidStoreRecordKey') from None
+        return node, identity, parent, key
+
+    def _checked_native(self, kind, native):
+        """Verify an unchanged public handle against this mailbox, not its editable account prefix."""
+        node, identity, parent, key = self._scope_record(kind, t(kind + 'Id', Id=native))
+        folder = identity if kind == 'Folder' else parent
+        def unavailable(exc):
+            return exc.proven and exc.code in {'ErrorFolderNotFound', 'ErrorAccessDenied'}
+        def matches_anchor(name):
+            try:
+                _, anchor, anchor_parent, anchor_key = self._scope_record('Folder', self._folder(name))
+            except EwsError as exc:
+                if unavailable(exc):
+                    return False
+                raise
+            if key is not None and anchor_key is not None:
+                if key != anchor_key:
+                    raise EwsError('MailboxOwnershipMismatch')
+                return True
+            return bool(folder and folder in (anchor, anchor_parent))
+
+        if matches_anchor('inbox'):
+            return node
+        # Some stores don't expose the extended property. The actual ID (or item's
+        # parent) must then be found beneath a folder explicitly qualified by mailbox.
+        if folder:
+            try:
+                if any(row['id'] == self._folder_ref(folder) for row in self._folder_rows()):
+                    return node
+            except EwsError as exc:
+                if not unavailable(exc):
+                    raise
+        # A delegate can have access to a single default folder but no Inbox or
+        # deep hierarchy. Its explicit resolution is just as authoritative.
+        if any(matches_anchor(name) for name in dict.fromkeys(_KNOWN.values()) if name != 'inbox'):
+            return node
+        raise EwsError('MailboxOwnershipUnverified')
+
+    def draft_destination(self, selection):
+        """Resolve one target. The eventual SaveOnly uses this same native ID, never the name again."""
+        folder = self._folder(selection)
+        fields = ('folder:DisplayName', 'folder:DistinguishedFolderId')
+        reply = self._call(m('GetFolder', _shape('Folder', fields), m('FolderIds', folder)))
+        node = _only(reply, 'm:Folders')
+        native = _opaque(_child(node, 't:FolderId').get('Id'))
+        if folder.tag == f'{{{NS["t"]}}}FolderId' and folder.get('Id') != native:
+            raise EwsError('FolderIdentityMismatch')
+        name = node.findtext('t:DisplayName', '', NS)
+        if not name:
+            raise EwsError('MissingFolderDisplayName')
+        # Derive aliases from this server record, not the spelling used to reach it.
+        distinguished = node.findtext('t:DistinguishedFolderId', '', NS)
+        names = sorted({name, *(alias for alias, kind in _KNOWN.items() if kind == distinguished)})
+        selected = t('FolderId', Id=native)
+        return self._folder_ref(native), names, lambda **content: self._save_draft(selected, **content)
+
     def _folder_info(self, value):
-        reply = self._call(m('GetFolder', _shape('Folder', ('folder:TotalCount',)),
-                             m('FolderIds', self._folder(value))))
-        folder = _only(reply, 'm:Folders')
-        result = {'id': _opaque(_child(folder, 't:FolderId').get('Id'))}
+        folder = self._folder(value)
+        if folder.tag != f'{{{NS["t"]}}}FolderId':
+            reply = self._call(m('GetFolder', _shape('Folder', ('folder:TotalCount',)), m('FolderIds', folder)))
+            folder = _child(_only(reply, 'm:Folders'), 't:FolderId')
+        result = {'id': _opaque(folder.get('Id'))}
         try:
             result['server_time'] = parsedate_to_datetime(self.wire.last_date).timestamp()
         except (TypeError, ValueError, OverflowError):
@@ -247,6 +340,11 @@ class EwsClient(EwsOperations, MailClient):
         return msg
 
     def read(self, *, message_ref='', include_attachment_data=False, **_legacy):
+        self._checked_native('Item', self.native_id(message_ref))
+        return self._read_scoped(message_ref=message_ref, include_attachment_data=include_attachment_data)
+
+    def _read_scoped(self, *, message_ref, include_attachment_data=False):
+        # Only an already checked public ref, or an ID from mailbox-qualified Find/Sync, enters here.
         native = self.native_id(message_ref)
         shape = _shape('Item', ('item:DateTimeReceived', 'item:ParentFolderId', 'item:Flag',
                                 'message:IsRead', 'message:InternetMessageId'), mime=True)
@@ -279,7 +377,7 @@ class EwsClient(EwsOperations, MailClient):
         page = self._find(folder, 1, 0, restriction=restriction)
         if not page['messages']:
             return None
-        original = self.read(message_ref=page['messages'][0]['message_ref'])
+        original = self._read_scoped(message_ref=page['messages'][0]['message_ref'])
         return original if original.get('message_id') == message_id else None
 
     def mark_read(self, *, message_ref='', **_legacy):
@@ -303,6 +401,7 @@ class EwsClient(EwsOperations, MailClient):
             if action != 'trash' and not destination:
                 raise ValueError('Choose a destination Exchange folder')
             target = self._folder('deleteditems' if action == 'trash' else destination)
+            self._checked_native('Item', native)
             op = 'CopyItem' if action == 'copy' else 'MoveItem'
             result = self._call(m(op, m('ToFolderId', target), m('ItemIds', t('ItemId', Id=native))))
             changed = result.find('m:Items/*/t:ItemId', NS)
@@ -318,8 +417,7 @@ class EwsClient(EwsOperations, MailClient):
             updates.append(t('SetItemField', t('FieldURI', FieldURI=uri), t('Message', value)))
         if not updates:
             raise ValueError('Choose at least one Exchange flag')
-        now = self._call(m('GetItem', _shape('Item'), m('ItemIds', t('ItemId', Id=native))))
-        current = _child(_only(now, 'm:Items'), 't:ItemId')
+        current = _child(self._checked_native('Item', native), 't:ItemId')
         if current.get('Id') != native or not current.get('ChangeKey'):
             raise EwsError('MissingCurrentItemVersion')
         self._call(m('UpdateItem', m('ItemChanges', t('ItemChange', current, t('Updates', *updates))),

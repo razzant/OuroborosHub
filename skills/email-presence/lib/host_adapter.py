@@ -26,6 +26,8 @@ PLACE_POLICY_UNREAD = ("Held: Ouroboros did not answer whether this place allows
 # The Host refused this skill itself (no grant, turned off, unreviewed or a stale token): only its owner can change that.
 SKILL_ACCESS_REFUSED = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
                         "check the skill's access in Skills.")
+_DRAFT_POLICY_UNREAD = "Draft not saved: the folder policy is unavailable. Try saving again when Ouroboros can check it."
+_DRAFT_ACCESS_REFUSED = "Draft not saved: Ouroboros refused Mail's request. Check the skill's access in Skills."
 _NO_PLACE_COVERS = "Held: no connected place covers this send; nothing was sent."
 # No binding was captured when the send was queued, so the outbox never sends it.
 _NO_PLACE_WHEN_QUEUED = ("Held: no connected place covered this send when it was queued, so it will not be sent; "
@@ -246,8 +248,9 @@ class LoopbackPresenceHostAdapter:
         listed = payload.get("presence_continuation_versions")
         self.continuation_version = 2 if isinstance(listed, list) and any(type(v) is int and v == 2 for v in listed) else 0
 
-    def place_hold(self, account_id, conversation_id):
-        """The SMTP worker is synchronous; use its own HTTP client on that thread."""
+    def place_hold(self, account_id, conversation_id, *, draft=False):
+        """Read current Place state for a queued send or a synchronous draft folder."""
+        unread = _DRAFT_POLICY_UNREAD if draft else PLACE_POLICY_UNREAD
         try:
             if self._place_http is None:
                 self._place_http = httpx.Client(timeout=10, trust_env=False)
@@ -261,19 +264,22 @@ class LoopbackPresenceHostAdapter:
                                             params={"provider": "email", "account_id": account_id,
                                                     "conversation_id": conversation_id})
             if response.status_code == 403 and response.json().get("code") == "presence_auth_blocked":
-                return SKILL_ACCESS_REFUSED
+                return _DRAFT_ACCESS_REFUSED if draft else SKILL_ACCESS_REFUSED
             if response.status_code == 404:
                 payload = response.json()
                 if payload.get("code") == "place_not_connected":
-                    return "Held: no connected Place; this legacy send has no captured unbound authorization"
+                    return "" if draft else "Held: no connected Place; this legacy send has no captured unbound authorization"
             response.raise_for_status()
             place = response.json()
             state = place.get("state")
             if not state:
-                return PLACE_POLICY_UNREAD
-            return "" if state == "active" else f"Held: {place.get('label') or 'Email'} is {state}"
+                return unread
+            if state == "active":
+                return ""
+            prefix = "Draft not saved:" if draft else "Held:"
+            return f"{prefix} {place.get('label') or 'Email'} is {state}"
         except (HostContractError, httpx.HTTPError, ValueError, AttributeError):
-            return PLACE_POLICY_UNREAD
+            return unread
 
     def _place_client(self):
         if self._place_http is None:
@@ -296,6 +302,31 @@ class LoopbackPresenceHostAdapter:
         if not isinstance(payload, dict) or type(payload.get("allowed")) is not bool or "binding" not in payload:
             raise HostContractError("Host omitted the mail operation's binding facts")
         return {**payload, "supported": True}
+
+    def draft_folder_hold(self, account_id, folder):
+        """Check the folder separately from the RFC Place. Drafts are never queued for retry."""
+        try:
+            decision = self.capture_binding(account_id, folder)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                try:
+                    if exc.response.json().get("code") == "presence_auth_blocked":
+                        return _DRAFT_ACCESS_REFUSED
+                except (ValueError, AttributeError):
+                    pass
+            return _DRAFT_POLICY_UNREAD
+        except (HostContractError, httpx.HTTPError, ValueError, AttributeError):
+            return _DRAFT_POLICY_UNREAD
+        if decision.get("supported") and decision.get("code") != "place_unattributable":
+            if decision["allowed"]:
+                return ""
+            state = decision.get("state")
+            if state in ("silent", "paused"):
+                return f"Draft not saved: {decision.get('label') or 'Email'} is {state}"
+            return _DRAFT_POLICY_UNREAD
+        # A folder outside an Active RFC scope can still be a valid unbound
+        # target. Only explicit not-connected (or no Places support) clears it.
+        return self.place_hold(account_id, folder, draft=True)
 
     def binding_hold(self, binding, account_id, conversation_id, *, thread_id=""):
         if not isinstance(binding, dict):

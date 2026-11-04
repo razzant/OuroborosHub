@@ -34,6 +34,8 @@ def exchange_tools(tmp_path, monkeypatch):
         def mailbox(self, **args):
             calls.append(('mailbox', self.account, args))
             return {'ok': True, 'message_ref': 'ews:new/Location+ID=='}
+        def draft_destination(self, selection):
+            return f'ews-folder:{self.account}:fixture-drafts', ['Drafts', 'drafts'], self.draft
         def draft(self, **args):
             calls.append(('draft', self.account, args))
             return {'ok': True, 'message_ref': 'ews:new/Draft+ID=='}
@@ -113,7 +115,7 @@ def test_companion_drains_known_pages_and_returns_to_normal_idle_wait(tmp_path):
 
 def test_place_message_can_be_opened_by_registered_mail_tool(tmp_path, monkeypatch):
     from lib.host_adapter import email_presence_event
-    from test_ews_mailbox import client, item, listing, NATIVE
+    from test_ews_mailbox import client, item, listing, NATIVE, proof
     from test_ews_wire import response
     from test_ews_delivery_sync import change
 
@@ -126,7 +128,7 @@ def test_place_message_can_be_opened_by_registered_mail_tool(tmp_path, monkeypat
                     '<m:IncludesLastItemInRange>true</m:IncludesLastItemInRange><m:Changes>'
                     + change(NATIVE, '2099-01-01T00:00:00Z') + '</m:Changes>')
     contents = response('GetItem', '<m:Items>' + item(mime=True) + '</m:Items>')
-    exchange, _ = client(folder, sync, contents, listing(item()), contents)
+    exchange, _ = client(folder, sync, contents, listing(item()), *proof(), contents)
     exchange.account = account
     for _ in range(3):  # One synthetic sync page and one capture in this fixture.
         exchange.poll(store)

@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.10.1
+version: 0.10.2
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -34,15 +34,15 @@ tools:
     description: Read an account-bound message reference or legacy UID and UIDVALIDITY without changing flags.
   - name: email_mark_read
     effect: write
-    target: [account_id]
+    target: [account_id,remove_labels]
     description: Mark one message read by its account-bound reference, or a legacy IMAP UID and UIDVALIDITY.
   - name: email_mailbox
     effect: write
-    target: [account_id,destination]
+    target: [account_id,destination,add_labels,remove_labels,label_id,label_names]
     description: List/create folders, copy/move messages and update flags.
   - name: email_draft
     effect: write
-    target: [account_id,to,cc,bcc]
+    target: [account_id,to,cc,bcc,folder,folder_names]
     conversation: conversation_id
     thread: thread_id
     description: Save a text draft without sending.
@@ -114,8 +114,10 @@ address. Host conversation identity remains RFC Message-ID/References; native
 Gmail message/thread ids remain explicit provider facts, and replies pass the
 native threadId to Gmail. No signature, footer or Auto-Submitted marker is added.
 
-Supply canonical `account_id` for a new `email_send` or `email_draft`, including
-a sole mailbox. Read/search results also include canonical `conversation_id`
+Supply canonical `account_id` for new sends, drafts, marking read, and mailbox
+writes, even with a sole connected mailbox. Reads and folder listing may still
+select that sole mailbox implicitly. A write with an implicit account returns
+the canonical account and its resolved targets in one `retry_arguments`. Read/search results also include canonical `conversation_id`
 and `thread_id` when the RFC source is known; pass both for a threaded reply.
 An omitted account or reply identity returns `needs_arguments` with exact
 `retry_arguments` before enqueueing or saving anything. Repeat that call so the
@@ -230,12 +232,32 @@ remain readable by explicit account_id.
   retains list/create/copy/move/flags, including the old list action. IMAP move
   requires UID MOVE, never a mailbox-wide expunge. Gmail adds label management,
   archive, trash/untrash, delete_draft and explicitly granted permanent deletion.
-  Its destination is declared before effects. For Gmail label creation,
+  For general IMAP mailbox actions the source folder inside a message reference
+  is not a separate Host target. Within the same Exchange mailbox, copy/move
+  declares the destination as supplied; use the same folder spelling as its Place.
+  The parent of an Exchange folder creation is not a separate Host target either.
+  Drafts check the resolved storage folder independently (below).
+  For Gmail label creation,
   properties.name keeps its existing precedence; a different or omitted top-level
   destination returns exact retry_arguments naming that actual label without
-  dropping any properties. A matching canonical call remains one call.
+  dropping any properties. Gmail exposes all added and removed label IDs, including
+  those implied by a move, archive or flag. A label name may need a read-only
+  lookup before the tool returns canonical arguments. Updating or deleting a label
+  exposes its actual ID; a rename exposes the new name as destination as well.
+  Gmail checks current custom label names alongside IDs, including rename's old
+  and new names. The move source is a removed label, trash/untrash expose TRASH,
+  and Gmail mark-read exposes its fixed removal of UNREAD. Follow returned
+  retry_arguments; label_names describes checked targets and never changes a
+  label. A matching canonical call remains one call.
 - email_draft saves or updates a Gmail draft by draft_id, or appends an IMAP
-  draft. Search Gmail folder DRAFT to obtain stable draft ids. Sending captured
+  draft. The selected draft folder is an explicit Host target. Omit the folder
+  to receive retry_arguments with the provider default (Gmail DRAFT, IMAP Drafts,
+  Exchange drafts). Gmail checks both DRAFT and Drafts. Exchange prepares the existing account-bound folder handle
+  and its current server names in folder_names; both are checked, and the same
+  native folder ID receives the draft. Use the stable handle for durable folder
+  rules across renames and localization. The Host checks these independently of any RFC
+  Place: a Silent/Paused folder holds the draft, a genuinely unconnected folder
+  is still writable, and a failed policy lookup does not save anything. Search Gmail folder DRAFT to obtain stable draft ids. Sending captured
   draft content with email_send does not silently delete the original draft;
   deleting it is a separate explicit mailbox operation.
 - email_send accepts sender, To/Cc/Bcc, MIME attachments and reply-all. Read a

@@ -6,6 +6,7 @@ import copy
 import re
 import time
 from contextlib import contextmanager
+from functools import cache
 from email.policy import SMTP
 from email.utils import getaddresses
 
@@ -17,6 +18,7 @@ from .delivery import DeliveryRejected
 from .mime import build_message, mailbox_addresses, parse_message
 
 BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
+_SYSTEM_LABEL_IDS = frozenset({"INBOX", "SENT", "DRAFT", "SPAM", "TRASH", "STARRED", "UNREAD", "IMPORTANT"})
 
 
 class GmailError(RuntimeError):
@@ -167,10 +169,10 @@ class GmailClient(MailClient):
         found = self.search(folder=folder, query="rfc822msgid:" + str(message_id), limit=1)
         return self.read(message_ref=found["messages"][0]["message_ref"]) if found["messages"] else None
 
-    def _label_id(self, value):
-        if value in {"INBOX", "SENT", "DRAFT", "SPAM", "TRASH", "STARRED", "UNREAD", "IMPORTANT"}:
+    def _label_id(self, value, *, snapshot=None):
+        if value in _SYSTEM_LABEL_IDS:
             return value
-        labels = self._request("GET", "/labels").get("labels", [])
+        labels = snapshot() if snapshot else self._request("GET", "/labels").get("labels", [])
         by_id = [label["id"] for label in labels if label["id"] == value]
         if by_id:
             return by_id[0]
@@ -179,37 +181,73 @@ class GmailClient(MailClient):
             raise ValueError("Choose an exact label id or unique name from email_folders")
         return matches[0]
 
-    def mark_read(self, *, message_ref="", uid=None, uidvalidity=None, folder=None):
-        return self.mailbox(action="flags", message_ref=message_ref, uid=uid, uidvalidity=uidvalidity, flags=["\\Seen"])
+    def mark_read(self, *, message_ref="", uid=None, uidvalidity=None, folder=None, prepare_targets=None):
+        return self.mailbox(action="flags", message_ref=message_ref, uid=uid, uidvalidity=uidvalidity,
+                            flags=["\\Seen"], prepare_targets=prepare_targets)
 
     def mailbox(self, *, action="list", folder="INBOX", uid=None, uidvalidity=None, message_ref="",
                 destination="", flags=None, remove_flags=False, add_labels=None, remove_labels=None,
-                label_id="", properties=None, draft_id=""):
+                label_id="", properties=None, draft_id="", label_names=None, prepare_targets=None):
+        # One fresh snapshot per operation. Never cache a mutable display name
+        # across calls or translate the provider's add/remove ID arrays as names.
+        @cache
+        def snapshot():
+            return self._request("GET", "/labels").get("labels", [])
+
+        def write(method, path, body, targets, affected=(), fixed_names=()):
+            if prepare_targets:
+                names = set(fixed_names)
+                current = set(affected) - _SYSTEM_LABEL_IDS
+                if current:
+                    by_id = {row["id"]: row["name"] for row in snapshot()}
+                    if not current <= by_id.keys():
+                        raise ValueError("Choose current Gmail label IDs from email_folders")
+                    names.update(by_id[key] for key in current if by_id[key] != key)
+                if names or label_names:
+                    targets["label_names"] = sorted(names)
+            prepared = prepare_targets(targets) if prepare_targets else None
+            return prepared if prepared is not None else self._request(method, path, body=body)
+
         if action == "list":
             return {"folders": self._request("GET", "/labels").get("labels", [])}
         if action == "create":
-            return self._request("POST", "/labels", body={"name": str(destination), **(properties or {})})
+            body = {"name": str(destination), **(properties or {})}
+            if not isinstance(body["name"], str):
+                raise ValueError("The label name must be a string")
+            return write("POST", "/labels", body, {"destination": body["name"]})
         if action in {"update_label", "delete_label"}:
-            selected = self._label_id(label_id or destination)
-            return self._request("PATCH" if action == "update_label" else "DELETE", "/labels/" + selected,
-                                 body=properties if action == "update_label" else None)
+            selected = self._label_id(label_id or destination, snapshot=snapshot)
+            targets = {"label_id" if label_id else "destination": selected}
+            if action == "update_label" and (properties or {}).get("name"):
+                if not isinstance(properties["name"], str):
+                    raise ValueError("The label name must be a string")
+                targets = {"label_id": selected, "destination": properties["name"]}
+            return write("PATCH" if action == "update_label" else "DELETE", "/labels/" + selected,
+                         properties if action == "update_label" else None, targets, [selected])
         if action == "delete_draft":
             if not re.fullmatch(r"[A-Za-z0-9_-]+", str(draft_id)):
                 raise ValueError("Choose draft_id from email_search(folder='DRAFT')")
-            return self._request("DELETE", "/drafts/" + str(draft_id))
+            return write("DELETE", "/drafts/" + str(draft_id), None, {})
         native = self.native_id(message_ref or (format(int(uid) % (2 ** 64), "x") if uid is not None and uidvalidity == 1 else ""))
         if action in {"trash", "untrash"}:
-            return self._request("POST", f"/messages/{native}/{action}", body={})
+            return write("POST", f"/messages/{native}/{action}", {}, {}, fixed_names=["TRASH"])
         if action == "delete":
             scopes = self.account.get("scopes")
             if scopes is not None and "https://mail.google.com/" not in scopes:
                 raise AccountError("Permanent deletion requires a new Google consent with the full mail scope; trash is available with gmail.modify")
-            return self._request("DELETE", "/messages/" + native)
+            return write("DELETE", "/messages/" + native, None, {})
+        for labels in (add_labels, remove_labels):
+            if labels is not None and (not isinstance(labels, (list, tuple))
+                                      or any(not isinstance(label, str) or not label.strip() for label in labels)):
+                raise ValueError("add_labels and remove_labels must be lists of Gmail label IDs")
         add, remove = list(add_labels or []), list(remove_labels or [])
+        targets = {}
         if action in {"copy", "move"}:
-            add.append(self._label_id(destination))
+            targets["destination"] = self._label_id(destination, snapshot=snapshot)
+            add.append(targets["destination"])
             if action == "move" and folder and folder != "ALL":
-                remove.append(self._label_id(folder))
+                targets["folder"] = self._label_id(folder, snapshot=snapshot)
+                remove.append(targets["folder"])
         elif action == "archive":
             remove.append("INBOX")
         elif action == "flags":
@@ -221,8 +259,12 @@ class GmailClient(MailClient):
                 (remove if bool(remove_flags) != inverse else add).append(label)
         elif action != "labels":
             raise ValueError("Unsupported Gmail mailbox action")
-        return self._request("POST", "/messages/" + native + "/modify",
-                             body={"addLabelIds": list(dict.fromkeys(add)), "removeLabelIds": list(dict.fromkeys(remove))})
+        body = {"addLabelIds": list(dict.fromkeys(add)), "removeLabelIds": list(dict.fromkeys(remove))}
+        if action == "flags" and set(add) - set(add_labels or []):
+            targets["add_labels"] = body["addLabelIds"]
+        if set(remove) - set(remove_labels or []):
+            targets["remove_labels"] = body["removeLabelIds"]
+        return write("POST", "/messages/" + native + "/modify", body, targets, [*add, *remove])
 
     def draft(self, *, to, subject, body="", folder="DRAFT", reply_to_message_id="", references=None,
               cc=(), bcc=(), html_body="", body_type="plain", attachments=(), sender="", draft_id="", thread_id=""):

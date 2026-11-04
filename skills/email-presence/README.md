@@ -1,8 +1,12 @@
 # Email Presence
 
-Version 0.10.1 connects Gmail, on-premises Exchange (EWS over HTTPS with NTLM),
+Version 0.10.2 connects Gmail, on-premises Exchange (EWS over HTTPS with NTLM),
 and IMAP/SMTP mailboxes, including Yandex and Proton Mail Bridge. Each account has its own credentials, inbox,
 outbox and receipts; sender addresses are separate from mailbox identity.
+Previously issued Exchange links still work. Mail asks Exchange whether an item
+or folder belongs to the selected mailbox before using its native ID. A shared
+login can therefore operate on multiple mailboxes without making their links
+interchangeable. Addresses that resolve to the same Exchange store are aliases.
 The Email accounts widget manages connections and shows queue counts and the
 latest delivery receipts, including retained work after a disconnect.
 
