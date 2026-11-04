@@ -3,8 +3,12 @@
 ## 0.10.3
 
 - Check the selected Gmail account, forwarding address, and affected label IDs
-  and names before creating a filter. A canonical retry does not alter its criteria.
-- Keep malformed Message-ID headers from stopping mailbox intake or hiding later mail.
+  and names before creating a filter. All Gmail settings writes check the actual
+  account; a canonical retry preserves the complete rule.
+- Keep malformed Message-ID headers from stopping intake or hiding later mail.
+  Header-only search may return a message reference without an RFC ID; read by
+  that reference for the full identity. IMAP rescans recognize identical old
+  captures from their retained source, without merging different messages.
 
 ## 0.10.2
 

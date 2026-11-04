@@ -183,3 +183,41 @@ def test_ews_conversion_fallback_does_not_trust_a_broken_provider_id(monkeypatch
     fallback = f"<ews-{hashlib.sha256(fixture.NATIVE.encode()).hexdigest()}@ouroboros.local>"
     assert result["source_format"]=="ews_properties" and result["body"]=="Содержимое Exchange."
     assert result["message_id"]==(expected or fallback)
+
+
+@pytest.mark.parametrize(("previous", "old_id", "expect_new"), [
+    ("same", "invalid", False), ("same", "<a@broken>", False),
+    ("different", "invalid", True), ("another_folder", "invalid", True),
+    ("missing_source", "invalid", True), ("tool_read_only", "invalid", True),
+])
+def test_upgrade_and_uidvalidity_reset_only_coalesce_a_proven_old_capture(tmp_path, previous, old_id, expect_new):
+    # These are values the 0.10.2 header registry accepted. For the second,
+    # it inserted a closing bracket which is NOT in the original bytes.
+    raw = source("<a@broken" if old_id == "<a@broken>" else "invalid", "bad ID, normal body")
+    old_wire = raw + b" (another message)" if previous == "different" else raw
+    store = EmailStore(tmp_path)
+    former = {"folder":"Archive" if previous == "another_folder" else "INBOX",
+              "uid":1, "uidvalidity":7, "message_id":old_id, "body":"old"}
+    if previous != "missing_source":
+        former["_raw_source"] = old_wire
+    if previous == "tool_read_only":
+        store.stage_inbound_attachments(former)
+        store.remember_read(former)
+    else:
+        assert store.ingest(former)[1]
+        event = store.claim_inbox()
+        store.complete_inbox(event.row_id, event.lease_token)
+    key = store.cursor_key("imap", "INBOX")
+    store.put(key, {"uid":1, "uidvalidity":7, "activated_at":1})
+    box = FakeIMAP(1800000000.0)
+    box.validity, box.next_uid = 8, 13
+    box.messages = {11:(raw,box.now), 12:(source(GOOD, "later"),box.now)}
+    worker = EmailRuntime(store, FakeClient(box), FakeHost(), account="imap")
+    assert worker.poll() == 1 + expect_new
+    assert [row[0] for row in drain(store)] == ([wire_id(raw)] if expect_new else []) + [GOOD]
+    assert store.get(key)["uid"] == 12 and store.get(key)["uidvalidity"] == 8
+    assert worker.poll() == 0
+    # A second reset from a freshly constructed worker also remains idempotent.
+    box.validity += 1
+    restarted = EmailRuntime(EmailStore(tmp_path), FakeClient(box), FakeHost(), account="imap")
+    assert restarted.poll() == 0 and store.get(key)["uidvalidity"] == 9

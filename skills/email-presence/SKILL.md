@@ -235,7 +235,11 @@ remain readable by explicit account_id.
   A headers-only view cannot hash the original message. When the ID is absent
   from that view, use its account-bound message_ref to read it; the optional
   message_id_note explains the missing identity. No full body is fetched just
-  for search. This recovery does not cover every malformed MIME structure or
+  for search. A synthetic ID does not recreate the sender's original thread.
+  After an IMAP UIDVALIDITY change, a previously tolerated damaged ID is only
+  recognized as an old capture when the same folder's inbox row records the
+  identical full-source digest. Without that evidence the message is captured.
+  This recovery does not cover every malformed MIME structure or
   unsupported charset.
 - email_folders is a declared read and works in Silent/Advises. email_mailbox
   retains list/create/copy/move/flags, including the old list action. IMAP move

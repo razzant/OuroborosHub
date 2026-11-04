@@ -9,6 +9,7 @@ from email import message_from_bytes
 from email.header import decode_header, make_header
 from email.errors import HeaderParseError, InvalidHeaderDefect, MessageError, NonPrintableDefect
 from email.message import EmailMessage, Message
+from email.parser import BytesHeaderParser
 from email.policy import default
 from email.utils import getaddresses, make_msgid, parseaddr
 from pathlib import Path
@@ -102,6 +103,28 @@ def usable_message_id(value: str | None) -> str:
     return token if re.fullmatch(fr"<{atom}(?:\.{atom})*>", token) else ""
 
 
+def _source_message_id(digest: str) -> str:
+    return f"<sha256-{digest}@ouroboros.local>"
+
+
+def prior_imap_capture(raw: bytes | None, message_id: str) -> tuple[str, str] | None:
+    """Identify a 0.10.2 header key only when full MIME now supplies the identity."""
+    if not raw or not message_id.startswith("<sha256-"):
+        return None
+    # Only the source headers are needed to reconstruct the previous parser's
+    # actual value (e.g. an implicitly closed angle bracket), not the body.
+    end = re.search(br"\r\n\r\n|\n\n|\r\r", raw)
+    headers = BytesHeaderParser(policy=default).parsebytes(raw[:end.start()] if end else raw)
+    try:
+        old = str(headers.get("Message-ID") or "").strip()
+    except _HEADER_PARSE_ERRORS:
+        return None  # The old parser could not have admitted this message.
+    if not old or old == message_id:
+        return None
+    digest = hashlib.sha256(raw).hexdigest()
+    return (old, digest) if message_id == _source_message_id(digest) else None
+
+
 def _message_ids(value: Any) -> list[str]:
     return [item.strip() for item in re.findall(r"<[^>]+>", str(value or "")) if item.strip()]
 
@@ -190,7 +213,7 @@ def parse_message(
         # can supply an empty ID and still return an exact provider message_ref.
         message_id = (invalid_id if raw_id and raw_id.strip() else "") or missing_id
         if message_id is None:
-            message_id = f"<sha256-{hashlib.sha256(raw).hexdigest()}@ouroboros.local>"
+            message_id = _source_message_id(hashlib.sha256(raw).hexdigest())
     sender_name, sender_addr = parseaddr(decode_header_value(header("From")))
     attachments = []
     for part in msg.walk():
