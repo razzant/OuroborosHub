@@ -5,9 +5,10 @@
 - A hold line says the state and the next step, not the Host's answer behind it. An
   unread Place policy reads `Held: It retries by itself.`, a refused skill
   `Held: Check this skill's access in Skills.` Mail that will never go asks to be sent
-  again: `Held: It will not go out; send it again if still needed.` after its Place was
-  disconnected, `…; send it again once a place covers it.` when none covered it at
-  queueing. A send no connected Place covers now, including one queued before Place
+  again: `Held: Work mail was disconnected, so it will not go out; send it again if still
+  needed.` names the Place, which the owner may have disconnected on purpose, and
+  `Held: It will not go out; send it again once a place covers it.` says that none covered
+  it at queueing. A send no connected Place covers now, including one queued before Place
   bindings, reads `Held: No connected place covers this send.`, and sending turned off
   reads `Held: Sending is off for this mailbox.` A Place's state reads as before; codes
   stay in the debug log (`LOG_LEVEL=DEBUG`).

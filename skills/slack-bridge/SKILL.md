@@ -502,9 +502,9 @@ text, `message.kind: "operation"` and a typed `message.reaction`
 (`operation`, `new` or `old`, `target`, and `effect` when it took effect); other
 Hosts keep only this local receipt, and `reaction_history_limitation` says so. A
 report frozen for a Host that no longer advertises it stays pending and is not sent;
-`history_report_error` says why. Because the bridge keeps its last `/identity` answer
-until it restarts, a Host's capability change reaches a running bridge at its next
-restart, and the report is sent then if the Host advertises it.
+`history_report_error` says an update records it. Because the bridge keeps its last
+`/identity` answer until it restarts, a Host's capability change reaches a running
+bridge at its next restart, and the report is sent then if the Host advertises it.
 `slack_api` writes to `reactions.add` remain generic operations.
 
 Queued rows from an earlier version become this event shape when they are claimed.

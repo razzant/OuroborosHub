@@ -43,7 +43,7 @@ def test_bind_check_retains_original_target_and_uses_opaque_token_only_for_reque
         binding = host.capture_binding("google:canonical", "<thread>", require_place=True)["binding"]
         assert host.binding_hold(binding, "google:canonical", "<thread>") == ""
         state[0] = "disconnected"
-        assert host.binding_hold(binding, "google:canonical", "<thread>") == _PLACE_DISCONNECTED
+        assert host.binding_hold(binding, "google:canonical", "<thread>") == _PLACE_DISCONNECTED.format(label="Email")
         assert host.binding_hold(None, "google:canonical", "<thread>") == _NO_PLACE_WHEN_QUEUED
     assert len(calls) == token.uses == 4
 
@@ -81,8 +81,9 @@ def test_unread_binding_is_held_in_words_that_ask_nothing_and_print_no_code(answ
 @pytest.mark.parametrize("facts,words", [
     ({"state": "silent", "code": "place_silent", "label": "Work mail"}, "Held: Work mail is silent"),
     ({"state": "paused", "code": "place_paused", "label": "Work mail"}, "Held: Work mail is paused"),
-    ({"state": "disconnected", "code": "place_disconnected", "label": ""}, _PLACE_DISCONNECTED),
-    ({"state": "disconnected", "code": "place_disconnected", "label": "Work mail"}, _PLACE_DISCONNECTED),
+    ({"state": "disconnected", "code": "place_disconnected", "label": ""}, _PLACE_DISCONNECTED.format(label="Email")),
+    ({"state": "disconnected", "code": "place_disconnected", "label": "Work mail"},
+     _PLACE_DISCONNECTED.format(label="Work mail")),
     # The Host answered no: "it retries by itself" would hide that a place has to cover this send.
     ({"state": "changed", "code": "place_scope_changed", "label": "Work mail"}, _NO_PLACE_COVERS),
     ({"state": "unknown", "code": "place_unattributable", "label": ""}, _NO_PLACE_COVERS),
@@ -112,7 +113,8 @@ def test_a_refused_skill_sends_its_owner_to_skills_and_an_unread_place_still_ret
     (SKILL_ACCESS_REFUSED, "once its reader acts", "in Skills", "refused"),
     (_NO_PLACE_COVERS, "once its reader acts", "place", "legacy"),
     (SENDING_OFF_HOLD, "once its reader acts", "Sending is off", "drafts"),
-    (_PLACE_DISCONNECTED, "never", "", "disconnected"),
+    # Which Place went decides whether to send again (its owner may have disconnected it on purpose).
+    (_PLACE_DISCONNECTED.format(label="Work mail"), "never", "Work mail was disconnected", "after this send was queued"),
     (_NO_PLACE_WHEN_QUEUED, "never", "place", "when it was queued"),
 ])
 def test_a_hold_says_whether_it_goes_and_what_its_reader_does_not_why(line, goes, also_says, cause):

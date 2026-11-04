@@ -30,7 +30,8 @@ _DRAFT_ACCESS_REFUSED = "Draft not saved: Ouroboros refused Mail's request. Chec
 _NO_PLACE_COVERS = "Held: No connected place covers this send."
 # No binding was captured when the send was queued, so the outbox never sends it.
 _NO_PLACE_WHEN_QUEUED = "Held: It will not go out; send it again once a place covers it."
-_PLACE_DISCONNECTED = "Held: It will not go out; send it again if still needed."
+# Its Place by name: the owner may have disconnected it on purpose, which decides whether to send again.
+_PLACE_DISCONNECTED = "Held: {label} was disconnected, so it will not go out; send it again if still needed."
 _OUTCOMES = frozenset({"message", "silent", "tool_delivered", "deferred"})
 _SPEECH = frozenset({"message", "deferred"})
 _DISPOSITIONS = frozenset({"retained", "rejected", "blocked", "retry"})
@@ -97,7 +98,7 @@ def place_refusal_hold(facts: Mapping[str, Any]) -> str:
     label = facts.get("label") or "Email"
     if state == "disconnected":
         # The bound Place was removed, or disconnected and connected again: this queued send never goes.
-        return _PLACE_DISCONNECTED
+        return _PLACE_DISCONNECTED.format(label=label)
     return f"Held: {label} is {state}"
 
 def email_presence_event(item: InboxItem, *, account_id: str, places: bool = False,
