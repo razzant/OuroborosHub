@@ -106,7 +106,9 @@ def test_account_discovery_retains_counts_and_addressable_receipts_after_disconn
     accounts = AccountStore(tmp_path)
     account = accounts.save_imap(imap_values())
     store = EmailStore(accounts.mail_dir(account))
-    store.enqueue_outbox(request_id="held-before-disconnect", to=["reader@example.invalid"], body="owed", hold_reason="Email is disconnected")
+    store.enqueue_outbox(request_id="held-before-disconnect", to=["reader@example.invalid"], body="owed",
+                         hold_reason="Email was disconnected after this send was queued, "
+                                     "so it will not be sent; send it again if it is still needed.")
     store.enqueue_outbox(request_id="unknown-acceptance", to=["reader@example.invalid"], body="uncertain")
     item = store.claim_outbox()
     store.uncertain_outbox(item.row_id, item.lease_token, "Provider acceptance unknown")

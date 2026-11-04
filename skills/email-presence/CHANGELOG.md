@@ -9,6 +9,9 @@
 - Name the Place's state in a Host's refusal (`Held: Work mail is paused`), not its code
   (`Held: place_paused`). A send no connected Place covers says so. The code stays in the
   debug log (`LOG_LEVEL=DEBUG`).
+- A send whose Place was disconnected after it was queued says that it will not be sent
+  and should be sent again if it is still needed. Connecting the Place again does not
+  release it, so `Held: Work mail is disconnected` was wrong once Work mail was back.
 
 ## 0.10.0
 

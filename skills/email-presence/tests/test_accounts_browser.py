@@ -35,6 +35,9 @@ window.disposeWidget=await mountModuleWidget(document.getElementById('mount'),
  {entry:'ui/accounts.js',entry_type:'module',assets:['ui/accounts.css'],height:780,appearance:'host'},null,new Set());
 window.ready=true;
 </script></body></html>'''
+# The adapter's words for mail whose bound Place went away after it was queued.
+HELD_AFTER_PLACE_DISCONNECT = ("Held: Email was disconnected after this send was queued, so it will not be sent; "
+                               "send it again if it is still needed.")
 
 
 def core_path():
@@ -166,7 +169,8 @@ def test_accounts_real_frame_forms_aliases_themes_disconnect(tmp_path, monkeypat
             assert len(account["senders"]) == 21
             from lib.store import EmailStore
             store = EmailStore(AccountStore(tmp_path).mail_dir(account))
-            store.enqueue_outbox(request_id="held-after-place-disconnect", to=["reader@example.invalid"], body="owed", hold_reason="Email is disconnected")
+            store.enqueue_outbox(request_id="held-after-place-disconnect", to=["reader@example.invalid"], body="owed",
+                                 hold_reason=HELD_AFTER_PLACE_DISCONNECT)
             store.enqueue_outbox(request_id="uncertain-provider-response", to=["reader@example.invalid"], body="unknown")
             item = store.claim_outbox()
             store.uncertain_outbox(item.row_id, item.lease_token, "Provider acceptance unknown")
@@ -191,7 +195,7 @@ def test_accounts_real_frame_forms_aliases_themes_disconnect(tmp_path, monkeypat
             expect(frame.locator(".recent-deliveries")).to_contain_text("held-after-place-disconnect")
             expect(frame.locator(".recent-deliveries")).to_contain_text("uncertain-provider-response")
             expect(frame.locator(".recent-deliveries")).to_contain_text("provider-rejected")
-            expect(frame.locator(".recent-deliveries")).to_contain_text("Held: Email is disconnected")
+            expect(frame.locator(".recent-deliveries")).to_contain_text(HELD_AFTER_PLACE_DISCONNECT)
             frame.locator(".recent-deliveries").scroll_into_view_if_needed()
             screenshot(page, f"retained-receipts-{width}.png")
             assert "/api/extensions/email-presence/accounts/preferences" in observed["posts"]

@@ -86,7 +86,12 @@ def place_refusal_hold(facts: Mapping[str, Any]) -> str:
         return PLACE_POLICY_UNREAD
     if state in {"changed", "unknown"}:  # These describe this send's match, not a state of a Place.
         return _NO_PLACE_COVERS
-    return f"Held: {facts.get('label') or 'Email'} is {state}"
+    label = facts.get("label") or "Email"
+    if state == "disconnected":
+        # The bound Place was removed, or disconnected and connected again: this queued send never goes.
+        return (f"Held: {label} was disconnected after this send was queued, so it will not be sent; "
+                "send it again if it is still needed.")
+    return f"Held: {label} is {state}"
 
 def email_presence_event(item: InboxItem, *, account_id: str, places: bool = False,
                          identity: bool = False, words=(), address="", senders=(), sender="") -> dict[str, Any]:

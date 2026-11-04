@@ -41,7 +41,7 @@ def test_bind_check_retains_original_target_and_uses_opaque_token_only_for_reque
         binding = host.capture_binding("google:canonical", "<thread>", require_place=True)["binding"]
         assert host.binding_hold(binding, "google:canonical", "<thread>") == ""
         state[0] = "disconnected"
-        assert host.binding_hold(binding, "google:canonical", "<thread>") == "Held: Email is disconnected"
+        assert host.binding_hold(binding, "google:canonical", "<thread>") == EMAIL_WAS_DISCONNECTED
         assert "original Place binding" in host.binding_hold(None, "google:canonical", "<thread>")
     assert len(calls) == token.uses == 4
 
@@ -49,6 +49,9 @@ def test_bind_check_retains_original_target_and_uses_opaque_token_only_for_reque
 PLACE_POLICY_WORDS = ("Held: Ouroboros did not answer whether this place allows sending. "
                       "Nothing was sent yet; it retries by itself and no approval is needed.")
 NO_PLACE_COVERS = "Held: no connected place covers this send; nothing was sent."
+# Removed, or disconnected and connected again: the Host never releases this binding.
+EMAIL_WAS_DISCONNECTED = ("Held: Email was disconnected after this send was queued, so it will not be sent; "
+                          "send it again if it is still needed.")
 BINDING = {"version": 1, "connector": "email-presence", "provider": "email", "account_id": "account",
            "conversation_id": "<thread>", "thread_id": "", "place_id": "bound"}
 
@@ -82,7 +85,10 @@ def test_unread_binding_is_held_in_words_that_ask_nothing_and_print_no_code(answ
 @pytest.mark.parametrize("facts,words", [
     ({"state": "silent", "code": "place_silent", "label": "Work mail"}, "Held: Work mail is silent"),
     ({"state": "paused", "code": "place_paused", "label": "Work mail"}, "Held: Work mail is paused"),
-    ({"state": "disconnected", "code": "place_disconnected", "label": ""}, "Held: Email is disconnected"),
+    ({"state": "disconnected", "code": "place_disconnected", "label": ""}, EMAIL_WAS_DISCONNECTED),
+    ({"state": "disconnected", "code": "place_disconnected", "label": "Work mail"},
+     "Held: Work mail was disconnected after this send was queued, so it will not be sent; "
+     "send it again if it is still needed."),
     # The Host answered no: "did not answer" and "no approval" would be false here.
     ({"state": "changed", "code": "place_scope_changed", "label": "Work mail"}, NO_PLACE_COVERS),
     ({"state": "unknown", "code": "place_unattributable", "label": ""}, NO_PLACE_COVERS),

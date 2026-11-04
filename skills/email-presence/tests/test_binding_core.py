@@ -104,12 +104,14 @@ def test_disconnect_never_reclassifies_held_bound_send_or_automatic_reply_as_unb
     assert store.receipt(automatic_id)["delivery_reporting"]["place_binding"]["place_id"] == own.place_id
     places.edit_place(drive, own.place_id, "disconnect", author="owner")
     # Reconnecting an account must not release mail held under the disconnected binding.
-    places.connect_place(drive, connector="email-presence", provider="email", account_id=second["id"], state="active")
+    places.connect_place(drive, connector="email-presence", provider="email", account_id=second["id"],
+                         label="Work mail", state="active")
     release_hold(store)
     for _ in range(2):
         assert runtime.process_outbox()
     assert not delivery.sent
-    assert store.receipt("held")["last_error"].endswith(" is disconnected")
+    assert store.receipt("held")["last_error"] == ("Held: Work mail was disconnected after this send was queued, "
+                                                   "so it will not be sent; send it again if it is still needed.")
     assert store.receipt("held")["delivery_reporting"]["place_binding"] == bound
     assert store.receipt(automatic_id)["state"] == "held"
     # A newly requested operation binds the new Place and remains usable.
