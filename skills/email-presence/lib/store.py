@@ -16,7 +16,7 @@ from email.utils import parseaddr
 from pathlib import Path
 
 from .delivery import email_report
-from .mime import conversation_root, mailbox_addresses
+from .mime import conversation_root, mailbox_addresses, prior_imap_capture
 
 _MAX_ATTACHMENT_FILES = 10
 _MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
@@ -361,6 +361,19 @@ class EmailStore:
                 cursor.update(uidvalidity=validity, uid=0, rescan=True)
             self._put(db, key, cursor)
         return cursor
+
+    def captured_before_id_repair(self, message):
+        """UIDVALIDITY changed: require the same folder, old captured ID and original bytes."""
+        witness = prior_imap_capture(message.get("_raw_source"), message["message_id"])
+        if witness is None:
+            return False
+        old_id, digest = witness
+        # Existing UNIQUE(folder, message_id) locates one candidate. Historical
+        # tool reads never entered this table and cannot suppress new intake.
+        with self._connect() as db:
+            return db.execute("""SELECT 1 FROM inbox WHERE folder=? AND message_id=?
+                AND json_extract(context_json,'$.source_artifact.sha256')=?""",
+                (message["folder"], old_id, digest)).fetchone() is not None
 
     def has_native_event(self, folder, event_key):
         """The exact opaque event is already in this folder's durable inbox."""
