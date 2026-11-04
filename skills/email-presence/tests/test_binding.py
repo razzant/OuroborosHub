@@ -42,13 +42,16 @@ def test_bind_check_retains_original_target_and_uses_opaque_token_only_for_reque
         assert host.binding_hold(binding, "google:canonical", "<thread>") == ""
         state[0] = "disconnected"
         assert host.binding_hold(binding, "google:canonical", "<thread>") == EMAIL_WAS_DISCONNECTED
-        assert "original Place binding" in host.binding_hold(None, "google:canonical", "<thread>")
+        assert host.binding_hold(None, "google:canonical", "<thread>") == NO_PLACE_WHEN_QUEUED
     assert len(calls) == token.uses == 4
 
 
 PLACE_POLICY_WORDS = ("Held: Ouroboros did not answer whether this place allows sending. "
                       "Nothing was sent yet; it retries by itself and no approval is needed.")
 NO_PLACE_COVERS = "Held: no connected place covers this send; nothing was sent."
+# Captured without a binding: nothing can release this send later.
+NO_PLACE_WHEN_QUEUED = ("Held: no connected place covered this send when it was queued, so it will not be sent; "
+                        "send it again once a place covers it.")
 # Removed, or disconnected and connected again: the Host never releases this binding.
 EMAIL_WAS_DISCONNECTED = ("Held: Email was disconnected after this send was queued, so it will not be sent; "
                           "send it again if it is still needed.")
@@ -117,7 +120,9 @@ def test_legacy_check_reads_a_place_state_as_before_and_an_unread_one_in_the_sam
 
 @pytest.mark.parametrize("facts,words", [
     ({"state": "paused", "code": "place_paused", "label": "Work mail"}, "Held: Work mail is paused"),
-    ({"state": "unknown", "code": "place_unattributable", "label": ""}, NO_PLACE_COVERS),
+    # The Host captures no binding for a send no place covers.
+    ({"state": "unknown", "code": "place_unattributable", "label": "", "binding": None}, NO_PLACE_WHEN_QUEUED),
+    ({"state": "unknown", "code": "place_not_connected", "label": "", "binding": None}, NO_PLACE_WHEN_QUEUED),
     ({"code": "place_something_new"}, PLACE_POLICY_WORDS),
     ({}, PLACE_POLICY_WORDS),
 ])
@@ -145,6 +150,34 @@ def test_enqueue_holds_use_the_same_words_and_count_as_held(tmp_path, monkeypatc
     tool, automatic = store.receipt("tool"), store.receipt(f"presence:{item.provider_event_key}:output")
     assert tool["last_error"] == automatic["last_error"] == words
     assert automatic["state"] == "held" and store.status()["outbox_held"] == 2
+
+
+def test_a_send_no_place_covered_reads_the_same_after_the_worker_rechecks_it(tmp_path, monkeypatch):
+    """The tool's answer and the receipt after a worker pass say one sentence for one fact."""
+    from types import SimpleNamespace
+
+    from lib.accounts import AccountStore
+    from lib.runtime import EmailRuntime
+    from lib.service import MailService
+    from lib.store import EmailStore
+    accounts = AccountStore(tmp_path)
+    account = accounts.save_imap({"address": "me@example.invalid", "password": "fixture", "imap_host": "imap.invalid", "smtp_host": "smtp.invalid"})
+    refused = {"supported": True, "ok": True, "allowed": False, "binding": None, "state": "unknown",
+               "code": "place_unattributable", "label": "", "place_id": ""}
+    service = MailService(SimpleNamespace(get_state_dir=lambda: tmp_path, get_settings=lambda _: {}))
+    monkeypatch.setattr(service, "capture_binding", lambda *_: refused)
+    answer = service.send(account_id=account["id"], to="reader@example.invalid", body="owed", request_id="tool")
+    assert answer["state"] == "held" and answer["receipt"]["last_error"] == NO_PLACE_WHEN_QUEUED
+
+    store = EmailStore(accounts.mail_dir(account))
+    with store._connect() as db:
+        db.execute("UPDATE outbox SET available_at=0 WHERE state='retry'")
+    with httpx.Client(transport=httpx.MockTransport(lambda _: pytest.fail("Nothing to recheck without a binding"))) as http:
+        host = LoopbackPresenceHostAdapter("", host_service_url="http://127.0.0.1:8767", skill_token="fixture",
+                                           place_http_client=http, sync_only=True)
+        assert EmailRuntime(store, SimpleNamespace(settings={}), host, account=account["id"]).process_outbox()
+    receipt = store.receipt("tool")
+    assert receipt["state"] == "held" and receipt["last_error"] == NO_PLACE_WHEN_QUEUED
 
 
 def test_legacy_capability_does_not_invent_unbound_snapshot_or_repeat_identity_probe():

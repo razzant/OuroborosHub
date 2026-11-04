@@ -12,6 +12,9 @@
 - A send whose Place was disconnected after it was queued says that it will not be sent
   and should be sent again if it is still needed. Connecting the Place again does not
   release it, so `Held: Work mail is disconnected` was wrong once Work mail was back.
+- A send no connected Place covered when it was queued says once that it will not be
+  sent and should be sent again once a Place covers it. The tool's answer and the
+  receipt after the outbox's next pass used to say this fact in two different sentences.
 
 ## 0.10.0
 

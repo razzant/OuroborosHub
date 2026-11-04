@@ -24,6 +24,9 @@ log = logging.getLogger("email_presence")
 PLACE_POLICY_UNREAD = ("Held: Ouroboros did not answer whether this place allows sending. "
                        "Nothing was sent yet; it retries by itself and no approval is needed.")
 _NO_PLACE_COVERS = "Held: no connected place covers this send; nothing was sent."
+# No binding was captured when the send was queued, so the outbox never sends it.
+_NO_PLACE_WHEN_QUEUED = ("Held: no connected place covered this send when it was queued, so it will not be sent; "
+                         "send it again once a place covers it.")
 _OUTCOMES = frozenset({"message", "silent", "tool_delivered", "deferred"})
 _SPEECH = frozenset({"message", "deferred"})
 _DISPOSITIONS = frozenset({"retained", "rejected", "blocked", "retry"})
@@ -85,7 +88,8 @@ def place_refusal_hold(facts: Mapping[str, Any]) -> str:
     if not state:
         return PLACE_POLICY_UNREAD
     if state in {"changed", "unknown"}:  # These describe this send's match, not a state of a Place.
-        return _NO_PLACE_COVERS
+        # Without a binding this send never goes; binding_hold(None) later says the same sentence.
+        return _NO_PLACE_WHEN_QUEUED if facts.get("binding") is None else _NO_PLACE_COVERS
     label = facts.get("label") or "Email"
     if state == "disconnected":
         # The bound Place was removed, or disconnected and connected again: this queued send never goes.
@@ -290,7 +294,7 @@ class LoopbackPresenceHostAdapter:
 
     def binding_hold(self, binding, account_id, conversation_id, *, thread_id=""):
         if not isinstance(binding, dict):
-            return "Held: the original Place binding was not captured; inspect the receipt before a new send"
+            return _NO_PLACE_WHEN_QUEUED
         try:
             response = self._place_client().get(f"{self.host_service_url}/presence/place", headers=self._headers(), params={
                 "operation": "check", "provider": "email", "account_id": account_id,
