@@ -261,33 +261,39 @@ def parse_message(
     return result
 
 
-def reply_all_recipients(message: dict[str, Any], mailbox: str = "") -> dict[str, list[str]]:
-    """Return RFC-style Reply-All groups while excluding the sending mailbox."""
-    own = (parseaddr(str(mailbox or ""))[1] or str(mailbox or "")).strip().casefold()
-    reply_targets = list(message.get("reply_to") or [])
-    if not reply_targets:
-        sender = str(message.get("sender") or "").strip()
-        if sender:
-            reply_targets = [sender]
-    ordered: list[str] = []
-    seen: set[str] = set()
+def _mailbox_key(value):
+    return (parseaddr(str(value))[1] or str(value)).strip().casefold()
 
-    def add(value: Any) -> None:
-        address = str(value or "").strip()
-        key = (parseaddr(address)[1] or address).casefold()
-        if not address or key == own or key in seen:
-            return
-        seen.add(key)
-        ordered.append(address)
 
-    for value in reply_targets:
-        add(value)
-    to_count = len(ordered)
-    for value in tuple(message.get("recipients") or ()) + tuple(message.get("cc") or ()):
-        add(value)
-    if to_count == 0 and ordered:
-        to_count = 1
-    return {"to": ordered[:to_count], "cc": ordered[to_count:]}
+def recipient_groups(to, cc=(), bcc=(), *, exclude=()):
+    """Keep the first spelling and order, with visible To then Cc taking precedence."""
+    seen = {_mailbox_key(value) for value in exclude}
+    def group(values):
+        result = []
+        for value in mailbox_addresses(values):
+            key = _mailbox_key(value)
+            if key not in seen:
+                result.append(value)
+                seen.add(key)
+        return result
+    return group(to), group(cc), group(bcc)
+
+
+def reply_all_recipients(message: dict[str, Any], mailbox=()) -> dict[str, list[str]]:
+    """Expand visible source headers, excluding every sender identity of the selected account."""
+    own = [mailbox] if isinstance(mailbox, str) else mailbox
+    sender = message.get("sender") or ""
+    primary = mailbox_addresses(message.get("reply_to") or sender)
+    others = mailbox_addresses(message.get("recipients"))
+    copies = mailbox_addresses(message.get("cc"))
+    if sender and _mailbox_key(sender) in {_mailbox_key(address) for address in own}:
+        primary.extend(others)  # Replying to our sent mail keeps its original To recipients together.
+    else:
+        copies = others + copies
+    to, cc, _ = recipient_groups(primary, copies, exclude=own)
+    if not to and cc:
+        to.append(cc.pop(0))  # As before, a visible addressee can anchor a reply with no external sender.
+    return {"to": to, "cc": cc}
 
 
 def _attachment_bytes(item: dict[str, Any]) -> bytes:

@@ -12,7 +12,7 @@ from lib.accounts import AccountStore
 from lib.ews import EwsClient
 from lib.ews_wire import EwsError, NS
 from lib.service import MailService, register_tools
-from test_ews_mailbox import ACCOUNT, identity, item, listing, names
+from test_ews_mailbox import ACCOUNT, folder_record, identity, item, listing, names
 from test_ews_wire import CONFIG, Session, response
 
 
@@ -22,6 +22,9 @@ class SharedStores(Session):
         super().__init__()
         self.keys, self.denied = keys, set(denied)
         self.folders = folders or ['B-inbox', 'B-projects']
+        self.labels = {'B-projects': ('Projects', ''), 'B-inbox': ('Posteingang', 'inbox'),
+                       'B-deleteditems': ('Gelöscht', 'deleteditems'), 'B-msgfolderroot': ('Postfach', 'msgfolderroot')}
+        self.item_folder = 'projects'
 
     def post(self, *args, **kwargs):
         op = ET.fromstring(kwargs['data']).find('s:Body', NS)[0]
@@ -37,8 +40,7 @@ class SharedStores(Session):
             if native in self.denied:
                 xml = response(verb, klass='Error', code='ErrorAccessDenied')
             elif kind == 'Folder' and op.find('.//t:FieldURI[@FieldURI="folder:DisplayName"]', NS) is not None:
-                xml = response('GetFolder', f'<m:Folders><t:Folder><t:FolderId Id="{native}"/>'
-                               '<t:DisplayName>Projects</t:DisplayName></t:Folder></m:Folders>')
+                xml = folder_record(native, *self.labels[native])
             elif op.find('.//t:IncludeMimeContent', NS) is not None:
                 xml = response(verb, '<m:Items>' + item(native, mime=True) + '</m:Items>')
             else:
@@ -46,7 +48,7 @@ class SharedStores(Session):
                 assert op.find('.//t:ExtendedFieldURI[@PropertyTag="0x0FFA"]', NS) is not None
                 owner = native[0]
                 key = base64.b64encode(('STORE-' + owner).encode()).decode() if self.keys else None
-                parent = owner + ('-projects' if kind == 'Item' else '-root')
+                parent = owner + ('-' + self.item_folder if kind == 'Item' else '-root')
                 xml = identity(kind, native, parent=parent, key=key)
         elif verb == 'FindFolder':
             root = op.find('m:ParentFolderIds/t:DistinguishedFolderId', NS)
@@ -58,7 +60,8 @@ class SharedStores(Session):
                 terminal = offset + 1 == len(self.folders)
                 xml = response(verb, '<m:RootFolder IncludesLastItemInRange="' + str(terminal).lower() +
                                '" IndexedPagingOffset="' + str(offset + 1) + '"><t:Folders><t:Folder><t:FolderId Id="' +
-                               self.folders[offset] + '"/></t:Folder></t:Folders></m:RootFolder>')
+                               self.folders[offset] + '"/><t:DisplayName>' + self.labels[self.folders[offset]][0] +
+                               '</t:DisplayName></t:Folder></t:Folders></m:RootFolder>')
         elif verb == 'FindItem':
             parent = op.find('m:ParentFolderIds', NS)[0]
             owner = parent.get('Id')[0] if parent.tag.endswith('}FolderId') else 'B'
@@ -87,7 +90,7 @@ def tools(tmp_path, monkeypatch):
     service = MailService(SimpleNamespace(get_state_dir=lambda: tmp_path, get_settings=lambda _: {}))
     handlers = {}
     register_tools(SimpleNamespace(register_tool=lambda name, handler, **_: handlers.update({name: handler})), service)
-    def call(tool, **args): return json.loads(handlers['email_' + tool](account_id=b['id'], **args))
+    def call(tool, **args): return json.loads(handlers['email_' + tool](**{'account_id': b['id'], **args}))
     return a, b, provider, call
 
 
@@ -120,10 +123,10 @@ def test_legacy_handles_checked_before_read_or_effect(tools, tool, args, foreign
     assert all(op.find('.//t:IncludeMimeContent', NS) is None for op in provider.operations)
     provider.operations.clear()
     result = invoke(False)
-    if tool == 'draft':
+    if tool not in ('search', 'read'):
         assert result['status'] == 'needs_arguments' and effect not in names(provider)
         retry = dict(result['retry_arguments'])
-        assert retry.pop('account_id') == b['id'] and retry['folder_names'] == ['Projects']
+        assert retry['account_id'] == b['id'] and 'Projects' in retry['folder_names']
         result = call(tool, **retry)
     assert result and effect in names(provider)
     if tool == 'read':
@@ -144,7 +147,12 @@ def test_absent_store_property_uses_actual_paged_mailbox_hierarchy(tools):
 def test_delegated_drafts_only_does_not_require_inbox_or_folder_tree(tools):
     _, b, provider, call = tools
     provider.denied = {'B-inbox', 'B-msgfolderroot'}
-    assert call('mark_read', message_ref=legacy_message(b,'B-msg'))['ok']
+    provider.item_folder = 'drafts'
+    provider.labels['B-drafts'] = ('Entwürfe', 'drafts')
+    prepared = call('mark_read', message_ref=legacy_message(b,'B-msg'))
+    assert 'UpdateItem' not in names(provider)
+    assert set(prepared['retry_arguments']['folder_names']) == {'Entwürfe', 'draft', 'drafts', f'ews-folder:{b["id"]}:B-drafts'}
+    assert call('mark_read', **prepared['retry_arguments'])['ok']
     assert names(provider)[-1] == 'UpdateItem'
     provider.operations.clear()
     with pytest.raises(EwsError, match='MailboxOwnershipMismatch'):
@@ -202,5 +210,7 @@ def test_relabelled_target_allowed_by_host_still_cannot_touch_paused_exchange(to
     with pytest.raises(EwsError, match='MailboxOwnershipMismatch'):
         call('mark_read', message_ref=legacy_message(b,'A-msg'))
     assert names(provider) == ['GetItem','GetFolder']
-    assert call('mark_read', message_ref=legacy_message(b,'B-msg'))['ok']
+    retry = call('mark_read', message_ref=legacy_message(b,'B-msg'))['retry_arguments']
+    assert not place_guard.dispatch_refusal(ctx, full, retry, ext_tool=descriptor)
+    assert call('mark_read', **retry)['ok']
     assert names(provider)[-1] == 'UpdateItem'

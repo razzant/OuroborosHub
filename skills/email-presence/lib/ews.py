@@ -205,9 +205,8 @@ class EwsClient(EwsOperations, MailClient):
             return node
         raise EwsError('MailboxOwnershipUnverified')
 
-    def draft_destination(self, selection):
-        """Resolve one target. The eventual SaveOnly uses this same native ID, never the name again."""
-        folder = self._folder(selection)
+    def _resolved_folder(self, folder):
+        """Read the names of a mailbox-qualified folder or an already verified native ID."""
         fields = ('folder:DisplayName', 'folder:DistinguishedFolderId')
         reply = self._call(m('GetFolder', _shape('Folder', fields), m('FolderIds', folder)))
         node = _only(reply, 'm:Folders')
@@ -217,11 +216,29 @@ class EwsClient(EwsOperations, MailClient):
         name = node.findtext('t:DisplayName', '', NS)
         if not name:
             raise EwsError('MissingFolderDisplayName')
-        # Derive aliases from this server record, not the spelling used to reach it.
-        distinguished = node.findtext('t:DistinguishedFolderId', '', NS)
+        # A mailbox-qualified distinguished lookup identifies the default folder even
+        # if its optional distinguished property is absent in the response.
+        distinguished = (folder.get('Id') if folder.tag == f'{{{NS["t"]}}}DistinguishedFolderId'
+                         else node.findtext('t:DistinguishedFolderId', '', NS))
         names = sorted({name, *(alias for alias, kind in _KNOWN.items() if kind == distinguished)})
-        selected = t('FolderId', Id=native)
-        return self._folder_ref(native), names, lambda **content: self._save_draft(selected, **content)
+        return t('FolderId', Id=native), self._folder_ref(native), names
+
+    def draft_destination(self, selection):
+        selected, handle, names = self._resolved_folder(self._folder(selection))
+        return handle, names, lambda **content: self._save_draft(selected, **content)
+
+    def _item_parent(self, checked_item):
+        native = _opaque(_child(checked_item, 't:ParentFolderId').get('Id'))
+        return self._resolved_folder(t('FolderId', Id=native))
+
+    @staticmethod
+    def _prepare_folders(prepare, *, new_name='', **folders):
+        names = {new_name} if new_name else set()
+        targets = {}
+        for key, (_, handle, aliases) in folders.items():
+            targets[key] = handle
+            names.update((handle, *aliases))
+        return prepare({**targets, 'folder_names': sorted(names)})
 
     def _folder_info(self, value):
         folder = self._folder(value)
@@ -383,17 +400,20 @@ class EwsClient(EwsOperations, MailClient):
         original = self._read_scoped(message_ref=page['messages'][0]['message_ref'])
         return original if original.get('message_id') == message_id else None
 
-    def mark_read(self, *, message_ref='', **_legacy):
-        return self.mailbox(action='flags', message_ref=message_ref, flags=[r'\Seen'])
+    def mark_read(self, *, message_ref='', prepare_targets=None, **_legacy):
+        return self.mailbox(action='flags', message_ref=message_ref, flags=[r'\Seen'], prepare_targets=prepare_targets)
 
     def mailbox(self, *, action='list', folder=None, destination='', message_ref='', flags=None,
-                remove_flags=False, **_other):
+                remove_flags=False, prepare_targets=None, **_other):
         if action == 'list':
             return {'folders': self._folders()}
         if action == 'create':
             if not destination:
                 raise ValueError('Supply the name of the new Exchange folder as destination')
-            response = self._call(m('CreateFolder', m('ParentFolderId', self._folder(folder or 'msgfolderroot')),
+            parent = self._resolved_folder(self._folder(folder or 'msgfolderroot'))
+            if prepare_targets and (needed := self._prepare_folders(prepare_targets, folder=parent, new_name=destination)):
+                return needed
+            response = self._call(m('CreateFolder', m('ParentFolderId', parent[0]),
                                     m('Folders', t('Folder', t('DisplayName', text=destination)))))
             node = _only(response, 'm:Folders')
             return {'ok': True, 'id': self._folder_ref(_child(node, 't:FolderId').get('Id')), 'name': destination}
@@ -403,10 +423,14 @@ class EwsClient(EwsOperations, MailClient):
         if action in {'copy', 'move', 'trash'}:
             if action != 'trash' and not destination:
                 raise ValueError('Choose a destination Exchange folder')
-            target = self._folder('deleteditems' if action == 'trash' else destination)
-            self._checked_native('Item', native)
+            target = self._resolved_folder(self._folder('deleteditems' if action == 'trash' else destination))
+            item = self._checked_native('Item', native)
+            if prepare_targets:
+                source = {} if action == 'copy' else {'folder': self._item_parent(item)}
+                if needed := self._prepare_folders(prepare_targets, destination=target, **source):
+                    return needed
             op = 'CopyItem' if action == 'copy' else 'MoveItem'
-            result = self._call(m(op, m('ToFolderId', target), m('ItemIds', t('ItemId', Id=native))))
+            result = self._call(m(op, m('ToFolderId', target[0]), m('ItemIds', t('ItemId', Id=native))))
             changed = result.find('m:Items/*/t:ItemId', NS)
             return {'ok': True, **({'message_ref': 'ews:' + _opaque(changed.get('Id'))} if changed is not None else {})}
         updates = []
@@ -420,9 +444,12 @@ class EwsClient(EwsOperations, MailClient):
             updates.append(t('SetItemField', t('FieldURI', FieldURI=uri), t('Message', value)))
         if not updates:
             raise ValueError('Choose at least one Exchange flag')
-        current = _child(self._checked_native('Item', native), 't:ItemId')
+        item = self._checked_native('Item', native)
+        current = _child(item, 't:ItemId')
         if current.get('Id') != native or not current.get('ChangeKey'):
             raise EwsError('MissingCurrentItemVersion')
+        if prepare_targets and (needed := self._prepare_folders(prepare_targets, folder=self._item_parent(item))):
+            return needed
         self._call(m('UpdateItem', m('ItemChanges', t('ItemChange', current, t('Updates', *updates))),
                      ConflictResolution='NeverOverwrite', MessageDisposition='SaveOnly', SuppressReadReceipts='true'))
         return {'ok': True}
