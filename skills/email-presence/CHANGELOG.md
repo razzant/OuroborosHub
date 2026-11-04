@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.2
+
+- Preserve existing Exchange message and folder references while verifying their
+  actual mailbox with the server before using native identifiers.
+- Expose draft folders and the Gmail labels a mailbox action changes to the
+  Host before writing, including when a caller uses an alternate argument.
+  Writes with an implicit sole account, draft folder, or incomplete Gmail targets can
+  return `needs_arguments` without writing; replay the returned `retry_arguments`.
+
 ## 0.10.1
 
 - Say what a hold means when the Host did not say whether a Place allows sending:

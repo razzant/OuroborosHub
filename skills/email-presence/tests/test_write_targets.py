@@ -464,3 +464,27 @@ def test_implicit_gmail_retry_preserves_opaque_public_reference(sole_gmail):
     assert retry['message_ref']==ref and retry['account_id']==account and retry['label_names']==['Filed'] and not writes
     assert call('email_mailbox',retry)['account_id']==account
     assert writes==[('POST','/messages/abcdef/modify',{'addLabelIds':['Label_1'],'removeLabelIds':[]})]
+
+
+@pytest.mark.parametrize('fallback',[False,True])
+@pytest.mark.parametrize(('status','payload','hint'),[
+    (403,{'code':'presence_auth_blocked'},'access in Skills'),
+    (403,{'code':'different_refusal'},'unavailable'),
+    (503,{'code':'places_unavailable'},'unavailable'),
+    (200,{'allowed':False,'binding':None,'state':'paused','label':'Work mail'},'Work mail is paused'),
+])
+def test_draft_folder_failure_explains_draft_without_promising_queued_send(fallback,status,payload,hint):
+    import httpx
+    from lib.host_adapter import LoopbackPresenceHostAdapter
+    def answer(req):
+        if req.url.path == '/identity':
+            return httpx.Response(200,json={'places_version':1,'presence_place_binding_version':1,'presence_delivery_version':1})
+        if fallback and req.url.params.get('operation') == 'bind':
+            return httpx.Response(200,json={'allowed':False,'binding':None,'code':'place_unattributable'})
+        return httpx.Response(status,json=payload)
+    with httpx.Client(transport=httpx.MockTransport(answer)) as http:
+        adapter=LoopbackPresenceHostAdapter('',host_service_url='http://127.0.0.1:8767',skill_token='fixture',
+                                            place_http_client=http,sync_only=True)
+        error=adapter.draft_folder_hold('imap:test','Work')
+    assert error.startswith('Draft not saved:') and hint in error
+    assert all(term not in error.lower() for term in ('sent','send','by itself','approval'))

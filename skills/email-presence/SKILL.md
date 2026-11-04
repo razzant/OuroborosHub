@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.10.1
+version: 0.10.2
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
