@@ -244,3 +244,77 @@ def test_google_return_connects_real_mail_consumer_and_denial_does_not_create_ac
         finally:
             page.close()
             browser.close()
+
+
+@pytest.mark.parametrize("width", [390, 1000])
+def test_exchange_widget_add_edit_disconnect_and_reconnect(tmp_path, monkeypatch, width):
+    core_path()
+    from xml.etree import ElementTree as ET
+    from playwright.sync_api import expect, sync_playwright
+    import requests
+
+    address = "reader@example.invalid"
+    endpoint = "https://exchange.example.invalid/EWS/Exchange.asmx"
+    calls = []
+    def exchange_reply(_session, request, **options):
+        assert request.method == "POST" and request.url == endpoint
+        operation = ET.fromstring(request.body).find("{*}Body/{*}GetFolder")
+        assert operation is not None and options.get("verify", True)
+        assert operation.findtext(".//{*}Mailbox/{*}EmailAddress") == address
+        calls.append(request.url)
+        response = requests.Response()
+        response.status_code, response.request, response._content_consumed = 200, request, True
+        response.headers["Content-Type"] = "text/xml; charset=utf-8"
+        response._content = b'''<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+          xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+          xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types"><s:Body>
+          <m:GetFolderResponse><m:ResponseMessages><m:GetFolderResponseMessage ResponseClass="Success">
+          <m:ResponseCode>NoError</m:ResponseCode><m:Folders><t:Folder><t:FolderId Id="inbox-id" ChangeKey="ck"/>
+          <t:DisplayName>Inbox</t:DisplayName><t:TotalCount>2</t:TotalCount></t:Folder></m:Folders>
+          </m:GetFolderResponseMessage></m:ResponseMessages></m:GetFolderResponse></s:Body></s:Envelope>'''
+        return response
+    monkeypatch.setattr(requests.Session, "send", exchange_reply)
+    with serve(tmp_path, monkeypatch) as (origin, observed), sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        try:
+            frame = mount(page, origin)
+            frame.get_by_role("button", name="Add Exchange", exact=True).click()
+            frame.get_by_label("Mailbox email address", exact=True).fill(address)
+            frame.get_by_label("EWS service URL", exact=True).fill(endpoint)
+            login = frame.get_by_label("Exchange login (blank means email address)", exact=True)
+            login.fill(r"ORG\reader")
+            assert not frame.evaluate("document.documentElement.scrollWidth > innerWidth")
+            screenshot(page, f"exchange-connection-{width}.png")
+            frame.get_by_label("Password", exact=True).fill("synthetic-ews-secret")
+            frame.get_by_role("button", name="Add account", exact=True).click()
+            expect(frame.get_by_role("status")).to_contain_text("Saved " + address)
+            card = frame.locator(".account")
+            expect(card).to_contain_text("Exchange (EWS) · Configured")
+            store = AccountStore(tmp_path)
+            saved = store.resolve()
+            assert saved["config"]["EWS_ENDPOINT"] == endpoint and saved["config"]["EMAIL_USER"] == r"ORG\reader"
+            card.get_by_role("button", name="Test connection", exact=True).click()
+            expect(frame.get_by_role("status")).to_contain_text("Authentication check succeeded")
+            assert calls == [endpoint]
+            screenshot(page, f"exchange-account-{width}.png")
+            card.get_by_role("button", name="Edit connection").click()
+            password = frame.get_by_label("Password (blank keeps saved for the same login)", exact=True)
+            assert password.input_value() == ""
+            frame.get_by_label("Display label", exact=True).fill("Research mailbox")
+            frame.get_by_role("button", name="Save connection", exact=True).click()
+            expect(card).to_contain_text("Research mailbox")
+            assert store.resolve()["config"]["EMAIL_PASSWORD"] == "synthetic-ews-secret"
+            card.get_by_role("button", name="Disconnect locally").click()
+            expect(card).to_contain_text("Exchange (EWS) · Disconnected")
+            assert "EMAIL_PASSWORD" not in store.get(saved["id"])["config"]
+            card.get_by_role("button", name="Reconnect", exact=True).click()
+            assert login.input_value() == r"ORG\reader"
+            frame.get_by_label("Password", exact=True).fill("replacement-private")
+            frame.get_by_role("button", name="Save connection", exact=True).click()
+            expect(card).to_contain_text("Exchange (EWS) · Configured")
+            assert store.resolve()["id"] == saved["id"] and store.resolve()["config"]["EMAIL_PASSWORD"] == "replacement-private"
+            assert not observed["faults"]
+        finally:
+            page.close()
+            browser.close()

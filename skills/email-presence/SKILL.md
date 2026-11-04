@@ -1,14 +1,14 @@
 ---
 name: email-presence
-description: Multi-account Gmail API and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.9.3
+description: Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
+version: 0.10.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
 runtime: python3
 permissions: [net, read_settings, route, tool, widget, companion_process, presence]
 env_from_settings: [EMAIL_IMAP_HOST, EMAIL_IMAP_PORT, EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_USER, EMAIL_PASSWORD, EMAIL_SMTP_USER, EMAIL_SMTP_PASSWORD, EMAIL_DEFAULT_FOLDER, EMAIL_AUTH_MODE, EMAIL_OAUTH_ACCESS_TOKEN, EMAIL_OAUTH_REFRESH_TOKEN, EMAIL_OAUTH_CLIENT_ID, EMAIL_OAUTH_CLIENT_SECRET, EMAIL_IMAP_SECURITY, EMAIL_SMTP_SECURITY, EMAIL_TLS_CA, EMAIL_TLS_FINGERPRINT, GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET]
-dependencies: [httpx, starlette]
+dependencies: [httpx, starlette, requests, requests-ntlm, defusedxml]
 when_to_use: User wants to read, compose, organize or configure mailboxes, or receive and reply to incoming mail through a Place.
 timeout_sec: 120
 companion_processes:
@@ -27,7 +27,7 @@ tools:
   - name: email_search
     effect: read
     target: []
-    description: Search old and new mailbox messages using Gmail queries or IMAP criteria.
+    description: Search old and new mailbox messages using provider queries or IMAP criteria.
   - name: email_read
     effect: read
     target: []
@@ -101,7 +101,7 @@ contributes:
 
 # Email Presence
 
-This transport connects multiple Gmail API or IMAP/SMTP mailboxes. Accounts
+This transport connects Gmail API, on-premises Exchange EWS and IMAP/SMTP mailboxes. Accounts
 are ordinary tools; a Place is optional for automatic intake and presence.
 A configured account without a Place remains usable by tasks and consciousness
 when the current mode and instructions permit it. This is not an owner-direct-only
@@ -135,6 +135,13 @@ never a Gmail thread id. Draft attribution remains a write, not a speaking turn.
    use the certificate/fingerprint obtained from Bridge, never your Proton login
    password. One mailbox may have many sender addresses; these are not separate
    account identities. IMAP and SMTP usernames/passwords may differ.
+   For on-premises Exchange (2013 SP1 or later), choose **Add Exchange**.
+   Enter the mailbox email address, its HTTPS EWS service URL (not the OWA webmail
+   address), and the NTLM login/password accepted by that server. The login may
+   differ from the mailbox address. Obtain the EWS URL from the provider or its
+   Autodiscover settings; this form does not discover hosts or import browser
+   sessions. Test connection reads the configured Inbox without sending mail.
+   The ordinary mail tools and optional intake work with the browser closed.
 2. For Gmail, configure and grant the installation's GOOGLE_OAUTH_CLIENT_ID and
    GOOGLE_OAUTH_CLIENT_SECRET where required. The existing EMAIL_OAUTH_CLIENT_*
    keys are accepted as fallback. The widget prepares a PKCE sign-in link; Google
@@ -162,6 +169,13 @@ Existing EMAIL_* configurations keep their original account id and state directo
 no mail or receipt is moved. New account stores live under hashed account directories.
 The private accounts.sqlite3 registry (mode0600) contains configuration and tokens;
 it is not an encrypted backup. The skill's normal source package contains no credentials.
+Exchange keeps the latest sync state per intake folder in that same account store.
+The native-event index prevents a replay after a partially processed page. With
+160-byte folder handles and 144-byte event keys its measured SQLite cost is
+about 34 KiB per 100 captured messages, in addition to ordinary retained mail.
+These rows, index and cursors follow the existing retained mailbox lifetime;
+disconnect preserves them, removing the skill's local data removes them.
+
 Settings changes reload account workers cooperatively; changing environment-granted
 legacy secrets may require restarting the skill. A disconnected account's receipts
 remain readable by explicit account_id.
@@ -173,10 +187,13 @@ remain readable by explicit account_id.
   including disconnected accounts. Select account_id explicitly when more than one account
   is connected; unknown ids never fall back to a neighbor. email_receipt returns
   JSON null for a missing request, with request_id scoped to the chosen account.
-- email_search uses Gmail query/page_token or IMAP criteria tokens. It retrieves
+- email_search uses Gmail or Exchange query/page_token, or IMAP criteria tokens. It retrieves
   headers/metadata, not every matching body. Results carry an account-bound
   message_ref; email_read accepts it, or legacy uid/uidvalidity/folder arguments.
   IMAP Unicode operands use UTF-8 literals and folder names use modified UTF-7.
+  An Exchange message_ref contains a case-sensitive native item ID. Use the
+  new reference returned by a move or copy when available; otherwise search
+  its destination again. A local intake row number is never an EWS item ID.
   Gmail search is not identical to its website's alias-expanded/thread-wide search.
 - email_read only peeks and preserves flags. A local reply-header cache and exact
   raw source artifacts retain explicitly read historical mail without submitting
@@ -216,6 +233,16 @@ remain readable by explicit account_id.
   bound/automatic send. A404, a missing legacy field, or origin.kind=tool alone
   never grants unbound delivery. Older Hosts keep their legacy check; receipts
   disclose unsupported binding capture, and a no-Place legacy send remains held.
+- Exchange saves new drafts (`draft_id` replacement is not implemented), sends with
+  an explicit To/Cc/Bcc envelope, and uses its native sync cursor for optional
+  inbox intake. The first pass skips historical messages and keeps eligible mail
+  arriving during that pass. A page is checkpointed after all captures. If Exchange
+  invalidates the cursor, recovery starts at the original activation boundary;
+  items already removed from the server may no longer be available. Automatic
+  capture retains Mail's per-folder RFC Message-ID deduplication; ordinary tools
+  can read physical copies separately by their native refs. Exchange acceptance
+  is a successful response to SendAndSaveCopy, which need not return an item ID.
+  A lost or ambiguous response is recorded as uncertain, not retried automatically.
 - Gmail intake stores native message identity once across labels, follows history
   pagination, and explicitly reports history_reset when an expired history cursor
   needs an activation-range rescan. IMAP UIDVALIDITY changes rescan from the saved
@@ -232,7 +259,7 @@ remain readable by explicit account_id.
   This is argument preparation, not another human approval or forwarding limit.
   Administrative forwarding or additional send-as management requiring domain
   delegation is reported as website_required for personal accounts. Other
-  providers' account settings use their own websites, not invented IMAP features.
+  providers' account settings are not exposed by this adapter; use the provider website.
 
 ## Retained input and late results
 

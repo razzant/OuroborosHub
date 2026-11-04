@@ -42,6 +42,19 @@ def conversation_fields(message):
     return {'conversation_id': root, 'thread_id': root} if root else {}
 
 
+def account_client(accounts, account, *, imap_client=MailClient):
+    """Open the same account transport for direct tools and the companion worker."""
+    if account["provider"] == "gmail":
+        return GmailClient(accounts, account["id"])
+    if account["provider"] == "ews":
+        from .ews import EwsClient  # Exchange dependencies are not needed to open other providers.
+        return EwsClient(account)
+    if account["provider"] == "imap":
+        return imap_client({**account["config"], "EMAIL_DEFAULT_SENDER": account.get("sender") or account["address"],
+                            "EMAIL_DEFAULT_FOLDER": account.get("folder") or "INBOX"})
+    raise AccountError("Unknown mail provider for this account")
+
+
 class MailService:
     def __init__(self, api, *, mail_client=MailClient):
         self.api = api
@@ -57,12 +70,7 @@ class MailService:
         accounts = self.accounts
         account = accounts.resolve(account_id)
         store = EmailStore(accounts.mail_dir(account))
-        if account["provider"] == "gmail":
-            client = GmailClient(accounts, account["id"])
-        else:
-            settings = {**account["config"], "EMAIL_DEFAULT_SENDER": account.get("sender") or account["address"],
-                        "EMAIL_DEFAULT_FOLDER": account.get("folder") or "INBOX"}
-            client = self.mail_client(settings)
+        client = account_client(accounts, account, imap_client=self.mail_client)
         try:
             yield account, store, client
         finally:
@@ -105,7 +113,7 @@ class MailService:
             if value["account_id"] != account["id"]:
                 raise AccountError("This message_ref belongs to another account")
             result = value["ref"]
-            if account["provider"] == "gmail" and isinstance(result, str):
+            if account["provider"] in {"gmail", "ews"} and isinstance(result, str):
                 return {"message_ref": result}
             if account["provider"] == "imap" and isinstance(result, dict) and set(result) == {"uid", "uidvalidity", "folder"}:
                 return result
@@ -124,15 +132,15 @@ class MailService:
 
     def list_accounts(self):
         return {"accounts": [{**AccountStore.public(row), "queue": self.queue_status(row)} for row in self.accounts.list()],
-                "setup": "Open the Email accounts widget to connect Google, IMAP or Proton Bridge. A Place is optional for ordinary tools."}
+                "setup": "Open the Email accounts widget to connect Google, Exchange (EWS), IMAP or Proton Bridge. A Place is optional for ordinary tools."}
 
     def search(self, *, account_id="", folder=None, criteria=None, query="", limit=50, page_token=""):
         with self.target(account_id) as (account, _store, client):
             kwargs = {"folder": folder or account.get("folder") or "INBOX", "criteria": criteria, "limit": limit}
-            if account["provider"] == "gmail":
+            if account["provider"] in {"gmail", "ews"}:
                 kwargs.update(query=query, page_token=page_token)
             elif query or page_token:
-                raise ValueError("Use IMAP criteria for this account; query/page_token belong to Gmail search")
+                raise ValueError("Use IMAP criteria for this account; query/page_token belong to Gmail or Exchange search")
             result = client.search(**kwargs)
             for message in result.get("messages", []):
                 message["message_ref"] = self.wrap_ref(account, message)
@@ -155,11 +163,16 @@ class MailService:
             message.update(conversation_fields(message))
             return message
 
+    def _account_result(self, account, result):
+        if result.get("message_ref"):
+            result = {**result, "message_ref": self.wrap_ref(account, result)}
+        return {**result, "account_id": account["id"]}
+
     def mark_read(self, *, account_id="", message_ref="", uid=None, uidvalidity=None, folder=None):
         with self.target(account_id) as (account, _store, client):
             kwargs = self.unwrap_ref(account, message_ref) if message_ref else {
                 "uid": uid, "uidvalidity": uidvalidity, "folder": folder or account.get("folder") or "INBOX"}
-            return {**client.mark_read(**kwargs), "account_id": account["id"]}
+            return self._account_result(account, client.mark_read(**kwargs))
 
     def mailbox(self, *, account_id="", message_ref="", **kwargs):
         with self.target(account_id) as (account, _store, client):
@@ -170,7 +183,7 @@ class MailService:
                 if 'name' in properties and properties['name'] != str(kwargs.get('destination') or ''):
                     return self._prepare_target('destination', properties['name'],
                         {**kwargs, 'account_id': account['id'], 'message_ref': message_ref})
-            return {**client.mailbox(**kwargs), "account_id": account["id"]}
+            return self._account_result(account, client.mailbox(**kwargs))
 
     @staticmethod
     def _prepare_target(argument, value, retry_arguments):
@@ -260,7 +273,7 @@ class MailService:
                 return preparation
             binding = self.capture_binding(account, thread) if existing is None else {}
             reporting = {"version": -1, "account_id": account["id"], "sender": chosen_sender, "origin": tool_origin(ctx)}
-            if original and original.get("provider_thread_id"):
+            if account["provider"] == "gmail" and original and original.get("provider_thread_id"):
                 reporting["gmail_thread_id"] = original["provider_thread_id"]
             hold = ""
             if binding.get("supported"):
@@ -303,12 +316,10 @@ class MailService:
             kwargs["attachments"] = store.stage_outbound_attachments("draft:" + uuid.uuid4().hex, kwargs.pop("attachments", None) or [])
             for key in ("cc", "bcc"):
                 kwargs[key] = addresses(kwargs.get(key))
-            if original and original.get("provider_thread_id"):
+            if account["provider"] == "gmail" and original and original.get("provider_thread_id"):
                 kwargs["thread_id"] = original["provider_thread_id"]
             result = client.draft(**kwargs)
-            if result.get("message_ref"):
-                result["message_ref"] = self.wrap_ref(account, result)
-            return {**result, "account_id": account["id"], "sender": chosen_sender}
+            return self._account_result(account, {**result, "sender": chosen_sender})
 
     def receipt(self, request_id, *, account_id=""):
         account = self.accounts.get(account_id) if account_id else self.accounts.resolve()
@@ -327,7 +338,7 @@ class MailService:
     def settings_read(self, *, account_id="", **kwargs):
         with self.target(account_id) as (account, _store, client):
             if account["provider"] != "gmail":
-                return {"ok": False, "code": "website_required", "message": "This provider exposes account settings on its website; IMAP/SMTP manage messages and folders."}
+                return {"ok": False, "code": "website_required", "message": "This mail adapter manages messages and folders. Open the provider website for account settings."}
             return client.settings_read(**kwargs)
 
     def settings_write(self, *, account_id="", forward_to="", **kwargs):
@@ -365,15 +376,15 @@ def register_tools(api, service):
     # email_accounts has no selection argument: it is the discovery surface.
     tool("email_send", service.send, "Queue a mail or RFC-threaded reply from an explicit account_id/sender. For replies use conversation_id/thread_id from email_read; an omitted account or reply identity returns needs_arguments with exact retry_arguments before any effect. request_id is account-scoped. Queued is not sent; inspect email_receipt for held, accepted or uncertain outcomes.",
          {**compose, "request_id": string}, ("body",))
-    tool("email_search", service.search, "Search old/new mail without marking it read. Gmail uses query/page_token; IMAP uses criteria tokens. Returned message_ref is account-bound; a page reports its continuation.",
+    tool("email_search", service.search, "Search old/new mail without marking it read. Gmail and Exchange accept provider-native query/page_token; IMAP uses criteria tokens. Returned message_ref is account-bound; a page reports its continuation.",
          {"folder": string, "criteria": array, "query": string, "limit": integer, "page_token": string})
     tool("email_read", service.read, "Read exact message_ref, or legacy uid+uidvalidity+folder, including canonical conversation_id/thread_id for replies. Peeks only; use email_mark_read for Seen. Historical reads do not enter Presence.", message)
     tool("email_mark_read", service.mark_read, "Mark this account's selected message read; accepts message_ref or legacy uid+uidvalidity+folder.", message)
     tool("email_folders", service.folders, "Read folders/labels without changing anything, including while a Place is Silent or consciousness Advises.", {})
-    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP: list/create/copy/move/flags, no global expunge. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. destination must name the actual create/copy/move target; Gmail properties.name overrides prepare exact retry_arguments before creation.",
+    tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags. Use the returned account-bound message_ref after moving or copying an Exchange item. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. destination must name the actual create/copy/move target; Gmail properties.name overrides prepare exact retry_arguments before creation.",
          {**message, "action": string, "destination": string, "flags": array, "remove_flags": {"type": "boolean"},
           "add_labels": array, "remove_labels": array, "label_id": string, "draft_id": string, "properties": {"type": "object"}})
-    tool("email_draft", service.draft, "Save a draft without sending. Supply account_id and, for replies, canonical conversation_id/thread_id; needs_arguments returns exact retry_arguments before saving when identity is missing. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP appends to its selected folder.",
+    tool("email_draft", service.draft, "Save a draft without sending. Supply account_id and, for replies, canonical conversation_id/thread_id; needs_arguments returns exact retry_arguments before saving when identity is missing. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP and Exchange save new drafts in the selected folder.",
          {**compose, "folder": string, "draft_id": string}, ("to", "subject"))
     tool("email_receipt", service.receipt, "Read the exact account-scoped delivery receipt. Uncertain acceptance must be inspected, never blindly sent again.", {"request_id": string}, ("request_id",))
     tool("email_test_connection", service.test_connection, "Check the selected account's authentication/TLS without sending mail or admitting historical messages.", {})

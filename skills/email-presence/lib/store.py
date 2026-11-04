@@ -368,10 +368,24 @@ class EmailStore:
         ) if key in message}
         staged = list(message.get("staged_files") or ())
         with self._connect() as db:
+            uid = message.get("uid")
+            validity = message.get("uidvalidity", 0)
+            if uid is None:
+                # Native opaque IDs cannot be truncated to an IMAP UID. Use
+                # the next local inbox address only when actually capturing;
+                # retain the exact provider key so replay remains idempotent.
+                if not context.get("provider_event_key"):
+                    raise ValueError("A native event key or a numeric UID is required")
+                db.execute("BEGIN IMMEDIATE")
+                validity = -1  # Local address space, never an IMAP generation.
+                db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS inbox_native_event
+                           ON inbox(folder,json_extract(context_json,'$.provider_event_key'))
+                           WHERE uidvalidity=-1""")
+                uid = db.execute("SELECT COALESCE(MAX(id),0)+1 FROM inbox").fetchone()[0]
             cur = db.execute("""INSERT OR IGNORE INTO inbox
                 (folder,uidvalidity,uid,message_id,in_reply_to,references_json,sender,subject,body,recipients_json,thread_key,context_json,cc_json,reply_to_json,attachments_json,staged_files_json,created_at,updated_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                    message.get("folder", "INBOX"), message.get("uidvalidity", 0), int(message["uid"]),
+                    message.get("folder", "INBOX"), validity, int(uid),
                     message["message_id"], message.get("in_reply_to", ""), json.dumps(message.get("references", [])),
                     message.get("sender", ""), message.get("subject", ""), message.get("body", ""),
                     json.dumps(message.get("recipients", [])), conversation_root(references=message.get("references"), in_reply_to=message.get("in_reply_to"), message_id=message["message_id"]),
@@ -389,9 +403,9 @@ class EmailStore:
             # SMTP DATA can have been accepted before a process disappears.
             if table == "outbox":
                 for row in db.execute("SELECT * FROM outbox WHERE state='sending' AND lease_until<=?", (now,)).fetchall():
-                    report = email_report(self._outbox_item(row), "uncertain", error="Process lost during SMTP acceptance")
+                    report = email_report(self._outbox_item(row), "uncertain", error="Process lost during provider acceptance")
                     self._freeze_reports(db, row["id"], [report] if report else [])
-                db.execute("UPDATE outbox SET state='uncertain',last_error='Process lost during SMTP delivery; inspect Message-ID before retry',updated_at=? WHERE state='sending' AND lease_until<=?", (now, now))
+                db.execute("UPDATE outbox SET state='uncertain',last_error='Process lost during mail delivery; inspect Message-ID before retry',updated_at=? WHERE state='sending' AND lease_until<=?", (now, now))
             fifo = "AND NOT EXISTS (SELECT 1 FROM inbox earlier WHERE earlier.id < inbox.id AND earlier.thread_key = inbox.thread_key AND earlier.state IN ('pending','retry','processing') AND earlier.host_reference='')" if table == "inbox" else ""
             row = db.execute(f"SELECT * FROM {table} WHERE ((state IN ('pending','retry') AND available_at<=?) OR (state='processing' AND lease_until<=?)) {scope} {fifo} ORDER BY {order} LIMIT 1", (now, now)).fetchone()
             if not row:

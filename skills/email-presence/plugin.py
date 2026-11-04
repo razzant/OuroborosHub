@@ -90,7 +90,12 @@ def register(api):
             def perform():
                 accounts = service.accounts
                 if action == "save":
-                    return accounts.public(accounts.save_imap(body))
+                    provider = body.get("provider", "imap")
+                    if provider == "ews":
+                        return accounts.public(accounts.save_ews(body))
+                    if provider == "imap":
+                        return accounts.public(accounts.save_imap(body))
+                    raise AccountError("Choose an IMAP or Exchange connection, or use Google sign-in")
                 account_id = str(body.get("account_id") or "")
                 if action == "preferences":
                     return accounts.public(accounts.update_preferences(account_id, body))
@@ -101,7 +106,7 @@ def register(api):
                 if action == "refresh-senders":
                     with service.target(account_id) as (account, _store, client):
                         if account["provider"] != "gmail":
-                            raise AccountError("Edit configured sender addresses for this IMAP account")
+                            raise AccountError("Edit the sender addresses in this account's connection")
                         values = client.settings_read(resource="sendAs")
                         senders = list(dict.fromkeys([account["address"]] + [
                             row["sendAsEmail"] for row in values.get("sendAs", [])
@@ -190,7 +195,7 @@ def register(api):
         "kind": "module", "entry": "ui/accounts.js", "entry_type": "module",
         "assets": ["ui/accounts.css"], "appearance": "host", "start": "auto", "height": 620})
     api.register_settings_section("email_presence", title="Email accounts", schema={"components": [
-        {"type": "markdown", "text": "Use the Email accounts widget to add Google, IMAP or Proton Bridge accounts and choose sender addresses. Google needs your installation's granted GOOGLE_OAUTH_CLIENT_ID (and CLIENT_SECRET when required). These fields below keep the original EMAIL_* mailbox configuration."},
+        {"type": "markdown", "text": "Use the Email accounts widget to add Google, IMAP, Proton Bridge or Exchange accounts and choose sender addresses. Google needs your installation's granted GOOGLE_OAUTH_CLIENT_ID (and CLIENT_SECRET when required). These fields below keep the original EMAIL_* mailbox configuration."},
         {"type": "form", "route": "settings/save", "method": "POST", "submit_label": "Save legacy mailbox settings", "fields": [
             {"name": "folder", "label": "Intake folder", "type": "text", "placeholder": "INBOX"},
             {"name": "sending", "label": "Sending", "type": "select", "default": "on",

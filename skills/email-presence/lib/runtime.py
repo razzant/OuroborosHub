@@ -9,9 +9,8 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from .delivery import email_report
+from .delivery import DeliveryRejected, email_report
 from .accounts import AccountError
-from .gmail import DeliveryRejected
 from .host_adapter import HostBindingTerminalError, HostRetryError, HostTurnStatus
 from .mime import MailAddressError, conversation_root, extract_body, mailbox_addresses
 from .settings import SENDING_OFF, load_settings
@@ -166,7 +165,7 @@ class EmailRuntime:
             reporting = {"version": mode, "account_id": self.account,
                          "sender": client_settings.get("EMAIL_DEFAULT_SENDER") or client_settings.get("EMAIL_USER", ""),
                          "origin": {"kind": "automatic", "task_id": turn_ref, "source_event_id": item.provider_event_key}}
-            if target.context.get("provider_thread_id"):
+            if getattr(self.client, "transport", None) == "gmail_api" and target.context.get("provider_thread_id"):
                 reporting["gmail_thread_id"] = target.context["provider_thread_id"]
             existing = self.store.receipt(request_id)
             hold = ""
@@ -417,15 +416,22 @@ class EmailRuntime:
             except asyncio.TimeoutError:
                 pass
 
+        def poll_page():
+            count = self.poll()
+            # Provider pages already checkpointed; the normal idle delay is for an empty tail.
+            return count, (self.store.get("poll_health") or {}).get("more_changes", False)
+
         async def poller():
             interval = self.poll_interval
             while not stop.is_set():
                 try:
-                    count = await asyncio.to_thread(self.poll)
+                    count, more = await asyncio.to_thread(poll_page)
+                    if more:
+                        continue  # Re-check stop and Place authority before draining another page.
                     interval = 5 if count else min(self.poll_interval, interval * 2)
                 except Exception as exc:
                     self.store.put("poll_health", {"ok": False, "checked_at": time.time(), "error": type(exc).__name__})
-                    log.warning("IMAP poll failed: %s", type(exc).__name__)
+                    log.warning("Mail poll failed: %s", type(exc).__name__)
                     interval = self.poll_interval
                 await wait(interval)
 

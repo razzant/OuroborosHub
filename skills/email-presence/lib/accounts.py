@@ -13,7 +13,10 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
+from email.errors import HeaderParseError
+from email.headerregistry import Address
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from .settings import load_settings, normalize_words
 
@@ -31,6 +34,23 @@ _CONNECTION_KEYS = set(SETTING_KEYS) - {"GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_
 
 class AccountError(ValueError):
     """An explicit account selection or connection is unavailable."""
+
+
+def _ews_endpoint(value):
+    url = str(value or "").strip()
+    try:
+        parts = urlsplit(url)
+        host, port = parts.hostname, parts.port
+        if (parts.scheme != "https" or not host or parts.username is not None or
+                parts.query or parts.fragment or "\\" in url or
+                any(char.isspace() or ord(char) < 32 for char in url)):
+            raise ValueError
+    except ValueError:
+        raise AccountError("Enter an HTTPS EWS service URL without credentials, a query or a fragment") from None
+    authority = f"[{host}]" if ":" in host else host
+    if port is not None and port != 443:
+        authority += f":{port}"
+    return urlunsplit(("https", authority, parts.path or "/", "", ""))
 
 
 class AccountStore:
@@ -212,12 +232,53 @@ class AccountStore:
             config[key] = config.get(key) or default
             if config[key] not in {"ssl", "starttls"}:
                 raise AccountError("TLS mode must be ssl or starttls")
+        return self.save({"id": identity, **self._password_record("imap", address, config, values, old)})
+
+    def save_ews(self, values):
+        endpoint = _ews_endpoint(values.get("endpoint"))
+        address = str(values.get("address") or "").strip()
+        try:
+            mailbox = Address(addr_spec=address)
+            if not mailbox.username or not mailbox.domain:
+                raise ValueError
+        except (ValueError, HeaderParseError):
+            raise AccountError("Enter the Exchange mailbox email address") from None
+        identity = "ews:" + hashlib.sha256(json.dumps([endpoint, address.casefold()]).encode()).hexdigest()[:32]
+        edit_id = values.get("account_id")
+        if edit_id is not None and edit_id != identity:
+            raise AccountError("A different mailbox or EWS endpoint needs its own account")
+
+        def connection(old):
+            previous_login = (old or {}).get("config", {}).get("EMAIL_USER")
+            username = str(values.get("username", previous_login if edit_id else None) or address).strip()
+            if not username or any(c in username for c in "\r\n\0"):
+                raise AccountError("Enter an Exchange login without line breaks")
+            password = values.get("password")
+            # A retained password belongs to this login on this endpoint, never a new destination.
+            if not password and edit_id and old and previous_login == username:
+                password = old["config"].get("EMAIL_PASSWORD")
+            if not isinstance(password, str) or not password:
+                raise AccountError("Enter the Exchange password for this login")
+            config = {"EWS_ENDPOINT": endpoint, "EMAIL_USER": username, "EMAIL_PASSWORD": password}
+            return self._password_record("ews", (old or {}).get("address", address), config, values, old)
+
+        try:
+            self.get(identity)
+        except AccountError:
+            if edit_id:
+                raise
+            return self.save({"id": identity, **connection(None)})
+        # Read the current credentials and preferences under the same lock as disconnect.
+        return self._change(identity, lambda row: row.update(connection(row)), connected=True)
+
+    @staticmethod
+    def _password_record(provider, address, config, values, old):
         raw_senders = (values.get("senders") if "senders" in values else (old or {}).get("senders")) or [address]
         senders = raw_senders.splitlines() if isinstance(raw_senders, str) else list(raw_senders)
         senders = list(dict.fromkeys([address] + [str(x).strip() for x in senders if str(x).strip()]))
         if any(c in sender for sender in senders for c in "\r\n\0"):
             raise AccountError("Sender addresses cannot contain line breaks")
-        record = {"id": identity, "provider": "imap", "address": address,
+        record = {"provider": provider, "address": address,
                   "label": str(values.get("label") or (old or {}).get("label") or address),
                   "senders": senders, "sender": str(values.get("sender") or (old or {}).get("sender") or address),
                   "config": config, "sending": values.get("sending", (old or {}).get("sending", "on")),
@@ -228,7 +289,7 @@ class AccountStore:
             raise AccountError("Sending must be on or off")
         if record["sender"] not in senders:
             raise AccountError("Default sender must be one of this account's configured addresses")
-        return self.save(record)
+        return record
 
     def _change(self, account_id, mutate, *, connected=None):
         # Preferences and disconnect serialize with refresh, so editing a label
