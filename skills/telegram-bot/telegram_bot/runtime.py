@@ -60,7 +60,7 @@ class TelegramTransportRuntime:
         inbox_workers: int = 2,
     ):
         self.state_dir = pathlib.Path(state_dir)
-        self.store = CustodyStore(self.state_dir / "custody.sqlite3")
+        self.store = CustodyStore.shared(self.state_dir / "custody.sqlite3")
         self.token_provider = token_provider
         self.logger = logger
         self.submitter = submitter
@@ -85,24 +85,23 @@ class TelegramTransportRuntime:
         self._stop_event = asyncio.Event()
         self._client_lock = asyncio.Lock()
         self._run_task = asyncio.current_task()
-        # Single owner per state dir and no worker of this runtime has started,
-        # so any leased row is stale (see CustodyStore.release_own_leases).
-        released = self.store.release_own_leases()
-        if any(released.values()):
-            self._log("info", f"telegram-bot: released stale leases {released}")
-        workers = [
-            asyncio.create_task(
-                self._inbox_worker(), name=f"telegram-presence-inbox-{index}"
-            )
-            for index in range(self.inbox_workers)
-        ]
-        workers.append(
-            asyncio.create_task(self._work_worker(), name="telegram-presence-work")
-        )
-        workers.append(
-            asyncio.create_task(self._outbox_worker(), name="telegram-presence-outbox")
-        )
+        workers = []
         try:
+            # Single owner per state dir and no worker of this runtime has started,
+            # so any leased row is stale (see CustodyStore.release_own_leases).
+            released = self.store.release_own_leases()
+            if any(released.values()):
+                self._log("info", f"telegram-bot: released stale leases {released}")
+            for index in range(self.inbox_workers):
+                workers.append(asyncio.create_task(
+                    self._inbox_worker(), name=f"telegram-presence-inbox-{index}"
+                ))
+            workers.append(
+                asyncio.create_task(self._work_worker(), name="telegram-presence-work")
+            )
+            workers.append(
+                asyncio.create_task(self._outbox_worker(), name="telegram-presence-outbox")
+            )
             await self._poll_loop()
         finally:
             self._stopping = True
@@ -113,6 +112,8 @@ class TelegramTransportRuntime:
             await asyncio.gather(*workers, return_exceptions=True)
             self._runtime_state = "stopped"
             self._run_task = None
+            # The workers' releases are committed; a later run or status read opens it again.
+            self.store.close()
 
     def stop(self) -> None:
         self._stopping = True
@@ -120,6 +121,9 @@ class TelegramTransportRuntime:
             self._stop_event.set()
         if self._run_task is not None and not self._run_task.done():
             self._run_task.cancel()
+        else:
+            # Nothing runs to close it on its way out, as in a pooled worker, whose runtime never starts.
+            self.store.close()
 
     def confirmed_bot(self) -> Tuple[str, str]:
         """The bot id getMe confirmed for the token configured now, else ``""`` and why not.

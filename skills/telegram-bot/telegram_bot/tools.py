@@ -133,7 +133,7 @@ def make_moderation_tool(api: Any):
         except (TypeError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
         receipt = str(request_id).strip()
-        inserted = CustodyStore(
+        inserted = CustodyStore.shared(
             pathlib.Path(api.get_state_dir()) / "custody.sqlite3"
         ).enqueue_outbox(
             f"telegram-moderate:{receipt}",
@@ -158,7 +158,7 @@ def make_receipt_tool(api: Any):
     def telegram_receipt(*, request_id: str, operation: str = "send") -> dict[str, Any]:
         if operation not in {"send", "moderate", "operation"}:
             return {"ok": False, "error": "operation must be send, moderate, or operation"}
-        return CustodyStore(
+        return CustodyStore.shared(
             pathlib.Path(api.get_state_dir()) / "custody.sqlite3"
         ).delivery_receipt(f"telegram-{operation}:{str(request_id).strip()}")
 
@@ -238,7 +238,7 @@ def make_operation_tool(api: Any, confirmed_account=lambda: ""):
                 raise ValueError("request_id is required for a retryable operation")
             parameters: dict[str, Any] = {"chat_id": target, "message_id": message}
             local_topic_id = _positive_id(topic_id, "topic_id") if topic_id is not None else None
-            store = CustodyStore(pathlib.Path(api.get_state_dir()) / "custody.sqlite3")
+            store = CustodyStore.shared(pathlib.Path(api.get_state_dir()) / "custody.sqlite3")
             reaction_target, album = None, ""
             if method == "editMessageText":
                 if not str(text or "").strip():

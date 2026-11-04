@@ -579,8 +579,9 @@ def test_an_interrupted_backfill_resumes_and_never_undoes_newer_evidence(tmp_pat
     monkeypatch.setattr(discovery, "_captured_group", readable)
 
     # Newer evidence for groups the backfill has not reached yet: a removal, a rename, a migration.
-    live = CustodyStore.__new__(CustodyStore)  # records updates without starting a backfill of its own
-    live.path = path
+    with monkeypatch.context() as unstarted:  # records updates without starting a backfill of its own
+        unstarted.setattr(discovery, "backfill_legacy", lambda connect: None)
+        live = CustodyStore(path)
     commit(live, member(1000, chat(-1060, "Group 060"), "left"),
            said(1001, chat(-1070, "Group 070 renamed"), "", new_chat_title="Group 070 renamed"),
            said(1002, chat(-1080, "Group 080", "group"), "", migrate_to_chat_id=-5080))

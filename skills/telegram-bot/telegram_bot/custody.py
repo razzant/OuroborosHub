@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import sqlite3
+import threading
 import time
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -197,13 +200,101 @@ def _with_reaction_target(conn: sqlite3.Connection, event: TelegramEvent) -> Tel
     )
 
 
+# Candidates of the three claims, oldest first. A claim reads its query plainly first and takes the write
+# lock only when it found a row; under that lock the same query decides again (see _claim_candidate).
+_CLAIMABLE_INBOX = """
+SELECT event_id, payload_json, attempts
+FROM inbox AS candidate
+WHERE (
+    (candidate.state='pending' AND candidate.available_at<=?)
+    OR (candidate.state='leased' AND candidate.lease_until<=?)
+)
+AND NOT EXISTS (
+    SELECT 1
+    FROM inbox AS earlier
+    WHERE earlier.conversation_key=candidate.conversation_key
+      AND earlier.update_id<candidate.update_id
+      AND earlier.state IN ('pending','leased')
+)
+ORDER BY candidate.update_id ASC
+LIMIT 1
+"""
+# Due order: a reference released after its read is due again later
+# than every one already waiting, so older work never takes every turn.
+_CLAIMABLE_WORK = """
+SELECT event_id, binding_id, work_ref, role, event_json, attempts
+FROM presence_work
+WHERE (state='pending' AND available_at<=?)
+   OR (state='leased' AND lease_until<=?)
+ORDER BY available_at ASC, created_at ASC
+LIMIT 1
+"""
+_CLAIMABLE_OUTBOX = """
+SELECT candidate.delivery_id, candidate.payload_json, candidate.attempts,
+       candidate.state, candidate.last_error
+FROM outbox AS candidate
+WHERE ((candidate.state='pending' AND candidate.available_at<=?)
+   OR (candidate.state='leased' AND candidate.lease_until<=?))
+AND NOT EXISTS (
+    SELECT 1 FROM outbox AS earlier
+    WHERE earlier.rowid < candidate.rowid
+      AND earlier.state IN ('pending','leased')
+      AND json_extract(earlier.payload_json, '$.chat_id') = json_extract(candidate.payload_json, '$.chat_id')
+      AND COALESCE(json_extract(earlier.payload_json, '$.topic_id'), '') = COALESCE(json_extract(candidate.payload_json, '$.topic_id'), '')
+)
+ORDER BY candidate.created_at ASC, candidate.rowid ASC
+LIMIT 1
+"""
+
+# This process's store of each custody file, for as long as something holds it (see CustodyStore.shared).
+_SHARED: "weakref.WeakValueDictionary[str, CustodyStore]" = weakref.WeakValueDictionary()
+_SHARED_LOCK = threading.Lock()
+
+
 class CustodyStore:
-    """Small connection-per-call store; SQLite owns queue truth across restarts."""
+    """SQLite custody over one kept connection; SQLite owns queue truth across restarts.
+
+    The connection opens on first use and stays open until ``close``; the next use opens it
+    again. Callers take turns on it under the store's lock, whatever thread they run on. An
+    idle poll therefore opens no file, and a claim takes the write lock only when a row is
+    claimable. Every commit is synchronous=FULL: a send marker, a delivered chunk or an
+    advanced Telegram offset must survive a power loss, or a message could go out twice in
+    someone's name or an acknowledged update be lost.
+    """
 
     def __init__(self, path: pathlib.Path):
         self.path = pathlib.Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn: Optional[sqlite3.Connection] = None
         self._initialize()
+
+    @classmethod
+    def shared(cls, path: pathlib.Path) -> "CustodyStore":
+        """The store of this file that something in this process already holds, else a new one.
+
+        The runtime, the status route and the tools of one process then share one connection,
+        and the file is initialized once per process rather than once per tool call.
+        """
+        key = os.path.realpath(path)
+        with _SHARED_LOCK:
+            store = _SHARED.get(key)
+            if store is None:
+                store = _SHARED[key] = cls(path)
+            return store
+
+    def __del__(self) -> None:
+        # Short-lived tool callers may drop the store without an explicit stop.
+        conn = getattr(self, "_conn", None)
+        if conn is not None:
+            conn.close()
+
+    def close(self) -> None:
+        """Close the kept connection once its current user is done; a later call opens it again."""
+        with self._lock:
+            conn, self._conn = self._conn, None
+            if conn is not None:
+                conn.close()
 
     def commit_update(self, update_id: int, event: Optional[TelegramEvent],
                       groups: Sequence[discovery.GroupSighting] = ()) -> bool:
@@ -269,32 +360,28 @@ class CustodyStore:
         binding = _token_binding(token)
         return row["value"][len(binding):] if row is not None and row["value"].startswith(binding) else ""
 
+    @staticmethod
+    def _claim_candidate(conn: sqlite3.Connection, query: str, now: float) -> Optional[sqlite3.Row]:
+        """The row a claim may lease, chosen under the write lock; ``None`` when nothing is claimable.
+
+        A plain read answers first, so an idle poll takes no write lock and writes nothing.
+        Only when it finds a row does ``BEGIN IMMEDIATE`` start, and the same query decides
+        again under it, as every claim always did; the caller's compare-and-set UPDATE stays
+        the authority on the lease.
+        """
+        if conn.execute(query, (now, now)).fetchone() is None:
+            return None
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(query, (now, now)).fetchone()
+        if row is None:
+            conn.commit()
+        return row
+
     def claim_inbox(self, *, lease_sec: float = 90.0) -> Optional[InboxLease]:
         now = time.time()
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                """
-                SELECT event_id, payload_json, attempts
-                FROM inbox AS candidate
-                WHERE (
-                    (candidate.state='pending' AND candidate.available_at<=?)
-                    OR (candidate.state='leased' AND candidate.lease_until<=?)
-                )
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM inbox AS earlier
-                    WHERE earlier.conversation_key=candidate.conversation_key
-                      AND earlier.update_id<candidate.update_id
-                      AND earlier.state IN ('pending','leased')
-                )
-                ORDER BY candidate.update_id ASC
-                LIMIT 1
-                """,
-                (now, now),
-            ).fetchone()
+            row = self._claim_candidate(conn, _CLAIMABLE_INBOX, now)
             if row is None:
-                conn.commit()
                 return None
             updated = conn.execute(
                 """
@@ -567,22 +654,8 @@ class CustodyStore:
     def claim_work(self, *, lease_sec: float = 90.0) -> Optional[WorkLease]:
         now = time.time()
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            # Due order: a reference released after its read is due again later
-            # than every one already waiting, so older work never takes every turn.
-            row = conn.execute(
-                """
-                SELECT event_id, binding_id, work_ref, role, event_json, attempts
-                FROM presence_work
-                WHERE (state='pending' AND available_at<=?)
-                   OR (state='leased' AND lease_until<=?)
-                ORDER BY available_at ASC, created_at ASC
-                LIMIT 1
-                """,
-                (now, now),
-            ).fetchone()
+            row = self._claim_candidate(conn, _CLAIMABLE_WORK, now)
             if row is None:
-                conn.commit()
                 return None
             updated = conn.execute(
                 """
@@ -719,28 +792,8 @@ class CustodyStore:
     def claim_outbox(self, *, lease_sec: float = 90.0) -> Optional[OutboxLease]:
         now = time.time()
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                """
-                SELECT candidate.delivery_id, candidate.payload_json, candidate.attempts,
-                       candidate.state, candidate.last_error
-                FROM outbox AS candidate
-                WHERE ((candidate.state='pending' AND candidate.available_at<=?)
-                   OR (candidate.state='leased' AND candidate.lease_until<=?))
-                AND NOT EXISTS (
-                    SELECT 1 FROM outbox AS earlier
-                    WHERE earlier.rowid < candidate.rowid
-                      AND earlier.state IN ('pending','leased')
-                      AND json_extract(earlier.payload_json, '$.chat_id') = json_extract(candidate.payload_json, '$.chat_id')
-                      AND COALESCE(json_extract(earlier.payload_json, '$.topic_id'), '') = COALESCE(json_extract(candidate.payload_json, '$.topic_id'), '')
-                )
-                ORDER BY candidate.created_at ASC, candidate.rowid ASC
-                LIMIT 1
-                """,
-                (now, now),
-            ).fetchone()
+            row = self._claim_candidate(conn, _CLAIMABLE_OUTBOX, now)
             if row is None:
-                conn.commit()
                 return None
             payload = json.loads(row["payload_json"])
             unanswered = row["state"] == "leased" or row["last_error"] in _UNANSWERED_ATTEMPT
@@ -1014,8 +1067,6 @@ class CustodyStore:
 
     def _initialize(self) -> None:
         with self._connect() as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS metadata(
@@ -1125,13 +1176,38 @@ class CustodyStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
+        """The kept connection, for one caller at a time.
+
+        A transaction its caller left unfinished, by an error, is rolled back on the way out,
+        as closing a per-call connection did.
+        """
+        with self._lock:
+            if self._conn is None:
+                self._conn = self._open()
+            conn = self._conn
+            try:
+                yield conn
+            finally:
+                if conn.in_transaction:
+                    try:
+                        conn.rollback()
+                    except sqlite3.Error:
+                        # A connection that cannot roll back is not reused.
+                        self._conn = None
+                        conn.close()
+
+    def _open(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=5.0, isolation_level=None, check_same_thread=False)
         try:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout=5000")
-            yield conn
-        finally:
+            conn.execute("PRAGMA journal_mode=WAL")
+            # Set here, never inherited: synchronous is per connection, and this one makes every commit.
+            conn.execute("PRAGMA synchronous=FULL")
+        except BaseException:
             conn.close()
+            raise
+        return conn
 
     @staticmethod
     def _metadata_int(conn: sqlite3.Connection, key: str) -> int:
