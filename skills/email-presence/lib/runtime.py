@@ -92,7 +92,9 @@ class EmailRuntime:
                 message = self.client.fetch(box, self.folder, uid, validity, include_attachment_data=True)
                 cursor["uid"] = uid
                 key = self.store.cursor_key(self.account, self.folder)
-                if (not cursor.get("rescan") or message["internal_date"] >= cursor["activated_at"]) and accepts(message):
+                rescan = cursor.get("rescan")
+                if ((not rescan or message["internal_date"] >= cursor["activated_at"]) and accepts(message)
+                        and not (rescan and self.store.captured_before_id_repair(message))):
                     if message.get("attachments") or message.get("_raw_source") is not None:
                         self.store.stage_inbound_attachments(message)
                     _, inserted = self.store.ingest(message, cursor_key=key, cursor=cursor)

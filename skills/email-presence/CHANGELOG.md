@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.10.3
+## 0.10.4
 
 - Keep one connection per mailbox store open instead of opening one for every call. An
   inbox or outbox loop with nothing to claim now only reads: it takes no write lock and
@@ -9,6 +9,16 @@
   is unchanged. Every commit stays `synchronous=FULL`. The companion closes a mailbox's
   connection when its worker stops, including host/client cleanup failures. Discarding
   a temporary tool store closes its connection too.
+
+## 0.10.3
+
+- Check the selected Gmail account, forwarding address, and affected label IDs
+  and names before creating a filter. All Gmail settings writes check the actual
+  account; a canonical retry preserves the complete rule.
+- Keep malformed Message-ID headers from stopping intake or hiding later mail.
+  Header-only search may return a message reference without an RFC ID; read by
+  that reference for the full identity. IMAP rescans recognize identical old
+  captures from their retained source, without merging different messages.
 
 ## 0.10.2
 

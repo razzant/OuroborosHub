@@ -201,7 +201,8 @@ class MailClient:
         part = next((p for p in data if isinstance(p, tuple) and isinstance(p[1], bytes)), None)
         if part is None:
             raise RuntimeError(f"IMAP UID {uid} disappeared before it could be read")
-        message = parse_message(part[1], folder=folder, uid=uid, include_attachment_data=include_attachment_data)
+        message = parse_message(part[1], folder=folder, uid=uid, include_attachment_data=include_attachment_data,
+                                missing_id="" if headers_only else None)
         metadata = b" ".join(p[0] if isinstance(p, tuple) else p for p in data if isinstance(p, (bytes, tuple)))
         date = imaplib.Internaldate2tuple(metadata)
         if date is None:

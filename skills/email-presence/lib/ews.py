@@ -9,7 +9,7 @@ from email.utils import getaddresses, parsedate_to_datetime
 from .client import MailClient
 from .ews_operations import EwsOperations
 from .ews_wire import EwsError, EwsWire, NS, ews_timestamp, m, t
-from .mime import _html_to_text, _message_ids, decode_header_value, parse_message
+from .mime import _html_to_text, _message_ids, decode_header_value, parse_message, usable_message_id
 
 
 # These are EWS distinguished folder IDs, not localized mailbox display names.
@@ -259,7 +259,7 @@ class EwsClient(EwsOperations, MailClient):
         facts = self._facts(item)
         return {**facts, 'subject': item.findtext('t:Subject', '', NS), 'sender': item.findtext('t:From/t:Mailbox/t:EmailAddress', '', NS),
                 'sender_name': item.findtext('t:From/t:Mailbox/t:Name', '', NS),
-                'message_id': item.findtext('t:InternetMessageId', '', NS) or _fallback_id(facts['provider_id']),
+                'message_id': usable_message_id(item.findtext('t:InternetMessageId', '', NS)) or _fallback_id(facts['provider_id']),
                 'references': _message_ids(item.findtext('t:References', '', NS)), 'in_reply_to': item.findtext('t:InReplyTo', '', NS),
                 'date': item.findtext('t:DateTimeReceived', '', NS)}
 
@@ -301,8 +301,11 @@ class EwsClient(EwsOperations, MailClient):
         item = self._get_item(native, _shape('Item', fields, text_body=True))
         msg = self._metadata(item)
         headers = {}
+        raw_mid = None
         for row in item.findall('t:InternetMessageHeaders/t:InternetMessageHeader', NS):
             name = (row.get('HeaderName') or '').casefold()
+            if name == 'message-id' and raw_mid is None:
+                raw_mid = row.text
             if name:
                 headers.setdefault(name, []).append(decode_header_value(row.text or ''))
 
@@ -319,7 +322,8 @@ class EwsClient(EwsOperations, MailClient):
         msg.update(sender=sender[0][1] if sender else '', sender_name=(sender[0][0] if sender else '') or msg['sender_name'],
                    recipients=[v for _, v in addresses('ToRecipients', 'to')], cc=[v for _, v in addresses('CcRecipients', 'cc')],
                    reply_to=[v for _, v in addresses('ReplyTo', 'reply-to')], headers=headers,
-                   message_id=item.findtext('t:InternetMessageId', '', NS) or next(iter(headers.get('message-id', [])), '') or msg['message_id'],
+                   message_id=usable_message_id(item.findtext('t:InternetMessageId', '', NS))
+                              or usable_message_id(raw_mid) or msg['message_id'],
                    in_reply_to=msg['in_reply_to'] or next(iter(headers.get('in-reply-to', [])), ''),
                    references=msg['references'] or _message_ids(' '.join(headers.get('references', []))))
         body = item.find('t:Body', NS)
@@ -362,13 +366,12 @@ class EwsClient(EwsOperations, MailClient):
             raise EwsError('InvalidMimeContent') from None
         if not raw:
             raise EwsError('MissingMimeContent')
-        message = parse_message(raw, uid=0, folder=facts['folder'], include_attachment_data=include_attachment_data)
+        message = parse_message(raw, uid=0, folder=facts['folder'], include_attachment_data=include_attachment_data,
+                                missing_id=_fallback_id(native))
         message.pop('uid')  # Only intake allocates a local numeric address; public EWS IDs stay opaque.
-        provider_mid = item.findtext('t:InternetMessageId', '', NS)
+        provider_mid = usable_message_id(item.findtext('t:InternetMessageId', '', NS))
         if provider_mid:
             message['message_id'] = provider_mid
-        elif message['message_id'] == f'<sha256-{hashlib.sha256(raw).hexdigest()}@ouroboros.local>':
-            message['message_id'] = _fallback_id(native)
         return {**message, **facts}
 
     def find_message(self, message_id, *, folder='INBOX'):

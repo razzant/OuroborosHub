@@ -1,6 +1,6 @@
 # Email Presence
 
-Version 0.10.3 connects Gmail, on-premises Exchange (EWS over HTTPS with NTLM),
+Version 0.10.4 connects Gmail, on-premises Exchange (EWS over HTTPS with NTLM),
 and IMAP/SMTP mailboxes, including Yandex and Proton Mail Bridge. Each account has its own credentials, inbox,
 outbox and receipts; sender addresses are separate from mailbox identity.
 Previously issued Exchange links still work. Mail asks Exchange whether an item

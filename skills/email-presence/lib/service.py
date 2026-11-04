@@ -174,7 +174,7 @@ class MailService:
         return {**result, "account_id": account["id"]}
 
     @staticmethod
-    def _mailbox_target_preparer(public, account_id):
+    def _write_target_preparer(public, account_id):
         # Compare what Host actually saw with the selected mailbox and the
         # provider's final targets. One retry exposes all missing facts.
         def prepare(targets):
@@ -193,7 +193,7 @@ class MailService:
                 "uid": uid, "uidvalidity": uidvalidity, "folder": folder or account.get("folder") or "INBOX"}
             public = {k:v for k,v in dict(account_id=account_id, message_ref=message_ref, uid=uid,
                       uidvalidity=uidvalidity, folder=folder, remove_labels=remove_labels).items() if v is not None}
-            prepare = self._mailbox_target_preparer(public, account['id'])
+            prepare = self._write_target_preparer(public, account['id'])
             if account['provider'] == 'gmail':
                 # The caller cannot apply arbitrary labels through this shortcut.
                 kwargs['prepare_targets'] = prepare
@@ -208,7 +208,7 @@ class MailService:
         with self.target(account_id) as (account, _store, client):
             public = {k: v for k, v in kwargs.items() if v is not None}
             public.update(account_id=account_id, message_ref=message_ref)
-            prepare = self._mailbox_target_preparer(public, account['id'])
+            prepare = self._write_target_preparer(public, account['id'])
             if message_ref:
                 kwargs.update(self.unwrap_ref(account, message_ref))
             if account['provider'] == 'gmail':
@@ -412,27 +412,26 @@ class MailService:
                 return {"ok": False, "code": "website_required", "message": "This mail adapter manages messages and folders. Open the provider website for account settings."}
             return client.settings_read(**kwargs)
 
-    def settings_write(self, *, account_id="", forward_to="", **kwargs):
+    def settings_write(self, *, account_id="", forward_to="", add_labels=None, remove_labels=None,
+                       label_names=None, **kwargs):
         with self.target(account_id) as (account, _store, client):
             if account["provider"] != "gmail":
                 return {"ok": False, "code": "website_required", "message": "Configure filters, forwarding and account settings on this provider's website."}
-            if kwargs.get('resource') == 'filters' and kwargs.get('action', 'update') == 'create':
-                values = dict(kwargs.get('values') or {})
-                action = values.get('action') or {}
-                nested = action.get('forward')
-                if nested and nested != forward_to:
-                    return self._prepare_target('forward_to', nested, {'account_id': account['id'], **kwargs})
-                if forward_to and not nested:
-                    kwargs['values'] = {**values, 'action': {**action, 'forward': forward_to}}
-            elif forward_to:
-                raise ValueError('forward_to applies to creating a Gmail filter')
-            return client.settings_write(**kwargs)
+            public = {**kwargs, "account_id": account_id, "forward_to": forward_to, "add_labels": add_labels or [],
+                      "remove_labels": remove_labels or [], "label_names": label_names or []}
+            if not (kwargs.get("resource") == "filters" and kwargs.get("action") == "create"):
+                if forward_to or add_labels or remove_labels or label_names:
+                    raise ValueError("Filter targets apply only to creating a Gmail filter")
+                # Only the account is affected by these settings writes, including deleting a rule.
+                public = {**kwargs, "account_id": account_id}
+            return client.settings_write(**kwargs, forward_to=forward_to,
+                                         prepare_targets=self._write_target_preparer(public, account["id"]))
 
 
 def register_tools(api, service):
     string, integer = {"type": "string"}, {"type": "integer"}
     array = {"type": "array", "items": string}
-    account = {"account_id": {"type": "string", "description": "Exact canonical id from email_accounts; required for writes with email_send, email_draft, email_mailbox or email_mark_read and whenever more than one account is connected. An omitted sole account can be prepared before the effect."}}
+    account = {"account_id": {"type": "string", "description": "Exact canonical id from email_accounts; required for writes with email_send, email_draft, email_mailbox, email_mark_read or email_settings and whenever more than one account is connected. An omitted sole account can be prepared before the effect."}}
     message = {"message_ref": string, "uid": integer, "uidvalidity": integer, "folder": string}
     compose = {"to": string, "body": string, "subject": string, "sender": string, "reply_to_message_id": string,
                'conversation_id': {'type': 'string', 'description': 'Canonical RFC conversation from email_read or retry_arguments; required for a threaded reply.'},
@@ -462,6 +461,8 @@ def register_tools(api, service):
     tool("email_test_connection", service.test_connection, "Check the selected account's authentication/TLS without sending mail or admitting historical messages.", {})
     settings = {"resource": string, "identifier": string}
     tool("email_settings_read", service.settings_read, "Read Gmail filters, send-as, vacation, language, IMAP/POP or forwarding settings. Other providers return website_required.", settings)
-    tool("email_settings", service.settings_write, "Change provider-supported Gmail settings: filters create/delete, vacation, language, IMAP/POP and existing send-as properties. For a forwarding filter supply forward_to matching values.action.forward; nested-only or mismatched targets return exact retry_arguments before any effect. Unsupported administrative forwarding actions name the website path.",
+    tool("email_settings", service.settings_write, "Change supported Gmail settings. A filter creation exposes the actual account, forwarding address, label IDs and their current names before saving. Follow returned retry_arguments when any target is missing or stale. Deleting a filter does not execute its actions.",
          {**settings, "action": string, "values": {"type": "object"},
-          "forward_to": {"type": "string", "description": "Canonical forwarding destination for filters/create. Matches values.action.forward; when given alone it fills that provider field without changing other filter data."}}, ("resource",))
+          "forward_to": {"type": "string", "description": "Actual forwarding address on filters/create. Given alone it fills values.action.forward."},
+          "add_labels": array, "remove_labels": array,
+          "label_names": {"type": "array", "items": string, "description": "Current names of filter label IDs from retry_arguments. These target fields do not change values.action."}}, ("resource",))
