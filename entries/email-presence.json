@@ -6,7 +6,7 @@
     "Email"
   ],
   "description": "Multi-account Gmail, on-premises Exchange EWS and IMAP/SMTP mail with folders, drafts, durable delivery and optional Presence intake.",
-  "digest": "9d1305c9ecdaee02722cb94960170bb2d27996e6b9c91f31e3e6fe287290c429",
+  "digest": "b9dbea533f752da8286b50484b78c584bebf8098f90d99f57f5732234d7aca70",
   "icon": "ui/icon.svg",
   "install_specs": [
     "httpx",
@@ -23,6 +23,6 @@
     "path": "skills/email-presence"
   },
   "type": "extension",
-  "version": "0.10.5",
+  "version": "0.10.6",
   "withdrawn": null
 }
