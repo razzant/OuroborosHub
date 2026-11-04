@@ -1,7 +1,7 @@
 ---
 name: agentrq-bridge
 description: "AgentRQ integration: structured HITL task board, permission gating, and real-time workspace bridge via MCP Streamable HTTP"
-version: 0.3.0
+version: 0.3.1
 type: extension
 runtime: python3
 entry: plugin.py

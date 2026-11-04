@@ -4,6 +4,7 @@ import asyncio
 import base64
 import ipaddress
 import json
+import logging
 import os
 import re
 from collections.abc import Mapping
@@ -17,6 +18,18 @@ from .accounts import public_message_ref
 from .store import InboxItem
 from .facts import email_facts, mailbox_identity
 
+log = logging.getLogger("email_presence")
+
+# The Host did not say whether this Place allows sending. The outbox counts a hold by its prefix.
+PLACE_POLICY_UNREAD = ("Held: Ouroboros did not answer whether this place allows sending. "
+                       "Nothing was sent yet; it retries by itself and no approval is needed.")
+# The Host refused this skill itself (no grant, turned off, unreviewed or a stale token): only its owner can change that.
+SKILL_ACCESS_REFUSED = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
+                        "check the skill's access in Skills.")
+_NO_PLACE_COVERS = "Held: no connected place covers this send; nothing was sent."
+# No binding was captured when the send was queued, so the outbox never sends it.
+_NO_PLACE_WHEN_QUEUED = ("Held: no connected place covered this send when it was queued, so it will not be sent; "
+                         "send it again once a place covers it.")
 _OUTCOMES = frozenset({"message", "silent", "tool_delivered", "deferred"})
 _SPEECH = frozenset({"message", "deferred"})
 _DISPOSITIONS = frozenset({"retained", "rejected", "blocked", "retry"})
@@ -70,6 +83,22 @@ def normalize_binding_id(value: Any) -> str:
     if value and not re.fullmatch(r"[0-9a-f]{32}", value):
         raise HostContractError("binding_id must be 32 lowercase hexadecimal characters")
     return value
+
+def place_refusal_hold(facts: Mapping[str, Any]) -> str:
+    """The Host's "not allowed": a person reads the Place's state, its code stays in the debug log."""
+    log.debug("Host refused this send: %s", facts.get("code"))
+    state = facts.get("state")
+    if not state:
+        return PLACE_POLICY_UNREAD
+    if state in {"changed", "unknown"}:  # These describe this send's match, not a state of a Place.
+        # Without a binding this send never goes; binding_hold(None) later says the same sentence.
+        return _NO_PLACE_WHEN_QUEUED if facts.get("binding") is None else _NO_PLACE_COVERS
+    label = facts.get("label") or "Email"
+    if state == "disconnected":
+        # The bound Place was removed, or disconnected and connected again: this queued send never goes.
+        return (f"Held: {label} was disconnected after this send was queued, so it will not be sent; "
+                "send it again if it is still needed.")
+    return f"Held: {label} is {state}"
 
 def email_presence_event(item: InboxItem, *, account_id: str, places: bool = False,
                          identity: bool = False, words=(), address="", senders=(), sender="") -> dict[str, Any]:
@@ -231,6 +260,8 @@ class LoopbackPresenceHostAdapter:
             response = self._place_http.get(f"{self.host_service_url}/presence/place", headers=self._headers(),
                                             params={"provider": "email", "account_id": account_id,
                                                     "conversation_id": conversation_id})
+            if response.status_code == 403 and response.json().get("code") == "presence_auth_blocked":
+                return SKILL_ACCESS_REFUSED
             if response.status_code == 404:
                 payload = response.json()
                 if payload.get("code") == "place_not_connected":
@@ -238,9 +269,11 @@ class LoopbackPresenceHostAdapter:
             response.raise_for_status()
             place = response.json()
             state = place.get("state")
-            return "" if state == "active" else f"Held: {place.get('label') or 'Email'} is {state or 'unavailable'}"
+            if not state:
+                return PLACE_POLICY_UNREAD
+            return "" if state == "active" else f"Held: {place.get('label') or 'Email'} is {state}"
         except (HostContractError, httpx.HTTPError, ValueError, AttributeError):
-            return "Held: place policy unavailable"
+            return PLACE_POLICY_UNREAD
 
     def _place_client(self):
         if self._place_http is None:
@@ -266,22 +299,23 @@ class LoopbackPresenceHostAdapter:
 
     def binding_hold(self, binding, account_id, conversation_id, *, thread_id=""):
         if not isinstance(binding, dict):
-            return "Held: the original Place binding was not captured; inspect the receipt before a new send"
+            return _NO_PLACE_WHEN_QUEUED
         try:
             response = self._place_client().get(f"{self.host_service_url}/presence/place", headers=self._headers(), params={
                 "operation": "check", "provider": "email", "account_id": account_id,
                 "conversation_id": conversation_id, "thread_id": thread_id,
                 "binding": json.dumps(binding, separators=(",", ":"))})
             payload = response.json()
-            if response.status_code == 403:
-                return "Held: host authorization blocked"
+            if response.status_code == 403 and payload.get("code") == "presence_auth_blocked":
+                return SKILL_ACCESS_REFUSED
             if response.status_code >= 400:
-                return "Held: " + str(payload.get("code") or "place policy unavailable")
+                log.debug("Host could not check this send's Place binding: HTTP %s, %s", response.status_code, payload.get("code"))
+                return PLACE_POLICY_UNREAD
             if payload.get("allowed") is True:
                 return ""
-            return "Held: " + str(payload.get("code") or payload.get("state") or "place policy unavailable")
+            return place_refusal_hold(payload)
         except (HostContractError, httpx.HTTPError, ValueError, AttributeError):
-            return "Held: place policy unavailable"
+            return PLACE_POLICY_UNREAD
 
     def close_sync(self):
         if self._place_http is not None:

@@ -52,6 +52,44 @@ def test_held_reply_survives_restart_and_active_delivers_once(tmp_path, state):
     assert json.loads(path.read_text())["state"] == "completed"
 
 
+PLACE_POLICY_WORDS = ("Held: Ouroboros did not answer whether this place allows sending. "
+                      "Nothing was sent yet; it retries by itself and no approval is needed.")
+ACCESS_REFUSED_WORDS = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
+                        "check the skill's access in Skills.")
+
+
+@pytest.mark.parametrize("answer,words", [
+    ({"state": "silent", "label": "Team board"}, "Held: Team board is silent"),
+    ({"state": "paused"}, "Held: AgentRQ is paused"),
+    ({"ok": False, "error": "disk", "code": "places_unavailable", "disposition": "retry"}, PLACE_POLICY_WORDS),
+    # The Host's 403 carries a diagnostic, not words for a person; only the owner can lift it in Skills.
+    ({"ok": False, "error": "skill 'agentrq-bridge' lacks grant 'presence'", "code": "presence_auth_blocked",
+      "disposition": "blocked"}, ACCESS_REFUSED_WORDS),
+    ({"ok": True}, PLACE_POLICY_WORDS),  # an answer that names no state says nothing about sending
+    ({"ok": False, "error": "Connect this place in Consciousness > Places.", "code": "place_not_connected",
+      "disposition": "blocked"}, "Held: Connect this place in Consciousness > Places."),
+])
+def test_a_hold_says_what_the_host_answered_and_retries_by_itself(tmp_path, answer, words):
+    sent = []
+    event = module.provider_event({"type": "message.created", "taskId": "task", "sender": "human", "text": "hello"}, "https://workspace.example")
+    inbox = module.PresenceInbox(tmp_path, "http://127.0.0.1:8767", "token", lambda task, text: sent.append((task, text)) or {"ok": True})
+    path = inbox.enqueue(event)
+    place = [answer]
+    def request(method, route, payload=None):
+        if route.startswith("/presence/place?"):
+            return place[0]
+        if route == "/identity":
+            return {"ok": True, "presence_continuation_version": 1}
+        return {"status": "completed", "outcome": "message", "text": "answer", "turn_ref": "turn"}
+    inbox._request = request
+    inbox.process(path)
+    held = json.loads(path.read_text())
+    assert held["state"] == "held" and held["error"] == words and not sent
+    place[0] = {"state": "active"}
+    inbox.observe_pending()  # the listener's own pass, not a person's action
+    assert sent == [("task", "answer")] and json.loads(path.read_text())["state"] == "completed"
+
+
 def test_retained_and_deferred_work_keep_original_references(tmp_path):
     inbox = module.PresenceInbox(tmp_path, "http://127.0.0.1:8767", "token", lambda *args: pytest.fail("silent outcome"))
     path = inbox.enqueue(module.provider_event({"type": "task.created", "taskId": "task", "assignee": "agent"}, "https://workspace.example"))

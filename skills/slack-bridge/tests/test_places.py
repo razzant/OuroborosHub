@@ -12,6 +12,62 @@ from lib.store import BridgeStore
 from test_host_adapter import _item
 from test_workers_plugin import _Slack
 
+PLACE_POLICY_WORDS = ("Held: Ouroboros did not answer whether this place allows sending. "
+                      "Nothing was sent yet; it retries by itself and no approval is needed.")
+NOT_CONNECTED = {"ok": False, "error": "Connect this place in Consciousness > Places.",
+                 "code": "place_not_connected", "disposition": "blocked"}
+# The Host's 403 carries a diagnostic, not words for a person; only the owner can lift it in Skills.
+ACCESS_REFUSED = {"ok": False, "error": "skill 'slack-bridge' lacks grant 'presence'",
+                  "code": "presence_auth_blocked", "disposition": "blocked"}
+ACCESS_REFUSED_WORDS = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
+                        "check the skill's access in Skills.")
+
+
+def _place_hold(place, identity=None):
+    """A real adapter whose Host answers /identity and /presence/place as told; an exception is raised."""
+    async def run():
+        def handler(request):
+            answer = (identity or httpx.Response(200, json={"places_version": 1})) if request.url.path == "/identity" else place
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            host = LoopbackPresenceHostAdapter(binding_id="", host_service_url="http://127.0.0.1:8767", skill_token="test", http_client=http)
+            return await host.place_hold("T1", "C1")
+    return asyncio.run(run())
+
+
+@pytest.mark.parametrize("place", [
+    httpx.ConnectError("refused"), httpx.ReadTimeout("slow"),
+    httpx.Response(503, json={"ok": False, "code": "places_unavailable", "disposition": "retry"}),
+    httpx.Response(404, text="not this Host's refusal"),
+    httpx.Response(404, json=["not an object"]),
+    httpx.Response(200, text="not JSON"),
+    httpx.Response(200, json={"place_id": "p", "label": "Slack"}),  # an answer that names no state says nothing about sending
+])
+def test_unread_place_policy_is_held_in_words_that_ask_nothing(place):
+    assert _place_hold(place) == PLACE_POLICY_WORDS
+
+
+def test_host_that_cannot_answer_identity_holds_in_the_same_words_and_older_hosts_do_not_hold():
+    assert _place_hold(httpx.Response(200, json={}), identity=httpx.ConnectError("refused")) == PLACE_POLICY_WORDS
+    assert _place_hold(httpx.Response(200, json={}), identity=httpx.Response(200, json={"ok": True})) == ""
+
+
+def test_place_state_reads_as_before_and_not_connected_keeps_the_hosts_words():
+    assert _place_hold(httpx.Response(200, json={"state": "silent", "label": "Team room"})) == "Held: Team room is silent"
+    assert _place_hold(httpx.Response(200, json={"state": "paused"})) == "Held: Slack is paused"
+    assert _place_hold(httpx.Response(200, json={"state": "active"})) == ""
+    assert _place_hold(httpx.Response(404, json=NOT_CONNECTED)) == "Held: Connect this place in Consciousness > Places."
+
+
+@pytest.mark.parametrize("place,words", [
+    (httpx.Response(403, json=ACCESS_REFUSED), ACCESS_REFUSED_WORDS),
+    (httpx.Response(503, json={"ok": False, "code": "places_unavailable", "disposition": "retry"}), PLACE_POLICY_WORDS),
+])
+def test_a_refused_skill_sends_its_owner_to_skills_and_an_unread_place_still_retries(place, words):
+    assert _place_hold(place) == words
+
 
 def test_slack_addressing_is_structured_and_legacy_payload_is_unchanged():
     item = dataclasses.replace(_item(), channel_type="mpim", thread_ts="9.0", structured={
@@ -76,8 +132,8 @@ def test_place_lookup_names_a_thread_only_when_one_is_given():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("state", ["silent", "paused"])
-def test_held_outbox_resumes_without_losing_identity_or_attempts(tmp_path, monkeypatch, state):
+@pytest.mark.parametrize("reason", ["Held: Slack is silent", "Held: Slack is paused", PLACE_POLICY_WORDS])
+def test_held_outbox_resumes_without_losing_identity_or_attempts(tmp_path, monkeypatch, reason):
     async def run():
         clock = [1000.0]
         monkeypatch.setattr("time.time", lambda: clock[0])
@@ -85,7 +141,7 @@ def test_held_outbox_resumes_without_losing_identity_or_attempts(tmp_path, monke
             held = True
             async def place_hold(self, account, conversation):
                 assert (account, conversation) == ("T1", "C1")
-                return f"Held: Slack is {state}" if self.held else ""
+                return reason if self.held else ""
         host, slack, store = Host(), _Slack(), BridgeStore(tmp_path)
         store.set_runtime(workspace_id="T1")
         store.enqueue_outbox(request_id="stable", target="C1", thread_ts="root", chunks=["bytes"])
@@ -93,7 +149,7 @@ def test_held_outbox_resumes_without_losing_identity_or_attempts(tmp_path, monke
         assert await worker.process_once()
         assert slack.posts == []
         part = store.delivery_receipt("stable")["parts"][0]
-        assert part["attempts"] == 0 and part["error"].startswith("Held:")
+        assert part["attempts"] == 0 and part["error"] == reason and part["state"] == "held"
         assert store.status()["outbox_held"] == 1
         host.held = False
         clock[0] += 6

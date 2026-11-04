@@ -104,12 +104,14 @@ def test_disconnect_never_reclassifies_held_bound_send_or_automatic_reply_as_unb
     assert store.receipt(automatic_id)["delivery_reporting"]["place_binding"]["place_id"] == own.place_id
     places.edit_place(drive, own.place_id, "disconnect", author="owner")
     # Reconnecting an account must not release mail held under the disconnected binding.
-    places.connect_place(drive, connector="email-presence", provider="email", account_id=second["id"], state="active")
+    places.connect_place(drive, connector="email-presence", provider="email", account_id=second["id"],
+                         label="Work mail", state="active")
     release_hold(store)
     for _ in range(2):
         assert runtime.process_outbox()
     assert not delivery.sent
-    assert "place_disconnected" in store.receipt("held")["last_error"]
+    assert store.receipt("held")["last_error"] == ("Held: Work mail was disconnected after this send was queued, "
+                                                   "so it will not be sent; send it again if it is still needed.")
     assert store.receipt("held")["delivery_reporting"]["place_binding"] == bound
     assert store.receipt(automatic_id)["state"] == "held"
     # A newly requested operation binds the new Place and remains usable.
@@ -177,8 +179,13 @@ def test_ordinary_reply_preserves_known_thread_and_rejects_an_unknown_thread(tmp
                          reply_to_message_id="<other>", references=["<unknown-thread>"], conversation_id='<unknown-thread>', thread_id='<unknown-thread>')
     assert wrong["state"] == "held"
     assert wrong["receipt"]["delivery_reporting"]["place_binding"] is None
+    # The tool's answer and the receipt after the worker's recheck say one sentence for one fact.
+    not_covered = ("Held: no connected place covered this send when it was queued, so it will not be sent; "
+                   "send it again once a place covers it.")
+    assert wrong["receipt"]["last_error"] == not_covered
     release_hold(store)
     assert runtime.process_outbox() and len(delivery.sent) == 1
+    assert store.receipt("unknown")["state"] == "held" and store.receipt("unknown")["last_error"] == not_covered
 
 
 @pytest.mark.parametrize("failure", ["timeout", "503"])
