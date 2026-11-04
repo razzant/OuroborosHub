@@ -35,6 +35,7 @@ def main():
     # Replace only network-facing client methods. Registration, store, MIME source
     # staging, context injection, JSON return and subprocess transport remain real.
     (skill / "plugin.py").write_text('''
+from contextlib import nullcontext
 from . import original_plugin
 
 class OfflineMailClient:
@@ -61,7 +62,7 @@ class OfflineMailClient:
 
 def register(api):
     original_plugin.MailClient = OfflineMailClient
-    original_plugin.MailService.capture_binding = lambda *args, **kwargs: {"supported": False}
+    original_plugin.MailService._presence_host = lambda self: nullcontext(None)
     original_plugin.register(api)
     async def asynchronous(ctx, *, fail=False):
         if fail:

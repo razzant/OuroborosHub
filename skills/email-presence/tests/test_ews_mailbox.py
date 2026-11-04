@@ -17,6 +17,18 @@ def client(*replies):
     return EwsClient(ACCOUNT, session=session), session
 
 
+def identity(kind, native, *, parent='I+/=', key='c3RvcmU=', changekey='key'):
+    element = 'Message' if kind == 'Item' else kind
+    prop = (f'<t:ExtendedProperty><t:ExtendedFieldURI PropertyTag="0xffa" PropertyType="Binary"/>'
+            f'<t:Value>{key}</t:Value></t:ExtendedProperty>') if key is not None else ''
+    return response('Get' + kind, f'<m:{kind}s><t:{element}><t:{kind}Id Id="{native}" ChangeKey="{changekey}"/>'
+                    f'<t:ParentFolderId Id="{parent}"/>{prop}</t:{element}></m:{kind}s>')
+
+
+def proof(kind='Item', native=NATIVE):
+    return identity(kind, native), identity('Folder', 'I+/=')
+
+
 def item(native=NATIVE, *, mime=False, mid=True):
     mail = EmailMessage()
     mail['From'] = 'Иван Петров <sender@example.invalid>'
@@ -56,7 +68,7 @@ def test_folder_auth_names_mailbox_not_login_and_reports_server_clock():
 
 
 def test_search_paging_opaque_case_sensitive_metadata_then_exact_read_without_marking():
-    c, s = client(listing(item(mid=False), last=False, offset=1), listing(item(NATIVE.swapcase())),
+    c, s = client(listing(item(mid=False), last=False, offset=1), listing(item(NATIVE.swapcase())), *proof(),
                   response('GetItem', '<m:Items>' + item(mime=True, mid=False) + '</m:Items>'))
     first = c.search(query='subject:обзор & notes', limit=1)
     second = c.search(query='subject:обзор & notes', limit=1, page_token=first['next_page_token'])
@@ -72,11 +84,11 @@ def test_search_paging_opaque_case_sensitive_metadata_then_exact_read_without_ma
     assert result['provider_event_key'] == found['message_ref'] and 'uid' not in result
     assert result['sender'] == 'sender@example.invalid' and result['attachments'][0]['data'] == b'file bytes'
     assert result['flags'] == [] and result['_raw_source']
-    assert names(s) == ['FindItem', 'FindItem', 'GetItem']
+    assert names(s) == ['FindItem', 'FindItem', 'GetItem', 'GetFolder', 'GetItem']
 
 
 def test_read_refuses_wrong_returned_item_or_missing_mime():
-    c, _ = client(response('GetItem', '<m:Items>' + item(native='Other') + '</m:Items>'),
+    c, _ = client(response('GetItem', '<m:Items>' + item(native='Other') + '</m:Items>'), *proof(),
                   response('GetItem', '<m:Items>' + item() + '</m:Items>'))
     with pytest.raises(EwsError, match='ItemIdentityMismatch'):
         c.read(message_ref='ews:' + NATIVE)
@@ -107,20 +119,22 @@ def test_folder_pages_and_ambiguous_name_are_not_silently_resolved():
 
 @pytest.mark.parametrize('action,operation', [('copy', 'CopyItem'), ('move', 'MoveItem'), ('trash', 'MoveItem')])
 def test_move_copy_return_new_reference_only_when_supplied(action, operation):
-    c, s = client(response(operation, '<m:Items><t:Message><t:ItemId Id="New+/="/></t:Message></m:Items>'),
-                  response(operation))
+    checks = (*(() if action == 'trash' else proof('Folder', 'dst')), *proof())
+    c, s = client(*checks, response(operation, '<m:Items><t:Message><t:ItemId Id="New+/="/></t:Message></m:Items>'),
+                  *checks, response(operation))
     args = dict(action=action, destination='ews-folder:ews:mailbox:dst', message_ref='ews:' + NATIVE)
     assert c.mailbox(**args)['message_ref'] == 'ews:New+/='
     assert not c.mailbox(**args).get('message_ref')
-    assert names(s) == [operation, operation]
-    assert s.operations[0].find('m:ItemIds/t:ItemId', NS).get('Id') == NATIVE
-    target = s.operations[0].find('m:ToFolderId', NS)[0]
+    effects = [op for op in s.operations if op.tag.endswith(operation)]
+    assert len(effects) == 2
+    assert effects[0].find('m:ItemIds/t:ItemId', NS).get('Id') == NATIVE
+    target = effects[0].find('m:ToFolderId', NS)[0]
     assert target.get('Id') == ('deleteditems' if action == 'trash' else 'dst')
 
 
 def test_create_folder_and_flags_use_exact_target_and_current_changekey():
     c, s = client(response('CreateFolder', '<m:Folders><t:Folder><t:FolderId Id="F+"/></t:Folder></m:Folders>'),
-                  response('GetItem', '<m:Items>' + item() + '</m:Items>'), response('UpdateItem'))
+                  *proof(), response('UpdateItem'))
     assert c.mailbox(action='create', folder='INBOX', destination='Tests & more')['id'] == 'ews-folder:ews:mailbox:F+'
     assert s.operations[0].findtext('.//t:DisplayName', namespaces=NS) == 'Tests & more'
     assert c.mailbox(action='flags', message_ref='ews:' + NATIVE, flags=[r'\Seen', r'\Flagged'], remove_flags=True)['ok']
@@ -131,7 +145,7 @@ def test_create_folder_and_flags_use_exact_target_and_current_changekey():
     assert update.findtext('.//t:FlagStatus', namespaces=NS) == 'NotFlagged'
     with pytest.raises(ValueError, match='support Seen'):
         c.mailbox(action='flags', message_ref='ews:' + NATIVE, flags=[r'\Seen', 'unknown'])
-    assert names(s) == ['CreateFolder', 'GetItem', 'UpdateItem']
+    assert names(s) == ['CreateFolder', 'GetItem', 'GetFolder', 'UpdateItem']
 
 
 def test_incomplete_pagination_or_non_ews_ref_never_claim_success():
@@ -151,7 +165,7 @@ def test_delegated_login_cannot_reuse_another_mailbox_folder_handle():
                         f'<t:Folder><t:FolderId Id="{native}"/><t:DisplayName>Team</t:DisplayName>'
                         '</t:Folder></t:Folders></m:RootFolder>')
     a, _ = client(directory('A+/='))
-    s = Session(directory('B+/='), listing(item()), response('CopyItem'))
+    s = Session(directory('B+/='), *proof('Folder', 'B+/='), listing(item()), *proof('Folder', 'B+/='), *proof(), response('CopyItem'))
     b = EwsClient({**ACCOUNT, 'id': 'ews:other', 'address': 'other@example.invalid'}, session=s)
     foreign = a.mailbox(action='list')['folders'][0]['id']
     own = b.mailbox(action='list')['folders'][0]['id']
@@ -161,5 +175,5 @@ def test_delegated_login_cannot_reuse_another_mailbox_folder_handle():
     assert names(s) == ['FindFolder']
     b.search(folder=own)
     b.mailbox(action='copy', message_ref='ews:' + NATIVE, destination=own)
-    assert s.operations[1].find('m:ParentFolderIds/t:FolderId', NS).get('Id') == 'B+/='
-    assert s.operations[2].find('m:ToFolderId/t:FolderId', NS).get('Id') == 'B+/='
+    assert s.operations[3].find('m:ParentFolderIds/t:FolderId', NS).get('Id') == 'B+/='
+    assert s.operations[-1].find('m:ToFolderId/t:FolderId', NS).get('Id') == 'B+/='

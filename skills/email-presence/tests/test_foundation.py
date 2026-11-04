@@ -176,7 +176,7 @@ def test_sending_setting_defaults_roundtrips_and_leaves_other_tools_working(tmp_
         assert EmailStore(tmp_path).receipt("two") is None
         for name, kwargs in (("email_search", {}), ("email_read", {"uid": 1, "uidvalidity": 7}),
                              ("email_mark_read", {"uid": 1, "uidvalidity": 7}),
-                             ("email_draft", {"account_id": ACCOUNT, "to": ACCOUNT, "subject": "draft", "body": "text"}),
+                             ("email_draft", {"account_id": ACCOUNT, "to": ACCOUNT, "subject": "draft", "body": "text", "folder": "Drafts"}),
                              ("email_mailbox", {"action": "list"})):
             assert json.loads(tools[name](**kwargs))["ok"]
         assert calls == ["search", "read", "mark_read", "draft", "mailbox"]
@@ -249,7 +249,7 @@ def test_outgoing_body_is_authored_without_connector_marks(body):
 
 def test_manifest_offers_facts_without_default_wakes():
     manifest = yaml.safe_load((Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1])
-    assert manifest["version"] == "0.10.0"
+    assert manifest["version"] == "0.10.1"
     place = manifest["contributes"][0]
     assert place["wakes"] == []
     assert place["settings"] == "email_presence"

@@ -11,7 +11,7 @@ from lib.ews import EwsClient
 from lib.ews_wire import EwsError, NS
 from lib.service import MailService, register_tools
 from lib.store import EmailStore
-from test_ews_mailbox import ACCOUNT, item
+from test_ews_mailbox import ACCOUNT, identity, item, proof
 from test_ews_wire import CONFIG, Session, response
 
 NATIVE = 'B+/=Case'
@@ -50,7 +50,9 @@ class Mailbox(Session):
     def post(self, *args, **kwargs):
         op = ET.fromstring(kwargs['data']).find('s:Body', NS)[0]
         name = op.tag.split('}')[-1]
-        if name == 'GetFolder':
+        if name == 'GetItem' and op.find('.//t:ExtendedFieldURI', NS) is not None:
+            answer = identity('Item', NATIVE, parent=FOLDER, key=None)
+        elif name == 'GetFolder':
             answer = response(name, f'<m:Folders><t:Folder><t:FolderId Id="{FOLDER}"/></t:Folder></m:Folders>')
         elif name == 'SyncFolderItems':
             assert op.findtext('m:SyncState', namespaces=NS) == 'before'
@@ -146,13 +148,13 @@ def test_alternate_read_timeout_preserves_owed_sync_page(tmp_path):
 
 @pytest.mark.parametrize(('klass', 'code'), [('Error', 'ErrorServerBusy'), ('Warning', 'ErrorMimeContentConversionFailed')])
 def test_only_definitive_item_local_conversion_failure_uses_other_shape(klass, code):
-    session = Session(response('GetItem', klass=klass, code=code))
+    session = Session(*proof('Item', NATIVE), response('GetItem', klass=klass, code=code))
     with pytest.raises(EwsError):
         EwsClient(ACCOUNT, session=session).read(message_ref='ews:' + NATIVE)
-    assert len(session.operations) == 1
+    assert len(session.operations) == 3
 
 
 def test_alternate_get_item_must_still_match_requested_opaque_id():
-    session = Session(FAILED_MIME, response('GetItem', '<m:Items>' + properties('other') + '</m:Items>'))
+    session = Session(*proof('Item', NATIVE), FAILED_MIME, response('GetItem', '<m:Items>' + properties('other') + '</m:Items>'))
     with pytest.raises(EwsError, match='ItemIdentityMismatch'):
         EwsClient(ACCOUNT, session=session).read(message_ref='ews:' + NATIVE)

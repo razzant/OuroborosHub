@@ -68,7 +68,7 @@ class Exchange(EwsOperations, MailClient):
             raise value
         return value
 
-    def read(self, *, message_ref, include_attachment_data):
+    def _read_scoped(self, *, message_ref, include_attachment_data):
         assert include_attachment_data
         self.reads.append(message_ref)
         if message_ref in self.read_errors:
@@ -291,7 +291,7 @@ def test_actual_sync_aliases_share_folder_identity_and_keep_mail_from_bootstrap(
     assert initial[1].find("m:SyncFolderId/t:FolderId", N).get("Id") == "folder-id"
     event = store.claim_inbox()
     assert event.message_id == "<fresh@example.invalid>" and event.provider_event_key == "ews:Ab/+"
-    restarted, final = soap_client([("GetFolder", _FOLDER_RESPONSE), ("SyncFolderItems", end)])
+    restarted, final = soap_client([("GetFolder", _FOLDER_RESPONSE), ("GetFolder", _FOLDER_RESPONSE), ("SyncFolderItems", end)])
     assert restarted.poll(EmailStore(tmp_path), folder=event.folder) == 0
     assert final[-1].findtext("m:SyncState", namespaces=N) == "last"
     assert not store.get("poll_health")["more_changes"]
@@ -310,10 +310,10 @@ def test_sync_cut_delivers_one_thread_oldest_first_across_pages(tmp_path, stamps
     client = Exchange(page(state="initial"), page(changes1, state="partial", last="false"),
                       page(changes2, state="terminal"))
     def same_thread(*, message_ref, include_attachment_data):
-        value = Exchange.read(client, message_ref=message_ref, include_attachment_data=include_attachment_data)
+        value = Exchange._read_scoped(client, message_ref=message_ref, include_attachment_data=include_attachment_data)
         value["references"] = ["<one-thread@example.invalid>"]
         return value
-    client.read = same_thread
+    client._read_scoped = same_thread
     assert client.poll(store) == 0 and client.poll(store) == 0
     assert store.get("poll_health")["more_changes"] and store.get("ews_sync:inbox")["state"] == "initial"
     assert not client.reads and store.claim_inbox(submitted=False) is None

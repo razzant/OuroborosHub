@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.10.0
+version: 0.10.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -38,11 +38,11 @@ tools:
     description: Mark one message read by its account-bound reference, or a legacy IMAP UID and UIDVALIDITY.
   - name: email_mailbox
     effect: write
-    target: [account_id,destination]
+    target: [account_id,folder,destination,add_labels,remove_labels,label_id]
     description: List/create folders, copy/move messages and update flags.
   - name: email_draft
     effect: write
-    target: [account_id,to,cc,bcc]
+    target: [account_id,to,cc,bcc,folder,folder_names]
     conversation: conversation_id
     thread: thread_id
     description: Save a text draft without sending.
@@ -233,9 +233,20 @@ remain readable by explicit account_id.
   Its destination is declared before effects. For Gmail label creation,
   properties.name keeps its existing precedence; a different or omitted top-level
   destination returns exact retry_arguments naming that actual label without
-  dropping any properties. A matching canonical call remains one call.
+  dropping any properties. Gmail exposes all added and removed label IDs, including
+  those implied by a move, archive or flag. A label name may need a read-only
+  lookup before the tool returns canonical arguments. Updating or deleting a label
+  exposes its actual ID; a rename exposes the new name as destination as well.
+  A matching canonical call remains one call.
 - email_draft saves or updates a Gmail draft by draft_id, or appends an IMAP
-  draft. Search Gmail folder DRAFT to obtain stable draft ids. Sending captured
+  draft. The selected draft folder is an explicit Host target. Omit the folder
+  to receive retry_arguments with the provider default (Gmail DRAFT, IMAP Drafts,
+  Exchange drafts). Exchange prepares the existing account-bound folder handle
+  and its current server names in folder_names; both are checked, and the same
+  native folder ID receives the draft. Use the stable handle for durable folder
+  rules across renames and localization. The Host checks these independently of any RFC
+  Place: a Silent/Paused folder holds the draft, a genuinely unconnected folder
+  is still writable, and a failed policy lookup does not save anything. Search Gmail folder DRAFT to obtain stable draft ids. Sending captured
   draft content with email_send does not silently delete the original draft;
   deleting it is a separate explicit mailbox operation.
 - email_send accepts sender, To/Cc/Bcc, MIME attachments and reply-all. Read a

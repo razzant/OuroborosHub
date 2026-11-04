@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.1
+
+- Preserve existing Exchange message and folder references while verifying their
+  actual mailbox with the server before using native identifiers.
+- Expose draft folders and the Gmail labels a mailbox action changes to the
+  Host before writing, including when a caller uses an alternate argument.
+
 ## 0.10.0
 
 - Connect on-premises Exchange mailboxes over HTTPS with NTLM. Exchange uses

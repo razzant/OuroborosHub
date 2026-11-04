@@ -217,8 +217,8 @@ class LoopbackPresenceHostAdapter:
         listed = payload.get("presence_continuation_versions")
         self.continuation_version = 2 if isinstance(listed, list) and any(type(v) is int and v == 2 for v in listed) else 0
 
-    def place_hold(self, account_id, conversation_id):
-        """The SMTP worker is synchronous; use its own HTTP client on that thread."""
+    def place_hold(self, account_id, conversation_id, *, allow_unbound=False):
+        """Read the Host's current Place state; only an explicit not-connected is an unbound target."""
         try:
             if self._place_http is None:
                 self._place_http = httpx.Client(timeout=10, trust_env=False)
@@ -234,7 +234,7 @@ class LoopbackPresenceHostAdapter:
             if response.status_code == 404:
                 payload = response.json()
                 if payload.get("code") == "place_not_connected":
-                    return "Held: no connected Place; this legacy send has no captured unbound authorization"
+                    return "" if allow_unbound else "Held: no connected Place; this legacy send has no captured unbound authorization"
             response.raise_for_status()
             place = response.json()
             state = place.get("state")
@@ -263,6 +263,16 @@ class LoopbackPresenceHostAdapter:
         if not isinstance(payload, dict) or type(payload.get("allowed")) is not bool or "binding" not in payload:
             raise HostContractError("Host omitted the mail operation's binding facts")
         return {**payload, "supported": True}
+
+    def draft_folder_hold(self, account_id, folder):
+        """Ask Host about this destination separately from the draft's RFC conversation."""
+        decision = self.capture_binding(account_id, folder)
+        if decision.get("supported") and decision.get("code") != "place_unattributable":
+            return "" if decision["allowed"] else "Held: " + str(decision.get("code") or "place policy unavailable")
+        # With RFC-only Places a folder can be unattributable without being a
+        # connected Place. Only a typed not-connected response (or a Host
+        # without Places) clears it; ambiguity or a read failure stays held.
+        return self.place_hold(account_id, folder, allow_unbound=True)
 
     def binding_hold(self, binding, account_id, conversation_id, *, thread_id=""):
         if not isinstance(binding, dict):
