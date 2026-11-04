@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/f07337c592a03dbd7c7c3b4ca317b926f7a4ed9b",
   "schema_version": 1,
   "skills": [
     {
@@ -151,13 +151,13 @@
         },
         {
           "path": "presence.py",
-          "sha256": "3f935ef0ad8740393d07ccec31c403e97257babab1e772acafdde08af48641b7",
-          "size": 23617
+          "sha256": "b8f9a431cf72d597bfe47da195e2785096dc2b095008bc1fe7d0e6c866dc65cd",
+          "size": 24054
         },
         {
           "path": "tests/test_presence.py",
-          "sha256": "3944370251cdf419441bbb4f87221536638a0860d4977d6d32b4b536a22a0d1a",
-          "size": 6922
+          "sha256": "ef934e8ee54b3264ec8d8aa96cc859a7414245d7b33ea4d699056cad215ad76a",
+          "size": 7232
         },
         {
           "path": "tests/test_presence_v2.py",
@@ -1322,8 +1322,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "13360029295e985bf2ca2d0b84335a9236fd85246ac75d95577c0e1aa7c2fcb1",
-          "size": 6337
+          "sha256": "9d0ad7f34b952a12430f2ba1d7066489ffa8bb59b7fdcac5485af53b1b07f958",
+          "size": 7237
         },
         {
           "path": "README.md",
@@ -1382,8 +1382,8 @@
         },
         {
           "path": "lib/host_adapter.py",
-          "sha256": "ecf797f81d54792cd5078d88746a582f7ab58546e6d0e6399d0a6f8d90eba0e2",
-          "size": 40415
+          "sha256": "f383f255a05ad4b8f3001bad4ee1adec8e55d4994935a6e08cf46c23c89c42e1",
+          "size": 41544
         },
         {
           "path": "lib/mime.py",
@@ -1432,8 +1432,8 @@
         },
         {
           "path": "tests/test_account_routes.py",
-          "sha256": "5763a9bacb88277ba3336a5bd9e1efbcf012c00d8555c72d1094584403017ed3",
-          "size": 8641
+          "sha256": "5f5182507dba34c6e1c29a4139dbbca9e6431b909f94c69c71447dcab7e17fa9",
+          "size": 8796
         },
         {
           "path": "tests/test_accounts.py",
@@ -1442,8 +1442,8 @@
         },
         {
           "path": "tests/test_accounts_browser.py",
-          "sha256": "accc4015d866fa3de0d618ff2eb9c70b62d1ddbd83b00e394e16d9da9e8734a1",
-          "size": 20108
+          "sha256": "eea206d0b1e0464fa450dbfc11be88e3bb69274da8d8d6ab8c1fbfc42e023d80",
+          "size": 20409
         },
         {
           "path": "tests/test_attachment_regressions.py",
@@ -1457,13 +1457,13 @@
         },
         {
           "path": "tests/test_binding.py",
-          "sha256": "9d6bb39c3111a57641405aa659cb21daaa843c2d8461a7727d39d9e55eea9dba",
-          "size": 9696
+          "sha256": "a1205f84da364ef37aad983fddc3a0b3a2a49219a6ad68729a67793940464f5b",
+          "size": 13320
         },
         {
           "path": "tests/test_binding_core.py",
-          "sha256": "3545d09199494f55d40ed285deaa04a778d7699723f4c625fe658a5be417006f",
-          "size": 15461
+          "sha256": "1c707622f40acd8020992be7d13e3a010e1595ff4c05cf00cdbc59cbe62c3de0",
+          "size": 16096
         },
         {
           "path": "tests/test_capabilities.py",
@@ -1537,8 +1537,8 @@
         },
         {
           "path": "tests/test_gmail.py",
-          "sha256": "9b1269b85557f0eb5c90cdb0809cc95d6282d53f80dbca4c6655b896df8b9862",
-          "size": 13706
+          "sha256": "5e5a62cc640694d2ec4d43429b26e051ff647a23f3652774a3c604149470d3f1",
+          "size": 13817
         },
         {
           "path": "tests/test_header_text_consumers.py",
@@ -2698,8 +2698,8 @@
         },
         {
           "path": "lib/host_adapter.py",
-          "sha256": "97b55c105b80485748728ef13748c887044cfc31a2a4e5474b6872caa71d4efb",
-          "size": 52446
+          "sha256": "00465507c7acc8183aeed6f010328180533252bc4f0d913b94ee367122f7cd4b",
+          "size": 52954
         },
         {
           "path": "lib/local_settings.py",
@@ -2858,8 +2858,8 @@
         },
         {
           "path": "tests/test_places.py",
-          "sha256": "90f51db6289cd52e440d64677b95a377a91c49420459ceca6130afc93df09f67",
-          "size": 10697
+          "sha256": "85282f48a3776b16340873bb1af8e15ec6c29bac277e2e5960de2f95486961d3",
+          "size": 11392
         },
         {
           "path": "tests/test_presence_continuation.py",
@@ -3040,8 +3040,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "0c5799aaf4213bb5f7cf54302e2a786556a6c69bded4c9439b46dee690b6a8ad",
-          "size": 7255
+          "sha256": "75d791eba59e5a27342b33db6e2018f38cd6712b694e20b78b0682a4ed120f4f",
+          "size": 7493
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -3105,8 +3105,8 @@
         },
         {
           "path": "telegram_bot/host.py",
-          "sha256": "7185e27b144c3af4367715b628c59c6f370dd42419d8e601c9b4efe67ac6031d",
-          "size": 20860
+          "sha256": "eda983dd3d57863b4210cca30c44b01583fee9a8e81e7a0b06316fbd425e9fa6",
+          "size": 21349
         },
         {
           "path": "telegram_bot/runtime.py",
@@ -3185,8 +3185,8 @@
         },
         {
           "path": "tests/test_places.py",
-          "sha256": "35a8f9a7a5a34420eb36ed429534a2f385653f6d3a24e3a624348dbd804f76c8",
-          "size": 9195
+          "sha256": "a09523a603e7b399f3fa271d1676fd987133e3fb9489efadefca61f60173d120",
+          "size": 9957
         },
         {
           "path": "tests/test_plugin.py",
