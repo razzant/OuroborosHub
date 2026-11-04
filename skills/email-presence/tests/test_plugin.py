@@ -161,7 +161,8 @@ def test_read_tool_only_peeks_and_mark_read_is_its_own_write(tmp_path, monkeypat
     plugin.register(api)
     read, read_schema = api.tools["email_read"]
     mark, mark_schema = api.tools["email_mark_read"]
-    assert set(read_schema["properties"]) == set(mark_schema["properties"]) == {"account_id", "message_ref", "uid", "uidvalidity", "folder"}
+    assert set(read_schema["properties"]) == {"account_id", "message_ref", "uid", "uidvalidity", "folder"}
+    assert set(mark_schema["properties"]) == {*read_schema["properties"], "remove_labels"}
     assert read_schema["required"] == mark_schema["required"] == []
     assert json.loads(read(uid=4, uidvalidity=7))["uid"] == 4
     assert calls == [("read", {"uid": 4, "uidvalidity": 7, "folder": "Work", "include_attachment_data": True})]

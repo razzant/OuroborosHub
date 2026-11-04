@@ -138,7 +138,8 @@ def test_existing_copy_move_targets_stay_one_call(provider,action):
     destination='STARRED' if provider=='gmail' else 'Archive'
     result,used,calls,targets=invoke(registered,requests,'email_mailbox',{
         'account_id':account['id'],'action':action,'folder':'INBOX','uid':4,
-        'uidvalidity':1 if provider=='gmail' else 7,'destination':destination},schemas)
+        'uidvalidity':1 if provider=='gmail' else 7,'destination':destination,
+        **({'remove_labels':['INBOX']} if provider=='gmail' and action=='move' else {})},schemas)
     assert calls==1 and targets['destination']==[destination]
     if provider=='gmail':
         assert requests[0]=={'method':'POST','path':'/messages/4/modify','body':{

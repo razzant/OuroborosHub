@@ -50,13 +50,16 @@ def tools_for(tmp_path, provider, client, *, account_id=None):
     return account['id'], lambda tool, args: json.loads(handlers[tool](**args))
 
 
-def gmail_for(tmp_path):
+def gmail_for(tmp_path, *, label_rows=None, reads=None):
     client = GmailClient.__new__(GmailClient)
     writes = []
     def request(method, path, **options):
         if method == 'GET':
             assert path == '/labels'
-            return {'labels': [{'id':'Label_1', 'name':'Public'}, {'id':'Label_2', 'name':'Archive Team'}]}
+            if reads is not None:
+                reads.append(path)
+            return {'labels': label_rows if label_rows is not None else [
+                {'id':'Label_1', 'name':'Public'}, {'id':'Label_2', 'name':'Archive Team'}]}
         writes.append((method, path, options.get('body')))
         return {}
     client._request = request
@@ -168,13 +171,16 @@ def test_draft_uses_the_real_host_for_both_rfc_and_folder(tmp_path, monkeypatch,
         if held: assert result['code']=='draft_folder_held'
 
 
-def test_draft_does_not_treat_an_outage_as_no_place():
+@pytest.mark.parametrize("failure", ["lookup", "bind", "offline"])
+def test_draft_does_not_treat_an_outage_as_no_place(failure):
     import httpx
     from lib.host_adapter import LoopbackPresenceHostAdapter
     def host(req):
+        if failure == 'offline':
+            raise httpx.ConnectError("unreachable", request=req)
         if req.url.path=='/identity':
             return httpx.Response(200,json={'places_version':1,'presence_place_binding_version':1,'presence_delivery_version':1})
-        if req.url.params.get('operation')=='bind':
+        if req.url.params.get('operation')=='bind' and failure != 'bind':
             return httpx.Response(200,json={'allowed':False,'code':'place_unattributable','binding':None})
         return httpx.Response(503,json={'code':'places_unavailable'})
     with httpx.Client(transport=httpx.MockTransport(host)) as http:
@@ -243,3 +249,114 @@ def test_exchange_save_uses_same_resolved_folder_and_cannot_hide_its_other_name(
         assert result['ok'] and names(session)[-1]=='CreateItem'
         assert session.operations[-1].find('m:SavedItemFolderId/t:FolderId',NS).get('Id')==native
         assert names(session).count('FindFolder')==(1 if selected=='SharedArchive' else 0)
+
+
+@pytest.mark.parametrize(('action','selection'), [
+    ('copy',{'destination':'Label_2'}), ('move',{'folder':'Label_2','destination':'INBOX'}),
+    ('labels',{'add_labels':['Label_2']}), ('labels',{'remove_labels':['Label_2']}),
+    ('update_label',{'label_id':'Label_2','properties':{'name':'New','labelListVisibility':'labelShow'}}),
+    ('delete_label',{'destination':'Label_2'}), ('trash',{}), ('untrash',{})])
+@pytest.mark.parametrize('restricted', [False,True])
+def test_gmail_ids_respect_current_label_name_and_native_trash(tmp_path, monkeypatch, action, selection, restricted):
+    account,call,writes = gmail_for(tmp_path)
+    guarded = 'TRASH' if action in ('trash','untrash') else 'Archive Team'
+    guard = host_guard(tmp_path,monkeypatch,'email_mailbox',account,[('', 'active'),(guarded,'paused' if restricted else 'active')])
+    args = {'account_id':account,'action':action,'uid':123,'uidvalidity':1,**selection}
+    assert not guard(args)
+    prepared = call('email_mailbox',args)
+    assert prepared['status']=='needs_arguments' and not writes
+    retry = prepared['retry_arguments']
+    assert guarded in published_targets('email_mailbox',retry)['label_names']
+    if restricted:
+        assert 'Paused' in guard(retry) and not writes
+    else:
+        assert not guard(retry)
+        call('email_mailbox',retry)
+        assert len(writes)==1
+        if action in ('trash','untrash'):
+            assert writes[0] == ('POST','/messages/7b/'+action,{})
+        if action == 'update_label':
+            assert writes[0] == ('PATCH','/labels/Label_2',selection['properties'])
+
+
+def test_move_keeps_stable_ids_on_name_change_and_lists_labels_once_per_dispatch(tmp_path):
+    rows=[{'id':'Label_1','name':'From'}, {'id':'Label_2','name':'To'}, {'id':'Label_3','name':'Extra'}]
+    reads=[]
+    account,call,writes=gmail_for(tmp_path,label_rows=rows,reads=reads)
+    args={'account_id':account,'action':'move','folder':'From','destination':'To','uid':123,'uidvalidity':1,
+          'remove_labels':['Label_3'], 'label_names':['invented']}
+    first=call('email_mailbox',args)
+    assert reads==['/labels'] and not writes
+    retry=first['retry_arguments']
+    assert retry['folder']=='Label_1' and set(retry['remove_labels'])=={'Label_1','Label_3'}
+    rows[0]['name']='Renamed'
+    rows.append({'id':'Label_4','name':'From'})
+    second=call('email_mailbox',retry)
+    assert len(reads)==2 and not writes
+    final=second['retry_arguments']
+    assert 'Renamed' in final['label_names'] and final['folder']=='Label_1'
+    call('email_mailbox',final)
+    assert len(reads)==3
+    assert writes==[('POST','/messages/7b/modify',{'addLabelIds':['Label_2'],'removeLabelIds':['Label_3','Label_1']})]
+    with pytest.raises(ValueError,match='current Gmail label IDs'):
+        call('email_mailbox',{**args,'action':'labels','add_labels':['Renamed']})
+    assert len(writes)==1
+
+
+@pytest.mark.parametrize('restricted',[False,True])
+def test_gmail_mark_read_guards_only_its_fixed_unread_removal(tmp_path,monkeypatch,restricted):
+    account,call,writes=gmail_for(tmp_path)
+    guard=host_guard(tmp_path,monkeypatch,'email_mark_read',account,[('', 'active'),('UNREAD','silent' if restricted else 'active')])
+    reference=MailService.wrap_ref({'id':account},{'message_ref':'gmail:7b'})
+    # The caller cannot use this read-flag shortcut to remove any other label.
+    args={'message_ref':reference,'account_id':account,'remove_labels':['EXTRA']}
+    prepared=call('email_mark_read',args)
+    assert prepared['status']=='needs_arguments' and not writes
+    retry=prepared['retry_arguments']
+    assert retry['message_ref']==reference and retry['remove_labels']==['UNREAD']
+    if restricted:
+        assert 'Silent' in guard(retry) and not writes
+    else:
+        assert not guard(retry)
+        call('email_mark_read',retry)
+        assert writes==[('POST','/messages/7b/modify',{'addLabelIds':[],'removeLabelIds':['UNREAD']})]
+
+
+@pytest.mark.parametrize('restricted',[False,True])
+def test_omitted_gmail_draft_folder_keeps_both_supported_spellings(tmp_path,monkeypatch,core_host,restricted):
+    places,drive,adapter=core_host
+    writes=[]
+    class Client:
+        def draft(self, **args): writes.append(args['folder']); return {'ok':True}
+    account,call=tools_for(tmp_path,'gmail',Client())
+    @contextmanager
+    def host(_): yield adapter
+    monkeypatch.setattr(MailService,'_presence_host',host)
+    places.connect_place(drive,connector='email-presence',provider='email',account_id=account,state='active')
+    places.connect_place(drive,connector='email-presence',provider='email',account_id=account,
+                         conversation_id='Drafts',state='silent' if restricted else 'active')
+    args={'account_id':account,'subject':'Draft','to':'reader@example.invalid','references':['<r>'],'conversation_id':'<r>','thread_id':'<r>'}
+    prepared=call('email_draft',args)
+    assert prepared['status']=='needs_arguments' and not writes
+    retry=prepared['retry_arguments']
+    assert retry['folder']=='DRAFT' and retry['folder_names']==['Drafts']
+    result=call('email_draft',retry)
+    assert bool(result['ok']) is not restricted and writes==([] if restricted else ['DRAFT'])
+
+
+def test_imap_mailbox_does_not_report_a_folder_overridden_by_its_authentic_reference(tmp_path):
+    writes=[]
+    imap=MailClient({'EMAIL_USER':'owner@example.invalid'})
+    class Box:
+        def response(self,key): return key,[b'7' if key=='UIDVALIDITY' else b'8']
+        def uid(self,*command): writes.append(command);return 'OK',[b'done']
+    @contextmanager
+    def open_box(folder,*,readonly=False):
+        writes.append((folder,readonly));yield Box()
+    imap.imap=open_box
+    account,call=tools_for(tmp_path,'imap',imap)
+    ref=MailService.wrap_ref({'id':account},{'uid':3,'uidvalidity':7,'folder':'Private'})
+    args={'account_id':account,'folder':'Other','message_ref':ref,'action':'flags','flags':[r'\Seen']}
+    assert published_targets('email_mailbox',args)=={'account_id':[account]}
+    assert call('email_mailbox',args)['ok']
+    assert writes==[('Private',False),('STORE','3','+FLAGS.SILENT',r'(\Seen)')]

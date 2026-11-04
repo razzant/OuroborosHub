@@ -6,6 +6,8 @@
   actual mailbox with the server before using native identifiers.
 - Expose draft folders and the Gmail labels a mailbox action changes to the
   Host before writing, including when a caller uses an alternate argument.
+  Calls with an implicit draft folder or incomplete Gmail label targets can
+  return `needs_arguments` without writing; replay the supplied arguments.
 
 ## 0.10.0
 

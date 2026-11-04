@@ -173,10 +173,30 @@ class MailService:
             result = {**result, "message_ref": self.wrap_ref(account, result)}
         return {**result, "account_id": account["id"]}
 
-    def mark_read(self, *, account_id="", message_ref="", uid=None, uidvalidity=None, folder=None):
+    @staticmethod
+    def _gmail_target_preparer(public):
+        # The provider describes the exact request just before writing. Prepare
+        # a new Host dispatch if a physical label or its current name was hidden.
+        def prepare(targets):
+            missing = {key: value for key, value in targets.items() if public.get(key) != value}
+            if missing:
+                return {'ok': False, 'status': 'needs_arguments', 'code': 'canonical_target_required',
+                        'message': 'Retry with the actual mail targets below; no provider change was made.',
+                        'retry_arguments': {**public, **missing}}
+        return prepare
+
+    def mark_read(self, *, account_id="", message_ref="", uid=None, uidvalidity=None, folder=None, remove_labels=None):
         with self.target(account_id) as (account, _store, client):
             kwargs = self.unwrap_ref(account, message_ref) if message_ref else {
                 "uid": uid, "uidvalidity": uidvalidity, "folder": folder or account.get("folder") or "INBOX"}
+            if account['provider'] == 'gmail':
+                # remove_labels attests the single fixed effect. It is never
+                # forwarded: this tool cannot apply arbitrary label mutations.
+                public = {k:v for k,v in dict(account_id=account['id'], message_ref=message_ref, uid=uid,
+                          uidvalidity=uidvalidity, folder=folder, remove_labels=remove_labels).items() if v is not None}
+                kwargs['prepare_targets'] = self._gmail_target_preparer(public)
+            elif remove_labels:
+                raise ValueError("remove_labels on email_mark_read applies only to Gmail")
             return self._account_result(account, client.mark_read(**kwargs))
 
     def mailbox(self, *, account_id="", message_ref="", **kwargs):
@@ -184,16 +204,8 @@ class MailService:
             if message_ref:
                 kwargs.update(self.unwrap_ref(account, message_ref))
             if account['provider'] == 'gmail':
-                # Compare the exact provider request with the caller-visible arguments. If
-                # the provider resolved a name/default, let Host see its ID before writing.
-                def prepare(targets):
-                    missing = {key: value for key, value in targets.items() if kwargs.get(key) != value}
-                    if missing:
-                        return {'ok': False, 'status': 'needs_arguments', 'code': 'canonical_target_required',
-                                'message': 'Retry with the actual mail targets below; no provider change was made.',
-                                'retry_arguments': {**kwargs, 'account_id': account['id'],
-                                                    'message_ref': message_ref, **missing}}
-                return self._account_result(account, client.mailbox(**kwargs, prepare_targets=prepare))
+                public = {**kwargs, 'account_id': account['id'], 'message_ref': message_ref}
+                return self._account_result(account, client.mailbox(**kwargs, prepare_targets=self._gmail_target_preparer(public)))
             return self._account_result(account, client.mailbox(**kwargs))
 
     @staticmethod
@@ -325,8 +337,10 @@ class MailService:
             names = []
             if account['provider'] == 'ews':
                 folder, names, save = client.draft_destination(folder)
+            elif account['provider'] == 'gmail' and folder == 'DRAFT':
+                names = ['Drafts']
             elif folder_names:
-                raise ValueError("folder_names applies only to Exchange; omit it for this account")
+                raise ValueError("Omit folder_names unless returned for this account in retry_arguments")
             retry = {**kwargs, 'to': kwargs.get('to', ''), 'account_id': account['id'], 'sender': chosen_sender,
                      'reply_all': reply_all, 'reply_folder': reply_folder, 'folder': folder,
                      **({'folder_names': names} if names else {})}
@@ -423,13 +437,14 @@ def register_tools(api, service):
     tool("email_search", service.search, "Search old/new mail without marking it read. Gmail and Exchange accept provider-native query/page_token; IMAP uses criteria tokens. Returned message_ref is account-bound; a page reports its continuation.",
          {"folder": string, "criteria": array, "query": string, "limit": integer, "page_token": string})
     tool("email_read", service.read, "Read exact message_ref, or legacy uid+uidvalidity+folder, including canonical conversation_id/thread_id for replies. Peeks only; use email_mark_read for Seen. Historical reads do not enter Presence.", message)
-    tool("email_mark_read", service.mark_read, "Mark this account's selected message read; accepts message_ref or legacy uid+uidvalidity+folder.", message)
+    tool("email_mark_read", service.mark_read, "Mark this account's selected message read; accepts message_ref or legacy uid+uidvalidity+folder. Follow retry_arguments for Gmail's fixed UNREAD removal.",
+         {**message, "remove_labels": array})
     tool("email_folders", service.folders, "Read folders/labels without changing anything, including while a Place is Silent or consciousness Advises.", {})
     tool("email_mailbox", service.mailbox, "Manage this account's folders/messages. IMAP and Exchange: list/create/copy/move/flags; Exchange also supports trash. After an Exchange move/copy, use the returned account-bound message_ref, or search the destination if no reference was supplied. Gmail also labels/archive/trash/untrash/delete/update_label/delete_label/delete_draft; permanent delete requires its grant. destination must name the actual create/copy/move target; For Gmail, resolved label IDs and implicit label changes can return exact retry_arguments before any write.",
          {**message, "action": string, "destination": string, "flags": array, "remove_flags": {"type": "boolean"},
-          "add_labels": array, "remove_labels": array, "label_id": string, "draft_id": string, "properties": {"type": "object"}})
+          "add_labels": array, "remove_labels": array, "label_names": array, "label_id": string, "draft_id": string, "properties": {"type": "object"}})
     tool("email_draft", service.draft, "Save a draft without sending. Supply account_id and, for replies, canonical conversation_id/thread_id; needs_arguments returns exact retry_arguments before saving when identity or the effective folder is missing. Choose a sender from email_accounts; Gmail draft_id updates an existing draft, while IMAP and Exchange save new drafts in the selected folder.",
-         {**compose, "folder": string, "folder_names": {"type": "array", "items": string, "description": "Exchange folder names from canonical retry_arguments; the server confirms them before saving."}, "draft_id": string}, ("to", "subject"))
+         {**compose, "folder": string, "folder_names": {"type": "array", "items": string, "description": "Names of the actual draft destination from retry_arguments. Do not invent folder aliases."}, "draft_id": string}, ("to", "subject"))
     tool("email_receipt", service.receipt, "Read the exact account-scoped delivery receipt. Uncertain acceptance must be inspected, never blindly sent again.", {"request_id": string}, ("request_id",))
     tool("email_test_connection", service.test_connection, "Check the selected account's authentication/TLS without sending mail or admitting historical messages.", {})
     settings = {"resource": string, "identifier": string}

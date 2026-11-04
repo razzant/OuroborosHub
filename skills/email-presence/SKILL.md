@@ -34,11 +34,11 @@ tools:
     description: Read an account-bound message reference or legacy UID and UIDVALIDITY without changing flags.
   - name: email_mark_read
     effect: write
-    target: [account_id]
+    target: [account_id,remove_labels]
     description: Mark one message read by its account-bound reference, or a legacy IMAP UID and UIDVALIDITY.
   - name: email_mailbox
     effect: write
-    target: [account_id,folder,destination,add_labels,remove_labels,label_id]
+    target: [account_id,destination,add_labels,remove_labels,label_id,label_names]
     description: List/create folders, copy/move messages and update flags.
   - name: email_draft
     effect: write
@@ -230,18 +230,26 @@ remain readable by explicit account_id.
   retains list/create/copy/move/flags, including the old list action. IMAP move
   requires UID MOVE, never a mailbox-wide expunge. Gmail adds label management,
   archive, trash/untrash, delete_draft and explicitly granted permanent deletion.
-  Its destination is declared before effects. For Gmail label creation,
+  For general IMAP mailbox actions the source folder inside a message reference
+  is not a separate Host target. Within the same Exchange mailbox, copy/move
+  declares the destination as supplied; use the same folder spelling as its Place.
+  Drafts check the resolved storage folder independently (below).
+  For Gmail label creation,
   properties.name keeps its existing precedence; a different or omitted top-level
   destination returns exact retry_arguments naming that actual label without
   dropping any properties. Gmail exposes all added and removed label IDs, including
   those implied by a move, archive or flag. A label name may need a read-only
   lookup before the tool returns canonical arguments. Updating or deleting a label
   exposes its actual ID; a rename exposes the new name as destination as well.
-  A matching canonical call remains one call.
+  Gmail checks current custom label names alongside IDs, including rename's old
+  and new names. The move source is a removed label, trash/untrash expose TRASH,
+  and Gmail mark-read exposes its fixed removal of UNREAD. Follow returned
+  retry_arguments; label_names describes checked targets and never changes a
+  label. A matching canonical call remains one call.
 - email_draft saves or updates a Gmail draft by draft_id, or appends an IMAP
   draft. The selected draft folder is an explicit Host target. Omit the folder
   to receive retry_arguments with the provider default (Gmail DRAFT, IMAP Drafts,
-  Exchange drafts). Exchange prepares the existing account-bound folder handle
+  Exchange drafts). Gmail checks both DRAFT and Drafts. Exchange prepares the existing account-bound folder handle
   and its current server names in folder_names; both are checked, and the same
   native folder ID receives the draft. Use the stable handle for durable folder
   rules across renames and localization. The Host checks these independently of any RFC

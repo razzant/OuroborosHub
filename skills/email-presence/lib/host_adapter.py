@@ -266,7 +266,10 @@ class LoopbackPresenceHostAdapter:
 
     def draft_folder_hold(self, account_id, folder):
         """Ask Host about this destination separately from the draft's RFC conversation."""
-        decision = self.capture_binding(account_id, folder)
+        try:
+            decision = self.capture_binding(account_id, folder)
+        except (HostContractError, httpx.HTTPError, ValueError, AttributeError):
+            return "Held: place policy unavailable"
         if decision.get("supported") and decision.get("code") != "place_unattributable":
             return "" if decision["allowed"] else "Held: " + str(decision.get("code") or "place policy unavailable")
         # With RFC-only Places a folder can be unattributable without being a
