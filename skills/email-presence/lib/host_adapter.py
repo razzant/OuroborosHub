@@ -21,17 +21,17 @@ from .facts import email_facts, mailbox_identity
 log = logging.getLogger("email_presence")
 
 # The Host did not say whether this Place allows sending. The outbox counts a hold by its prefix.
-PLACE_POLICY_UNREAD = ("Held: Ouroboros did not answer whether this place allows sending. "
-                       "Nothing was sent yet; it retries by itself and no approval is needed.")
+PLACE_POLICY_UNREAD = "Held: It retries by itself."
 # The Host refused this skill itself (no grant, turned off, unreviewed or a stale token): only its owner can change that.
-SKILL_ACCESS_REFUSED = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
-                        "check the skill's access in Skills.")
+SKILL_ACCESS_REFUSED = "Held: Check this skill's access in Skills."
 _DRAFT_POLICY_UNREAD = "Draft not saved: the folder policy is unavailable. Try saving again when Ouroboros can check it."
 _DRAFT_ACCESS_REFUSED = "Draft not saved: Ouroboros refused Mail's request. Check the skill's access in Skills."
-_NO_PLACE_COVERS = "Held: no connected place covers this send; nothing was sent."
+# A bound send, or one queued before bindings, that no connected Place covers now; one that covers it releases it.
+_NO_PLACE_COVERS = "Held: No connected place covers this send."
 # No binding was captured when the send was queued, so the outbox never sends it.
-_NO_PLACE_WHEN_QUEUED = ("Held: no connected place covered this send when it was queued, so it will not be sent; "
-                         "send it again once a place covers it.")
+_NO_PLACE_WHEN_QUEUED = "Held: It will not go out; send it again once a place covers it."
+# Its Place by name: the owner may have disconnected it on purpose, which decides whether to send again.
+_PLACE_DISCONNECTED = "Held: {label} was disconnected, so it will not go out; send it again if still needed."
 _OUTCOMES = frozenset({"message", "silent", "tool_delivered", "deferred"})
 _SPEECH = frozenset({"message", "deferred"})
 _DISPOSITIONS = frozenset({"retained", "rejected", "blocked", "retry"})
@@ -98,8 +98,7 @@ def place_refusal_hold(facts: Mapping[str, Any]) -> str:
     label = facts.get("label") or "Email"
     if state == "disconnected":
         # The bound Place was removed, or disconnected and connected again: this queued send never goes.
-        return (f"Held: {label} was disconnected after this send was queued, so it will not be sent; "
-                "send it again if it is still needed.")
+        return _PLACE_DISCONNECTED.format(label=label)
     return f"Held: {label} is {state}"
 
 def email_presence_event(item: InboxItem, *, account_id: str, places: bool = False,
@@ -268,7 +267,7 @@ class LoopbackPresenceHostAdapter:
             if response.status_code == 404:
                 payload = response.json()
                 if payload.get("code") == "place_not_connected":
-                    return "" if draft else "Held: no connected Place; this legacy send has no captured unbound authorization"
+                    return "" if draft else _NO_PLACE_COVERS
             response.raise_for_status()
             place = response.json()
             state = place.get("state")

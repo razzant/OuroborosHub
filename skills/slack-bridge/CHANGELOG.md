@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.9.3
+
+- A hold line says the state and the next step, not the Host's answer behind it. An
+  unread place policy reads `Held: It retries by itself.`, a refused skill
+  `Held: Check this skill's access in Skills.`, and a held reaction report that
+  Ouroboros records it after an update; SKILL.md says which Host answer each means.
+  A place's state and the Host's "not connected" read as before.
+
 ## 1.9.2
 
 - Keep one store connection open instead of opening one for every call. A companion

@@ -18,6 +18,7 @@ import pytest
 
 from telegram_bot.api import TelegramApiError, TelegramClient
 from telegram_bot.custody import REACTION_WITHHELD, CustodyStore
+from telegram_bot.delivery import REACTION_HISTORY_UNAVAILABLE, REACTION_REPORT_UNREADABLE
 from telegram_bot.events import parse_telegram_update
 from telegram_bot.host import PresenceHostClient, PresenceHostError, PresenceSubmission, PresenceWorkResult
 from telegram_bot.runtime import TelegramTransportRuntime
@@ -809,7 +810,7 @@ def test_frozen_list_report_stays_local_on_a_host_that_could_count_it_as_speech(
         assert value.submitter.reports == [] and provider.calls == []
         entry, receipt_after = stored_entry(value.store)
         assert entry["payload"] == legacy_report() and receipt_after == receipt_before
-        assert entry["acked"] is False and entry["error"].startswith("Held: Host history for reactions is unavailable")
+        assert entry["acked"] is False and entry["error"] == REACTION_HISTORY_UNAVAILABLE
         receipt = value.store.delivery_receipt("telegram-operation:old")
         assert receipt["state"] == "delivered" and "unavailable" in receipt["history_limitation"]
         assert value.store.status_snapshot()["delivery_reports_held"] == 1
@@ -910,8 +911,18 @@ def test_report_that_does_not_state_its_facts_is_disclosed_not_guessed(tmp_path,
         assert await value.process_one_delivery_report()
         assert value.submitter.reports == []
         entry, _ = stored_entry(value.store)
-        assert entry["acked"] is False and "does not state its message and values" in entry["error"]
+        assert entry["acked"] is False and entry["error"] == REACTION_REPORT_UNREADABLE
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("line,recorded_later,provenance", [
+    (REACTION_HISTORY_UNAVAILABLE, True, "receipt"),
+    (REACTION_REPORT_UNREADABLE, False, "does not state"),
+])
+def test_a_held_reaction_report_says_whether_history_gets_it_and_not_why(line, recorded_later, provenance):
+    assert line.startswith("Held: ")  # status counts a held report by its prefix
+    assert ("update" in line) is recorded_later and ("will not" in line) is not recorded_later
+    assert provenance not in line  # the receipt beside it already shows the provider's answer
 
 
 def test_typed_report_frozen_on_a_capable_host_is_held_after_the_host_changes_back(tmp_path):

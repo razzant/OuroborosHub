@@ -13,7 +13,7 @@ from starlette.testclient import TestClient
 
 from lib.accounts import AccountStore
 from lib.client import MailClient
-from lib.host_adapter import LoopbackPresenceHostAdapter
+from lib.host_adapter import _NO_PLACE_WHEN_QUEUED, _PLACE_DISCONNECTED, LoopbackPresenceHostAdapter
 from lib.runtime import EmailRuntime
 from lib.service import MailService
 from lib.store import EmailStore
@@ -110,8 +110,7 @@ def test_disconnect_never_reclassifies_held_bound_send_or_automatic_reply_as_unb
     for _ in range(2):
         assert runtime.process_outbox()
     assert not delivery.sent
-    assert store.receipt("held")["last_error"] == ("Held: Work mail was disconnected after this send was queued, "
-                                                   "so it will not be sent; send it again if it is still needed.")
+    assert store.receipt("held")["last_error"].endswith(_PLACE_DISCONNECTED.partition("}")[2])
     assert store.receipt("held")["delivery_reporting"]["place_binding"] == bound
     assert store.receipt(automatic_id)["state"] == "held"
     # A newly requested operation binds the new Place and remains usable.
@@ -180,12 +179,10 @@ def test_ordinary_reply_preserves_known_thread_and_rejects_an_unknown_thread(tmp
     assert wrong["state"] == "held"
     assert wrong["receipt"]["delivery_reporting"]["place_binding"] is None
     # The tool's answer and the receipt after the worker's recheck say one sentence for one fact.
-    not_covered = ("Held: no connected place covered this send when it was queued, so it will not be sent; "
-                   "send it again once a place covers it.")
-    assert wrong["receipt"]["last_error"] == not_covered
+    assert wrong["receipt"]["last_error"] == _NO_PLACE_WHEN_QUEUED
     release_hold(store)
     assert runtime.process_outbox() and len(delivery.sent) == 1
-    assert store.receipt("unknown")["state"] == "held" and store.receipt("unknown")["last_error"] == not_covered
+    assert store.receipt("unknown")["state"] == "held" and store.receipt("unknown")["last_error"] == _NO_PLACE_WHEN_QUEUED
 
 
 @pytest.mark.parametrize("failure", ["timeout", "503"])

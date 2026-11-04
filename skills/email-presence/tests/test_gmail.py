@@ -11,6 +11,7 @@ import pytest
 
 from lib.accounts import AccountError, AccountStore
 from lib.gmail import GmailClient
+from lib.host_adapter import place_refusal_hold
 from lib.google_auth import begin, finish
 from lib.runtime import EmailRuntime
 from lib.store import EmailStore
@@ -124,8 +125,7 @@ class BindingHost:
         self.calls = []
     def binding_hold(self, binding, account, conversation, *, thread_id=""):
         self.calls.append((binding, account, conversation, thread_id))
-        return ("Held: Email was disconnected after this send was queued, so it will not be sent; "
-                "send it again if it is still needed.") if self.disconnected else ""
+        return place_refusal_hold({"state": "disconnected", "code": "place_disconnected"}) if self.disconnected else ""
 
 
 @pytest.mark.parametrize("outcome,state", [("accepted", "completed"), ("timeout", "uncertain"), ("missing_id", "uncertain"), ("denied", "failed"), ("quota", "retry")])

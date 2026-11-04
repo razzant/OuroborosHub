@@ -21,11 +21,9 @@ _EARLY_CONTINUATION = 2
 # The Host's documented hint for each busy admission resource, when its own is unusable.
 _BUSY_RETRY_SEC = {"conversation": 1.0, "capacity": 5.0}
 # The Host did not say whether this place allows sending. The outbox counts a hold by its prefix.
-PLACE_POLICY_UNREAD = ("Held: Ouroboros did not answer whether this place allows sending. "
-                       "Nothing was sent yet; it retries by itself and no approval is needed.")
+PLACE_POLICY_UNREAD = "Held: It retries by itself."
 # The Host refused this skill itself (no grant, turned off, unreviewed or a stale token): only its owner can change that.
-SKILL_ACCESS_REFUSED = ("Held: Ouroboros refused this skill's request, so nothing was sent; "
-                        "check the skill's access in Skills.")
+SKILL_ACCESS_REFUSED = "Held: Check this skill's access in Skills."
 _EVENT_KEYS = {
     "source_event_id",
     "provider",

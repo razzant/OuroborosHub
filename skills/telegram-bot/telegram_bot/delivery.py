@@ -16,10 +16,10 @@ def tool_origin(ctx):
     return origin
 
 
-REACTION_HISTORY_UNAVAILABLE = ("Held: Host history for reactions is unavailable until the Host is updated; "
-                                "the provider receipt stays here")
-REACTION_REPORT_UNREADABLE = ("Held: this earlier reaction report does not state its message and values, "
-                              "so it is not added to Host history")
+# A Host without presence_explicit_completion could count the report as speech; the provider receipt stays local.
+REACTION_HISTORY_UNAVAILABLE = "Held: Ouroboros records this reaction after an update."
+# An earlier version's report that does not state its message and values; it never reaches Host history.
+REACTION_REPORT_UNREADABLE = "Held: Ouroboros will not record this reaction."
 
 
 def _reaction_fact(values, target, state):
