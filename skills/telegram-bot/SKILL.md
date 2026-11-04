@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.10.3
+version: 0.10.4
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -208,7 +208,9 @@ Older hosts retain the previous event filtering and receive the already-saved
 delivery identities survive the upgrade. Before each outgoing message part or
 mutation the worker re-reads the place, including a private chat's place.
 Silent/Paused or an unavailable lookup holds the queued bytes and receipts
-without consuming retries; Active resumes.
+without consuming retries; Active resumes, and an unavailable lookup clears once
+Ouroboros answers. When Ouroboros refuses the skill itself (its grant,
+enablement, review or token), the hold lasts until its access is fixed in Skills.
 
 Supported v1 Telegram content is text/caption, photos, documents, voice
 messages, audio files, edited messages, and message-reaction provider facts. See
@@ -571,7 +573,7 @@ connector at its next restart, and until then it keeps acting on the earlier ans
 for held reports and new reports alike. On a capable Host, an
 earlier version's list-shaped report is sent in the typed shape built from its own
 message ID and values, with `resolution: unresolved` because it recorded no topic. One
-that does not state them stays held and says so.
+that does not state them stays held and is never sent.
 
 ## Connector settings and facts (0.6.3)
 
