@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/fcac74863a1c415a0c4445cb8a53190a1bd0180b",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
   "skills": [
     {
@@ -1322,17 +1322,17 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "75abbaef9fd829ca3c5104ff14c281242faa01d2b18a8b56e1bde5b9be690009",
-          "size": 8256
+          "sha256": "12196553d7bc06cbfbec733a9c09b71a20794dc5d8016cd42dcf52734f2e9a6d",
+          "size": 8850
         },
         {
           "path": "README.md",
-          "sha256": "0525481fd0f3dca535ddae71be3d0367dbe6550497a4cbf1ec07f58c409b1e2a",
+          "sha256": "f74953fc2d70d177f415ca346306d1399ee314d2c71f54501142f1c9637e666a",
           "size": 1918
         },
         {
           "path": "SKILL.md",
-          "sha256": "a3a51a3c6f087f61bbfc63bde80610c325bdc06a2f63ec744e8cc4658f743f38",
+          "sha256": "6816ee601899d7c318ceb8e307246c3b9fc4b8cf3ab3e36bf4b60f69367f07be",
           "size": 34861
         },
         {
@@ -1407,8 +1407,8 @@
         },
         {
           "path": "lib/store.py",
-          "sha256": "9b5f32c98ae1435312def7aed576b68fcdd7159f19a59ad1b3b80c27dc101040",
-          "size": 40555
+          "sha256": "493391d5cf38fe479f034dd157342ad0ed248c5200a92b62f0ad121204389bca",
+          "size": 42858
         },
         {
           "path": "plugin.py",
@@ -1417,8 +1417,8 @@
         },
         {
           "path": "scripts/email_daemon.py",
-          "sha256": "2ea56701d3b441cb3598442f7faaa2bd4d544c56bc7ff320bf9e0b136aa31b42",
-          "size": 5142
+          "sha256": "07249b1166962428e295b5c1ef2101a1febec2623c36617f8a29ea2d35f0352f",
+          "size": 5469
         },
         {
           "path": "tests/conftest.py",
@@ -1537,7 +1537,7 @@
         },
         {
           "path": "tests/test_foundation.py",
-          "sha256": "b4cf6daf16751de25abf6595568cad0f8aa1bd7f38be0ce2e29a914161c83a03",
+          "sha256": "db69b1a0a4dcad23edc64135b1c315e62c709f0905f1df5b8c19ff016befa6db",
           "size": 13895
         },
         {
@@ -1574,6 +1574,11 @@
           "path": "tests/test_intake_admission.py",
           "sha256": "dc9c4e964eb8dc8ab7558f81aa2aa8aa753b8855b4ac9fba35e097eeb77e066d",
           "size": 7050
+        },
+        {
+          "path": "tests/test_kept_connection.py",
+          "sha256": "394e1e0992b0c069d796e5459e3b4b8244cb961d96a20360fd1e0a6aa0d7500a",
+          "size": 10493
         },
         {
           "path": "tests/test_mail_error_boundaries.py",
@@ -1667,7 +1672,7 @@
       "name": "email-presence",
       "slug": "email-presence",
       "type": "extension",
-      "version": "0.10.3"
+      "version": "0.10.4"
     },
     {
       "description": "GDELT Cloud geopolitical intelligence: conflict events, news stories, entity graph, energy infrastructure, macro-finance, prediction markets, and web research via MCP Progressive Discovery.",
@@ -2697,8 +2702,13 @@
       "description": "Slack connector for workspace places, with typed conversation facts, durable threaded replies, files, and live place-state delivery holds.",
       "files": [
         {
+          "path": "CHANGELOG.md",
+          "sha256": "38e60c924d1cc54578312584cda64ccf6c8eaf120a42ca72451a76c33d2e782d",
+          "size": 803
+        },
+        {
           "path": "SKILL.md",
-          "sha256": "aad041e743964d510aa70172151311a6d3158263ce05656fd985ff680929bf45",
+          "sha256": "7169a05b07b8732e2c4db70e7ae82e869f77096e3e15e0f51ebd266749a4574b",
           "size": 51706
         },
         {
@@ -2758,8 +2768,8 @@
         },
         {
           "path": "lib/store.py",
-          "sha256": "88fb10d5c554a81371b58a4eb6e9f9580f8859dc922f4d223094d9e7c5649875",
-          "size": 60517
+          "sha256": "1c5ac8a1a57ebd241849b3f3a40e9c76866c087dc1a4e19cb597fe504c5351e8",
+          "size": 63907
         },
         {
           "path": "lib/tool_results.py",
@@ -2773,13 +2783,13 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "7fb513cac76dcc6f6eb4a9ac93b3b6d69d4864d6621af82dbf793ae9a04777c7",
-          "size": 29271
+          "sha256": "3467f21f61f58e3032dd7c7fa364a9c941d09b1fb91d963410c2ec15bd5dfe43",
+          "size": 30120
         },
         {
           "path": "scripts/slack_daemon.py",
-          "sha256": "975e3e242388c9e1d1fe22c9f6d0ad40b52247bbcf2742f79a7cc222832a04b7",
-          "size": 4238
+          "sha256": "7b26c3cd5292929414768e39dd02dcbf0d69ab73c99dcd3878e00588b176069c",
+          "size": 4569
         },
         {
           "path": "tests/INBOUND_LEASE.md",
@@ -2855,6 +2865,11 @@
           "path": "tests/test_inbound_lease_runtime.py",
           "sha256": "ef63ab9ea30b6f72e61bffc31cec8aa6a2def54ceb524f9cd63b941c75ee9752",
           "size": 15043
+        },
+        {
+          "path": "tests/test_kept_connection.py",
+          "sha256": "89e9d5927df2d140f20d2af61fff0484671e6bd52bedfe3fa228b4e680ea48c0",
+          "size": 14953
         },
         {
           "path": "tests/test_message_deletion.py",
@@ -2965,7 +2980,7 @@
       "name": "slack-bridge",
       "slug": "slack-bridge",
       "type": "extension",
-      "version": "1.9.1"
+      "version": "1.9.2"
     },
     {
       "description": "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders.",
@@ -3060,8 +3075,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "75d791eba59e5a27342b33db6e2018f38cd6712b694e20b78b0682a4ed120f4f",
-          "size": 7493
+          "sha256": "e028f2a9e78213548da9dda079684e5c24747900da0f642da65a89e241d4a710",
+          "size": 8669
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -3075,18 +3090,18 @@
         },
         {
           "path": "README.md",
-          "sha256": "88cbd2168d49cc8c422e491cca485971c147b06aab5f1ed77bd7709c0fe04835",
+          "sha256": "68b25a734f4e8572ec96cec0850670d4ef16623f89137d1cc019d943ecea38a1",
           "size": 2190
         },
         {
           "path": "SKILL.md",
-          "sha256": "21d7c5ff39f1e1b70f4eb56be3d5c611150e2837503bd41da9a2ee14f1cc9d1d",
+          "sha256": "23a611947ce592c62d82a4fe8e5444607f6c1051dda6aae37cdd508a03ee60b5",
           "size": 42802
         },
         {
           "path": "plugin.py",
-          "sha256": "07852f99a460631c26ef31455eebb786d6bb611daeb3c02e0238cd0f999615ae",
-          "size": 18829
+          "sha256": "cc07ea6fecf3877db9d4022062efdde5ffff5a38b10d2ef618332e25334cfecf",
+          "size": 19563
         },
         {
           "path": "telegram_bot/__init__.py",
@@ -3100,8 +3115,8 @@
         },
         {
           "path": "telegram_bot/custody.py",
-          "sha256": "422edebdfe244709305af764849a7bfa4a5d4ab15345f067cf126b19798eb552",
-          "size": 56169
+          "sha256": "184b89d646b67eeb4ed89751bafb8ef3b22218b55d4860a6249b7974c168d2c1",
+          "size": 59127
         },
         {
           "path": "telegram_bot/delivery.py",
@@ -3130,8 +3145,8 @@
         },
         {
           "path": "telegram_bot/runtime.py",
-          "sha256": "9829326bf4785a2983f3432557688ae0e7e99dae1bbee44a55be27f58fce5084",
-          "size": 39383
+          "sha256": "7bb2b97b18289e572ed737fed076ca4dd16d36cba15fa22be68d453488d2edf7",
+          "size": 39730
         },
         {
           "path": "telegram_bot/settings.py",
@@ -3140,8 +3155,8 @@
         },
         {
           "path": "telegram_bot/tools.py",
-          "sha256": "cb8a17170609fbe3c9106c82ce7ff2f6a30314e660bfb3ca49c32aeae863195a",
-          "size": 14082
+          "sha256": "819176f554b0c85fc86971b3862ea68f70471f5cfd446c30c6d5e6f440703f50",
+          "size": 14103
         },
         {
           "path": "tests/conftest.py",
@@ -3185,8 +3200,8 @@
         },
         {
           "path": "tests/test_group_discovery.py",
-          "sha256": "0c5278e31fd036ef4a8c47dffa981565f2efa725b13ebb606ef431fb6c6580f8",
-          "size": 30099
+          "sha256": "a41581c5cd3237a53abdb56249fcc6938c68722f47e4c3e4e15e1a9aa534cf70",
+          "size": 30189
         },
         {
           "path": "tests/test_host.py",
@@ -3197,6 +3212,11 @@
           "path": "tests/test_identity.py",
           "sha256": "35da29261ced3cc0843c91c5752b590909d9ab73563a236e80d3d6acd765ac72",
           "size": 3696
+        },
+        {
+          "path": "tests/test_kept_connection.py",
+          "sha256": "4c73e59e1796e53ebb6f106b16fd04f2a0fe852210800c59b8556a3cdd101bc1",
+          "size": 14871
         },
         {
           "path": "tests/test_moderation.py",
@@ -3258,7 +3278,7 @@
       "name": "telegram-bot",
       "slug": "telegram-bot",
       "type": "extension",
-      "version": "0.10.2"
+      "version": "0.10.3"
     },
     {
       "connects": [

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.3 — unreleased
+
+- Keep one custody connection open instead of opening one for every call. A poll with
+  nothing to do is now a plain read: it opens no file, takes no write lock and writes
+  nothing, so the waiting workers no longer recreate the custody WAL file several times a
+  second on the Host's event loop. A claim with work still decides under `BEGIN IMMEDIATE`
+  with the same compare-and-set, so which rows are leased, in what order and with what
+  attempts is unchanged. Every commit stays `synchronous=FULL`, now set on that connection
+  itself: the `NORMAL` the schema setup asked for never applied to working writes and does
+  not now either.
+- The runtime, the status route and the tools of one process share that store, and its
+  file is set up once per process. The runtime closes it when it stops or is unloaded,
+  after its workers return their leases, including failed startup. Discarding a temporary
+  store closes its connection too; the next use of a retained store opens it again.
+- The status and settings routes read and write their files beside the Host's HTTP loop,
+  not on it. Two settings saves at once still keep each other's fields.
+
 ## 0.10.2 — unreleased
 
 - Say what a hold means when the Host did not say whether a place allows sending:

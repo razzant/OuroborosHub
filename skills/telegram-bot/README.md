@@ -1,4 +1,4 @@
-# Telegram Bot 0.10.2
+# Telegram Bot 0.10.3
 
 A public Telegram bot connector for private-chat, group and channel places,
 separate from the built-in owner-control Telegram bridge. It keeps incoming

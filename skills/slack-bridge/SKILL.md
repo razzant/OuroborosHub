@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.9.1
+version: 1.9.2
 type: extension
 entry: plugin.py
 plugin_api: "2.0"

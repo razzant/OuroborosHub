@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import pathlib
 import re
 import sqlite3
+import threading
 import uuid
 from typing import Any, Dict, Optional
 
@@ -37,6 +39,7 @@ _BOT_DIFFERENCES = (
 
 _RUNTIME: Optional[TelegramTransportRuntime] = None
 _STATE_DIR: Optional[pathlib.Path] = None
+_SETTINGS_SAVE = threading.Lock()
 
 
 def _widget_render() -> Dict[str, Any]:
@@ -163,7 +166,7 @@ def _status_payload() -> Dict[str, Any]:
     elif _STATE_DIR is None:
         counts: Dict[str, Any] = {}
     else:
-        counts = CustodyStore(_STATE_DIR / "custody.sqlite3").status_snapshot()
+        counts = CustodyStore.shared(_STATE_DIR / "custody.sqlite3").status_snapshot()
     runtime = _RUNTIME.status_snapshot(counts) if _RUNTIME is not None else {}
     binding_id = str(_load_local_settings().get("binding_id") or "").strip()
     # Connect offers only the groups of the bot getMe confirmed for the current token.
@@ -198,7 +201,8 @@ def _status_payload() -> Dict[str, Any]:
 
 
 async def _status_route(_request: Any) -> JSONResponse:
-    payload = _status_payload()
+    # Custody counts, the token and local settings are file reads: they run beside the Host's HTTP loop.
+    payload = await asyncio.to_thread(_status_payload)
     held = payload.get("outbox_held", 0)
     text, tone = ((f"{held} held", "warn") if held else
                   (payload["connect_unavailable"], "warn") if payload["connect"] is None else
@@ -264,7 +268,7 @@ def _make_telegram_send(api: Any):
             except ValueError as exc:
                 return {"ok": False, "error": str(exc)}
         receipt = str(request_id or uuid.uuid4().hex).strip()
-        inserted = CustodyStore(
+        inserted = CustodyStore.shared(
             pathlib.Path(api.get_state_dir()) / "custody.sqlite3"
         ).enqueue_outbox(
             f"telegram-send:{receipt}",
@@ -281,9 +285,27 @@ def _make_telegram_send(api: Any):
     return telegram_send
 
 
+def _save_local_settings(changes: Dict[str, Any]) -> None:
+    """Merge the form's fields into the saved settings and replace the file atomically.
+
+    One save at a time, as when each ran whole on the HTTP loop: none drops another's fields.
+    """
+    with _SETTINGS_SAVE:
+        settings = {**_load_local_settings(), **changes}
+        path = _STATE_DIR / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f"{path.name}.tmp.{uuid.uuid4().hex}")
+        temporary.write_text(
+            json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
+
 async def _settings_save_route(request: Any) -> JSONResponse:
+    # The settings file is read and written beside the Host's HTTP loop, never on it.
     if request.method == "GET":
-        settings = _load_local_settings()
+        settings = await asyncio.to_thread(_load_local_settings)
         return JSONResponse({
             "management_group_id": settings.get("management_group_id") or "",
             "words": "\n".join(settings.get("words", [])),
@@ -314,10 +336,10 @@ async def _settings_save_route(request: Any) -> JSONResponse:
             {"ok": False, "error": "Telegram transport state is unavailable"},
             status_code=503,
         )
-    settings = _load_local_settings()
+    changes: Dict[str, Any] = {}
     if "words" in body:
         try:
-            settings["words"] = normalize_words(body["words"])
+            changes["words"] = normalize_words(body["words"])
         except ValueError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     if "management_group_id" in body:
@@ -330,17 +352,10 @@ async def _settings_save_route(request: Any) -> JSONResponse:
                 },
                 status_code=400,
             )
-        settings["management_group_id"] = group_id
+        changes["management_group_id"] = group_id
     if "binding_id" in body:
-        settings["binding_id"] = binding_id
-    path = _STATE_DIR / "settings.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f"{path.name}.tmp.{uuid.uuid4().hex}")
-    temporary.write_text(
-        json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+        changes["binding_id"] = binding_id
+    await asyncio.to_thread(_save_local_settings, changes)
     return JSONResponse({"ok": True, **({"binding_id": binding_id} if "binding_id" in body else {})})
 
 
