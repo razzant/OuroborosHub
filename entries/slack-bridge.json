@@ -6,7 +6,7 @@
     "Slack"
   ],
   "description": "Slack connector for workspace places, with typed conversation facts, durable threaded replies, files, and live place-state delivery holds.",
-  "digest": "ada1ce1d00b2d1dbce338caa434967e97ed4afc14395cbd03b344cb08cf73769",
+  "digest": "2c1919429131bea7334268768455a9caa2c0ef376ac4e0a668759fae5aa27e23",
   "icon": "ui/icon.svg",
   "install_specs": [
     "httpx",
@@ -20,6 +20,6 @@
     "path": "skills/slack-bridge"
   },
   "type": "extension",
-  "version": "1.9.1",
+  "version": "1.9.2",
   "withdrawn": null
 }
