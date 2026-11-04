@@ -14,6 +14,7 @@ from starlette.testclient import TestClient
 from lib.host_adapter import LoopbackPresenceHostAdapter, email_presence_event
 from lib.mime import build_message, parse_message
 from lib.runtime import EmailRuntime
+from lib.settings import SENDING_OFF_HOLD
 from lib.store import EmailStore
 from test_plugin import _settings_app
 from test_transport import rig as _rig
@@ -198,7 +199,7 @@ def test_sending_off_holds_automatic_and_queued_mail_then_resumes(rig):
     assert runtime.process_outbox() and runtime.process_outbox()
     assert not client.sent
     assert store.receipt("queued")["state"] == "held"
-    assert store.receipt("queued")["attempts"] == 0
+    assert store.receipt("queued")["attempts"] == 0 and store.receipt("queued")["last_error"] == SENDING_OFF_HOLD
     path.write_text(json.dumps({"sending": "on"}))
     clock[0] += 6
     assert runtime.process_outbox() and runtime.process_outbox()
@@ -249,7 +250,7 @@ def test_outgoing_body_is_authored_without_connector_marks(body):
 
 def test_manifest_offers_facts_without_default_wakes():
     manifest = yaml.safe_load((Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1])
-    assert manifest["version"] == "0.10.4"
+    assert manifest["version"] == "0.10.5"
     place = manifest["contributes"][0]
     assert place["wakes"] == []
     assert place["settings"] == "email_presence"

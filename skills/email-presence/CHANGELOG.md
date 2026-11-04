@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.5
+
+- A hold line says the state and the next step, not the Host's answer behind it. An
+  unread Place policy reads `Held: It retries by itself.`, a refused skill
+  `Held: Check this skill's access in Skills.` Mail that will never go asks to be sent
+  again: `Held: It will not go out; send it again if still needed.` after its Place was
+  disconnected, `…; send it again once a place covers it.` when none covered it at
+  queueing. A send no connected Place covers now, including one queued before Place
+  bindings, reads `Held: No connected place covers this send.`, and sending turned off
+  reads `Held: Sending is off for this mailbox.` A Place's state reads as before; codes
+  stay in the debug log (`LOG_LEVEL=DEBUG`).
+
 ## 0.10.4
 
 - Keep one connection per mailbox store open instead of opening one for every call. An

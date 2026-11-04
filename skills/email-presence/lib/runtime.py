@@ -13,7 +13,7 @@ from .delivery import DeliveryRejected, email_report
 from .accounts import AccountError
 from .host_adapter import HostBindingTerminalError, HostRetryError, HostTurnStatus, place_refusal_hold
 from .mime import MailAddressError, conversation_root, extract_body, mailbox_addresses
-from .settings import SENDING_OFF, load_settings
+from .settings import SENDING_OFF_HOLD, load_settings
 from .store import RequestIdConflict
 
 log = logging.getLogger("email_presence")
@@ -302,7 +302,7 @@ class EmailRuntime:
         try:
             current = self.account_loader() if self.account_loader else load_settings(self.store.state_dir)
             if current.get("sending", "on") == "off":
-                self.store.hold_outbox(item, "Held: " + SENDING_OFF)
+                self.store.hold_outbox(item, SENDING_OFF_HOLD)
                 return True
             reason = self._delivery_hold(item)
             if reason:

@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 
 SENDING_OFF = "Sending is off for this mailbox in its connector settings; reading, drafts and tidying keep working"
+# A queued send while sending is off; it goes once sending is on.
+SENDING_OFF_HOLD = "Held: Sending is off for this mailbox."
 
 
 def load_settings(state_dir):
