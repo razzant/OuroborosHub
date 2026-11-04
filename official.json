@@ -51,7 +51,7 @@
       "recommended": false
     },
     {
-      "digest": "6371a765904e587d69b7955c5c7465400059e26acf1a1a42b8e7228661f4e5a9",
+      "digest": "c4b507af64252dfdc814a7e1eda10f463b116b076cf81cc86350454c2bbd4ec6",
       "name": "email-presence",
       "recommended": false
     },
@@ -86,12 +86,12 @@
       "recommended": false
     },
     {
-      "digest": "2c1919429131bea7334268768455a9caa2c0ef376ac4e0a668759fae5aa27e23",
+      "digest": "4d3893ce192d0efc0807912aba2ff1f7b8016ff2f5352ad32208c28a29d69ac1",
       "name": "slack-bridge",
       "recommended": false
     },
     {
-      "digest": "b2175b5ac0fb49d1dfd0ae83917e7977cd6a214ecd438ab2aa2a3b2ed84aa3eb",
+      "digest": "b3586ed297dde18a0a1d3204282f7aa4431329ca8638e52919d33115548d1570",
       "name": "telegram-bot",
       "recommended": false
     },
