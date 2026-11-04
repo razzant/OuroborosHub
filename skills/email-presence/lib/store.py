@@ -717,6 +717,7 @@ class EmailStore:
             result = dict(r)
             result["state"] = _delivery_state(result["state"], result["last_error"])
             result["delivery_reporting"] = json.loads(result.pop("reporting_json"))
+            result["delivery_reporting"].pop("reply_all_fingerprint", None)
             result["account_id"] = result["delivery_reporting"].get("account_id", "")
             result["sender"] = result["delivery_reporting"].get("sender", "")
             result["provider_receipt"] = result["delivery_reporting"].get("provider_receipt")

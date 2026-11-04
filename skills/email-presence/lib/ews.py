@@ -205,31 +205,47 @@ class EwsClient(EwsOperations, MailClient):
             return node
         raise EwsError('MailboxOwnershipUnverified')
 
-    def _resolved_folder(self, folder):
+    def _resolved_folder(self, folder, defaults):
         """Read the names of a mailbox-qualified folder or an already verified native ID."""
-        fields = ('folder:DisplayName', 'folder:DistinguishedFolderId')
-        reply = self._call(m('GetFolder', _shape('Folder', fields), m('FolderIds', folder)))
-        node = _only(reply, 'm:Folders')
+        distinguished = folder.get('Id') if folder.tag == f'{{{NS["t"]}}}DistinguishedFolderId' else ''
+        def fetch(*extra):
+            shape = _shape('Folder', ('folder:DisplayName', *extra))
+            return _only(self._call(m('GetFolder', shape, m('FolderIds', folder))), 'm:Folders')
+        if distinguished:
+            node = fetch()
+        else:
+            try:
+                node = fetch('folder:DistinguishedFolderId')
+            except EwsError as exc:
+                if not exc.proven or exc.code not in {'ErrorInvalidPropertyRequest', 'ErrorInvalidPropertyForOperation'}:
+                    raise
+                node = fetch()  # Older servers can reject the optional property itself.
+            distinguished = node.findtext('t:DistinguishedFolderId', '', NS)
         native = _opaque(_child(node, 't:FolderId').get('Id'))
         if folder.tag == f'{{{NS["t"]}}}FolderId' and folder.get('Id') != native:
             raise EwsError('FolderIdentityMismatch')
         name = node.findtext('t:DisplayName', '', NS)
         if not name:
             raise EwsError('MissingFolderDisplayName')
-        # A mailbox-qualified distinguished lookup identifies the default folder even
-        # if its optional distinguished property is absent in the response.
-        distinguished = (folder.get('Id') if folder.tag == f'{{{NS["t"]}}}DistinguishedFolderId'
-                         else node.findtext('t:DistinguishedFolderId', '', NS))
-        names = sorted({name, *(alias for alias, kind in _KNOWN.items() if kind == distinguished)})
+        if not distinguished and not defaults:
+            # A localized display name cannot tell us that this is e.g. Deleted Items.
+            # Resolve the supported defaults once for this dispatch, including inaccessible
+            # entries; never carry these IDs across tool calls, accounts or retries.
+            kinds = list(dict.fromkeys(_KNOWN.values()))
+            replies = self.wire.read_folder_ids([self._folder(kind) for kind in kinds])
+            for kind, reply in zip(kinds, replies):
+                defaults[kind] = _opaque(_child(_only(reply, 'm:Folders'), 't:FolderId').get('Id')) if reply is not None else None
+        names = sorted({name, *(alias for alias, kind in _KNOWN.items()
+                                if kind == distinguished or (not distinguished and defaults.get(kind) == native))})
         return t('FolderId', Id=native), self._folder_ref(native), names
 
     def draft_destination(self, selection):
-        selected, handle, names = self._resolved_folder(self._folder(selection))
+        selected, handle, names = self._resolved_folder(self._folder(selection), {})
         return handle, names, lambda **content: self._save_draft(selected, **content)
 
-    def _item_parent(self, checked_item):
+    def _item_parent(self, checked_item, defaults):
         native = _opaque(_child(checked_item, 't:ParentFolderId').get('Id'))
-        return self._resolved_folder(t('FolderId', Id=native))
+        return self._resolved_folder(t('FolderId', Id=native), defaults)
 
     @staticmethod
     def _prepare_folders(prepare, *, new_name='', **folders):
@@ -410,7 +426,7 @@ class EwsClient(EwsOperations, MailClient):
         if action == 'create':
             if not destination:
                 raise ValueError('Supply the name of the new Exchange folder as destination')
-            parent = self._resolved_folder(self._folder(folder or 'msgfolderroot'))
+            parent = self._resolved_folder(self._folder(folder or 'msgfolderroot'), {})
             if prepare_targets and (needed := self._prepare_folders(prepare_targets, folder=parent, new_name=destination)):
                 return needed
             response = self._call(m('CreateFolder', m('ParentFolderId', parent[0]),
@@ -423,10 +439,11 @@ class EwsClient(EwsOperations, MailClient):
         if action in {'copy', 'move', 'trash'}:
             if action != 'trash' and not destination:
                 raise ValueError('Choose a destination Exchange folder')
-            target = self._resolved_folder(self._folder('deleteditems' if action == 'trash' else destination))
+            defaults = {}
+            target = self._resolved_folder(self._folder('deleteditems' if action == 'trash' else destination), defaults)
             item = self._checked_native('Item', native)
             if prepare_targets:
-                source = {} if action == 'copy' else {'folder': self._item_parent(item)}
+                source = {} if action == 'copy' else {'folder': self._item_parent(item, defaults)}
                 if needed := self._prepare_folders(prepare_targets, destination=target, **source):
                     return needed
             op = 'CopyItem' if action == 'copy' else 'MoveItem'
@@ -448,7 +465,7 @@ class EwsClient(EwsOperations, MailClient):
         current = _child(item, 't:ItemId')
         if current.get('Id') != native or not current.get('ChangeKey'):
             raise EwsError('MissingCurrentItemVersion')
-        if prepare_targets and (needed := self._prepare_folders(prepare_targets, folder=self._item_parent(item))):
+        if prepare_targets and (needed := self._prepare_folders(prepare_targets, folder=self._item_parent(item, {}))):
             return needed
         self._call(m('UpdateItem', m('ItemChanges', t('ItemChange', current, t('Updates', *updates))),
                      ConflictResolution='NeverOverwrite', MessageDisposition='SaveOnly', SuppressReadReceipts='true'))

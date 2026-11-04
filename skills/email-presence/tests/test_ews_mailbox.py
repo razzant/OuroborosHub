@@ -6,7 +6,7 @@ import pytest
 
 from lib.ews import EwsClient
 from lib.ews_wire import EwsError, NS
-from test_ews_wire import CONFIG, FakeResponse, Session, response
+from test_ews_wire import CONFIG, FakeResponse, Session, batch_response, response
 
 ACCOUNT = {'id': 'ews:mailbox', 'address': 'mailbox@example.invalid', 'sender': 'mailbox@example.invalid', 'config': CONFIG}
 NATIVE = 'AA+aB/C='
@@ -33,6 +33,11 @@ def folder_record(native, name, distinguished=''):
     alias = f'<t:DistinguishedFolderId>{distinguished}</t:DistinguishedFolderId>' if distinguished else ''
     return response('GetFolder', f'<m:Folders><t:Folder><t:FolderId Id="{native}"/>'
                     f'<t:DisplayName>{name}</t:DisplayName>{alias}</t:Folder></m:Folders>')
+
+
+def default_records():
+    return batch_response('GetFolder', [('Success', 'NoError', '<m:Folders><t:Folder><t:FolderId '
+                          f'Id="native-{i}"/></t:Folder></m:Folders>') for i in range(7)])
 
 
 def item(native=NATIVE, *, mime=False, mid=True):
@@ -126,7 +131,8 @@ def test_folder_pages_and_ambiguous_name_are_not_silently_resolved():
 @pytest.mark.parametrize('action,operation', [('copy', 'CopyItem'), ('move', 'MoveItem'), ('trash', 'MoveItem')])
 def test_move_copy_return_new_reference_only_when_supplied(action, operation):
     target_id = 'bin' if action == 'trash' else 'dst'
-    checks = (*(() if action == 'trash' else proof('Folder', 'dst')), folder_record(target_id, 'Target'), *proof())
+    checks = (*(() if action == 'trash' else proof('Folder', 'dst')), folder_record(target_id, 'Target'),
+              *(() if action == 'trash' else (default_records(),)), *proof())
     c, s = client(*checks, response(operation, '<m:Items><t:Message><t:ItemId Id="New+/="/></t:Message></m:Items>'),
                   *checks, response(operation))
     args = dict(action=action, destination='ews-folder:ews:mailbox:dst', message_ref='ews:' + NATIVE)
@@ -175,7 +181,7 @@ def test_delegated_login_cannot_reuse_another_mailbox_folder_handle():
                         '</t:Folder></t:Folders></m:RootFolder>')
     a, _ = client(directory('A+/='))
     s = Session(directory('B+/='), *proof('Folder', 'B+/='), listing(item()), *proof('Folder', 'B+/='),
-                folder_record('B+/=', 'Team'), *proof(), response('CopyItem'))
+                folder_record('B+/=', 'Team'), default_records(), *proof(), response('CopyItem'))
     b = EwsClient({**ACCOUNT, 'id': 'ews:other', 'address': 'other@example.invalid'}, session=s)
     foreign = a.mailbox(action='list')['folders'][0]['id']
     own = b.mailbox(action='list')['folders'][0]['id']

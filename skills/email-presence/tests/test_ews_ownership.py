@@ -13,7 +13,7 @@ from lib.ews import EwsClient
 from lib.ews_wire import EwsError, NS
 from lib.service import MailService, register_tools
 from test_ews_mailbox import ACCOUNT, folder_record, identity, item, listing, names
-from test_ews_wire import CONFIG, Session, response
+from test_ews_wire import CONFIG, Session, batch_response, response
 
 
 class SharedStores(Session):
@@ -25,11 +25,28 @@ class SharedStores(Session):
         self.labels = {'B-projects': ('Projects', ''), 'B-inbox': ('Posteingang', 'inbox'),
                        'B-deleteditems': ('Gelöscht', 'deleteditems'), 'B-msgfolderroot': ('Postfach', 'msgfolderroot')}
         self.item_folder = 'projects'
+        self.optional_error = None
+        self.batch_error = None
 
     def post(self, *args, **kwargs):
         op = ET.fromstring(kwargs['data']).find('s:Body', NS)[0]
         verb = op.tag.split('}')[-1]
-        if verb in ('GetFolder', 'GetItem'):
+        if verb == 'GetFolder' and len(op.find('m:FolderIds', NS)) > 1:
+            assert op.findtext('m:FolderShape/t:BaseShape', namespaces=NS) == 'IdOnly'
+            assert op.find('m:FolderShape/t:AdditionalProperties', NS) is None
+            rows = []
+            for ref in op.find('m:FolderIds', NS):
+                assert ref.tag == f'{{{NS["t"]}}}DistinguishedFolderId'
+                assert ref.findtext('t:Mailbox/t:EmailAddress', namespaces=NS) == 'b@example.invalid'
+                native = 'B-' + ref.get('Id')
+                if native in self.denied:
+                    rows.append(('Error', 'ErrorAccessDenied', ''))
+                elif native not in self.labels:
+                    rows.append(('Error', 'ErrorFolderNotFound', ''))
+                else:
+                    rows.append(('Success', 'NoError', f'<m:Folders><t:Folder><t:FolderId Id="{native}"/></t:Folder></m:Folders>'))
+            xml = self.batch_error or batch_response(verb, rows)
+        elif verb in ('GetFolder', 'GetItem'):
             kind = verb[3:]
             ref = op.find('m:' + kind + 'Ids', NS)[0]
             native = ref.get('Id')
@@ -40,7 +57,10 @@ class SharedStores(Session):
             if native in self.denied:
                 xml = response(verb, klass='Error', code='ErrorAccessDenied')
             elif kind == 'Folder' and op.find('.//t:FieldURI[@FieldURI="folder:DisplayName"]', NS) is not None:
-                xml = folder_record(native, *self.labels[native])
+                if self.optional_error and op.find('.//t:FieldURI[@FieldURI="folder:DistinguishedFolderId"]', NS) is not None:
+                    xml = response(verb, klass='Error', code=self.optional_error)
+                else:
+                    xml = folder_record(native, *self.labels[native])
             elif op.find('.//t:IncludeMimeContent', NS) is not None:
                 xml = response(verb, '<m:Items>' + item(native, mime=True) + '</m:Items>')
             else:
@@ -148,7 +168,7 @@ def test_delegated_drafts_only_does_not_require_inbox_or_folder_tree(tools):
     _, b, provider, call = tools
     provider.denied = {'B-inbox', 'B-msgfolderroot'}
     provider.item_folder = 'drafts'
-    provider.labels['B-drafts'] = ('Entwürfe', 'drafts')
+    provider.labels['B-drafts'] = ('Entwürfe', '')  # Missing kind, with Inbox and root both inaccessible.
     prepared = call('mark_read', message_ref=legacy_message(b,'B-msg'))
     assert 'UpdateItem' not in names(provider)
     assert set(prepared['retry_arguments']['folder_names']) == {'Entwürfe', 'draft', 'drafts', f'ews-folder:{b["id"]}:B-drafts'}

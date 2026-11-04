@@ -260,13 +260,20 @@ remain readable by explicit account_id.
 - For IMAP and Exchange, folder_names identifies the actual folders changed.
   A move changes source and destination; a copy writes only the destination.
   Marking a message read or changing its flags writes its actual source folder.
-  Creating a child also affects its parent. Exchange trash moves to Deleted Items.
+  Creating a child also affects its parent. IMAP asks the server for its hierarchy
+  delimiter before CREATE; if the server omits the response, Mail leaves the folder unchanged.
+  Exchange trash moves to Deleted Items. Exchange writes check the affected folder
+  identities and require read access to their metadata; ordinary message reads still work
+  under the existing account and item permissions.
   Gmail delete_draft checks both DRAFT and Drafts before deleting the selected draft.
 - For Reply All, follow retry_arguments: Mail expands the original visible
   recipients before sending or saving. You may edit the explicit To/Cc/Bcc;
   leaving reply_all false keeps that choice. A permitted group thread remains
   permitted if a separate conversation with one recipient is paused. Bcc from
-  the original message is never copied into a reply.
+  the original message is never copied into a reply. Keep the opaque reply_all_fingerprint
+  returned by a prepared send. An exact repeat works even after the source disappears;
+  if you edit the recipient list, replay the explicit accepted arguments. For an older
+  send without a fingerprint, use its explicit arguments or inspect email_receipt.
 - email_draft saves or updates a Gmail draft by draft_id, or appends an IMAP
   draft. The selected draft folder is an explicit Host target. Omit the folder
   to receive retry_arguments with the provider default (Gmail DRAFT, IMAP Drafts,
@@ -481,7 +488,7 @@ attachments are copied into immutable, skill-owned staged files before a
 Presence turn; the Host receives their metadata and staged paths separately.
 Outbound sends and drafts accept staged file attachments, To/Cc/Bcc envelopes,
 and optional multipart/alternative HTML. `reply_all` derives Reply-To/From plus
-original To/Cc recipients, removes the sending mailbox and de-duplicates
+original To/Cc recipients, excludes configured sender identities from automatic additions and de-duplicates
 addresses. SMTP sends keep Bcc envelope-only; drafts retain a Bcc header for
 later manual sending. Partial SMTP
 recipient acceptance is retained in the receipt alongside accepted/refused

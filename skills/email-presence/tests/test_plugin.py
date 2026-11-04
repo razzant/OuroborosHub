@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import importlib.util
 import json
 from pathlib import Path
@@ -127,16 +128,23 @@ def test_read_tool_only_peeks_and_mark_read_is_its_own_write(tmp_path, monkeypat
     spec.loader.exec_module(plugin)
     calls = []
 
-    class Client:
+    class Client(plugin.MailClient):
         settings = {"EMAIL_DEFAULT_FOLDER": "Work"}
         def __init__(self, _settings):
             pass
         def read(self, **kwargs):
             calls.append(("read", kwargs))
             return {"uid": kwargs["uid"], "attachments": []}
-        def mark_read(self, **kwargs):
-            calls.append(("mark_read", kwargs))
-            return {"ok": True, "uid": kwargs["uid"]}
+        @contextmanager
+        def imap(self, folder, *, readonly=True):
+            assert not readonly
+            class Box:
+                def response(self, name):
+                    return 'OK', [b'7']
+                def uid(self, *args):
+                    calls.append(('uid', folder, args))
+                    return 'OK', [b'']
+            yield Box()
 
     class API:
         def __init__(self):
@@ -162,7 +170,7 @@ def test_read_tool_only_peeks_and_mark_read_is_its_own_write(tmp_path, monkeypat
     read, read_schema = api.tools["email_read"]
     mark, mark_schema = api.tools["email_mark_read"]
     assert set(read_schema["properties"]) == {"account_id", "message_ref", "uid", "uidvalidity", "folder"}
-    assert set(mark_schema["properties"]) == {*read_schema["properties"], "remove_labels"}
+    assert set(mark_schema["properties"]) == {*read_schema["properties"], "remove_labels", "folder_names"}
     assert read_schema["required"] == mark_schema["required"] == []
     assert json.loads(read(uid=4, uidvalidity=7))["uid"] == 4
     assert calls == [("read", {"uid": 4, "uidvalidity": 7, "folder": "Work", "include_attachment_data": True})]
@@ -172,5 +180,6 @@ def test_read_tool_only_peeks_and_mark_read_is_its_own_write(tmp_path, monkeypat
     assert len(calls) == 1
     prepared = json.loads(mark(uid=4, uidvalidity=7, folder="Archive"))
     assert prepared["status"] == "needs_arguments" and len(calls) == 1
-    assert json.loads(mark(**prepared["retry_arguments"])) == {"ok": True, "uid": 4, "account_id": "owner@example.org"}
-    assert calls[-1] == ("mark_read", {"uid": 4, "uidvalidity": 7, "folder": "Archive"})
+    assert prepared["retry_arguments"]["folder_names"] == ["Archive"]
+    assert json.loads(mark(**prepared["retry_arguments"])) == {"ok": True, "uid": 4, "uidvalidity": 7, "account_id": "owner@example.org"}
+    assert calls[1:] == [('uid', 'Archive', ('STORE', '4', '+FLAGS.SILENT', r'(\Seen)'))]

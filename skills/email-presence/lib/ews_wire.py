@@ -90,6 +90,14 @@ class EwsWire:
             self.session.close()
 
     def call(self, operation):
+        return self._responses(operation)[0]
+
+    def read_folder_ids(self, qualified_folders):
+        """IdOnly lookup. EWS returns a response per input folder in request order."""
+        operation = m('GetFolder', m('FolderShape', t('BaseShape', text='IdOnly')), m('FolderIds', *qualified_folders))
+        return self._responses(operation, folder_count=len(qualified_folders))
+
+    def _responses(self, operation, *, folder_count=None):
         name = operation.tag.removeprefix(f'{{{NS["m"]}}}')
         envelope = ET.Element(f'{{{NS["s"]}}}Envelope')
         ET.SubElement(envelope, f'{{{NS["s"]}}}Header').append(t('RequestServerVersion', Version='Exchange2013_SP1'))
@@ -130,17 +138,23 @@ class EwsWire:
                                proven=code == 'ErrorServerBusy')
             wrapper = body[0]
             messages = wrapper.find('m:ResponseMessages', NS)
-            if (wrapper.tag != f'{{{NS["m"]}}}{name}Response' or messages is None or len(messages) != 1
-                    or messages[0].tag != f'{{{NS["m"]}}}{name}ResponseMessage'):
+            if (wrapper.tag != f'{{{NS["m"]}}}{name}Response' or messages is None
+                    or len(messages) != (folder_count if folder_count is not None else 1)):
                 raise EwsError('UnexpectedResponse', http_status=status)
-            message = messages[0]
-            codes = message.findall('m:ResponseCode', NS)
-            if len(codes) != 1:
-                raise EwsError('UnexpectedResponse', http_status=status)
-            if status == 200 and message.get('ResponseClass') == 'Success' and codes[0].text == 'NoError':
-                return message
-            if message.get('ResponseClass') == 'Error':
-                code = _code(codes[0].text)
-                raise EwsError(code, http_status=status, retry_after=_delay(response, message),
-                               proven=code != 'UnknownResponse')
-            raise EwsError('UncertainResponse', http_status=status)
+            rows = []
+            for message in messages:
+                codes = message.findall('m:ResponseCode', NS)
+                if message.tag != f'{{{NS["m"]}}}{name}ResponseMessage' or len(codes) != 1:
+                    raise EwsError('UnexpectedResponse', http_status=status)
+                if status == 200 and message.get('ResponseClass') == 'Success' and codes[0].text == 'NoError':
+                    rows.append(message)
+                elif message.get('ResponseClass') == 'Error':
+                    code = _code(codes[0].text)
+                    if folder_count is not None and status == 200 and code in {'ErrorFolderNotFound', 'ErrorAccessDenied'}:
+                        rows.append(None)  # A delegate need not have access to every default folder.
+                    else:
+                        raise EwsError(code, http_status=status, retry_after=_delay(response, message),
+                                       proven=code != 'UnknownResponse')
+                else:
+                    raise EwsError('UncertainResponse', http_status=status)
+            return rows

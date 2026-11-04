@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import inspect
 import json
 import os
+import re
 import uuid
 from contextlib import contextmanager
 from functools import wraps
@@ -261,15 +263,16 @@ class MailService:
         return original, references, root
 
     @staticmethod
-    def _reply_groups(account, original, to, cc, bcc, *, queued=None):
-        if queued is None:
-            derived = reply_all_recipients(original, [account["address"], *account["senders"]])
-            derived_to, derived_cc = derived["to"], derived["cc"]
-        else:
-            # A repeated high-level request compares against the first send. Only the
-            # queue can supply its automatic members, never the current source headers.
-            derived_to, derived_cc = queued.to, queued.cc
-        return recipient_groups([*derived_to, *to], [*derived_cc, *cc], bcc)
+    def _reply_groups(account, original, to, cc, bcc):
+        derived = reply_all_recipients(original, [account["address"], *account["senders"]])
+        return recipient_groups([*derived["to"], *to], [*derived["cc"], *cc], bcc)
+
+    @staticmethod
+    def _reply_fingerprint(account_id, request_id, message_id, supplied, envelope):
+        # The explicit inputs and the disclosed envelope must BOTH match. The queue
+        # alone cannot distinguish automatically included copies from manual ones.
+        data = ["reply-all:1", account_id, request_id, message_id, supplied, envelope]
+        return hashlib.sha256(json.dumps(data, separators=(",", ":")).encode("ascii")).hexdigest()
 
     @staticmethod
     def _prepare_conversation(root, conversation_id, thread_id, retry_arguments, *, required,
@@ -291,7 +294,7 @@ class MailService:
 
     def send(self, ctx=None, *, account_id="", sender="", to="", body="", subject="", reply_to_message_id="", references=None,
              cc=None, bcc=None, reply_all=False, html_body="", body_type="plain", attachments=None, request_id="", reply_folder="",
-             conversation_id="", thread_id=""):
+             conversation_id="", thread_id="", reply_all_fingerprint=""):
         with self.target(account_id) as (account, store, client):
             if account.get("sending", "on") == "off":
                 return {"ok": False, "account_id": account["id"], "code": "sending_off", "error": SENDING_OFF}
@@ -304,7 +307,18 @@ class MailService:
             original, references, thread = self._reply_context(account, store, client, reply_to_message_id,
                                                                references, reply_all, reply_folder, replaying=queued is not None)
             if reply_all:
-                recipients, visible_cc, visible_bcc = self._reply_groups(account, original, recipients, visible_cc, visible_bcc, queued=queued)
+                supplied = (recipients, visible_cc, visible_bcc)
+                groups = ((queued.to, queued.cc, queued.bcc) if queued is not None
+                          else self._reply_groups(account, original, *supplied))
+                reply_all_fingerprint = self._reply_fingerprint(account['id'], rid, reply_to_message_id, supplied, groups)
+                if queued is not None and queued.reporting.get('reply_all_fingerprint') != reply_all_fingerprint:
+                    known = bool(queued.reporting.get('reply_all_fingerprint'))
+                    return {'ok': False, 'account_id': account['id'], 'request_id': rid,
+                            'code': 'request_id_conflict' if known else 'reply_all_replay_unverifiable',
+                            'error': ('The Reply All arguments differ from the accepted send.' if known else
+                                      'The queued email has no record of the original Reply All expansion.')
+                                     + ' Use its accepted explicit arguments to replay, or check email_receipt.'}
+                recipients, visible_cc, visible_bcc = groups
                 to, cc, bcc = ", ".join(recipients), visible_cc, visible_bcc
             if not recipients or (not str(body).strip() and not str(html_body).strip()):
                 raise ValueError("to (or reply_all source) and body are required")
@@ -315,12 +329,17 @@ class MailService:
                 'account_id': account['id'], 'sender': chosen_sender, 'to': to, 'body': body, 'subject': subject,
                 'reply_to_message_id': reply_to_message_id, 'references': references, 'cc': cc, 'bcc': bcc,
                 'reply_all': False, 'html_body': html_body, 'body_type': body_type, 'attachments': attachments,
-                'request_id': rid, 'reply_folder': reply_folder}, required=queued is None and bool(reply_to_message_id or references),
+                'request_id': rid, 'reply_folder': reply_folder, 'reply_all_fingerprint': reply_all_fingerprint or None},
+                required=queued is None and bool(reply_to_message_id or references),
                 missing_account=queued is None and not account_id, expanded=queued is None and reply_all)
             if preparation:
                 return preparation
             binding = self.capture_binding(account, thread) if queued is None else {}
             reporting = {"version": -1, "account_id": account["id"], "sender": chosen_sender, "origin": tool_origin(ctx)}
+            # This optional round-trip value only recognizes a later implicit replay.
+            # A missing or modified value never selects recipients or authorizes a send.
+            if reply_to_message_id and isinstance(reply_all_fingerprint, str) and re.fullmatch(r"[0-9a-f]{64}", reply_all_fingerprint):
+                reporting["reply_all_fingerprint"] = reply_all_fingerprint
             if account["provider"] == "gmail" and original and original.get("provider_thread_id"):
                 reporting["gmail_thread_id"] = original["provider_thread_id"]
             hold = ""
@@ -456,7 +475,8 @@ def register_tools(api, service):
     tool("email_accounts", service.list_accounts, "List configured mailbox identities, sender addresses and granted scopes; no passwords or tokens are returned.", {}, select=False)
     # email_accounts has no selection argument: it is the discovery surface.
     tool("email_send", service.send, "Queue a mail or RFC-threaded reply from an explicit account_id/sender. For replies use conversation_id/thread_id from email_read. Reply All first returns the actual recipients; submit the returned arguments before sending. request_id is account-scoped. Queued is not sent; inspect email_receipt for held, accepted or uncertain outcomes.",
-         {**compose, "request_id": string}, ("body",))
+         {**compose, "request_id": string, "reply_all_fingerprint": {"type": "string", "description":
+              "Opaque replay value from Reply All retry_arguments. Pass it back unchanged when submitting the explicit recipients."}}, ("body",))
     tool("email_search", service.search, "Search old/new mail without marking it read. Gmail and Exchange accept provider-native query/page_token; IMAP uses criteria tokens. Returned message_ref is account-bound; a page reports its continuation.",
          {"folder": string, "criteria": array, "query": string, "limit": integer, "page_token": string})
     tool("email_read", service.read, "Read exact message_ref, or legacy uid+uidvalidity+folder, including canonical conversation_id/thread_id for replies. Peeks only; use email_mark_read for Seen. Historical reads do not enter Presence.", message)

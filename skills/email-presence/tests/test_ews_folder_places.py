@@ -2,10 +2,11 @@
 import pytest
 
 from lib.ews import EwsClient
-from lib.ews_wire import NS
+from lib.ews_wire import EwsError, NS
 from test_declared_target_preparation import published_targets
 from test_ews_mailbox import ACCOUNT, names
 from test_ews_ownership import SharedStores, legacy_message
+from test_ews_wire import response
 from test_write_targets import host_guard, tools_for
 
 
@@ -127,3 +128,89 @@ def test_restricted_folder_search_and_read_remain_available(tmp_path, monkeypatc
         args = {'account_id': account, **extra}
         assert not guard(args) and call(tool, args)
     assert not MUTATIONS.intersection(names(server))
+
+
+def batches(server):
+    return [op for op in server.operations if op.tag.endswith('}GetFolder') and len(op.find('m:FolderIds', NS)) > 1]
+
+
+@pytest.mark.parametrize('action,alias,kind,label,selection', [
+    ('mark_read', 'inbox', 'inbox', 'Posteingang', 'parent'),
+    ('copy', 'trash', 'deleteditems', 'Gelöscht', 'name'),
+    ('move', 'deleteditems', 'deleteditems', 'Gelöscht', 'handle'),
+    ('flags', 'spam', 'junkemail', 'Unerwünscht', 'parent'),
+    ('create', 'sent', 'sentitems', 'Gesendet', 'handle'),
+    ('copy', 'draft', 'drafts', 'Entwürfe', 'handle'),
+])
+@pytest.mark.parametrize('held', [False, True])
+def test_default_alias_still_guarded_without_optional_kind(tmp_path, monkeypatch, action, alias, kind, label, selection, held):
+    server, account, call = scene(tmp_path)
+    native = 'B-' + kind
+    server.labels[native] = (label, '')
+    if native not in server.folders:
+        server.folders.append(native)
+    # Two native folders without the optional kind on move; neither needs a second alias lookup.
+    server.labels['B-inbox'] = ('Posteingang', '')
+    server.item_folder = kind if selection == 'parent' else 'inbox'
+    server.denied.add('B-outbox')
+    tool = 'email_mark_read' if action == 'mark_read' else 'email_mailbox'
+    guard = host_guard(tmp_path, monkeypatch, tool, account, [('', 'active'), (alias, 'paused' if held else 'active')])
+    args = {'account_id': account}
+    if action != 'mark_read':
+        args['action'] = action
+    if action != 'create':
+        args['message_ref'] = legacy_message(ACCOUNT, 'B-msg')
+    if selection != 'parent':
+        target = label if selection == 'name' else handle(native)
+        args.update({'folder': target, 'destination': 'Q4'} if action == 'create' else {'destination': target})
+    elif action == 'flags':
+        args['flags'] = [r'\Flagged']
+    assert not guard(args)
+    retry = call(tool, args)['retry_arguments']
+    assert {alias, label, handle(native)} <= set(retry['folder_names'])
+    assert len(batches(server)) == 1 and not MUTATIONS.intersection(names(server))
+    if held:
+        assert 'Paused' in guard(retry)
+    else:
+        assert not guard(retry) and call(tool, retry)['ok']
+        assert len(batches(server)) == 2  # A new dispatch gets fresh identities.
+        write, = [op for op in server.operations if op.tag.split('}')[-1] in MUTATIONS]
+        if action in ('copy', 'move', 'create'):
+            slot = 'ParentFolderId' if action == 'create' else 'ToFolderId'
+            assert write.find('m:' + slot + '/t:FolderId', NS).get('Id') == native
+        else:
+            assert write.find('.//t:ItemId', NS).attrib == {'Id': 'B-msg', 'ChangeKey': 'key'}
+
+
+@pytest.mark.parametrize('error', ['ErrorInvalidPropertyRequest', 'ErrorInvalidPropertyForOperation', 'ErrorAccessDenied'])
+def test_only_unsupported_optional_property_is_retried(tmp_path, error):
+    server, account, call = scene(tmp_path)
+    server.labels['B-inbox'] = ('Posteingang', '')
+    server.optional_error = error
+    args = {'account_id': account, 'message_ref': legacy_message(ACCOUNT, 'B-msg')}
+    if error == 'ErrorAccessDenied':
+        with pytest.raises(EwsError, match=error):
+            call('email_mark_read', args)
+        assert not batches(server) and not MUTATIONS.intersection(names(server))
+    else:
+        retry = call('email_mark_read', args)['retry_arguments']
+        assert 'inbox' in retry['folder_names'] and len(batches(server)) == 1
+        assert call('email_mark_read', retry)['ok'] and names(server).count('UpdateItem') == 1
+
+
+@pytest.mark.parametrize('bad,code', [
+    ('incomplete-success', 'UnexpectedResponse'), ('transport', 'TransportFailure'),
+    ('one-ambiguous-row', 'ErrorServerBusy'),
+])
+def test_unknown_default_identity_never_mutates(tmp_path, bad, code):
+    from requests.exceptions import ConnectionError
+    from test_ews_wire import batch_response
+    server, account, call = scene(tmp_path)
+    server.labels['B-inbox'] = ('Posteingang', '')
+    row = ('Error', 'ErrorAccessDenied', '')
+    server.batch_error = (response('GetFolder') if bad == 'incomplete-success' else
+                          ConnectionError() if bad == 'transport' else
+                          batch_response('GetFolder', [row] * 6 + [('Error', 'ErrorServerBusy', '')]))
+    with pytest.raises(EwsError, match=code):
+        call('email_mark_read', {'account_id': account, 'message_ref': legacy_message(ACCOUNT, 'B-msg')})
+    assert len(batches(server)) == 1 and not MUTATIONS.intersection(names(server))

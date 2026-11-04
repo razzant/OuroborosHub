@@ -141,6 +141,12 @@ def test_editing_the_single_retry_replaces_automatic_members_even_if_source_chan
     if kind == 'send':
         saved = store.queued_message(retry['request_id'])
         assert (saved.to, saved.cc, saved.bcc) == ((OWNER,), (), (PEER,))
+        assert call(edit)['deduplicated']
+        original_call = dict(to='', body='Hello', subject='Answer', reply_to_message_id=SOURCE,
+                             reply_all=True, request_id=retry['request_id'])
+        mismatch = call(original_call)
+        assert mismatch['code'] == 'request_id_conflict'
+        assert PEER not in json.dumps(mismatch) and store.status()['outbox'] == {'pending': 1}
     else:
         assert (calls[-1][1]['to'], calls[-1][1]['cc'], calls[-1][1]['bcc']) == (OWNER, [], [PEER])
 
@@ -150,23 +156,30 @@ def test_queued_reply_replays_original_and_explicit_calls_without_regenerating_m
     source = {'message_id': SOURCE, 'references': [ROOT], 'sender': PEER, 'cc': [PAUSED]}
     account, service, store, calls = context(tmp_path, source)
     call = registered(service, 'email_send')
-    high = dict(to='', subject='Answer', body='Original', reply_all=True, reply_to_message_id=SOURCE,
-                bcc=[BLIND], request_id='queue-once')
+    account['senders'].append(ALIAS)
+    AccountStore(tmp_path).save(account)
+    extra_to, extra_cc = 'to-extra@example.invalid', 'cc-extra@example.invalid'
+    high = dict(to=extra_to, cc=[extra_cc], subject='Answer', body='Original', reply_all=True,
+                reply_to_message_id=SOURCE, bcc=[BLIND], request_id='queue-once')
     offer = call(high)
     retry = offer['retry_arguments']
     first = call(retry)
     assert first['ok'] and not first['deduplicated']
+    assert 'reply_all_fingerprint' not in first['receipt']['delivery_reporting']
     store.put('read_message:' + SOURCE, {**source, 'sender': 'later@example.invalid', 'cc': []} if source_state=='changed' else None)
     for args in [high, retry]:
         same = call(args)
         assert same['deduplicated'] and same['receipt']['provider_message_id'] == first['receipt']['provider_message_id']
-    for key, value in [('body', 'changed'), ('subject', 'other'), ('cc', ['new@example.invalid']),
-                       ('bcc', []), ('references', ['<other@local.invalid>']), ('reply_to_message_id', '<other@local.invalid>')]:
-        assert call({**high, key: value})['code'] == 'request_id_conflict'
+    for key, value in [('to', ''), ('to', 'other@example.invalid'), ('cc', []), ('cc', [PAUSED]),
+                       ('bcc', []), ('bcc', [OWNER]), ('body', 'changed'), ('subject', 'other'), ('sender', ALIAS),
+                       ('references', ['<other@local.invalid>']), ('reply_to_message_id', '<other@local.invalid>')]:
+        conflict = call({**high, key: value})
+        assert conflict['code'] == 'request_id_conflict'
+        assert BLIND not in json.dumps(conflict)
     assert call({**retry, 'cc': []})['code'] == 'request_id_conflict'
     assert calls == [('read', SOURCE), ('binding', ROOT)]
     queued = store.queued_message(retry['request_id'])
-    assert (queued.to, queued.cc, queued.bcc, queued.references) == ((PEER,), (PAUSED,), (BLIND,), (ROOT,))
+    assert (queued.to, queued.cc, queued.bcc, queued.references) == ((PEER, extra_to), (PAUSED, extra_cc), (BLIND,), (ROOT,))
     assert store.status()['outbox'] == {'pending': 1}
 
 
@@ -182,3 +195,24 @@ def test_reply_to_self_keeps_a_blank_draft_and_never_promotes_bcc_into_to(tmp_pa
     with pytest.raises(ValueError, match='to .*required'):
         registered(service, 'email_send')({**args, 'body': 'Hello', 'bcc': [BLIND]})
     assert store.status()['outbox'] == {}
+
+
+@pytest.mark.parametrize('stamp', [None, 'not-a-fingerprint'])
+def test_mail_without_reply_all_provenance_replays_explicitly_without_disclosing_old_recipients(tmp_path, stamp):
+    account, service, store, calls = context(tmp_path, None)
+    call = registered(service, 'email_send')
+    explicit = dict(account_id=account['id'], request_id='old', reply_to_message_id=SOURCE,
+                    references=[ROOT], thread_id=ROOT, conversation_id=ROOT, subject='Answer', body='Body',
+                    to=PEER, cc=[PAUSED], bcc=[BLIND])
+    if stamp is None:
+        store.enqueue_outbox(request_id='old', in_reply_to=SOURCE, references=[ROOT], subject='Answer',
+                             body='Body', to=[PEER], cc=[PAUSED], bcc=[BLIND], reporting={'sender': OWNER})
+    else:
+        # Replay metadata never selects the audience or blocks a new explicit send.
+        assert call({**explicit, 'reply_all_fingerprint': stamp})['ok']
+    assert 'reply_all_fingerprint' not in store.queued_message('old').reporting
+    implicit = call({**explicit, 'reply_all': True, 'to': '', 'cc': [], 'bcc': []})
+    assert not implicit['ok'] and implicit['code'] == 'reply_all_replay_unverifiable'
+    assert all(addr not in json.dumps(implicit) for addr in (PEER, PAUSED, BLIND))
+    assert call(explicit)['deduplicated']
+    assert store.status()['outbox'] == {'pending': 1} and not any(c[0] == 'read' for c in calls)
