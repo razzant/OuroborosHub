@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/2a0e99c6f5a0e5d780cb8d0b85236dbf5dbf5f8b",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/e055e3029a42ad3ff75a1e8e9298fe205db0373b",
   "schema_version": 1,
   "skills": [
     {
@@ -1322,8 +1322,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "0a07374a66bb87fc26bb82a1776aa2348e27de06267b191d9f0344b26f1a906d",
-          "size": 6261
+          "sha256": "c09656af5eddf195f61c9953e86d5f757c6317520bc1719547b0008a56a9adb2",
+          "size": 6269
         },
         {
           "path": "README.md",
@@ -1332,8 +1332,8 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "056eae3f1806d141f1f82b3f5aba03ae8792641db4c988768e372d951974ab87",
-          "size": 33250
+          "sha256": "8b35701b8f637df122e195c740fc6106e2f98621df9f20f025d5ca85b38144d0",
+          "size": 33544
         },
         {
           "path": "lib/accounts.py",
@@ -1372,8 +1372,8 @@
         },
         {
           "path": "lib/gmail.py",
-          "sha256": "e884a7ef36303de9c29dab418fc7224821b2329f22eb11349c48b526540b8e94",
-          "size": 22830
+          "sha256": "822935a0655b601f4609388239ca7b70ea2bc19410d26de44cfa1fd55fa4c515",
+          "size": 22834
         },
         {
           "path": "lib/google_auth.py",
@@ -1397,8 +1397,8 @@
         },
         {
           "path": "lib/service.py",
-          "sha256": "4d5bdffe80d511231cbb7b1c158fb4dd3cb951f1e5daf501215a1fdcb87ef450",
-          "size": 30705
+          "sha256": "8e987f58548cda4d06d8628e6b4e1a0b67a743c3f4eb2dfb619bd7c3ecf5b8a5",
+          "size": 31456
         },
         {
           "path": "lib/settings.py",
@@ -1427,8 +1427,8 @@
         },
         {
           "path": "tests/isolated_tool_probe.py",
-          "sha256": "3a8cdd7904dad182e08bd5945f5d7c01c57975542cedcc6b6290c09fcc764422",
-          "size": 9994
+          "sha256": "cab9a5c941cc76fd51354fd79ec4cb42518c8e77eaa9883308130cb9689e3f2a",
+          "size": 10140
         },
         {
           "path": "tests/test_account_routes.py",
@@ -1537,8 +1537,8 @@
         },
         {
           "path": "tests/test_foundation.py",
-          "sha256": "036d62aa879b49de65e9a0b95ddea549bbd9d29cccbe5016d738443990ea5a96",
-          "size": 13872
+          "sha256": "ae24a9879873b46b253f9d6f1363f8c7d1236de7d36284349a7fd6c7ebd930b1",
+          "size": 13895
         },
         {
           "path": "tests/test_gmail.py",
@@ -1587,8 +1587,8 @@
         },
         {
           "path": "tests/test_plugin.py",
-          "sha256": "5447516ce7660cbcba4b3bd51d8c72f4df5c314b0cebdf74c7a69d5672e1e45c",
-          "size": 8261
+          "sha256": "b8844f266ca0e17adbcab48b97b4ce1e81966d92fe8ee6cdfd79dcc3b240a060",
+          "size": 8395
         },
         {
           "path": "tests/test_presence_v2_intake.py",
@@ -1627,8 +1627,8 @@
         },
         {
           "path": "tests/test_write_targets.py",
-          "sha256": "75281b1a20478e9ed199ea6395d2c39fb3e1bf64a101ed57e1964b3a22d83c1a",
-          "size": 20124
+          "sha256": "9c7b3700591bb290e747912fa227849b981f7a7b47f657451895ad13397e0284",
+          "size": 26260
         },
         {
           "path": "ui/accounts.css",
