@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.10.5
+## 0.10.6
 
 - A hold line says the state and the next step, not the Host's answer behind it. An
   unread Place policy reads `Held: It retries by itself.`, a refused skill
@@ -12,6 +12,14 @@
   bindings, reads `Held: No connected place covers this send.`, and sending turned off
   reads `Held: Sending is off for this mailbox.` A Place's state reads as before; codes
   stay in the debug log (`LOG_LEVEL=DEBUG`).
+
+## 0.10.5
+
+- Check the actual folders changed by IMAP and Exchange mailbox actions.
+  Copying from a folder still requires only read access to the source.
+- Check the Gmail Drafts folder before deleting a draft by its draft ID.
+- Return the complete Reply All recipient list before queuing a send or saving
+  a draft. The mailbox and RFC thread continue to govern group replies.
 
 ## 0.10.4
 

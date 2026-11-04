@@ -344,7 +344,7 @@ def test_omitted_gmail_draft_folder_keeps_both_supported_spellings(tmp_path,monk
     assert bool(result['ok']) is not restricted and writes==([] if restricted else ['DRAFT'])
 
 
-def test_imap_mailbox_does_not_report_a_folder_overridden_by_its_authentic_reference(tmp_path):
+def test_imap_mailbox_reports_the_folder_in_its_authentic_reference_before_store(tmp_path):
     writes=[]
     imap=MailClient({'EMAIL_USER':'owner@example.invalid'})
     class Box:
@@ -358,7 +358,11 @@ def test_imap_mailbox_does_not_report_a_folder_overridden_by_its_authentic_refer
     ref=MailService.wrap_ref({'id':account},{'uid':3,'uidvalidity':7,'folder':'Private'})
     args={'account_id':account,'folder':'Other','message_ref':ref,'action':'flags','flags':[r'\Seen']}
     assert published_targets('email_mailbox',args)=={'account_id':[account]}
-    assert call('email_mailbox',args)['ok']
+    result=call('email_mailbox',args)
+    assert result['status']=='needs_arguments' and not writes
+    retry=result['retry_arguments']
+    assert retry['message_ref']==ref and published_targets('email_mailbox',retry)['folder_names']==['Private']
+    assert call('email_mailbox',retry)['ok']
     assert writes==[('Private',False),('STORE','3','+FLAGS.SILENT',r'(\Seen)')]
 
 
@@ -424,7 +428,7 @@ def test_implicit_account_cannot_borrow_another_active_target(tmp_path,monkeypat
      {'addLabelIds':['STARRED'],'removeLabelIds':['Label_1']}),
     ('email_mailbox',{'action':'create','properties':{'name':'New'}},{'destination':'New'},'POST','/labels',{'name':'New'}),
     ('email_mailbox',{'action':'delete','uid':11,'uidvalidity':1},{},'DELETE','/messages/b',None),
-    ('email_mailbox',{'action':'delete_draft','draft_id':'draft-one'},{},'DELETE','/drafts/draft-one',None),
+    ('email_mailbox',{'action':'delete_draft','draft_id':'draft-one'},{'remove_labels':['DRAFT'],'label_names':['Drafts']},'DELETE','/drafts/draft-one',None),
 ])
 def test_sole_active_account_prepares_all_targets_once(tmp_path,monkeypatch,sole_gmail,tool,args,targets,method,path,body):
     account,call,writes=sole_gmail

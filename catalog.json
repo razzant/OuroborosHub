@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/7a01e43ec88169036f5258054cc75a91c2678513",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/d16e8de3f21d9afd62e50ce28186ebe5b2384cfe",
   "schema_version": 1,
   "skills": [
     {
@@ -1322,8 +1322,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "a8983660b9ef7deb62fb57a3a46e257408e7d87f3843781237907a5dfcfb435d",
-          "size": 9681
+          "sha256": "7010e5e2848f743ca79174cff651fca5b674f4a6d3738e30ae1de4a82721f7c9",
+          "size": 9230
         },
         {
           "path": "README.md",
@@ -1332,8 +1332,8 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "0d69c9ab69619aaa8a85f7b904762cdcb82890606c66769e81d8cfed747d2d47",
-          "size": 35030
+          "sha256": "62df4c8ba5603abf5a37a7cad9f2553c529e548ecc1a767ad7467ed38f51052b",
+          "size": 35937
         },
         {
           "path": "lib/accounts.py",
@@ -1342,8 +1342,8 @@
         },
         {
           "path": "lib/client.py",
-          "sha256": "46a4b05aa3cab5c0b691e4eca2edeb675bba12e131c8460a7f94e359996f2739",
-          "size": 17030
+          "sha256": "f43ee54fd78f2260c9d061cbc35107869ddda60f0a099306b7f3de32a3d8d889",
+          "size": 19377
         },
         {
           "path": "lib/delivery.py",
@@ -1352,8 +1352,8 @@
         },
         {
           "path": "lib/ews.py",
-          "sha256": "268a2e9b907f08635553af5657175fbbfa4a5e7460483431a7f94ed401cf47a1",
-          "size": 23476
+          "sha256": "31f4babc333aecf8eeec9eff61be91df5f2aa3a633953b2c4a6c0660c913a3fd",
+          "size": 26072
         },
         {
           "path": "lib/ews_operations.py",
@@ -1362,8 +1362,8 @@
         },
         {
           "path": "lib/ews_wire.py",
-          "sha256": "d30b4fe37a8016e35dc73868e6f88f9a8f64249cab1b2ab24f81bde4f1140eea",
-          "size": 7030
+          "sha256": "36654db9e590027acfa39411a031c0b409c6fdeccb4317bc24dcd02ecd2c4a09",
+          "size": 7899
         },
         {
           "path": "lib/facts.py",
@@ -1372,8 +1372,8 @@
         },
         {
           "path": "lib/gmail.py",
-          "sha256": "5aef1ef10ef35620958a521e9c6ccdda7ae098d173a87c6c9ab348af2d46994c",
-          "size": 24948
+          "sha256": "a3d856196efd6457c6fdb0f44546c57041055e5905d32f15aca475b54cd28edd",
+          "size": 25021
         },
         {
           "path": "lib/google_auth.py",
@@ -1382,33 +1382,33 @@
         },
         {
           "path": "lib/host_adapter.py",
-          "sha256": "6b8acc07c0004a5e8f9ba7cfb1e3369587c8cdb8a08eb2b96a6d35f0df2afe9d",
-          "size": 43122
+          "sha256": "19510dfa00af1c77918c3b0b39b53ff9cf45b29e50a0f5f89564122a2b7f082b",
+          "size": 43296
         },
         {
           "path": "lib/mime.py",
-          "sha256": "b89dfb748f962bdf4351833d814a6d3dadfe35ea14a9a3d6326bed501c639b64",
-          "size": 15425
+          "sha256": "0074eb8527313b541c5a67325f607ac3e53ccb6f23f464d4a6ff725a169aa1c2",
+          "size": 15852
         },
         {
           "path": "lib/runtime.py",
-          "sha256": "b6e9d7e404f9c98f9e238152814089a5ecaae8e72f9fe483d0d1e4f72a887a43",
-          "size": 27914
+          "sha256": "96986c58aaf6deb16cc7f16d3c908a732de029a337e288aaae8f4c35742d3eba",
+          "size": 27915
         },
         {
           "path": "lib/service.py",
-          "sha256": "e5b1432ea0abb515f927ff25585aeb71bc61f94b3ff38123baacccd75e112800",
-          "size": 31693
+          "sha256": "1699250adb8fa8ed60bcd2713bfb04721db8d15aaa44247a73996f741ffa7786",
+          "size": 34392
         },
         {
           "path": "lib/settings.py",
-          "sha256": "b818d8be3cc710781a22459b0d40dbc525105d474518677e7581174d1ad418bd",
-          "size": 1012
+          "sha256": "6f74e45d9c0bb33a681db8fc9bf284cf931c0b622f32292de11a79ec1024ae5c",
+          "size": 886
         },
         {
           "path": "lib/store.py",
-          "sha256": "493391d5cf38fe479f034dd157342ad0ed248c5200a92b62f0ad121204389bca",
-          "size": 42858
+          "sha256": "a6f23e82f4bffb120dc75dc8fc9cd645b2fbd35180edd4b2608d29ffcf3da1bf",
+          "size": 42312
         },
         {
           "path": "plugin.py",
@@ -1427,13 +1427,13 @@
         },
         {
           "path": "tests/isolated_tool_probe.py",
-          "sha256": "cab9a5c941cc76fd51354fd79ec4cb42518c8e77eaa9883308130cb9689e3f2a",
-          "size": 10140
+          "sha256": "41ecb34bdff1122f8dc2ad1ea39c93bd864f3be18d49dc9e57647412bcc12693",
+          "size": 10565
         },
         {
           "path": "tests/test_account_routes.py",
-          "sha256": "22b0fde3d08eaa593b1efed30128b3938f304ab76a286f2ea414b13211ab727a",
-          "size": 8766
+          "sha256": "5f5182507dba34c6e1c29a4139dbbca9e6431b909f94c69c71447dcab7e17fa9",
+          "size": 8796
         },
         {
           "path": "tests/test_accounts.py",
@@ -1442,8 +1442,8 @@
         },
         {
           "path": "tests/test_accounts_browser.py",
-          "sha256": "c352f251d1817823fff52011f16099605dee996650a4cffcf677b71382001600",
-          "size": 20377
+          "sha256": "eea206d0b1e0464fa450dbfc11be88e3bb69274da8d8d6ab8c1fbfc42e023d80",
+          "size": 20409
         },
         {
           "path": "tests/test_attachment_regressions.py",
@@ -1457,13 +1457,13 @@
         },
         {
           "path": "tests/test_binding.py",
-          "sha256": "dfd649829ef0f040df40ab4a7744d7fa8dc68c2146e78be46ef485be6c55ea5a",
-          "size": 13610
+          "sha256": "a1205f84da364ef37aad983fddc3a0b3a2a49219a6ad68729a67793940464f5b",
+          "size": 13320
         },
         {
           "path": "tests/test_binding_core.py",
-          "sha256": "14df50d266b864ff0259c386d8c3485b33a0160d7c1ff859d4ea8994f6ed6d6c",
-          "size": 15856
+          "sha256": "1c707622f40acd8020992be7d13e3a010e1595ff4c05cf00cdbc59cbe62c3de0",
+          "size": 16096
         },
         {
           "path": "tests/test_capabilities.py",
@@ -1482,8 +1482,8 @@
         },
         {
           "path": "tests/test_declared_target_preparation.py",
-          "sha256": "49332f18b968832e11882a8285fe750b663adf214c90dea590bb49c5e92646c8",
-          "size": 12535
+          "sha256": "63740faae96d1e8e978c320768f11bd320d61a8f542b68459175605065c9e4aa",
+          "size": 12638
         },
         {
           "path": "tests/test_deferred_observation_custody.py",
@@ -1511,14 +1511,19 @@
           "size": 18936
         },
         {
+          "path": "tests/test_ews_folder_places.py",
+          "sha256": "d19fa21b83ea4c3e05c09b8b157df8086b8d33fb153f3789bfd21ea378c5c7f5",
+          "size": 11994
+        },
+        {
           "path": "tests/test_ews_mailbox.py",
-          "sha256": "f29af7c1e2ac711e80fcdd3274ae38a21c106c8ea11c7d7e096c5d5e38a61f74",
-          "size": 10806
+          "sha256": "4fdcd2cdbd07f40cba69ce487457c159613f099cc06f64d2169195be6128915d",
+          "size": 11767
         },
         {
           "path": "tests/test_ews_ownership.py",
-          "sha256": "d1cbd142a949a88357ef99872b1715ad975fe093ebdeda002eb91fac84eb7bc6",
-          "size": 11349
+          "sha256": "b8bbb43644b58fe5b998e039ee89982a27b14b959792cabec9cd3b87b688716f",
+          "size": 13446
         },
         {
           "path": "tests/test_ews_structured_read.py",
@@ -1527,23 +1532,28 @@
         },
         {
           "path": "tests/test_ews_tool_binding.py",
-          "sha256": "91b5466ada8822cf9d7d9d87003f4613cdfb46794ea272a544910baa506606e9",
-          "size": 8929
+          "sha256": "85a3ceec7e7c089e996a5ba1b1f4111e424c5859fe11d6d4e1f3e947d834c870",
+          "size": 9181
         },
         {
           "path": "tests/test_ews_wire.py",
-          "sha256": "d2177f39f920684909de72a941c550ddc2052577c5ee1dfded0f30df0160dd4a",
-          "size": 5273
+          "sha256": "00c6cee92ff793f987ef1ce9baee69ce10d4b3f8bafd278a9475b604d0f87628",
+          "size": 5912
         },
         {
           "path": "tests/test_foundation.py",
-          "sha256": "be618d7592b53fc1037154511cf88e1d58e91a3b86e46e4fc6345e0256e19642",
-          "size": 13999
+          "sha256": "c6f5e6b4be1fc9aaba8b374c17b76aaf08d79a7a2c291976e272f901b4a9ecf0",
+          "size": 13895
         },
         {
           "path": "tests/test_gmail.py",
-          "sha256": "f18e08579fbfaaef1503eb7250da28f29920820d2e078695fc58e654663e8b7f",
-          "size": 13800
+          "sha256": "5e5a62cc640694d2ec4d43429b26e051ff647a23f3652774a3c604149470d3f1",
+          "size": 13817
+        },
+        {
+          "path": "tests/test_gmail_draft_deletion.py",
+          "sha256": "0f46b5aa08e6536d58ac9f9dec5cd31bffef08321ddbd94bf3961cb98c18709f",
+          "size": 1664
         },
         {
           "path": "tests/test_gmail_filter_targets.py",
@@ -1559,6 +1569,11 @@
           "path": "tests/test_host_adapter.py",
           "sha256": "ccf931fcfc35b8ebea3f83c6d3293b719cc6ab59b22c65d76f6f90b82216a1f4",
           "size": 1987
+        },
+        {
+          "path": "tests/test_imap_folder_targets.py",
+          "sha256": "36f469344dc4d3b9f4c3635a471ed2e1ae9c608046582f7c0193810d7930d7f6",
+          "size": 6670
         },
         {
           "path": "tests/test_inbound_address_headers.py",
@@ -1602,8 +1617,8 @@
         },
         {
           "path": "tests/test_plugin.py",
-          "sha256": "b8844f266ca0e17adbcab48b97b4ce1e81966d92fe8ee6cdfd79dcc3b240a060",
-          "size": 8395
+          "sha256": "4d08adc1af4237a1452acf56c5a67ffb232d1f80b4338eafd3876b81de336565",
+          "size": 8784
         },
         {
           "path": "tests/test_presence_v2_intake.py",
@@ -1614,6 +1629,11 @@
           "path": "tests/test_protocol_regressions.py",
           "sha256": "dfeb2723f30b011d38577bd171b95550db98ed15ede3cb63d3ca0e1055a74d53",
           "size": 5411
+        },
+        {
+          "path": "tests/test_reply_all_envelope.py",
+          "sha256": "ca05ad25addcfea69eae66cbf86ef5f431f4be72e12da38f54f72793470cf710",
+          "size": 12493
         },
         {
           "path": "tests/test_retained_custody.py",
@@ -1642,8 +1662,8 @@
         },
         {
           "path": "tests/test_write_targets.py",
-          "sha256": "27de7d0016e474916ee86c4dbfd29e1b639c0d5b66833c3c4ca0a4dac011e002",
-          "size": 27728
+          "sha256": "2f69e26ab3f81f50f21b7c0f3e7aee3208a8cbb99a8b23f34fe6b918e55e3d10",
+          "size": 28022
         },
         {
           "path": "ui/accounts.css",
@@ -2703,13 +2723,13 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "e2caa725d4210f63a73a57d3240a888ec5aab1d654ce91afb42c9de90b1f4aaf",
-          "size": 1202
+          "sha256": "38e60c924d1cc54578312584cda64ccf6c8eaf120a42ca72451a76c33d2e782d",
+          "size": 803
         },
         {
           "path": "SKILL.md",
-          "sha256": "472a6697161b7b8b9b31675da488490a92288dfe8181f02e8bb75cf8ea8e16c5",
-          "size": 51859
+          "sha256": "7169a05b07b8732e2c4db70e7ae82e869f77096e3e15e0f51ebd266749a4574b",
+          "size": 51706
         },
         {
           "path": "lib/__init__.py",
@@ -2728,8 +2748,8 @@
         },
         {
           "path": "lib/host_adapter.py",
-          "sha256": "7e0900db1ae99ca50a3be66f27fb9c6f543d985cf07ba539a0a25e35e53e5a93",
-          "size": 52729
+          "sha256": "00465507c7acc8183aeed6f010328180533252bc4f0d913b94ee367122f7cd4b",
+          "size": 52954
         },
         {
           "path": "lib/local_settings.py",
@@ -2753,8 +2773,8 @@
         },
         {
           "path": "lib/runtime.py",
-          "sha256": "3479fa995f0b154563b9e9bc528b86bb0b4388c2480e2d8bde62887b4109a167",
-          "size": 41418
+          "sha256": "29029ebed67039eb4c37b56b0d168563b1216d7d5c967f6885b401a8bd191b11",
+          "size": 41403
         },
         {
           "path": "lib/slack_api.py",
@@ -2893,8 +2913,8 @@
         },
         {
           "path": "tests/test_places.py",
-          "sha256": "e3330a6d768c5eb8ed0f66a60ed0c02af9039f0f863dc6666517dc8232f68b16",
-          "size": 11640
+          "sha256": "85282f48a3776b16340873bb1af8e15ec6c29bac277e2e5960de2f95486961d3",
+          "size": 11392
         },
         {
           "path": "tests/test_presence_continuation.py",
@@ -2918,8 +2938,8 @@
         },
         {
           "path": "tests/test_reactions.py",
-          "sha256": "487f985f123cc97df31339951c672e790553676690b9508247107190b0b6b06e",
-          "size": 80095
+          "sha256": "c9fa3a8e442411d86124304af188089f2173b0c30b8b85827936a71831c2eef8",
+          "size": 79814
         },
         {
           "path": "tests/test_read_tools.py",
@@ -2980,7 +3000,7 @@
       "name": "slack-bridge",
       "slug": "slack-bridge",
       "type": "extension",
-      "version": "1.9.3"
+      "version": "1.9.2"
     },
     {
       "description": "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders.",
@@ -3075,8 +3095,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "222d278dc71e2de3a1321d6436a596769daa660e0b7b2ec1a76ef35dc8161ab5",
-          "size": 9097
+          "sha256": "e028f2a9e78213548da9dda079684e5c24747900da0f642da65a89e241d4a710",
+          "size": 8669
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -3090,13 +3110,13 @@
         },
         {
           "path": "README.md",
-          "sha256": "f8c90507e98f5aaa9287c8c75eaccc75f04e5879ab66591cffcbb3787a2e3775",
+          "sha256": "68b25a734f4e8572ec96cec0850670d4ef16623f89137d1cc019d943ecea38a1",
           "size": 2190
         },
         {
           "path": "SKILL.md",
-          "sha256": "29d0a4bf7309fa49cb343368c5fff0bb1fb0b24190a18b00e0a79a1026d44222",
-          "size": 42999
+          "sha256": "23a611947ce592c62d82a4fe8e5444607f6c1051dda6aae37cdd508a03ee60b5",
+          "size": 42802
         },
         {
           "path": "plugin.py",
@@ -3120,8 +3140,8 @@
         },
         {
           "path": "telegram_bot/delivery.py",
-          "sha256": "8ec4d56b44e0a5766195f5bdb23c63c093693cfd2f45e77b43a0fe32b79bf488",
-          "size": 5906
+          "sha256": "83b948f72f2be58245d4ac4eac941a0fcdf6852b4ba619ce280033717cfa2d85",
+          "size": 5873
         },
         {
           "path": "telegram_bot/discovery.py",
@@ -3140,8 +3160,8 @@
         },
         {
           "path": "telegram_bot/host.py",
-          "sha256": "d2f680c43f6a9c2c1de2654a7626c7da5765ebb3bebc682f20284ecb011df8f0",
-          "size": 21124
+          "sha256": "eda983dd3d57863b4210cca30c44b01583fee9a8e81e7a0b06316fbd425e9fa6",
+          "size": 21349
         },
         {
           "path": "telegram_bot/runtime.py",
@@ -3225,8 +3245,8 @@
         },
         {
           "path": "tests/test_places.py",
-          "sha256": "a52ec5920c97c43a1abb2458c59a4aa19db01dbd4a6fcb909eb70a119d7dad14",
-          "size": 10238
+          "sha256": "a09523a603e7b399f3fa271d1676fd987133e3fb9489efadefca61f60173d120",
+          "size": 9957
         },
         {
           "path": "tests/test_plugin.py",
@@ -3240,8 +3260,8 @@
         },
         {
           "path": "tests/test_reactions.py",
-          "sha256": "1345adb3f2f7aa9831297c1ddbe4f9b88bb6326290687f765f6fea02da1da0d0",
-          "size": 101378
+          "sha256": "adff27738e3cbc623e8d445c5982ccb43fa759637928801cd0e001bc0278db53",
+          "size": 100772
         },
         {
           "path": "tests/test_retained_custody.py",
@@ -3278,7 +3298,7 @@
       "name": "telegram-bot",
       "slug": "telegram-bot",
       "type": "extension",
-      "version": "0.10.4"
+      "version": "0.10.3"
     },
     {
       "connects": [

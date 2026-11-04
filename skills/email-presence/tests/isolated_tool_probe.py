@@ -35,10 +35,10 @@ def main():
     # Replace only network-facing client methods. Registration, store, MIME source
     # staging, context injection, JSON return and subprocess transport remain real.
     (skill / "plugin.py").write_text('''
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from . import original_plugin
 
-class OfflineMailClient:
+class OfflineMailClient(original_plugin.MailClient):
     def __init__(self, settings):
         self.settings = settings
     def search(self, **kwargs):
@@ -51,9 +51,19 @@ class OfflineMailClient:
                 "uid": kwargs["uid"], "message_id": "<fixture@example.invalid>",
                 "body": "Unicode 📬 and 'quoted' text", "attachments": [],
                 "_raw_source": b"Subject: fixture\\r\\n\\r\\nbody"}
-    def mark_read(self, **kwargs):
-        return {"ok": True, "uid": kwargs["uid"], "uidvalidity": kwargs["uidvalidity"], "folder": kwargs["folder"]}
+    @contextmanager
+    def imap(self, folder, *, readonly=True):
+        assert folder == "INBOX" and not readonly
+        class Box:
+            def response(self, name):
+                return "OK", [b"7"]
+            def uid(self, *args):
+                assert args == ("STORE", "4", "+FLAGS.SILENT", "(" + chr(92) + "Seen)")
+                return "OK", [b""]
+        yield Box()
     def mailbox(self, **kwargs):
+        if kwargs.get("action") != "list":
+            return super().mailbox(**kwargs)
         return {"folders": [{"name": "INBOX", "selectable": True}, {"name": "Архив", "optional": None}]}
     def draft(self, **kwargs):
         return {"ok": True, "saved": kwargs["body"], "sent": False, "uid": None}
@@ -121,7 +131,8 @@ def register(api):
         assert Path(message["source_artifact"]["path"]).read_bytes() == b"Subject: fixture\r\n\r\nbody"
         prepared_mark = invoke("email_mark_read", uid=4, uidvalidity=7)
         assert prepared_mark["status"] == "needs_arguments"
-        assert invoke("email_mark_read", **prepared_mark["retry_arguments"]) == {"ok": True, "uid": 4, "uidvalidity": 7, "folder": "INBOX", "account_id": "mail@example.invalid"}
+        assert prepared_mark["retry_arguments"]["folder_names"] == ["INBOX"]
+        assert invoke("email_mark_read", **prepared_mark["retry_arguments"]) == {"ok": True, "uid": 4, "uidvalidity": 7, "account_id": "mail@example.invalid"}
         assert invoke("email_mailbox", action="list") == {"folders": [
             {"name": "INBOX", "selectable": True}, {"name": "Архив", "optional": None}], "account_id": "mail@example.invalid"}
         prepared_draft = invoke("email_draft", to="reader@example.invalid", subject="Draft", body="Черновик")

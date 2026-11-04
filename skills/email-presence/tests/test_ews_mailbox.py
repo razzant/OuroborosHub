@@ -6,7 +6,7 @@ import pytest
 
 from lib.ews import EwsClient
 from lib.ews_wire import EwsError, NS
-from test_ews_wire import CONFIG, FakeResponse, Session, response
+from test_ews_wire import CONFIG, FakeResponse, Session, batch_response, response
 
 ACCOUNT = {'id': 'ews:mailbox', 'address': 'mailbox@example.invalid', 'sender': 'mailbox@example.invalid', 'config': CONFIG}
 NATIVE = 'AA+aB/C='
@@ -27,6 +27,17 @@ def identity(kind, native, *, parent='I+/=', key='c3RvcmU=', changekey='key'):
 
 def proof(kind='Item', native=NATIVE):
     return identity(kind, native), identity('Folder', 'I+/=')
+
+
+def folder_record(native, name, distinguished=''):
+    alias = f'<t:DistinguishedFolderId>{distinguished}</t:DistinguishedFolderId>' if distinguished else ''
+    return response('GetFolder', f'<m:Folders><t:Folder><t:FolderId Id="{native}"/>'
+                    f'<t:DisplayName>{name}</t:DisplayName>{alias}</t:Folder></m:Folders>')
+
+
+def default_records():
+    return batch_response('GetFolder', [('Success', 'NoError', '<m:Folders><t:Folder><t:FolderId '
+                          f'Id="native-{i}"/></t:Folder></m:Folders>') for i in range(7)])
 
 
 def item(native=NATIVE, *, mime=False, mid=True):
@@ -119,7 +130,9 @@ def test_folder_pages_and_ambiguous_name_are_not_silently_resolved():
 
 @pytest.mark.parametrize('action,operation', [('copy', 'CopyItem'), ('move', 'MoveItem'), ('trash', 'MoveItem')])
 def test_move_copy_return_new_reference_only_when_supplied(action, operation):
-    checks = (*(() if action == 'trash' else proof('Folder', 'dst')), *proof())
+    target_id = 'bin' if action == 'trash' else 'dst'
+    checks = (*(() if action == 'trash' else proof('Folder', 'dst')), folder_record(target_id, 'Target'),
+              *(() if action == 'trash' else (default_records(),)), *proof())
     c, s = client(*checks, response(operation, '<m:Items><t:Message><t:ItemId Id="New+/="/></t:Message></m:Items>'),
                   *checks, response(operation))
     args = dict(action=action, destination='ews-folder:ews:mailbox:dst', message_ref='ews:' + NATIVE)
@@ -129,14 +142,16 @@ def test_move_copy_return_new_reference_only_when_supplied(action, operation):
     assert len(effects) == 2
     assert effects[0].find('m:ItemIds/t:ItemId', NS).get('Id') == NATIVE
     target = effects[0].find('m:ToFolderId', NS)[0]
-    assert target.get('Id') == ('deleteditems' if action == 'trash' else 'dst')
+    assert target.tag == f'{{{NS["t"]}}}FolderId' and target.get('Id') == target_id
 
 
 def test_create_folder_and_flags_use_exact_target_and_current_changekey():
-    c, s = client(response('CreateFolder', '<m:Folders><t:Folder><t:FolderId Id="F+"/></t:Folder></m:Folders>'),
+    c, s = client(folder_record('I+/=', 'Posteingang', 'inbox'),
+                  response('CreateFolder', '<m:Folders><t:Folder><t:FolderId Id="F+"/></t:Folder></m:Folders>'),
                   *proof(), response('UpdateItem'))
     assert c.mailbox(action='create', folder='INBOX', destination='Tests & more')['id'] == 'ews-folder:ews:mailbox:F+'
-    assert s.operations[0].findtext('.//t:DisplayName', namespaces=NS) == 'Tests & more'
+    assert s.operations[1].findtext('.//t:DisplayName', namespaces=NS) == 'Tests & more'
+    assert s.operations[1].find('m:ParentFolderId/t:FolderId', NS).get('Id') == 'I+/='
     assert c.mailbox(action='flags', message_ref='ews:' + NATIVE, flags=[r'\Seen', r'\Flagged'], remove_flags=True)['ok']
     update = s.operations[-1]
     assert update.get('SuppressReadReceipts') == 'true' and update.get('MessageDisposition') == 'SaveOnly'
@@ -145,7 +160,7 @@ def test_create_folder_and_flags_use_exact_target_and_current_changekey():
     assert update.findtext('.//t:FlagStatus', namespaces=NS) == 'NotFlagged'
     with pytest.raises(ValueError, match='support Seen'):
         c.mailbox(action='flags', message_ref='ews:' + NATIVE, flags=[r'\Seen', 'unknown'])
-    assert names(s) == ['CreateFolder', 'GetItem', 'GetFolder', 'UpdateItem']
+    assert names(s) == ['GetFolder', 'CreateFolder', 'GetItem', 'GetFolder', 'UpdateItem']
 
 
 def test_incomplete_pagination_or_non_ews_ref_never_claim_success():
@@ -165,7 +180,8 @@ def test_delegated_login_cannot_reuse_another_mailbox_folder_handle():
                         f'<t:Folder><t:FolderId Id="{native}"/><t:DisplayName>Team</t:DisplayName>'
                         '</t:Folder></t:Folders></m:RootFolder>')
     a, _ = client(directory('A+/='))
-    s = Session(directory('B+/='), *proof('Folder', 'B+/='), listing(item()), *proof('Folder', 'B+/='), *proof(), response('CopyItem'))
+    s = Session(directory('B+/='), *proof('Folder', 'B+/='), listing(item()), *proof('Folder', 'B+/='),
+                folder_record('B+/=', 'Team'), default_records(), *proof(), response('CopyItem'))
     b = EwsClient({**ACCOUNT, 'id': 'ews:other', 'address': 'other@example.invalid'}, session=s)
     foreign = a.mailbox(action='list')['folders'][0]['id']
     own = b.mailbox(action='list')['folders'][0]['id']

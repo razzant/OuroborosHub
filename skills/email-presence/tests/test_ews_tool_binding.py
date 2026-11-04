@@ -61,7 +61,9 @@ def test_opaque_refs_remain_bound_across_search_read_and_move(exchange_tools):
     assert calls[-1] == ('read', first['id'], 'ews:AA/Case+Sensitive==')
     assert read['thread_id'] == '<root@example.invalid>'
     moved = call('email_mailbox', account_id=first['id'], action='move', message_ref=ref, destination='Archive')
-    assert calls[-1][2] == {'action': 'move', 'message_ref': 'ews:AA/Case+Sensitive==', 'destination': 'Archive'}
+    provider_args = dict(calls[-1][2])
+    assert callable(provider_args.pop('prepare_targets'))
+    assert provider_args == {'action': 'move', 'message_ref': 'ews:AA/Case+Sensitive==', 'destination': 'Archive'}
     assert moved['message_ref'].startswith('mail:') and moved['message_ref'] != ref
     call('email_read', account_id=first['id'], message_ref=moved['message_ref'])
     assert calls[-1] == ('read', first['id'], 'ews:new/Location+ID==')
@@ -79,8 +81,10 @@ def test_exchange_native_thread_is_never_the_rfc_author_or_a_gmail_route(exchang
     assert retry['thread_id'] == retry['conversation_id'] == '<root@example.invalid>'
     draft = call('email_draft', **retry)
     assert draft['message_ref'].startswith('mail:') and 'thread_id' not in calls[-1][2]
-    sent = call('email_send', **args, conversation_id=read['conversation_id'], thread_id=read['thread_id'],
-                request_id='fixture-reply')
+    offer = call('email_send', **args, conversation_id=read['conversation_id'], thread_id=read['thread_id'],
+                 request_id='fixture-reply')
+    assert offer['status'] == 'needs_arguments' and not store.queued_message('fixture-reply')
+    sent = call('email_send', **offer['retry_arguments'])
     assert sent['ok'] and store.status()['outbox'] == {'pending': 1}
     queued = store.queued_message('fixture-reply')
     assert queued.in_reply_to == read['message_id'] and 'gmail_thread_id' not in queued.reporting
