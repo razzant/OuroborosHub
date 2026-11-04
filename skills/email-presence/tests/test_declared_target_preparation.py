@@ -25,7 +25,11 @@ def harness(provider='gmail'):
     requests=[];account={'id':provider+':fixture','provider':provider,'address':'owner@example.invalid'}
     if provider=='gmail':
         client=GmailClient.__new__(GmailClient)
-        def capture(method,path,**kwargs):requests.append({'method':method,'path':path,**kwargs});return {'id':'fixture-result'}
+        def capture(method,path,**kwargs):
+            if method=='GET' and path=='/labels':
+                return {'labels':[{'id':'Label_1','name':'Filed'}]}
+            requests.append({'method':method,'path':path,**kwargs})
+            return {'id':'fixture-result'}
         client._request=capture
     else:
         client=MailClient.__new__(MailClient)
@@ -98,7 +102,10 @@ def test_filter_body_is_preserved_and_forward_destination_is_attributed(forward)
     assert requests==[{'method':'POST','path':'/settings/filters','body':body}]
     assert DECLARATIONS['email_settings']['effect']=='write'
     if forward:assert body['action']['forward'] in [value for values in targets.values() for value in values]
-    else:assert calls==1 and targets=={'account_id':[account['id']]}
+    assert calls==2
+    assert targets['account_id']==[account['id']]
+    assert targets['add_labels']==['Label_1'] and targets['remove_labels']==['INBOX']
+    assert targets['label_names']==['Filed']
 
 
 @pytest.mark.parametrize('matching',[False,True])
@@ -120,7 +127,8 @@ def test_filter_target_preparation_preserves_values_and_never_sends_mismatch(sha
             'action':{'addLabelIds':['Label_1'],'removeLabelIds':['INBOX']}}
     if shape!='top_only':values['action']['forward']='actual@example.invalid'
     original=json.dumps(values,sort_keys=True)
-    args={'account_id':account['id'],'resource':'filters','action':'create','values':values}
+    args={'account_id':account['id'],'resource':'filters','action':'create','values':values,
+          'add_labels':['Label_1'],'remove_labels':['INBOX'],'label_names':['Filed']}
     if shape in ('matching','top_only'):args['forward_to']='actual@example.invalid'
     if shape=='mismatch':args['forward_to']='wrong@example.invalid'
     result,used,calls,targets=invoke(registered,requests,'email_settings',args,schemas)

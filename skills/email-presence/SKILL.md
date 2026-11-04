@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.10.2
+version: 0.10.3
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -68,7 +68,7 @@ tools:
     description: Read supported provider settings, filters and sender configuration.
   - name: email_settings
     effect: write
-    target: [account_id,forward_to]
+    target: [account_id,forward_to,add_labels,remove_labels,label_names]
     description: Change supported provider settings; website-only operations are reported explicitly.
 ui_tab:
   tab_id: email_presence
@@ -114,8 +114,8 @@ address. Host conversation identity remains RFC Message-ID/References; native
 Gmail message/thread ids remain explicit provider facts, and replies pass the
 native threadId to Gmail. No signature, footer or Auto-Submitted marker is added.
 
-Supply canonical `account_id` for new sends, drafts, marking read, and mailbox
-writes, even with a sole connected mailbox. Reads and folder listing may still
+Supply canonical `account_id` for new sends, drafts, marking read, mailbox and Gmail
+settings writes, even with a sole connected mailbox. Reads and folder listing may still
 select that sole mailbox implicitly. A write with an implicit account returns
 the canonical account and its resolved targets in one `retry_arguments`. Read/search results also include canonical `conversation_id`
 and `thread_id` when the RFC source is known; pass both for a threaded reply.
@@ -226,8 +226,17 @@ remain readable by explicit account_id.
   characters while the original MIME bytes remain unchanged. These reads stay
   capturable and searchable. Parsed address fields are projections, not permission
   to send to malformed text: outgoing validation and selected-output custody still
-  apply. Other pre-existing malformed-header parser failures, including unusual
-  Message-ID/Date values and exotic charsets, remain outside these recovery paths.
+  apply. A damaged Message-ID does not stop intake. Mail keeps the original
+  MIME when available and uses a usable provider or MIME identity, or a stable
+  local fallback rather than claiming that the sender supplied a valid ID.
+  An IMAP full read keeps the SHA-256 identity of the complete source;
+  Gmail can use its native message ID for a damaged header, and Exchange uses
+  its native item ID when neither source supplies a usable InternetMessageId.
+  A headers-only view cannot hash the original message. When the ID is absent
+  from that view, use its account-bound message_ref to read it; the optional
+  message_id_note explains the missing identity. No full body is fetched just
+  for search. This recovery does not cover every malformed MIME structure or
+  unsupported charset.
 - email_folders is a declared read and works in Silent/Advises. email_mailbox
   retains list/create/copy/move/flags, including the old list action. IMAP move
   requires UID MOVE, never a mailbox-wide expunge. Gmail adds label management,
@@ -298,12 +307,16 @@ remain readable by explicit account_id.
   independent workers of this one companion.
 - email_settings_read inspects supported Gmail settings; email_settings changes
   supported filters, vacation, language, IMAP/POP and existing send-as properties.
-  A forwarding filter uses canonical forward_to alongside values.action.forward.
-  Nested-only or mismatched destinations return needs_arguments and exact
-  retry_arguments before a provider change. Matching destinations execute in one
-  call; forward_to alone fills that nested field while preserving other filter
-  data. Non-forwarding filters and other settings need no additional argument.
-  This is argument preparation, not another human approval or forwarding limit.
+  A settings write exposes its selected account, even when it is the only mailbox.
+  Before creating a filter, Mail compares the effective values.action.forward,
+  addLabelIds and removeLabelIds and current custom label names with the declared
+  forward_to, add_labels, remove_labels and label_names. Missing or stale targets
+  return exact retry_arguments without writing. A canonical call writes once.
+  The label fields describe the original Gmail action; they never add an effect.
+  forward_to alone fills the nested forwarding field while preserving the criteria
+  and other actions. Gmail runs an installed filter until it is deleted; a later
+  local Place change does not suspend an existing provider rule. Deleting a filter
+  acts on the selected account and filter identifier, without executing the rule.
   Administrative forwarding or additional send-as management requiring domain
   delegation is reported as website_required for personal accounts. Other
   providers' account settings are not exposed by this adapter; use the provider website.

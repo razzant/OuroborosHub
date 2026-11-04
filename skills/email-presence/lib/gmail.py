@@ -118,7 +118,8 @@ class GmailClient(MailClient):
         else:
             encoded = payload.get("raw") or ""
             raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
-        message = parse_message(raw, folder="Gmail", uid=self._uid(native), include_attachment_data=include_attachment_data)
+        message = parse_message(raw, folder="Gmail", uid=self._uid(native), include_attachment_data=include_attachment_data,
+                                missing_id="" if headers_only else None, invalid_id=f"<gmail-{native}@ouroboros.local>")
         labels = list(payload.get("labelIds") or [])
         message.update(uidvalidity=1, internal_date=int(payload.get("internalDate") or 0) / 1000,
                        provider_id=native, provider_thread_id=str(payload.get("threadId") or ""),
@@ -181,6 +182,17 @@ class GmailClient(MailClient):
             raise ValueError("Choose an exact label id or unique name from email_folders")
         return matches[0]
 
+    def _current_label_names(self, affected, snapshot=None):
+        """Names are alternate Host targets; the Gmail request still uses the caller's exact IDs."""
+        custom = set(affected) - _SYSTEM_LABEL_IDS
+        if not custom:
+            return set()
+        labels = snapshot() if snapshot else self._request("GET", "/labels").get("labels", [])
+        by_id = {row["id"]: row["name"] for row in labels}
+        if not custom <= by_id.keys():
+            raise ValueError("Choose current Gmail label IDs from email_folders")
+        return {by_id[key] for key in custom if by_id[key] != key}
+
     def mark_read(self, *, message_ref="", uid=None, uidvalidity=None, folder=None, prepare_targets=None):
         return self.mailbox(action="flags", message_ref=message_ref, uid=uid, uidvalidity=uidvalidity,
                             flags=["\\Seen"], prepare_targets=prepare_targets)
@@ -197,12 +209,7 @@ class GmailClient(MailClient):
         def write(method, path, body, targets, affected=(), fixed_names=()):
             if prepare_targets:
                 names = set(fixed_names)
-                current = set(affected) - _SYSTEM_LABEL_IDS
-                if current:
-                    by_id = {row["id"]: row["name"] for row in snapshot()}
-                    if not current <= by_id.keys():
-                        raise ValueError("Choose current Gmail label IDs from email_folders")
-                    names.update(by_id[key] for key in current if by_id[key] != key)
+                names.update(self._current_label_names(affected, snapshot))
                 if names or label_names:
                     targets["label_names"] = sorted(names)
             prepared = prepare_targets(targets) if prepare_targets else None
@@ -297,7 +304,7 @@ class GmailClient(MailClient):
             path += "/" + quote(str(identifier), safe="")
         return self._request("GET", path)
 
-    def settings_write(self, *, resource, action="update", identifier="", values=None):
+    def settings_write(self, *, resource, action="update", identifier="", values=None, forward_to="", prepare_targets=None):
         from urllib.parse import quote
         if resource in {"autoForwarding", "forwardingAddresses"}:
             return {"ok": False, "code": "website_required", "message": "Changing forwarding requires Workspace administrative delegation; use Gmail settings for a personal account."}
@@ -312,8 +319,34 @@ class GmailClient(MailClient):
             raise ValueError("Gmail filters are created or deleted, not updated")
         if action == "delete" and not identifier:
             raise ValueError("identifier is required for delete")
-        return self._request({"create": "POST", "update": "PUT", "delete": "DELETE"}[action], path,
-                             body=None if action == "delete" else dict(values or {}))
+        body = None if action == "delete" else dict(values or {})
+        targets = {}
+        if resource == "filters" and action == "create":
+            if identifier:
+                raise ValueError("Creating a Gmail filter targets the filter collection; omit identifier")
+            if any(key.lower() == "action" and key != "action" for key in body):
+                raise ValueError("Use the Gmail filter's documented action field")
+            rule = body.get("action", {})
+            if not isinstance(rule, dict) or rule.keys() - {"forward", "addLabelIds", "removeLabelIds"}:
+                raise ValueError("Gmail filter action must be an object with forward, addLabelIds or removeLabelIds")
+            if not isinstance(rule.get("forward", ""), str) or not isinstance(forward_to, str):
+                raise ValueError("Gmail filter forwarding destination must be a string")
+            forward = rule.get("forward") or forward_to
+            if forward and not rule.get("forward"):
+                body["action"] = {**rule, "forward": forward}
+            targets["forward_to"] = forward
+            affected = []
+            for key, wire in (("add_labels", "addLabelIds"), ("remove_labels", "removeLabelIds")):
+                ids = rule.get(wire, [])
+                if not isinstance(ids, list) or any(not isinstance(i, str) or not i.strip() for i in ids):
+                    raise ValueError(f"{wire} must be a list of Gmail label IDs")
+                targets[key] = ids
+                affected.extend(ids)
+            if prepare_targets:
+                targets["label_names"] = sorted(self._current_label_names(affected))
+        if prepare_targets and (needed := prepare_targets(targets)):
+            return needed
+        return self._request({"create": "POST", "update": "PUT", "delete": "DELETE"}[action], path, body=body)
 
     @contextmanager
     def delivery(self):

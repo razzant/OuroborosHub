@@ -7,7 +7,7 @@ import mimetypes
 import re
 from email import message_from_bytes
 from email.header import decode_header, make_header
-from email.errors import HeaderParseError, InvalidHeaderDefect, MessageError
+from email.errors import HeaderParseError, InvalidHeaderDefect, MessageError, NonPrintableDefect
 from email.message import EmailMessage, Message
 from email.policy import default
 from email.utils import getaddresses, make_msgid, parseaddr
@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Any
 
 _ADDRESS_PARSE_ERRORS = (ValueError, IndexError, AttributeError, TypeError, HeaderParseError)
+
+
+def _wire_text(value: str, errors: str = "replace") -> str:
+    # raw_items uses surrogateescape for octets above ASCII.
+    return value.encode("utf-8", "surrogateescape").decode("utf-8", errors)
 
 
 def decode_header_value(value: Any) -> str:
@@ -29,7 +34,7 @@ def decode_header_value(value: Any) -> str:
         text = source
     # raw_items uses surrogateescape for 8-bit wire bytes. Recover valid UTF-8,
     # replace undecodable bytes for display, and retain the original MIME source.
-    return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+    return _wire_text(text)
 
 
 def _plain_from_part(part: Message) -> str:
@@ -72,6 +77,29 @@ def extract_body(message: Message, max_chars: int | None = 100_000) -> str:
         html_body = value if kind == "text/html" else ""
     text = plain.strip() or _html_to_text(html_body)
     return text if max_chars is None or len(text) <= max_chars else text[:max_chars] + f"\n[Body truncated: {len(text)} characters total]"
+
+
+# email.headerregistry lazily constructs a Message-ID tree; a malformed value
+# can raise rather than reporting a defect (notably on Python 3.10).
+_HEADER_PARSE_ERRORS = (*_ADDRESS_PARSE_ERRORS, UnboundLocalError, RecursionError, OverflowError)
+
+
+def usable_message_id(value: str | None) -> str:
+    """Decode one usable identity, retaining the established <local-token> form."""
+    if not value:
+        return ""
+    try:
+        # Preserve UTF-8 IDs, but never deduplicate on lossy replacement text.
+        parsed = default.header_fetch_parse("Message-ID", _wire_text(value, errors="strict"))
+        if not any(isinstance(d, (InvalidHeaderDefect, NonPrintableDefect)) for d in parsed.defects):
+            return str(parsed).strip()
+    except _HEADER_PARSE_ERRORS:
+        pass
+    # Old mail and local clients can use a single unqualified atom. This is
+    # distinct from trusting an arbitrary broken header as a deduplication key.
+    token = str(value).strip()
+    atom = r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
+    return token if re.fullmatch(fr"<{atom}(?:\.{atom})*>", token) else ""
 
 
 def _message_ids(value: Any) -> list[str]:
@@ -142,16 +170,27 @@ def parse_message(
     uid: int,
     max_body_chars: int = 100_000,
     include_attachment_data: bool = False,
+    missing_id: str | None = None,
+    invalid_id: str = "",
 ) -> dict[str, Any]:
     msg = message_from_bytes(raw, policy=default)
+    def raw_header(name):
+        return next((v for k, v in msg.raw_items() if k.lower() == name.lower()), None)
+
     def header(name):
-        # A broken external address must remain readable without stopping later
-        # messages. Only stdlib header parsing falls back to its original value.
         try:
             return msg.get(name)
-        except _ADDRESS_PARSE_ERRORS:
-            return next((value for key, value in msg.raw_items() if key.lower() == name.lower()), None)
-    message_id = str(msg.get("Message-ID") or "").strip() or f"<sha256-{hashlib.sha256(raw).hexdigest()}@ouroboros.local>"
+        except _HEADER_PARSE_ERRORS:
+            return _wire_text(raw_header(name) or "")
+
+    raw_id = raw_header("Message-ID")
+    message_id = usable_message_id(raw_id)
+    if not message_id:
+        # A metadata projection is not the original wire message. Its caller
+        # can supply an empty ID and still return an exact provider message_ref.
+        message_id = (invalid_id if raw_id and raw_id.strip() else "") or missing_id
+        if message_id is None:
+            message_id = f"<sha256-{hashlib.sha256(raw).hexdigest()}@ouroboros.local>"
     sender_name, sender_addr = parseaddr(decode_header_value(header("From")))
     attachments = []
     for part in msg.walk():
@@ -164,18 +203,20 @@ def parse_message(
         "folder": folder,
         "uid": int(uid),
         "message_id": message_id,
-        "in_reply_to": str(msg.get("In-Reply-To") or "").strip(),
-        "references": _message_ids(msg.get("References")),
+        "in_reply_to": str(header("In-Reply-To") or "").strip(),
+        "references": _message_ids(header("References")),
         "subject": decode_header_value(msg.get("Subject")),
         "sender": sender_addr or decode_header_value(header("From")),
         "sender_name": sender_name,
         "recipients": _addresses(header("To")),
         "cc": _addresses(header("Cc")),
         "reply_to": _addresses(header("Reply-To")),
-        "date": str(msg.get("Date") or ""),
+        "date": str(header("Date") or ""),
         "body": extract_body(msg, max_chars=max_body_chars),
         "attachments": attachments,
     }
+    if not message_id:
+        result["message_id_note"] = "No usable Message-ID in these headers; read the full message by message_ref."
     result["headers"] = {
         name.lower(): [decode_header_value(value) for key, value in msg.raw_items() if key.lower() == name.lower()]
         for name in ("From", "To", "Cc", "Reply-To", "List-Id", "List-Unsubscribe", "Precedence", "Auto-Submitted")

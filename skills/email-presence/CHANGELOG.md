@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.3
+
+- Check the selected Gmail account, forwarding address, and affected label IDs
+  and names before creating a filter. A canonical retry does not alter its criteria.
+- Keep malformed Message-ID headers from stopping mailbox intake or hiding later mail.
+
 ## 0.10.2
 
 - Preserve existing Exchange message and folder references while verifying their
