@@ -13,6 +13,7 @@ import httpx
 
 from .accounts import AccountError
 from .client import MailClient
+from .delivery import DeliveryRejected
 from .mime import build_message, mailbox_addresses, parse_message
 
 BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -24,14 +25,6 @@ class GmailError(RuntimeError):
         self.reason = str(reason)
         self.retry_after = retry_after
         super().__init__(f"Gmail HTTP {status}" + (f" ({reason})" if reason else ""))
-
-
-class DeliveryRejected(RuntimeError):
-    """A typed provider response proves the message was not accepted."""
-    def __init__(self, cause):
-        self.retryable = cause.status == 429
-        self.retry_after = cause.retry_after
-        super().__init__(str(cause))
 
 
 class GmailClient(MailClient):
@@ -303,7 +296,7 @@ class GmailClient(MailClient):
             result = self._request("POST", "/messages/send", body=payload, access=self._delivery_access)
         except GmailError as exc:
             if 400 <= exc.status < 500 and exc.status != 408:
-                raise DeliveryRejected(exc) from exc
+                raise DeliveryRejected(exc, retryable=exc.status == 429, retry_after=exc.retry_after) from exc
             raise
         if not result.get("id"):
             raise RuntimeError("Gmail send response omitted its message id; inspect Sent before sending again")

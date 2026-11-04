@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.4
+## 0.10.1
 
 - Say what a hold means when the Host did not say whether a Place allows sending:
   `Held: Ouroboros did not answer whether this place allows sending. Nothing was sent
@@ -9,6 +9,15 @@
 - Name the Place's state in a Host's refusal (`Held: Work mail is paused`), not its code
   (`Held: place_paused`). A send no connected Place covers says so. The code stays in the
   debug log (`LOG_LEVEL=DEBUG`).
+
+## 0.10.0
+
+- Connect on-premises Exchange mailboxes over HTTPS with NTLM. Exchange uses
+  the existing account widget, mail tools, optional Place intake and outbox.
+  Mailbox addresses and credentials belong to the local installation.
+- Preserve native Exchange item references alongside RFC reply identity.
+  Reads do not mark messages read. A successful Exchange send can have no item
+  ID; an ambiguous response stays uncertain without an automatic resend.
 
 ## 0.9.3
 

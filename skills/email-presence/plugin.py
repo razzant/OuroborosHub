@@ -46,9 +46,10 @@ def register(api):
                                                 sender=account.get("sender") or account["address"])
         text = "Disconnected" if not account["connected"] else (
             "Worker stopped: " + account["runtime_error"] if account.get("runtime_error") else
-            f"{held} held" if held else "Tools account; no automatic intake" if (health or {}).get("intake") == "no_place"
+            f"{held} held" if held else "Mail intake failed: " + str(health.get("error") or "test the connection")
+            if health and health.get("ok") is False else "Tools account; no automatic intake" if (health or {}).get("intake") == "no_place"
             else "Authenticated intake" if (health or {}).get("ok") else "Configured; test connection")
-        payload.update(text=text, tone="warn" if held or not account["connected"] or account.get("runtime_error") else "ok" if (health or {}).get("ok") else "muted",
+        payload.update(text=text, tone="warn" if held or not account["connected"] or account.get("runtime_error") or (health or {}).get("ok") is False else "ok" if (health or {}).get("ok") else "muted",
                        title="Email transport")
         return payload
 
@@ -90,7 +91,12 @@ def register(api):
             def perform():
                 accounts = service.accounts
                 if action == "save":
-                    return accounts.public(accounts.save_imap(body))
+                    provider = body.get("provider", "imap")
+                    if provider == "ews":
+                        return accounts.public(accounts.save_ews(body))
+                    if provider == "imap":
+                        return accounts.public(accounts.save_imap(body))
+                    raise AccountError("Choose an IMAP or Exchange connection, or use Google sign-in")
                 account_id = str(body.get("account_id") or "")
                 if action == "preferences":
                     return accounts.public(accounts.update_preferences(account_id, body))
@@ -101,7 +107,7 @@ def register(api):
                 if action == "refresh-senders":
                     with service.target(account_id) as (account, _store, client):
                         if account["provider"] != "gmail":
-                            raise AccountError("Edit configured sender addresses for this IMAP account")
+                            raise AccountError("Edit the sender addresses in this account's connection")
                         values = client.settings_read(resource="sendAs")
                         senders = list(dict.fromkeys([account["address"]] + [
                             row["sendAsEmail"] for row in values.get("sendAs", [])
@@ -190,7 +196,7 @@ def register(api):
         "kind": "module", "entry": "ui/accounts.js", "entry_type": "module",
         "assets": ["ui/accounts.css"], "appearance": "host", "start": "auto", "height": 620})
     api.register_settings_section("email_presence", title="Email accounts", schema={"components": [
-        {"type": "markdown", "text": "Use the Email accounts widget to add Google, IMAP or Proton Bridge accounts and choose sender addresses. Google needs your installation's granted GOOGLE_OAUTH_CLIENT_ID (and CLIENT_SECRET when required). These fields below keep the original EMAIL_* mailbox configuration."},
+        {"type": "markdown", "text": "Use the Email accounts widget to add Google, IMAP, Proton Bridge or Exchange accounts and choose sender addresses. Google needs your installation's granted GOOGLE_OAUTH_CLIENT_ID (and CLIENT_SECRET when required). These fields below keep the original EMAIL_* mailbox configuration."},
         {"type": "form", "route": "settings/save", "method": "POST", "submit_label": "Save legacy mailbox settings", "fields": [
             {"name": "folder", "label": "Intake folder", "type": "text", "placeholder": "INBOX"},
             {"name": "sending", "label": "Sending", "type": "select", "default": "on",

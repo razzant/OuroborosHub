@@ -14,7 +14,7 @@ if str(SKILL_ROOT) not in sys.path:
 
 from lib.client import MailClient
 from lib.accounts import AccountError, AccountStore, SETTING_KEYS
-from lib.gmail import GmailClient
+from lib.service import account_client
 from lib.host_adapter import create_host_adapter
 from lib.runtime import EmailRuntime
 from lib.store import EmailStore
@@ -40,9 +40,7 @@ async def manage_accounts(state, stop, *, refresh_seconds=1):
         client = host = None
         try:
             directory = accounts.mail_dir(account)
-            cfg = account.get("config") or {}
-            client = (GmailClient(accounts, account["id"]) if account["provider"] == "gmail" else
-                      MailClient({**cfg, "EMAIL_DEFAULT_SENDER": account.get("sender") or account["address"]}))
+            client = account_client(accounts, account, imap_client=MailClient)
             root_settings = json.loads((state / "settings.json").read_text(encoding="utf-8")) if (state / "settings.json").exists() else {}
             host = create_host_adapter(str(root_settings.get("binding_id") or "") if account.get("legacy") else "",
                                        words=account.get("words", []), account_id=account["id"], address=account["address"],

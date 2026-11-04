@@ -127,3 +127,25 @@ def test_account_discovery_retains_counts_and_addressable_receipts_after_disconn
         web_queue = http.get("/accounts").json()["accounts"][0]["queue"]
         assert web_queue == api_queue
         assert http.get("/status", params={"account_id": account["id"]}).json()["receipts"] == api_queue["receipts"]
+
+
+def test_exchange_save_list_and_disconnect_use_the_existing_accounts_routes(tmp_path):
+    base = {"provider": "ews", "address": "owner@example.invalid",
+            "endpoint": "https://exchange.example.invalid:8443/service/EWS", "password": "private-fixture"}
+    with TestClient(_settings_app(tmp_path)) as http:
+        for bad_url in ("http://exchange.example.invalid/EWS", "https://user:secret@example.invalid/EWS",
+                        "https://exchange.example.invalid/EWS?token=secret", "https://example.invalid/EWS#secret"):
+            refused = http.post("/accounts/save", json={**base, "endpoint": bad_url})
+            assert refused.status_code == 400 and "secret" not in refused.text
+        assert not http.get("/accounts").json()["accounts"]
+        saved = http.post("/accounts/save", json=base)
+        assert saved.status_code == 200 and "private-fixture" not in saved.text
+        account = saved.json()["account"]
+        assert account["connection"] == {"EWS_ENDPOINT": base["endpoint"], "EMAIL_USER": base["address"]}
+        assert account["password_configured"] and account["sending"] == "on"
+        status = http.get("/status", params={"account_id": account["id"]}).json()
+        assert status["provider"] == "ews" and status["connected"] and status["address"] == base["address"]
+        assert "private-fixture" not in http.get("/accounts").text
+        assert http.post("/accounts/disconnect", json={"account_id": account["id"]}).status_code == 200
+        detached = http.get("/accounts").json()["accounts"][0]
+        assert not detached["password_configured"] and not detached["connected"]

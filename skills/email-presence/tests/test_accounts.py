@@ -124,3 +124,41 @@ def test_new_unconfigured_send_is_not_a_false_queued_success(tmp_path):
     with pytest.raises(AccountError, match="Connect a mailbox"):
         MailService(api).send(to="recipient@example.invalid", body="hello")
     assert not (tmp_path / "email_presence.sqlite3").exists()
+
+
+def test_exchange_connection_edits_and_reconnect_keep_the_mailbox_and_its_history(tmp_path):
+    accounts = AccountStore(tmp_path)
+    address = "mail@example.invalid"
+    endpoint = "https://exchange.example.invalid/EWS/Exchange.asmx"
+    fields = {"address": address, "endpoint": endpoint}
+    initial = accounts.save_ews({**fields, "username": r"ORG\reader", "password": "first-private",
+                                 "senders": [address, "alias@example.invalid"]})
+    assert initial["provider"] == "ews" and initial["id"].startswith("ews:")
+    accounts.update_preferences(initial["id"], {"sender": "alias@example.invalid", "words": ["invoice"], "sending": "off"})
+    store = EmailStore(accounts.mail_dir(initial))
+    store.enqueue_outbox(request_id="original", to=["to@example.invalid"], body="keep", hold_reason="sending_off")
+    edited = {**fields, "account_id": initial["id"], "password": ""}
+    same = accounts.save_ews({**edited, "address": address.upper(),
+                              "endpoint": "HTTPS://EXCHANGE.example.invalid:443/EWS/Exchange.asmx"})
+    assert same["id"] == initial["id"] and same["config"] == {
+        "EWS_ENDPOINT": endpoint, "EMAIL_USER": r"ORG\reader", "EMAIL_PASSWORD": "first-private"}
+    assert same["sender"] == "alias@example.invalid" and same["words"] == ["invoice"] and same["sending"] == "off"
+    with pytest.raises(AccountError, match="Exchange password"):
+        accounts.save_ews({**edited, "username": "different-login"})
+    with pytest.raises(AccountError, match="own account"):
+        accounts.save_ews({**edited, "endpoint": "https://elsewhere.example.invalid/EWS/Exchange.asmx"})
+    with pytest.raises(AccountError, match="own account"):
+        accounts.save_ews({**edited, "address": "other@example.invalid"})
+    assert accounts.resolve(initial["id"])["config"] == same["config"]
+    changed = accounts.save_ews({**edited, "username": "different-login", "password": "other-private"})
+    assert changed["id"] == same["id"] and changed["config"]["EMAIL_USER"] == "different-login"
+    disconnected = accounts.disconnect(initial["id"])
+    assert not disconnected["connected"] and "EMAIL_PASSWORD" not in disconnected["config"]
+    with pytest.raises(AccountError, match="Exchange password"):
+        accounts.save_ews(edited)
+    restored = accounts.save_ews({**edited, "password": "restored-private"})
+    assert restored["id"] == initial["id"] and restored["config"]["EMAIL_PASSWORD"] == "restored-private"
+    assert EmailStore(accounts.mail_dir(restored)).receipt("original")["state"] == "held"
+    other = accounts.save_ews({**fields, "address": "other@example.invalid", "password": "other"})
+    assert other["id"] != initial["id"] and accounts.mail_dir(other) != accounts.mail_dir(initial)
+    assert other["config"]["EMAIL_USER"] == other["address"]

@@ -14,6 +14,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from .accounts import public_message_ref
 from .store import InboxItem
 from .facts import email_facts, mailbox_identity
 
@@ -104,7 +105,9 @@ def email_presence_event(item: InboxItem, *, account_id: str, places: bool = Fal
                     "references": list(item.references), "imap_uid": item.uid,
                     "folder": item.folder, "uidvalidity": item.uidvalidity,
                     "subject": item.subject, "to": list(item.recipients),
-                    **item.context},
+                    **item.context,
+                    **({"message_ref": public_message_ref(account_id, item.context["message_ref"])}
+                       if item.context.get("message_ref") else {})},
         "text": f"Subject: {item.subject}\n\n{item.body}",
         **({"facts": email_facts(item, address or account_id, words, senders)} if places else {}),
         **({"identity": mailbox_identity(address or account_id, senders=senders, sender=sender)} if identity else {}),
