@@ -262,7 +262,8 @@ remain readable by explicit account_id.
   Marking a message read or changing its flags writes its actual source folder.
   Before IMAP CREATE, Mail checks the server's hierarchy delimiter. For a nested
   path it declares any missing intermediate folders and the nearest existing
-  parent that would gain a child. An existing active parent stays writable when
+  parent that would gain a child. Mail checks the spelling you selected and the
+  spelling returned by the server when they differ. An existing active parent stays writable when
   a more distant ancestor is paused. A flat namespace treats the name literally.
   Exchange trash moves to Deleted Items. Exchange writes check the affected folder
   identities and require read access to their metadata; ordinary message reads still work

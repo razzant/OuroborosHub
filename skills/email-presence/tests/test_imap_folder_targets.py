@@ -25,7 +25,11 @@ class RecordingBox:
 
     def list(self, *args):
         self.list_calls.append(args)
-        return "OK", [b'(\\Noselect) ' + self.delimiter + b' ""'] if args else [b'() "/" Legal']
+        if not args:
+            return "OK", [b'() "/" Legal']
+        if args[1] == '""':
+            return "OK", [b'(\\Noselect) ' + self.delimiter + b' ""']
+        return "OK", [b'() ' + self.delimiter + b' ' + args[1].encode("ascii")]
 
     def response(self, key):
         return key, [b"7" if key == "UIDVALIDITY" else b"5"]
@@ -112,7 +116,11 @@ def test_create_declares_parent_only_in_the_reported_hierarchy(tmp_path, monkeyp
     assert bool(refusal) == denied
     assert box.writes == ([] if denied else [("CREATE", MailClient.folder_name(child))])
     if held != child:
-        assert box.list_calls and set(box.list_calls) == {(MailClient.folder_name(child), '""')}
+        lookups = {(MailClient.folder_name(child), '""')}
+        if delimiter != b"NIL":
+            parent = child.rsplit(delimiter[1:2].decode("ascii"), 1)[0]
+            lookups.add(('""', MailClient.folder_name(parent)))
+        assert set(box.list_calls) == lookups
     if delimiter == b"NIL":
         assert not used.get("folder_names")
 
@@ -207,6 +215,124 @@ def test_retry_checks_again_if_parent_was_removed(tmp_path, monkeypatch):
     args = call(tool, args)["retry_arguments"]
     assert args["folder_names"] == ["Legal", "Legal/2026"] and "Paused" in guard(args)
     assert not box.writes
+
+
+@pytest.mark.parametrize(("requested", "parent", "actual", "held"), [
+    ("Team/OPS/March", "Team/OPS", "Team/Ops", "Team/OPS"),
+    ("TEAM/OPS/2026/March", "TEAM/OPS", "Team/Ops", "TEAM/OPS/2026"),
+    ("TEAM/OPS/2026/March", "TEAM/OPS", "Team/Ops", "Team/Ops"),
+    ("TEAM/OPS/2026/March", "TEAM/OPS", "Team/Ops", "Team/Ops/2026"),
+    ("TEAM/OPS/2026/March", "TEAM/OPS", "Team/Ops", "Team/Ops/2026/March"),
+    ("TEAM/OPS/2026/March", "TEAM/OPS", "Team/Ops", "Team"),
+    ("team/2026/", "team", "Team", "Team"),
+    ("team/2026/", "team", "Team", "Team/2026"),
+    ("team/2026/", "team", "Team", "Elsewhere"),
+])
+def test_create_uses_provider_spelling_for_existing_parent_and_new_paths(
+        tmp_path, monkeypatch, requested, parent, actual, held):
+    row = ("OK", [b'() "/" ' + actual.encode()])
+    box = HierarchyBox({MailClient.folder_name(n): row for n in (parent, actual)})
+    _, _, run = guarded_calls(tmp_path, monkeypatch, "email_mailbox", [(held, "paused")], box=box)
+    used, refusal = run({"action": "create", "destination": requested})
+    destination = actual + requested[len(parent):]
+    assert used["destination"] == requested
+    affected = {parent, actual, requested.rstrip("/"), destination.rstrip("/")}
+    if "/2026/" in requested[len(parent):]:
+        affected.update((parent + "/2026", actual + "/2026"))
+    assert set(used["folder_names"]) == affected - {requested}
+    denied = held in affected
+    assert bool(refusal) == denied
+    assert box.writes == ([] if denied else [("CREATE", MailClient.folder_name(requested))])
+
+
+@pytest.mark.parametrize("parent,other", [("A", "a"), ("a", "A")])
+def test_case_sensitive_server_keeps_distinct_existing_folders(tmp_path, monkeypatch, parent, other):
+    box = HierarchyBox({MailClient.folder_name(p): ("OK", [b'() "/" ' + p.encode()]) for p in ("A", "a")})
+    _, _, run = guarded_calls(tmp_path, monkeypatch, "email_mailbox", [(other, "paused")], box=box)
+    used, refusal = run({"action": "create", "destination": parent + "/New"})
+    assert not refusal and used["folder_names"] == [parent]
+    assert box.writes == [("CREATE", MailClient.folder_name(parent + "/New"))]
+
+
+def test_wildcard_response_uses_the_literal_name_and_decodes_its_server_spelling(tmp_path, monkeypatch):
+    parent, actual = 'Legal/台北 & OP*%"', 'Legal/台北 & Op*%"'
+    wire = b'Legal/&U,BTFw- &- Op*%"'
+    rows = ("OK", [b'() "/" "Legal/anything"', (b'(\\Noselect) "/" {%d}' % len(wire), wire), b''])
+    box = HierarchyBox({MailClient.folder_name(n): rows for n in (parent, actual)})
+    _, _, run = guarded_calls(tmp_path, monkeypatch, "email_mailbox", [("Legal", "paused")], box=box)
+    used, refusal = run({"action": "create", "destination": parent + "/New"})
+    assert not refusal and set(used["folder_names"]) == {parent, actual, actual + "/New"}
+    assert used["destination"] == parent + "/New" and box.writes == [("CREATE", MailClient.folder_name(parent + "/New"))]
+
+
+@pytest.mark.parametrize(("insensitive", "held", "denied"), [
+    (True, "отчёты/счета 10%", True), (True, "отчёты/счета 10%/Q4", True),
+    (True, "отчёты", False), (False, "отчёты/счета 10%", False),
+])
+def test_wildcard_parent_uses_case_of_decoded_provider_names(tmp_path, monkeypatch, insensitive, held, denied):
+    requested, actual = "Отчёты/Счета 10%", "отчёты/счета 10%"
+    assert MailClient.folder_name(requested) == '"&BB4EQgRHBFEEQgRL-/&BCEERwQ1BEIEMA- 10%"'
+    assert MailClient.folder_name(actual) == '"&BD4EQgRHBFEEQgRL-/&BEEERwQ1BEIEMA- 10%"'
+    names = ["отчёты", actual[:-1] + "1", actual]
+    if not insensitive:
+        names += ["Отчёты", requested]
+    key = str.casefold if insensitive else str
+    created = []
+
+    class UnicodeMailboxes(RecordingBox):
+        def list(self, ref, pattern):
+            if pattern == '""':
+                return super().list(ref, pattern)
+            query = key(MailClient.decode_folder(pattern[1:-1]))
+            # In this fixture the only wildcard is a trailing %, within the final component.
+            if query.endswith("%"):
+                prefix = query[:-1]
+                found = [n for n in names if key(n).startswith(prefix) and "/" not in key(n)[len(prefix):]]
+            else:
+                found = [n for n in names if key(n) == query]
+            return "OK", [b'() "/" ' + MailClient.folder_name(n).encode("ascii") for n in found] or [None]
+
+        def create(self, wire):
+            parent, _, child = MailClient.decode_folder(wire[1:-1]).rpartition("/")
+            created.append(next(n for n in names if key(n) == key(parent)) + "/" + child)
+            return super().create(wire)
+
+    box = UnicodeMailboxes()
+    _, _, run = guarded_calls(tmp_path, monkeypatch, "email_mailbox", [(held, "paused")], box=box)
+    used, refusal = run({"action": "create", "destination": requested + "/Q4"})
+    print("IMAP_UNICODE_CREATE", insensitive, held, used.get("folder_names"), box.writes, created)
+    assert bool(refusal) == denied
+    assert created == ([] if denied else [(actual if insensitive else requested) + "/Q4"])
+    assert box.writes == ([] if denied else [("CREATE", MailClient.folder_name(requested + "/Q4"))])
+
+
+@pytest.mark.parametrize("row", [b'', b'not a LIST row', b'() "/" ""', b'() "/" "unclosed', (b'() "/" {9}', b'bad')])
+def test_malformed_parent_list_refuses_before_create(tmp_path, monkeypatch, row):
+    box = HierarchyBox({'"Legal/2026"': ("OK", [row])})
+    _, _, run = guarded_calls(tmp_path, monkeypatch, "email_mailbox", None, box=box)
+    with pytest.raises(RuntimeError, match="malformed"):
+        run({"action": "create", "destination": "Legal/2026/Q4"})
+    assert not box.writes
+
+
+def test_ambiguous_wildcard_case_variants_do_not_choose_a_sibling(tmp_path, monkeypatch):
+    box = HierarchyBox({'"Team/OPS%"': ("OK", [b'() "/" "Team/Ops%"', b'() "/" "Team/ops%"'])})
+    _, _, run = guarded_calls(tmp_path, monkeypatch, "email_mailbox", None, box=box)
+    with pytest.raises(RuntimeError, match="ambiguous"):
+        run({"action": "create", "destination": "Team/OPS%/New"})
+    assert not box.writes
+
+
+@pytest.mark.parametrize("state", ["paused", "active"])
+def test_nonexistent_branch_with_children_does_not_prove_a_materialized_parent(tmp_path, monkeypatch, state):
+    row = ("OK", [b'(\\NonExistent \\Noselect \\HasChildren) "/" "Team/Ops"'])
+    box = HierarchyBox({'"Team/OPS"': row, '"Team/Ops"': row, '"Team"': ("OK", [b'() "/" Team'])})
+    _, _, run = guarded_calls(tmp_path, monkeypatch, "email_mailbox", [("Team", state)], box=box)
+    used, refusal = run({"action": "create", "destination": "Team/OPS/March"})
+    assert used["folder_names"] == ["Team", "Team/OPS", "Team/Ops", "Team/Ops/March"]
+    assert used["destination"] == "Team/OPS/March"
+    assert bool(refusal) == (state == "paused")
+    assert box.writes == ([] if refusal else [("CREATE", '"Team/OPS/March"')])
 
 
 @pytest.mark.parametrize(("source", "restricted", "deny"), [

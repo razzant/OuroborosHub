@@ -257,29 +257,49 @@ class MailClient:
         return "INBOX" if name.isascii() and name.upper() == "INBOX" else name
 
     def _listed_parent(self, box, parent, delimiter):
-        pattern = self.folder_name(parent)
-        quoted = pattern.encode("ascii")
-        raw = re.sub(rb'\\([\\"])', rb'\1', quoted[1:-1])
-        for row in self._ok(box.list('""', pattern), "parent lookup"):
-            header = row[0] if isinstance(row, tuple) else row
-            match = _LIST_HEADER.match(header or b"")
-            if not match:
+        wildcard = "*" in parent or "%" in parent
+        matches = {}
+        literal_tail = False
+        for row in self._ok(box.list('""', self.folder_name(parent)), "parent lookup"):
+            if row is None or (literal_tail and row == b""):  # imaplib: no matches, or a literal's empty trailer.
+                literal_tail = False
                 continue
-            # LIST interprets * and % as wildcards even inside a quoted pattern.
-            # Match the mailbox itself (as a quoted string, literal or atom).
-            name = header[match.end():]
-            if name.startswith(b'"'):
-                exact = name == quoted or name.startswith(quoted + b" ")
-            elif isinstance(row, tuple) and name.startswith(b"{"):
-                exact = row[1] == raw
+            header = row[0] if isinstance(row, tuple) else row
+            if literal_tail and header.startswith((b" ", b")")):  # Extended LIST data after a literal.
+                literal_tail = isinstance(row, tuple)
+                continue
+            literal_tail = isinstance(row, tuple)
+            match = _LIST_HEADER.match(header)
+            if not match:
+                raise RuntimeError("IMAP LIST returned malformed parent metadata")
+            token = header[match.end():]
+            if token.startswith(b'"') and (value := re.match(rb'^"((?:\\[\\"]|[^"\\])*)"(?: |$)', token)):
+                raw = re.sub(rb'\\([\\"])', rb'\1', value[1])
+            elif literal_tail and token == b"{%d}" % len(row[1]):
+                raw = row[1]
+            elif token and not token.startswith((b'"', b"{")):
+                raw = token.partition(b" ")[0]
             else:
-                exact = name.partition(b" ")[0] == raw
-            if exact:
-                if match[2] != delimiter:
-                    raise RuntimeError("IMAP LIST returned inconsistent hierarchy delimiters")
-                if b"\\nonexistent" not in match[1].lower().split():
-                    return True  # \Noselect alone can still be a real hierarchy node.
-        return False
+                raw = b""
+            if not raw:
+                raise RuntimeError("IMAP LIST returned a missing or malformed parent name")
+            actual = self.decode_folder(raw.decode("ascii"))
+            # LIST "" <literal without wildcards> names the mailbox as SELECT would.
+            # Compare decoded names: * and % stay literal, and a case variant
+            # must have been returned by the server. Never fold modified UTF-7 bytes.
+            if wildcard and actual.casefold() != parent.casefold():
+                continue
+            if match[2] != delimiter:
+                raise RuntimeError("IMAP LIST returned inconsistent hierarchy delimiters")
+            exists = b"\\nonexistent" not in match[1].lower().split()  # \Noselect alone can be a real node.
+            if actual in matches and matches[actual] != exists:
+                raise RuntimeError("IMAP LIST returned conflicting parent metadata")
+            matches[actual] = exists
+        if wildcard and parent in matches:
+            return parent, matches[parent]
+        if len(matches) > 1:
+            raise RuntimeError("IMAP LIST returned ambiguous parent names; use the exact listed spelling")
+        return next(iter(matches.items()), (None, False))
 
     def _create_names(self, box, destination):
         # LIST <reference> "" asks for this namespace's delimiter, even when
@@ -296,16 +316,27 @@ class MailClient:
                 # that can have children. The created name excludes that suffix.
                 name = destination.removesuffix(delimiter)
                 names = [name] if name else []
+                addressed = name
+                aliases = set()
                 parent = name.rpartition(delimiter)[0]
                 # CREATE can materialize missing parents. Stop at the first
                 # existing parent: nothing above it is being changed.
                 while parent:
+                    addressed = addressed.rpartition(delimiter)[0]
+                    if addressed:
+                        aliases.add(addressed)
                     names.append(parent)
-                    higher = parent.rpartition(delimiter)[0]
-                    if not higher or self._listed_parent(box, parent, match[2]):
+                    actual, exists = self._listed_parent(box, parent, match[2])
+                    if actual and actual != parent:
+                        # Host checks the originally addressed names AND the
+                        # provider's spellings. CREATE keeps its original argument.
+                        aliases.update(names)
+                        names = [actual + n[len(parent):] for n in names]
+                        parent = actual
+                    if exists:
                         break
-                    parent = higher
-                return [self._canonical_folder(n) for n in names]
+                    parent = parent.rpartition(delimiter)[0]
+                return [self._canonical_folder(n) for n in (*names, *aliases)]
         raise RuntimeError("IMAP LIST omitted the hierarchy delimiter for the new folder")
 
     def mailbox(self, *, action="list", folder="INBOX", uid=None, uidvalidity=None,

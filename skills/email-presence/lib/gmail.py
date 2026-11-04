@@ -190,7 +190,7 @@ class GmailClient(MailClient):
         labels = snapshot() if snapshot else self._request("GET", "/labels").get("labels", [])
         by_id = {row["id"]: row.get("name") for row in labels}
         if any(not isinstance(by_id.get(key), str) or not by_id[key].strip() for key in custom):
-            raise ValueError("Choose current Gmail label IDs from email_folders")
+            raise ValueError("Cannot verify the current Gmail label IDs and their names; refresh the message or label selection and retry")
         return {by_id[key] for key in custom if by_id[key] != key}
 
     def mark_read(self, *, message_ref="", uid=None, uidvalidity=None, folder=None, prepare_targets=None):
