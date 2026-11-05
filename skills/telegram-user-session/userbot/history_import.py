@@ -30,7 +30,7 @@ import sqlite3
 import time
 from urllib.parse import urlencode
 
-from .normalize import actor_facts, canonical_text, chat_facts, content_revision, iso, media_descriptor
+from .normalize import actor_facts, canonical_text, chat_facts, content_revision, iso, media_descriptor, reply_chain
 from .participant_state import receiving_refusal
 from .presence import build_event
 
@@ -303,6 +303,8 @@ def history_record(account, peer, topic, message, sender=None, conversation=None
         media['status'] = 'not_downloaded'
     facts = {'sent_at': iso(getattr(message, 'date', None)),
              'reply_to_message_id': getattr(getattr(message, 'reply_to', None), 'reply_to_msg_id', None)}
+    if (chain := reply_chain(message, topic)) is not None:
+        facts['reply_chain_id'] = chain
     if edited:
         facts['edited_at'] = iso(message.edit_date)
     if media is not None:
@@ -807,6 +809,8 @@ class HistoryImporter:
         """Live intake's custody of this message revision, with the source IDs that tell it.
 
         The revision's own capture counts, and so does a pre-0.3 capture of the same edit.
+        A capture filed before 0.4.2 under its reply chain sits in another conversation, so it
+        does not keep the message out of the chat's.
         Only an admitted capture is in the conversation. A capture live intake let go of for
         good without the Host admitting it would otherwise never arrive, so the import carries
         the message under this run's current authorization; the Host's answer then says

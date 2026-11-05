@@ -13,8 +13,9 @@ from .config import load_config, _private_dir, _write_json
 from .participant_state import Journal, policy, digest, receiving_refusal, legacy_text_matches
 from .participant_ops import Operations, SPECS, validate
 from .presence import (_urllib_transport, EARLY_CONTINUATION, PresenceToken, anchored_message_id, build_event,
-                       busy_delay, lists_early_continuation, retry_seconds)
-from .normalize import actor_facts, canonical_text, chat_facts, content_revision, iso, media_descriptor, staged_suffix
+                       busy_delay, lists_early_continuation, retry_seconds, source_event_id)
+from .normalize import (actor_facts, canonical_text, chat_facts, content_revision, iso, media_descriptor, reply_chain,
+                        staged_suffix)
 
 @contextmanager
 def session_lock(root):
@@ -397,6 +398,8 @@ class Participant:
                    'sender_profile_status':'available' if sender is not None else 'unavailable',
                    'mentioned':bool(m.mentioned), 'sent_at':iso(getattr(m,'date',None)),
                    'reply_to_message_id':getattr(getattr(m,'reply_to',None),'reply_to_msg_id',None)}
+        if (chain := reply_chain(m, topic)) is not None:
+            message['reply_chain_id'] = chain
         if getattr(m,'edit_date',None) is not None:
             message['edited_at'] = iso(m.edit_date)
         if media is not None:
@@ -404,7 +407,10 @@ class Participant:
         e = build_event(int(self.account),event.chat_id,m.id,event.sender_id,canonical_text(m),topic_id=topic,event_kind=kind,revision=revision,
               actor=actor_facts(sender), conversation={'title': title, 'chat_type': chat_kind}, message=message, source_order=True)
         e['facts'] = facts
-        self.journal.capture(e, files, raw_id=raw_id)
+        # 0.4.1 filed a reply chain outside a forum under its first message. A row it stored so keeps
+        # standing for this message: a redelivery or a later reaction on an edited one adds nothing.
+        earlier = source_event_id(int(self.account), event.chat_id, m.id, chain, revision=revision) if chain else None
+        self.journal.capture(e, files, raw_id=raw_id, earlier=earlier)
         self.journal.remember_chat(self.account, event.chat_id, title, chat_kind, 'incoming', chat_username, members)
     def legacy_edit_seen(self, peer, topic, message, actor):
         """Whether a pre-0.3 capture of this edit time already says what this edit says."""
@@ -463,15 +469,18 @@ class Participant:
                 return type(exc).__name__
 
     async def thread_of(self, chat, peer, message, catalog=None, guard=None):
-        """The thread a message belongs to, the same for live capture and history import.
+        """The forum topic a message belongs to, the same for live capture and history import.
 
-        A forum message gets its forum topic; elsewhere a message thread's top names it.
+        A conversation is a chat or a forum topic. Elsewhere a reply chain, which Telegram names
+        by its top in a supergroup or a discussion group, stays in its chat's one conversation,
+        as in telegram-bot; a private chat with a topic-enabled bot is one conversation too, since
+        this connector has no topic catalog for private chats.
         A history page passes the forum catalog it already read; live capture reads one.
         ``guard``, when given, runs before each Telegram read and may raise to stop it.
         """
         if getattr(chat,'forum',False):
             return await self.forum_topic(peer, message, catalog, guard)
-        return getattr(getattr(message,'reply_to',None), 'reply_to_top_id', None)
+        return None
 
     async def forum_topic(self, peer, message, catalog=None, guard=None):
         """Refresh once, preserving an explicit top over any reply ancestry."""
@@ -533,7 +542,11 @@ class Participant:
                 if queued is not None and json.loads(queued['args']).get('text') == chunk:
                     continue  # Queued once under this output identity; the target it was given stands.
                 args = {'peer':event['conversation_id'], 'text':chunk, 'reply_id':reply}
-                if event['thread_id']: args['topic_id']=int(event['thread_id'])
+                # Only a forum topic is a destination. An event stored before 0.4.2 under a reply
+                # chain is answered in its chat, where Telegram keeps the reply in its chain. This pairs with
+                # the earlier-ID lookup in capture: one without the other answers such a message twice or never.
+                if event['thread_id'] and (event.get('conversation') or {}).get('chat_type') == 'forum':
+                    args['topic_id']=int(event['thread_id'])
                 self.journal.enqueue(self.account, key, 'send_text', args,
                     origin={'kind':'automatic','source_event_id':event['source_event_id'], 'task_id':str(body.get('task_id') or body.get('turn_ref') or '')})
     def retry_delay(self, seq, body):
