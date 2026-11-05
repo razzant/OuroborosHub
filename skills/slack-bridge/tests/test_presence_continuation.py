@@ -27,8 +27,8 @@ TOKEN = "fixture-host-token"
 
 
 def envelope(event_id: str, *, ts: str, text: str, thread_ts: str = "", channel: str = "C1",
-             user: str = "U1", files: tuple = ()) -> dict:
-    event = {"type": "message", "user": user, "channel": channel, "channel_type": "channel", "ts": ts,
+             user: str = "U1", files: tuple = (), channel_type: str = "channel") -> dict:
+    event = {"type": "message", "user": user, "channel": channel, "channel_type": channel_type, "ts": ts,
              "text": text, **({"thread_ts": thread_ts} if thread_ts else {}),
              **({"files": list(files)} if files else {})}
     return {"type": "events_api", "envelope_id": f"env-{event_id}",

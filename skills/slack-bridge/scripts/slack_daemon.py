@@ -6,6 +6,7 @@ import os
 import pathlib
 import signal
 import sys
+from contextlib import closing
 from typing import Any
 
 SKILL_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -46,87 +47,87 @@ def _new_root_channels(settings: dict[str, Any]) -> tuple[list[str], str]:
 
 async def _run() -> None:
     state_dir = pathlib.Path(os.environ.get("OUROBOROS_SKILL_STATE_DIR") or ".")
-    store = BridgeStore(state_dir)
-    store.set_runtime(socket_state="starting", companion_pid=os.getpid())
-    try:
-        settings = load_local_settings(state_dir)
-    except LocalSettingsError as exc:
-        # Same contract as the extension child: unreadable settings are an
-        # explicit failure, never a silently empty configuration.
-        store.set_runtime(socket_state="error", last_socket_error=str(exc)[:500])
-        raise
-    new_root_channels, channels_error = _new_root_channels(settings)
-    # What this companion actually uses, for the status route.
-    store.set_runtime(new_root_channels=new_root_channels, new_root_channels_error=channels_error)
+    with closing(BridgeStore(state_dir)) as store:
+        store.set_runtime(socket_state="starting", companion_pid=os.getpid())
+        try:
+            settings = load_local_settings(state_dir)
+        except LocalSettingsError as exc:
+            # Same contract as the extension child: unreadable settings are an
+            # explicit failure, never a silently empty configuration.
+            store.set_runtime(socket_state="error", last_socket_error=str(exc)[:500])
+            raise
+        new_root_channels, channels_error = _new_root_channels(settings)
+        # What this companion actually uses, for the status route.
+        store.set_runtime(new_root_channels=new_root_channels, new_root_channels_error=channels_error)
 
-    try:
-        slack = SlackClient(
-            os.environ.get("SLACK_BOT_TOKEN", ""),
-            os.environ.get("SLACK_APP_TOKEN", ""),
-        )
-    except Exception as exc:
-        store.set_runtime(socket_state="error", last_socket_error=str(exc))
-        raise
+        try:
+            slack = SlackClient(
+                os.environ.get("SLACK_BOT_TOKEN", ""),
+                os.environ.get("SLACK_APP_TOKEN", ""),
+            )
+        except Exception as exc:
+            store.set_runtime(socket_state="error", last_socket_error=str(exc))
+            raise
 
-    runtime: BridgeRuntime | None = None
-    try:
-        auth = await slack.auth_test()
-        bot_user_id = str(auth.get("user_id") or "")
-        if not bot_user_id:
-            raise RuntimeError("Slack auth.test did not return a bot user ID")
-        store.set_runtime(
-            bot_user_id=bot_user_id,
-            bot_id=str(auth.get("bot_id") or ""),
-            app_id=str(auth.get("app_id") or ""),
-            workspace_id=str(auth.get("team_id") or ""),
-            workspace_name=str(auth.get("team") or ""),
-            socket_state="authorized",
-            last_socket_error="",
-        )
+        runtime: BridgeRuntime | None = None
+        try:
+            auth = await slack.auth_test()
+            bot_user_id = str(auth.get("user_id") or "")
+            if not bot_user_id:
+                raise RuntimeError("Slack auth.test did not return a bot user ID")
+            store.set_runtime(
+                bot_user_id=bot_user_id,
+                bot_id=str(auth.get("bot_id") or ""),
+                app_id=str(auth.get("app_id") or ""),
+                workspace_id=str(auth.get("team_id") or ""),
+                workspace_name=str(auth.get("team") or ""),
+                socket_state="authorized",
+                last_socket_error="",
+            )
 
-        runtime = BridgeRuntime(
-            store=store,
-            slack=slack,
-            host=create_host_adapter(str(settings.get("binding_id") or "").strip(), identity=slack_identity(auth)),
-            bot_user_id=bot_user_id,
-            bot_id=str(auth.get("bot_id") or ""),
-            app_id=str(auth.get("app_id") or ""),
-            inbound_workers=_bounded_int(
-                settings.get("SLACK_INBOUND_WORKERS"), 4, minimum=1, maximum=16
-            ),
-            outbound_workers=_bounded_int(
-                settings.get("SLACK_OUTBOUND_WORKERS"), 2, minimum=1, maximum=8
-            ),
-            new_root_channels=new_root_channels,
-        )
+            runtime = BridgeRuntime(
+                store=store,
+                slack=slack,
+                host=create_host_adapter(str(settings.get("binding_id") or "").strip(), identity=slack_identity(auth)),
+                bot_user_id=bot_user_id,
+                bot_id=str(auth.get("bot_id") or ""),
+                app_id=str(auth.get("app_id") or ""),
+                inbound_workers=_bounded_int(
+                    settings.get("SLACK_INBOUND_WORKERS"), 4, minimum=1, maximum=16
+                ),
+                outbound_workers=_bounded_int(
+                    settings.get("SLACK_OUTBOUND_WORKERS"), 2, minimum=1, maximum=8
+                ),
+                new_root_channels=new_root_channels,
+            )
 
-        loop = asyncio.get_running_loop()
-        stop = asyncio.Event()
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(signum, stop.set)
-            except (NotImplementedError, RuntimeError):
-                pass
+            loop = asyncio.get_running_loop()
+            stop = asyncio.Event()
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.add_signal_handler(signum, stop.set)
+                except (NotImplementedError, RuntimeError):
+                    pass
 
-        runtime_task = asyncio.create_task(runtime.run(), name="slack-bridge-runtime")
-        stop_task = asyncio.create_task(stop.wait(), name="slack-bridge-stop")
-        done, _pending = await asyncio.wait(
-            {runtime_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        if stop_task in done:
-            await runtime.close()
-            await asyncio.gather(runtime_task, return_exceptions=True)
-        else:
-            stop_task.cancel()
-            await runtime_task
-    except Exception as exc:
-        store.set_runtime(socket_state="error", last_socket_error=str(exc)[:500])
-        raise
-    finally:
-        if runtime is not None:
-            await runtime.close()
-        else:
-            await slack.aclose()
+            runtime_task = asyncio.create_task(runtime.run(), name="slack-bridge-runtime")
+            stop_task = asyncio.create_task(stop.wait(), name="slack-bridge-stop")
+            done, _pending = await asyncio.wait(
+                {runtime_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if stop_task in done:
+                await runtime.close()
+                await asyncio.gather(runtime_task, return_exceptions=True)
+            else:
+                stop_task.cancel()
+                await runtime_task
+        except Exception as exc:
+            store.set_runtime(socket_state="error", last_socket_error=str(exc)[:500])
+            raise
+        finally:
+            if runtime is not None:
+                await runtime.close()
+            else:
+                await slack.aclose()
 
 
 def main() -> None:

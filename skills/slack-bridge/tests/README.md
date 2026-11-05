@@ -5,8 +5,7 @@ workers and Slack client against deterministic HTTP fixtures:
 
 ```sh
 python3 -I -S "$CORE_ROOT/scripts/safe_test.py" --temp-parent /tmp -- \
-  "$TEST_PYTHON" -m pytest -q "$BRIDGE_ROOT/skills/slack-bridge/tests" \
-  --ignore="$BRIDGE_ROOT/skills/slack-bridge/tests/test_presence_process_consumer.py"
+  "$TEST_PYTHON" -m pytest -q "$BRIDGE_ROOT/skills/slack-bridge/tests"
 ```
 
 Set these variables to an isolated core candidate, this bridge checkout and a
@@ -14,9 +13,10 @@ dependency-only Python environment. The launcher prints disposable state roots
 and changes its working directory to core, so the bridge test path is absolute.
 It is not an OS sandbox. Test state is retained for diagnosis.
 
-The [separate-process consumer](PRESENCE_PROCESS_CONSUMER.md) documents the
-opt-in command, its nine scenarios, retained evidence and exact production versus
-synthetic boundaries. An unset core root reports SKIP, not consumer evidence.
+The repository's `tests/test_slack_conversation_core_consumer.py` and
+`tests/test_reaction_core_consumer.py` run this bridge through a real core's Presence
+routes when `OUROBOROS_PRESENCE_CORE_ROOT` names a core checkout. An unset core
+root reports SKIP, not consumer evidence.
 
 The [inbound lease boundary](INBOUND_LEASE.md) documents the finite first-poll
 budget regression, typed lease-loss containment, tests and remaining ownership
@@ -69,13 +69,12 @@ controls at generic dispatch and all three upload phases stay uncertain without
 resending. This establishes the bridge's attempt boundary, not Slack
 exactly-once delivery.
 
-Proactive initiation, explicit manual author continuation, Stop/Panic and
-cancellation during core reacquisition remain core test obligations. The child
-fixture covers Host death/restart at its second parked-author boundary, with
-synthetic child admission/completion. Full application bootstrap, configured
-review qualification, platform/native behavior and live adoption require their
-own evidence. Run logs and dated pass counts belong in the source-bound handoff,
-not in this maintained test description.
+Proactive initiation, explicit manual author continuation, Stop/Panic,
+cancellation during core reacquisition and a Host process restart remain core
+test obligations. Full application bootstrap, configured review qualification,
+platform/native behavior and live adoption require their own evidence. Run logs
+and dated pass counts belong in the source-bound handoff, not in this maintained
+test description.
 
 `test_retained_custody.py` covers retained parent and real child observations,
 FIFO release, restart and late-output deduplication with real adapter/store/workers.

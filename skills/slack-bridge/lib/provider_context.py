@@ -47,7 +47,7 @@ async def capture_context(slack: Any, item: Any, workspace_name: str,
         observe("conversations.info", lambda: slack.conversation_info(item.channel_id)),
     ]
     reaction = item.event_type in REACTION_EVENTS
-    has_thread = not reaction and bool(item.thread_ts or item.event_type in {"message", "app_mention"})
+    has_thread = not reaction and bool(item.conversation_thread)
     if has_thread:
         lookups.append(capture_thread(slack, item))
     if reaction:
@@ -59,7 +59,17 @@ async def capture_context(slack: Any, item: Any, workspace_name: str,
         snapshot["thread"] = results[2]
     if reaction:
         snapshot["reaction_target"] = results[2]
+        _flat_chat_target(snapshot, item)
     return snapshot
+
+
+def _flat_chat_target(snapshot: dict[str, Any], item: Any) -> None:
+    """A top-level message of a direct or group chat belongs to the chat's flow. Reaction events
+    carry no channel type, so the conversation observation says which kind this is; unknown stays."""
+    info = snapshot["conversation"].get("data") if snapshot["conversation"].get("status") == "available" else None
+    target = snapshot["reaction_target"]
+    if isinstance(info, dict) and (info.get("is_im") or info.get("is_mpim")) and target.get("thread_ts") == item.message_ts:
+        target["thread_ts"] = ""
 
 
 async def capture_reaction_target(slack: Any, item: Any, retained: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -96,7 +106,7 @@ async def capture_thread(slack: Any, item: Any) -> dict[str, Any]:
     Pages share the existing provider-I/O budget. The dated result is context,
     never additional inbox work or an atomic snapshot of the conversation.
     """
-    arguments = {"channel_id": item.channel_id, "thread_ts": item.thread_ts or item.message_ts, "limit": 200}
+    arguments = {"channel_id": item.channel_id, "thread_ts": item.conversation_thread, "limit": 200}
     data: dict[str, Any] = {**arguments, "messages": [], "complete": False,
                            "next_cursor": None, "pages_read": 0}
 

@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 import pathlib
 import sqlite3
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-from .events import REACTION_EVENTS, ParsedEnvelope, provider_facts
+from .events import REACTION_EVENTS, ParsedEnvelope, conversation_thread, provider_facts
 from .slack_api import normalize_text_format
 
 
@@ -42,13 +44,11 @@ def _reaction_lane(operation: str, payload: Mapping[str, Any]) -> str:
     return f"reaction:{channel}:{ts}" if channel and ts else ""
 
 
-def _lane_reactions_by_message(db: sqlite3.Connection) -> None:
-    """Move live reaction rows an earlier version queued in their channel's lane to their message's.
+def _reaction_lane_moves(db: sqlite3.Connection) -> list[tuple[str, int]]:
+    """Live reaction rows an earlier version queued in their channel's lane, each with its message's lane.
 
-    Id, lease and send marker stay, so writes to one message keep their order and an
-    attempt that may have reached Slack is still never repeated. Only rows still in an
-    older lane are read, and of ``slack_api`` rows only those naming a reactions method;
-    one naming no message, or unreadable, keeps the lane it has.
+    Only rows still in an older lane are read, and of ``slack_api`` rows only those naming
+    a reactions method; one naming no message, or unreadable, keeps the lane it has.
     """
     rows = db.execute(
         """SELECT id,operation,payload_json FROM outbox WHERE state IN ('pending','leased')
@@ -56,6 +56,7 @@ def _lane_reactions_by_message(db: sqlite3.Connection) -> None:
            AND (operation<>'generic_api' OR payload_json LIKE '%"reactions.add"%'
                 OR payload_json LIKE '%"reactions.remove"%')"""
     ).fetchall()
+    moves = []
     for row in rows:
         try:
             payload = json.loads(row["payload_json"] or "{}")
@@ -63,7 +64,25 @@ def _lane_reactions_by_message(db: sqlite3.Connection) -> None:
             continue
         lane = _reaction_lane(str(row["operation"]), payload) if isinstance(payload, dict) else ""
         if lane:
-            db.execute("UPDATE outbox SET ordering_key=? WHERE id=?", (lane, row["id"]))
+            moves.append((lane, int(row["id"])))
+    return moves
+
+
+def _lane_reactions_by_message(db: sqlite3.Connection) -> None:
+    """Move live reaction rows an earlier version queued in their channel's lane to their message's.
+
+    Id, lease and send marker stay, so writes to one message keep their order and an
+    attempt that may have reached Slack is still never repeated.
+    """
+    for lane, row_id in _reaction_lane_moves(db):
+        db.execute("UPDATE outbox SET ordering_key=? WHERE id=?", (lane, row_id))
+
+
+# A delivery report due for its callback, oldest first.
+_DUE_REPORT = """SELECT id,report_payload_json,report_attempts FROM outbox
+   WHERE report_payload_json<>'' AND report_available_at<=?
+   AND (report_state='pending' OR (report_state='reporting' AND report_lease_until<=?))
+   ORDER BY id LIMIT 1"""
 
 
 class InboxLeaseLost(RuntimeError):
@@ -103,8 +122,10 @@ class InboxItem:
     transport_queue_report: dict[str, Any] | None = None
 
     @property
-    def reply_thread_ts(self) -> str:
-        return self.thread_ts or self.message_ts
+    def conversation_thread(self) -> str:
+        """The thread of this row's conversation as received, "" when it has none."""
+        thread = self.ordering_key.rpartition(":")[2]
+        return "" if thread == "0" else thread
 
     @property
     def provider_event_key(self) -> str:
@@ -136,10 +157,17 @@ class OutboxItem:
     output_ref: str = ""
 
     def delivery_report(self, state: str, *, result: Mapping[str, Any] | None = None,
-                        error: str = "") -> dict[str, Any] | None:
+                        error: str = "", conversation_kind: str = "") -> dict[str, Any] | None:
+        """``conversation_kind`` is the channel type Slack stated for this conversation, "" when it never
+        did: then the receipt names the thread the message was sent in, as before. A top-level post sent
+        as one Slack message is filed under the thread it opens; a post split into parts keeps the thread
+        it was sent in, so its parts stay together."""
         if self.delivery_reporting_version != 1:
             return None
         result = result or {}
+        thread = self.thread_ts
+        if conversation_kind and not thread and self.chunk_count == 1:
+            thread = conversation_thread(conversation_kind, "", str(result.get("ts") or ""))
         message = {"provider_message_id": str(result.get("ts") or ""),
                    "requested_target": self.target, "target_resolved": bool(self.resolved_channel),
                    "chunk_count": self.chunk_count}
@@ -151,7 +179,7 @@ class OutboxItem:
             "schema_version": 1, "delivery_id": self.request_id, "part_id": str(self.chunk_index),
             "state": state, "provider": "slack", "account_id": self.provider_account_id,
             "conversation_id": str(result.get("channel") or self.resolved_channel or self.target),
-            "thread_id": self.thread_ts, "text": self.text, "format": self.text_format,
+            "thread_id": thread, "text": self.text, "format": self.text_format,
             "message": message, "origin": self.origin,
         }
 
@@ -235,24 +263,66 @@ def _queued_event(row: sqlite3.Row, text_chars: int | None) -> dict[str, Any]:
 class BridgeStore:
     """Small durable queue shared by the extension child and companion.
 
-    Every method opens its own SQLite connection, so short-lived plugin children
-    and the long-lived companion can use the same database safely.
+    Each store keeps one SQLite connection, opened on first use and kept until
+    ``close`` (a later call opens it again); its methods take turns on it under the
+    store's lock, whatever thread calls them. Short-lived plugin children and the
+    long-lived companion each keep their own and share the database through SQLite.
+    A worker with nothing to claim only reads: it takes no write lock and writes
+    nothing. Every commit is synchronous=FULL: a send marker or an envelope
+    acknowledged to Slack must survive a power loss, or a message could go out twice
+    or be lost.
     """
 
     def __init__(self, state_dir: pathlib.Path | str):
         self.state_dir = pathlib.Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.state_dir / "slack_bridge.sqlite3"
+        self._lock = threading.Lock()
+        self._db: sqlite3.Connection | None = None
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=FULL")
-        connection.execute("PRAGMA busy_timeout=10000")
-        connection.execute("PRAGMA foreign_keys=ON")
+    def __del__(self) -> None:
+        # Short-lived tool callers may drop the store without an explicit stop.
+        db = getattr(self, "_db", None)
+        if db is not None:
+            db.close()
+
+    def close(self) -> None:
+        """Close the kept connection once its current user is done."""
+        with self._lock:
+            db, self._db = self._db, None
+            if db is not None:
+                db.close()
+
+    def _open(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=10.0, check_same_thread=False)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("PRAGMA busy_timeout=10000")
+            connection.execute("PRAGMA foreign_keys=ON")
+        except BaseException:
+            connection.close()
+            raise
         return connection
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """The kept connection for one caller at a time: committed on success, rolled back on error."""
+        with self._lock:
+            if self._db is None:
+                self._db = self._open()
+            db = self._db
+            try:
+                with db:
+                    yield db
+            finally:
+                if db.in_transaction:
+                    # Its commit and rollback both failed. Closing discards the transaction, as it
+                    # did for a per-call connection; the next call opens a fresh one.
+                    self._db = None
+                    db.close()
 
     def _initialize(self) -> None:
         with self._connect() as db:
@@ -515,9 +585,14 @@ class BridgeStore:
             False: ("AND q.host_reference = ''", "q.id"),
             True: ("AND q.host_reference <> ''", "q.available_at, q.id"),
         }[submitted]
+        claimable = self._claimable_sql("inbox", scope, order)
         with self._connect() as db:
+            # A plain read first: with nothing claimable no write lock is taken. Otherwise the
+            # same query decides again under BEGIN IMMEDIATE, and the CAS below stays the authority.
+            if db.execute(claimable, {"now": now}).fetchone() is None:
+                return None
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute(self._claimable_sql("inbox", scope, order), {"now": now}).fetchone()
+            row = db.execute(claimable, {"now": now}).fetchone()
             if row is None:
                 db.commit()
                 return None
@@ -595,6 +670,8 @@ class BridgeStore:
         An own receipt names its author exactly; only a posted text chunk's creation receipt
         counts, never another mutation that merely returned a ``ts``. Nothing is inferred from
         time or text, and the same timestamp in another channel or workspace does not match.
+        ``thread_ts`` is the message's conversation by the channel type Slack stated for it,
+        the row's own or the conversation's (``conversation_thread``); with none, its own root.
         """
         if not team_id or not channel_id or not message_ts:
             return None
@@ -605,7 +682,7 @@ class BridgeStore:
                 (channel_id, message_ts, team_id),
             ).fetchone()
             seen = None if own else db.execute(
-                """SELECT actor_user_id,thread_ts,text FROM inbox WHERE team_id=? AND channel_id=? AND message_ts=?
+                """SELECT actor_user_id,thread_ts,text,channel_type FROM inbox WHERE team_id=? AND channel_id=? AND message_ts=?
                    AND event_type IN ('message','app_mention') AND subtype!='message_deleted'
                    ORDER BY id DESC LIMIT 1""",
                 (team_id, channel_id, message_ts),
@@ -613,10 +690,20 @@ class BridgeStore:
         row = own or seen
         if row is None:
             return None
+        kind = (str(seen["channel_type"]) if seen else "") or self.conversation_kind(team_id, channel_id)
         message = {"ts": message_ts, "text": str(row["text"]),
                    **({"user": str(seen["actor_user_id"])} if seen else {})}
         return {"source": "slack-bridge outbox" if own else "slack-bridge inbox", "message": message,
-                "thread_ts": str(row["thread_ts"] or message_ts), **({"is_self": True} if own else {})}
+                "thread_ts": conversation_thread(kind, str(row["thread_ts"] or ""), message_ts),
+                **({"is_self": True} if own else {})}
+
+    def conversation_kind(self, team_id: str, channel_id: str) -> str:
+        """The channel type Slack stated in the newest stored event of this conversation, "" if none did."""
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT channel_type FROM inbox WHERE team_id=? AND channel_id=? AND channel_type<>''
+                   ORDER BY message_ts DESC LIMIT 1""", (team_id, channel_id)).fetchone()
+        return str(row["channel_type"]) if row else ""
 
     def withhold_inbox(self, row_id: int, lease_token: str, reason: str) -> None:
         """Settle a retained observation without submitting it, now or after an update."""
@@ -820,7 +907,7 @@ class BridgeStore:
         # A reaction held for its thread's place waits only with writes to that message.
         lane = _reaction_lane(operation, payload) or f"{target}:{thread_ts}"
         with self._connect() as db:
-            db.execute(
+            cursor = db.execute(
                 """INSERT OR IGNORE INTO outbox
                    (request_id,chunk_index,chunk_count,target,thread_ts,text,ordering_key,kind,operation,payload_json,
                     origin_json,delivery_reporting_version,created_at,updated_at)
@@ -830,13 +917,26 @@ class BridgeStore:
                  json.dumps(dict(origin or {}), ensure_ascii=False),
                  1 if delivery_reporting_version == 1 else 0, now, now),
             )
-            inserted = db.total_changes > 0
+            # This statement's own count: the connection's total_changes spans every earlier call.
+            inserted = cursor.rowcount == 1
         return inserted
+
+    def _outbox_has_work(self, db: sqlite3.Connection, now: float) -> bool:
+        """Whether a claim's transaction would change anything: settle a lost attempt, move a
+        reaction row out of an older lane, or lease a row. Plain reads, without the write lock."""
+        return bool(
+            db.execute("SELECT 1 FROM outbox WHERE state='leased' AND send_started=1 AND lease_until<=? LIMIT 1",
+                       (now,)).fetchone()
+            or _reaction_lane_moves(db)
+            or db.execute(self._claimable_sql("outbox"), {"now": now}).fetchone()
+        )
 
     def claim_outbox(self, *, lease_seconds: float = 60.0) -> OutboxItem | None:
         now = time.time()
         token = uuid.uuid4().hex
         with self._connect() as db:
+            if not self._outbox_has_work(db, now):
+                return None
             db.execute("BEGIN IMMEDIATE")
             # The process may have died after Slack accepted a request but before
             # the result was stored. An expired attempt is uncertainty, never
@@ -982,13 +1082,10 @@ class BridgeStore:
     def claim_report(self) -> dict[str, Any] | None:
         now, token = time.time(), uuid.uuid4().hex
         with self._connect() as db:
+            if db.execute(_DUE_REPORT, (now, now)).fetchone() is None:
+                return None  # nothing due: no write lock taken
             db.execute("BEGIN IMMEDIATE")
-            row = db.execute(
-                """SELECT id,report_payload_json,report_attempts FROM outbox
-                   WHERE report_payload_json<>'' AND report_available_at<=?
-                   AND (report_state='pending' OR (report_state='reporting' AND report_lease_until<=?))
-                   ORDER BY id LIMIT 1""", (now, now),
-            ).fetchone()
+            row = db.execute(_DUE_REPORT, (now, now)).fetchone()
             if row is None:
                 return None
             db.execute("""UPDATE outbox SET report_state='reporting',report_lease_token=?,

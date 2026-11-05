@@ -21,6 +21,7 @@ from lib.store import BridgeStore
 
 REPLY = {"type": "message", "user": "U1", "ts": "1.0", "thread_ts": "0.5", "parent_user_id": "U2", "text": "reply"}
 ROOT = {"type": "message", "user": "U1", "ts": "1.0", "text": "root"}
+DM = {"channel": "D1", "channel_type": "im"}
 
 
 def _envelope(event_id: str, event: dict, *, envelope_id: str = "") -> dict:
@@ -53,7 +54,14 @@ def _parse(envelope: dict):
       "message": {**REPLY, "text": "edited"}, "previous_message": REPLY}, ("1.0", "0.5", "1.5", "T1:C1:0.5")),
     ({**REPLY, "event_ts": "1.0"}, ("1.0", "0.5", "1.0", "T1:C1:0.5")),
     ({**ROOT}, ("1.0", "", "1600", "T1:C1:1.0")),
-], ids=["threaded-delete", "root-delete", "previous-ts-fallback", "no-event-ts", "edit", "reply", "root"])
+    # A top-level message's edit and deletion land where it lives: a channel root's own thread, a DM's flow.
+    ({"type": "message", "subtype": "message_changed", "ts": "1.5", "event_ts": "1.5",
+      "message": {**ROOT, "text": "edited"}, "previous_message": ROOT}, ("1.0", "", "1.5", "T1:C1:1.0")),
+    ({"type": "message", "subtype": "message_changed", "ts": "1.5", "event_ts": "1.5", **DM,
+      "message": {**ROOT, "text": "edited"}, "previous_message": ROOT}, ("1.0", "", "1.5", "T1:D1:0")),
+    (_deletion(ROOT, **DM), ("1.0", "", "1.6", "T1:D1:0")),
+], ids=["threaded-delete", "root-delete", "previous-ts-fallback", "no-event-ts", "edit", "reply", "root",
+        "root-edit", "dm-root-edit", "dm-root-delete"])
 def test_message_and_thread_identity(event, expected):
     parsed = _parse(_envelope("Ev-1", event))
     assert (parsed.message_ts, parsed.thread_ts, parsed.event_ts, parsed.ordering_key) == expected

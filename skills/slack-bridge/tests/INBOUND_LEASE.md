@@ -40,9 +40,7 @@ early output is durable before the observer claims the row. It also checks
 immediate output and an observer takeover after a lease expires inside a GET.
 The stale observer's checkpoint is contained while an input loop still admits a
 new conversation. Existing continuation tests cover independent author/child
-polls, replay, corrections, reporting modes and delivery identity. The separate
-Host fixture is described in
-[PRESENCE_PROCESS_CONSUMER.md](PRESENCE_PROCESS_CONSUMER.md).
+polls, replay, corrections, reporting modes and delivery identity.
 
 The poll is finite: one author and at most two distinct child GETs per iterator,
 plus the queue-observation POST. A pending result releases the inbox for a later

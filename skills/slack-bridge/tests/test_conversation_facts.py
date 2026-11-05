@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from copy import deepcopy
+from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 
 from lib.events import parse_socket_envelope
 from lib.host_adapter import slack_presence_event
+from lib.provider_context import capture_context
 from lib.store import BridgeStore
 
 
@@ -124,3 +129,170 @@ def test_old_persisted_events_keep_unknown_facts(tmp_path):
     event = slack_presence_event(BridgeStore(tmp_path).claim_inbox())
     assert event["message"]["provider_facts"] == {}
     assert event["text"] == "A shared update"
+
+
+def _spoken(ts, *, channel="D1", channel_type="im", thread_ts=None, event_id=None, kind="message"):
+    event = {"type": kind, "user": "U1", "channel": channel, "ts": ts, "text": "words",
+             **({"channel_type": channel_type} if channel_type else {}), **({"thread_ts": thread_ts} if thread_ts else {})}
+    return {"type": "events_api", "envelope_id": "env-" + ts,
+            "payload": {"team_id": "T1", "event_id": event_id or "Ev-" + ts, "event": event}}
+
+
+def _received(tmp_path, payload):
+    store = BridgeStore(tmp_path)
+    store.ingest_envelope(payload, parse_socket_envelope(payload))
+    return store.claim_inbox()
+
+
+@pytest.mark.parametrize("payload,thread", [
+    # The flow of a direct or group message is one conversation; it names no thread.
+    (_spoken("1.0"), ""),
+    (_spoken("1.0", channel_type="mpim", channel="G1"), ""),
+    # An explicit thread stays its own conversation, in a direct or group message too.
+    (_spoken("2.0", thread_ts="1.0"), "1.0"),
+    (_spoken("2.0", channel_type="mpim", channel="G1", thread_ts="1.0"), "1.0"),
+    # A thread's parent stays in the flow it was posted in; in a channel it is its own thread.
+    (_spoken("1.0", thread_ts="1.0"), ""),
+    (_spoken("1.0", channel="C1", channel_type="channel", thread_ts="1.0"), "1.0"),
+    # A top-level channel message opens its own conversation, wherever the channel's ID came from.
+    (_spoken("1.0", channel="C1", channel_type="channel"), "1.0"),
+    (_spoken("1.0", channel="C1", channel_type="group"), "1.0"),
+    (_spoken("1.0", channel="C1", channel_type="", kind="app_mention"), "1.0"),
+])
+def test_one_stored_conversation_names_the_event_the_lane_and_the_reply(tmp_path, payload, thread):
+    item = _received(tmp_path, payload)
+    channel = payload["payload"]["event"]["channel"]
+    assert item.ordering_key == f"T1:{channel}:{thread or '0'}" and item.conversation_thread == thread
+    event = slack_presence_event(item)
+    assert event["thread_id"] == event["conversation"]["thread_ts"] == thread
+    assert event["conversation_key"] == f"slack:T1:{channel}:{thread or '0'}"
+    # Its time is its own: Slack's send time of this message, whatever thread the conversation names.
+    sent = float(payload["payload"]["event"]["ts"])
+    assert event["message"]["sent_at"] == datetime.fromtimestamp(sent, timezone.utc).isoformat()
+
+
+def test_direct_messages_share_the_room_a_proactive_send_lands_in(tmp_path):
+    store = BridgeStore(tmp_path)
+    keys = set()
+    for ts in ("1.0", "2.0", "3.0"):
+        store.ingest_envelope(payload := _spoken(ts), parse_socket_envelope(payload))
+        item = store.claim_inbox()
+        keys.add(slack_presence_event(item)["conversation_key"])
+        store.complete_inbox(item.row_id, item.lease_token)
+    assert keys == {"slack:T1:D1:0"}
+
+
+def test_a_message_received_under_its_own_key_keeps_it_through_custody(tmp_path):
+    """What an earlier version stored stays: its room, its reply thread, and with them its identities."""
+    store = BridgeStore(tmp_path)
+    store.ingest_envelope(payload := _spoken("1.0"), parse_socket_envelope(payload))
+    with store._connect() as db:
+        db.execute("UPDATE inbox SET ordering_key='T1:D1:1.0'")
+    item = store.claim_inbox()
+    assert item.conversation_thread == "1.0"
+    assert slack_presence_event(item)["conversation_key"] == "slack:T1:D1:1.0"
+
+
+@pytest.mark.parametrize("payload,reads", [(_spoken("1.0"), False), (_spoken("2.0", thread_ts="1.0"), True),
+                                           (_spoken("1.0", channel="C1", channel_type="channel"), True)])
+def test_a_thread_is_read_only_where_the_conversation_is_one(tmp_path, payload, reads):
+    item = _received(tmp_path, payload)
+    calls = []
+
+    class Slack:
+        async def user_info(self, _user): return {}
+        async def conversation_info(self, _channel): return {}
+        async def read_messages(self, **arguments):
+            calls.append(arguments)
+            return {"messages": [], "complete": True, "next_cursor": None}
+
+    snapshot = asyncio.run(capture_context(Slack(), item, "Workspace"))
+    assert ("thread" in snapshot) is reads and len(calls) == int(reads)
+    if reads:
+        assert calls[0]["thread_ts"] == item.conversation_thread
+
+
+@pytest.mark.parametrize("info,thread_ts,filed", [
+    # A chat's top-level message lives in the chat's flow; a channel's is the thread it opens.
+    ({"is_im": True}, "", ""), ({"is_mpim": True}, "", ""), ({"is_channel": True}, "", "100.0"),
+    # A reply stays in its thread, in a chat too.
+    ({"is_im": True}, "99.0", "99.0"),
+])
+def test_a_reaction_joins_the_conversation_its_target_was_posted_in(tmp_path, info, thread_ts, filed):
+    store = BridgeStore(tmp_path)
+    payload = {"type": "events_api", "envelope_id": "env-r", "payload": {"team_id": "T1", "event_id": "Ev-r", "event": {
+        "type": "reaction_added", "user": "U1", "reaction": "eyes", "item_user": "U_BOT",
+        "item": {"type": "message", "channel": "D1", "ts": "100.0"}}}}
+    store.ingest_envelope(payload, parse_socket_envelope(payload))
+    item = store.claim_inbox()
+
+    class Slack:
+        async def user_info(self, _user): return {}
+        async def conversation_info(self, _channel): return info
+        async def read_messages(self, *_channel, **_arguments):
+            target = {"ts": "100.0", "user": "U_BOT", "text": "words", **({"thread_ts": thread_ts} if thread_ts else {})}
+            return {"messages": [target], "complete": True, "next_cursor": None}
+
+    snapshot = asyncio.run(capture_context(Slack(), item, "Workspace"))
+    assert snapshot["reaction_target"]["thread_ts"] == filed
+    event = slack_presence_event(replace(item, provider_context=snapshot))
+    assert event["thread_id"] == event["conversation"]["thread_ts"] == filed
+    assert event["conversation_key"] == f"slack:T1:D1:{filed or '0'}"
+
+
+@pytest.mark.parametrize("stated,channel,sent_in,parts,filed", [
+    # A top-level post in a channel opens the thread its replies continue: the receipt names that thread.
+    ("channel", "C1", "", 1, "9.9"), ("group", "C1", "", 1, "9.9"),
+    # A post split into parts keeps the thread it was sent in, so its parts stay together.
+    ("channel", "C1", "", 2, ""),
+    # A send into a thread stays in that thread; a send into a direct or group chat stays in its flow.
+    ("channel", "C1", "5.0", 1, "5.0"), ("im", "D1", "", 1, ""), ("mpim", "G1", "", 1, ""), ("im", "D1", "5.0", 1, "5.0"),
+    # A conversation Slack never described here keeps the thread the message was sent in.
+    ("", "C1", "", 1, ""), ("", "D1", "", 1, ""),
+])
+def test_a_send_is_filed_in_the_conversation_its_replies_continue(tmp_path, stated, channel, sent_in, parts, filed):
+    heard = [_spoken("1.0", channel=channel, channel_type=stated)] if stated else []
+    assert _filed(tmp_path, heard, channel, sent_in=sent_in, parts=parts) == filed
+
+
+def _filed(tmp_path, heard, channel, *, sent_in="", parts=1, via="slack_send"):
+    """The thread the delivery receipt of one post names, once the events ``heard`` are stored."""
+    from lib.runtime import OutboundWorker
+
+    store = BridgeStore(tmp_path)
+    store.set_runtime(workspace_id="T1")
+    for payload in heard:
+        store.ingest_envelope(payload, parse_socket_envelope(payload))
+    if via == "slack_send":
+        store.enqueue_outbox(request_id="send-1", target=channel, thread_ts=sent_in, chunks=["words"] * parts,
+                             origin={"kind": "tool"}, delivery_reporting_version=1)
+    else:
+        store.enqueue_mutation(request_id="send-1", operation="generic_api", origin={"kind": "tool"}, delivery_reporting_version=1,
+                               payload={"method": "POST", "path": "chat.postMessage", "effect": "write", "result_kind": "auto",
+                                        "params": {}, "body": {"channel": channel, "text": "words"}})
+
+    class Slack:
+        async def resolve_target(self, target): return target
+        async def post_message(self, **sent): return {"ok": True, "channel": sent["channel"], "ts": "9.9"}
+        async def generic_request(self, *, body, **_request):
+            return {"ok": True, "channel": body["channel"], "ts": "9.9", "message": {"ts": "9.9", "text": body["text"]}}
+
+    assert asyncio.run(OutboundWorker(store, Slack()).process_once()) is True
+    with store._connect() as db:
+        report = db.execute("SELECT report_payload_json FROM outbox WHERE report_payload_json<>'' ORDER BY id").fetchone()[0]
+    return json.loads(report)["thread_id"]
+
+
+@pytest.mark.parametrize("heard,via,channel,filed", [
+    # A post through slack_api's chat.postMessage is filed like a send: a channel's under the thread it opens,
+    # a chat's in its flow.
+    ([("C1", "channel")], "slack_api", "C1", "9.9"), ([("D1", "im")], "slack_api", "D1", ""),
+    # A newer event that states no type, a mention here, does not hide the type stated before it, and alone states none.
+    ([("C1", "channel"), ("C1", "")], "slack_send", "C1", "9.9"), ([("C1", "")], "slack_send", "C1", ""),
+    # Each conversation's own type counts: another's does not describe this one, nor does a newer one replace it.
+    ([("C1", "channel")], "slack_send", "D1", ""), ([("C1", "channel"), ("D1", "im")], "slack_send", "C1", "9.9"),
+])
+def test_every_post_is_filed_by_the_type_its_own_conversation_last_stated(tmp_path, heard, via, channel, filed):
+    heard = [_spoken(f"{ts}.0", channel=where, channel_type=stated, kind="message" if stated else "app_mention")
+             for ts, (where, stated) in enumerate(heard, start=1)]
+    assert _filed(tmp_path, heard, channel, via=via) == filed

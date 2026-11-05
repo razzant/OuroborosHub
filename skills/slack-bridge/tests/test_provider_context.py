@@ -96,8 +96,9 @@ def test_provider_mock_through_worker_persists_context_before_host(tmp_path):
         assert event["conversation"]["channel_id"] == "D_TEST"
         assert event["conversation"]["topic"] == {"value": "Current work"}
         assert event["conversation"]["is_im"] is True
-        assert event["thread_id"] == "123.456" and event["text"] == "Hello"
-        assert sorted(calls) == ["/api/conversations.info", "/api/conversations.replies", "/api/users.info"]
+        assert event["thread_id"] == "" and event["text"] == "Hello"
+        assert sorted(calls) == ["/api/conversations.info", "/api/users.info"]
+        assert "thread_history" not in event["conversation"]
         assert store.status()["inbox_delivered"] == 1
     asyncio.run(run())
 
@@ -176,11 +177,11 @@ def test_retry_after_restart_reuses_exact_snapshot_but_next_event_refreshes(tmp_
             worker = InboundWorker(reopened, slack, host, staged_root=tmp_path / "staged")
             await worker.process_once()
             assert events[0] == events[1]
-            assert context_row(reopened) == saved and len(calls) == 3
+            assert context_row(reopened) == saved and len(calls) == 2
             next_value = payload("event-2")
             reopened.ingest_envelope(next_value, parse_socket_envelope(next_value))
             await worker.process_once()
-        assert events[2]["actor"]["display_name"] == "Changed name" and len(calls) == 6
+        assert events[2]["actor"]["display_name"] == "Changed name" and len(calls) == 4
     asyncio.run(run())
 
 
@@ -271,7 +272,7 @@ def test_real_lookup_wait_expiry_still_submits_original_message(tmp_path, monkey
         assert event["text"] == "Hello"
         assert event["actor"]["platform_actor_id"] == "U_TEST"
         assert event["account_id"] == "T_TEST" and event["conversation_id"] == "D_TEST"
-        assert event["thread_id"] == "123.456"
+        assert event["thread_id"] == ""
         section, marker = (("actor", "profile_lookup") if slow_method == "users.info"
                            else ("conversation", "info_lookup"))
         observation = event[section][marker]

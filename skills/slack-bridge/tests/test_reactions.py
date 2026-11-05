@@ -19,7 +19,7 @@ import pytest
 from lib.events import parse_socket_envelope
 from lib.host_adapter import LoopbackPresenceHostAdapter
 from lib.provider_context import capture_reaction_target
-from lib.runtime import InboundWorker, OutboundWorker, _discover_reporting
+from lib.runtime import _REACTION_HISTORY_UNAVAILABLE, InboundWorker, OutboundWorker, _discover_reporting
 from lib.slack_api import SlackClient
 from lib.store import REACTION_WITHHELD, BridgeStore
 from test_workers_plugin import _Api, _load_plugin
@@ -616,6 +616,38 @@ def test_remove_names_the_removed_value_and_unknown_target_stays_unresolved(tmp_
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("channel,kind,thread_ts,stored_in,filed", [
+    # A chat's top-level message lives in the chat's flow, so a reaction to it is held and recorded there.
+    ("D1", "im", "", "inbox", ""), ("G1", "mpim", "", "inbox", ""),
+    # A reply stays in its thread, in a chat too; a channel's top-level message is the thread it opens.
+    ("D1", "im", "99.0", "inbox", "99.0"), ("C1", "channel", "", "inbox", "101.5"),
+    # Ouroboros's own message, kept as its send, takes the type Slack stated for its conversation.
+    ("D1", "im", "", "outbox", ""), ("C1", "channel", "", "outbox", "101.5"),
+    # A conversation Slack never described keeps the target's own root: nothing is guessed from an ID.
+    ("D1", "", "", "inbox", "101.5"),
+])
+def test_an_own_reaction_is_held_and_receipted_in_the_conversation_of_its_target(tmp_path, channel, kind,
+                                                                                 thread_ts, stored_in, filed):
+    async def run():
+        store = BridgeStore(tmp_path)
+        heard = message(ts="101.5" if stored_in == "inbox" else "100.0", thread_ts=thread_ts, channel=channel)
+        heard["payload"]["event"]["channel_type"] = kind
+        ingest(store, heard)
+        if stored_in == "outbox":
+            store.set_runtime(workspace_id="T1")
+            store.enqueue_outbox(request_id="say", target=channel, thread_ts=thread_ts, chunks=["my own words"])
+            sent = store.claim_outbox()
+            store.set_resolved_target(sent, channel, "T1")
+            store.complete_outbox(sent.row_id, sent.lease_token, provider_message_ts="101.5")
+        queue(store, ts="101.5", channel=channel)
+        world = World(store, tmp_path)
+        await outbound_pass(world)
+        [report] = world.reports
+        assert (report["conversation_id"], report["thread_id"]) == (channel, filed)
+        assert {query.get("thread_id", "") for query in world.place_queries} == {filed}
+    asyncio.run(run())
+
+
 def test_old_host_keeps_the_local_receipt_and_gets_no_report(tmp_path):
     async def run():
         store = BridgeStore(tmp_path)
@@ -773,6 +805,12 @@ def test_a_thread_paused_after_queueing_holds_its_reaction_and_an_unretained_tar
     asyncio.run(run())
 
 
+def test_a_held_reaction_report_says_history_gets_it_after_an_update_and_not_why():
+    line = _REACTION_HISTORY_UNAVAILABLE
+    assert line.startswith("Held: ") and "update" in line
+    assert "receipt" not in line  # the receipt beside it already shows the provider's answer
+
+
 @pytest.mark.parametrize("later,reported", [(OLD_HOST, False), (None, False), (CAPABLE, True)])
 def test_report_frozen_on_a_capable_host_goes_only_to_a_capable_one(tmp_path, later, reported):
     async def run():
@@ -799,7 +837,7 @@ def test_report_frozen_on_a_capable_host_goes_only_to_a_capable_one(tmp_path, la
             assert part(store)["history_report_state"] == "acked" and len(reopened.reports) == 1
         else:
             assert reopened.reports == [] and part(store)["history_report_state"] == "pending"
-            assert part(store)["history_report_error"].startswith("Held: Host history for reactions is unavailable")
+            assert part(store)["history_report_error"] == _REACTION_HISTORY_UNAVAILABLE
     asyncio.run(run())
 
 
