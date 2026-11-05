@@ -267,6 +267,11 @@ class IdentityTests(Case):
         value = make_event("review", 1, None, account=account_id(11), repo=REPO, thread="pr.1", kind="review", raw=review,
                            actor={"platform": "github"}, route=route("inline"), watched=WATCHED, history=[])
         self.assertEqual(value["message"]["sent_at"], "2026-02-04T00:00:00+00:00")
+        # A wordless review's state change: its placeholder text is not an edit of words.
+        value = make_event("review", 2, {"text": ""}, account=account_id(11), repo=REPO, thread="pr.1", kind="review",
+                           raw={**review, "body": "", "state": "DISMISSED", "updated_at": "2026-02-05T00:00:00Z"},
+                           actor={"platform": "github"}, route=route("inline"), watched=WATCHED, history=[])
+        self.assertNotIn("edited_at", value["message"])
 
     def test_later_arrival_resolves_exact_subroute_and_freezes_request(self):
         second = event("later", route("inline"))

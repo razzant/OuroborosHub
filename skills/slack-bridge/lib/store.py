@@ -182,9 +182,10 @@ def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(float(epoch), timezone.utc).isoformat()
 
 
-def message_revision(facts: Mapping[str, Any], subtype: str, event_ts: str, message_ts: str) -> str:
-    """The provider revision shared by message and app_mention deliveries; for a revision, its time."""
-    changed = subtype == "message_changed"
+def _message_revision(row: Mapping[str, Any] | sqlite3.Row) -> str:
+    """The provider revision shared by message and app_mention deliveries."""
+    facts = json.loads(row["structured_json"])
+    changed = row["subtype"] == "message_changed"
     message = facts.get("message", {}) if changed else facts
     edited = message.get("edited")
     previous_edited = facts.get("previous_message", {}).get("edited") if changed else None
@@ -193,11 +194,7 @@ def message_revision(facts: Mapping[str, Any], subtype: str, event_ts: str, mess
     if (isinstance(edited, Mapping) and str(edited.get("ts") or "").strip()
             and (not isinstance(previous_edited, Mapping) or previous_edited.get("ts") != edited["ts"])):
         return str(edited["ts"]).strip()
-    return str(event_ts if changed else message_ts)
-
-
-def _message_revision(row: Mapping[str, Any] | sqlite3.Row) -> str:
-    return message_revision(json.loads(row["structured_json"]), row["subtype"], row["event_ts"], row["message_ts"])
+    return str(row["event_ts"] if changed else row["message_ts"])
 
 
 def _queued_event(row: sqlite3.Row, text_chars: int | None) -> dict[str, Any]:

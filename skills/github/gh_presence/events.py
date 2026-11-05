@@ -128,6 +128,7 @@ def make_event(event_id, revision, old, *, account, repo, thread, kind, raw, act
     if not old and not first_observed_update and kind in ("issue", "pr"):
         facts.append("new_issue" if kind == "issue" else "new_pull_request")
     old_text = (old or {}).get("text", "")
+    edited = bool(old) and text != old_text  # the words themselves, before any placeholder below
     if text and text != old_text and not first_observed_update:
         spans = mentions(text, watched)
         if spans:
@@ -181,4 +182,4 @@ def make_event(event_id, revision, old, *, account, repo, thread, kind, raw, act
                         "raw": raw, "original_author": actor, "reply_route": route,
                         "fact_evidence": evidence, "coverage_gaps": gaps, "notification": notification,
                         "context_fingerprint": context_fingerprint(history), "observed_at": now(),
-                        **times(kind, raw, bool(old) and text != old_text)}}
+                        **times(kind, raw, edited)}}

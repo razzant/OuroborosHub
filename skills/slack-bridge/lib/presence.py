@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 from .events import DECLARED_FILE_KEYS, REACTION_EVENTS, file_facts, provider_facts
 from .provider_context import enrich_event
-from .store import InboxItem, _iso, message_revision
+from .store import InboxItem, _iso
 
 # reaction.target.excerpt never exceeds this; the full words stay in provider_facts.
 _REACTION_EXCERPT_CHARS = 500
@@ -119,15 +119,26 @@ def _iso_ts(ts: str) -> str:
         return ""
 
 
+def _edit_time(item: InboxItem) -> str:
+    """When the shown words were last edited: Slack's ``edited.ts``, or this change's own time when a
+    ``message_changed`` altered the words without a newer stamp. An unfurl or a file change edits no words."""
+    changed = item.subtype == "message_changed"
+    current = (item.structured.get("message") if changed else item.structured) or {}
+    previous = (item.structured.get("previous_message") or {}) if changed else {}
+    stamp, before = (str(edited.get("ts") or "") if isinstance(edited, Mapping) else ""
+                     for edited in (current.get("edited"), previous.get("edited")))
+    if changed and current.get("text") != previous.get("text") and stamp == before:
+        return item.event_ts
+    return stamp
+
+
 def _times(item: InboxItem) -> dict[str, str]:
-    """Slack's own times for ``message.sent_at``/``edited_at``: when the message was sent and, for a later
-    revision, that revision's time (``message_revision``); a reaction's is when it was made. Never a receipt time;
-    an unreadable one is absent."""
+    """Slack's own times for ``message.sent_at``/``edited_at``: when the message was sent and when its words were
+    last edited; a reaction's is when it was made. Never a receipt time; an unreadable one is absent."""
     if item.event_type in REACTION_EVENTS:
         sent, edited = item.event_ts, ""
     else:
-        revision = message_revision(item.structured, item.subtype, item.event_ts, item.message_ts)
-        sent, edited = item.message_ts, revision if revision != item.message_ts else ""
+        sent, edited = item.message_ts, _edit_time(item)
     return {key: value for key, value in (("sent_at", _iso_ts(sent)), ("edited_at", _iso_ts(edited))) if value}
 
 
