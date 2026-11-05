@@ -110,10 +110,15 @@ def test_exact_slack_facts_map_to_frozen_generic_event() -> None:
     assert event["text"] == "/status is ordinary conversation text"
     # Slack's own send time, and an edit's time only on an edit; never the bridge's receipt.
     assert event["message"]["sent_at"] == "1970-01-01T00:00:10+00:00" and "edited_at" not in event["message"]
-    edit = slack_presence_event(replace(_item(), subtype="message_changed",
-                                        structured={"message": {"ts": "10.0", "edited": {"ts": "12.5"}}}))
-    assert (edit["message"]["sent_at"], edit["message"]["edited_at"]) == (
-        "1970-01-01T00:00:10+00:00", "1970-01-01T00:00:12.500000+00:00")
+    # An edit's time is its revision: Slack's edit stamp when it advanced, else the change event's own time.
+    for structured, edited_at in (
+            ({"message": {"ts": "10.0", "edited": {"ts": "12.5"}}}, "1970-01-01T00:00:12.500000+00:00"),
+            ({"message": {"ts": "10.0"}}, "1970-01-01T00:00:10.100000+00:00"),
+            ({"message": {"ts": "10.0", "edited": {"ts": "9.5"}}, "previous_message": {"edited": {"ts": "9.5"}}},
+             "1970-01-01T00:00:10.100000+00:00"),
+            ({"message": {"ts": "10.0", "edited": "not a stamp"}}, "1970-01-01T00:00:10.100000+00:00")):
+        edit = slack_presence_event(replace(_item(), subtype="message_changed", structured=structured))
+        assert (edit["message"]["sent_at"], edit["message"]["edited_at"]) == ("1970-01-01T00:00:10+00:00", edited_at)
 
 
 def test_completed_turn_posts_exact_contract_and_delivers_nonempty_text() -> None:

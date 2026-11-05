@@ -252,10 +252,17 @@ class IdentityTests(Case):
                            actor={"platform": "github", "is_bot": True}, route=route(), watched=WATCHED, history=[])
         self.assertEqual((value["message"]["sent_at"], value["message"]["edited_at"]),
                          ("2026-02-02T00:00:00+00:00", "2026-02-03T00:00:00+00:00"))
-        value = make_event("first", 1, None, account=account_id(11), repo=REPO, thread="issue.1", kind="issue_comment",
-                           raw={**raw, "updated_at": "2026-02-03T00:00:00Z"}, actor={"platform": "github"}, route=route(),
-                           watched=WATCHED, history=[], first_observed_update=True)
-        self.assertEqual(value["message"]["edited_at"], "2026-02-03T00:00:00+00:00")
+        # Only an edit of the words seen before has an edit time: not a state change, not a first sighting.
+        for old, first in (({"text": "current"}, False), (None, True)):
+            value = make_event("same", 2, old, account=account_id(11), repo=REPO, thread="issue.1", kind="issue_comment",
+                               raw={**raw, "updated_at": "2026-02-03T00:00:00Z"}, actor={"platform": "github"},
+                               route=route(), watched=WATCHED, history=[], first_observed_update=first)
+            self.assertEqual(value["message"]["sent_at"], "2026-02-02T00:00:00+00:00")
+            self.assertNotIn("edited_at", value["message"])
+        value = make_event("request", 2, {"text": "before"}, account=account_id(11), repo=REPO, thread="pr.1",
+                           kind="review_request", raw={**raw, "updated_at": "2026-02-03T00:00:00Z"},
+                           actor={"platform": "github"}, route=route("inline"), watched=WATCHED, history=history)
+        self.assertFalse({"sent_at", "edited_at"} & set(value["message"]))
         review = {"id": 701, "body": "ok", "submitted_at": "2026-02-04T00:00:00Z"}
         value = make_event("review", 1, None, account=account_id(11), repo=REPO, thread="pr.1", kind="review", raw=review,
                            actor={"platform": "github"}, route=route("inline"), watched=WATCHED, history=[])

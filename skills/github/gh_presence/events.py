@@ -55,13 +55,14 @@ def provider_time(value):
     return parsed.isoformat() if parsed.utcoffset() is not None else ""
 
 
-def times(kind, raw, revised):
-    """``message.sent_at``, when the object was written, and for a later revision ``edited_at``, when GitHub last
-    changed it (for an issue or pull request any change, a new comment included); never an observation time. A review
-    request has none of its own (it borrows the pull request's)."""
-    sent = "" if kind == "review_request" else provider_time(created(raw))
-    edited = provider_time(raw.get("updated_at") or raw.get("updatedAt")) if revised else ""
-    return {key: value for key, value in (("sent_at", sent), ("edited_at", edited)) if value}
+def times(kind, raw, edited):
+    """``message.sent_at``, when the object was written, and when its words were edited ``edited_at``, GitHub's last
+    change (for an issue or pull request any change, a new comment included); never an observation time. A state
+    change is no edit, and a review request has no time of its own (it borrows the pull request's)."""
+    if kind == "review_request":
+        return {}
+    changed = provider_time(raw.get("updated_at") or raw.get("updatedAt")) if edited else ""
+    return {key: value for key, value in (("sent_at", provider_time(created(raw))), ("edited_at", changed)) if value}
 
 
 def before(a, b):
@@ -180,4 +181,4 @@ def make_event(event_id, revision, old, *, account, repo, thread, kind, raw, act
                         "raw": raw, "original_author": actor, "reply_route": route,
                         "fact_evidence": evidence, "coverage_gaps": gaps, "notification": notification,
                         "context_fingerprint": context_fingerprint(history), "observed_at": now(),
-                        **times(kind, raw, bool(old) or first_observed_update)}}
+                        **times(kind, raw, bool(old) and text != old_text)}}

@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 from .events import DECLARED_FILE_KEYS, REACTION_EVENTS, file_facts, provider_facts
 from .provider_context import enrich_event
-from .store import InboxItem, _iso
+from .store import InboxItem, _iso, message_revision
 
 # reaction.target.excerpt never exceeds this; the full words stay in provider_facts.
 _REACTION_EXCERPT_CHARS = 500
@@ -120,12 +120,14 @@ def _iso_ts(ts: str) -> str:
 
 
 def _times(item: InboxItem) -> dict[str, str]:
-    """Slack's own times for ``message.sent_at``/``edited_at``: when the message was sent and, for an
-    edit, when it was edited; a reaction's is when it was made. Never a receipt time; unreadable is absent."""
+    """Slack's own times for ``message.sent_at``/``edited_at``: when the message was sent and, for a later
+    revision, that revision's time (``message_revision``); a reaction's is when it was made. Never a receipt time;
+    an unreadable one is absent."""
     if item.event_type in REACTION_EVENTS:
         sent, edited = item.event_ts, ""
     else:
-        sent, edited = item.message_ts, ((item.structured.get("message") or item.structured).get("edited") or {}).get("ts")
+        revision = message_revision(item.structured, item.subtype, item.event_ts, item.message_ts)
+        sent, edited = item.message_ts, revision if revision != item.message_ts else ""
     return {key: value for key, value in (("sent_at", _iso_ts(sent)), ("edited_at", _iso_ts(edited))) if value}
 
 
