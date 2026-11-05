@@ -9,6 +9,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -101,8 +102,18 @@ def place_refusal_hold(facts: Mapping[str, Any]) -> str:
         return _PLACE_DISCONNECTED.format(label=label)
     return f"Held: {label} is {state}"
 
+def _sent_at(date_header: Any) -> str:
+    """The Date header (the sender's origination time) as ``message.sent_at``; "" when absent, unreadable or
+    without a time zone, never a receipt time."""
+    try:
+        sent = parsedate_to_datetime(str(date_header or ""))
+    except (TypeError, ValueError, OverflowError, IndexError):
+        return ""
+    return sent.isoformat() if sent.utcoffset() is not None else ""
+
 def email_presence_event(item: InboxItem, *, account_id: str, places: bool = False,
                          identity: bool = False, words=(), address="", senders=(), sender="") -> dict[str, Any]:
+    sent_at = _sent_at(item.context.get("date"))
     return {
         "source_event_id": item.provider_event_key,
         "provider": "email",
@@ -119,6 +130,7 @@ def email_presence_event(item: InboxItem, *, account_id: str, places: bool = Fal
                     "folder": item.folder, "uidvalidity": item.uidvalidity,
                     "subject": item.subject, "to": list(item.recipients),
                     **item.context,
+                    **({"sent_at": sent_at} if sent_at else {}),
                     **({"message_ref": public_message_ref(account_id, item.context["message_ref"])}
                        if item.context.get("message_ref") else {})},
         "text": f"Subject: {item.subject}\n\n{item.body}",

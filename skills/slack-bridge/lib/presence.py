@@ -102,9 +102,6 @@ def _with_reaction_fact(event: dict[str, Any], item: InboxItem) -> None:
     if lookup:
         facts = {**message["provider_facts"], "reaction": {**raw, "target_lookup": _public_lookup(lookup)}}
         message["provider_facts"] = facts
-    sent_at = _sent_at(item.event_ts)
-    if sent_at:
-        message["sent_at"] = sent_at
 
 
 def _public_lookup(lookup: Mapping[str, Any]) -> dict[str, Any]:
@@ -115,11 +112,21 @@ def _public_lookup(lookup: Mapping[str, Any]) -> dict[str, Any]:
     return public
 
 
-def _sent_at(event_ts: str) -> str:
+def _iso_ts(ts: str) -> str:
     try:
-        return _iso(float(event_ts))
+        return _iso(float(ts))
     except (TypeError, ValueError, OverflowError, OSError):
         return ""
+
+
+def _times(item: InboxItem) -> dict[str, str]:
+    """Slack's own times for ``message.sent_at``/``edited_at``: when the message was sent and, for an
+    edit, when it was edited; a reaction's is when it was made. Never a receipt time; unreadable is absent."""
+    if item.event_type in REACTION_EVENTS:
+        sent, edited = item.event_ts, ""
+    else:
+        sent, edited = item.message_ts, ((item.structured.get("message") or item.structured).get("edited") or {}).get("ts")
+    return {key: value for key, value in (("sent_at", _iso_ts(sent)), ("edited_at", _iso_ts(edited))) if value}
 
 
 def slack_presence_event(item: InboxItem, *, transport_queue: bool = False, places: bool = False) -> dict[str, Any]:
@@ -163,6 +170,7 @@ def slack_presence_event(item: InboxItem, *, transport_queue: bool = False, plac
             "attachments": _attachments(item),
             "blocks": list(item.structured.get("blocks") or []),
             "provider_facts": provider_facts(item.structured),
+            **_times(item),
         },
         "text": item.text,
     }

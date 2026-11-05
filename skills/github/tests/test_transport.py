@@ -241,9 +241,25 @@ class IdentityTests(Case):
         self.assertNotIn("mention", value["facts"])
         self.assertEqual(value["actor"]["attribution"], "unknown")
         self.assertEqual(value["message"]["coverage_gaps"][0]["code"], "team_membership_not_proven")
+        self.assertFalse({"sent_at", "edited_at"} & set(value["message"]))  # a request has no time of its own
         value = make_event("bot", 1, None, account=account_id(11), repo=REPO, thread="issue.1", kind="issue_comment",
                            raw=raw, actor={"platform": "github", "is_bot": True}, route=route(), watched=WATCHED, history=[])
         self.assertIn("from_bot", value["facts"])
+        self.assertEqual(value["message"]["sent_at"], "2026-02-02T00:00:00+00:00")
+        self.assertNotIn("edited_at", value["message"])
+        value = make_event("edit", 2, {"text": "before"}, account=account_id(11), repo=REPO, thread="issue.1",
+                           kind="issue_comment", raw={**raw, "updated_at": "2026-02-03T00:00:00Z"},
+                           actor={"platform": "github", "is_bot": True}, route=route(), watched=WATCHED, history=[])
+        self.assertEqual((value["message"]["sent_at"], value["message"]["edited_at"]),
+                         ("2026-02-02T00:00:00+00:00", "2026-02-03T00:00:00+00:00"))
+        value = make_event("first", 1, None, account=account_id(11), repo=REPO, thread="issue.1", kind="issue_comment",
+                           raw={**raw, "updated_at": "2026-02-03T00:00:00Z"}, actor={"platform": "github"}, route=route(),
+                           watched=WATCHED, history=[], first_observed_update=True)
+        self.assertEqual(value["message"]["edited_at"], "2026-02-03T00:00:00+00:00")
+        review = {"id": 701, "body": "ok", "submitted_at": "2026-02-04T00:00:00Z"}
+        value = make_event("review", 1, None, account=account_id(11), repo=REPO, thread="pr.1", kind="review", raw=review,
+                           actor={"platform": "github"}, route=route("inline"), watched=WATCHED, history=[])
+        self.assertEqual(value["message"]["sent_at"], "2026-02-04T00:00:00+00:00")
 
     def test_later_arrival_resolves_exact_subroute_and_freezes_request(self):
         second = event("later", route("inline"))

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.5
+
+- Every message carries `message.sent_at`, Telegram's send time as an ISO time, and an edit
+  `message.edited_at` from `edit_date`, so the Host can say when the person wrote instead of
+  "at an unrecorded time". Reactions keep theirs; `sent_at_epoch` stays.
+
 ## 0.10.4 — unreleased
 
 - A hold line says the state and the next step, not the Host's answer behind it. An

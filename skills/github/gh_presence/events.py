@@ -46,6 +46,24 @@ def created(raw):
     return raw.get("created_at") or raw.get("createdAt") or raw.get("submitted_at") or ""
 
 
+def provider_time(value):
+    """A GitHub timestamp as an ISO time with its zone; "" when absent or unreadable."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    return parsed.isoformat() if parsed.utcoffset() is not None else ""
+
+
+def times(kind, raw, revised):
+    """``message.sent_at``, when the object was written, and for a later revision ``edited_at``, when GitHub last
+    changed it (for an issue or pull request any change, a new comment included); never an observation time. A review
+    request has none of its own (it borrows the pull request's)."""
+    sent = "" if kind == "review_request" else provider_time(created(raw))
+    edited = provider_time(raw.get("updated_at") or raw.get("updatedAt")) if revised else ""
+    return {key: value for key, value in (("sent_at", sent), ("edited_at", edited)) if value}
+
+
 def before(a, b):
     try:
         return datetime.fromisoformat(a.replace("Z", "+00:00")) < datetime.fromisoformat(b.replace("Z", "+00:00"))
@@ -161,4 +179,5 @@ def make_event(event_id, revision, old, *, account, repo, thread, kind, raw, act
                         "previous_source_event_id": event_id.rsplit(":", 1)[0] + ":" + str(revision - 1) if old else None,
                         "raw": raw, "original_author": actor, "reply_route": route,
                         "fact_evidence": evidence, "coverage_gaps": gaps, "notification": notification,
-                        "context_fingerprint": context_fingerprint(history), "observed_at": now()}}
+                        "context_fingerprint": context_fingerprint(history), "observed_at": now(),
+                        **times(kind, raw, bool(old) or first_observed_update)}}
