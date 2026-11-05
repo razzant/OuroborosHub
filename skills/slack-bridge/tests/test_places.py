@@ -83,6 +83,23 @@ def test_new_root_signal_marks_only_new_top_level_posts_in_listed_channels(tmp_p
     assert "facts" not in slack_presence_event(item)
 
 
+@pytest.mark.parametrize("channel,kind,thread", [
+    # The signal is a fact only. A new top-level post in a channel opens its own thread, and the reply goes
+    # there; in a direct or group chat it joins the chat's one conversation, and the reply goes to the chat.
+    ("C0STATUS01", "channel", "20.0"), ("D0DIRECT01", "im", ""), ("G0GROUPS01", "mpim", ""),
+])
+def test_a_new_root_keeps_the_room_and_reply_thread_of_its_conversation(tmp_path, channel, kind, thread):
+    payload = {"type": "events_api", "envelope_id": "env-root",
+               "payload": {"team_id": "T1", "event_id": "Ev-root", "event": _root(channel=channel, channel_type=kind)}}
+    store = BridgeStore(tmp_path)
+    store.ingest_envelope(payload, parse_socket_envelope(payload, bot_user_id="U_BOT", new_root_channels={channel}))
+    item = store.claim_inbox()
+    presence = slack_presence_event(item, places=True)
+    assert NEW_ROOT_SIGNAL in presence["facts"]
+    assert (presence["thread_id"], presence["conversation_key"], item.conversation_thread) == (
+        thread, f"slack:T1:{channel}:{thread or '0'}", thread)
+
+
 @pytest.mark.parametrize("advertised, sent", [(1, True), (None, False), (True, False), (2, False)])
 def test_new_root_signal_reaches_only_a_host_that_vouches_for_signals(advertised, sent):
     async def run():

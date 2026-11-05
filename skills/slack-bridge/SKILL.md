@@ -179,7 +179,7 @@ explicit wake choice. Place notes supply behavior instructions.
 
 ### New top-level posts in listed channels
 
-To wake on new top-level posts (new threads) in chosen channels without waking
+To wake on new top-level posts in chosen channels without waking
 on their replies:
 
 1. Under Settings › Slack Bridge, enter exact channel IDs in **New-root channel
@@ -196,7 +196,10 @@ and no `edited` marker gets `new_root_signal: true` in
 `message.provider_facts` and `signal.new_root` in the event's facts. Thread
 replies, including those also sent to the channel, edits, deletes, reactions,
 join or topic notices and posts in unlisted channels never get it. Only the
-exact channel ID is compared, never a channel name or the message text.
+exact channel ID is compared, never a channel name or the message text. The
+signal moves nothing: in a channel the post opens its own thread, where the
+reply goes; in a listed direct or group chat it joins the chat's one
+conversation, and the reply is a plain message there.
 
 The list changes no admission. Every event is still captured and submitted, and
 mentions, direct messages and my threads keep their own facts. A bot's post still
