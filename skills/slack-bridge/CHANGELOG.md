@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.10.0
+## 1.11.0
 
 - A direct or group chat is one conversation: its top-level messages carry an empty
   `thread_id` and the Host key `slack:<team>:<channel>:0`, which Ouroboros's own
@@ -29,10 +29,20 @@
   with, and with it their retries, reply thread and output identity. Earlier
   per-message conversations of a direct chat stay as the conversations of the threads
   under those messages; the chat's own conversation starts with what Ouroboros sent
-  there at top level. Nothing is imported, renamed or resent. Rolling back to 1.9.x
-  while a top-level message that 1.10.0 stored for a direct or group chat still waits
-  makes a Host with continuation refuse that event, and the bridge records it as
-  failed, so roll back with no such message waiting.
+  there at top level. Nothing is imported, renamed or resent. Rolling back to 1.10.0
+  or earlier while a top-level message that 1.11.0 stored for a direct or group chat
+  still waits makes a Host with continuation refuse that event, and the bridge
+  records it as failed, so roll back with no such message waiting.
+- Restores what 1.10.0 dropped. It was published from a local copy of 1.9.0, so it
+  reverted the changes of 1.9.1 to 1.9.3: hold lines that say what a hold means and
+  only the next step, a skill the Host refused waiting for its owner, and claims
+  that stay idle without write transactions (see 1.9.2 and 1.9.3).
+
+## 1.10.0
+
+- New top-level posts in channels listed by exact ID (`SLACK_NEW_ROOT_CHANNELS`) carry
+  `signal.new_root`, an opt-in wake, sent only to Hosts that advertise
+  `presence_wake_signals: 1`. Published from a local copy based on 1.9.0.
 
 ## 1.9.3
 

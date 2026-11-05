@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.10.0
+version: 1.11.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -627,6 +627,9 @@ References: [conversations.list](https://docs.slack.dev/reference/methods/conver
 - Outgoing writes keep queue order within one lane. For sends and most mutations,
   a lane is one thread, or a conversation's top level. For reaction writes, it is
   the reacted message. A held or in-flight item holds back only its own lane.
+  A lane is named by the target as queued: a send to a user ID finds its DM
+  channel only when it is sent, so it is not ordered against writes that name
+  that DM's channel ID.
   Opening the store moves live reaction rows, including such `slack_api` calls,
   that an earlier version queued per channel into their message's lane. Each claim
   does the same, so a row an older process queues later is ordered too. Their
@@ -924,7 +927,7 @@ turn event declare `identity.sends_as` with the bot's `user_id` and `user` name
 from Slack `auth.test`, and `kind: bot`. This is the credential that speaks,
 separate from the incoming message's actor. Older hosts receive no identity key.
 
-## Conversation identity (1.10.0)
+## Conversation identity (1.11.0)
 
 A direct or group chat is one conversation: its top-level messages carry an empty
 `thread_id` (Host key `slack:<team>:<channel>:0`), the conversation Ouroboros's own
@@ -944,6 +947,6 @@ with, so their retries, replies and receipts are unchanged. Earlier per-message
 conversations of a direct chat stay as they are: each is the conversation of the
 thread under that message. The chat's own conversation starts with what Ouroboros
 sent there at top level. Nothing is imported, renamed or resent. Rolling back to
-1.9.x while a top-level message that 1.10.0 stored for a direct or group chat still
-waits makes a Host with continuation refuse that event, and the bridge records it as
-failed, so roll back with no such message waiting.
+1.10.0 or earlier while a top-level message that 1.11.0 stored for a direct or group
+chat still waits makes a Host with continuation refuse that event, and the bridge
+records it as failed, so roll back with no such message waiting.
