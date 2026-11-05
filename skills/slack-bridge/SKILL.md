@@ -952,6 +952,6 @@ with, so their retries, replies and receipts are unchanged. Earlier per-message
 conversations of a direct chat stay as they are: each is the conversation of the
 thread under that message. The chat's own conversation starts with what Ouroboros
 sent there at top level. Nothing is imported, renamed or resent. Rolling back to
-1.10.0 or earlier while a top-level message that 1.11.0 stored for a direct or group
+1.10.1 or earlier while a top-level message that 1.11.0 stored for a direct or group
 chat still waits makes a Host with continuation refuse that event, and the bridge
 records it as failed, so roll back with no such message waiting.

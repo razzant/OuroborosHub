@@ -29,7 +29,7 @@
   with, and with it their retries, reply thread and output identity. Earlier
   per-message conversations of a direct chat stay as the conversations of the threads
   under those messages; the chat's own conversation starts with what Ouroboros sent
-  there at top level. Nothing is imported, renamed or resent. Rolling back to 1.10.0
+  there at top level. Nothing is imported, renamed or resent. Rolling back to 1.10.1
   or earlier while a top-level message that 1.11.0 stored for a direct or group chat
   still waits makes a Host with continuation refuse that event, and the bridge
   records it as failed, so roll back with no such message waiting.
