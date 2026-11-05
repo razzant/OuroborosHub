@@ -13,8 +13,9 @@
   conversation. The bridge decides this once, when an event is received, and inbound
   readers take the conversation stored with it: the event, its queue lane, the reply
   and its receipt, the thread read and the output identity. A reaction takes its
-  target's conversation from the provider lookup, and the receipt of Ouroboros's own
-  top-level channel post uses the channel type stored from a received event.
+  target's conversation from that message's retained record, and from one
+  `conversations.replies` read only when none is stored; the receipt of Ouroboros's
+  own top-level channel post uses the channel type stored from a received event.
 - The automatic answer to a top-level message of a direct or group chat is a plain
   message in the chat, no longer a thread under it. `slack_send` still places a
   message anywhere, with or without `thread_ts`.
