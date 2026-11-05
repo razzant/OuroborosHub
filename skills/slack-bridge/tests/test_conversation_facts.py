@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
@@ -145,8 +146,9 @@ def _received(tmp_path, payload):
     # The flow of a direct or group message is one conversation; it names no thread.
     (_spoken("1.0"), ""),
     (_spoken("1.0", channel_type="mpim", channel="G1"), ""),
-    # An explicit thread stays its own conversation, in a direct message too.
+    # An explicit thread stays its own conversation, in a direct or group message too.
     (_spoken("2.0", thread_ts="1.0"), "1.0"),
+    (_spoken("2.0", channel_type="mpim", channel="G1", thread_ts="1.0"), "1.0"),
     # A thread's parent stays in the flow it was posted in; in a channel it is its own thread.
     (_spoken("1.0", thread_ts="1.0"), ""),
     (_spoken("1.0", channel="C1", channel_type="channel", thread_ts="1.0"), "1.0"),
@@ -222,6 +224,9 @@ def test_a_reaction_on_a_top_level_message_joins_the_conversation_it_was_posted_
 
     snapshot = asyncio.run(capture_context(Slack(), item, "Workspace"))
     assert snapshot["reaction_target"]["thread_ts"] == filed
+    event = slack_presence_event(replace(item, provider_context=snapshot))
+    assert event["thread_id"] == event["conversation"]["thread_ts"] == filed
+    assert event["conversation_key"] == f"slack:T1:D1:{filed or '0'}"
 
 
 @pytest.mark.parametrize("stated,channel,sent_in,parts,filed", [
