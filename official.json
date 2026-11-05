@@ -51,12 +51,12 @@
       "recommended": false
     },
     {
-      "digest": "7f3866f02dc4d3c531afeb1a0a8fa174a549bd844c66a3206dab260b18df4efd",
+      "digest": "62f8ed4e0657bb1ca1492fb6101b033d1819d2fcca6dc13e94792478e6b7c7b9",
       "name": "email-presence",
       "recommended": false
     },
     {
-      "digest": "bb02a67b78a699fec974cb546455c925547ad1c5cb7ede277fad5473d8fe323d",
+      "digest": "b939ba0d0156a9e39dd7d34b12976aecb06f9271b6b79885ef0ee417a63e9260",
       "name": "github",
       "recommended": false
     },
@@ -86,7 +86,7 @@
       "recommended": false
     },
     {
-      "digest": "cf13cdf68a36b0af64f4af0347b0792d513781c93680d477b98d06aaeafd7406",
+      "digest": "c6262c948c28032ffdb4b2e169efc66491a79989af8f298e7ac1435491ca5f40",
       "name": "slack-bridge",
       "recommended": false
     },
