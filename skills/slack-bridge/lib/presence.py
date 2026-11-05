@@ -10,6 +10,8 @@ from .store import InboxItem, _iso
 
 # reaction.target.excerpt never exceeds this; the full words stay in provider_facts.
 _REACTION_EXCERPT_CHARS = 500
+# Declared on the place contribution; marks a new top-level post in a configured channel.
+NEW_ROOT_SIGNAL = "signal.new_root"
 
 
 def slack_identity(auth):
@@ -195,6 +197,8 @@ def slack_wake_facts(event: Mapping[str, Any]) -> list[str]:
             history = (conversation.get("thread_history") or {}).get("data") or {}
             if own and "my_thread" not in facts and any(row.get("user") == own for row in history.get("messages", [])):
                 facts.append("my_thread")
+        if provider.get("new_root_signal") is True:
+            facts.append(NEW_ROOT_SIGNAL)
     if event["actor"].get("is_bot") or provider.get("actor_is_bot"):
         facts.append("from_bot")
     return facts

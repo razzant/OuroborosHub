@@ -82,10 +82,6 @@ _CONTINUATION_TERMINAL = _TERMINAL_WORK_STATES | {"interrupted"}
 _OBSERVING = frozenset({"pending", "unresolved"})
 _DISPOSITIONS = frozenset({"retained", "rejected", "blocked", "retry"})
 _BINDING_ID_RE = re.compile(r"[0-9a-f]{32}")
-# The Host did not say whether this place allows sending. The outbox counts a hold by its prefix.
-PLACE_POLICY_UNREAD = "Held: It retries by itself."
-# The Host refused this skill itself (no grant, turned off, unreviewed or a stale token): only its owner can change that.
-SKILL_ACCESS_REFUSED = "Held: Check this skill's access in Skills."
 
 
 class HostAdapterUnavailable(RuntimeError):
@@ -439,6 +435,8 @@ class LoopbackPresenceHostAdapter:
         self.presence_identity = 0
         self.reaction_context = 0
         self.explicit_completion = 0
+        # A Host without ``presence_wake_signals: 1`` refuses an event naming a signal.
+        self.wake_signals = 0
         self.connector_identity = dict(identity or {})
 
     async def discover_delivery_support(self) -> int:
@@ -468,6 +466,8 @@ class LoopbackPresenceHostAdapter:
                                         and payload["presence_reaction_context"] == 1)
             self.explicit_completion = int(type(payload.get("presence_explicit_completion")) is int
                                            and payload["presence_explicit_completion"] == 1)
+            self.wake_signals = int(type(payload.get("presence_wake_signals")) is int
+                                    and payload["presence_wake_signals"] == 1)
             self.available = bool(self._skill_token and (self.binding_id or self.places_version))
             self.delivery_reporting_version = 1 if payload.get("presence_delivery_version") == 1 else 0
             self.continuation_version = _continuation_version(payload)
@@ -478,6 +478,7 @@ class LoopbackPresenceHostAdapter:
             self.continuation_version = 0
             self.reaction_context = 0
             self.explicit_completion = 0
+            self.wake_signals = 0
             self.delivery_reporting_status = "unavailable"
         return self.delivery_reporting_version
 
@@ -488,7 +489,7 @@ class LoopbackPresenceHostAdapter:
         """
         await self.discover_delivery_support()
         if not self.places_version:
-            return PLACE_POLICY_UNREAD if self.delivery_reporting_status == "unavailable" else ""
+            return "Held: place policy unavailable" if self.delivery_reporting_status == "unavailable" else ""
         try:
             response = await self._http.get(
                 f"{self.host_service_url}/presence/place",
@@ -497,24 +498,10 @@ class LoopbackPresenceHostAdapter:
                         **({"thread_id": thread_id} if thread_id else {})}, timeout=10,
             )
             place = await self._json_response(response)
-        except HostBindingTerminalError:
-            # "Not connected" and a refused skill are the Host's answers, not an unread policy:
-            # the first says what to do in its own words; the second waits for the owner, not for a retry.
-            try:
-                refusal = response.json()
-                code = refusal.get("code")
-                words = refusal.get("error") if code == "place_not_connected" else ""
-            except (ValueError, AttributeError):
-                code, words = "", ""
-            if code == "presence_auth_blocked":
-                return SKILL_ACCESS_REFUSED
-            return f"Held: {words}" if words else PLACE_POLICY_UNREAD
         except (HostContractError, httpx.HTTPError):
-            return PLACE_POLICY_UNREAD
+            return "Held: place policy unavailable"
         state = place.get("state")
-        if not state:
-            return PLACE_POLICY_UNREAD
-        return "" if state == "active" else f"Held: {place.get('label') or 'Slack'} is {state}"
+        return "" if state == "active" else f"Held: {place.get('label') or 'Slack'} is {state or 'unavailable'}"
 
     async def report_delivery(self, payload: Mapping[str, Any]) -> None:
         if self._skill_token is None:
@@ -577,6 +564,11 @@ class LoopbackPresenceHostAdapter:
             raise HostContractError("HOST_SERVICE_TOKEN is missing")
         version = self.continuation_version
         continuing = version in (1, 2)
+        presence_event = slack_presence_event(event, transport_queue=continuing, places=bool(self.places_version))
+        if "facts" in presence_event and not self.wake_signals:
+            presence_event["facts"] = [fact for fact in presence_event["facts"] if not fact.startswith("signal.")]
+        if self.presence_identity and self.connector_identity:
+            presence_event["identity"] = self.connector_identity
         response = await self._http.post(
             f"{self.host_service_url}/presence/turn",
             headers={
@@ -585,8 +577,7 @@ class LoopbackPresenceHostAdapter:
             },
             json={
                 **({"binding_id": self.binding_id} if not self.places_version else {}),
-                "event": {**slack_presence_event(event, transport_queue=continuing, places=bool(self.places_version)),
-                          **({"identity": self.connector_identity} if self.presence_identity and self.connector_identity else {})},
+                "event": presence_event,
                 "staged_files": [
                     _staged_path(file) for file in event.staged_files if _staged_path(file)
                 ],

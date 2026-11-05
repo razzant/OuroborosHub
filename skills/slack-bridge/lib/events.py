@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Collection, Mapping, Sequence
 
 
 # Slack file-object facts a model may see (https://docs.slack.dev/reference/objects/file-object/).
@@ -17,6 +17,9 @@ _FILE_FLAG_FACTS = ("is_external", "is_deleted", "is_tombstoned", "is_hidden_by_
 # Already carried by the stored declaration and the frozen attachment keys.
 DECLARED_FILE_KEYS = frozenset({"id", "name", "mimetype", "size"})
 REACTION_EVENTS = frozenset({"reaction_added", "reaction_removed"})
+# Subtypes that post a new message. Edits, deletes, joins, topic changes and
+# other provider notices are not new top-level posts.
+_POSTED_SUBTYPES = frozenset({"", "bot_message", "file_share", "me_message"})
 
 
 def file_facts(raw: Any) -> dict[str, Any]:
@@ -193,11 +196,14 @@ def parse_socket_envelope(
     bot_user_id: str = "",
     bot_id: str = "",
     app_id: str = "",
+    new_root_channels: Collection[str] = (),
 ) -> ParsedEnvelope:
     """Parse one Socket Mode envelope without adding policy or prompt text.
 
     Unsupported envelopes still return a stable classification so the caller can
-    durably record them before acknowledging Slack.
+    durably record them before acknowledging Slack. ``new_root_channels`` are
+    the configured channel IDs whose new top-level posts carry the
+    ``new_root_signal`` fact; it never changes what is accepted.
     """
 
     envelope_id = _text(payload.get("envelope_id"))
@@ -287,6 +293,11 @@ def parse_socket_envelope(
         parent_user_id = _text(message.get("parent_user_id"))
         if parent_user_id:
             structured["parent_user_id"] = parent_user_id
+        # A new top-level post in a configured channel: membership of the exact
+        # ID only, never its name or the words. A reply or a revision is not one.
+        if (channel_id in new_root_channels and not thread_ts and subtype in _POSTED_SUBTYPES
+                and not isinstance(message.get("edited"), Mapping)):
+            structured["new_root_signal"] = True
 
     channel_type = _text(event.get("channel_type"))
     parsed = SlackEvent(
