@@ -38,11 +38,18 @@
   only the next step, a skill the Host refused waiting for its owner, and claims
   that stay idle without write transactions (see 1.9.2 and 1.9.3).
 
+## 1.10.1
+
+- Every event carries `message.sent_at`, Slack's send time of its message (for a
+  reaction, when it was made), and an edited message `message.edited_at`, when its
+  words were last edited.
+
 ## 1.10.0
 
 - New top-level posts in channels listed by exact ID (`SLACK_NEW_ROOT_CHANNELS`) carry
   `signal.new_root`, an opt-in wake, sent only to Hosts that advertise
-  `presence_wake_signals: 1`. Published from a local copy based on 1.9.0.
+  `presence_wake_signals: 1`. Published from a local copy of 1.9.0, this release
+  lacked the changes of 1.9.1 to 1.9.3, and so did 1.10.1.
 
 ## 1.9.3
 
