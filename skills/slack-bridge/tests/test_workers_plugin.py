@@ -156,7 +156,7 @@ async def _host_adapter_flow_preserves_text_and_queues_threaded_reply(tmp_path) 
 
     outbound = OutboundWorker(store, slack)
     assert await outbound.process_once() is True
-    assert slack.posts == [("D1", "response", "1.1")]
+    assert slack.posts == [("D1", "response", "")]
     assert slack.formats == ["markdown"]
     assert store.status()["outbox_delivered"] == 1
 

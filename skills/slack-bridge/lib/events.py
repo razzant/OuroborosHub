@@ -17,6 +17,19 @@ _FILE_FLAG_FACTS = ("is_external", "is_deleted", "is_tombstoned", "is_hidden_by_
 # Already carried by the stored declaration and the frozen attachment keys.
 DECLARED_FILE_KEYS = frozenset({"id", "name", "mimetype", "size"})
 REACTION_EVENTS = frozenset({"reaction_added", "reaction_removed"})
+# A direct or group-direct chat is one flowing conversation; a channel post opens a thread of its own.
+_FLAT_CHATS = frozenset({"im", "mpim"})
+
+
+def conversation_thread(channel_type: str, thread_ts: str, message_ts: str) -> str:
+    """The thread that is this message's conversation; "" is the flow of a direct or group chat.
+
+    A reply belongs to its thread. Any other message, a thread's parent included, stays where
+    it was posted: a flat chat's flow, or in a channel the thread the message opens.
+    """
+    if thread_ts and thread_ts != message_ts:
+        return thread_ts
+    return "" if channel_type in _FLAT_CHATS else message_ts
 
 
 def file_facts(raw: Any) -> dict[str, Any]:
@@ -91,12 +104,10 @@ class SlackEvent:
     structured: dict[str, Any]
 
     @property
-    def root_thread_ts(self) -> str:
-        return self.thread_ts or self.message_ts
-
-    @property
     def ordering_key(self) -> str:
-        return f"{self.team_id}:{self.channel_id}:{self.root_thread_ts}"
+        """Conversation identity, frozen at receipt: every later reader takes it from the stored row."""
+        thread = conversation_thread(self.channel_type, self.thread_ts, self.message_ts)
+        return f"{self.team_id}:{self.channel_id}:{thread or '0'}"
 
 
 @dataclass(frozen=True)

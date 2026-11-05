@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
-from .events import REACTION_EVENTS, ParsedEnvelope, provider_facts
+from .events import REACTION_EVENTS, ParsedEnvelope, conversation_thread, provider_facts
 from .slack_api import normalize_text_format
 
 
@@ -122,8 +122,10 @@ class InboxItem:
     transport_queue_report: dict[str, Any] | None = None
 
     @property
-    def reply_thread_ts(self) -> str:
-        return self.thread_ts or self.message_ts
+    def conversation_thread(self) -> str:
+        """The thread of this row's conversation as received, "" when it has none."""
+        thread = self.ordering_key.rpartition(":")[2]
+        return "" if thread == "0" else thread
 
     @property
     def provider_event_key(self) -> str:
@@ -155,10 +157,17 @@ class OutboxItem:
     output_ref: str = ""
 
     def delivery_report(self, state: str, *, result: Mapping[str, Any] | None = None,
-                        error: str = "") -> dict[str, Any] | None:
+                        error: str = "", conversation_kind: str = "") -> dict[str, Any] | None:
+        """``conversation_kind`` is the channel type Slack stated for this conversation, "" when it never
+        did: then the receipt names the thread the message was sent in, as before. A top-level post sent
+        as one Slack message is filed under the thread it opens; a post split into parts keeps the thread
+        it was sent in, so its parts stay together."""
         if self.delivery_reporting_version != 1:
             return None
         result = result or {}
+        thread = self.thread_ts
+        if conversation_kind and not thread and self.chunk_count == 1:
+            thread = conversation_thread(conversation_kind, "", str(result.get("ts") or ""))
         message = {"provider_message_id": str(result.get("ts") or ""),
                    "requested_target": self.target, "target_resolved": bool(self.resolved_channel),
                    "chunk_count": self.chunk_count}
@@ -170,7 +179,7 @@ class OutboxItem:
             "schema_version": 1, "delivery_id": self.request_id, "part_id": str(self.chunk_index),
             "state": state, "provider": "slack", "account_id": self.provider_account_id,
             "conversation_id": str(result.get("channel") or self.resolved_channel or self.target),
-            "thread_id": self.thread_ts, "text": self.text, "format": self.text_format,
+            "thread_id": thread, "text": self.text, "format": self.text_format,
             "message": message, "origin": self.origin,
         }
 
@@ -683,6 +692,14 @@ class BridgeStore:
                    **({"user": str(seen["actor_user_id"])} if seen else {})}
         return {"source": "slack-bridge outbox" if own else "slack-bridge inbox", "message": message,
                 "thread_ts": str(row["thread_ts"] or message_ts), **({"is_self": True} if own else {})}
+
+    def conversation_kind(self, team_id: str, channel_id: str) -> str:
+        """The channel type Slack stated in the newest stored event of this conversation, "" if none did."""
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT channel_type FROM inbox WHERE team_id=? AND channel_id=? AND channel_type<>''
+                   ORDER BY message_ts DESC LIMIT 1""", (team_id, channel_id)).fetchone()
+        return str(row["channel_type"]) if row else ""
 
     def withhold_inbox(self, row_id: int, lease_token: str, reason: str) -> None:
         """Settle a retained observation without submitting it, now or after an update."""
