@@ -20,6 +20,7 @@ from userbot.config import Config, save_config, _write_json
 from userbot.participant import Participant
 from userbot.participant_state import Journal, digest, policy, save_policy, receiving_refusal
 from userbot.normalize import canonical_text, content_revision, media_descriptor
+from userbot.presence import build_event
 from telethon import functions as F, types as T
 
 ACCOUNT = 8667525238
@@ -768,6 +769,112 @@ class UpgradeFromByteRevisions(Capturing):
         m = text_message(36, 809, 'same bytes')
         self.e.spool(incoming(m, 809)); self.e.spool(incoming(m, 809))
         self.assertEqual(self.j.db.execute('SELECT count(*) FROM raw_updates').fetchone()[0], 1)
+
+
+def chain(mid, text, to, top=None, forum_topic=None, **message):
+    """A reply in a supergroup. Telegram names its message thread by the root: a first reply to the root carries only
+    the message it answers, a reply to that reply also carries reply_to_top_id, the root (core.telegram.org/api/threads)."""
+    header = T.MessageReplyHeader(reply_to_msg_id=to, reply_to_top_id=top, forum_topic=forum_topic)
+    return text_message(mid, GROUP, text, reply_to=header, **message)
+
+
+async def forum_entity(peer):
+    return T.Channel(id=123, title='Forum', photo=T.ChatPhotoEmpty(), date=None, megagroup=True, access_hash=456, forum=True)
+
+
+async def in_topic_40(peer, ids=None, **kw):
+    m = T.Message(id=ids or 51, peer_id=T.PeerChannel(123), date=None, message='in topic',
+                  reply_to=T.MessageReplyHeader(reply_to_msg_id=40, reply_to_top_id=40, forum_topic=True))
+    return m if ids else [m]
+
+
+class ChainBase(Capturing):
+    def events(self):
+        return [json.loads(r['event']) for r in self.j.db.execute('SELECT event FROM inbox ORDER BY seq')]
+
+    def answer(self, event, ref):
+        self.e.consume_outputs({'outputs': [{'outcome': 'message', 'output_ref': ref, 'text': 'Six works, yes.'}]}, event)
+
+    def receipts(self):
+        return [(b['conversation_id'], b['thread_id'], b['message']['message_id'])
+                for b in (json.loads(r['body']) for r in self.j.db.execute('SELECT body FROM reports ORDER BY rowid'))]
+
+    def queued_topic(self, ref):
+        """The topic an automatic answer names when queued: it orders the answer and picks its place."""
+        return json.loads(self.j.get(self.e.account, 'auto:' + digest(ref) + ':0')['args']).get('topic_id')
+
+
+class ReplyChains(ChainBase):
+    """A conversation is a chat or a forum topic: a reply chain is its chat's (owner, 24.09: «ключ по треду только в форумах»)."""
+
+    async def test_a_reply_chain_is_its_chats_conversation_both_ways_and_a_forum_topic_its_own(self):
+        await self.capture(chain(21, 'Has anyone tried this with six players?', to=20), GROUP)
+        await self.capture(chain(22, 'We did last week', to=21, top=20), GROUP)
+        events = self.events()
+        self.assertEqual([(e['conversation_key'], e['thread_id']) for e in events], [(f'telegram:{ACCOUNT}:{GROUP}:0', '')] * 2)
+        self.assertEqual([e['message'].get('reply_chain_id') for e in events], [None, 20])  # the chain stays a message fact
+        # Its answer replies to the second message in the chat and is receipted in the same conversation.
+        self.answer(events[1], 'answer')
+        self.assertIsNone(self.queued_topic('answer'))
+        await self.e.dispatch_one()
+        self.assertEqual([(s.reply_to.reply_to_msg_id, s.reply_to.top_msg_id) for s in self.sends()], [(22, None)])
+        self.assertEqual(self.receipts(), [(str(GROUP), '', '11')])
+        # A comment under a channel post names the post as its top even as a first reply: the group's conversation too.
+        await self.capture(chain(31, 'First comment', to=30, top=30), GROUP)
+        comment = self.events()[-1]
+        self.assertEqual((comment['conversation_key'], comment['message']['reply_chain_id']), (f'telegram:{ACCOUNT}:{GROUP}:0', 30))
+        # A forum topic stays its own conversation, both ways.
+        self.client.get_entity, self.client.get_messages = forum_entity, in_topic_40
+        await self.capture(chain(51, 'In the topic', to=40, top=40, forum_topic=True), GROUP)
+        topical = self.events()[-1]
+        self.assertEqual((topical['conversation_key'], topical['thread_id']), (f'telegram:{ACCOUNT}:{GROUP}:40', '40'))
+        self.assertNotIn('reply_chain_id', topical['message'])
+        self.answer(topical, 'topic-answer')
+        self.assertEqual(self.queued_topic('topic-answer'), 40)  # queued in its topic's lane and checked at its topic's place
+        await self.e.dispatch_one()
+        self.assertEqual((self.sends()[-1].reply_to.reply_to_msg_id, self.sends()[-1].reply_to.top_msg_id), (51, 40))
+        self.assertEqual(self.receipts()[-1], (str(GROUP), '40', '11'))
+
+
+class UpgradeFromChainTopics(ChainBase):
+    """Rows filed before 0.4.2 under a reply chain keep their key; a re-observation never adds a second event."""
+    EDITED = datetime(2026, 11, 1, 11, 0, tzinfo=timezone.utc)
+
+    def stored_chain_row(self, edited=None):
+        kind = {'event_kind': 'edit', 'revision': content_revision(edited)} if edited is not None else {}
+        event = build_event(ACCOUNT, GROUP, 22, 809, 'We did last week', topic_id=20, source_order=True,
+                            conversation={'title': 'Test', 'chat_type': 'supergroup'},
+                            message={'sent_at': '2026-11-01T10:00:00+00:00', 'reply_to_message_id': 21}, **kind)
+        event['facts'] = ['any_message']
+        self.j.capture(event)
+        return event
+
+    async def test_telegram_delivering_it_again_adds_no_second_event_and_new_chain_messages_join_the_chat(self):
+        edit = chain(22, 'We did last week', to=21, top=20, edit_date=self.EDITED)
+        stored = [self.stored_chain_row(), self.stored_chain_row(edited=edit)]
+        # The catch-up at start may deliver the message and its edit again, with other counters (other bytes).
+        self.e.spool(incoming(chain(22, 'We did last week', to=21, top=20, views=7, forwards=0), GROUP))
+        self.e.spool(incoming(chain(22, 'We did last week', to=21, top=20, edit_date=self.EDITED, views=9, forwards=1), GROUP), 'edit')
+        await self.e.hydrate_once(); await self.e.hydrate_once()
+        self.assertEqual(self.j.raw_heads(), [])
+        self.assertEqual([e['source_event_id'] for e in self.events()], [e['source_event_id'] for e in stored])
+        self.assertIn(':edit:', stored[1]['source_event_id'])
+        await self.capture(chain(23, 'Same here', to=22, top=20), GROUP)
+        # A genuine later edit of the stored message is a new revision: a new event, in the chat's conversation.
+        await self.capture(chain(22, 'We did it last week', to=21, top=20, edit_date=self.EDITED + timedelta(hours=1)),
+                           GROUP, kind='edit')
+        self.assertEqual([(e['conversation_key'], e['message'].get('event_kind')) for e in self.events()],
+                         [(stored[0]['conversation_key'], None), (stored[0]['conversation_key'], 'edit'),
+                          (f'telegram:{ACCOUNT}:{GROUP}:0', None), (f'telegram:{ACCOUNT}:{GROUP}:0', 'edit')])
+
+    async def test_its_answer_is_sent_in_the_chat_instead_of_being_refused(self):
+        stored = self.stored_chain_row()
+        self.answer(stored, 'late-answer')
+        await self.e.dispatch_one()
+        self.assertEqual(self.j.get(self.e.account, 'auto:' + digest('late-answer') + ':0')['state'], 'sent')
+        self.assertEqual([(s.reply_to.reply_to_msg_id, s.reply_to.top_msg_id) for s in self.sends()], [(22, None)])
+        self.assertEqual(self.receipts(), [(str(GROUP), '', '11')])
+        self.assertEqual([e['conversation_key'] for e in self.events()], [f'telegram:{ACCOUNT}:{GROUP}:20'])
 
 
 class ModerationTechnical(Base):
