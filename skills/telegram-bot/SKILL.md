@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.10.4
+version: 0.10.5
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -424,8 +424,9 @@ caption, original author/chat/message IDs, date, entities, and photo/document/
 voice/audio descriptors. Selected quotes and forwarding origins remain separate source
 facts; a forwarded author does not replace the current sender.
 
-Edits retain their original message id with `message.event_kind` set to
-`edited_message`. Reaction updates retain the target message id and the old/new
+Each message keeps Telegram's send time as `message.sent_at` (ISO, from its `date`;
+`sent_at_epoch` stays). Edits retain their original message id and send time with
+`message.event_kind` set to `edited_message` and `message.edited_at` from `edit_date`. Reaction updates retain the target message id and the old/new
 reaction arrays, with `event_kind` set to `message_reaction` and no synthetic
 message text. These are observations for model judgment, not automatic replies.
 

@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.10.0
+version: 1.10.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -405,6 +405,11 @@ still a separate change. Ordinary messages without mentions, real edits,
 deletes and reactions retain their existing admission. This adds no rule about
 who should answer or who is an owner.
 
+Every accepted event carries `message.sent_at`, Slack's own send time of its message as an ISO
+time (a reaction's is when it was made), and `message.edited_at` says when the words were
+last edited: Slack's `edited.ts`, or the change event's own time when a `message_changed`
+changed the words without a newer stamp. An unfurl or a file change edits no words. Neither
+is the bridge's receipt time, and an unreadable one is left out.
 Accepted events expose the authenticated bot's `self_user_id`, when known, in
 `message.provider_facts`. Current messages also retain `mentioned_user_ids`
 from explicit Slack `<@ID>` tokens and rich-text user elements, plus the

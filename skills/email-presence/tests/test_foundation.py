@@ -250,7 +250,7 @@ def test_outgoing_body_is_authored_without_connector_marks(body):
 
 def test_manifest_offers_facts_without_default_wakes():
     manifest = yaml.safe_load((Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1])
-    assert manifest["version"] == "0.10.7"
+    assert manifest["version"] == "0.10.8"
     place = manifest["contributes"][0]
     assert place["wakes"] == []
     assert place["settings"] == "email_presence"
