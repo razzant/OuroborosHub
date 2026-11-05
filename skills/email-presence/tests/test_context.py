@@ -92,10 +92,11 @@ def test_raw_mime_context_reaches_host_after_restart(tmp_path, monkeypatch, to, 
             await host.submit(item)
 
     asyncio.run(exercise())
-    # A Date without a time zone ("-0000") or an unreadable one leaves the send time unknown.
-    for date in ('Fri, 18 Sep 2026 12:30:00 -0000', '1 Jan 1000000000000000000 00:00:00 +0000'):
-        unknown = email_presence_event(replace(item, context={**item.context, 'date': date}), account_id=account)
-        assert unknown['message']['date'] == date and 'sent_at' not in unknown['message']
+    # "-0000" is UTC from an unnamed zone; a Date without any zone or an unreadable one leaves the send time unknown.
+    for date, sent in (('Fri, 18 Sep 2026 12:30:00 -0000 (UTC)', '2026-09-18T12:30:00+00:00'),
+                       ('Fri, 18 Sep 2026 12:30:00', None), ('1 Jan 1000000000000000000 00:00:00 +0000', None)):
+        fact = email_presence_event(replace(item, context={**item.context, 'date': date}), account_id=account)['message']
+        assert fact['date'] == date and fact.get('sent_at') == sent
 
 
 @pytest.mark.parametrize('reply_to, expected', [

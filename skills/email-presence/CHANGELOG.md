@@ -3,8 +3,8 @@
 ## 0.10.8
 
 - A message's `Date` header with a time zone is also sent as `message.sent_at` (ISO, in the
-  sender's offset), so the Host can say when the person wrote. A Date without a zone or an
-  unreadable one leaves it unknown; the server's receipt time is never used.
+  sender's offset; `-0000` as UTC), so the Host can say when the person wrote. A Date without
+  a zone or an unreadable one leaves it unknown; the server's receipt time is never used.
 - When Exchange cannot render a message as MIME, its native read now names the message's own
   Date header as `date`, as the MIME reader does; Exchange's receipt time stays `internal_date`.
 

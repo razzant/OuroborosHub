@@ -478,8 +478,9 @@ queued mail is never logged as accepted speech. Existing delivery reporting gran
 
 Incoming Presence events retain the From address and display name, all To and Cc
 addresses, Date, and decoded named From/To/Cc/Reply-To headers. A Date with a time zone
-is also `message.sent_at`, an ISO time in the sender's offset; a Date without one
-or an unreadable Date leaves the send time unknown. Reply-To stays
+is also `message.sent_at`, an ISO time in the sender's offset (`-0000`, UTC from an
+unnamed zone, as `+00:00`); a Date without a zone or an unreadable Date leaves the send
+time unknown. Reply-To stays
 separate from the From actor. Automatic responses go to Reply-To when supplied,
 or From otherwise; To and Cc are context, not an automatic reply-all list. The
 configured mailbox account identifies the receiving transport, even when that
