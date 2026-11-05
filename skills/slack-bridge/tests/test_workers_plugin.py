@@ -863,13 +863,16 @@ def test_settings_read_hydrates_the_form_without_writing(tmp_path, method):
         assert absent.status_code == 200
         assert json.loads(absent.body) == {
             "binding_id": "", "SLACK_INBOUND_WORKERS": "4", "SLACK_OUTBOUND_WORKERS": "2",
+            "SLACK_NEW_ROOT_CHANNELS": "",
         }
         assert list(tmp_path.iterdir()) == []
 
-        path.write_text(json.dumps({"binding_id": "a" * 32, "SLACK_OUTBOUND_WORKERS": 5, "unrelated": True}))
+        path.write_text(json.dumps({"binding_id": "a" * 32, "SLACK_OUTBOUND_WORKERS": 5, "unrelated": True,
+                                    "SLACK_NEW_ROOT_CHANNELS": ["C0123456789", "G0123456789"]}))
         before = _file_identity(path)
         stored = json.loads((await handler(_http_request(method, clearing))).body)
-        assert stored == {"binding_id": "a" * 32, "SLACK_INBOUND_WORKERS": "4", "SLACK_OUTBOUND_WORKERS": "5"}
+        assert stored == {"binding_id": "a" * 32, "SLACK_INBOUND_WORKERS": "4", "SLACK_OUTBOUND_WORKERS": "5",
+                          "SLACK_NEW_ROOT_CHANNELS": "C0123456789\nG0123456789"}
         assert "binding_id" not in field_names
         assert [key for key in stored if key != "binding_id"] == field_names
         assert _file_identity(path) == before
@@ -901,9 +904,10 @@ def test_hydrated_settings_round_trip_keeps_binding_and_explicit_edits(tmp_path)
         assert (await save(form)).status_code == 200
         assert json.loads(path.read_text()) == {
             "binding_id": "a" * 32, "unrelated": True,
-            "SLACK_INBOUND_WORKERS": 4, "SLACK_OUTBOUND_WORKERS": 3,
+            "SLACK_INBOUND_WORKERS": 4, "SLACK_OUTBOUND_WORKERS": 3, "SLACK_NEW_ROOT_CHANNELS": [],
         }
-        assert await read() == {"binding_id": "a" * 32, "SLACK_INBOUND_WORKERS": "4", "SLACK_OUTBOUND_WORKERS": "3"}
+        assert await read() == {"binding_id": "a" * 32, "SLACK_INBOUND_WORKERS": "4", "SLACK_OUTBOUND_WORKERS": "3",
+                                "SLACK_NEW_ROOT_CHANNELS": ""}
 
         # Replacing or deliberately clearing the binding stays an owner choice.
         assert (await save({**form, "binding_id": "b" * 32})).status_code == 200

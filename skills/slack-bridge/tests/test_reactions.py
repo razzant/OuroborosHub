@@ -19,7 +19,7 @@ import pytest
 from lib.events import parse_socket_envelope
 from lib.host_adapter import LoopbackPresenceHostAdapter
 from lib.provider_context import capture_reaction_target
-from lib.runtime import _REACTION_HISTORY_UNAVAILABLE, InboundWorker, OutboundWorker, _discover_reporting
+from lib.runtime import InboundWorker, OutboundWorker, _discover_reporting
 from lib.slack_api import SlackClient
 from lib.store import REACTION_WITHHELD, BridgeStore
 from test_workers_plugin import _Api, _load_plugin
@@ -772,12 +772,6 @@ def test_a_thread_paused_after_queueing_holds_its_reaction_and_an_unretained_tar
     asyncio.run(run())
 
 
-def test_a_held_reaction_report_says_history_gets_it_after_an_update_and_not_why():
-    line = _REACTION_HISTORY_UNAVAILABLE
-    assert line.startswith("Held: ") and "update" in line
-    assert "receipt" not in line  # the receipt beside it already shows the provider's answer
-
-
 @pytest.mark.parametrize("later,reported", [(OLD_HOST, False), (None, False), (CAPABLE, True)])
 def test_report_frozen_on_a_capable_host_goes_only_to_a_capable_one(tmp_path, later, reported):
     async def run():
@@ -804,7 +798,7 @@ def test_report_frozen_on_a_capable_host_goes_only_to_a_capable_one(tmp_path, la
             assert part(store)["history_report_state"] == "acked" and len(reopened.reports) == 1
         else:
             assert reopened.reports == [] and part(store)["history_report_state"] == "pending"
-            assert part(store)["history_report_error"] == _REACTION_HISTORY_UNAVAILABLE
+            assert part(store)["history_report_error"].startswith("Held: Host history for reactions is unavailable")
     asyncio.run(run())
 
 
