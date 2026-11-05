@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from dataclasses import replace
 
@@ -207,8 +208,13 @@ def test_a_thread_is_read_only_where_the_conversation_is_one(tmp_path, payload, 
         assert calls[0]["thread_ts"] == item.conversation_thread
 
 
-@pytest.mark.parametrize("info,filed", [({"is_im": True}, ""), ({"is_mpim": True}, ""), ({"is_channel": True}, "100.0")])
-def test_a_reaction_on_a_top_level_message_joins_the_conversation_it_was_posted_in(tmp_path, info, filed):
+@pytest.mark.parametrize("info,thread_ts,filed", [
+    # A chat's top-level message lives in the chat's flow; a channel's is the thread it opens.
+    ({"is_im": True}, "", ""), ({"is_mpim": True}, "", ""), ({"is_channel": True}, "", "100.0"),
+    # A reply stays in its thread, in a chat too.
+    ({"is_im": True}, "99.0", "99.0"),
+])
+def test_a_reaction_joins_the_conversation_its_target_was_posted_in(tmp_path, info, thread_ts, filed):
     store = BridgeStore(tmp_path)
     payload = {"type": "events_api", "envelope_id": "env-r", "payload": {"team_id": "T1", "event_id": "Ev-r", "event": {
         "type": "reaction_added", "user": "U1", "reaction": "eyes", "item_user": "U_BOT",
@@ -220,7 +226,8 @@ def test_a_reaction_on_a_top_level_message_joins_the_conversation_it_was_posted_
         async def user_info(self, _user): return {}
         async def conversation_info(self, _channel): return info
         async def read_messages(self, *_channel, **_arguments):
-            return {"messages": [{"ts": "100.0", "user": "U_BOT", "text": "words"}], "complete": True, "next_cursor": None}
+            target = {"ts": "100.0", "user": "U_BOT", "text": "words", **({"thread_ts": thread_ts} if thread_ts else {})}
+            return {"messages": [target], "complete": True, "next_cursor": None}
 
     snapshot = asyncio.run(capture_context(Slack(), item, "Workspace"))
     assert snapshot["reaction_target"]["thread_ts"] == filed
@@ -240,20 +247,48 @@ def test_a_reaction_on_a_top_level_message_joins_the_conversation_it_was_posted_
     ("", "C1", "", 1, ""), ("", "D1", "", 1, ""),
 ])
 def test_a_send_is_filed_in_the_conversation_its_replies_continue(tmp_path, stated, channel, sent_in, parts, filed):
+    heard = [_spoken("1.0", channel=channel, channel_type=stated)] if stated else []
+    assert _filed(tmp_path, heard, channel, sent_in=sent_in, parts=parts) == filed
+
+
+def _filed(tmp_path, heard, channel, *, sent_in="", parts=1, via="slack_send"):
+    """The thread the delivery receipt of one post names, once the events ``heard`` are stored."""
     from lib.runtime import OutboundWorker
 
     store = BridgeStore(tmp_path)
     store.set_runtime(workspace_id="T1")
-    if stated:
-        store.ingest_envelope(heard := _spoken("1.0", channel=channel, channel_type=stated), parse_socket_envelope(heard))
-    store.enqueue_outbox(request_id="send-1", target=channel, thread_ts=sent_in, chunks=["words"] * parts,
-                         origin={"kind": "tool"}, delivery_reporting_version=1)
+    for payload in heard:
+        store.ingest_envelope(payload, parse_socket_envelope(payload))
+    if via == "slack_send":
+        store.enqueue_outbox(request_id="send-1", target=channel, thread_ts=sent_in, chunks=["words"] * parts,
+                             origin={"kind": "tool"}, delivery_reporting_version=1)
+    else:
+        store.enqueue_mutation(request_id="send-1", operation="generic_api", origin={"kind": "tool"}, delivery_reporting_version=1,
+                               payload={"method": "POST", "path": "chat.postMessage", "effect": "write", "result_kind": "auto",
+                                        "params": {}, "body": {"channel": channel, "text": "words"}})
 
     class Slack:
         async def resolve_target(self, target): return target
         async def post_message(self, **sent): return {"ok": True, "channel": sent["channel"], "ts": "9.9"}
+        async def generic_request(self, *, body, **_request):
+            return {"ok": True, "channel": body["channel"], "ts": "9.9", "message": {"ts": "9.9", "text": body["text"]}}
 
     assert asyncio.run(OutboundWorker(store, Slack()).process_once()) is True
     with store._connect() as db:
-        report = db.execute("SELECT report_payload_json FROM outbox WHERE report_payload_json IS NOT NULL ORDER BY id").fetchone()[0]
-    assert __import__("json").loads(report)["thread_id"] == filed
+        report = db.execute("SELECT report_payload_json FROM outbox WHERE report_payload_json<>'' ORDER BY id").fetchone()[0]
+    return json.loads(report)["thread_id"]
+
+
+@pytest.mark.parametrize("heard,via,channel,filed", [
+    # A post through slack_api's chat.postMessage is filed like a send: a channel's under the thread it opens,
+    # a chat's in its flow.
+    ([("C1", "channel")], "slack_api", "C1", "9.9"), ([("D1", "im")], "slack_api", "D1", ""),
+    # A newer event that states no type, a mention here, does not hide the type stated before it, and alone states none.
+    ([("C1", "channel"), ("C1", "")], "slack_send", "C1", "9.9"), ([("C1", "")], "slack_send", "C1", ""),
+    # Each conversation's own type counts: another's does not describe this one, nor does a newer one replace it.
+    ([("C1", "channel")], "slack_send", "D1", ""), ([("C1", "channel"), ("D1", "im")], "slack_send", "C1", "9.9"),
+])
+def test_every_post_is_filed_by_the_type_its_own_conversation_last_stated(tmp_path, heard, via, channel, filed):
+    heard = [_spoken(f"{ts}.0", channel=where, channel_type=stated, kind="message" if stated else "app_mention")
+             for ts, (where, stated) in enumerate(heard, start=1)]
+    assert _filed(tmp_path, heard, channel, via=via) == filed

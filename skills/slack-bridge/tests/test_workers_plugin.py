@@ -117,7 +117,7 @@ def test_inbound_lease_covers_maximum_presence_turn(monkeypatch, tmp_path) -> No
     assert claimed["seconds"] >= 1800.0
 
 
-def _payload() -> dict:
+def _payload(*, channel: str = "D1", channel_type: str = "im") -> dict:
     return {
         "type": "events_api",
         "envelope_id": "env-1",
@@ -126,9 +126,9 @@ def _payload() -> dict:
             "team_id": "T1",
             "event": {
                 "type": "message",
-                "channel_type": "im",
+                "channel_type": channel_type,
                 "user": "U1",
-                "channel": "D1",
+                "channel": channel,
                 "ts": "1.1",
                 "text": "/status remains conversation text",
             },
@@ -161,13 +161,17 @@ async def _host_adapter_flow_preserves_text_and_queues_threaded_reply(tmp_path) 
     assert store.status()["outbox_delivered"] == 1
 
 
-def test_deferred_ack_is_queued_once_before_eventual_reply(tmp_path) -> None:
-    asyncio.run(_deferred_ack_is_queued_once_before_eventual_reply(tmp_path))
+@pytest.mark.parametrize("channel,channel_type,thread", [
+    # A direct message is acknowledged and answered in the chat's flow; a channel post, in the thread it opens.
+    ("D1", "im", ""), ("C1", "channel", "1.1"),
+])
+def test_deferred_ack_is_queued_once_before_eventual_reply(tmp_path, channel, channel_type, thread) -> None:
+    asyncio.run(_deferred_ack_is_queued_once_before_eventual_reply(tmp_path, channel, channel_type, thread))
 
 
-async def _deferred_ack_is_queued_once_before_eventual_reply(tmp_path) -> None:
+async def _deferred_ack_is_queued_once_before_eventual_reply(tmp_path, channel, channel_type, thread) -> None:
     store = BridgeStore(tmp_path)
-    payload = _payload()
+    payload = _payload(channel=channel, channel_type=channel_type)
     store.ingest_envelope(payload, parse_socket_envelope(payload))
     original_retry = store.retry_inbox
 
@@ -189,9 +193,9 @@ async def _deferred_ack_is_queued_once_before_eventual_reply(tmp_path) -> None:
 
     messages = []
     while item := store.claim_outbox():
-        messages.append(item.text)
+        messages.append((item.text, item.thread_ts))
         store.complete_outbox(item.row_id, item.lease_token, provider_message_ts="ok")
-    assert messages == ["working", "late reply"]
+    assert messages == [("working", thread), ("late reply", thread)]
     assert store.status()["inbox_delivered"] == 1
 
 

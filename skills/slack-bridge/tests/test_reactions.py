@@ -615,21 +615,29 @@ def test_remove_names_the_removed_value_and_unknown_target_stays_unresolved(tmp_
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("channel,kind,thread_ts,filed", [
+@pytest.mark.parametrize("channel,kind,thread_ts,stored_in,filed", [
     # A chat's top-level message lives in the chat's flow, so a reaction to it is held and recorded there.
-    ("D1", "im", "", ""), ("G1", "mpim", "", ""),
+    ("D1", "im", "", "inbox", ""), ("G1", "mpim", "", "inbox", ""),
     # A reply stays in its thread, in a chat too; a channel's top-level message is the thread it opens.
-    ("D1", "im", "99.0", "99.0"), ("C1", "channel", "", "101.5"),
+    ("D1", "im", "99.0", "inbox", "99.0"), ("C1", "channel", "", "inbox", "101.5"),
+    # Ouroboros's own message, kept as its send, takes the type Slack stated for its conversation.
+    ("D1", "im", "", "outbox", ""), ("C1", "channel", "", "outbox", "101.5"),
     # A conversation Slack never described keeps the target's own root: nothing is guessed from an ID.
-    ("D1", "", "", "101.5"),
+    ("D1", "", "", "inbox", "101.5"),
 ])
 def test_an_own_reaction_is_held_and_receipted_in_the_conversation_of_its_target(tmp_path, channel, kind,
-                                                                                 thread_ts, filed):
+                                                                                 thread_ts, stored_in, filed):
     async def run():
         store = BridgeStore(tmp_path)
-        target = message(ts="101.5", thread_ts=thread_ts, channel=channel)
-        target["payload"]["event"]["channel_type"] = kind
-        ingest(store, target)
+        heard = message(ts="101.5" if stored_in == "inbox" else "100.0", thread_ts=thread_ts, channel=channel)
+        heard["payload"]["event"]["channel_type"] = kind
+        ingest(store, heard)
+        if stored_in == "outbox":
+            store.set_runtime(workspace_id="T1")
+            store.enqueue_outbox(request_id="say", target=channel, thread_ts=thread_ts, chunks=["my own words"])
+            sent = store.claim_outbox()
+            store.set_resolved_target(sent, channel, "T1")
+            store.complete_outbox(sent.row_id, sent.lease_token, provider_message_ts="101.5")
         queue(store, ts="101.5", channel=channel)
         world = World(store, tmp_path)
         await outbound_pass(world)
