@@ -766,8 +766,11 @@ author poll.
 - A stopped author's terminal is `cancelled` with `outcome: "silent"`. Nothing
   new is sent, the event ends `failed`, and it is never resubmitted.
 
-Each arrival is still its own submission in arrival order. While an author is
-live, arrivals in its conversation reach it as context without waiting for its answer.
+Each arrival is still its own submission in arrival order. A reaction is queued
+on its target message's own timestamp, so in a direct or group chat it may reach
+Ouroboros before a waiting top-level message it names; it is context only. While
+an author is live, arrivals in its conversation reach it as context without
+waiting for its answer.
 Older Hosts keep version 1 or plain turns: their conversation's queue is still held until
 the author parks or ends, but polling stays off the input workers.
 References stored as version 2 cannot be observed by an older bridge that is
