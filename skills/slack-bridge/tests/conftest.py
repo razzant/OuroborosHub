@@ -13,7 +13,7 @@ if str(SKILL_ROOT) not in sys.path:
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "serial: process consumer requiring exclusive fixture execution")
+    config.addinivalue_line("markers", "serial: separate-process case requiring exclusive fixture execution")
 
 
 def _decode_tool_json(result: Any) -> Any:
