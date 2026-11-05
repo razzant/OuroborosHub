@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/b2c0302a08f894f5f08d5808a6199f410b684c5d",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/8a51a2d7b2b67924f954e47f68b4dfa3e3cc9e99",
   "schema_version": 1,
   "skills": [
     {
@@ -2728,13 +2728,13 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "2ff3070dd1c3e3873b928fdfc4d7c908346c0d1b9b1d7408331560f90e10f8ff",
-          "size": 3008
+          "sha256": "4290b2e9b78093379bb4d5541d8df95627e8279b38c27a3751c0d37d65281c85",
+          "size": 3577
         },
         {
           "path": "SKILL.md",
-          "sha256": "aadbca5912f5db42e3df8de9108205b5fde39b2d479f9fcac78d4a3b04545d32",
-          "size": 53681
+          "sha256": "ef4c0e5f01b15645736a514c897585e06d9c4cca94c4df367bd260d63a314629",
+          "size": 54057
         },
         {
           "path": "lib/__init__.py",
@@ -2753,8 +2753,8 @@
         },
         {
           "path": "lib/host_adapter.py",
-          "sha256": "7e0900db1ae99ca50a3be66f27fb9c6f543d985cf07ba539a0a25e35e53e5a93",
-          "size": 52729
+          "sha256": "0f92c25d9ef5ef0f154f1c051e19385702eba8c16e8efa89416839f61d5fe01d",
+          "size": 52735
         },
         {
           "path": "lib/local_settings.py",
@@ -2778,8 +2778,8 @@
         },
         {
           "path": "lib/runtime.py",
-          "sha256": "37b80030fc7f963286c2b940403d2b97deb1d2b9b022f6e960001506a2f63b08",
-          "size": 41763
+          "sha256": "1f1bf27620d2773e4320f7cb357d0b3971055cc41ab76f43f93111c8073659a1",
+          "size": 41769
         },
         {
           "path": "lib/slack_api.py",
@@ -2843,8 +2843,8 @@
         },
         {
           "path": "tests/test_conversation_facts.py",
-          "sha256": "dac595d4f5551faf8bb31981b5a3048a73021fbac8f650d8e71b37e7879f3cad",
-          "size": 13460
+          "sha256": "9bca439251c7b6b29f32e575257fc93b1ad5c8e6df7a6e641e102af212222739",
+          "size": 15731
         },
         {
           "path": "tests/test_delivery_reporting.py",
@@ -2943,8 +2943,8 @@
         },
         {
           "path": "tests/test_reactions.py",
-          "sha256": "c9b3a3bccee74f26207d71cbe713f68d03e25bae60b389f5e59ee6247ad41c1f",
-          "size": 81398
+          "sha256": "a4b5c1aa1851692f2e11d988596f77716f9d34b60cef3a1e27c51f9f85cef908",
+          "size": 82064
         },
         {
           "path": "tests/test_read_tools.py",
@@ -2988,8 +2988,8 @@
         },
         {
           "path": "tests/test_workers_plugin.py",
-          "sha256": "a8fd1303989beb011994e9b615bc8e40e238e1dd332971d4166ad5735f755b57",
-          "size": 42184
+          "sha256": "20fe45b67b793e0677de33cc14347ee7d75c0265c60c36bd0e1c21651459a428",
+          "size": 42637
         },
         {
           "path": "ui/icon.svg",
