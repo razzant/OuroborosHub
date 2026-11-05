@@ -615,6 +615,30 @@ def test_remove_names_the_removed_value_and_unknown_target_stays_unresolved(tmp_
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("channel,kind,thread_ts,filed", [
+    # A chat's top-level message lives in the chat's flow, so a reaction to it is held and recorded there.
+    ("D1", "im", "", ""), ("G1", "mpim", "", ""),
+    # A reply stays in its thread, in a chat too; a channel's top-level message is the thread it opens.
+    ("D1", "im", "99.0", "99.0"), ("C1", "channel", "", "101.5"),
+    # A conversation Slack never described keeps the target's own root: nothing is guessed from an ID.
+    ("D1", "", "", "101.5"),
+])
+def test_an_own_reaction_is_held_and_receipted_in_the_conversation_of_its_target(tmp_path, channel, kind,
+                                                                                 thread_ts, filed):
+    async def run():
+        store = BridgeStore(tmp_path)
+        target = message(ts="101.5", thread_ts=thread_ts, channel=channel)
+        target["payload"]["event"]["channel_type"] = kind
+        ingest(store, target)
+        queue(store, ts="101.5", channel=channel)
+        world = World(store, tmp_path)
+        await outbound_pass(world)
+        [report] = world.reports
+        assert (report["conversation_id"], report["thread_id"]) == (channel, filed)
+        assert {query.get("thread_id", "") for query in world.place_queries} == {filed}
+    asyncio.run(run())
+
+
 def test_old_host_keeps_the_local_receipt_and_gets_no_report(tmp_path):
     async def run():
         store = BridgeStore(tmp_path)

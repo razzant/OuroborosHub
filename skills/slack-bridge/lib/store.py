@@ -670,6 +670,8 @@ class BridgeStore:
         An own receipt names its author exactly; only a posted text chunk's creation receipt
         counts, never another mutation that merely returned a ``ts``. Nothing is inferred from
         time or text, and the same timestamp in another channel or workspace does not match.
+        ``thread_ts`` is the message's conversation by the channel type Slack stated for it,
+        the row's own or the conversation's (``conversation_thread``); with none, its own root.
         """
         if not team_id or not channel_id or not message_ts:
             return None
@@ -680,7 +682,7 @@ class BridgeStore:
                 (channel_id, message_ts, team_id),
             ).fetchone()
             seen = None if own else db.execute(
-                """SELECT actor_user_id,thread_ts,text FROM inbox WHERE team_id=? AND channel_id=? AND message_ts=?
+                """SELECT actor_user_id,thread_ts,text,channel_type FROM inbox WHERE team_id=? AND channel_id=? AND message_ts=?
                    AND event_type IN ('message','app_mention') AND subtype!='message_deleted'
                    ORDER BY id DESC LIMIT 1""",
                 (team_id, channel_id, message_ts),
@@ -688,10 +690,12 @@ class BridgeStore:
         row = own or seen
         if row is None:
             return None
+        kind = (str(seen["channel_type"]) if seen else "") or self.conversation_kind(team_id, channel_id)
         message = {"ts": message_ts, "text": str(row["text"]),
                    **({"user": str(seen["actor_user_id"])} if seen else {})}
         return {"source": "slack-bridge outbox" if own else "slack-bridge inbox", "message": message,
-                "thread_ts": str(row["thread_ts"] or message_ts), **({"is_self": True} if own else {})}
+                "thread_ts": conversation_thread(kind, str(row["thread_ts"] or ""), message_ts),
+                **({"is_self": True} if own else {})}
 
     def conversation_kind(self, team_id: str, channel_id: str) -> str:
         """The channel type Slack stated in the newest stored event of this conversation, "" if none did."""
