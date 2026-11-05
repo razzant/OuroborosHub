@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/8a51a2d7b2b67924f954e47f68b4dfa3e3cc9e99",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/85e89ccce4ceea7136af94dcd8ba94f61bf318cf",
   "schema_version": 1,
   "skills": [
     {
@@ -2733,8 +2733,8 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "ef4c0e5f01b15645736a514c897585e06d9c4cca94c4df367bd260d63a314629",
-          "size": 54057
+          "sha256": "9f61d84259c32c071895c682c528cf742751b763d416d5a0eb572e7a58d3f0a8",
+          "size": 54234
         },
         {
           "path": "lib/__init__.py",
@@ -2818,28 +2818,18 @@
         },
         {
           "path": "tests/INBOUND_LEASE.md",
-          "sha256": "6f6dab7fef712a11b7c4b984a880067234a90b4c0dcf7157b7555e39cb912762",
-          "size": 4020
-        },
-        {
-          "path": "tests/PRESENCE_PROCESS_CONSUMER.md",
-          "sha256": "5c29ea9b5973ca826e9358d72f5bc726367cef493f5a629eb2f9806dfb634bd4",
-          "size": 6847
+          "sha256": "f3baad68c7085e4b2fb38375de3422507f02493c04b343dd78071f1e6860bbd6",
+          "size": 3916
         },
         {
           "path": "tests/README.md",
-          "sha256": "dd4efd121cd18b9d6bb951a911dfba370325b76bb1135b4ca7bad614758e59d7",
-          "size": 6433
+          "sha256": "7aa8c6684e1dbe2251840508bed876aa621c87389ad407b24b1f462027a92c51",
+          "size": 6286
         },
         {
           "path": "tests/conftest.py",
-          "sha256": "1a80faab163899d6cfe2075ce93473de44cb18db17ba8d481f30965d0140e274",
-          "size": 987
-        },
-        {
-          "path": "tests/presence_process_host.py",
-          "sha256": "aa82396b436d2d6c124ac4effee5b85123e370f041f2973f96264d50f80282ac",
-          "size": 13644
+          "sha256": "a46b7f6d55ef28c86328cdb92063f906963c2fbe123f2150c861d09842275a5b",
+          "size": 992
         },
         {
           "path": "tests/test_conversation_facts.py",
@@ -2925,11 +2915,6 @@
           "path": "tests/test_presence_continuation.py",
           "sha256": "f566c0f805fd85715a80791c587e60f813593b93d0c8f6c1f5f7bd9308d41e7e",
           "size": 59226
-        },
-        {
-          "path": "tests/test_presence_process_consumer.py",
-          "sha256": "7d7ff7ae8e604e3cecdddc58f76c62130950f54aff3dbf716708bcf9296ed116",
-          "size": 44853
         },
         {
           "path": "tests/test_presence_v2_intake.py",
