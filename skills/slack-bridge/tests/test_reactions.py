@@ -463,7 +463,8 @@ def test_ordinary_message_events_gain_no_reaction_shape(tmp_path):
         world = World(store, tmp_path, replies=[{"ts": "100.000001", "user": "U_AUTHOR", "text": "the words"}])
         await drive(world)
         event = provider_turn(world)
-        assert "reaction" not in event["message"] and "kind" not in event["actor"] and "sent_at" not in event["message"]
+        assert "reaction" not in event["message"] and "kind" not in event["actor"]
+        assert event["message"]["sent_at"] == "1970-01-01T00:01:40.000001+00:00"  # its own send time, not a reaction's
         assert event["thread_id"] == "100.000001" and "any_message" in event["facts"]
     asyncio.run(run())
 

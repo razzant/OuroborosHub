@@ -1,7 +1,7 @@
 ---
 name: github
 description: Observe connected GitHub issues, pull requests and Discussions, and deliver authorized replies or explained issue closures with durable receipts.
-version: 0.1.4
+version: 0.1.5
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -64,6 +64,9 @@ within its words and scope. Transport capability supplies no additional permissi
 
 Read the source and current thread before promising or sending. Event context
 contains observation dates, exact attribution, immutable source IDs and gaps.
+`message.sent_at` is when GitHub says the object was written, and an edit of its words
+adds `message.edited_at` (GitHub's last change); a state change adds none, and a review
+request has neither.
 Use the ordinary reader when it can reach the source; disclose unavailable context.
 Use `send_user_message(destination='main', request_id=...)` for owner reports
 and `escalate(..., request_id=...)` for questions. The host supplies the origin

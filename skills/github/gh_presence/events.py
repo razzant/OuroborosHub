@@ -46,6 +46,25 @@ def created(raw):
     return raw.get("created_at") or raw.get("createdAt") or raw.get("submitted_at") or ""
 
 
+def provider_time(value):
+    """A GitHub timestamp as an ISO time with its zone; "" when absent or unreadable."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    return parsed.isoformat() if parsed.utcoffset() is not None else ""
+
+
+def times(kind, raw, edited):
+    """``message.sent_at``, when the object was written, and when its words were edited ``edited_at``, GitHub's last
+    change (for an issue or pull request any change, a new comment included); never an observation time. A state
+    change is no edit, and a review request has no time of its own (it borrows the pull request's)."""
+    if kind == "review_request":
+        return {}
+    changed = provider_time(raw.get("updated_at") or raw.get("updatedAt")) if edited else ""
+    return {key: value for key, value in (("sent_at", provider_time(created(raw))), ("edited_at", changed)) if value}
+
+
 def before(a, b):
     try:
         return datetime.fromisoformat(a.replace("Z", "+00:00")) < datetime.fromisoformat(b.replace("Z", "+00:00"))
@@ -109,6 +128,7 @@ def make_event(event_id, revision, old, *, account, repo, thread, kind, raw, act
     if not old and not first_observed_update and kind in ("issue", "pr"):
         facts.append("new_issue" if kind == "issue" else "new_pull_request")
     old_text = (old or {}).get("text", "")
+    edited = bool(old) and text != old_text  # the words themselves, before any placeholder below
     if text and text != old_text and not first_observed_update:
         spans = mentions(text, watched)
         if spans:
@@ -161,4 +181,5 @@ def make_event(event_id, revision, old, *, account, repo, thread, kind, raw, act
                         "previous_source_event_id": event_id.rsplit(":", 1)[0] + ":" + str(revision - 1) if old else None,
                         "raw": raw, "original_author": actor, "reply_route": route,
                         "fact_evidence": evidence, "coverage_gaps": gaps, "notification": notification,
-                        "context_fingerprint": context_fingerprint(history), "observed_at": now()}}
+                        "context_fingerprint": context_fingerprint(history), "observed_at": now(),
+                        **times(kind, raw, edited)}}

@@ -35,6 +35,7 @@ def properties(native):
           <t:InternetMessageHeader HeaderName="Message-ID">&lt;original@example.invalid&gt;</t:InternetMessageHeader>
           <t:InternetMessageHeader HeaderName="References">&lt;root@example.invalid&gt; &lt;parent@example.invalid&gt;</t:InternetMessageHeader>
           <t:InternetMessageHeader HeaderName="In-Reply-To">&lt;parent@example.invalid&gt;</t:InternetMessageHeader>
+          <t:InternetMessageHeader HeaderName="Date">Wed, 04 Nov 2026 02:59:00 +0300</t:InternetMessageHeader>
         </t:InternetMessageHeaders>
         <t:Attachments><t:FileAttachment><t:AttachmentId Id="att+/="/><t:Name>отчёт.pdf</t:Name>
           <t:ContentType>application/pdf</t:ContentType><t:Size>234</t:Size></t:FileAttachment></t:Attachments>
@@ -99,6 +100,8 @@ def test_public_read_failed_mime_returns_native_fields_and_no_fabricated_file(tm
     assert (result['message_id'], result['conversation_id'], result['in_reply_to']) == (
         '<original@example.invalid>', '<root@example.invalid>', '<parent@example.invalid>')
     assert result['headers']['list-id'] == ['mail.example.invalid']
+    # The sender's Date header, not Exchange's DateTimeReceived (2026-11-04T00:00:01Z), which stays the receipt.
+    assert result['date'] == 'Wed, 04 Nov 2026 02:59:00 +0300'
     assert result['source_format'] == 'ews_properties' and 'MIME' in result['source_note']
     assert result['attachments'] == [{'file_name': 'отчёт.pdf', 'mime_type': 'application/pdf', 'size': 234,
                                       'content_available': False, 'provider_attachment_id': 'att+/='}]

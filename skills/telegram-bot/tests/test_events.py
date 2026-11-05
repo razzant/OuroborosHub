@@ -48,6 +48,7 @@ def test_parses_exact_actor_chat_topic_message_and_media_provenance():
     assert event.conversation["topic_id"] == 42
     assert event.message["message_id"] == 9
     assert event.message["sent_at_epoch"] == 1_700_000_000
+    assert event.message["sent_at"] == "2023-11-14T22:13:20+00:00" and "edited_at" not in event.message
     assert event.message["reply_to_message_id"] == 8
     assert [item["file_id"] for item in event.message["attachments"]] == [
         "large",
@@ -66,6 +67,11 @@ def test_parses_exact_actor_chat_topic_message_and_media_provenance():
         "text",
     }
     assert event.to_dict()["text"] == "See both files"
+    edited = parse_telegram_update({"update_id": 78, "edited_message": {
+        "message_id": 9, "date": 1_700_000_000, "edit_date": 1_700_000_060, "text": "Corrected",
+        "from": {"id": 123, "is_bot": False}, "chat": {"id": -456, "type": "supergroup"}}}, bot_account_id="900")
+    assert (edited.message["sent_at"], edited.message["edited_at"]) == (
+        "2023-11-14T22:13:20+00:00", "2023-11-14T22:14:20+00:00")
 
 
 def test_ignores_bot_edits_service_and_empty_messages():

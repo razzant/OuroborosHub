@@ -51,12 +51,12 @@
       "recommended": false
     },
     {
-      "digest": "759231e7994c9ba6d05270098cc7e42f0da4b119f662a6d9b697bd6839f91258",
+      "digest": "62f8ed4e0657bb1ca1492fb6101b033d1819d2fcca6dc13e94792478e6b7c7b9",
       "name": "email-presence",
       "recommended": false
     },
     {
-      "digest": "5c1af3f64088ebd88cc1e64bbaf1562c47eb3d4b1dd90802c73ef98c61fa3802",
+      "digest": "b939ba0d0156a9e39dd7d34b12976aecb06f9271b6b79885ef0ee417a63e9260",
       "name": "github",
       "recommended": false
     },
@@ -86,12 +86,12 @@
       "recommended": false
     },
     {
-      "digest": "9007bafa030c6521ead2c708fda9b1464a73648d8cff92c5c7805bf03c405a07",
+      "digest": "c6262c948c28032ffdb4b2e169efc66491a79989af8f298e7ac1435491ca5f40",
       "name": "slack-bridge",
       "recommended": false
     },
     {
-      "digest": "b3586ed297dde18a0a1d3204282f7aa4431329ca8638e52919d33115548d1570",
+      "digest": "8c2c6fc353f6256c0415a9f8763838b9a2874516a9b323358d96f46348284816",
       "name": "telegram-bot",
       "recommended": false
     },

@@ -358,6 +358,8 @@ class EwsClient(EwsOperations, MailClient):
                    message_id=usable_message_id(item.findtext('t:InternetMessageId', '', NS))
                               or usable_message_id(raw_mid) or msg['message_id'],
                    in_reply_to=msg['in_reply_to'] or next(iter(headers.get('in-reply-to', [])), ''),
+                   # The sender's Date, as the MIME reader gives it; the receipt stays internal_date.
+                   date=next(iter(headers.get('date', [])), ''),
                    references=msg['references'] or _message_ids(' '.join(headers.get('references', []))))
         body = item.find('t:Body', NS)
         msg['body'] = (body.text or '') if body is not None else ''

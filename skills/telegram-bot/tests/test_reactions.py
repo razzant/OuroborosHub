@@ -313,7 +313,8 @@ def test_edit_keeps_the_topic_and_newest_words(tmp_path):
 
 def test_ordinary_events_gain_no_reaction_shape(tmp_path):
     event = parse(said())
-    assert "reaction" not in event.message and "kind" not in event.actor and "sent_at" not in event.message
+    assert "reaction" not in event.message and "kind" not in event.actor
+    assert event.message["sent_at"] == "1970-01-01T00:00:01+00:00"  # its own send time, not a reaction's
 
 
 # -- Worker to Host --------------------------------------------------------------------------
