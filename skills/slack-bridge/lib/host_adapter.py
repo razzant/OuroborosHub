@@ -605,7 +605,7 @@ class LoopbackPresenceHostAdapter:
                 return _retained_reference(payload, response.status_code, mode)
             # Blocked needs repair and retry needs time; both keep the event queued.
             # A busy conversation or full capacity (v2 429) is such a retry: no
-            # task row was written, so the same event stays this thread's head.
+            # task row was written, so the same event stays this conversation's head.
             if disposition in {"retry", "blocked"} and not str(payload.get("work_ref") or "").strip():
                 raise HostRetryError(_refusal_error(payload, response.status_code),
                                      code=str(payload.get("code") or ""), field=str(payload.get("field") or ""),

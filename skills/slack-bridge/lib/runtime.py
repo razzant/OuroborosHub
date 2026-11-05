@@ -289,7 +289,7 @@ class InboundWorker:
             )
             return True
         except Exception as exc:
-            # A capacity refusal keeps the same event first in its thread and frees
+            # A capacity refusal keeps the same event first in its conversation and frees
             # this worker for other conversations; it is paced by the Host's hint.
             delay = _retry_delay(exc, item.attempts)
             self.store.retry_inbox(

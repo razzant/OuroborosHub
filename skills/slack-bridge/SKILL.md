@@ -876,16 +876,21 @@ separate from the incoming message's actor. Older hosts receive no identity key.
 A direct or group chat is one conversation: its top-level messages carry an empty
 `thread_id` (Host key `slack:<team>:<channel>:0`), the conversation Ouroboros's own
 top-level sends there already use. A reply in a thread belongs to that thread, in a
-chat too. A top-level channel message opens its own thread; the receipt of
+chat too. That thread's conversation starts with its first reply; its root stays in
+the chat's conversation, and `slack_thread` reads it.
+A top-level channel message opens its own thread; the receipt of
 Ouroboros's own top-level channel post names that thread once any received event has
 stated the channel's type. Until then, and for a post sent in several parts, the
 receipt stays at the channel's top level. Ouroboros's own reaction is held and
 recorded in the conversation of the message it names, by the type Slack stated
-there. An event that carries no channel type keeps the earlier per-message
-conversation.
+there. A message or mention that carries no channel type keeps the earlier
+per-message conversation.
 
 Upgrade. Events received before the update keep the conversation they were stored
 with, so their retries, replies and receipts are unchanged. Earlier per-message
 conversations of a direct chat stay as they are: each is the conversation of the
 thread under that message. The chat's own conversation starts with what Ouroboros
-sent there at top level. Nothing is imported, renamed or resent.
+sent there at top level. Nothing is imported, renamed or resent. Rolling back to
+1.9.x while a top-level message that 1.10.0 stored for a direct or group chat still
+waits makes a Host with continuation refuse that event, and the bridge records it as
+failed, so roll back with no such message waiting.

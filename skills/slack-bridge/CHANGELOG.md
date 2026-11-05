@@ -4,13 +4,17 @@
 
 - A direct or group chat is one conversation: its top-level messages carry an empty
   `thread_id` and the Host key `slack:<team>:<channel>:0`, which Ouroboros's own
-  top-level sends there already use. A reply to a proactive DM therefore sees it, and a
-  second message reaches the answer being prepared. Edits, deletions and reactions of
+  top-level sends there already use. A top-level answer to a proactive DM therefore
+  sees it, and on a Host with continuation version 2 a second message reaches the
+  answer being prepared. Edits, deletions and reactions of
   such a message, Ouroboros's own reactions included, land there too. A reply in a
   thread keeps its thread, in a chat too; a top-level channel message still opens its
-  own thread, and an event without a channel type keeps its per-message conversation.
-  The bridge decides this once, at receipt, and the event, queue lane, reply, thread
-  read and receipt all read the stored inbox key.
+  own thread, and a message or mention without a channel type keeps its per-message
+  conversation. The bridge decides this once, when an event is received, and inbound
+  readers take the conversation stored with it: the event, its queue lane, the reply
+  and its receipt, the thread read and the output identity. A reaction takes its
+  target's conversation from the provider lookup, and the receipt of Ouroboros's own
+  top-level channel post uses the channel type stored from a received event.
 - The automatic answer to a top-level message of a direct or group chat is a plain
   message in the chat, no longer a thread under it. `slack_send` still places a
   message anywhere, with or without `thread_ts`.
@@ -24,7 +28,10 @@
   with, and with it their retries, reply thread and output identity. Earlier
   per-message conversations of a direct chat stay as the conversations of the threads
   under those messages; the chat's own conversation starts with what Ouroboros sent
-  there at top level. Nothing is imported, renamed or resent.
+  there at top level. Nothing is imported, renamed or resent. Rolling back to 1.9.x
+  while a top-level message that 1.10.0 stored for a direct or group chat still waits
+  makes a Host with continuation refuse that event, and the bridge records it as
+  failed, so roll back with no such message waiting.
 
 ## 1.9.3
 
