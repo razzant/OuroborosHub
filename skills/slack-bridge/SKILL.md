@@ -142,6 +142,16 @@ contributes:
     scope: account
     source: {route: status, refresh_s: 15}
     icon: ui/icon.svg
+    settings: slack_presence
+    facts:
+      - any_message
+      - direct_message
+      - group_dm
+      - mention
+      - my_thread
+      - reply_to_me
+      - from_bot
+      - {id: signal.new_root, label: "New top-level post in a listed channel (connector setting)"}
     wakes: [direct_message, group_dm, mention, my_thread, reply_to_me]
 ---
 
@@ -162,9 +172,41 @@ runtime.
 Connect Slack in Places using provider `slack` and the workspace Team ID shown
 in the widget. The host selects the place by account and conversation. Suggested
 wakes are direct messages, group DMs, mentions, my threads, and replies to me.
-Every supported event reaches the host for capture; its typed facts determine
-whether consciousness wakes. Bot messages carry `from_bot` and need an explicit
-wake choice. Place notes supply behavior instructions.
+`signal.new_root` is an opt-in wake for an allowlist of channels; it is not
+suggested. Every supported event reaches the host for capture; its typed facts
+determine whether consciousness wakes. Bot messages carry `from_bot` and need an
+explicit wake choice. Place notes supply behavior instructions.
+
+### New top-level posts in listed channels
+
+To wake on new top-level posts (new threads) in chosen channels without waking
+on their replies:
+
+1. Under Settings › Slack Bridge, enter exact channel IDs in **New-root channel
+   IDs** (`SLACK_NEW_ROOT_CHANNELS`), one per line. Commas and spaces also
+   separate them. An ID such as `C0123456789` is at the bottom of the channel's
+   About tab. Names, `#name` and other tokens are refused whole, and the list
+   holds at most 100 IDs. Empty means none.
+2. Save, then toggle the skill so the companion restarts with the new list.
+3. In the Slack place's wakes, check **New top-level post in a listed channel**.
+
+A `message` or `app_mention` event in a listed channel that posts a new message
+(no subtype, `bot_message`, `file_share` or `me_message`) with no `thread_ts`
+and no `edited` marker gets `new_root_signal: true` in
+`message.provider_facts` and `signal.new_root` in the event's facts. Thread
+replies, including those also sent to the channel, edits, deletes, reactions,
+join or topic notices and posts in unlisted channels never get it. Only the
+exact channel ID is compared, never a channel name or the message text.
+
+The list changes no admission. Every event is still captured and submitted, and
+mentions, direct messages and my threads keep their own facts. A bot's post still
+needs `from_bot` to wake. The fact is decided when the event arrives, so a changed
+list applies to later events only. The bridge sends `signal.new_root` only to a
+Host whose `/identity` advertises `presence_wake_signals: 1`, because an older
+Host refuses an event naming an undeclared fact; there the provider fact remains
+and the event's facts omit the signal. The status route reports
+`new_root_channels`, the list the running companion uses, and
+`new_root_channels_error` when it ignored an invalid hand-edited value.
 
 The adapter negotiates `places_version >= 1` through `/identity`, omits
 `binding_id`, and uses the dedicated `presence` permission. Older hosts still
@@ -188,10 +230,12 @@ transport retry budget.
 4. Grant both settings to this reviewed skill, then enable it.
 5. Connect the Slack place and choose its wakes and notes.
 6. Invite the bot to channels where it should participate.
+7. Optionally list channels for [new top-level posts](#new-top-level-posts-in-listed-channels).
 
 Every DM, MPDM, public channel, and private channel event that the installed app
 can receive is transported; the host place decides admission. Invite the bot where Slack requires explicit
-membership; there is no second bridge-local channel allowlist.
+membership; there is no second bridge-local admission allowlist. The new-root
+channel list only adds a fact to some events.
 
 Every file a Slack message declares becomes one entry of the event's
 `message.attachments`: its Slack ID, name, type and size, the curated file facts
@@ -368,7 +412,8 @@ who should answer or who is an owner.
 Accepted events expose the authenticated bot's `self_user_id`, when known, in
 `message.provider_facts`. Current messages also retain `mentioned_user_ids`
 from explicit Slack `<@ID>` tokens and rich-text user elements, plus the
-provider's `parent_user_id` when supplied. For edits these facts describe the
+provider's `parent_user_id` when supplied, and `new_root_signal` for a new
+top-level post in a [listed channel](#new-top-level-posts-in-listed-channels). For edits these facts describe the
 current nested message, not its previous revision; reactions and deletes do
 not acquire current-message mention or parent facts. Missing fields remain
 unknown, including in older persisted events. Mentions are occurrences, which
@@ -594,9 +639,11 @@ exists but cannot be read, is not JSON, or is not a JSON object is reported as
 `binding_state: "unreadable"` with `local_settings_error` in the status route,
 the companion refuses to start on it, and saving settings returns HTTP 409
 without overwriting the bytes nobody could parse. Opening the settings form
-reads the saved Binding ID and worker counts back without writing anything, so
-changing one field keeps the others; an unreadable file answers that read with
-409 as well, which disables Save.
+reads the saved Binding ID, worker counts and new-root channel IDs back without
+writing anything, so changing one field keeps the others; an unreadable file
+answers that read with 409 as well, which disables Save. Saving keeps fields the
+form does not show, stores the channel IDs as a normalized list and refuses an
+invalid list with HTTP 400, leaving the file unchanged.
 
 Delivery is durable and retries are bounded. Immediately before a provider
 write, the outbox persists an attempt marker under its current lease. A lost

@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from lib.runtime import BridgeRuntime
 from lib.socket_mode import SocketModeClient
 from lib.store import BridgeStore
 
@@ -83,3 +84,24 @@ async def _failed_durable_insert_is_not_acknowledged(tmp_path, monkeypatch, even
     with pytest.raises(OSError, match="disk unavailable"):
         await socket.handle_raw_message(websocket, _raw(event_type))
     assert websocket.sent == []
+
+
+@pytest.mark.parametrize("channels, marked", [(["C1"], True), (["C2"], False), ([], False)])
+def test_socket_marks_new_roots_only_in_its_configured_channels(tmp_path, channels, marked) -> None:
+    async def run():
+        store = BridgeStore(tmp_path)
+        socket = SocketModeClient(_Slack(), store, bot_user_id="U_BOT", new_root_channels=channels)
+        await socket.handle_raw_message(_WebSocket(store), _raw())
+        item = store.claim_inbox()
+        assert item is not None and item.text == "hello"
+        assert item.structured.get("new_root_signal") is (True if marked else None)
+    asyncio.run(run())
+
+
+def test_runtime_hands_its_configured_channels_to_the_socket(tmp_path) -> None:
+    store = BridgeStore(tmp_path)
+    runtime = BridgeRuntime(store=store, slack=_Slack(), host=object(), bot_user_id="U_BOT",
+                            new_root_channels=["C1", "G2", "C1"])
+    assert runtime.socket.new_root_channels == frozenset({"C1", "G2"})
+    assert BridgeRuntime(store=store, slack=_Slack(), host=object(),
+                         bot_user_id="U_BOT").socket.new_root_channels == frozenset()

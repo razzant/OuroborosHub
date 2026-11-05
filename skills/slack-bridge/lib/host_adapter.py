@@ -439,6 +439,8 @@ class LoopbackPresenceHostAdapter:
         self.presence_identity = 0
         self.reaction_context = 0
         self.explicit_completion = 0
+        # A Host without ``presence_wake_signals: 1`` refuses an event naming a signal.
+        self.wake_signals = 0
         self.connector_identity = dict(identity or {})
 
     async def discover_delivery_support(self) -> int:
@@ -468,6 +470,8 @@ class LoopbackPresenceHostAdapter:
                                         and payload["presence_reaction_context"] == 1)
             self.explicit_completion = int(type(payload.get("presence_explicit_completion")) is int
                                            and payload["presence_explicit_completion"] == 1)
+            self.wake_signals = int(type(payload.get("presence_wake_signals")) is int
+                                    and payload["presence_wake_signals"] == 1)
             self.available = bool(self._skill_token and (self.binding_id or self.places_version))
             self.delivery_reporting_version = 1 if payload.get("presence_delivery_version") == 1 else 0
             self.continuation_version = _continuation_version(payload)
@@ -478,6 +482,7 @@ class LoopbackPresenceHostAdapter:
             self.continuation_version = 0
             self.reaction_context = 0
             self.explicit_completion = 0
+            self.wake_signals = 0
             self.delivery_reporting_status = "unavailable"
         return self.delivery_reporting_version
 
@@ -577,6 +582,11 @@ class LoopbackPresenceHostAdapter:
             raise HostContractError("HOST_SERVICE_TOKEN is missing")
         version = self.continuation_version
         continuing = version in (1, 2)
+        presence_event = slack_presence_event(event, transport_queue=continuing, places=bool(self.places_version))
+        if "facts" in presence_event and not self.wake_signals:
+            presence_event["facts"] = [fact for fact in presence_event["facts"] if not fact.startswith("signal.")]
+        if self.presence_identity and self.connector_identity:
+            presence_event["identity"] = self.connector_identity
         response = await self._http.post(
             f"{self.host_service_url}/presence/turn",
             headers={
@@ -585,8 +595,7 @@ class LoopbackPresenceHostAdapter:
             },
             json={
                 **({"binding_id": self.binding_id} if not self.places_version else {}),
-                "event": {**slack_presence_event(event, transport_queue=continuing, places=bool(self.places_version)),
-                          **({"identity": self.connector_identity} if self.presence_identity and self.connector_identity else {})},
+                "event": presence_event,
                 "staged_files": [
                     _staged_path(file) for file in event.staged_files if _staged_path(file)
                 ],

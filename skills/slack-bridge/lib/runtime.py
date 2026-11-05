@@ -725,6 +725,7 @@ class BridgeRuntime:
         app_id: str = "",
         inbound_workers: int = 4,
         outbound_workers: int = 2,
+        new_root_channels: Sequence[str] = (),
     ) -> None:
         self.store = store
         self.slack = slack
@@ -735,6 +736,7 @@ class BridgeRuntime:
             bot_user_id=bot_user_id,
             bot_id=bot_id,
             app_id=app_id,
+            new_root_channels=new_root_channels,
         )
         self.inbound_workers = max(1, min(16, int(inbound_workers)))
         self.outbound_workers = max(1, min(8, int(outbound_workers)))
