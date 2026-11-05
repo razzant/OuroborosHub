@@ -34,7 +34,7 @@ SUITES = {
                        'core_env': 'OUROBOROS_THEME_CORE_ROOT'},
     'slack-bridge': {'skills': ['slack-bridge'],
                      'tests': ['skills/slack-bridge/tests', 'tests/test_slack_presence_core_consumer.py',
-                               'tests/test_reaction_core_consumer.py'],
+                               'tests/test_slack_conversation_core_consumer.py', 'tests/test_reaction_core_consumer.py'],
                      'dependencies': ['httpx', 'starlette', 'websockets']},
     'email-presence': {'skills': ['email-presence'], 'tests': ['skills/email-presence/tests'],
                        'dependencies': ['httpx', 'starlette', 'requests', 'requests-ntlm', 'defusedxml'], 'cwd': 'skills/email-presence',
