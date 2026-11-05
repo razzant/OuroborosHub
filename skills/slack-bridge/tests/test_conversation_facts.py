@@ -4,6 +4,7 @@ import asyncio
 import json
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 
@@ -165,6 +166,9 @@ def test_one_stored_conversation_names_the_event_the_lane_and_the_reply(tmp_path
     event = slack_presence_event(item)
     assert event["thread_id"] == event["conversation"]["thread_ts"] == thread
     assert event["conversation_key"] == f"slack:T1:{channel}:{thread or '0'}"
+    # Its time is its own: Slack's send time of this message, whatever thread the conversation names.
+    sent = float(payload["payload"]["event"]["ts"])
+    assert event["message"]["sent_at"] == datetime.fromtimestamp(sent, timezone.utc).isoformat()
 
 
 def test_direct_messages_share_the_room_a_proactive_send_lands_in(tmp_path):
