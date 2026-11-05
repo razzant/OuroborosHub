@@ -143,6 +143,13 @@ def content_revision(message):
     return stamp + ':' + digest(content)[:32]
 
 
+def reply_chain(message, topic):
+    """The reply chain Telegram names by its first message outside a topic, kept as a message fact
+    (``message.reply_chain_id``, as in telegram-bot): a supergroup thread or a forum's General thread."""
+    top = getattr(getattr(message, 'reply_to', None), 'reply_to_top_id', None)
+    return top if topic is None and type(top) is int and top > 0 else None
+
+
 def iso(value):
     return value.astimezone(timezone.utc).isoformat() if value is not None else None
 
