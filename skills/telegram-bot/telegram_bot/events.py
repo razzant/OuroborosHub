@@ -13,6 +13,13 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 _PLACE_CHAT_TYPES = frozenset({"private", "group", "supergroup", "channel"})
 # getFile serves at most this much; a larger file can never be downloaded by a bot.
 BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+TOO_LARGE_NOTE = ("Not staged: larger than the Bot API's 20 MiB download limit. "
+                  "The Telegram message reference is retained.")
+
+
+def too_large_marks(size: int) -> Dict[str, str]:
+    """Telegram never serves a bot a file above the download limit; retrying it would hold its conversation."""
+    return {"status": "too_large", "note": TOO_LARGE_NOTE} if size > BOT_API_DOWNLOAD_LIMIT else {}
 # The Host classifies a staged file by its bytes, but an MP3 without an ID3 tag or an
 # M4A under a generic MP4 brand is only recognized with its usual suffix.
 _AUDIO_SUFFIXES = {
@@ -30,8 +37,9 @@ class TelegramAttachment:
     file_name: str
     mime_type: str
     file_size: int
-    # Voice and audio only; omitted from the dict when absent, so photo and
-    # document facts keep their exact earlier shape.
+    # duration_sec is voice and audio only; status and note mark a file above the Bot API
+    # download limit. All three are omitted from the dict when absent, so an ordinary photo
+    # or document keeps its exact earlier shape.
     duration_sec: Optional[int] = None
     status: Optional[str] = None
     note: Optional[str] = None
@@ -354,6 +362,7 @@ def _attachments(message: Dict[str, Any]) -> Tuple[TelegramAttachment, ...]:
                     file_name=f"photo-{photo.get('file_unique_id') or photo.get('file_id')}.jpg",
                     mime_type="image/jpeg",
                     file_size=_integer(photo.get("file_size")) or 0,
+                    **too_large_marks(_integer(photo.get("file_size")) or 0),
                 )
             )
     document = message.get("document")
@@ -366,6 +375,7 @@ def _attachments(message: Dict[str, Any]) -> Tuple[TelegramAttachment, ...]:
                 file_name=str(document.get("file_name") or "document"),
                 mime_type=str(document.get("mime_type") or "application/octet-stream"),
                 file_size=_integer(document.get("file_size")) or 0,
+                **too_large_marks(_integer(document.get("file_size")) or 0),
             )
         )
     for kind in ("voice", "audio"):
@@ -387,7 +397,6 @@ def _sound(kind: str, item: Dict[str, Any]) -> TelegramAttachment:
         name += suffix
     size = _integer(item.get("file_size")) or 0
     duration = _integer(item.get("duration"))
-    too_large = size > BOT_API_DOWNLOAD_LIMIT
     return TelegramAttachment(
         kind=kind,
         file_id=str(item.get("file_id")),
@@ -396,9 +405,7 @@ def _sound(kind: str, item: Dict[str, Any]) -> TelegramAttachment:
         mime_type=mime,
         file_size=size,
         duration_sec=duration if duration is not None and duration >= 0 else None,
-        status="too_large" if too_large else None,
-        note=("Not staged: larger than the Bot API's 20 MiB download limit. "
-              "The Telegram message reference is retained.") if too_large else None,
+        **too_large_marks(size),
     )
 
 

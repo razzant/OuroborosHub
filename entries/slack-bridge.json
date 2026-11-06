@@ -6,7 +6,7 @@
     "Slack"
   ],
   "description": "Slack connector for workspace places, with typed conversation facts, durable replies, files, and live place-state delivery holds.",
-  "digest": "d178950fe4ac18b398dc7e88606b235948598ff80ec92e1ead0e5a2ee27b8d11",
+  "digest": "49b0b96db471abab53d37e2a5d0e34bf305a86ac9941b0ff3e9221724a9945e5",
   "icon": "ui/icon.svg",
   "install_specs": [
     "httpx",
@@ -20,7 +20,7 @@
     "path": "skills/slack-bridge"
   },
   "type": "extension",
-  "version": "1.11.0",
+  "version": "1.11.1",
   "when_to_use": "User wants Ouroboros to receive Slack messages or files, reply in Slack conversations and threads, or send proactive Slack text messages.",
   "withdrawn": null
 }

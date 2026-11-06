@@ -8,13 +8,13 @@ import re
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
-from .api import TelegramClient, TelegramApiError, _split_text
+from .api import TelegramClient, TelegramApiError, TelegramFileTooLarge, _split_text
 from .delivery import (REACTION_HISTORY_UNAVAILABLE, REACTION_REPORT_UNREADABLE, delivery_report,
                        is_reaction_report, reaction_receipt, typed_reaction_report)
 from .formatting import prepare_text, prepare_caption
 from .custody import REACTION_WITHHELD, CustodyStore, InboxLease, OutboxLease, _chat_forum
 from .discovery import group_sightings
-from .events import parse_telegram_update
+from .events import TOO_LARGE_NOTE, parse_telegram_update, too_large_marks
 from .host import PresenceHostHTTPError, PresenceSubmission, PresenceWorkResult
 from .settings import load_settings
 
@@ -371,12 +371,22 @@ class TelegramTransportRuntime:
                 # Telegram will never serve it; retrying would hold the conversation.
                 # The event keeps the reference and says why nothing was staged.
                 continue
+            # A row stored before photos and documents carried the mark (0.10.5 and earlier),
+            # or a file Telegram refuses without having sized it: the same fact, said on the event.
+            marks = too_large_marks(_declared_size(attachment))
+            if marks:
+                attachment.update(marks)
+                continue
             name = _safe_filename(
                 str(attachment.get("file_name") or f"attachment-{index}")
             )
             destination = event_dir / f"{index}-{name}"
             if not destination.is_file() or destination.stat().st_size == 0:
-                await client.download_file(str(attachment["file_id"]), destination)
+                try:
+                    await client.download_file(str(attachment["file_id"]), destination)
+                except TelegramFileTooLarge:
+                    attachment.update(status="too_large", note=TOO_LARGE_NOTE)
+                    continue
             staged.append(destination)
         return staged
 
@@ -813,6 +823,13 @@ def _optional_int(value: Any) -> Optional[int]:
 
 def _safe_component(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)[:160] or "event"
+
+
+def _declared_size(attachment: Dict[str, Any]) -> int:
+    try:
+        return int(attachment.get("file_size") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def _safe_filename(value: str) -> str:

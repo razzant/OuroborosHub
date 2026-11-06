@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.10.5
+version: 0.10.6
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -245,13 +245,13 @@ Telegram delivers far longer and larger recordings than the recognizer accepts;
 such a recording, like WAV, FLAC or AAC, is still staged whole, never cut, and
 stays only a file, and the tool's error says so.
 
-A recording Telegram declares larger than the Bot API's 20 MiB download limit
-is not downloaded: its attachment carries `status` `too_large` and a note, and
-the event goes on with the message reference instead of retrying forever.
-If the update omits the size and `getFile` later refuses an oversized file, the
-existing download retry path still holds that conversation; this version does
-not resolve that failure. Unknown-size recordings that download successfully
-remain supported.
+Any attachment (photo, document, voice or audio) that Telegram declares larger than
+the Bot API's 20 MiB download limit is not downloaded: it carries `status`
+`too_large` and a note, and the event goes on with the message reference instead
+of retrying forever, so a later message of the same chat is never held behind it.
+The same holds for a row stored by an earlier version with that size and no mark,
+and for a file whose size the update omitted when `getFile` refuses it as too big.
+Any other download failure still retries and keeps the event first in its chat.
 
 ## Connecting groups (0.9.0)
 

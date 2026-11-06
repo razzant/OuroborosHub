@@ -92,3 +92,31 @@ async def _edit_and_reaction_operations_use_bot_api_method_shapes():
         "parse_mode": "HTML",
     }
     assert transport.json_calls[-1][1]["reaction"] == [{"type": "emoji", "emoji": "👍"}]
+
+
+class _TooBigTransport(FakeTransport):
+    def __init__(self, response):
+        super().__init__()
+        self.response = response
+
+    async def post_json(self, url, payload, timeout_sec):
+        self.json_calls.append((url, payload, timeout_sec))
+        return self.response
+
+
+def test_a_file_telegram_will_not_serve_is_a_typed_refusal(tmp_path):
+    from telegram_bot.api import TelegramApiError, TelegramFileTooLarge
+
+    async def attempt(response):
+        client = TelegramClient("token", transport=_TooBigTransport(response))
+        try:
+            await client.download_file("file-1", tmp_path / "x.zip")
+        except TelegramApiError as exc:
+            return exc
+        return None
+
+    refused = asyncio.run(attempt({"ok": False, "error_code": 400, "description": "Bad Request: file is too big"}))
+    declared = asyncio.run(attempt({"ok": True, "result": {"file_path": "d/x.zip", "file_size": 487_480_164}}))
+    other = asyncio.run(attempt({"ok": False, "error_code": 400, "description": "Bad Request: wrong file_id"}))
+    assert isinstance(refused, TelegramFileTooLarge) and isinstance(declared, TelegramFileTooLarge)
+    assert isinstance(other, TelegramApiError) and not isinstance(other, TelegramFileTooLarge)

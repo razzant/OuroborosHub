@@ -237,8 +237,13 @@ class IdentityTests(Case):
         value = make_event("facts", 1, None, account=account_id(11), repo=REPO, thread="pr.1", kind="review_request",
                            raw=raw, actor={"platform": "github", "is_bot": True}, route=route("inline"),
                            watched=WATCHED, history=history)
-        self.assertTrue({"my_thread", "reply_to_me", "assigned", "review_requested"}.issubset(value["facts"]))
-        self.assertNotIn("mention", value["facts"])
+        # A review-request list is not new words: it carries only what it newly adds.
+        self.assertTrue({"assigned", "review_requested"}.issubset(value["facts"]))
+        self.assertFalse({"my_thread", "reply_to_me", "mention"} & set(value["facts"]))
+        reply = make_event("reply", 1, None, account=account_id(11), repo=REPO, thread="pr.1", kind="inline_comment",
+                           raw=raw, actor={"platform": "github", "platform_actor_id": "22", "is_bot": False},
+                           route=route("inline"), watched=WATCHED, history=history)
+        self.assertTrue({"my_thread", "reply_to_me"}.issubset(reply["facts"]))  # new words in that thread still are
         self.assertEqual(value["actor"]["attribution"], "unknown")
         self.assertEqual(value["message"]["coverage_gaps"][0]["code"], "team_membership_not_proven")
         self.assertFalse({"sent_at", "edited_at"} & set(value["message"]))  # a request has no time of its own
@@ -457,6 +462,29 @@ class SenderTests(Case):
         self.assertEqual(len(self.provider.posts), 1)
 
 
+class RevisionFactTests(unittest.TestCase):
+    """The account's own merges and edits are not replies in its threads (28.10: 13 of 32 self-wakes)."""
+
+    def revision(self, old, body, kind="pr"):
+        own = {"id": 900, "number": 1, "created_at": "2026-01-01T00:00:00Z", "_actor_id": "11"}
+        raw = {"id": 900, "number": 1, "title": "Fix", "body": body, "user": WRITER, "state": "closed",
+               "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-03T00:00:00Z", "assignees": []}
+        return make_event("rev", 2 if old else 1, old, account=account_id(11), repo=REPO, thread="pr.1", kind=kind,
+                          raw=raw, actor={"platform": "github", "platform_actor_id": "11", "is_bot": False},
+                          route=route(), watched=WATCHED, history=[own])["facts"]
+
+    def test_a_revision_of_an_own_thread_carries_only_what_it_adds(self):
+        self.assertEqual(self.revision({"text": "Fix\n\nold body"}, "merged body"), ["any_message"])
+        self.assertEqual(self.revision(None, "body", kind="pr_details"), ["any_message"])
+        self.assertIn("new_pull_request", self.revision(None, "body"))  # its first observation is still new words
+
+    def test_an_edit_mentions_only_a_newly_added_watched_login(self):
+        kept = self.revision({"text": "Fix\n\nping @contributor"}, "ping @contributor again")
+        added = self.revision({"text": "Fix\n\nplain"}, "now @contributor")
+        self.assertNotIn("mention", kept)
+        self.assertIn("mention", added)
+
+
 class CollectorTests(Case):
     def test_old_object_edited_during_first_scan_is_live_with_unknown_prior(self):
         collector = Collector(self.store, self.provider, CONFIG)
@@ -472,8 +500,8 @@ class CollectorTests(Case):
         self.assertEqual(value["message"]["action"], "updated_before_first_observation")
         self.assertEqual(value["actor"]["attribution"], "unknown")
         self.assertIn("any_message", value["facts"])
-        self.assertIn("my_thread", value["facts"])  # the verified opener is watched
-        self.assertFalse({"new_issue", "mention", "assigned"} & set(value["facts"]))
+        # The verified opener is watched, but a first-scan snapshot of an older object is not new words.
+        self.assertFalse({"my_thread", "new_issue", "mention", "assigned"} & set(value["facts"]))
         self.assertIn({"scope": "revision", "code": "prior_revision_unavailable"}, value["message"]["coverage_gaps"])
         self.assertIn(raw["body"], value["text"])
 

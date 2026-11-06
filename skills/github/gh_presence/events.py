@@ -123,6 +123,11 @@ def make_event(event_id, revision, old, *, account, repo, thread, kind, raw, act
     gaps = []
     # A REST original author does not identify the editor/assigner/state actor.
     event_actor = actor if not old and not first_observed_update and kind != "review_request" else {"platform": "github", "attribution": "unknown"}
+    # Relations ("in my thread", "a reply to me") belong to new words someone wrote. A revision (an edit, merge, close,
+    # reopen, draft flip), a first-scan snapshot of an older object, a pull request's details and a review-request list
+    # are not new words: they carry any_message plus only what that revision newly adds (a mention, an assignee, a
+    # requested reviewer), so the account's own merges and edits no longer read as replies in its threads.
+    new_words = not old and not first_observed_update and kind not in ("pr_details", "review_request")
     if event_actor.get("is_bot"):
         facts.append("from_bot")
     if not old and not first_observed_update and kind in ("issue", "pr"):
@@ -131,6 +136,9 @@ def make_event(event_id, revision, old, *, account, repo, thread, kind, raw, act
     edited = bool(old) and text != old_text  # the words themselves, before any placeholder below
     if text and text != old_text and not first_observed_update:
         spans = mentions(text, watched)
+        if old:  # an edit mentions only a watched login it newly adds
+            earlier = {span["user_id"] for span in mentions(old_text, watched)}
+            spans = [span for span in spans if span["user_id"] not in earlier]
         if spans:
             facts.append("mention")
             evidence["mention"] = spans
@@ -142,14 +150,14 @@ def make_event(event_id, revision, old, *, account, repo, thread, kind, raw, act
         opened = entry.get("number") == route["number"] and kind in ("issue", "pr", "discussion")
         if str(entry.get("_actor_id", "")) in ids and (opened or before(created(entry), target_time or "")):
             prior.append({"id": entry.get("id"), "created_at": created(entry), "actor_id": entry["_actor_id"]})
-    if prior:
+    if prior and new_words:
         facts.append("my_thread")
         evidence["my_thread"] = prior
     if history_gap:
         gaps.append({"scope": "history", "code": history_gap})
     parent_id = raw.get("in_reply_to_id") or (raw.get("replyTo") or {}).get("id")
     parents = [r for r in history if str(r.get("id")) == str(parent_id) and str(r.get("_actor_id", "")) in ids]
-    if parent_id and parents:
+    if parent_id and parents and new_words:
         facts.append("reply_to_me")
         evidence["reply_to_me"] = {"parent_id": parent_id, "actor_id": parents[0]["_actor_id"]}
     previous = (old or {}).get("comparison", {})

@@ -25,7 +25,14 @@ is required. No new connector endpoint, scheduler or Main transport.
    and `assigned` must be accepted as facts/wake choices by the host upgrade.
    Manifest suggestions name `new_issue`, `new_pull_request`, `mention`,
    `my_thread`, `review_requested` and `assigned`; `any_message` stays an owner
-   choice. Discussion is never new_issue.
+   choice. Discussion is never new_issue. Relation facts (`new_issue`,
+   `new_pull_request`, `my_thread`, `reply_to_me`) belong to new words only: a
+   revision (edit, merge, close, reopen, draft flip), a first-scan snapshot of an
+   older object, a pull request's details and a review-request list carry
+   `any_message` plus only what that revision newly adds (a newly mentioned watched
+   login, a newly added assignee or requested reviewer) (0.1.6). Events written by
+   the account this connector sends as are still reported; the host recognises
+   them from `identity.sends_as` and does not wake on them.
 3. Reply projections must retain actual `output_ref`, including retained original
    and late child outputs. `work_ref` identifies the polled work;
    `child_work_ref` exposes a late child even on terminal failure. Released
