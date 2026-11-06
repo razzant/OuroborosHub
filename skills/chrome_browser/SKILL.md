@@ -159,6 +159,7 @@ owner's shared tab and tabs a page opened stay open.
 | `BROWSER_ATTACHING` | Approved; setting up. | Call again shortly. |
 | `BROWSER_TAB_NOT_ATTACHED` | The owner approved, but Chrome refused to attach the chosen tab (its answer is quoted), for example because the extension still holds an attachment from before its worker restarted. Nothing was opened instead. | Tell the owner. With a new `browser_connect` link they can share another tab. Approving the same tab again fails the same way; no way to share it again was tested. |
 | `BROWSER_CONNECTION_LOST` | The generation, first observed closing layer, its time and a finite WebSocket code when available are reported. The 0.4.0 extension's exact peer reasons `User disconnected` and `All controlled tabs detached` have safe names; they do not establish the underlying trigger. A preceding debugger detach is shown separately; a detach or tab removal alone is not transport loss. Other peer supplied reasons outside a short exact allowlist are shown as unknown. | New `browser_connect`, then fresh `browser_snapshot` and reassess. Do not replay an action whose reply was lost. |
+| `BROWSER_CONNECTION_CHANGED` | A different connection generation replaced the one used by this call. The result distinguishes refusal before dispatch from a dispatched call whose effects require checking. | After approval take a fresh snapshot; never replay an earlier action automatically. |
 | `BROWSER_APPROVAL_EXPIRED` | Not approved within 15 minutes. | New `browser_connect`. |
 | `BROWSER_DISCONNECTED` | Ended with `browser_disconnect`. | New `browser_connect` if needed. |
 | `BROWSER_GUARD_REQUIRED` / `_INVALID` / `_NOT_ARMED` | The host's request guard is not configured (`_REQUIRED`); the host set it up without a usable address or token (`_INVALID`, reported by `browser_connect` before any link is made); or it did not confirm the route after approval (`_NOT_ARMED`). | Report it; it is a setup or host problem. |
@@ -217,7 +218,7 @@ nothing is done in that page, or the result is replaced by the guard's reason; a
 in a tab list is judged with its tab. A hop counts until a new document really replaces the
 one it led to: a 204, a download or a redirect that fails leaves the old document in the tab,
 and the hop with it, and a new document clears it. This withholds what reaches the agent: a
-hop's request has already been sent by then. Moving to another page or tab
+hop's request has already been sent by then. Tab-list output is checked by the titles and addresses it contains, including empty-title tabs and tabs retained for that call after teardown or reconnection. Moving to another page or tab
 (`browser_navigate`, going back, `browser_tabs`) is never refused because of the page being
 left.
 
