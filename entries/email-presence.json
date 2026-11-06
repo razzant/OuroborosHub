@@ -6,7 +6,7 @@
     "Email"
   ],
   "description": "Multi-account Gmail, on-premises Exchange EWS and IMAP/SMTP mail with folders, drafts, durable delivery and optional Presence intake.",
-  "digest": "08a0c8aebe570a5764c50bab6080dd6f2ee5f4400f63e5b7b94e571d4b6f4316",
+  "digest": "8e94854ef9598cfe302bb918b29f48c355a7112549f901209fb8b16a3c8507e1",
   "icon": "ui/icon.svg",
   "install_specs": [
     "httpx",
