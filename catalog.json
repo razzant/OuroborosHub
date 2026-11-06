@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/5812950ee6ec86c8613196311cef19d1e1307ebd",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/d3b49c6e97a43585dd222508d23911929b3cf08b",
   "schema_version": 1,
   "skills": [
     {
@@ -37,7 +37,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "fa0940646cddbc63005c5ce59f4fc68c1a418c1d22b8da30d57fac71a494166e",
+          "sha256": "cc17c2d453a92d4f8286cd2ebdc451e17c09b11174ad15c1e2409e2654decb27",
           "size": 5826
         },
         {
@@ -57,8 +57,8 @@
         },
         {
           "path": "scripts/a2a_presence.py",
-          "sha256": "da5f4dda51dadea8527e4585cc86943929b9e30cce532ea51ae8e530eaf2091d",
-          "size": 8017
+          "sha256": "3b14cf290615980e1b65016c0750ac45eef38cce59bc6d3793a16dca87c1ea89",
+          "size": 8139
         },
         {
           "path": "tests/test_a2a_agent_card.py",
@@ -77,8 +77,8 @@
         },
         {
           "path": "tests/test_a2a_operation_ownership.py",
-          "sha256": "9b8cc501d60f87e94e76bac338f738b406237421cd4d7ada89e724c2ddaf63e2",
-          "size": 18079
+          "sha256": "4464effc26639631e63819833676a8c79d2d290910af3a23f3731f9b715c8dac",
+          "size": 20610
         },
         {
           "path": "tests/test_a2a_sdk_card_shape.py",
@@ -110,7 +110,7 @@
       "name": "a2a",
       "slug": "a2a",
       "type": "extension",
-      "version": "1.5.0",
+      "version": "1.5.1",
       "when_to_use": "User asks to communicate with another A2A-compatible agent, discover an agent card, send an A2A message, check A2A task status, or expose this Ouroboros instance as an A2A peer."
     },
     {
