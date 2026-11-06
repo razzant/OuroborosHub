@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/84056d5d93246a54444e657975c289c4285fe6e5",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/05c9cd3ba6f1a94e1f7fe229a8a8c4f3d07d7710",
   "schema_version": 1,
   "skills": [
     {
@@ -1322,8 +1322,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "6a0af078eba08671172f000b0d1e62eeb5cf7f2e9a89eb665e4facc6052776dc",
-          "size": 10883
+          "sha256": "83a053b2074dd2dceb6f80b0e5eb4f150820c017a46ba5969256b7e362391685",
+          "size": 11256
         },
         {
           "path": "README.md",
@@ -1332,8 +1332,8 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "f3c7bf7a59b42b4868e7c756ece65d7df4d996fd7640fe0476cfe32d9b6c8359",
-          "size": 36951
+          "sha256": "3828a3db31fc792e76143ef1f78afcef6fccaa16cd4c34c8cccfab8272c0bcf8",
+          "size": 37265
         },
         {
           "path": "lib/accounts.py",
@@ -1377,8 +1377,8 @@
         },
         {
           "path": "lib/google_auth.py",
-          "sha256": "feb55d9da99a0ef50fdfe4548b6c6d46acbfc96fc8f848aa7ef68e42c7940dcc",
-          "size": 7762
+          "sha256": "388b3ad6126ed7a4c1b5d5cc054187695b428d7c4053be67742d91c4048d40da",
+          "size": 8092
         },
         {
           "path": "lib/host_adapter.py",
@@ -1412,8 +1412,8 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "5f59491a49f2f17e34af32db7dd3367fe427a11b392adb20babd5443069c418a",
-          "size": 12396
+          "sha256": "680bf6027ca28b443896a8725cc107c4eaf8f4d593dcb7eb078dde7ab8fda020",
+          "size": 12498
         },
         {
           "path": "scripts/email_daemon.py",
@@ -1432,8 +1432,8 @@
         },
         {
           "path": "tests/test_account_routes.py",
-          "sha256": "22b0fde3d08eaa593b1efed30128b3938f304ab76a286f2ea414b13211ab727a",
-          "size": 8766
+          "sha256": "f66caa8082d7d165b9e5d289111b0c14c6d5b5d91c9a0d64c0f82218b9410524",
+          "size": 9656
         },
         {
           "path": "tests/test_accounts.py",
@@ -1442,8 +1442,8 @@
         },
         {
           "path": "tests/test_accounts_browser.py",
-          "sha256": "c352f251d1817823fff52011f16099605dee996650a4cffcf677b71382001600",
-          "size": 20377
+          "sha256": "d7ef8a28861c51d94ae5cde1f26327a423c82bc8339e69843e83bdfaee61e96d",
+          "size": 20974
         },
         {
           "path": "tests/test_attachment_regressions.py",
@@ -1542,13 +1542,13 @@
         },
         {
           "path": "tests/test_foundation.py",
-          "sha256": "64ec936336587fc42998beecd9d7f56174f90eeeb571d185f4785de163063d48",
+          "sha256": "50360a3b34c97577ab101cfae2bf8b7ef709cc1f7c34f3ea94ca83b06edc7e5f",
           "size": 13999
         },
         {
           "path": "tests/test_gmail.py",
-          "sha256": "f18e08579fbfaaef1503eb7250da28f29920820d2e078695fc58e654663e8b7f",
-          "size": 13800
+          "sha256": "d13a929291c0c81cb2718ab5129df8932b0e50393ea23a905559ada44abfb015",
+          "size": 14736
         },
         {
           "path": "tests/test_gmail_draft_deletion.py",
@@ -1677,8 +1677,8 @@
         },
         {
           "path": "ui/accounts.js",
-          "sha256": "71db70c5783a6f1899ddd9b34e7425f7334faff4241730b54b2c3e643f7246fc",
-          "size": 19541
+          "sha256": "30e2c59e1458eca2b4445c55f24fb0d0f47e05272a695bff02715038abe4fe35",
+          "size": 20017
         },
         {
           "path": "ui/icon.svg",
@@ -1697,7 +1697,7 @@
       "name": "email-presence",
       "slug": "email-presence",
       "type": "extension",
-      "version": "0.10.8"
+      "version": "0.10.9"
     },
     {
       "description": "GDELT Cloud geopolitical intelligence: conflict events, news stories, entity graph, energy infrastructure, macro-finance, prediction markets, and web research via MCP Progressive Discovery.",
