@@ -1,7 +1,7 @@
 ---
 name: email-presence
 description: Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.10.8
+version: 0.10.9
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -159,8 +159,12 @@ never a Gmail thread id. Draft attribution remains a write, not a speaking turn.
    needs its reachable public address and a Web client with that exact redirect;
    a local Desktop client uses loopback. An older host without the return page
    needs an update. Calendar has a separate consent and credential owner.
-3. Gmail requests openid/email, gmail.modify and gmail.settings.basic. Full mail
-   scope, including deletion that skips Trash, is optional and named at consent.
+3. Gmail requests openid/email and gmail.modify, plus gmail.settings.basic for filters,
+   forwarding and sender addresses unless the owner clears that choice at sign-in: a
+   Workspace administrator may approve only mail access, and a request for more is
+   refused as a whole. Without it reading, drafting, sending and organizing work and
+   settings writes report Google's refusal. Full mail scope, including deletion that
+   skips Trash, is optional and named at consent.
    Granted scopes are shown as known or unknown; provider refusals are not
    reported as successes. Local disconnect removes this skill's credentials and
    preserves history. Google project-wide revocation is different and may affect

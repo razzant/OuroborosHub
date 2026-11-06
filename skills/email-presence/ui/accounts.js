@@ -99,10 +99,13 @@ function googleForm() {
     form.append(fields);
     const full = node('input', {type:'checkbox', name:'permanent_delete'});
     form.append(node('label', {class:'check'}, [full, node('span', {text:'Also request permanent deletion that skips Trash. Ordinary reading, drafting, sending and organizing do not need this permission.'})]));
+    const manage = node('input', {type:'checkbox', name:'manage_settings', checked:true});
+    form.append(node('label', {class:'check'}, [manage, node('span', {text:'Also allow managing Gmail settings: filters, forwarding and sender addresses. Clear this when your Workspace administrator approved only mail access; reading, drafting, sending and organizing mail work without it.'})]));
     const submit = node('button', {type:'button', text:'Prepare Google sign-in', class:'primary'});
     form.append(node('div', {class:'actions'}, [submit, button('Cancel', async () => { selectedForm = null; })]));
     formAction(form, submit, async () => {
-            const value = await request('oauth/begin', {...formData(form), permanent_delete:full.checked});
+            const value = await request('oauth/begin', {...formData(form), permanent_delete:full.checked,
+                                                        manage_settings:manage.checked});
             authLink = value.authorization_url;
             notice = 'Continue in Google, then return here and refresh the account list. The Google page confirms the actual account connected.';
             noticeError = false;

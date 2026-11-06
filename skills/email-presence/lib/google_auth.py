@@ -13,8 +13,11 @@ import httpx
 
 from .accounts import AccountError
 
-SCOPES = ("openid", "email", "https://www.googleapis.com/auth/gmail.modify",
-          "https://www.googleapis.com/auth/gmail.settings.basic")
+MAIL_SCOPES = ("openid", "email", "https://www.googleapis.com/auth/gmail.modify")
+# Filters, forwarding and send-as management. Requested by default; an owner whose Workspace administrator approved
+# only mail access connects without it, and settings writes then report Google's refusal.
+SETTINGS_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic"
+SCOPES = MAIL_SCOPES + (SETTINGS_SCOPE,)
 FULL_MAIL_SCOPE = "https://mail.google.com/"
 RETURN_PAGE = "/onboarding/static/provider-return.html"
 
@@ -28,7 +31,8 @@ def _request(method, url, *, http=None, **kwargs):
     return response.json()
 
 
-def begin(store, settings, *, origin, login_hint="", permanent_delete=False, http=None, verify_return=True):
+def begin(store, settings, *, origin, login_hint="", permanent_delete=False, manage_settings=True, http=None,
+          verify_return=True):
     client_id = str(settings.get("GOOGLE_OAUTH_CLIENT_ID") or settings.get("EMAIL_OAUTH_CLIENT_ID") or "").strip()
     client_secret = str(settings.get("GOOGLE_OAUTH_CLIENT_SECRET") or settings.get("EMAIL_OAUTH_CLIENT_SECRET") or "").strip()
     if not client_id:
@@ -50,7 +54,7 @@ def begin(store, settings, *, origin, login_hint="", permanent_delete=False, htt
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
     envelope = {"v": 1, "skill": "email-presence", "nonce": secrets.token_urlsafe(32)}
     state = base64.urlsafe_b64encode(json.dumps(envelope, separators=(",", ":")).encode()).decode().rstrip("=")
-    scopes = list(SCOPES) + ([FULL_MAIL_SCOPE] if permanent_delete else [])
+    scopes = list(MAIL_SCOPES if not manage_settings else SCOPES) + ([FULL_MAIL_SCOPE] if permanent_delete else [])
     store.begin_oauth(state, {"verifier": verifier, "client_id": client_id, "client_secret": client_secret,
                               "redirect_uri": redirect, "scopes": scopes})
     query = {"client_id": client_id, "redirect_uri": redirect, "response_type": "code", "scope": " ".join(scopes),
