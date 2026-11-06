@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/50c8872ea77fd0a0c7eb31e29ec824ce3f02586c",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/f3c5b9850ee469a96994b909bdda2e25813ea54d",
   "schema_version": 1,
   "skills": [
     {
@@ -1751,8 +1751,8 @@
       "files": [
         {
           "path": "HOST_CONTRACT.md",
-          "sha256": "74855bbeb14833a8e98d43c84226d9a1c67c9b2ad6e14da4bf2a03978a664ea5",
-          "size": 8742
+          "sha256": "1ec9ab306f89a5a93aeaaecbf4da5cb9e680513dde0d17a8e88251d989d36f4d",
+          "size": 8110
         },
         {
           "path": "SETUP.md",
@@ -1761,7 +1761,7 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "713d96a9ce8b9be61e043aad44a99cbbfa6ffdeb8d8007a5ba48a21172d7157b",
+          "sha256": "2b17a7fc033d789efb853ebd8a05e79a478f322dcb94590b6c5ebd9ac58483a5",
           "size": 6593
         },
         {
@@ -1796,8 +1796,8 @@
         },
         {
           "path": "gh_presence/events.py",
-          "sha256": "e3aa3b84e42e49ec8885480fbef5756a12f96eaffe46c155245ec942e8eca04b",
-          "size": 10797
+          "sha256": "760c6710f19f0520fecfefe92110ab0ca4b54346a8af7675752e4228f349c3e6",
+          "size": 9974
         },
         {
           "path": "gh_presence/host.py",
@@ -1911,8 +1911,8 @@
         },
         {
           "path": "tests/test_transport.py",
-          "sha256": "ec7c493c4e3f97356ade5075331bef99cd04a7adb7fe3e3e6bf7da3b895e09ae",
-          "size": 46711
+          "sha256": "3e41636b38fac45219557e9fa56434d72e590baa6e2c9c9358a79e7fc90c3087",
+          "size": 44637
         },
         {
           "path": "ui/icon.svg",
@@ -1927,7 +1927,7 @@
       "name": "github",
       "slug": "github",
       "type": "extension",
-      "version": "0.1.6"
+      "version": "0.1.5"
     },
     {
       "description": "Universal Google Workspace integration for Google Sheets, Docs, Drive, Slides and Calendar via explicit OAuth or Service Account authentication.",
@@ -2728,13 +2728,13 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "ebf41625b0b61ad4c14e442e4a1f6b9a5922fd399981faf0a9f8594336a075e4",
-          "size": 5183
+          "sha256": "0337ab8516219ba51267771816da4864fa415d1baa4dc88aa87e4503f733f8a3",
+          "size": 4493
         },
         {
           "path": "SKILL.md",
-          "sha256": "dd38ef1510996b4033a8f58703ef868c6963731c55add65200466e0b8955a399",
-          "size": 58090
+          "sha256": "cec75bb221d5b9d2a2d16081392d5e1c61d527eb05a49a18bc97be13dce00a9a",
+          "size": 57710
         },
         {
           "path": "lib/__init__.py",
@@ -2748,8 +2748,8 @@
         },
         {
           "path": "lib/events.py",
-          "sha256": "c206aab78f913747674e786d454947c99fd7880f8ca1d0bfe0902f1a99067d56",
-          "size": 15120
+          "sha256": "cb65becb418b43a9c285776c1d92b6d8aaf865df5c490ee797cdb0db613e95cf",
+          "size": 14857
         },
         {
           "path": "lib/host_adapter.py",
@@ -2763,8 +2763,8 @@
         },
         {
           "path": "lib/presence.py",
-          "sha256": "301ed2af2a99ba4b3da6b37ef93827723ede1e5f5b30872131e6a9e32d8b787d",
-          "size": 11014
+          "sha256": "f71bec793a5804397b2e76e7a795e3cb535f628ba1010cef8cb14ba87f795c6c",
+          "size": 10582
         },
         {
           "path": "lib/provider_context.py",
@@ -2908,8 +2908,8 @@
         },
         {
           "path": "tests/test_places.py",
-          "sha256": "1a02a3f3318f202bc88a6f98def824f3b0d34422b69c970e0171baa3a00b3f8a",
-          "size": 22071
+          "sha256": "ecec068d1f4fbb17b92e1801e4401b4f589c70cbb81cd7712a010beafe60e9d1",
+          "size": 20953
         },
         {
           "path": "tests/test_presence_continuation.py",
@@ -2990,7 +2990,7 @@
       "name": "slack-bridge",
       "slug": "slack-bridge",
       "type": "extension",
-      "version": "1.11.1",
+      "version": "1.11.0",
       "when_to_use": "User wants Ouroboros to receive Slack messages or files, reply in Slack conversations and threads, or send proactive Slack text messages."
     },
     {
@@ -3086,8 +3086,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "b59393846021ea36f1a66659c1f27faa7bff3461086e87e56bf63defe723009e",
-          "size": 9975
+          "sha256": "6139d92ddd0b46811389803fd3f6f88296e6b13d60f1dafb4265216c7295c655",
+          "size": 9367
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -3106,8 +3106,8 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "87f13e18ca88df5d91bfa833d6ef5e176d4ff8c5de531b2432f9c15d400ff951",
-          "size": 43245
+          "sha256": "5d61afc39b117b5cdca273c93012c9138f2820f63a93b44f4bd762efd842d6e6",
+          "size": 43162
         },
         {
           "path": "plugin.py",
@@ -3121,8 +3121,8 @@
         },
         {
           "path": "telegram_bot/api.py",
-          "sha256": "3f59f82d1430ef1bc0cc76624a5c10861da1b131e9635a37c76acb8b328f9d44",
-          "size": 19393
+          "sha256": "0526fb9be81680d2e260a23bf66a7f4af150538816777628fce90ecdf97cf328",
+          "size": 18870
         },
         {
           "path": "telegram_bot/custody.py",
@@ -3141,8 +3141,8 @@
         },
         {
           "path": "telegram_bot/events.py",
-          "sha256": "b15f6ff5a82e7fd37e00f17fc91e8807b451d2f2fb5380330016d7c8d1af5c81",
-          "size": 19967
+          "sha256": "ff0e7b8ca6fca9031498a634e458a46caa6ab7fa5b0e24b8b9fb2bd188d1d100",
+          "size": 19526
         },
         {
           "path": "telegram_bot/formatting.py",
@@ -3156,8 +3156,8 @@
         },
         {
           "path": "telegram_bot/runtime.py",
-          "sha256": "9b7f9343be85ccba2073ce2c6bf9f731eda96bbf5422209935724ccf8e079287",
-          "size": 40496
+          "sha256": "7bb2b97b18289e572ed737fed076ca4dd16d36cba15fa22be68d453488d2edf7",
+          "size": 39730
         },
         {
           "path": "telegram_bot/settings.py",
@@ -3176,8 +3176,8 @@
         },
         {
           "path": "tests/test_api.py",
-          "sha256": "134e72b9c635b1399b8eab07592605647bcbc56a3e89741025d1954486dad678",
-          "size": 4840
+          "sha256": "5a34bbe721b4cf5fc7e0c8472a4202899fe53ac28fffab40a551a1a046b3d2e6",
+          "size": 3599
         },
         {
           "path": "tests/test_context.py",
@@ -3266,8 +3266,8 @@
         },
         {
           "path": "tests/test_voice_audio.py",
-          "sha256": "e45ef98da76b197bd48968a3685d63e815a3a3430648985c8fa43db9846ac355",
-          "size": 11678
+          "sha256": "b987ef9c4f43b4a6ac3c851d68588b21b6fd81a0c379a12cdf6f863e3d879019",
+          "size": 7399
         },
         {
           "path": "tests/test_words.py",
@@ -3289,7 +3289,7 @@
       "name": "telegram-bot",
       "slug": "telegram-bot",
       "type": "extension",
-      "version": "0.10.6"
+      "version": "0.10.5"
     },
     {
       "connects": [
