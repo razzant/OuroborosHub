@@ -6,7 +6,8 @@
   chat. Like voice and audio since 0.10.1, it carries `status: too_large` and a note and the
   event goes on with the message reference. A row stored earlier without the mark, and a
   file Telegram refuses with "file is too big" when the update did not size it, take the
-  same path. Before this a 487 MB archive kept a work group's 16 later messages, two of
+  same path, as does a body longer than the limit after `getFile` accepted it. Before this
+  a 487 MB archive kept a work group's 16 later messages, two of
   them @mentions of the bot, waiting behind 203 download attempts for a day. Any other
   download failure still retries and keeps the event first.
 

@@ -120,3 +120,35 @@ def test_a_file_telegram_will_not_serve_is_a_typed_refusal(tmp_path):
     other = asyncio.run(attempt({"ok": False, "error_code": 400, "description": "Bad Request: wrong file_id"}))
     assert isinstance(refused, TelegramFileTooLarge) and isinstance(declared, TelegramFileTooLarge)
     assert isinstance(other, TelegramApiError) and not isinstance(other, TelegramFileTooLarge)
+
+
+def test_a_body_longer_than_the_limit_is_the_same_typed_refusal(monkeypatch):
+    from telegram_bot import api
+    from telegram_bot.api import TelegramFileTooLarge
+
+    class Body:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, size):
+            return b"x" * size  # the server keeps sending past the limit
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda request, timeout: Body())
+    transport_class = next(value for value in vars(api).values()
+                           if isinstance(value, type) and "_get_bytes" in vars(value))
+    try:
+        transport_class._get_bytes("https://example.invalid/file", 1.0, 10)
+    except TelegramFileTooLarge:
+        pass
+    else:
+        raise AssertionError("an over-limit body must be the typed too-large refusal")
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda request, timeout: (_ for _ in ()).throw(OSError("reset")))
+    try:
+        transport_class._get_bytes("https://example.invalid/file", 1.0, 10)
+    except TelegramFileTooLarge:
+        raise AssertionError("a transport failure is not a size refusal")
+    except api.TelegramApiError:
+        pass

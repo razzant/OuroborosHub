@@ -120,8 +120,8 @@ class UrllibTelegramTransport:
                 data = response.read(max_bytes + 1)
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise TelegramApiError("download", type(exc).__name__) from exc
-        if len(data) > max_bytes:
-            raise TelegramApiError("download", f"file exceeds {max_bytes} bytes")
+        if len(data) > max_bytes:  # larger than getFile said: Telegram will not serve it to a bot either
+            raise TelegramFileTooLarge("download", f"file exceeds {max_bytes} bytes")
         return data
 
 
