@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.11.1
+version: 1.11.2
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -149,10 +149,9 @@ contributes:
       - group_dm
       - mention
       - my_thread
-      - reply_to_me
       - from_bot
       - {id: signal.new_root, label: "New top-level post in a listed channel (connector setting)"}
-    wakes: [direct_message, group_dm, mention, my_thread, reply_to_me]
+    wakes: [direct_message, group_dm, mention, my_thread]
 ---
 
 # Slack Bridge
@@ -171,7 +170,15 @@ runtime.
 
 Connect Slack in Places using provider `slack` and the workspace Team ID shown
 in the widget. The host selects the place by account and conversation. Suggested
-wakes are direct messages, group DMs, mentions, my threads, and replies to me.
+wakes are direct messages, group DMs, mentions and my threads. A thread reply is
+`my_thread` when this bot wrote the thread's root or any message of the captured
+thread. A Slack thread is flat: every reply names the root's author as its
+`parent_user_id`, and no message names a message it answers, so this bridge never
+reports `reply_to_me`; whom a reply in a thread is for is the model's judgment,
+with the [names](#people-an-event-names) it mentions and the thread's authors in
+front of it. Up to 1.11.1 every reply under a root this bot wrote also carried
+`reply_to_me`; a place that kept that wake without `my_thread` no longer wakes on
+those replies until My threads is checked.
 `signal.new_root` is an opt-in wake for an allowlist of channels; it is not
 suggested. Every supported event reaches the host for capture; its typed facts
 determine whether consciousness wakes. Bot messages carry `from_bot` and need an
@@ -381,6 +388,37 @@ is still current. `slack_user_info` and `slack_conversation_info` can obtain fre
 provider data on demand. Provider profile facts do not link people, infer roles
 or grant system ownership; those judgments stay with the model.
 
+### People an event names
+
+The same capture names the people the event names. `message.mentions` lists each
+explicit mention of the message (`provider_facts.mentioned_user_ids`, in that
+order) as `{"id", "name", "is_self"}`, and `conversation.thread_history.authors`
+lists the captured thread's authors the same way, in the order they first wrote.
+`name` is the profile's display name, else its real name, else `null`. `is_self`
+is true only for this bot's own `self_user_id`, so it is never true while that ID
+is unknown. A bot message without a user ID is not an author; its `bot_profile`
+stays on the message. The raw `provider_facts` are unchanged. Both lists are
+observations: neither says whom a message is for. A Host that does not read them
+ignores them.
+
+Each person is read at most once per event: the author's own `users.info` lookup
+above, else a name this credential observed within a day (an earlier event's
+`users.info` read, or the users.list scan `slack_resolve` keeps), else one
+`users.info` read. At most four reads run at once and they share one ten-second
+budget; once Slack limits the rate, the reads still waiting are not sent, because
+later events' author lookups share that limit. A person still unread then, or
+refused, keeps an older name when one is known and is `null` otherwise. The saved
+snapshot keeps each name's source, time and error, so a retry resubmits the same
+names; `slack_user_info` reads a person afresh. Events captured by an earlier
+version carry neither list.
+
+Names are kept as one row per person and credential in the bridge database's
+directory cache, about 200 bytes each (ID, name, source, time). They grow with the
+number of distinct people named, not with message volume: a workspace of 2,000
+members holds at most about 0.4 MB, and a newer read replaces its row in place. A
+rotated credential starts rows of its own; the old ones stay until the skill's
+state is removed.
+
 `slack_history` and `slack_thread` fetch one page per call and preserve full
 provider message text, timestamps, author IDs and thread fields. These explicit
 tools do not retrieve a directory, feed historical messages into Presence as new
@@ -437,13 +475,21 @@ to participate. All otherwise admissible messages still reach Presence.
 Message edits (`message_changed`) are normalized from Slack's nested
 `message`/`previous_message` objects while both objects remain in provider
 facts. When both snapshots identify the same message and contain matching
-content, changes only to `language` or the `edited` marker do not start another
-Presence turn. The complete envelope is still committed as `ignored` with
-reason `message_content_unchanged` before acknowledgement. Every other field,
-including unknown fields, remains in the comparison; missing comparison facts
-do not suppress an update. Real edits retain their original message timestamp
-and still reach the model. Slack documents automatic language detection as one
-source of [`message_changed`](https://docs.slack.dev/reference/events/message/message_changed/).
+content, a revision that changes only what Slack keeps beside the words does not
+start another Presence turn: `language`; the `edited` marker and the editor's
+`source_team` and `user_team`; the state of the thread the message roots
+(`reply_count`, `reply_users`, `reply_users_count`, `latest_reply`, `is_locked`,
+this bot's own `subscribed` and `last_read` marks, and the root's own `thread_ts`);
+and the `block_id` Slack generates again for unchanged blocks. Deleting a reply,
+for one, re-sends its thread's root with only the bot's read mark gone; up to
+1.11.1 that woke the bot as if the root's author had written again. The complete
+envelope is still committed as `ignored` with reason `message_content_unchanged`
+before acknowledgement. Every other field, including unknown fields, remains in
+the comparison, so new words, files, attachments such as a link unfurl and a
+deleted root's tombstone still reach the model; missing comparison facts do not
+suppress an update. Real edits retain their original message timestamp and still
+reach the model. Slack documents automatic language detection as one source of
+[`message_changed`](https://docs.slack.dev/reference/events/message/message_changed/).
 This snapshot comparison does not recover an original message missed while
 disconnected: an unchanged revision remains ignored even if it arrives first.
 The automatic thread observation can recover accessible earlier speech as context;

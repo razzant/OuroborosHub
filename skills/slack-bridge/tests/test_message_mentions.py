@@ -42,7 +42,7 @@ def _edited_payload(kind, event_id, revision="3.0", *, text="<@U_BOT> question")
 @pytest.mark.parametrize("first_type", ["message", "app_mention"])
 @pytest.mark.parametrize("edited", [False, True])
 def test_both_socket_surfaces_have_custody_but_submit_one_presence_turn(tmp_path, monkeypatch, first_type, edited):
-    async def context(*_args):
+    async def context(*_args, **_kwargs):
         return {}
 
     monkeypatch.setattr("lib.runtime.capture_context", context)

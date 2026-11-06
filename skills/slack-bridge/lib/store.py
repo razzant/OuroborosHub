@@ -1114,6 +1114,18 @@ class BridgeStore:
             row = db.execute("SELECT value_json FROM directory_cache WHERE cache_key=?", (cache_key,)).fetchone()
         return json.loads(row[0]) if row else None
 
+    def directory_snapshots(self, cache_keys: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Read several cached observations at once; an absent key is absent from the result."""
+        found: dict[str, dict[str, Any]] = {}
+        keys = list(dict.fromkeys(str(key) for key in cache_keys))
+        with self._connect() as db:
+            for start in range(0, len(keys), 500):
+                part = keys[start:start + 500]
+                rows = db.execute(f"SELECT cache_key,value_json FROM directory_cache WHERE cache_key IN "
+                                  f"({','.join('?' * len(part))})", part).fetchall()
+                found.update((str(row[0]), json.loads(row[1])) for row in rows)
+        return found
+
     def save_directory_snapshot(self, cache_key: str, value: Mapping[str, Any]) -> None:
         """Cache one credential-scoped scan; an older concurrent scan cannot replace a newer one."""
         with self._connect() as db:

@@ -199,7 +199,13 @@ def slack_presence_event(item: InboxItem, *, transport_queue: bool = False, plac
 
 
 def slack_wake_facts(event: Mapping[str, Any]) -> list[str]:
-    """Match only provider identities/relationships, never the meaning of speech."""
+    """Match only provider identities/relationships, never the meaning of speech.
+
+    A thread reply is ``my_thread`` when this bot wrote the thread's root (``parent_user_id``) or any captured
+    message in it. A Slack thread is flat: ``parent_user_id`` names the root's author on every reply, and no
+    message names a message it answers, so Slack never reports ``reply_to_me`` (a reply to a message this bot
+    wrote). Whom a message is for stays the reader's judgment.
+    """
     conversation, message = event["conversation"], event["message"]
     provider = message.get("provider_facts") or {}
     own = provider.get("self_user_id")
@@ -213,10 +219,9 @@ def slack_wake_facts(event: Mapping[str, Any]) -> list[str]:
         if own and own in provider.get("mentioned_user_ids", []):
             facts.append("mention")
         if message.get("thread_id"):
-            if own and provider.get("parent_user_id") == own:
-                facts.extend(["reply_to_me", "my_thread"])
             history = (conversation.get("thread_history") or {}).get("data") or {}
-            if own and "my_thread" not in facts and any(row.get("user") == own for row in history.get("messages", [])):
+            if own and (provider.get("parent_user_id") == own
+                        or any(row.get("user") == own for row in history.get("messages", []))):
                 facts.append("my_thread")
         if provider.get("new_root_signal") is True:
             facts.append(NEW_ROOT_SIGNAL)
