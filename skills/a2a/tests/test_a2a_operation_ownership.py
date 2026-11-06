@@ -192,6 +192,50 @@ def test_lost_host_operation_reconciles_to_failed_with_its_reason(tmp_path, monk
         daemon._wait_final_after_expiry_sync(-61, daemon.time.monotonic() + 1, ref)
 
 
+def test_lost_host_work_fails_the_task_through_the_real_presence_read(tmp_path, monkeypatch):
+    """The host's answer goes through PresenceTransport.read() and view(), with no stand-in for _read_operation_sync.
+
+    Work the host still holds keeps the task working; a host-terminal "lost" fails it with its reason and ends the
+    wait on the first read instead of polling until A2A_STREAM_DEADLINE_SEC.
+    """
+    reason = "the host restarted before answering; the message was not carried over"
+    daemon = load_daemon(tmp_path, monkeypatch)
+    daemon._A2A_SDK_AVAILABLE = False
+    monkeypatch.setattr(daemon.httpx, "post", lambda url, **kw: httpx.Response(200,
+        json={"status": "unresolved", "turn_ref": "turn/lost"}, request=httpx.Request("POST", url)))
+    conversation, source = daemon._bind_inbound_message_sync("task", "ctx", "m")
+    with pytest.raises(daemon._HostWaitExpired):
+        daemon._inject_sync(conversation, "hello", source)
+    work_url = daemon.HOST_SERVICE_URL + "/presence/work/turn%2Flost"
+    answer, requests, other_get = {"ok": True, "status": "pending"}, [], daemon.httpx.get
+
+    def host_get(url, **kwargs):
+        if url != work_url:
+            return other_get(url, **kwargs)
+        requests.append(url)
+        return httpx.Response(200, json=answer, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(daemon.httpx, "get", host_get)
+    monkeypatch.setattr(daemon.httpx, "post", lambda *a, **kw: pytest.fail("no resubmission"))
+    with TestClient(daemon._build_app()) as client:
+        def get_task():
+            return client.post("/", json={"jsonrpc": "2.0", "id": "get", "method": "tasks/get",
+                                          "params": {"id": "task"}}).json()["result"]
+
+        assert daemon._read_operation_sync(source)["status"] == "pending"
+        assert get_task()["status"]["state"] == "working"
+        answer = {"ok": True, "operation_ref": source, "status": "lost", "reason": "host_restarted_before_answer"}
+        assert daemon._read_operation_sync(source)["status"] == "lost"
+        task = get_task()
+        assert task["status"]["state"] == "failed" and not task.get("artifacts")
+        assert task["status"]["message"]["parts"][0]["text"] == reason
+    polled = len(requests)
+    with pytest.raises(RuntimeError, match=reason) as ended:
+        daemon._wait_final_after_expiry_sync(conversation, daemon.time.monotonic() + 1, source)
+    assert not isinstance(ended.value, daemon._HostWaitExpired)
+    assert len(requests) == polled + 1
+
+
 def test_real_sdk_lost_old_message_replay_does_not_change_current_message(tmp_path, monkeypatch):
     daemon, store, context, refs = _stored_sdk_tasks(tmp_path, monkeypatch)
     from a2a.types import Message, Part, Role, Task, TaskState, TaskStatus
