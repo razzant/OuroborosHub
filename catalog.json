@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/84056d5d93246a54444e657975c289c4285fe6e5",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/24b45338b906310642043cfc968d9749cd8b5f91",
   "schema_version": 1,
   "skills": [
     {
@@ -1322,18 +1322,18 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "6a0af078eba08671172f000b0d1e62eeb5cf7f2e9a89eb665e4facc6052776dc",
-          "size": 10883
+          "sha256": "64283767fb92d5ad3c8ebb106cd60ddab79f04bb368b24fb6ed8254a836fd28e",
+          "size": 11299
         },
         {
           "path": "README.md",
-          "sha256": "10723ff3d384d89fc89eac6044b024087908d4e38825673fe86e71d02fdfb965",
+          "sha256": "b0b576837bb119db74e7aaf5e93b7bf5d8fba156543937b0a559931bb9dc29d4",
           "size": 1918
         },
         {
           "path": "SKILL.md",
-          "sha256": "f3c7bf7a59b42b4868e7c756ece65d7df4d996fd7640fe0476cfe32d9b6c8359",
-          "size": 36951
+          "sha256": "245872fdf7b9db2ddaa3562fe15527814394d8d0e6c809a4cfc0769f878a716c",
+          "size": 37333
         },
         {
           "path": "lib/accounts.py",
@@ -1372,13 +1372,13 @@
         },
         {
           "path": "lib/gmail.py",
-          "sha256": "6396637d1a323d43127a1f32390a3ca2e1895efababb9e6f2bd1c1866fa7466f",
-          "size": 26192
+          "sha256": "7f125b48289a0fb1657cf4ae97b7f4c5988417ffb7355d8988f5353bd4ac9639",
+          "size": 26700
         },
         {
           "path": "lib/google_auth.py",
-          "sha256": "feb55d9da99a0ef50fdfe4548b6c6d46acbfc96fc8f848aa7ef68e42c7940dcc",
-          "size": 7762
+          "sha256": "388b3ad6126ed7a4c1b5d5cc054187695b428d7c4053be67742d91c4048d40da",
+          "size": 8092
         },
         {
           "path": "lib/host_adapter.py",
@@ -1412,8 +1412,8 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "5f59491a49f2f17e34af32db7dd3367fe427a11b392adb20babd5443069c418a",
-          "size": 12396
+          "sha256": "680bf6027ca28b443896a8725cc107c4eaf8f4d593dcb7eb078dde7ab8fda020",
+          "size": 12498
         },
         {
           "path": "scripts/email_daemon.py",
@@ -1432,8 +1432,8 @@
         },
         {
           "path": "tests/test_account_routes.py",
-          "sha256": "22b0fde3d08eaa593b1efed30128b3938f304ab76a286f2ea414b13211ab727a",
-          "size": 8766
+          "sha256": "f66caa8082d7d165b9e5d289111b0c14c6d5b5d91c9a0d64c0f82218b9410524",
+          "size": 9656
         },
         {
           "path": "tests/test_accounts.py",
@@ -1442,8 +1442,8 @@
         },
         {
           "path": "tests/test_accounts_browser.py",
-          "sha256": "c352f251d1817823fff52011f16099605dee996650a4cffcf677b71382001600",
-          "size": 20377
+          "sha256": "d7ef8a28861c51d94ae5cde1f26327a423c82bc8339e69843e83bdfaee61e96d",
+          "size": 20974
         },
         {
           "path": "tests/test_attachment_regressions.py",
@@ -1482,8 +1482,8 @@
         },
         {
           "path": "tests/test_declared_target_preparation.py",
-          "sha256": "63740faae96d1e8e978c320768f11bd320d61a8f542b68459175605065c9e4aa",
-          "size": 12638
+          "sha256": "29cca079dfefd606707a5342b78f07fb35a5c9a6c98ea500e247173c2cc0f883",
+          "size": 12743
         },
         {
           "path": "tests/test_deferred_observation_custody.py",
@@ -1542,13 +1542,13 @@
         },
         {
           "path": "tests/test_foundation.py",
-          "sha256": "64ec936336587fc42998beecd9d7f56174f90eeeb571d185f4785de163063d48",
+          "sha256": "50360a3b34c97577ab101cfae2bf8b7ef709cc1f7c34f3ea94ca83b06edc7e5f",
           "size": 13999
         },
         {
           "path": "tests/test_gmail.py",
-          "sha256": "f18e08579fbfaaef1503eb7250da28f29920820d2e078695fc58e654663e8b7f",
-          "size": 13800
+          "sha256": "667069e671f45effa85eee676761fd38289ea2749bfd0b9604f8563d4306bd45",
+          "size": 15818
         },
         {
           "path": "tests/test_gmail_draft_deletion.py",
@@ -1667,18 +1667,18 @@
         },
         {
           "path": "tests/test_write_targets.py",
-          "sha256": "252346b89d34f56bc8d64662c43f28ffaf22f966b650e5adf00117795bc66cfc",
-          "size": 28288
+          "sha256": "39443f2e5eef1058b5a316ace5d40e7bbfb3a25a8d1d5b996f8eade2ea6f692d",
+          "size": 28407
         },
         {
           "path": "ui/accounts.css",
-          "sha256": "33806e4a07315846df88bf2e85d892b7e2284c9581b83257a795169ea2c4bd15",
-          "size": 2554
+          "sha256": "e9d4a877bbc77e324db857373cfd06a289a38aa74f226d197946e6290630fb37",
+          "size": 2565
         },
         {
           "path": "ui/accounts.js",
-          "sha256": "71db70c5783a6f1899ddd9b34e7425f7334faff4241730b54b2c3e643f7246fc",
-          "size": 19541
+          "sha256": "7c05097d0e081f6ca84d6dbe98836a3b3946cc8944c935e2ef7a504e8485fdcc",
+          "size": 20290
         },
         {
           "path": "ui/icon.svg",
@@ -1697,7 +1697,7 @@
       "name": "email-presence",
       "slug": "email-presence",
       "type": "extension",
-      "version": "0.10.8"
+      "version": "0.10.9"
     },
     {
       "description": "GDELT Cloud geopolitical intelligence: conflict events, news stories, entity graph, energy infrastructure, macro-finance, prediction markets, and web research via MCP Progressive Discovery.",

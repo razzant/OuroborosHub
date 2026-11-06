@@ -13,6 +13,7 @@ from email.utils import getaddresses
 import httpx
 
 from .accounts import AccountError
+from .google_auth import FULL_MAIL_SCOPE, SETTINGS_SCOPE
 from .client import MailClient
 from .delivery import DeliveryRejected
 from .mime import build_message, mailbox_addresses, parse_message
@@ -335,6 +336,11 @@ class GmailClient(MailClient):
             raise ValueError("Gmail filters are created or deleted, not updated")
         if action == "delete" and not identifier:
             raise ValueError("identifier is required for delete")
+        scopes = self.account.get("scopes")
+        if scopes is not None and not {SETTINGS_SCOPE, FULL_MAIL_SCOPE} & set(scopes):
+            return {"ok": False, "code": "settings_permission_missing",
+                    "message": "This mailbox was connected without permission to manage Gmail settings; change them on "
+                               "Gmail's website, or reconnect Google with that choice ticked if the administrator allows it."}
         body = None if action == "delete" else dict(values or {})
         targets = {}
         if resource == "filters" and action == "create":

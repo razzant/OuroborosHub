@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.9
+
+- Connecting Google mail can leave out the permission to manage Gmail settings (filters,
+  forwarding, sender addresses). A Workspace whose administrator approved only mail access
+  refused the whole sign-in with `admin_policy_enforced` because of it. The choice is on by
+  default, as before; without it mail works, and a settings write answers
+  `settings_permission_missing` before contacting Google.
+
 ## 0.10.8
 
 - A message's `Date` header with a time zone is also sent as `message.sent_at` (ISO, in the
