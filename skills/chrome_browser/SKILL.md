@@ -2,7 +2,7 @@
 name: chrome_browser
 title: Chrome (shared tab)
 description: Work in the owner's own Chrome through Microsoft's official Playwright Extension - the tab they share plus background tabs for the same work, trusted input in background tabs, and handback by plain conversation.
-version: 0.2.0
+version: 0.2.1
 type: script
 runtime: node
 os: [darwin, linux, win32]
@@ -97,6 +97,11 @@ The skill uses Microsoft's unchanged **Playwright Extension** and the official
    when the server session ends or after 15 minutes without approval. If Chrome refuses the
    chosen tab, tools answer `BROWSER_TAB_NOT_ATTACHED` with Chrome's reason; the next
    `browser_connect` says why the last attempt ended and gives a new link.
+   Keep the **same task and browser tool session alive** while the owner approves. Use a
+   warm wait supported by the current role. A child that cannot wait for the owner should
+   relay the pending step to its parent without finalizing; the root owner-facing task
+   waits where supported. If no warm wait is available, explain that ending the task
+   ends this link. A later task needs a new connection and approval.
 3. **Work.** `browser_snapshot` returns the page's accessibility tree with element refs;
    act with `browser_click`, `browser_type`, `browser_fill_form` (also for checkboxes and
    radio buttons), `browser_select_option`, `browser_press_key`, `browser_navigate`.
@@ -119,6 +124,8 @@ The skill uses Microsoft's unchanged **Playwright Extension** and the official
 6. **End.** `browser_disconnect` ends the connection when the work is done or the owner
    asks. Every tab stays open with what was typed into it. A connection that was lost
    is never re-established by itself: ask for a new approval with `browser_connect`.
+   After reapproval, take a fresh `browser_snapshot` and reassess the page. A command
+   sent before a lost reply may already have acted; never replay it automatically.
 
 Only tabs opened with `browser_tabs` action `new` can be closed by the agent. The
 owner's shared tab and tabs a page opened stay open.
@@ -151,7 +158,7 @@ owner's shared tab and tabs a page opened stay open.
 | `BROWSER_NEEDS_APPROVAL` | Link given, owner has not approved. Nothing was done or queued. | Wait for the owner. |
 | `BROWSER_ATTACHING` | Approved; setting up. | Call again shortly. |
 | `BROWSER_TAB_NOT_ATTACHED` | The owner approved, but Chrome refused to attach the chosen tab (its answer is quoted), for example because the extension still holds an attachment from before its worker restarted. Nothing was opened instead. | Tell the owner. With a new `browser_connect` link they can share another tab. Approving the same tab again fails the same way; no way to share it again was tested. |
-| `BROWSER_CONNECTION_LOST` | Extension disconnected, tabs closed, extension stopped or Chrome quit. | New `browser_connect`. |
+| `BROWSER_CONNECTION_LOST` | The generation, first observed closing layer, its time and a finite WebSocket code when available are reported. The 0.4.0 extension's exact peer reasons `User disconnected` and `All controlled tabs detached` have safe names; they do not establish the underlying trigger. A preceding debugger detach is shown separately; a detach or tab removal alone is not transport loss. Other peer supplied reasons outside a short exact allowlist are shown as unknown. | New `browser_connect`, then fresh `browser_snapshot` and reassess. Do not replay an action whose reply was lost. |
 | `BROWSER_APPROVAL_EXPIRED` | Not approved within 15 minutes. | New `browser_connect`. |
 | `BROWSER_DISCONNECTED` | Ended with `browser_disconnect`. | New `browser_connect` if needed. |
 | `BROWSER_GUARD_REQUIRED` / `_INVALID` / `_NOT_ARMED` | The host's request guard is not configured (`_REQUIRED`); the host set it up without a usable address or token (`_INVALID`, reported by `browser_connect` before any link is made); or it did not confirm the route after approval (`_NOT_ARMED`). | Report it; it is a setup or host problem. |

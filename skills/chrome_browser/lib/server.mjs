@@ -63,6 +63,7 @@ export const CONNECT_TOOL = {
     'they paste it into a NEW tab of their Chrome, pick the tab to share and choose "Allow & select".',
     'Chrome switches to that tab once at approval. browser_tabs never activates a tab, but a page opening a popup can (see the skill\'s limits).',
     'Until the owner approves, every other browser tool answers BROWSER_NEEDS_APPROVAL and nothing is queued.',
+    'Keep the same task and browser tool session alive while waiting for approval; use a supported warm wait, or relay the pending approval to the parent without finalizing a child task.',
     'Calling it again while waiting returns the same link; after a lost, failed or ended connection it makes a new one and says why the last one ended.',
   ].join(' '),
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
@@ -81,6 +82,7 @@ export const SERVER_INSTRUCTIONS = [
   'Start with browser_connect and give the link to the owner only. After approval, act in the shared tab and in background tabs you open with browser_tabs action "new"; those tabs open without being activated and selecting one does not bring it to front. A popup a page opens is another matter: clicking a target=_blank link or a button calling window.open can open it active and switch the owner\'s view, and nothing here prevents or undoes that.',
   'Action results are short: the Playwright code that ran, the page address and title when they change, and any dialog. Call browser_snapshot to see the page and get element refs.',
   'Handback is conversational: when the owner wants to do something themselves (a login, a code, a decision), stop sending actions until they say they are done, then take a fresh browser_snapshot. There is no lock; their edits are in the page.',
+  'Approval and handback require the same live task and browser tool session. Use the warm wait the current role supports; a child relays the pending owner step to its parent without finalizing. If no warm wait exists, explain that the link cannot survive the task ending. After reapproval take a fresh snapshot and reassess; never replay an action whose result was lost.',
   'Requests from attached tabs are checked by the host\'s request guard; a refused request fails with ERR_BLOCKED_BY_CLIENT and the reason is reported.',
   'The guard also decides which addresses you may open and which pages you may read (their address and any redirect on the way); if it refuses, nothing is opened, or the output is withheld with its reason.',
   'Console entries and network requests kept from a page you have left are judged by where they came from: those you may not read are withheld and counted, and the rest are returned.',
@@ -577,6 +579,7 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
       'The connect page warns that the connection reaches the whole browser profile (signed-in sessions and cookies). That is accurate: say so if they ask.',
       `If the link does not open, the Playwright Extension is not installed in that Chrome (Chrome Web Store id ${rt.extension.id}). If the page reports an unsupported protocol or version, the installed extension does not match the one this skill was tested with (${rt.extension.tested_version}, relay protocol ${rt.extension.relay_protocol_version}): tell the owner instead of retrying.`,
       'Until they approve, other browser tools answer BROWSER_NEEDS_APPROVAL; nothing is queued. The link stops working when this browser session ends or after 15 minutes without approval.',
+      'Keep this task and its browser tool session alive while waiting, using a supported warm wait. A child should relay the pending owner step to its parent without finalizing. If this role cannot wait warmly, explain that the link cannot survive the task ending.',
     ].join('\n'));
   }
 
@@ -612,6 +615,7 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
     if (refusal)
       return errorResult(refusal);
     const backend = connection.backend();
+    const attempt = connection.diagnostic;
     connection.closedPages.length = 0;
     // No page tool runs unless the host acknowledged the guard for the very context it acts in.
     const tabForGuard = await currentTab(backend);
@@ -658,6 +662,12 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
       return errorResult('BROWSER_TAB_CHANGED: the tab this call was checked for closed or stopped being current while the host was being asked. Nothing was done, in it or in the tab current now. Take a fresh browser_snapshot before acting again.');
     if (frameError)
       return errorResult(frameError.message);
+    if (connection.diagnostic !== attempt)
+      return errorResult('BROWSER_CONNECTION_CHANGED: The earlier connection ended while this call was being checked. Nothing was done. Take a fresh browser_snapshot after approval before acting.');
+    if (attempt?.terminal)
+      return errorResult('BROWSER_CONNECTION_LOST: The connection began closing while this call was being checked. Nothing was done. Call browser_connect for a new approval, then take a fresh browser_snapshot.');
+    if (connection.state !== 'ready')
+      return errorResult(connection.refusal());
     const mark = guard.blockSeq;
     const deliveryMark = rt.pointerHooks.deliveryMark();
     let result;
@@ -665,6 +675,20 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
       result = await callDecisions.run(decide, () => backend.callTool(name, params, signal));
     } catch (error) {
       result = errorResult(String(error));
+    }
+    // A command may have reached Chrome before its answer disappeared. Withhold
+    // the incomplete result and make its effect explicitly unknown; a later call
+    // gets the ordinary pre-dispatch refusal and never replays this one.
+    if (connection.state !== 'ready' || connection.diagnostic !== attempt || attempt?.terminal) {
+      // A completed backend result is evidence that the command answered before a later
+      // settling/teardown event. Preserve it and report the later loss separately; only
+      // an error/absent result has an unknown effect and must not be replayed.
+      if (result && !result.isError && result.content?.length) {
+        const note = connection.diagnostic === attempt ? connection.reason : 'BROWSER_CONNECTION_CHANGED: The connection changed.';
+        result = { ...result, content: [...result.content, { type: 'text', text: `### Connection after result\n${note} The browser result was received before the connection ended; its effect is not unknown.` }] };
+      } else {
+        return errorResult(`${connection.diagnostic === attempt ? connection.reason : 'BROWSER_CONNECTION_CHANGED: The connection changed.'} This call was already dispatched when the connection ended; its effect is unknown. Do not repeat it automatically. After new approval, take a fresh browser_snapshot and reassess.`);
+      }
     }
     result = describePrivateFiles(result, connection.outputDir());
     // What the call returns is judged by the page it left the agent on, by the page a page tool worked in (it can

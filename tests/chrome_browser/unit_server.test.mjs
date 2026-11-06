@@ -131,6 +131,192 @@ test('an approval with no tab attached is not ready; nothing replaces the tab, a
   assert.notEqual(next.split('\n').find((line) => line.startsWith('chrome-extension://')), link, 'a new link');
 });
 
+test('connection loss keeps the WebSocket observation before Playwright tears down its context', async () => {
+  const { core, chrome, call } = await connected();
+  chrome.close(1000, 'Playwright client disconnected');
+  await waitFor(() => core.connection.state === 'closed', 'WebSocket loss');
+  assert.deepEqual(core.connection.diagnostic.terminal.source, 'extension_websocket_close');
+  assert.equal(core.connection.diagnostic.terminal.wsCode, 1000);
+  assert.equal(core.connection.diagnostic.terminal.reason, 'playwright_client_disconnected');
+  assert.match(textOf(await call('browser_snapshot')), /first observed at extension_websocket_close/);
+});
+
+test('official extension close reasons survive as safe peer observations without attributing a trigger', async () => {
+  for (const [wireReason, expected] of [
+    ['User disconnected', 'user_disconnected'],
+    ['All controlled tabs detached', 'all_controlled_tabs_detached'],
+  ]) {
+    const { core, chrome, call } = await connected();
+    chrome.close(1000, wireReason);
+    await waitFor(() => core.connection.state === 'closed', 'official extension close');
+    assert.equal(core.connection.diagnostic.terminal.source, 'extension_websocket_close');
+    assert.equal(core.connection.diagnostic.terminal.wsCode, 1000);
+    assert.equal(core.connection.diagnostic.terminal.reason, expected);
+    const refusal = textOf(await call('browser_snapshot'));
+    assert.match(refusal, new RegExp(`generation ${core.connection.diagnostic.generation}: first observed at extension_websocket_close`));
+    assert.match(refusal, new RegExp(`peer reason ${expected}`));
+    assert.match(refusal, /underlying trigger unknown/);
+  }
+});
+
+test('unknown and empty socket reasons are never retained or emitted; abnormal closure keeps its code', async () => {
+  for (const [close, expectedCode] of [
+    [(chrome) => chrome.close(1000, 'plainAlphanumericSecret4821'), 1000],
+    [(chrome) => chrome.close(1000, ''), 1000],
+    [(chrome) => chrome.terminate(), 1006],
+  ]) {
+    const { core, chrome, call } = await connected();
+    close(chrome);
+    await waitFor(() => core.connection.state === 'closed', 'socket close');
+    assert.deepEqual(core.connection.diagnostic.terminal.source, 'extension_websocket_close');
+    assert.equal(core.connection.diagnostic.terminal.wsCode, expectedCode);
+    assert.equal(core.connection.diagnostic.terminal.reason, 'unknown');
+    const output = `${JSON.stringify(core.connection.diagnostic)} ${core.connection.reason} ${textOf(await call('browser_snapshot'))} ${textOf(await call('browser_connect'))}`;
+    assert.doesNotMatch(output, /plainAlphanumericSecret4821/);
+  }
+});
+
+test('CDP close and context-only loss state the observed layer, without assigning a trigger', async () => {
+  const cdp = await connected();
+  cdp.core.connection._relay._closeCDPConnection('plainAlphanumericSecret4821');
+  await waitFor(() => cdp.core.connection.state === 'closed', 'CDP close');
+  assert.deepEqual(cdp.core.connection.diagnostic.terminal, {
+    at: cdp.core.connection.diagnostic.terminal.at, source: 'cdp_close', reason: 'unknown',
+  });
+  assert.match(cdp.core.connection.reason, /first observed at cdp_close.*underlying trigger unknown/);
+  assert.doesNotMatch(cdp.core.connection.reason, /plainAlphanumericSecret4821/);
+
+  const backend = await connected();
+  backend.core.connection.backend().emit('disconnected');
+  await waitFor(() => backend.core.connection.state === 'closed', 'backend close');
+  assert.equal(backend.core.connection.diagnostic.terminal.source, 'backend_disconnected');
+  assert.match(backend.core.connection.reason, /underlying trigger unknown/);
+});
+
+test('debugger detach is a preceding observation, and removing one of two tabs does not close the connection', async () => {
+  const tabs = [
+    { id: TAB, url: `${ALLOWED}/start`, title: 'Start', windowId: 1, index: 0, active: true },
+    { id: 8, url: `${ALLOWED}/other`, title: 'Other', windowId: 1, index: 1, active: false },
+  ];
+  const { core, chrome, settle } = await connected({ tabs });
+  chrome.detach(TAB, 'plainAlphanumericSecret4821');
+  await waitFor(() => core.connection.diagnostic.lastDetach, 'debugger detach');
+  assert.equal(core.connection.diagnostic.lastDetach.reason, 'unknown');
+  assert.equal(core.connection.state, 'ready');
+  chrome.removeTab(TAB);
+  await settle();
+  assert.equal(core.connection.state, 'ready');
+  assert.equal(core.connection.diagnostic.terminal, null);
+  chrome.detach(8, 'target_closed');
+  await waitFor(() => core.connection.diagnostic.lastDetach?.reason === 'target_closed', 'known detach');
+  chrome.terminate();
+  await waitFor(() => core.connection.state === 'closed', 'later socket close');
+  assert.equal(core.connection.diagnostic.terminal.source, 'extension_websocket_close');
+  assert.equal(core.connection.diagnostic.lastDetach.reason, 'target_closed');
+  assert.ok(core.connection.diagnostic.lastDetach.at <= core.connection.diagnostic.terminal.at);
+  assert.doesNotMatch(JSON.stringify(core.connection.diagnostic), /plainAlphanumericSecret4821/);
+});
+
+test('explicit disconnect and shutdown precede teardown echoes; a fresh approval uses a new generation', async () => {
+  const { core, chrome, call, link } = await connected();
+  const oldRelay = core.connection._relay;
+  const oldSocket = oldRelay._extensionConnection._ws;
+  await call('browser_disconnect');
+  assert.equal(core.connection.diagnostic.terminal.source, 'explicit_disconnect');
+  const previous = core.connection.reason;
+  oldSocket.emit('close', 1006, Buffer.from('plainAlphanumericSecret4821'));
+  assert.equal(core.connection.reason, previous);
+  const next = textOf(await call('browser_connect'));
+  const newLink = next.split('\n').find((line) => line.startsWith('chrome-extension://'));
+  assert.notEqual(newLink, link);
+  assert.match(textOf(await call('browser_snapshot')), /BROWSER_NEEDS_APPROVAL.*Nothing was done and nothing was queued/);
+  assert.equal(core.connection.diagnostic.terminal, null);
+  const newChrome = await connectFakeChrome(runtime.utils.ws, new URL(newLink).searchParams.get('mcpRelayUrl'), {
+    tabs: [{ id: TAB, url: `${ALLOWED}/fresh`, title: 'Fresh', windowId: 1, index: 0, active: true }],
+  });
+  cleanups.push(async () => newChrome.close());
+  await waitFor(() => core.connection.state === 'ready', 'new approval');
+  oldRelay._handler.handleExtensionEvent('chrome.debugger.onDetach', [{ tabId: TAB }, 'target_closed']);
+  oldSocket.emit('close', 1006, Buffer.from('plainAlphanumericSecret4821'));
+  assert.equal(core.connection.diagnostic.lastDetach, null);
+  assert.equal(core.connection.diagnostic.terminal, null);
+  assert.equal(core.connection.state, 'ready');
+  assert.match(textOf(await call('browser_snapshot')), /Fresh page content/);
+
+  await core.shutdown();
+  assert.equal(core.connection.diagnostic.terminal.source, 'shutdown');
+  assert.equal(core.connection.state, 'closed');
+  await chrome.close();
+});
+
+test('an action sent before the connection vanishes has unknown effect and is never replayed', async () => {
+  let sent = 0;
+  const world = await connected({ onCommand: (w, method, params) => {
+    if (method === 'chrome.debugger.sendCommand' && params?.[1] === 'Page.navigate') {
+      sent += 1;
+      w.chrome.terminate();
+    }
+  } });
+  const result = await world.call('browser_navigate', { url: `${ALLOWED}/action` });
+  assert.equal(sent, 1);
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /effect is unknown.*Do not repeat it automatically/);
+  assert.doesNotMatch(textOf(result), /Nothing was done/);
+  assert.equal(world.core.connection.state, 'closed');
+  const newCall = await world.call('browser_navigate', { url: `${ALLOWED}/another` });
+  assert.match(textOf(newCall), /Nothing was done and no earlier action is repeated/);
+  assert.equal(sent, 1);
+});
+
+test('an acknowledged result survives a later connection loss during settling', async () => {
+  const world = await connected();
+  const backend = world.core.connection.backend();
+  const callTool = backend.callTool.bind(backend);
+  backend.callTool = async (...args) => {
+    const result = await callTool(...args);
+    world.core.connection._close(world.core.connection._generation, 'BROWSER_CONNECTION_LOST', 'test settling loss', 'backend_disconnected');
+    return result;
+  };
+  const result = await world.call('browser_evaluate', { function: '() => "CONFIRMED_RESULT_273"' });
+  assert.equal(result.isError, undefined, textOf(result));
+  assert.match(textOf(result), /CONFIRMED_RESULT_273/);
+  assert.match(textOf(result), /Connection after result/);
+  assert.match(textOf(result), /effect is not unknown/);
+  assert.doesNotMatch(textOf(result), /Do not repeat it automatically/);
+});
+
+test('loss while attaching records the socket and never becomes ready', async () => {
+  for (const [interrupt, code] of [
+    [(socket) => socket.terminate(), 1006],
+    [(socket) => socket.close(1000, 'plainAlphanumericSecret4821'), 1000],
+  ]) {
+    let interrupted = false;
+    const { core, call, chrome } = await connected({ onCommand: (_world, method, _params, socket) => {
+      if (!interrupted && method === 'chrome.debugger.attach') {
+        interrupted = true;
+        interrupt(socket);
+      }
+    } });
+    assert.equal(interrupted, true);
+    assert.equal(core.connection.state, 'closed');
+    assert.equal(core.connection.diagnostic.terminal.source, 'extension_websocket_close');
+    assert.equal(core.connection.diagnostic.terminal.wsCode, code);
+    const answer = textOf(await call('browser_snapshot'));
+    assert.match(answer, /first observed at extension_websocket_close/);
+    assert.doesNotMatch(`${answer} ${core.connection.reason} ${JSON.stringify(core.connection.diagnostic)}`, /plainAlphanumericSecret4821/);
+    assert.equal(chrome.commands.filter((command) => command.method === 'chrome.tabs.create').length, 0);
+  }
+});
+
+test('removing the last tab is a tab event, not itself a recorded transport loss', async () => {
+  const { core, chrome } = await connected();
+  chrome.removeTab(TAB);
+  await waitFor(() => chrome.tab(TAB) === undefined, 'last tab removed');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(core.connection.diagnostic.terminal, null);
+  assert.equal(core.connection.state, 'ready');
+});
+
 test('a host that does not confirm the guard leaves no working connection', async () => {
   const { core, call } = await connected({
     decide: (message) => ('armed' in message ? { armed: false, block: 'BROWSER_SESSION_CLOSED: closing' } : { block: '' }),

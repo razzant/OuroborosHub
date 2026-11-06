@@ -49,7 +49,7 @@ export async function connectFakeChrome(WebSocket, relayUrl, { tabs = [], refuse
       return;
     commands.push({ method: message.method, params: message.params });
     // What the page does the moment Chrome receives a command, stated by the test (before the command's answer).
-    onCommand?.(message.method, message.params);
+    onCommand?.(message.method, message.params, { terminate: () => socket.terminate(), close: (code, reason) => socket.close(code, reason) });
     const tabId = message.params?.[0]?.tabId;
     if (message.method === 'chrome.debugger.attach' && refuseAttach.has(tabId)) {
       send({ id: message.id, error: refuseAttach.get(tabId) });
@@ -191,7 +191,9 @@ export async function connectFakeChrome(WebSocket, relayUrl, { tabs = [], refuse
   };
   return {
     commands, fetchAnswers, emit, removeTab, tab: tabOf, requestChain, respond, failRequest, commit, navigation, onNextNavigate, navigatedWithinDocument, attachFrame, detachFrame, consoleCall, pageError,
+    detach: (tabId, reason) => send({ method: 'chrome.debugger.onDetach', params: [{ tabId }, reason] }),
     cdp: (method) => commands.filter((command) => command.method === 'chrome.debugger.sendCommand' && command.params?.[1] === method).map((command) => command.params?.[2]),
-    close: () => socket.close(1000, 'fake Chrome closed'),
+    close: (code = 1000, reason = 'fake Chrome closed') => socket.close(code, reason),
+    terminate: () => socket.terminate(),
   };
 }

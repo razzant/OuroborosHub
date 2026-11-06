@@ -41,6 +41,46 @@ function recordAttachRefusals(relay, refusals) {
   };
 }
 
+// Only protocol values we can name exactly cross into a diagnostic. A WebSocket
+// reason is arbitrary text supplied by the peer, even when it looks harmless.
+const WS_REASONS = new Map([
+  // Playwright Extension 0.4.0 (microsoft/playwright v1.63.0):
+  // background.ts disconnect; relayConnection.ts _checkLastTabDetached.
+  ['User disconnected', 'user_disconnected'],
+  ['All controlled tabs detached', 'all_controlled_tabs_detached'],
+  ['Playwright client disconnected', 'playwright_client_disconnected'],
+  ['Server stopped', 'server_stopped'],
+]);
+const DETACH_REASONS = new Set(['target_closed', 'canceled_by_user', 'replaced_with_devtools']);
+const safeReason = (value, allowed) => allowed.get?.(value) ?? (allowed.has?.(value) ? value : 'unknown');
+
+// Hooks are local to this relay and only observe. In particular, the socket's close
+// listener is installed on an accepted extension socket before upstream installs
+// its own listener, which closes CDP and then the browser context.
+function observeRelay(relay, connection, generation) {
+  const handleExtension = relay._handleExtensionConnection;
+  relay._handleExtensionConnection = function(ws) {
+    if (!this._extensionConnection)
+      ws.on('close', (code, reason) => connection._observeTerminal(generation, 'extension_websocket_close', {
+        wsCode: Number.isInteger(code) && code >= 1000 && code <= 4999 ? code : null,
+        reason: safeReason(reason?.toString(), WS_REASONS),
+      }));
+    return handleExtension.call(this, ws);
+  };
+  const closeCDP = relay._closeCDPConnection;
+  relay._closeCDPConnection = function(reason) {
+    if (this._cdpConnection?.readyState === 1)
+      connection._observeTerminal(generation, 'cdp_close', { reason: safeReason(reason, WS_REASONS) });
+    return closeCDP.call(this, reason);
+  };
+  const handleEvent = relay._handler.handleExtensionEvent;
+  relay._handler.handleExtensionEvent = function(method, params) {
+    if (method === 'chrome.debugger.onDetach')
+      connection._observeDetach(generation, params?.[1]);
+    return handleEvent.call(this, method, params);
+  };
+}
+
 function tabNotAttachedMessage(refusals) {
   if (!refusals.length)
     return 'the owner approved, but no tab was attached and Chrome reported no refusal, so there is no tab to work in and none was opened in its place. Tell the owner; a new browser_connect link lets them approve again';
@@ -90,6 +130,7 @@ export class BrowserConnection {
     this._state = 'idle';
     this._reason = '';
     this._generation = 0;
+    this._diagnostic = null;
     this._relay = null;
     this._browser = null;
     this._backend = null;
@@ -114,6 +155,32 @@ export class BrowserConnection {
 
   get reason() {
     return this._reason;
+  }
+
+  get diagnostic() {
+    return this._diagnostic;
+  }
+
+  _observeTerminal(generation, source, detail = {}) {
+    if (!this._current(generation) || this._state === 'idle' || this._state === 'closed' || this._diagnostic?.terminal)
+      return;
+    this._diagnostic.terminal = { at: Date.now(), source, ...detail };
+  }
+
+  _observeDetach(generation, reason) {
+    if (!this._current(generation) || this._state === 'idle' || this._state === 'closed' || this._diagnostic?.terminal)
+      return;
+    this._diagnostic.lastDetach = { at: Date.now(), reason: safeReason(reason, DETACH_REASONS) };
+  }
+
+  _diagnosticText() {
+    const { generation, terminal, lastDetach } = this._diagnostic ?? {};
+    if (!terminal)
+      return 'first observed layer unknown; underlying trigger unknown';
+    const detail = [terminal.wsCode !== undefined && terminal.wsCode !== null ? `WebSocket code ${terminal.wsCode}` : '',
+      terminal.reason ? `peer reason ${terminal.reason}` : ''].filter(Boolean).join(', ');
+    const detach = lastDetach ? `; last debugger detach at ${new Date(lastDetach.at).toISOString()} (reason ${lastDetach.reason})` : '';
+    return `generation ${generation}: first observed at ${terminal.source} on ${new Date(terminal.at).toISOString()}${detail ? ` (${detail})` : ''}${detach}; underlying trigger unknown`;
   }
 
   backend() {
@@ -156,9 +223,11 @@ export class BrowserConnection {
       return { status: 'attaching' };
     await this._closing;
     const generation = ++this._generation;
+    this._diagnostic = { generation, terminal: null, lastDetach: null };
     const relay = new this._tools.CDPRelayServer('chrome', undefined, undefined, undefined);
     this._attachRefusals = [];
     recordAttachRefusals(relay, this._attachRefusals);
+    observeRelay(relay, this, generation);
     await relay.start();
     if (!this._current(generation)) {
       relay.stop();
@@ -173,7 +242,7 @@ export class BrowserConnection {
     this._approvalTimer.unref?.();
     relay.waitForExtension().then(
         () => this._attach(generation, relay),
-        (error) => this._close(generation, 'BROWSER_CONNECT_FAILED', `the relay stopped before approval (${redact(error?.message)})`)).catch(() => {});
+        () => this._close(generation, 'BROWSER_CONNECT_FAILED', 'the relay stopped before approval', 'relay_failed')).catch(() => {});
     return { status: 'needs_approval', url: this._url, reused: false };
   }
 
@@ -193,7 +262,7 @@ export class BrowserConnection {
         return;
       }
       this._browser = browser;
-      browser.on('disconnected', () => this._close(generation, 'BROWSER_CONNECTION_LOST', 'the extension connection closed (the owner disconnected, the shared tabs were closed, the extension stopped or Chrome quit)'));
+      browser.on('disconnected', () => this._close(generation, 'BROWSER_CONNECTION_LOST', 'the browser connection closed', 'browser_disconnected'));
       const context = browser.contexts()[0];
       if (!context)
         throw new Error('the extension offered no browser context');
@@ -230,7 +299,7 @@ export class BrowserConnection {
         await backend.dispose().catch(() => {});
         return;
       }
-      backend.once('disconnected', () => this._close(generation, 'BROWSER_CONNECTION_LOST', 'the browser context closed'));
+      backend.once('disconnected', () => this._close(generation, 'BROWSER_CONNECTION_LOST', 'the browser context closed', 'backend_disconnected'));
       this._backend = backend;
       this._context = context;
       this._state = 'ready';
@@ -240,7 +309,7 @@ export class BrowserConnection {
         await backend.dispose().catch(() => {});
       const code = ['BROWSER_GUARD_NOT_ARMED', 'BROWSER_TAB_NOT_ATTACHED'].includes(error?.code) ? error.code : 'BROWSER_ATTACH_FAILED';
       if (alive())
-        this._close(generation, code, redact(error?.message || String(error)));
+        this._close(generation, code, this._diagnostic?.terminal ? 'the connection closed while attaching' : redact(error?.message || String(error)), 'attach_failed');
     }
   }
 
@@ -387,15 +456,16 @@ export class BrowserConnection {
 
   _expire(generation) {
     if (this._current(generation) && this._state === 'pending')
-      this._close(generation, 'BROWSER_APPROVAL_EXPIRED', `the owner did not approve within ${Math.round(this._approvalTtlMs / 60000)} minutes; the link no longer works`);
+      this._close(generation, 'BROWSER_APPROVAL_EXPIRED', `the owner did not approve within ${Math.round(this._approvalTtlMs / 60000)} minutes; the link no longer works`, 'approval_expired');
   }
 
-  _close(generation, code, message) {
+  _close(generation, code, message, source = 'adapter_close') {
     if (!this._current(generation) || this._state === 'closed' || this._state === 'idle')
       return this._closing;
+    this._observeTerminal(generation, source);
     this._state = 'closed';
     this._generation += 1;
-    this._reason = `${code}: ${message}.`;
+    this._reason = `${code}: ${message}. ${this._diagnosticText()}.`;
     this._event('closed', { code });
     return this._teardown();
   }
@@ -424,6 +494,7 @@ export class BrowserConnection {
     if (this._state === 'idle' || this._state === 'closed')
       return { status: 'not_connected' };
     const generation = this._generation;
+    this._observeTerminal(generation, 'explicit_disconnect');
     this._generation += 1;
     this._state = 'closed';
     this._reason = 'BROWSER_DISCONNECTED: the connection was ended with browser_disconnect.';
@@ -433,6 +504,7 @@ export class BrowserConnection {
   }
 
   async shutdown() {
+    this._observeTerminal(this._generation, 'shutdown');
     this._generation += 1;
     if (this._state !== 'idle')
       this._state = 'closed';
@@ -449,7 +521,7 @@ export class BrowserConnection {
       case 'idle':
         return 'BROWSER_NOT_CONNECTED: No Chrome tab is connected. Call browser_connect; it returns a link for the owner to approve in their own Chrome. Nothing was done.';
       case 'pending':
-        return 'BROWSER_NEEDS_APPROVAL: The owner has not approved the connection yet (the link from browser_connect, opened in a new tab of their Chrome). Nothing was done and nothing was queued; call the tool again after the owner says they approved. If the connect page reports an unsupported protocol or version, the installed Playwright Extension is not the tested 0.4.0 (relay protocol 2); tell the owner instead of retrying.';
+        return 'BROWSER_NEEDS_APPROVAL: The owner has not approved the connection yet (the link from browser_connect, opened in a new tab of their Chrome). Nothing was done and nothing was queued; keep this task and its browser tool session alive while waiting for the owner, then call the tool again after they say they approved. If the connect page reports an unsupported protocol or version, the installed Playwright Extension is not the tested 0.4.0 (relay protocol 2); tell the owner instead of retrying.';
       case 'attaching':
         return 'BROWSER_ATTACHING: The owner approved; the connection is still being set up. Nothing was done; call the tool again in a moment.';
       default:
