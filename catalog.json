@@ -2728,13 +2728,13 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "e2caa725d4210f63a73a57d3240a888ec5aab1d654ce91afb42c9de90b1f4aaf",
-          "size": 1202
+          "sha256": "60f27d76f05dcee3e2197734cb7908122d232a9c9b0d3f19b950af2ab047d3d8",
+          "size": 1452
         },
         {
           "path": "SKILL.md",
-          "sha256": "472a6697161b7b8b9b31675da488490a92288dfe8181f02e8bb75cf8ea8e16c5",
-          "size": 51859
+          "sha256": "0b1f65e6298df40ced5de571d1dd4d40b35281d26a4ad7eefb628c483c5073b0",
+          "size": 52026
         },
         {
           "path": "lib/__init__.py",
@@ -2763,8 +2763,8 @@
         },
         {
           "path": "lib/presence.py",
-          "sha256": "df6ee395482a58e09323b14967f1690d281e874b5a638f63eb6c1c4f1aab6462",
-          "size": 9144
+          "sha256": "44cebd2d0e2555ffba454959ba3e6a240256cc9c510e507bb70cf5b71b4ca945",
+          "size": 9262
         },
         {
           "path": "lib/provider_context.py",
@@ -2918,8 +2918,8 @@
         },
         {
           "path": "tests/test_places.py",
-          "sha256": "e3330a6d768c5eb8ed0f66a60ed0c02af9039f0f863dc6666517dc8232f68b16",
-          "size": 11640
+          "sha256": "43db80c1d47398d1be842ee5fb84faa8817feebd899c8c7cd9f0cef112181c62",
+          "size": 12152
         },
         {
           "path": "tests/test_presence_continuation.py",
@@ -3005,7 +3005,7 @@
       "name": "slack-bridge",
       "slug": "slack-bridge",
       "type": "extension",
-      "version": "1.9.3"
+      "version": "1.10.0"
     },
     {
       "description": "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders.",

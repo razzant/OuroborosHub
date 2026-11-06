@@ -584,7 +584,7 @@ CONNECTORS = sorted(directory.name for directory in (ROOT / "skills").iterdir()
 # Mirrors of the core contract, compared with a core checkout by the opt-in parity test below:
 # ouroboros/places.py WAKE_FACTS, ouroboros/extension_ui_validation.py _validate_contribution (common and
 # place keys) and ouroboros/icon_geometry.py (geometry and paint). The hub also refuses g and ellipse.
-CORE_WAKE_FACTS = ("direct_message", "group_dm", "mention", "reply_to_me", "my_thread", "new_issue",
+CORE_WAKE_FACTS = ("direct_message", "group_dm", "mention", "reply_to_me", "my_thread", "signal.new_root", "new_issue",
                    "new_pull_request", "review_requested", "assigned", "any_message", "from_bot")
 CORE_PLACE_KEYS = {"id", "label", "title", "icon", "order", "render",
                    "provides", "destination", "scope", "wakes", "source", "settings", "read_only", "facts"}

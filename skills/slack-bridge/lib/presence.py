@@ -183,6 +183,8 @@ def slack_wake_facts(event: Mapping[str, Any]) -> list[str]:
     facts = []
     if message.get("event_type") in {"message", "app_mention"} and message.get("subtype") != "message_deleted":
         facts.append("any_message")
+        if message.get("subtype") == "" and not message.get("thread_id"):
+            facts.append("signal.new_root")
         if conversation.get("channel_type") == "im" or conversation.get("is_im"):
             facts.append("direct_message")
         if conversation.get("channel_type") == "mpim" or conversation.get("is_mpim"):

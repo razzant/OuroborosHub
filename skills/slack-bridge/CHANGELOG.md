@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.10.0
+
+- Add the opt-in `signal.new_root` wake fact for top-level, subtype-free Slack
+  messages. Replies, edits, deletes and other subtypes do not receive it; the
+  existing message, mention, direct-message, thread and bot facts remain intact.
+
 ## 1.9.3
 
 - A hold line says the state and the next step, not the Host's answer behind it. An

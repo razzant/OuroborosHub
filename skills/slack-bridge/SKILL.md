@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.9.3
+version: 1.10.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -142,7 +142,7 @@ contributes:
     scope: account
     source: {route: status, refresh_s: 15}
     icon: ui/icon.svg
-    wakes: [direct_message, group_dm, mention, my_thread, reply_to_me]
+    wakes: [direct_message, group_dm, mention, my_thread, reply_to_me, signal.new_root]
 ---
 
 # Slack Bridge
@@ -161,10 +161,12 @@ runtime.
 
 Connect Slack in Places using provider `slack` and the workspace Team ID shown
 in the widget. The host selects the place by account and conversation. Suggested
-wakes are direct messages, group DMs, mentions, my threads, and replies to me.
-Every supported event reaches the host for capture; its typed facts determine
-whether consciousness wakes. Bot messages carry `from_bot` and need an explicit
-wake choice. Place notes supply behavior instructions.
+wakes are direct messages, group DMs, mentions, my threads, replies to me, and
+the opt-in `signal.new_root` fact. Every supported event reaches the host for
+capture; its typed facts determine whether consciousness wakes. A top-level
+message with no subtype carries `signal.new_root`; replies, edits, deletes and
+other subtypes do not. Bot messages carry `from_bot` and need an explicit wake
+choice. Place notes supply behavior instructions.
 
 The adapter negotiates `places_version >= 1` through `/identity`, omits
 `binding_id`, and uses the dedicated `presence` permission. Older hosts still
