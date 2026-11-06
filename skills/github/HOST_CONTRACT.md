@@ -32,7 +32,8 @@ is required. No new connector endpoint, scheduler or Main transport.
    `any_message` plus only what that revision newly adds (a newly mentioned watched
    login, a newly added assignee or requested reviewer) (0.1.6). Events written by
    the account this connector sends as are still reported; the host recognises
-   them from `identity.sends_as` and does not wake on them.
+   them from `identity.sends_as` and does not wake on them, unless that account
+   is the owner's own, confirmed account.
 3. Reply projections must retain actual `output_ref`, including retained original
    and late child outputs. `work_ref` identifies the polled work;
    `child_work_ref` exposes a late child even on terminal failure. Released
