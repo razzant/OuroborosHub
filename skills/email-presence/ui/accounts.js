@@ -12,6 +12,7 @@ let selectedForm = null;
 let notice = '';
 let noticeError = false;
 let authLink = '';
+let googleSettingsChoice = true; // survives re-renders until the owner changes it
 const unsubscribe = window.OuroborosWidget?.onTheme?.(theme => { document.documentElement.dataset.theme = theme; });
 window.__ouroWidgetOnDispose?.(() => { disposed = true; abort.abort(); unsubscribe?.(); });
 
@@ -99,8 +100,9 @@ function googleForm() {
     form.append(fields);
     const full = node('input', {type:'checkbox', name:'permanent_delete'});
     form.append(node('label', {class:'check'}, [full, node('span', {text:'Also request permanent deletion that skips Trash. Ordinary reading, drafting, sending and organizing do not need this permission.'})]));
-    const manage = node('input', {type:'checkbox', name:'manage_settings', checked:true});
-    form.append(node('label', {class:'check'}, [manage, node('span', {text:'Also allow managing Gmail settings: filters, forwarding and sender addresses. Clear this when your Workspace administrator approved only mail access; reading, drafting, sending and organizing mail work without it.'})]));
+    const manage = node('input', {type:'checkbox', name:'manage_settings', checked:googleSettingsChoice,
+                                   onchange:() => { googleSettingsChoice = manage.checked; }});
+    form.append(node('label', {class:'check'}, [manage, node('span', {text:'Also allow managing Gmail settings: filters, forwarding, vacation replies and sender addresses. Clear this when Google refuses the sign-in with admin_policy_enforced because your Workspace administrator approved only mail access; reading, drafting, sending and organizing mail work without it.'})]));
     const submit = node('button', {type:'button', text:'Prepare Google sign-in', class:'primary'});
     form.append(node('div', {class:'actions'}, [submit, button('Cancel', async () => { selectedForm = null; })]));
     formAction(form, submit, async () => {

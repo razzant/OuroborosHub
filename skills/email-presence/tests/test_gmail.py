@@ -92,6 +92,23 @@ def test_gmail_settings_permission_is_requested_by_default_and_can_be_left_out(t
     assert scopes(manage_settings=False, permanent_delete=True) == mail + ["https://mail.google.com/"]
 
 
+def test_a_mail_only_grant_answers_settings_writes_itself_and_a_settings_grant_reaches_google(tmp_path):
+    accounts = AccountStore(tmp_path)
+    account = gmail_account(accounts)  # openid, email and gmail.modify: a sign-in with the settings choice cleared
+    sent = []
+    def handler(request):
+        sent.append((request.method, request.url.path))
+        return httpx.Response(200, json={"displayLanguage": "en"})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        refused = GmailClient(accounts, account["id"], http=http).settings_write(
+            resource="language", values={"displayLanguage": "en"})
+        assert refused["code"] == "settings_permission_missing" and not sent
+        accounts.save({**accounts.get(account["id"]),
+                       "scopes": account["scopes"] + ["https://www.googleapis.com/auth/gmail.settings.basic"]})
+        GmailClient(accounts, account["id"], http=http).settings_write(resource="language", values={"displayLanguage": "en"})
+    assert sent == [("PUT", "/gmail/v1/users/me/settings/language")]
+
+
 def test_refresh_cannot_restore_disconnected_account(tmp_path):
     accounts = AccountStore(tmp_path)
     account = gmail_account(accounts)

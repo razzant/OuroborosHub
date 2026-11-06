@@ -160,10 +160,11 @@ never a Gmail thread id. Draft attribution remains a write, not a speaking turn.
    a local Desktop client uses loopback. An older host without the return page
    needs an update. Calendar has a separate consent and credential owner.
 3. Gmail requests openid/email and gmail.modify, plus gmail.settings.basic for filters,
-   forwarding and sender addresses unless the owner clears that choice at sign-in: a
-   Workspace administrator may approve only mail access, and a request for more is
-   refused as a whole. Without it reading, drafting, sending and organizing work and
-   settings writes report Google's refusal. Full mail scope, including deletion that
+   forwarding, vacation replies and sender addresses, unless the owner clears that choice
+   at sign-in. A Workspace administrator may approve only mail access, and Google then
+   refuses a larger request as a whole (admin_policy_enforced). Without it, reading,
+   drafting, sending and organizing work, and settings writes answer
+   `settings_permission_missing`. Full mail scope, including deletion that
    skips Trash, is optional and named at consent.
    Granted scopes are shown as known or unknown; provider refusals are not
    reported as successes. Local disconnect removes this skill's credentials and

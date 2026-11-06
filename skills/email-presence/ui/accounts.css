@@ -27,7 +27,7 @@ label { display:flex; flex-direction:column; gap:4px; color:var(--muted); font-s
 input,select,textarea { width:100%; min-width:0; border:1px solid var(--line); border-radius:7px; padding:8px; background:var(--paper); color:var(--ink); }
 textarea { min-height:74px; resize:vertical; }
 label.check { flex-direction:row; align-items:start; gap:8px; }
-input[type="checkbox"] { width:auto; margin-top:4px; }
+input[type="checkbox"] { width:auto; margin-top:4px; flex:none; }
 pre { white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
 .spacer { flex:1; }
 @media(max-width:420px) { #root { padding:10px; } .account,form { padding:10px; } .actions button { flex:1 1 auto; } }
