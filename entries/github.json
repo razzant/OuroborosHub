@@ -6,7 +6,7 @@
     "GitHub"
   ],
   "description": "GitHub places for issues, pull requests, reviews and Discussions, with separate Notifications readers, owner questions in Main and durable reply receipts.",
-  "digest": "8549a8ecfa142d0626cd654b104fdf265439b02cbff70959fad14b5ae2189429",
+  "digest": "907fa1f054c8eac2f19dfe228f0b58b333baa8f9244370149e4038db8129e1f6",
   "icon": "ui/icon.svg",
   "install_specs": [
     "PyJWT[crypto]>=2.13,<3"

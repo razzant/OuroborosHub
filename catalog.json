@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/e8874eb166b46d9440e2ee297043a451a4309204",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/b0c1408c5221cfeb2425ecac28a9ce582539bdd1",
   "schema_version": 1,
   "skills": [
     {
@@ -1751,8 +1751,8 @@
       "files": [
         {
           "path": "HOST_CONTRACT.md",
-          "sha256": "74855bbeb14833a8e98d43c84226d9a1c67c9b2ad6e14da4bf2a03978a664ea5",
-          "size": 8742
+          "sha256": "cd3b103334e220f1e7f87ebf44c301fc993cd1b1c73a5b538065b729795bfdf9",
+          "size": 8933
         },
         {
           "path": "SETUP.md",
@@ -3086,8 +3086,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "b59393846021ea36f1a66659c1f27faa7bff3461086e87e56bf63defe723009e",
-          "size": 9975
+          "sha256": "d8625c7f3a3639e0860dd6e6bbb23d27749a25f86560a6dfa4c5f9085defb118",
+          "size": 10043
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -3121,8 +3121,8 @@
         },
         {
           "path": "telegram_bot/api.py",
-          "sha256": "3f59f82d1430ef1bc0cc76624a5c10861da1b131e9635a37c76acb8b328f9d44",
-          "size": 19393
+          "sha256": "cd9e35e7445d37d0a9e4fc79939e0747400479c5d7340a8ebae08844a605fee7",
+          "size": 19469
         },
         {
           "path": "telegram_bot/custody.py",
@@ -3176,8 +3176,8 @@
         },
         {
           "path": "tests/test_api.py",
-          "sha256": "134e72b9c635b1399b8eab07592605647bcbc56a3e89741025d1954486dad678",
-          "size": 4840
+          "sha256": "0b9de7ceb88a7beea7f56f0beb44596f3b5d617f767ef7993935189c2852224e",
+          "size": 6070
         },
         {
           "path": "tests/test_context.py",
