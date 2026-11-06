@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import sqlite3
 
@@ -273,4 +274,43 @@ def test_selected_output_survives_retained_author_and_repeated_terminal(tmp_path
             assert bridge.outbox()[0]["output_ref"] == "selection-1"
         finally:
             await bridge.close()
+    asyncio.run(run())
+
+
+def test_an_answer_keeps_the_thread_and_output_identity_its_row_was_stored_with(tmp_path):
+    """A DM row an earlier version stored under its own ts, retained across the update, is answered in that
+    thread under the output identity that version hashed; a row stored now is answered in the chat's flow."""
+    def output_id(output_ref, thread):  # what lib.runtime._output_request_id hashes, in 1.9 as now
+        key = json.dumps([f"output:{output_ref}", "T1", "D1", thread], ensure_ascii=False, separators=(",", ":"))
+        return f"presence-output:{hashlib.sha256(key.encode('utf-8')).hexdigest()}"
+
+    async def run():
+        host, slack = RefusalHost(), FakeSlack()
+        host.turn_status["Ev-1"] = 409
+        host.scripts["Ev-1"] = lambda body: retained(body)
+        host.work["turn-1"] = [unresolved("turn-1"), terminal("turn-1", "Late answer", output_ref="out-1")]
+        host.scripts["Ev-2"] = lambda body: completed("turn-2", body, text="New answer", output_ref="out-2")
+        bridge = Bridge(tmp_path, host, slack)
+        try:
+            await bridge.ingest(envelope("Ev-1", ts="1.0", text="Question", channel="D1", channel_type="im"))
+            with sqlite3.connect(bridge.store.path) as db:  # the key 1.9 stored: the message's own ts
+                db.execute("UPDATE inbox SET ordering_key='T1:D1:1.0'")
+            assert await bridge.inbound.process_once()
+            await bridge.ingest(envelope("Ev-2", ts="2.0", text="Next question", channel="D1", channel_type="im"))
+            assert await bridge.inbound.process_once()
+            bridge.due()
+            assert await bridge.inbound.process_once()
+            await bridge.send_all()
+        finally:
+            await bridge.close()
+        assert [(row["text"], row["thread_ts"], row["request_id"]) for row in bridge.outbox()] == [
+            ("New answer", "", output_id("out-2", "")), ("Late answer", "1.0", output_id("out-1", "1.0"))]
+        assert [post.get("thread_ts", "") for post in slack.posts] == ["", "1.0"]
+        # Every event field the thread decides is what 1.9 sent for the old row, its thread read included.
+        events = [host.body(source)["event"] for source in ("Ev-1", "Ev-2")]
+        assert [(event["thread_id"], event["conversation"]["thread_ts"], event["conversation_key"],
+                 "thread_history" in event["conversation"]) for event in events] == [
+            ("1.0", "1.0", "slack:T1:D1:1.0", True), ("", "", "slack:T1:D1:0", False)]
+        assert bridge.inbox() == {"Ev-1": "delivered", "Ev-2": "delivered"}
+
     asyncio.run(run())

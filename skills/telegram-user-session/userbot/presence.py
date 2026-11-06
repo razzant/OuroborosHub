@@ -83,6 +83,13 @@ def _number(value: int, label: str, *, signed: bool = False) -> int:
 MAX_SOURCE_ORDER = 2**53 - 1
 
 
+def source_event_id(account_id: int | str, peer_id: int | str, message_id: int | str, topic_id: int | None = None, *,
+                    provider: str = "telegram", revision: str = "") -> str:
+    """The stable source ID of one message revision: account, peer, topic (``0`` for none), message, edit revision."""
+    event_id = f"{provider}:{account_id}:{peer_id}:{topic_id or 0}:{message_id}"
+    return event_id + (":edit:" + parse.quote(revision, safe="") if revision else "")
+
+
 def build_event(
     account_id: int, peer_id: int, message_id: int, actor_id: int, text: str, *,
     topic_id: int | None = None, provider: str = "telegram",
@@ -132,9 +139,7 @@ def build_event(
         raise TypeError("actor must be an object")
     thread = str(topic_id) if topic_id is not None else ""
     account, peer = str(account_id), str(peer_id)
-    event_id = f"{provider}:{account}:{peer}:{thread or '0'}:{message_id}"
-    if event_kind == "edit":
-        event_id += ":edit:" + parse.quote(revision, safe="")
+    event_id = source_event_id(account, peer, message_id, topic_id, provider=provider, revision=revision)
     message_facts = {**(message or {}), "message_id": str(message_id)}
     message_facts.pop("source_order", None)  # only ever the provider's own id, never a caller's value
     if source_order and message_id <= MAX_SOURCE_ORDER:

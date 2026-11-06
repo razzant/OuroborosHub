@@ -150,7 +150,7 @@ def slack_presence_event(item: InboxItem, *, transport_queue: bool = False, plac
     ``event.conversation``; only a continuation-capable Host is sent it.
     """
 
-    thread_id = item.thread_ts or item.message_ts
+    thread_id = item.conversation_thread
     event = {
         "source_event_id": item.provider_event_key,
         "provider": "slack",

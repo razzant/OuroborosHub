@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.10.1
+version: 1.11.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -9,7 +9,7 @@ runtime: python3
 permissions: [net, read_settings, widget, route, tool, companion_process, presence]
 env_from_settings: [SLACK_BOT_TOKEN, SLACK_APP_TOKEN]
 dependencies: [httpx, websockets]
-when_to_use: User wants Ouroboros to receive Slack messages or files, reply in Slack threads, or send proactive Slack text messages.
+when_to_use: User wants Ouroboros to receive Slack messages or files, reply in Slack conversations and threads, or send proactive Slack text messages.
 timeout_sec: 30
 companion_processes:
   - name: slack_socket_mode
@@ -179,7 +179,7 @@ explicit wake choice. Place notes supply behavior instructions.
 
 ### New top-level posts in listed channels
 
-To wake on new top-level posts (new threads) in chosen channels without waking
+To wake on new top-level posts in chosen channels without waking
 on their replies:
 
 1. Under Settings › Slack Bridge, enter exact channel IDs in **New-root channel
@@ -196,7 +196,10 @@ and no `edited` marker gets `new_root_signal: true` in
 `message.provider_facts` and `signal.new_root` in the event's facts. Thread
 replies, including those also sent to the channel, edits, deletes, reactions,
 join or topic notices and posts in unlisted channels never get it. Only the
-exact channel ID is compared, never a channel name or the message text.
+exact channel ID is compared, never a channel name or the message text. The
+signal moves nothing: in a channel the post opens its own thread, where the
+reply goes; in a listed direct or group chat it joins the chat's one
+conversation, and the reply is a plain message there.
 
 The list changes no admission. Every event is still captured and submitted, and
 mentions, direct messages and my threads keep their own facts. A bot's post still
@@ -216,8 +219,10 @@ token is opaque and revealed only at authenticated loopback requests.
 
 Queued sends re-read the place immediately before delivery. Silent or Paused
 keeps the item held with its original identity and bytes; Active allows it to
-resume. An unavailable policy lookup also holds with a visible reason. Holds
-do not consume the transport retry budget.
+resume. An unavailable policy lookup also holds until Ouroboros answers. When
+Ouroboros refuses the skill itself (its grant, enablement, review or token), the
+hold lasts until its access is fixed in Skills. Holds do not consume the
+transport retry budget.
 
 ## Slack app setup
 
@@ -326,11 +331,13 @@ edited public manifest does not grant scopes to an already-installed app.
 ## Provider context and on-demand reads
 
 After the Socket envelope is durably accepted, the inbound worker looks up its
-exact author with `users.info` and room with `conversations.info`. Messages and
-mentions also read `conversations.replies` using their thread root, or their own
-timestamp when they started the thread. A root with no replies returns its one
-message; a queued root can already have later replies at processing time. Other
-event kinds read thread context when they carry a thread timestamp, except
+exact author with `users.info` and room with `conversations.info`. A message in
+a thread, and a top-level channel message, which opens its own thread, also read
+`conversations.replies` at that thread's root. A channel root with no replies
+returns its one message; a queued root can already have later replies at
+processing time. A top-level message of a direct or group chat reads no thread:
+the chat's own conversation holds the exchange, and `slack_history` reads more.
+Other event kinds read thread context when they carry a thread timestamp, except
 reactions, which read at most [their target](#reactions). Cursor pages
 share the same ten-second provider-I/O budget (page size 200). These
 observations run concurrently outside the Socket acknowledgement handler. The
@@ -437,7 +444,7 @@ disconnected: an unchanged revision remains ignored even if it arrives first.
 The automatic thread observation can recover accessible earlier speech as context;
 it does not replay that speech as new inbox work.
 A delete's `message_id` is the deleted message (`deleted_ts`, else
-`previous_message.ts`) and its `thread_id` is that message's original thread;
+`previous_message.ts`) and its `thread_id` is that message's conversation;
 the deletion's own timestamp stays its `event_ts`, and `deleted_ts` and the
 previous message remain provider facts. Deletes already queued by an earlier
 version keep the identity they were stored with.
@@ -472,9 +479,11 @@ asked again), each
   whether `event.thread_id` is proven. `resolved` comes from an exact
   team+channel+message record (this bridge's inbox, or the creation receipt of its
   own posted text) or from one narrow `conversations.replies` read of that
-  timestamp when no record exists. A top-level message keeps its own timestamp as
-  its conversation and a reply names its proved root. No retry and no history scan
-  follow. Refused, rate-limited or empty reads leave `unresolved` with an empty
+  timestamp when no record exists. A top-level channel message keeps its own
+  timestamp as its conversation; a top-level message of a direct or group chat
+  belongs to the chat's own conversation (a proven, empty `thread_id`); a reply
+  names its proved root. No retry and no history scan follow. Refused,
+  rate-limited or empty reads leave `unresolved` with an empty
   `thread_id`, never a thread named after the reacted message, and the read's
   error stays in `provider_facts.reaction.target_lookup`.
 - `target.author` holds what is known (`item_user`, or the retained or read
@@ -550,9 +559,9 @@ text, `message.kind: "operation"` and a typed `message.reaction`
 (`operation`, `new` or `old`, `target`, and `effect` when it took effect); other
 Hosts keep only this local receipt, and `reaction_history_limitation` says so. A
 report frozen for a Host that no longer advertises it stays pending and is not sent;
-`history_report_error` says why. Because the bridge keeps its last `/identity` answer
-until it restarts, a Host's capability change reaches a running bridge at its next
-restart, and the report is sent then if the Host advertises it.
+`history_report_error` says an update records it. Because the bridge keeps its last
+`/identity` answer until it restarts, a Host's capability change reaches a running
+bridge at its next restart, and the report is sent then if the Host advertises it.
 `slack_api` writes to `reactions.add` remain generic operations.
 
 Queued rows from an earlier version become this event shape when they are claimed.
@@ -606,10 +615,11 @@ References: [conversations.list](https://docs.slack.dev/reference/methods/conver
 - Expired inbox leases and outbound leases that never began a provider write are
   reclaimed after a crash. An outbound write whose receipt was not durably
   recorded becomes `uncertain`, with no automatic resend.
-- Admission is ordered per Slack thread while independent threads may run
-  concurrently. Deferred and continuing work retain their durable reference and
-  polling, but allow later messages in the same thread after the initial
-  acknowledgement.
+- Admission is ordered per conversation while independent conversations run
+  concurrently. A conversation is a thread, a top-level channel message's own
+  thread, or the whole flow of a direct or group chat. Deferred and continuing
+  work retain their durable reference and polling, but allow later messages of
+  the same conversation after the initial acknowledgement.
 - The companion runs two inbound pools, each of the configured inbound worker
   count. Input workers only submit events that have no Host reference yet. Once
   a reference is durable, the input worker queues any speech its envelope
@@ -618,10 +628,13 @@ References: [conversations.list](https://docs.slack.dev/reference/methods/conver
   any Host version.
 - Retryable refusals and connection failures before sending have at most five
   attempts. An ambiguous write result ends `uncertain` on its first occurrence;
-  failed and uncertain items no longer block later messages in the same thread.
+  failed and uncertain items no longer block later messages in the same lane.
 - Outgoing writes keep queue order within one lane. For sends and most mutations,
   a lane is one thread, or a conversation's top level. For reaction writes, it is
   the reacted message. A held or in-flight item holds back only its own lane.
+  A lane is named by the target as queued: a send to a user ID finds its DM
+  channel only when it is sent, so it is not ordered against writes that name
+  that DM's channel ID.
   Opening the store moves live reaction rows, including such `slack_api` calls,
   that an earlier version queued per channel into their message's lane. Each claim
   does the same, so a row an older process queues later is ordered too. Their
@@ -682,7 +695,7 @@ A Host may then answer while the author's result still waits for review:
 `outcome`/`text`/`output_ref`, and a promoted child's own `work_ref`. The bridge
 stores that write-once envelope as the event's Host reference; a retried event
 receives the identical stored envelope, never a rerun. Like deferred work, the
-event then only polls, so later messages in its thread are submitted meanwhile.
+event then only polls, so later messages in its conversation are submitted meanwhile.
 If promotion happens on a later reentry, a pending or terminal author poll (or
 an older Host's `interrupted` one) can supply `child_work_ref`. The bridge
 checkpoints each discovered reference beside the initial envelope before polling
@@ -729,7 +742,7 @@ repair. An older Host's blocked/retry refusal with an admitted work reference
 keeps the legacy `refused:` observation path instead of resubmitting that event.
 
 With a continuation-capable Host, each submission also carries
-`event.conversation.transport_queue`: a snapshot of this thread's later events
+`event.conversation.transport_queue`: a snapshot of this conversation's later events
 that the bridge has durably received without a stored Host reference. It is read from the
 existing inbox immediately before the event's first submission attempt and kept
 with the event, so a retry resubmits the same observation, like the
@@ -785,7 +798,7 @@ author poll.
 
 - `status: "continuing"` with `outcome: "deferred"`, empty text and a
   `continuation_ref` is custody, not a reply. It arrives once the author's intake
-  is open. The bridge stores it, which releases that thread's queue, and an
+  is open. The bridge stores it, which releases that conversation's queue, and an
   observation worker polls the reference. A replayed envelope keeps the version
   it was stored under: a version 1 envelope returned for a version 2 request is
   observed as version 1. Any other echoed version is refused and the event stays
@@ -795,23 +808,28 @@ author poll.
   and nothing is sent; any reply arrives through that author's poll.
 - HTTP 429 `presence_capacity_full` with `disposition: "retry"` (field
   `conversation` or `capacity`) means nothing ran. The same event stays first
-  in its thread and is resubmitted unchanged after max(hint, backoff). The hint
+  in its conversation and is resubmitted unchanged after max(hint, backoff). The hint
   is the Host's numeric `retry_after` and is never shortened. The backoff is the
   bridge's own: 1 second, doubling per refusal, capped at 30 seconds. It is used
   alone when the hint is missing or malformed. There is no attempt cap. Other
-  threads continue meanwhile. Nothing is dropped, merged or debounced.
+  conversations continue meanwhile. Nothing is dropped, merged or debounced.
 - Author outputs and terminals may carry `reply_anchor: {source_event_id,
-  message}`, which names the last input the author covered. A Slack reply still
-  goes to the event's own channel and thread; the anchor does not change the
-  destination. Promoted children and retained views carry no anchor and keep
-  that same destination. Each `output_ref` is queued once across the initial
-  envelope, polls, the terminal, children and restarts.
+  message}`, which names the last input the author covered. A Slack reply goes to
+  the event's own conversation: its thread, or, for a top-level message of a
+  direct or group chat, the chat itself as a plain message. The anchor does not
+  change the destination. This is the default only: `slack_send`, with or without
+  `thread_ts`, places a message anywhere. Promoted children and retained views
+  carry no anchor and keep that same destination. Each `output_ref` is queued
+  once across the initial envelope, polls, the terminal, children and restarts.
 - A stopped author's terminal is `cancelled` with `outcome: "silent"`. Nothing
   new is sent, the event ends `failed`, and it is never resubmitted.
 
-Each arrival is still its own submission in arrival order. While an author is
-live, arrivals in its thread reach it as context without waiting for its answer.
-Older Hosts keep version 1 or plain turns: their thread queue is still held until
+Each arrival is still its own submission in arrival order. A reaction is queued
+on its target message's own timestamp, so in a direct or group chat it may reach
+Ouroboros before a waiting top-level message it names; it is context only. While
+an author is live, arrivals in its conversation reach it as context without
+waiting for its answer.
+Older Hosts keep version 1 or plain turns: their conversation's queue is still held until
 the author parks or ends, but polling stays off the input workers.
 References stored as version 2 cannot be observed by an older bridge that is
 rolled back. They keep their custody until this version runs again.
@@ -913,3 +931,27 @@ When `/identity` advertises `presence_identity: 1`, the status route and every
 turn event declare `identity.sends_as` with the bot's `user_id` and `user` name
 from Slack `auth.test`, and `kind: bot`. This is the credential that speaks,
 separate from the incoming message's actor. Older hosts receive no identity key.
+
+## Conversation identity (1.11.0)
+
+A direct or group chat is one conversation: its top-level messages carry an empty
+`thread_id` (Host key `slack:<team>:<channel>:0`), the conversation Ouroboros's own
+top-level sends there already use. A reply in a thread belongs to that thread, in a
+chat too. That thread's conversation starts with its first reply; its root stays in
+the chat's conversation, and `slack_thread` reads it.
+A top-level channel message opens its own thread; the receipt of
+Ouroboros's own top-level channel post names that thread once any received event has
+stated the channel's type. Until then, and for a post sent in several parts, the
+receipt stays at the channel's top level. Ouroboros's own reaction is held and
+recorded in the conversation of the message it names, by the type Slack stated
+there. A message or mention that carries no channel type keeps the earlier
+per-message conversation.
+
+Upgrade. Events received before the update keep the conversation they were stored
+with, so their retries, replies and receipts are unchanged. Earlier per-message
+conversations of a direct chat stay as they are: each is the conversation of the
+thread under that message. The chat's own conversation starts with what Ouroboros
+sent there at top level. Nothing is imported, renamed or resent. Rolling back to
+1.10.1 or earlier while a top-level message that 1.11.0 stored for a direct or group
+chat still waits makes a Host with continuation refuse that event, and the bridge
+records it as failed, so roll back with no such message waiting.

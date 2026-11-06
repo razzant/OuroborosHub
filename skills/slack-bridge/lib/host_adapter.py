@@ -82,6 +82,10 @@ _CONTINUATION_TERMINAL = _TERMINAL_WORK_STATES | {"interrupted"}
 _OBSERVING = frozenset({"pending", "unresolved"})
 _DISPOSITIONS = frozenset({"retained", "rejected", "blocked", "retry"})
 _BINDING_ID_RE = re.compile(r"[0-9a-f]{32}")
+# The Host did not say whether this place allows sending. The outbox counts a hold by its prefix.
+PLACE_POLICY_UNREAD = "Held: It retries by itself."
+# The Host refused this skill itself (no grant, turned off, unreviewed or a stale token): only its owner can change that.
+SKILL_ACCESS_REFUSED = "Held: Check this skill's access in Skills."
 
 
 class HostAdapterUnavailable(RuntimeError):
@@ -489,7 +493,7 @@ class LoopbackPresenceHostAdapter:
         """
         await self.discover_delivery_support()
         if not self.places_version:
-            return "Held: place policy unavailable" if self.delivery_reporting_status == "unavailable" else ""
+            return PLACE_POLICY_UNREAD if self.delivery_reporting_status == "unavailable" else ""
         try:
             response = await self._http.get(
                 f"{self.host_service_url}/presence/place",
@@ -498,10 +502,24 @@ class LoopbackPresenceHostAdapter:
                         **({"thread_id": thread_id} if thread_id else {})}, timeout=10,
             )
             place = await self._json_response(response)
+        except HostBindingTerminalError:
+            # "Not connected" and a refused skill are the Host's answers, not an unread policy:
+            # the first says what to do in its own words; the second waits for the owner, not for a retry.
+            try:
+                refusal = response.json()
+                code = refusal.get("code")
+                words = refusal.get("error") if code == "place_not_connected" else ""
+            except (ValueError, AttributeError):
+                code, words = "", ""
+            if code == "presence_auth_blocked":
+                return SKILL_ACCESS_REFUSED
+            return f"Held: {words}" if words else PLACE_POLICY_UNREAD
         except (HostContractError, httpx.HTTPError):
-            return "Held: place policy unavailable"
+            return PLACE_POLICY_UNREAD
         state = place.get("state")
-        return "" if state == "active" else f"Held: {place.get('label') or 'Slack'} is {state or 'unavailable'}"
+        if not state:
+            return PLACE_POLICY_UNREAD
+        return "" if state == "active" else f"Held: {place.get('label') or 'Slack'} is {state}"
 
     async def report_delivery(self, payload: Mapping[str, Any]) -> None:
         if self._skill_token is None:
@@ -596,7 +614,7 @@ class LoopbackPresenceHostAdapter:
                 return _retained_reference(payload, response.status_code, mode)
             # Blocked needs repair and retry needs time; both keep the event queued.
             # A busy conversation or full capacity (v2 429) is such a retry: no
-            # task row was written, so the same event stays this thread's head.
+            # task row was written, so the same event stays this conversation's head.
             if disposition in {"retry", "blocked"} and not str(payload.get("work_ref") or "").strip():
                 raise HostRetryError(_refusal_error(payload, response.status_code),
                                      code=str(payload.get("code") or ""), field=str(payload.get("field") or ""),

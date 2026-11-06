@@ -288,10 +288,16 @@ class Journal:
     def raw_done(self, key):
         with self.db:
             self.db.execute("UPDATE raw_updates SET state='done' WHERE id=?",(key,))
-    def capture(self, event, files=(), raw_id=None):
+    def capture(self, event, files=(), raw_id=None, earlier=None):
+        """Store one captured event once; ``earlier`` is the ID an earlier version gave the same message."""
         data = json.dumps(event, sort_keys=True, ensure_ascii=True)
         with self.db:
             old = self.db.execute("SELECT event FROM inbox WHERE id=?", (event["source_event_id"],)).fetchone()
+            if old is None and earlier and self.db.execute("SELECT 1 FROM inbox WHERE id=?", (earlier,)).fetchone():
+                # Captured under that ID before: the stored row keeps standing, nothing is added.
+                if raw_id is not None:
+                    self.db.execute("UPDATE raw_updates SET state='done' WHERE id=?",(raw_id,))
+                return
             if old:
                 # A later observation of the same source (a renamed sender, a reaction
                 # delivered as an edit update) keeps the first capture. Different

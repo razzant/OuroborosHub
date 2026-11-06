@@ -266,6 +266,35 @@ class WorkflowTests(unittest.TestCase):
                              ['-m pip install -r mail-calendar-core/requirements.txt',
                               '-m playwright install --with-deps chromium webkit'])
 
+    def test_presence_consumers_run_against_the_pinned_core_in_every_suite_that_lists_them(self):
+        hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']
+        checkout = next(step for step in hosted['steps'] if step.get('with', {}).get('path') == 'presence-core')
+        name = next(step for step in hosted['steps'] if step.get('name') == 'Name that core for the Presence consumers')
+        consumers = {path.relative_to(ROOT).as_posix() for path in (ROOT / 'tests').glob('test_*_core_consumer.py')
+                     if 'CORE_ENV = "OUROBOROS_PRESENCE_CORE_ROOT"' in path.read_text(encoding='utf-8')}
+        self.assertEqual(consumers, {'tests/test_slack_conversation_core_consumer.py', 'tests/test_reaction_core_consumer.py',
+                                     'tests/test_voice_attachment_core_consumer.py'})
+        # Every suite that runs one of them requires the core, and no other suite does.
+        listing = [suite for suite, spec in ci_checks.SUITES.items() if consumers & set(spec['tests'])]
+        required = [suite for suite, spec in ci_checks.SUITES.items()
+                    if spec.get('core_env') == 'OUROBOROS_PRESENCE_CORE_ROOT']
+        self.assertEqual(listing, required)
+        condition = f"contains(fromJSON('{json.dumps(sorted(required))}'), matrix.suite)"
+        self.assertEqual((checkout['if'], name['if']), (condition, condition))
+        self.assertEqual(checkout['with']['repository'], 'razzant/ouroboros')
+        self.assertRegex(checkout['with']['ref'], r'^[a-f0-9]{40}$')
+        self.assertEqual(checkout['with']['persist-credentials'], 'false')
+        steps = hosted['steps']
+        self.assertLess(steps.index(checkout), steps.index(name))
+        self.assertLess(steps.index(name), len(steps) - 1)  # both precede the suite run
+        with tempfile.TemporaryDirectory(prefix='hub presence workflow ') as tmp:
+            root = Path(tmp)
+            output = root / 'environment'
+            # Execute the actual shell step.
+            subprocess.run(['/bin/sh', '-c', name['run']], check=True, capture_output=True, text=True,
+                           env={**os.environ, 'GITHUB_WORKSPACE': str(root), 'GITHUB_ENV': str(output)})
+            self.assertEqual(output.read_text(encoding='utf-8'), f'OUROBOROS_PRESENCE_CORE_ROOT={root / "presence-core"}\n')
+
     def test_chrome_browser_workflow_installs_node_and_the_npm_closure_its_pins_record(self):
         hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']
         node = next(step for step in hosted['steps'] if step.get('uses') == 'actions/setup-node@v4')

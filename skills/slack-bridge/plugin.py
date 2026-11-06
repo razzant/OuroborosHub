@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import pathlib
 import re
 import shutil
+import threading
 import time
 import uuid
 from typing import Any
@@ -113,9 +115,12 @@ def _make_slack_send(api: Any):
 
 
 def _make_status(api: Any):
-    async def status(_request: Any = None) -> JSONResponse:
+    def read_status() -> dict[str, Any]:
         store = BridgeStore(_state_dir(api))
-        payload = store.status()
+        try:
+            payload = store.status()
+        finally:
+            store.close()
         identity = payload.pop("connector_identity", {})
         if payload.get("presence_identity") == 1 and identity:
             payload["identity"] = identity
@@ -147,7 +152,11 @@ def _make_status(api: Any):
                 "local_settings_error": settings_error,
             }
         )
-        return JSONResponse(payload)
+        return payload
+
+    async def status(_request: Any = None) -> JSONResponse:
+        # The store and both settings sources are file reads: they run beside the Host's HTTP loop.
+        return JSONResponse(await asyncio.to_thread(read_status))
 
     return status
 
@@ -381,6 +390,9 @@ def _channel_lines(value: Any) -> str:
 
 
 def _make_settings_save(api: Any):
+    # One request at a time, as when each ran whole on the HTTP loop: no save drops another's fields.
+    one_at_a_time = threading.Lock()
+
     async def settings_save(request: Any) -> JSONResponse:
         # The host hydrates the form with GET (and admits HEAD beside it):
         # only POST saves, so reading the form never writes the file.
@@ -395,64 +407,68 @@ def _make_settings_save(api: Any):
                 return JSONResponse(
                     {"ok": False, "error": "Expected a JSON object"}, status_code=400
                 )
+        # The settings file is read and written beside the Host's HTTP loop.
+        return await asyncio.to_thread(settle, saving, body)
 
-        try:
-            current = _load_local_settings(api)
-        except LocalSettingsError as exc:
-            # Saving would rewrite the whole object, silently discarding values
-            # this reader could not parse. Refuse instead of overwriting them.
+    def settle(saving: bool, body: Any) -> JSONResponse:
+        with one_at_a_time:
+            try:
+                current = _load_local_settings(api)
+            except LocalSettingsError as exc:
+                # Saving would rewrite the whole object, silently discarding values
+                # this reader could not parse. Refuse instead of overwriting them.
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": (
+                            f"{exc}. Existing settings were left unchanged; repair or "
+                            "remove the file before saving."
+                        ),
+                    },
+                    status_code=409,
+                )
+            if not saving:
+                # Exactly the form's fields, as strings; the number fields have
+                # placeholders, not defaults, so unset counts show the effective one.
+                values = {"binding_id": str(current.get("binding_id") or "")}
+                for key, default, _minimum, _maximum in _WORKER_SETTINGS:
+                    values[key] = str(current.get(key) or default)
+                values[NEW_ROOT_CHANNELS] = _channel_lines(current.get(NEW_ROOT_CHANNELS))
+                return JSONResponse(values)
+            if "binding_id" in body:
+                binding_id = str(body.get("binding_id") or "").strip()
+                if binding_id:
+                    try:
+                        binding_id = normalize_binding_id(binding_id)
+                    except HostContractError as exc:
+                        return JSONResponse(
+                            {"ok": False, "error": str(exc)}, status_code=400
+                        )
+                current["binding_id"] = binding_id
+            for key, default, minimum, maximum in _WORKER_SETTINGS:
+                if key not in body:
+                    continue
+                try:
+                    value = int(body[key])
+                except (TypeError, ValueError):
+                    return JSONResponse(
+                        {"ok": False, "error": f"{key} must be an integer"},
+                        status_code=400,
+                    )
+                current[key] = max(minimum, min(maximum, value or default))
+            if NEW_ROOT_CHANNELS in body:
+                try:
+                    current[NEW_ROOT_CHANNELS] = normalize_channel_ids(body[NEW_ROOT_CHANNELS])
+                except ValueError as exc:
+                    return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+            _save_local_settings(api, current)
             return JSONResponse(
                 {
-                    "ok": False,
-                    "error": (
-                        f"{exc}. Existing settings were left unchanged; repair or "
-                        "remove the file before saving."
-                    ),
-                },
-                status_code=409,
+                    "ok": True,
+                    "message": "Slack Bridge settings saved. Toggle the skill to restart its companion.",
+                }
             )
-        if not saving:
-            # Exactly the form's fields, as strings; the number fields have
-            # placeholders, not defaults, so unset counts show the effective one.
-            values = {"binding_id": str(current.get("binding_id") or "")}
-            for key, default, _minimum, _maximum in _WORKER_SETTINGS:
-                values[key] = str(current.get(key) or default)
-            values[NEW_ROOT_CHANNELS] = _channel_lines(current.get(NEW_ROOT_CHANNELS))
-            return JSONResponse(values)
-        if "binding_id" in body:
-            binding_id = str(body.get("binding_id") or "").strip()
-            if binding_id:
-                try:
-                    binding_id = normalize_binding_id(binding_id)
-                except HostContractError as exc:
-                    return JSONResponse(
-                        {"ok": False, "error": str(exc)}, status_code=400
-                    )
-            current["binding_id"] = binding_id
-        for key, default, minimum, maximum in _WORKER_SETTINGS:
-            if key not in body:
-                continue
-            try:
-                value = int(body[key])
-            except (TypeError, ValueError):
-                return JSONResponse(
-                    {"ok": False, "error": f"{key} must be an integer"},
-                    status_code=400,
-                )
-            current[key] = max(minimum, min(maximum, value or default))
-        if NEW_ROOT_CHANNELS in body:
-            try:
-                current[NEW_ROOT_CHANNELS] = normalize_channel_ids(body[NEW_ROOT_CHANNELS])
-            except ValueError as exc:
-                return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-
-        _save_local_settings(api, current)
-        return JSONResponse(
-            {
-                "ok": True,
-                "message": "Slack Bridge settings saved. Toggle the skill to restart its companion.",
-            }
-        )
 
     return settings_save
 

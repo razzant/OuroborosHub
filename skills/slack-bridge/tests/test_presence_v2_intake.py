@@ -323,6 +323,56 @@ def test_slow_output_poll_never_holds_input_of_its_own_or_other_conversations(tm
     asyncio.run(run())
 
 
+def test_a_direct_message_burst_reaches_the_live_author_while_channel_posts_run_apart(tmp_path):
+    """A DM's top-level messages are one conversation: the second waits for the first's custody ACK, then
+    reaches its live author under the same key, listed in the first's queue snapshot. Top-level channel
+    posts each open a thread of their own and are admitted at once."""
+    async def run():
+        host, slack = V2Host(), FakeSlack()
+        host.scripts["Ev-1"] = lambda body: ack("turn-1", body)
+        host.scripts["Ev-2"] = lambda body: heard(body, "turn-1")
+        for source in ("Ev-8", "Ev-9"):
+            host.scripts[source] = lambda body: heard(body)
+        for source in ("Ev-1", "Ev-8"):
+            host.gate(source)
+        bridge = SplitBridge(tmp_path, host, slack)
+        other, tasks = bridge.worker("intake"), []
+        try:
+            await bridge.ingest(envelope("Ev-1", ts="1.0", channel="D1", channel_type="im", text="Write the report"))
+            await bridge.ingest(envelope("Ev-2", ts="2.0", channel="D1", channel_type="im", text="Also cover Q3"))
+            tasks.append(asyncio.create_task(bridge.intake.process_once()))
+            await asyncio.wait_for(host.arrived["Ev-1"].wait(), 5)
+            assert await other.process_once() is False  # the DM's next message waits for the custody ACK
+            host.release("Ev-1")
+            assert await asyncio.wait_for(tasks[0], 5)
+            assert bridge.row("Ev-1")["host_reference"].startswith("continuing:")
+            assert await other.process_once()  # and then reaches the live author
+
+            await bridge.ingest(envelope("Ev-8", ts="8.0", text="First post"))
+            await bridge.ingest(envelope("Ev-9", ts="9.0", text="Second post"))
+            tasks.append(asyncio.create_task(bridge.intake.process_once()))
+            await asyncio.wait_for(host.arrived["Ev-8"].wait(), 5)
+            assert await other.process_once()  # another channel post is another thread, admitted meanwhile
+            host.release("Ev-8")
+            assert await asyncio.wait_for(tasks[1], 5)
+        finally:
+            for source in ("Ev-1", "Ev-8"):
+                host.release(source)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await bridge.close()
+        first, second = host.body("Ev-1")["event"], host.body("Ev-2")["event"]
+        queue = first["conversation"]["transport_queue"]
+        assert queue["conversation_key"] == first["conversation_key"] == second["conversation_key"] == "slack:T1:D1:0"
+        assert [queued["source_event_id"] for queued in queue["events"]] == ["Ev-2"]
+        posts = [host.body(source)["event"] for source in ("Ev-8", "Ev-9")]
+        assert [post["conversation_key"] for post in posts] == ["slack:T1:C1:8.0", "slack:T1:C1:9.0"]
+        assert posts[0]["conversation"]["transport_queue"]["events"] == []
+        assert host.turn_order == ["Ev-1", "Ev-2", "Ev-8", "Ev-9"]
+        assert bridge.inbox() == {"Ev-1": "pending", "Ev-2": "delivered", "Ev-8": "delivered", "Ev-9": "delivered"}
+
+    asyncio.run(run())
+
+
 # ---- saturation, busy hints, order and floods -----------------------------------------------
 
 @pytest.mark.parametrize("field,delays", [
