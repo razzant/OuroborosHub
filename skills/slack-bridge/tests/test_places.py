@@ -226,8 +226,10 @@ def test_slack_addressing_is_structured_and_legacy_payload_is_unchanged():
     assert set(event["facts"]) == {"any_message", "group_dm", "mention", "reply_to_me", "my_thread", "from_bot"}
     assert "facts" not in slack_presence_event(item)
     ordinary = dataclasses.replace(item, structured={}, thread_ts="", subtype="", channel_type="channel", text="mention BOT please")
-    assert slack_presence_event(ordinary, places=True)["facts"] == ["any_message", "signal.new_root"]
-    assert slack_presence_event(dataclasses.replace(ordinary, channel_type="im"), places=True)["facts"] == ["any_message", "signal.new_root", "direct_message"]
+    assert slack_presence_event(ordinary, places=True)["facts"] == ["any_message"]
+    root = dataclasses.replace(ordinary, structured={"new_root_signal": True})
+    assert slack_presence_event(root, places=True)["facts"] == ["any_message", "signal.new_root"]
+    assert slack_presence_event(dataclasses.replace(root, channel_type="im"), places=True)["facts"] == ["any_message", "direct_message", "signal.new_root"]
     deleted = dataclasses.replace(ordinary, channel_type="im", subtype="message_deleted")
     assert slack_presence_event(deleted, places=True)["facts"] == []
 
