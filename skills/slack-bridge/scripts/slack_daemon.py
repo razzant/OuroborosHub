@@ -14,7 +14,9 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 from lib.host_adapter import create_host_adapter  # noqa: E402
-from lib.local_settings import LocalSettingsError, load_local_settings  # noqa: E402
+from lib.local_settings import (  # noqa: E402
+    NEW_ROOT_CHANNELS, LocalSettingsError, load_local_settings, normalize_channel_ids,
+)
 from lib.presence import slack_identity  # noqa: E402
 from lib.runtime import BridgeRuntime  # noqa: E402
 from lib.slack_api import SlackClient  # noqa: E402
@@ -31,6 +33,18 @@ def _bounded_int(value: Any, default: int, *, minimum: int, maximum: int) -> int
     return max(minimum, min(maximum, parsed))
 
 
+def _new_root_channels(settings: dict[str, Any]) -> tuple[list[str], str]:
+    """The saved channel list and its error; an invalid list marks no event.
+
+    The form refuses invalid input; a hand-edited file must not stop transport.
+    """
+    try:
+        return normalize_channel_ids(settings.get(NEW_ROOT_CHANNELS)), ""
+    except ValueError as exc:
+        log.warning("Ignoring %s: %s", NEW_ROOT_CHANNELS, exc)
+        return [], str(exc)
+
+
 async def _run() -> None:
     state_dir = pathlib.Path(os.environ.get("OUROBOROS_SKILL_STATE_DIR") or ".")
     with closing(BridgeStore(state_dir)) as store:
@@ -42,6 +56,9 @@ async def _run() -> None:
             # explicit failure, never a silently empty configuration.
             store.set_runtime(socket_state="error", last_socket_error=str(exc)[:500])
             raise
+        new_root_channels, channels_error = _new_root_channels(settings)
+        # What this companion actually uses, for the status route.
+        store.set_runtime(new_root_channels=new_root_channels, new_root_channels_error=channels_error)
 
         try:
             slack = SlackClient(
@@ -81,6 +98,7 @@ async def _run() -> None:
                 outbound_workers=_bounded_int(
                     settings.get("SLACK_OUTBOUND_WORKERS"), 2, minimum=1, maximum=8
                 ),
+                new_root_channels=new_root_channels,
             )
 
             loop = asyncio.get_running_loop()

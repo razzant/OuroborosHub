@@ -1,10 +1,55 @@
 # Changelog
 
+## 1.11.0
+
+- A direct or group chat is one conversation: its top-level messages carry an empty
+  `thread_id` and the Host key `slack:<team>:<channel>:0`, which Ouroboros's own
+  top-level sends there already use. A top-level answer to a proactive DM therefore
+  sees it, and on a Host with continuation version 2 a second message reaches the
+  answer being prepared. Edits, deletions and reactions of
+  such a message, Ouroboros's own reactions included, land there too. A reply in a
+  thread keeps its thread, in a chat too; a top-level channel message still opens its
+  own thread, and a message or mention without a channel type keeps its per-message
+  conversation. The bridge decides this once, when an event is received, and inbound
+  readers take the conversation stored with it: the event, its queue lane, the reply
+  and its receipt, the thread read and the output identity. A reaction takes its
+  target's conversation from that message's retained record, and from one
+  `conversations.replies` read only when none is stored; the receipt of Ouroboros's
+  own top-level channel post uses the channel type stored from a received event.
+- The automatic answer to a top-level message of a direct or group chat is a plain
+  message in the chat, no longer a thread under it. `slack_send` still places a
+  message anywhere, with or without `thread_ts`.
+- The receipt of Ouroboros's own top-level channel post names the thread the post
+  opens once a received event has stated the channel's type, so the post is recorded
+  with the replies under it. A post sent in several parts, or into a channel no event
+  has described, stays at the channel's top level. Nothing a person sees changes.
+- A top-level message of a direct or group chat no longer reads
+  `conversations.replies`, which returned only that message.
+- Upgrade: events received before the update keep the conversation they were stored
+  with, and with it their retries, reply thread and output identity. Earlier
+  per-message conversations of a direct chat stay as the conversations of the threads
+  under those messages; the chat's own conversation starts with what Ouroboros sent
+  there at top level. Nothing is imported, renamed or resent. Rolling back to 1.10.1
+  or earlier while a top-level message that 1.11.0 stored for a direct or group chat
+  still waits makes a Host with continuation refuse that event, and the bridge
+  records it as failed, so roll back with no such message waiting.
+- Restores what 1.10.0 dropped. It was published from a local copy of 1.9.0, so it
+  reverted the changes of 1.9.1 to 1.9.3: hold lines that say what a hold means and
+  only the next step, a skill the Host refused waiting for its owner, and claims
+  that stay idle without write transactions (see 1.9.2 and 1.9.3).
+
+## 1.10.1
+
+- Every event carries `message.sent_at`, Slack's send time of its message (for a
+  reaction, when it was made), and an edited message `message.edited_at`, when its
+  words were last edited.
+
 ## 1.10.0
 
-- Add the opt-in `signal.new_root` wake fact for top-level, subtype-free Slack
-  messages. Replies, edits, deletes and other subtypes do not receive it; the
-  existing message, mention, direct-message, thread and bot facts remain intact.
+- New top-level posts in channels listed by exact ID (`SLACK_NEW_ROOT_CHANNELS`) carry
+  `signal.new_root`, an opt-in wake, sent only to Hosts that advertise
+  `presence_wake_signals: 1`. Published from a local copy of 1.9.0, this release
+  lacked the changes of 1.9.1 to 1.9.3, and so did 1.10.1.
 
 ## 1.9.3
 

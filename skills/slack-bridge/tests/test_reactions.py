@@ -463,7 +463,8 @@ def test_ordinary_message_events_gain_no_reaction_shape(tmp_path):
         world = World(store, tmp_path, replies=[{"ts": "100.000001", "user": "U_AUTHOR", "text": "the words"}])
         await drive(world)
         event = provider_turn(world)
-        assert "reaction" not in event["message"] and "kind" not in event["actor"] and "sent_at" not in event["message"]
+        assert "reaction" not in event["message"] and "kind" not in event["actor"]
+        assert event["message"]["sent_at"] == "1970-01-01T00:01:40.000001+00:00"  # its own send time, not a reaction's
         assert event["thread_id"] == "100.000001" and "any_message" in event["facts"]
     asyncio.run(run())
 
@@ -612,6 +613,38 @@ def test_remove_names_the_removed_value_and_unknown_target_stays_unresolved(tmp_
         assert report["message"]["reaction"]["old"] == [{"type": "name", "value": "eyes"}]
         assert "new" not in report["message"]["reaction"]
         assert report["message"]["reaction"]["target"]["resolution"] == "unresolved"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("channel,kind,thread_ts,stored_in,filed", [
+    # A chat's top-level message lives in the chat's flow, so a reaction to it is held and recorded there.
+    ("D1", "im", "", "inbox", ""), ("G1", "mpim", "", "inbox", ""),
+    # A reply stays in its thread, in a chat too; a channel's top-level message is the thread it opens.
+    ("D1", "im", "99.0", "inbox", "99.0"), ("C1", "channel", "", "inbox", "101.5"),
+    # Ouroboros's own message, kept as its send, takes the type Slack stated for its conversation.
+    ("D1", "im", "", "outbox", ""), ("C1", "channel", "", "outbox", "101.5"),
+    # A conversation Slack never described keeps the target's own root: nothing is guessed from an ID.
+    ("D1", "", "", "inbox", "101.5"),
+])
+def test_an_own_reaction_is_held_and_receipted_in_the_conversation_of_its_target(tmp_path, channel, kind,
+                                                                                 thread_ts, stored_in, filed):
+    async def run():
+        store = BridgeStore(tmp_path)
+        heard = message(ts="101.5" if stored_in == "inbox" else "100.0", thread_ts=thread_ts, channel=channel)
+        heard["payload"]["event"]["channel_type"] = kind
+        ingest(store, heard)
+        if stored_in == "outbox":
+            store.set_runtime(workspace_id="T1")
+            store.enqueue_outbox(request_id="say", target=channel, thread_ts=thread_ts, chunks=["my own words"])
+            sent = store.claim_outbox()
+            store.set_resolved_target(sent, channel, "T1")
+            store.complete_outbox(sent.row_id, sent.lease_token, provider_message_ts="101.5")
+        queue(store, ts="101.5", channel=channel)
+        world = World(store, tmp_path)
+        await outbound_pass(world)
+        [report] = world.reports
+        assert (report["conversation_id"], report["thread_id"]) == (channel, filed)
+        assert {query.get("thread_id", "") for query in world.place_queries} == {filed}
     asyncio.run(run())
 
 

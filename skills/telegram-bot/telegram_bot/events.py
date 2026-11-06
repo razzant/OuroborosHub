@@ -151,6 +151,7 @@ def parse_telegram_update(
         "event_kind": event_kind,
         "message_id": message_id,
         "sent_at_epoch": _integer(message.get("date")),
+        **_time_facts(_integer(message.get("date")), _integer(message.get("edit_date"))),
         "reply_to_message_id": _reply_message_id(message),
         "attachments": [item.to_dict() for item in attachments],
     }
@@ -273,7 +274,6 @@ def _parse_reaction_update(
     # Outside a forum the chat is the conversation. In a forum only a retained record proves the topic.
     proven = chat.get("is_forum") is not True and chat.get("type") in _PLACE_CHAT_TYPES
     sent_at_epoch = _integer(reaction.get("date"))
-    sent_at = _iso_time(sent_at_epoch) if sent_at_epoch else ""
     return TelegramEvent(
         source_event_id=f"telegram:{bot_id}:{update_id}",
         provider="telegram",
@@ -287,7 +287,7 @@ def _parse_reaction_update(
             "event_kind": "message_reaction_count" if counted else "message_reaction",
             "message_id": message_id,
             "sent_at_epoch": sent_at_epoch,
-            **({"sent_at": sent_at} if sent_at else {}),
+            **_time_facts(sent_at_epoch),
             **raw,
             "reaction": {"schema_version": 1, **values, "target": {
                 "message_id": str(message_id), "resolution": "resolved" if proven else "unresolved"}},
@@ -328,6 +328,13 @@ def _iso_time(epoch: int) -> str:
         return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
     except (OverflowError, OSError, ValueError):
         return ""
+
+
+def _time_facts(sent_epoch: Optional[int], edited_epoch: Optional[int] = None) -> Dict[str, str]:
+    """``message.sent_at`` and, for an edit, ``edited_at`` from Telegram's own dates; an absent or unreadable one is
+    omitted, never replaced by a receipt time."""
+    times = (("sent_at", sent_epoch), ("edited_at", edited_epoch))
+    return {key: value for key, epoch in times if epoch and (value := _iso_time(epoch))}
 
 
 def _attachments(message: Dict[str, Any]) -> Tuple[TelegramAttachment, ...]:

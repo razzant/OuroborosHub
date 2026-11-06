@@ -1,6 +1,7 @@
 """Provider headers survive persistence without becoming transport identity."""
 
 import asyncio
+from dataclasses import replace
 from email.message import EmailMessage
 import json
 import sqlite3
@@ -69,6 +70,7 @@ def test_raw_mime_context_reaches_host_after_restart(tmp_path, monkeypatch, to, 
             assert fact['to'] == recipients
             assert fact['cc'] == parsed['cc']
             assert fact['date'] == 'Fri, 18 Sep 2026 12:30:00 +0300'
+            assert fact['sent_at'] == '2026-09-18T12:30:00+03:00'  # the Date header, never a receipt time
             assert fact['reply_to'] == ['replies@example.org', 'coord@example.org']
             assert fact['headers'] == parsed['headers']
             assert 'Мира Example' in fact['headers']['from'][0]
@@ -90,6 +92,12 @@ def test_raw_mime_context_reaches_host_after_restart(tmp_path, monkeypatch, to, 
             await host.submit(item)
 
     asyncio.run(exercise())
+    # "-0000" is UTC from an unnamed zone; a Date without any zone or an unreadable one leaves the send time unknown.
+    for date, sent in (('Fri, 18 Sep 2026 12:30:00 -0000', '2026-09-18T12:30:00+00:00'),
+                       ('Fri, 18 Sep 2026 12:30:00 -0000 (UTC)', '2026-09-18T12:30:00+00:00'),
+                       ('Fri, 18 Sep 2026 12:30:00', None), ('1 Jan 1000000000000000000 00:00:00 +0000', None)):
+        fact = email_presence_event(replace(item, context={**item.context, 'date': date}), account_id=account)['message']
+        assert fact['date'] == date and fact.get('sent_at') == sent
 
 
 @pytest.mark.parametrize('reply_to, expected', [

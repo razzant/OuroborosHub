@@ -14,7 +14,9 @@ from typing import Any
 from starlette.responses import JSONResponse
 
 from .lib.host_adapter import HostContractError, normalize_binding_id
-from .lib.local_settings import LocalSettingsError, load_local_settings, settings_path
+from .lib.local_settings import (
+    NEW_ROOT_CHANNELS, LocalSettingsError, load_local_settings, normalize_channel_ids, settings_path,
+)
 from .lib.slack_api import (
     SlackApiError,
     SlackClient,
@@ -380,6 +382,13 @@ _WORKER_SETTINGS = (
 )
 
 
+def _channel_lines(value: Any) -> str:
+    """The saved channel list as form text, one ID per line, without reinterpreting it."""
+    if isinstance(value, list):
+        return "\n".join(str(item) for item in value)
+    return value if isinstance(value, str) else ""
+
+
 def _make_settings_save(api: Any):
     # One request at a time, as when each ran whole on the HTTP loop: no save drops another's fields.
     one_at_a_time = threading.Lock()
@@ -424,6 +433,7 @@ def _make_settings_save(api: Any):
                 values = {"binding_id": str(current.get("binding_id") or "")}
                 for key, default, _minimum, _maximum in _WORKER_SETTINGS:
                     values[key] = str(current.get(key) or default)
+                values[NEW_ROOT_CHANNELS] = _channel_lines(current.get(NEW_ROOT_CHANNELS))
                 return JSONResponse(values)
             if "binding_id" in body:
                 binding_id = str(body.get("binding_id") or "").strip()
@@ -446,6 +456,11 @@ def _make_settings_save(api: Any):
                         status_code=400,
                     )
                 current[key] = max(minimum, min(maximum, value or default))
+            if NEW_ROOT_CHANNELS in body:
+                try:
+                    current[NEW_ROOT_CHANNELS] = normalize_channel_ids(body[NEW_ROOT_CHANNELS])
+                except ValueError as exc:
+                    return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
             _save_local_settings(api, current)
             return JSONResponse(
@@ -634,7 +649,11 @@ def register(api: Any) -> None:
                         "Set and grant `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in Secrets. "
                         "Connect Slack under Consciousness → Places. "
                         "The bridge receives messages from every DM, MPDM, public channel, "
-                        "and private channel that the installed app can actually see."
+                        "and private channel that the installed app can actually see.\n\n"
+                        "New top-level posts in the channels listed below carry the "
+                        "`signal.new_root` fact; replies, edits, deletes and reactions never do. "
+                        "It wakes only a place whose wakes include it. Use exact channel IDs "
+                        "(C…, G…), not names: the ID is at the bottom of the channel's About tab."
                     ),
                 },
                 {
@@ -654,6 +673,14 @@ def register(api: Any) -> None:
                             "label": "Outbound workers",
                             "type": "number",
                             "placeholder": "2",
+                        },
+                        {
+                            "name": NEW_ROOT_CHANNELS,
+                            "label": "New-root channel IDs (one per line)",
+                            "type": "textarea",
+                            "placeholder": "C0123456789",
+                            "help": "Exact channel IDs whose new top-level posts carry signal.new_root. "
+                                    "Empty means none. Toggle the skill after saving.",
                         },
                     ],
                 },

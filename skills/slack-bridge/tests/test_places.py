@@ -2,15 +2,158 @@
 import asyncio
 import dataclasses
 import json
+import re
+from pathlib import Path
 
 import httpx
 import pytest
 
+from lib.events import parse_socket_envelope
 from lib.host_adapter import PLACE_POLICY_UNREAD, SKILL_ACCESS_REFUSED, LoopbackPresenceHostAdapter, slack_presence_event
+from lib.local_settings import NEW_ROOT_CHANNELS
+from lib.presence import NEW_ROOT_SIGNAL
 from lib.runtime import OutboundWorker
 from lib.store import BridgeStore
 from test_host_adapter import _item
-from test_workers_plugin import _Slack
+from test_workers_plugin import _Api, _Slack, _load_plugin
+
+_LISTED = frozenset({"C0STATUS01"})
+
+
+def _place_declaration():
+    import yaml
+    text = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8")
+    return next(item for item in yaml.safe_load(text.split("---")[1])["contributes"] if item.get("provides") == "place")
+
+
+def _declared_fact_ids():
+    return {fact if isinstance(fact, str) else fact["id"] for fact in _place_declaration()["facts"]}
+
+
+def _root(**fields):
+    return {"type": "message", "user": "U1", "channel": "C0STATUS01", "channel_type": "channel",
+            "ts": "20.0", "event_ts": "20.0", "text": "Rollout plan for stage 3", **fields}
+
+
+_NEW_ROOT_CASES = {
+    "listed root": (_root(), _LISTED, True),
+    "listed root mention": (_root(type="app_mention", text="<@U_BOT> rollout plan"), _LISTED, True),
+    "listed bot post": (_root(subtype="bot_message", user=None, bot_id="B_OTHER"), _LISTED, True),
+    "listed file post": (_root(subtype="file_share", files=[{"id": "F1", "name": "plan.pdf"}]), _LISTED, True),
+    "no list": (_root(), frozenset(), False),
+    "another channel": (_root(channel="C0OTHER001"), _LISTED, False),
+    "thread reply": (_root(thread_ts="19.0", parent_user_id="U2"), _LISTED, False),
+    "reply also sent to channel": (_root(subtype="thread_broadcast", thread_ts="19.0"), _LISTED, False),
+    "edit": ({"type": "message", "subtype": "message_changed", "channel": "C0STATUS01", "channel_type": "channel",
+              "event_ts": "21.0", "message": {"user": "U1", "ts": "20.0", "text": "Rollout plan, revised"},
+              "previous_message": {"user": "U1", "ts": "20.0", "text": "Rollout plan"}}, _LISTED, False),
+    "mention added by an edit": (_root(type="app_mention", text="<@U_BOT> rollout plan",
+                                       edited={"user": "U1", "ts": "21.0"}), _LISTED, False),
+    "delete": ({"type": "message", "subtype": "message_deleted", "channel": "C0STATUS01", "channel_type": "channel",
+                "ts": "22.0", "deleted_ts": "20.0",
+                "previous_message": {"user": "U1", "ts": "20.0", "text": "Rollout plan"}}, _LISTED, False),
+    "reaction": ({"type": "reaction_added", "user": "U1", "reaction": "eyes", "event_ts": "23.0",
+                  "item": {"type": "message", "channel": "C0STATUS01", "ts": "20.0"}}, _LISTED, False),
+    "join notice": (_root(subtype="channel_join", text="<@U1> has joined the channel"), _LISTED, False),
+}
+
+
+@pytest.mark.parametrize("case", _NEW_ROOT_CASES)
+def test_new_root_signal_marks_only_new_top_level_posts_in_listed_channels(tmp_path, case):
+    event, channels, expected = _NEW_ROOT_CASES[case]
+    payload = {"type": "events_api", "envelope_id": "env-root",
+               "payload": {"team_id": "T1", "event_id": "Ev-root", "event": event}}
+    parsed = parse_socket_envelope(payload, bot_user_id="U_BOT", new_root_channels=channels)
+    plain = parse_socket_envelope(payload, bot_user_id="U_BOT")
+    # The list never changes admission; it only adds the one fact.
+    assert parsed.accepted and (parsed.accepted, parsed.reason) == (plain.accepted, plain.reason)
+    added = {key: value for key, value in parsed.event.structured.items() if key not in plain.event.structured}
+    assert added == ({"new_root_signal": True} if expected else {})
+
+    store = BridgeStore(tmp_path)
+    store.ingest_envelope(payload, parsed)
+    item = store.claim_inbox()
+    presence = slack_presence_event(item, places=True)
+    assert presence["facts"].count(NEW_ROOT_SIGNAL) == int(expected)
+    assert presence["message"]["provider_facts"].get("new_root_signal") is (True if expected else None)
+    without = slack_presence_event(dataclasses.replace(item, structured=plain.event.structured), places=True)
+    assert [fact for fact in presence["facts"] if fact != NEW_ROOT_SIGNAL] == without["facts"]
+    # The Host refuses a fact the place does not declare; legacy hosts get no facts at all.
+    assert set(presence["facts"]) <= _declared_fact_ids()
+    assert "facts" not in slack_presence_event(item)
+
+
+@pytest.mark.parametrize("channel,kind,thread", [
+    # The signal is a fact only. A new top-level post in a channel opens its own thread, and the reply goes
+    # there; in a direct or group chat it joins the chat's one conversation, and the reply goes to the chat.
+    ("C0STATUS01", "channel", "20.0"), ("D0DIRECT01", "im", ""), ("G0GROUPS01", "mpim", ""),
+])
+def test_a_new_root_keeps_the_room_and_reply_thread_of_its_conversation(tmp_path, channel, kind, thread):
+    payload = {"type": "events_api", "envelope_id": "env-root",
+               "payload": {"team_id": "T1", "event_id": "Ev-root", "event": _root(channel=channel, channel_type=kind)}}
+    store = BridgeStore(tmp_path)
+    store.ingest_envelope(payload, parse_socket_envelope(payload, bot_user_id="U_BOT", new_root_channels={channel}))
+    item = store.claim_inbox()
+    presence = slack_presence_event(item, places=True)
+    assert NEW_ROOT_SIGNAL in presence["facts"]
+    assert (presence["thread_id"], presence["conversation_key"], item.conversation_thread) == (
+        thread, f"slack:T1:{channel}:{thread or '0'}", thread)
+
+
+@pytest.mark.parametrize("advertised, sent", [(1, True), (None, False), (True, False), (2, False)])
+def test_new_root_signal_reaches_only_a_host_that_vouches_for_signals(advertised, sent):
+    async def run():
+        submitted = []
+
+        def handler(request):
+            if request.url.path == "/identity":
+                answer = {"places_version": 1}
+                if advertised is not None:
+                    answer["presence_wake_signals"] = advertised
+                return httpx.Response(200, json=answer)
+            submitted.append(json.loads(request.content))
+            return httpx.Response(200, json={"status": "completed", "outcome": "silent", "turn_ref": "t"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            host = LoopbackPresenceHostAdapter(binding_id="", host_service_url="http://127.0.0.1:8767",
+                                               skill_token="test", http_client=http)
+            await host.submit(dataclasses.replace(_item(), structured={"new_root_signal": True}))
+        event = submitted[0]["event"]
+        assert event["facts"] == (["any_message", NEW_ROOT_SIGNAL] if sent else ["any_message"])
+        # The observation itself stays with the message either way.
+        assert event["message"]["provider_facts"]["new_root_signal"] is True
+    asyncio.run(run())
+
+
+def test_place_declares_new_root_signal_as_opt_in_beside_every_reported_fact(tmp_path):
+    place = _place_declaration()
+    ids = [fact if isinstance(fact, str) else fact["id"] for fact in place["facts"]]
+    assert len(ids) == len(set(ids))
+    signal = next(fact for fact in place["facts"] if isinstance(fact, dict) and fact.get("id") == NEW_ROOT_SIGNAL)
+    assert set(signal) == {"id", "label"} and re.fullmatch(r"signal\.[a-z0-9_-]{1,40}", signal["id"])
+    assert signal["label"].strip() and len(signal["label"]) <= 120
+    # Opt-in: the suggested wakes are unchanged and never include the signal.
+    assert place["wakes"] == ["direct_message", "group_dm", "mention", "my_thread", "reply_to_me"]
+    # The place sheet offers only declared facts, so each fact this bridge reports stays selectable.
+    assert set(ids) == {"any_message", "direct_message", "group_dm", "mention", "my_thread", "reply_to_me",
+                        "from_bot", NEW_ROOT_SIGNAL}
+    # Its settings door names the section whose form holds the channel list.
+    api = _Api(tmp_path)
+    _load_plugin().register(api)
+    _title, schema = api.settings[place["settings"]]
+    form = next(component for component in schema["components"] if component["type"] == "form")
+    assert NEW_ROOT_CHANNELS in [field["name"] for field in form["fields"]]
+    try:
+        from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
+        from ouroboros.extension_ui_validation import validate_contributions, validate_settings_schema
+    except ImportError:
+        return  # The serving core's validators run only where that core is importable.
+    root = Path(__file__).resolve().parents[1]
+    clean, problems = validate_contributions(
+        parse_skill_manifest_text((root / "SKILL.md").read_text(encoding="utf-8")), skill_dir=root)
+    assert problems == []
+    assert any(item.get("provides") == "place" and signal in item["facts"] for item in clean)
+    validate_settings_schema(schema)
 
 NOT_CONNECTED = {"ok": False, "error": "Connect this place in Consciousness > Places.",
                  "code": "place_not_connected", "disposition": "blocked"}

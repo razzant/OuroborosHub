@@ -561,6 +561,26 @@ class IdentityAndCustody(Base):
         self.assertEqual((self.records(plan)[sid(GROUP, 31)], row['custody']), ('duplicate', 'live'))
         self.assertEqual(self.stored(), {})
 
+    async def test_a_reply_chain_is_imported_into_the_chats_conversation_even_where_0_4_1_filed_it_apart(self):
+        def reply(mid, text, **header):
+            return message(mid, GROUP, text, NOW - DAY, sender=809, reply_to=T.MessageReplyHeader(**header))
+        chained = reply(22, 'We did last week', reply_to_msg_id=21, reply_to_top_id=20)
+        self.histories[GROUP] = [message(20, GROUP, 'Board games on Friday?', NOW - DAY),
+                                 reply(21, 'Has anyone tried this with six players?', reply_to_msg_id=20), chained]
+        # Live capture before 0.4.2 filed the reply to a reply under its chain's top, a conversation of its own, and
+        # the Host admitted it there. That copy is not in the chat's conversation, so the import records the message.
+        self.j.capture(H.history_record(ACCOUNT, GROUP, 20, chained, conversation={'chat_type': 'supergroup'})['event'])
+        await self.engine.incoming_once()
+        plan = self.plan()
+        self.act(plan, 'start')
+        self.assertEqual(await self.drive(plan), 'done')
+        self.assertEqual(sorted(self.posted_ids()), [sid(GROUP, 20), sid(GROUP, 21), sid(GROUP, 22)])
+        self.assertEqual(self.view(plan)['chats'][0]['skipped'], {})
+        chains = {r['event']['message']['message_id']: r['event']['message'].get('reply_chain_id')
+                  for body in self.posts() for r in body['records']}
+        self.assertEqual(chains, {'20': None, '21': None, '22': 20})  # the same fact live capture keeps
+        self.assertIn(sid(GROUP, 22, thread=20), self.wire.rows)  # the earlier live copy stays where it was
+
     async def test_a_second_plan_reimports_as_duplicates_whatever_the_display_facts(self):
         self.histories[GROUP] = [message(1, GROUP, 'one', NOW - DAY), message(2, GROUP, 'two', NOW - DAY)]
         first = self.plan()
