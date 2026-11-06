@@ -225,11 +225,25 @@ def test_slack_addressing_is_structured_and_legacy_payload_is_unchanged():
     event = slack_presence_event(item, places=True)
     assert set(event["facts"]) == {"any_message", "group_dm", "mention", "reply_to_me", "my_thread", "from_bot"}
     assert "facts" not in slack_presence_event(item)
-    ordinary = dataclasses.replace(item, structured={}, thread_ts="", channel_type="channel", text="mention BOT please")
+    ordinary = dataclasses.replace(item, structured={}, thread_ts="", subtype="", channel_type="channel", text="mention BOT please")
     assert slack_presence_event(ordinary, places=True)["facts"] == ["any_message"]
-    assert slack_presence_event(dataclasses.replace(ordinary, channel_type="im"), places=True)["facts"] == ["any_message", "direct_message"]
+    root = dataclasses.replace(ordinary, structured={"new_root_signal": True})
+    assert slack_presence_event(root, places=True)["facts"] == ["any_message", "signal.new_root"]
+    assert slack_presence_event(dataclasses.replace(root, channel_type="im"), places=True)["facts"] == ["any_message", "direct_message", "signal.new_root"]
     deleted = dataclasses.replace(ordinary, channel_type="im", subtype="message_deleted")
     assert slack_presence_event(deleted, places=True)["facts"] == []
+
+
+@pytest.mark.parametrize("change", [
+    {"thread_ts": "9.0"},
+    {"subtype": "file_share"},
+    {"subtype": "message_changed"},
+    {"subtype": "message_deleted"},
+])
+def test_new_root_signal_excludes_replies_edits_deletes_and_subtypes(change):
+    item = dataclasses.replace(_item(), thread_ts="", subtype="", structured={})
+    item = dataclasses.replace(item, **change)
+    assert "signal.new_root" not in slack_presence_event(item, places=True)["facts"]
 
 
 def test_places_host_accepts_unbound_events_and_checks_state_each_time():
