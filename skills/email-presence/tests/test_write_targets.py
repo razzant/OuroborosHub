@@ -52,6 +52,7 @@ def tools_for(tmp_path, provider, client, *, account_id=None):
 
 def gmail_for(tmp_path, *, label_rows=None, reads=None):
     client = GmailClient.__new__(GmailClient)
+    client.account = {'id': 'gmail:fixture', 'provider': 'gmail'}  # a real client carries its account; scopes unknown
     writes = []
     def request(method, path, **options):
         if method == 'GET':
