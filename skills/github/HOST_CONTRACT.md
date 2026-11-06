@@ -31,7 +31,8 @@ is required. No new connector endpoint, scheduler or Main transport.
    older object, a pull request's details and a review-request list carry
    `any_message` plus only what that revision newly adds (a newly mentioned watched
    login, a newly added assignee or requested reviewer) (0.1.6). Events written by
-   the account this connector sends as are still reported; the host recognises
+   the account this connector sends as, other than its own receipted sends, are
+   still reported; the host recognises
    them from `identity.sends_as` and does not wake on them, unless that account
    is the owner's own, confirmed account. GitHub does not name a revision's
    editor, so a revision is sent with an unknown actor: one that newly adds a

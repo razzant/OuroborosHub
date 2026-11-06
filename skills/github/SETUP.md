@@ -36,7 +36,9 @@ is refused as `state_namespace_changed_preserve_old_custody`; retain and
 reconcile the old state before an explicit separate setup.
 
 Use a dedicated writer identity. The PAT author is verified through `/user`;
-a configured username cannot change who publishes. Store only these custom keys
+a configured username cannot change who publishes. Events written by the writer
+are heard, not woken on; if the writer is your own account, confirm it on its
+place (This is my account), and your posts there wake it again. Store only these custom keys
 in the host's Secrets UI and grant this payload access when installation is
 authorized:
 
