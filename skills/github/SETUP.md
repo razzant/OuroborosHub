@@ -158,8 +158,10 @@ before any Active trial. The payload never changes a place to Active.
 4. Choose wakes, notes and model in Places. The connector suggests `new_issue`,
    `new_pull_request`, `mention`, `my_thread`, `review_requested` and `assigned`;
    these facts are never disguised as mentions. `any_message` is an explicit choice
-   that adds unaddressed conversations and new Discussions. Bots still require
-   `from_bot` explicitly. A blank model inherits the
+   that adds unaddressed conversations and new Discussions. A merge, close, reopen
+   or edit carries `any_message` plus only a newly added mention, assignee or
+   reviewer, so without `any_message` it waits for the next own wake. Bots still
+   require `from_bot` explicitly. A blank model inherits the
    consciousness model slot; verify that inheritance if the desired model is Main.
 5. Enable collection in the configuration. Inspect baseline progress, per-stream
    completions/gaps, waiting work and receipts. Use a short Silent trial and a
