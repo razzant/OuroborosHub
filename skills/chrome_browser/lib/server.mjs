@@ -405,16 +405,16 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
     return page ? await firstRefusal(connection.navigationTargets(page), decide) : null;
   }
 
-  // Tab lists in a result carry other tabs' titles (page content). A tab whose title appears
-  // in the text, as upstream last rendered it, is judged like the current tab. One that closed
-  // during the call has left upstream's list but not the text.
-  async function listedTabRefusal(backend, text, decide) {
-    const closed = connection.closedPages.map((page) => prepared.tools.Tab.forPage(page));
-    for (const tab of [...closed, ...(backend._context?.tabs?.() ?? [])]) {
+  // Tab lists carry page titles and addresses, including tabs closed before the reply.
+  // Use this call's pages: teardown empties upstream's tabs, and a newer call can clear
+  // connection.closedPages. An empty title still needs its address checked.
+  async function listedTabRefusal(pages, text, decide) {
+    for (const page of pages) {
+      const tab = prepared.tools.Tab.forPage(page);
       if (!tab)
         continue;
-      const title = tab._lastHeader?.title;
-      if (!title || !text.includes(title))
+      const { title, url } = tab._lastHeader ?? {};
+      if (!(title && text.includes(title)) && !(url && text.includes(url)))
         continue;
       const refusal = await pageRefusal(tab.page, decide);
       if (refusal)
@@ -670,32 +670,27 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
       return errorResult(connection.refusal());
     const mark = guard.blockSeq;
     const deliveryMark = rt.pointerHooks.deliveryMark();
+    const browserContext = connection.context();
+    const outputDir = connection.outputDir();
+    const outputPages = new Set(browserContext.pages());
+    const rememberPage = (page) => outputPages.add(page);
+    browserContext.on('page', rememberPage);
     let result;
     try {
       result = await callDecisions.run(decide, () => backend.callTool(name, params, signal));
     } catch (error) {
       result = errorResult(String(error));
+    } finally {
+      browserContext.off('page', rememberPage);
     }
-    // A command may have reached Chrome before its answer disappeared. Withhold
-    // the incomplete result and make its effect explicitly unknown; a later call
-    // gets the ordinary pre-dispatch refusal and never replays this one.
-    if (connection.state !== 'ready' || connection.diagnostic !== attempt || attempt?.terminal) {
-      // A completed backend result is evidence that the command answered before a later
-      // settling/teardown event. Preserve it and report the later loss separately; only
-      // an error/absent result has an unknown effect and must not be replayed.
-      if (result && !result.isError && result.content?.length) {
-        const note = connection.diagnostic === attempt ? connection.reason : 'BROWSER_CONNECTION_CHANGED: The connection changed.';
-        result = { ...result, content: [...result.content, { type: 'text', text: `### Connection after result\n${note} The browser result was received before the connection ended; its effect is not unknown.` }] };
-      } else {
-        return errorResult(`${connection.diagnostic === attempt ? connection.reason : 'BROWSER_CONNECTION_CHANGED: The connection changed.'} This call was already dispatched when the connection ended; its effect is unknown. Do not repeat it automatically. After new approval, take a fresh browser_snapshot and reassess.`);
-      }
-    }
-    result = describePrivateFiles(result, connection.outputDir());
+    // Upstream can return observed data even after loss during settling, including
+    // a Result alongside an Error. Keep both through the ordinary output checks.
+    result = describePrivateFiles(result, outputDir);
     // What the call returns is judged by the page it left the agent on, by the page a page tool worked in (it can
     // have closed under the call, with another current by now), and by any tab title it lists.
     const after = await pageRefusal((await currentTab(backend))?.page, decide)
       ?? (name === 'browser_tabs' ? null : await pageRefusal(tabForGuard?.page, decide))
-      ?? await listedTabRefusal(backend, textOf(result), decide);
+      ?? await listedTabRefusal(outputPages, textOf(result), decide);
     if (after)
       result = withheldResult(after, true);
     result = withDeliveryNotes(name, result, rt.pointerHooks.deliveriesSince(deliveryMark));
@@ -703,6 +698,14 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
     if (blocked.length) {
       const lines = blocked.map((entry) => `- ${entry.method} ${entry.where}: ${entry.block}`);
       result = { ...result, content: [...(result.content || []), { type: 'text', text: `### Requests the guard refused while this call ran\n${lines.join('\n')}` }] };
+    }
+    // Receiving a backend response establishes neither every external effect nor when
+    // Chrome completed it. Report loss separately, also when output was withheld.
+    if (connection.state !== 'ready' || connection.diagnostic !== attempt || attempt?.terminal) {
+      const note = connection.diagnostic === attempt
+        ? connection.reason || 'BROWSER_CONNECTION_LOST: The connection began closing.'
+        : 'BROWSER_CONNECTION_CHANGED: The connection changed.';
+      result = { ...result, content: [...(result.content || []), { type: 'text', text: `### Connection during call\n${note} This call was dispatched; the backend response does not establish all of its effects. Do not repeat it automatically. After new approval, take a fresh browser_snapshot and reassess.` }] };
     }
     return mergeTextParts(result);
   }

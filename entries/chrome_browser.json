@@ -3,7 +3,7 @@
     "computer"
   ],
   "description": "Work in the owner's own Chrome through Microsoft's official Playwright Extension - the tab they share plus background tabs for the same work, trusted input in background tabs, and handback by plain conversation.",
-  "digest": "0845ab67378036913983c92346b63b463cfa9a2d1a29793cb933669d2addeac4",
+  "digest": "01b376f5b208acd793b4f1e729d9a9edf2598853e815d9f1bce334f26040c67c",
   "install_specs": [
     {
       "kind": "npm",

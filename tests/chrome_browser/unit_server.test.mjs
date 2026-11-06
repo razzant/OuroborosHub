@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { NODE_MODULES, requirePinnedInstall } from './helpers/env.mjs';
 import { startMockGuard } from './helpers/mock_guard.mjs';
 import { connectFakeChrome } from './helpers/fake_chrome.mjs';
@@ -24,6 +25,8 @@ const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3
 
 const runtime = { ...loadPinnedPlaywright(NODE_MODULES), extension: PINS.extension };
 const textOf = (result) => (result.content || []).filter((part) => part.type === 'text').map((part) => part.text).join('\n');
+const sectionOf = (result, name) => textOf(result).split(/^### /m).slice(1)
+    .find((section) => section.startsWith(`${name}\n`))?.slice(name.length + 1).trim();
 const refuseForbidden = (message) => {
   if ('armed' in message)
     return { armed: true };
@@ -260,29 +263,229 @@ test('an action sent before the connection vanishes has unknown effect and is ne
   const result = await world.call('browser_navigate', { url: `${ALLOWED}/action` });
   assert.equal(sent, 1);
   assert.equal(result.isError, true);
-  assert.match(textOf(result), /effect is unknown.*Do not repeat it automatically/);
+  assert.match(textOf(result), /Connection during call/);
+  assert.match(textOf(result), /does not establish all of its effects.*Do not repeat it automatically/);
+  assert.equal(sectionOf(result, 'Result'), undefined);
   assert.doesNotMatch(textOf(result), /Nothing was done/);
   assert.equal(world.core.connection.state, 'closed');
   const newCall = await world.call('browser_navigate', { url: `${ALLOWED}/another` });
   assert.match(textOf(newCall), /Nothing was done and no earlier action is repeated/);
+  await reapprove(world);
   assert.equal(sent, 1);
 });
 
-test('an acknowledged result survives a later connection loss during settling', async () => {
-  const world = await connected();
-  const backend = world.core.connection.backend();
-  const callTool = backend.callTool.bind(backend);
-  backend.callTool = async (...args) => {
-    const result = await callTool(...args);
-    world.core.connection._close(world.core.connection._generation, 'BROWSER_CONNECTION_LOST', 'test settling loss', 'backend_disconnected');
-    return result;
+// Only page I/O is replaced. The pinned BrowserBackend, official browser_evaluate handler,
+// Response serialization and Tab.waitForCompletion/waitForTimeout all run unchanged.
+// The returned value is page data, absent from the function and its generated-code echo.
+const RECEIPT_FUNCTION = '() => { receipt.calls += 1; return receipt.value; }';
+function evaluationFixture(world, { beforeReply, settling } = {}) {
+  const page = world.page();
+  const receipt = { calls: 0, value: 'CONFIRMED_RESULT_273' };
+  const events = [];
+  page.evaluate = async (fn, arg) => {
+    if (arg === RECEIPT_FUNCTION) {
+      const answer = await vm.runInNewContext(`(${fn.toString()})(expression)`, { receipt, expression: arg });
+      events.push('evaluated');
+      await beforeReply?.();
+      events.push('replied');
+      return answer;
+    }
+    assert.equal(typeof arg, 'number', 'the next page read is the real Tab.waitForTimeout settling read');
+    assert.equal(events.at(-1), 'replied');
+    events.push('settling');
+    await settling?.();
+    return undefined;
   };
-  const result = await world.call('browser_evaluate', { function: '() => "CONFIRMED_RESULT_273"' });
-  assert.equal(result.isError, undefined, textOf(result));
-  assert.match(textOf(result), /CONFIRMED_RESULT_273/);
-  assert.match(textOf(result), /Connection after result/);
-  assert.match(textOf(result), /effect is not unknown/);
-  assert.doesNotMatch(textOf(result), /Do not repeat it automatically/);
+  return { receipt, events, call: () => world.call('browser_evaluate', { function: RECEIPT_FUNCTION }) };
+}
+
+async function loseConnection(world) {
+  world.chrome.close(1000, 'privatePeerReason273');
+  await waitFor(() => world.core.connection.state === 'closed', 'settling connection loss');
+  await world.core.connection._closing;
+}
+
+async function reapprove(world) {
+  const link = textOf(await world.call('browser_connect')).split('\n').find((line) => line.startsWith('chrome-extension://'));
+  const chrome = await connectFakeChrome(runtime.utils.ws, new URL(link).searchParams.get('mcpRelayUrl'), {
+    tabs: [{ id: TAB, url: `${ALLOWED}/fresh`, title: 'Fresh', windowId: 1, index: 0, active: true }],
+  });
+  cleanups.push(async () => chrome.close());
+  await waitFor(() => world.core.connection.state === 'ready', 'reapproval');
+  const fresh = await world.call('browser_snapshot');
+  assert.equal(fresh.isError, undefined, textOf(fresh));
+  assert.match(textOf(fresh), /Fresh page content/);
+  assert.equal(chrome.cdp('Runtime.callFunctionOn').some((params) => JSON.stringify(params).includes(RECEIPT_FUNCTION)), false,
+      'the old evaluation was not replayed into the new browser context');
+  assert.equal(chrome.cdp('Page.navigate').length, 0, 'no old navigation was replayed after approval');
+  assert.equal(chrome.commands.filter((command) => command.method === 'chrome.tabs.create').length, 0,
+      'no old tab creation was replayed after approval');
+}
+
+test('the pinned backend itself retains Result and Error through actual settling teardown', async () => {
+  for (const withError of [false, true]) {
+    const world = await connected();
+    const backend = world.core.connection.backend();
+    const fixture = evaluationFixture(world, { settling: async () => {
+      if (withError)
+        backend._context._pendingUnhandledRejections.push(new Error('AFTER_RESULT_FAILURE_273'));
+      await loseConnection(world);
+    } });
+    const result = await backend.callTool('browser_evaluate', { function: RECEIPT_FUNCTION });
+    assert.deepEqual(fixture.events, ['evaluated', 'replied', 'settling']);
+    assert.equal(result.isError, withError ? true : undefined);
+    assert.equal(sectionOf(result, 'Result'), JSON.stringify(fixture.receipt.value));
+    assert.doesNotMatch(sectionOf(result, 'Ran Playwright code'), /CONFIRMED_RESULT_273/);
+    if (withError)
+      assert.match(sectionOf(result, 'Error'), /AFTER_RESULT_FAILURE_273/);
+    assert.equal(backend._context.currentTab(), undefined);
+    assert.equal(fixture.receipt.calls, 1);
+  }
+});
+
+test('an acknowledged Result survives actual pinned settling, including an accompanying backend error', async () => {
+  for (const loss of [true, false]) {
+    for (const withError of [true, false]) {
+      const world = await connected();
+      const backend = world.core.connection.backend();
+      const fixture = evaluationFixture(world, { settling: async () => {
+        if (withError)
+          backend._context._pendingUnhandledRejections.push(new Error('AFTER_RESULT_FAILURE_273'));
+        if (loss)
+          await loseConnection(world);
+      } });
+      const result = await fixture.call();
+      assert.deepEqual(fixture.events, ['evaluated', 'replied', 'settling']);
+      assert.equal(result.isError, withError ? true : undefined, textOf(result));
+      assert.equal(sectionOf(result, 'Result'), JSON.stringify(fixture.receipt.value), textOf(result));
+      assert.doesNotMatch(sectionOf(result, 'Ran Playwright code'), /CONFIRMED_RESULT_273/);
+      if (withError)
+        assert.match(sectionOf(result, 'Error'), /AFTER_RESULT_FAILURE_273/);
+      if (loss) {
+        assert.equal(backend._context.currentTab(), undefined, 'upstream really disposed its context');
+        assert.match(textOf(result), /Connection during call/);
+        assert.match(textOf(result), /Do not repeat it automatically/);
+        assert.doesNotMatch(textOf(result), /effect is not unknown|received before the connection ended|privatePeerReason273/);
+        await reapprove(world);
+      }
+      assert.equal(fixture.receipt.calls, 1, 'neither loss nor reapproval replays the evaluation');
+    }
+  }
+});
+
+test('a genuinely lost evaluation reply has no Result, retains the error, and is not replayed on reapproval', async () => {
+  const world = await connected();
+  const fixture = evaluationFixture(world, { beforeReply: async () => {
+    await loseConnection(world);
+    throw new Error('EVALUATION_REPLY_LOST_273');
+  } });
+  const result = await fixture.call();
+  assert.equal(fixture.receipt.calls, 1, 'the fixture executed before its reply was lost');
+  assert.deepEqual(fixture.events, ['evaluated']);
+  assert.equal(result.isError, true);
+  assert.equal(sectionOf(result, 'Result'), undefined);
+  assert.equal(sectionOf(result, 'Ran Playwright code'), undefined);
+  assert.match(sectionOf(result, 'Error'), /EVALUATION_REPLY_LOST_273/);
+  assert.match(textOf(result), /Do not repeat it automatically/);
+  assert.doesNotMatch(textOf(result), /CONFIRMED_RESULT_273|Nothing was done|effect is not unknown|privatePeerReason273/);
+  await reapprove(world);
+  assert.equal(fixture.receipt.calls, 1);
+});
+
+test('an acknowledged Result from a refused redirect is withheld after teardown and reapproval', async () => {
+  for (const withError of [false, true]) {
+    const world = await connected();
+    const backend = world.core.connection.backend();
+    const fixture = evaluationFixture(world, {
+      beforeReply: async () => {
+        world.chrome.navigation(TAB, [`${ALLOWED}/from`, `${FORBIDDEN}/bounce?secret=273`, `${ALLOWED}/landing`]);
+        await world.settle();
+      },
+      settling: async () => {
+        if (withError)
+          backend._context._pendingUnhandledRejections.push(new Error('PRIVATE_ERROR_273'));
+        await loseConnection(world);
+        await reapprove(world); // the next call empties connection.closedPages
+      },
+    });
+    const result = await fixture.call();
+    assert.equal(result.isError, true);
+    assert.match(textOf(result), /output is withheld.*forbidden\.example\/bounce/);
+    assert.match(textOf(result), /Connection during call/);
+    assert.doesNotMatch(textOf(result), /CONFIRMED_RESULT_273|PRIVATE_ERROR_273|secret=273|privatePeerReason273/);
+    assert.ok(world.questions().includes(`${FORBIDDEN}/bounce?secret=273`), 'the original redirect provenance was checked');
+    assert.equal(fixture.receipt.calls, 1);
+  }
+});
+
+test('a tab-list Result keeps its original title checks after teardown and a new session call', async () => {
+  for (const [forbidden, title] of [[true, 'PRIVATE_TITLE_273'], [false, 'READABLE_TITLE_273'], [true, ''], [false, '']]) {
+    const world = await connected({ tabs: [
+      { id: TAB, url: `${ALLOWED}/start`, title: 'Start', windowId: 1, index: 0, active: true },
+      { id: 8, url: `${forbidden ? FORBIDDEN : ALLOWED}/other`, title, windowId: 1, index: 1 },
+    ] });
+    const backend = world.core.connection.backend();
+    let reads = 0;
+    // Response._build reads the current tab's local console log after the tabs tool
+    // already built its Result. End the old context here, then let a fresh call run.
+    backend._context.currentTab()._consoleLog.take = async () => {
+      reads += 1;
+      await loseConnection(world);
+      await reapprove(world);
+      assert.deepEqual(world.core.connection.closedPages, []);
+      return undefined;
+    };
+    const result = await world.call('browser_tabs', { action: 'list' });
+    assert.equal(reads, 1);
+    assert.equal(backend._context.currentTab(), undefined);
+    assert.equal(backend._context.tabs().length, 0);
+    assert.equal(result.isError, forbidden ? true : undefined, textOf(result));
+    if (forbidden) {
+      assert.match(textOf(result), /output is withheld.*forbidden\.example\/other/);
+      assert.doesNotMatch(textOf(result), /PRIVATE_TITLE_273/);
+    } else {
+      assert.ok(sectionOf(result, 'Result').includes(`[${title}](${ALLOWED}/other)`), textOf(result));
+    }
+    assert.match(textOf(result), /Connection during call/);
+    assert.doesNotMatch(textOf(result), /privatePeerReason273/);
+  }
+});
+
+test('a tab opened during a call keeps its output check after teardown, even with an empty title', async () => {
+  for (const forbidden of [true, false]) {
+    const world = await connected({ onCommand: ({ chrome }, method, params) => {
+      const id = params?.[0]?.tabId;
+      if (method === 'chrome.debugger.attach' && id >= 900) {
+        chrome.onNextNavigate(id, ({ url, loaderId }) => {
+          chrome.navigation(id, [url, `${forbidden ? FORBIDDEN : ALLOWED}/landing`], { loaderId });
+        });
+      }
+    } });
+    const backend = world.core.connection.backend();
+    let reads = 0;
+    world.page().context().on('page', (page) => {
+      page.once('framenavigated', () => {
+        runtime.bundle.tools.Tab.forPage(page)._consoleLog.take = async () => {
+          reads += 1;
+          await loseConnection(world);
+          await reapprove(world);
+          return undefined;
+        };
+      });
+    });
+    const result = await world.call('browser_tabs', { action: 'new', url: `${ALLOWED}/go` });
+    assert.equal(reads, 1);
+    assert.equal(backend._context.tabs().length, 0);
+    assert.equal(result.isError, forbidden ? true : undefined, textOf(result));
+    if (forbidden) {
+      assert.match(textOf(result), /output is withheld.*forbidden\.example\/landing/);
+      assert.equal(sectionOf(result, 'Result'), undefined);
+    } else {
+      assert.ok(sectionOf(result, 'Result').includes(`[](${ALLOWED}/landing)`), textOf(result));
+    }
+    assert.match(textOf(result), /Connection during call/);
+    assert.equal(world.chrome.commands.filter((command) => command.method === 'chrome.tabs.create').length, 1);
+  }
 });
 
 test('loss while attaching records the socket and never becomes ready', async () => {
