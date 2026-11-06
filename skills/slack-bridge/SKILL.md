@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.11.0
+version: 1.11.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -175,7 +175,12 @@ wakes are direct messages, group DMs, mentions, my threads, and replies to me.
 `signal.new_root` is an opt-in wake for an allowlist of channels; it is not
 suggested. Every supported event reaches the host for capture; its typed facts
 determine whether consciousness wakes. Bot messages carry `from_bot` and need an
-explicit wake choice. Place notes supply behavior instructions.
+explicit wake choice. `from_bot` follows the author's account (`users.info`
+`is_bot`): a person who posts through an app, such as an AI assistant posting as
+them, is that person and wakes like their typed message; the message then carries
+`provider_facts.posted_via_app`. Only when Slack names no person, or the account
+cannot be looked up, do the app or bot markers on the message make it `from_bot`.
+Place notes supply behavior instructions.
 
 ### New top-level posts in listed channels
 

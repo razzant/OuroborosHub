@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.11.1
+
+- `from_bot` follows the author's account, not the client that posted. A person writing
+  through an app (an AI assistant posting as them, for example) carried `bot_id`,
+  `app_id` or `bot_profile` and was reported as a bot, so a direct message or a reply in
+  Ouroboros's own thread never woke it: in one colleague's DM, 8 of 42 messages, all of
+  them his substantive updates, waited for the next own wake. The account's `users.info`
+  `is_bot` now decides; the markers decide only when Slack names no person or the lookup
+  is unavailable. They stay visible as `provider_facts.posted_via_app` (stored rows keep
+  their earlier `actor_is_bot` name and are read the same way).
+
 ## 1.11.0
 
 - A direct or group chat is one conversation: its top-level messages carry an empty

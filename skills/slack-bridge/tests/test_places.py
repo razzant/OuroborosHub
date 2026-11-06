@@ -234,6 +234,32 @@ def test_slack_addressing_is_structured_and_legacy_payload_is_unchanged():
     assert slack_presence_event(deleted, places=True)["facts"] == []
 
 
+@pytest.mark.parametrize("marker", ["posted_via_app", "actor_is_bot"])  # the marker's 1.11.1 and earlier names
+def test_a_person_posting_through_an_app_is_that_person_and_a_bot_account_stays_a_bot(marker):
+    via_app = dataclasses.replace(_item(), channel_type="im", structured={marker: True})
+
+    def facts(user):
+        return slack_presence_event(dataclasses.replace(via_app, provider_context={"user": user}), places=True)["facts"]
+
+    person = facts({"status": "available", "data": {"id": "U069", "is_bot": False}})
+    assert "from_bot" not in person and "direct_message" in person  # wakes like the person's typed message
+    assert "from_bot" in facts({"status": "available", "data": {"id": "UBOT", "is_bot": True}})
+    # The account is unknown (no lookup, or no person behind the event): the markers still decide.
+    assert "from_bot" in facts({"status": "unavailable"})
+    assert "from_bot" in slack_presence_event(via_app, places=True)["facts"]
+    typed = dataclasses.replace(via_app, structured={}, provider_context=None)
+    assert "from_bot" not in slack_presence_event(typed, places=True)["facts"]
+
+
+def test_app_markers_stay_a_visible_fact_not_an_author_claim():
+    payload = {"type": "events_api", "envelope_id": "e1", "payload": {"event_id": "Ev1", "team_id": "T1", "event": {
+        "type": "message", "channel": "D1", "channel_type": "im", "user": "U069", "app_id": "A0ASSIST",
+        "bot_id": "B0ASSIST", "ts": "1.0", "event_ts": "1.0", "text": "update: commit 8d6c355"}}}
+    parsed = parse_socket_envelope(payload, bot_user_id="UOURO", bot_id="BOURO", app_id="AOURO")
+    assert parsed.accepted and parsed.event.structured["posted_via_app"] is True
+    assert "actor_is_bot" not in parsed.event.structured and parsed.event.actor_user_id == "U069"
+
+
 @pytest.mark.parametrize("change", [
     {"thread_ts": "9.0"},
     {"subtype": "file_share"},

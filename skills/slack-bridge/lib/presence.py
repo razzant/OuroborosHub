@@ -220,7 +220,12 @@ def slack_wake_facts(event: Mapping[str, Any]) -> list[str]:
                 facts.append("my_thread")
         if provider.get("new_root_signal") is True:
             facts.append(NEW_ROOT_SIGNAL)
-    if event["actor"].get("is_bot") or provider.get("actor_is_bot"):
+    # `from_bot` names the author's account (users.info `is_bot`), not the client that posted:
+    # a person writing through an app wakes like their typed message. App or bot markers
+    # decide only when that account is unknown (no lookup, or no person behind the event).
+    # `actor_is_bot` is the marker's name on rows stored before 1.11.1.
+    author = event["actor"].get("is_bot")
+    if author is True or (author is None and (provider.get("posted_via_app") or provider.get("actor_is_bot"))):
         facts.append("from_bot")
     return facts
 

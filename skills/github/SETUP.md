@@ -36,7 +36,9 @@ is refused as `state_namespace_changed_preserve_old_custody`; retain and
 reconcile the old state before an explicit separate setup.
 
 Use a dedicated writer identity. The PAT author is verified through `/user`;
-a configured username cannot change who publishes. Store only these custom keys
+a configured username cannot change who publishes. Events written by the writer
+are heard, not woken on; if the writer is your own account, confirm it on its
+place (This is my account), and your posts there wake it again. Store only these custom keys
 in the host's Secrets UI and grant this payload access when installation is
 authorized:
 
@@ -156,8 +158,10 @@ before any Active trial. The payload never changes a place to Active.
 4. Choose wakes, notes and model in Places. The connector suggests `new_issue`,
    `new_pull_request`, `mention`, `my_thread`, `review_requested` and `assigned`;
    these facts are never disguised as mentions. `any_message` is an explicit choice
-   that adds unaddressed conversations and new Discussions. Bots still require
-   `from_bot` explicitly. A blank model inherits the
+   that adds unaddressed conversations and new Discussions. A merge, close, reopen
+   or edit carries `any_message` plus only a newly added mention, assignee or
+   reviewer, so without `any_message` it waits for the next own wake. Bots still
+   require `from_bot` explicitly. A blank model inherits the
    consciousness model slot; verify that inheritance if the desired model is Main.
 5. Enable collection in the configuration. Inspect baseline progress, per-stream
    completions/gaps, waiting work and receipts. Use a short Silent trial and a

@@ -293,8 +293,11 @@ def parse_socket_envelope(
     # event admissible or turn an occurrence into a request to this bot.
     if bot_user_id:
         structured["self_user_id"] = bot_user_id
+    # Posted through an app or by a bot: an observation about the message, not about its
+    # author. A person writing through an app is that person (slack_wake_facts reads the
+    # author's account first); the marker decides only when Slack names no person.
     if bot_event_id or app_event_id or message.get("bot_profile"):
-        structured["actor_is_bot"] = True
+        structured["posted_via_app"] = True
     if event_type in {"message", "app_mention"} and subtype != "message_deleted":
         if subtype != "message_changed" and isinstance(message.get("edited"), Mapping):
             structured["edited"] = dict(message["edited"])
