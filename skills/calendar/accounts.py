@@ -55,7 +55,8 @@ def connect_caldav(ctx, *, login, password, server_url='', alias='', preset='cal
         for calendar in calendars:
             existing = ctx.store.get_calendar(calendar['id'])
             ctx.store.upsert_calendar({**calendar,
-                **({key: existing[key] for key in ('role_visible', 'role_busy', 'role_publish', 'publish_mode', 'is_default')} if existing else {})})
+                **({key: existing[key] for key in ('role_visible', 'role_busy', 'role_publish', 'publish_mode', 'is_default')} if existing else {})},
+                restore=True)  # observed by this connection, so an earlier disconnect no longer hides it
         ctx.store.set_account_status(account_id, 'ok')
     except ops.ProviderError as exc:
         ctx.store.set_account_status(account_id, 'auth_failed' if exc.kind == 'auth' else 'error', exc.message)
@@ -110,7 +111,7 @@ def reload_yandex(ctx) -> Dict[str, Any]:
             st.upsert_calendar({**cal, "role_visible": existing["role_visible"] if existing else True,
                                 "role_busy": existing["role_busy"] if existing else True,
                                 "role_publish": existing["role_publish"] if existing else False,
-                                "publish_mode": existing["publish_mode"] if existing else "busy"})
+                                "publish_mode": existing["publish_mode"] if existing else "busy"}, restore=True)
         st.set_account_status(account_id, "ok", "", synced=False)
         report.append({"account": account_id, "status": "ok", "calendars": [{"id": c["id"], "name": c["name"], "writable": c["writable"]} for c in cals]})
     st.set_setting("sync_requested_at", iso_utc(now_utc()))
@@ -190,7 +191,7 @@ def reload_google(ctx) -> Dict[str, Any]:
             st.upsert_calendar({**cal, "role_visible": existing["role_visible"] if existing else True,
                                 "role_busy": existing["role_busy"] if existing else True,
                                 "role_publish": existing["role_publish"] if existing else False,
-                                "publish_mode": existing["publish_mode"] if existing else "busy"})
+                                "publish_mode": existing["publish_mode"] if existing else "busy"}, restore=True)
             st.set_setting(f"google_default_reminders:{cal['id']}", cal.get("default_reminders") or [])
         st.set_account_status(account_id, "ok", "", synced=False)
         report.append({"account": account_id, "status": "ok", "calendars": [{"id": c["id"], "name": c["name"], "writable": c["writable"], "primary": c.get("is_primary", False)} for c in cals]})

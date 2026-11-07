@@ -201,7 +201,7 @@ class CalendarWidgetBrowserTests(BrowserCase):
                 self.assertLess(p['lineTop'], p['height'])
                 if '23:55' in now:
                     self.assertGreater(p['height'] - p['lineTop'], 25)
-                self.page.get_by_role('button', name='›').click()
+                self.page.get_by_role('button', name='Следующий день').click()
                 self.assertEqual(self.page.locator('.now').count(), 0)
 
     def test_today_tracks_rollover_but_manual_navigation_pins_date(self):
@@ -220,9 +220,37 @@ class CalendarWidgetBrowserTests(BrowserCase):
         }""")
         self.page.get_by_role('button', name='Служебные').click()
         self.assertEqual(self.position()['day'], '2026-09-28')
-        self.page.get_by_role('button', name='‹').click()
+        self.page.get_by_role('button', name='Предыдущий день').click()
         self.assertEqual(self.page.locator('.now').count(), 0)
-        self.assertIn('2026-09-27', self.page.locator('.bar .title').inner_text())
+        self.assertIn('воскресенье, 27 сентября', self.page.locator('.bar .title').inner_text())
+
+    def test_navigation_shows_pending_target_and_rolls_back_after_error(self):
+        self.mount('2026-09-27T18:30:00+04:00')
+        self.page.evaluate("""() => {
+            const old = OuroborosWidget.fetch;
+            window.releaseNavigation = null;
+            OuroborosWidget.fetch = path => {
+                if (path.includes('date=2026-09-28')) return new Promise(resolve => {
+                    window.releaseNavigation = () => resolve({ok: false, status: 503, json: async () => ({message: 'calendar unavailable'})});
+                });
+                return old(path);
+            };
+        }""")
+        next_button = self.page.get_by_role('button', name='Следующий день', exact=True)
+        next_button.click()
+        expect(self.page.locator('.status.pending')).to_contain_text('загружается понедельник, 28 сентября')
+        expect(self.page.locator('.bar .title')).to_contain_text('28 сентября')
+        self.assertTrue(self.page.evaluate("document.activeElement === document.querySelector('.primary-bar button[aria-label=\\\"Следующий день\\\"]')"))
+        self.page.evaluate('releaseNavigation()')
+        expect(self.page.locator('.msg.err')).to_contain_text('calendar unavailable')
+        expect(self.page.locator('.bar .title')).to_contain_text('воскресенье, 27 сентября')
+        expect(self.page.get_by_role('button', name='Повторить', exact=True)).to_be_visible()
+
+    def test_primary_composition_keeps_calendar_filters_quiet(self):
+        self.mount('2026-09-27T18:30:00+04:00')
+        expect(self.page.locator('.calendar-filters summary')).to_contain_text('Календари (0)')
+        self.assertEqual(self.page.locator('.calendar-filters .cals button').count(), 0)
+        expect(self.page.get_by_role('button', name='Следующий день', exact=True)).to_be_visible()
 
     def mount_recurring_card(self):
         self.mount('2026-09-27T18:30:00+04:00')

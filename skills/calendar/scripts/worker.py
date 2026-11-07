@@ -84,10 +84,11 @@ def sync_account(store: Store, providers: Providers, account: Dict[str, Any], tz
             store.upsert_calendar({**cal, "role_visible": existing["role_visible"] if existing else True,
                                    "role_busy": existing["role_busy"] if existing else True,
                                    "role_publish": existing["role_publish"] if existing else False,
-                                   "publish_mode": existing["publish_mode"] if existing else "busy"})
+                                   "publish_mode": existing["publish_mode"] if existing else "busy"},
+                                  restore=_retired_before_connection(existing, account))
             stored = store.get_calendar(cal["id"])
             if stored is None or stored.get('deleted_at'):
-                continue  # disconnected while discovery was in flight
+                continue  # deleted by the owner, or disconnected while discovery was in flight
             report["calendars"] += 1
             state = store.get_sync_state(cal["id"])
             ctag = cal.get("ctag") or ""
@@ -129,6 +130,19 @@ def sync_account(store: Store, providers: Providers, account: Dict[str, Any], tz
         return report
     report["status"] = "ok"
     return report
+
+
+def _retired_before_connection(calendar, account) -> bool:
+    """Whether this companion's discovery may restore a listed, retired calendar.
+
+    Disconnect retires an account's calendars and deletes the account row; reconnecting creates a
+    new row. Google's OAuth return leaves discovery to this companion, so a calendar retired no later
+    than the current connection began is restored. A calendar the owner deleted while this connection
+    existed stays deleted, even if a listing taken before the deletion still contains it. Stored times
+    have second precision; a tie counts as earlier, so a reconnect within its disconnect's second restores.
+    """
+    retired, connected = parse_stored((calendar or {}).get("deleted_at")), parse_stored(account.get("created_at"))
+    return bool(retired and connected and retired <= connected)
 
 
 def wipe_external_cache(store: Store, calendar_id: str) -> None:

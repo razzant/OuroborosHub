@@ -37,9 +37,12 @@ def test_disconnected_account_cannot_be_resurrected_by_late_discovery(tmp_path):
     account=ctx.store.get_account(old['account_id'])
     ctx.store.delete_account(account['id'])
     ctx.store.upsert_calendar(old)  # the response captured before disconnect arrives late
+    ctx.store.upsert_calendar(old, restore=True)  # even as a reconnect discovery
     assert ctx.store.get_calendar(cid)['deleted_at']
     ctx.store.upsert_account(account)
-    ctx.store.upsert_calendar(old)  # an actual reconnected account keeps ordinary discovery
+    ctx.store.upsert_calendar(old)  # an ordinary refresh does not lift the retirement
+    assert ctx.store.get_calendar(cid)['deleted_at']
+    ctx.store.upsert_calendar(old, restore=True)  # the reconnected account's discovery does
     assert ctx.store.get_calendar(cid)['deleted_at'] is None
 
 
