@@ -20,7 +20,10 @@
     var DAY_START_H = 0;
 
     var state = {
-        view: 'day', date: null, shownDate: null, data: null, error: '', loading: false, loadSeq: 0, loadRequest: null, loadQuery: '', loadTarget: null, showHidden: false,
+        /* view/date are the request the owner asked for (date null = follow the host's today); shown* is what the body
+         * really holds and which request produced it; failed is the last request that did not load, kept for Retry. */
+        view: 'day', date: null, shownView: null, shownDate: null, shownRequest: null, failed: null,
+        data: null, error: '', loading: false, loadSeq: 0, loadRequest: null, loadQuery: '', showHidden: false,
         selectedCals: null, editing: null, drag: null, disposed: false, theme: 'light', poll: null, dirty: false, notice: '',
         hourScale: 1, gridScrollTop: 0, focusNow: true, zooming: false, linksOpen: false, linkError: '', toolbar: null, shell: null,
         savedDraft: null, draftLoaded: false, draftDirty: false, draftSaving: false, draftRequest: null, draftError: ''
@@ -89,7 +92,7 @@
         '.ev .event-text{position:sticky;top:30px;background:var(--accent-bg)}.ev .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ev .m{color:var(--muted);font-size:11px}',
         '.ev .rs{position:absolute;left:0;right:0;bottom:0;height:7px;cursor:ns-resize}',
         '.hatch{position:absolute;left:0;right:0;background:repeating-linear-gradient(135deg,var(--busy) 0 6px,transparent 6px 12px);opacity:.9;pointer-events:none}',
-        '.usual{position:absolute;left:0;right:0;border-top:2px dotted var(--accent);border-bottom:2px dotted var(--accent);opacity:.7;font-size:11px;color:var(--accent);padding:0 6px;box-sizing:border-box;pointer-events:none}',
+        '.col > .usual{position:absolute;left:0;right:0;border-top:2px dotted var(--accent);border-bottom:2px dotted var(--accent);opacity:.7;font-size:11px;color:var(--accent);padding:0 6px;box-sizing:border-box;pointer-events:none}',
         '.now{position:absolute;left:0;right:0;border-top:2px solid #e5333f;pointer-events:none;z-index:2;filter:drop-shadow(0 1px 2px rgba(0,0,0,.35))}',
         '.now::before{content:"";position:absolute;left:0;top:-5px;width:8px;height:8px;border-radius:50%;background:#e5333f}',
         '.allday{display:flex;flex-wrap:wrap;gap:6px;padding:6px 8px;border-bottom:1px solid var(--line);min-height:20px;border-left:1px solid var(--line)}',
@@ -149,35 +152,45 @@
         var q = 'agenda?view=' + state.view + '&date=' + (state.date || '') + (state.showHidden ? '&show_hidden=1' : '') +
             (state.selectedCals ? '&calendars=' + encodeURIComponent(state.selectedCals.length ? state.selectedCals.join(',') : '-') : '');
         if (coalesce && state.loading && state.loadQuery === q) return state.loadRequest;
-        var seq = ++state.loadSeq;
+        var seq = ++state.loadSeq, request = { view: state.view, date: state.date };
         var cached = dataCache[q];
         state.loading = true; state.loadQuery = q;
-        state.loadTarget = state.date || (cached && cached.anchor) || null;
         state.error = '';
-        if (cached) {
-            if (!state.date && state.data && state.data.anchor !== cached.anchor) state.focusNow = true;
-            state.data = cached;
-            state.shownDate = cached.anchor || state.shownDate;
-        }
+        if (!coalesce) state.failed = null;   // the owner's own action replaces an earlier failure; the poll leaves it on screen
+        if (cached) show(cached, request);
         /* Paint the requested date and pending state before the network can answer. This is deliberately
          * separate from the response repaint: the toolbar stays mounted, so pointer presses and focus survive. */
         render();
         state.loadRequest = api(q).then(function (d) {
             if (state.disposed || seq !== state.loadSeq) return;
             dataCache[q] = d;
-            if (!state.date && state.data && state.data.anchor !== d.anchor) state.focusNow = true;
-            state.data = d; state.shownDate = d.anchor || state.shownDate; state.error = '';
-            state.loading = false; state.loadTarget = null;
-            /* A null date follows the host's current day/week across midnight. Only arrows pin a date. */
+            show(d, request); state.error = '';
+            if (state.failed && state.failed.view === request.view && state.failed.date === request.date) state.failed = null;
+            state.loading = false;
             render();
         }).catch(function (e) {
             if (state.disposed || seq !== state.loadSeq) return;
-            state.loading = false; state.loadTarget = null; state.error = e.message || String(e);
-            /* A failed request never advances the logical calendar. Return the header to what is actually shown. */
-            if (state.shownDate) state.date = state.shownDate;
+            state.loading = false;
+            /* A failed request never advances the calendar: the request returns to what the body shows (a null date keeps
+             * following today), and the failed one is kept for Retry. A background refresh does not hide an earlier failure. */
+            if (!(coalesce && state.failed)) state.failed = { view: request.view, date: request.date, anchor: request.date || state.shownDate, message: e.message || String(e) };
+            if (state.shownRequest) { state.view = state.shownRequest.view; state.date = state.shownRequest.date; }
             render();
         });
         return state.loadRequest;
+    }
+
+    function show(d, request) {   // the body now holds d, the answer to request
+        /* A null date follows the host's current day/week across midnight. Only arrows pin a date. */
+        if (!request.date && state.data && state.data.anchor !== d.anchor) state.focusNow = true;
+        state.data = d; state.shownDate = d.anchor || state.shownDate;
+        state.shownView = request.view; state.shownRequest = request;
+    }
+
+    function retry() {   // repeat exactly what failed, not what happens to be shown
+        var f = state.failed;
+        if (f) { state.view = f.view; state.date = f.date; state.focusNow = true; }
+        load();
     }
 
     /* ---------- rendering ---------- */
@@ -189,10 +202,30 @@
         return WEEKDAYS[d.getUTCDay()] + ', ' + d.getUTCDate() + ' ' + MONTHS[d.getUTCMonth()];
     }
 
-    function weekTitle(d, dateStr) {
-        var days = d && d.days && d.days.length ? d.days : [{ date: dateStr || localDate(ownerNow()) }];
-        var first = parseISO(days[0].date), last = parseISO(days[days.length - 1].date);
-        return 'Неделя · ' + first.getUTCDate() + '–' + last.getUTCDate() + ' ' + MONTHS[last.getUTCMonth()];
+    function weekRange(dateStr) {   // Monday to Sunday, as the skill's week_bounds
+        var back = (parseISO(dateStr).getUTCDay() + 6) % 7, first = addDays(dateStr, -back);
+        return [first, addDays(first, 6)];
+    }
+
+    function rangeText(range) {   // the month and the year are named wherever the two ends differ
+        var a = parseISO(range[0]), b = parseISO(range[1]);
+        var tail = function (d, year) { return d.getUTCDate() + ' ' + MONTHS[d.getUTCMonth()] + (year ? ' ' + d.getUTCFullYear() : ''); };
+        if (a.getUTCFullYear() !== b.getUTCFullYear()) return tail(a, true) + ' – ' + tail(b, true);
+        if (a.getUTCMonth() !== b.getUTCMonth()) return tail(a) + ' – ' + tail(b);
+        return a.getUTCDate() + '–' + tail(b);
+    }
+
+    /* What a request covers, in words: the body's own days when they are the answer, else the range the skill will return. */
+    function periodOf(view, dateStr, days) {
+        if (view !== 'week') return { title: humanDate(dateStr), label: humanDate(dateStr) };
+        var range = days && days.length ? [days[0].date, days[days.length - 1].date] : weekRange(dateStr || localDate(ownerNow()));
+        return { title: 'Неделя · ' + rangeText(range), label: 'неделя ' + rangeText(range) };
+    }
+    function shownPeriod() { return periodOf(state.shownView || state.view, state.shownDate, state.data && state.data.days); }
+    function requestedPeriod() {
+        var date = state.date || state.shownDate || localDate(ownerNow());
+        var r = state.shownRequest, settled = !state.loading && state.data && r && r.view === state.view && r.date === state.date;
+        return settled ? shownPeriod() : periodOf(state.view, date, null);
     }
 
     function buildToolbar() {
@@ -200,8 +233,9 @@
         var previous = el('button', { type: 'button', text: 'Назад', title: 'Предыдущий день', 'aria-label': 'Предыдущий день', onclick: function () { shift(-1); } });
         var today = el('button', { type: 'button', text: 'Сегодня', onclick: function () { state.date = null; state.focusNow = true; load(); } });
         var next = el('button', { type: 'button', text: 'Вперёд', title: 'Следующий день', 'aria-label': 'Следующий день', onclick: function () { shift(1); } });
-        var day = el('button', { type: 'button', text: 'День', onclick: function () { state.view = 'day'; state.date = state.date || state.shownDate; state.focusNow = true; load(); } });
-        var week = el('button', { type: 'button', text: 'Неделя', onclick: function () { state.view = 'week'; state.date = state.date || state.shownDate; state.focusNow = true; load(); } });
+        /* Switching the view keeps the request's date as it is: a null date still follows today after midnight. */
+        var day = el('button', { type: 'button', text: 'День', onclick: function () { state.view = 'day'; state.focusNow = true; load(); } });
+        var week = el('button', { type: 'button', text: 'Неделя', onclick: function () { state.view = 'week'; state.focusNow = true; load(); } });
         var event = el('button', { type: 'button', text: '+ Событие', class: 'primary', onclick: function () { openCard(null, defaultStart()); } });
         var service = el('button', { type: 'button', text: 'Служебные', title: 'Показать служебные события и «обычно»', onclick: function () { state.showHidden = !state.showHidden; load(); } });
         var accounts = el('button', { type: 'button', text: 'Аккаунты', 'aria-expanded': 'false', title: 'Подключённые аккаунты', onclick: accToggle });
@@ -223,9 +257,7 @@
     function updateToolbar(d) {
         var t = state.toolbar;
         if (!t) return;
-        var shown = state.shownDate || (d && d.anchor) || localDate(ownerNow());
-        var requested = state.date || shown;
-        t.title.textContent = state.view === 'week' ? weekTitle(d, requested) : humanDate(requested);
+        t.title.textContent = requestedPeriod().title;   // the request; after a failure that is again what the body shows
         var previousLabel = state.view === 'week' ? 'Предыдущая неделя' : 'Предыдущий день';
         var nextLabel = state.view === 'week' ? 'Следующая неделя' : 'Следующий день';
         t.previous.textContent = 'Назад'; t.previous.title = previousLabel; t.previous.setAttribute('aria-label', previousLabel);
@@ -262,7 +294,7 @@
     }
 
     function renderMobileAgenda(d) {
-        var week = state.view === 'week', heading = week ? 'Повестка недели' : 'Повестка дня';
+        var week = state.shownView === 'week', heading = week ? 'Повестка недели' : 'Повестка дня';
         var box = el('section', { class: 'mobile-agenda', 'aria-label': heading }, [el('h3', { text: heading })]);
         var rows = (d.events || []).slice();
         (d.hidden_busy || []).forEach(function (e) { rows.push({ start: e.start, end: e.end, all_day: e.all_day, title: 'Занято (служебное)', _mobileKind: 'hidden' }); });
@@ -316,7 +348,13 @@
         if (state.panel) body.appendChild(renderPanel());
         if (acc.open) body.appendChild(accNode());
         accRestoreFocus(kept);
-        if (state.loading && d && state.loadTarget && state.loadTarget !== state.shownDate) body.appendChild(el('div', { class: 'status pending', role: 'status', text: 'Показан ' + humanDate(state.shownDate) + ' · загружается ' + humanDate(state.loadTarget) + '…' }));
+        /* The body keeps the last answer until the next one arrives; it is named whenever it is not what was asked for. */
+        var shownLabel = d ? shownPeriod().label : '';
+        if (state.loading && d && requestedPeriod().label !== shownLabel) body.appendChild(el('div', { class: 'status pending', role: 'status', text: 'На экране ' + shownLabel + ' · загружается ' + requestedPeriod().label + '…' }));
+        var failed = state.failed, failedLabel = failed ? periodOf(failed.view, failed.anchor, null).label : '';
+        if (failed) body.appendChild(el('div', { class: 'msg err', role: 'alert' }, [
+            el('span', { text: (d && failedLabel !== shownLabel ? 'Не загружено: ' + failedLabel + '; на экране ' + shownLabel + '. ' : '') + 'Ошибка: ' + failed.message }),
+            el('button', { type: 'button', text: 'Повторить', onclick: retry })]));
         if (state.error) body.appendChild(el('div', { class: 'msg err', role: 'alert' }, [el('span', { text: 'Ошибка: ' + state.error }), el('button', { type: 'button', text: 'Повторить', onclick: function () { load(); } })]));
         if (state.notice) body.appendChild(el('div', { class: 'status', role: 'status', text: state.notice }));
         body.appendChild(draftErrorView());
@@ -340,7 +378,7 @@
                 scroller.scrollTop = state.gridScrollTop;
                 state.focusNow = false;
             }
-            if (state.view === 'day') body.appendChild(renderList(d));
+            if (state.shownView !== 'week') body.appendChild(renderList(d));
         }
         state.zooming = false;
         var status = renderStatus(d);
@@ -369,7 +407,7 @@
 
     function renderGrid(d) {
         var days = d.days;
-        var grid = el('div', { class: 'grid' + (state.view === 'week' ? ' week' : ''), style: '--hour-px:' + HOUR_PX + 'px' });
+        var grid = el('div', { class: 'grid' + (state.shownView === 'week' ? ' week' : ''), style: '--hour-px:' + HOUR_PX + 'px' });
         grid.appendChild(el('div', { class: 'corner' }));
         var todayStr = localDate(ownerNow());
         days.forEach(function (day) {
@@ -486,6 +524,8 @@
         if (d.sync.conflict) parts.push('конфликтов: ' + d.sync.conflict);
         if (d.sync.failed) parts.push('не отправлено: ' + d.sync.failed);
         if (d.sync.uncertain) parts.push('outcomes unconfirmed: ' + d.sync.uncertain);
+        var companion = d.sync.companion;   // the background worker: quiet while alive, named when stale or unknown
+        if (companion !== 'alive') parts.push('фон: ' + ({ stale: 'давно не отвечал', unknown: 'неизвестно' }[companion || 'unknown'] || companion));
         (d.calendars || []).forEach(function (c) { if (c.sync_warning) parts.push(c.name + ': ' + c.sync_warning); });
         if (!parts.length) return null;
         return el('div', { class: 'status', role: 'status', text: parts.join(' · ') });
@@ -809,7 +849,6 @@
     function shift(n) {
         var base = state.date || state.shownDate || localDate(ownerNow());
         state.date = addDays(base, state.view === 'week' ? 7 * n : n);
-        state.loadTarget = state.date;
         state.focusNow = true;
         load();
     }
