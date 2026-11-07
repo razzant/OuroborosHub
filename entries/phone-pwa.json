@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "name": "phone-pwa",
+  "title": "Phone access",
+  "description": "Authenticated phone PWA access to the existing Ouroboros UI, with a real ten-minute QR widget, repeated browser/app pairing, revocable device sessions and a host-owned Cloudflare tunnel companion. Experimental; full owner access and changing Quick Tunnel addresses are explicit.",
+  "version": "0.2.0",
+  "type": "extension",
+  "category": [
+    "computer",
+    "ouroboros"
+  ],
+  "owner": "josephsteuerjr",
+  "source": {
+    "kind": "hosted",
+    "path": "skills/phone-pwa"
+  },
+  "digest": "15411afe520bd36c632bb75ccb20b02ca345ed8928130eeb8c15deca7ef0afa7",
+  "install_specs": [
+    "aiohttp==3.13.2",
+    "qrcode==8.2"
+  ],
+  "withdrawn": null
+}
