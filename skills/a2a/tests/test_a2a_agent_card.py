@@ -140,7 +140,10 @@ def test_capability_first_card_with_live_tools():
     assert card["protocolVersion"] == "0.3.0"
     assert card["preferredTransport"] == "JSONRPC"
     assert card["additionalInterfaces"] and card["additionalInterfaces"][0]["transport"] == "JSONRPC"
-    assert card["version"] == "1.5.0"
+    # The card speaks the skill's own version (SKILL.md frontmatter), never a stale copy.
+    skill_md = (pathlib.Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8")
+    assert card["version"] == next(line.split(":", 1)[1].strip() for line in skill_md.splitlines()
+                                   if line.startswith("version:"))
 
 
 def test_env_override_beats_everything():
