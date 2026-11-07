@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.12.0
+version: 1.12.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -130,6 +130,13 @@ tools:
   - name: slack_api
     effect: write
     target: []
+    sends:
+      when:
+        path: [chat.postMessage, chat.update, chat.postEphemeral, chat.scheduleMessage, chat.meMessage]
+      target: body.channel
+      conversation: body.channel
+      thread: body.thread_ts
+      text: body.text
     description: Call an actual Slack Web API method with a model-selected read or durable write effect.
   - name: slack_receipt
     effect: read
