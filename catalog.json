@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/1d29401506099cb86c6ef814ef96d0edee6913cb",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/040072e080997d892925f63505979b1581ee5116",
   "schema_version": 1,
   "skills": [
     {
@@ -807,13 +807,13 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "4fa73a81facccd2b68f5392afb2f531bfd88772abff7fc240cbf240d56c13201",
-          "size": 24132
+          "sha256": "1f9d874f59432be179353d28783301e25d6e1a2d98477c8da6dd4c927051c600",
+          "size": 25649
         },
         {
           "path": "lib/connection.mjs",
-          "sha256": "4511ce6c4ab2c8586b3ab434668f85dceb1271b1149c627a22ee9af12fe9f674",
-          "size": 21275
+          "sha256": "6b6cfaf510ee1449624bed4681d82f64451a183d7b447b7718f503c6f2647e20",
+          "size": 25181
         },
         {
           "path": "lib/guard.mjs",
@@ -842,8 +842,8 @@
         },
         {
           "path": "lib/server.mjs",
-          "sha256": "9ca56a7b2b9f9157760b254c2fc0d5a9a9e20d4047c30968d2c29ceea5870b71",
-          "size": 36962
+          "sha256": "5d4d78fadfa9a86443d2fad5036c93d000dc7ba7acbae4c523b62a65935e01a5",
+          "size": 39629
         },
         {
           "path": "patches/LICENSE-Apache-2.0.txt",
@@ -886,7 +886,7 @@
       "slug": "chrome_browser",
       "title": "Chrome (shared tab)",
       "type": "script",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "when_to_use": "The owner wants work done in their own signed-in Chrome - in a tab they share and in background tabs for the same work - while they keep using the browser, and takes the page over by saying so when a login, a code or a decision is theirs."
     },
     {
