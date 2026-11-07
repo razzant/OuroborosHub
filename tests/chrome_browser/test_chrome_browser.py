@@ -12,6 +12,8 @@ fail and say what to install. Nothing here skips.
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -54,3 +56,42 @@ def test_node_file_passes_without_skips(name):
     # A skipped, todo or cancelled test is not a pass: this suite never skips.
     assert counts['pass'] == counts['tests'] and not (counts['fail'] or counts['cancelled'] or counts['skipped'] or counts['todo']), \
         f'{name}: {counts}{shown}'
+
+
+@pytest.mark.parametrize('alternate', [False, True])
+def test_setup_fallback_projects_manifest(tmp_path, alternate):
+    """The old-host export and new-host declaration describe the same server."""
+    import yaml
+
+    source = HERE.parents[1] / 'skills' / 'chrome_browser'
+    skill = tmp_path / 'chrome_browser'
+    shutil.copytree(source, skill)
+    manifest = skill / 'SKILL.md'
+    text = manifest.read_text()
+    data = yaml.safe_load(text.split('---', 2)[1])
+    declaration = data['mcp_servers'][0]
+    if alternate:
+        changed = dict(declaration, id='another_chrome', title='Changed title',
+                       entry='scripts/alternate.mjs', browser_policy=False)
+        text = text.replace(json.dumps(data['mcp_servers'], separators=(',', ':')),
+                            json.dumps([changed], separators=(',', ':')))
+        manifest.write_text(text)
+        declaration = changed
+    node = shutil.which('node')
+    assert node, 'Node is required'
+    env = dict(os.environ, OUROBOROS_CHROME_NODE_MODULES=str(tmp_path / 'missing'))
+    run = subprocess.run([node, str(skill / 'scripts' / 'setup.mjs'), 'status'],
+                         cwd=skill, env=env, capture_output=True, text=True, timeout=30)
+    # No dependencies were installed in this isolated fixture: useful status, not readiness.
+    assert run.returncode == 1, run.stderr
+    report = json.loads(run.stdout)
+    assert report['ready'] is False
+    exported = report['mcp_import_document']['mcpServers']
+    assert set(exported) == {declaration['id']}
+    server = exported[declaration['id']]
+    assert server['args'] == [str(skill / declaration['entry'])]
+    assert server['task_session'] == declaration['task_session']
+    assert server['browser_policy'] == declaration['browser_policy']
+    assert report['mcp_server_entry']['name'] == declaration['title']
+    assert 'Connect tools' in report['connection']['preferred']
+    assert report['owner_steps'], 'Keep the older-host consumer field'

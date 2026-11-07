@@ -2,22 +2,23 @@
 name: chrome_browser
 title: Chrome (shared tab)
 description: Work in the owner's own Chrome through Microsoft's official Playwright Extension - the tab they share plus background tabs for the same work, trusted input in background tabs, and handback by plain conversation.
-version: 0.2.0
+version: 0.3.0
 type: script
 runtime: node
+mcp_servers: [{"id":"chrome_browser","title":"Chrome (shared tab)","runtime":"node","entry":"scripts/server.mjs","task_session":true,"browser_policy":true}]
 os: [darwin, linux, win32]
 license: MIT AND Apache-2.0
 permissions: [net, fs, subprocess]
 when_to_use: The owner wants work done in their own signed-in Chrome - in a tab they share and in background tabs for the same work - while they keep using the browser, and takes the page over by saying so when a login, a code or a decision is theirs.
 model_experience:
-  what_model_sees: Once the owner has imported this skill's server under Settings → Advanced → MCP Servers and enabled it, 25 tools named mcp_chrome_browser__*. Two are this skill's (browser_connect, browser_disconnect) and 23 are the official Playwright MCP 0.0.84 tools (browser_snapshot, browser_click, browser_type, browser_fill_form, browser_tabs, browser_take_screenshot and others). Action results are short Playwright markdown with the Playwright code that ran, the page address and title when they changed, and any dialog. browser_snapshot returns the page's accessibility snapshot inline, and screenshots arrive as image content. Installing the skill alone adds no tool.
+  what_model_sees: Once the owner chooses Connect tools on this skill (or asks Ouroboros to connect it), 25 tools named mcp_chrome_browser__*. Two are this skill's (browser_connect, browser_disconnect) and 23 are the official Playwright MCP 0.0.84 tools (browser_snapshot, browser_click, browser_type, browser_fill_form, browser_tabs, browser_take_screenshot and others). Action results are short Playwright markdown with the Playwright code that ran, the page address and title when they changed, and any dialog. browser_snapshot returns the page's accessibility snapshot inline, and screenshots arrive as image content. Installing the skill alone adds no tool.
   token_effect: About 25 tool schemas wherever the host loads this server's tools. Each snapshot costs what the page's accessibility tree contains; screenshots cost an image.
 timeout_sec: 60
 scripts:
   - name: setup.mjs
-    description: "status - checks the pinned dependency and patch, prints the document for Settings → Import mcp.json and the owner's steps. Writes nothing, starts nothing."
+    description: "status - checks the pinned dependency and patch and describes Connect tools. Also prints the manual MCP import fallback for older hosts. Writes nothing, starts nothing."
   - name: server.mjs
-    description: The MCP stdio server. The host's task MCP holder starts it from the imported Settings entry; it is not run with skill_exec.
+    description: The MCP stdio server. The host's task MCP holder starts it from the connected Settings entry; it is not run with skill_exec.
 install_specs:
   - kind: npm
     package: "@playwright/mcp@0.0.84"
@@ -48,11 +49,31 @@ The skill uses Microsoft's unchanged **Playwright Extension** and the official
    the Chrome Web Store:
    <https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm>.
    This skill was tested with version 0.4.0 (relay protocol 2).
-2. Enable the skill. Ouroboros installs its one declared npm dependency,
-   `@playwright/mcp@0.0.84`, which brings exactly `playwright-core` and `playwright`
-   1.65.0-alpha-2026-10-30. npm must be on PATH. No browser is downloaded.
-3. Run `setup.mjs status` (with `skill_exec`). It checks every pinned file and the
-   patch, and prints `mcp_import_document`, ready to paste into Ouroboros:
+2. Enable the skill and approve its requested permissions. Ouroboros installs the
+   pinned dependency; hosts with automatic npm preparation also supply Node/npm if
+   absent. This downloads no browser. A dependency failure is not a connected skill.
+3. Choose **Connect tools** on the skill card, or ask Ouroboros **“Connect Chrome's
+   tools”**. Confirm the displayed changes. Ouroboros configures the server and lists
+   its tools; you do not copy JSON, run commands or edit MCP switches. If MCP was off,
+   the confirmation names other saved servers that would also start. A conflicting
+   existing server ID is reported, never silently replaced.
+4. When a task needs Chrome, open its one-time link in the intended profile, select
+   the tab and choose **Allow & select**. This approval is separate from installing
+   the tools and remains necessary for each new server session.
+
+The saved connection follows the installed skill and runtime paths. Disabling or
+removing the skill leaves its MCP settings row but makes the bound tools unavailable;
+turn that row off under Settings → Advanced → MCP Servers if you want it off too.
+An accepted skill update can reuse the connection; an unaccepted update cannot run.
+Connect tools needs a host that supports the `mcp_servers` manifest declaration.
+Older hosts may install this skill without offering that action; they need npm on
+PATH and use the manual fallback below. Do not claim the browser is connected from a dependency or catalog
+check alone.
+
+### Older hosts: manual fallback
+
+Ask Ouroboros to run `setup.mjs status` (with `skill_exec`). It checks the pinned
+files and patch, and prints `mcp_import_document`, derived from this manifest:
 
    ```json
    {"mcpServers": {"chrome_browser": {"type": "stdio",
@@ -67,15 +88,15 @@ The skill uses Microsoft's unchanged **Playwright Extension** and the official
    `"ready": true` from `setup.mjs status` covers only the pinned dependency and the
    patch; whether the host runs the server with both features shows when
    `browser_connect` is called.
-4. **Import.** In **Settings → Advanced → MCP Servers** choose **Import mcp.json**, paste
+1. **Import.** In **Settings → Advanced → MCP Servers** choose **Import mcp.json**, paste
    the whole document and choose **Preview**. It reads `Add (disabled)` and `Server ID
    chrome_browser`, and says what both flags mean. Choose **Apply 1 to draft**: nothing is
    saved or started yet. If it says `Not imported: browser_policy, task_session`, this
    Ouroboros cannot run the server yet: stop and report that sentence. `mcp_server_entry`
    in the same report is one saved settings row, for a tool that writes settings itself;
    Import refuses that shape.
-5. **Enable.** The new server is off. Turn on its **Enabled** box and **Enable MCP client**.
-6. **Save.** Choose **Save Settings**. Ouroboros lists the tools through a short-lived
+2. **Enable.** The new server is off. Turn on its **Enabled** box and **Enable MCP client**.
+3. **Save.** Choose **Save Settings**. Ouroboros lists the tools through a short-lived
    server process that connects to no browser. The card may still say **Not listed yet**
    after that background listing finishes: choose **Refresh saved catalog** or reload
    Settings to see the 25 tools. Keep the Server ID: it names every tool. The display

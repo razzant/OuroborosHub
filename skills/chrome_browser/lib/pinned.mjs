@@ -96,7 +96,7 @@ function setupMessage(root, problems) {
   const allMissing = problems.length > 0 && problems.every((p) => p.code === 'missing');
   const want = `@playwright/mcp ${PINS.npm['@playwright/mcp'].version} with playwright-core ${PINS.npm['playwright-core'].version}`;
   if (allMissing)
-    return `chrome_browser needs ${want} in ${root}. They are installed when the skill is enabled (Ouroboros runs npm for its declared dependency; npm must be on PATH). Nothing was started.`;
+    return `chrome_browser needs ${want} in ${root}. They are installed when the skill is enabled. Re-enable the skill to prepare its declared dependency. Supporting Ouroboros hosts also prepare Node/npm if absent; older hosts need npm on PATH. Nothing was started.`;
   return `chrome_browser found a different Playwright than it was written for in ${root} (${describeProblems(problems)}). It needs exactly ${want}; reinstall the skill's dependencies. Nothing was started.`;
 }
 
