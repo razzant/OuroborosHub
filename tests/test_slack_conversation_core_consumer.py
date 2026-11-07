@@ -128,7 +128,7 @@ def _drive(root: Path, scenario: str) -> dict:
     data, repo = root / "data", root / "repo"
     ChronicleStore(data).ensure_activated()  # as on a running install: rows written from now on carry their authors
     places.connect_place(data, connector="slack-bridge", provider="slack", account_id="T1", conversation_id="",
-                         wakes=["direct_message", "reply_to_me"])
+                         wakes=["direct_message", "my_thread"])
     presence_admission.focus_enabled = lambda _root: True
     presence_admission.focus_allowance = lambda _root: {"status": "available", "remaining_usd": 2, "settled_usd": 1}
     presence_context._own_work_section = lambda *_args: ""

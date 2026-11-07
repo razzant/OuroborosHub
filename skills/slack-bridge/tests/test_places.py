@@ -132,11 +132,11 @@ def test_place_declares_new_root_signal_as_opt_in_beside_every_reported_fact(tmp
     signal = next(fact for fact in place["facts"] if isinstance(fact, dict) and fact.get("id") == NEW_ROOT_SIGNAL)
     assert set(signal) == {"id", "label"} and re.fullmatch(r"signal\.[a-z0-9_-]{1,40}", signal["id"])
     assert signal["label"].strip() and len(signal["label"]) <= 120
-    # Opt-in: the suggested wakes are unchanged and never include the signal.
-    assert place["wakes"] == ["direct_message", "group_dm", "mention", "my_thread", "reply_to_me"]
-    # The place sheet offers only declared facts, so each fact this bridge reports stays selectable.
-    assert set(ids) == {"any_message", "direct_message", "group_dm", "mention", "my_thread", "reply_to_me",
-                        "from_bot", NEW_ROOT_SIGNAL}
+    # Opt-in: the suggested wakes never include the signal.
+    assert place["wakes"] == ["direct_message", "group_dm", "mention", "my_thread"]
+    # The place sheet offers only declared facts, so each fact this bridge reports stays selectable, and a fact it
+    # never reports (a Slack thread names no message a reply answers, so no reply_to_me) is not offered.
+    assert set(ids) == {"any_message", "direct_message", "group_dm", "mention", "my_thread", "from_bot", NEW_ROOT_SIGNAL}
     # Its settings door names the section whose form holds the channel list.
     api = _Api(tmp_path)
     _load_plugin().register(api)
@@ -223,7 +223,7 @@ def test_slack_addressing_is_structured_and_legacy_payload_is_unchanged():
         "self_user_id": "BOT", "mentioned_user_ids": ["BOT"], "parent_user_id": "BOT", "actor_is_bot": True,
     })
     event = slack_presence_event(item, places=True)
-    assert set(event["facts"]) == {"any_message", "group_dm", "mention", "reply_to_me", "my_thread", "from_bot"}
+    assert set(event["facts"]) == {"any_message", "group_dm", "mention", "my_thread", "from_bot"}
     assert "facts" not in slack_presence_event(item)
     ordinary = dataclasses.replace(item, structured={}, thread_ts="", subtype="", channel_type="channel", text="mention BOT please")
     assert slack_presence_event(ordinary, places=True)["facts"] == ["any_message"]
@@ -232,6 +232,38 @@ def test_slack_addressing_is_structured_and_legacy_payload_is_unchanged():
     assert slack_presence_event(dataclasses.replace(root, channel_type="im"), places=True)["facts"] == ["any_message", "direct_message", "signal.new_root"]
     deleted = dataclasses.replace(ordinary, channel_type="im", subtype="message_deleted")
     assert slack_presence_event(deleted, places=True)["facts"] == []
+
+
+def _thread_reply(tmp_path, text, *, parent, history=()):
+    """One person's reply in a channel thread through the real parser and store, with its captured thread."""
+    payload = {"type": "events_api", "envelope_id": "env-reply", "payload": {"team_id": "T1", "event_id": "Ev-reply",
+               "event": {"type": "message", "user": "U_OWNER", "channel": "C1", "channel_type": "channel",
+                         "ts": "12.0", "thread_ts": "10.0", "parent_user_id": parent, "text": text}}}
+    store = BridgeStore(tmp_path)
+    store.ingest_envelope(payload, parse_socket_envelope(payload, bot_user_id="U_BOT"))
+    thread = {"status": "available", "data": {"messages": [*history, {"ts": "12.0", "user": "U_OWNER", "text": text}]}}
+    return dataclasses.replace(store.claim_inbox(), provider_context={"thread": thread})
+
+
+@pytest.mark.parametrize("parent,history,expected", [
+    # I1 (06.11): in a thread Ouroboros started, its owner wrote to a colleague. Thread membership is the only
+    # relation Slack states; no fact says the message answers the bot.
+    ("U_BOT", (), ["any_message", "my_thread"]),
+    # The bot's earlier words in someone else's thread are the same relation, and only that.
+    ("U_ROOT", ({"ts": "10.0", "user": "U_ROOT", "text": "root"}, {"ts": "11.0", "user": "U_BOT", "text": "mine"}),
+     ["any_message", "my_thread"]),
+    # A thread the bot neither started nor wrote in carries no relation fact.
+    ("U_ROOT", ({"ts": "10.0", "user": "U_ROOT", "text": "root"},), ["any_message"]),
+])
+def test_a_reply_in_a_bot_thread_is_my_thread_and_never_a_reply_to_me(tmp_path, parent, history, expected):
+    item = _thread_reply(tmp_path, "<@U_COLLEAGUE> привет! Давай обновим мой эксперимент?", parent=parent, history=history)
+    event = slack_presence_event(item, places=True)
+    assert event["facts"] == expected and "reply_to_me" not in event["facts"]
+    # The bot is not mentioned: the occurrence names someone else, and the raw provider facts keep saying so.
+    assert event["message"]["provider_facts"]["mentioned_user_ids"] == ["U_COLLEAGUE"]
+    assert event["message"]["provider_facts"]["parent_user_id"] == parent
+    mentioned = dataclasses.replace(item, structured={**item.structured, "mentioned_user_ids": ["U_BOT", "U_COLLEAGUE"]})
+    assert slack_presence_event(mentioned, places=True)["facts"] == [*expected[:1], "mention", *expected[1:]]
 
 
 @pytest.mark.parametrize("marker", ["posted_via_app", "actor_is_bot"])  # the marker's 1.11.1 and earlier names

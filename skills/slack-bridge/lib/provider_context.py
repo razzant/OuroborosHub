@@ -9,7 +9,13 @@ from typing import Any, Awaitable, Callable, Mapping
 import httpx
 
 from .events import REACTION_EVENTS, provider_facts
+from .people import NAME_MAX_AGE_SEC, known_names, person_name, remember_names
 from .slack_api import SlackApiError
+
+# One event's people (its mentions and its thread's authors) are read with users.info a few at a time, within one
+# provider-I/O budget; a person still unread when it ends keeps no name.
+_NAME_READS = 4
+_NAME_BUDGET_SEC = 10.0
 
 
 def lookup_error(exc: Exception) -> dict[str, Any]:
@@ -41,7 +47,9 @@ async def observe(source: str, call: Callable[[], Awaitable[dict[str, Any]]]) ->
 
 
 async def capture_context(slack: Any, item: Any, workspace_name: str,
-                          retained_target: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                          retained_target: Mapping[str, Any] | None = None, *,
+                          names: Any = None) -> dict[str, Any]:
+    """``names`` is the bridge store whose credential-scoped observations name this event's people first."""
     lookups = [
         observe("users.info", lambda: slack.user_info(item.actor_user_id)),
         observe("conversations.info", lambda: slack.conversation_info(item.channel_id)),
@@ -60,7 +68,97 @@ async def capture_context(slack: Any, item: Any, workspace_name: str,
     if reaction:
         snapshot["reaction_target"] = results[2]
         _flat_chat_target(snapshot, item)
+    people = _named_people(item, snapshot)
+    if people:
+        snapshot["people"] = await capture_people(slack, people, names=names,
+                                                  seen={item.actor_user_id: snapshot["user"]})
     return snapshot
+
+
+def _named_people(item: Any, snapshot: Mapping[str, Any]) -> list[str]:
+    """The Slack user ids this event names: its message's explicit mentions, then its captured thread's authors."""
+    ids = [str(user_id) for user_id in (item.structured or {}).get("mentioned_user_ids") or []]
+    data = (snapshot.get("thread") or {}).get("data")
+    rows = data.get("messages") if isinstance(data, Mapping) else None
+    for row in rows if isinstance(rows, list) else []:
+        if isinstance(row, Mapping) and isinstance(row.get("user"), str) and row["user"].strip():
+            ids.append(row["user"].strip())
+    return list(dict.fromkeys(user_id for user_id in ids if user_id))
+
+
+async def capture_people(slack: Any, user_ids: list[str], *, names: Any = None,
+                         seen: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    """Name each person, reading Slack at most once per id: this capture's own users.info lookup of them (``seen``),
+    else a name observed under this credential within ``NAME_MAX_AGE_SEC``, else one users.info read. A failed read
+    keeps an older observation when there is one (``refresh_error`` says why it is not newer); otherwise the name
+    stays None beside the error. Every name is dated and names its source; users.info reads are kept for later
+    events (``people.remember_names``)."""
+    now = datetime.now(timezone.utc)
+    token = str(getattr(slack, "bot_token", "") or "")
+    cached = known_names(names, token, user_ids) if names is not None and token else {}
+    observed = {user_id: dict(observation) for user_id, observation in (seen or {}).items() if user_id in user_ids}
+    current = {user_id for user_id, entry in cached.items()
+               if user_id not in observed and 0 <= now.timestamp() - entry["observed_at"] <= NAME_MAX_AGE_SEC}
+    observed.update(await _read_users(slack, [user_id for user_id in user_ids
+                                              if user_id not in observed and user_id not in current], now))
+    people: dict[str, dict[str, Any]] = {}
+    read: dict[str, dict[str, Any]] = {}
+    for user_id in user_ids:
+        observation = observed.get(user_id)
+        kept = {**cached[user_id], "observed_at": _iso(cached[user_id]["observed_at"])} if user_id in cached else None
+        if observation is None:
+            people[user_id] = kept
+        elif observation.get("status") == "available":
+            people[user_id] = read[user_id] = {"name": person_name(observation.get("data")), "source": "users.info",
+                                               "observed_at": observation["observed_at"]}
+        elif kept is not None:
+            people[user_id] = {**kept, "refresh_error": observation.get("error") or {}}
+        else:
+            people[user_id] = {"name": None, "source": "users.info",
+                               "observed_at": observation.get("observed_at") or now.isoformat(),
+                               "error": observation.get("error") or {}}
+    if names is not None and token and read:
+        remember_names(names, token, {user_id: {**entry, "observed_at": _epoch(entry["observed_at"])}
+                                      for user_id, entry in read.items()})
+    return {"observed_at": now.isoformat(), "users": people}
+
+
+async def _read_users(slack: Any, user_ids: list[str], now: datetime) -> dict[str, dict[str, Any]]:
+    """One users.info read per id, a few at a time, within the shared budget; an unfinished read is a timeout.
+    Once Slack limits the rate, reads still waiting are not sent and carry that refusal: later events' author
+    lookups share the method's limit."""
+    reads = asyncio.Semaphore(_NAME_READS)
+    limited: list[dict[str, Any]] = []
+
+    async def read(user_id: str) -> dict[str, Any]:
+        async with reads:
+            if limited:
+                return {**limited[0], "observed_at": datetime.now(timezone.utc).isoformat()}
+            observation = await observe("users.info", lambda: slack.user_info(user_id))
+            error = observation.get("error") or {}
+            if error.get("http_status") == 429 or error.get("code") == "ratelimited":
+                limited.append(observation)
+            return observation
+
+    tasks = {user_id: asyncio.ensure_future(read(user_id)) for user_id in user_ids}
+    try:
+        if tasks:
+            await asyncio.wait(tasks.values(), timeout=_NAME_BUDGET_SEC)
+    finally:
+        for task in tasks.values():
+            task.cancel()
+        await asyncio.gather(*tasks.values(), return_exceptions=True)
+    timeout = {"status": "unavailable", "source": "users.info", "observed_at": now.isoformat(),
+               "error": {"code": "lookup_timeout"}}
+    return {user_id: dict(timeout) if task.cancelled() else task.result() for user_id, task in tasks.items()}
+
+
+def _iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
+def _epoch(iso: str) -> float:
+    return datetime.fromisoformat(iso).timestamp()
 
 
 def _flat_chat_target(snapshot: dict[str, Any], item: Any) -> None:
@@ -185,4 +283,33 @@ def enrich_event(event: dict[str, Any], snapshot: Mapping[str, Any] | None) -> d
                 for message in data.get("messages", [])
             ]}
         event["conversation"]["thread_history"] = thread
+    people = snapshot.get("people")
+    if isinstance(people, Mapping):
+        _with_people(event, people.get("users") if isinstance(people.get("users"), Mapping) else {})
     return event
+
+
+def _with_people(event: dict[str, Any], users: Mapping[str, Any]) -> None:
+    """Name the people this event names as ``{id, name, is_self}``: the message's explicit mentions
+    (``message.mentions``, in ``mentioned_user_ids`` order) and the captured thread's authors
+    (``thread_history.authors``, in first-message order). ``name`` is None when the capture observed none;
+    ``is_self`` is true only for this bot's own known id. The provider facts stay as they are."""
+    facts = event["message"].get("provider_facts") or {}
+    own = str(facts.get("self_user_id") or "")
+
+    def person(user_id: str) -> dict[str, Any]:
+        entry = users.get(user_id) if isinstance(users.get(user_id), Mapping) else {}
+        name = entry.get("name")
+        return {"id": user_id, "name": name if isinstance(name, str) and name.strip() else None,
+                "is_self": bool(own) and user_id == own}
+
+    mentioned = [str(user_id) for user_id in facts.get("mentioned_user_ids") or [] if str(user_id)]
+    if mentioned:
+        event["message"]["mentions"] = [person(user_id) for user_id in mentioned]
+    thread = event["conversation"].get("thread_history")
+    data = thread.get("data") if isinstance(thread, dict) else None
+    rows = data.get("messages") if isinstance(data, Mapping) else None
+    authors = [row["user"].strip() for row in rows if isinstance(row, Mapping)
+               and isinstance(row.get("user"), str) and row["user"].strip()] if isinstance(rows, list) else []
+    if authors:
+        thread["authors"] = [person(user_id) for user_id in dict.fromkeys(authors)]

@@ -165,3 +165,63 @@ def test_language_update_is_durable_before_ack_but_only_original_is_claimable(tm
     assert claimed.event_id == "Ev-original"
     store.complete_inbox(claimed.row_id, claimed.lease_token)
     assert store.claim_inbox() is None
+
+
+def _thread_root(**fields):
+    """A thread root as Slack re-sends it: the 06.11 10:31:38Z shape, after a reply under it was deleted."""
+    return {
+        "type": "message", "user": "U_ROOT", "ts": "1793232132.554429", "thread_ts": "1793232132.554429",
+        "client_msg_id": "528a21fd", "team": "T_WORKSPACE",
+        "text": "Media is not being delivered in the chat.",
+        "reply_count": 27, "reply_users_count": 9, "latest_reply": "1793931322.589289",
+        "reply_users": ["U_ROOT", "U_BOT", "U_OTHER"], "is_locked": False,
+        "blocks": [{"type": "rich_text", "block_id": "PkhCE", "elements": [{"type": "rich_text_section", "elements": [
+            {"type": "text", "text": "Media is not being delivered in the chat."}]}]}],
+        "language": {"locale": "en", "is_reliable": True}, **fields,
+    }
+
+
+def _regenerated(message, block_id):
+    return {**message, "blocks": [{**message["blocks"][0], "block_id": block_id}]}
+
+
+_ROOT = _thread_root()
+_BOOKKEEPING_REVISIONS = {
+    # Deleting a reply under the root: only this bot's read and follow marks on the root changed.
+    "reply deleted": ({**_ROOT, "last_read": "1793931991.992449", "subscribed": True}, _ROOT),
+    # Slack regenerates every block_id when it re-renders an unchanged message.
+    "follow mark, regenerated blocks": ({**_ROOT, "subscribed": False}, _regenerated(_ROOT, "34EJ0")),
+    # The last reply went away: the thread's own state, the root's own thread_ts included, is gone.
+    "thread emptied": ({**_ROOT, "reply_count": 0, "reply_users_count": 0, "reply_users": [],
+                        "latest_reply": "0000000000.000000", "subscribed": False},
+                       _regenerated({key: value for key, value in _ROOT.items() if key not in {
+                           "thread_ts", "reply_count", "reply_users_count", "reply_users", "latest_reply", "is_locked"}},
+                           "OYy0")),
+    "language detector, regenerated blocks": (_ROOT, _regenerated({**_ROOT, "language": {"locale": "ru"}}, "1Pqij")),
+    "re-saved without new words": (_ROOT, _regenerated({**_ROOT, "edited": {"user": "U_ROOT", "ts": "1793891194.0"},
+                                                        "source_team": "T_WORKSPACE", "user_team": "T_WORKSPACE"}, "Yg7d")),
+}
+
+
+@pytest.mark.parametrize("case", _BOOKKEEPING_REVISIONS)
+def test_thread_bookkeeping_and_regenerated_blocks_are_not_an_edit(tmp_path, case):
+    previous, current = _BOOKKEEPING_REVISIONS[case]
+    envelope = _envelope("Ev-root-revision", current, previous=previous)
+    parsed = parse_socket_envelope(envelope, bot_user_id="U_BOT")
+    assert not parsed.accepted and parsed.reason == "message_content_unchanged"
+    store = BridgeStore(tmp_path)
+    store.ingest_envelope(envelope, parsed)
+    assert store.claim_inbox() is None and store.status()["inbox_ignored"] == 1
+
+
+@pytest.mark.parametrize("current", [
+    # The same bookkeeping beside new words, an unfurl, a deleted root (a tombstone) or a reply's own thread.
+    _regenerated({**_ROOT, "text": "Media is delivered again.", "edited": {"user": "U_ROOT", "ts": "1793891194.0"}}, "Yg7d"),
+    {**_ROOT, "attachments": [{"id": 1, "fallback": "joi.com", "from_url": "https://joi.com/chats/1"}]},
+    {**_ROOT, "subtype": "tombstone", "hidden": True, "text": "This message was deleted.", "user": "USLACKBOT"},
+    {**_ROOT, "thread_ts": "1793232000.000001"},
+])
+def test_a_root_revision_with_new_content_still_reaches_the_model(current):
+    previous = {**_ROOT, "last_read": "1793931991.992449", "subscribed": True}
+    parsed = parse_socket_envelope(_envelope("Ev-root-edit", current, previous=previous), bot_user_id="U_BOT")
+    assert parsed.accepted and parsed.event.structured["message"] == current

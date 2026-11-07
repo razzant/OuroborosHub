@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/c8d6c2aa9fdc72bf42d7943d3e34bcce80443423",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/253c9112a534728b32a884385a4fb196b7e130b8",
   "schema_version": 1,
   "skills": [
     {
@@ -2728,13 +2728,13 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "ebf41625b0b61ad4c14e442e4a1f6b9a5922fd399981faf0a9f8594336a075e4",
-          "size": 5183
+          "sha256": "1c9e6318c00a412e2c142f8fa4a041207f1ee37c2283bd1223e4d693df10df05",
+          "size": 7281
         },
         {
           "path": "SKILL.md",
-          "sha256": "dd38ef1510996b4033a8f58703ef868c6963731c55add65200466e0b8955a399",
-          "size": 58090
+          "sha256": "b25b13fc221bd34a4ed5e395417f0ffb17b091cd1165a9de690a97ff78ed40ab",
+          "size": 61226
         },
         {
           "path": "lib/__init__.py",
@@ -2743,13 +2743,13 @@
         },
         {
           "path": "lib/directory.py",
-          "sha256": "8fa8e446cec4b23e4de7ce1d2e7ad65ed2b8d2a281212d0ab89897df42df339f",
-          "size": 7815
+          "sha256": "fdc41f5d649b3c5f045a6eed6072b0322d24718282b8496adb32311e760219d3",
+          "size": 7708
         },
         {
           "path": "lib/events.py",
-          "sha256": "c206aab78f913747674e786d454947c99fd7880f8ca1d0bfe0902f1a99067d56",
-          "size": 15120
+          "sha256": "5dc4b71d580777b8659d091c7dc54fee876e7e2bbd23c389d4fe4c2ec0c150dc",
+          "size": 16172
         },
         {
           "path": "lib/host_adapter.py",
@@ -2762,14 +2762,19 @@
           "size": 3255
         },
         {
+          "path": "lib/people.py",
+          "sha256": "2b355bf33ce38aa615d56b270c145ae74488835617c6335bb37b4570277c4f17",
+          "size": 3068
+        },
+        {
           "path": "lib/presence.py",
-          "sha256": "301ed2af2a99ba4b3da6b37ef93827723ede1e5f5b30872131e6a9e32d8b787d",
-          "size": 11014
+          "sha256": "03056fe0720a57fa6b8a13f3dce064fa4f6f92ed2529ffedfaa22ca22d5e1e76",
+          "size": 11330
         },
         {
           "path": "lib/provider_context.py",
-          "sha256": "c0cabf08e4201a4247e26016f4b100a760cc8d2ecddd9d3deac24d94cf39dc1c",
-          "size": 9348
+          "sha256": "61f511da49c125673ab06373f4051df69a8bc2b24463a5f191e2d25789665cb9",
+          "size": 16789
         },
         {
           "path": "lib/read_tools.py",
@@ -2778,8 +2783,8 @@
         },
         {
           "path": "lib/runtime.py",
-          "sha256": "b166c789567701d56dfe70a3bfd0fe4eb50e2ae6edfa9c630b077605d1454468",
-          "size": 41865
+          "sha256": "f9e7e018adb304a20619e77ee291c1cb5bc9beb30850ac125f84ee420b42db36",
+          "size": 41932
         },
         {
           "path": "lib/slack_api.py",
@@ -2793,8 +2798,8 @@
         },
         {
           "path": "lib/store.py",
-          "sha256": "95cdeef0280f2657f335f933c5843d005c9af837b37999bd37e86826177c1d07",
-          "size": 65510
+          "sha256": "a24ccaf16dccd4425bab9e6bcf2a1df99f9a0e114dc6f8c5c4880ff1a80c0b83",
+          "size": 66238
         },
         {
           "path": "lib/tool_results.py",
@@ -2887,6 +2892,11 @@
           "size": 14953
         },
         {
+          "path": "tests/test_mention_names.py",
+          "sha256": "3023fb2ddac93639b46354caaf7f3f18f991300e3c94852fd1fe52457446b614",
+          "size": 13486
+        },
+        {
           "path": "tests/test_message_deletion.py",
           "sha256": "b3e686fa95591e3c9e445ac8b06ed7c885543e679f0da81fb6612d874eafe83b",
           "size": 7876
@@ -2898,18 +2908,18 @@
         },
         {
           "path": "tests/test_message_mentions.py",
-          "sha256": "2d2ff01e7ee560f858f0407e2b5e5de4b940a652e7dd2b477ed8b94b0c171382",
-          "size": 9925
+          "sha256": "0c4b508b9bde896c050fe89c75726816e63aa75208f331ee248541a7c7586042",
+          "size": 9936
         },
         {
           "path": "tests/test_message_revisions.py",
-          "sha256": "5a320cb1bb2bec8f3b114befa92b1c3f2fd0665151f0014f21513a98bc6dbdce",
-          "size": 6942
+          "sha256": "5d3f16168cfafa398324ce2bcc184f905fe7b4f05aafbf885f6e98faa64cc905",
+          "size": 10672
         },
         {
           "path": "tests/test_places.py",
-          "sha256": "197722e542d5b64b2c048941fb113cecfeb06ae2e36d8d4d611730ce6b2aaf13",
-          "size": 22737
+          "sha256": "2e0c01e5dd02236849260da3d4154fc4ec827cab546f1174e14a327319132acd",
+          "size": 25193
         },
         {
           "path": "tests/test_presence_continuation.py",
@@ -2958,8 +2968,8 @@
         },
         {
           "path": "tests/test_thread_context.py",
-          "sha256": "73f2ece13f8f19beacb8d8accdd5166829d176a39f4c8a6af32af4375f49cbdd",
-          "size": 17582
+          "sha256": "7d628015456d12246a654603bf6c2c269d600655d18b33b507b7728dc1af6d20",
+          "size": 18069
         },
         {
           "path": "tests/test_tool_contract.py",
@@ -2990,7 +3000,7 @@
       "name": "slack-bridge",
       "slug": "slack-bridge",
       "type": "extension",
-      "version": "1.11.1",
+      "version": "1.11.2",
       "when_to_use": "User wants Ouroboros to receive Slack messages or files, reply in Slack conversations and threads, or send proactive Slack text messages."
     },
     {
