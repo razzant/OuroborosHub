@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.12.0
+
+- `slack_reaction_add` and `slack_reaction_remove` declare `effect: gesture` and
+  `message: ts`, so a Host that knows gestures can offer a reaction on the waking message
+  beside `slack_send` as a third form of response, next to words and silence. Their
+  registered descriptions now say what a reaction is for and give `name` an example. On a
+  Host that predates gestures the unknown effect is an undeclared write, refused by Silent,
+  Paused and Advises as before; arguments, queue and receipts are unchanged.
+
 ## 1.11.2
 
 - A thread reply is `my_thread` when this bot wrote the thread's root or a message of the

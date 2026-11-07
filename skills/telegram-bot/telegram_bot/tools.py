@@ -281,3 +281,45 @@ def make_operation_tool(api: Any, confirmed_account=lambda: ""):
                 "message_id": message}
 
     return telegram_operation
+
+
+TELEGRAM_REACT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "action": {"type": "string", "enum": ["set", "clear"],
+                   "description": "set puts this bot's one reaction on the message, replacing its earlier one; clear removes it."},
+        "chat_id": {"type": "string", "description": "Exact numeric Telegram chat ID."},
+        "message_id": {"type": "integer", "description": "Exact provider message ID of the message reacted to."},
+        "topic_id": {"type": "integer", "description": "Known forum topic of the target, as in the event. Checked against this topic's place and kept local; never sent to Telegram. A reaction in a forum needs it unless the message is in General."},
+        "emoji": {"type": "string", "description": "For set: one emoji Telegram offers for reactions, such as 👍 or 👀."},
+        "custom_emoji_id": {"type": "string", "description": "For set, instead of emoji: a custom emoji ID."},
+        "is_big": {"type": "boolean", "default": False},
+        "request_id": {"type": "string", "description": "Stable operation identity; reuse only for the same logical reaction. Its receipt is telegram_receipt(operation=operation)."},
+    },
+    "required": ["action", "chat_id", "message_id", "request_id"],
+}
+
+
+def make_react_tool(operation: Any):
+    """``telegram_operation(method=setMessageReaction)`` with set/clear arguments: the same checks, outbox and receipt."""
+    def telegram_react(
+        ctx: Any = None,
+        *, action: str, chat_id: str, message_id: int, request_id: str,
+        topic_id: int | None = None, emoji: str = "", custom_emoji_id: str = "", is_big: bool = False,
+    ) -> dict[str, Any]:
+        emoji, custom = str(emoji or "").strip(), str(custom_emoji_id or "").strip()
+        if action == "set":
+            if bool(emoji) == bool(custom):
+                return {"ok": False, "error": "set takes exactly one of emoji or custom_emoji_id"}
+            reaction = [{"type": "emoji", "emoji": emoji} if emoji else {"type": "custom_emoji", "custom_emoji_id": custom}]
+        elif action == "clear":
+            if emoji or custom:
+                return {"ok": False, "error": "clear removes this bot's reaction; omit emoji and custom_emoji_id"}
+            reaction = []
+        else:
+            return {"ok": False, "error": "action must be set or clear"}
+        return operation(ctx, method="setMessageReaction", chat_id=chat_id, message_id=message_id,
+                         request_id=request_id, topic_id=topic_id, reaction=reaction, is_big=is_big)
+
+    return telegram_react

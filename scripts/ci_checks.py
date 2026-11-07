@@ -37,7 +37,7 @@ SUITES = {
     # Without that core the suite stops with an error; its consumers never skip.
     'slack-bridge': {'skills': ['slack-bridge'],
                      'tests': ['skills/slack-bridge/tests', 'tests/test_slack_conversation_core_consumer.py',
-                               'tests/test_reaction_core_consumer.py'],
+                               'tests/test_reaction_core_consumer.py', 'tests/test_gesture_core_consumer.py'],
                      'dependencies': ['httpx', 'starlette', 'websockets'],
                      'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT'},
     'email-presence': {'skills': ['email-presence'], 'tests': ['skills/email-presence/tests'],
@@ -48,6 +48,7 @@ SUITES = {
     'github': {'skills': ['github'], 'tests': ['skills/github/tests'],
                'dependencies': ['PyJWT[crypto]>=2.13,<3', 'httpx', 'starlette']},
     'telegram-bot': {'skills': ['telegram-bot'], 'tests': ['skills/telegram-bot/tests', 'tests/test_reaction_core_consumer.py',
+                                                           'tests/test_gesture_core_consumer.py',
                                                            'tests/test_voice_attachment_core_consumer.py'],
                      'dependencies': ['httpx', 'starlette', 'websockets', 'telethon>=1.45,<2', 'PySocks>=1.7.1'],
                      'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT'},
