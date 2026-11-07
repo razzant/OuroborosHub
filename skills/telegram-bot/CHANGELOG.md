@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.0
+
+- New `telegram_react` (`action: set` with one `emoji` or `custom_emoji_id`, or
+  `action: clear`) declares `effect: gesture` with `message: message_id`, so a Host that
+  knows gestures can offer a reaction on the waking message beside `telegram_send`. It calls
+  `telegram_operation` with `setMessageReaction` unchanged: same topic checks, outbox row,
+  `request_id` deduplication, receipt and no-resend of an unknown outcome. Nothing new is
+  stored. `telegram_operation` stays `write` and keeps `setMessageReaction`. On a Host that
+  predates gestures `telegram_react` is an undeclared write and no reaction door is shown.
+
 ## 0.10.6
 
 - A photo or document above the Bot API's 20 MiB download limit no longer holds its whole

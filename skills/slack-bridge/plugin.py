@@ -350,10 +350,20 @@ def _register_mutation_tools(api: Any) -> None:
         ("slack_bookmark_add", "bookmark_add", {"channel": {"type": "string"}, "title": {"type": "string"}, "link": {"type": "string"}, "emoji": {"type": "string"}, "request_id": {"type": "string"}}, ["channel", "title", "link"]),
         ("slack_bookmark_remove", "bookmark_remove", {"channel": {"type": "string"}, "bookmark_id": {"type": "string"}, "request_id": {"type": "string"}}, ["channel", "bookmark_id"]),
     ]
+    reaction_descriptions = {
+        "slack_reaction_add": "Add this bot's emoji reaction to one exact Slack message (channel and its ts), for example "
+                              "to show you saw, agree or laughed.",
+        "slack_reaction_remove": "Remove this bot's emoji reaction from one exact Slack message (channel and its ts).",
+    }
     for name, operation, properties, required in action_specs:
-        note = (" A reaction can be the whole social response; it is not speech or proof of finished work."
-                " The provider outcome, including a no-op, is read with slack_receipt." if name.startswith("slack_reaction") else "")
-        register_json_tool(api, name, _make_action(api, operation), description=f"Queue Slack {operation.replace('_', ' ')} and preserve its provider receipt.{note}", schema={"type": "object", "properties": properties, "required": required, "additionalProperties": False}, timeout_sec=30)
+        if name in reaction_descriptions:
+            properties = {**properties, "name": {"type": "string", "description": "Slack emoji name without colons, such as eyes or white_check_mark."}}
+            description = (f"{reaction_descriptions[name]} It is queued durably. A reaction can be the whole social response; "
+                           "it is a gesture, not speech or proof of finished work. "
+                           "The provider outcome, including a no-op, is read with slack_receipt.")
+        else:
+            description = f"Queue Slack {operation.replace('_', ' ')} and preserve its provider receipt."
+        register_json_tool(api, name, _make_action(api, operation), description=description, schema={"type": "object", "properties": properties, "required": required, "additionalProperties": False}, timeout_sec=30)
     register_json_tool(
         api,
         "slack_join",

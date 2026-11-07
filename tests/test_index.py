@@ -689,7 +689,9 @@ def test_every_exported_tool_has_an_effect_and_destination(name):
     assert set(names) == exported_names(directory, tool_prefix(names))
     assert len(names) == len(set(names))
     for row in rows:
-        assert row["effect"] in {"read", "message", "write"}
+        assert row["effect"] in {"read", "message", "gesture", "write"}
+        # A gesture acts on one message: the core fills that argument from the waking event.
+        assert (row["effect"] == "gesture") == bool(row.get("message")), row["name"]
         target = row["target"]
         assert isinstance(target, (str, list))
         for argument in ([target] if isinstance(target, str) else target):
@@ -793,3 +795,19 @@ def test_mixed_tools_remain_write_and_email_covers_all_recipients():
         assert manifests[connector][name]["effect"] == "read"
     assert manifests["email-presence"]["email_send"]["effect"] == "message"
     assert manifests["email-presence"]["email_send"]["target"] == ["account_id", "to", "cc", "bcc"]
+
+
+def test_gestures_are_reactions_on_one_message_of_the_declared_conversation():
+    """A gesture door is what a gesture-aware core offers beside the send door: it must name the conversation and
+    the message argument and aim nowhere else. An older core reads the unknown effect as an undeclared write."""
+    manifests = {name: {row["name"]: row for row in builder.read_manifest(ROOT / "skills" / name)["tools"]} for name in CONNECTORS}
+    gestures = {(connector, name): row for connector, rows in manifests.items() for name, row in rows.items()
+                if row.get("effect") == "gesture"}
+    assert set(gestures) == {("slack-bridge", "slack_reaction_add"), ("slack-bridge", "slack_reaction_remove"),
+                             ("telegram-bot", "telegram_react")}
+    for key, row in gestures.items():
+        targets = [row["target"]] if isinstance(row["target"], str) else row["target"]
+        assert row.get("conversation") and row.get("message"), key
+        assert set(targets) <= {"account_id", row["conversation"], row.get("thread", "")}, key
+    assert gestures[("slack-bridge", "slack_reaction_add")]["message"] == "ts"
+    assert gestures[("telegram-bot", "telegram_react")]["message"] == "message_id"

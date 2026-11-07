@@ -37,7 +37,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "cc17c2d453a92d4f8286cd2ebdc451e17c09b11174ad15c1e2409e2654decb27",
+          "sha256": "441086ebc944df4d1c1ccda2521fe06ec7cef2302505649187b9fb47d08e2e0a",
           "size": 5826
         },
         {
@@ -47,12 +47,12 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "c7808c8aae9b42cef310517f5a93f77c540ce1cf90ede5d8a6cf87ca7176372f",
-          "size": 4808
+          "sha256": "30817e1586b46ca2dd84c4fb6a0c94e6ddb730c71484766d9835764418c005f1",
+          "size": 5979
         },
         {
           "path": "scripts/a2a_daemon.py",
-          "sha256": "11bdf6683b75078e7b9e30fe12be69f14e80706ad2c29e542e4f2dabfac44280",
+          "sha256": "ba104be2d5838da37b6cf5ac9fe17718f8157bf7f57c2e862781e8b3a955bbfc",
           "size": 66465
         },
         {
@@ -62,8 +62,8 @@
         },
         {
           "path": "tests/test_a2a_agent_card.py",
-          "sha256": "a0da576c9eacd494b87ea2b12f6f53819a9f371ff207d92ef84a01856314e924",
-          "size": 10068
+          "sha256": "743fd4e587370bf55ec4d9bf2d436620e4f637f5abcfa97579a24e0ea69a2b63",
+          "size": 10388
         },
         {
           "path": "tests/test_a2a_client_auth.py",
@@ -84,6 +84,11 @@
           "path": "tests/test_a2a_sdk_card_shape.py",
           "sha256": "02f99f4c1e970f1e993983e71bda2d24abd839f6ec0ff26dbf079a1fd1883a7f",
           "size": 3551
+        },
+        {
+          "path": "tests/test_a2a_settings_route.py",
+          "sha256": "2fc643d4507f19d6e9924d50e1e2231a288634be4a81a685815f45fe7d5b1186",
+          "size": 3771
         },
         {
           "path": "tests/test_a2a_stream_dispatch.py",
@@ -110,7 +115,7 @@
       "name": "a2a",
       "slug": "a2a",
       "type": "extension",
-      "version": "1.5.1",
+      "version": "1.5.2",
       "when_to_use": "User asks to communicate with another A2A-compatible agent, discover an agent card, send an A2A message, check A2A task status, or expose this Ouroboros instance as an A2A peer."
     },
     {
@@ -2729,13 +2734,13 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "1c9e6318c00a412e2c142f8fa4a041207f1ee37c2283bd1223e4d693df10df05",
-          "size": 7281
+          "sha256": "18e24230109f69a7874eb5cb95ee9306f87175bf51ae82315498a14cedf201fa",
+          "size": 7807
         },
         {
           "path": "SKILL.md",
-          "sha256": "b25b13fc221bd34a4ed5e395417f0ffb17b091cd1165a9de690a97ff78ed40ab",
-          "size": 61226
+          "sha256": "a77acb0841f07e08955e8a1661cf4147a441805b98a95f420734b43fbb1e4775",
+          "size": 61866
         },
         {
           "path": "lib/__init__.py",
@@ -2814,8 +2819,8 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "23e175a6b087a20054f4be7f78904a0f66799eb7b47a61b40457a842e406db0a",
-          "size": 31694
+          "sha256": "2c3570cb24720353646b68378169151303f031ebcdc1767acc651ab3a98f3a39",
+          "size": 32353
         },
         {
           "path": "scripts/slack_daemon.py",
@@ -2939,8 +2944,8 @@
         },
         {
           "path": "tests/test_reactions.py",
-          "sha256": "1249b082e497010e24b506b9364f1491177a8467edb9c487037fbc6906966f77",
-          "size": 82146
+          "sha256": "bc3ac9d5ee33eb0b1725f648dd556c13cca2343190a9a7263e6ee2611be3d3cd",
+          "size": 86185
         },
         {
           "path": "tests/test_read_tools.py",
@@ -3001,7 +3006,7 @@
       "name": "slack-bridge",
       "slug": "slack-bridge",
       "type": "extension",
-      "version": "1.11.2",
+      "version": "1.12.0",
       "when_to_use": "User wants Ouroboros to receive Slack messages or files, reply in Slack conversations and threads, or send proactive Slack text messages."
     },
     {
@@ -3097,8 +3102,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "d8625c7f3a3639e0860dd6e6bbb23d27749a25f86560a6dfa4c5f9085defb118",
-          "size": 10043
+          "sha256": "293c19249d5cbeeefce338790436f1b58d03d167777d39d07b61d5261d027990",
+          "size": 10681
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -3117,13 +3122,13 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "87f13e18ca88df5d91bfa833d6ef5e176d4ff8c5de531b2432f9c15d400ff951",
-          "size": 43245
+          "sha256": "45c4ac84db5050627489d8b18ba182f8710a122bad15efc995079010301b3485",
+          "size": 44473
         },
         {
           "path": "plugin.py",
-          "sha256": "cc07ea6fecf3877db9d4022062efdde5ffff5a38b10d2ef618332e25334cfecf",
-          "size": 19563
+          "sha256": "4976223d84a35806aaf26b1b3e20a115b28e713370470bed39c00756ca5b3a3a",
+          "size": 20497
         },
         {
           "path": "telegram_bot/__init__.py",
@@ -3177,8 +3182,8 @@
         },
         {
           "path": "telegram_bot/tools.py",
-          "sha256": "819176f554b0c85fc86971b3862ea68f70471f5cfd446c30c6d5e6f440703f50",
-          "size": 14103
+          "sha256": "5637ed1d711783a0726f2a1d7879fcffaff53d0aeebd0335a0103ed1f78224b9",
+          "size": 16720
         },
         {
           "path": "tests/conftest.py",
@@ -3262,8 +3267,8 @@
         },
         {
           "path": "tests/test_reactions.py",
-          "sha256": "359bff076df7651207f6960e9b20537509b6ba702148ace3fbf86a5d6f7b0cfe",
-          "size": 101449
+          "sha256": "1a36d7640c1420d971df245f752cdb51a168a7a75d73860cea206c3c566ed146",
+          "size": 109725
         },
         {
           "path": "tests/test_retained_custody.py",
@@ -3300,7 +3305,7 @@
       "name": "telegram-bot",
       "slug": "telegram-bot",
       "type": "extension",
-      "version": "0.10.6"
+      "version": "0.11.0"
     },
     {
       "connects": [
