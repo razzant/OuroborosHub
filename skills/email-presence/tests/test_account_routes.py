@@ -151,3 +151,19 @@ def test_exchange_save_list_and_disconnect_use_the_existing_accounts_routes(tmp_
         assert http.post("/accounts/disconnect", json={"account_id": account["id"]}).status_code == 200
         detached = http.get("/accounts").json()["accounts"][0]
         assert not detached["password_configured"] and not detached["connected"]
+
+
+def test_google_sign_in_route_keeps_the_settings_permission_unless_the_owner_clears_it(tmp_path, monkeypatch):
+    import sys
+
+    app = _settings_app(tmp_path, {"GOOGLE_OAUTH_CLIENT_ID": "client"})
+    seen = []
+    def begin(*_args, **kwargs):
+        seen.append(kwargs["manage_settings"])
+        return {"ok": True, "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth"}
+    monkeypatch.setattr(sys.modules["email_settings_fixture"].google_auth, "begin", begin)
+    with TestClient(app) as http:
+        assert http.post("/oauth/begin", json={"origin": "http://127.0.0.1:8765"}).status_code == 200
+        assert http.post("/oauth/begin", json={"origin": "http://127.0.0.1:8765", "manage_settings": False}).status_code == 200
+    # An older widget that never sends the choice keeps the permission; only an explicit false leaves it out.
+    assert seen == [True, False]

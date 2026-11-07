@@ -161,6 +161,30 @@ def _files(raw: Any) -> tuple[SlackFile, ...]:
     return tuple(parsed)
 
 
+# Fields Slack rewrites on a message whose words stay the same: its language detector, the edit stamp and the
+# editor's team, and the state of the thread the message roots (replies, their authors, the lock, and this bot's
+# own follow and read marks). Deleting a reply, for one, re-sends the root with only its read mark gone.
+_REVISION_BOOKKEEPING = frozenset({
+    "language", "edited", "source_team", "user_team",
+    "reply_count", "reply_users", "reply_users_count", "latest_reply", "is_locked", "subscribed", "last_read",
+})
+
+
+def _revision_content(message: Mapping[str, Any]) -> dict[str, Any]:
+    """The message as its readers see it: without bookkeeping, without a root's own thread marker (its
+    ``thread_ts`` equal to its ``ts``) and without the ``block_id`` Slack generates again for unchanged blocks."""
+    def without_block_ids(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {key: without_block_ids(item) for key, item in value.items() if key != "block_id"}
+        if isinstance(value, list):
+            return [without_block_ids(item) for item in value]
+        return value
+
+    root = message.get("thread_ts") == message.get("ts")
+    return without_block_ids({key: value for key, value in message.items()
+                              if key not in _REVISION_BOOKKEEPING and not (key == "thread_ts" and root)})
+
+
 def _message_content_unchanged(
     message: Mapping[str, Any], previous: Mapping[str, Any]
 ) -> bool:
@@ -169,16 +193,11 @@ def _message_content_unchanged(
         return False
     if not any(key in message and key in previous for key in ("text", "blocks", "attachments", "files")):
         return False
-    # Slack also emits message_changed when its language detector runs. A new
-    # edit timestamp alone is not new content either. Keep every other field in
-    # the comparison so unknown provider additions still reach the model.
-    bookkeeping = {"language", "edited"}
-    current_content = {key: value for key, value in message.items() if key not in bookkeeping}
-    previous_content = {key: value for key, value in previous.items() if key not in bookkeeping}
-    # Canonical JSON preserves booleans versus numbers, unlike dict equality.
+    # Every field outside the bookkeeping above stays in the comparison, so unknown provider additions
+    # still reach the model. Canonical JSON preserves booleans versus numbers, unlike dict equality.
     return (
-        json.dumps(current_content, sort_keys=True, separators=(",", ":"))
-        == json.dumps(previous_content, sort_keys=True, separators=(",", ":"))
+        json.dumps(_revision_content(message), sort_keys=True, separators=(",", ":"))
+        == json.dumps(_revision_content(previous), sort_keys=True, separators=(",", ":"))
     )
 
 

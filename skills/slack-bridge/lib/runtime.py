@@ -194,7 +194,8 @@ class InboundWorker:
             if not item.host_reference and item.provider_context is None:
                 retained = (self.store.retained_message(item.team_id, item.channel_id, item.message_ts)
                             if reaction else None)
-                snapshot = await capture_context(self.slack, item, self.store.workspace_name(), retained)
+                snapshot = await capture_context(self.slack, item, self.store.workspace_name(), retained,
+                                                 names=self.store)
                 self.store.set_provider_context(item.row_id, item.lease_token, snapshot)
                 item = dataclasses.replace(item, provider_context=snapshot)
             if item.files and not item.staged_files and not item.host_reference:

@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.11.2
+
+- A thread reply is `my_thread` when this bot wrote the thread's root or a message of the
+  captured thread, and never `reply_to_me`. A Slack thread is flat: every reply names the
+  root's author as its `parent_user_id`, and no message names one it answers. Every reply
+  under a root the bot wrote was still reported as a reply to the bot, so the Host told
+  the model the event addressed it and kept the words as addressed to it: on 6 November a
+  message the owner wrote to a colleague in a thread Ouroboros had opened was answered and
+  turned into work. The place no longer declares or suggests `reply_to_me`; a place that
+  kept it without `my_thread` wakes on those replies again once My threads is checked.
+- Mentions and thread authors carry names. `message.mentions` lists each explicit mention
+  as `{id, name, is_self}`, and `conversation.thread_history.authors` the captured thread's
+  authors the same way, so a reader sees who is named and who said what without a lookup.
+  A name comes from one this credential observed within a day (an earlier `users.info`
+  read or the `slack_resolve` directory scan), else from one `users.info` read: at most
+  four at once, within one ten-second budget and none after Slack limits the rate, kept
+  as one small row per person. A person left unread is `null`. `provider_facts` are
+  unchanged.
+- A revision that changes only Slack's bookkeeping is not an edit. A root's thread state
+  (`reply_count`, `reply_users`, `reply_users_count`, `latest_reply`, `is_locked`, the
+  bot's `subscribed` and `last_read`, the root's own `thread_ts`), the editor's
+  `source_team` and `user_team`, and a regenerated `block_id` join `language` and
+  `edited`. Deleting a reply re-sends its root with only the read mark gone, and on
+  6 November that woke a turn as a new message from the root's author. Of the 1,009
+  revisions one install's bridge had accepted, 496 changed no words, files or
+  attachments; they are now ignored as `message_content_unchanged`. New words, files,
+  link unfurls and a deleted root's tombstone still reach the model.
+
 ## 1.11.1
 
 - `from_bot` follows the author's account, not the client that posted. A person writing

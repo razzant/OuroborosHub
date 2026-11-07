@@ -1,7 +1,7 @@
 {
   "endorsements": [
     {
-      "digest": "8ded2740818b0f4c288e87a6a3c847a43ecec3eed3d3b66b78f6f288d30bf3ca",
+      "digest": "3c3b0eae6a1449f12d0fc6c5cfd68246dadef9669201fc2b1b6332b9bc2e481c",
       "name": "a2a",
       "recommended": false
     },
@@ -51,7 +51,7 @@
       "recommended": false
     },
     {
-      "digest": "62f8ed4e0657bb1ca1492fb6101b033d1819d2fcca6dc13e94792478e6b7c7b9",
+      "digest": "72620575d36b9ad90c8462dd6b9a427bbb6accf70f972c6a825f8aeaacff6e19",
       "name": "email-presence",
       "recommended": false
     },
@@ -86,7 +86,7 @@
       "recommended": false
     },
     {
-      "digest": "d13233d800680e99cb99bdb3aadb6dc50c6a65430c2e8531378f989fbafd4e1c",
+      "digest": "17b2d08cca88f73ad3e9f17d7e87f5d04ecfbf9d61a65b2395f3bf4b61a3d073",
       "name": "slack-bridge",
       "recommended": false
     },

@@ -6,7 +6,7 @@
     "A2A"
   ],
   "description": "Agent-to-Agent connector for peer places, with durable Presence requests, discovery, streaming status and retained task outcomes.",
-  "digest": "8ded2740818b0f4c288e87a6a3c847a43ecec3eed3d3b66b78f6f288d30bf3ca",
+  "digest": "3c3b0eae6a1449f12d0fc6c5cfd68246dadef9669201fc2b1b6332b9bc2e481c",
   "icon": "ui/icon.svg",
   "install_specs": [
     {
@@ -26,7 +26,7 @@
     "path": "skills/a2a"
   },
   "type": "extension",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "when_to_use": "User asks to communicate with another A2A-compatible agent, discover an agent card, send an A2A message, check A2A task status, or expose this Ouroboros instance as an A2A peer.",
   "withdrawn": null
 }

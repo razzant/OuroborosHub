@@ -75,6 +75,40 @@ def test_google_pkce_connect_identity_aliases_error_and_single_use_state(tmp_pat
         assert accounts.resolve()["address"] == "one@example.invalid"
 
 
+def test_gmail_settings_permission_is_requested_by_default_and_can_be_left_out(tmp_path):
+    accounts = AccountStore(tmp_path)
+    settings = {"GOOGLE_OAUTH_CLIENT_ID": "client"}
+
+    def scopes(**choice):
+        opened = begin(accounts, settings, origin="http://127.0.0.1:8765", verify_return=False, **choice)
+        return parse_qs(urlsplit(opened["authorization_url"]).query)["scope"][0].split()
+
+    settings_scope = "https://www.googleapis.com/auth/gmail.settings.basic"
+    mail = ["openid", "email", "https://www.googleapis.com/auth/gmail.modify"]
+    # Default: filters, forwarding and sender addresses can be managed, as before.
+    assert scopes() == mail + [settings_scope]
+    # A Workspace that approved only mail access: the same mail scopes, nothing for settings.
+    assert scopes(manage_settings=False) == mail
+    assert scopes(manage_settings=False, permanent_delete=True) == mail + ["https://mail.google.com/"]
+
+
+def test_a_mail_only_grant_answers_settings_writes_itself_and_a_settings_grant_reaches_google(tmp_path):
+    accounts = AccountStore(tmp_path)
+    account = gmail_account(accounts)  # openid, email and gmail.modify: a sign-in with the settings choice cleared
+    sent = []
+    def handler(request):
+        sent.append((request.method, request.url.path))
+        return httpx.Response(200, json={"displayLanguage": "en"})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        refused = GmailClient(accounts, account["id"], http=http).settings_write(
+            resource="language", values={"displayLanguage": "en"})
+        assert refused["code"] == "settings_permission_missing" and not sent
+        accounts.save({**accounts.get(account["id"]),
+                       "scopes": account["scopes"] + ["https://www.googleapis.com/auth/gmail.settings.basic"]})
+        GmailClient(accounts, account["id"], http=http).settings_write(resource="language", values={"displayLanguage": "en"})
+    assert sent == [("PUT", "/gmail/v1/users/me/settings/language")]
+
+
 def test_refresh_cannot_restore_disconnected_account(tmp_path):
     accounts = AccountStore(tmp_path)
     account = gmail_account(accounts)

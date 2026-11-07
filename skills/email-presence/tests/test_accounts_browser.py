@@ -3,6 +3,7 @@
 The only substituted boundary is the provider. Run with OUROBOROS_SOURCE_DIR
 and OUROBOROS_RUN_MAIL_BROWSER=1. No installed skill or personal account is used.
 """
+import json
 import os
 import socket
 import sys
@@ -38,6 +39,8 @@ window.ready=true;
 </script></body></html>'''
 # The adapter's words for mail whose bound Place went away after it was queued.
 HELD_AFTER_PLACE_DISCONNECT = place_refusal_hold({"state": "disconnected", "code": "place_disconnected"})
+
+SETTINGS_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic"
 
 
 def core_path():
@@ -221,7 +224,8 @@ def test_google_return_connects_real_mail_consumer_and_denial_does_not_create_ac
             expect(frame.get_by_role("button", name="Continue in Google", exact=True)).to_be_visible()
             accounts = AccountStore(tmp_path)
             with accounts._db() as db:
-                state = db.execute("SELECT state FROM oauth_pending").fetchone()[0]
+                state, pending = db.execute("SELECT state, value FROM oauth_pending").fetchone()
+            assert SETTINGS_SCOPE in json.loads(pending)["scopes"], "Gmail settings stay requested by default"
             assert not accounts.list(), "Preparing or opening login is not a connected account"
             page.route("https://provider.example.invalid/return", lambda route: route.fulfill(content_type="text/html", body='<a id="continue">Return</a>'))
             page.goto("https://provider.example.invalid/return")
@@ -236,10 +240,14 @@ def test_google_return_connects_real_mail_consumer_and_denial_does_not_create_ac
             frame = mount(page, origin)
             expect(frame.locator(".account")).to_contain_text("google@example.invalid")
             frame.get_by_role("button", name="Add Google mail", exact=True).click()
+            frame.get_by_label("Also allow managing Gmail settings", exact=False).uncheck()
             frame.get_by_role("button", name="Prepare Google sign-in", exact=True).click()
             expect(frame.get_by_role("button", name="Continue in Google", exact=True)).to_be_visible()
             with accounts._db() as db:
-                state = db.execute("SELECT state FROM oauth_pending").fetchone()[0]
+                state, pending = db.execute("SELECT state, value FROM oauth_pending").fetchone()
+            # A Workspace that approved only mail access: the cleared choice leaves the settings permission out.
+            assert SETTINGS_SCOPE not in json.loads(pending)["scopes"]
+            assert "https://www.googleapis.com/auth/gmail.modify" in json.loads(pending)["scopes"]
             page.goto(origin + "/onboarding/static/provider-return.html?" + urlencode({"error": "access_denied", "state": state}))
             page.locator('[data-return-status][data-tone="warn"]').wait_for()
             expect(page.locator("[data-return-detail]")).to_contain_text("Google authorization was not granted")
