@@ -4,6 +4,24 @@ Thresholds affect color only: <=10% bad, <=25% warn, otherwise ok.
 No quota policy, refresh, routing or freshness judgment lives here.
 """
 
+from datetime import datetime
+
+
+def local_reset(at):
+    """The moment of a reset in the time zone of this machine: the chip's title is read by the person at it. A value without a zone stays as it came."""
+    if not at:
+        return "unknown"
+    try:
+        moment = datetime.fromisoformat(str(at).replace("Z", "+00:00"))
+    except ValueError:
+        return at
+    if moment.tzinfo is None:
+        return at
+    try:
+        return moment.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    except (ValueError, OverflowError, OSError):  # a moment the machine's zone cannot hold (a "forever" marker in the year 9999): as it came
+        return at
+
 
 def chip(view):
     reserve = view.get("reserve") or {}
@@ -22,7 +40,7 @@ def chip(view):
         # Known ids lack display labels on the dedicated passive endpoint.
         label = {"codex": "Codex", "claude": "Claude"}.get(label, label)
         share = (group.get("measured") or {}).get("average_remaining_pct") if group.get("tightest") else None
-        reset = (group.get("next_reset") or {}).get("at") or "unknown"
+        reset = local_reset((group.get("next_reset") or {}).get("at"))
         if share is None:
             titles.append(f"{label}: remaining unknown; next reset {reset}")
         else:

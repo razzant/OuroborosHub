@@ -21,8 +21,9 @@ import pytest
 import plugin
 import quota_summary as qs
 import test_quotas
+from conftest import launch_engine
 from test_r3 import RunsBackwards, _Body, _prefs_route
-from test_reserve import (NOW, _node, _route_and_tool, _widget_fixture, at, constraint, group,
+from test_reserve import (NOW, with_i18n, _node, _route_and_tool, _widget_fixture, at, constraint, group,
                           payload, profile, snap)
 
 WIDGET = Path(os.environ.get("ORDER_FOCUS_WIDGET_PATH", Path(__file__).with_name("widget.js"))).resolve()
@@ -225,6 +226,15 @@ function deferredFetch(env) {
 const pressed = (env, prefix) => walk(env.root).filter((n) => String(n.getAttribute('data-focus') || '').startsWith(prefix)
   && n.getAttribute('aria-pressed') === 'true').map((n) => n.getAttribute('data-focus'));
 const active = (env) => env.document.activeElement;
+// The window row shows one limit: pick its window, then its scope (the plate of the stack's old rows).
+function showLimit(env, g) {
+  const tab = byFocus(env.root, 'win:' + g.harness + ':' + g.window_seconds);
+  assert.ok(tab, 'a tab for the window of ' + g.key);
+  if (tab.getAttribute('aria-selected') !== 'true') tab.listeners.click[0]({ stopPropagation() {} });
+  const scope = byFocus(env.root, 'scope:' + g.key);
+  if (scope && scope.getAttribute('aria-pressed') !== 'true') scope.listeners.click[0]({ stopPropagation() {} });
+  assert.ok(byFocus(env.root, 'limit:' + g.key), 'the plate of ' + g.key + ' is shown');
+}
 
 (async () => {
   const fx = JSON.parse(process.env.ORDER_FOCUS_FIXTURE);
@@ -244,7 +254,7 @@ const active = (env) => env.document.activeElement;
     const other = groups.find((g) => !g.tightest);
     click(env, 'scenario:recent_pace');
     click(env, 'horizon:24h');
-    click(env, 'limit:' + other.key);
+    showLimit(env, other);
     before.resolve(response(fx.view)); await settle();
     assert.deepEqual(pressed(env, 'scenario:'), ['scenario:recent_pace']);
     assert.deepEqual(pressed(env, 'horizon:'), ['horizon:24h']);
@@ -288,9 +298,12 @@ const active = (env) => env.document.activeElement;
     if (mode !== 'focus_never_on_refresh') {
       // The disabled redraw dropped it, as a browser does.
       assert.ok(active(env) === env.document.body, 'focus did not fall to the body');
-      // Another redraw while the read is in the air keeps the place.
+      // Another redraw while the read is in the air. The word over the bars opens the list in place and hands the keyboard to itself (a press follows the control pressed); it is the
+      // reader's own press, so it is judged as that: the focus is on the word they pressed and never on Refresh, which is still disabled. The case then goes on with the focus put back
+      // on the page (the rule of the word over the bars: the old bottom button of the accounts is gone).
       click(env, 'accounts'); await settle();
-      assert.ok(active(env) === env.document.body, 'a redraw in flight moved focus');
+      assert.ok(active(env) === byFocus(env.root, 'accounts') && active(env) !== refresh(), 'a redraw in flight moved focus');
+      env.document.activeElement = env.document.body;
     }
     if (mode === 'focus_moved_on') byFocus(env.root, 'about').focus();
     if (mode === 'focus_left_frame') env.document.hasFocus = () => false;
@@ -338,8 +351,25 @@ const active = (env) => env.document.activeElement;
       assert.equal(key(), want);
       assert.ok(active(env).isConnected, 'focus on a node the redraw removed');
     };
+    // A row of the list picks its account as its bar does (the pick is the bar's when the window on screen has one): Clear gives the keyboard to that bar.
+    const expectBackToBar = (account) => {
+      assert.equal(card(), undefined, 'the selection is dropped');
+      assert.ok(new RegExp('^bar:.*:' + account + '$').test(key()), 'the keyboard is on the bar of ' + account + ': ' + key());
+      assert.ok(active(env).isConnected, 'focus on a node the redraw removed');
+    };
+    // The window on screen picks its top account from the first drawing (pickDecide), so that bar or row is open and red already. The first press on it lets the pick go
+    // (the window picks no more of its own); the second is the reader's own pick, the one Clear and Escape give the keyboard back from.
+    const pickAsReader = (focusKey) => {
+      const node = byFocus(env.root, focusKey);
+      assert.ok(node, 'missing control ' + focusKey);
+      assert.equal(node.getAttribute('aria-pressed'), 'true', 'the top account is picked already');
+      click(env, focusKey);
+      assert.equal(card(), undefined, 'the first press lets the pick go');
+      click(env, focusKey);
+    };
     if (mode === 'select_clear_from_bar' || mode === 'select_escape_from_card') {
-      click(env, bar);
+      showLimit(env, only);
+      pickAsReader(bar);
       assert.ok(card() && key() === bar, 'the bar selects and keeps the keyboard');
       if (mode === 'select_clear_from_bar') {
         byFocus(env.root, 'inspector-clear').focus();
@@ -352,23 +382,32 @@ const active = (env) => env.document.activeElement;
       }
       expectBack(bar);
     } else if (mode === 'select_clear_from_row') {
+      // Rule: a row of the list picks its account and the list shuts at once (the bars and the chart come back with that account picked), and the
+      // keyboard goes to the word over the bars; Clear is hidden in the plate (display:none, still in the page), so it is pressed as a script does.
       click(env, 'accounts');
       click(env, 'acct:codex:c2');
-      assert.ok(card() && key() === 'acct:codex:c2');
-      byFocus(env.root, 'inspector-clear').focus();
+      // The list folds with a motion (the row stays until it ends): the word says it is shut.
+      assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'false', 'the list is shut by the pick');
+      assert.ok(card() && key() === 'accounts', 'the pick keeps the keyboard on the word over the bars');
       click(env, 'inspector-clear');
-      expectBack('acct:codex:c2');
+      expectBackToBar('codex:c2');
     } else if (mode === 'select_opener_folded') {
+      // Was: the list folded by the word while the card stood, the row gone. Now the pick itself folds it; the word then opens the list again and a pick of it goes
+      // back to the word the same way.
       click(env, 'accounts');
       click(env, 'acct:codex:c2');
-      click(env, 'accounts');
-      assert.equal(byFocus(env.root, 'acct:codex:c2'), undefined, 'the row is folded away');
+      assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'false', 'the list is folded away');
       assert.ok(card());
-      byFocus(env.root, 'inspector-clear').focus();
+      click(env, 'accounts');
+      assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'true', 'the word opens the list again');
+      click(env, 'acct:codex:c2');
+      assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'false');
+      assert.ok(card());
       click(env, 'inspector-clear');
-      expectBack('accounts');
+      expectBackToBar('codex:c2');
     } else if (mode === 'select_opener_gone_after_reading') {
-      click(env, bar);
+      showLimit(env, only);
+      pickAsReader(bar);
       const gone = JSON.parse(JSON.stringify(fx.view));
       gone.reserve.summary.groups.forEach((g) => {
         if (g.key === only.key) g.bars = g.bars.filter((b) => b.account !== 'codex:c1');
@@ -376,7 +415,7 @@ const active = (env) => env.document.activeElement;
       current = gone;
       env.interval()();
       await settle();
-      assert.equal(byFocus(env.root, bar), undefined, 'the opening bar is gone with the reading');
+      assert.ok(byFocus(env.root, bar) === undefined, 'the opening bar is gone with the reading');
       assert.ok(card(), 'the account itself is still there');
       byFocus(env.root, 'inspector-clear').focus();
       escape();
@@ -453,24 +492,14 @@ FOCUS_STATE = """() => {
 }"""
 
 
-def _launch(playwright):
-    errors = []
-    for options in ({}, {"channel": "chrome"}):
-        try:
-            return playwright.chromium.launch(**options)
-        except Exception as exc:  # no browser build for this Playwright here
-            errors.append(f"{options or 'bundled'}: {type(exc).__name__}")
-    pytest.skip("no Chromium or Chrome for Playwright on this machine (" + "; ".join(errors) + ")")
-
-
 def test_real_chrome_keyboard_refresh_keeps_focus(widget_view):
     sync_api = pytest.importorskip("playwright.sync_api")
     with sync_api.sync_playwright() as playwright:
-        browser = _launch(playwright)
+        browser = launch_engine(playwright, "chromium")
         try:
             page = browser.new_page()
             page.set_content('<!doctype html><html><head></head><body><div id="root"></div></body></html>')
-            page.evaluate(REAL_PAGE_STUB, widget_view)
+            page.evaluate(with_i18n(REAL_PAGE_STUB), widget_view)
             page.add_script_tag(content=WIDGET.read_text(encoding="utf-8"))
             page.wait_for_selector('[data-focus="refresh"]:not([disabled])')
             assert page.evaluate("document.hasFocus()") is True
@@ -524,15 +553,6 @@ SELECT_STATE = """() => {
 }"""
 
 
-def _launch_engine(playwright, engine):
-    if engine == "chromium":
-        return _launch(playwright)
-    try:
-        return playwright.webkit.launch()
-    except Exception as exc:  # no WebKit build for this Playwright here
-        pytest.skip(f"no WebKit build for Playwright on this machine ({type(exc).__name__})")
-
-
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_real_browser_clear_and_escape_give_the_keyboard_back(widget_view, engine):
     sync_api = pytest.importorskip("playwright.sync_api")
@@ -545,33 +565,71 @@ def test_real_browser_clear_and_escape_give_the_keyboard_back(widget_view, engin
         if g["key"] == only["key"]:
             g["bars"] = [b for b in g["bars"] if b.get("account") != "codex:c1"]
     with sync_api.sync_playwright() as playwright:
-        browser = _launch_engine(playwright, engine)
+        browser = launch_engine(playwright, engine)
         try:
             page = browser.new_page()
             page.set_content('<!doctype html><html><head></head><body><div id="root"></div></body></html>')
-            page.evaluate(REAL_SELECT_STUB, widget_view)
+            page.evaluate(with_i18n(REAL_SELECT_STUB), widget_view)
             page.add_script_tag(content=WIDGET.read_text(encoding="utf-8"))
             page.wait_for_selector('[data-focus="refresh"]:not([disabled])')
 
             def selected():
+                # The card of a pick on a bar stands in a moment after the bar opens (the pick is drawn in place, the card enters behind it).
+                page.wait_for_selector(".inspector", state="attached")
                 state = page.evaluate(SELECT_STATE)
                 assert state["card"] is True, state
                 return state
 
             def back(want):
+                # The card shuts with a motion (the pick is let go in place) and leaves the page when it is over: the keyboard is judged once it has.
+                page.wait_for_selector(".inspector", state="detached")
                 state = page.evaluate(SELECT_STATE)
                 assert (state["card"], state["key"], state["connected"]) == (False, want, True), state
 
+            def open_card(by="key"):
+                # In the plate the card stands at rest (kit: the card under the chart): a strip with its body shut and hidden, Clear and Diagnostics out of reach. The reader presses the strip
+                # (its title is a button: Enter by the keyboard, a click by the pointer) and the whole card is theirs; where the card stands whole (the account list) there is nothing to press.
+                page.wait_for_selector(".inspector", state="attached")
+                toggle = page.locator('[data-focus="inspector-toggle"]')
+                if toggle.count() and toggle.is_visible() and toggle.get_attribute("aria-expanded") != "true":
+                    if by == "key":
+                        toggle.focus()
+                        page.keyboard.press("Enter")
+                    else:
+                        toggle.click()
+                    page.wait_for_selector(".inspector.kt-open")
+                    assert toggle.get_attribute("aria-expanded") == "true"
+
+            def press_clear():
+                # Rule: Clear ("Снять выбор") is hidden in the plate (display:none, still in the page), so no key or pointer reaches it; the pick is let go
+                # as a script presses the button, and the keyboard is judged where the button hands it back.
+                page.wait_for_selector(".inspector", state="attached")
+                page.evaluate("document.querySelector('[data-focus=\"inspector-clear\"]').click()")
+
+            def card_focus(key):
+                # A hidden element takes no focus (the call does nothing): the focus is asserted, so that Clear and Diagnostics are the ones the keys go to.
+                open_card("key")
+                page.focus('[data-focus="%s"]' % key)
+                assert page.evaluate(SELECT_STATE)["key"] == key
+
+            # One plate: show the limit the bar is in (its window, then its scope).
+            page.click('[data-focus="win:%s:%s"]' % (only["harness"], only["window_seconds"]))
+            if page.locator('[data-focus="scope:%s"]' % only["key"]).count():
+                page.click('[data-focus="scope:%s"]' % only["key"])
             # The keyboard: a bar selects, Clear (Enter) gives the bar back.
+            # The window picks its top account from the first drawing: that bar is open and red already. The first press lets the pick go (the card shuts), the second is the
+            # reader's own.
             page.focus(bar)
+            assert page.get_attribute(bar, "aria-pressed") == "true"
+            page.keyboard.press("Enter")
+            page.wait_for_function("() => !document.querySelector('.inspector')")
             page.keyboard.press("Enter")
             assert selected()["key"] == bar_key
-            page.focus('[data-focus="inspector-clear"]')
-            page.keyboard.press("Enter")
+            press_clear()
             back(bar_key)
             # Escape from inside the card, Diagnostics open.
             page.keyboard.press("Enter")
-            page.focus('[data-focus="inspector-diag"]')
+            card_focus("inspector-diag")
             page.keyboard.press("Enter")
             assert selected()["key"] == "inspector-diag"
             page.keyboard.press("Escape")
@@ -579,23 +637,16 @@ def test_real_browser_clear_and_escape_give_the_keyboard_back(widget_view, engin
             # The pointer: a click on the bar, a click on Clear.
             page.click(bar)
             selected()
-            page.click('[data-focus="inspector-clear"]')
+            open_card("pointer")
+            press_clear()
             back(bar_key)
-            # A row of the account list; then that row folded away.
+            # A row of the account list picks its account and shuts the list (no folding of the opener under a card any more).
             page.click('[data-focus="accounts"]')
             page.focus('[data-focus="acct:codex:c2"]')
             page.keyboard.press("Enter")
             selected()
-            page.focus('[data-focus="inspector-clear"]')
-            page.keyboard.press("Enter")
-            back("acct:codex:c2")
-            page.keyboard.press("Enter")
-            page.focus('[data-focus="accounts"]')
-            page.keyboard.press("Enter")
-            assert page.query_selector('[data-focus="acct:codex:c2"]') is None
-            selected()
-            page.focus('[data-focus="inspector-clear"]')
-            page.keyboard.press("Enter")
+            press_clear()
+            # The window on screen is the limit only c1 has a bar in, so the row picks c2 as an account (no bar); its row is gone with the list, the keyboard goes to the word.
             back("accounts")
             # The opening bar gone with the next reading (Refresh reads it).
             page.focus(bar)
@@ -607,7 +658,7 @@ def test_real_browser_clear_and_escape_give_the_keyboard_back(widget_view, engin
                 "(sel) => !document.querySelector(sel)"
                 " && !document.querySelector('[data-focus=\"refresh\"]').disabled", arg=bar)
             selected()
-            page.focus('[data-focus="inspector-clear"]')
+            open_card("key")
             page.keyboard.press("Escape")
             back("accounts")
         finally:

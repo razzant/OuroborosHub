@@ -19,7 +19,7 @@ from pathlib import Path
 import plugin
 import quota_summary as qs
 import test_quotas
-from test_reserve import NOW, at, constraint, group, payload, profile, snap, summary_of, _node, _route_and_tool
+from test_reserve import NOW, at, constraint, group, payload, profile, snap, summary_of, _harness, _node, _route_and_tool
 
 FABLE = ["fable", "claude-fable-5-1", "claude-fable-5", "best"]
 OPUS = ["opus", "claude-opus-5-5"]
@@ -269,6 +269,14 @@ function click(env, key) {
   assert.ok(node, 'no node with data-focus ' + key);
   node.listeners.click[0]({ stopPropagation() {} });
 }
+// The widget picks its top account at the opening: the card of that account stands already, and a press on its row would let the pick go. So an account is
+// pressed only when it is not the picked one yet.
+function pick(env, key) {
+  const node = byFocus(env.root, key);
+  assert.ok(node, 'no node with data-focus ' + key);
+  if (node.getAttribute('aria-pressed') !== 'true') node.listeners.click[0]({ stopPropagation() {} });
+  assert.equal(byFocus(env.root, key).getAttribute('aria-pressed'), 'true', key + ' is picked');
+}
 (async () => {
   Date.now = () => Number(process.env.FIXED_NOW);
   const route = JSON.parse(process.env.ROUTE);
@@ -291,7 +299,7 @@ function click(env, key) {
   async function opened(view, sid, diagnostics) {
     const env = await boot(view);
     click(env, 'accounts');
-    click(env, 'acct:claude:' + sid);
+    pick(env, 'acct:claude:' + sid);
     if (diagnostics) click(env, 'inspector-diag');
     return env;
   }
@@ -308,9 +316,12 @@ function click(env, key) {
   assert.equal(classes(card(env.root), 'quota-cooldown').length, 0);
   assert.doesNotMatch(allSpoken(card(env.root)), /Limit reached|Cooling/);
   assert.match(dotOf(env.root), /\bwarn\b/);
-  const fableRow = byFocus(env.root, 'limit:' + keyOf('|weekly_scoped:Fable|'));
-  assert.match(fableRow.getAttribute('aria-label'), /2 with this model limit reported reached \(1\.30\)/);
-  assert.match(classes(fableRow.parentNode, 'l-tail')[0].textContent, /^1 at the limit · 3 restricted/);
+  const fableRow = showKey(env, keyOf('|weekly_scoped:Fable|'));
+  assert.match(describedBy(env.root, fableRow), /2 with this model limit reported reached \(1\.30\)/);
+  // The account at the limit now is said once, by the plate's bubble (not by the legend, which keeps the held back): 1 there, 3 restricted below.
+  assert.match(classes(fableRow.parentNode, 'wt-limit-head')[0].textContent, /^At the limit · 1$/);
+  assert.match(classes(fableRow.parentNode, 'lg')[0].textContent, /^3 restricted/);
+  assert.doesNotMatch(classes(fableRow.parentNode, 'lg')[0].textContent, /at the limit/i);
   // The account list names the hold by its model and kind.
   assert.equal(stateOf(env.root, 'split').textContent, 'model limit reached: Fable');
   assert.match(stateOf(env.root, 'split').title, /model limit reached: Fable until .*reported by a stale reading/);
@@ -392,7 +403,7 @@ function click(env, key) {
   assert.match(stateOf(env.root, 'twocool').title, /model cooldown: Opus until .*; model cooldown: Sonnet until /);
   assert.match(classes(byFocus(env.root, 'acct:claude:two'), 'state-dot')[0].className, /\bwarn\b/);
   // A window's own cooldown: the window says it, amber, on its own model only.
-  click(env, 'acct:claude:drawncool');
+  pick(env, 'acct:claude:drawncool');
   click(env, 'inspector-diag');
   const opus = lineOf(env.root, 'Opus');
   assert.ok(opus, classes(card(env.root), 'win-line').map((l) => l.textContent).join(' | '));
@@ -407,10 +418,11 @@ function click(env, key) {
   assert.match(wideLine.textContent, /^Cooling down · M00 \+24 · until /);
   assert.match(wideLine.title, /m23 \+1 more not listed$/);
   assert.match(wideLine.getAttribute('aria-label'), /\+1 more not listed/);
-  const wideRow = byFocus(env.root, 'limit:' + keyOf('|weekly_scoped:Wide|'));
-  // 0.8.1: the name is text beside the row's control, not inside it.
-  assert.equal(classes(wideRow.parentNode, 'l-name-text')[0].textContent, 'Weekly · M00 +24');
-  assert.match(wideRow.getAttribute('aria-label'), /models: m00, m01, .*m23 \+1 more/);
+  const wideRow = showKey(env, keyOf('|weekly_scoped:Wide|'));
+  // The plate draws no name (its tab and scope say it); the note the word Chart is described by (the spoken summary) starts with it.
+  assert.equal(wideRow.getAttribute('aria-label'), null, 'the word is its own name');
+  assert.match(describedBy(env.root, wideRow), /^Weekly · M00 \+24 — /);
+  assert.match(describedBy(env.root, wideRow), /models: m00, m01, .*m23 \+1 more/);
 
   // A spent shared window and an account cooldown: the reset red, the
   // cooldown's end amber — each on its own line.
@@ -440,7 +452,7 @@ def test_real_widget_model_holds_and_the_two_colours(tmp_path, monkeypatch):
     monkeypatch.undo()
     node = _node()
     assert node is not None, "a Node runtime is required for widget tests"
-    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    harness = _harness(test_quotas)
     widget = Path(__file__).with_name("widget.js").resolve()
     result = subprocess.run(
         [str(node), "-e", harness + NODE_MODEL_HOLDS], cwd=widget.parent,
@@ -474,7 +486,7 @@ NODE_NO_OVERVIEW = r"""
   const card = classes(env.root, 'inspector')[0];
   // No Diagnostics to wait under: every reported exhaustion — the passed one
   // and the one naming no model too — and the credential are on the card.
-  assert.equal(byFocus(env.root, 'inspector-diag'), undefined);
+  assert.ok(byFocus(env.root, 'inspector-diag') === undefined);
   const lines = classes(card, 'quota-exhaustion').map((n) => n.textContent);
   assert.equal(lines.length, 2, lines.join(' | '));
   assert.ok(lines.some((t) => /^Reported model limit reached · Fable · its reported reset has passed/.test(t)),
@@ -495,7 +507,7 @@ def test_real_widget_without_an_overview_shows_every_reported_exhaustion(tmp_pat
     monkeypatch.undo()
     node = _node()
     assert node is not None, "a Node runtime is required for widget tests"
-    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    harness = _harness(test_quotas)
     widget = Path(__file__).with_name("widget.js").resolve()
     result = subprocess.run(
         [str(node), "-e", harness + NODE_NO_OVERVIEW], cwd=widget.parent,
@@ -533,9 +545,12 @@ NODE_SECOND_FLOOR = r"""
   // the place the old account list's second floor said the same.
   const opened = async (sid) => {
     const env = await boot(route);
-    for (const key of ['accounts', 'acct:claude:' + sid, 'inspector-diag']) {
-      byFocus(env.root, key).listeners.click[0]({ stopPropagation() {} });
-    }
+    byFocus(env.root, 'accounts').listeners.click[0]({ stopPropagation() {} });
+    // The top account is picked at the opening: its row is pressed only when the pick is not there yet; a second press would let it go.
+    const row = byFocus(env.root, 'acct:claude:' + sid);
+    if (row.getAttribute('aria-pressed') !== 'true') row.listeners.click[0]({ stopPropagation() {} });
+    assert.equal(byFocus(env.root, 'acct:claude:' + sid).getAttribute('aria-pressed'), 'true', sid);
+    byFocus(env.root, 'inspector-diag').listeners.click[0]({ stopPropagation() {} });
     return env;
   };
   const card = (env) => classes(env.root, 'inspector')[0];
@@ -603,7 +618,7 @@ def test_real_widget_second_floor_keeps_a_model_hold_on_its_model(tmp_path, monk
     monkeypatch.undo()
     node = _node()
     assert node is not None, "a Node runtime is required for widget tests"
-    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    harness = _harness(test_quotas)
     widget = Path(__file__).with_name("widget.js").resolve()
     result = subprocess.run(
         [str(node), "-e", harness + NODE_SECOND_FLOOR], cwd=widget.parent,

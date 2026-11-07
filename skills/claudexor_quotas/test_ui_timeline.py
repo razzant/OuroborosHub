@@ -1,4 +1,4 @@
-"""The calm timeline of the real widget: tabs, headline, model choice, folded details.
+"""The calm timeline of the real widget: one row of controls, the combined headline, model choice, folded details.
 
 The fixtures pass through the real backend (reserve_view with analytics over a real
 HistoryStore); the same fake DOM as the other widget tests lets us see the DOM order,
@@ -93,10 +93,14 @@ function indexOf(root, cls) { return walk(root).findIndex((n) => String(n.classN
     const env = await boot((url) => answer(url));
     const block = classes(env.root, 'tl-block')[0];
     assert.ok(block, 'a timeline block under the charted row');
-    // head (tabs + model), hero, controls, plot, short legend, then Details — in that order.
-    const order = ['tl-head', 'tl-hero', 'tl-controls', 'chart-plot', 'calm-legend', 'chart-table'].map((c) => indexOf(block, c));
+    // The graph is the plate's continuation: the row of controls (span, future, Combined, model), the plot, the short
+    // legend, then Details — in that order. It has no head of its own and, in the window mode, no headline: both would
+    // say what the plate above already says.
+    const order = ['tl-controls', 'chart-plot', 'calm-legend', 'chart-table'].map((c) => indexOf(block, c));
     assert.ok(order.every((i) => i >= 0), 'every part is there: ' + order);
     assert.deepEqual(order.slice().sort((a, b) => a - b), order, 'calm order, nothing long before the graph');
+    assert.equal(indexOf(block, 'tl-head'), -1, 'no head (and no line under it) in the graph');
+    assert.equal(indexOf(block, 'tl-hero'), -1, 'the window mode draws no headline: the plate has those figures');
     // Everything the calm view folds away lives under Details: the schedule, the long legend, the joint paragraph.
     const details = classes(block, 'chart-table')[0];
     for (const cls of ['schedule', 'chart-legend']) {
@@ -112,55 +116,92 @@ function indexOf(root, cls) { return walk(root).findIndex((n) => String(n.classN
     assert.match(legend, /no new use: a condition, not a forecast/);
     // One curve: nothing in the block is hatched.
     assert.ok(!walk(block).some((n) => n.tagName === 'PATTERN'));
-    // The row bars are still there, one strip per limit.
-    assert.equal(classes(env.root, 'bars').length, fx.default.reserve.summary.groups.length);
-    // The tab strip and the headline.
-    const tabs = classes(block, 'tl-tab').map(text);
-    assert.equal(tabs[0], 'Combined');
-    assert.ok(tabs.length >= 3, tabs.join('|'));
-    const hero = text(classes(block, 'tl-hero')[0]);
-    assert.match(hero, /Next reset/);
+    // One plate under the window row (not a stack of rows): one strip, of the picked window.
+    assert.equal(classes(env.root, 'bars').length, 1);
+    assert.equal(classes(env.root, 'lrow').length, 1);
+    assert.equal(classes(env.root, 'wt-row')[0].getAttribute('role'), 'tablist');
+    // No tab strip in the graph (the window is picked in the row above, and no tab of it would be a second one); the one
+    // thing it holds that the plate does not is Combined, a switch in its row of controls.
+    assert.equal(classes(block, 'wt-tab').length, 0);
+    assert.equal(classes(block, 'tab-mark-num').length, 0);
+    assert.equal(classes(block, 'wt-bar').length, 0);
+    assert.ok(!walk(block).some((n) => n.getAttribute('role') === 'tablist' || n.getAttribute('role') === 'tab'), 'no tablist, not even of one');
+    const row = classes(block, 'tl-controls')[0];
+    const inRow = walk(row).filter((n) => n.tagName === 'BUTTON').map((n) => n.getAttribute('data-focus'));
+    assert.deepEqual(inRow, ['horizon:24h', 'horizon:7d', 'scenario:no_new_use', 'scenario:recent_pace', 'graph:joint', 'tl-model'],
+      'the row: the span, the future, Combined, and the model choice last');
     env.disposeHooks[0]();
-  } else if (mode === 'tabs') {
+  } else if (mode === 'switch') {
     const env = await boot((url) => answer(url));
-    const block = classes(env.root, 'tl-block')[0];
-    const tabs = classes(block, 'tl-tab');
-    assert.equal(tabs.filter((t) => t.getAttribute('aria-selected') === 'true').length, 1);
-    assert.equal(tabs.filter((t) => t.getAttribute('tabindex') === '0').length, 1, 'one tab stop in the tablist');
-    assert.equal(classes(block, 'tl-tabs')[0].getAttribute('role'), 'tablist');
-    assert.ok(classes(block, 'tl-tabs')[0].listeners.keydown.length, 'arrow keys are handled on the strip');
+    const block = () => classes(env.root, 'tl-block')[0];
+    const sw = () => byFocus(env.root, 'graph:joint');
+    // Combined is one switch among the graph's controls: pressed or not, with the original words on it.
+    assert.ok(sw(), 'Combined is a control of the graph');
+    assert.equal(sw().tagName, 'BUTTON');
+    assert.equal(text(sw()), 'Combined');
+    assert.equal(sw().getAttribute('aria-pressed'), 'false', 'off: the graph draws the plate\'s window');
+    assert.equal(sw().getAttribute('role'), null, 'a switch, not a tab');
+    assert.match(sw().title, /^Per account the smaller of its binding limits, in units of its shortest window/);
+    assert.ok(walk(classes(block(), 'tl-controls')[0]).includes(sw()), 'it stands in the row of controls, beside the span and the future');
+    assert.equal(classes(block(), 'wt-tab').length, 0, 'no tab of the window in the graph');
+    assert.equal(classes(block(), 'tab-mark-num').length, 0);
+    assert.equal(classes(env.root, 'tl-hero').length, 0, 'the window mode draws no headline: the plate has those figures');
     const calls0 = env.calls.length;
-    click(env, 'tab:joint');
+    const shownKey = fx.default.reserve.chart.group_key;
+    click(env, 'graph:joint');
     await sleep();
-    const now = classes(env.root, 'tl-tab');
-    assert.equal(now[0].getAttribute('aria-selected'), 'true', 'Combined chosen');
-    assert.match(text(classes(env.root, 'tl-hero')[0]), /equivalents left/);
-    assert.match(text(classes(env.root, 'tl-hero')[0]), /counted/);
+    assert.equal(sw().getAttribute('aria-pressed'), 'true', 'Combined on');
+    const hero = text(classes(env.root, 'tl-hero')[0]);
+    assert.match(hero, /equivalents left/);
+    assert.match(hero, /counted/);
+    assert.match(hero, /Next reset/);
+    assert.equal(classes(block(), 'tl-hero').length, 1, 'Combined has its headline: its numbers are not the plate\'s');
     assert.equal(env.calls.length, calls0, 'Combined needs no new request: the chart on hand carries it');
-    // A window tab asks for its own chart once, and the block follows it.
-    const other = fx.default.reserve.summary.groups.find((g) => g.key !== fx.default.reserve.chart.group_key && g.window_seconds
-      && classes(env.root, 'tl-tab').some((t) => t.getAttribute('data-focus') === 'tab:' + g.key));
-    assert.ok(other, 'another window is a tab');
-    click(env, 'tab:' + other.key);
+    // Combined is the graph's own state: the window row above keeps its pick.
+    assert.equal(classes(env.root, 'wt-tab').filter((t) => t.getAttribute('aria-selected') === 'true').length, 1);
+    assert.equal(byFocus(env.root, 'limit:' + shownKey).getAttribute('aria-pressed'), 'true', 'the plate is still the same window');
+    // The same control turns it off again: the window, with no headline and no new request.
+    click(env, 'graph:joint');
+    await sleep();
+    assert.equal(sw().getAttribute('aria-pressed'), 'false');
+    assert.equal(classes(env.root, 'tl-hero').length, 0);
+    assert.equal(env.calls.length, calls0, 'the window on the plate needs no new request');
+    // Another window is picked in the window row: it asks for its own chart once, and the block follows it, back on the window.
+    const other = fx.default.reserve.summary.groups.find((g) => g.key !== shownKey && g.window_seconds
+      && byFocus(env.root, 'win:' + g.harness + ':' + g.window_seconds)
+      && g.window_seconds !== fx.default.reserve.summary.groups.find((x) => x.key === shownKey).window_seconds);
+    assert.ok(other, 'another window is a tab of the window row');
+    click(env, 'graph:joint');
+    assert.equal(sw().getAttribute('aria-pressed'), 'true');
+    click(env, 'win:' + other.harness + ':' + other.window_seconds);
     await sleep(); await sleep();
     const asked = env.calls.filter((c) => c.url.includes('group=' + encodeURIComponent(other.key)));
     assert.equal(asked.length, 1, 'one chart request for the picked window');
+    assert.equal(sw().getAttribute('aria-pressed'), 'false', 'a window picked above takes the graph back from Combined');
     env.disposeHooks[0]();
   } else if (mode === 'hidden_rows') {
+    // The graph's controls are the same whatever the family's other windows are, or are hidden by the reader.
     const probe = await boot((url) => answer(url));
-    const tabKeys = classes(probe.root, 'tl-tab').map((t) => t.getAttribute('data-focus').slice(4)).filter((k) => k !== 'joint');
-    const gone = tabKeys.find((k) => k !== fx.default.reserve.chart.group_key);
-    assert.ok(gone);
+    const shown = fx.default.reserve.chart.group_key;
+    const row = (env) => walk(classes(classes(env.root, 'tl-block')[0], 'tl-controls')[0]).filter((n) => n.tagName === 'BUTTON')
+      .map((n) => n.getAttribute('data-focus'));
+    const all = row(probe);
+    assert.ok(all.includes('graph:joint') && all.includes('tl-model'), all.join());
+    const gone = fx.default.reserve.summary.groups.find((g) => g.key !== shown && g.window_seconds).key;
     probe.disposeHooks[0]();
     const v = JSON.parse(JSON.stringify(fx.default));
     v.display = { hidden: [gone] };
     const env = await boot(() => v);
-    assert.ok(!byFocus(env.root, 'tab:' + gone), 'a window the reader hid from the rows is not a tab either');
+    assert.deepEqual(row(env), all, 'hiding a row changes nothing in the graph\'s controls');
+    assert.equal(classes(classes(env.root, 'tl-block')[0], 'wt-tab').length, 0);
+    assert.equal(classes(classes(env.root, 'tl-block')[0], 'tab-mark-num').length, 0);
     env.disposeHooks[0]();
   } else if (mode === 'model') {
     const env = await boot((url) => answer(url));
     const btn = byFocus(env.root, 'tl-model');
-    assert.ok(btn, 'the model choice is a visible control beside the tabs');
+    assert.ok(btn, 'the model choice is a visible control, in the graph\'s row of controls');
+    assert.ok(walk(classes(classes(env.root, 'tl-block')[0], 'tl-controls')[0]).includes(btn), 'the same row as the span and the future');
+    assert.equal(classes(classes(env.root, 'tl-block')[0], 'tl-head').length, 0, 'not in a head of the graph: it has none');
     assert.equal(btn.getAttribute('aria-expanded'), 'false');
     assert.ok(!classes(env.root, 'tl-model-panel').length);
     click(env, 'tl-model');
@@ -237,8 +278,10 @@ function indexOf(root, cls) { return walk(root).findIndex((n) => String(n.classN
     };
     const env = await boot(() => v);
     click(env, 'accounts');
-    click(env, 'acct:' + acct.key);
+    // The top account is already picked when the widget opens, so its row is pressed only when the pick is not there yet: a second press would clear it.
+    if (byFocus(env.root, 'acct:' + acct.key).getAttribute('aria-pressed') !== 'true') click(env, 'acct:' + acct.key);
     await sleep();
+    assert.equal(byFocus(env.root, 'acct:' + acct.key).getAttribute('aria-pressed'), 'true', 'the account is picked');
     const said = classes(env.root, 'account-resources').map(text).join('\n');
     const lines = classes(env.root, 'tl-scope').map(text);
     const has = (s) => assert.ok(lines.some((l) => l.includes(s)), 'missing: ' + s + '\n' + lines.join('\n'));
@@ -266,6 +309,194 @@ function indexOf(root, cls) { return walk(root).findIndex((n) => String(n.classN
     const env = await boot(() => v);
     assert.ok(!byFocus(env.root, 'tl-model'), 'no model button when there is nothing to pick');
     env.disposeHooks[0]();
+  } else if (mode === 'captions') {
+    // Span and Future say what they are: each caption is quiet text in view at the head of its capsule, not a button.
+    const en = I18N_ANSWER.en;
+    const env = await boot((url) => answer(url));
+    const row = classes(classes(env.root, 'tl-block')[0], 'tl-controls')[0];
+    const labels = classes(row, 'seg-label');
+    assert.deepEqual(labels.map(text), [en['chart.span'], en['chart.future']], 'the texts are the table\'s');
+    assert.deepEqual(labels.map(text), ['Span', 'Future']);
+    labels.forEach((label) => {
+      assert.ok(!String(label.className).split(/\s+/).includes('sr-only'), 'in view, not for a screen reader only: ' + label.className);
+      assert.equal(label.tagName, 'SPAN', 'a caption, not a button');
+      assert.equal(label.getAttribute('data-focus'), null, 'no stop of the keyboard');
+      assert.equal(label.getAttribute('tabindex'), null);
+      assert.equal(label.getAttribute('role'), null);
+    });
+    // Each heads its own segment, which still names itself for a screen reader; the row's buttons are the same as before.
+    const groups = classes(row, 'seg').filter((s) => s.getAttribute('role') === 'group');
+    assert.deepEqual(groups.map((s) => s.getAttribute('aria-label')), ['Span', 'Future']);
+    groups.forEach((s, i) => assert.ok(s.childNodes[0] === labels[i], 'the caption comes first in its segment'));
+    assert.deepEqual(walk(row).filter((n) => n.tagName === 'BUTTON').map((n) => n.getAttribute('data-focus')),
+      ['horizon:24h', 'horizon:7d', 'scenario:no_new_use', 'scenario:recent_pace', 'graph:joint', 'tl-model']);
+    env.disposeHooks[0]();
+  } else if (mode === 'idle') {
+    // A pace nobody has measured draws what No new use draws: Recent pace is muted, says why, and still works.
+    const PHRASE = 'No account has a measured pace yet, so this line is the same as No new use';
+    const clone = (v) => JSON.parse(JSON.stringify(v));
+    // where: the scenarios the plot draws, the window's or Combined's (Combined has none in the fixture: it gets a copy).
+    const withPace = (view, where, atPace) => {
+      const v = clone(view);
+      const an = v.reserve.chart.analytics;
+      if (where === 'joint' && !an.joint.scenarios) an.joint.scenarios = clone(an.window.scenarios);
+      const scenarios = (where === 'window' ? an.window : an.joint).scenarios;
+      scenarios.recent_pace.at_pace = atPace;
+      if (where === 'window') v.reserve.chart.scenarios = clone(scenarios);
+      return v;
+    };
+    const pace = (env) => byFocus(env.root, 'scenario:recent_pace');
+    const idle = (node) => String(node.className).split(/\s+/).includes('idle');
+    const legend = (env) => text(classes(env.root, 'calm-legend')[0]);
+
+    let env = await boot(() => withPace(fx.default, 'window', 0));
+    let b = pace(env);
+    assert.ok(idle(b) && String(b.className).split(/\s+/).includes('seg-opt'), b.className);
+    assert.equal(b.getAttribute('data-idle'), 'true');
+    assert.equal(b.title, PHRASE);
+    assert.equal(b.getAttribute('aria-label'), 'Recent pace — ' + PHRASE, 'the same phrase, appended to the name');
+    assert.equal(text(b), 'Recent pace', 'not hidden and not renamed');
+    const calm = byFocus(env.root, 'scenario:no_new_use');
+    assert.ok(!idle(calm) && calm.getAttribute('data-idle') === null && calm.getAttribute('aria-label') === null);
+    assert.equal(calm.title, 'Every account read now keeps its share and refills once at its next reported reset');
+    assert.match(legend(env), /no new use: a condition, not a forecast/);
+    // The button works: it picks the line, and the legend says that line is the same as no new use.
+    click(env, 'scenario:recent_pace');
+    await sleep();
+    b = pace(env);
+    assert.equal(b.getAttribute('aria-pressed'), 'true');
+    assert.ok(idle(b), 'chosen it is still the idle one');
+    assert.match(legend(env), /recent pace: no measured pace yet — same as no new use/);
+    assert.doesNotMatch(legend(env), /a condition, not a forecast/);
+    assert.ok(legend(env).length <= 140, legend(env));
+    assert.ok(walk(env.root).some((n) => n.getAttribute('class') === 'chart-svg'), 'the plot stays');
+    env.disposeHooks[0]();
+
+    // A measured pace: nothing muted, the old title and legend.
+    env = await boot(() => withPace(fx.default, 'window', 2));
+    b = pace(env);
+    assert.ok(!idle(b) && b.getAttribute('data-idle') === null && b.getAttribute('aria-label') === null);
+    assert.equal(b.title, 'The accounts with a measured recent pace keep it; the others are held');
+    click(env, 'scenario:recent_pace');
+    await sleep();
+    assert.match(legend(env), /recent pace: a condition, not a forecast/);
+    assert.doesNotMatch(legend(env), /no measured pace yet/);
+    env.disposeHooks[0]();
+
+    // Combined reads the scenarios it draws, not the mode: a measured window beside an idle Combined, and the other way round.
+    env = await boot(() => withPace(withPace(fx.default, 'window', 2), 'joint', 0));
+    assert.ok(!idle(pace(env)), 'the window draws a measured pace');
+    click(env, 'graph:joint');
+    await sleep();
+    assert.ok(idle(pace(env)), 'Combined draws none');
+    assert.equal(pace(env).getAttribute('data-idle'), 'true');
+    click(env, 'scenario:recent_pace');
+    await sleep();
+    assert.match(legend(env), /recent pace: no measured pace yet/);
+    click(env, 'graph:joint');
+    await sleep();
+    assert.ok(!idle(pace(env)), 'back on the window, the pace is measured again');
+    env.disposeHooks[0]();
+    env = await boot(() => withPace(withPace(fx.default, 'window', 0), 'joint', 3));
+    assert.ok(idle(pace(env)), 'the window draws none');
+    click(env, 'graph:joint');
+    await sleep();
+    assert.ok(!idle(pace(env)), 'Combined draws a measured pace');
+    assert.equal(pace(env).getAttribute('data-idle'), null);
+    env.disposeHooks[0]();
+  } else if (mode === 'how') {
+    // Details, facts first: the method is one fold more, "How it is counted", and keeps its own state through a redraw.
+    const env = await boot((url) => answer(url));
+    const outer = () => classes(env.root, 'chart-table')[0];
+    const how = () => classes(env.root, 'chart-how')[0];
+    assert.equal(classes(env.root, 'chart-how').length, 1, 'one fold for the method');
+    assert.equal(how().tagName, 'DETAILS');
+    assert.ok(walk(outer()).includes(how()), 'inside the Details');
+    const summary = byFocus(env.root, 'chart-how');
+    assert.equal(summary.tagName, 'SUMMARY');
+    assert.equal(text(summary), 'How it is counted');
+    assert.ok(walk(how()).includes(summary) && walk(how())[1] === summary, 'its summary heads it');
+    const all = walk(outer());
+    // The facts stand outside the fold, before it; the notes and the data are inside it.
+    for (const cls of ['chart-legend', 'tl-facts', 'schedule', 'reserve-detail']) {
+      const nodes = classes(outer(), cls);
+      if (cls !== 'tl-facts') assert.ok(nodes.length, cls + ' is there'); // the pace lines are drawn only at a measured pace
+      nodes.forEach((n) => {
+        assert.ok(!walk(how()).includes(n), cls + ' is not folded');
+        assert.ok(all.indexOf(n) < all.indexOf(how()), cls + ' comes before the fold');
+      });
+    }
+    assert.ok(classes(how(), 'chart-notes').length, 'the notes are in the fold');
+    assert.equal(classes(outer(), 'chart-notes').filter((n) => !walk(how()).includes(n)).length, 0, 'none of them outside');
+    const tables = all.filter((n) => n.tagName === 'TABLE' && !String(n.className).split(/\s+/).includes('schedule'));
+    assert.ok(tables.length >= 1, 'the data table is there');
+    assert.ok(tables.every((n) => walk(how()).includes(n)), 'and in the fold');
+    assert.match(text(how()), /recorded changes/);
+    // Open, it survives the redraw of the poll, with the keyboard on its summary; the Details around it are its own state.
+    assert.ok(!how().open && !outer().open);
+    how().open = true;
+    how().listeners.toggle[0]();
+    summary.focus();
+    const before = how();
+    env.interval()();
+    await sleep(); await sleep();
+    assert.notEqual(how(), before, 'the poll drew it again');
+    assert.equal(how().open, true, 'and left it open');
+    assert.ok(!outer().open, 'the Details are not opened by it');
+    assert.equal(env.document.activeElement.getAttribute('data-focus'), 'chart-how');
+    assert.ok(env.document.activeElement === byFocus(env.root, 'chart-how'));
+    // Shut, it stays shut; the Details open on their own.
+    how().open = false;
+    how().listeners.toggle[0]();
+    outer().open = true;
+    outer().listeners.toggle[0]();
+    env.interval()();
+    await sleep(); await sleep();
+    assert.ok(!how().open, 'shut stays shut');
+    assert.equal(outer().open, true);
+    env.disposeHooks[0]();
+  } else if (mode === 'joint_unit') {
+    // The combined view's unit is one phrase per length, so a language can decline it; in English it is today's phrase.
+    const clone = (v) => JSON.parse(JSON.stringify(v));
+    const seen = async (seconds) => {
+      const v = clone(fx.default);
+      v.reserve.chart.analytics.joint.unit.window_seconds = seconds;
+      const env = await boot(() => v);
+      click(env, 'graph:joint');
+      await sleep();
+      const out = { hero: text(classes(env.root, 'tl-unit')[0]), note: text(classes(env.root, 'tl-joint')[0]),
+                    axis: text(walk(env.root).find((n) => n.getAttribute('class') === 'unit-text')) };
+      env.disposeHooks[0]();
+      return out;
+    };
+    const english = [[18000, '5-hour window equivalents left', '5-hour window equivalents now'],
+      [604800, 'Weekly window equivalents left', 'Weekly window equivalents now'],
+      [172800, '2-day window equivalents left', '2-day window equivalents now'],
+      [1209600, '2-week window equivalents left', '2-week window equivalents now'],
+      [86400, 'Daily window equivalents left', 'Daily window equivalents now'],
+      [3600, 'Hourly window equivalents left', 'Hourly window equivalents now'],
+      [120, '2-minute window equivalents left', '2-minute window equivalents now'],
+      [60, 'Per-minute window equivalents left', 'Per-minute window equivalents now'],
+      [0, 'No stated length window equivalents left', 'No stated length window equivalents now']];
+    for (const [seconds, left, now] of english) {
+      const out = await seen(seconds);
+      assert.equal(out.hero, left, 'the headline, ' + seconds);
+      assert.equal(out.axis, left, 'the axis caption says the same, ' + seconds);
+      assert.ok(out.note.includes(now + ' · 0 of 3 accounts counted'), out.note);
+    }
+    // Russian: each length has its own phrase; the one the pack lacks stays English.
+    Object.assign(I18N_ANSWER, { language: 'ru', revision: 1, plural_select: null, strings: {
+      'joint.left_h': '{n}-часовых окон осталось',
+      'joint.now_h': '{n}-часовых окон сейчас',
+      'joint.left_week': 'Недельных окон осталось',
+      'joint.counted': 'учтено {known}, всего {of}',
+      'joint.next_reset': 'Ближайший сброс' } });
+    const five = await seen(18000);
+    assert.equal(five.hero, '5-часовых окон осталось');
+    assert.equal(five.axis, five.hero);
+    assert.ok(five.note.includes('5-часовых окон сейчас · учтено 0, всего 3 accounts'), five.note);
+    assert.equal((await seen(604800)).hero, 'Недельных окон осталось');
+    assert.equal((await seen(172800)).hero, '2-day window equivalents left', 'a phrase the pack lacks stays English');
   }
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
 """
@@ -276,7 +507,8 @@ def fixture_json(tmp_path_factory):
     return json.dumps(_views(tmp_path_factory.mktemp("uitimeline")))
 
 
-@pytest.mark.parametrize("case", ["composition", "tabs", "hidden_rows", "model", "model_ignored", "no_choice", "money"])
+@pytest.mark.parametrize("case", ["composition", "switch", "hidden_rows", "model", "model_ignored", "no_choice", "money",
+                                  "captions", "idle", "how", "joint_unit"])
 def test_calm_timeline(fixture_json, case):
     node = _node()
     assert node is not None, "Node is required"

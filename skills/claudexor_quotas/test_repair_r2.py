@@ -259,7 +259,7 @@ NODE_REPAIR = r"""
   }
   const fiveHour = fx.weekly_tightest.reserve.summary.groups.find((g) => /\|primary\|/.test(g.key)).key;
   let from = asked.length;
-  click(env, 'limit:' + fiveHour);
+  showKey(env, fiveHour);
   await drain(env, fx.weekly_tightest);
   assert.ok(asked.slice(from).includes(fiveHour), 'a click chooses: ' + asked.slice(from));
   from = asked.length;

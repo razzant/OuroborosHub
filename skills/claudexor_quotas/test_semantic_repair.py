@@ -254,7 +254,7 @@ def test_widget_future_svg_and_cursor_do_not_coerce_unknown_to_zero(tmp_path):
     js = r'''
 (async () => {
   const fx=JSON.parse(process.env.GAP_FIXTURE), env=await boot(()=>fx);
-  byFocus(env.root,'tab:joint').listeners.click[0]({stopPropagation(){}});await settle();
+  byFocus(env.root,'graph:joint').listeners.click[0]({stopPropagation(){}});await settle();
   const line=walk(env.root).find(n=>n.tagName==='PATH' && n.getAttribute('class')==='line-scenario');assert.ok(line);
   const xs=[...line.getAttribute('d').matchAll(/[ML]([\d.]+) /g)].map(m=>+m[1]);
   const reset=walk(env.root).find(n=>n.getAttribute('class')==='reset-dot');assert.ok(reset);
