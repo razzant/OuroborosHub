@@ -97,13 +97,13 @@ class CalendarWidgetStateTests(SkillCase):
                 timezone:'Asia/Dubai', now:backend.now, days:[{date:day,weekday:'Day'}], calendars:backend.calendars,
                 events:[],hidden_busy:[],usual:[],accounts:[],sync:{companion:'alive'}}));
         }""")
-        self.page.get_by_role('button', name='›', exact=True).click()
-        self.page.get_by_role('button', name='›', exact=True).click()
+        self.page.get_by_role('button', name='Следующий день', exact=True).click()
+        self.page.get_by_role('button', name='Следующий день', exact=True).click()
         self.calls_reach('agenda', 3)
         self.page.evaluate("completeAgenda('2026-09-29')")
-        expect(self.page.locator('.bar .title')).to_contain_text('2026-09-29')
+        expect(self.page.locator('.bar .title')).to_contain_text('29 сентября')
         self.page.evaluate("completeAgenda('2026-09-28')")
-        expect(self.page.locator('.bar .title')).to_contain_text('2026-09-29')
+        expect(self.page.locator('.bar .title')).to_contain_text('29 сентября')
 
     def test_http_warning_is_visible_before_password_submission(self):
         self.mount_state(); self.open_accounts()

@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 from test_calendar_round2 import OneAdapterProviders, make_context
 from test_sync_atomicity import FeedAdapter, SyncCase
+import accounts
+import management
 import ops
 import providers
 import providers_google as google
@@ -99,6 +101,133 @@ class ReminderConnectionTests(unittest.TestCase):
         result = tools.set_reminder_mode(ctx, cal['id'], False)
         self.assertEqual(adapter.defaults, [{'method': 'popup', 'minutes': 10}], result)
         self.assertFalse((ctx.store.get_setting(reminders.MODE_KEY) or {}).get(cal['id']))
+
+
+class ListingAdapter(FeedAdapter):
+    """A provider calendar list taken before ``during_list`` runs, so it can still name a calendar deleted meanwhile."""
+
+    def __init__(self, listing):
+        super().__init__()
+        self.listing, self.during_list, self.fetched, self.deleted = listing, None, [], []
+
+    def list_calendars(self):
+        listing = [dict(calendar) for calendar in self.listing]
+        if self.during_list:
+            self.during_list()
+        return listing
+
+    def fetch(self, calendar, cursor='', tz=None):
+        self.fetched.append(calendar['id'])
+        return super().fetch(calendar, cursor, tz)
+
+    def delete_calendar(self, calendar):
+        self.deleted.append(calendar['id'])
+        return {'deleted': True, 'calendar_id': calendar['id']}
+
+
+class AccountReconnectionTests(unittest.TestCase):
+    EMAIL = 'owner@example.test'
+    ACCOUNT = 'google:' + EMAIL
+    OBSERVED = {'id': ACCOUNT + ':primary', 'account_id': ACCOUNT, 'provider': 'google',
+                'external_id': EMAIL, 'name': 'Personal', 'writable': True}
+    OWNER = {'role_visible': 0, 'role_busy': 0, 'role_publish': 1, 'publish_mode': 'full', 'sort_order': 3, 'is_default': 1}
+
+    def setUp(self):
+        self.ctx = make_context()
+        self.addCleanup(shutil.rmtree, self.ctx.state_dir)
+
+    def connect_google(self, adapter):
+        self.ctx.providers = OneAdapterProviders(adapter)
+        self.ctx.store.upsert_account({'id': self.ACCOUNT, 'provider': 'google', 'login': self.EMAIL})
+        self.ctx.store.upsert_calendar(self.OBSERVED)
+        self.ctx.store.update_calendar(self.OBSERVED['id'], self.OWNER)
+
+    def disconnect(self, account_id):
+        providers_in_use = self.ctx.providers
+        result = json.loads(tools.cal_settings(self.ctx, action='disconnect', calendar_id=account_id, confirm=True))
+        self.ctx.providers = providers_in_use  # keep the synthetic provider; the public disconnect path really ran
+        self.assertEqual(result['status'], 'updated', result)
+        return result
+
+    def assert_restored(self, calendar_id, account_id):
+        restored = self.ctx.store.get_calendar(calendar_id)
+        self.assertIsNone(restored['deleted_at'])
+        self.assertEqual({key: restored[key] for key in self.OWNER}, self.OWNER)
+        self.assertEqual([c['id'] for c in self.ctx.store.list_calendars(account_id=account_id)], [calendar_id])
+
+    def test_caldav_reconnect_restores_calendar_with_owner_fields(self):
+        def discover(adapter):
+            return [{'id': adapter.account_id + ':work', 'account_id': adapter.account_id, 'provider': adapter.provider,
+                     'external_id': 'work', 'href': adapter.home + 'work/', 'name': 'Work', 'writable': True}]
+        form = {'login': 'person', 'password': 'synthetic-password', 'server_url': 'https://dav.example.test/dav/'}
+        with patch.object(providers.CalDAVAdapter, 'list_calendars', discover):
+            first = accounts.connect_caldav(self.ctx, **form)
+            self.assertEqual(first['status'], 'connected', first)
+            calendar_id = first['calendars'][0]['id']
+            self.ctx.store.update_calendar(calendar_id, self.OWNER)
+            self.disconnect(first['account_id'])
+            self.assertTrue(self.ctx.store.get_calendar(calendar_id)['deleted_at'])
+            again = accounts.connect_caldav(self.ctx, **form)
+        self.assertEqual(again['status'], 'connected', again)
+        self.assert_restored(calendar_id, first['account_id'])
+
+    def test_google_reload_restores_calendar_with_owner_fields(self):
+        self.connect_google(ListingAdapter([self.OBSERVED]))
+        self.disconnect(self.ACCOUNT)
+        with patch.object(google, 'load_tokens', return_value={self.EMAIL: {'email': self.EMAIL}}):  # signed in again
+            self.assertEqual(tools.reload_google(self.ctx)['status'], 'ok')
+        self.assert_restored(self.OBSERVED['id'], self.ACCOUNT)
+
+    def test_google_sign_in_restores_calendar_when_companion_discovers_it(self):
+        adapter = ListingAdapter([self.OBSERVED])
+        self.connect_google(adapter)
+        self.disconnect(self.ACCOUNT)
+        signed_in = {'account_id': self.ACCOUNT, 'email': self.EMAIL, 'offline_access': True}
+        with patch.object(google, 'finish_auth', return_value=signed_in):
+            self.assertTrue(accounts.complete_google(self.ctx, code='code', state='state')['ok'])
+        # The OAuth return leaves calendar discovery to the companion's next pass.
+        report = worker.sync_account(self.ctx.store, self.ctx.providers, self.ctx.store.get_account(self.ACCOUNT), self.ctx.tz)
+        self.assertEqual((report['status'], report['calendars']), ('ok', 1), report)
+        self.assertEqual(adapter.fetched, [self.OBSERVED['id']])
+        self.assert_restored(self.OBSERVED['id'], self.ACCOUNT)
+
+    def test_owner_deleted_calendar_stays_retired_through_ordinary_refresh_and_sync(self):
+        adapter = ListingAdapter([self.OBSERVED])
+        self.connect_google(adapter)
+        with self.ctx.store._conn() as conn:  # the connection began before the deletion (stored times have second precision)
+            conn.execute('UPDATE accounts SET created_at=? WHERE id=?', ('2026-01-01T00:00:00+00:00', self.ACCOUNT))
+        def owner_deletes():
+            adapter.during_list = None
+            deleted = json.loads(management.cal_manage(self.ctx, action='delete', calendar_id=self.OBSERVED['id'], confirm=True))
+            self.assertEqual(deleted['status'], 'done', deleted)
+        adapter.during_list = owner_deletes  # the companion's listing was taken before the delete
+        report = worker.sync_account(self.ctx.store, self.ctx.providers, self.ctx.store.get_account(self.ACCOUNT), self.ctx.tz)
+        self.assertEqual(adapter.deleted, [self.OBSERVED['id']])
+        self.assertEqual((report['status'], report['calendars'], adapter.fetched), ('ok', 0, []), report)
+        self.ctx.store.upsert_calendar(self.OBSERVED)
+        listed = json.loads(management.cal_calendars(self.ctx, refresh=True))
+        worker.sync_account(self.ctx.store, self.ctx.providers, self.ctx.store.get_account(self.ACCOUNT), self.ctx.tz)
+        self.assertEqual([a['calendars'] for a in listed['accounts'] if a['account_id'] == self.ACCOUNT], [[]])
+        self.assertTrue(self.ctx.store.get_calendar(self.OBSERVED['id'])['deleted_at'])
+        self.assertEqual(self.ctx.store.list_calendars(account_id=self.ACCOUNT), [])
+        self.assertEqual(adapter.fetched, [])
+
+    def test_late_discovery_for_disconnected_account_changes_nothing(self):
+        late = {**self.OBSERVED, 'id': self.ACCOUNT + ':new', 'external_id': 'new', 'name': 'New'}
+        adapter = ListingAdapter([self.OBSERVED, late])
+        self.connect_google(adapter)
+        account_in_flight = self.ctx.store.get_account(self.ACCOUNT)  # a companion pass read it before the disconnect
+        self.disconnect(self.ACCOUNT)
+        retired = self.ctx.store.get_calendar(self.OBSERVED['id'])
+        self.assertTrue(retired['deleted_at'])
+        for calendar in (self.OBSERVED, late):
+            self.ctx.store.upsert_calendar(calendar)
+            self.ctx.store.upsert_calendar(calendar, restore=True)
+        report = worker.sync_account(self.ctx.store, self.ctx.providers, account_in_flight, self.ctx.tz)
+        self.assertEqual((report['calendars'], adapter.fetched), (0, []), report)
+        self.assertEqual(self.ctx.store.get_calendar(self.OBSERVED['id']), retired)
+        self.assertIsNone(self.ctx.store.get_calendar(late['id']))
+        self.assertIsNone(self.ctx.store.get_account(self.ACCOUNT))
 
 
 class ProviderConnectionTests(SyncCase):

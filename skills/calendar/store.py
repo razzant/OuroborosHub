@@ -310,8 +310,14 @@ class Store:
             c.execute("UPDATE calendars SET deleted_at=? WHERE account_id=? AND deleted_at IS NULL", (_ts(), account_id))
             c.execute("DELETE FROM accounts WHERE id=?", (account_id,))
 
-    def upsert_calendar(self, cal: Dict[str, Any]) -> None:
-        """Insert a calendar or refresh its provider-owned facts; owner roles are kept."""
+    def upsert_calendar(self, cal: Dict[str, Any], *, restore: bool = False) -> None:
+        """Insert a calendar or refresh its provider-owned facts; owner roles are kept.
+
+        A retired calendar stays retired, so an ordinary refresh or sync never revives a calendar
+        the owner deleted. restore=True is only for a calendar observed by a reconnection or an
+        explicit discovery; it clears deleted_at. The accounts gate makes a late discovery for a
+        disconnected account a no-op either way.
+        """
         ts = _ts()
         with self._conn() as c:
             c.execute(
@@ -321,7 +327,8 @@ class Store:
                 " :role_visible, :role_busy, :role_publish, :publish_mode, :sort_order, :is_default, NULL, :ts"
                 " WHERE EXISTS (SELECT 1 FROM accounts WHERE id=:account_id)"
                 " ON CONFLICT(id) DO UPDATE SET external_id=excluded.external_id, href=excluded.href, name=excluded.name, description=excluded.description,"
-                " tz=excluded.tz, writable=excluded.writable, access_role=excluded.access_role, deleted_at=NULL, updated_at=excluded.updated_at",
+                " tz=excluded.tz, writable=excluded.writable, access_role=excluded.access_role,"
+                " deleted_at=CASE WHEN :restore THEN NULL ELSE deleted_at END, updated_at=excluded.updated_at",
                 {
                     "id": cal["id"], "account_id": cal["account_id"], "provider": cal["provider"],
                     "external_id": cal.get("external_id") or "", "href": cal.get("href") or "", "name": cal.get("name") or cal["id"],
@@ -332,7 +339,7 @@ class Store:
                     "role_busy": 1 if cal.get("role_busy", True) else 0,
                     "role_publish": 1 if cal.get("role_publish", False) else 0,
                     "publish_mode": cal.get("publish_mode") or ("full" if cal["provider"] == PROVIDER_LOCAL else "busy"), "sort_order": int(cal.get("sort_order") or 0),
-                    "is_default": 1 if cal.get("is_default") else 0, "ts": ts,
+                    "is_default": 1 if cal.get("is_default") else 0, "ts": ts, "restore": 1 if restore else 0,
                 },
             )
 

@@ -20,12 +20,13 @@
     var DAY_START_H = 0;
 
     var state = {
-        view: 'day', date: null, data: null, error: '', loading: false, loadSeq: 0, loadRequest: null, loadQuery: '', showHidden: false,
+        view: 'day', date: null, shownDate: null, data: null, error: '', loading: false, loadSeq: 0, loadRequest: null, loadQuery: '', loadTarget: null, showHidden: false,
         selectedCals: null, editing: null, drag: null, disposed: false, theme: 'light', poll: null, dirty: false, notice: '',
-        hourScale: 1, gridScrollTop: 0, focusNow: true, zooming: false, linksOpen: false, linkError: '',
+        hourScale: 1, gridScrollTop: 0, focusNow: true, zooming: false, linksOpen: false, linkError: '', toolbar: null, shell: null,
         savedDraft: null, draftLoaded: false, draftDirty: false, draftSaving: false, draftRequest: null, draftError: ''
 
     };
+    var dataCache = Object.create(null);
     var root = document.getElementById('root') || document.body;
 
     /* ---------- utils ---------- */
@@ -64,16 +65,16 @@
 
     /* ---------- styles ---------- */
     var css = [
-        ':root,:root[data-theme="light"]{--bg:#fff;--fg:#1c1c1e;--muted:#6b6f76;--line:#e3e5e8;--soft:#f4f5f7;--accent:#3b6cf6;--accent-bg:#e8effd;--busy:#dfe3ea;--danger:#c0392b;--card:#fff;--ok:#176b49;--warn:#805000;--ok-bg:#e6f4ec;--warn-bg:#fdf3dc;--err-bg:#fdecea}',
-        ':root[data-theme="dark"]{--bg:#121316;--fg:#ececef;--muted:#9a9ea6;--line:#2a2d33;--soft:#1b1d22;--accent:#7aa2ff;--accent-bg:#1f2a44;--busy:#2c3038;--danger:#ff7b6b;--card:#181a1f;--ok:#83e499;--warn:#f7cb58;--ok-bg:#17301f;--warn-bg:#3a2f14;--err-bg:#3a1f1c}',
+        ':root,:root[data-theme="light"]{--bg:var(--surface-page,#fff);--fg:var(--text-primary,#1c1c1e);--muted:var(--text-secondary,#62666d);--line:var(--border-subtle,#e3e5e8);--soft:var(--surface-rest,#f4f5f7);--accent:var(--tone-crimson,#9c3d57);--accent-bg:var(--tone-crimson-soft,#f5e7eb);--busy:#dfe3ea;--danger:var(--tone-danger,#b42318);--card:var(--surface-card,#fff);--ok:#176b49;--warn:#805000;--ok-bg:#e6f4ec;--warn-bg:#fdf3dc;--err-bg:#fdecea}',
+        ':root[data-theme="dark"]{--bg:var(--surface-page,#121316);--fg:var(--text-primary,#ececef);--muted:var(--text-secondary,#a1a5ad);--line:var(--border-subtle,#2a2d33);--soft:var(--surface-rest,#1b1d22);--accent:var(--tone-crimson,#e07b91);--accent-bg:var(--tone-crimson-soft,#3b232b);--busy:#2c3038;--danger:var(--tone-danger,#ff8c82);--card:var(--surface-card,#181a1f);--ok:#83e499;--warn:#f7cb58;--ok-bg:#17301f;--warn-bg:#3a2f14;--err-bg:#3a1f1c}',
         'html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:14px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}',
         '#root{padding:12px;box-sizing:border-box}',
-        '.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}',
-        '.bar .title{font-weight:600;font-size:16px;margin-right:auto}',
-        'button{background:var(--soft);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit}',
+        '.calendar-shell{max-width:100%;color:var(--fg)}.calendar-toolbar{display:grid;gap:6px;margin-bottom:10px}.bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0}.primary-bar{gap:6px}.secondary-bar{justify-content:flex-end}.primary-bar .title{font-weight:650;font-size:16px;line-height:24px;margin-right:auto;text-transform:none}.secondary-bar{font-size:12px;color:var(--muted)}.calendar-body{min-width:0}',
+        '.bar .title{font-weight:650;font-size:16px;margin-right:auto}',
+        'button{background:var(--soft);color:var(--fg);border:0;border-radius:999px;min-height:36px;padding:7px 12px;cursor:pointer;font:inherit}button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}',
         'button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.danger{color:var(--danger)}button.on{background:var(--accent-bg);border-color:var(--accent)}',
         ':root[data-theme="dark"] button.primary{color:#0e1116}',   // white on the light accent of the dark palette is only about 2.5:1
-        '.grid-scroll{height:' + GRID_VIEWPORT_PX + 'px;max-height:55vh;overflow:auto;border:1px solid var(--line);border-radius:10px;overscroll-behavior:contain;background:var(--card)}',
+        '.grid-scroll{height:' + GRID_VIEWPORT_PX + 'px;max-height:none;overflow:auto;border:0;border-radius:12px;overscroll-behavior:auto;background:var(--card);box-shadow:0 1px 0 rgba(0,0,0,.04)}.grid-scroll:focus-visible{outline:2px solid var(--accent);outline-offset:2px}',
         '.grid{display:grid;grid-template-columns:48px minmax(0,1fr);--hour-px:44px}',
         '.grid.week{grid-template-columns:48px repeat(7,minmax(0,1fr))}',
         '.hours{position:relative;padding-bottom:40px}.hour{height:var(--hour-px);border-top:1px solid var(--line);font-size:11px;color:var(--muted);padding:2px 4px;box-sizing:border-box}',
@@ -100,7 +101,7 @@
         '.card .actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}.card .actions .spacer{flex:1}',
         '.card input:disabled,.card select:disabled,.card textarea:disabled,.acc button:disabled,.linkbox button:disabled,.linkissues button:disabled{opacity:.55;cursor:not-allowed}',
         '.status{font-size:12px;color:var(--muted);margin-top:8px}.err{color:var(--danger)}',
-        '.cals{display:flex;flex-wrap:wrap;gap:6px}.cals button{font-size:12px;padding:3px 8px}',
+        '.calendar-filters{margin:2px 0 8px;color:var(--muted)}.calendar-filters summary{display:inline-flex;align-items:center;min-height:36px;padding:0 12px;border-radius:999px;background:var(--soft);cursor:pointer;user-select:none}.cals{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding:8px 0}.cals button{font-size:12px;min-height:36px;padding:6px 10px}.mobile-agenda{display:none}.mobile-agenda h3{font-size:16px;margin:4px 0 10px}.mobile-event{display:flex;width:100%;gap:12px;align-items:flex-start;text-align:left;border-radius:12px;margin:6px 0;padding:10px 12px;background:var(--card);box-shadow:0 1px 0 rgba(0,0,0,.05)}.mobile-event.hidden{background:repeating-linear-gradient(135deg,var(--soft) 0 6px,var(--card) 6px 12px);cursor:default}.mobile-event.usual{border-left:3px dotted var(--accent);cursor:default}.mobile-event-time{min-width:76px;color:var(--muted);font-variant-numeric:tabular-nums}.mobile-event-main{display:grid;gap:2px;min-width:0}.mobile-event-main strong{font-size:14px;overflow-wrap:anywhere}.mobile-event-main small{font-size:12px;color:var(--muted);overflow-wrap:anywhere}',
         /* accounts */
         'button.attn{position:relative}button.attn::after{content:"";position:absolute;top:-3px;right:-3px;width:9px;height:9px;border-radius:50%;background:var(--warn);border:2px solid var(--bg)}',
         '.acc,.linkissues{border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px;background:var(--card)}',
@@ -126,7 +127,7 @@
         '.linkbox ul{margin:6px 0 0;padding-left:18px;color:var(--muted);font-size:12px}.linkbox li{overflow-wrap:anywhere}.linkbox .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}',
         '.linkbox .confirm{border-top:1px solid var(--line);margin-top:8px;padding-top:8px}.linkbox .confirm p{margin:0 0 8px}.linkbox select{width:auto;max-width:100%;margin-bottom:8px}',
         '.linkissues .linkhead{width:100%;text-align:left}.issue{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;padding:8px 0 0}.issue .grow{flex:1 1 0;min-width:0;overflow-wrap:anywhere}',
-        '@media (max-width:600px){.grid.week{grid-template-columns:36px repeat(7,1fr)}.ev{font-size:11px;padding:2px 4px}.bar .title{width:100%}.acc-actions{width:100%}}'
+        '@media (max-width:600px){#root{padding:10px}.primary-bar .title{width:100%;flex-basis:100%;margin-bottom:2px}.primary-bar{gap:5px}.secondary-bar{justify-content:flex-start}.secondary-bar button{min-height:36px;padding-inline:10px}.grid.week{grid-template-columns:36px repeat(7,1fr)}.ev{font-size:11px;padding:2px 4px}.grid-scroll{height:360px}.acc-actions{width:100%}}@media (max-width:560px){.calendar-body > .grid-scroll,.calendar-body > .list{display:none}.mobile-agenda{display:block}.calendar-filters{margin-bottom:4px}.calendar-filters summary{min-height:40px}.primary-bar button{min-height:44px}.secondary-bar button{min-height:44px}.scale button{min-width:44px}.event{min-height:44px}}'
     ].join('\n');
     var styleTag = el('style', { text: css });
     document.head.appendChild(styleTag);
@@ -148,94 +149,186 @@
             (state.selectedCals ? '&calendars=' + encodeURIComponent(state.selectedCals.length ? state.selectedCals.join(',') : '-') : '');
         if (coalesce && state.loading && state.loadQuery === q) return state.loadRequest;
         var seq = ++state.loadSeq;
+        var cached = dataCache[q];
         state.loading = true; state.loadQuery = q;
+        state.loadTarget = state.date || (cached && cached.anchor) || null;
+        state.error = '';
+        if (cached) {
+            if (!state.date && state.data && state.data.anchor !== cached.anchor) state.focusNow = true;
+            state.data = cached;
+            state.shownDate = cached.anchor || state.shownDate;
+        }
+        /* Paint the requested date and pending state before the network can answer. This is deliberately
+         * separate from the response repaint: the toolbar stays mounted, so pointer presses and focus survive. */
+        render();
         state.loadRequest = api(q).then(function (d) {
             if (state.disposed || seq !== state.loadSeq) return;
+            dataCache[q] = d;
             if (!state.date && state.data && state.data.anchor !== d.anchor) state.focusNow = true;
-            state.data = d; state.error = '';
+            state.data = d; state.shownDate = d.anchor || state.shownDate; state.error = '';
+            state.loading = false; state.loadTarget = null;
             /* A null date follows the host's current day/week across midnight. Only arrows pin a date. */
+            render();
         }).catch(function (e) {
-            if (!state.disposed && seq === state.loadSeq) state.error = e.message || String(e);
-        }).then(function () {
             if (state.disposed || seq !== state.loadSeq) return;
-            state.loading = false; render();
+            state.loading = false; state.loadTarget = null; state.error = e.message || String(e);
+            /* A failed request never advances the logical calendar. Return the header to what is actually shown. */
+            if (state.shownDate) state.date = state.shownDate;
+            render();
         });
         return state.loadRequest;
     }
 
     /* ---------- rendering ---------- */
+    var MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+    var WEEKDAYS = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+
+    function humanDate(dateStr) {
+        var d = parseISO(dateStr || localDate(ownerNow()));
+        return WEEKDAYS[d.getUTCDay()] + ', ' + d.getUTCDate() + ' ' + MONTHS[d.getUTCMonth()];
+    }
+
+    function weekTitle(d, dateStr) {
+        var days = d && d.days && d.days.length ? d.days : [{ date: dateStr || localDate(ownerNow()) }];
+        var first = parseISO(days[0].date), last = parseISO(days[days.length - 1].date);
+        return 'Неделя · ' + first.getUTCDate() + '–' + last.getUTCDate() + ' ' + MONTHS[last.getUTCMonth()];
+    }
+
+    function buildToolbar() {
+        var title = el('span', { class: 'title' });
+        var previous = el('button', { type: 'button', text: 'Назад', title: 'Предыдущий день', 'aria-label': 'Предыдущий день', onclick: function () { shift(-1); } });
+        var today = el('button', { type: 'button', text: 'Сегодня', onclick: function () { state.date = null; state.focusNow = true; load(); } });
+        var next = el('button', { type: 'button', text: 'Вперёд', title: 'Следующий день', 'aria-label': 'Следующий день', onclick: function () { shift(1); } });
+        var day = el('button', { type: 'button', text: 'День', onclick: function () { state.view = 'day'; state.date = state.date || state.shownDate; state.focusNow = true; load(); } });
+        var week = el('button', { type: 'button', text: 'Неделя', onclick: function () { state.view = 'week'; state.date = state.date || state.shownDate; state.focusNow = true; load(); } });
+        var event = el('button', { type: 'button', text: '+ Событие', class: 'primary', onclick: function () { openCard(null, defaultStart()); } });
+        var service = el('button', { type: 'button', text: 'Служебные', title: 'Показать служебные события и «обычно»', onclick: function () { state.showHidden = !state.showHidden; load(); } });
+        var accounts = el('button', { type: 'button', text: 'Аккаунты', 'aria-expanded': 'false', title: 'Подключённые аккаунты', onclick: accToggle });
+        var settings = el('button', { type: 'button', text: 'Настройки', title: 'Напоминания и синхронизация', onclick: function () { togglePanel(); } });
+        var scale = el('div', { class: 'scale', role: 'group', 'aria-label': 'Масштаб временной сетки' }, [
+            el('button', { type: 'button', text: '−', title: 'Уменьшить масштаб сетки', 'aria-label': 'Уменьшить масштаб сетки', onclick: function () { changeScale(-1); } }),
+            el('span'),
+            el('button', { type: 'button', text: '+', title: 'Увеличить масштаб сетки', 'aria-label': 'Увеличить масштаб сетки', onclick: function () { changeScale(1); } })
+        ]);
+        var primary = el('div', { class: 'bar primary-bar', role: 'toolbar', 'aria-label': 'Навигация календаря' }, [title, previous, today, next, day, week, event]);
+        var secondary = el('div', { class: 'bar secondary-bar', role: 'toolbar', 'aria-label': 'Дополнительные настройки календаря' }, [service, accounts, settings, scale]);
+        var wrap = el('div', { class: 'calendar-toolbar' }, [primary, secondary]);
+        state.toolbar = { title: title, previous: previous, today: today, next: next, day: day, week: week, event: event, service: service, accounts: accounts, settings: settings, scale: scale, scaleText: scale.querySelector('span') };
+        return wrap;
+    }
+
+    function updateToolbar(d) {
+        var t = state.toolbar;
+        if (!t) return;
+        var shown = state.shownDate || (d && d.anchor) || localDate(ownerNow());
+        var requested = state.date || shown;
+        t.title.textContent = state.view === 'week' ? weekTitle(d, requested) : humanDate(requested);
+        var previousLabel = state.view === 'week' ? 'Предыдущая неделя' : 'Предыдущий день';
+        var nextLabel = state.view === 'week' ? 'Следующая неделя' : 'Следующий день';
+        t.previous.textContent = 'Назад'; t.previous.title = previousLabel; t.previous.setAttribute('aria-label', previousLabel);
+        t.next.textContent = 'Вперёд'; t.next.title = nextLabel; t.next.setAttribute('aria-label', nextLabel);
+        t.day.className = state.view === 'day' ? 'on' : '';
+        t.week.className = state.view === 'week' ? 'on' : '';
+        t.service.className = state.showHidden ? 'on' : '';
+        t.accounts.className = (acc.open ? 'on' : '') + (d && accAttention(d) ? ' attn' : '');
+        t.accounts.setAttribute('aria-expanded', acc.open ? 'true' : 'false');
+        t.settings.className = state.panel ? 'on' : '';
+        t.scaleText.textContent = Math.round(HOUR_SCALES[state.hourScale] / HOUR_SCALES[1] * 100) + '%';
+        var scaleButtons = t.scale.querySelectorAll('button');
+        scaleButtons[0].disabled = state.hourScale === 0;
+        scaleButtons[1].disabled = state.hourScale === HOUR_SCALES.length - 1;
+    }
+
+    function renderMobileAgenda(d) {
+        var box = el('section', { class: 'mobile-agenda', 'aria-label': 'Повестка дня' });
+        box.appendChild(el('h3', { text: state.view === 'week' ? 'Повестка недели' : 'Повестка дня' }));
+        var events = (d.events || []).slice();
+        (d.hidden_busy || []).forEach(function (e) { if (!e.all_day) events.push(Object.assign({}, e, { title: 'Занято (служебное)', _mobileKind: 'hidden' })); });
+        (d.usual || []).forEach(function (e) { events.push(Object.assign({}, e, { title: 'Обычно · ' + (e.title || ''), _mobileKind: 'usual' })); });
+        events.sort(function (a, b) { return String(a.start).localeCompare(String(b.start)); });
+        if (!events.length) box.appendChild(el('div', { class: 'status', text: 'На этот день встреч нет' }));
+        events.forEach(function (e) {
+            var klass = 'mobile-event' + (e._mobileKind ? ' ' + e._mobileKind : '');
+            box.appendChild(el('button', { type: 'button', class: klass, onclick: function () { if (!e._mobileKind) openCard(e); } }, [
+                el('span', { class: 'mobile-event-time', text: e.all_day ? 'весь день' : fmtHM(parseISO(e.start)) + '–' + fmtHM(parseISO(e.end)) }),
+                el('span', { class: 'mobile-event-main' }, [el('strong', { text: e.title }), el('small', { text: (e.calendar_name || '') + syncNote(e) + linkNote(e) })])
+            ]));
+        });
+        return box;
+    }
+
     function render() {
         var previousGrid = root.querySelector('.grid-scroll');
         if (previousGrid && !state.focusNow && !state.zooming) state.gridScrollTop = previousGrid.scrollTop;
         var kept = accKeepFocus();
-        root.innerHTML = '';
+        if (!state.shell || !state.shell.isConnected) {
+            root.innerHTML = '';
+            state.shell = el('div', { class: 'calendar-shell' });
+            state.shell.appendChild(buildToolbar());
+            state.shell.appendChild(el('div', { class: 'calendar-body' }));
+            root.appendChild(state.shell);
+        }
+        var body = state.shell.querySelector('.calendar-body');
+        body.innerHTML = '';
         var d = state.data;
-        var bar = el('div', { class: 'bar' }, [
-            el('span', { class: 'title', text: 'Календарь' + (d ? ' · ' + (state.view === 'week' ? 'неделя' : d.days[0].weekday + ' ' + d.anchor) : '') }),
-            el('button', { text: '‹', onclick: function () { shift(-1); } }),
-            el('button', { text: 'Сегодня', onclick: function () { state.date = null; state.focusNow = true; load(); } }),
-            el('button', { text: '›', onclick: function () { shift(1); } }),
-            el('button', { text: 'День', class: state.view === 'day' ? 'on' : '', onclick: function () { state.view = 'day'; state.focusNow = true; load(); } }),
-            el('button', { text: 'Неделя', class: state.view === 'week' ? 'on' : '', onclick: function () { state.view = 'week'; state.focusNow = true; load(); } }),
-            el('div', { class: 'scale', role: 'group', 'aria-label': 'Масштаб временной сетки' }, [
-                el('button', { text: '−', title: 'Уменьшить масштаб сетки', 'aria-label': 'Уменьшить масштаб сетки', disabled: state.hourScale === 0 ? 'disabled' : null,
-                    onclick: function () { changeScale(-1); } }),
-                el('span', { text: Math.round(HOUR_SCALES[state.hourScale] / HOUR_SCALES[1] * 100) + '%' }),
-                el('button', { text: '+', title: 'Увеличить масштаб сетки', 'aria-label': 'Увеличить масштаб сетки', disabled: state.hourScale === HOUR_SCALES.length - 1 ? 'disabled' : null,
-                    onclick: function () { changeScale(1); } })
-            ]),
-            el('button', { text: 'Служебные', class: state.showHidden ? 'on' : '', title: 'Показать служебные события и «обычно»', onclick: function () { state.showHidden = !state.showHidden; load(); } }),
-            el('button', { text: 'Аккаунты', class: (acc.open ? 'on' : '') + (d && accAttention(d) ? ' attn' : ''), 'aria-expanded': acc.open ? 'true' : 'false',
-                title: d && accAttention(d) ? 'Есть аккаунт, которому нужно внимание' : 'Подключённые аккаунты: Google, Яндекс, CalDAV', onclick: accToggle }),
-            el('button', { text: '⚙', title: 'Напоминания и синхронизация', class: state.panel ? 'on' : '', onclick: function () { togglePanel(); } }),
-            el('button', { text: '+ Событие', class: 'primary', onclick: function () { openCard(null, defaultStart()); } })
-        ]);
-        root.appendChild(bar);
-        if (state.savedDraft && !state.editing) root.appendChild(el('div', { class: 'msg info' }, [
-            el('span', { text: 'Unfinished calendar edit: ' + (state.savedDraft.inputs.title || state.savedDraft.event.title || 'New event') }),
-            el('button', { text: 'Restore draft', onclick: restoreDraft }),
-            el('button', { text: 'Discard draft', onclick: function () { clearDraft(); render(); } })
+        updateToolbar(d);
+        if (state.savedDraft && !state.editing) body.appendChild(el('div', { class: 'msg info' }, [
+            el('span', { text: 'Незавершённое событие: ' + (state.savedDraft.inputs.title || state.savedDraft.event.title || 'Новое событие') }),
+            el('button', { text: 'Восстановить', onclick: restoreDraft }),
+            el('button', { text: 'Удалить черновик', onclick: function () { clearDraft(); render(); } })
         ]));
-        if (state.panel) root.appendChild(renderPanel());
-        if (acc.open) root.appendChild(accNode());
+        if (state.panel) body.appendChild(renderPanel());
+        if (acc.open) body.appendChild(accNode());
         accRestoreFocus(kept);
-        if (state.error) root.appendChild(el('div', { class: 'status err', text: 'Ошибка: ' + state.error }));
-        if (state.notice) root.appendChild(el('div', { class: 'status', role: 'status', text: state.notice }));
-        root.appendChild(draftErrorView());
-        if (d && d.events_complete === false) root.appendChild(el('div', { class: 'status err', text: 'Calendar list is incomplete: ' +
-            Object.keys(d.unexpanded_series || {}).map(function (id) { return id + ': ' + d.unexpanded_series[id]; }).join('; ') }));
-        if (!d) { root.appendChild(el('div', { class: 'status', text: state.loading ? 'Загрузка…' : 'Нет данных' })); return; }
+        if (state.loading && d && state.loadTarget && state.loadTarget !== state.shownDate) body.appendChild(el('div', { class: 'status pending', role: 'status', text: 'Показан ' + humanDate(state.shownDate) + ' · загружается ' + humanDate(state.loadTarget) + '…' }));
+        if (state.error) body.appendChild(el('div', { class: 'msg err', role: 'alert' }, [el('span', { text: 'Ошибка: ' + state.error }), el('button', { type: 'button', text: 'Повторить', onclick: function () { load(); } })]));
+        if (state.notice) body.appendChild(el('div', { class: 'status', role: 'status', text: state.notice }));
+        body.appendChild(draftErrorView());
+        if (d && d.events_complete === false) body.appendChild(el('div', { class: 'msg err' }, [el('span', { text: 'Список календаря неполный: ' + Object.keys(d.unexpanded_series || {}).map(function (id) { return id + ': ' + d.unexpanded_series[id]; }).join('; ') })]));
+        if (!d) { body.appendChild(el('div', { class: 'status', text: state.loading ? 'Загрузка…' : 'Нет данных' })); return; }
         var issues = renderLinkIssues(d);
-        if (issues) root.appendChild(issues);
-        root.appendChild(renderCalendarChips(d));
-        var scroller = el('div', { class: 'grid-scroll', 'aria-label': 'Временная сетка календаря', tabindex: '0' }, [renderGrid(d)]);
-        root.appendChild(scroller);
-        if (state.focusNow && scroller.querySelector('.now')) {
-            var line = scroller.querySelector('.now');
-            scroller.scrollTop += line.getBoundingClientRect().top - scroller.getBoundingClientRect().top - scroller.clientHeight * 0.45;
-            state.gridScrollTop = scroller.scrollTop;
+        if (issues) body.appendChild(issues);
+        body.appendChild(renderCalendarChips(d));
+        var narrow = window.matchMedia && window.matchMedia('(max-width:560px)').matches;
+        if (narrow && state.view === 'day') {
+            body.appendChild(renderMobileAgenda(d));
             state.focusNow = false;
         } else {
-            scroller.scrollTop = state.gridScrollTop;
-            state.focusNow = false;
+            var scroller = el('div', { class: 'grid-scroll', 'aria-label': 'Временная сетка календаря', tabindex: '0' }, [renderGrid(d)]);
+            body.appendChild(scroller);
+            if (state.focusNow && scroller.querySelector('.now')) {
+                var line = scroller.querySelector('.now');
+                scroller.scrollTop += line.getBoundingClientRect().top - scroller.getBoundingClientRect().top - scroller.clientHeight * 0.45;
+                state.gridScrollTop = scroller.scrollTop;
+                state.focusNow = false;
+            } else {
+                scroller.scrollTop = state.gridScrollTop;
+                state.focusNow = false;
+            }
+            if (state.view === 'day') body.appendChild(renderList(d));
         }
         state.zooming = false;
-        if (state.view === 'day') root.appendChild(renderList(d));
-        root.appendChild(renderStatus(d));
-        if (state.editing) root.appendChild(renderCard());
+        var status = renderStatus(d);
+        if (status) body.appendChild(status);
+        if (state.editing) body.appendChild(renderCard());
     }
 
     function renderCalendarChips(d) {
-        var wrap = el('div', { class: 'cals' });
-        d.calendars.filter(function (c) { return c.visible; }).forEach(function (c) {
+        var visible = d.calendars.filter(function (c) { return c.visible; });
+        var wrap = el('details', { class: 'calendar-filters' });
+        var summary = el('summary', { text: 'Календари (' + visible.length + ')' });
+        wrap.appendChild(summary);
+        var chips = el('div', { class: 'cals' });
+        visible.forEach(function (c) {
             var on = !state.selectedCals || state.selectedCals.indexOf(c.id) >= 0;
-            wrap.appendChild(el('button', { text: c.name, class: on ? 'on' : '', title: c.provider, onclick: function () {
-                var all = d.calendars.filter(function (x) { return x.visible; }).map(function (x) { return x.id; });
+            chips.appendChild(el('button', { text: c.name, class: on ? 'on' : '', title: c.provider, onclick: function () {
+                var all = visible.map(function (x) { return x.id; });
                 var cur = state.selectedCals ? state.selectedCals.slice() : all.slice();
                 var i = cur.indexOf(c.id); if (i >= 0) cur.splice(i, 1); else cur.push(c.id);
                 state.selectedCals = cur.length === all.length ? null : cur; load();
             } }));
         });
+        wrap.appendChild(chips);
         return wrap;
     }
 
@@ -252,6 +345,8 @@
             var lane = el('div', { class: 'allday' });
             d.events.filter(function (e) { return e.all_day && e.start.slice(0, 10) <= day.date && day.date < (e.end.slice(0, 10) || e.start.slice(0, 10)); })
                 .forEach(function (e) { lane.appendChild(el('span', { class: 'chip', text: e.title + syncNote(e), onclick: function () { openCard(e); } })); });
+            (d.hidden_busy || []).filter(function (e) { return e.all_day && e.start.slice(0, 10) <= day.date && day.date < (e.end.slice(0, 10) || e.start.slice(0, 10)); })
+                .forEach(function () { lane.appendChild(el('span', { class: 'chip hidden', text: 'Занято (служебное)' })); });
             grid.appendChild(lane);
         });
         var hours = el('div', { class: 'hours' });
@@ -354,8 +449,8 @@
         if (d.sync.failed) parts.push('не отправлено: ' + d.sync.failed);
         if (d.sync.uncertain) parts.push('outcomes unconfirmed: ' + d.sync.uncertain);
         (d.calendars || []).forEach(function (c) { if (c.sync_warning) parts.push(c.name + ': ' + c.sync_warning); });
-        parts.push('фон: ' + (d.sync.companion || 'неизвестно'));
-        return el('div', { class: 'status', text: parts.join(' · ') + ' · ' + d.timezone });
+        if (!parts.length) return null;
+        return el('div', { class: 'status', role: 'status', text: parts.join(' · ') });
     }
 
     /* ---------- drag / resize ---------- */
@@ -673,7 +768,13 @@
         return overlay;
     }
 
-    function shift(n) { state.date = addDays(state.date || localDate(ownerNow()), state.view === 'week' ? 7 * n : n); state.focusNow = true; load(); }
+    function shift(n) {
+        var base = state.date || state.shownDate || localDate(ownerNow());
+        state.date = addDays(base, state.view === 'week' ? 7 * n : n);
+        state.loadTarget = state.date;
+        state.focusNow = true;
+        load();
+    }
 
     function changeScale(direction) {
         var next = Math.max(0, Math.min(HOUR_SCALES.length - 1, state.hourScale + direction));
@@ -927,7 +1028,12 @@
             copied: 'Браузер открыть не удалось — ссылка для входа скопирована. Откройте её вручную.',
             failed: 'Не удалось открыть вход автоматически' + (g.openError ? ' (' + g.openError + ')' : '') + '. Откройте ссылку ниже.' }[g.opened] || '';
         var link = el('a', { href: g.url, target: '_blank', rel: 'noopener', text: 'Открыть вход в Google' });
-        link.addEventListener('click', function (ev) { ev.preventDefault(); accOpenAuth(g); });   // inside the click, so the host sees the gesture
+        link.addEventListener('click', function (ev) {
+            if (window.OuroborosWidget && typeof OuroborosWidget.openExternal === 'function') {
+                ev.preventDefault(); accOpenAuth(g); // the host sees the gesture
+            }
+            // Without the bridge, keep the ordinary target=_blank link usable.
+        });
         var copy = el('button', { type: 'button', text: 'Скопировать ссылку' });
         copy.addEventListener('click', function () {
             var done = function (t) { copy.textContent = t; };
