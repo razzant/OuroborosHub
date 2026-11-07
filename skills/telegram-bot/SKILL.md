@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.10.6
+version: 0.11.0
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -136,6 +136,13 @@ tools:
   conversation: chat_id
   thread: topic_id
   description: Queue an edit of this bot's own message, or set or clear its reaction on a reachable message, with durable receipts.
+- name: telegram_react
+  effect: gesture
+  target: chat_id
+  conversation: chat_id
+  thread: topic_id
+  message: message_id
+  description: Set or clear this bot's reaction on an exact Telegram message; a gesture, not speech.
 - name: telegram_receipt
   effect: read
   target: []
@@ -440,6 +447,20 @@ A reaction can be the whole social response: it shows you understood, saw or
 laughed without another message. It is optional, it is not speech, a read
 receipt or agreement, and an early gesture does not replace a promised result.
 This connector has no emoji dictionary and no required sequence of gestures.
+
+**As a response (0.11.0).** `telegram_react` declares `effect: gesture` with
+`message: message_id`. A Host that knows gestures can offer it beside
+`telegram_send` for the message that woke a turn, with `chat_id`, `topic_id` and
+`message_id` filled in. `action: set` takes one `emoji` or `custom_emoji_id`;
+`action: clear` takes neither. It calls `telegram_operation` with
+`method: setMessageReaction` and nothing else changed: the same checks and topic
+rules below, the same outbox row and receipt `telegram-operation:<request_id>`
+(one `request_id` names one operation whichever tool queued it), the same provider
+outcomes, and an unknown outcome is never sent again. `telegram_operation` stays a
+mixed `write` tool and keeps `setMessageReaction`. A Host that predates gestures
+reads `telegram_react` as an undeclared write: Silent, Paused and Advises refuse it
+as before, and it offers no reaction door. The reaction stays an act on that
+message, never the turn's words or evidence of finished work.
 
 **What this bot can read.** Telegram sends a bot reaction updates only when it is
 an administrator of the chat, and only as they happen. `message_reaction` names
