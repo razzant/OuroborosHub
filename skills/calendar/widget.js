@@ -28,6 +28,7 @@
     };
     var dataCache = Object.create(null);
     var root = document.getElementById('root') || document.body;
+    var narrowQuery = window.matchMedia ? window.matchMedia('(max-width:560px)') : null;   // the same width as the stylesheet's agenda rule
 
     /* ---------- utils ---------- */
     function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -70,7 +71,7 @@
         'html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font:14px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}',
         '#root{padding:12px;box-sizing:border-box}',
         '.calendar-shell{max-width:100%;color:var(--fg)}.calendar-toolbar{display:grid;gap:6px;margin-bottom:10px}.bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0}.primary-bar{gap:6px}.secondary-bar{justify-content:flex-end}.primary-bar .title{font-weight:650;font-size:16px;line-height:24px;margin-right:auto;text-transform:none}.secondary-bar{font-size:12px;color:var(--muted)}.calendar-body{min-width:0}',
-        '.bar .title{font-weight:650;font-size:16px;margin-right:auto}',
+        '.bar .title{font-weight:650;font-size:16px;margin-right:auto}.nav-group,.view-group{display:flex;flex:none;gap:5px;align-items:center}',
         'button{background:var(--soft);color:var(--fg);border:0;border-radius:999px;min-height:36px;padding:7px 12px;cursor:pointer;font:inherit}button:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}',
         'button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button.danger{color:var(--danger)}button.on{background:var(--accent-bg);border-color:var(--accent)}',
         ':root[data-theme="dark"] button.primary{color:#0e1116}',   // white on the light accent of the dark palette is only about 2.5:1
@@ -83,9 +84,9 @@
         '.corner{border-bottom:1px solid var(--line);background:var(--soft)}',
         '.grid > .corner:first-child,.grid > .colhead{position:sticky;top:0;z-index:3}',
         '.scale{display:flex;align-items:center;gap:3px}.scale span{min-width:38px;text-align:center;color:var(--muted);font-size:12px}',
-        '.ev{position:absolute;left:3px;right:6px;border-radius:7px;padding:3px 6px;font-size:12px;box-sizing:border-box;overflow:hidden;background:var(--accent-bg);border-left:3px solid var(--accent);cursor:grab;user-select:none}',
+        '.ev{position:absolute;left:3px;right:6px;border-radius:7px;padding:3px 6px;font-size:12px;box-sizing:border-box;overflow:clip;background:var(--accent-bg);border-left:3px solid var(--accent);cursor:grab;user-select:none}',
         '.ev.hidden{opacity:.75;border-left-style:dashed}.ev.pending{outline:1px dashed var(--muted)}.ev.conflict{outline:2px solid var(--danger)}',
-        '.ev .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ev .m{color:var(--muted);font-size:11px}',
+        '.ev .event-text{position:sticky;top:30px;background:var(--accent-bg)}.ev .t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ev .m{color:var(--muted);font-size:11px}',
         '.ev .rs{position:absolute;left:0;right:0;bottom:0;height:7px;cursor:ns-resize}',
         '.hatch{position:absolute;left:0;right:0;background:repeating-linear-gradient(135deg,var(--busy) 0 6px,transparent 6px 12px);opacity:.9;pointer-events:none}',
         '.usual{position:absolute;left:0;right:0;border-top:2px dotted var(--accent);border-bottom:2px dotted var(--accent);opacity:.7;font-size:11px;color:var(--accent);padding:0 6px;box-sizing:border-box;pointer-events:none}',
@@ -101,7 +102,7 @@
         '.card .actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}.card .actions .spacer{flex:1}',
         '.card input:disabled,.card select:disabled,.card textarea:disabled,.acc button:disabled,.linkbox button:disabled,.linkissues button:disabled{opacity:.55;cursor:not-allowed}',
         '.status{font-size:12px;color:var(--muted);margin-top:8px}.err{color:var(--danger)}',
-        '.calendar-filters{margin:2px 0 8px;color:var(--muted)}.calendar-filters summary{display:inline-flex;align-items:center;min-height:36px;padding:0 12px;border-radius:999px;background:var(--soft);cursor:pointer;user-select:none}.cals{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding:8px 0}.cals button{font-size:12px;min-height:36px;padding:6px 10px}.mobile-agenda{display:none}.mobile-agenda h3{font-size:16px;margin:4px 0 10px}.mobile-event{display:flex;width:100%;gap:12px;align-items:flex-start;text-align:left;border-radius:12px;margin:6px 0;padding:10px 12px;background:var(--card);box-shadow:0 1px 0 rgba(0,0,0,.05)}.mobile-event.hidden{background:repeating-linear-gradient(135deg,var(--soft) 0 6px,var(--card) 6px 12px);cursor:default}.mobile-event.usual{border-left:3px dotted var(--accent);cursor:default}.mobile-event-time{min-width:76px;color:var(--muted);font-variant-numeric:tabular-nums}.mobile-event-main{display:grid;gap:2px;min-width:0}.mobile-event-main strong{font-size:14px;overflow-wrap:anywhere}.mobile-event-main small{font-size:12px;color:var(--muted);overflow-wrap:anywhere}',
+        '.calendar-filters{margin:2px 0 8px;color:var(--muted)}.calendar-filters summary{display:inline-flex;align-items:center;min-height:36px;padding:0 12px;border-radius:999px;background:var(--soft);cursor:pointer;user-select:none}.cals{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding:8px 0}.cals button{font-size:12px;min-height:36px;padding:6px 10px}.mobile-agenda{display:none}.mobile-agenda h3{font-size:16px;margin:4px 0 10px}.mobile-event{display:flex;box-sizing:border-box;width:100%;gap:12px;align-items:flex-start;text-align:left;border-radius:12px;margin:6px 0;padding:10px 12px;background:var(--card);box-shadow:0 1px 0 rgba(0,0,0,.05)}.mobile-event.hidden{background:repeating-linear-gradient(135deg,var(--soft) 0 6px,var(--card) 6px 12px);cursor:default}.mobile-event.usual{border-left:3px dotted var(--accent);cursor:default}.mobile-event-time{flex:none;min-width:90px;white-space:nowrap;color:var(--muted);font-variant-numeric:tabular-nums}.mobile-event-main{display:grid;gap:2px;min-width:0}.mobile-event-main strong{font-size:14px;overflow-wrap:anywhere}.mobile-event-main small{font-size:12px;color:var(--muted);overflow-wrap:anywhere}.mobile-day{margin-top:16px}.mobile-day:first-of-type{margin-top:0}.mobile-day h4{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline;margin:0 0 2px;font-size:13px;font-weight:600;color:var(--muted)}.mobile-day h4 small{font-size:12px;font-weight:400}.mobile-day.today h4{color:var(--accent)}',
         /* accounts */
         'button.attn{position:relative}button.attn::after{content:"";position:absolute;top:-3px;right:-3px;width:9px;height:9px;border-radius:50%;background:var(--warn);border:2px solid var(--bg)}',
         '.acc,.linkissues{border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px;background:var(--card)}',
@@ -127,7 +128,7 @@
         '.linkbox ul{margin:6px 0 0;padding-left:18px;color:var(--muted);font-size:12px}.linkbox li{overflow-wrap:anywhere}.linkbox .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}',
         '.linkbox .confirm{border-top:1px solid var(--line);margin-top:8px;padding-top:8px}.linkbox .confirm p{margin:0 0 8px}.linkbox select{width:auto;max-width:100%;margin-bottom:8px}',
         '.linkissues .linkhead{width:100%;text-align:left}.issue{display:flex;gap:10px;align-items:flex-start;justify-content:space-between;padding:8px 0 0}.issue .grow{flex:1 1 0;min-width:0;overflow-wrap:anywhere}',
-        '@media (max-width:600px){#root{padding:10px}.primary-bar .title{width:100%;flex-basis:100%;margin-bottom:2px}.primary-bar{gap:5px}.secondary-bar{justify-content:flex-start}.secondary-bar button{min-height:36px;padding-inline:10px}.grid.week{grid-template-columns:36px repeat(7,1fr)}.ev{font-size:11px;padding:2px 4px}.grid-scroll{height:360px}.acc-actions{width:100%}}@media (max-width:560px){.calendar-body > .grid-scroll,.calendar-body > .list{display:none}.mobile-agenda{display:block}.calendar-filters{margin-bottom:4px}.calendar-filters summary{min-height:40px}.primary-bar button{min-height:44px}.secondary-bar button{min-height:44px}.scale button{min-width:44px}.event{min-height:44px}}'
+        '@media (max-width:600px){#root{padding:10px}.primary-bar .title{width:100%;flex-basis:100%;margin-bottom:2px}.primary-bar{gap:5px}.secondary-bar{justify-content:flex-start}.secondary-bar button{min-height:36px;padding-inline:10px}.grid.week{grid-template-columns:36px repeat(7,1fr)}.ev{font-size:11px;padding:2px 4px}.grid-scroll{height:360px}.acc-actions{width:100%}}@media (max-width:560px){.calendar-body > .grid-scroll,.calendar-body > .list,.secondary-bar .scale{display:none}.mobile-agenda{display:block}.calendar-filters{margin-bottom:4px}.calendar-filters summary{min-height:40px}.primary-bar button{min-height:44px}.secondary-bar button{min-height:44px}.scale button{min-width:44px}.event{min-height:44px}}'
     ].join('\n');
     var styleTag = el('style', { text: css });
     document.head.appendChild(styleTag);
@@ -210,7 +211,9 @@
             el('span'),
             el('button', { type: 'button', text: '+', title: 'Увеличить масштаб сетки', 'aria-label': 'Увеличить масштаб сетки', onclick: function () { changeScale(1); } })
         ]);
-        var primary = el('div', { class: 'bar primary-bar', role: 'toolbar', 'aria-label': 'Навигация календаря' }, [title, previous, today, next, day, week, event]);
+        var navigation = el('div', { class: 'nav-group', role: 'group', 'aria-label': 'Переход по датам' }, [previous, today, next]);
+        var views = el('div', { class: 'view-group', role: 'group', 'aria-label': 'Вид календаря' }, [day, week]);
+        var primary = el('div', { class: 'bar primary-bar', role: 'toolbar', 'aria-label': 'Навигация календаря' }, [title, navigation, views, event]);
         var secondary = el('div', { class: 'bar secondary-bar', role: 'toolbar', 'aria-label': 'Дополнительные настройки календаря' }, [service, accounts, settings, scale]);
         var wrap = el('div', { class: 'calendar-toolbar' }, [primary, secondary]);
         state.toolbar = { title: title, previous: previous, today: today, next: next, day: day, week: week, event: event, service: service, accounts: accounts, settings: settings, scale: scale, scaleText: scale.querySelector('span') };
@@ -239,20 +242,53 @@
         scaleButtons[1].disabled = state.hourScale === HOUR_SCALES.length - 1;
     }
 
+    /* Narrow agenda: Day lists its date, Week groups the same rows under each day. A row appears on every day
+     * it covers, exactly as the grid places it; service busy time stays an anonymous row without its title. */
+    function agendaTime(e, dayStr) {
+        if (e.all_day) return 'весь день';
+        var s = parseISO(e.start), en = parseISO(e.end), from = s >= parseISO(dayStr), next = parseISO(addDays(dayStr, 1));
+        if (from && en <= next) return fmtHM(s) + '–' + fmtHM(en);
+        if (from) return 'с ' + fmtHM(s);
+        return en < next ? 'до ' + fmtHM(en) : 'весь день';
+    }
+
+    function agendaRow(e, dayStr) {
+        var note = (e.calendar_name || '') + syncNote(e) + linkNote(e);
+        var parts = [el('span', { class: 'mobile-event-time', text: agendaTime(e, dayStr) }),
+            el('span', { class: 'mobile-event-main' }, [el('strong', { text: e.title }), note ? el('small', { text: note }) : null])];
+        var klass = 'mobile-event' + (e._mobileKind ? ' ' + e._mobileKind : '');
+        if (e._mobileKind) return el('div', { class: klass }, parts);   // busy time and «обычно» have no card to open
+        return el('button', { type: 'button', class: klass, onclick: function () { openCard(e); } }, parts);
+    }
+
     function renderMobileAgenda(d) {
-        var box = el('section', { class: 'mobile-agenda', 'aria-label': 'Повестка дня' });
-        box.appendChild(el('h3', { text: state.view === 'week' ? 'Повестка недели' : 'Повестка дня' }));
-        var events = (d.events || []).slice();
-        (d.hidden_busy || []).forEach(function (e) { if (!e.all_day) events.push(Object.assign({}, e, { title: 'Занято (служебное)', _mobileKind: 'hidden' })); });
-        (d.usual || []).forEach(function (e) { events.push(Object.assign({}, e, { title: 'Обычно · ' + (e.title || ''), _mobileKind: 'usual' })); });
-        events.sort(function (a, b) { return String(a.start).localeCompare(String(b.start)); });
-        if (!events.length) box.appendChild(el('div', { class: 'status', text: 'На этот день встреч нет' }));
-        events.forEach(function (e) {
-            var klass = 'mobile-event' + (e._mobileKind ? ' ' + e._mobileKind : '');
-            box.appendChild(el('button', { type: 'button', class: klass, onclick: function () { if (!e._mobileKind) openCard(e); } }, [
-                el('span', { class: 'mobile-event-time', text: e.all_day ? 'весь день' : fmtHM(parseISO(e.start)) + '–' + fmtHM(parseISO(e.end)) }),
-                el('span', { class: 'mobile-event-main' }, [el('strong', { text: e.title }), el('small', { text: (e.calendar_name || '') + syncNote(e) + linkNote(e) })])
-            ]));
+        var week = state.view === 'week', heading = week ? 'Повестка недели' : 'Повестка дня';
+        var box = el('section', { class: 'mobile-agenda', 'aria-label': heading }, [el('h3', { text: heading })]);
+        var rows = (d.events || []).slice();
+        (d.hidden_busy || []).forEach(function (e) { rows.push({ start: e.start, end: e.end, all_day: e.all_day, title: 'Занято (служебное)', _mobileKind: 'hidden' }); });
+        (d.usual || []).forEach(function (e) { rows.push(Object.assign({}, e, { title: 'Обычно · ' + (e.title || ''), _mobileKind: 'usual' })); });
+        var todayStr = localDate(ownerNow()), any = false;
+        var days = (d.days || []).map(function (day) {
+            var dayStart = parseISO(day.date);
+            var items = rows.filter(function (e) { return e.all_day ? allDayCovers(e, day.date) : overlapsDay(e, day.date); });
+            items.sort(function (a, b) {
+                var as = a.all_day ? -1 : Math.max(parseISO(a.start) - dayStart, 0), bs = b.all_day ? -1 : Math.max(parseISO(b.start) - dayStart, 0);
+                return as - bs || String(a.end).localeCompare(String(b.end)) || String(a.title).localeCompare(String(b.title));
+            });
+            any = any || items.length > 0;
+            return { date: day.date, items: items };
+        });
+        if (!any) { box.appendChild(el('div', { class: 'status', text: week ? 'На этой неделе встреч нет' : 'На этот день встреч нет' })); return box; }
+        days.forEach(function (day) {
+            var group = box;
+            if (week) {
+                var today = day.date === todayStr;
+                var note = [today ? 'сегодня' : '', day.items.length ? '' : 'нет встреч'].filter(Boolean).join(' · ');
+                group = el('section', { class: 'mobile-day' + (today ? ' today' : ''), 'aria-label': humanDate(day.date) }, [
+                    el('h4', {}, [el('span', { text: humanDate(day.date) }), note ? el('small', { text: note }) : null])]);
+                box.appendChild(group);
+            }
+            day.items.forEach(function (e) { group.appendChild(agendaRow(e, day.date)); });
         });
         return box;
     }
@@ -289,8 +325,7 @@
         var issues = renderLinkIssues(d);
         if (issues) body.appendChild(issues);
         body.appendChild(renderCalendarChips(d));
-        var narrow = window.matchMedia && window.matchMedia('(max-width:560px)').matches;
-        if (narrow && state.view === 'day') {
+        if (narrowQuery && narrowQuery.matches) {   // the stylesheet hides the hour grid at this width, in Day and Week alike
             body.appendChild(renderMobileAgenda(d));
             state.focusNow = false;
         } else {
@@ -343,9 +378,9 @@
         grid.appendChild(el('div', { class: 'corner' }));
         days.forEach(function (day) {
             var lane = el('div', { class: 'allday' });
-            d.events.filter(function (e) { return e.all_day && e.start.slice(0, 10) <= day.date && day.date < (e.end.slice(0, 10) || e.start.slice(0, 10)); })
+            d.events.filter(function (e) { return e.all_day && allDayCovers(e, day.date); })
                 .forEach(function (e) { lane.appendChild(el('span', { class: 'chip', text: e.title + syncNote(e), onclick: function () { openCard(e); } })); });
-            (d.hidden_busy || []).filter(function (e) { return e.all_day && e.start.slice(0, 10) <= day.date && day.date < (e.end.slice(0, 10) || e.start.slice(0, 10)); })
+            (d.hidden_busy || []).filter(function (e) { return e.all_day && allDayCovers(e, day.date); })
                 .forEach(function () { lane.appendChild(el('span', { class: 'chip hidden', text: 'Занято (служебное)' })); });
             grid.appendChild(lane);
         });
@@ -374,8 +409,10 @@
             var e = item.ev;
             var cls = 'ev' + (e.visibility === 'hidden' ? ' hidden' : '') + ((e.sync_state || '').indexOf('pending') === 0 ? ' pending' : '') + (e.sync_state === 'conflict' ? ' conflict' : '');
             var node = el('div', { class: cls, title: e.title }, [
-                el('div', { class: 't', text: e.title }),
-                el('div', { class: 'm', text: fmtHM(parseISO(e.start)) + '–' + fmtHM(parseISO(e.end)) + (e.calendar_name ? ' · ' + e.calendar_name : '') + syncNote(e) + linkNote(e) }),
+                el('div', { class: 'event-text' }, [
+                    el('div', { class: 't', text: e.title }),
+                    el('div', { class: 'm', text: agendaTime(e, day.date) + (e.calendar_name ? ' · ' + e.calendar_name : '') + syncNote(e) + linkNote(e) })
+                ]),
                 el('div', { class: 'rs' })
             ]);
             node.style.left = 'calc(' + (item.left * 100) + '% + 3px)';
@@ -398,6 +435,7 @@
     }
 
     function overlapsDay(e, dayStr) { var s = e.start.slice(0, 10), en = e.end.slice(0, 10); return s <= dayStr && dayStr <= en && !(en === dayStr && e.end.slice(11, 16) === '00:00' && s !== dayStr); }
+    function allDayCovers(e, dayStr) { return e.start.slice(0, 10) <= dayStr && dayStr < (e.end.slice(0, 10) || e.start.slice(0, 10)); }   // the end date is exclusive
 
     function place(col, dayStr, startISO, endISO, node) {
         var s = parseISO(startISO), e = parseISO(endISO);
@@ -434,7 +472,7 @@
         if (!upcoming.length) box.appendChild(el('div', { class: 'status', text: 'Дальше сегодня ничего нет' }));
         upcoming.forEach(function (e) {
             box.appendChild(el('div', { class: 'row', onclick: function () { openCard(e); } }, [
-                el('span', { class: 'when', text: e.all_day ? 'весь день' : fmtHM(parseISO(e.start)) + '–' + fmtHM(parseISO(e.end)) }),
+                el('span', { class: 'when', text: agendaTime(e, d.anchor || localDate(now)) }),
                 el('span', { text: e.title + (e.calendar_name ? ' · ' + e.calendar_name : '') + syncNote(e) + linkNote(e) })
             ]));
         });
@@ -1368,6 +1406,12 @@
     }
 
     /* ---------- lifecycle ---------- */
+    function narrowChanged() {   // turning a phone or resizing the frame swaps grid and agenda at once, not at the next poll
+        if (state.disposed || state.editing || accTyping()) return;   // an open card or form keeps its fields; its close repaints
+        state.focusNow = !narrowQuery.matches;
+        render();
+    }
+    if (narrowQuery && narrowQuery.addEventListener) narrowQuery.addEventListener('change', narrowChanged);
     document.addEventListener('visibilitychange', accWake);
     window.addEventListener('focus', accWake);
     if (typeof window.__ouroWidgetOnDispose === 'function') {
@@ -1375,6 +1419,7 @@
             state.disposed = true;
             if (state.poll) clearInterval(state.poll);
             clearTimeout(acc.timer);
+            if (narrowQuery && narrowQuery.removeEventListener) narrowQuery.removeEventListener('change', narrowChanged);
             document.removeEventListener('visibilitychange', accWake);
             window.removeEventListener('focus', accWake);
             if (typeof offTheme === 'function') offTheme();

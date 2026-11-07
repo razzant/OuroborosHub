@@ -224,11 +224,12 @@ def wait_until(page, condition, seconds=20):
     raise AssertionError('the browser did not reach the expected state')
 
 
-def widget_frame(browser, url, engine, height=720, timezone_id=None):
-    """The calendar inside its real module frame; the widths follow the existing cases (WebKit is the phone)."""
+def widget_frame(browser, url, engine, height=720, timezone_id=None, width=None):
+    """The real module frame: retain phone coverage for WebKit; grid-only gestures name a wide viewport."""
     from playwright.sync_api import expect
     expect.set_options(timeout=20_000)
-    context = browser.new_context(viewport={'width': 390 if engine == 'webkit' else 980, 'height': 900},
+    width = width or (390 if engine == 'webkit' else 980)
+    context = browser.new_context(viewport={'width': width, 'height': 900},
                                   **({'timezone_id': timezone_id} if timezone_id else {}))
     context.outside, context.consent = [], []
 
@@ -248,7 +249,7 @@ def widget_frame(browser, url, engine, height=720, timezone_id=None):
     page.wait_for_function('window.ready === true')
     assert 'allow-forms' not in page.locator('iframe').get_attribute('sandbox')
     frame = page.locator('iframe').element_handle().content_frame()
-    frame.wait_for_selector('.grid')
+    frame.wait_for_selector('.mobile-agenda' if width <= 560 else '.grid')
     expect(frame.locator('html')).to_have_attribute('data-theme', 'light')
     return context, page, frame
 
@@ -278,15 +279,15 @@ def test_calendar_host_card(calendar_server, tmp_path, engine, scenario):
                 frame.get_by_role('button', name='Создать', exact=True).click()
                 expect(frame.locator('.card')).to_have_count(0)
                 assert [x for x in state['posts'] if x[0] == 'event']
-                frame.locator('.ev', has_text='Host-created').click()
+                frame.locator('.ev, button.mobile-event', has_text='Host-created').click()
                 expect(frame.locator('.card .status')).not_to_have_text('Загружаю событие…')
                 frame.get_by_placeholder('Название', exact=True).fill('Host-edited')
                 frame.get_by_placeholder('Название', exact=True).press('Enter')
                 expect(frame.locator('.card')).to_have_count(0)
-                expect(frame.locator('.ev', has_text='Host-edited')).to_have_count(1)
+                expect(frame.locator('.ev, button.mobile-event', has_text='Host-edited')).to_have_count(1)
                 assert [x for x in state['posts'] if x[0] == 'event/update'][-1][1]['title'] == 'Host-edited'
             else:
-                frame.locator('.ev', has_text='Notify meeting').click()
+                frame.locator('.ev, button.mobile-event', has_text='Notify meeting').click()
                 expect(frame.locator('.card .status')).not_to_have_text('Загружаю событие…')
                 notify = frame.locator('label.inline', has_text='уведомить участников').locator('input')
                 notify.check()
@@ -304,6 +305,32 @@ def test_calendar_host_card(calendar_server, tmp_path, engine, scenario):
                 page.evaluate(f"ouroTheme.set('{theme}')")
                 expect(frame.locator('html')).to_have_attribute('data-theme', theme)
                 page.screenshot(path=str(evidence / f'calendar-{engine}-{scenario}-{theme}.png'))
+            assert frame.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            page.evaluate('async () => { await disposeWidget(); }')
+            expect(page.locator('iframe')).to_have_count(0)
+            assert context.outside == []
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_calendar_host_phone_agenda(calendar_server, tmp_path, engine):
+    """Both engines show Day/Week through the real bridge at phone width, with the real event card."""
+    from playwright.sync_api import sync_playwright, expect
+    ctx, provider, event, state, url = calendar_server
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True, downloads_path=str(tmp_path / 'downloads'))
+        try:
+            context, page, frame = widget_frame(browser, url, engine, width=390)
+            expect(frame.locator('.mobile-event', has_text='Notify meeting')).to_be_visible()
+            assert frame.locator('.grid-scroll').count() == 0
+            frame.get_by_role('button', name='Неделя', exact=True).click()
+            expect(frame.locator('.mobile-day')).to_have_count(7)
+            frame.locator('.mobile-day.today').get_by_role('button', name='Notify meeting').click()
+            expect(frame.locator('.card .status')).not_to_have_text('Загружаю событие…')
+            expect(frame.get_by_placeholder('Название', exact=True)).to_have_value('Notify meeting')
+            frame.get_by_role('button', name='Отмена', exact=True).click()
+            shoot(page, frame, evidence_dir(tmp_path), f'calendar-{engine}-phone-week')
             assert frame.evaluate('document.documentElement.scrollWidth <= innerWidth')
             page.evaluate('async () => { await disposeWidget(); }')
             expect(page.locator('iframe')).to_have_count(0)
@@ -455,7 +482,7 @@ def test_link_actions_change_the_real_store_only_after_the_owner_applies_them(li
             expect(strip).to_have_count(0)   # nothing differs yet
 
             def open_copy(title):
-                frame.locator('.ev').filter(has_text=title).filter(has_text='personal').click()
+                frame.locator('.ev, button.mobile-event').filter(has_text=title).filter(has_text='personal').click()
                 expect(frame.locator('.card .status')).not_to_have_text('Загружаю событие…')
                 return frame.locator('.linkbox')
 
@@ -527,7 +554,7 @@ def test_calendar_reassign_failure_stays_visible_and_success_still_closes(link_h
         browser = getattr(pw, engine).launch(headless=True, downloads_path=str(tmp_path / 'downloads'))
         try:
             context, page, frame = widget_frame(browser, url, engine, height=720)
-            frame.locator('.ev').filter(has_text='Planning').filter(has_text='work').click()
+            frame.locator('.ev, button.mobile-event').filter(has_text='Planning').filter(has_text='work').click()
             expect(frame.locator('.card .status')).not_to_have_text('Загружаю событие…')
             frame.locator('.card .cals label', has_text='personal').locator('input').uncheck()
             if partial:
@@ -538,10 +565,10 @@ def test_calendar_reassign_failure_stays_visible_and_success_still_closes(link_h
             assert response['status'] == ('partial' if partial else 'failed'), response
             if partial:
                 expect(frame.locator('.card')).to_have_count(0)
-                expect(frame.locator('#root > .status', has_text='источник')).to_be_visible()
+                expect(frame.locator('.calendar-body > .status', has_text='источник')).to_be_visible()
                 assert ctx.store.get_event(group['source'])['title'] == 'Content applied'
                 frame.get_by_role('button', name='Сегодня', exact=True).click()
-                expect(frame.locator('#root > .status', has_text='источник')).to_be_visible()
+                expect(frame.locator('.calendar-body > .status', has_text='источник')).to_be_visible()
             else:
                 expect(frame.locator('.card .status.err')).to_contain_text('источник')
                 expect(frame.get_by_role('button', name='Сохранить', exact=True)).to_be_enabled()
@@ -595,8 +622,8 @@ def test_owner_wall_clock_resize_ignores_browser_dst(temporal_host, tmp_path, en
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch(headless=True, downloads_path=str(tmp_path / 'downloads'))
         try:
-            context, page, frame = widget_frame(browser, url, engine, timezone_id=browser_zone)
-            event = frame.locator('.ev', has_text='Owner clock')
+            context, page, frame = widget_frame(browser, url, engine, timezone_id=browser_zone, width=980)  # resize handles belong to the grid
+            event = frame.locator('.ev, button.mobile-event', has_text='Owner clock')
             expect(event.locator('.m')).to_contain_text('02:30–03:30')
             hour = frame.locator('.col .hline').first.bounding_box()['height']
             assert abs(event.bounding_box()['y'] - frame.locator('.col').first.bounding_box()['y'] - 2.5 * hour) < 1
@@ -630,7 +657,7 @@ def test_all_day_title_card_keeps_dates_after_owner_zone_change(temporal_host, t
         browser = getattr(pw, engine).launch(headless=True, downloads_path=str(tmp_path / 'downloads'))
         try:
             context, page, frame = widget_frame(browser, url, engine, timezone_id='America/New_York')
-            event = frame.locator('.allday .chip', has_text='Calendar date')
+            event = frame.locator('.allday .chip, button.mobile-event', has_text='Calendar date')
             expect(event).to_be_visible()
             event.click()
             expect(frame.locator('.card .status')).not_to_have_text('Загружаю событие…')
@@ -644,7 +671,7 @@ def test_all_day_title_card_keeps_dates_after_owner_zone_change(temporal_host, t
             assert 'start' not in body and 'end' not in body
             saved = ctx.store.get_event(event_id)
             assert (saved['start_utc'], saved['end_utc'], saved['tz']) == (before['start_utc'], before['end_utc'], before['tz'])
-            expect(frame.locator('.allday .chip', has_text='Date title changed')).to_be_visible()
+            expect(frame.locator('.allday .chip, button.mobile-event', has_text='Date title changed')).to_be_visible()
             shoot(page, frame, evidence_dir(tmp_path), f'calendar-{engine}-all-day-{owner_zone.replace("/", "-")}')
             assert context.outside == []
         finally:

@@ -313,10 +313,11 @@ class Store:
     def upsert_calendar(self, cal: Dict[str, Any], *, restore: bool = False) -> None:
         """Insert a calendar or refresh its provider-owned facts; owner roles are kept.
 
-        A retired calendar stays retired, so an ordinary refresh or sync never revives a calendar
-        the owner deleted. restore=True is only for a calendar observed by a reconnection or an
-        explicit discovery; it clears deleted_at. The accounts gate makes a late discovery for a
-        disconnected account a no-op either way.
+        A retired calendar stays retired, so an ordinary refresh never revives it. restore=True is for
+        a calendar observed by a connected account's discovery; it lifts a disconnect's retirement,
+        never a deletion the owner made with cal_manage: that deletion's done receipt decides, not the
+        second-precision times of the deletion, disconnect and reconnect. The accounts gate makes a
+        late discovery for a disconnected account a no-op either way.
         """
         ts = _ts()
         with self._conn() as c:
@@ -328,7 +329,9 @@ class Store:
                 " WHERE EXISTS (SELECT 1 FROM accounts WHERE id=:account_id)"
                 " ON CONFLICT(id) DO UPDATE SET external_id=excluded.external_id, href=excluded.href, name=excluded.name, description=excluded.description,"
                 " tz=excluded.tz, writable=excluded.writable, access_role=excluded.access_role,"
-                " deleted_at=CASE WHEN :restore THEN NULL ELSE deleted_at END, updated_at=excluded.updated_at",
+                " deleted_at=CASE WHEN :restore AND NOT EXISTS (SELECT 1 FROM intents i WHERE i.kind='calendar' AND i.state='done'"
+                " AND i.calendar_id=:id AND json_extract(i.payload_json,'$.request.action')='delete') THEN NULL ELSE deleted_at END,"
+                " updated_at=excluded.updated_at",
                 {
                     "id": cal["id"], "account_id": cal["account_id"], "provider": cal["provider"],
                     "external_id": cal.get("external_id") or "", "href": cal.get("href") or "", "name": cal.get("name") or cal["id"],

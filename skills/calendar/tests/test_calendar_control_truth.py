@@ -46,6 +46,23 @@ def test_disconnected_account_cannot_be_resurrected_by_late_discovery(tmp_path):
     assert ctx.store.get_calendar(cid)['deleted_at'] is None
 
 
+def test_reconnect_discovery_lifts_only_a_disconnect_never_a_confirmed_owner_deletion(tmp_path):
+    ctx=context(tmp_path,'UTC');cid=add_external_calendar(ctx.store);old=ctx.store.get_calendar(cid)
+    account=ctx.store.get_account(old['account_id'])
+    def receipt(rid,action,state):
+        ctx.store.add_intent('calendar',account['id'],cid,'',{'request':{'action':action,'calendar_id':cid}},intent_id=rid)
+        ctx.store.settle_intent(rid,state,{})
+    for rid,action,state in (('lost','delete','uncertain'),('refused','delete','failed'),('renamed','update','done')):
+        receipt(rid,action,state)   # none of these deleted the calendar
+    ctx.store.delete_account(account['id']);ctx.store.upsert_account(account)
+    ctx.store.upsert_calendar(old,restore=True)
+    assert ctx.store.get_calendar(cid)['deleted_at'] is None
+    ctx.store.update_calendar(cid,{'deleted_at':'2026-12-10T09:00:00+00:00'});receipt('deleted','delete','done')   # as cal_manage records it
+    ctx.store.delete_account(account['id']);ctx.store.upsert_account(account)
+    ctx.store.upsert_calendar(old,restore=True)
+    assert ctx.store.get_calendar(cid)['deleted_at']=='2026-12-10T09:00:00+00:00'
+
+
 def test_active_failure_counts_exclude_retired_or_superseded_events(tmp_path):
     ctx=context(tmp_path,'UTC');row=create(ctx,title='Existing',start='2026-12-10T09:00')
     first=ctx.store.add_intent('update','local','local:personal',row['id'],{})
@@ -137,7 +154,9 @@ def test_notice_remaining_time_is_actual_and_host_transport_bypasses_proxy(tmp_p
         def __exit__(self,*args):pass
         def read(self):return b'{}'
     def build(*handlers):
-        assert len(handlers)==1 and handlers[0].proxies=={}
+        proxies=[h for h in handlers if isinstance(h,reminders.urllib.request.ProxyHandler)]
+        guards=[h for h in handlers if isinstance(h,reminders._LoopbackRedirectHandler)]
+        assert len(handlers)==2 and len(proxies)==1 and proxies[0].proxies=={} and len(guards)==1
         def open_request(request,timeout):
             captures.append(request);return Response()
         return SimpleNamespace(open=open_request)
@@ -147,6 +166,62 @@ def test_notice_remaining_time_is_actual_and_host_transport_bypasses_proxy(tmp_p
     assert channel._request('GET','/identity')=={}
     assert captures[0].full_url=='http://127.0.0.1:8767/identity'
     assert captures[0].get_header('X-skill-token')=='synthetic-token'
+
+
+@pytest.mark.parametrize('source',['argument','environment'])
+@pytest.mark.parametrize('url',['http://host.example.test:8767','https://127.0.0.1:8767','http://user:secret@127.0.0.1:8767',
+                                'http://127.0.0.1.example.test:8767','http://[::ffff:127.0.0.1]:8767','ftp://127.0.0.1:8767',''])
+def test_skill_token_never_leaves_plain_loopback_host_service(monkeypatch,url,source):
+    opened=[]
+    monkeypatch.setattr(reminders.urllib.request,'build_opener',lambda *handlers:SimpleNamespace(open=lambda request,timeout:opened.append(request)))
+    monkeypatch.setenv('HOST_SERVICE_TOKEN','synthetic-token')
+    if source=='environment':
+        monkeypatch.setenv('HOST_SERVICE_URL',url);channel=reminders.NotifyChannel()
+    else:
+        monkeypatch.delenv('HOST_SERVICE_URL',raising=False);channel=reminders.NotifyChannel(url,'synthetic-token')
+    assert channel.base_url==''
+    assert channel.state(refresh=True)=='unreachable'
+    assert channel.send('notice','text')==('no_route','unreachable')
+    assert opened==[]   # no request, so no X-Skill-Token, for any destination except plain-HTTP loopback
+    for loopback in ('http://localhost:8767','http://[::1]:8767'):
+        assert reminders.NotifyChannel(loopback,'synthetic-token').base_url==loopback
+
+
+def test_host_service_redirect_off_loopback_is_refused_before_the_token_moves(monkeypatch):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+    seen=[]
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*args):pass
+        def reply(self):
+            seen.append((self.command,self.path,self.headers.get('X-Skill-Token')))
+            if self.path in self.server.moves:
+                self.send_response(302);self.send_header('Location',self.server.moves[self.path]);self.send_header('Content-Length','0');self.end_headers();return
+            body=json.dumps({'notify_version':1} if self.command=='GET' else {'ok':True,'ts':'t','chat_id':1}).encode()
+            self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(body)))
+            self.end_headers();self.wfile.write(body)
+        do_GET=do_POST=reply
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.moves={}
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    base=f'http://127.0.0.1:{server.server_port}';outbound=[]
+    real_open=reminders.urllib.request.HTTPHandler.http_open
+    def recorded(handler,request):
+        outbound.append(request.full_url);return real_open(handler,request)
+    monkeypatch.setattr(reminders.urllib.request.HTTPHandler,'http_open',recorded)
+    monkeypatch.setenv('http_proxy','http://unrelated.invalid:3128')   # the loopback call bypasses any proxy
+    try:
+        for target in (f'http://203.0.113.9:{server.server_port}/identity',f'http://user:secret@127.0.0.1:{server.server_port}/identity'):
+            server.moves={'/identity':target};seen.clear();outbound.clear()
+            assert reminders.NotifyChannel(base,'synthetic-token').state(refresh=True)=='unreachable'
+            assert outbound==[base+'/identity'] and seen==[('GET','/identity','synthetic-token')]
+            server.moves={'/notify':target};seen.clear();outbound.clear()
+            assert reminders.NotifyChannel(base,'synthetic-token').send('notice','text')[0]=='unknown'   # the host may have accepted it
+            assert outbound==[base+'/identity',base+'/notify'] and [s[:2] for s in seen]==[('GET','/identity'),('POST','/notify')]
+        server.moves={'/identity':base+'/identity-moved'};seen.clear();outbound.clear()
+        assert reminders.NotifyChannel(base,'synthetic-token').state(refresh=True)=='ready'   # loopback to loopback still works
+        assert seen==[('GET','/identity','synthetic-token'),('GET','/identity-moved','synthetic-token')]
+    finally:
+        server.shutdown();server.server_close();thread.join(timeout=5)
 
 
 @pytest.mark.parametrize('remote_change',['none','delete','rsvp'])
