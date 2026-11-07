@@ -1,7 +1,7 @@
 ---
 name: a2a
 description: Agent-to-Agent protocol bridge for Ouroboros. Provides a local A2A-compatible server plus client tools for discovering and messaging other A2A agents.
-version: 1.5.1
+version: 1.5.2
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
