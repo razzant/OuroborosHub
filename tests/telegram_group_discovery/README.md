@@ -20,7 +20,7 @@ is required) and `TG_DISCOVERY_LEGACY_REF` (the published skill the update case 
 `089ea45`) inside it. Evidence (JUnit, JSON facts, host logs, screenshots at 1100x750 and 390x844, light and dark)
 goes to `<evidence-dir>`.
 
-Cases: provenance; groups offered by exact signed id; one chosen group connected Silent; repeat Open preserves
+Cases: provenance; groups and observed private chats offered by exact numeric id; one chosen group or private chat connected Silent; repeat Open preserves
 settings; membership/service add, remove, re-add and migration; no cap; unknown / known-empty / unreadable list;
-a group pending under skill 0.8 offered after the update. Each engine gets a fresh host; each case sets up what
+a group and a private chat pending under skill 0.8 offered after the update. Each engine gets a fresh host; each case sets up what
 it needs and runs alone. Against skill 0.8 (no `status.connect`) the suite is the negative control and fails.

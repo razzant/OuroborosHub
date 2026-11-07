@@ -172,13 +172,15 @@ class Shots:
     def __init__(self, page, directory: Path, engine: str):
         self.page, self.dir, self.engine = page, directory, engine
 
-    def __call__(self, name: str) -> list:
+    def __call__(self, name: str, *, focus: str | None = None) -> list:
         written = []
         try:
             for width, height, scheme in VIEWS:
                 self.page.set_viewport_size({"width": width, "height": height})
                 self.page.emulate_media(color_scheme=scheme)
                 self.page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+                if focus:
+                    self.page.locator(focus).scroll_into_view_if_needed()
                 path = self.dir / f"{self.engine}-{width}x{height}-{scheme}-{name}.png"
                 self.page.screenshot(path=str(path))
                 written.append(path.name)

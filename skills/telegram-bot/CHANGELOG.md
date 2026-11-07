@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.7
+
+- Connect now offers private chats the bot has already seen, labelled with the
+  person's observed name, username when available, and numeric chat ID. The owner
+  still chooses each chat explicitly; new places start Silent. No place, wake
+  choice or reply is created by discovery.
+- Private chats reuse the existing custody projection, including ordered
+  block/unblock evidence and one resumable backfill of retained inbox messages.
+  Existing group membership, migration and delivery records stay unchanged.
+
 ## 0.10.6
 
 - A photo or document above the Bot API's 20 MiB download limit no longer holds its whole

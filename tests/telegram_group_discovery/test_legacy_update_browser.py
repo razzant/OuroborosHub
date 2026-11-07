@@ -24,6 +24,7 @@ def test_group_pending_under_the_old_skill_is_offered_after_update(legacy_host, 
     host = legacy_host
     last = max(host.bot.push(update) for update in [
         U.group_message(*PENDING, "heard while the old skill ran"),
+        U.private_message(U.OTHER, "a private chat heard by the old skill"),
         *(U.group_message(chat, title, "from the old days") for chat, title in SCATTERED),
         *(U.group_message(*FLOOD, f"message {n}") for n in range(400))])
     host.bot.wait_acked(last)
@@ -37,6 +38,7 @@ def test_group_pending_under_the_old_skill_is_offered_after_update(legacy_host, 
     offered = ui.connect_rows(after)
     record(f"legacy-update-{host.engine}", {"before": old, "installed": installed, "after": after})
     expected = {ui.exact(chat) for chat, _ in [PENDING, FLOOD, *SCATTERED]}
+    expected.add(ui.exact(U.OTHER["id"]))
     assert {ui.identity(r) for r in offered} == expected and len(offered) == len(expected), offered[:3]
 
     ui.open_connect(page, host.url)

@@ -1,9 +1,9 @@
-"""Groups the bot has been seen in, offered as the owner's Connect choices.
+"""Chats the bot has been seen in, offered as the owner's Connect choices.
 
-Each group or supergroup update leaves its chat id, type and title and the bot's
+Each private chat, group or supergroup update leaves its id, type, label and the bot's
 newest membership evidence beside custody, in the transaction that advances the
 provider offset. Nothing here creates an inbox event, a turn or a place: the
-owner connects each group. A listed group is an observation, not a live
+owner connects each chat. A listed chat is an observation, not a live
 membership check.
 """
 
@@ -20,7 +20,8 @@ from .events import _integer
 
 _ACCOUNT = re.compile(r"[1-9][0-9]*")
 _GROUP_TYPES = ("group", "supergroup")
-_BACKFILL_KEY = "group_backfill"
+_CHAT_TYPES = ("private", *_GROUP_TYPES)
+_BACKFILL_KEY = "chat_backfill"
 _BACKFILL_BATCH = 200
 
 GROUPS_TABLE = """
@@ -63,14 +64,15 @@ class GroupSighting:
 
 
 def group_sightings(update: Any, account_id: str) -> Tuple[GroupSighting, ...]:
-    """What one raw update shows about the groups of the bot ``account_id``.
+    """What one raw update shows about the chats of the bot ``account_id``.
 
     A message, edit, service message or reaction from a group shows the bot there
     when Telegram generated the update. The bot's own ``my_chat_member`` status,
     or a service message naming it as the member who left, records a removal. A
     group upgraded to a supergroup is retired by ``migrate_to_chat_id``; the
     supergroup is observed under its new id from its own updates, which carry its
-    type and title. Private chats and channels are not groups.
+    type and title. Private messages and the bot's block/unblock updates also
+    name their chat. Channels are not offered.
     """
     if not isinstance(update, dict) or not _ACCOUNT.fullmatch(str(account_id)):
         return ()
@@ -114,25 +116,26 @@ def record_sightings(conn: sqlite3.Connection, update_id: int, sightings: Sequen
 
 
 def offered_groups(conn: sqlite3.Connection, account_id: str) -> List[Dict[str, str]]:
-    """Connect rows for groups whose newest evidence shows this bot present, by title.
+    """Connect rows for chats whose newest evidence shows this bot present, by label.
 
-    Every such group is listed. The label carries the numeric id beside the
-    title, so groups with the same title stay distinguishable.
+    Every such chat is listed. The label carries the numeric id beside the
+    name, so chats with the same name stay distinguishable. The existing
+    telegram_groups projection also holds private chats; no second registry.
     """
     rows = conn.execute(
-        "SELECT chat_id, title FROM telegram_groups WHERE account_id=? AND membership='present'",
+        "SELECT chat_id, title, chat_type FROM telegram_groups WHERE account_id=? AND membership='present'",
         (account_id,),
     ).fetchall()
     return [
         {"account_id": account_id, "conversation_id": chat_id,
-         "label": f"{' '.join(title.split()) or 'Group'} ({chat_id})"}
-        for chat_id, title in sorted(((str(row[0]), str(row[1])) for row in rows),
+         "label": f"{' '.join(title.split()) or ('Private chat' if kind == 'private' else 'Group')} ({chat_id})"}
+        for chat_id, title, kind in sorted(((str(row[0]), str(row[1]), str(row[2])) for row in rows),
                                      key=lambda row: (row[1].casefold(), row[0]))
     ]
 
 
 def backfill_legacy(connect: Callable[[], ContextManager[sqlite3.Connection]]) -> None:
-    """Observe the groups of inbox rows captured before this projection, once.
+    """Observe the chats of saved inbox rows once, including pre-upgrade private chats.
 
     The inbox is read in short batches; each commits its sightings with its
     progress, so an interrupted backfill resumes and a finished one never runs
@@ -179,7 +182,7 @@ def backfill_unreadable(conn: sqlite3.Connection) -> int:
 
 
 def _captured_group(payload: Any) -> Optional[Tuple[GroupSighting, ...]]:
-    """The group a saved inbox event came from; ``None`` when its origin is unreadable."""
+    """The chat a saved inbox event came from; ``None`` when its origin is unreadable."""
     try:
         event = json.loads(payload)
     except (TypeError, ValueError, RecursionError):
@@ -192,9 +195,14 @@ def _captured_group(payload: Any) -> Optional[Tuple[GroupSighting, ...]]:
             or str(conversation.get("chat_id")) != str(chat_id)
             or chat_type not in ("private", "channel", *_GROUP_TYPES)):
         return None
-    if chat_type not in _GROUP_TYPES:
+    if chat_type not in _CHAT_TYPES:
         return ()
-    title = conversation.get("title")
+    if chat_type == "private":
+        actor = _object(event.get("actor"))
+        person = actor if str(actor.get("platform_actor_id")) == str(chat_id) else {}
+        title = _private_label({**person, **{k: v for k, v in conversation.items() if v}})
+    else:
+        title = conversation.get("title")
     return (GroupSighting(account, str(chat_id), "present", chat_type, title if isinstance(title, str) else ""),)
 
 
@@ -211,10 +219,21 @@ def _progress(conn: sqlite3.Connection) -> Dict[str, Any]:
 def _sighting(account_id: str, chat: Any, membership: str) -> Tuple[GroupSighting, ...]:
     chat = _object(chat)
     chat_id, title = _integer(chat.get("id")), chat.get("title")
-    if chat.get("type") not in _GROUP_TYPES or chat_id is None:
+    if chat.get("type") not in _CHAT_TYPES or chat_id is None:
         return ()
+    if chat["type"] == "private":
+        title = _private_label(chat)
     return (GroupSighting(account_id, str(chat_id), membership, chat["type"],
                           title if isinstance(title, str) else ""),)
+
+
+def _private_label(chat: Dict[str, Any]) -> str:
+    parts = [chat[key].strip() for key in ("first_name", "last_name")
+             if isinstance(chat.get(key), str) and chat[key].strip()]
+    username = chat.get("username")
+    if isinstance(username, str) and username.strip():
+        parts.append("@" + username.strip().lstrip("@"))
+    return " ".join(parts)
 
 
 def _object(value: Any) -> Dict[str, Any]:
