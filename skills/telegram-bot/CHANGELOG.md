@@ -6,9 +6,12 @@
   person's observed name, username when available, and numeric chat ID. The owner
   still chooses each chat explicitly; new places start Silent. No place, wake
   choice or reply is created by discovery.
-- Private chats reuse the existing custody projection, including ordered
-  block/unblock evidence and one resumable backfill of retained inbox messages.
-  Existing group membership, migration and delivery records stay unchanged.
+- Private chats reuse the existing custody projection. New updates record ordered
+  block/unblock evidence; one resumable pass adds retained private messages.
+  Earlier blocks were never recorded, so an old blocked chat may remain offered
+  until newer evidence arrives. Rolling back to 0.10.6 keeps private rows visible
+  but stops updating their evidence. Group membership, migration and delivery
+  records stay unchanged.
 
 ## 0.10.6
 

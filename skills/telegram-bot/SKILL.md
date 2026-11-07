@@ -184,7 +184,7 @@ It provides:
 The payload does not call the owner `/chat/inject` path, allocate synthetic
 internal chats, interpret owner commands, or create prompt envelopes. It uses
 only the reviewed `presence` Host permission. Connect a Telegram place with the
-bot account ID, or one group at a time (see
+bot account ID, or one chat at a time (see
 [Connecting groups](#connecting-groups-090)). On hosts advertising `places_version >= 1`, private chats,
 groups and channels are captured without a binding ID. A private chat carries
 the `direct_message` fact; the person opened that chat with the bot, and the
@@ -309,6 +309,11 @@ The list records what the bot has observed and does not check current membership
   the existing custody lifetime, including removed chats' last evidence.
   Status reads use this projection, never repeat the inbox pass. A large retained
   inbox can delay the first startup; each transaction reads at most 200 rows.
+  Earlier versions did not record private-chat blocks: a chat reconstructed from
+  retained messages may still be offered after an old block, until a newer block,
+  unblock or message updates its evidence.
+- Rolling back to 0.10.6 keeps these private rows visible in the same chooser,
+  but that version no longer updates their names or block/unblock evidence.
 
 ## Retained input and late results
 
