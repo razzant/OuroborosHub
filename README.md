@@ -62,12 +62,13 @@ binds a name to its digest. Updating the payload or dependency declaration chang
 the digest; CI requires the maintainer to renew or remove the old endorsement.
 Membership in the hub alone does not confer Official status.
 
-The initial Official set is: `a2a`, `adaptive-code-review`, `anti-slop`,
-`cache_efficiency_snapshot`, `claudexor_quotas`, `confluence`, `context-lens`,
-`duckduckgo`, `email`, `email-presence`, `github`, `google-workspace`, `keenable`,
-`memory-atlas`, `perplexity`, `slack-bridge`, `telegram-bot`, `pdf_tools`, `word_tools`.
-The recommended hub starters are `duckduckgo`, `pdf_tools`, `word_tools`,
-`anti-slop` and `memory-atlas`. The app manages recommendations for its built-ins.
+The current Official set and recommended starter choices live in
+[`official.json`](official.json). Recommended hub starters are `anti-slop`,
+`chrome_browser`, `duckduckgo`, `keenable`, `memory-atlas`, `office_reader`,
+`pdf_tools`, `table_tools` and `word_tools`. The app manages recommendations for
+its built-ins. An Official release without `recommended: true` remains available
+for manual selection. Completed starter setup does not rerun when recommendations change;
+an unfinished default starter may use the current recommendations when retried.
 
 Source trust controls the app's acceptance flow. Dependencies, owner grants,
 runtime permissions and enablement still apply. Ouroboros can install and review

@@ -26,6 +26,11 @@
       "recommended": false
     },
     {
+      "digest": "ae7a52945ac21f7e245598756148b4e7b40e954b96a961209ff151f462f84b10",
+      "name": "chrome_browser",
+      "recommended": true
+    },
+    {
       "digest": "9ebc010de160df6706d57e1a751a832f712f2eedb595db31400ae1e2c1297331",
       "name": "claudexor_quotas",
       "recommended": false
@@ -68,11 +73,16 @@
     {
       "digest": "7d5dcdf9407b1e327a528cea075bf9f1d086af5d80fdbb96e2c89fc8eda01701",
       "name": "keenable",
-      "recommended": false
+      "recommended": true
     },
     {
       "digest": "02af7b5a3ded32550bb3655a33d0570bf17a1d05da6ceca7bba9d6335d3412b2",
       "name": "memory-atlas",
+      "recommended": true
+    },
+    {
+      "digest": "6f794bfd8aee4c179d756863e5a6893746281ab5348328fb075b64bbe172f07c",
+      "name": "office_reader",
       "recommended": true
     },
     {
@@ -89,6 +99,11 @@
       "digest": "4e520129bf22f3e3d4f4f59c4cce92c8bca110f4f8aaedfe3c74c372c3fb977d",
       "name": "slack-bridge",
       "recommended": false
+    },
+    {
+      "digest": "4e24776e52cbde4fcac39f03733881019b4b09f656f4f2dc7531ad39c80a0efd",
+      "name": "table_tools",
+      "recommended": true
     },
     {
       "digest": "89587f381b874af97b5ab4a7911999569914867a107b336819b4261eb554ecc9",
