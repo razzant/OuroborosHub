@@ -999,7 +999,7 @@ class CustodyStore:
         }
 
     def offered_groups(self, account_id: str) -> List[Dict[str, str]]:
-        """Connect choices of one bot; reads its groups, never the message history."""
+        """Connect choices of one bot; reads its chat projection, never message history."""
         with self._connect() as conn:
             return discovery.offered_groups(conn, account_id)
 

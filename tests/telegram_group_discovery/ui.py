@@ -18,6 +18,8 @@ _ROWS = """(dialog) => [...dialog.querySelectorAll('.place-accounts .place-conne
 
 def open_connect(page, url: str, *, settle: bool = True) -> None:
     """Dashboard > Consciousness > Connect a place > the Telegram connector, until its list has been read."""
+    if page.locator("dialog.place-sheet[open]").count():
+        close_sheets(page)
     # The SPA's controls, not all unrelated page resources, establish readiness.
     page.goto(url + "/#dashboard", wait_until="domcontentloaded")
     page.locator('[data-dashboard-tab="consciousness"]').click()

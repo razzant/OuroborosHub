@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.11.1
+
+- Connect now offers private chats the bot has already seen, labelled with the
+  person's observed name, username when available, and numeric chat ID. The owner
+  still chooses each chat explicitly; new places start Silent. No place, wake
+  choice or reply is created by discovery.
+- Private chats reuse the existing custody projection. New updates record ordered
+  block/unblock evidence; one resumable pass adds retained private messages.
+  Earlier blocks were never recorded, so an old blocked chat may remain offered
+  until newer evidence arrives. Rolling back to 0.11.0 keeps private rows visible
+  but stops updating their evidence. Group membership, migration and delivery
+  records stay unchanged.
+
 ## 0.11.0
 
 - New `telegram_react` (`action: set` with one `emoji` or `custom_emoji_id`, or

@@ -171,15 +171,15 @@ def _status_payload() -> Dict[str, Any]:
         counts = CustodyStore.shared(_STATE_DIR / "custody.sqlite3").status_snapshot()
     runtime = _RUNTIME.status_snapshot(counts) if _RUNTIME is not None else {}
     binding_id = str(_load_local_settings().get("binding_id") or "").strip()
-    # Connect offers only the groups of the bot getMe confirmed for the current token.
-    # null, never [], while that bot or its groups cannot be read.
+    # Connect offers only the observed chats of the bot getMe confirmed for the current token.
+    # null, never [], while that bot or its chats cannot be read.
     account, unavailable = _RUNTIME.confirmed_bot() if _RUNTIME is not None else ("", "Telegram bot not running")
     groups = None
     if account:
         try:
             groups = _RUNTIME.store.offered_groups(account)
         except (sqlite3.Error, OSError):
-            unavailable = "Observed groups could not be read"
+            unavailable = "Observed chats could not be read"
     return {
         "runtime_state": runtime.get("runtime_state", "not_started"),
         "bot_label": runtime.get("bot_label", "not connected"),

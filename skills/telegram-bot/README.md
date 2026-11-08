@@ -1,10 +1,10 @@
-# Telegram Bot 0.10.5
+# Telegram Bot 0.11.1
 
 A public Telegram bot connector for private-chat, group and channel places,
 separate from the built-in owner-control Telegram bridge. It keeps incoming
 events and outgoing delivery receipts in its durable inbox/outbox.
 
-Groups the bot is in are offered by name when you connect a Telegram place
+Private chats and groups the bot has seen are offered by name and numeric ID when you connect a Telegram place
 (Consciousness, **Connect a place**, **Telegram**); each new place starts Silent
 until you make it Active. See [Connecting groups](SKILL.md#connecting-groups-090).
 

@@ -211,6 +211,7 @@ def test_groups_reach_connect_through_the_poll_loop_and_membership_updates_stay_
             assert len(api.requests) == requests and connector.host.turns == turns
 
             assert status["connect"] == [
+                {"account_id": "9", "conversation_id": "3", "label": "Ann (3)"},
                 {"account_id": "9", "conversation_id": "-100", "label": "Book club (-100)"},
                 {"account_id": "9", "conversation_id": "-102", "label": 'R&D <team> "core" notes (-102)'},
                 {"account_id": "9", "conversation_id": "-105", "label": "Renamed (-105)"},
@@ -236,7 +237,7 @@ def test_groups_reach_connect_through_the_poll_loop_and_membership_updates_stay_
                 conn.execute("ALTER TABLE telegram_groups RENAME TO unreadable_groups")
             broken = await connector.status()
             assert broken["connect"] is None and broken["telegram_offset"] == 12
-            assert (broken["text"], broken["tone"]) == ("Observed groups could not be read", "warn")
+            assert (broken["text"], broken["tone"]) == ("Observed chats could not be read", "warn")
             with sqlite3.connect(connector.runtime.store.path) as conn:
                 conn.execute("ALTER TABLE unreadable_groups RENAME TO telegram_groups")
             assert (await connector.status())["connect"] == status["connect"]
@@ -403,17 +404,33 @@ def test_a_migration_retires_the_old_id_and_offers_the_supergroup_from_its_own_m
     assert store.claim_inbox().event_id == "telegram:9:1" and store.claim_inbox() is None
 
 
-def test_private_chats_channels_other_members_and_unknown_bots_note_no_group():
+def test_channels_other_members_and_unknown_bots_are_not_offered():
     room = chat(-100, "Club")
-    assert group_sightings(said(1, chat(3, kind="private")), "9") == ()
     assert group_sightings(said(1, chat(-103, "News", "channel")), "9") == ()
-    assert group_sightings(member(1, chat(3, kind="private"), "kicked"), "9") == ()
     assert group_sightings(member(1, chat(-104, "News", "channel"), "administrator"), "9") == ()
     assert group_sightings(member(1, room, "member", bot=OTHER_BOT), "9") == ()
     assert group_sightings(said(1, room), "unknown") == ()
     assert group_sightings(said(1, room), "") == ()
     assert group_sightings({"update_id": 1, "channel_post": said(1, room)["message"]}, "9") == ()
     assert group_sightings(said(1, room), "9") == (discovery.GroupSighting("9", "-100", "present", "supergroup", "Club"),)
+
+
+def test_private_chats_keep_names_numeric_ids_and_newest_block_or_unblock_evidence(tmp_path):
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+    person = {**chat(3, kind="private"), "last_name": "Lee", "username": "ann_lee"}
+    twin = {**person, "id": 4}
+    commit(store, said(1, person), said(2, twin), said(3, chat(-100, "Club")), said(4, person))
+    assert listed(store) == ["Ann Lee @ann_lee (3)", "Ann Lee @ann_lee (4)", "Club (-100)"]
+    assert [row["conversation_id"] for row in store.offered_groups("9")] == ["3", "4", "-100"]
+    assert listed(store, str(OTHER_BOT)) == []
+    renamed = {**person, "first_name": "Anne", "username": "anne_lee"}
+    commit(store, member(5, renamed, "kicked"), said(4, person))
+    assert listed(store) == ["Ann Lee @ann_lee (4)", "Club (-100)"]
+    commit(store, member(6, renamed, "member"))
+    assert listed(store) == ["Ann Lee @ann_lee (4)", "Anne Lee @anne_lee (3)", "Club (-100)"]
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM presence_work").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("update,expected", [
@@ -510,7 +527,7 @@ def legacy_custody(path, groups=260):
                          "attempts, available_at, received_at) VALUES (?, ?, ?, ?, 'pending', 0, 0, 0)",
                          (f"legacy:{name}", base + 10 + offset, f"legacy:{name}", raw))
         conn.execute("DROP TABLE telegram_groups")
-        conn.execute("DELETE FROM metadata WHERE key='group_backfill'")
+        conn.execute("DELETE FROM metadata WHERE key='chat_backfill'")
 
 
 def commit_legacy(store, update, account=str(BOT)):
@@ -523,13 +540,13 @@ def custody_rows(path):
         rows = {table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
                 for table in ("inbox", "outbox", "presence_work")}
         rows["metadata"] = conn.execute(
-            "SELECT * FROM metadata WHERE key!='group_backfill' ORDER BY key").fetchall()
+            "SELECT * FROM metadata WHERE key!='chat_backfill' ORDER BY key").fetchall()
     return rows
 
 
 def backfill_marker(path):
     with sqlite3.connect(path) as conn:
-        row = conn.execute("SELECT value FROM metadata WHERE key='group_backfill'").fetchone()
+        row = conn.execute("SELECT value FROM metadata WHERE key='chat_backfill'").fetchone()
     return json.loads(row[0]) if row else None
 
 
@@ -543,7 +560,7 @@ def test_legacy_backfill_offers_every_saved_group_once_and_changes_no_custody_ro
     assert custody_rows(path) == before
     offered = listed(store)
     # More rows than one backfill batch, in every inbox state, none left out.
-    assert len(offered) == 260 and offered[0] == "Group 000 (-1000)" and offered[-1] == "Group 259 (-1259)"
+    assert len(offered) == 261 and offered[0] == "Ann (3)" and offered[-1] == "Group 259 (-1259)"
     assert listed(store, str(OTHER_BOT)) == ["Theirs (-2000)"]
     assert store.status_snapshot()["group_backfill_unreadable"] == len(_INVALID)
     assert backfill_marker(path) == {"after": 275, "done": True, "unreadable": len(_INVALID)}
@@ -555,7 +572,7 @@ def test_legacy_backfill_offers_every_saved_group_once_and_changes_no_custody_ro
                      (json.dumps({"account_id": "9", "conversation_id": "-3000", "conversation": {
                          "chat_id": "-3000", "chat_type": "group", "title": "Late"}}),))
     CustodyStore(path)
-    assert "Late (-3000)" not in listed(store) and len(listed(store)) == 260
+    assert "Late (-3000)" not in listed(store) and len(listed(store)) == 261
     assert backfill_marker(path)["after"] == 275
 
 
@@ -589,10 +606,30 @@ def test_an_interrupted_backfill_resumes_and_never_undoes_newer_evidence(tmp_pat
     offered = listed(live)
     assert "Group 060 (-1060)" not in offered and "Group 080 (-1080)" not in offered
     assert "Group 070 renamed (-1070)" in offered and "Group 070 (-1070)" not in offered
-    assert len(offered) == 118 and "Group 000 (-1000)" in offered and "Group 119 (-1119)" in offered
+    assert len(offered) == 119 and "Group 000 (-1000)" in offered and "Group 119 (-1119)" in offered
     assert backfill_marker(path) == {"after": 135, "done": True, "unreadable": len(_INVALID)}
     # Only the offset moved, for the live updates.
     after = custody_rows(path)
     assert {key: rows for key, rows in after.items() if key != "metadata"} == {
         key: rows for key, rows in before.items() if key != "metadata"}
     assert after["metadata"] == [("telegram_offset", "1003")]
+
+
+def test_upgrade_from_group_only_projection_adds_seen_private_chats_without_changing_custody(tmp_path):
+    path = tmp_path / "custody.sqlite3"
+    old = CustodyStore(path)
+    person = {**chat(3, kind="private"), "last_name": "Lee", "username": "ann_lee"}
+    update = said(1, person)
+    update["message"]["from"] = {"id": 3, "first_name": "Ann", "last_name": "Lee", "username": "ann_lee"}
+    commit_legacy(old, update)
+    commit(old, said(2, chat(-100, "Club")), member(3, chat(-100, "Club"), "left"))
+    # Older versions finished the groups-only pass and retained this person's event.
+    with sqlite3.connect(path) as conn:
+        conn.execute("DELETE FROM metadata WHERE key='chat_backfill'")
+        conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('group_backfill',?)",
+                     (json.dumps({"after": 3, "done": True, "unreadable": 0}),))
+    before = custody_rows(path)
+    upgraded = CustodyStore(path)
+    assert listed(upgraded) == ["Ann Lee @ann_lee (3)"]
+    assert custody_rows(path) == before
+    assert backfill_marker(path) == {"after": 2, "done": True, "unreadable": 0}
