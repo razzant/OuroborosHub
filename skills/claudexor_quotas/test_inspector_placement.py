@@ -42,41 +42,28 @@ const pick = (env, key) => {
 };
 // The window row shows one limit: pick its window, then its scope (the plate of the stack's old rows).
 function showLimit(env, g) {
-  const tab = byFocus(env.root, 'win:' + g.harness + ':' + g.window_seconds);
-  assert.ok(tab, 'a tab for the window of ' + g.key);
-  if (tab.getAttribute('aria-selected') !== 'true') tab.listeners.click[0]({ stopPropagation() {} });
-  const scope = byFocus(env.root, 'scope:' + g.key);
-  if (scope && scope.getAttribute('aria-pressed') !== 'true') scope.listeners.click[0]({ stopPropagation() {} });
-  assert.ok(byFocus(env.root, 'limit:' + g.key), 'the plate of ' + g.key + ' is shown');
+  const ring = byFocus(env.root, 'ring:' + g.harness + ':' + g.key);
+  assert.ok(ring, 'a ring for ' + g.key);
+  if (ring.getAttribute('aria-pressed') !== 'true') ring.listeners.click[0]({ stopPropagation() {} });
+  assert.ok(classes(env.root, 'q-plate').some((p) => p.getAttribute('data-limit') === g.key), 'the plate of ' + g.key + ' is shown');
 }
 // The stub keeps focus on a node a redraw removed; the keyboard is where it should be only on a live node.
 const keyboardOn = (env, key) => walk(env.root).includes(active(env)) && active(env).getAttribute('data-focus') === key;
-const cards = (env) => classes(env.root, 'inspector');
-// The card stands in a fold of one row (.ins-wrap > .ins-fold). Under a chart it is the plate's own child (the plate is the row of the limits, .lrow); where no chart is over it
-// (Chart folded) it is a row of the limits itself. Either way it is among the limits.
-const inRows = (card) => { const holder = card.parentNode.parentNode.parentNode; return has(holder, 'lrows') || (has(holder, 'lrow') && has(holder.parentNode, 'lrows')); };
-const limitKey = (row) => classes(row, 'l-chart')[0].getAttribute('data-focus').slice(6);
-// The children of a list, one word each: a limit row, the card (alone, or in its fold), a chart (alone, or in its fold: it stands
-// there only where nothing is picked; a picked bar lifts it into the plate), an account row.
-const seq = (parent) => parent.childNodes.map((n) => has(n, 'inspector') || has(n, 'ins-wrap') ? 'card'
+// The cards that are seen: the opened account's card beside the bars of the plate (not the stand-in that asks for a pick, and not while the list of
+// accounts stands in the plate's place: then the plate is folded away and inert) and the account's full card under its row of the list.
+const shut = (n) => { for (let up = n.parentNode; up; up = up.parentNode) if (up.inert === true) return true; return false; };
+const cards = (env) => classes(env.root, 'q-card').filter((c) => !has(c, 'q-card-none') && !shut(c)).concat(classes(env.root, 'inspector'));
+const limitKey = (plate) => plate.getAttribute('data-limit');
+// The children of the box of the limits, one word each: the plate of a limit, the history under it.
+const seq = (parent) => parent.childNodes.map((n) => has(n, 'inspector') ? 'card'
   : has(n, 'tl-block') || has(n, 'tl-wrap') ? 'chart'
-  : has(n, 'lrow') ? 'row:' + limitKey(n) : has(n, 'acc-row') ? n.getAttribute('data-focus') : cls(n)[0]);
-// The plate of a limit (its row) and whether its chart stands in it: with a bar picked the chart is the plate's own child.
-const plateOf = (env, key) => classes(env.root, 'lrow').find((r) => limitKey(r) === key);
-const chartIn = (env, key) => { const r = plateOf(env, key); return !!r && classes(r, 'tl-block').length === 1; };
-// Where the card of a limit stands: 'plate' (the plate's own child, right after the chart: the plate's area `card`, a second card that goes under the chart's plate), 'below' (the next row
-// of the limits: where no chart is over it, Chart folded, it stands whole in its own place), 'plate-no-chart' (in the plate but not after a chart: wrong) or '' (nowhere).
-const placeOf = (env, key) => {
-  const r = plateOf(env, key);
-  if (!r) return '';
-  const kids = r.childNodes;
-  const w = kids.findIndex((n) => has(n, 'ins-wrap'));
-  if (w >= 0) return w > 0 && has(kids[w - 1], 'tl-wrap') ? 'plate' : 'plate-no-chart';
-  const sibs = r.parentNode.childNodes;
-  const next = sibs[sibs.indexOf(r) + 1];
-  return next && has(next, 'ins-wrap') ? 'below' : '';
-};
+  : has(n, 'q-plate') ? 'row:' + limitKey(n) : has(n, 'acc-row') ? n.getAttribute('data-focus') : cls(n)[0]);
+const plateOf = (env, key) => classes(env.root, 'q-plate').find((r) => limitKey(r) === key);
+// Where the card of a limit stands: 'plate' (beside the bars of that limit's plate) or '' (nowhere).
+const placeOf = (env, key) => { const r = plateOf(env, key); return r && classes(r, 'q-card').some((c) => !has(c, 'q-card-none')) ? 'plate' : ''; };
 const rowsSeq = (env) => seq(classes(env.root, 'lrows')[0]);
+// The history stands in the plate of the limit shown, its last part (the fold .tl-wrap).
+const chartIn = (env, key) => { const p = plateOf(env, key); return !!p && has(p.childNodes[p.childNodes.length - 1], 'tl-wrap'); };
 const tableSeq = (env) => seq(classes(env.root, 'acc-table')[0]);
 const after = (list, item) => list[list.indexOf(item) + 1];
 const barKey = (g, i = 0) => 'bar:' + g.key + ':' + g.bars[i].account;
@@ -87,7 +74,7 @@ const barKey = (g, i = 0) => 'bar:' + g.key + ':' + g.bars[i].account;
   const groups = fx.view.reserve.summary.groups.filter((g) => (g.bars || []).some((b) => b.account));
   assert.ok(groups.length >= 2, 'the fixture has two limits with named bars');
   const env = await boot(fx.view);
-  const charted = () => classes(env.root, 'lrow').filter((r) => has(r, 'sel')).map(limitKey);
+  const charted = () => classes(env.root, 'q-ring').filter((r) => r.getAttribute('aria-pressed') === 'true').map((r) => r.getAttribute('data-limit'));
   const first = groups[0], second = groups[1];
   // The screen's own children: the root holds the head and the one card (capsule: shell), and the screen stands in the card.
   const rootKinds = () => classes(env.root, 'shell-card')[0].childNodes.map((n) => cls(n)[0]);
@@ -103,41 +90,32 @@ const barKey = (g, i = 0) => 'bar:' + g.key + ':' + g.bars[i].account;
       pick(env, barKey(g));
       oneCard();
       const rows = rowsSeq(env);
-      // One plate: the shown limit's row, the chart in it and the card in it, right under the chart (the card is no more a row of its own).
+      // One plate: the shown limit's, the card beside its bars, the history in it under the bars.
       assert.deepEqual(rows, ['row:' + g.key], 'one plate: ' + rows.join(' '));
-      assert.equal(placeOf(env, g.key), 'plate', 'the card is under the chart of ' + g.key);
-      assert.ok(chartIn(env, g.key), 'the chart of ' + g.key + ' stands in its plate');
+      assert.ok(chartIn(env, g.key), 'the history stands in the plate');
+      assert.equal(placeOf(env, g.key), 'plate', 'the card stands beside the bars of ' + g.key);
       assert.deepEqual(charted(), [g.key]);
       assert.ok(keyboardOn(env, barKey(g)), 'the keyboard stays on the bar');
       click(env, 'inspector-clear');
       assert.equal(cards(env).length, 0);
+      assert.equal(classes(env.root, 'q-card-none').length, 1, 'the card asks for a pick');
     }
   } else if (mode === 'chart_moves_card_stays') {
     showLimit(env, first);
     pick(env, barKey(first));
     showLimit(env, second);
     assert.deepEqual(charted(), [second.key]);
-    let rows = rowsSeq(env);
-    // Another window is shown: a pick stands in every window (the reader's follows where its account has a bar, else the top bar is
-    // picked), so the card is under the plate shown and the chart in it; the limit of the first window is not drawn.
-    assert.deepEqual(rows, ['row:' + second.key], rows.join(' '));
-    assert.equal(placeOf(env, second.key), 'plate', 'the card is under the chart of the plate shown');
-    assert.ok(chartIn(env, second.key), 'the chart stands in the plate shown');
+    // Another limit is shown: a pick stands in every limit (the reader's follows where its account has a bar, else the top bar is picked), so the card
+    // stands beside the bars of the plate shown, with its history under it; the first limit is not drawn.
+    assert.deepEqual(rowsSeq(env), ['row:' + second.key]);
+    assert.ok(chartIn(env, second.key));
+    assert.equal(placeOf(env, second.key), 'plate');
     oneCard();
-    assert.ok(inRows(cards(env)[0]), 'the card is among the limits');
-    // Back to the origin window: the card is under its plate, the chart in it.
     showLimit(env, first);
-    rows = rowsSeq(env);
     assert.deepEqual(charted(), [first.key]);
-    assert.deepEqual(rows, ['row:' + first.key]);
-    assert.equal(placeOf(env, first.key), 'plate');
+    assert.deepEqual(rowsSeq(env), ['row:' + first.key]);
     assert.ok(chartIn(env, first.key));
-    // Folded (the plate's word Chart): the chart leaves the plate, the card goes out of it and stands whole in its own place under the plate (no chart is left to go under).
-    click(env, 'limit:' + first.key);
-    rows = rowsSeq(env);
-    assert.ok(!rows.includes('chart') && !chartIn(env, first.key));
-    assert.equal(after(rows, 'row:' + first.key), 'card');
-    assert.equal(placeOf(env, first.key), 'below');
+    assert.equal(placeOf(env, first.key), 'plate');
     oneCard();
   } else if (mode === 'another_selection_moves_the_card') {
     // Two bars of two different accounts in two limits (a bar of the selected account clears it instead).
@@ -155,36 +133,25 @@ const barKey = (g, i = 0) => 'bar:' + g.key + ':' + g.bars[i].account;
     const rows = rowsSeq(env);
     assert.equal(placeOf(env, second.key), 'plate');
     assert.ok(!rows.includes('row:' + first.key), 'one plate: the first limit is not drawn');
-    // A bar of the same account again clears it (the existing toggle).
+    // A bar of the same account again lets it go (the existing toggle).
     click(env, barKey(second, i2));
     assert.equal(cards(env).length, 0);
   } else if (mode === 'list_row_card_under_its_row') {
-    // Rule: the list opens in the place of the bars, the chart and the card, and a row of it picks its
-    // account and shuts the list. The card is never a row of the table now: it stands in the plate under the chart, like the card of a pressed bar.
+    // The list opens in the place of the plate (folded away): the picked account's full card stands under its own row, one card; a row picks its
+    // account and shuts the list, and the card stands beside the bars again, like the card of a pressed bar.
     click(env, 'accounts');
     oneCard();
-    assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'true', 'the word over the bars is pressed while the list stands');
-    assert.ok(!tableSeq(env).includes('card'), 'the card is not a row of the table: ' + tableSeq(env).join(' '));
+    assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'true', 'the word is pressed while the list stands');
+    const picked = classes(env.root, 'acc-row').find((r) => r.getAttribute('aria-pressed') === 'true').getAttribute('data-focus');
+    assert.equal(after(tableSeq(env), picked), 'card', 'the card under its row: ' + tableSeq(env).join(' '));
     click(env, 'acct:codex:c2');
     assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'false', 'a row of the list shuts the list');
     oneCard();
     const shown = rowsSeq(env)[0].slice(4);
     const plateGroup = groups.find((g) => g.key === shown);
-    assert.equal(placeOf(env, shown), 'plate', 'the card of the row stands in the plate, under the chart');
+    assert.equal(placeOf(env, shown), 'plate', 'the card of the row stands beside the bars');
     const c2 = plateGroup.bars.findIndex((b) => b.account === 'codex:c2');
     assert.ok(c2 >= 0 && byFocus(env.root, barKey(plateGroup, c2)).getAttribute('aria-pressed') === 'true', 'the bar of the row account is picked');
-    // Opened again the list does not take the card out of the plate; the word shuts it.
-    click(env, 'accounts');
-    oneCard();
-    assert.equal(placeOf(env, shown), 'plate');
-    assert.ok(!tableSeq(env).includes('card'), 'still not a row of the table');
-    click(env, 'accounts');
-    // A bar of another account takes the card to its own bar (the list is shut: no table with a card in it).
-    showLimit(env, first);
-    pick(env, barKey(first));
-    oneCard();
-    assert.ok(!classes(env.root, 'acc-table').length || !tableSeq(env).includes('card'));
-    assert.equal(placeOf(env, first.key), 'plate');
   } else if (mode === 'hidden_origin_limit') {
     // The limits are hidden from the rows (display only): with a plate still shown the pick moves to it (another window, the card under
     // that plate); with no plate left to stand under, the card goes to the account's own row of the list — or under the list's header —
@@ -207,12 +174,8 @@ const barKey = (g, i = 0) => 'bar:' + g.key + ':' + g.bars[i].account;
     hide(first);
     assert.ok(!rowsSeq(env).includes('row:' + first.key), 'the limit is hidden');
     oneCard();
-    if (family.length > 1) {
-      // Another limit is shown: the card stands in its plate (or under it).
-      assert.ok(inRows(cards(env)[0]), 'under the plate of the limit that is shown');
-      family.filter((g) => g !== first).forEach(hide);
-    }
-    assert.equal(classes(env.root, 'lrow').length, 0, 'no limit is drawn');
+    if (family.length > 1) family.filter((g) => g !== first).forEach(hide);
+    assert.equal(classes(env.root, 'q-plate').length, 0, 'no limit is drawn');
     oneCard();
     assert.equal(after(tableSeq(env), 'acct:' + account), 'card', tableSeq(env).join(' '));
     // The word shuts the list: with no plate to carry it the card stays in the list while the fold plays (the list has no header of its own now:
@@ -224,23 +187,23 @@ const barKey = (g, i = 0) => 'bar:' + g.key + ':' + g.bars[i].account;
     assert.ok(all, 'Show all rows');
     all.listeners.click[0]({ stopPropagation() {} });
     showLimit(env, first);
-    assert.equal(placeOf(env, first.key), 'plate', 'the card is back under the chart of its limit once it is shown');
+    assert.equal(placeOf(env, first.key), 'plate', 'the card is back beside the bars of its limit once it is shown');
     oneCard();
   } else if (mode === 'the_reading_keeps_the_place') {
     // A timed read, a read that fails, and the read after it: one card, in the same place, the keyboard on
     // the same control — the 30-second redraw is not a reason for the card to move or the focus to be lost.
     showLimit(env, second);
     pick(env, barKey(second));
-    byFocus(env.root, 'inspector-diag').focus();
-    click(env, 'inspector-diag');
+    byFocus(env.root, 'inspector-details').focus();
+    click(env, 'inspector-details');
     const where = () => rowsSeq(env).join(' ') + ' | ' + placeOf(env, second.key);
     const placed = where();
     assert.equal(placeOf(env, second.key), 'plate');
     const state = (label) => {
       assert.equal(cards(env).length, 1, label + ': one card');
       assert.equal(where(), placed, label + ': same place');
-      assert.ok(keyboardOn(env, 'inspector-diag'), label + ': keyboard on Diagnostics, on a live node');
-      assert.ok(classes(cards(env)[0], 'insp-diag-body').length, label + ': Diagnostics still open');
+      assert.ok(keyboardOn(env, 'inspector-details'), label + ': keyboard on the details, on a live node');
+      assert.ok(classes(cards(env)[0], 'q-more-body').length, label + ': the details still open');
     };
     state('before any read');
     env.interval()(); await settle();
@@ -267,7 +230,7 @@ const barKey = (g, i = 0) => 'bar:' + g.key + ':' + g.bars[i].account;
     env.interval()(); await settle();
     assert.ok(byFocus(env.root, 'bar:' + only.key + ':' + account) === undefined, 'the opening bar is gone');
     oneCard();
-    assert.equal(after(rowsSeq(env), 'row:' + only.key), 'card', rowsSeq(env).join(' '));
+    assert.equal(placeOf(env, only.key), 'plate', 'the card still beside the bars of the limit it was opened from');
   } else {
     throw new Error('unknown case ' + mode);
   }
@@ -315,58 +278,32 @@ REAL_STUB = r"""
 
 REAL_STUB = with_i18n(REAL_STUB)
 
-# Under a chart the card stands in the plate (.lrow > .ins-wrap > .ins-fold), right after the chart (.tl-wrap > .tl-block) and tucked under the chart's own plate: 16px of its top go under
-# it (the chart is the higher layer), 16px in from each side of it. In the account list it stands alone, one row of the table. `unit` is the card's fold (the row it stands as).
-# The chart of a picked limit is the plate's own child (it stands right under the bars), so the card's `prev` is that chart.
+# The opened account's card stands in the plate of the limit its bar is in: beside the bars (to their left) where the plate is wide, over them on a phone.
 WHERE = """() => {
-  const cards = [...document.querySelectorAll('.inspector')];
+  const cards = [...document.querySelectorAll('.q-card:not(.q-card-none)')];
   const c = cards[0] || null;
-  const unit = c && (c.closest('.ins-wrap') || c);
-  const prev = unit && unit.previousElementSibling;
-  const plate = unit && unit.parentElement && unit.parentElement.classList.contains('lrow') ? unit.parentElement : null;
-  const own = plate && plate.querySelector('[data-focus^="limit:"]');
-  const block = prev && prev.querySelector('.tl-block');
+  const plate = c && c.closest('.q-plate');
+  const strip = plate && plate.querySelector('.q-bars');
   const R = (n) => n.getBoundingClientRect();
-  const gap = unit && prev ? R(unit).top - R(prev).bottom : null;
-  // What the reader sees at a point of the card's top edge: the chart's plate over it (tucked under) or the card's own button.
-  const hit = c ? document.elementFromPoint(R(c).left + R(c).width / 2, R(c).top + 4) : null;
-  return { count: cards.length, parent: unit ? unit.parentElement.className : null,
-           plateLimit: own ? own.getAttribute('data-focus').slice(6) : null,
-           prevLimit: own ? own.getAttribute('data-focus').slice(6) : null,
-           prevIsChart: !!(prev && prev.classList.contains('tl-wrap') && block),
-           rowGap: plate ? (parseFloat(getComputedStyle(plate).rowGap) || 0) + (parseFloat(getComputedStyle(prev).marginBottom) || 0) : null,
-           left: block && c ? R(c).left - R(block).left : null, right: block && c ? R(block).right - R(c).right : null,
-           under: block && c ? R(block).bottom - R(c).top : null,
-           chartOver: !!(hit && block && block.contains(hit)),
-           prevFocus: prev && prev.getAttribute ? prev.getAttribute('data-focus') : null,
-           chartInPlate: !!(prev && prev.querySelector('.tl-block')), gap,
-           active: document.activeElement && document.activeElement.getAttribute
-             ? document.activeElement.getAttribute('data-focus') : null,
+  return { count: cards.length, plateLimit: plate ? plate.getAttribute('data-limit') : null,
+           beside: c && strip ? R(c).right <= R(strip).left + 0.5 && R(c).top <= R(strip).bottom : null,
+           over: c && strip ? R(c).bottom <= R(strip).top + 0.5 : null,
+           inside: c && plate ? R(c).left >= R(plate).left - 0.5 && R(c).right <= R(plate).right + 0.5 : null,
+           active: document.activeElement && document.activeElement.getAttribute ? document.activeElement.getAttribute('data-focus') : null,
            overflow: document.documentElement.scrollWidth > window.innerWidth + 1 };
 }"""
 
 
 def _pick(page, selector):
-    """A press on a bar or a row for the reader's own pick: the top one is picked already, and a press on a picked one lets it go."""
+    """A press on a bar for the reader's own pick: the top one is picked already, and a press on a picked one lets it go."""
     if page.get_attribute(selector, "aria-pressed") == "true":
         page.click(selector)
     page.click(selector)
-    # A pick that follows a pick let go goes in two moves (the first card and the chart shut, then the new ones open: --dur-5 and a little): the card is awaited.
-    page.wait_for_function("document.querySelectorAll('.inspector').length === 1", timeout=3000)
+    page.wait_for_function("document.querySelectorAll('.q-card:not(.q-card-none)').length === 1", timeout=3000)
 
 
-# The card and the chart over it open in folds (--dur-5): the rectangles are read where the card has stood still for twenty frames.
-STILL = """() => new Promise((done) => {
-  const at = () => { const c = document.querySelector('.inspector'); const t = document.querySelector('.tl-top') || document.body;
-    return c ? [c.getBoundingClientRect().top, c.getBoundingClientRect().height, t.getBoundingClientRect().bottom].join(':') : ''; };
-  let last = at(), same = 0;
-  const tick = () => { const now = at(); same = now === last && now ? same + 1 : 0; last = now; if (same >= 20) done(true); else requestAnimationFrame(tick); };
-  requestAnimationFrame(tick);
-})"""
-
-
-@pytest.mark.parametrize("engine, width", [("chromium", 1120), ("chromium", 390), ("webkit", 390)])
-def test_real_browser_the_card_touches_the_row_it_came_from(widget_view, engine, width):
+@pytest.mark.parametrize("engine, width", [("chromium", 1120), ("chromium", 390), ("webkit", 390), ("webkit", 598)])
+def test_real_browser_the_card_stands_beside_the_bars_of_its_limit(widget_view, engine, width):
     sync_api = pytest.importorskip("playwright.sync_api")
     groups = [g for g in widget_view["reserve"]["summary"]["groups"] if any(b.get("account") for b in g.get("bars") or [])]
     assert len(groups) >= 2
@@ -381,56 +318,19 @@ def test_real_browser_the_card_touches_the_row_it_came_from(widget_view, engine,
             page.wait_for_selector(".tl-block .chart-svg")
             for g in groups:
                 key = "bar:%s:%s" % (g["key"], g["bars"][0]["account"])
-                # One plate: show the limit first (its window, then its scope).
-                page.click('[data-focus="win:%s:%s"]' % (g["harness"], g["window_seconds"]))
-                if page.locator('[data-focus="scope:%s"]' % g["key"]).count():
-                    page.click('[data-focus="scope:%s"]' % g["key"])
+                page.click('[data-focus="ring:%s:%s"]' % (g["harness"], g["key"]))
                 _pick(page, '[data-focus="%s"]' % key)
-                page.evaluate(STILL)
                 where = page.evaluate(WHERE)
-                # The card is the plate's own child, right after the chart, in the plate of the limit its bar is in.
-                assert where["count"] == 1 and "lrow" in where["parent"].split() and where["plateLimit"] == g["key"], (g["key"], where)
-                assert where["prevIsChart"] and where["chartInPlate"], ("the card stands right after the chart of its own limit", g["key"], where)
+                assert where["count"] == 1 and where["plateLimit"] == g["key"] and where["inside"], (g["key"], where)
                 if width > 520:
-                    # Wide: a second, narrower card whose top goes 16px under the chart's plate (the plate is the higher layer), 16px in from each side.
-                    assert abs(where["under"] - 16) <= 1.5, ("16px of the card go under the chart", g["key"], where)
-                    assert abs(where["left"] - 16) <= 1.5 and abs(where["right"] - 16) <= 1.5, ("16px narrower on each side", g["key"], where)
-                    assert where["chartOver"], ("the chart's plate is over the card", g["key"], where)
+                    assert where["beside"], ("the card stands beside the bars", g["key"], where)
+                elif len([b for b in g["bars"] if b.get("account")]) == 1:
+                    assert where["beside"], ("on a phone a plate of one account stands its card and its bar side by side", g["key"], where)
                 else:
-                    # Narrow (520px and under): the card is as wide as the chart and stands under it, not tucked: one row of the plate below it.
-                    assert abs(where["left"]) <= 1.5 and abs(where["right"]) <= 1.5, ("as wide as the chart", g["key"], where)
-                    assert abs(where["gap"] - where["rowGap"]) <= 1.5, ("under the chart, the gap the plate keeps between its rows", g["key"], where)
+                    assert where["over"], ("on a phone the card stands over the bars", g["key"], where)
                 assert where["active"] == key and not where["overflow"], where
                 page.keyboard.press("Escape")
-                # The pick let go, the card shuts by the height of its fold (--dur-5) and leaves with the end of it: nothing is left behind.
-                page.wait_for_function("document.querySelectorAll('.inspector').length === 0", timeout=3000)
-                assert page.evaluate(WHERE)["count"] == 0
-            # A row of the account list. Rule: the list stands in the place of the bars, the chart and the card, and a row
-            # picks its account and shuts the list; the card is no more the row's next sibling, it stands in the plate right after the chart, and the bar of the account is picked.
-            # The plate shown is the first limit. A row that is not the picked one is pressed (the picked one is the plate's own pick already).
-            page.click('[data-focus="win:%s:%s"]' % (groups[0]["harness"], groups[0]["window_seconds"]))
-            if page.locator('[data-focus="scope:%s"]' % groups[0]["key"]).count():
-                page.click('[data-focus="scope:%s"]' % groups[0]["key"])
-            page.click('[data-focus="accounts"]')
-            row = page.locator('.acc-row:not(.active)').first.get_attribute("data-focus")
-            page.click('[data-focus="%s"]' % row)
-            page.wait_for_function("document.querySelector('[data-focus=\"accounts\"]').getAttribute('aria-pressed') === 'false'", timeout=3000)
-            page.wait_for_function("document.querySelectorAll('.inspector').length === 1", timeout=3000)
-            page.evaluate(STILL)
-            where = page.evaluate(WHERE)
-            assert where["count"] == 1 and where["prevFocus"] != row, ("the card is not the row's next sibling", row, where)
-            if "lrow" in where["parent"].split():
-                assert where["prevIsChart"], where
-                assert page.locator('[data-focus^="bar:"][data-focus$=":%s"][aria-pressed="true"]' % row[len("acct:"):]).count() == 1, ("the bar of the row account is picked", where)
-            else:
-                # No bar of that account in the plate shown: the card stands in the shut section of the accounts, as the one place left for it.
-                assert where["parent"] == "accounts", where
-            # The word over the bars, from the keyboard: the list opens, the card stays in its plate and the keyboard stays on the word.
-            page.focus('[data-focus="accounts"]')
-            page.keyboard.press("Enter")
-            page.wait_for_function("document.querySelector('[data-focus=\"accounts\"]').getAttribute('aria-pressed') === 'true'", timeout=3000)
-            where = page.evaluate(WHERE)
-            assert where["count"] == 1 and "lrow" in where["parent"].split() and where["active"] == "accounts", where
+                page.wait_for_function("document.querySelectorAll('.q-card:not(.q-card-none)').length === 0", timeout=3000)
         finally:
             browser.close()
 

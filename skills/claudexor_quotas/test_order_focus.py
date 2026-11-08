@@ -228,12 +228,10 @@ const pressed = (env, prefix) => walk(env.root).filter((n) => String(n.getAttrib
 const active = (env) => env.document.activeElement;
 // The window row shows one limit: pick its window, then its scope (the plate of the stack's old rows).
 function showLimit(env, g) {
-  const tab = byFocus(env.root, 'win:' + g.harness + ':' + g.window_seconds);
-  assert.ok(tab, 'a tab for the window of ' + g.key);
-  if (tab.getAttribute('aria-selected') !== 'true') tab.listeners.click[0]({ stopPropagation() {} });
-  const scope = byFocus(env.root, 'scope:' + g.key);
-  if (scope && scope.getAttribute('aria-pressed') !== 'true') scope.listeners.click[0]({ stopPropagation() {} });
-  assert.ok(byFocus(env.root, 'limit:' + g.key), 'the plate of ' + g.key + ' is shown');
+  const ring = byFocus(env.root, 'ring:' + g.harness + ':' + g.key);
+  assert.ok(ring, 'a ring for ' + g.key);
+  if (ring.getAttribute('aria-pressed') !== 'true') ring.listeners.click[0]({ stopPropagation() {} });
+  assert.ok(classes(env.root, 'q-plate').some((p) => p.getAttribute('data-limit') === g.key), 'the plate of ' + g.key + ' is shown');
 }
 
 (async () => {
@@ -258,7 +256,7 @@ function showLimit(env, g) {
     before.resolve(response(fx.view)); await settle();
     assert.deepEqual(pressed(env, 'scenario:'), ['scenario:recent_pace']);
     assert.deepEqual(pressed(env, 'horizon:'), ['horizon:24h']);
-    assert.deepEqual(pressed(env, 'limit:'), ['limit:' + other.key]);
+    assert.deepEqual(pressed(env, 'ring:'), ['ring:' + other.harness + ':' + other.key]);
     // The widget asks for the chart it now shows, once, from the same read.
     const asked = pending.filter((p) => p.call.method === 'GET' && p !== before);
     assert.ok(asked.length >= 1);
@@ -341,7 +339,7 @@ function showLimit(env, g) {
     let current = fx.view;
     const env = await boot(() => current);
     const key = () => { const a = active(env); return a && a.getAttribute ? a.getAttribute('data-focus') : null; };
-    const card = () => classes(env.root, 'inspector')[0];
+    const card = () => classes(env.root, 'q-card').filter((c) => !/\bq-card-none\b/.test(c.className))[0] || classes(env.root, 'inspector')[0];
     const escape = () => env.document.listeners.keydown[0]({ key: 'Escape' });
     const only = fx.view.reserve.summary.groups.find((g) => (g.bars || []).length === 1);
     assert.ok(only && only.bars[0].account === 'codex:c1', 'a limit only c1 has a bar in');
@@ -375,9 +373,9 @@ function showLimit(env, g) {
         byFocus(env.root, 'inspector-clear').focus();
         click(env, 'inspector-clear');
       } else {
-        byFocus(env.root, 'inspector-diag').focus();
-        click(env, 'inspector-diag');
-        assert.equal(key(), 'inspector-diag');
+        byFocus(env.root, 'inspector-details').focus();
+        click(env, 'inspector-details');
+        assert.equal(key(), 'inspector-details');
         escape();
       }
       expectBack(bar);
@@ -549,7 +547,7 @@ REAL_SELECT_STUB = r"""
 SELECT_STATE = """() => {
   const a = document.activeElement;
   return { key: a && a.getAttribute ? a.getAttribute('data-focus') : null, body: a === document.body,
-           connected: !!(a && a.isConnected), card: !!document.querySelector('.inspector') };
+           connected: !!(a && a.isConnected), card: !!document.querySelector('.q-card:not(.q-card-none), .inspector') };
 }"""
 
 
@@ -574,70 +572,48 @@ def test_real_browser_clear_and_escape_give_the_keyboard_back(widget_view, engin
             page.wait_for_selector('[data-focus="refresh"]:not([disabled])')
 
             def selected():
-                # The card of a pick on a bar stands in a moment after the bar opens (the pick is drawn in place, the card enters behind it).
-                page.wait_for_selector(".inspector", state="attached")
+                page.wait_for_selector(".q-card:not(.q-card-none)", state="attached")
                 state = page.evaluate(SELECT_STATE)
                 assert state["card"] is True, state
                 return state
 
             def back(want):
-                # The card shuts with a motion (the pick is let go in place) and leaves the page when it is over: the keyboard is judged once it has.
-                page.wait_for_selector(".inspector", state="detached")
+                page.wait_for_selector(".q-card:not(.q-card-none)", state="detached")
                 state = page.evaluate(SELECT_STATE)
                 assert (state["card"], state["key"], state["connected"]) == (False, want, True), state
 
-            def open_card(by="key"):
-                # In the plate the card stands at rest (kit: the card under the chart): a strip with its body shut and hidden, Clear and Diagnostics out of reach. The reader presses the strip
-                # (its title is a button: Enter by the keyboard, a click by the pointer) and the whole card is theirs; where the card stands whole (the account list) there is nothing to press.
-                page.wait_for_selector(".inspector", state="attached")
-                toggle = page.locator('[data-focus="inspector-toggle"]')
-                if toggle.count() and toggle.is_visible() and toggle.get_attribute("aria-expanded") != "true":
-                    if by == "key":
-                        toggle.focus()
-                        page.keyboard.press("Enter")
-                    else:
-                        toggle.click()
-                    page.wait_for_selector(".inspector.kt-open")
-                    assert toggle.get_attribute("aria-expanded") == "true"
-
             def press_clear():
-                # Rule: Clear ("Снять выбор") is hidden in the plate (display:none, still in the page), so no key or pointer reaches it; the pick is let go
-                # as a script presses the button, and the keyboard is judged where the button hands it back.
-                page.wait_for_selector(".inspector", state="attached")
-                page.evaluate("document.querySelector('[data-focus=\"inspector-clear\"]').click()")
+                # Clear (the ×) stands on the card of the pick: the keyboard and the pointer reach it.
+                page.wait_for_selector(".q-card:not(.q-card-none)", state="attached")
+                page.click('[data-focus="inspector-clear"]')
 
             def card_focus(key):
-                # A hidden element takes no focus (the call does nothing): the focus is asserted, so that Clear and Diagnostics are the ones the keys go to.
-                open_card("key")
                 page.focus('[data-focus="%s"]' % key)
                 assert page.evaluate(SELECT_STATE)["key"] == key
 
-            # One plate: show the limit the bar is in (its window, then its scope).
-            page.click('[data-focus="win:%s:%s"]' % (only["harness"], only["window_seconds"]))
-            if page.locator('[data-focus="scope:%s"]' % only["key"]).count():
-                page.click('[data-focus="scope:%s"]' % only["key"])
+            # One plate: show the limit the bar is in (its ring).
+            page.click('[data-focus="ring:%s:%s"]' % (only["harness"], only["key"]))
             # The keyboard: a bar selects, Clear (Enter) gives the bar back.
             # The window picks its top account from the first drawing: that bar is open and red already. The first press lets the pick go (the card shuts), the second is the
             # reader's own.
             page.focus(bar)
             assert page.get_attribute(bar, "aria-pressed") == "true"
             page.keyboard.press("Enter")
-            page.wait_for_function("() => !document.querySelector('.inspector')")
+            page.wait_for_function("() => !document.querySelector('.q-card:not(.q-card-none)')")
             page.keyboard.press("Enter")
             assert selected()["key"] == bar_key
             press_clear()
             back(bar_key)
-            # Escape from inside the card, Diagnostics open.
+            # Escape from inside the card, its details open.
             page.keyboard.press("Enter")
-            card_focus("inspector-diag")
+            card_focus("inspector-details")
             page.keyboard.press("Enter")
-            assert selected()["key"] == "inspector-diag"
+            assert selected()["key"] == "inspector-details"
             page.keyboard.press("Escape")
             back(bar_key)
             # The pointer: a click on the bar, a click on Clear.
             page.click(bar)
             selected()
-            open_card("pointer")
             press_clear()
             back(bar_key)
             # A row of the account list picks its account and shuts the list (no folding of the opener under a card any more).
@@ -658,7 +634,7 @@ def test_real_browser_clear_and_escape_give_the_keyboard_back(widget_view, engin
                 "(sel) => !document.querySelector(sel)"
                 " && !document.querySelector('[data-focus=\"refresh\"]').disabled", arg=bar)
             selected()
-            open_card("key")
+            page.focus('[data-focus="inspector-clear"]')
             page.keyboard.press("Escape")
             back("accounts")
         finally:

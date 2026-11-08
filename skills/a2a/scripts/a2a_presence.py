@@ -140,7 +140,8 @@ class PresenceTransport:
     def view(record):
         payload = record.get("response") or {}
         status = payload.get("status")
-        if payload.get("ok") is False or (status == "completed" and payload.get("outcome") not in {"message", "silent", "tool_delivered"}) or status not in {"completed", "failed", "cancelled", "interrupted"}:
+        # "lost" (the host restarted before answering) stays terminal: result() and the daemon report its reason.
+        if payload.get("ok") is False or (status == "completed" and payload.get("outcome") not in {"message", "silent", "tool_delivered"}) or status not in {"completed", "failed", "cancelled", "interrupted", "lost"}:
             status = "pending"
         if status == "interrupted":
             status = "failed"

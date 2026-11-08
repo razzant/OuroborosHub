@@ -250,11 +250,13 @@ PLATE = """() => { const block = document.querySelector('.tl-block'), s = getCom
 
 
 @pytest.mark.parametrize("width", [1280, 860, 360])
-def test_the_plate_of_the_chart_has_four_round_corners_no_line_under_it_and_holds_the_chart(browser, base_view, width):
+def test_the_history_stands_in_the_plate_under_a_hairline_with_no_plate_of_its_own_and_holds_the_chart(browser, base_view, width):
     page = _open(browser, _variant(base_view), width)
     plate = page.evaluate(PLATE)
-    assert plate["corners"] == ["18px"] * 4, plate
-    assert plate["line"] == ["0px", "0px"], plate
+    # The history is the plate's last part now (the approved composition, 8 Nov 2026): no plate of its own, a hairline over it, the plate's ground.
+    assert plate["corners"] == ["0px"] * 4, plate
+    assert plate["line"] == ["1px", "0px"], plate
+    assert plate["bg"] in ("rgba(0, 0, 0, 0)", "transparent"), plate
     assert plate["within"] and plate["kids"] and plate["page"], plate
     page.close()
 
@@ -332,3 +334,20 @@ def test_the_idle_option_keeps_the_ink_of_a_live_button_and_is_told_by_its_outli
     assert got["ink"] == got["quietInk"], ("the ink of the idle option is the ink of the other options", got)
     assert got["border"] == "dashed", ("the idle option is told by its form", got)
     page.close()
+
+
+def test_tooltip_at_now_keeps_both_series_inside_narrow_page(browser, base_view):
+    page = _open(browser, base_view, 320, details=False)
+    try:
+        page.locator('[data-focus="chart-plot"]').focus()
+        tip = page.locator('.chart-tip')
+        assert tip.is_visible()
+        assert tip.locator('.tip-row').count() == 2
+        box = tip.bounding_box()
+        assert box and box['x'] >= 0 and box['x'] + box['width'] <= 320
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        evidence = os.environ.get('QUOTAS_EVIDENCE_DIR')
+        if evidence:
+            page.screenshot(path=str(Path(evidence) / (browser.browser_type.name + '-tooltip-now.png')), full_page=True)
+    finally:
+        page.close()

@@ -23,9 +23,11 @@ from .telegram_bot.settings import load_settings, normalize_words
 from .telegram_bot.tools import (
     make_moderation_tool,
     make_operation_tool,
+    make_react_tool,
     make_receipt_tool,
     MODERATION_SCHEMA,
     TELEGRAM_OPERATION_SCHEMA,
+    TELEGRAM_REACT_SCHEMA,
 )
 
 
@@ -169,15 +171,15 @@ def _status_payload() -> Dict[str, Any]:
         counts = CustodyStore.shared(_STATE_DIR / "custody.sqlite3").status_snapshot()
     runtime = _RUNTIME.status_snapshot(counts) if _RUNTIME is not None else {}
     binding_id = str(_load_local_settings().get("binding_id") or "").strip()
-    # Connect offers only the groups of the bot getMe confirmed for the current token.
-    # null, never [], while that bot or its groups cannot be read.
+    # Connect offers only the observed chats of the bot getMe confirmed for the current token.
+    # null, never [], while that bot or its chats cannot be read.
     account, unavailable = _RUNTIME.confirmed_bot() if _RUNTIME is not None else ("", "Telegram bot not running")
     groups = None
     if account:
         try:
             groups = _RUNTIME.store.offered_groups(account)
         except (sqlite3.Error, OSError):
-            unavailable = "Observed groups could not be read"
+            unavailable = "Observed chats could not be read"
     return {
         "runtime_state": runtime.get("runtime_state", "not_started"),
         "bot_label": runtime.get("bot_label", "not connected"),
@@ -449,16 +451,31 @@ def register(api: Any) -> None:
         description="Queue a Telegram delete/restrict/ban/unban operation with exact provider IDs. Reuse request_id when retrying; queued is not delivered.",
         schema=MODERATION_SCHEMA,
     )
+    operation = make_operation_tool(api, runtime.recorded_bot)
     api.register_tool(
         "telegram_operation",
-        make_operation_tool(api, runtime.recorded_bot),
+        operation,
         description=(
             "Queue an edit of this bot's own message, or set or clear this bot's reaction on any message it can "
             "reach, through the existing outbox. A reaction can be the whole social response, and it is not "
-            "speech or proof of finished work. Use exact numeric chat/message IDs and a new request_id; "
+            "speech or proof of finished work; telegram_react is the same reaction with simpler arguments. "
+            "Use exact numeric chat/message IDs and a new request_id; "
             "in a forum pass the target's known topic_id, which is never invented."
         ),
         schema=TELEGRAM_OPERATION_SCHEMA,
+    )
+    api.register_tool(
+        "telegram_react",
+        make_react_tool(operation),
+        description=(
+            "Set or clear this bot's one emoji reaction on an exact Telegram message, for example to show you "
+            "saw, agree or laughed. A reaction can be the whole social response; it is a gesture, not speech "
+            "or proof of finished work. set replaces this bot's earlier reaction on that message. It is queued "
+            "durably as a setMessageReaction operation with telegram_operation's checks, and its provider "
+            "outcome is read with telegram_receipt(operation=\"operation\", request_id=...). In a forum pass "
+            "the target's known topic_id, which is never invented."
+        ),
+        schema=TELEGRAM_REACT_SCHEMA,
     )
     api.register_tool(
         "telegram_receipt",

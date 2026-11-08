@@ -22,7 +22,7 @@ from telegram_bot.delivery import REACTION_HISTORY_UNAVAILABLE, REACTION_REPORT_
 from telegram_bot.events import parse_telegram_update
 from telegram_bot.host import PresenceHostClient, PresenceHostError, PresenceSubmission, PresenceWorkResult
 from telegram_bot.runtime import TelegramTransportRuntime
-from telegram_bot.tools import make_operation_tool
+from telegram_bot.tools import make_operation_tool, make_react_tool
 from test_formatted_delivery import Provider, ready_again, runtime
 
 CAPABLE = {"presence_delivery_version": 1, "places_version": 1, "presence_reaction_context": 1,
@@ -313,7 +313,8 @@ def test_edit_keeps_the_topic_and_newest_words(tmp_path):
 
 def test_ordinary_events_gain_no_reaction_shape(tmp_path):
     event = parse(said())
-    assert "reaction" not in event.message and "kind" not in event.actor and "sent_at" not in event.message
+    assert "reaction" not in event.message and "kind" not in event.actor
+    assert event.message["sent_at"] == "1970-01-01T00:00:01+00:00"  # its own send time, not a reaction's
 
 
 # -- Worker to Host --------------------------------------------------------------------------
@@ -542,6 +543,142 @@ def test_registered_tool_reads_records_of_the_bot_getme_confirmed(tmp_path):
     refused = operate(**arguments, request_id="b")["error"]
     assert "forum_topic_unknown" in refused and "identity" not in refused
     api.unload()
+
+
+# -- telegram_react: the same operation with set/clear arguments ----------------------------
+
+def react(path, account=BOT):
+    return make_react_tool(tool(path, account))
+
+
+def _manifest_tools():
+    import yaml
+    text = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8")
+    return {row["name"]: row for row in yaml.safe_load(text.split("---")[1])["tools"]}
+
+
+def test_react_declares_a_gesture_and_the_mixed_operation_stays_a_write(tmp_path):
+    from test_plugin import FakeApi
+    tools = _manifest_tools()
+    assert {key: tools["telegram_react"][key] for key in ("effect", "target", "conversation", "thread", "message")} == {
+        "effect": "gesture", "target": "chat_id", "conversation": "chat_id", "thread": "topic_id", "message": "message_id"}
+    assert tools["telegram_operation"]["effect"] == "write" and "message" not in tools["telegram_operation"]
+    skill = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("telegram_react_registered", skill / "plugin.py",
+                                                  submodule_search_locations=[str(skill)])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    api = FakeApi(tmp_path)
+    module.register(api)
+    registered = {name: metadata for name, _handler, metadata in api.tools}
+    assert set(tools) == set(registered)
+    schema = registered["telegram_react"]["schema"]
+    assert schema["properties"]["action"]["enum"] == ["set", "clear"]
+    assert schema["properties"]["message_id"]["type"] == "integer" and "message_id" in schema["required"]
+    assert "gesture, not speech" in registered["telegram_react"]["description"]
+    assert 'telegram_receipt(operation="operation"' in registered["telegram_react"]["description"]
+    # The old door keeps both methods for callers written against it.
+    assert registered["telegram_operation"]["schema"]["properties"]["method"]["enum"] == ["editMessageText", "setMessageReaction"]
+    api.unload()
+
+
+@pytest.mark.parametrize("arguments,reaction", [
+    ({"action": "set", "emoji": "👍"}, [THUMB]),
+    ({"action": "set", "custom_emoji_id": "cu5"}, [{"type": "custom_emoji", "custom_emoji_id": "cu5"}]),
+    ({"action": "clear"}, []),
+    ({"action": "set", "emoji": "👍", "is_big": True}, [THUMB]),
+])
+def test_react_queues_byte_for_byte_what_the_operation_queues(tmp_path, arguments, reaction):
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+    commit(store, said(chat=FORUM, topic=5, message_id=7))
+    via_react = react(tmp_path)(chat_id="-100", message_id=7, topic_id=5, request_id="a", **arguments)
+    via_operation = tool(tmp_path)(method="setMessageReaction", chat_id="-100", message_id=7, topic_id=5,
+                                   reaction=reaction, is_big=arguments.get("is_big", False), request_id="b")
+    assert via_react == {**via_operation, "request_id": "a"} and via_react["state"] == "queued"
+    assert store.outbox_payload("telegram-operation:a") == store.outbox_payload("telegram-operation:b")
+
+
+def test_one_request_id_is_one_operation_whichever_tool_queued_it(tmp_path):
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+    first = react(tmp_path)(action="set", chat_id="55", message_id=7, emoji="👍", request_id="same")
+    again = react(tmp_path)(action="clear", chat_id="55", message_id=7, request_id="same")
+    through_operation = tool(tmp_path)(method="setMessageReaction", chat_id="55", message_id=7, reaction=[HEART],
+                                       request_id="same")
+    assert first["state"] == "queued" and again["state"] == through_operation["state"] == "already_queued"
+    assert store.outbox_payload("telegram-operation:same")["parameters"]["reaction"] == [THUMB]
+
+
+@pytest.mark.parametrize("arguments,message", [
+    ({"action": "set"}, "exactly one"),
+    ({"action": "set", "emoji": "👍", "custom_emoji_id": "cu5"}, "exactly one"),
+    ({"action": "set", "emoji": "  "}, "exactly one"),
+    ({"action": "clear", "emoji": "👍"}, "omit emoji"),
+    ({"action": "add", "emoji": "👍"}, "set or clear"),
+    ({"action": "set", "emoji": "👍", "chat_id": "@name"}, "numeric"),
+    ({"action": "set", "emoji": "👍", "message_id": 0}, "positive"),
+    ({"action": "set", "emoji": "👍", "request_id": " "}, "request_id"),
+])
+def test_react_refusals_queue_nothing(tmp_path, arguments, message):
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+    call = {"chat_id": "55", "message_id": 7, "request_id": "r", **arguments}
+    result = react(tmp_path)(**call)
+    assert result["ok"] is False and message in result["error"]
+    assert store.delivery_receipt("telegram-operation:r") == {"state": "not_found"}
+
+
+def test_react_keeps_the_operations_forum_topic_rules(tmp_path):
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+    commit(store, said(chat=FORUM, topic=5, message_id=7))
+    unknown = react(tmp_path)(action="set", chat_id="-100", message_id=999, emoji="👍", request_id="a")
+    assert unknown["ok"] is False and unknown["error"].startswith("forum_topic_unknown") and "Not sent" in unknown["error"]
+    mismatch = react(tmp_path)(action="set", chat_id="-100", message_id=7, topic_id=6, emoji="👍", request_id="b")
+    assert mismatch["ok"] is False and "forum_topic_mismatch" in mismatch["error"]
+    unconfirmed = react(tmp_path, account="")(action="clear", chat_id="-100", message_id=7, request_id="c")
+    assert unconfirmed["ok"] is False and "identity is unconfirmed" in unconfirmed["error"]
+    for request_id in ("a", "b", "c"):
+        assert store.delivery_receipt(f"telegram-operation:{request_id}") == {"state": "not_found"}
+
+
+def test_waking_message_names_the_ids_the_host_fills_and_react_lands_on_it(tmp_path):
+    """Host event -> declared door -> outbox -> provider -> receipt and typed report, through the real workers."""
+    async def run():
+        provider = Provider([{"ok": True, "result": True}])
+        value = world(tmp_path, provider)
+        commit(value.store, said(chat=FORUM, topic=5, message_id=7))
+        assert await value.process_one_inbox()
+        [event] = value.submitter.turns
+        # What the Host fills in: conversation_id, thread_id and message.message_id, an integer.
+        assert (event["conversation_id"], event["thread_id"], event["message"]["message_id"]) == ("-100", "5", 7)
+        assert type(event["message"]["message_id"]) is int
+        result = react(value.state_dir)(action="set", chat_id=event["conversation_id"], topic_id=event["thread_id"],
+                                        message_id=event["message"]["message_id"], emoji="👍", request_id="w")
+        assert result["state"] == "queued"
+        assert await value.process_one_outbox()
+        assert provider_reactions(provider) == [{"chat_id": "-100", "message_id": 7, "reaction": [THUMB], "is_big": False}]
+        assert value.store.delivery_receipt("telegram-operation:w")["state"] == "delivered"
+        await drain_reports(value)
+        [report] = value.submitter.reports
+        valid_receipt(report)
+        assert report["text"] == "" and report["thread_id"] == "5" and report["message"]["kind"] == "operation"
+        assert report["message"]["reaction"]["operation"] == "set"
+        assert report["message"]["reaction"]["target"] == {"message_id": "7", "resolution": "resolved"}
+    asyncio.run(run())
+
+
+def test_react_with_an_unknown_outcome_is_never_sent_again(tmp_path):
+    async def run():
+        provider = Provider([{"ok": False, "error_code": 502, "description": "Bad Gateway"}])
+        value = world(tmp_path, provider)
+        assert react(value.state_dir)(action="clear", chat_id="55", message_id=7, request_id="u")["state"] == "queued"
+        assert await value.process_one_outbox()
+        assert not await value.process_one_outbox()
+        assert value.store.delivery_receipt("telegram-operation:u")["state"] == "uncertain"
+        assert len(provider_reactions(provider)) == 1
+        again = react(value.state_dir)(action="clear", chat_id="55", message_id=7, request_id="u")
+        assert again["state"] == "already_queued" and not await value.process_one_outbox()
+        assert len(provider_reactions(provider)) == 1
+    asyncio.run(run())
 
 
 # -- Tool to outbox to provider to receipt ---------------------------------------------------

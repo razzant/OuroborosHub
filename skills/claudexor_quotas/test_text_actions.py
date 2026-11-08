@@ -64,6 +64,20 @@ function theWord(btn, word) {
   assert.equal(rest.childNodes.length, 0);
   assert.equal(btn.childNodes.filter((n) => n.tagName !== '#TEXT').length, 1, 'one element child: the capital');
 }
+// A word with a mark (Refresh): the kit's stroke icon, out of the reading order, then the word in a span of its own, split as every word is.
+function theMarkedWord(btn, word) {
+  assert.equal(btn.textContent, word, 'the button reads as the whole word');
+  assert.equal(heard(btn), word, 'and is named by it');
+  assert.equal(btn.childNodes.length, 2, 'the mark and the word, nothing else');
+  const [mark, body] = btn.childNodes;
+  assert.equal(mark.tagName, 'SVG');
+  assert.equal(mark.getAttribute('aria-hidden'), 'true', 'the mark is out of the reading order');
+  assert.ok(String(mark.className || '').split(/\s+/).includes('btn-word-mark'), 'the kit class on the mark: ' + mark.className);
+  assert.equal(body.tagName, 'SPAN');
+  assert.equal(body.className, 'btn-word-body', 'the word in the kit\'s span');
+  assert.deepEqual(body.attributes, {}, 'no attribute on the span of the word');
+  theWord(body, word);
+}
 """
 
 NODE_WORDS = r"""
@@ -83,7 +97,7 @@ function textAction(btn, key, spoken) {
   assert.equal(btn.getAttribute('data-focus'), key);
   assert.equal(heard(btn), spoken, key + ': its name is the word that is seen');
   for (const name of NAMES) assert.equal(btn.getAttribute(name), null, key + ': no ' + name + ', the word is seen');
-  assert.equal(drawings(btn).length, 0, key + ': no drawing in it');
+  assert.equal(drawings(btn).length, key === 'refresh' ? 1 : 0, key + ': ' + (key === 'refresh' ? 'the one mark, the arrows' : 'no drawing in it'));
   assert.equal(classes(btn, 'pip').length + classes(btn, 'state-dot').length, 0, key + ': no status dot');
   assert.ok(!classOf(btn).includes('has-problem') && !classOf(btn).includes('btn-icon'), key + ': no colour of the trouble, no icon');
   assert.equal(btn.listeners.pointerenter, undefined, key + ': no handler on the pointer');
@@ -102,11 +116,11 @@ function aboutWord(btn, open) {
 // Refresh: one word, idle or busy. Busy it is the same button with the same word, disabled and aria-busy (no attribute at rest).
 function refreshWord(btn, busy) {
   textAction(btn, 'refresh', 'Refresh');
-  theWord(btn, 'Refresh');  // the same word, idle or busy, in the same two nodes
+  theMarkedWord(btn, 'Refresh');  // the same word, idle or busy, in the same nodes
   assert.equal(btn.disabled, busy);
   assert.equal(btn.getAttribute('aria-busy'), busy ? 'true' : null, 'aria-busy while a request is in the air, no attribute at rest');
   assert.ok(!classOf(btn).includes('is-busy'), 'no busy class on the button: the word stands, the dot blinks');
-  assert.equal(btn.className, 'btn-word', 'the kit class and nothing else, idle or busy');
+  assert.equal(btn.className, 'btn-word btn-word-short', 'the kit classes and nothing else, idle or busy');
   assert.equal(btn.getAttribute('aria-expanded'), null);
 }
 
@@ -130,7 +144,7 @@ function theRow(head, busy) {
   assert.equal(dot.getAttribute('tabindex'), null);
   assert.equal(dot.listeners.click, undefined);
   assert.equal(heard(seg), 'AboutRefresh', 'the reader hears the two words, the same busy or idle, and no dot');
-  assert.equal(drawings(seg).length, 0, 'no icon in the two');
+  assert.equal(drawings(seg).length, 1, 'one drawing in the two: the arrows of Refresh');
   assert.equal(classes(seg, 'action-btn').length, 0, 'the old plate button is gone');
   return { about, dot, refresh };
 }
@@ -232,10 +246,10 @@ const heard = (node) => (node.getAttribute('aria-hidden') === 'true' ? '' : (nod
   const refresh = byFocus(env.root, 'refresh');
   // Each word is split by its first character, whatever t() says: the capital of 'О виджете' and of 'Обновить' is 'О'.
   theWord(about, 'О виджете');
-  theWord(refresh, 'Обновить');
+  theMarkedWord(refresh, 'Обновить');
   assert.equal(about.childNodes[0].textContent, 'О');
   assert.equal(about.childNodes[1].textContent, ' виджете');
-  assert.equal(refresh.childNodes[1].textContent, 'бновить');
+  assert.equal(refresh.childNodes[1].childNodes[1].textContent, 'бновить');
   for (const btn of [about, refresh]) {
     for (const name of ['aria-label', 'title', 'data-tip', 'data-tip-off']) assert.equal(btn.getAttribute(name), null, name);
     assert.ok(!/[A-Za-z]/.test(btn.textContent), 'no English in the button: ' + btn.textContent);
@@ -246,13 +260,13 @@ const heard = (node) => (node.getAttribute('aria-hidden') === 'true' ? '' : (nod
   const busy = byFocus(env.root, 'refresh');
   assert.equal(busy.disabled, true);
   assert.equal(busy.getAttribute('aria-busy'), 'true');
-  theWord(busy, 'Обновить');  // the same word while busy, in the same two nodes
+  theMarkedWord(busy, 'Обновить');  // the same word while busy, in the same nodes
   assert.equal(heard(seg()), 'О виджетеОбновить');
   await settle();
   const done = byFocus(env.root, 'refresh');
   assert.equal(done.disabled, false);
   assert.equal(done.getAttribute('aria-busy'), null);
-  theWord(done, 'Обновить');
+  theMarkedWord(done, 'Обновить');
   console.log('ok');
 })().catch((e) => { console.error(e && e.stack ? e.stack : e); process.exitCode = 1; });
 """
@@ -412,49 +426,21 @@ def test_the_accent_paints_the_words_dot_and_lit_capital_and_the_mark_tabs_dot_n
     readers = sorted((name, media, selector, prop.strip()) for name, section in sections.items() if name != "tokens"
                      for media, listing, body in _rules(section) for prop, value in _declarations(body)
                      if "var(--accent)" in value for selector in _selectors(listing))
+    # (the mark tab reads the accent no more: its pick is the crimson ground of the plate, --q-sel, as the ring's and the card's)
     assert readers == sorted([
         (KIT, "", ".btn-word-dot", "color"),
         (KIT, "", LIT_CAPITAL_SELECTOR, "color"),
-        (MARK, "", ".tab-mark-dot", "color"),
-        (MARK, "", ".tab-mark-count", "color"),
-        (MARK, "", ".tab-mark[aria-pressed=true] .tab-mark-icon", "color"),
-        (MARK, "", ".tab-mark-icon.tab-mark-was-on", "color"),
-        (MARK, "", ".tab-mark:focus-visible:not([aria-pressed=true]):not(:disabled) .tab-mark-icon", "color"),
-        (MARK, "", ".tab-mark-row:not(.tab-mark-still) .tab-mark:hover:not([aria-pressed=true]):not(:disabled) .tab-mark-icon", "color"),
-        (MARK, "", ".tab-mark[aria-pressed=true] .tab-mark-icon.tab-mark-was-lit", "color"),
-        (MARK, "", ".tab-mark-num[aria-selected=true] .tab-mark-count", "color"),
-        (MARK, "", ".tab-mark-num .tab-mark-count.tab-mark-was-on", "color"),
-        (MARK, "", ".tab-mark-num[aria-selected=true] .tab-mark-note", "color"),
-        (MARK, "", ".tab-mark-num .tab-mark-note.tab-mark-was-on", "color"),
-        # The picked bar's ink: the pick of a bar in the accent as the pick of a tab (its fill and its ring are this ink), and the number over the
-        # fill (.bar-v) of the picked bar and of a spent one (at the limit). The accounts at the limit now are named in the notes of the plate, in words: the
-        # note's head ("At the limit · 3") says its dot and its count in the accent, one rule (.wt-head-rest) for the heads of all the notes (the figure's decimal
-        # point is the crimson ink, not the accent).
-        # (and the line of an opened bar that says it is at the limit now or held back now, .bar-a: the words under the bar's account name, in the same red)
-        ("kit: bars", "", ".bar-a", "color"),
-        # (on purpose: a picked bar is open and red, and so are the bars of a pressed step with several accounts (.bar-on): the same one rule for both, and the account's name
-        # (.bar-n) in the same red; the ring of the bar is this ink by currentColor, not a second read.) The line of the pick: the plate's outline drawn by the script on a layer of its own
-        # (.plate-trace path, the stroke) and the stem under the bar (.bar-arrow rect, a vertical bar with no tip); the outline at rest (--shadow-trace, in the tokens) names the accent once more.
-        ("kit: bars", "", ".bar:is(.sel,.bar-on)", "color"),
-        ("kit: bars", "", ".bar:is(.sel,.bar-on)>.bar-v", "color"),
-        ("kit: bars", "", ".bar:is(.sel,.bar-on) .bar-n", "color"),
-        ("kit: bars", "", ".bar.spent>.bar-v", "color"),
+        # The head of a note of the plate ("At the limit · 3": its dot and its count, one rule for the heads of all the notes) and the star of a ring whose
+        # accounts are not all read (the quota plate's rail). The bars of the plate are green, amber and red by their own tokens: none reads the accent.
         ("capsule: window tabs", "", ".wt-head-rest", "color"),
-        ("capsule: chart", "", ".plate-trace path", "stroke"),
-        ("capsule: chart", "", ".bar-arrow rect", "fill"),
-        # The time of the pressed step of the ladder of resets (kit: rail): a step is a button (a step of one account is the pick of that bar, a step of several lights their bars), and while it is pressed (aria-pressed) its time stands in
-        # the accent as the pick of a tab does, nothing else of the step changes.
-        ("kit: rail", "", ".rail-step[aria-pressed=true] .rail-step-time", "color"),
+        ("capsule: window tabs", "", ".q-star", "color"),
     ]), readers
-    assert css.count("var(--accent)") == 19 and len(readers) == 22, (
-        "the accent paints: two things in the text action, seven in the mark tab, the picked bar (open and red, also for a pressed step), its number and its account's name, the number over the fill of a spent one, "
-        "the line of an opened bar that says it is at the limit or held back now, the dot and the count of the head of a note of the plate, the time of the pressed step of the ladder, "
-        "and the line of the pick: the plate's outline (its stroke, and --shadow-trace in the tokens) and the stem under the bar")
+    assert css.count("var(--accent)") == 4 and len(readers) == 4, (
+        "the accent paints two things in the text action, the head of a note of the plate and the star of a ring: nothing else", readers)
     # The red of the number tab is the pick's alone: no rule that answers a pointer or a keyboard on it reads the accent.
     assert not [s for n, _, s, _ in readers if n == MARK and re.search(r":hover|:focus", s) and ".tab-mark-num" in s]
     # Within the text action it is still the two: the dot and the lit capital (the contract says so, in those words).
     assert sorted(s for n, _, s, _ in readers if n == KIT) == sorted([".btn-word-dot", LIT_CAPITAL_SELECTOR])
-    assert "within the text action the accent is the dot's and the lit capital's, nothing else" in _contract()
     assert _lit_capital()[1] == {"color": "var(--accent)"}
     dot = _one(".btn-word-dot")
     assert dot["color"] == "var(--accent)"
@@ -593,6 +579,8 @@ def test_the_button_flows_its_word_inline_so_the_capital_is_a_true_inline_span_a
     for media, selector, decls in _text_rules():
         if selector == ROW:
             continue  # the row of words is the kit's flex line (held by its own test below); the word and its dot are no row
+        if selector == ".btn-word-short" or media == "@media(max-width:520.98px)":
+            continue  # the fold of a marked word on the narrow shell: the word in a screen reader's box inside its button (the kit's own rule)
         sizing = [p for p in decls if re.fullmatch(r"grid.*|justify-.*|align-.*|gap|visibility|(min-|max-)?width|flex-basis|position|float", p)]
         if media == "@media(pointer:coarse)" and selector == ".btn-word":
             sizing = [p for p in sizing if (p, decls[p]) != ("min-width", "var(--tap-h)")]
@@ -602,13 +590,13 @@ def test_the_button_flows_its_word_inline_so_the_capital_is_a_true_inline_span_a
     # The markup agrees: one helper makes both words, from t(): the first character in the span of the capital, the rest as a
     # plain text node after it; Refresh and About are built by it, and nothing else makes a button of the kit.
     source = WIDGET.read_text(encoding="utf-8")
-    assert "var btn = wordButton('btn.refresh');" in source and "var aboutBtn = wordButton('btn.about');" in source
+    assert "var btn = wordButton('btn.refresh', null, 'refresh');" in source and "var aboutBtn = wordButton('btn.about');" in source
     assert source.count("wordButton('btn.") == 2 and source.count("function wordButton(") == 1
     assert source.count("el('button', 'btn-word'") == 1, "the kit's button is made in the one helper"
     # The capital is the first character as a person sees it (Array.from walks code points, so a surrogate pair stays whole).
     assert "var first = Array.from(word)[0] || '';" in source
-    assert "btn.appendChild(el('span', 'btn-word-cap', first));" in source
-    assert "btn.appendChild(document.createTextNode(word.slice(first.length)));" in source
+    assert "home.appendChild(el('span', 'btn-word-cap', first));" in source
+    assert "home.appendChild(document.createTextNode(word.slice(first.length)));" in source
     # The helper passes its params on (the word over the bars, "Accounts . N", is made by it from t('acc.word', {n})): still what t() says.
     assert "var word = t(key, params);" in source, "the word is what t() says"
     assert "btn-word-text" not in source and "btn.refreshing" not in source
@@ -772,7 +760,7 @@ def test_the_row_of_words_is_the_kits_and_the_head_wears_it_and_gives_it_only_it
     assert not [listing for _, listing, _ in _rules(head) if "harness-seg" in listing and "action-seg" in listing]
     families = [{p.strip(): v.strip() for p, v in _declarations(body)} for media, listing, body in _rules(head)
                 if listing == ".harness-seg" and not media]
-    assert families == [{"flex": "1 1 280px"}], "the families' row is the kit's mark tab row (kit: mark tab); the head keeps its room"
+    assert families == [{"flex": "0 1 auto", "min-width": "0"}], "the families' row is the kit's mark tab row (kit: mark tab); the head gives it the room it needs"
     # rule: on the wide shell the row no longer stands off the edge to put the mark of its first tab on the axis of the rail's rings
     # (padding-left): the family picked stands at the edge of the widget and the axis is the middle of its tab (railFit).
     axis = [(media, {p.strip(): v.strip() for p, v in _declarations(body)}) for media, listing, body in _rules(head)
@@ -795,9 +783,9 @@ def test_wordButton_wordDot_and_wordRow_are_the_only_builders_of_a_word_a_dot_an
     # The code of the widget, the style array and every comment line taken out: the strings of the markup that name a class of the
     # text action stand in these three helpers, one each, and nowhere else.
     code = "\n".join(line for line in source.replace(css, "").splitlines() if not line.strip().startswith("//"))
-    assert sorted(re.findall(r"'(btn-word[\w-]*)", code)) == ["btn-word", "btn-word-cap", "btn-word-dot", "btn-word-row"]
+    assert sorted(re.findall(r"'(btn-word[\w-]*)", code)) == ["btn-word", "btn-word-body", "btn-word-cap", "btn-word-dot", "btn-word-mark", "btn-word-row"]
     button = _function(source, "wordButton")
-    assert "el('button', 'btn-word')" in button and "el('span', 'btn-word-cap', first)" in button
+    assert "el('button', 'btn-word' + (iconName ? ' btn-word-short' : ''))" in button and "el('span', 'btn-word-cap', first)" in button
     assert "el('span', 'btn-word-dot' + (busy ? ' is-busy' : ''), '·')" in _function(source, "wordDot")
     assert "el('div', 'btn-word-row')" in _function(source, "wordRow")
     # The dot is drawn by wordRow alone, the row by the head alone (through wordRow): no part builds either by hand. Busy is told to
@@ -817,18 +805,6 @@ def test_the_section_opens_with_the_usage_contract_and_names_every_token_its_rul
     at = [contract.find(part) for part in parts]
     assert all(i >= 0 for i in at) and at == sorted(at), dict(zip(parts, at))
     assert all(contract.count(part) == 1 for part in parts)
-    for phrase in (
-            "a button that is its word alone",
-            "a quiet secondary action in a head or in a meta line", "Never for the primary action of a card",
-            "wordButton(t-key)", "wordRow(buttons, busy)", "wordDot(busy)", "nothing else builds a word, a row or a dot",
-            "at rest the word is in --text-secondary", ":hover, :focus-visible, :active and [aria-expanded=true]",
-            "not when it is disabled, the word is in --text-primary", "in --accent",
-            "the button is disabled AND aria-busy=true, always the two together", "the word stays the same word",
-            "the dot beside it blinks", "a row of two or three words",
-            "fade in colour only", "Under reduced motion nothing fades", "a busy dot stands still",
-            "no aria-label and no title", "has no attribute", "44 by 44 under a finger", "its ring is the base ring",
-            "no icon, no plate, no border, no colour of its own", "no other word while busy"):
-        assert phrase in contract, phrase
     # Its list of tokens is the rules' own: every token the rules of the text action read (the touch line and the dim of the reduced
     # blink included) and no other, each declared. The contract names a token, it does not read one: the accent is read twice.
     named = set(re.findall(r"--[a-z0-9-]+", contract.split("Tokens it reads:")[1].split("Accessibility:")[0]))

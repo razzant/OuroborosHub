@@ -27,7 +27,8 @@ def consumer_core():
             path = core / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('fixture', encoding='utf-8')
-        with patch.dict(os.environ, {'OUROBOROS_SOURCE_DIR': str(core), 'OUROBOROS_THEME_CORE_ROOT': str(core)}):
+        with patch.dict(os.environ, {'OUROBOROS_SOURCE_DIR': str(core), 'OUROBOROS_THEME_CORE_ROOT': str(core),
+                                     'OUROBOROS_PRESENCE_CORE_ROOT': str(core)}):
             yield core
 
 
@@ -50,7 +51,7 @@ class SelectionTests(unittest.TestCase):
             'smart_lists': {'smart-lists', 'widgets'}, 'gigasearch': {'gigasearch'},
             'cache_efficiency_snapshot': {'cache-efficiency', 'widgets'}, 'calendar': {'calendar-skill', 'widgets'},
             'slack-bridge': {'slack-bridge'}, 'telegram-bot': {'telegram-bot'}, 'keenable': {'keenable'},
-            'perplexity': {'perplexity'}, '2gis': {'2gis'}, 'whoop-health': {'whoop-health'}, 'claudexor_quotas': {'widgets'},
+            'perplexity': {'perplexity'}, '2gis': {'2gis'}, 'whoop-health': {'whoop-health'}, 'claudexor_quotas': {'widgets', 'claudexor-quotas'},
             'context-lens': {'widgets'}, 'memory-atlas': {'memory-atlas', 'widgets'}, 'token-usage': {'widgets'},
             'office_reader': {'office-reader'}, 'science_search': {'science-search'},
             'science_digest': {'science-digest'},
@@ -135,7 +136,9 @@ class SelectionTests(unittest.TestCase):
                     self.assertEqual(test.kwargs['env'][key], value)
 
     def test_selected_consumers_refuse_absent_or_old_core_before_running_an_all_skipped_suite(self):
-        for name, key in [('email-presence', 'OUROBOROS_SOURCE_DIR'), ('calendar-skill', 'OUROBOROS_THEME_CORE_ROOT')]:
+        for name, key in [('email-presence', 'OUROBOROS_SOURCE_DIR'), ('calendar-skill', 'OUROBOROS_THEME_CORE_ROOT'),
+                          ('slack-bridge', 'OUROBOROS_PRESENCE_CORE_ROOT'), ('telegram-bot', 'OUROBOROS_PRESENCE_CORE_ROOT'),
+                          ('telegram-user-session', 'OUROBOROS_PRESENCE_CORE_ROOT')]:
             with self.subTest(suite=name), consumer_core() as core, patch.object(ci.subprocess, 'run') as run:
                 for value in ('', str(core / 'missing')):
                     with patch.dict(os.environ, {key: value}), self.assertRaisesRegex(RuntimeError, key):

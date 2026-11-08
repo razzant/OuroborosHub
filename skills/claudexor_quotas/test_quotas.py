@@ -1031,28 +1031,22 @@ function describedBy(root, node) {
   return hit ? hit.textContent : '';
 }
 
-// The window row shows one limit at a time (the plate): pick its window — a tab, by its length — then its
-// scope; returns the plate's chart control, where the old stack had one row for every limit.
+// The rail shows one limit at a time (the plate): press its ring — one ring per limit, a window and its scope; returns the
+// plate's head, which the plate's whole spoken summary describes (its parent is the plate).
 function showKey(env, key) {
-  const [harness, , seconds] = key.split('|');
-  const tab = byFocus(env.root, 'win:' + harness + ':' + seconds);
-  if (tab && tab.getAttribute('aria-selected') !== 'true') tab.listeners.click[0]({ stopPropagation() {} });
-  const scope = byFocus(env.root, 'scope:' + key);
-  if (scope && scope.getAttribute('aria-pressed') !== 'true') scope.listeners.click[0]({ stopPropagation() {} });
-  return byFocus(env.root, 'limit:' + key);
+  const harness = key.split('|')[0];
+  const ring = byFocus(env.root, 'ring:' + harness + ':' + key);
+  if (ring && ring.getAttribute('aria-pressed') !== 'true') ring.listeners.click[0]({ stopPropagation() {} });
+  const plate = classes(env.root, 'q-plate')[0];
+  return plate ? classes(plate, 'q-head')[0] : undefined;
 }
 // Every limit of the family in turn, as the plates the window row shows: each enabled tab, then each scope.
 function plates(env) {
+  // One ring per limit (a window, and a scope of it where the engine has one): each pressed in turn shows its plate.
   const out = [];
-  const tabs = classes(env.root, 'wt-tab').filter((t) => t.getAttribute('aria-disabled') !== 'true');
-  tabs.forEach((t) => {
-    byFocus(env.root, t.getAttribute('data-focus')).listeners.click[0]({ stopPropagation() {} });
-    const scopes = classes(env.root, 'wt-scope-opt').map((b) => b.getAttribute('data-focus'));
-    if (!scopes.length) out.push(classes(env.root, 'lrow')[0]);
-    scopes.forEach((key) => {
-      byFocus(env.root, key).listeners.click[0]({ stopPropagation() {} });
-      out.push(classes(env.root, 'lrow')[0]);
-    });
+  classes(env.root, 'q-ring').map((r) => r.getAttribute('data-focus')).forEach((key) => {
+    byFocus(env.root, key).listeners.click[0]({ stopPropagation() {} });
+    out.push(classes(env.root, 'q-plate')[0]);
   });
   return out;
 }
@@ -1097,6 +1091,7 @@ async function boot(view, postValue) {
     setInterval(callback) { intervalCallback = callback; return 17; },
     clearInterval(id) { if (id === 17) intervalCleared = true; },
     addEventListener(name, handler) { (windowListeners[name] ||= []).push(handler); },
+    removeEventListener(name, handler) { windowListeners[name] = (windowListeners[name] || []).filter(fn => fn !== handler); },
     setTimeout: (callback, ms) => setTimeout(callback, ms),
     // 0.7.0: the widget bounds every request with a backstop timer and
     // clears it when the request settles.

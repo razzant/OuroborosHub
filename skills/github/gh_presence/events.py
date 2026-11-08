@@ -46,6 +46,25 @@ def created(raw):
     return raw.get("created_at") or raw.get("createdAt") or raw.get("submitted_at") or ""
 
 
+def provider_time(value):
+    """A GitHub timestamp as an ISO time with its zone; "" when absent or unreadable."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    return parsed.isoformat() if parsed.utcoffset() is not None else ""
+
+
+def times(kind, raw, edited):
+    """``message.sent_at``, when the object was written, and when its words were edited ``edited_at``, GitHub's last
+    change (for an issue or pull request any change, a new comment included); never an observation time. A state
+    change is no edit, and a review request has no time of its own (it borrows the pull request's)."""
+    if kind == "review_request":
+        return {}
+    changed = provider_time(raw.get("updated_at") or raw.get("updatedAt")) if edited else ""
+    return {key: value for key, value in (("sent_at", provider_time(created(raw))), ("edited_at", changed)) if value}
+
+
 def before(a, b):
     try:
         return datetime.fromisoformat(a.replace("Z", "+00:00")) < datetime.fromisoformat(b.replace("Z", "+00:00"))
@@ -104,13 +123,22 @@ def make_event(event_id, revision, old, *, account, repo, thread, kind, raw, act
     gaps = []
     # A REST original author does not identify the editor/assigner/state actor.
     event_actor = actor if not old and not first_observed_update and kind != "review_request" else {"platform": "github", "attribution": "unknown"}
+    # Relations ("in my thread", "a reply to me") belong to new words someone wrote. A revision (an edit, merge, close,
+    # reopen, draft flip), a first-scan snapshot of an older object, a pull request's details and a review-request list
+    # are not new words: they carry any_message plus only what that revision newly adds (a mention, an assignee, a
+    # requested reviewer), so the account's own merges and edits no longer read as replies in its threads.
+    new_words = not old and not first_observed_update and kind not in ("pr_details", "review_request")
     if event_actor.get("is_bot"):
         facts.append("from_bot")
     if not old and not first_observed_update and kind in ("issue", "pr"):
         facts.append("new_issue" if kind == "issue" else "new_pull_request")
     old_text = (old or {}).get("text", "")
+    edited = bool(old) and text != old_text  # the words themselves, before any placeholder below
     if text and text != old_text and not first_observed_update:
         spans = mentions(text, watched)
+        if old:  # an edit mentions only a watched login it newly adds
+            earlier = {span["user_id"] for span in mentions(old_text, watched)}
+            spans = [span for span in spans if span["user_id"] not in earlier]
         if spans:
             facts.append("mention")
             evidence["mention"] = spans
@@ -122,14 +150,14 @@ def make_event(event_id, revision, old, *, account, repo, thread, kind, raw, act
         opened = entry.get("number") == route["number"] and kind in ("issue", "pr", "discussion")
         if str(entry.get("_actor_id", "")) in ids and (opened or before(created(entry), target_time or "")):
             prior.append({"id": entry.get("id"), "created_at": created(entry), "actor_id": entry["_actor_id"]})
-    if prior:
+    if prior and new_words:
         facts.append("my_thread")
         evidence["my_thread"] = prior
     if history_gap:
         gaps.append({"scope": "history", "code": history_gap})
     parent_id = raw.get("in_reply_to_id") or (raw.get("replyTo") or {}).get("id")
     parents = [r for r in history if str(r.get("id")) == str(parent_id) and str(r.get("_actor_id", "")) in ids]
-    if parent_id and parents:
+    if parent_id and parents and new_words:
         facts.append("reply_to_me")
         evidence["reply_to_me"] = {"parent_id": parent_id, "actor_id": parents[0]["_actor_id"]}
     previous = (old or {}).get("comparison", {})
@@ -161,4 +189,5 @@ def make_event(event_id, revision, old, *, account, repo, thread, kind, raw, act
                         "previous_source_event_id": event_id.rsplit(":", 1)[0] + ":" + str(revision - 1) if old else None,
                         "raw": raw, "original_author": actor, "reply_route": route,
                         "fact_evidence": evidence, "coverage_gaps": gaps, "notification": notification,
-                        "context_fingerprint": context_fingerprint(history), "observed_at": now()}}
+                        "context_fingerprint": context_fingerprint(history), "observed_at": now(),
+                        **times(kind, raw, edited)}}

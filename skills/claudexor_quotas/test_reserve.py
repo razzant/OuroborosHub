@@ -1574,8 +1574,7 @@ function click(env, key) {
   node.listeners.click[0]({ stopPropagation() {} });
 }
 const hasSvg = (root) => walk(root).some((n) => n.getAttribute('class') === 'chart-svg');
-// 0.8.0: a limit is one .lrow; its name button (data-focus "limit:<key>")
-// carries the whole spoken summary and shows the limit in the timeline.
+// A limit is one plate, shown by its ring; the plate's head carries its whole spoken summary.
 const rowOf = (env, key) => showKey(env, key).parentNode;
 const has = (c, name) => String(c.className).split(/\s+/).includes(name);
 const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n) => n.getAttribute('class'));
@@ -1600,30 +1599,29 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
     // The figure is the skill's own current windows alone, of the accounts it
     // applies to; last-known windows are said under it, never added in.
     const row = rowOf(env, g.key);
-    // 0.8.1: the figure says its unit itself — "left of N accounts" — in place of
+    // The figure says its unit itself — "N of M account-windows left" — in place of
     // the unit line the overview no longer carries above the rows.
     assert.equal(classes(row, 'l-fig')[0].textContent,
-                 (g.measured.accounts ? g.measured.windows.toFixed(2) : '—') + ' left of ' + g.slots
-                 + (g.slots === 1 ? ' account' : ' accounts'));
+                 (g.measured.accounts ? g.measured.windows.toFixed(2) : '—') + ' of ' + g.slots
+                 + (g.slots === 1 ? ' account-window left' : ' account-windows left'));
     if (g.last_known && g.last_known.accounts) {
       // Said once, in words: no caption under the bars; the dated values are the legend's item "N last known · sum" when they are not at
       // the limit or held, and the plate's spoken summary always says them, not counted.
       assert.equal(classes(row, 'l-sub').length, 0, 'no caption under the bars');
-      assert.match(describedBy(env.root, byFocus(env.root, 'limit:' + g.key)),
+      assert.match(describedBy(env.root, showKey(env, g.key)),
                    new RegExp('last known ' + g.last_known.windows.toFixed(2) + ' account-windows, read .*, not counted'));
     }
   });
   // The stamp counts the accounts of the picked window that are read and dates the oldest reading; the note under the row, with the
   // star the tab carries, names who has no fresh data ("Read 2 of 3 · just now" in the row of the plate's figure, "* No fresh data · 1 read 2 h ago · c3" under it).
   // (the note stands in the plate, under its row of the figure and the stamp: the figure and the stamp first in the reading order of the page, the note after them)
-  assert.match(text, /\d+ left of \d+ accounts[\s\S]*Read \d+ of \d+ · [\s\S]*\* No fresh data · 1 read 2 h ago · c3/);
+  assert.match(text, /Read \d+ of \d+ · [\s\S]*\d+ of \d+ account-windows left[\s\S]*\* No fresh data · 1 read 2 h ago · c3/);
   const stamp = classes(env.root, 'reserve-age')[0];
   assert.match(stamp.textContent, /^Read \d+ of \d+ · /);
   assert.match(stamp.title, /^Accounts of this window read: \d+ of \d+ · /);
   showKey(env, tight.key); // the loop above showed every limit in turn; the chart on hand is the tightest one's
   assert.ok(hasSvg(env.root), 'the timeline is open on every mount');
-  // 0.8.1: the timeline has one toggle, the charted row's own control; no
-  // second one inside the timeline, and no unit line above the rows.
+  // The history has no toggle of its own and stands open; no unit line above the plate.
   assert.ok(byFocus(env.root, 'chart-toggle') === undefined);
   assert.equal(classes(env.root, 'chart-toggle').length, 0);
   assert.equal(classes(env.root, 'reserve-unit').length, 0);
@@ -1632,14 +1630,18 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   // and the plate's figure carries the unit.
   assert.ok(has(classes(env.root, 'reserve-title')[0], 'sr-only'));
   assert.match(classes(env.root, 'l-fig')[0].title, /a full account counts 1/);
-  assert.ok(has(stamp, 'wt-stamp') && has(stamp.parentNode, 'wt-plate') && classes(env.root, 'rail-bot').length === 0 && classes(classes(env.root, 'rail')[0], 'reserve-age').length === 0,
-    'the stamp stands in the plate, not in the rail of windows (the rail has no foot)');
-  assert.ok(stamp.parentNode.childNodes.indexOf(stamp) > stamp.parentNode.childNodes.indexOf(classes(stamp.parentNode, 'wt-fact')[0]) && classes(stamp.parentNode, 'l-fig')[0].parentNode === classes(stamp.parentNode, 'wt-fact')[0],
-    'the figure stands in the fact bubble of the plate, the stamp after it');
-  assert.equal(classes(env.root, 'l-chart').length, 1, 'one plate, one control');
-  assert.equal(classes(env.root, 'l-chart').filter((b) => b.getAttribute('aria-pressed') === 'true').length, 1);
-  assert.equal(showKey(env, tight.key).textContent, 'Chart', 'the word, pressed while the chart is shown');
-  assert.ok(byFocus(env.root, 'limit:' + other.key) === undefined, 'only the picked limit has a plate');
+  assert.ok(has(stamp, 'q-stamp') && has(stamp.parentNode, 'q-head') && classes(classes(env.root, 'q-rail')[0], 'reserve-age').length === 0,
+    'the stamp stands in the head of the plate, not in the rail of rings');
+  const plateNow = rowOf(env, tight.key);
+  const statusNow = classes(plateNow, 'q-status')[0];
+  assert.ok(plateNow.childNodes.indexOf(statusNow) === plateNow.childNodes.indexOf(classes(plateNow, 'q-head')[0]) + 1
+    && statusNow.childNodes[0] === classes(plateNow, 'l-fig')[0],
+    'the status line stands right under the head of the plate, the figure first in it');
+  assert.equal(classes(env.root, 'l-chart').length, 0, 'no word folds the history');
+  assert.equal(classes(env.root, 'q-ring').length, groups.length, 'one ring per limit');
+  assert.deepEqual(classes(env.root, 'q-ring').filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.getAttribute('data-limit')), [tight.key],
+    'the ring of the charted limit is the pressed one');
+  assert.equal(classes(env.root, 'q-plate').length, 1, 'only the picked limit has a plate');
   assert.equal(env.calls.length, 1, env.calls.map((c) => c.url).join());
   assert.ok(env.calls[0].url.startsWith(PREFIX + 'quotas?'));
   assert.doesNotMatch(env.calls[0].url, /chart=0|reuse=1/);
@@ -1649,19 +1651,17 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   assert.equal(classes(rowOf(env, tight.key), 'rs-tight').length, 0, 'no badge "lowest left" on the plate');
   assert.match(describedBy(env.root, tightName), /lowest average share left in this family/);
   assert.match(classes(rowOf(env, tight.key), 'l-fig')[0].title, /Lowest average share left among this family’s measured limits: a ranking, not a verdict/);
-  assert.equal(tightName.getAttribute('aria-pressed'), 'true');
-  assert.ok(has(rowOf(env, tight.key), 'sel'));
-  // The top account is picked at the opening, so the timeline of the charted limit stands in the plate, right under the bars (the fold .tl-wrap, a child of the
-  // plate); the plate's own row of controls stays after it, and nothing of the timeline stands beside the plate.
-  const plateKids = rowOf(env, tight.key).childNodes;
-  const fold = plateKids[plateKids.indexOf(classes(rowOf(env, tight.key), 'bars')[0]) + 1];
-  assert.ok(has(fold, 'tl-wrap'), 'the timeline stands in the plate right after the bars');
+  assert.equal(byFocus(env.root, 'ring:codex:' + tight.key).getAttribute('aria-pressed'), 'true');
+  // The history of the charted limit stands in its plate, under the bars (the fold .tl-wrap, the plate's last part), whatever account is picked.
+  const plateNode = rowOf(env, tight.key);
+  const fold = plateNode.childNodes[plateNode.childNodes.length - 1];
+  assert.ok(has(fold, 'tl-wrap'), 'the history stands in the plate, under the bars');
   assert.equal(classes(fold, 'tl-block').length, 1);
   assert.equal(classes(env.root, 'tl-block').length, 1, 'one timeline');
   assert.equal(classes(env.root, 'rs-tight').length, 0, 'and no limit wears a badge');
   // One bar per account the limit applies to, as the skill sends them:
   // restricted ones marked, unknown ones outlined; the row says it in words.
-  const cells = classes(classes(rowOf(env, tight.key), 'bars')[0], 'bar');  // the strip's, not the legend's
+  const cells = classes(classes(rowOf(env, tight.key), 'q-bars')[0], 'q-bar');  // the strip's, not the legend's
   assert.equal(cells.length, tight.bars.length);
   assert.equal(cells.filter((c) => has(c, 'unknown')).length, tight.bars.filter((b) => b.state === 'unknown').length);
   assert.equal(cells.filter((c) => has(c, 'last')).length, tight.bars.filter((b) => b.state === 'last_known').length);
@@ -1670,9 +1670,9 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   assert.match(describedBy(env.root, tightName), /1 stale/);
   assert.match(describedBy(env.root, tightName), /1 cooldown reported \(0\.86\)/);
   assert.match(text, /cooling down/);
-  // The next reported reset stands in the row, with what it gives back.
-  assert.match(classes(rowOf(env, tight.key), 'nx')[0].textContent,
-               new RegExp('next reset .*\\+' + tight.next_reset_returns.toFixed(2) + ' if unused'));
+  // The next reported reset is the first step of the ladder in the rail, and the plate's spoken summary says it with what it gives back.
+  assert.match(describedBy(env.root, tightName), new RegExp('next reset .*\\+' + tight.next_reset_returns.toFixed(2) + ' if unused'));
+  assert.ok(classes(env.root, 'q-step').length >= 1, 'the ladder has the next reset');
 
   // 2. The timeline: the record behind now and one future ahead of it, from
   // the row's own figure, with its reset schedule and checkpoints; no estimate
@@ -1765,30 +1765,13 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   await settle();
   assert.match(env.calls.at(-1).url, /horizon=24h/);
 
-  // 3. Folding the timeline: the next timed read leaves the chart out (and
-  // the host answers without one); unfolding it asks once, with reuse.
-  const noChart = JSON.parse(JSON.stringify(fixture.view));
-  delete noChart.reserve.chart;
-  env = await boot((url) => (/chart=0/.test(url) ? noChart : fixture.view));
-  // 0.8.1: the charted row's own control folds it; folded, nothing stands
-  // under the row and no row is drawn as charted.
-  click(env, 'limit:' + tight.key);
-  assert.ok(!hasSvg(env.root));
-  assert.equal(classes(env.root, 'tl-block').length, 0);
-  assert.equal(showKey(env, tight.key).textContent, 'Chart', 'the same word, no longer pressed');
-  assert.equal(showKey(env, tight.key).getAttribute('aria-pressed'), 'false');
-  // Folded, the plate is not charted (no .sel on it), but the picked bar of the top account stays open and red (.sel on the bar).
-  assert.ok(!has(rowOf(env, tight.key), 'sel'), 'the plate is not drawn as charted');
-  assert.equal(classes(env.root, 'sel').filter((n) => !has(n, 'bar')).length, 0, 'only a bar wears .sel');
-  assert.equal(classes(env.root, 'l-chart').filter((b) => has(b, 'on')).length, 0);
+  // 3. The history has no fold: the timed read keeps asking for the chart of the limit on screen, with reuse, and the plate's history stays drawn.
+  env = await boot(fixture.view);
+  assert.ok(byFocus(env.root, 'limit:' + tight.key) === undefined, 'no word folds it');
   env.interval()();
   await settle();
-  assert.match(env.calls.at(-1).url, /chart=0/);
-  click(env, 'limit:' + tight.key);
-  await settle();
-  assert.match(env.calls.at(-1).url, /reuse=1/);
+  assert.doesNotMatch(env.calls.at(-1).url, /chart=0/);
   assert.ok(hasSvg(env.root));
-  assert.ok(has(rowOf(env, tight.key), 'sel'));
 
   // 4. The limit's details, notes and data table sit under the timeline;
   // open, they survive the timed redraw, with the keyboard on them. About
@@ -1856,18 +1839,18 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   // One plate at a time: the two limits are two scopes of one window, each shown in turn.
   const rows = plates(env);
   assert.equal(rows.length, 2);
-  // The row's spoken summary is the note its one control (.l-chart, the word Chart) is described by.
-  const heard = rows.map((r) => describedBy(r, classes(r, 'l-chart')[0]));
+  // The plate's spoken summary is the note its head is described by.
+  const heard = rows.map((r) => describedBy(r, classes(r, 'q-head')[0]));
   assert.match(heard[0], /models: fable-a, fable-b/);
   assert.match(heard[1], /models: fable-c, fable-d/);
-  const names = rows.map((r) => describedBy(r, classes(r, 'l-chart')[0]).split(' — ')[0]);
+  const names = rows.map((r) => describedBy(r, classes(r, 'q-head')[0]).split(' — ')[0]);
   assert.notEqual(names[0], names[1]);
   showKey(env, fixture.scoped.reserve.summary.groups.find((x) => x.tightest).key);
   await settle();
   // Family accounts without a reading of the limit are said, not counted as zero: each plate's figure is of
   // the one account that reads the limit (the plates are read as they were drawn, one per scope).
-  assert.equal(classes(rows[0], 'l-fig')[0].textContent, '0.70 left of 1 account');
-  assert.match(env.root.textContent, /0\.40 left of 1 account/);
+  assert.equal(classes(rows[0], 'l-fig')[0].textContent, '0.70 of 1 account-window left');
+  assert.match(env.root.textContent, /0\.40 of 1 account-window left/);
   assert.match(heard[0], /2 other accounts: no reading, limit may not apply/);
   const scopedTight = fixture.scoped.reserve.summary.groups.find((x) => x.tightest);
   assert.match(classes(env.root, 'tl-scope')[0].textContent, new RegExp('models: ' + scopedTight.models.join(', ')));
@@ -2848,7 +2831,7 @@ async function opened(view, sid) {
   const five = fx.route.reserve.summary.groups.find((g) => g.key.includes('|five_hour|'));
   const row = showKey(env, five.key);
   assert.match(describedBy(env.root, row), /full at the limit until /);
-  assert.equal(classes(classes(row.parentNode, 'bars')[0], 'bar').filter((c) => String(c.className).includes('spent')).length, 1);
+  assert.equal(classes(classes(row.parentNode, 'q-bars')[0], 'q-bar').filter((c) => String(c.className).includes('spent')).length, 1);
 
   // Finding 1, 0.8.0: a total seen at one sweep only holds for no stretch of
   // time. It is not drawn as a mark (no symbols on the chart); the record
@@ -2958,14 +2941,15 @@ async function bootThemed(view) {
   // The word "Accounts · N" over the bars is a pressed word (aria-pressed), not an expander; About stays an expander.
   assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'false');
   assert.equal(byFocus(env.root, 'about').getAttribute('aria-expanded'), 'false');
-  assert.equal(classes(env.root, 'inspector').length, 1, 'the top account is picked at the opening: its card stands under the plate');
+  assert.equal(classes(env.root, 'q-card').length, 1, 'the top account is picked at the opening: its card stands beside the bars');
+  assert.equal(classes(env.root, 'q-card-none').length, 0);
   assert.equal(classes(env.root, 'win-line').length, 0);
 
   // Coverage in every row: the figure is of every account the limit applies
   // to, and the row says how many of them are current.
   groups.forEach((g) => {
     const name = showKey(env, g.key);
-    assert.match(classes(name.parentNode, 'l-fig')[0].textContent, new RegExp(' left of ' + g.slots + ' accounts?$'));
+    assert.match(classes(name.parentNode, 'l-fig')[0].textContent, new RegExp(' of ' + g.slots + ' account-windows? left$'));
     // the noun takes the number's form (one account, two accounts); the word boundary keeps 'account' from passing for 'accounts'
     assert.match(describedBy(env.root, name), new RegExp(g.measured.accounts + ' current of ' + g.slots + (g.slots === 1 ? ' account\\b' : ' accounts\\b')));
   });
@@ -3000,17 +2984,17 @@ async function bootThemed(view) {
   // its diagnostics open, the keyboard on them.
   click(env, 'accounts');
   click(env, 'acct:codex:c1');
-  click(env, 'inspector-diag');
+  click(env, 'inspector-details');
   assert.ok(classes(env.root, 'win-line').length > 0);
-  byFocus(env.root, 'inspector-diag').focus();
+  byFocus(env.root, 'inspector-details').focus();
   env.interval()();
   await settle();
-  assert.equal(byFocus(env.root, 'inspector-diag').getAttribute('aria-expanded'), 'true');
+  assert.equal(byFocus(env.root, 'inspector-details').getAttribute('aria-expanded'), 'true');
   assert.ok(classes(env.root, 'win-line').length > 0);
-  assert.equal(env.document.activeElement.getAttribute('data-focus'), 'inspector-diag');
+  assert.equal(env.document.activeElement.getAttribute('data-focus'), 'inspector-details');
   assert.equal(env.theme('dark'), 'dark');
   await settle();
-  assert.ok(classes(env.root, 'inspector').length);
+  assert.ok(classes(env.root, 'q-card').length);
 
   // 3. The timeline survives a poll and a theme change too, and says what it
   // assumes — in one line on the face, every caveat under its details.
@@ -3033,7 +3017,7 @@ async function bootThemed(view) {
   // session is kept.
   env = await bootThemed(view);
   assert.ok(hasSvg(env.root));
-  assert.equal(classes(env.root, 'inspector').length, 1, 'the top account is picked again');
+  assert.equal(classes(env.root, 'q-card').length, 1, 'the top account is picked again');
   assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'false');
 
   // 5. With no reserve overview the account list is all there is: open, and
@@ -3500,7 +3484,7 @@ async function opened(view, sid, diagnostics) {
   // reserve holds the share back, and so does the window's line. The shared
   // week, which no cooldown covers, stays neutral everywhere.
   const keyOf = (part) => route.reserve.summary.groups.find((g) => g.key.includes(part)).key;
-  const heldCells = classes(classes(showKey(env, keyOf('|weekly_scoped:Fable|')).parentNode, 'bars')[0], 'bar')
+  const heldCells = classes(classes(showKey(env, keyOf('|weekly_scoped:Fable|')).parentNode, 'q-bars')[0], 'q-bar')
     .filter((c) => !/\bunknown\b/.test(c.className));
   assert.equal(heldCells.length, 1);
   assert.match(heldCells[0].className, /\brestricted\b/);
@@ -4102,97 +4086,64 @@ def _five_hour_and_weekly(directory):
 
 
 NODE_FIVE_HOUR_TO_WEEKLY = r"""
-const nameOf = (env, key) => showKey(env, key);
-const rowOf = (env, key) => nameOf(env, key).parentNode;
-const cueOf = (env, key) => classes(rowOf(env, key), 'l-chart')[0];
 const has = (c, name) => String(c.className).split(/\s+/).includes(name);
-// The timeline of the charted limit stands in its plate, in the fold (.tl-wrap) right under the bars (the top account of the row is picked at the opening).
-const below = (env, key) => {
-  const plate = rowOf(env, key);
-  const next = plate.childNodes[plate.childNodes.findIndex((n) => has(n, 'bars')) + 1];
+const ringKey = (k) => 'ring:' + k.split('|')[0] + ':' + k;
+// The history of the limit on screen stands in its plate, under the bars (the fold .tl-wrap, the plate's last part).
+const below = () => {
+  const plate = classes(env.root, 'q-plate')[0];
+  const next = plate.childNodes[plate.childNodes.length - 1];
   return next && has(next, 'tl-wrap') ? classes(next, 'tl-block')[0] || null : null;
 };
-const tabKey = (k) => 'win:' + k.split('|')[0] + ':' + k.split('|')[2];
-function expectCharted(env, shown, other) {
-  // One plate: the shown limit has it, the other limit has none until it is picked.
-  const btn = byFocus(env.root, 'limit:' + shown);
-  assert.ok(btn, 'the shown limit has the plate');
-  assert.ok(byFocus(env.root, 'limit:' + other) === undefined, 'the other limit is not drawn');
-  assert.equal(btn.getAttribute('aria-pressed'), 'true');
-  assert.equal(btn.textContent, 'Chart', 'the same word whether the chart is shown or not: aria-pressed says which');
-  assert.ok(has(btn.parentNode, 'sel'));
-  assert.equal(btn.getAttribute('aria-label'), null, 'the word is its own name');
-  assert.equal(btn.getAttribute('title'), null);
-  assert.ok(below(env, shown), 'the timeline stands under the charted limit');
+let env;
+function expectShown(shown, other, named) {
+  // One plate: the shown limit's ring is pressed and the plate speaks its name first; the other ring is not pressed.
+  assert.equal(byFocus(env.root, ringKey(shown)).getAttribute('aria-pressed'), 'true');
+  assert.equal(byFocus(env.root, ringKey(other)).getAttribute('aria-pressed'), 'false');
+  assert.equal(classes(env.root, 'q-plate').length, 1);
+  assert.match(describedBy(env.root, classes(env.root, 'q-head')[0]), named);
+  assert.ok(below(), 'the history stands under the plate');
   assert.equal(classes(env.root, 'tl-block').length, 1);
-}
-
-// The plate's one control is the chart toggle in its own slot - a button with a word, one handler, a direct child of the row beside the name,
-// which the tab says, so the plate draws none - and the note it is described by starts with the name of the limit shown.
-function expectControl(env, key, named) {
-  const btn = nameOf(env, key);
-  assert.equal(btn.tagName, 'BUTTON');
-  assert.equal(btn.listeners.click.length, 1);
-  assert.equal(cueOf(env, key), btn, 'the control is the cue');
-  assert.ok(has(btn.parentNode, 'lrow'));
-  assert.equal(classes(btn.parentNode, 'l-chart').length, 1, 'one control per row');
-  assert.equal(walk(btn).filter((n) => n.tagName === 'SVG').length, 0, 'a word, no chart mark');
-  assert.equal(walk(btn).filter((n) => n !== btn && n.tagName === 'BUTTON').length, 0);
-  assert.equal(classes(btn, 'l-name-text').length, 0, 'the name is not inside the control');
-  assert.equal(classes(btn.parentNode, 'l-name').length, 0);
-  assert.match(describedBy(env.root, btn), named);
+  assert.equal(classes(env.root, 'l-chart').length, 0, 'no word folds the history');
 }
 
 (async () => {
   const fx = JSON.parse(process.env.SWITCH_FIXTURE);
   const asked = (url) => decodeURIComponent(url);
-  const env = await boot((url) => (asked(url).includes('group=' + fx.week_key) ? fx.week : fx.five));
+  env = await boot((url) => (asked(url).includes('group=' + fx.week_key) ? fx.week : fx.five));
   const five = fx.five_key, week = fx.week_key;
 
-  expectControl(env, five, /^5-hour — /);
-  assert.equal(classes(env.root, 'chart-toggle').length, 0, 'no second toggle inside the timeline');
-  // The family's lowest-left limit, the 5-hour one, is charted first.
-  expectCharted(env, five, week);
+  assert.equal(classes(env.root, 'chart-toggle').length, 0, 'no toggle inside the history');
+  // The family's lowest-left limit, the 5-hour one, is shown first.
+  expectShown(five, week, /^5-hour — /);
   assert.equal(env.calls.length, 1);
 
-  // 5 hour -> weekly: the weekly name asks once, with reuse, for its chart
-  // over its own span, and its timeline replaces the 5-hour one.
-  byFocus(env.root, tabKey(week)).focus();
+  // 5 hour -> weekly: its ring asks once, with reuse, for its chart over its own span, and its history replaces the 5-hour one.
+  byFocus(env.root, ringKey(week)).focus();
   showKey(env, week);
-  assert.match(below(env, week).textContent, /Loading the timeline for this limit/);
+  assert.match(below().textContent, /Loading the timeline for this limit/);
   await settle();
   assert.equal(env.calls.length, 2);
   const url = asked(env.calls[1].url);
   assert.ok(url.includes('group=' + week), url);
   assert.match(url, /horizon=7d/);
   assert.match(url, /reuse=1/);
-  expectCharted(env, week, five);
-  expectControl(env, week, /^Weekly — /);
-  assert.ok(walk(below(env, week)).some((n) => n.getAttribute('class') === 'chart-svg'));
+  expectShown(week, five, /^Weekly — /);
+  assert.ok(walk(below()).some((n) => n.getAttribute('class') === 'chart-svg'));
   assert.equal(byFocus(env.root, 'horizon:7d').getAttribute('aria-pressed'), 'true');
-  assert.equal(env.document.activeElement.getAttribute('data-focus'), tabKey(week), 'the keyboard stays on the tab it chose');
+  assert.equal(env.document.activeElement.getAttribute('data-focus'), ringKey(week), 'the keyboard stays on the ring it chose');
 
-  // ... and back: the 5-hour chart over 24 hours.
-  byFocus(env.root, tabKey(five)).focus();
+  // ... and back: the 5-hour chart over 24 hours. A second press of the ring on screen changes nothing.
+  byFocus(env.root, ringKey(five)).focus();
   showKey(env, five);
   await settle();
   assert.match(asked(env.calls.at(-1).url), /horizon=24h/);
-  expectCharted(env, five, week);
-  assert.equal(env.document.activeElement.getAttribute('data-focus'), tabKey(five), 'the keyboard stays on the tab it chose');
-
-  // On the charted limit the same button folds the timeline, and says so;
-  // folded, nothing stands under any row and no row is drawn as charted.
-  nameOf(env, five).listeners.click[0]({ stopPropagation() {} });
-  assert.equal(cueOf(env, five).textContent, 'Chart', 'the same word, no longer pressed');
-  assert.equal(nameOf(env, five).getAttribute('aria-label'), null);
-  assert.equal(nameOf(env, five).getAttribute('aria-pressed'), 'false');
-  assert.ok(!has(cueOf(env, five), 'on'));
-  assert.equal(walk(env.root).filter((n) => n.getAttribute('class') === 'chart-svg').length, 0);
-  assert.equal(below(env, five), null);
-  assert.equal(classes(env.root, 'tl-block').length, 0);
-  // The plate is not charted (no .sel on it); the picked bar of the top account stays open and red (.sel on the bar).
-  assert.ok(!has(rowOf(env, five), 'sel'));
-  assert.equal(classes(env.root, 'sel').filter((n) => !has(n, 'bar')).length, 0);
+  expectShown(five, week, /^5-hour — /);
+  assert.equal(env.document.activeElement.getAttribute('data-focus'), ringKey(five), 'the keyboard stays on the ring it chose');
+  const calls = env.calls.length;
+  byFocus(env.root, ringKey(five)).listeners.click[0]({ stopPropagation() {} });
+  await settle();
+  assert.equal(env.calls.length, calls);
+  expectShown(five, week, /^5-hour — /);
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
   process.exitCode = 1;

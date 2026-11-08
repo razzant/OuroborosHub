@@ -116,10 +116,11 @@ function indexOf(root, cls) { return walk(root).findIndex((n) => String(n.classN
     assert.match(legend, /no new use: a condition, not a forecast/);
     // One curve: nothing in the block is hatched.
     assert.ok(!walk(block).some((n) => n.tagName === 'PATTERN'));
-    // One plate under the window row (not a stack of rows): one strip, of the picked window.
-    assert.equal(classes(env.root, 'bars').length, 1);
-    assert.equal(classes(env.root, 'lrow').length, 1);
-    assert.equal(classes(env.root, 'wt-row')[0].getAttribute('role'), 'tablist');
+    // One plate beside the rail of rings (not a stack of rows): one strip, of the picked limit; the rings are a group of pressed buttons.
+    assert.equal(classes(env.root, 'q-bars').length, 1);
+    assert.equal(classes(env.root, 'q-plate').length, 1);
+    assert.equal(classes(env.root, 'q-rings')[0].getAttribute('role'), 'group');
+    assert.equal(classes(env.root, 'q-ring').filter((r) => r.getAttribute('aria-pressed') === 'true').length, 1);
     // No tab strip in the graph (the window is picked in the row above, and no tab of it would be a second one); the one
     // thing it holds that the plate does not is Combined, a switch in its row of controls.
     assert.equal(classes(block, 'wt-tab').length, 0);
@@ -157,9 +158,9 @@ function indexOf(root, cls) { return walk(root).findIndex((n) => String(n.classN
     assert.match(hero, /Next reset/);
     assert.equal(classes(block(), 'tl-hero').length, 1, 'Combined has its headline: its numbers are not the plate\'s');
     assert.equal(env.calls.length, calls0, 'Combined needs no new request: the chart on hand carries it');
-    // Combined is the graph's own state: the window row above keeps its pick.
-    assert.equal(classes(env.root, 'wt-tab').filter((t) => t.getAttribute('aria-selected') === 'true').length, 1);
-    assert.equal(byFocus(env.root, 'limit:' + shownKey).getAttribute('aria-pressed'), 'true', 'the plate is still the same window');
+    // Combined is the graph's own state: the rail keeps its pick.
+    assert.deepEqual(classes(env.root, 'q-ring').filter((r) => r.getAttribute('aria-pressed') === 'true').map((r) => r.getAttribute('data-limit')), [shownKey],
+      'the plate is still the same limit');
     // The same control turns it off again: the window, with no headline and no new request.
     click(env, 'graph:joint');
     await sleep();
@@ -168,12 +169,12 @@ function indexOf(root, cls) { return walk(root).findIndex((n) => String(n.classN
     assert.equal(env.calls.length, calls0, 'the window on the plate needs no new request');
     // Another window is picked in the window row: it asks for its own chart once, and the block follows it, back on the window.
     const other = fx.default.reserve.summary.groups.find((g) => g.key !== shownKey && g.window_seconds
-      && byFocus(env.root, 'win:' + g.harness + ':' + g.window_seconds)
+      && byFocus(env.root, 'ring:' + g.harness + ':' + g.key)
       && g.window_seconds !== fx.default.reserve.summary.groups.find((x) => x.key === shownKey).window_seconds);
-    assert.ok(other, 'another window is a tab of the window row');
+    assert.ok(other, 'another window has a ring of the rail');
     click(env, 'graph:joint');
     assert.equal(sw().getAttribute('aria-pressed'), 'true');
-    click(env, 'win:' + other.harness + ':' + other.window_seconds);
+    click(env, 'ring:' + other.harness + ':' + other.key);
     await sleep(); await sleep();
     const asked = env.calls.filter((c) => c.url.includes('group=' + encodeURIComponent(other.key)));
     assert.equal(asked.length, 1, 'one chart request for the picked window');

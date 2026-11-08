@@ -31,7 +31,8 @@ def group_message(chat_id: int, title: str, text: str = "hello", *, kind: str = 
 
 def private_message(person: dict = OTHER, text: str = "hi") -> dict:
     return {"message": {"message_id": next(_message), "date": next(_date),
-                        "chat": {"id": person["id"], "type": "private", "first_name": person["first_name"]},
+                        "chat": {"id": person["id"], "type": "private", **{k: person[k] for k in
+                                 ("first_name", "last_name", "username") if k in person}},
                         "from": person, "text": text}}
 
 

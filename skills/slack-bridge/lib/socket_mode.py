@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import websockets
@@ -45,6 +45,7 @@ class SocketModeClient:
         bot_user_id: str,
         bot_id: str = "",
         app_id: str = "",
+        new_root_channels: Iterable[str] = (),
         connector: Callable[..., Any] = websockets.connect,
     ) -> None:
         self.slack = slack
@@ -52,6 +53,8 @@ class SocketModeClient:
         self.bot_user_id = str(bot_user_id)
         self.bot_id = str(bot_id or "")
         self.app_id = str(app_id or "")
+        # Configured channel IDs whose new top-level posts carry the new-root fact.
+        self.new_root_channels = frozenset(new_root_channels)
         self._connector = connector
         self._stop = asyncio.Event()
         self._websocket: Any = None
@@ -86,6 +89,7 @@ class SocketModeClient:
                 bot_user_id=self.bot_user_id,
                 bot_id=self.bot_id,
                 app_id=self.app_id,
+                new_root_channels=self.new_root_channels,
             )
             row_id, inserted = self.store.ingest_envelope(payload, parsed)
             await websocket.send(json.dumps({"envelope_id": envelope_id}))

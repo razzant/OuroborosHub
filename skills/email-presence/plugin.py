@@ -136,7 +136,8 @@ def register(api):
                 origin = f"http://127.0.0.1:{int(info['server_port'])}"
             result = await asyncio.to_thread(google_auth.begin, service.accounts, api.get_settings(SETTING_KEYS),
                                             origin=origin, login_hint=str(body.get("login_hint") or ""),
-                                            permanent_delete=body.get("permanent_delete") is True)
+                                            permanent_delete=body.get("permanent_delete") is True,
+                                            manage_settings=body.get("manage_settings") is not False)
             return JSONResponse(result)
         except (ValueError, TypeError, KeyError, RuntimeError) as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)

@@ -68,7 +68,7 @@ logger = logging.getLogger("a2a_daemon")
 STATE_DIR = pathlib.Path(os.environ.get("OUROBOROS_SKILL_STATE_DIR") or ".")
 
 # Card version — kept in step with the skill version (SKILL.md / catalog entry).
-A2A_CARD_VERSION = "1.5.0"
+A2A_CARD_VERSION = "1.5.2"
 
 # JSON-RPC error code the A2A spec assigns to TaskNotCancelableError.
 _JSONRPC_TASK_NOT_CANCELABLE = -32002

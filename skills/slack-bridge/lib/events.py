@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Collection, Mapping, Sequence
 
 
 # Slack file-object facts a model may see (https://docs.slack.dev/reference/objects/file-object/).
@@ -17,6 +17,22 @@ _FILE_FLAG_FACTS = ("is_external", "is_deleted", "is_tombstoned", "is_hidden_by_
 # Already carried by the stored declaration and the frozen attachment keys.
 DECLARED_FILE_KEYS = frozenset({"id", "name", "mimetype", "size"})
 REACTION_EVENTS = frozenset({"reaction_added", "reaction_removed"})
+# Subtypes that post a new message. Edits, deletes, joins, topic changes and
+# other provider notices are not new top-level posts.
+_POSTED_SUBTYPES = frozenset({"", "bot_message", "file_share", "me_message"})
+# A direct or group-direct chat is one flowing conversation; a channel post opens a thread of its own.
+_FLAT_CHATS = frozenset({"im", "mpim"})
+
+
+def conversation_thread(channel_type: str, thread_ts: str, message_ts: str) -> str:
+    """The thread that is this message's conversation; "" is the flow of a direct or group chat.
+
+    A reply belongs to its thread. Any other message, a thread's parent included, stays where
+    it was posted: a flat chat's flow, or in a channel the thread the message opens.
+    """
+    if thread_ts and thread_ts != message_ts:
+        return thread_ts
+    return "" if channel_type in _FLAT_CHATS else message_ts
 
 
 def file_facts(raw: Any) -> dict[str, Any]:
@@ -91,12 +107,10 @@ class SlackEvent:
     structured: dict[str, Any]
 
     @property
-    def root_thread_ts(self) -> str:
-        return self.thread_ts or self.message_ts
-
-    @property
     def ordering_key(self) -> str:
-        return f"{self.team_id}:{self.channel_id}:{self.root_thread_ts}"
+        """Conversation identity, frozen at receipt: every later reader takes it from the stored row."""
+        thread = conversation_thread(self.channel_type, self.thread_ts, self.message_ts)
+        return f"{self.team_id}:{self.channel_id}:{thread or '0'}"
 
 
 @dataclass(frozen=True)
@@ -147,6 +161,30 @@ def _files(raw: Any) -> tuple[SlackFile, ...]:
     return tuple(parsed)
 
 
+# Fields Slack rewrites on a message whose words stay the same: its language detector, the edit stamp and the
+# editor's team, and the state of the thread the message roots (replies, their authors, the lock, and this bot's
+# own follow and read marks). Deleting a reply, for one, re-sends the root with only its read mark gone.
+_REVISION_BOOKKEEPING = frozenset({
+    "language", "edited", "source_team", "user_team",
+    "reply_count", "reply_users", "reply_users_count", "latest_reply", "is_locked", "subscribed", "last_read",
+})
+
+
+def _revision_content(message: Mapping[str, Any]) -> dict[str, Any]:
+    """The message as its readers see it: without bookkeeping, without a root's own thread marker (its
+    ``thread_ts`` equal to its ``ts``) and without the ``block_id`` Slack generates again for unchanged blocks."""
+    def without_block_ids(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {key: without_block_ids(item) for key, item in value.items() if key != "block_id"}
+        if isinstance(value, list):
+            return [without_block_ids(item) for item in value]
+        return value
+
+    root = message.get("thread_ts") == message.get("ts")
+    return without_block_ids({key: value for key, value in message.items()
+                              if key not in _REVISION_BOOKKEEPING and not (key == "thread_ts" and root)})
+
+
 def _message_content_unchanged(
     message: Mapping[str, Any], previous: Mapping[str, Any]
 ) -> bool:
@@ -155,16 +193,11 @@ def _message_content_unchanged(
         return False
     if not any(key in message and key in previous for key in ("text", "blocks", "attachments", "files")):
         return False
-    # Slack also emits message_changed when its language detector runs. A new
-    # edit timestamp alone is not new content either. Keep every other field in
-    # the comparison so unknown provider additions still reach the model.
-    bookkeeping = {"language", "edited"}
-    current_content = {key: value for key, value in message.items() if key not in bookkeeping}
-    previous_content = {key: value for key, value in previous.items() if key not in bookkeeping}
-    # Canonical JSON preserves booleans versus numbers, unlike dict equality.
+    # Every field outside the bookkeeping above stays in the comparison, so unknown provider additions
+    # still reach the model. Canonical JSON preserves booleans versus numbers, unlike dict equality.
     return (
-        json.dumps(current_content, sort_keys=True, separators=(",", ":"))
-        == json.dumps(previous_content, sort_keys=True, separators=(",", ":"))
+        json.dumps(_revision_content(message), sort_keys=True, separators=(",", ":"))
+        == json.dumps(_revision_content(previous), sort_keys=True, separators=(",", ":"))
     )
 
 
@@ -193,11 +226,14 @@ def parse_socket_envelope(
     bot_user_id: str = "",
     bot_id: str = "",
     app_id: str = "",
+    new_root_channels: Collection[str] = (),
 ) -> ParsedEnvelope:
     """Parse one Socket Mode envelope without adding policy or prompt text.
 
     Unsupported envelopes still return a stable classification so the caller can
-    durably record them before acknowledging Slack.
+    durably record them before acknowledging Slack. ``new_root_channels`` are
+    the configured channel IDs whose new top-level posts carry the
+    ``new_root_signal`` fact; it never changes what is accepted.
     """
 
     envelope_id = _text(payload.get("envelope_id"))
@@ -276,8 +312,11 @@ def parse_socket_envelope(
     # event admissible or turn an occurrence into a request to this bot.
     if bot_user_id:
         structured["self_user_id"] = bot_user_id
+    # Posted through an app or by a bot: an observation about the message, not about its
+    # author. A person writing through an app is that person (slack_wake_facts reads the
+    # author's account first); the marker decides only when Slack names no person.
     if bot_event_id or app_event_id or message.get("bot_profile"):
-        structured["actor_is_bot"] = True
+        structured["posted_via_app"] = True
     if event_type in {"message", "app_mention"} and subtype != "message_deleted":
         if subtype != "message_changed" and isinstance(message.get("edited"), Mapping):
             structured["edited"] = dict(message["edited"])
@@ -287,6 +326,11 @@ def parse_socket_envelope(
         parent_user_id = _text(message.get("parent_user_id"))
         if parent_user_id:
             structured["parent_user_id"] = parent_user_id
+        # A new top-level post in a configured channel: membership of the exact
+        # ID only, never its name or the words. A reply or a revision is not one.
+        if (channel_id in new_root_channels and not thread_ts and subtype in _POSTED_SUBTYPES
+                and not isinstance(message.get("edited"), Mapping)):
+            structured["new_root_signal"] = True
 
     channel_type = _text(event.get("channel_type"))
     parsed = SlackEvent(

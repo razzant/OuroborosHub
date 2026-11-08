@@ -28,6 +28,10 @@ class TelegramApiError(RuntimeError):
         self.error_code = int(error_code or 0)
 
 
+class TelegramFileTooLarge(TelegramApiError):
+    """Telegram will never serve this file to a bot: it is above the Bot API download limit."""
+
+
 class TelegramTransport(Protocol):
     async def post_json(
         self, url: str, payload: Dict[str, Any], timeout_sec: float
@@ -116,8 +120,8 @@ class UrllibTelegramTransport:
                 data = response.read(max_bytes + 1)
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise TelegramApiError("download", type(exc).__name__) from exc
-        if len(data) > max_bytes:
-            raise TelegramApiError("download", f"file exceeds {max_bytes} bytes")
+        if len(data) > max_bytes:  # larger than getFile said: Telegram will not serve it to a bot either
+            raise TelegramFileTooLarge("download", f"file exceeds {max_bytes} bytes")
         return data
 
 
@@ -172,10 +176,16 @@ class TelegramClient:
     async def download_file(
         self, file_id: str, destination: pathlib.Path
     ) -> pathlib.Path:
-        metadata = await self.get_file(file_id)
+        try:
+            metadata = await self.get_file(file_id)
+        except TelegramApiError as exc:
+            # Telegram's own refusal of a file it did not size in the update ("Bad Request: file is too big").
+            if exc.error_code == 400 and "file is too big" in exc.description.casefold():
+                raise TelegramFileTooLarge(exc.endpoint, exc.description, exc.error_code) from exc
+            raise
         declared_size = int(metadata.get("file_size") or 0)
         if declared_size > _MAX_DOWNLOAD_BYTES:
-            raise TelegramApiError(
+            raise TelegramFileTooLarge(
                 "getFile", "file exceeds Telegram Bot API download limit"
             )
         file_path = str(metadata["file_path"]).lstrip("/")

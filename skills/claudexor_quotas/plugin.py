@@ -2023,10 +2023,19 @@ def _missing_items(tag: str, english: Dict[str, Any], have: Dict[str, Any]) -> L
     """The keys not translated yet and not yet reported in this process, as the host's miss queue takes them."""
     seen = _REPORTED_MISSES.setdefault(tag, set())
     fresh = [key for key in english if key not in have and key not in seen]
-    seen.update(fresh)
     return [{"key": f"code:{I18N_PREFIX}.{key}",
              "context": {"source": _english_text(english[key]), "table": I18N_PREFIX, "role": "quotas"}}
             for key in fresh]
+
+
+def _accept_missing(tag: str, items: List[Dict[str, Any]], answer: Any) -> bool:
+    # The host returns a count, not accepted IDs. Only a fully accepted batch can
+    # be deduplicated safely; partial/rejected batches remain eligible for retry.
+    accepted = answer.get("accepted") if isinstance(answer, dict) else None
+    if type(accepted) is int and accepted == len(items):
+        prefix = f"code:{I18N_PREFIX}."
+        _REPORTED_MISSES.setdefault(tag, set()).update(item["key"][len(prefix):] for item in items)
+    return type(accepted) is int and accepted > 0
 
 
 def _view_from_memory(view: Dict[str, Any], english: Dict[str, Any], root: Path,
@@ -2039,7 +2048,11 @@ def _view_from_memory(view: Dict[str, Any], english: Dict[str, Any], root: Path,
     view.update(language=tag, revision=int(doc.get("revision") or 0),
                 plural_select=doc.get("plural_select"), strings=strings)
     items = _missing_items(tag, english, strings)
-    if items and memory.record_missing(root, tag, items).get("accepted"):
+    woke = False
+    for start in range(0, len(items), 200):
+        batch = items[start:start + 200]
+        woke = _accept_missing(tag, batch, memory.record_missing(root, tag, batch)) or woke
+    if woke:
         translation.on_language_event("missing", root, tag)
 
 
@@ -2056,9 +2069,13 @@ def _view_from_loopback(view: Dict[str, Any], english: Dict[str, Any], port: int
     view.update(language=tag, revision=int(payload.get("revision") or 0),
                 plural_select=payload.get("plural_select"), strings=strings)
     items = _missing_items(tag, english, strings)
-    if items:
-        _request_json(port, "/api/ui/i18n/missing", method="POST", timeout_sec=I18N_FALLBACK_TIMEOUT_SEC,
-                      payload={"language": tag, "items": items})
+    for start in range(0, len(items), 200):
+        batch = items[start:start + 200]
+        answer, error, status = _request_json(port, "/api/ui/i18n/missing", method="POST",
+                                              timeout_sec=I18N_FALLBACK_TIMEOUT_SEC,
+                                              payload={"language": tag, "items": batch})
+        if not error and 200 <= status < 300:
+            _accept_missing(tag, batch, answer)
 
 
 def i18n_view(api: Any) -> Dict[str, Any]:

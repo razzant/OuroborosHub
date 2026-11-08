@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.11.2
+
+- `telegram_operation` declares which of its calls deliver words: an
+  `editMessageText` call (`method`) changes what people read, so a Host that knows
+  the `sends` field treats it as a message to `chat_id`, with its words at `text`,
+  and judges, guards and holds it like `telegram_send`. A reaction
+  (`setMessageReaction`) stays a write here and keeps `telegram_react` as its
+  gesture door. A Host that does not know the field ignores it.
+
+## 0.11.1
+
+- Connect now offers private chats the bot has already seen, labelled with the
+  person's observed name, username when available, and numeric chat ID. The owner
+  still chooses each chat explicitly; new places start Silent. No place, wake
+  choice or reply is created by discovery.
+- Private chats reuse the existing custody projection. New updates record ordered
+  block/unblock evidence; one resumable pass adds retained private messages.
+  Earlier blocks were never recorded, so an old blocked chat may remain offered
+  until newer evidence arrives. Rolling back to 0.11.0 keeps private rows visible
+  but stops updating their evidence. Group membership, migration and delivery
+  records stay unchanged.
+
+## 0.11.0
+
+- New `telegram_react` (`action: set` with one `emoji` or `custom_emoji_id`, or
+  `action: clear`) declares `effect: gesture` with `message: message_id`, so a Host that
+  knows gestures can offer a reaction on the waking message beside `telegram_send`. It calls
+  `telegram_operation` with `setMessageReaction` unchanged: same topic checks, outbox row,
+  `request_id` deduplication, receipt and no-resend of an unknown outcome. Nothing new is
+  stored. `telegram_operation` stays `write` and keeps `setMessageReaction`. On a Host that
+  predates gestures `telegram_react` is an undeclared write and no reaction door is shown.
+
+## 0.10.6
+
+- A photo or document above the Bot API's 20 MiB download limit no longer holds its whole
+  chat. Like voice and audio since 0.10.1, it carries `status: too_large` and a note and the
+  event goes on with the message reference. A row stored earlier without the mark, and a
+  file Telegram refuses with "file is too big" when the update did not size it, take the
+  same path, as does a body longer than the limit after `getFile` accepted it. Before this
+  a 487 MB archive kept a work group's 16 later messages, two of
+  them @mentions of the bot, waiting behind 203 download attempts for a day. Any other
+  download failure still retries and keeps the event first.
+
+## 0.10.5
+
+- Every message carries `message.sent_at`, Telegram's send time as an ISO time, and an edit
+  `message.edited_at` from `edit_date`, so the Host can say when the person wrote instead of
+  "at an unrecorded time". Reactions keep theirs; `sent_at_epoch` stays.
+
 ## 0.10.4 — unreleased
 
 - A hold line says the state and the next step, not the Host's answer behind it. An

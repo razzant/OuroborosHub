@@ -24,6 +24,11 @@ SUITES = {
                            'token-usage', 'smart_lists', 'calendar'],
                 'tests': ['tests/test_widget_theme_contracts.py', 'tests/test_dashboard_theme_browser.py'],
                 'shared': ['tests/fixtures/dashboard_theme_responses.json']},
+    # The quota widget's whole payload suite: its Node harnesses and its real Chromium and WebKit cases. catalog-check.yml
+    # gives it Node and Playwright's browsers; QUOTAS_REQUIRE_RUNTIME turns a skip for want of them into a failure.
+    'claudexor-quotas': {'skills': ['claudexor_quotas'], 'tests': ['skills/claudexor_quotas'],
+                         'dependencies': ['playwright>=1.50,<2'], 'cwd': 'skills/claudexor_quotas',
+                         'env': {'QUOTAS_REQUIRE_RUNTIME': '1'}},
     # The whole suite, real host and browsers included: catalog-check.yml gives this suite the pinned core (ATLAS_CORE),
     # its runtime and Playwright's browsers. Without them the suite stops with an error; it never skips.
     'memory-atlas': {'skills': ['memory-atlas'], 'tests': ['tests/memory_atlas'], 'dependencies': ['starlette']},
@@ -32,10 +37,14 @@ SUITES = {
                                  'tests/test_calendar_host_browser.py'],
                        'dependencies': ['icalendar', 'python-dateutil', 'cryptography'],
                        'core_env': 'OUROBOROS_THEME_CORE_ROOT'},
+    # Suites that list a Presence consumer (tests/test_*_core_consumer.py): catalog-check.yml gives them the pinned
+    # core (OUROBOROS_PRESENCE_CORE_ROOT), and the consumers drive the connectors through its Presence routes.
+    # Without that core the suite stops with an error; its consumers never skip.
     'slack-bridge': {'skills': ['slack-bridge'],
-                     'tests': ['skills/slack-bridge/tests', 'tests/test_slack_presence_core_consumer.py',
-                               'tests/test_reaction_core_consumer.py'],
-                     'dependencies': ['httpx', 'starlette', 'websockets']},
+                     'tests': ['skills/slack-bridge/tests', 'tests/test_slack_conversation_core_consumer.py',
+                               'tests/test_reaction_core_consumer.py', 'tests/test_gesture_core_consumer.py'],
+                     'dependencies': ['httpx', 'starlette', 'websockets'],
+                     'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT'},
     'email-presence': {'skills': ['email-presence'], 'tests': ['skills/email-presence/tests'],
                        'dependencies': ['httpx', 'starlette', 'requests', 'requests-ntlm', 'defusedxml'], 'cwd': 'skills/email-presence',
                        'core_env': 'OUROBOROS_SOURCE_DIR', 'env': {'OUROBOROS_RUN_MAIL_BROWSER': '1'}},
@@ -44,12 +53,15 @@ SUITES = {
     'github': {'skills': ['github'], 'tests': ['skills/github/tests'],
                'dependencies': ['PyJWT[crypto]>=2.13,<3', 'httpx', 'starlette']},
     'telegram-bot': {'skills': ['telegram-bot'], 'tests': ['skills/telegram-bot/tests', 'tests/test_reaction_core_consumer.py',
+                                                           'tests/test_gesture_core_consumer.py',
                                                            'tests/test_voice_attachment_core_consumer.py'],
-                     'dependencies': ['httpx', 'starlette', 'websockets', 'telethon>=1.45,<2', 'PySocks>=1.7.1']},
+                     'dependencies': ['httpx', 'starlette', 'websockets', 'telethon>=1.45,<2', 'PySocks>=1.7.1'],
+                     'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT'},
     'telegram-user-session': {'skills': ['telegram-user-session'],
                               'tests': ['skills/telegram-user-session/tests', 'tests/test_telegram_participant_widget_browser.py',
                                         'tests/test_voice_attachment_core_consumer.py'],
-                              'dependencies': ['telethon>=1.45,<2', 'PySocks>=1.7.1', 'httpx', 'starlette']},
+                              'dependencies': ['telethon>=1.45,<2', 'PySocks>=1.7.1', 'httpx', 'starlette'],
+                              'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT'},
     '2gis': {'skills': ['2gis'], 'tests': ['tests/test_2gis.py']},
     'keenable': {'skills': ['keenable'], 'tests': ['tests/test_keenable_transport.py', 'tests/test_keenable_widget.py'],
                  'shared': ['tests/fixtures/keenable/']},
@@ -102,7 +114,7 @@ def run_suite(name):
         if core is None or not all((core / path).is_file() for path in (
                 'ouroboros/gateway/host_service.py', 'web/provider-return.html')):
             raise RuntimeError(f'{name} requires {core_env} to name the coordinated core checkout; '
-                               'its host and provider return consumers must run, not skip')
+                               'its real-core consumers must run, not skip')
         env[core_env] = str(core)
     subprocess.run([sys.executable, '-B', '-m', 'pip', 'install', 'PyYAML', 'pytest',
                     *suite.get('dependencies', [])], check=True)

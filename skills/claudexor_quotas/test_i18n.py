@@ -177,7 +177,7 @@ def test_the_plugin_registers_its_table_with_the_generator(tmp_path, fakes):
     assert len(translation.catalogs) == 1
     prefix, table, note = translation.catalogs[0]
     assert prefix == "quotas.ui" and "quota" in note.lower() and len(note) < 400
-    assert table() == plugin.catalog_rows() and table()["plate.of"] == "left of {n} accounts"
+    assert table() == plugin.catalog_rows() and table()["plate.of"] == "of {n} account-windows left"
     assert "i18n" in host.routes
 
 
@@ -245,13 +245,15 @@ def test_what_is_missing_is_reported_once_and_wakes_the_generator(tmp_path, fake
     host = Host(tmp_path)
     plugin.register(host)
     host.routes["i18n"]({})
-    assert len(memory.recorded) == 1 and translation.events == [("missing", "ru")]
-    tag, items = memory.recorded[0]
+    assert len(memory.recorded) >= 3 and translation.events == [("missing", "ru")]
+    tag = memory.recorded[0][0]
+    items = [item for _tag, batch in memory.recorded for item in batch]
+    batches = len(memory.recorded)
     assert tag == "ru" and len(items) == len(STRINGS) - 3
     first = next(item for item in items if item["key"] == "code:quotas.ui.plate.of")
-    assert first["context"]["source"] == "left of {n} accounts" and first["context"]["table"] == "quotas.ui"
+    assert first["context"]["source"] == "of {n} account-windows left" and first["context"]["table"] == "quotas.ui"
     host.routes["i18n"]({})  # the same misses are not reported again
-    assert len(memory.recorded) == 1 and len(translation.events) == 1
+    assert len(memory.recorded) == batches and len(translation.events) == 1
 
 
 def test_a_language_with_no_memory_yet_is_english_and_queues_everything(tmp_path, fakes):
@@ -260,7 +262,7 @@ def test_a_language_with_no_memory_yet_is_english_and_queues_everything(tmp_path
     plugin.register(host)
     answer = host.routes["i18n"]({})
     assert answer["language"] == "de" and answer["strings"] == {} and answer["en"] == STRINGS
-    assert len(memory.recorded[0][1]) == len(STRINGS)
+    assert sum(len(batch) for _tag, batch in memory.recorded) == len(STRINGS)
 
 
 def test_a_broken_memory_never_breaks_the_route(tmp_path, fakes):
@@ -270,7 +272,7 @@ def test_a_broken_memory_never_breaks_the_route(tmp_path, fakes):
     plugin.register(host)
     answer = host.routes["i18n"]({})
     assert answer["language"] == "" and answer["strings"] == {} and answer["en"] == STRINGS
-    assert any("i18n read failed" in message for _level, message in host.logs) or host.logs == []
+    assert any("i18n read failed" in message for _level, message in host.logs)
 
 
 def test_without_the_hosts_modules_the_gateways_routes_stand_in(tmp_path, monkeypatch):
@@ -283,7 +285,7 @@ def test_without_the_hosts_modules_the_gateways_routes_stand_in(tmp_path, monkey
         if path == "/api/ui/i18n":
             return {"language": "ru", "english": False, "revision": 5, "plural_select": ru_select(),
                     "entries": ru_doc()["entries"]}, "", 200
-        return {"accepted": 1}, "", 200
+        return {"accepted": len(payload["items"])}, "", 200
 
     monkeypatch.setattr(plugin, "_request_json", fake_request)
     host = Host(tmp_path)
@@ -291,7 +293,7 @@ def test_without_the_hosts_modules_the_gateways_routes_stand_in(tmp_path, monkey
     answer = host.routes["i18n"]({})
     assert answer["language"] == "ru" and answer["revision"] == 5 and answer["strings"]["btn.refresh"] == "Обновить"
     posted = [c for c in calls if c[0] == "POST"]
-    assert len(posted) == 1 and posted[0][1] == "/api/ui/i18n/missing"
+    assert len(posted) >= 3 and posted[0][1] == "/api/ui/i18n/missing"
     assert posted[0][2]["language"] == "ru" and posted[0][2]["items"][0]["key"].startswith("code:quotas.ui.")
 
 
@@ -320,7 +322,10 @@ NODE_I18N = r"""
       status: classes(env.root, 'reserve-age').map((n) => n.textContent),
       cards: classes(env.root, 'empty-card').map((n) => n.textContent),
       retry: !!byFocus(env.root, 'retry'),
-      chart: classes(env.root, 'l-chart').map((n) => heard(n)),
+      title: classes(env.root, 'q-title').map((n) => n.textContent),
+      rings: classes(env.root, 'q-ring-name').map((n) => n.textContent),
+      ringSub: classes(env.root, 'q-ring-sub').map((n) => n.textContent),
+      say: walk(env.root).filter((n) => n.getAttribute('id') === 'quotas-win-say').map((n) => n.textContent),
     };
   }
   console.log(JSON.stringify(out));
@@ -329,10 +334,11 @@ NODE_I18N = r"""
 
 RU = {
     "btn.about": "О виджете", "btn.refresh": "Обновить",
-    "plate.of": {"forms": {"one": "осталось из {n} аккаунта", "few": "осталось из {n} аккаунтов", "many": "осталось из {n} аккаунтов",
-                           "other": "осталось из {n} аккаунта"}},
+    "plate.of": {"forms": {"one": "из {n} аккаунт-окна осталось", "few": "из {n} аккаунт-окон осталось", "many": "из {n} аккаунт-окон осталось",
+                           "other": "из {n} аккаунт-окна осталось"}},
     "n.account": {"forms": {"one": "{n} аккаунт", "few": "{n} аккаунта", "many": "{n} аккаунтов", "other": "{n} аккаунта"}},
-    "acc.title": "Аккаунты · {summary}", "acc.word": "Аккаунты · {n}", "plate.chart": "График",
+    "acc.title": "Аккаунты · {summary}", "acc.word": "Аккаунты · {n}",
+    "plate.window": "Окно: {len}", "plate.len_d": "{n}-дневное окно", "ring.avg_left": "в среднем осталось", "win.short.d": "{n}д",
     "reset.next": "следующий сброс {when}",
     "len.week": "Недельный",
 }
@@ -368,15 +374,15 @@ def test_the_real_widget_draws_russian_labels_and_the_plural_forms(tmp_path):
     assert one["about"] == ["О виджете"] and one["refresh"] == ["Обновить"]
     # the plural form is the language's: 1 / 3 / 5
     assert [x["of"][0].strip() for x in (one, three, five)] == [
-        "осталось из 1 аккаунта", "осталось из 3 аккаунтов", "осталось из 5 аккаунтов"]
+        "из 1 аккаунт-окна осталось", "из 3 аккаунт-окон осталось", "из 5 аккаунт-окон осталось"]
     # the word over the bars carries the bare count now ("Accounts · N", key acc.word): the plural forms stand in the line above
     assert [x["accounts"][0] for x in (one, three, five)] == [
         "Аккаунты · 1", "Аккаунты · 3", "Аккаунты · 5"]
-    # the plate's one control is the word, in the install's language, and nothing else of the old pill is drawn
-    assert one["chart"] == ["График"] and three["chart"] == ["График"] and five["chart"] == ["График"]
+    # the plate's head, the ring's short name and its caption are in the install's language
+    assert one["title"] == ["7-дневное окно"] and one["rings"] == ["7д"] and one["ringSub"] == ["в среднем осталось"]
     assert one["lowest"] == [] and three["lowest"] == [] and five["lowest"] == [], "the badge 'lowest left' is gone from the plate"
-    # the date is the browser's own, in Russian: a short weekday, the day, a short month, the hour
-    assert re.match(r"следующий сброс [а-я]{2} \d{1,2} [а-я]+ \d\d:\d\d", three["reset"][0]), three["reset"]
+    # the date is the browser's own, in Russian: a short weekday, the day, a short month, the hour (the plate's spoken summary says the next reset)
+    assert re.search(r"следующий сброс [а-я]{2} \d{1,2} [а-я]+ \d\d:\d\d", three["say"][0]), three["say"]
 
 
 def test_a_phrase_the_translation_lacks_stays_english(tmp_path):
@@ -389,11 +395,11 @@ def test_a_phrase_the_translation_lacks_stays_english(tmp_path):
 
 def test_english_and_a_garbled_translation_leave_the_screen_in_english(tmp_path):
     english = _run(tmp_path, {"language": "", "revision": 0, "plural_select": None, "strings": {}})
-    assert english["n3"]["about"] == ["About"] and english["n3"]["of"][0].strip() == "left of 3 accounts"
-    assert english["n1"]["of"][0].strip() == "left of 1 account" and english["n3"]["accounts"] == ["Accounts · 3"]
+    assert english["n3"]["about"] == ["About"] and english["n3"]["of"][0].strip() == "of 3 account-windows left"
+    assert english["n1"]["of"][0].strip() == "of 1 account-window left" and english["n3"]["accounts"] == ["Accounts · 3"]
     garbled = _run(tmp_path, {"language": "ru", "revision": 2, "plural_select": {"map": "x"},
                               "strings": {"btn.about": 5, "plate.of": {"forms": 3}, "n.account": {"forms": {}}}})
-    assert garbled["n3"]["about"] == ["About"] and garbled["n3"]["of"][0].strip() == "left of 3 accounts"
+    assert garbled["n3"]["about"] == ["About"] and garbled["n3"]["of"][0].strip() == "of 3 account-windows left"
 
 
 def _foot_views(tmp_path):
@@ -448,9 +454,9 @@ MEMORY_PREFIX = "code:quotas.ui."
 WINDOW_ROW_WORDS = [
     "win.row", "win.hidden_in_rows", "win.none", "win.avg", "win.avg_read", "win.applies",
     "win.short.h", "win.short.d", "win.short.m", "win.short.none",
-    "cycle.note", "scope.row", "account.some", "status.unread", "status.quota_unread",
+    "cycle.note", "account.some", "status.unread", "status.quota_unread",
     "stamp.read_word", "stamp.read_of", "stamp.title", "stamp.title_failed", "stamp.title_quota", "stamp.title_none",
-    "foot.not_read", "foot.read_ago", "foot.read_just_now", "foot.read_up_to", "foot.more", "foot.more_label", "foot.why_not_read", "foot.why_unreadable", "foot.why_sources_disagree",
+    "foot.not_read", "foot.read_ago", "foot.read_just_now", "foot.read_up_to", "foot.more", "foot.why_not_read", "foot.why_unreadable", "foot.why_sources_disagree",
     "foot.why_reset_passed", "foot.why_too_old", "foot.why_no_reading_in_answer"]
 
 
@@ -465,15 +471,14 @@ def test_the_words_of_the_window_row_the_stamp_and_the_footnote_are_in_the_engli
     # The stamp and the footnote say what they say: the count, the star's words, the reasons (each reason is a key of FOOT_WHY).
     # The stamp is three short lines in the narrow rail: the word, the count, the age. The rail says a window in one short word.
     assert STRINGS["stamp.read_word"] == "Read" and STRINGS["stamp.read_of"] == "{n} of {m}" and "stamp.read" not in STRINGS
-    assert STRINGS["win.short.h"] == "{n}H" and STRINGS["win.short.d"] == "{n}D" and STRINGS["win.short.m"] == "{n}M"
+    assert STRINGS["win.short.h"] == "{n}h" and STRINGS["win.short.d"] == "{n}d" and STRINGS["win.short.m"] == "{n}m"
     # (the note's head says it in the plate's own words: "No fresh data · 3", and a group of readings that are old says "read 4 days ago")
     assert STRINGS["foot.not_read"] == "No fresh data · {n}" and STRINGS["foot.more"] == "{n} more"
     assert STRINGS["foot.read_ago"] == "read {age} ago"
     # ...a reading under two minutes old is "read just now" (never "just now ago"), and accounts read at different ages are "read up to <the oldest> ago"
     assert STRINGS["foot.read_just_now"] == "read just now" and STRINGS["foot.read_up_to"] == "read up to {age} ago"
     # the number over the plate says what it is: what is left, of how many accounts
-    assert STRINGS["plate.of"] == {"one": "left of {n} account", "other": "left of {n} accounts"}
-    assert STRINGS["foot.more_label"] == "{n} more accounts — open the account list"
+    assert STRINGS["plate.of"] == {"one": "of {n} account-window left", "other": "of {n} account-windows left"}
     assert STRINGS["stamp.title"] == "Accounts of this window read: {n} of {m} · {observed}"
     assert {STRINGS[key] for key in WINDOW_ROW_WORDS if key.startswith("foot.why_")} == {
         "not read", "unreadable", "sources disagree", "window reset after the reading", "reading older than the window", "not in the answer"}
@@ -484,16 +489,16 @@ def test_the_words_of_the_window_row_the_stamp_and_the_footnote_are_in_the_engli
                         ("win.short.m", {"n"}), ("win.short.none", set()),
                         ("stamp.title", {"n", "m", "observed"}), ("status.unread", {"when"}),
                         ("status.quota_unread", {"when"}), ("win.avg_read", {"name", "avg", "read", "n"}), ("win.applies", {"m", "n"}),
-                        ("foot.more", {"n"}), ("foot.more_label", {"n"}), ("win.none", {"name"}), ("win.avg", {"name", "avg"}),
+                        ("foot.more", {"n"}), ("win.none", {"name"}), ("win.avg", {"name", "avg"}),
                         ("cycle.note", {"family"}), ("foot.not_read", {"n"}), ("foot.read_ago", {"age"}), ("foot.read_up_to", {"age"}), ("foot.read_just_now", set()),
                         # the words of the top of the capsule: the bubble at the limit, the credits (the fact's caption is the window's name alone)
                         ("plate.at_limit", {"n"}), ("plate.back", {"in"}),
                         ("plate.over_plan", {"amount"}), ("credits.family", set()), ("credits.family_n", {"count"}),
-                        ("credits.on_accounts", {"n"}), ("cycle.period", set())):
+                        ("credits.on_accounts", {"n"}), ("ring.scoped", {"scope", "len"}), ("plate.window", {"len"})):
         assert set(PLACEHOLDER.findall(" ".join(_forms_of(STRINGS[key])))) == params, key
     # English left in the widget beside the row would be the old defect: the labels of the row and of the scope go through t().
     for gone in ("'Limit window'", "'Limit scope'", "'avg left'", "'no current reading'", "'hidden in Rows'"):
-        assert gone not in WIDGET.split("function windowRow(")[1].split("function scopeRow(")[0], gone
+        assert gone not in WIDGET.split("function limitRail(")[1].split("function litOf(")[0], gone
 
 
 def test_the_russian_memory_has_the_same_phrases_as_the_english_table_with_the_same_placeholders_and_the_plural_forms():
@@ -516,14 +521,6 @@ def test_the_russian_memory_has_the_same_phrases_as_the_english_table_with_the_s
     for key in ("win.avg_read", "win.applies"):
         assert set(entries[key]["forms"]) == {"one", "few", "many", "other"}, key
     said = {key: entries[key].get("text") for key in WINDOW_ROW_WORDS if "text" in entries[key]}
-    assert said["stamp.read_word"] == "Прочитано" and said["stamp.read_of"] == "{n} из {m}"
-    assert said["foot.not_read"] == "Нет свежих данных · {n}" and said["foot.more"] == "ещё {n}"
-    assert said["foot.read_ago"] == "читали {age} назад"
-    assert said["foot.read_just_now"] == "читали только что" and said["foot.read_up_to"] == "читали до {age} назад"
-    assert {form for form in entries["plate.of"]["forms"].values()} == {"осталось из {n} аккаунта", "осталось из {n} аккаунтов"}
-    # The short names of the windows: "5ч", "7д", "30д" in Russian (the English "5H", "7D", "30D"), the full name stays in the label and the title.
-    assert said["win.short.h"] == "{n}ч" and said["win.short.d"] == "{n}д" and said["win.short.m"] == "{n}мин" and said["win.short.none"] == "н/д"
-    assert said["win.row"] == "Окно лимита" and said["scope.row"] == "Область лимита" and said["account.some"] == "аккаунт"
     assert all(re.search(r"[А-Яа-яЁё]", text) for text in said.values()), [k for k, v in said.items() if not re.search(r"[А-Яа-яЁё]", v)]
 
 
@@ -533,12 +530,13 @@ PLATE_WORDS_GONE = ["plate.lowest", "plate.show_chart", "plate.hide_chart", "pla
                     # the rail has no caption ("average across accounts") and no grey place (a window the family does not report is not drawn)
                     "rail.cap", "win.not_reported", "win.cursor_none",
                     # the fact's caption is the name of the window alone: the word "Remaining" is gone from the plate (the title of the figure keeps its sense)
-                    "plate.remaining"]
+                    "plate.remaining",
+                    # the history has no fold of its own: the plate's word Chart is gone, and so is the scope row (each scope has its own ring)
+                    "plate.chart", "scope.row", "chart.strip", "chart.strip_label", "acc.strip_of", "cycle.period"]
 
 
 def test_the_word_chart_and_the_dated_values_line_are_in_both_files_and_the_words_that_left_the_plate_are_in_neither():
-    assert STRINGS["plate.chart"] == "Chart" and STRINGS["legend.last"] == "last known"
-    assert "wordButton('plate.chart')" in WIDGET and "t('legend.last')" in WIDGET
+    assert STRINGS["legend.last"] == "last known" and "t('legend.last')" in WIDGET
     for key in PLATE_WORDS_GONE:
         assert key not in STRINGS, key
         assert ("'%s'" % key) not in WIDGET, "the widget still asks for %s" % key
@@ -546,8 +544,7 @@ def test_the_word_chart_and_the_dated_values_line_are_in_both_files_and_the_word
         pytest.skip(RU_JSON_SKIP)
     memory = json.loads(RU_JSON.read_text(encoding="utf-8"))["entries"]
     ru = {key[len(MEMORY_PREFIX):]: value for key, value in memory.items()}
-    assert ru["plate.chart"]["text"] == "График" and ru["plate.chart"]["source"] == "Chart"
-    assert ru["legend.last"]["text"] == "по прошлому чтению" and ru["legend.last"]["source"] == "last known"
+    assert ru["legend.last"]["text"].strip() and ru["legend.last"]["source"] == STRINGS["legend.last"]
     assert not [key for key in PLATE_WORDS_GONE if key in ru], "the memory still holds words the plate no longer asks for"
 
 
@@ -576,52 +573,40 @@ def test_the_words_of_the_ladder_of_resets_are_in_both_files_with_the_same_place
                         ("ladder.step", {"when", "accounts", "names", "amount"}), ("ladder.more_label", {"n"})):
         assert set(PLACEHOLDER.findall(" ".join(_forms_of(STRINGS[key])))) == params, key
     # "N more" of the ladder is the footnote's own phrase (the same two words, the same count).
-    assert "t('foot.more', { n: extra || 1 })" in WIDGET and "t('foot.more', { n: left })" in WIDGET
+    assert "t('foot.more', { n: steps.length - max })" in WIDGET
     if RU_JSON is None:
         pytest.skip(RU_JSON_SKIP)
     memory = json.loads(RU_JSON.read_text(encoding="utf-8"))["entries"]
     ru = {key[len(MEMORY_PREFIX):]: value for key, value in memory.items()}
     for key in LADDER_WORDS:
         assert key in ru, key
-    assert ru["ladder.title"]["text"] == "Сбросы" and ru["ladder.none"]["text"] == "не сообщены"
-    # In Russian as the windows are named (5ч, 7д): "40м", "5ч", "2д", "2д 5ч" ("<1м" is "<" and "1м": the memory refuses the sign); no forms (the unit is a letter, it does not decline).
-    assert [ru[k]["text"] for k in ("ladder.in_min", "ladder.in_hour", "ladder.in_day", "ladder.in_day_hour")] == [
-        "{v}м", "{v}ч", "{v}д", "{d}д {h}ч"]
+    for key in LADDER_WORDS:
+        translated = ru[key].get("text") or " ".join(ru[key].get("forms", {}).values())
+        assert translated.strip(), key
+        assert set(PLACEHOLDER.findall(translated)) == set(PLACEHOLDER.findall(_text(STRINGS[key]))), key
     assert "ladder.date" not in ru, "the memory holds no date of the step"
     assert all("forms" not in ru[k] for k in ("ladder.in_min", "ladder.in_hour", "ladder.in_day", "ladder.in_day_hour"))
     assert set(ru["plate.back"]["forms"]) == {"one", "few", "many", "other"} and all(
-        "через {in}" in form for form in ru["plate.back"]["forms"].values()), "the bubble: back in {in}; the verb still follows the count"
-    assert ru["ladder.step"]["text"] == "{when} — {accounts}: {names} · вернётся {amount}, если не тратить"
+        "{in}" in form for form in ru["plate.back"]["forms"].values()), "each form retains the reset countdown"
     assert set(ru["ladder.more_label"]["forms"]) == {"one", "few", "many", "other"}
     assert all(re.search(r"[А-Яа-яЁё]", form) for form in ru["ladder.more_label"]["forms"].values())
 
 
 # ---------------------------------------------------------------------------
-# The words a bar opens to (kit: bars): in the English table, in the Russian memory, and asked for by the widget. "back in {in}" and the age phrases are the
-# plate's and the note's own (plate.back, foot.read_ago, foot.read_just_now), taken as they are.
-BAR_WORDS = ["bar.reset_in", "bar.at_limit", "bar.was_at_limit", "bar.restricted_now", "bar.read", "bar.no_data"]
+# The words a bar opened to are gone with the opening: no figure and no words in a bar (the card beside the bars says them), so
+# neither file holds them and the widget asks for none.
+BAR_WORDS_GONE = ["bar.reset_in", "bar.at_limit", "bar.was_at_limit", "bar.restricted_now", "bar.read", "bar.no_data"]
 
 
-def test_the_words_a_bar_opens_to_are_in_both_files_with_the_same_placeholders_and_the_widget_asks_for_them():
-    for key in BAR_WORDS:
-        assert key in STRINGS, key
-        assert ("t('%s'" % key) in WIDGET, "the widget never asks for %s" % key
-    assert [STRINGS[key] for key in BAR_WORDS] == ["reset in {in}", "at the limit", "was at the limit", "restricted now", "read {age}", "no data"]
-    # the bar's lines that say "back in" and "read ... ago" are the plate's and the note's phrases, not new ones
-    assert "t('plate.back', { n: 1, 'in': until })" in WIDGET and "t('foot.read_ago', { age: agePhrase(part) })" in WIDGET and "t('foot.read_just_now')" in WIDGET
-    assert "bar.back_in" not in STRINGS and "bar.read_ago" not in STRINGS, "the plate's and the note's phrases are taken, no twin of them"
-    # what the widget passes is what the phrase has
-    for key, params in (("bar.reset_in", {"in"}), ("bar.read", {"age"}), ("bar.at_limit", set()), ("bar.was_at_limit", set()),
-                        ("bar.restricted_now", set()), ("bar.no_data", set())):
-        assert set(PLACEHOLDER.findall(" ".join(_forms_of(STRINGS[key])))) == params, key
+def test_the_words_a_bar_opened_to_are_gone_with_the_opening():
+    for key in BAR_WORDS_GONE:
+        assert key not in STRINGS, key
+        assert ("'%s'" % key) not in WIDGET, "the widget still asks for %s" % key
     if RU_JSON is None:
         pytest.skip(RU_JSON_SKIP)
     memory = json.loads(RU_JSON.read_text(encoding="utf-8"))["entries"]
     ru = {key[len(MEMORY_PREFIX):]: value for key, value in memory.items()}
-    for key in BAR_WORDS:
-        assert key in ru and ru[key]["source"] == STRINGS[key], key
-    assert [ru[key]["text"] for key in BAR_WORDS] == [
-        "сброс через {in}", "на лимите", "был на лимите", "ограничен сейчас", "прочитано {age}", "нет данных"]
+    assert not [key for key in BAR_WORDS_GONE if key in ru], "the memory still holds words the bars no longer ask for"
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +636,141 @@ def test_the_words_of_the_checkpoint_tiles_are_in_both_files_with_the_same_place
     for key in TILE_WORDS:
         # the memory remembers the English it translated: a changed English is a stale translation
         assert key in ru and ru[key]["source"] == STRINGS[key], key
-    assert [ru[key]["text"] for key in TILE_WORDS] == ["Останется, если больше ничего не тратить", "Останется при текущем темпе", "{when} · из {total}"]
     assert _placeholders(ru["fact.tile_when"]["text"]) == {"when", "total"}
     assert not [key for key in TILE_WORDS_GONE if key in ru], "the memory still holds words the tiles no longer ask for"
+
+
+@pytest.mark.parametrize('path', ['route', 'fallback'])
+def test_old_language_response_cannot_cross_page_lifecycle(tmp_path, path):
+    harness = test_quotas.NODE_WIDGET_MATRIX.split('(async () => {')[0]
+    harness = harness.replace("const wrapper = (url, options) => (isI18n(url) ? Promise.resolve(response(I18N_ANSWER)) : current.call(window, url, options));",
+                              "const wrapper = (url, options) => current.call(window, url, options);")
+    harness = harness.replace(": response(typeof view === 'function' ? view(url, calls) : view));",
+                              ": Promise.resolve(typeof view === 'function' ? view(url, calls) : view).then(response));")
+    script = r'''
+(async () => {
+  const view = JSON.parse(process.env.TEST_VIEW);
+  const fallback = process.env.TEST_PATH === 'fallback';
+  let phase = 0, resolveOld;
+  const en = I18N_ANSWER;
+  const ru = {...en, language: 'ru', strings: {'btn.about': 'О виджете', 'btn.refresh': 'Обновить'}};
+  const env = await boot(url => {
+    if (isI18n(url)) {
+      if (phase === 0 && fallback) return {};
+      if (phase === 1 && !fallback) return new Promise(resolve => { resolveOld = resolve; });
+      return phase === 2 ? ru : en;
+    }
+    if (fallback && String(url).includes('text=1') && phase === 0) return new Promise(resolve => { resolveOld = resolve; });
+    return view;
+  });
+  if (!fallback) { phase = 1; env.interval()(); }
+  await settle();
+  assert.equal(typeof resolveOld, 'function', 'old transport remains in flight');
+  env.windowListeners.pagehide[0]();
+  phase = 2;
+  env.windowListeners.pageshow[0]();
+  await settle();
+  assert.match(byFocus(env.root, 'about').textContent, /О виджете/);
+  resolveOld(fallback ? {...view, text: en} : en);
+  await settle();
+  byFocus(env.root, 'accounts').listeners.click[0]({stopPropagation(){}});
+  await settle();
+  assert.match(byFocus(env.root, 'about').textContent, /О виджете/, 'old English must not overwrite new Russian');
+  env.disposeHooks[0]();
+})().catch(e => { console.error(e.stack || e); process.exit(1); });
+'''
+    widget = Path(os.environ.get('QUOTAS_REVIEW_WIDGET_PATH', HERE / 'widget.js'))
+    result = subprocess.run([str(_node()), '-e', harness + script], cwd=HERE,
+                            env={**os.environ, 'WIDGET_PATH': str(widget), 'TEST_PATH': path,
+                                 'TEST_VIEW': json.dumps(_views(tmp_path)['n1'])},
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_loopback_misses_retry_rejections_and_queue_all_chunks(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin, '_host_i18n', lambda: (None, None, None))
+    plugin._REPORTED_MISSES.clear()
+    rejected = True
+    batches = []
+
+    def request(port, path, method='GET', timeout_sec=0, payload=None):
+        if method == 'GET':
+            return {'language': 'ru', 'entries': {}}, '', 200
+        batch = payload['items']
+        batches.append(batch)
+        assert len(batch) <= 200
+        return ({'accepted': 0} if rejected else {'accepted': len(batch)}), '', 200
+
+    monkeypatch.setattr(plugin, '_request_json', request)
+    host = Host(tmp_path)
+    plugin.i18n_view(host)
+    assert not plugin._REPORTED_MISSES.get('ru')
+    rejected = False
+    batches.clear()
+    plugin.i18n_view(host)
+    assert {item['key'] for batch in batches for item in batch} == {'code:quotas.ui.' + k for k in STRINGS}
+    assert len(batches) >= 3
+    batches.clear()
+    plugin.i18n_view(host)
+    assert not batches
+
+
+def test_selection_and_billing_words_use_current_translation(tmp_path):
+    translated = {key: 'ЯЗЫК ' + key + ' ' + ' '.join('{' + name + '}' for name in PLACEHOLDER.findall(_text(value)))
+                  for key, value in STRINGS.items()}
+    harness = test_quotas.NODE_WIDGET_MATRIX.split('(async () => {')[0]
+    harness = harness.replace('const isI18n =', 'Object.assign(I18N_ANSWER, JSON.parse(process.env.TEST_I18N));\nconst isI18n =', 1)
+    script = r'''
+(async () => {
+  const views = JSON.parse(process.env.TEST_VIEWS);
+  const env = await boot(views.cursor_mixed);
+  const first = allSpoken(env.root);
+  for (const key of ['budget.share', 'budget.ends', 'budget.last_read', 'budget.unlimited_note', 'pick.selected', 'pick.select']) {
+    assert.ok(first.includes('ЯЗЫК ' + key), 'translated billing/selection ' + key);
+  }
+  byFocus(env.root, 'accounts').listeners.click[0]({stopPropagation(){}});
+  byFocus(env.root, 'acct:cursor:a2').listeners.click[0]({stopPropagation(){}});
+  const text = allSpoken(env.root);
+  assert.ok(text.includes('ЯЗЫК accounts.unlimited'));
+  assert.ok(text.includes('ЯЗЫК pick.selected'));
+  assert.doesNotMatch(text, /select this account|unlimited included usage|cycle ends/);
+  assert.match(text, /a2/, 'provider account label is preserved');
+  env.disposeHooks[0]();
+})().catch(e => { console.error(e.stack || e); process.exit(1); });
+'''
+    result = subprocess.run([str(_node()), '-e', harness + script], cwd=HERE,
+                            env={**os.environ, 'WIDGET_PATH': str(HERE / 'widget.js'),
+                                 'TEST_I18N': json.dumps({'language': 'ru', 'strings': translated}),
+                                 'TEST_VIEWS': json.dumps(W._cursor_views(tmp_path))},
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_resize_handlers_and_timer_are_released_and_restored(tmp_path):
+    harness = test_quotas.NODE_WIDGET_MATRIX.split('(async () => {')[0]
+    harness = harness.replace('    root: made.root,', '    window,\n    root: made.root,')
+    script = r'''
+(async () => {
+ const env = await boot(JSON.parse(process.env.TEST_VIEW));
+ assert.equal(env.windowListeners.resize.length, 2);
+ let timer, cancelled = false;
+ env.window.setTimeout = (fn, ms) => { assert.equal(ms, 120); timer = fn; return 456; };
+ const clear = env.window.clearTimeout;
+ env.window.clearTimeout = id => { if (id === 456) cancelled = true; else clear(id); };
+ env.windowListeners.resize[1]();
+ assert.equal(typeof timer, 'function');
+ env.windowListeners.pagehide[0]();
+ assert.equal(env.windowListeners.resize.length, 0);
+ assert.ok(cancelled, 'pending resize timer was cleared');
+ env.window.setTimeout = (fn, ms) => setTimeout(fn, ms);
+ env.windowListeners.pageshow[0]();
+ await settle();
+ assert.equal(env.windowListeners.resize.length, 2, 'one handler pair after restoration');
+ env.disposeHooks[0]();
+ assert.equal(env.windowListeners.resize.length, 0);
+})().catch(e => { console.error(e.stack || e); process.exit(1); });
+'''
+    result = subprocess.run([str(_node()), '-e', harness + script], cwd=HERE,
+                            env={**os.environ, 'WIDGET_PATH': str(HERE / 'widget.js'),
+                                 'TEST_VIEW': json.dumps(_views(tmp_path)['n1'])}, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr

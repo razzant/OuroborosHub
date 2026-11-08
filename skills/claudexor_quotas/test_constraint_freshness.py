@@ -392,8 +392,10 @@ NODE_FRESHNESS = r"""
     assert.equal(classes(env.root,'inspector').length,1,name+': its card stands already');
     click(env,rowKey);
     assert.equal(byFocus(env.root,'accounts').getAttribute('aria-pressed'),'false',name+': a press on a row shuts the list');
-    assert.equal(classes(env.root,'inspector').length,1,name+': the first press keeps the pick, its card stands');
-    const inspector = classes(env.root,'inspector')[0].textContent;
+    // Back on the plate, the picked account's card stands beside the bars; its full details are under its one button.
+    assert.equal(classes(env.root,'q-card').length,1,name+': the first press keeps the pick, its card stands');
+    click(env,'inspector-details');
+    const inspector = classes(env.root,'q-card')[0].textContent;
     const credits = classes(env.root,'account-credits')[0].textContent;
     assert.match(inspector,/its window reset after the last reading/,name);
     if (name === 'explicit') {

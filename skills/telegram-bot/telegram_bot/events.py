@@ -13,6 +13,13 @@ from typing import Any, Dict, Optional, Sequence, Tuple
 _PLACE_CHAT_TYPES = frozenset({"private", "group", "supergroup", "channel"})
 # getFile serves at most this much; a larger file can never be downloaded by a bot.
 BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+TOO_LARGE_NOTE = ("Not staged: larger than the Bot API's 20 MiB download limit. "
+                  "The Telegram message reference is retained.")
+
+
+def too_large_marks(size: int) -> Dict[str, str]:
+    """Telegram never serves a bot a file above the download limit; retrying it would hold its conversation."""
+    return {"status": "too_large", "note": TOO_LARGE_NOTE} if size > BOT_API_DOWNLOAD_LIMIT else {}
 # The Host classifies a staged file by its bytes, but an MP3 without an ID3 tag or an
 # M4A under a generic MP4 brand is only recognized with its usual suffix.
 _AUDIO_SUFFIXES = {
@@ -30,8 +37,9 @@ class TelegramAttachment:
     file_name: str
     mime_type: str
     file_size: int
-    # Voice and audio only; omitted from the dict when absent, so photo and
-    # document facts keep their exact earlier shape.
+    # duration_sec is voice and audio only; status and note mark a file above the Bot API
+    # download limit. All three are omitted from the dict when absent, so an ordinary photo
+    # or document keeps its exact earlier shape.
     duration_sec: Optional[int] = None
     status: Optional[str] = None
     note: Optional[str] = None
@@ -151,6 +159,7 @@ def parse_telegram_update(
         "event_kind": event_kind,
         "message_id": message_id,
         "sent_at_epoch": _integer(message.get("date")),
+        **_time_facts(_integer(message.get("date")), _integer(message.get("edit_date"))),
         "reply_to_message_id": _reply_message_id(message),
         "attachments": [item.to_dict() for item in attachments],
     }
@@ -273,7 +282,6 @@ def _parse_reaction_update(
     # Outside a forum the chat is the conversation. In a forum only a retained record proves the topic.
     proven = chat.get("is_forum") is not True and chat.get("type") in _PLACE_CHAT_TYPES
     sent_at_epoch = _integer(reaction.get("date"))
-    sent_at = _iso_time(sent_at_epoch) if sent_at_epoch else ""
     return TelegramEvent(
         source_event_id=f"telegram:{bot_id}:{update_id}",
         provider="telegram",
@@ -287,7 +295,7 @@ def _parse_reaction_update(
             "event_kind": "message_reaction_count" if counted else "message_reaction",
             "message_id": message_id,
             "sent_at_epoch": sent_at_epoch,
-            **({"sent_at": sent_at} if sent_at else {}),
+            **_time_facts(sent_at_epoch),
             **raw,
             "reaction": {"schema_version": 1, **values, "target": {
                 "message_id": str(message_id), "resolution": "resolved" if proven else "unresolved"}},
@@ -330,6 +338,13 @@ def _iso_time(epoch: int) -> str:
         return ""
 
 
+def _time_facts(sent_epoch: Optional[int], edited_epoch: Optional[int] = None) -> Dict[str, str]:
+    """``message.sent_at`` and, for an edit, ``edited_at`` from Telegram's own dates; an absent or unreadable one is
+    omitted, never replaced by a receipt time."""
+    times = (("sent_at", sent_epoch), ("edited_at", edited_epoch))
+    return {key: value for key, epoch in times if epoch and (value := _iso_time(epoch))}
+
+
 def _attachments(message: Dict[str, Any]) -> Tuple[TelegramAttachment, ...]:
     result = []
     photos = message.get("photo")
@@ -347,6 +362,7 @@ def _attachments(message: Dict[str, Any]) -> Tuple[TelegramAttachment, ...]:
                     file_name=f"photo-{photo.get('file_unique_id') or photo.get('file_id')}.jpg",
                     mime_type="image/jpeg",
                     file_size=_integer(photo.get("file_size")) or 0,
+                    **too_large_marks(_integer(photo.get("file_size")) or 0),
                 )
             )
     document = message.get("document")
@@ -359,6 +375,7 @@ def _attachments(message: Dict[str, Any]) -> Tuple[TelegramAttachment, ...]:
                 file_name=str(document.get("file_name") or "document"),
                 mime_type=str(document.get("mime_type") or "application/octet-stream"),
                 file_size=_integer(document.get("file_size")) or 0,
+                **too_large_marks(_integer(document.get("file_size")) or 0),
             )
         )
     for kind in ("voice", "audio"):
@@ -380,7 +397,6 @@ def _sound(kind: str, item: Dict[str, Any]) -> TelegramAttachment:
         name += suffix
     size = _integer(item.get("file_size")) or 0
     duration = _integer(item.get("duration"))
-    too_large = size > BOT_API_DOWNLOAD_LIMIT
     return TelegramAttachment(
         kind=kind,
         file_id=str(item.get("file_id")),
@@ -389,9 +405,7 @@ def _sound(kind: str, item: Dict[str, Any]) -> TelegramAttachment:
         mime_type=mime,
         file_size=size,
         duration_sec=duration if duration is not None and duration >= 0 else None,
-        status="too_large" if too_large else None,
-        note=("Not staged: larger than the Bot API's 20 MiB download limit. "
-              "The Telegram message reference is retained.") if too_large else None,
+        **too_large_marks(size),
     )
 
 

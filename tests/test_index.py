@@ -560,12 +560,14 @@ print(json.dumps([payload_digest(Path(c['path']), manifest_entry=c['front'].get(
             self.assertEqual(entries[name]['owner'], facts['owner'])
         categories = builder.read_json(ROOT / 'categories.json')['categories']
         self.assertEqual(len(categories), 12)
-        expected = set('a2a adaptive-code-review anti-slop cache_efficiency_snapshot calendar claudexor_quotas confluence '
-                       'context-lens duckduckgo email email-presence github google-workspace keenable memory-atlas perplexity '
-                       'slack-bridge telegram-bot pdf_tools word_tools'.split())
+        expected = set('a2a adaptive-code-review anti-slop cache_efficiency_snapshot calendar chrome_browser '
+                       'claudexor_quotas confluence context-lens duckduckgo email email-presence github '
+                       'google-workspace keenable memory-atlas office_reader perplexity slack-bridge '
+                       'table_tools telegram-bot pdf_tools word_tools'.split())
         self.assertEqual({r['name'] for r in official['endorsements']}, expected)
         self.assertEqual({r['name'] for r in official['endorsements'] if r.get('recommended')},
-                         set('duckduckgo pdf_tools word_tools anti-slop memory-atlas'.split()))
+                         set('duckduckgo pdf_tools word_tools anti-slop memory-atlas chrome_browser '
+                             'keenable office_reader table_tools'.split()))
         generated = builder.build_catalog(ROOT)
         self.assertEqual({r['slug'] for r in generated['skills']}, set(entries))
         for entry in entries.values():
@@ -584,7 +586,7 @@ CONNECTORS = sorted(directory.name for directory in (ROOT / "skills").iterdir()
 # Mirrors of the core contract, compared with a core checkout by the opt-in parity test below:
 # ouroboros/places.py WAKE_FACTS, ouroboros/extension_ui_validation.py _validate_contribution (common and
 # place keys) and ouroboros/icon_geometry.py (geometry and paint). The hub also refuses g and ellipse.
-CORE_WAKE_FACTS = ("direct_message", "group_dm", "mention", "reply_to_me", "my_thread", "new_issue",
+CORE_WAKE_FACTS = ("direct_message", "group_dm", "mention", "reply_to_me", "my_thread", "signal.new_root", "new_issue",
                    "new_pull_request", "review_requested", "assigned", "any_message", "from_bot")
 CORE_PLACE_KEYS = {"id", "label", "title", "icon", "order", "render",
                    "provides", "destination", "scope", "wakes", "source", "settings", "read_only", "facts"}
@@ -689,7 +691,9 @@ def test_every_exported_tool_has_an_effect_and_destination(name):
     assert set(names) == exported_names(directory, tool_prefix(names))
     assert len(names) == len(set(names))
     for row in rows:
-        assert row["effect"] in {"read", "message", "write"}
+        assert row["effect"] in {"read", "message", "gesture", "write"}
+        # A gesture acts on one message: the core fills that argument from the waking event.
+        assert (row["effect"] == "gesture") == bool(row.get("message")), row["name"]
         target = row["target"]
         assert isinstance(target, (str, list))
         for argument in ([target] if isinstance(target, str) else target):
@@ -793,3 +797,28 @@ def test_mixed_tools_remain_write_and_email_covers_all_recipients():
         assert manifests[connector][name]["effect"] == "read"
     assert manifests["email-presence"]["email_send"]["effect"] == "message"
     assert manifests["email-presence"]["email_send"]["target"] == ["account_id", "to", "cc", "bcc"]
+    # A mixed tool stays a write and declares which calls deliver words: an edit of the bot's message, not a reaction.
+    sends = manifests["telegram-bot"]["telegram_operation"]["sends"]
+    assert (sends["when"], sends["target"], sends["text"]) == ({"method": ["editMessageText"]}, "chat_id", "text")
+    assert manifests["telegram-user-session"]["tg_edit"]["effect"] == "message"
+    tools = {row["name"]: row for row in builder.read_manifest(ROOT / "skills" / "email")["tools"]}
+    assert (tools["email_send"]["effect"], tools["email_send"]["target"], tools["email_send"]["text"]) == (
+        "message", ["to", "cc", "bcc"], "body")
+    assert "effect" not in tools["email_read"]  # the tools skill declares only its send
+
+
+def test_gestures_are_reactions_on_one_message_of_the_declared_conversation():
+    """A gesture door is what a gesture-aware core offers beside the send door: it must name the conversation and
+    the message argument and aim nowhere else. An older core reads the unknown effect as an undeclared write."""
+    manifests = {name: {row["name"]: row for row in builder.read_manifest(ROOT / "skills" / name)["tools"]} for name in CONNECTORS}
+    gestures = {(connector, name): row for connector, rows in manifests.items() for name, row in rows.items()
+                if row.get("effect") == "gesture"}
+    assert set(gestures) == {("slack-bridge", "slack_reaction_add"), ("slack-bridge", "slack_reaction_remove"),
+                             ("telegram-bot", "telegram_react"), ("telegram-user-session", "tg_react")}
+    for key, row in gestures.items():
+        targets = [row["target"]] if isinstance(row["target"], str) else row["target"]
+        assert row.get("conversation") and row.get("message"), key
+        assert set(targets) <= {"account_id", row["conversation"], row.get("thread", "")}, key
+    assert gestures[("slack-bridge", "slack_reaction_add")]["message"] == "ts"
+    assert gestures[("telegram-bot", "telegram_react")]["message"] == "message_id"
+    assert gestures[("telegram-user-session", "tg_react")]["message"] == "message_id"

@@ -1,7 +1,7 @@
 {
   "endorsements": [
     {
-      "digest": "8ded2740818b0f4c288e87a6a3c847a43ecec3eed3d3b66b78f6f288d30bf3ca",
+      "digest": "147ff878ebd6c3bbde89e05278d66348405d6c55bf2c611c77e86d00e314d2b9",
       "name": "a2a",
       "recommended": false
     },
@@ -21,12 +21,17 @@
       "recommended": false
     },
     {
-      "digest": "47825f8126a250e01e7afa067663888bb3315b2967a3c64dee021d2c602a9560",
+      "digest": "1df308334b4ff526182ccea2cdb247f787a717ab3a6b75d5c8728ce8b227507a",
       "name": "calendar",
       "recommended": false
     },
     {
-      "digest": "9ebc010de160df6706d57e1a751a832f712f2eedb595db31400ae1e2c1297331",
+      "digest": "ae7a52945ac21f7e245598756148b4e7b40e954b96a961209ff151f462f84b10",
+      "name": "chrome_browser",
+      "recommended": true
+    },
+    {
+      "digest": "dea08f0616620db92304fdba4232bfc9ac4be20e7f260ceadeb04cbdb608458b",
       "name": "claudexor_quotas",
       "recommended": false
     },
@@ -46,17 +51,17 @@
       "recommended": true
     },
     {
-      "digest": "0e56122071ec4f9d21c83b9835e7423c7c4cebd8e513d012778c65c49db1e351",
+      "digest": "d32c8fc9df7dc71e3aeb9f469667cf97896e64d7a3b369e62f735b8fbf72d755",
       "name": "email",
       "recommended": false
     },
     {
-      "digest": "759231e7994c9ba6d05270098cc7e42f0da4b119f662a6d9b697bd6839f91258",
+      "digest": "72620575d36b9ad90c8462dd6b9a427bbb6accf70f972c6a825f8aeaacff6e19",
       "name": "email-presence",
       "recommended": false
     },
     {
-      "digest": "5c1af3f64088ebd88cc1e64bbaf1562c47eb3d4b1dd90802c73ef98c61fa3802",
+      "digest": "415da55d9d94e79be70885c5dbf3aed2d56fb69b97856cafef1044d179d5a2b7",
       "name": "github",
       "recommended": false
     },
@@ -68,11 +73,16 @@
     {
       "digest": "7d5dcdf9407b1e327a528cea075bf9f1d086af5d80fdbb96e2c89fc8eda01701",
       "name": "keenable",
-      "recommended": false
+      "recommended": true
     },
     {
       "digest": "02af7b5a3ded32550bb3655a33d0570bf17a1d05da6ceca7bba9d6335d3412b2",
       "name": "memory-atlas",
+      "recommended": true
+    },
+    {
+      "digest": "6f794bfd8aee4c179d756863e5a6893746281ab5348328fb075b64bbe172f07c",
+      "name": "office_reader",
       "recommended": true
     },
     {
@@ -86,12 +96,17 @@
       "recommended": false
     },
     {
-      "digest": "c7d6be7c1df7ace32040e2b12ece0b9d298cac41d63b0674ba5d25d929354d8b",
+      "digest": "4e520129bf22f3e3d4f4f59c4cce92c8bca110f4f8aaedfe3c74c372c3fb977d",
       "name": "slack-bridge",
       "recommended": false
     },
     {
-      "digest": "b3586ed297dde18a0a1d3204282f7aa4431329ca8638e52919d33115548d1570",
+      "digest": "4e24776e52cbde4fcac39f03733881019b4b09f656f4f2dc7531ad39c80a0efd",
+      "name": "table_tools",
+      "recommended": true
+    },
+    {
+      "digest": "ed69097c6879530dc6e7966b5ddb8e2347603919d080a4aaba9c539f5f66e69b",
       "name": "telegram-bot",
       "recommended": false
     },

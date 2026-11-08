@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import re
 import time
 from datetime import datetime, timezone
@@ -12,6 +11,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .people import directory_key
 from .provider_context import lookup_error
 from .slack_api import SlackApiError, SlackConfigurationError
 from .store import BridgeStore
@@ -103,8 +103,7 @@ async def resolve_directory(api: Any, slack: Any, token: str, *, query: str, kin
     if not query:
         raise SlackConfigurationError("query must contain a name or identifier")
     store = BridgeStore(api.get_state_dir())
-    # A rotated credential or different installation cannot inherit directory visibility.
-    key = kind + ":" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+    key = directory_key(kind, token)
     saved = None if refresh else store.directory_snapshot(key)
     now = time.time()
     fresh = saved is not None and 0 <= now - float(saved["observed_at"]) <= CACHE_MAX_AGE_SEC

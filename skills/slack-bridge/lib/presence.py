@@ -10,6 +10,8 @@ from .store import InboxItem, _iso
 
 # reaction.target.excerpt never exceeds this; the full words stay in provider_facts.
 _REACTION_EXCERPT_CHARS = 500
+# Declared on the place contribution; marks a new top-level post in a configured channel.
+NEW_ROOT_SIGNAL = "signal.new_root"
 
 
 def slack_identity(auth):
@@ -100,9 +102,6 @@ def _with_reaction_fact(event: dict[str, Any], item: InboxItem) -> None:
     if lookup:
         facts = {**message["provider_facts"], "reaction": {**raw, "target_lookup": _public_lookup(lookup)}}
         message["provider_facts"] = facts
-    sent_at = _sent_at(item.event_ts)
-    if sent_at:
-        message["sent_at"] = sent_at
 
 
 def _public_lookup(lookup: Mapping[str, Any]) -> dict[str, Any]:
@@ -113,11 +112,34 @@ def _public_lookup(lookup: Mapping[str, Any]) -> dict[str, Any]:
     return public
 
 
-def _sent_at(event_ts: str) -> str:
+def _iso_ts(ts: str) -> str:
     try:
-        return _iso(float(event_ts))
+        return _iso(float(ts))
     except (TypeError, ValueError, OverflowError, OSError):
         return ""
+
+
+def _edit_time(item: InboxItem) -> str:
+    """When the shown words were last edited: Slack's ``edited.ts``, or this change's own time when a
+    ``message_changed`` altered the words without a newer stamp. An unfurl or a file change edits no words."""
+    changed = item.subtype == "message_changed"
+    current = (item.structured.get("message") if changed else item.structured) or {}
+    previous = (item.structured.get("previous_message") or {}) if changed else {}
+    stamp, before = (str(edited.get("ts") or "") if isinstance(edited, Mapping) else ""
+                     for edited in (current.get("edited"), previous.get("edited")))
+    if changed and current.get("text") != previous.get("text") and stamp == before:
+        return item.event_ts
+    return stamp
+
+
+def _times(item: InboxItem) -> dict[str, str]:
+    """Slack's own times for ``message.sent_at``/``edited_at``: when the message was sent and when its words were
+    last edited; a reaction's is when it was made. Never a receipt time; an unreadable one is absent."""
+    if item.event_type in REACTION_EVENTS:
+        sent, edited = item.event_ts, ""
+    else:
+        sent, edited = item.message_ts, _edit_time(item)
+    return {key: value for key, value in (("sent_at", _iso_ts(sent)), ("edited_at", _iso_ts(edited))) if value}
 
 
 def slack_presence_event(item: InboxItem, *, transport_queue: bool = False, places: bool = False) -> dict[str, Any]:
@@ -128,7 +150,7 @@ def slack_presence_event(item: InboxItem, *, transport_queue: bool = False, plac
     ``event.conversation``; only a continuation-capable Host is sent it.
     """
 
-    thread_id = item.thread_ts or item.message_ts
+    thread_id = item.conversation_thread
     event = {
         "source_event_id": item.provider_event_key,
         "provider": "slack",
@@ -161,6 +183,7 @@ def slack_presence_event(item: InboxItem, *, transport_queue: bool = False, plac
             "attachments": _attachments(item),
             "blocks": list(item.structured.get("blocks") or []),
             "provider_facts": provider_facts(item.structured),
+            **_times(item),
         },
         "text": item.text,
     }
@@ -176,7 +199,13 @@ def slack_presence_event(item: InboxItem, *, transport_queue: bool = False, plac
 
 
 def slack_wake_facts(event: Mapping[str, Any]) -> list[str]:
-    """Match only provider identities/relationships, never the meaning of speech."""
+    """Match only provider identities/relationships, never the meaning of speech.
+
+    A thread reply is ``my_thread`` when this bot wrote the thread's root (``parent_user_id``) or any captured
+    message in it. A Slack thread is flat: ``parent_user_id`` names the root's author on every reply, and no
+    message names a message it answers, so Slack never reports ``reply_to_me`` (a reply to a message this bot
+    wrote). Whom a message is for stays the reader's judgment.
+    """
     conversation, message = event["conversation"], event["message"]
     provider = message.get("provider_facts") or {}
     own = provider.get("self_user_id")
@@ -190,12 +219,18 @@ def slack_wake_facts(event: Mapping[str, Any]) -> list[str]:
         if own and own in provider.get("mentioned_user_ids", []):
             facts.append("mention")
         if message.get("thread_id"):
-            if own and provider.get("parent_user_id") == own:
-                facts.extend(["reply_to_me", "my_thread"])
             history = (conversation.get("thread_history") or {}).get("data") or {}
-            if own and "my_thread" not in facts and any(row.get("user") == own for row in history.get("messages", [])):
+            if own and (provider.get("parent_user_id") == own
+                        or any(row.get("user") == own for row in history.get("messages", []))):
                 facts.append("my_thread")
-    if event["actor"].get("is_bot") or provider.get("actor_is_bot"):
+        if provider.get("new_root_signal") is True:
+            facts.append(NEW_ROOT_SIGNAL)
+    # `from_bot` names the author's account (users.info `is_bot`), not the client that posted:
+    # a person writing through an app wakes like their typed message. App or bot markers
+    # decide only when that account is unknown (no lookup, or no person behind the event).
+    # `actor_is_bot` is the marker's name on rows stored before 1.11.1.
+    author = event["actor"].get("is_bot")
+    if author is True or (author is None and (provider.get("posted_via_app") or provider.get("actor_is_bot"))):
         facts.append("from_bot")
     return facts
 

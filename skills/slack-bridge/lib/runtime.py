@@ -102,14 +102,14 @@ def _automatic_origin(item: InboxItem, turn_ref: str) -> dict[str, str]:
 
 def _output_request_id(item: InboxItem, output: HostOutput) -> str:
     """One outbox identity per Host output and destination, never per text or turn index."""
-    key = json.dumps([output.identity, item.team_id, item.channel_id, item.reply_thread_ts],
+    key = json.dumps([output.identity, item.team_id, item.channel_id, item.conversation_thread],
                      ensure_ascii=False, separators=(",", ":"))
     return f"presence-output:{hashlib.sha256(key.encode('utf-8')).hexdigest()}"
 
 
 def _delivery_report(item: Any, state: str, *, result: dict[str, Any] | None = None,
-                     error: str = "") -> dict[str, Any] | None:
-    return item.delivery_report(state, result=result, error=error)
+                     error: str = "", conversation_kind: str = "") -> dict[str, Any] | None:
+    return item.delivery_report(state, result=result, error=error, conversation_kind=conversation_kind)
 
 
 class InboundWorker:
@@ -146,7 +146,7 @@ class InboundWorker:
             self.store.enqueue_outbox(
                 request_id=_output_request_id(item, output),
                 target=item.channel_id,
-                thread_ts=item.reply_thread_ts,
+                thread_ts=item.conversation_thread,
                 chunks=chunks,
                 origin=_automatic_origin(item, output.turn_ref),
                 delivery_reporting_version=mode,
@@ -160,7 +160,7 @@ class InboundWorker:
             if chunks:
                 self.store.enqueue_outbox(
                     request_id=f"presence:{delivery_key}:ack:{index}",
-                    target=item.channel_id, thread_ts=item.reply_thread_ts, chunks=chunks,
+                    target=item.channel_id, thread_ts=item.conversation_thread, chunks=chunks,
                     origin=_automatic_origin(item, status.turn_ref),
                     delivery_reporting_version=status.delivery_reporting_version,
                 )
@@ -194,7 +194,8 @@ class InboundWorker:
             if not item.host_reference and item.provider_context is None:
                 retained = (self.store.retained_message(item.team_id, item.channel_id, item.message_ts)
                             if reaction else None)
-                snapshot = await capture_context(self.slack, item, self.store.workspace_name(), retained)
+                snapshot = await capture_context(self.slack, item, self.store.workspace_name(), retained,
+                                                 names=self.store)
                 self.store.set_provider_context(item.row_id, item.lease_token, snapshot)
                 item = dataclasses.replace(item, provider_context=snapshot)
             if item.files and not item.staged_files and not item.host_reference:
@@ -289,7 +290,7 @@ class InboundWorker:
             )
             return True
         except Exception as exc:
-            # A capacity refusal keeps the same event first in its thread and frees
+            # A capacity refusal keeps the same event first in its conversation and frees
             # this worker for other conversations; it is paced by the Host's hint.
             delay = _retry_delay(exc, item.attempts)
             self.store.retry_inbox(
@@ -331,7 +332,7 @@ class InboundWorker:
             self.store.enqueue_outbox(
                 request_id=f"presence:{delivery_key}:final:{index}",
                 target=item.channel_id,
-                thread_ts=item.reply_thread_ts,
+                thread_ts=item.conversation_thread,
                 chunks=chunks,
                 origin=_automatic_origin(item, delivery.turn_ref),
                 delivery_reporting_version=delivery.delivery_reporting_version,
@@ -475,7 +476,9 @@ class OutboundWorker:
                 item.row_id,
                 item.lease_token,
                 provider_message_ts=str(result.get("ts") or ""),
-                report_payload=_delivery_report(item, "delivered", result=result),
+                report_payload=_delivery_report(
+                    item, "delivered", result=result,
+                    conversation_kind=self.store.conversation_kind(item.provider_account_id, actual_channel)),
             )
             return True
 
@@ -602,7 +605,9 @@ class OutboundWorker:
                                    "plain" if body.get("mrkdwn") is False else "mrkdwn")
                     item = dataclasses.replace(item, resolved_channel=channel, text=message_text,
                                                text_format=text_format)
-                    report = _delivery_report(item, "delivered", result=result)
+                    report = _delivery_report(
+                        item, "delivered", result=result,
+                        conversation_kind=self.store.conversation_kind(item.provider_account_id, channel))
                     if report:
                         report["message"].update(operation=payload.get("path"), provider_message_id=timestamp)
             self.store.complete_outbox(item.row_id, item.lease_token,
@@ -721,6 +726,7 @@ class BridgeRuntime:
         app_id: str = "",
         inbound_workers: int = 4,
         outbound_workers: int = 2,
+        new_root_channels: Sequence[str] = (),
     ) -> None:
         self.store = store
         self.slack = slack
@@ -731,6 +737,7 @@ class BridgeRuntime:
             bot_user_id=bot_user_id,
             bot_id=bot_id,
             app_id=app_id,
+            new_root_channels=new_root_channels,
         )
         self.inbound_workers = max(1, min(16, int(inbound_workers)))
         self.outbound_workers = max(1, min(8, int(outbound_workers)))

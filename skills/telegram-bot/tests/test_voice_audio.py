@@ -138,3 +138,82 @@ def test_at_the_limit_is_still_downloaded(tmp_path):
     runtime.store.commit_update(7, event)
     assert asyncio.run(runtime.process_one_inbox())
     assert [pathlib.Path(path).name for path in submitter.calls[0][1]] == ["0-voice-v-uniq.ogg"]
+
+
+# A file Telegram will never serve a bot never holds its conversation, whatever its kind.
+DOCUMENT = {"file_id": "d-id", "file_unique_id": "d-uniq", "file_name": "NX.zip", "mime_type": "application/zip"}
+
+
+def test_document_above_the_limit_is_reported_and_the_next_message_proceeds(tmp_path):
+    big = parse_telegram_update(_update(7, document={**DOCUMENT, "file_size": 487_480_164}), bot_account_id="9")
+    assert big.message["attachments"][0]["status"] == "too_large"
+    runtime, submitter, clients = _runtime(tmp_path)
+    runtime.store.commit_update(7, big)
+    runtime.store.commit_update(8, parse_telegram_update(_update(8, text="ты видишь zip?"), bot_account_id="9"))
+    assert asyncio.run(runtime.process_one_inbox()) and asyncio.run(runtime.process_one_inbox())
+    assert clients == [] or clients[0].downloads == []
+    assert [sent["message"]["attachments"][0]["status"] for sent, staged in submitter.calls[:1]] == ["too_large"]
+    assert submitter.calls[1][0]["text"] == "ты видишь zip?"
+    assert runtime.store.status_snapshot()["inbox_submitted"] == 2
+
+
+def test_a_row_stored_before_the_mark_is_reported_not_retried(tmp_path):
+    event = parse_telegram_update(_update(document={**DOCUMENT, "file_size": BOT_API_DOWNLOAD_LIMIT + 1}),
+                                  bot_account_id="9")
+    for key in ("status", "note"):  # how 0.10.5 and earlier stored a document of any size
+        event.message["attachments"][0].pop(key)
+    runtime, submitter, clients = _runtime(tmp_path)
+    runtime.store.commit_update(7, event)
+    assert asyncio.run(runtime.process_one_inbox())
+    assert clients == [] or clients[0].downloads == []
+    sent, staged = submitter.calls[0]
+    assert staged == () and sent["message"]["attachments"][0]["status"] == "too_large"
+    assert "20 MiB" in sent["message"]["attachments"][0]["note"]
+
+
+class _RefusingClient(RuntimeClient):
+    def __init__(self, token, error):
+        super().__init__(token)
+        self.error = error
+
+    async def download_file(self, file_id, destination):
+        self.downloads.append((file_id, destination))
+        raise self.error
+
+
+def _refusing_runtime(tmp_path, error):
+    submitter = AcceptingSubmitter()
+    runtime = TelegramTransportRuntime(state_dir=tmp_path, token_provider=lambda: "token", logger=Logger(),
+                                       submitter=submitter, client_factory=lambda token: _RefusingClient(token, error))
+    return runtime, submitter
+
+
+def test_telegram_refusing_a_file_it_did_not_size_marks_it_and_moves_on(tmp_path):
+    from telegram_bot.api import TelegramFileTooLarge
+    runtime, submitter = _refusing_runtime(
+        tmp_path, TelegramFileTooLarge("getFile", "Bad Request: file is too big", 400))
+    runtime.store.commit_update(7, parse_telegram_update(_update(document={**DOCUMENT, "file_size": 0}),
+                                                         bot_account_id="9"))
+    assert asyncio.run(runtime.process_one_inbox())
+    sent, staged = submitter.calls[0]
+    assert staged == () and sent["message"]["attachments"][0]["status"] == "too_large"
+    assert runtime.store.status_snapshot()["inbox_submitted"] == 1
+
+
+def test_a_transient_download_failure_still_keeps_the_event_first(tmp_path):
+    from telegram_bot.api import TelegramApiError
+    runtime, submitter = _refusing_runtime(tmp_path, TelegramApiError("getFile", "ReadTimeout"))
+    runtime.store.commit_update(7, parse_telegram_update(_update(document={**DOCUMENT, "file_size": 4_800_000}),
+                                                         bot_account_id="9"))
+    assert asyncio.run(runtime.process_one_inbox())
+    assert submitter.calls == []  # not submitted: it retries with its file, the conversation waits for it
+    assert runtime.store.status_snapshot()["inbox_submitted"] == 0
+
+
+def test_a_document_within_the_limit_is_still_staged(tmp_path):
+    event = parse_telegram_update(_update(document={**DOCUMENT, "file_size": 4_800_000}), bot_account_id="9")
+    assert "status" not in event.message["attachments"][0]
+    runtime, submitter, clients = _runtime(tmp_path)
+    runtime.store.commit_update(7, event)
+    assert asyncio.run(runtime.process_one_inbox())
+    assert [pathlib.Path(path).name for path in submitter.calls[0][1]] == ["0-NX.zip"]

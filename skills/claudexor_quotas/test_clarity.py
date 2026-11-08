@@ -119,38 +119,40 @@ function deferredFetch(env) {
     }
     // One screen: rows, the timeline open on its own, the account list folded;
     // the top account of the row picked on its own (its card stands under the plate) and no settings panel.
-    assert.equal(classes(env.root, 'lrow').length, 1, 'one plate, of the picked window');
+    assert.equal(classes(env.root, 'q-plate').length, 1, 'one plate, of the picked window');
     assert.ok(walk(env.root).some((n) => n.getAttribute('class') === 'chart-svg'), 'the timeline is open');
     // The word "Accounts" is a pressed/unpressed word now (aria-pressed), not an expander.
     assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'false');
-    assert.equal(classes(env.root, 'inspector').length, 1, 'the top account is picked by default');
+    assert.equal(classes(env.root, 'q-card').length, 1, 'the top account is picked by default');
+    assert.equal(classes(env.root, 'q-card-none').length, 0);
     // The top is the first bar with today's reading and room left, not the held one (c1) nor the first by place.
-    const picked = classes(env.root, 'bar').filter((b) => b.getAttribute('aria-pressed') === 'true');
+    const picked = classes(env.root, 'q-bar').filter((b) => b.getAttribute('aria-pressed') === 'true');
     assert.equal(picked.length, 1);
     assert.match(picked[0].getAttribute('data-focus'), /:codex:c2$/);
-    assert.match(classes(env.root, 'inspector')[0].textContent, /c2/);
+    assert.match(classes(env.root, 'q-card')[0].textContent, /c2/);
     assert.ok(byFocus(env.root, 'settings') === undefined);
     // The cooling account says it once, with its scope and end.
     click(env, 'accounts');
     click(env, 'acct:codex:c1');
-    const card = classes(env.root, 'inspector')[0];
+    const card = classes(env.root, 'q-card')[0];
     assert.equal((card.textContent.match(/Cooling down/g) || []).length, 1);
     assert.match(card.textContent, /whole account/);
     assert.match(card.textContent, /until/);
-    assert.equal(byFocus(env.root, 'inspector-diag').getAttribute('aria-expanded'), 'false');
-    click(env, 'inspector-diag');
+    assert.equal(byFocus(env.root, 'inspector-details').getAttribute('aria-expanded'), 'false');
+    click(env, 'inspector-details');
     assert.ok(classes(env.root, 'win-line').length);
+    assert.equal((classes(env.root, 'q-card')[0].textContent.match(/Cooling down/g) || []).length, 1, 'said once, opened too');
     // About opens in place, beside everything else; Escape closes it and
     // gives the keyboard back to its button. A second Escape clears the
     // selected account.
     click(env, 'about');
     assert.equal(byFocus(env.root, 'about').getAttribute('aria-expanded'), 'true');
-    assert.ok(classes(env.root, 'about-panel').length && classes(env.root, 'lrow').length);
+    assert.ok(classes(env.root, 'about-panel').length && classes(env.root, 'q-plate').length);
     env.document.listeners.keydown[0]({ key: 'Escape' });
     assert.equal(env.document.activeElement.getAttribute('data-focus'), 'about');
     assert.ok(!classes(env.root, 'about-panel').length);
     env.document.listeners.keydown[0]({ key: 'Escape' });
-    assert.equal(classes(env.root, 'inspector').length, 0);
+    assert.equal(classes(env.root, 'q-card-none').length, 1, 'the second Escape lets the pick go');
     env.disposeHooks[0]();
   }
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
@@ -184,18 +186,8 @@ def test_clarity_has_one_readable_style_system():
     source = Path(__file__).with_name('widget.js').read_text()
     css = source.split('var STYLE = [',1)[1].split("].join('');",1)[0]
     import re
-    # (no gradient and no mask anywhere except the haze at the edge of a run that scrolls: the six --ladder-haze-* tokens are the only gradients, and
-    # the masks that wear them are all under `.rail-scroll*`: the opened ladder window (.rail-scroll-start / -end, top and bottom) and the row of
-    # the bars that goes sideways (.rail-scroll-x*, left and right); the narrow rail's row still wraps onto the next line, it does not fade)
-    haze = re.findall(r'\.rail-scroll[^{]*\{[^}]*\}', css)
-    assert haze and any('mask-image' in rule and 'var(--ladder-haze-y)' in rule for rule in haze)
-    masks = re.findall(r'(?:-webkit-)?mask-image:([^;}]*)', ''.join(haze))
-    assert masks and all(re.fullmatch(r'none|var\(--ladder-haze-[xy](?:-start|-end)?\)', value) for value in masks)
-    tokens = re.findall(r'--ladder-haze-[xy](?:-start|-end)?:linear-gradient\([^;]*\);?', css)
-    assert len(tokens) == 6, 'the haze is written once, as six tokens'
+    # (no gradient and no mask anywhere: the haze at the edge of a run that scrolled went with the row of bars that scrolled; the bars of the plate wrap)
     rest = css
-    for rule in haze + tokens:
-        rest = rest.replace(rule, '')
     assert not re.search(r'gradient\(|mask-image|backdrop-filter|glass|font-size:(?:[0-9]|1[01])(?:\.\d+)?px', rest)
     assert not re.search(r'backdrop-filter|glass|font-size:(?:[0-9]|1[01])(?:\.\d+)?px', css)
     assert all(f'--type-{role}:{size}px' in css for role,size in [('meta',12),('body',14),('section',16)])

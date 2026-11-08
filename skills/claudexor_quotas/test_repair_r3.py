@@ -399,7 +399,7 @@ const paceLines = (env) => walk(env.root).filter((n) => n.tagName === 'PATH'
   assert.deepEqual(barStates(env), ['last_known', 'last_known']);
   // The figure is current only: "—", never 0; the kept values are the dated
   // item of the legend ("2 last known · 0.70": the sum of what they had) and the hatched bars.
-  assert.match(env.root.textContent, /— left of 2/);
+  assert.match(env.root.textContent, /— of 2 account-windows left/);
   assert.match(env.root.textContent, /2 last known · 0\.70/);
   assert.equal(classes(env.root, 'l-sub').length, 0, 'no caption under the bars');
   assert.doesNotMatch(env.root.textContent, /0\.70 of 2|0\.00 of 2|incl\./);

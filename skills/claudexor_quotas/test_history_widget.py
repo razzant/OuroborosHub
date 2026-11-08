@@ -93,15 +93,21 @@ NODE_HISTORY = r"""
   // pick opens the list again with the word first (the pick still shows the card of the row's account).
   const press=(node)=>node.listeners.click[0]({stopPropagation(){}});
   const openList=()=>{ if (byFocus(env.root,'accounts').getAttribute('aria-pressed')!=='true') press(byFocus(env.root,'accounts')); };
+  // A pick shows the account's card beside the bars: its bonus resets in one dated line; the full counter is under the card's one button.
+  const summary=()=>{ const r=classes(env.root,'q-res'); return r.length?r[0].textContent:''; };
   const pick=(key)=>{ openList(); press(byFocus(env.root,'acct:'+key));
-    assert.equal(byFocus(env.root,'accounts').getAttribute('aria-pressed'),'false','a press on a row shuts the list'); };
+    assert.equal(byFocus(env.root,'accounts').getAttribute('aria-pressed'),'false','a press on a row shuts the list');
+    press(byFocus(env.root,'inspector-details')); };
   const select=(i)=>pick(family.accounts[i].key);
   select(0);
+  assert.match(summary(),/Bonus resets: none \(0\)/,'a reported 0 is a zero');
   assert.match(classes(env.root,'account-credits')[0].textContent,/Manual reset credits · 0 · observed/);
   assert.match(classes(env.root,'account-credits')[0].title,/source synthetic-source.*0 reset credits/);
   select(1);
+  assert.match(summary(),/Bonus resets: 2 reported · usability unknown · last known/,'a counter never says usable, and a kept one is dated');
   assert.match(classes(env.root,'account-credits')[0].textContent,/last known 2.*not current/);
   select(2);
+  assert.match(summary(),/Bonus resets: count unreadable/);
   assert.match(classes(env.root,'account-credits')[0].textContent,/count unreadable.*<script>/);
   assert.equal(walk(classes(env.root,'account-credits')[0]).filter(n=>n.tagName==='SCRIPT').length,0);
 
@@ -129,7 +135,9 @@ NODE_HISTORY = r"""
   assert.doesNotMatch(classes(env.root,'family-credits')[0].textContent,/0 reported/);
   pick(family.accounts[0].key);
   assert.equal(classes(env.root,'account-credits').length,0,'unreported counter adds no empty row');
+  assert.doesNotMatch(summary(),/Bonus resets/,'nor a line in the card');
   pick(family.accounts[1].key);
+  assert.match(summary(),/Bonus resets: unknown · sources disagree/);
   assert.match(classes(env.root,'account-credits')[0].textContent,/unknown · sources disagree/);
   const unreported=JSON.parse(JSON.stringify(unknown));
   unreported.groups[0].reset_credits.conflict_accounts=0;

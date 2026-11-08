@@ -463,7 +463,8 @@ def test_ordinary_message_events_gain_no_reaction_shape(tmp_path):
         world = World(store, tmp_path, replies=[{"ts": "100.000001", "user": "U_AUTHOR", "text": "the words"}])
         await drive(world)
         event = provider_turn(world)
-        assert "reaction" not in event["message"] and "kind" not in event["actor"] and "sent_at" not in event["message"]
+        assert "reaction" not in event["message"] and "kind" not in event["actor"]
+        assert event["message"]["sent_at"] == "1970-01-01T00:01:40.000001+00:00"  # its own send time, not a reaction's
         assert event["thread_id"] == "100.000001" and "any_message" in event["facts"]
     asyncio.run(run())
 
@@ -612,6 +613,38 @@ def test_remove_names_the_removed_value_and_unknown_target_stays_unresolved(tmp_
         assert report["message"]["reaction"]["old"] == [{"type": "name", "value": "eyes"}]
         assert "new" not in report["message"]["reaction"]
         assert report["message"]["reaction"]["target"]["resolution"] == "unresolved"
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("channel,kind,thread_ts,stored_in,filed", [
+    # A chat's top-level message lives in the chat's flow, so a reaction to it is held and recorded there.
+    ("D1", "im", "", "inbox", ""), ("G1", "mpim", "", "inbox", ""),
+    # A reply stays in its thread, in a chat too; a channel's top-level message is the thread it opens.
+    ("D1", "im", "99.0", "inbox", "99.0"), ("C1", "channel", "", "inbox", "101.5"),
+    # Ouroboros's own message, kept as its send, takes the type Slack stated for its conversation.
+    ("D1", "im", "", "outbox", ""), ("C1", "channel", "", "outbox", "101.5"),
+    # A conversation Slack never described keeps the target's own root: nothing is guessed from an ID.
+    ("D1", "", "", "inbox", "101.5"),
+])
+def test_an_own_reaction_is_held_and_receipted_in_the_conversation_of_its_target(tmp_path, channel, kind,
+                                                                                 thread_ts, stored_in, filed):
+    async def run():
+        store = BridgeStore(tmp_path)
+        heard = message(ts="101.5" if stored_in == "inbox" else "100.0", thread_ts=thread_ts, channel=channel)
+        heard["payload"]["event"]["channel_type"] = kind
+        ingest(store, heard)
+        if stored_in == "outbox":
+            store.set_runtime(workspace_id="T1")
+            store.enqueue_outbox(request_id="say", target=channel, thread_ts=thread_ts, chunks=["my own words"])
+            sent = store.claim_outbox()
+            store.set_resolved_target(sent, channel, "T1")
+            store.complete_outbox(sent.row_id, sent.lease_token, provider_message_ts="101.5")
+        queue(store, ts="101.5", channel=channel)
+        world = World(store, tmp_path)
+        await outbound_pass(world)
+        [report] = world.reports
+        assert (report["conversation_id"], report["thread_id"]) == (channel, filed)
+        assert {query.get("thread_id", "") for query in world.place_queries} == {filed}
     asyncio.run(run())
 
 
@@ -1243,6 +1276,67 @@ def declared_tools():
     import yaml
     text = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8")
     return {row["name"]: row for row in yaml.safe_load(text.split("---")[1])["tools"]}
+
+
+def test_reaction_tools_declare_a_gesture_on_the_message_their_registered_schema_names(tmp_path):
+    """The door a gesture-aware Host offers: conversation ``channel``, message ``ts``, nothing else to fill."""
+    api = _Api(tmp_path)
+    _load_plugin().register(api)
+    declared = declared_tools()
+    for name in ("slack_reaction_add", "slack_reaction_remove"):
+        row, (_handler, metadata) = declared[name], api.tools[name]
+        assert (row["effect"], row["target"], row["conversation"], row["message"]) == ("gesture", "channel", "channel", "ts")
+        assert "thread" not in row  # a reaction addresses its message; the bridge re-reads the thread itself
+        schema = metadata["schema"]
+        assert set(schema["required"]) == {"channel", "ts", "name"}
+        assert schema["properties"]["ts"] == {"type": "string"} and "colons" in schema["properties"]["name"]["description"]
+        assert "gesture, not speech" in metadata["description"] and "slack_receipt" in metadata["description"]
+    # Only reactions are gestures; the other message actions keep their effects.
+    assert {name for name, row in declared.items() if row.get("effect") == "gesture"} == {
+        "slack_reaction_add", "slack_reaction_remove"}
+    assert declared["slack_pin_add"]["effect"] == declared["slack_message_delete"]["effect"] == "write"
+
+
+def _waking(tmp_path, payload):
+    from lib.host_adapter import slack_presence_event
+    store = BridgeStore(tmp_path)
+    store.ingest_envelope(payload, parse_socket_envelope(payload))
+    return slack_presence_event(store.claim_inbox())
+
+
+def _said(ts, *, channel="C1", channel_type="channel", thread_ts=None, kind="message"):
+    event = {"type": kind, "user": "U1", "channel": channel, "channel_type": channel_type, "ts": ts, "text": "words",
+             **({"thread_ts": thread_ts} if thread_ts else {})}
+    return {"type": "events_api", "envelope_id": "env-" + ts, "payload": {"team_id": "T1", "event_id": "Ev-" + ts, "event": event}}
+
+
+def _edited(ts):
+    return {"type": "events_api", "envelope_id": "env-e", "payload": {"team_id": "T1", "event_id": "Ev-e", "event": {
+        "type": "message", "subtype": "message_changed", "channel": "C1", "channel_type": "channel", "ts": "999.0",
+        "message": {"type": "message", "user": "U1", "ts": ts, "text": "new words"},
+        "previous_message": {"type": "message", "user": "U1", "ts": ts, "text": "old words"}}}}
+
+
+@pytest.mark.parametrize("payload,ts", [
+    (_said("100.000001"), "100.000001"),                                       # top-level channel post
+    (_said("100.000002", thread_ts="100.000001"), "100.000002"),               # a reply in its thread
+    (_said("100.000003", channel="D1", channel_type="im"), "100.000003"),      # a direct message
+    (_said("100.000004", kind="app_mention"), "100.000004"),                   # a mention
+    (_edited("100.000005"), "100.000005"),                                     # an edit: the edited message, not the edit event
+])
+def test_waking_event_names_its_own_ts_where_the_host_fills_the_gesture(tmp_path, payload, ts, tool_json):
+    """``event.message.message_id`` is the exact Slack ``ts`` the reaction tool needs, as a string."""
+    event = _waking(tmp_path / "in", payload)
+    assert event["message"]["message_id"] == ts and isinstance(event["message"]["message_id"], str)
+    api = _Api(tmp_path / "out")
+    _load_plugin().register(api)
+    queued = tool_json(api.tools["slack_reaction_add"][0](channel=event["conversation_id"], ts=event["message"]["message_id"],
+                                                          name="eyes", request_id="r"))
+    assert queued["state"] == "queued"
+    with sqlite3.connect(BridgeStore(tmp_path / "out").path) as db:
+        [(operation, body)] = db.execute("SELECT operation, payload_json FROM outbox").fetchall()
+    assert operation == "reaction_add" and json.loads(body) == {"channel": payload["payload"]["event"]["channel"], "ts": ts,
+                                                                "name": "eyes"}
 
 
 def test_thread_reader_takes_a_reply_timestamp_but_cannot_promise_reactions(monkeypatch, tool_json):

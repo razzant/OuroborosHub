@@ -131,6 +131,36 @@ if pytest is not None:
     def pytest_unconfigure(config):
         subprocess.run = _real_run
 
+    # In CI (QUOTAS_REQUIRE_RUNTIME=1) the runtime is given: Node, Playwright and both browsers. A test skipped there for
+    # want of it would pass unseen, so such a skip fails. A skip that says what the run lacks on purpose stays a skip: the
+    # Russian table outside the skill (RU_JSON_SKIP).
+    KEPT_SKIPS = (RU_JSON_SKIP,)
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_makereport(item, call):
+        outcome = yield
+        report = outcome.get_result()
+        if os.environ.get("QUOTAS_REQUIRE_RUNTIME") != "1" or not report.skipped or hasattr(report, "wasxfail"):
+            return
+        reason = str(report.longrepr[2] if isinstance(report.longrepr, tuple) else report.longrepr)
+        if any(kept in reason for kept in KEPT_SKIPS):
+            return
+        report.outcome = "failed"
+        report.longrepr = "skipped where the runtime is required (QUOTAS_REQUIRE_RUNTIME=1): " + reason
+
+    # The same for a whole module skipped at its import (pytest.importorskip at the top of a file).
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_make_collect_report(collector):
+        outcome = yield
+        report = outcome.get_result()
+        if os.environ.get("QUOTAS_REQUIRE_RUNTIME") != "1" or not report.skipped:
+            return
+        reason = str(report.longrepr[2] if isinstance(report.longrepr, tuple) else report.longrepr)
+        if any(kept in reason for kept in KEPT_SKIPS):
+            return
+        report.outcome = "failed"
+        report.longrepr = "skipped where the runtime is required (QUOTAS_REQUIRE_RUNTIME=1): " + reason
+
 
 if __name__ == "__main__":
     argv = sys.argv[1:]

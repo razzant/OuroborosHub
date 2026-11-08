@@ -74,24 +74,18 @@
     // (inspectorSlot).
     var selectionOpener = '';
     var selectionLimit = '';
-    // The pick the widget makes itself (topAccount, pickDecide): the top bar of the window on screen is picked from the first drawing, so the bar is open and red and the
-    // chart stands under it at once. `pickAuto` is whether the pick that stands is the widget's own (the reader's is never moved by it); `pickHome` the window ('family|limit') the pick
-    // stands in; `pickBare` the window where the reader let the pick go (no pick of the widget's there until the window or the family changes); `pickAt` the window the last drawing
-    // was of; `pickDue` the line of the pick (traceStart) is owed once: at the opening, at a pick of a window or a family, never at the poll.
     var pickAuto = false;
     var pickHome = '';
     var pickBare = '';
     var pickAt = '';
     var pickDue = false;
-    // What the last drawing was made from (the family, the reserve's context, the facets): a pick on the plate draws the account's card from it
-    // with no drawing of the page (selectInPlace). None while a drawing is under way or has failed.
-    var drawnFrom = null;
     var accountsOpen = false;
     // The accounts list stands in the place of the bars, the chart and the card (renderReserve, renderAccounts). accountsRun is 'open' or 'shut' for the one drawing that plays the fold
     // after the list was opened or shut (accountsSet), else ''; accountsSpace is the height of the place the list replaces, in px, measured at the moment it opens.
     var accountsRun = '';
     var accountsSpace = 0;
     var diagnosticsOpen = false;
+    var limitDetailsOpen = Object.create(null);
     var aboutOpen = false;
     var currentView = null;
     var displayFrame = String(Date.now()) + '-' + String(Math.random()).slice(2);
@@ -105,96 +99,12 @@
     // use". The last chart request asked on the reader's behalf is kept so a
     // mismatch is asked about once, never in a loop.
     var timelineOpen = true;
-    // The picked account's card under the chart: up (the whole card, in the place of the chart) or at rest (a strip). It is up while it is pressed (cardOpen, the pin: it lives through the poll; another
-    // bar puts it down, selectAccount, and it is let go at a change of window or family, cardWhere), while the pointer is on it (cardHover) and while the keyboard focus is in it (cardFocus).
-    var cardOpen = false;
-    var cardHover = false;
-    var cardFocus = false;
     // The timers of the pointer's and the focus's going off the card (a beat is kept so the edge does not flicker); the card the script drew last.
     var cardLeave = { hover: 0, focus: 0 };
-    var cardLast = null;
-    // The height of the place the chart holds in the plate, in px, measured as the card is pressed (cardPress): the body of the pressed card is no taller than it (0: no chart stood there).
-    var cardRoom = 0;
-    var cardYield = 0;
     var cardWhere = '';
     var chartKeys = {};
-    // The window row (capsule: window tabs): the limit last shown in each
-    // window length of a family, so a tab opens on the scope the reader left
-    // it on; whether the next drawing answers the reader's own pick of a
-    // window, scope or family (only that one moves — a redraw of fresh data
-    // never does); and the shared underline: where it stood, and the row and
-    // tab the drawing in hand wants it under, placed once the row is attached.
-    var scopePicks = {};
-    var motionPending = false;
-    var drawMotion = false;
-    var drawElapsed = 0;
-    var motionAt = 0;
-    // The head's family tabs, which are the kit's mark tabs (kit: mark tab): the family the reader has just left by picking another,
-    // kept while that pick's motion runs, so the mark of the family left can start from the look it had as the mark picked starts from
-    // the look it had. Only a pick of a family moves the marks: the pick of a window drops it. Whether the tab picked was showing its
-    // preview at the click (under the pointer, or with the keyboard on it): its mark was red then, so its start is that red (markLit).
-    // Both are the head's to keep and the kit's markStart to read. And the marks of the drawing in hand that wear a start state (a class
-    // that holds the look they had a moment ago), which the kit's settleMarks takes off at the next frame.
-    var markFrom = '';
-    var markLit = false;
-    var markStarts = [];
-    // The window row's tabs are the kit's number tabs (kit: mark tab, the number is the mark): the window the reader has just left by picking
-    // another (its place, as the tab keys it) and whether the tab picked was showing its preview at the click, kept while that pick's motion
-    // runs, as the family's are (markFrom, markLit). The head's marks and the window row's never move for each other's pick.
-    var winFrom = '';
-    var winLit = false;
-    // And whether the pick came by a press of the pointer (the mouse button or a finger: the ring of the tab was shrunk to --press at the click):
-    // the ring starts from that press, so it goes from the press to its picked size on the spring and does not leap through the preview's size.
-    var winPressed = false;
-    // The reader's own pick of a family moves the rail in (kit: rail, motion): the family tabs slide to their new places (markWas,
-    // markFlip and markSlide), the thread runs from the picked family's mark down to the first ring, the windows come down one after another and the
-    // foot of the rail comes last. railPending is set by the pick; the drawing it asks for is inside the movement (railMotion) and so is
-    // every drawing within RAIL_MOTION_MS of it (the chart's read), which carries the movement on from where it was (railElapsed). A
-    // window's pick, the 30 s poll and Refresh never move it, and nothing moves under reduced motion. The shifts of the tabs (railFlips: by the
-    // family's key, how far each tab comes, which one rides, which ones give way) are worked out once, at the pick, from the places the tabs are
-    // seen at, and kept until the movement is over: a drawing inside the span puts the same shifts on its new tabs and reads no place.
-    var railPending = false;
-    var railMotion = false;
-    var railElapsed = 0;
-    var railMotionAt = 0;
-    var railFlips = {};
-    // The movement goes on from where it was by the page's own clock when the page has one: the time of the pick on document.timeline (railStart)
-    // is kept with the movement, and the animations of the pick and of every drawing inside its span are given it as their start time
-    // (clockSet, once per drawing), so a drawing inside the span puts no delay of its own (railShift stays 0) and the animations that
-    // replace the ones it removes stand exactly where those stood. A page with no such clock goes on by the delay (--rail-elapsed) alone.
-    var railStart = null;
-    var railClock = false;
-    var railShift = 0;
-    // The sweep of the rings (kit: ring, motion): the arc of a ring is drawn from nothing to its share when the reader picks a window (the ring of the
-    // window picked alone: sweepWho is its key) or a family (every ring of the rail, each as its row comes down: 'all'). sweepPending is set by the
-    // pick; the drawing it asks for wears the sweep (sweepOn), and so does every drawing within SWEEP_MS of it (the chart's read, a second drawing), which
-    // carries the sweep on from where it was by the page's own clock (sweepStart: the time of the pick on document.timeline, given to the animations by
-    // clockSet) or, with no such clock, by the delay (sweepShift, --sweep-elapsed). The 30 s poll and Refresh never sweep, and nothing sweeps under
-    // reduced motion.
-    var sweepPending = '';
-    var sweepWho = '';
-    var sweepAt = 0;
-    var sweepStart = null;
-    var sweepOn = false;
-    var sweepClock = false;
-    var sweepShift = 0;
-    // After the pick of a family the head's tabs show no preview by the pointer until the pointer moves (kit: mark tab, .tab-mark-still): the
-    // tabs slide under a pointer that stands still, and the one that comes under it would turn red as if the reader had pointed at it. The
-    // flag lives here, in the widget's memory, so a drawing keeps it (the row is drawn wearing it); the first pointer that really moves takes it
-    // off the row (releaseStill). stillAt is where the click was, so a move that is none (the same place) does not count. The keyboard's
-    // preview is not touched.
-    var stillHold = false;
-    var stillRow = null;
-    var stillAt = null;
-    // The same for the bars: a pick of a bar moves the bars under a pointer that stands where the click was (the bar that was open shuts, the one picked slides from under the pointer), and the bar
-    // that comes under it would open by the pointer as if the reader had pointed at it, pushing the bars on its right back and forth. Until the pointer really moves the rows wear .bars-still
-    // and the pointer opens nothing (the pick, the keyboard and the ladder's step open as ever). The flag lives here so a drawing keeps it (barStrip); barStillAt is where the click was.
-    var barStill = false;
-    var barStillAt = null;
-    // The order of the head's family tabs (the ids): the family the reader picked last stands first and the others keep the order they were
-    // seen in, so a pick moves one tab to the front and the tabs it passes shift one place, all the same way (a pick of a third family does not
-    // send the second back to where it was). It lives here, in the widget's memory, and is kept nowhere: a widget just drawn has the family on
-    // screen first and the rest in the order the answer lists them.
+    // The order of the head's family tabs (the ids): the order they were first seen in, kept in the widget's memory and nowhere else, so a family
+    // that comes and goes in the answers keeps its place and a pick moves no tab.
     var familyOrder = [];
     var chartAsked = '';
     var horizonChoice = '';
@@ -233,45 +143,6 @@
     // its room from it, not from the root, so the card's own padding is left out.
     var shellBox = null;
     var railBox = null;
-    // The note of the accounts not read (windowFoot) that windowRow made for the plate: renderReserve hands it to the plate it draws (windowPlate, cyclePlate),
-    // which puts it under its number row, with the family's credits.
-    var railNote = null;
-    // The ladder of resets under the rings (kit: rail; ladderOf, ladderNode): the zone windowRow made for the drawing in hand, which render()
-    // fits once at its end (ladderFit: the one read of the layout), and whether this drawing has a ladder, so that the plate's row of the
-    // next reset (limitRow) wears the mark that hides it on the wide shell (ladderLine is that row, kept to take the mark off again if nothing of the ladder fits).
-    var ladderZone = null;
-    var ladderDrawn = false;
-    var ladderLine = null;
-    // The reader's own pick of a window (or of a scope) moves the ladder (kit: rail, motion): the steps that stood fade at once (ladderOut: the
-    // node of the old ladder, kept for that pick's drawing alone) and the new ones come down one after another. ladderPending is set by the pick;
-    // the drawing it asks for wears the movement (ladderMotion), and so does every drawing within LADDER_MS of it, which carries it on from where it
-    // was by the page's own clock (ladderStart, the time of the pick on document.timeline, given to the animations by clockSet) or, with no
-    // such clock, by the delay (ladderShift, --ladder-elapsed). The pick of a family moves the ladder with the rail (railMotion); the 30 s poll and
-    // Refresh never move it, and nothing moves under reduced motion.
-    var ladderPending = false;
-    var ladderMotion = false;
-    var ladderAt = 0;
-    var ladderStart = null;
-    var ladderClock = false;
-    var ladderShift = 0;
-    var ladderOut = null;
-    // The ladder open (the word "N more" pressed, and the window came out): its steps all stand in a window that scrolls, and the place of the scroll is kept here
-    // (ladderTop), so the 30 s poll, which draws the ladder again, gives the new node the scroll it had. It is open for the limit it was pressed on (ladderKey, against the
-    // key of the limit drawn): a pick of a window or of a family, a limit that gives way to another with no pick (a row hidden, an answer that names none) and a drawing with
-    // no ladder fold it (ladderFold); so does a drawing with no room for the window, and it does not open again by itself.
-    var ladderOpen = false;
-    var ladderTop = 0;
-    var ladderKey = '';
-    // The step of the ladder pressed (kit: rail): {key: the step's data-focus, limit: the key of the limit it stands on, account: the one account of a step of one}, or null. A step of one account
-    // is the pick of that account; a step of several only lights their bars (data-step-lit; the others step back) and picks none. It stands until it is pressed again, another step is pressed, any
-    // pick of an account (a bar, a row of the list, Clear, Escape) or of a window or a family lets it go (selectAccount, stepClear), or the answer no longer has the step (stepAccounts). It lives
-    // here, not in a node: the 30 s drawing builds the tree anew and puts it back (barStrip: data-step-lit, ladderNode: aria-pressed).
-    var stepOn = null;
-    // The ladder the last drawing made (its node, detached by the next drawing): the one that fades when a pick of a window draws the new one.
-    var ladderLast = null;
-    // The old ladder kept for the whole span of the movement: a drawing inside the span (the chart's read) puts it over its new ladder again, so the
-    // fade is never cut short (it stands at opacity 0 once its animation is over, and the clock of the pick carries the animation on).
-    var ladderKept = null;
 
     var STYLE_ID = 'claudexor-quotas-style';
 
@@ -292,10 +163,10 @@
         "--status-bad:#e99a9f;--status-bad-bg:#40292e;",
         "--warn-text:var(--status-warn);--bad-text:var(--status-bad);",
         "--focus-accent-border:#ec7782;--share-ink:#a6a6b3;--scenario-ink:#9ab9fa;",
-        "--share-track:rgba(var(--neutral-rgb),.07);--calm-a:#ee8a62;--calm-b:#f2a65a;",
+        "--share-track:rgba(var(--neutral-rgb),.07);--calm-a:#2fd359;--calm-b:#2fd359;",
         // colour: the accent, the one red of the shell (the sidebar's: the same in both themes); it paints the dot between About and Refresh and the
         // capital of a lit word (kit: text action), and, in the kit's mark tab, the dot and the number of a tab with a mark and the mark of the tab
-        // that is picked or previewed, and the dot and the number of the number tab that is picked (the number is its mark)
+        // that is picked or previewed; and the star of a ring whose accounts are not all read (the quota plate)
         "--accent:#c93545;",
         // colour: the ink at a strength (the .07 step is --share-track) and the shadow of a raised pill
         "--tint-1:rgba(var(--neutral-rgb),.035);--tint-2:rgba(var(--neutral-rgb),.05);--tint-3:rgba(var(--neutral-rgb),.06);",
@@ -306,14 +177,12 @@
         "--hatch:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc2JyBoZWlnaHQ9JzYnPjxwYXRoIGQ9J00tMSAxbDItMk0wIDZsNi02TTUgN2wyLTInIHN0cm9rZT0nI2E2YTZiMycgc3Ryb2tlLXdpZHRoPScxLjUnLz48L3N2Zz4=);",
         // type: the three sizes of the card and two for a figure (the display's and the plate's number); the weights and the line heights in use; the tracking of the small
         // meta type (the sidebar's, on its version number), worn by the text action and its dot
-        "--type-meta:12px;--type-body:14px;--type-section:16px;--type-display:28px;--type-figure:44px;--track-meta:.06em;",
+        "--type-meta:12px;--type-body:14px;--type-section:16px;--type-display:28px;--track-meta:.06em;",
         "--weight-light:300;--weight-regular:400;--weight-medium:500;--weight-semibold:600;",
         "--lh-body:1.5;--lh-ui:1.35;--lh-tight:1.15;",
-        // size: a row of controls, a compact one, a touch target, the dot of the stamp (the blinking one, and the quiet one between its words), the row of the bars (its height, the gap, the least and the most a bar is wide, the width one opens to and the most it opens to, and the width it has at rest, which the script writes on the row: barsFit; the least height a box keeps while the folds in it go their way, --fold-hold, which the script writes on the box: foldHold; and how far under the top of a fill over 80% the foot of the number stands, --bar-v-in: the number's own line, at --type-ladder, and the step the number keeps off the top of a lower fill, so it stands in the fill as far from its top as it stands over a lower one)
-        "--row-h:32px;--row-h-sm:26px;--tap-h:44px;--dot-size:5px;--sep-size:2px;--bar-h:88px;--bar-gap:5px;--bar-min:20px;--bar-max:56px;--bar-open:172px;--bar-rest:var(--bar-max);--fold-hold:0px;--bar-v-in:calc(var(--type-ladder) + var(--space-1h));",
+        "--row-h:32px;--row-h-sm:26px;--tap-h:44px;--dot-size:5px;--sep-size:2px;--bar-min:20px;--bar-max:56px;",
         // space: a ladder of 2 4 6 8 10 12 16 24 (-1h is the half step between 4 and 8, -2h the one between 8 and 12)
         "--space-0:2px;--space-1:4px;--space-1h:6px;--space-2:8px;--space-2h:10px;--space-3:12px;--space-4:16px;--space-5:24px;",
-        "--kt-strip:52px;",
         // radius (-field: the corner of the chart's plot area, -tile: a white tile or card, -card: the plate of the whole chart)
         "--radius-xs:3px;--radius-sm:6px;--radius-md:8px;--radius-field:10px;--radius-row:12px;--radius-tile:14px;--radius-card:18px;--radius-pill:999px;",
         // chart (the graph's field): the width of its curves, the radius of its dots (a reset at the foot, the cursor, the start of the scenario; the ring round a dot is --ring-w), and the dashes of its lines, each "dash gap" in the svg's unit (a dash of .1 with a round cap is a dot)
@@ -328,129 +197,55 @@
         // The room inside the card on the wide shell (from 860px; the narrow one keeps --shell-card-pad): --shell-card-pad-y over the first part and under the last, --shell-card-pad-x at the sides.
         "--shell-card-pad-y:var(--space-5);--shell-card-pad-x:var(--space-4);",
         "--shell-card-shadow:-6px 0 20px rgba(255,255,255,.05),0 0 10px rgba(255,255,255,.04);",
-        // rail: the rail at the side of the card (its width: what a ring needs on the axis of the widest tab of the head's row, --rail-tab-w: the axis of the
-        // family picked is the middle of its tab, so at the most it is half of the widest tab off the edge of the rail, and from there the rail holds half of the
-        // ring, the growth of the ring that is picked (--ring-grow) and the air at the card (--rail-air); so it is as wide as the rings ask and the same for
-        // every family; 114px is the width of the widest tab until the script measures the row (railFit); and the room over its first line), the ring (the box
-        // it stands in, its size, and the small one of a capsule on the narrow shell)
-        "--rail-tab-w:114px;--rail-air:var(--space-2);--rail-w:calc(var(--rail-tab-w) / 2 + var(--ring-box) / 2 + var(--ring-grow) + var(--rail-air));--rail-top:17.5px;--ring-box:var(--ring-size-lg);--ring-size:28px;--ring-size-lg:47px;--ring-size-sm:22px;",
-        // rail rows: a row is as high as its ring, the badge under it and the thread between two rings need. The thread keeps --thread-gap under the
-        // badge above (the star hangs a hair under the badge's edge, so it keeps about 1.5px) and --thread-gap from the box of the ring below, whichever
-        // ring is picked: a ring that is picked has grown by --ring-grow at its top and at its bottom (the thread over it ends that much higher) and
-        // its badge has gone down by --badge-grow (the thread under it starts that much lower). So the thread is the room that is left: --thread-len at rest,
-        // less the growth of the ring below, or of the badge above, when one of them is picked. 74px is the least row whose shortest thread (the badge
-        // above picked: 14.7 - 6.36 = 8.34px) is not under 8px. The rail's top is such that the box of the first ring (and the thread to it from
-        // the head) stands where it stood with the rings of 56px.
-        "--rail-row-h:74px;--thread-gap:var(--space-0);--thread-len:calc(var(--rail-row-h) - var(--ring-box) / 2 - var(--badge-drop) - 2 * var(--thread-gap));",
-        "--thread-top:calc(var(--thread-gap) + var(--badge-drop) - var(--rail-row-h) / 2);--ring-grow:calc((var(--mark-on) - 1) * var(--ring-box) / 2);--badge-grow:calc((var(--mark-on) - 1) * var(--badge-drop));",
-        // the badge in the gap of the ring (kit: ring): drawn in the svg's own units (viewBox 184), so it is the ring's size over 184 for one unit;
-        // its outer radius (the circle of 41 and half of the 5 of the stroke: 43.5 units), the height of its centre from the top of the box (the
-        // path's lowest point: 92 + 81 = 173 units) and how far its bottom stands under the centre of the box: the thread between two rings starts there
-        "--ring-unit:calc(var(--ring-size-lg) / 184);--badge-r:calc(var(--ring-unit) * 43.5);--badge-cy:calc(var(--ring-unit) * 173);",
-        "--badge-drop:calc(var(--badge-cy) - var(--ring-size-lg) / 2 + var(--badge-r));--type-badge:7.5px;--type-star:9px;",
-        // the share inside the ring of the rail: its size, and the size of the sign (%) after it
-        "--type-ring:11px;--type-unit:8px;",
-        // the ladder of resets under the rings (kit: rail): the head of it (the hairline on the axis, 22px wide, the air, the word "Resets" at --type-ladder), a step
-        // (the thread's room over the bead, the bead, how long to the reset at --type-meta and the amount at --type-ladder, one line each) and the word that
-        // counts the steps that did not fit; the heights are such that the lines of the text fit them (the head: 12 + 1 + 8 + one line of 11px at 1.35; a step: 12 + 7 + 4 + 15
-        // + 13.75 = 51.75), so the script reads them as they are and reckons how many steps stand in the room the rail leaves. The bead grows to --ladder-bead-grow under
-        // the pointer or the keyboard; at rest it is the tertiary grey (the ink at a strength, it turns with the theme), and the first step's, the nearest reset, is the crimson ink.
-        "--ladder-title-h:36px;--ladder-step-h:52px;--ladder-more-h:30px;--ladder-bead:7px;--ladder-bead-grow:1.4;--ladder-hair:22px;--type-ladder:11px;",
-        "--ladder-bead-rest:rgba(var(--neutral-rgb),.38);",
-        // the open ladder: the window of the steps is --ladder-window steps high (the half of the next one under the haze says there are more), the haze at its edges --ladder-haze
-        "--ladder-window:5.5;--ladder-haze:22px;--ladder-haze-ink:#000;",
-        // the haze itself: the mask of the window of steps (down: the whole, at its start, at its end) and of the row of bars (the same, sideways), each written once and worn by its rule
-        "--ladder-haze-y:linear-gradient(to bottom,transparent 0,var(--ladder-haze-ink) var(--ladder-haze),var(--ladder-haze-ink) calc(100% - var(--ladder-haze)),transparent 100%);--ladder-haze-y-start:linear-gradient(to bottom,var(--ladder-haze-ink) 0,var(--ladder-haze-ink) 0,var(--ladder-haze-ink) calc(100% - var(--ladder-haze)),transparent 100%);--ladder-haze-y-end:linear-gradient(to bottom,transparent 0,var(--ladder-haze-ink) var(--ladder-haze),var(--ladder-haze-ink) 100%,var(--ladder-haze-ink) 100%);--ladder-haze-x:linear-gradient(to right,transparent 0,var(--ladder-haze-ink) var(--ladder-haze),var(--ladder-haze-ink) calc(100% - var(--ladder-haze)),transparent 100%);--ladder-haze-x-start:linear-gradient(to right,var(--ladder-haze-ink) 0,var(--ladder-haze-ink) 0,var(--ladder-haze-ink) calc(100% - var(--ladder-haze)),transparent 100%);--ladder-haze-x-end:linear-gradient(to right,transparent 0,var(--ladder-haze-ink) var(--ladder-haze),var(--ladder-haze-ink) 100%,var(--ladder-haze-ink) 100%);",
-        // motion: the ladder when a window is picked (kit: rail, motion): the steps that stood fade in --dur-ladder-out, the new ones come down from --ladder-at, a row
-        // after another (--rail-row-step); --ladder-elapsed is what the script sets where a drawing inside the movement has no clock of the page to go on by
-        "--dur-ladder-out:120ms;--ladder-at:100ms;--ladder-elapsed:0ms;--j:0;",
-        // the star of a window not read whole: on the wide rail it stands on the axis, a bead on the lower edge of the badge: the middle of its glyph
-        // --star-rise over the edge (so it hangs about half a pixel under it), the top of its box such that the middle of the glyph is there (the middle
-        // of the star is .38 of its font size under the top of a box of one line, in the system face)
-        "--star-rise:1.2px;--star-top:calc(var(--badge-cy) + var(--badge-r) - var(--star-rise) - var(--type-star) * .38);",
-        // the room a share keeps at the end of a capsule on the narrow shell (the widest it is: 100%)
-        "--share-w:32px;",
-        // axis: the one vertical of the shell, from the left edge of the head and of the rail: the middle of the whole tab of the family picked (the
-        // first tab of the head, which stands at the edge of the widget, as far from it as from the top: --shell-card-gap), and the rings of the rail,
-        // the thread from the head, the ladder and its seams stand on it (the head and the rail derive their air from it). The script puts the middle
-        // of the tab picked here (railFit); until it does the axis is the middle of the widest tab (--rail-tab-w, halved). The
-        // size of a family's mark (FAMILY_MARK_PX in the script), the height of the head's line, and the thread that runs down the axis from the
-        // head to the first ring: it starts a hair under the mark (picked, so grown by --mark-on) and ends a hair over the ring's box
-        "--rail-axis:calc(var(--rail-tab-w) / 2);--mark-px:14px;--head-h:var(--row-h);",
-        // the ladder of the rail stands on the axis, as wide as the rail leaves round it: the same at both sides, and --ladder-air short of the card where the axis is
-        // nearer the card than the middle of the rail (a wide tab's), so a step, the outline of its focus and its words are never cut at the rail's edge
-        "--ladder-air:var(--space-1);--ladder-w:calc(min(var(--rail-axis), var(--rail-w) - var(--rail-axis) - var(--ladder-air)) * 2);",
-        "--lead-top:calc(var(--mark-px) * var(--mark-on) / 2 + var(--space-0) - var(--shell-card-gap) - var(--head-h) / 2);",
-        "--lead-end:calc(var(--rail-top) + (var(--rail-row-h) - var(--ring-box)) / 2 - var(--thread-gap));",
-        // axis: where the thread ends over a first ring that is picked: the ring's box grows to --mark-on about its centre, so its top has gone up
-        // by half of the growth, and the thread ends that much higher (the same hair over the ring as when it is not picked)
-        "--lead-end-on:calc(var(--lead-end) - var(--ring-grow));",
-        // colour: the ring and the thread between two rows of the rail are the ink at a strength (built on --neutral-rgb, they turn with the
-        // theme): the track, the arc and the dot of a ring, the arc and the dot of the one picked, the thread
+        // the ring (the box it stands in: the kit's plain size and the large one)
+        "--ring-size:28px;--ring-size-lg:47px;",
+        // the size of a family's mark in the head (FAMILY_MARK_PX in the script)
+        "--mark-px:14px;",
+        // colour: the kit's plain ring is the ink at a strength (built on --neutral-rgb, it turns with the theme): its track, arc and dot
         "--ring-track:rgba(var(--neutral-rgb),.16);--ring-arc:rgba(var(--neutral-rgb),.55);--ring-dot:rgba(var(--neutral-rgb),.72);",
-        "--ring-arc-on:rgba(var(--neutral-rgb),.82);--ring-dot-on:rgba(var(--neutral-rgb),.9);--rail-thread:rgba(var(--neutral-rgb),.16);",
-        // colour: a step darker for a row under the pointer (not picked): the arc, the dot and the edge of the badge, between the rest and the picked
-        "--ring-arc-hover:rgba(var(--neutral-rgb),.68);--ring-dot-hover:rgba(var(--neutral-rgb),.8);",
-        // colour: the edge of the badge in the gap of the ring: stronger than the track (the ground inside is the page's own, so a track's tone does not read
-        // on a dark one) and quieter than the arc; the light theme sets its own below
-        "--ring-badge-edge:rgba(var(--neutral-rgb),.3);--ring-badge-edge-hover:rgba(var(--neutral-rgb),.44);",
         // colour: the app's own (ui.css): the capsule of a window on the narrow shell, its elevation at rest, and the crimson tone of the capsule picked
         "--surface-capsule:rgba(44,34,52,.62);--elev-rest:0 1px 2px rgba(0,0,0,.5),0 8px 24px rgba(0,0,0,.35);",
         "--tone-crimson:rgba(240,90,106,.18);--tone-crimson-ink:#ffa0aa;",
-        // line: the hairline of an edge and the ring of the focus (--ring-inset: the ring drawn inside the box, for a part whose neighbours clip what is outside it)
-        "--border-w:1px;--ring-w:2px;--ring-offset:2px;--ring-inset:calc(var(--ring-w) * -1);--focus-line:var(--ring-w) solid var(--focus-accent-border);",
+        "--border-w:1px;--ring-w:2px;--ring-offset:2px;--focus-line:var(--ring-w) solid var(--focus-accent-border);",
         // motion: durations from the shortest and the curve
-        "--dur-1:120ms;--dur-2:140ms;--dur-4:180ms;--dur-5:220ms;",
+        "--dur-1:120ms;--dur-2:140ms;--dur-5:220ms;",
         "--ease:cubic-bezier(.2,.8,.2,1);",
         // motion: the bars' opening (kit: bars): the basis, the share of the free room and the most of a bar move in --dur-bars on --ease-bars, a longer and more even run than --dur-5 on --ease, so the pair that shuts and opens does not leap in its first frames
-        "--dur-bars:300ms;--ease-bars:cubic-bezier(.4,0,.2,1);",
         // motion: the blink of a dot, as the sidebar's dots blink while it checks: it dims to --blink-dim and back in --dur-blink (.15, .7s)
         "--dur-blink:700ms;--blink-dim:.15;",
-        // motion: the step the other kinds of bar take back to, while a kind of the legend is held (--dim-others)
-        "--dim-others:.35;",
-        // motion: the sidebar's spring and the time of the ring that grows when its row is picked
         "--nav-spring:cubic-bezier(.34,1.5,.64,1);--dur-nav:500ms;",
         // motion: the press of a row of the rail (the app's: a state changes colour or size, never the height): under the finger or the button the ring
         // shrinks to --press of its size in --dur-1 and comes back on the spring (--nav-spring, --dur-nav) when it is let go
         "--press:.94;",
-        // motion: the reader's pick of a family (kit: rail, motion): the tabs slide (--dur-flip on --ease-flip: a soft start, so no tab leaps in
-        // its first frames, and no bounce on a long way; the sine's in-out, whose 70% of the way is at about 280 ms of the 450; the tabs that give
-        // way dim to --yield-dim in a quarter of that time, stay so to its four fifths and come back), the thread from the
-        // mark down to the first ring is drawn (--dur-rail-thread, from --rail-thread-at: when the tabs have gone about 70% of the way), the windows
-        // come down (--dur-rail-row, from --rail-row-at, --rail-row-step apart), and the note under them (the accounts not read) and the foot of the
-        // rail fade in after the last one (--dur-rail-foot); all of it ends within RAIL_MOTION_MS (1240 ms) in the script
-        "--dur-flip:450ms;--ease-flip:cubic-bezier(.37,0,.63,1);--yield-dim:.3;--dur-rail-thread:200ms;--rail-thread-at:280ms;",
-        "--dur-rail-row:280ms;--rail-row-at:380ms;--rail-row-step:70ms;--dur-rail-foot:240ms;",
-        // motion: the arc of a ring that is picked is drawn from nothing to its share (kit: ring, motion): --dur-sweep on --ease-sweep, a soft landing
-        // with no rebound on the arc; the dot at the end of the arc runs round the ring with it in the same time and on the same curve
-        "--dur-sweep:650ms;--ease-sweep:cubic-bezier(.3,.5,.2,1);",
-        // motion: the line of a pick (capsule: chart): the stem runs from the foot of the picked bar to the chart's plate, then the two arms run round the plate's edge and meet
-        // opposite the stem; the two times together (--dur-trace-stem, --dur-trace-arms) are the time of the whole line, which the script shares out by the lengths (on its own svg) so that
-        // the line runs at one speed, on --ease-trace (linear). --trace-w is the line's width, the one width of the picked bar's ring, the stem and the plate's outline (--shadow-trace: that
-        // width as a ring drawn inside); the script (traceWidth) puts it to whole device pixels on the root
-        "--dur-trace-stem:160ms;--dur-trace-arms:320ms;--ease-trace:linear;--trace-w:1.5px;--shadow-trace:inset 0 0 0 var(--trace-w) var(--accent);",
-        // motion: the stand-ins inside the plate while its line is drawn (capsule: chart): they dim to --skel-dim and back in --dur-skel (skel-pulse, kit: motion)
-        "--dur-skel:1100ms;--skel-dim:.45;",
-        // layer: the tab that rides to the front stands over the tabs it passes while it slides
-        "--z-flip:1;--z-plate:2;--z-card:1;",
-        // motion: what the script sets on a node's own style for it (the row's number, the count of rows, how far a drawing inside the span
-        // has gone, the place a tab slides from: worked out once, at the pick, and the look a tab that gives way starts dimming from when it is
-        // a second pick inside the movement), declared here at their rest values
-        "--i:0;--rail-rows:3;--rail-elapsed:0ms;--flip-x:0px;--flip-y:0px;--yield-from:1;--kt-room:none;--kt-gap:var(--space-2);--acc-space:auto;",
-        // motion: and what the script sets on a ring that sweeps (the share it sweeps to, the time it waits, how far a drawing inside the span has
-        // gone), declared at their rest values
-        "--ring-share:0;--sweep-at:0ms;--sweep-elapsed:0ms;",
-        // motion: the picked tab's model mark, a little bigger: the scale it grows to (the kit's mark tab: .tab-mark-icon, the picked one and the one just left)
-        "--mark-on:1.2;--mark-hover:1.12}",
+        // what the script sets on a node's own style (the room the account list takes), declared at its rest value
+        "--acc-space:auto;",
+        // The quota plate's own: the capsule its rings and steps stand on, the plate, the selected (crimson) ring, step and card, what is left (green), held (amber),
+        // at the limit (red), the hatches of a last-known and an unread bar, and the sizes of the rail, the ring, the card and the bars (qBarsFit writes the last three).
+        "--q-capsule:rgba(255,255,255,.07);--q-capsule-hover:rgba(255,255,255,.11);--q-plate:#1b1b1e;--q-edge:rgba(255,255,255,.09);--q-track:rgba(255,255,255,.075);",
+        "--q-sel:#872236;--q-sel-ink:#ffdfe1;--q-sel-meta:rgba(255,223,225,.78);--q-sel-rule:rgba(255,223,225,.16);--q-outline:#fe7d85;",
+        "--q-green:#2fd359;--q-amber:#f7cb58;--q-red:#ef4444;--q-chip:rgba(255,255,255,.06);--q-limit-bg:#c42127;--q-limit-ink:#fff;--q-held-ink:#2b1d00;",
+        "--q-shadow:0 1px 2px rgba(0,0,0,.4),0 6px 20px rgba(0,0,0,.28);--q-sel-shadow:0 0 0 var(--ring-w) var(--q-outline);--q-lit-shadow:0 0 0 var(--ring-w) var(--q-green);",
+        "--q-dim-shadow:0 0 0 var(--ring-w) var(--q-amber);--q-edge-shadow:inset 0 0 0 var(--border-w) var(--q-edge);--q-spent-shadow:inset 0 -3px 0 var(--q-red);",
+        "--q-hatch-green:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc2JyBoZWlnaHQ9JzYnPjxwYXRoIGQ9J00tMSAxbDItMk0wIDZsNi02TTUgN2wyLTInIHN0cm9rZT0nIzJmZDM1OScgc3Ryb2tlLXdpZHRoPScyLjInLz48L3N2Zz4=);",
+        "--q-hatch-amber:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc2JyBoZWlnaHQ9JzYnPjxwYXRoIGQ9J00tMSAxbDItMk0wIDZsNi02TTUgN2wyLTInIHN0cm9rZT0nI2Y3Y2I1OCcgc3Ryb2tlLXdpZHRoPScyLjInLz48L3N2Zz4=);",
+        "--q-hatch-grey:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc2JyBoZWlnaHQ9JzYnPjxwYXRoIGQ9J00tMSAxbDItMk0wIDZsNi02TTUgN2wyLTInIHN0cm9rZT0nIzZiNmI3NScgc3Ryb2tlLXdpZHRoPScxJy8+PC9zdmc+);",
+        "--q-rail-w:96px;--q-ring:46px;--q-ring-sm:28px;--q-card-w:188px;--q-cols:10;--q-bw:56px;--q-bh:96px;--q-bar-gap:5px;--q-mark:7px;--q-swatch:10px;--q-base:3px;}",
         ":root[data-theme=light]{color-scheme:light;--surface:#fff;--inset:#f3f3f5;",
         "--text-primary:#26262b;--text-secondary:#626977;--text-meta:#60606b;--text-disabled:#90909a;",
-        "--edge:#e2e2e7;--edge-strong:#91919d;--edge-idle:#8a8a96;--neutral-rgb:38,38,43;--ring-badge-edge:rgba(var(--neutral-rgb),.26);--ring-badge-edge-hover:rgba(var(--neutral-rgb),.4);",
+        "--edge:#e2e2e7;--edge-strong:#91919d;--edge-idle:#8a8a96;--neutral-rgb:38,38,43;",
         "--status-ok:#38704f;--status-warn:#845713;--status-warn-bg:#fbf5e9;",
         "--status-bad:#a73c49;--status-bad-bg:#fcf0f1;",
-        "--focus-accent-border:#b62f42;--share-ink:#787884;--scenario-ink:#365eac;--calm-a:#cf5636;--calm-b:#d9822b;",
+        "--focus-accent-border:#b62f42;--share-ink:#787884;--scenario-ink:#365eac;--calm-a:#16a34a;--calm-b:#16a34a;",
         "--shell-bg:#f5f6f8;--shell-card-bg:#fff;--shell-card-shadow:-8px 0 22px rgba(24,16,32,.07),0 0 12px rgba(24,16,32,.055);",
         "--surface-capsule:#fff;--elev-rest:0 1px 2px rgba(28,33,51,.05),0 6px 18px rgba(28,33,51,.06);",
         "--tone-crimson:rgba(201,53,69,.1);--tone-crimson-ink:#b52b3b;",
+        "--q-capsule:#fff;--q-capsule-hover:#f5f6f8;--q-plate:#fff;--q-edge:rgba(32,35,43,.08);--q-track:rgba(32,35,43,.065);",
+        "--q-sel:rgba(201,53,69,.1);--q-sel-ink:#b52b3b;--q-sel-meta:#9a3a46;--q-sel-rule:rgba(181,43,59,.14);--q-outline:#bf2f40;",
+        "--q-green:#22c55e;--q-amber:#f59e0b;--q-chip:rgba(32,35,43,.05);",
+        "--q-shadow:0 1px 2px rgba(28,33,51,.05),0 6px 18px rgba(28,33,51,.06);",
+        "--q-hatch-green:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc2JyBoZWlnaHQ9JzYnPjxwYXRoIGQ9J00tMSAxbDItMk0wIDZsNi02TTUgN2wyLTInIHN0cm9rZT0nIzIyYzU1ZScgc3Ryb2tlLXdpZHRoPScyLjInLz48L3N2Zz4=);",
+        "--q-hatch-amber:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc2JyBoZWlnaHQ9JzYnPjxwYXRoIGQ9J00tMSAxbDItMk0wIDZsNi02TTUgN2wyLTInIHN0cm9rZT0nI2Y1OWUwYicgc3Ryb2tlLXdpZHRoPScyLjInLz48L3N2Zz4=);",
+        "--q-hatch-grey:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc2JyBoZWlnaHQ9JzYnPjxwYXRoIGQ9J00tMSAxbDItMk0wIDZsNi02TTUgN2wyLTInIHN0cm9rZT0nI2I5YmNjNCcgc3Ryb2tlLXdpZHRoPScxJy8+PC9zdmc+);",
         "--hatch:url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPSc2JyBoZWlnaHQ9JzYnPjxwYXRoIGQ9J00tMSAxbDItMk0wIDZsNi02TTUgN2wyLTInIHN0cm9rZT0nIzc4Nzg4NCcgc3Ryb2tlLXdpZHRoPScxLjUnLz48L3N2Zz4=)}",
         /* base */
         // Reset, the page and the focus ring every focusable thing shares.
@@ -488,8 +283,6 @@
         ".btn-compact,.btn-compact-wide{min-height:var(--row-h-sm)}",
         ".btn-compact{padding:var(--space-0) var(--space-2)}",
         ".btn-compact-wide{padding:var(--space-0) var(--space-2h)}",
-        // The quiet hover of an option: the ink comes forward on a faint tint (.hover-quiet, worn by a quieter option).
-        ".hover-quiet:hover{color:var(--text-primary);background:var(--tint-2)}",
         /* kit: text action */
         // The text action. What it is: a button that is its word alone, as the sidebar's version check is: no border, no plate and no
         // padding sideways (on hover either), no icon and no coloured status. The word is in the meta size with the sidebar's tracking.
@@ -511,11 +304,14 @@
         // Motion: the word and its capital fade in colour only (--dur-5 on --ease); the busy dot blinks by the rule .is-busy of kit: motion. Under reduced motion
         // nothing fades, and a busy dot stands still (the same rule's pair).
         // Tokens it reads: --text-secondary --text-primary --accent --type-meta --track-meta --lh-ui --weight-semibold --row-h-sm
-        // --tap-h --radius-sm --space-0 --space-2 --dur-5 --ease. It writes no colour and no size of its own.
+        // --tap-h --radius-sm --space-0 --space-1 --space-2 --dur-5 --ease. It writes no colour and no size of its own.
         // Accessibility: the name of the button is its word, so no aria-label and no title (the word is seen); the span of the capital
         // has no attribute, so a screen reader reads the whole word; the dot is aria-hidden; the button is 26px high and 44 by 44 under
         // a finger (kit: touch); its ring is the base ring.
-        // Not to do: no icon, no plate, no border, no colour of its own (within the text action the accent is the dot's and the lit capital's, nothing else),
+        // A mark: wordButton(key, params, iconName) puts the kit's stroke icon before the word (.btn-word-mark, aria-hidden, the word's ink), and the
+        // word itself in a span (.btn-word-body) that the narrow shell (520px and under) folds to a screen reader's (.btn-word-short: the mark stands
+        // alone, the name of the button is still its word). Refresh wears it; About has none.
+        // Not to do: no plate, no border, no colour of its own (within the text action the accent is the dot's and the lit capital's, nothing else),
         // no other word while busy (one button, one word), no flex or grid on the button itself.
         // The button is an inline-block (a button centres its content by itself), never a flex or grid row: the capital is a span in it,
         // and a span that is a flex item is block-level, which a screen reader names with a gap in the word ("A bout").
@@ -542,326 +338,57 @@
         ".btn-word-row{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-0)}",
         // Without motion nothing fades (the word and its capital take their ink at once) and nothing blinks; a busy dot would then show
         // nothing, so it stays dimmed to the blink's low end (--blink-dim): the reduced pair of the blink is a still dim dot.
+        ".btn-word-mark{display:inline-block;vertical-align:-3px;margin-right:var(--space-1)}",
+        ".btn-word-short{position:relative}",
+        "@media(max-width:520.98px){.btn-word-short .btn-word-mark{margin-right:0}.btn-word-short .btn-word-body{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}}",
         "@media(prefers-reduced-motion:reduce){.btn-word,.btn-word-cap{transition:none}}",
         /* kit: mark tab */
-        // The mark tab. What it is: a button that is one choice of a row, told by its mark: the model's mark (a drawing, or the initial where
-        // there is none), its name and, when it has a number, a small dot and that number. It is no plate: no border, no ground and no shadow
-        // in any state, and its text keeps the meta size and the regular weight in every one, so a pick changes no word. It has a second kind,
-        // the number tab: no mark of a model, its number (with the dot before it) is its mark, told by its colour alone: it never grows.
-        // When to use it: for a row of choices that each have a mark and of which one is picked, where the pick must be seen at a glance and
-        // must move no word (the head's families). Never for a command (that is a button with a plate, .pill-btn, or a text action), and never
-        // for a row of plain words (that is the tabs, or the segment). The number tab is for a row of tabs that have no model to draw but
-        // each a figure that is what the tab tells (the windows of a family's limits, each with the average left): the figure is the mark.
-        // How to use it: markTab({key, mark, name, count, pressed}) makes each tab (key: what markStart finds it by; mark: a node of the
-        // caller's; name: the text; count: a number, which draws the dot and the number, or none; pressed: true or false for a choice, none for
-        // a tab that is no choice) and markRow(tabs) the row of them. The number tab (the rail's) is made by markTab({key, name, count, note, selected, ring})
-        // (no mark, a ring of ringGauge, and a tab with neither is none of the kit's: count, a number or a short text such as 68% or a dash, is the mark; note: a sign that stands after the number, aria-hidden,
-        // such as * for a figure that rests on a part of what it counts; selected: true or false for a tab of a tablist, role=tab and
-        // aria-selected) and its row by markRow(tabs, true), a tablist. When the reader picks a tab, markStart(row, fromKey, toKey, lit) tells the
-        // row which tab was left and which was picked (lit: whether the one picked was showing its preview at the click, which
-        // markPreviewed(tab) says; and pressed: whether the pick came by a press of the pointer, which markPressed(event) says: a rail row's ring then
-        // starts from the press and not from the preview's size), and settleMarks() ends it at the next frame. The helpers stand together in widget.js and nothing else
-        // builds a tab, a mark, a dot, a number or a row, so the classes below (.tab-mark, .tab-mark-icon, .tab-mark-name, .tab-mark-dot,
-        // .tab-mark-count, .tab-mark-row, .tab-mark-num, .tab-mark-note and the start states .tab-mark-was-off, .tab-mark-was-lit, .tab-mark-was-press,
-        // .tab-mark-was-on) are worn through them.
-        // A part adds its wiring to a tab it gets (aria-label, title, data-focus, aria-controls, the click) and its place to a row (the head's
-        // .harness-seg), never a look.
-        // States: at rest the mark is in the tab's ink (--text-primary), at its size. Previewed, a tab not picked under the pointer or with
-        // the keyboard on it (:hover, :focus-visible; not when it is disabled) shows the same mark in --accent, not grown: a promise of the pick.
-        // Picked (aria-pressed=true) the mark is in --accent and grown to --mark-on. The dot and the number are in --accent in every state.
-        // A row that is still (.tab-mark-still, worn through markRow's third argument) shows no preview by the pointer: a pick has moved its
-        // tabs under a pointer that stands still, and the tab that has come under it must not turn red as if it were pointed at. The part takes
-        // the class off at the first real move of the pointer; the keyboard's preview (:focus-visible) is never held.
-        // The number tab is the other way round: its name is in --text-primary, the ink, in every state, and its dot and number tell the pick
-        // alone: at rest they are in --text-meta; previewed (not picked, :hover or :focus-visible, not aria-disabled) they go to --text-primary,
-        // not red; picked (aria-selected=true) they are in --accent. Its note (the star) is in the ink and the semibold weight at rest and
-        // previewed, and in --accent when the tab is picked, with the number. Nothing grows. A tab that is aria-disabled previews nothing.
-        // Its text never wraps (white-space: nowrap): a name does not break at its hyphen, and a row with no room wraps whole tabs (markRow).
-        // Motion: the mark's colour and size fade together by the mark's own transition (--dur-5 on --ease), and nothing else of the tab
-        // moves. A pick redraws the row, so a new mark has no look to fade from: markStart draws the two marks that change in the look they
-        // had a moment ago (a start state: the mark picked in the tab's ink at its size, or in the preview's red at its size when the tab was
-        // previewed, so that only the size moves; the mark left in the picked look), and the next frame takes the class off after a read of
-        // the look, which the browser holds as the look the change starts from. It is a start state and a transition, never keyframes: the
-        // canon lets a keyframe move transform and opacity alone (kit: motion), so a keyframe could not fade the red. Under reduced motion
-        // nothing fades and nothing moves (the picked mark is simply drawn at its size) and no start state is drawn.
-        // The number tab fades its number and its note in colour alone (--dur-5 on --ease) and starts a pick from the same classes on
-        // the number and on the note (markStart puts them): the one picked from its quiet look (was-off) or, when it showed its
-        // preview, from the ink (was-lit), the one left from the picked red (was-on). Its ring starts from the preview's size or, for a press of the
-        // pointer, from the press (kit: rail).
-        // Tokens it reads: --text-primary --text-meta --accent --mark-on --type-meta --lh-ui --weight-regular
-        // --weight-semibold --row-h --tap-h --radius-sm --space-1 --space-1h --dur-5 --ease. It writes no colour of its own and no size off
-        // the scale (the 5px between a tab's parts is the tab's own air, the one literal).
-        // Accessibility: the pick is aria-pressed (the colour tells nothing alone) and the row is a group, which the part gives a name; a tab
-        // that has a number carries an aria-label that says what it counts ("Claude — 2 accounts": the part's wiring), so the bare number is
-        // not read as it is seen, and the dot is aria-hidden; the tab is 32px high, 44px under a finger (kit: touch); its ring is the base
-        // ring; a tab that is disabled previews nothing. The number tab is a tab of a tablist (role=tab, aria-selected) and its row a tablist
-        // the part names; the tab's own wiring (aria-controls, aria-describedby, the roving tabindex, the arrow keys) is the part's, and so
-        // is the aria-disabled of a place with nothing to tell (a tab with no number).
-        // Not to do: no plate, no border, no shadow and no ground in any state; no change of the text's weight or size on a pick or a
-        // preview (only the mark moves); no colour of its own (within the mark tab the accent is the mark's, the dot's and the number's,
-        // nothing else); no dot without a number; no keyframes; no start state drawn by the part; the number tab changes colour only, never
-        // its size or its weight, and shows the red on a pick alone, never on a preview.
-        // The row (markRow): a flex line, the tabs centred on each other with a small gap; it may wrap, so a row with no room does not run
-        // out of its place. A part gives it its place (margin, width, the room it asks for in a bar) and nothing else.
-        ".tab-mark-row{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-1)}",
-        // The tab: an inline flex line of its parts, 5px between them, the row's height and a little air sideways; no border and no ground
-        // (so no state can fill them), the ink, the size and the regular weight of its text. The ring is the base's.
-        ".tab-mark{display:inline-flex;align-items:center;gap:5px;min-height:var(--row-h);padding:var(--space-1) var(--space-1h);border:0;border-radius:var(--radius-sm);background:none;appearance:none;color:var(--text-primary);font-size:var(--type-meta);font-weight:var(--weight-regular);line-height:var(--lh-ui)}",
-        // The mark (.tab-mark-icon: the model's drawing, or its initial where the widget has no drawing) is in the tab's ink. Picked
-        // (aria-pressed=true), it turns the accent and grows to --mark-on; a tab not picked shows the same red, without the growth, under
-        // the pointer or the keyboard, as a preview of the pick (a tab that is disabled shows none). Nothing else of the tab moves: not the
-        // name, not the number. The colour and the size fade together, by the mark's one transition (--dur-5 on --ease). The reader's own
-        // pick redraws the row, so a new mark has no look to fade from: markStart draws the two marks that change in the look they had a
-        // moment ago (the start state) and settleMarks takes that off at the next frame, so the transition carries each to its look now.
-        // The mark of the tab picked wears .tab-mark-was-off (the tab's ink, its size; heavier than the picked rule, so it wins by weight),
-        // or .tab-mark-was-lit when the tab was already showing its preview at the click (its mark was red then: the start is that red at
-        // the tab's size, so only the size moves and the mark does not go through the ink), and the mark of the tab left wears
-        // .tab-mark-was-on (the picked look, in one rule with the picked mark). The classes hold a look and move nothing; there are no
-        // keyframes. Under reduced motion nothing fades and nothing grows, and no start state is drawn (the last rule of this section).
-        ".tab-mark-icon{transition:color var(--dur-5) var(--ease),transform var(--dur-5) var(--ease)}",
-        ".tab-mark[aria-pressed=true] .tab-mark-icon,.tab-mark-icon.tab-mark-was-on{color:var(--accent);transform:scale(var(--mark-on))}",
-        // The preview by the pointer is off in a row that is still (.tab-mark-still: a pick has moved its tabs under a pointer that stands
-        // still, and the first move of the pointer takes the class off); the keyboard's preview is not.
-        ".tab-mark:focus-visible:not([aria-pressed=true]):not(:disabled) .tab-mark-icon,.tab-mark-row:not(.tab-mark-still) .tab-mark:hover:not([aria-pressed=true]):not(:disabled) .tab-mark-icon{color:var(--accent)}",
-        ".tab-mark[aria-pressed=true] .tab-mark-icon.tab-mark-was-off{color:var(--text-primary);transform:none}",
-        ".tab-mark[aria-pressed=true] .tab-mark-icon.tab-mark-was-lit{color:var(--accent);transform:none}",
-        // The dot between the name and the number (drawn only with a number, out of the reading order) and the number: the accent. The
-        // dot is the semibold weight, the number the regular one on tabular digits.
-        ".tab-mark-dot{color:var(--accent);font-weight:var(--weight-semibold)}",
-        ".tab-mark-count{color:var(--accent);font-weight:var(--weight-regular);font-variant-numeric:tabular-nums}",
-        // The number that stands after the dot (a tab with a mark; the ring's share has no dot) holds the room of two digits (tabular, so a digit is one width) whatever it
-        // counts: the tab, and the rail's width and axis that railFit reads from the tabs, do not move when the count goes from 9 to 10; the digits stand in the middle of that room.
-        ".tab-mark-dot+.tab-mark-count{min-width:2ch;text-align:center}",
-        // The number tab (.tab-mark-num: no mark, the number is it; it stands in the rail's ring, no dot). Its name is the ink (the tab's own --text-primary) in every state: the
-        // pick is told by the number alone. It is --text-meta at rest and turns --accent when it is picked. A tab not picked
-        // shows, under the pointer or the keyboard (not when it is aria-disabled), the ink on its number, never the red: the red is
-        // the pick's alone. Nothing grows: only the colour moves, by the number's own transition (--dur-5 on --ease), from the
-        // start state of a pick (was-off: the quiet look; was-lit: the preview's ink; was-on, on the tab left: the picked red), which wears
-        // the classes of the mark's and is heavier than the picked rule, so it wins by weight. The text of the tab never wraps (white-space:nowrap), so the tab keeps its height; a row with no room wraps
-        // whole tabs, which the row's own flex-wrap does.
-        ".tab-mark-num{white-space:nowrap}",
-        ".tab-mark-num .tab-mark-count{color:var(--text-meta);transition:color var(--dur-5) var(--ease)}",
-        ".tab-mark-num[aria-selected=true] .tab-mark-count,.tab-mark-num .tab-mark-count.tab-mark-was-on{color:var(--accent)}",
-        ".tab-mark-num:is(:hover,:focus-visible):not([aria-selected=true]):not([aria-disabled=true]) .tab-mark-count{color:var(--text-primary)}",
-        ".tab-mark-num[aria-selected=true] .tab-mark-count.tab-mark-was-off{color:var(--text-meta)}",
-        ".tab-mark-num[aria-selected=true] .tab-mark-count.tab-mark-was-lit{color:var(--text-primary)}",
-        // The note after the number (.tab-mark-note, the star): a hair of air before it, the semibold weight and the ink at rest and under
-        // the pointer; the number's red with the number when the tab is picked. The weight is the sign's own in every state: it is no word
-        // that a pick or a preview changes (the contract's "no change of weight" is about the words). It fades with the number: its start
-        // state is its own class, put by markStart as on the number (was-off, was-lit: the ink; was-on: the picked red), so the star changes
-        // its colour with the number and not at once.
-        ".tab-mark-note{margin-left:1px;font-weight:var(--weight-semibold);color:var(--text-primary);transition:color var(--dur-5) var(--ease)}",
-        ".tab-mark-num[aria-selected=true] .tab-mark-note,.tab-mark-num .tab-mark-note.tab-mark-was-on{color:var(--accent)}",
-        ".tab-mark-num[aria-selected=true] .tab-mark-note:is(.tab-mark-was-off,.tab-mark-was-lit){color:var(--text-primary)}",
-        "@media(prefers-reduced-motion:reduce){.tab-mark-icon,.tab-mark-num .tab-mark-count,.tab-mark-note{transition:none}}",
+        // The mark tab. What it is: a button that is one choice of a row, told by its mark: the model's mark (a drawing, or the initial where there is
+        // none), its name and, when it has a number, that number after the name. It is a quiet capsule: no plate at rest, the neutral veil under the
+        // pointer, and the crimson of the pick (--q-sel) when it is picked, as the ring of a limit and the card of an account are: one colour says
+        // "picked" everywhere in the widget. When to use it: for a row of choices that each have a mark and of which one is picked (the head's
+        // families). Never for a command (that is .pill-btn or a text action), and never for a row of plain words (the segment). How to use it:
+        // markTab({key, mark, name, count, pressed}) makes each tab (key: its data-mark-key; mark: a node of the caller's; name: the text; count: a
+        // number, or none; pressed: true or false for a choice, none for a tab that is no choice) and markRow(tabs) the row of them. The helpers stand
+        // together in widget.js and nothing else builds a tab, a mark, a number or a row, so the classes below (.tab-mark, .tab-mark-icon, .tab-mark-name,
+        // .tab-mark-count, .tab-mark-row) are worn through them. A part adds its wiring to a tab (aria-label, title, data-focus, the click) and its place
+        // to a row (the head's .harness-seg), never a look. States: at rest the tab is in the secondary ink on no ground; under the pointer or the keyboard
+        // the neutral veil (--q-capsule-hover) and the primary ink; picked (aria-pressed=true) the crimson ground, the crimson ink and the semibold weight;
+        // the number is the meta ink, and the crimson meta ink on the picked tab. The order of the tabs never changes with the pick: a pick moves no tab.
+        // On the narrow shell (520px and under) a tab not picked keeps its mark and its number and folds its name (the name stays its label), so the
+        // four families, the picked one named, and the words at the right stand on one line. Motion: the ground and the ink fade (--dur-1 on --ease);
+        // nothing moves and nothing grows; under reduced motion nothing fades. Tokens it reads: --row-h --radius-pill --space-0 --space-1 --space-1h --space-2
+        // --text-secondary --text-primary --text-meta --q-capsule-hover --q-sel --q-sel-ink --q-sel-meta --type-meta --lh-ui --weight-regular
+        // --weight-semibold --weight-medium --mark-px --dur-1 --ease. Accessibility: the pick is aria-pressed; a tab with a number carries an aria-label that
+        // says what it counts ("Claude — 2 accounts": the part's wiring); 32px high, 44px under a finger (kit: touch); its ring is the base ring. Not to do:
+        // no border, no shadow, no reorder on a pick, no second colour for the pick, no keyframes.
+        ".tab-mark-row{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-0)}",
+        ".tab-mark{display:inline-flex;align-items:center;gap:var(--space-1h);min-height:var(--row-h);padding:0 var(--space-2);border:0;border-radius:var(--radius-pill);background:none;appearance:none;color:var(--text-secondary);font-size:var(--type-meta);font-weight:var(--weight-regular);line-height:var(--lh-ui);white-space:nowrap;transition:background-color var(--dur-1) var(--ease),color var(--dur-1) var(--ease)}",
+        ".tab-mark:is(:hover,:focus-visible):not([aria-pressed=true]):not(:disabled){background:var(--q-capsule-hover);color:var(--text-primary)}",
+        ".tab-mark[aria-pressed=true]{background:var(--q-sel);color:var(--q-sel-ink);font-weight:var(--weight-semibold)}",
+        ".tab-mark-icon{flex:none;width:var(--mark-px);height:var(--mark-px)}",
+        ".tab-mark-count{color:var(--text-meta);font-weight:var(--weight-regular);font-variant-numeric:tabular-nums}",
+        ".tab-mark[aria-pressed=true] .tab-mark-count{color:var(--q-sel-meta);font-weight:var(--weight-medium)}",
+        "@media(max-width:520.98px){.tab-mark{gap:var(--space-1);padding:0 var(--space-1h)}.tab-mark[aria-pressed=true]{gap:var(--space-1h);padding:0 var(--space-2)}.tab-mark:not([aria-pressed=true]) .tab-mark-name{display:none}}",
+        "@media(prefers-reduced-motion:reduce){.tab-mark{transition:none}}",
         /* kit: ring */
         // The ring. What it is: a gauge of one share, an open ring of 300 degrees with its gap of 60 degrees at the bottom: a track, an arc of the share that is left (round at both ends) and a dot at the end of the arc. It has two forms and the form is all it says: ok (the share is known: track, arc and dot) and unknown (it is not: the track alone, dotted, no arc and no dot). No colour of a state, no red.
         // When to use it: beside a name that has a share to tell (a window of a limit; later an account), where the share must be seen at a glance and its number stands next to it. Never alone: the number is the ring's word, and the ring itself is out of the reading order.
-        // The two sizes are both the kit's: the large ring (lg, 47px) is the rail's; the plain ring (28px, the size left out) is the kit's base size for the cards of the accounts; no part asks for it yet, and it stays as the form a part that tells a share beside a name takes.
-        // How to use it: ringGauge(pct, form, size, badge, sweep) is the one builder (pct: the share left, 0 to 100; form: ok or unknown, and a pct that is no number is unknown;
-        // size: left out for the plain ring, lg for the large one with the thinner strokes that holds a number inside it, the rail's). It makes the svg (viewBox 0 0 184 184, the
+        // The two sizes are both the kit's: the large ring (lg) is the quota plate's; the plain ring (28px, the size left out) is the kit's base size, the form a part that tells a share beside a name takes.
+        // How to use it: ringGauge(pct, form, size) is the one builder (pct: the share left, 0 to 100; form: ok or unknown, and a pct that is no number is unknown;
+        // size: left out for the plain ring, lg for the large one with the thinner strokes, the quota plate's rings). It makes the svg (viewBox 0 0 184 184, the
         // size --ring-size, or --ring-size-lg for the large one, aria-hidden, not focusable) with its track, arc and dot, the geometry in the svg's own attributes (one path for
         // the track and the arc; pathLength 100 and a dash of pct; the dot's centre at the angle 120 + 3 x pct degrees) and the classes ring, ring-track, ring-arc and ring-dot,
-        // which are worn through it and nowhere else. badge (true, with the large ring alone, the rail's) sets a small circle in the gap of the ring: its centre on the lowest
-        // point of the ring's path, a stroke thinner than the track's (5 units against 7) in the badge's own edge tone (--ring-badge-edge: stronger than the track, quieter than
-        // the arc), the fill the ground under the rail (class ring-badge, drawn last); the short name of the window is written over it by the part (kit: rail). sweep (true, with
-        // a ring of the form ok) makes the ring draw its arc from nothing to its share when it appears: it wears the class ring-sweep and the property --ring-share (the share,
-        // the number the keyframes read), and the arc and the dot play ring-sweep-arc and ring-sweep-dot (kit: motion) in --dur-sweep on --ease-sweep, the dot running round the
-        // ring at the end of the arc, in step with it; the part that asks for it gives the time to wait (--sweep-at: the class ring-sweep-row waits for the row the ring stands
-        // in, as the row comes down, kit: rail) and, where the page has no clock of its own to carry a drawing inside the span on, how far the drawing has gone
-        // (--sweep-elapsed). Ask for it for the ring of a pick of the reader's, never for a redraw of fresh data (the poll, Refresh): the share then changes with no show. It is
-        // the kit's one motion in the ring, written for every part that wears a ring: the rail's now, the cards of the accounts later.
-        // States: the colours are the tokens', the ink at a strength, and turn with the theme: the track --ring-track, the arc --ring-arc, the dot --ring-dot. A part that is picked darkens the arc and the dot (--ring-arc-on, --ring-dot-on) and grows the box the ring stands in, never the ring.
-        // Tokens it reads: --ring-size --ring-size-lg --ring-track --ring-arc --ring-dot --ring-badge-edge --shell-bg, and for the sweep --dur-sweep --ease-sweep --ring-share --sweep-at --sweep-elapsed, and for the rings that run one after another --i --rail-row-at --rail-row-step. Not to do: no colour of a state, no number drawn in the svg (the box the ring stands in may hold one: kit: rail), no motion but the sweep (which counts no number: the share inside the ring is in place from the first frame, and no script runs per frame).
+        // which are worn through it and nowhere else. A part that wears the ring may set its size and its colours by its own class (the quota plate's ring is --q-ring wide and
+        // green); the ring draws its share at once, with no motion.
+        // States: the colours are the tokens', the ink at a strength, and turn with the theme: the track --ring-track, the arc --ring-arc, the dot --ring-dot.
+        // Tokens it reads: --ring-size --ring-size-lg --ring-track --ring-arc --ring-dot. Not to do: no colour of a state, no number drawn in the svg (the box the ring stands in
+        // may hold one: the quota plate's ring holds its share), no motion (the share is in place from the first frame, and no script runs per frame).
         ".ring{display:block;flex:none;width:var(--ring-size);height:var(--ring-size);overflow:visible}",
         ".ring-lg{width:var(--ring-size-lg);height:var(--ring-size-lg)}",
         ".ring-track{stroke:var(--ring-track)}",
         ".ring-arc{stroke:var(--ring-arc)}",
         ".ring-dot{fill:var(--ring-dot)}",
-        ".ring-badge{fill:var(--shell-bg);stroke:var(--ring-badge-edge)}",
-        // The sweep: a ring that is asked to (ringGauge's sweep) draws its arc from nothing to its share and the dot runs round the ring with it, both
-        // `backwards` (the end state is the plain ring, so nothing stays empty if an animation never starts). The dot turns about the centre of the box
-        // of the svg (view-box, 50% 50%) from the angle of the start of the arc to its own: the whole of the arc's turn, 3 degrees to a share point, back.
-        // It waits --sweep-at, less --sweep-elapsed; a ring that stands in a row of the rail waits for its row (ring-sweep-row).
-        ".ring-sweep .ring-arc{animation:ring-sweep-arc var(--dur-sweep) var(--ease-sweep) backwards;animation-delay:calc(var(--sweep-at) - var(--sweep-elapsed))}",
-        ".ring-sweep .ring-dot{transform-box:view-box;transform-origin:50% 50%;animation:ring-sweep-dot var(--dur-sweep) var(--ease-sweep) backwards;animation-delay:calc(var(--sweep-at) - var(--sweep-elapsed))}",
-        ".ring-sweep-row{--sweep-at:calc(var(--rail-row-at) + var(--i) * var(--rail-row-step))}",
-        "@media(prefers-reduced-motion:reduce){.ring-sweep .ring-arc,.ring-sweep .ring-dot{animation:none}}",
-        /* kit: rail */
-        // The rail. What it is: a column at the side of a card that lists the choices of the card (the windows of a limit), on the ground and not in the card: the rows (a
-        // tablist of the kit's number tabs that wear a ring: markTab with a ring, .tab-mark-rail), anything a part adds under them (the ladder of resets). The stamp of the
-        // picked window is not in the rail (it stands in the plate's row of the figure). It is --rail-w wide (what the ring needs at the axis of the widest tab of the head, with
-        // --rail-air at the card; the same for every family), with no air at its sides: the rows keep their air from the edge themselves. The rows stand on the axis
-        // (--rail-axis, the middle of the whole tab of the family picked), and from the head a thread (.rail-lead) runs down the axis to the first ring, one line with the
-        // threads between the rings. On a narrow shell (under 860px) it is the same markup drawn as a row of capsules over the card: there is no thread from the head, the rows
-        // stand in a line that wraps onto the next one (no scroll inside it, no fade: every window is in sight and the picked one is never cut), each a capsule of the kit's
-        // height.
-        // A row of the rail: the box of the ring (--ring-box) and nothing at its right: the share in the middle of the ring, the short name of the window in the badge set in the
-        // gap of the ring (semibold, tabular, --type-badge, the meta ink; the ink when picked), the star, a bead on the axis at the lower edge of the badge, where the share
-        // rests on a part of what it counts (--type-star, --star-top); the row is --rail-row-h high (the ring and the badge under it, and the thread). The full name and the
-        // share are in the row's label and title. Between two rows runs a thread on the axis of the rings: it starts --thread-gap under the badge of the ring above
-        // (--badge-drop; the star hangs a hair under it) and ends --thread-gap over the box of the ring below, so it is the room that is left (--thread-len at rest, 8px at least
-        // when the ring above is picked). A row that is picked takes the ink for its word (its weight does not change), the accent for its share (a dash too) and its star, and
-        // its ring grows to --mark-on in its box and darkens (the arc and the dot); under the pointer or the keyboard a row that is not picked grows its ring to --mark-hover,
-        // darkens the arc, the dot and the edge of the badge a step (--ring-arc-hover, --ring-dot-hover, --ring-badge-edge-hover) and brings its word to the ink. Pressed
-        // (:active, the mouse and the finger) its ring shrinks to --press of its size in --dur-1 and, let go, springs back (--nav-spring). The red is the share's alone: no red
-        // arc, no plate. A row with nothing to tell (aria-disabled) keeps the quiet ink of a disabled word and a dotted ring.
-        // Motion: the ring's box moves by transform alone (--dur-nav on --nav-spring; the press, --dur-1 on --ease), the colours of the ring and of the badge's name by a colour transition (--dur-5 on --ease); a pick redraws the rail, so markStart draws the two rings that change in the size they had a moment ago (the start states, as the mark tab's), and settleMarks takes them off at the next frame. Under reduced motion nothing moves, nothing fades and a press does not shrink the ring.
-        // Tokens it reads: --rail-w --rail-tab-w --rail-row-h --star-top --badge-cy --badge-grow --thread-len --thread-top --ring-grow --type-badge --type-star --type-ring --type-unit --share-w --rail-top --ring-box --ring-size-sm --rail-thread --mark-on --mark-hover --press --ring-arc-on --ring-dot-on --ring-arc-hover --ring-dot-hover --ring-badge-edge-hover --nav-spring --dur-nav --dur-1 --dur-5 --ease --surface-capsule --elev-rest --tone-crimson --tone-crimson-ink. Not to do: no red ring, no plate on a row, no JS that rebuilds the rail by width (the narrow shell is CSS alone).
-        // Motion of the reader's pick of a family (.rail-moving on the rail, put by the script only for that pick and for the drawings inside its span): the thread is drawn from
-        // the mark down (scaleY, from the top), the rows come down one after another (opacity and a short fall), the thread between two rows with its row, and then the note
-        // under them (the accounts not read: .wt-foot) fades in, after the last row, so nothing stands alone in an empty rail. The thread ends over a first ring that is picked
-        // as high as the ring has grown (.rail-lead-on, --lead-end-on); the tab picked rides over the tabs it passes while it slides (.tab-mark-ride), and the tabs that give way
-        // dim while it does (.tab-mark-yield). Only transform and opacity; the keyframes are the kit's (kit: motion); a row's number is --i, their count --rail-rows, and
-        // --rail-elapsed carries a drawing inside the span on from where the movement was (the tabs of the head too: their shifts are worked out once, at the pick). The end
-        // state is the plain style: a row whose animation never starts stays as it is. Under reduced motion there is no movement.
-        // Tokens it reads, besides: --i --rail-rows --rail-elapsed --rail-axis --lead-top --lead-end --lead-end-on --dur-rail-thread --rail-thread-at --dur-rail-row --rail-row-at --rail-row-step --dur-rail-foot --dur-flip --ease-flip --yield-dim --yield-from --z-flip --ease, and for the ladder and the rows of the steps --accent --border-w --j --lh-ui --radius-pill --radius-row --ring-inset --row-h --space-0 --space-1 --space-1h --space-2 --space-2h --space-3 --tap-h --weight-medium --weight-semibold.
-        ".rail{position:relative;display:flex;flex-direction:column;min-width:0;padding:var(--rail-top) 0 var(--space-2)}",
-        ".rail-lead{position:absolute;left:calc(var(--rail-axis) - var(--border-w) / 2);top:var(--lead-top);width:var(--border-w);height:calc(var(--lead-end) - var(--lead-top));background:var(--rail-thread);pointer-events:none}",
-        ".rail-lead-on{height:calc(var(--lead-end-on) - var(--lead-top))}",
-        ".rail .tab-mark-row{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:0}",
-        ".tab-mark-rail{position:relative;display:flex;align-items:center;width:100%;min-height:var(--rail-row-h);padding:0 var(--space-2) 0 calc(var(--rail-axis) - var(--ring-box) / 2);border-radius:var(--radius-row);color:var(--text-secondary);text-align:left}",
-        "@media(pointer:coarse){@media not all and (max-width:859.98px){.tab-mark-rail.tab-mark-num{min-height:var(--rail-row-h)}}}",
-        ".tab-mark-rail[aria-selected=true]{color:var(--text-primary)}",
-        ".tab-mark-rail:is(:hover,:focus-visible):not([aria-selected=true]):not([aria-disabled=true]){color:var(--text-primary)}",
-        ".tab-mark-rail .tab-mark-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-        ".tab-mark-rail .tab-mark-count{font-size:var(--type-ring);font-weight:var(--weight-semibold);line-height:1;white-space:nowrap}",
-        ".tab-mark-rail .tab-mark-unit{font-size:var(--type-unit)}",
-        ".tab-mark-rail .tab-mark-note{font-size:var(--type-meta)}",
-        // The short name of the window is the badge in the gap of the ring (wide rail): in the box of the ring, over the badge circle drawn by the
-        // ring (.ring-badge), its centre on the lowest point of the ring's path, so the box's one transform carries ring, share, badge and star
-        // together. Semibold, tabular, in the meta ink (the ink when the window is picked or under the pointer). The star of a window not read
-        // whole is a bead on the axis, on the lower edge of the badge (--star-top). On the narrow shell the name is the plain word of the capsule
-        // (the rule is wide-only).
-        "@media not all and (max-width:859.98px){.tab-mark-ring .tab-mark-name{position:absolute;left:50%;top:var(--badge-cy);overflow:visible;text-overflow:clip;transform:translate(-50%,-50%);color:var(--text-meta);font-size:var(--type-badge);font-weight:var(--weight-semibold);line-height:1;font-variant-numeric:tabular-nums;transition:color var(--dur-5) var(--ease)}.tab-mark-ring .tab-mark-note{position:absolute;left:50%;top:var(--star-top);margin:0;transform:translateX(-50%);font-size:var(--type-star);line-height:1}}",
-        "@media not all and (max-width:859.98px){.tab-mark-rail[aria-selected=true] .tab-mark-name,.tab-mark-rail:is(:hover,:focus-visible):not([aria-selected=true]):not([aria-disabled=true]) .tab-mark-name{color:var(--text-primary)}}",
-        "@media(max-width:859.98px){.ring-badge{display:none}}",
-        ".tab-mark-rail~.tab-mark-rail::before{content:'';position:absolute;left:calc(var(--rail-axis) - var(--border-w) / 2);top:var(--thread-top);width:var(--border-w);height:var(--thread-len);background:var(--rail-thread);pointer-events:none}",
-        "@media not all and (max-width:859.98px){.tab-mark-rail[aria-selected=true]::before{height:calc(var(--thread-len) - var(--ring-grow))}.tab-mark-rail[aria-selected=true]+.tab-mark-rail::before{top:calc(var(--thread-top) + var(--badge-grow));height:calc(var(--thread-len) - var(--badge-grow))}}",
-        ".tab-mark-ring{position:relative;display:grid;flex:none;place-items:center;width:var(--ring-box);height:var(--ring-box);transition:transform var(--dur-nav) var(--nav-spring)}",
-        ".tab-mark-ring>*{grid-area:1/1}",
-        ".tab-mark-rail[aria-selected=true] .tab-mark-ring,.tab-mark-ring.tab-mark-was-on{transform:scale(var(--mark-on))}",
-        ".tab-mark-rail:is(:hover,:focus-visible):not([aria-selected=true]):not([aria-disabled=true]) .tab-mark-ring{transform:scale(var(--mark-hover))}",
-        ".tab-mark-rail[aria-selected=true] .tab-mark-ring.tab-mark-was-off{transform:none}",
-        ".tab-mark-rail[aria-selected=true] .tab-mark-ring.tab-mark-was-lit{transform:scale(var(--mark-hover))}",
-        // A row picked by a press of the pointer starts from the press (the ring at --press, as it was when the button came up), so the spring takes it from there to
-        // --mark-on and the ring does not leap through the preview's size. The row of the mouse and of the finger; a pick by the keyboard has no press.
-        ".tab-mark-rail[aria-selected=true] .tab-mark-ring.tab-mark-was-press{transform:scale(var(--press))}",
-        ".tab-mark-rail[aria-selected=true] .ring-arc{stroke:var(--ring-arc-on)}",
-        ".tab-mark-rail[aria-selected=true] .ring-dot{fill:var(--ring-dot-on)}",
-        // The parts of the ring take a darker step under the pointer or the keyboard (a row not picked), by a colour transition (--dur-5 on --ease)
-        ".tab-mark-rail :is(.ring-arc,.ring-dot,.ring-badge){transition:stroke var(--dur-5) var(--ease),fill var(--dur-5) var(--ease)}",
-        ".tab-mark-rail:is(:hover,:focus-visible):not([aria-selected=true]):not([aria-disabled=true]) .ring-arc{stroke:var(--ring-arc-hover)}",
-        ".tab-mark-rail:is(:hover,:focus-visible):not([aria-selected=true]):not([aria-disabled=true]) .ring-dot{fill:var(--ring-dot-hover)}",
-        ".tab-mark-rail:is(:hover,:focus-visible):not([aria-selected=true]):not([aria-disabled=true]) .ring-badge{stroke:var(--ring-badge-edge-hover)}",
-        // The press (mouse and finger, :active): the box of the ring shrinks to --press of the size it has (the picked ring: of --mark-on) in --dur-1, and
-        // when it is let go the base rule's spring (--dur-nav on --nav-spring) takes it back to its size. It is as strong as the preview's rule and stands after it.
-        ".tab-mark-rail:not([aria-selected=true]):not([aria-disabled=true]):active .tab-mark-ring{transform:scale(var(--press));transition:transform var(--dur-1) var(--ease)}",
-        ".tab-mark-rail[aria-selected=true]:active .tab-mark-ring{transform:scale(calc(var(--mark-on) * var(--press)));transition:transform var(--dur-1) var(--ease)}",
-        // Under reduced motion nothing fades and nothing moves: the press does not shrink the ring (the picked one stays at --mark-on)
-        "@media(prefers-reduced-motion:reduce){.tab-mark-ring,.tab-mark-ring .ring,.tab-mark-rail :is(.ring-arc,.ring-dot,.ring-badge),.tab-mark-ring .tab-mark-name{transition:none}.tab-mark-rail:not([aria-selected=true]):not([aria-disabled=true]):active .tab-mark-ring{transform:none;transition:none}.tab-mark-rail[aria-selected=true]:active .tab-mark-ring{transform:scale(var(--mark-on));transition:none}}",
-        // The slide of the row of marks when the pick puts the tab picked first (markWas, markFlip, markSlide): the shifts of the tabs are worked out
-        // once, at the pick (--flip-x and --flip-y, from where each tab was seen), and every tab that stands elsewhere now wears .tab-mark-slide, whose
-        // keyframes (rail-slide, kit: motion) draw it at its old place and carry it to its own by the transform alone (--dur-flip on --ease-flip). A drawing
-        // inside the span of the movement puts the same shifts on its new tabs and the keyframes go on from where they were (a negative delay, --rail-elapsed),
-        // so the slide is never started again. The tabs that give way (.tab-mark-yield) dim to --yield-dim in a quarter of the slide, stay dim to its four
-        // fifths and come back (rail-yield, opacity alone: held for as long as the tab picked passes over their words), and the tab picked (.tab-mark-ride) stands over them for as long as it slides. Nothing else moves, and no will-change is held; the end
-        // state is the plain style; under reduced motion the tab is at its place at once and nothing dims.
-        ".tab-mark-slide{animation:rail-slide var(--dur-flip) var(--ease-flip) backwards;animation-delay:calc(0ms - var(--rail-elapsed))}",
-        ".tab-mark-slide.tab-mark-yield{animation:rail-slide var(--dur-flip) var(--ease-flip) backwards,rail-yield var(--dur-flip) var(--ease-flip) backwards;animation-delay:calc(0ms - var(--rail-elapsed))}",
-        ".tab-mark-ride{z-index:var(--z-flip)}",
-        "@media(prefers-reduced-motion:reduce){.tab-mark-slide,.tab-mark-slide.tab-mark-yield{animation:none}}",
-        ".rail-moving .rail-lead{transform-origin:top;animation:rail-draw var(--dur-rail-thread) var(--ease) backwards;animation-delay:calc(var(--rail-thread-at) - var(--rail-elapsed))}",
-        ".rail-moving .tab-mark-rail{animation:rail-drop var(--dur-rail-row) var(--ease) backwards;animation-delay:calc(var(--rail-row-at) + var(--i) * var(--rail-row-step) - var(--rail-elapsed))}",
-        "@media(prefers-reduced-motion:reduce){.rail-moving .rail-lead,.rail-moving .tab-mark-rail{animation:none}}",
-        // The ladder of resets (kit: rail, its second part; the comment here is its contract). What it is: under the rings (the rail has no foot: the stamp stands in the plate), the steps at which the picked window gives
-        // accounts back, soonest first, on the rail's axis: a hairline on the axis (22px), the word "Resets" (11px, semibold, the quiet ink; no button), and for each step a bead on the
-        // axis (7px; the first step's, the nearest reset, in the crimson ink, the others in the tertiary grey), under it how long to the reset (12px semibold, the ink; untilWords: "40m", "5h", "2d 5h", "<1m"; said again at every drawing from Date.now())
-        // and the amount that comes back, "+2.70" (11px, the meta ink; its decimal point in the crimson ink, a span of its own, the text of the amount stays
-        // "+2.70"), a thread between two steps as between two rings. The whole moment (the day, the date and the hour in the reader's local time) is in the step's title and aria-label
-        // (whenWords; steps that say the same in how long and stand side by side are ONE step, glued by ladderOf: the earliest moment, the accounts of all, the sum of what they give back, and the title says the first and the last moment,
-        // "Sun 1 Nov 12:31 – Sun 1 Nov 12:54", so the first step may be wider than the plate's row of the next reset: the same moment, the amount and the accounts no fewer); the step itself says no date. Every line is one line and fits the 64px of the grey field (the axis the middle of it). It is no part of the card: it takes the room that is
-        // left between the last ring and the foot of the card (.rail-ladder-zone: it grows from nothing, it is cut at its edge, and it adds nothing to the height of the rail, so it never
-        // stretches the card); the steps that do not stand whole in that room are not drawn (.rail-fit-off, put by the script from one read of the layout at the end of a drawing)
-        // and the word "N more" (.rail-more, a button) counts them; it comes down last, after the last step that stands. The word opens the ladder DOWNWARD IN THE RAIL ITSELF (aria-expanded; it reads "less"
-        // while open and folds it): the steps stand in a window (.rail-scroll) of --ladder-window steps (5.5: the half of the next one under the haze says there is more), never higher than the room of the zone
-        // (the capsule is not stretched), that scrolls by itself: no bar, the page is not dragged (overscroll-behavior), the edges fade by one haze (.rail-scroll-start / .rail-scroll-end, put by one passive
-        // listener of the scroll only where an edge is reached or left). Pressing it touches NOTHING else: not the plate, the chart, the Details or the schedule; the right part does not change by a pixel.
-        // The word is drawn only where its press opens the window (a step stands in it) and counts all the steps less those that stand. Folded again, it goes back to the steps that stand and to the start of the scroll; open and the place of the scroll
-        // outlive the 30 s poll and any redraw (ladderOpen, ladderTop), for the limit they were pressed on (ladderKey); a pick of a window or a family, another limit drawn, a drawing with no ladder and a drawing with no room for the window fold it, and it does not open again by itself.
-        // The stamp ("Read 18 of 20 · 2 days ago") is no part of the rail: it stands in the plate, in the row of the figure (see the stamp, wt-stamp). A step is a tab stop of the keyboard like the items of the legend (tabindex, role group, a label that says the
-        // accounts by name); under the pointer or the keyboard its bead grows to --ladder-bead-grow and takes the crimson ink, its amount the ink, and the bars of its accounts stand
-        // out on the plate (the script: dimOnItem); pressed, the bead shrinks to --press of its size and springs back, as a ring does. The red at rest is the first bead and the points of the amounts, and
-        // nothing else. On the narrow shell (under 860px) there is no
-        // ladder (display: none) and the plate keeps its own row of the next reset, which the wide shell hides (.nx-in-ladder) while it has the ladder.
-        // Motion: the pick of a family moves the ladder with the rail (.rail-moving: its head and its steps come down after the rings by the rail's own keyframes, --i counting on from the
-        // rings); the pick of a window moves it alone (.rail-ladder-moving: the old steps fade in --dur-ladder-out, .rail-ladder-out, and the new ones come down, ladder-drop, from --ladder-at, a
-        // row after another, the word "N more" the last of them); the poll and Refresh move nothing, the numbers change where they stand. Transform and opacity only; under reduced motion everything stands in its place at once.
-        // How to use it: ladderOf(g) is what the ladder stands on (the steps of a window, soonest first, neighbours that say the same in how long glued, the accounts of each and what they give back; or none), ladderNode(g, index, base) the
-        // markup (the zone, the ladder in it, the head, the steps and the word that counts the steps that did not fit), and ladderLayout(z, clicked) the one read of the layout that reckons how many steps stand or how high the open window is (ladderFit calls it at the end of a drawing, ladderToggle at the press of the word; ladderEdges sets the haze).
-        // Tokens it reads: --ladder-window --ladder-haze --ladder-haze-ink --ladder-haze-y --ladder-haze-y-start --ladder-haze-y-end --ladder-haze-x --ladder-haze-x-start --ladder-haze-x-end --ladder-title-h --ladder-step-h --ladder-more-h --ladder-bead --ladder-bead-grow --ladder-bead-rest --ladder-hair --type-ladder --type-meta --dur-ladder-out --ladder-at
-        // --ladder-elapsed --rail-axis --ladder-w --rail-thread --text-primary --text-secondary --text-meta --tone-crimson-ink --press --nav-spring --dur-nav --dur-1 --dur-5 --ease --i --rail-row-step.
-        // Not to do: no observer of the size and no script by frames (one read of the layout for a drawing), no step that stretches the card, no red beyond the first bead and the points, no second row of the next reset beside it on the wide shell, no press of the word "N more" that touches the chart, the Details or any part of the card.
-        ".rail-ladder-zone{position:relative;flex:1 1 0;min-height:0;overflow:hidden}",
-        // The window of the steps (open: it scrolls). No bar of scroll (the page has none anywhere: scrollbar-width, ::-webkit-scrollbar), so nothing moves the axis; the page is not dragged along
-        // at its ends (overscroll-behavior); its edges fade into the ground by a mask, none over the start while it stands at its start and none under the end while it stands at its end
-        // (the script puts .rail-scroll-start and .rail-scroll-end only where an edge is reached or left). Folded, it does not scroll (the steps that do not stand are not drawn).
-        // The keyboard (Tab to a step past the window) scrolls to it with the haze's width to spare (scroll-padding-block), so the step in focus stands out of the haze and not faded at the edge.
-        ".rail-scroll{width:100%;overflow:hidden;overscroll-behavior:contain;scrollbar-width:none;scroll-padding-block:var(--ladder-haze);-webkit-mask-image:var(--ladder-haze-y);mask-image:var(--ladder-haze-y)}",
-        ".rail-scroll::-webkit-scrollbar{display:none;width:0;height:0}",
-        ".rail-scroll-on{overflow-y:auto}",
-        ".rail-scroll-start{-webkit-mask-image:var(--ladder-haze-y-start);mask-image:var(--ladder-haze-y-start)}",
-        ".rail-scroll-end{-webkit-mask-image:var(--ladder-haze-y-end);mask-image:var(--ladder-haze-y-end)}",
-        ".rail-scroll-start.rail-scroll-end{-webkit-mask-image:none;mask-image:none}",
-        // The same haze drawn to the right, for the row of the bars (kit: bars) where it goes sideways: .rail-scroll-x is worn while the row scrolls, and
-        // -start / -end where the row stands at an edge (the script puts them with it and takes all three off a row that fits, so no haze stands over a row that does not scroll).
-        ".rail-scroll-x{-webkit-mask-image:var(--ladder-haze-x);mask-image:var(--ladder-haze-x)}",
-        ".rail-scroll-x-start{-webkit-mask-image:var(--ladder-haze-x-start);mask-image:var(--ladder-haze-x-start)}",
-        ".rail-scroll-x-end{-webkit-mask-image:var(--ladder-haze-x-end);mask-image:var(--ladder-haze-x-end)}",
-        ".rail-scroll-x-start.rail-scroll-x-end{-webkit-mask-image:none;mask-image:none}",
-        ".rail-ladder{display:flex;flex-direction:column;align-items:center;width:var(--ladder-w);margin-left:calc(var(--rail-axis) - var(--ladder-w) / 2)}",
-        ".rail-ladder-title{position:relative;flex:none;width:100%;height:var(--ladder-title-h);padding-top:calc(var(--space-3) + var(--border-w) + var(--space-2));color:var(--text-secondary);font-size:var(--type-ladder);font-weight:var(--weight-semibold);line-height:var(--lh-ui);text-align:center;white-space:nowrap}",
-        ".rail-ladder-title::before{content:'';position:absolute;left:calc(50% - var(--ladder-hair) / 2);top:var(--space-3);width:var(--ladder-hair);height:var(--border-w);background:var(--rail-thread)}",
-        ".rail-step{position:relative;display:flex;flex:none;flex-direction:column;align-items:center;width:100%;height:var(--ladder-step-h);padding-top:var(--space-3);color:var(--text-meta);text-align:center;white-space:nowrap}",
-        ".rail-step~.rail-step::before{content:'';position:absolute;left:calc(50% - var(--border-w) / 2);top:0;width:var(--border-w);height:var(--space-3);background:var(--rail-thread);pointer-events:none}",
-        ".rail-bead{flex:none;width:var(--ladder-bead);height:var(--ladder-bead);margin-bottom:var(--space-1);border-radius:var(--radius-pill);background:var(--ladder-bead-rest);transition:transform var(--dur-nav) var(--nav-spring),background-color var(--dur-5) var(--ease)}",
-        ".rail-step-first .rail-bead{background:var(--tone-crimson-ink)}",
-        ".rail-step-time{color:var(--text-primary);font-size:var(--type-meta);font-weight:var(--weight-semibold);line-height:1.25;font-variant-numeric:tabular-nums;transition:color var(--dur-5) var(--ease)}",
-        ".rail-step-amount{font-size:var(--type-ladder);line-height:1.25;font-variant-numeric:tabular-nums;transition:color var(--dur-5) var(--ease)}",
-        ".rail-step-dot{color:var(--tone-crimson-ink)}",
-        ".rail-step-none{max-width:calc(100% - var(--space-1));color:var(--text-meta);font-size:var(--type-ladder);line-height:1.25;white-space:normal;text-wrap:balance}",
-        // A step with accounts is a button (role, aria-pressed: the script): the pointer shows it, and while it is pressed (its bars are lit, the others step back) its time stands in the accent, nothing else of it changes.
-        ".rail-step[aria-pressed]{cursor:pointer}",
-        ".rail-step[aria-pressed=true] .rail-step-time{color:var(--accent)}",
-        ".rail-step:is(:hover,:focus-visible) .rail-bead{transform:scale(var(--ladder-bead-grow));background:var(--tone-crimson-ink)}",
-        ".rail-step:is(:hover,:focus-visible) .rail-step-amount{color:var(--text-primary)}",
-        ".rail-step:active .rail-bead{transform:scale(calc(var(--ladder-bead-grow) * var(--press)));transition:transform var(--dur-1) var(--ease)}",
-        ".rail-more{display:block;flex:none;width:100%;height:var(--ladder-more-h);padding:0;border:0;background:none;color:var(--text-meta);font-size:var(--type-ladder);text-decoration:underline dotted;text-underline-offset:var(--space-0)}",
-        ".rail-more:is(:hover,:focus-visible){color:var(--text-primary)}",
-        // The window and the zone cut what is outside them: the ring of a step and of the word stands inside their boxes, so it is seen whole.
-        ".rail-step:focus-visible,.rail-more:focus-visible{outline-offset:var(--ring-inset)}",
-        ".rail-fit-off{display:none}",
-        ".rail-more-void{visibility:hidden}",
-        ".rail .rail-ladder .rail-step.rail-step-in{animation:ladder-drop var(--dur-rail-row) var(--ease) backwards;animation-delay:calc(var(--j) * var(--rail-row-step))}",
-        "@media(pointer:coarse){.rail-more{min-height:var(--tap-h)}}",
-        "@media(prefers-reduced-motion:reduce){.rail-bead,.rail-step-time,.rail-step-amount{transition:none}.rail-step:active .rail-bead{transform:scale(var(--ladder-bead-grow));transition:none}}",
-        ".rail-moving .rail-ladder-title,.rail-moving .rail-step,.rail-moving .rail-more{animation:rail-drop var(--dur-rail-row) var(--ease) backwards;animation-delay:calc(var(--rail-row-at) + var(--i) * var(--rail-row-step) - var(--rail-elapsed))}",
-        ".rail-ladder-moving .rail-ladder-title,.rail-ladder-moving .rail-step,.rail-ladder-moving .rail-more{animation:ladder-drop var(--dur-rail-row) var(--ease) backwards;animation-delay:calc(var(--ladder-at) + var(--i) * var(--rail-row-step) - var(--ladder-elapsed))}",
-        ".rail-ladder-out{position:absolute;top:0;left:0;opacity:0;pointer-events:none;animation:ladder-leave var(--dur-ladder-out) var(--ease) backwards;animation-delay:calc(0ms - var(--ladder-elapsed))}",
-        "@media(prefers-reduced-motion:reduce){.rail-moving .rail-ladder-title,.rail-moving .rail-step,.rail-moving .rail-more,.rail-ladder-moving .rail-ladder-title,.rail-ladder-moving .rail-step,.rail-ladder-moving .rail-more,.rail-ladder-out,.rail .rail-ladder .rail-step.rail-step-in{animation:none}}",
-        "@media not all and (max-width:859.98px){.nx-in-ladder.nx-in-ladder{display:none}}",
-        "@media(max-width:859.98px){.rail-ladder-zone{display:none}}",
-        "@media(max-width:859.98px){.rail{padding:0}.rail-lead{display:none}}",
-        "@media(max-width:859.98px){.rail .tab-mark-row{flex-direction:row;flex-wrap:wrap;align-items:center;gap:var(--space-1h)}}",
-        "@media(max-width:859.98px){.tab-mark-rail{flex:0 0 auto;display:flex;width:auto;max-width:100%;min-height:var(--row-h);padding:0 calc(var(--space-2h) + var(--share-w)) 0 0;border-radius:var(--radius-pill);font-size:var(--type-meta)}.tab-mark-rail>*,.tab-mark-ring>*{position:relative}.tab-mark-rail .tab-mark-name{font-weight:var(--weight-medium)}.tab-mark-rail .ring{width:var(--ring-size-sm);height:var(--ring-size-sm)}}",
-        // The same markup on the narrow shell: the box of the ring is no box (display: contents), so the ring (22px, in the room of the kit's
-        // 30px box) grows and shrinks by itself, and the share, out of the line (it is not reordered: the tab keeps its reading order), stands at the end of
-        // the capsule in the room the capsule keeps for it (--share-w).
-        "@media(max-width:859.98px){.tab-mark-ring{display:contents}.tab-mark-ring .ring{margin:0 calc(var(--space-1h) + var(--space-1)) 0 var(--space-1);transition:transform var(--dur-nav) var(--nav-spring)}.tab-mark-rail .tab-mark-count{position:absolute;top:0;right:var(--space-2h);bottom:0;display:flex;align-items:center;font-size:var(--type-meta)}.tab-mark-rail .tab-mark-unit{font-size:inherit}}",
-        "@media(max-width:859.98px){.tab-mark-rail[aria-selected=true] .ring,.tab-mark-ring.tab-mark-was-on .ring{transform:scale(var(--mark-on))}.tab-mark-rail:is(:hover,:focus-visible):not([aria-selected=true]):not([aria-disabled=true]) .ring{transform:scale(var(--mark-hover))}.tab-mark-rail[aria-selected=true] .tab-mark-ring.tab-mark-was-off .ring{transform:none}.tab-mark-rail[aria-selected=true] .tab-mark-ring.tab-mark-was-lit .ring{transform:scale(var(--mark-hover))}.tab-mark-rail[aria-selected=true] .tab-mark-ring.tab-mark-was-press .ring{transform:scale(var(--press))}.tab-mark-rail:not([aria-selected=true]):not([aria-disabled=true]):active .ring{transform:scale(var(--press));transition:transform var(--dur-1) var(--ease)}.tab-mark-rail[aria-selected=true]:active .ring{transform:scale(calc(var(--mark-on) * var(--press)));transition:transform var(--dur-1) var(--ease)}}",
-        "@media(max-width:859.98px) and (prefers-reduced-motion:reduce){.tab-mark-rail:not([aria-selected=true]):not([aria-disabled=true]):active .ring{transform:none;transition:none}.tab-mark-rail[aria-selected=true]:active .ring{transform:scale(var(--mark-on));transition:none}}",
-        "@media(max-width:859.98px){.tab-mark-rail::before,.tab-mark-rail~.tab-mark-rail::before{content:'';position:absolute;left:0;right:0;top:50%;width:auto;height:var(--row-h);margin-top:calc(var(--row-h) / -2);border-radius:var(--radius-pill);background:var(--surface-capsule);box-shadow:var(--elev-rest);pointer-events:none}}",
-        "@media(max-width:859.98px){.tab-mark-rail[aria-selected=true]{color:var(--tone-crimson-ink)}.tab-mark-rail[aria-selected=true]::before{background:var(--tone-crimson)}}",
         /* kit: segmented control */
         // A row of options that look like buttons: the segment, its caption and its option.
         // Tokens it reads: --space-0 --type-meta --text-meta --space-1 --edge.
@@ -871,12 +398,9 @@
         /* kit: rows and tables */
         // Rows: the list of limits and the row of one limit (its figure, its bars and the words under them, its chart word).
         // Tokens it reads: --space-3 --space-1 --space-4 --lh-ui --type-section --weight-semibold --text-meta --type-meta --space-2 --space-0 --edge-strong
-        // --type-figure --weight-light --lh-tight --tone-crimson-ink --text-primary --track-meta --dur-nav --nav-spring --weight-regular --focus-line
-        // --ring-offset --radius-sm --press --dur-1 --ease --dur-4 --border-w --edge --weight-medium --type-body.
+        // --weight-light --lh-tight --tone-crimson-ink --text-primary --track-meta --dur-nav --nav-spring --weight-regular --focus-line
+        // --ring-offset --radius-sm --press --dur-1 --ease --border-w --edge --weight-medium --type-body.
         ".lrows{margin-top:0}",
-        // Every row is a plate (.lrow.wt-plate): a grid with no box of its own (no ground, no padding, no line under it: it stands on the card's own
-        // surface), a hair of air between its rows and the room the graph under it needs; its columns and areas are below, under the window-tabs plate.
-        ".lrow{display:grid;column-gap:var(--space-3);row-gap:var(--space-1);padding:0 0 var(--space-4)}",
         // The figure of a row: the account-windows left, its unit beside it. It has no box (display: contents): the number and its unit are
         // the grid items of the fact (capsule: window tabs).
         ".l-fig{display:contents;white-space:nowrap;line-height:var(--lh-ui)}",
@@ -885,28 +409,12 @@
         ".num-strong{font-size:var(--type-section);font-weight:var(--weight-semibold);font-variant-numeric:tabular-nums}",
         ".meta-num{color:var(--text-meta);font-size:var(--type-meta);font-variant-numeric:tabular-nums}",
         ".cover-link{margin-top:var(--space-2);padding:var(--space-0) 0;border:0;background:none;text-align:left;font-size:var(--type-meta);color:var(--text-meta);text-decoration:underline;text-decoration-color:var(--edge-strong);text-underline-offset:3px}",
-        "@media(max-width:520.98px){.lrow{column-gap:var(--space-2)}}",
         // Narrower still, the figure may wrap.
         "@media(max-width:360px){.l-fig{white-space:normal}}",
-        // Under the window-tabs plate (every row is one): the picked window's row, bare on the card. Two rows of named areas: the bars over the whole
-        // width and, under them, the fact (its number on two lines) at the left, the model list (the scope row, when the length has several limits) at
-        // the left of the room that is left, and at the right the stamp and the chart word (the kit's text action, in the row's own slot). The notes under
-        // that row (the accounts at the limit, the accounts not read, the manual resets, the legend, the reset) have no area: each takes the whole width in
-        // the row the flow gives it. An area nobody fills has no place, and the others keep theirs.
-        ".lrow.wt-plate{position:relative;grid-template-columns:auto minmax(0,1fr) auto auto;grid-template-areas:\"strip strip strip strip\" \"fact scope stamp ctl\";align-items:center}",
-        // The parts of the number's row keep the air the notes stand from it (--space-3 in all: the row gap and this).
-        ".wt-plate>.l-chart{grid-area:ctl;justify-self:end;margin-bottom:var(--space-2)}",
         // The figure of the plate is its headline: --type-figure, thin (--weight-light), on both lines of the fact's grid, at the left of the window's name and of the
         // unit's quiet words. It is the plate's alone (the kit's .num-strong stays what the graph reads). Its decimal point is the crimson ink (.wt-dot, a
         // span of its own). With no current reading the figure is a dash in the quiet ink: never a zero.
-        ".wt-plate .wt-num{grid-column:1;grid-row:1/3;font-size:var(--type-figure);font-weight:var(--weight-light);line-height:var(--lh-tight)}",
-        ".wt-plate .wt-num.none{color:var(--text-meta)}",
         ".wt-dot{color:var(--tone-crimson-ink)}",
-        // The fact has no bubble: a grid of two columns, the figure at the left over both lines and, at its right, the window's name (the ink) over the unit
-        // ("of 20 accounts", the quiet ink), both in the meta type and its tracking.
-        ".wt-fact{grid-area:fact;justify-self:start;align-self:center;display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:var(--space-3);align-items:center;min-width:0;max-width:100%;margin-bottom:var(--space-2)}",
-        ".wt-fact-cap{grid-column:2;grid-row:1;align-self:end;color:var(--text-primary);font-size:var(--type-meta);line-height:var(--lh-ui);letter-spacing:var(--track-meta)}",
-        ".wt-fact .of{grid-column:2;grid-row:2;align-self:start;letter-spacing:var(--track-meta)}",
         // The accounts at the limit now (or what a billing cycle spent beyond its plan), in words and not in a bubble: "At the limit · 3", the names
         // after it (the ink) and when the soonest of them is back (the quiet ink). It takes the keyboard (the accounts are named in its hint), and under the pointer or
         // the keyboard it lights their bars (the plate dims the bars but theirs). Its touch box under a finger is the "N more" button's own (.wt-foot-more);
@@ -914,12 +422,8 @@
         ".wt-limit{grid-column:1/-1;justify-self:start;min-width:0;max-width:100%;color:var(--text-meta);font-size:var(--type-meta);line-height:var(--lh-ui);letter-spacing:var(--track-meta);overflow-wrap:anywhere;transition:transform var(--dur-nav) var(--nav-spring)}",
         ".wt-limit-head{margin-right:var(--space-2);color:var(--text-primary);font-weight:var(--weight-regular);font-variant-numeric:tabular-nums}",
         ".wt-limit[tabindex]{cursor:default}",
-        // Under the window-tabs plate, for the reader's own pick (.wt-in): the fact and the bubble rise in
-        // (the keyframes are the kit's: motion).
-        ".wt-in>.wt-fact{animation:wt-rise var(--dur-4) var(--ease) both}",
         // Backwards, not both: the end of the keyframes is the rest, and a fill held after it would stand over the press (:active) of the bubble.
-        ".wt-in>.wt-limit{animation:wt-rise var(--dur-4) var(--ease) backwards}",
-        "@media(prefers-reduced-motion:reduce){.wt-in>.wt-fact,.wt-in>.wt-limit{animation:none}.wt-limit{transition:none}}",
+        "@media(prefers-reduced-motion:reduce){.wt-limit{transition:none}}",
         // Tables: the data tables of the details, the schedule and the facts table; each wears .tbl. One table: the full width,
         // the figures aligned, a cell a line above it in the quiet ink, a head cell and a caption in the primary ink at the
         // medium weight (.emph is that ink and weight for a word as well: a bold figure in a line, a tip's time and value).
@@ -946,76 +450,6 @@
         ".calm-legend .legend-item svg{margin-top:0}",
         ".legend-item{display:flex;align-items:flex-start;gap:var(--space-1h);overflow-wrap:anywhere}",
         ".legend-item svg{flex:none;margin-top:var(--space-1)}",
-        /* kit: bars */
-        // One bar per account, as tall as its share left on one 0–100% scale.
-        // One track height in every row, charted or not: the same share is
-        // the same height wherever it stands.
-        // The row is the plate's first line, the card's whole width and --bar-h high: a bar is a tube (the corner of a row, the track for its ground, the fill
-        // with no corner of its own, for the tube cuts it), as wide as the room gives it between --bar-min and --bar-max. Where the bars do not fit at the least
-        // the row goes sideways (no bar of scroll, the page has none anywhere; its edges fade: .rail-scroll-x, the rail's haze drawn to the right; the keyboard brings a bar in focus out of the haze: scroll-padding-inline), and with few bars
-        // they stand at the left at their widest. There is no line under the row.
-        // What a bar is told by is its form and its tone, never a colour of a state (no pink, no amber): a bar that is not in the line has its
-        // ink (the bar's colour) on its base, 3px (at the limit now it is an empty track with it; held back, the fill stays with it: the words
-        // under the bars say why); a dated value keeps the hatch, and its base is dashed when it was at the limit; an unknown one is a thin ring in
-        // the track's tone with a "?". The pointer turns the fill to the bar's ink; the picked bar's ink is the accent (its fill, its number and a hairline ring
-        // drawn inside). Picking a bar does not change its width (the row scrolls, and a bar that grew by it would be cut by it); the pointer or the keyboard on a bar
-        // opens it to the side, and the picked bar is the open one on every pointer (the rules after the number, below).
-        // Tokens it reads: --bar-gap --bar-h --space-3 --ladder-haze --bar-min --bar-max --radius-row --share-track --ring-inset --share-ink --dur-5 --ease
-        // --dur-bars --hatch --border-w --text-meta --type-meta --accent --trace-w --text-primary --type-ladder --weight-semibold --surface --bar-rest
-        // --bar-open --space-2 --space-0 --lh-ui --dur-4 --weight-medium --dur-1.
-        ".bars{grid-area:strip;display:flex;align-items:stretch;gap:var(--bar-gap);width:100%;min-width:0;height:var(--bar-h);margin-bottom:var(--space-3);overflow-x:auto;overscroll-behavior-x:contain;scroll-padding-inline:var(--ladder-haze);scrollbar-width:none}",
-        ".bars::-webkit-scrollbar{display:none;width:0;height:0}",
-        ".bar{position:relative;display:block;flex:1 1 0;min-width:var(--bar-min);max-width:var(--bar-max);height:100%;min-height:0;padding:0;border:0;border-radius:var(--radius-row);overflow:hidden;background:var(--share-track)}",
-        // The tube and the row cut what is outside them: the ring of the keyboard stands inside the bar.
-        ".bar:focus-visible{outline-offset:var(--ring-inset)}",
-        ".bar>.fill{position:absolute;left:0;right:0;bottom:0;width:100%;border-radius:0;background:var(--share-ink);transition:background var(--dur-5) var(--ease),width 0s linear var(--dur-bars)}",
-        ".bar:is(:hover:not(:disabled):not(:where(.bars-still>.bar)),.sel,.bar-on)>.fill{background:currentColor}",
-        ".bar.last>.fill{background:var(--share-track) var(--hatch);box-shadow:inset 0 1.5px 0 var(--share-ink)}",
-        ".bar.last:is(:hover:not(:disabled):not(:where(.bars-still>.bar)),.sel,.bar-on)>.fill{background:var(--share-track) var(--hatch);box-shadow:inset 0 1.5px 0 currentColor}",
-        ".bar.spent:after,.bar.held:after{content:\"\";position:absolute;left:0;right:0;bottom:0;height:3px;background:currentColor}",
-        ".bar.unknown{background:transparent;box-shadow:inset 0 0 0 var(--border-w) var(--share-track)}",
-        ".bar.unknown:after{content:\"?\";position:absolute;left:0;right:0;bottom:4px;text-align:center;color:var(--text-meta);font-size:var(--type-meta);line-height:1}",
-        // A value dated at the limit (was at the limit when last read; held back and last read) has a dashed base in the share ink
-        // (as the graph's dashed "carried: last known"), not the ink base: it is not exhaustion now.
-        // A dashed border, not a gradient: the style system has none.
-        ".bar.was:after,.bar.held.last:after{content:\"\";position:absolute;left:0;right:0;bottom:0;height:0;background:none;border-bottom:3px dashed var(--share-ink)}",
-        ".bar:is(.sel,.bar-on).was:after,.bar:is(.sel,.bar-on).held.last:after{border-bottom-color:currentColor}",
-        // The picked bar: its ink is the accent, its fill and its number with it, and a ring drawn inside in the same ink, of the width of the line of the pick (--trace-w). An unknown one keeps its
-        // "?" and turns it to the same ink.
-        ".bar:is(.sel,.bar-on){color:var(--accent);box-shadow:inset 0 0 0 var(--trace-w) currentColor}",
-        ".bar:is(.sel,.bar-on).unknown:after{color:currentColor}",
-        // A bar of no account is a disabled button, and its ink is the ink all the same (its base and the pointer are drawn in it).
-        ".bar:disabled{cursor:default;color:var(--text-primary)}",
-        // The number over the fill (.bar-v, hidden from a reader: the bar's own words say it): the share left in percent, in the quiet ink, a step above the top of the fill (the
-        // script sets where); a bar at the limit now has it in the accent, semibold; where the fill is over 80% (.in) it stands in the fill, in the ink the fill is read against
-        // (the hatched fill of a dated value is the track's, so the primary ink there).
-        ".bar-v{position:absolute;left:0;right:0;text-align:center;color:var(--text-meta);font-size:var(--type-ladder);line-height:1;font-variant-numeric:tabular-nums;pointer-events:none}",
-        ".bar.spent>.bar-v{color:var(--accent);font-weight:var(--weight-semibold)}",
-        ".bar:is(.sel,.bar-on)>.bar-v{color:var(--accent)}",
-        ".bar>.bar-v.in{color:var(--surface)}",
-        ".bar.last>.bar-v.in{color:var(--text-primary)}",
-        // A bar opens to the side (the pointer over it or the keyboard on it; under a finger, the picked one): its basis and its most are the width it has at rest (--bar-rest, written on the row by
-        // barsFit) and --bar-open, the room of its words, added in the rule (the sum cannot stand on :root, the rest is the row's); the open bar does not shrink, so a row that cannot hold it goes
-        // sideways (barBring brings the bar into the room of the row). Its words (.bar-i: drawn by the script for a bar of an account, hidden from a reader, who has the bar's own words) show at the
-        // right of the liquid, after a short delay, in a room of the same width whatever they say; a line that is longer than the room is cut with an ellipsis. The liquid does not
-        // stretch: the fill, the number and the base keep the width the bar has at rest. As the bar closes they keep it for as long as the move takes
-        // (the width goes back to 100% after that time, in no time of its own), so the liquid does not splash; as it opens there is no delay. A bar of no account is a disabled button and stays shut.
-        // The step of the ladder of resets (kit: rail) that is pressed opens no bar and wears none in the accent: a step of one account is the pick of that account (.sel; the script keeps .bar-on on its bar, the same look), a
-        // step of several lights their bars alone (data-step-lit, below: the others step back as they do under the pointer).
-        // The first line of the words is the account's name (.bar-n), a line in the accent (.bar-a) says the bar is at the limit or held back now. The move of the basis and of the most
-        // is the transition of the bars' one rule (capsule: bars and legend, below), together with the fade of the dimming.
-        ".bar>.bar-v,.bar:after{width:100%;transition:width 0s linear var(--dur-bars)}",
-        ".bar-i{position:absolute;top:0;bottom:0;left:calc(var(--bar-rest) + var(--space-3));width:calc(var(--bar-open) - var(--space-3) - var(--space-2));display:flex;flex-direction:column;justify-content:center;gap:var(--space-0);text-align:left;white-space:nowrap;color:var(--text-meta);font-size:var(--type-meta);line-height:var(--lh-ui);opacity:0;pointer-events:none;transition:opacity var(--dur-4) var(--ease)}",
-        ".bar-i>*{min-width:0;overflow:hidden;text-overflow:ellipsis}",
-        ".bar-n{color:var(--text-primary);font-weight:var(--weight-medium)}",
-        ".bar:is(.sel,.bar-on) .bar-n{color:var(--accent)}",
-        ".bar-a{color:var(--accent)}",
-        // A row that is still (.bars-still, the script: barStill) lets the pointer open and light nothing: a pick moves the bars under a pointer that stands where the click was, and the bar
-        // that comes under it would open at once and push the bars on its right back and forth (the pointer still opens a bar, but not under a pointer that has not moved).
-        // The pick, the keyboard and the step of the ladder open as they did; the first real move of the pointer takes the class off (releaseBarStill). :where() keeps the specificity of the rule.
-        "@media(pointer:fine){.bars>.bar:is(:hover:not(:disabled):not(:where(.bars-still>.bar)),:focus-visible,.sel,.bar-on){flex-basis:calc(var(--bar-rest) + var(--bar-open));flex-grow:0;flex-shrink:0;max-width:calc(var(--bar-rest) + var(--bar-open))}.bars>.bar:is(:hover:not(:disabled):not(:where(.bars-still>.bar)),:focus-visible,.sel,.bar-on)>:is(.fill,.bar-v),.bars>.bar:is(:hover:not(:disabled):not(:where(.bars-still>.bar)),:focus-visible,.sel,.bar-on):after{right:auto;width:var(--bar-rest);transition-delay:0s}.bars>.bar:is(:hover:not(:disabled):not(:where(.bars-still>.bar)),:focus-visible,.sel,.bar-on)>.bar-i{opacity:1;transition-delay:var(--dur-1)}}",
-        "@media(pointer:coarse){.bars>.bar:is(.sel,.bar-on){flex-basis:calc(var(--bar-rest) + var(--bar-open));flex-grow:0;flex-shrink:0;max-width:calc(var(--bar-rest) + var(--bar-open))}.bars>.bar:is(.sel,.bar-on)>:is(.fill,.bar-v),.bars>.bar:is(.sel,.bar-on):after{right:auto;width:var(--bar-rest);transition-delay:0s}.bars>.bar:is(.sel,.bar-on)>.bar-i{opacity:1;transition-delay:var(--dur-1)}}",
-        "@media(prefers-reduced-motion:reduce){.bar>.fill,.bar>.bar-v,.bar:after,.bar-i{transition:none}}",
         /* kit: panels and cards */
         // A bordered surface: the account card, the account list, the About panel, the model list's panel and the empty card, each
         // with its own padding; and the card standing in a list as a band. The model list's panel and the empty card wear .card.
@@ -1028,7 +462,7 @@
         // The selected account's card stands in the list it was chosen from as
         // one more band of it, in the list's own rhythm; under a folded list's
         // header it stays a card.
-        ".lrows>.inspector,.lrows>.ins-wrap>.ins-fold>.inspector{border-width:0 0 var(--border-w);border-radius:0;padding:var(--space-3) var(--space-2)}",
+        ".lrows>.inspector{border-width:0 0 var(--border-w);border-radius:0;padding:var(--space-3) var(--space-2)}",
         // The head of a card: its title across from its controls (.split-row), the title at the section size (.title-section).
         ".split-row{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2);flex-wrap:wrap}",
         ".title-section{margin:0;font-size:var(--type-section);font-weight:var(--weight-semibold)}",
@@ -1044,39 +478,14 @@
         ".dot-label{display:inline-flex;align-items:center;gap:var(--space-1h);font-size:var(--type-meta);color:var(--text-meta)}",
         ".dot-label.strong{color:var(--text-primary)}",
         /* kit: motion */
-        // The keyframes a part may borrow, by name: the blink of a dot (the text action's and the stamp's, while a read is in the air), the rise and
-        // the growth of the window-tabs plate (and the rise of the note under their row), and the rail's five (rail-draw, rail-drop, rail-fade, rail-slide, rail-yield), and the ring's two (ring-sweep-arc, ring-sweep-dot). Transform and opacity only, but for the one exception the canon names (test_style_canons.py): the arc of a ring draws by stroke-dashoffset, in ring-sweep-arc alone, on a ring of 47px (a repaint the size of the ring, cheap). What they move, and
-        // its reduced-motion pair, is written with the part.
+        // The keyframes a part may borrow, by name: the blink of a dot (the text action's and the stamp's, while a read is in the air). Opacity only.
+        // Each animation that wears one, with its reduced-motion pair, is written with the part.
         // The one class a part wears for the blink: .is-busy on a dot (a read is in the air: it dims to --blink-dim and back in --dur-blink on --ease); under
         // reduced motion it does not move and stays at the dim.
-        // Tokens it reads: --dur-blink --ease --blink-dim --ring-share --skel-dim --flip-x --flip-y --yield-from --yield-dim.
+        // Tokens it reads: --dur-blink --ease --blink-dim.
         ".is-busy{animation:blink var(--dur-blink) var(--ease) infinite}",
         "@media(prefers-reduced-motion:reduce){.is-busy{animation:none;opacity:var(--blink-dim)}}",
         "@keyframes blink{50%{opacity:var(--blink-dim)}}",
-        // The ring's sweep (kit: ring): the arc is drawn by its dash offset, from the whole share (nothing seen) to none (the share, as the ring stands); the dot
-        // turns back by the angle of the share (3 degrees to a point) and comes to its own place. Same time and same curve, so the dot is at the end of the arc at every frame.
-        "@keyframes ring-sweep-arc{from{stroke-dashoffset:var(--ring-share)}to{stroke-dashoffset:0}}",
-        "@keyframes ring-sweep-dot{from{transform:rotate(calc(var(--ring-share) * -3deg))}to{transform:rotate(0deg)}}",
-        "@keyframes wt-rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}",
-        "@keyframes wt-grow{from{opacity:.4;transform:scaleY(.6)}to{opacity:1;transform:none}}",
-        // The wait of the chart's plate while the line of a pick is drawn (capsule: chart): the stand-ins pulse by opacity alone (skel-pulse), and the content comes in by opacity alone (tl-reveal) when the line has met.
-        "@keyframes skel-pulse{50%{opacity:var(--skel-dim)}}",
-        "@keyframes tl-reveal{from{opacity:0}to{opacity:1}}",
-        // The rail's, for the reader's pick of a family: the thread drawn from the top down, a window coming down into its place, the foot fading in.
-        "@keyframes rail-draw{from{transform:scaleY(0)}to{transform:none}}",
-        "@keyframes rail-drop{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}",
-        "@keyframes rail-fade{from{opacity:0}to{opacity:1}}",
-        // And the ladder of resets, for the reader's pick of a window (kit: rail): a step comes down into its place as a window of the rail does, and the steps that stood fade (the node
-        // of the old ladder stands at opacity 0, so the keyframes say only where it begins).
-        "@keyframes ladder-drop{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}",
-        "@keyframes ladder-leave{from{opacity:1}}",
-        // And the head's tabs: a tab goes from its old place (the shifts the script sets on it, --flip-x and --flip-y) to its own, and a tab that gives
-        // way dims to --yield-dim half way and comes back, in the same time.
-        "@keyframes rail-slide{from{transform:translate(var(--flip-x),var(--flip-y))}to{transform:none}}",
-        // The tabs that give way dim quickly (a quarter of the time), stay dim for as long as the tab picked passes over them (to about four
-        // fifths) and come back; a second pick inside the movement starts the dimming from the look the tab has then (--yield-from, set by the
-        // script from one read of its opacity; 1 otherwise).
-        "@keyframes rail-yield{0%{opacity:var(--yield-from)}25%,80%{opacity:var(--yield-dim)}100%{opacity:1}}",
         /* kit: inputs */
         // The rows menu: a fold with a checkbox for each row; a quiet line (.meta-line).
         // Tokens it reads: --space-2.
@@ -1086,30 +495,22 @@
         /* kit: touch */
         // Under a coarse pointer (a finger) a pressable kit part is at least --tap-h high; with a mouse the sizes above stay. A
         // capsule whose own rule sets a smaller height (the graph's pill segment, the Details summary, an account row) lifts it with
-        // a line of its own beside that rule. The row of bars is --tap-h high, and under a finger the gap between two bars is not a gap: the row has none
-        // (gap:0) and each bar of it wears half of --bar-gap as a transparent border at either side (the ground is clipped to the padding box, so the bar is drawn as
-        // wide as before), so a touch between two bars lands on one of them. The border is part of the width (border-box): the least and the most a bar is wide
-        // grow by --bar-gap with it. A bar is as wide as the card allows for the number of its accounts (at --bar-min on a phone with many accounts, and the
-        // row goes sideways): the width of the target is the number's, not a thing a rule can lift. There is no pointer over a bar under a finger: the picked bar is the
-        // one that stands open (kit: bars).
-        // Tokens it reads: --tap-h --bar-gap --bar-min --bar-max.
-        "@media(pointer:coarse){.pill-btn,.seg-opt,.btn-compact,.btn-compact-wide,.btn-word,.tab-mark,.cover-link,.rows-menu summary,.rows-menu label{min-height:var(--tap-h)}.btn-word{min-width:var(--tap-h)}.bars{min-height:var(--tap-h);gap:0}.bars>.bar{border-inline:calc(var(--bar-gap) / 2) solid transparent;background-clip:padding-box;min-width:calc(var(--bar-min) + var(--bar-gap));max-width:calc(var(--bar-max) + var(--bar-gap))}}",
-        // The head's line is as high as its tabs: a finger's height, too (the thread from the mark to the first ring reads it).
-        "@media(pointer:coarse){:root{--head-h:var(--tap-h)}}",
+        // a line of its own beside that rule.
+        // Tokens it reads: --tap-h.
+        "@media(pointer:coarse){.pill-btn,.seg-opt,.btn-compact,.btn-compact-wide,.btn-word,.tab-mark,.cover-link,.rows-menu summary,.rows-menu label{min-height:var(--tap-h)}.btn-word{min-width:var(--tap-h)}}",
         /* kit: press */
         // The press of a control that has no plate of its own to sink (:active, mouse and finger): it shrinks to --press of its size in --dur-1 on --ease, and when it is let go
         // the control's own rule takes it back. Written once, for the controls it lists: the window row's limit line that the keyboard reaches, the banner's retry and the scope option. Each has its pair under reduced motion: nothing
         // moves, the press does not shrink it. The press of the rail's ring is the rail's own (kit: rail): the kit of a tab keeps every rule of the tab.
         // Tokens it reads: --press --dur-1 --ease.
-        ".wt-limit[tabindex]:active,.banner .banner-retry:active,.wt-scope .wt-scope-opt:active{transform:scale(var(--press));transition:transform var(--dur-1) var(--ease)}",
-        "@media(prefers-reduced-motion:reduce){.wt-limit[tabindex]:active,.banner .banner-retry:active,.wt-scope .wt-scope-opt:active{transform:none;transition:none}}",
+        ".wt-limit[tabindex]:active,.banner .banner-retry:active{transform:scale(var(--press));transition:transform var(--dur-1) var(--ease)}",
+        "@media(prefers-reduced-motion:reduce){.wt-limit[tabindex]:active,.banner .banner-retry:active{transform:none;transition:none}}",
         /* kit: focus ring */
         // The ring of a thing the keyboard reaches that the base does not reach by what it is (a button and a summary wear it, a region that wears .focus-ring does): the
         // line and its offset are the base's, the corner is the small one so the ring follows the thing, drawn outside it. The second rule draws the same ring inside, for a
         // thing that fills its box to the edge of the card, which would cut it. Written once, for the things they list.
         // Tokens it reads: --focus-line --ring-offset --radius-sm.
         ".wt-limit[tabindex]:focus-visible,.lg .legend-item:focus-visible,.nx[tabindex]:focus-visible,.wt-foot-g:focus-visible{outline:var(--focus-line);outline-offset:var(--ring-offset);border-radius:var(--radius-sm)}",
-        ".wt-plate>.tl-wrap>.tl-strip:focus-visible,.wt-plate .kt-toggle:focus-visible{outline:var(--focus-line);outline-offset:calc(var(--ring-offset)*-1)}",
         /* capsule: shell */
         // The card: everything under the head (banners, About, the limits, the accounts, the empty states) stands in this one
         // card, as the page stands in the app's shell: the shell's tokens for its colour, corner, glow and its gap to the head,
@@ -1123,9 +524,9 @@
         // ground and the card on it. With no rail (nothing yet, an error, no limit) the card has the whole width. Under 860px the same frame is a
         // block: the rail, a row of capsules, over the card, 8px off it.
         ".shell{display:grid;grid-template-columns:minmax(0,1fr);min-width:0}",
-        ".shell.has-rail{grid-template-columns:var(--rail-w) minmax(0,1fr)}",
+        ".shell.has-rail{grid-template-columns:var(--q-rail-w) minmax(0,1fr);column-gap:var(--space-2);align-items:start}",
         ".control-bar+.shell{margin-top:var(--shell-card-gap)}",
-        "@media(max-width:859.98px){.shell.has-rail{display:block}.has-rail>.shell-card{margin-top:var(--space-2)}}",
+        "@media(max-width:520.98px){.shell.has-rail{display:block}.has-rail>.shell-card{margin-top:var(--space-2)}}",
         "@media(max-width:520.98px){.shell-card{padding:var(--shell-card-pad) var(--space-1)}}",
         // On the wide shell (the rail at the side, from 860px) the card has more room inside it, so that its parts do not stand against its edges: --shell-card-pad-y over and under, --shell-card-pad-x
         // at the sides. The row of the bars, the chart and its plate stand inside these fields (the bars' width, --bar-rest, is worked out from the row, so it follows by itself). Under 860px the padding above stands as it was.
@@ -1136,13 +537,12 @@
         ".lrows>:first-child{border-top-left-radius:var(--shell-card-inner-radius);border-top-right-radius:var(--shell-card-inner-radius)}",
         ".lrows>:last-child{border-bottom-left-radius:var(--shell-card-inner-radius);border-bottom-right-radius:var(--shell-card-inner-radius);border-bottom-color:transparent}",
         /* capsule: head */
-        // The control bar: families on the left, About and Refresh on the right.
-        ".control-bar{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:var(--space-2)}",
+        // The control bar: families on the left, About and Refresh on the right, one line where the width allows it (the tabs fold their names on the
+        // narrow shell, kit: mark tab; Refresh folds its word, kit: text action), the words on a second line where it does not.
+        ".control-bar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--space-1) var(--space-2)}",
         // The families are the kit's row of mark tabs (kit: mark tab): the markup wears .tab-mark-row and .harness-seg, and the head
-        // gives the row only its place: the room it asks for in the bar.
-        ".harness-seg{flex:1 1 280px}",
-        // The row keeps no air of its own at its left (the first tab, the family picked, stands at the edge of the widget, --shell-card-gap from it,
-        // as far as from the top): the rail's axis is the middle of that tab (--rail-axis, railFit).
+        // gives the row only its place: the room it asks for in the bar (what the tabs need, no more).
+        ".harness-seg{flex:0 1 auto;min-width:0}",
         // About and Refresh are the kit's row of words (kit: text action): the markup wears .btn-word-row and .action-seg, and the head
         // gives the row only its place: the right end of the bar, and the height of a row of controls.
         ".action-seg{margin-left:auto;min-height:var(--row-h)}",
@@ -1150,7 +550,6 @@
         // (the kit's tab wears it as its mark). The ghosts it shows before the first answer are tabs of the kit, disabled: the base's
         // disabled ink is theirs, the head adds no look.
         ".harness-initial{display:inline-flex;align-items:center;justify-content:center;width:var(--mark-px);height:var(--mark-px);font-size:var(--type-meta);font-weight:var(--weight-semibold)}",
-        // About wears no state: a trouble of the system is said by the banners and the status line of the card, not by the word.
         /* capsule: banners */
         // Banners: what failed, in the open, above everything it touches.
         ".banners{display:flex;flex-direction:column;gap:var(--space-2)}",
@@ -1188,8 +587,6 @@
         // tracking; in the plate (a grid) they take a line of their own, and the row gap is their air.
         ".family-credits{letter-spacing:var(--track-meta)}",
         ".family-credits .emph{margin-right:var(--space-2);font-weight:var(--weight-regular)}",
-        ".lrow>.family-credits{grid-column:1/-1;margin:0}",
-        ".wt-plate .kt-sum>.family-credits{margin:var(--space-1) 0 0}",
         "@media(max-width:520.98px){.reserve-head{display:block}.reserve-age{text-align:left;margin-top:var(--space-0)}}",
         /* capsule: bars and legend */
         // The legend of the bars' kinds (About shows it).
@@ -1204,23 +601,15 @@
         ".lg,.nx{grid-column:1/-1;min-width:0;margin:0;padding:0;line-height:var(--lh-ui);letter-spacing:var(--track-meta)}",
         // Tight (under 640px) the plate is one column in the order of its markup (the bars, the fact, the model list, the stamp, the chart word, the notes; the
         // window-tabs capsule gives the parts of its own their places): the bars span the row and the chart word joins the stamp's row at the right.
-        "@media(max-width:639.98px){.wt-plate.wt-plate>.l-chart{grid-area:auto;grid-column:2;justify-self:end}.wt-plate.wt-plate>.bars{grid-area:auto;grid-column:1/-1}}",
         ".lg{list-style:none}",
         ".nx{display:flex;flex-wrap:wrap;gap:var(--space-1)}",
         ".lg b,.nx b{font-weight:var(--weight-medium);color:var(--text-primary);font-variant-numeric:tabular-nums}",
         ".lg .legend-item,.nx>span{white-space:nowrap}",
-        // In the summary of the account card (cardTake): under the note, and, 520px and under, its words wrap, the card being narrower than the plate.
-        ".wt-plate .kt-sum .nx,.wt-plate .kt-sum .lg{margin:var(--space-1) 0 0}",
-        ".wt-in .kt-sum .nx{animation:wt-rise var(--dur-4) var(--ease) both}",
-        "@media(prefers-reduced-motion:reduce){.wt-in .kt-sum .nx{animation:none}}",
-        "@media(max-width:520.98px){.wt-plate .nx>span{white-space:normal}}",
         ".lg .legend-item,.nx[tabindex]{position:relative;cursor:default}",
         ".lg .legend-item{display:block}",
         // The dot between two cells of the reset stands at the end of the cell before it, on a no-break space, so a line never begins with
         // it. It is drawn, not text: a reader hears no dot (the empty alternative; the line before it is for a browser without one).
         ".nx>span:not(:last-child):after{content:\"\\00a0·\";content:\"\\00a0·\"/\"\"}",
-        // The small bar of the About legend: the kit's bar at the size of a mark, 12 x 16.
-        ".strip-legend .bar{flex:none;display:inline-block;width:12px;min-width:0;height:16px;border-radius:var(--radius-sm)}",
         // Under the window-tabs plate, hover, focus and touch are one thing on a handle (a legend item; the reset row, when the engine says
         // which accounts reset then): its words come forward, and on the strip the
         // bars of the other kinds step back. The ring is the kit's. The bars step back by the
@@ -1230,31 +619,6 @@
         // Under a finger a handle's words stay the size they are: the 44px is a transparent box round them that its row does not count (the
         // plate does not grow), as the note's "N more" has it.
         "@media(pointer:coarse){.lg .legend-item:after,.nx[tabindex]:after{content:\"\";position:absolute;left:calc(var(--space-1) * -1);right:calc(var(--space-1) * -1);top:50%;height:var(--tap-h);margin-top:calc(var(--tap-h) / -2)}}",
-        // The one transition of a bar: the fade of the dimming, the move of the pick and the move of its opening (the basis and the most, kit: bars); its pair is under reduced motion, at the end.
-        ".bars .bar{transition:opacity var(--dur-1),transform var(--dur-5) var(--ease),flex-basis var(--dur-bars) var(--ease-bars),flex-grow var(--dur-bars) var(--ease-bars),max-width var(--dur-bars) var(--ease-bars)}",
-        // A row drawn anew wears .bars-fitting until the script has written the width its bars rest at (barsFit): its first styles are the token's, and a bar that is open would travel from that width to the row's own, so the row moves nothing until it is set.
-        ".bars.bars-fitting .bar{transition:none}",
-        ".wt-plate[data-dim=limit] .bars .bar:not(.spent){opacity:var(--dim-others)}",
-        ".wt-plate[data-dim=held] .bars .bar:not(.held){opacity:var(--dim-others)}",
-        ".wt-plate[data-dim=was] .bars .bar:not(.was){opacity:var(--dim-others)}",
-        // The item "last known" counts the dated readings that are neither at the limit (.was) nor held back (.held): both of those wear .last
-        // too, and, with no names to light, step back with the rest.
-        ".wt-plate[data-dim=last] .bars .bar:is(:not(.last),.was,.held){opacity:var(--dim-others)}",
-        ".wt-plate[data-dim=unknown] .bars .bar:not(.unknown){opacity:var(--dim-others)}",
-        // The note under the row (a group of the accounts not read) lights the bars of its own accounts and steps the others back: the
-        // plate wears data-dim=group and the bars of the group's accounts wear data-lit (litBars, set by the group's own events).
-        ".wt-plate[data-dim=group] .bars .bar:not([data-lit]){opacity:var(--dim-others)}",
-        // The step of the ladder pressed (a step of several accounts) holds the same light after the pointer has gone: the bars of its accounts (data-step-lit, the script) stand, the others step back, the picked bar
-        // stays; a handle under the pointer or the keyboard (data-dim) has the plate meanwhile.
-        ".wt-plate:not([data-dim]) .bars[data-step] .bar:not([data-step-lit],.sel){opacity:var(--dim-others)}",
-        // Under the window-tabs plate, for the reader's own pick (.wt-in): the two rows rise in and the bars grow from their
-        // base a step apart (the keyframes are the kit's: motion). The bars' growth holds nothing after its
-        // end (backwards, not both), or it would hold the opacity the dimming above takes.
-        ".wt-in>.lg,.wt-in>.nx{animation:wt-rise var(--dur-4) var(--ease) both}",
-        ".wt-in>.bars>.bar{transform-origin:bottom;animation:wt-grow var(--dur-2) var(--ease) backwards}",
-        // The picked bar keeps its grown look: the growth of the pick would end in a step back to the size it has not got.
-        ".wt-in>.bars>.bar.sel{animation:none}",
-        "@media(prefers-reduced-motion:reduce){.wt-in>.lg,.wt-in>.nx,.wt-in>.bars>.bar{animation:none}.bars .bar{transition:none}}",
         /* capsule: chart */
         // The timeline: one limit, the record behind now and one future ahead.
         // The calm timeline: graph tabs and the model choice on one line, a
@@ -1265,91 +629,20 @@
         // its place in the rows once more and keeps all four corners its own.
         ".tl-block{position:relative;padding:var(--space-3);border-radius:var(--radius-card);background:var(--inset)}",
         ".lrows>.tl-block{border-radius:var(--radius-card)}",
-        // The timeline (.tl-wrap) and the account's card (.ins-wrap) each stand in a fold of one row, 1fr open and 0fr shut: the one node is moved from under the plate
-        // to its place right under the bars (.tl-top, the plate's area `chart`) and back, and opens and shuts by the row's height (selectInPlace). The fold clips only while
-        // it moves (.fold-run), so the shadow of a part and the focus ring of Details are not cut at rest.
-        ".tl-wrap,.ins-wrap{display:grid;grid-template-rows:1fr;min-width:0}",
-        ".tl-wrap>.tl-fold,.ins-wrap>.ins-fold{min-height:0;min-width:0}",
+        // Inside the plate of a limit (its last part, the approved composition) the history has no plate of its own: a hairline over it, the plate's
+        // own air, its controls and plot on the plate's ground.
+        ".q-plate>.tl-wrap{margin-top:var(--space-3)}",
+        ".q-plate .tl-block{padding:var(--space-3) var(--space-1) 0;border-top:var(--border-w) solid var(--q-edge);border-radius:0;background:none}",
+        ".tl-wrap{display:grid;grid-template-rows:1fr;min-width:0}",
+        ".tl-wrap>.tl-fold{min-height:0;min-width:0}",
         ".fold-run{transition:grid-template-rows var(--dur-5) var(--ease)}",
-        ".fold-run>.tl-fold,.fold-run>.ins-fold{overflow:hidden}",
+        ".fold-run>.tl-fold{overflow:hidden}",
         ".fold-shut{grid-template-rows:0fr}",
-        // The box that holds the folds of a pick keeps most of its height while they go their way (.fold-held, the script: foldHold): the page does not fall to the plate and rise again.
-        ".fold-held{min-height:var(--fold-hold)}",
         "@media(prefers-reduced-motion:reduce){.fold-run{transition:none}}",
         ".lrows>.tl-wrap>.tl-fold>.tl-block{border-radius:var(--radius-card)}",
-        ".lrows>:last-child>.ins-fold>.inspector{border-bottom-color:transparent}",
-        // The card of the picked account under the chart's plate (.wt-plate>.ins-wrap): a second, narrower card whose top goes under the plate (16px in, the plate above it). At rest a strip
-        // (the dot, the name, the plan; the lead window at the right); under the pointer or the keyboard (hover, focus) one more row of the windows; pressed (.kt-open) the whole card. Where
-        // there is no chart over it (Chart folded, no plate) the card stands in its own place whole: the strip, the row and the button below are the plate's alone.
-        ".wt-plate>.tl-wrap{position:relative;z-index:var(--z-plate);transition:grid-template-rows var(--dur-5) var(--ease-flip),padding-bottom var(--dur-5) var(--ease-flip)}",
-        // The card up (.kt-open) takes the place of the chart, and the chart folds into a strip as tall as the card's own (--kt-strip): its content row goes to 0fr (its words out of the page by visibility once it has)
-        // while the wrap's own bottom padding grows to the strip, on the same curve, so the row is the strip plus what is left of the chart and the card's body (the place less the strip and the gap, --kt-gap: 0 on a narrow screen, where the card keeps its own 12px) always
-        // fills the rest. The wrap wears the plate's ground and corners then (the same grey as the chart's), and the strip's word stands on it (.tl-strip); the chart opens again as the card is let go. The state
-        // is the card's own class, so a drawing that builds the card up builds the chart folded; .tl-yield only holds the clip while the row moves (cardPress).
-        ".wt-plate:has(>.ins-wrap>.ins-fold>.inspector.kt-open)>.tl-wrap{grid-template-rows:0fr;padding-bottom:var(--kt-strip);border-radius:var(--radius-card);background:var(--inset)}",
-        ".wt-plate>.tl-wrap>.tl-fold{transition:opacity var(--dur-2) var(--ease)}",
-        ".wt-plate>.tl-wrap.tl-yield>.tl-fold{overflow:hidden}",
-        ".wt-plate:has(>.ins-wrap>.ins-fold>.inspector.kt-open)>.tl-wrap>.tl-fold{overflow:hidden;opacity:0;visibility:hidden;transition:opacity var(--dur-2) var(--ease),visibility 0s linear var(--dur-5)}",
-        // The strip's word: a button the size of the strip, over the wrap's top, hidden while the chart stands open and shown once the chart's own words have faded (--dur-2); the pointer, the keyboard focus
-        // or a press on it gives the chart back (chartStrip).
-        ".wt-plate>.tl-wrap>.tl-strip{position:absolute;inset:0 0 auto;display:flex;align-items:center;height:var(--kt-strip);margin:0;padding:0 var(--space-4);border:0;border-radius:var(--radius-card);background:transparent;color:var(--text-meta);font-family:inherit;font-size:var(--type-body);font-weight:var(--weight-regular);line-height:var(--lh-ui);text-align:start;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;opacity:0;visibility:hidden;transition:opacity var(--dur-2) var(--ease),visibility 0s linear var(--dur-2)}",
-        ".wt-plate:has(>.ins-wrap>.ins-fold>.inspector.kt-open)>.tl-wrap>.tl-strip{opacity:1;visibility:visible;transition:opacity var(--dur-2) var(--ease) var(--dur-2),visibility 0s linear var(--dur-2)}",
-        "@media(prefers-reduced-motion:reduce){.wt-plate>.tl-wrap,.wt-plate>.tl-wrap>.tl-fold,.wt-plate>.tl-wrap>.tl-strip,.wt-plate:has(>.ins-wrap>.ins-fold>.inspector.kt-open)>.tl-wrap>.tl-fold,.wt-plate:has(>.ins-wrap>.ins-fold>.inspector.kt-open)>.tl-wrap>.tl-strip{transition:none}}",
-        ".wt-plate>.ins-wrap{grid-column:1/-1;position:relative;z-index:var(--z-card);margin:calc(-1*(var(--space-2) + var(--space-1) + var(--space-4))) var(--space-4) var(--space-4);transition:margin var(--dur-5) var(--ease-flip)}",
-        // Nothing after the card in the plate (the fact, the notes and the stamp stand in its summary, and there is no model list): the card is the last of it and leaves no margin, no empty row of the
-        // grid and no padding of the plate under it.
-        ".wt-plate:has(>.ins-wrap):not(:has(>.wt-scope))>.ins-wrap{margin-bottom:0}",
-        ".lrow.wt-plate:has(>.ins-wrap):not(:has(>.wt-scope)){padding-bottom:0}",
-        ".wt-plate>.ins-wrap.fold-run{transition:grid-template-rows var(--dur-5) var(--ease),margin var(--dur-5) var(--ease)}",
-        ".wt-plate>.ins-wrap.fold-shut{margin-top:0;margin-bottom:0}",
-        // The card up (.kt-open: pressed, under the pointer or with the focus in it) takes the place of the chart and its width, no longer hung under the plate: its top is one gap (--space-2) under the chart's strip (it takes back the 8px and 4px
-        // the folded chart leaves above it, less that gap), no 16px off each side, no padding for the part that stood under the plate, all four corners its own (520px and under: the card is already the plate's width, only the corners and the body change). The margins and the corners move as the chart folds and the body opens (--dur-5), so the head rises with the chart's fold and the sum of the heights stays. A shut
-        // fold keeps its zero margins (it is the stronger rule); the bottom margin is the rest's (none where nothing follows the card).
-        "@media not all and (max-width:520.98px){.wt-plate>.ins-wrap:not(.fold-shut):has(>.ins-fold>.inspector.kt-open){margin-top:calc(-1*var(--space-1));margin-inline:0}}",
-        "@media(prefers-reduced-motion:reduce){.wt-plate>.ins-wrap,.wt-plate>.ins-wrap.fold-run{transition:none}}",
-        "@media not all and (max-width:639.98px){.lrow.wt-plate.wt-up:has(>.ins-wrap){grid-template-areas:\"strip strip strip strip\" \"chart chart chart chart\" \"card card card card\" \"fact scope stamp ctl\"}.wt-plate>.ins-wrap{grid-area:card}}",
-        "@media not all and (max-width:639.98px){.lrow.wt-plate.wt-up:has(>.ins-wrap):not(:has(>.wt-scope)){grid-template-areas:\"strip strip strip strip\" \"chart chart chart chart\" \"card card card card\"}}",
-        ".wt-plate>.ins-wrap>.ins-fold>.inspector{padding:var(--space-4) 0 0;border:0;border-radius:0 0 var(--radius-card) var(--radius-card);background:var(--surface-capsule);box-shadow:var(--elev-rest);transition:padding var(--dur-5) var(--ease-flip),border-radius var(--dur-5) var(--ease-flip)}",
-        ".wt-plate>.ins-wrap>.ins-fold>.inspector.kt-open{padding-top:0;border-radius:var(--radius-card)}",
-        "@media(prefers-reduced-motion:reduce){.wt-plate>.ins-wrap>.ins-fold>.inspector{transition:none}}",
-        // On a narrow screen (520px and under) the card is not a tab hung under the plate: it is as wide as the plate (no 16px off each side, so the text has the room), it does not go under the
-        // plate (no negative top margin, no room kept for it in the card's padding) and wears all four corners. The shut fold above keeps its zero margins (it is the stronger rule).
-        "@media(max-width:520.98px){.wt-plate>.ins-wrap{margin:0 0 var(--space-4);--kt-gap:0px}.wt-plate>.ins-wrap>.ins-fold>.inspector{padding:0;border-radius:var(--radius-card)}}",
-        // The line of a pick (the stem, then the arms round the plate, drawn by the script on a layer of its own: .plate-trace, taken off at the end) ends as the
-        // plate's outline (.tl-traced on the chart's block: the same line, at the same place, as a ring drawn inside the chart's wrap in its :after: an inset shadow of --trace-w) and the stem under the picked bar
-        // (.bar-arrow: a vertical bar, no tip). The outline sits on the wrap, not on the block: the wrap is the chart at rest and the strip it folds into under the card, so the outline shrinks and grows with the chart,
-        // whole, and stands through the card as the stem does. Every size and place of the layer is worked out in whole device pixels (traceGeo), so the live line and the outline lie on the same pixels. The line is drawn
-        // by the kit's ring-sweep-arc (a path of pathLength 100 and a dash of 100, --ring-share 100: the dash offset is the keyframes' alone), linear, so the speed is one.
-        // The outline and the stem come with no fade and go in --dur-1; under reduced motion there is no movement: the script draws the end state.
-        ".wt-plate>.tl-wrap:after{content:\"\";position:absolute;inset:0;border-radius:var(--radius-card);box-shadow:var(--shadow-trace);opacity:0;pointer-events:none;transition:opacity var(--dur-1) var(--ease)}",
-        ".wt-plate:has(>.tl-wrap>.tl-fold>.tl-block.tl-traced)>.tl-wrap:after{opacity:1;transition:none}",
-        ".plate-trace,.bar-arrow{position:absolute;overflow:visible;pointer-events:none}",
-        ".plate-trace{width:100%;height:100%}",
-        ".plate-trace path{fill:none;stroke:var(--accent);stroke-width:var(--trace-w)}",
-        ".bar-arrow rect{fill:var(--accent)}",
-        ".bar-arrow{opacity:0;transition:opacity var(--dur-1) var(--ease)}",
-        ".bar-arrow.on{opacity:1;transition:none}",
-        ".trace-stem,.trace-arm{--ring-share:100}",
-        ".trace-stem{animation:ring-sweep-arc var(--dur-trace-stem) var(--ease-trace) backwards}",
-        ".trace-arm{animation:ring-sweep-arc var(--dur-trace-arms) var(--ease-trace) var(--dur-trace-stem) backwards}",
-        "@media(prefers-reduced-motion:reduce){.wt-plate>.tl-wrap:after,.bar-arrow{transition:none}.trace-stem,.trace-arm{animation:none}}",
         // The wait of the plate (tl-wait, put by the script from the start of the pick's folds to the end of the line; none at the poll, at a quick second pick, or under reduced motion): the content
         // stands hidden by visibility (the plate keeps its height, the nodes live), and over it a layer of stand-ins of the same layout (.tl-skel, aria-hidden): the row of four capsules, the field of the
         // chart, the line of the legend, the line of Details, grey by --tint-3 and pulsing by opacity. When the line has met the layer fades (.sk-off) and the content comes in (tl-reveal) in --dur-4, nothing moves.
-        ".tl-skel{position:absolute;inset:var(--space-3);display:flex;flex-direction:column;gap:var(--space-3);pointer-events:none;opacity:1;transition:opacity var(--dur-4) var(--ease)}",
-        ".tl-skel.sk-off{opacity:0}",
-        ".sk-caps{display:flex;gap:var(--space-2)}",
-        ".sk-cap{flex:0 0 18%;height:var(--row-h-sm);border-radius:var(--radius-pill)}",
-        ".sk-field{flex:1 1 0;min-height:0;border-radius:var(--radius-field)}",
-        ".sk-legend{width:60%;height:var(--row-h-sm);border-radius:var(--radius-sm)}",
-        ".sk-detail{width:36%;height:var(--row-h);border-radius:var(--radius-sm)}",
-        ".sk-cap,.sk-field,.sk-legend,.sk-detail{background:var(--tint-3);animation:skel-pulse var(--dur-skel) var(--ease) infinite}",
-        ".tl-block.tl-wait>:not(.tl-skel){visibility:hidden}",
-        ".tl-block.tl-reveal>:not(.tl-skel){animation:tl-reveal var(--dur-4) var(--ease) backwards}",
-        "@media(max-width:520.98px){.tl-skel{inset-inline:var(--space-1)}}",
-        "@media(prefers-reduced-motion:reduce){.tl-skel{transition:none}.sk-cap,.sk-field,.sk-legend,.sk-detail{animation:none}.tl-block.tl-reveal>:not(.tl-skel){animation:none}}",
-        ".wt-plate>.tl-top{grid-column:1/-1;margin-bottom:var(--space-2)}",
-        "@media not all and (max-width:639.98px){.lrow.wt-plate.wt-up{grid-template-areas:\"strip strip strip strip\" \"chart chart chart chart\" \"fact scope stamp ctl\"}.wt-plate>.tl-top{grid-area:chart}}",
         ".tl-model{flex:none;max-width:48%;color:var(--text-meta)}",
         ".tl-model-k{font-weight:var(--weight-regular)}",
         ".tl-model-v{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-primary);font-weight:var(--weight-medium)}",
@@ -1376,11 +669,11 @@
         // The pill variant of the kit's segment, a context and no markup of its own: in the graph's row of controls
         // (.tl-block .tl-controls) the same segment is a pill. The segment is its track, the option the pill (the compact 26px of
         // the kit's buttons, 11px a side), the active one stands raised on the surface.
-        ".tl-block .tl-controls .seg,.wt-plate .seg{padding:var(--space-0);border-radius:var(--radius-pill);background:var(--tint-3);gap:0}",
-        ".tl-block .tl-controls .seg-opt,.wt-plate .seg-opt{min-height:var(--row-h-sm);padding:var(--space-0) 11px;border-color:transparent;border-radius:var(--radius-pill);color:var(--text-meta)}",
+        ".tl-block .tl-controls .seg{padding:var(--space-0);border-radius:var(--radius-pill);background:var(--tint-3);gap:0}",
+        ".tl-block .tl-controls .seg-opt{min-height:var(--row-h-sm);padding:var(--space-0) 11px;border-color:transparent;border-radius:var(--radius-pill);color:var(--text-meta)}",
         // This rule outranks the kit's touch line, so the lift for a finger stands here (the kit: touch).
-        "@media(pointer:coarse){.tl-block .tl-controls .seg-opt,.wt-plate .seg-opt{min-height:var(--tap-h)}}",
-        ".tl-block .tl-controls .seg-opt.active,.wt-plate .seg-opt.active{background:var(--surface);border-color:transparent;color:var(--text-primary);box-shadow:var(--shadow-pop)}",
+        "@media(pointer:coarse){.tl-block .tl-controls .seg-opt{min-height:var(--tap-h)}}",
+        ".tl-block .tl-controls .seg-opt.active{background:var(--surface);border-color:transparent;color:var(--text-primary);box-shadow:var(--shadow-pop)}",
         // The caption of a segment (Span, Future) is quiet text in its capsule, left of the options: not a button, no border.
         ".tl-block .tl-controls .seg-label{padding-left:var(--space-2)}",
         // An option that for now draws what another one draws (a pace nobody has measured is no new use): told by its dashed outline, not by a pale ink, for it is a live button and keeps the ink of the others.
@@ -1420,13 +713,15 @@
         ".chart-svg .cursor-dot{r:var(--chart-dot-cursor);stroke:var(--surface);stroke-width:var(--chart-line);stroke-dasharray:none}",
         ".chart-svg .cursor-dot.line-observed{fill:var(--calm-a)}",
         ".chart-svg .cursor-dot.line-scenario{fill:var(--calm-a);stroke-dasharray:none}",
-        // The tip over the chart: a pill of the ink, one line (the script puts it over the highest point read, centred on the cursor and held inside the plot):
+        // The tip over the chart: a wrapping pill of the ink (the script puts it over the highest point read, centred on the cursor and held inside the plot):
         // the ink is the pill's ground and the surface its words, so in the dark theme it is a light pill. The moment, the "of N", the short name and the dots between them stand back.
-        ".chart-tip{position:absolute;z-index:5;pointer-events:none;display:flex;align-items:center;gap:var(--space-2);white-space:nowrap;padding:var(--space-1) var(--space-3);border-radius:var(--radius-pill);background:var(--text-primary);color:var(--surface);box-shadow:var(--elev-rest);font-size:var(--type-meta);transform:translate(-50%,calc(-100% - var(--space-3)))}",
+        ".chart-tip{position:absolute;z-index:5;pointer-events:none;display:flex;flex-wrap:wrap;box-sizing:border-box;width:max-content;max-width:100%;align-items:center;gap:var(--space-2);white-space:normal;overflow-wrap:anywhere;padding:var(--space-1) var(--space-3);border-radius:var(--radius-card);background:var(--text-primary);color:var(--surface);box-shadow:var(--elev-rest);font-size:var(--type-meta);transform:translate(-50%,calc(-100% - var(--space-3)))}",
         // Where the room over the point is short, the pill stands under it.
         ".chart-tip.tip-below{transform:translate(-50%,var(--space-3))}",
-        ".tip-row{display:flex;align-items:center;gap:var(--space-2);font-variant-numeric:tabular-nums}",
+        ".tip-row{display:flex;flex-wrap:wrap;min-width:0;align-items:center;gap:var(--space-2);font-variant-numeric:tabular-nums}",
         ".tip-row svg{flex:none}",
+        ".tip-when{flex-basis:100%}",
+        ".tip-sep{display:none}",
         ".tip-val{font-size:var(--type-body);font-weight:var(--weight-semibold)}",
         ".tip-when,.tip-of,.tip-name,.tip-sep{opacity:.72}",
         // Under the chart, one line per line drawn: whose total it is and, for
@@ -1490,55 +785,7 @@
         ".wt-controls~.tl-hero{margin-top:var(--space-3)}",
         "@media(max-width:520.98px){.tl-block{padding-inline:var(--space-1)}.reserve-detail{grid-template-columns:minmax(0,1fr)}.reserve-detail dt{padding-bottom:0;border-bottom:0}.reserve-detail dd{padding-top:var(--space-0)}.schedule-card{overflow-x:auto}.cp-tiles{grid-auto-flow:row}.cp-tile{padding:var(--space-2) var(--space-3)}.tl-model{max-width:100%}.tl-hero{display:block}.tl-next{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 var(--space-2);margin-top:var(--space-1);text-align:left}.tl-block .tl-controls{gap:var(--space-2)}}",
         /* capsule: account card */
-        // The selected account.
-        ".kt-top{position:relative}",
-        ".kt-right{display:grid;align-items:center;justify-items:end;flex:0 0 auto}",
-        ".kt-right>*{grid-area:1/1}",
-        ".kt-lead,.kt-toggle{display:none}",
-        ".wt-plate .kt-lead{display:block;font-size:var(--type-meta);line-height:var(--lh-ui);color:var(--text-meta);font-variant-numeric:tabular-nums;transition:opacity var(--dur-2) var(--ease) var(--dur-2)}",
-        ".wt-plate .kt-open .kt-lead{opacity:0;transition-delay:0s}",
-        ".wt-plate .kt-toggle{display:block;position:absolute;inset:0;margin:0;padding:0;border:0;border-radius:inherit;background:transparent;cursor:pointer}",
-        ".wt-plate .kt-more{display:grid;grid-template-rows:0fr;transition:grid-template-rows var(--dur-5) var(--ease-flip)}",
-        ".wt-plate .kt-clip{min-height:0;min-width:0;overflow:hidden;max-height:var(--kt-room);visibility:hidden;transition:visibility 0s linear var(--dur-5)}",
-        ".wt-plate .kt-open .kt-more{grid-template-rows:1fr}",
-        // The body of the pressed card is exactly as tall as the place of the chart it took (--kt-room, measured as it is pressed): the pad inside is no shorter than it and the clip no taller, so a short
-        // body fills the place and a long one scrolls (a thin bar), its padding with it. The size stands on the pad, not on the clip: a grid item with a set height cannot fold to 0fr. Both rules hold through the
-        // fold both ways, so the chart's row and the body fold at the same sizes and the sum of the two stays the place.
-        ".wt-plate .kt-open .kt-clip{visibility:visible;transition-delay:0s;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--edge-strong) transparent}",
-        ".wt-plate .kt-pad{min-height:var(--kt-room);padding:0 var(--space-4) var(--space-4)}",
-        ".wt-plate .kt-pad>:first-child{margin-top:0}",
-        "@media(prefers-reduced-motion:reduce){.wt-plate .kt-more,.wt-plate .kt-clip,.wt-plate .kt-lead{transition:none}}",
-        ".wt-plate .kt-top>.insp-head{min-height:var(--kt-strip);padding:0 var(--space-4);flex-wrap:nowrap}",
-        // The name, the plan and the next window stand in one line of the strip only where there is room for all three; on a narrow screen (520px and under) the title wraps as it does outside the plate,
-        // so the name keeps the width of its own text and is never squeezed to nothing by the words after it.
-        "@media not all and (max-width:520.98px){.wt-plate .kt-top .insp-title{flex-wrap:nowrap}}",
-        // The card in the plate draws no "Clear": the pick is kept always (the top account is picked of itself); outside the plate the button is the card's own.
-        ".wt-plate .kt-right .insp-clear{display:none}",
-        // The number and the notes of the plate stand in the card (cardTake), the real nodes. At rest the strip carries, on the right, the account's share and after it the number
-        // again, a copy (.kt-mini, "5.53 of 16"); pressed, the pair dissolves (the plate's card has no "Clear" to take its place). Under the pointer the row of windows carries,
-        // on its right, the head of the note ("At the limit · 3", a copy). Pressed, the summary stands first in the card: the fact on the left, the stamp and the chart word
-        // on the right, the note and the reset under them, and a rule between it and the rest.
-        ".wt-plate .kt-pair{display:inline-flex;align-items:baseline;gap:var(--space-3);white-space:nowrap}",
-        ".wt-plate .kt-mini{display:inline-flex;align-items:baseline;gap:var(--space-1h);transition:opacity var(--dur-2) var(--ease) var(--dur-2)}",
-        ".wt-plate .kt-mini .wt-num{grid-column:auto;grid-row:auto;font-size:var(--type-section);font-weight:var(--weight-light);line-height:var(--lh-ui);color:var(--text-primary)}",
-        ".wt-plate .kt-of{font-size:var(--type-meta);line-height:var(--lh-ui);color:var(--text-meta)}",
-        ".wt-plate .kt-open .kt-mini{opacity:0;transition-delay:0s}",
-        ".wt-plate .kt-sum{padding:var(--space-1) 0 0}",
-        ".wt-plate .kt-row{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:var(--space-2) var(--space-4);min-width:0}",
-        ".wt-plate .kt-sum .wt-fact{margin:0;justify-self:auto;align-self:auto}",
-        ".wt-plate .kt-side{display:flex;align-items:center;gap:var(--space-4);flex:0 1 auto;min-width:0;margin-left:auto}",
-        ".wt-plate .kt-sum .l-chart{margin:0;justify-self:auto}",
-        ".wt-plate .kt-sum .wt-limit{margin:var(--space-2) 0 0;max-width:100%}",
-        // The reader's pick still rises the fact and the bubble once the card has taken them (the plate keeps wt-in; the delay of a drawing in hand stays on the nodes: plateMotion runs before cardTake).
-        ".wt-in .kt-sum .wt-fact{animation:wt-rise var(--dur-4) var(--ease) both}",
-        ".wt-in .kt-sum .wt-limit{animation:wt-rise var(--dur-4) var(--ease) backwards}",
-        "@media(prefers-reduced-motion:reduce){.wt-in .kt-sum .wt-fact,.wt-in .kt-sum .wt-limit{animation:none}}",
-        ".wt-plate .kt-rule{margin:var(--space-3) 0;border-top:var(--border-w) solid var(--edge)}",
-        // What follows the row of the fact in the summary (the note, the notes of the window, the states, the reset) takes one gap off it, and stands one gap under the one before.
-        ".wt-plate .kt-sum>.kt-row+*{margin-top:var(--space-2)}",
         // On a narrow screen (520px and under) the stamp and the chart word take a row of their own, the words of the stamp and of the reset wrap: the card is narrower than the plate they stood in.
-        "@media(max-width:520.98px){.wt-plate .kt-side{flex:1 1 100%;margin-left:0;justify-content:space-between}}",
-        "@media(prefers-reduced-motion:reduce){.wt-plate .kt-mini{transition:none}}",
         ".insp-title{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-1) var(--space-2);min-width:0;font-size:var(--type-body);font-weight:var(--weight-semibold)}",
         // The dot and the name stand in one pair: a narrow line wraps the plan and the next-up mark after the pair, never the dot off its name.
         ".insp-who{display:flex;align-items:center;gap:var(--space-2);min-width:0;max-width:100%}",
@@ -1675,47 +922,7 @@
         ".empty-desc{font-size:var(--type-meta);color:var(--text-meta);max-width:360px;margin:0}",
         ".empty-notes{display:flex;gap:var(--space-3);flex-wrap:wrap}",
         /* capsule: window tabs */
-        // The windows of a limit and the plate of the picked one, built on the kit's own parts: the windows stand in the rail (kit: rail), at the
-        // left of the card, on the ground: the kit's row of number tabs that wear a ring (.tab-mark-rail:
-        // name, ring, the average left, the note * where it rests on part of the accounts) and, under them, the ladder of resets. The note that names who is not read stands in the
-        // card, over the plate. The plate stands in the card: .lrow with its figure, the stamp of the reading, its chart word, bars and, under them, the
-        // states (.calm-legend) and the reset; the scope row is the model list (.wt-scope: the kit's pill segment, its ellipsis on .wt-scope-opt). What is
-        // written here is only what differs, in kit variables, and only for the classes of this capsule, under one prefix: wt-. What the plate
-        // changes in the other parts' classes (the list and the row's columns and areas, the two rows under the bars - they keep the short
-        // names lg and nx - the bars' dimming and the bar's new mark, the word was, the graph's row of controls) is written with those parts,
-        // under the window-tabs plate.
-        // The row of tabs is the kit's tablist in the rail: a column of its own height, and the tab a hair of its own, no more.
-        ".wt-row{flex:0 0 auto;min-width:0}",
-        // A tab is the kit's number tab with a ring (kit: rail): the word, the ring and the average left, and the note where it rests on part
-        // of the accounts. A place the family has no window for has no tab; a window the reader hid in Rows keeps its tab, grey, with its hint:
-        // its ring is the dotted one and its figure a dash.
-        ".wt-tab{min-width:0}",
-        ".wt-tab[aria-disabled=true]{color:var(--text-disabled);cursor:default}",
-        // The stamp (the picked window's: of the accounts the window applies to, how many are read and how old the oldest reading is) stands in the row of the figure
-        // of the plate, on its right, before the chart word: one line, "Read 18 of 20 · 2 days ago", in the meta type (12 on 16), the meta ink and the regular weight, but
-        // the number read ("18 of 20") in the ink; the age is in the ink too when the oldest reading is old (past the half hour). All at the regular weight.
-        // It stands on the baseline of the figure ("of 20 accounts"). The dot is a disc (--sep-size: as quiet as the " · " of the notes; --dot-size while it blinks) of the stamp's own ink and not a sign: the words a reader and a copy of the
-        // text have stay in it, unseen. It blinks while a read the reader asked for (Refresh) is in the air, not on the 30 s poll (a read nobody asked for). No colour of a state:
-        // nothing here is green, amber or red. It is no part of the rail. Where the row is tight (under 640px) it goes to a line of its own under the figure, at the left. It moves with the plate
-        // (.wt-in>.wt-stamp rises as the figure does) and stands still on the poll.
-        ".wt-stamp{grid-area:stamp;justify-self:end;align-self:center;position:relative;margin:0 0 var(--space-2);min-width:0;font-size:var(--type-meta);line-height:var(--lh-ui);font-weight:var(--weight-regular);color:var(--text-meta);text-align:right;white-space:nowrap}",
-        // The budget's plate has no chart word: the stamp ends the row.
-        ".wt-plate.wt-plate.wt-plate-cycle{grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:\"strip strip strip\" \"fact scope stamp\"}",
-        // On the narrowest screens the figure of a billing cycle (the money, with its decimals) leaves the unit's words no column beside it: they stand under it, on one line ("Period left of $40.00"),
-        // the fact's own width and not the figure's column (the figure first, a line of its own); the words take a line of their own only when they do not fit beside the name.
-        "@media(max-width:279.98px){.wt-plate-cycle .wt-fact{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:var(--space-1)}.wt-plate-cycle .wt-num{order:-1;flex:1 0 100%}.wt-plate-cycle .wt-fact-cap{align-self:baseline;min-width:0}}",
-        // Tight (under 640px): one column, top down in the order of the markup — the bars (the rule is with the bars'), the fact, the model list, then the line of the stamp (at the left,
-        // it may wrap: never cut, never a scroll across) and the chart word (its rule is with the bars' too), then the notes, the legend and the reset, which span the row as they do on
-        // the wide plate. No named areas: the flow puts each part in the next row, and the chart word follows the stamp, so it joins its row at the right.
-        "@media(max-width:639.98px){.wt-plate.wt-plate,.wt-plate.wt-plate.wt-plate-cycle{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:none}.wt-plate.wt-plate>.wt-fact{grid-area:auto;grid-column:1/-1;justify-self:stretch}.wt-plate.wt-plate>.wt-scope{grid-area:auto;grid-column:1/-1}.wt-plate.wt-plate>.wt-stamp{grid-area:auto;grid-column:1;justify-self:start;align-self:center;text-align:left;white-space:normal}.wt-plate.wt-plate.wt-plate-cycle>.wt-stamp{grid-column:1/-1}}",
-        ".wt-in>.wt-stamp{animation:wt-rise var(--dur-4) var(--ease) both}",
-        // In the summary of the account card (cardTake marks what it moves with wt-carded, so the selector holds no class of the card): beside the fact, one line; 520px and under, in a row of its own with the chart word, its words wrap from the left.
-        ".wt-stamp.wt-carded{margin:0;justify-self:auto;align-self:auto;white-space:nowrap}",
-        "@media(max-width:520.98px){.wt-stamp.wt-carded{text-align:left;white-space:normal}}",
-        // The stamp rises again in the card's summary (cardTake moves it there): no .kt-sum in the selector, this capsule styles only its own wt- classes.
-        ".wt-in .wt-stamp{animation:wt-rise var(--dur-4) var(--ease) both}",
-        "@media(prefers-reduced-motion:reduce){.wt-in .wt-stamp{animation:none}}",
-        "@media(prefers-reduced-motion:reduce){.wt-in>.wt-stamp{animation:none}}",
+        // Reading stamps, limit controls and rail layout for the selected family.
         ".wt-age{overflow-wrap:anywhere}",
         ".wt-n{color:var(--text-primary);font-weight:var(--weight-regular)}",
         ".wt-sep{display:inline-block;width:var(--sep-size);height:var(--sep-size);margin:0 var(--space-1);border-radius:50%;background:currentColor;vertical-align:middle}",
@@ -1729,7 +936,6 @@
         // its place where this window has none, so the plate does not jump as the reader moves along the rail.
         ".wt-foot{grid-column:1/-1;min-width:0;margin:0;letter-spacing:var(--track-meta)}",
         ".wt-foot-hold{visibility:hidden}",
-        ".wt-foot.wt-carded{margin:var(--space-1) 0 0}",
         // (a note in the card's summary is still the rail's last row on the pick of a family: it keeps .wt-foot-in's fade after the last window)
         ".wt-foot-head{margin-right:var(--space-2);color:var(--text-primary);font-weight:var(--weight-regular)}",
         // The dot and what follows it in a head of words ("Name · 3"): the accent, on tabular digits. One rule for the heads of the plate's notes (at the limit, not read, over plan, manual resets).
@@ -1747,30 +953,133 @@
         // nothing): the note is the height it is under a mouse.
         ".wt-foot-more{position:relative;margin:0 0 0 var(--space-1h);padding:0}",
         "@media(pointer:coarse){.wt-foot-more{min-height:0}.wt-foot-more:after{content:'';position:absolute;left:calc(var(--space-1) * -1);right:calc(var(--space-1) * -1);top:50%;height:var(--tap-h);margin-top:calc(var(--tap-h) / -2)}}",
-        // The scope row stands at the right of the fact, on its first line, when the length has several limits: the kit's segment in its pill
-        // variant (the graph's "Period"): the grey track, the picked option white and raised. Many models wrap to a second line, whole; an
-        // option wider than the line is cut with an ellipsis.
-        ".wt-scope{grid-area:scope;justify-self:start;min-width:0;max-width:100%;margin-top:0}",
-        ".wt-scope .wt-scope-opt{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:transform var(--dur-nav) var(--nav-spring)}",
-        "@media(prefers-reduced-motion:reduce){.wt-scope .wt-scope-opt{transition:none}}",
-        // Motion — transform and opacity only, and only for the reader's own pick (.wt-in):
-        // the content rises in, the bars grow from their base a step apart (140 ms and
-        // up to 80 ms of steps: under 220 ms in all). The keyframes are the kit's (kit: motion); what they move
-        // in the other parts' classes (the figure and its line, the two rows, the bars) is
-        // written with those parts, under the window-tabs plate.
-        ".wt-in>.wt-scope{animation:wt-rise var(--dur-4) var(--ease) both}",
-        // The note under the rows comes in the same way, and only for the reader's own pick: no motion on the 30 seconds' redraw.
-        ".wt-in>.wt-foot:not(.wt-foot-in){animation:wt-rise var(--dur-4) var(--ease) both}",
-        // And once the card has taken the note into its summary (cardTake marks it wt-carded, so the selector holds no class of the card) it rises the same way; the plate keeps wt-in.
-        ".wt-in .wt-foot.wt-carded:not(.wt-foot-in){animation:wt-rise var(--dur-4) var(--ease) both}",
-        "@media(prefers-reduced-motion:reduce){.wt-in .wt-foot.wt-carded:not(.wt-foot-in){animation:none}}",
-        // And the pick of a family moves it with the rail, not on its own (the script puts .wt-foot-in on it; the plate it stands in wears .wt-in for that pick too, so the plate's
-        // rise is not put on a note that wears it: .wt-in>.wt-foot:not(.wt-foot-in)): it fades in after the last window, as the foot of the rail does (kit: rail), so it is not seen alone
-        // in an empty rail while the windows are still coming down.
-        ".wt-foot-in{animation:rail-fade var(--dur-rail-foot) var(--ease) backwards;animation-delay:calc(var(--rail-row-at) + var(--rail-rows) * var(--rail-row-step) - var(--rail-elapsed))}",
         // On the narrow shell (the rail is a row of capsules over the card) the note follows the row. The place the hidden copy keeps would be an empty band
         // there, so it is gone: the row and the card stand close, and the card moves by the height of a note only where one is drawn.
-        "@media(prefers-reduced-motion:reduce){.wt-in>.wt-scope,.wt-foot-in,.wt-in>.wt-foot:not(.wt-foot-in){animation:none}.wt-foot-g{transition:none}}"
+        "@media(prefers-reduced-motion:reduce){.wt-foot-g{transition:none}}",
+        // The quota plate (the owner's approved composition, 8 Nov 2026): the rail of rings and resets at the left (a row over the plate on a phone), the plate of the
+        // picked limit with the opened account and every account's bar, and the history under it. Green is what is left, amber held by another limit, a red base an
+        // account at its limit, a hatch last known, "?" not read, grey switched off; the picked ring, step and card are crimson. The tokens are the --q-* ones.
+        ".q-rail{display:flex;flex-direction:column;gap:var(--space-1h);min-width:0;padding:var(--space-2) 0 0}",
+        ".q-rings{display:flex;flex-direction:column;gap:var(--space-1h)}",
+        // A ring on its capsule is one limit: the PR's ring at --q-ring, the value and its % one unit (one size, weight and baseline), the short name under it.
+        ".q-ring{display:flex;flex-direction:column;align-items:center;gap:var(--space-0);width:100%;margin:0;padding:var(--space-2) var(--space-1) var(--space-1h);border:0;border-radius:16px;background:var(--q-capsule);box-shadow:var(--q-shadow);color:var(--text-primary);font:inherit;cursor:pointer;transition:background var(--dur-1) var(--ease),color var(--dur-1) var(--ease)}",
+        ".q-ring:hover{background:var(--q-capsule-hover)}",
+        ".q-ring.on{background:var(--q-sel);color:var(--q-sel-ink)}",
+        ".q-ring-hidden{cursor:default;box-shadow:none;background:none;outline:var(--border-w) dashed var(--q-edge);outline-offset:calc(var(--border-w) * -1);color:var(--text-meta)}",
+        ".q-ring-hidden:hover{background:none}",
+        ".q-gauge{position:relative;display:block;width:var(--q-ring);height:var(--q-ring)}",
+        ".q-gauge>.ring{position:absolute;inset:0;width:var(--q-ring);height:var(--q-ring)}",
+        ".q-ring .ring-arc{stroke:var(--q-green)}",
+        ".q-ring .ring-dot{fill:var(--q-green)}",
+        ".q-ring .ring-track{stroke:var(--q-track)}",
+        ".q-ring.on .ring-track{stroke:var(--q-sel-rule)}",
+        ".q-pc{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:var(--type-meta);font-weight:var(--weight-medium);line-height:1;letter-spacing:0;font-variant-numeric:tabular-nums}",
+        ".q-ring-tx{display:flex;flex-direction:column;align-items:center;max-width:100%;min-width:0}",
+        // A long scope ("Claude and GPT 7d") wraps onto a second line and no further (a name of eighty letters ends in an ellipsis there); the ring's title and
+        // label say it whole.
+        ".q-ring-name{display:-webkit-box;max-width:100%;overflow:hidden;font-size:var(--type-meta);font-weight:var(--weight-semibold);line-height:var(--lh-ui);text-align:center;overflow-wrap:anywhere;-webkit-line-clamp:2;-webkit-box-orient:vertical}",
+        ".q-ring-sub{font-size:var(--type-meta);font-weight:var(--weight-medium);line-height:var(--lh-tight);color:var(--text-meta);white-space:nowrap}",
+        ".q-ring.on .q-ring-sub{color:var(--q-sel-meta)}",
+        ".q-ring-val{display:none}",
+        ".q-star{margin-left:var(--border-w);color:var(--accent)}",
+        ".q-ring.on .q-star{color:inherit}",
+        // The ladder of resets of the picked limit: in how long, and how many account-windows come back if unused.
+        ".q-ladder{display:flex;flex-direction:column;margin-top:var(--space-1h);padding:0 var(--space-0)}",
+        ".q-ladder-title{margin:0 0 var(--space-1);padding:0 var(--space-1h);font-size:var(--type-meta);font-weight:var(--weight-medium);color:var(--text-meta)}",
+        ".q-step{display:grid;grid-template-columns:var(--space-3) auto;column-gap:var(--space-1);align-items:center;width:100%;margin:0;padding:var(--space-1) var(--space-1h);border:0;border-radius:var(--radius-field);background:none;color:var(--text-primary);font:inherit;text-align:left;cursor:pointer}",
+        ".q-step:hover{background:var(--q-capsule-hover)}",
+        ".q-step.on{background:var(--q-sel);color:var(--q-sel-ink)}",
+        ".q-step-dot{grid-row:span 2;width:var(--q-mark);height:var(--q-mark);border-radius:50%;background:var(--q-green);justify-self:center}",
+        ".q-step-when{font-size:var(--type-body);font-weight:var(--weight-semibold);line-height:var(--lh-ui);white-space:nowrap;font-variant-numeric:tabular-nums}",
+        ".q-step-back{font-size:var(--type-meta);line-height:var(--lh-ui);color:var(--text-meta);white-space:nowrap;font-variant-numeric:tabular-nums}",
+        ".q-step.on .q-step-back{color:var(--q-sel-meta)}",
+        ".q-ladder-more{align-self:flex-start;margin:var(--space-0) 0 0 18px;padding:var(--space-0) var(--space-1h);border:0;border-radius:var(--radius-md);background:none;color:var(--text-meta);font:inherit;font-size:var(--type-meta);cursor:pointer}",
+        ".q-ladder-more:hover{color:var(--text-primary);background:var(--q-capsule-hover)}",
+        ".q-ladder-none{padding:var(--space-0) var(--space-1h);font-size:var(--type-meta);color:var(--text-meta)}",
+        // The plate of the picked limit: its head (the window, the scope, the stamp), its figure, the notes, then the opened account beside every account's bar.
+        ".q-plate{min-width:0;padding:14px 14px var(--space-3);border-radius:var(--radius-card);background:var(--q-plate);box-shadow:var(--q-shadow)}",
+        ".q-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-1) var(--space-2);min-width:0;margin:0 0 var(--space-2h)}",
+        ".q-title{margin:0;font-size:var(--type-section);font-weight:var(--weight-semibold);line-height:var(--lh-ui);white-space:nowrap}",
+        ".q-scope{display:inline-flex;align-items:center;height:22px;padding:0 var(--space-2);border-radius:var(--radius-pill);background:var(--q-chip);font-size:var(--type-meta);color:var(--text-meta);white-space:nowrap}",
+        ".q-scope.own{background:var(--q-sel);color:var(--q-sel-ink)}",
+        ".q-stamp{margin-left:auto;font-size:var(--type-meta);color:var(--text-meta)}",
+        // The status line under the head: the figure and the notes, one wrapping line, a short note beside another, a long one on its own; each note
+        // keeps its words whole where it can (a box of at most the line's width).
+        ".q-status{display:flex;flex-wrap:wrap;align-items:baseline;column-gap:var(--space-3);row-gap:var(--space-0);margin:calc(var(--space-1h) * -1) 0 var(--space-2h)}",
+        ".q-status>*{flex:0 1 auto;max-width:100%;min-width:0}",
+        ".q-limit-details{margin-top:var(--space-2);font-size:var(--type-meta);color:var(--text-meta)}",
+        ".q-limit-details>summary{cursor:pointer;padding:var(--space-1) 0}",
+        ".q-limit-details .q-note+.q-note{margin-top:var(--space-1)}",
+        ".q-fig{font-size:var(--type-meta);color:var(--text-meta);white-space:nowrap}",
+        ".q-fig-num{font-size:var(--type-body);font-weight:var(--weight-semibold);color:var(--text-primary);font-variant-numeric:tabular-nums}",
+        ".q-fig-num.none{color:var(--text-meta)}",
+        ".q-cov,.q-note{margin:0;font-size:var(--type-meta);letter-spacing:0;line-height:var(--lh-ui);color:var(--text-meta)}",
+        ".q-money{margin:0;font-size:var(--type-meta);color:var(--text-meta)}",
+        ".q-money-fig{font-size:var(--type-section);font-weight:var(--weight-semibold);color:var(--text-primary);font-variant-numeric:tabular-nums}",
+        ".q-plate[data-dim] .q-bar:not([data-lit]){opacity:.35}",
+        ".q-plate[data-dim] .q-bar[data-lit]{box-shadow:var(--q-dim-shadow)}",
+        ".q-accts{display:grid;grid-template-columns:var(--q-card-w) minmax(0,1fr);gap:var(--space-3);align-items:start}",
+        // The opened account: its name and address, its share, its reset, its plan and age, its cooldowns, its bonus resets and credits, its details under one button.
+        ".q-card{min-width:0;padding:var(--space-2) var(--space-2h) var(--space-1h);border-radius:var(--radius-tile);background:var(--q-sel);color:var(--q-sel-ink)}",
+        ".q-card-none{background:var(--q-chip);color:var(--text-meta)}",
+        ".q-card-head{display:flex;align-items:flex-start;gap:var(--space-1)}",
+        ".q-an{flex:1 1 auto;min-width:0;font-size:var(--type-body);font-weight:var(--weight-semibold);line-height:var(--lh-ui);overflow-wrap:anywhere}",
+        ".q-dot{margin-right:var(--space-1h);vertical-align:var(--space-0)}",
+        ".q-clear{flex:none;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;margin:calc(var(--border-w) * -1) calc(var(--space-1) * -1) 0 0;padding:0;border:0;border-radius:var(--radius-pill);background:none;color:var(--q-sel-meta);cursor:pointer}",
+        ".q-clear:hover{background:var(--q-sel-rule);color:var(--q-sel-ink)}",
+        ".q-em{font-size:var(--type-meta);line-height:var(--lh-ui);color:var(--q-sel-meta);overflow-wrap:anywhere}",
+        ".q-al{margin-top:var(--space-0);font-size:var(--type-meta);line-height:var(--lh-ui);color:var(--q-sel-meta)}",
+        ".q-card-none .q-al{color:var(--text-meta)}",
+        ".q-big{font-size:var(--type-body);font-weight:var(--weight-semibold);color:var(--q-sel-ink);font-variant-numeric:tabular-nums}",
+        ".q-u{white-space:nowrap}",
+        ".q-ck{opacity:.85;font-variant-numeric:tabular-nums}",
+        ".q-st{display:inline-block;padding:0 var(--space-1h);border-radius:var(--radius-pill);font-size:var(--type-meta);line-height:18px;font-weight:var(--weight-semibold);vertical-align:var(--border-w)}",
+        ".q-st-limit{background:var(--q-limit-bg);color:var(--q-limit-ink)}",
+        ".q-st-held{background:var(--q-amber);color:var(--q-held-ink)}",
+        ".q-st-last,.q-st-unknown,.q-st-off{background:var(--q-chip);color:var(--q-sel-ink)}",
+        ".q-cool{margin-top:var(--space-0);font-size:var(--type-meta);line-height:var(--lh-ui);color:var(--q-sel-ink)}",
+        ".q-res{margin-top:var(--space-1h);padding-top:var(--space-1);border-top:var(--border-w) solid var(--q-sel-rule)}",
+        ".q-rl{font-size:var(--type-meta);line-height:var(--lh-ui);color:var(--q-sel-ink)}",
+        ".q-rk,.q-ra,.q-rl.unk{color:var(--q-sel-meta)}",
+        ".q-rl b{font-weight:var(--weight-semibold)}",
+        ".q-more{margin-top:var(--space-1h)}",
+        ".q-more-btn{min-height:24px;padding:0 var(--space-2);border:0;border-radius:var(--radius-pill);background:var(--q-sel-rule);color:var(--q-sel-ink);font:inherit;font-size:var(--type-meta);cursor:pointer}",
+        ".q-more-body{margin-top:var(--space-1h);color:var(--text-primary)}",
+        // Every account's bar, with no figure in it (the card says the exact share); the grid is written by qBarsFit.
+        ".q-bcol{min-width:0}",
+        ".q-bhead{display:flex;align-items:center;min-height:20px;margin-bottom:var(--space-1h);font-size:var(--type-meta);color:var(--text-meta)}",
+        ".q-bars{display:grid;grid-template-columns:repeat(var(--q-cols),var(--q-bw));grid-auto-rows:var(--q-bh);gap:var(--space-1h) var(--q-bar-gap);min-width:0}",
+        ".q-bar{position:relative;display:block;width:100%;height:100%;margin:0;padding:0;border:0;border-radius:var(--radius-md);background:var(--q-track);overflow:hidden;cursor:pointer}",
+        ".q-bar:disabled{cursor:default}",
+        ".q-bar:hover{box-shadow:var(--q-edge-shadow)}",
+        ".q-fill{position:absolute;left:0;right:0;bottom:0;border-radius:0 0 var(--radius-md) var(--radius-md);background:var(--q-green)}",
+        ".q-fill.full{border-radius:var(--radius-md)}",
+        ".q-bar.held .q-fill{background:var(--q-amber)}",
+        ".q-bar.last .q-fill{background:var(--q-hatch-green)}",
+        ".q-bar.last.held .q-fill{background:var(--q-hatch-amber)}",
+        ".q-bar.spent::after,.q-bar.was::after{content:'';position:absolute;left:var(--q-base);right:var(--q-base);bottom:var(--q-base);height:var(--q-base);border-radius:var(--space-0);background:var(--q-red)}",
+        ".q-bar.was::after{height:0;border-top:var(--q-base) dashed var(--q-red);border-radius:0;background:none}",
+        ".q-bar.unknown{background:var(--q-track) var(--q-hatch-grey)}",
+        ".q-bar.off .q-fill{background:var(--text-meta);opacity:.45}",
+        ".q-unk{position:absolute;left:0;right:0;top:calc(50% - var(--space-2));font-size:var(--type-meta);font-weight:var(--weight-semibold);line-height:var(--space-4);text-align:center;color:var(--text-meta)}",
+        ".q-bar.sel{box-shadow:var(--q-sel-shadow);overflow:visible}",
+        ".q-bars[data-step] .q-bar:not(.lit){opacity:.35}",
+        ".q-bars[data-step] .q-bar.lit{box-shadow:var(--q-lit-shadow)}",
+        ".q-keys{display:flex;flex-wrap:wrap;gap:var(--space-0) var(--space-3);margin:var(--space-2) 0 0;font-size:var(--type-meta);color:var(--text-meta)}",
+        ".q-key{display:inline-flex;align-items:center;gap:var(--q-bar-gap);white-space:nowrap}",
+        ".q-sw{display:inline-block;width:var(--q-swatch);height:var(--q-swatch);border-radius:var(--radius-xs)}",
+        // the small bars of About's legend: the plate's bars, 12 by 16
+        ".q-swatch{flex:none;display:inline-block;width:var(--space-3);height:var(--space-4);border-radius:var(--radius-xs);cursor:default}",
+        ".k-last{background:var(--q-hatch-green)}",
+        ".k-unknown{background:var(--q-track) var(--q-hatch-grey)}",
+        ".k-held{background:var(--q-amber)}",
+        ".k-spent{background:var(--q-track);box-shadow:var(--q-spent-shadow)}",
+        ".k-off{background:var(--text-meta);opacity:.45}",
+        ".q-hist-title{margin:0 0 var(--space-2);font-size:var(--type-meta);font-weight:var(--weight-medium);color:var(--text-meta)}",
+        "@media(prefers-reduced-motion:reduce){.q-ring,.q-step{transition:none}}",
+        // A phone: the rings in a row and the ladder in a row under them, over the plate; the card over the bars. A plate of one account stands its card and its
+        // bar side by side (the approved composition): the bar's column holds the word over it and the bar, the legend spans both columns under them.
+        "@media(max-width:520.98px){.q-rail{padding:0}.q-rings{flex-direction:row;flex-wrap:wrap}.q-ring{flex-direction:row;flex:1 1 auto;width:auto;min-width:0;justify-content:center;gap:var(--q-bar-gap);padding:var(--space-1) var(--space-2h) var(--space-1) var(--space-1);border-radius:var(--radius-pill)}.q-gauge,.q-gauge>.ring{width:var(--q-ring-sm);height:var(--q-ring-sm)}.q-pc{display:none}.q-ring-tx{align-items:flex-start}.q-ring-name{text-align:left}.q-ring-sub{display:none}.q-ring-val{display:block;font-size:var(--type-meta);font-weight:var(--weight-medium);line-height:var(--lh-tight);font-variant-numeric:tabular-nums}.q-ladder{flex-direction:row;flex-wrap:wrap;align-items:center;gap:var(--space-0) var(--space-1);margin:0;padding:0}.q-ladder-title{margin:0 var(--space-0) 0 var(--space-1);padding:0}.q-step{display:inline-flex;align-items:baseline;gap:var(--q-bar-gap);width:auto;padding:var(--border-w) var(--space-2)}.q-step-dot{align-self:center}.q-ladder-more{margin:0}.q-plate{padding:var(--space-3) var(--space-2h) var(--space-2h)}.q-title{font-size:var(--type-body)}.q-accts{display:block}.q-card{margin:0 0 var(--space-2h)}.q-accts-one{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto 1fr auto;gap:var(--space-1) var(--space-2h);align-items:start}.q-accts-one .q-card{grid-column:1;grid-row:1/3;margin:0}.q-accts-one .q-bcol{display:contents}.q-accts-one .q-bhead{grid-column:2;grid-row:1}.q-accts-one .q-bars{grid-column:2;grid-row:2;grid-template-columns:var(--q-bw)}.q-accts-one .q-keys{grid-column:1/-1;grid-row:3;margin:0}}"
     ].join('');
 
     function el(tag, cls, text) {
@@ -1894,15 +1203,8 @@
         return 'M' + (92 - r / 2) + ' ' + y + 'A' + r + ' ' + r + ' 0 1 1 ' + (92 + r / 2) + ' ' + y;
     }
 
-    // The badge (the rail's, the large ring's option): a small circle set in the gap of the ring, its centre on the lowest point of the ring's
-    // path (the angle 90 degrees: x 92, y 92 + r), the radius BADGE_R in the svg's units, a stroke of BADGE_STROKE (thinner than the track's 7: the
-    // room inside is for the name, "30D" at 7.5px with a pixel of air, and the circle stands over the ends of the arc by a pixel or so), in the tone of
-    // the badge's edge, the fill the ground under the rail (so it reads as set into the gap). It is drawn last, over the ends of the arc, and holds no
-    // text: the short name of the window is the part's (an html node over it, kit: rail). Drawn here and nowhere else.
-    var BADGE_R = 41;
-    var BADGE_STROKE = 5;
 
-    function ringGauge(pct, form, size, badge, sweep) {
+    function ringGauge(pct, form, size) {
         var large = size === 'lg';
         var geo = large ? RING_SIZES.lg : RING_SIZES.plain;
         var path = large ? ringPath(geo.r) : RING_PATH;
@@ -1920,14 +1222,6 @@
             var angle = (120 + 3 * share) * Math.PI / 180;
             svg.appendChild(svgEl('circle', { 'class': 'ring-dot', r: geo.dot, cx: (92 + geo.r * Math.cos(angle)).toFixed(2),
                 cy: (92 + geo.r * Math.sin(angle)).toFixed(2) }));
-            // The sweep (kit: ring, motion): the arc is drawn from nothing to its share and the dot runs round with it; the keyframes read the share.
-            if (sweep) {
-                svg.classList.add('ring-sweep');
-                setVar(svg, '--ring-share', String(share));
-            }
-        }
-        if (large && badge) {
-            svg.appendChild(svgEl('circle', { 'class': 'ring-badge', r: BADGE_R, cx: 92, cy: 92 + geo.r, 'stroke-width': BADGE_STROKE }));
         }
         return svg;
     }
@@ -1942,13 +1236,23 @@
     // The word comes from t(key). Its first character stands in a span of its own (.btn-word-cap), which the kit turns to the accent
     // when the word is lit, and the rest follows it as a plain text node. The span carries no aria attribute: the button's name stays
     // the whole word.
-    function wordButton(key, params) {
+    // With iconName the kit's stroke icon stands before the word (.btn-word-mark, out of the reading order) and the word in a span of its own
+    // (.btn-word-body) that the narrow shell folds (.btn-word-short): the button's name is still the word.
+    function wordButton(key, params, iconName) {
         var word = t(key, params);
-        var btn = el('button', 'btn-word');
+        var btn = el('button', 'btn-word' + (iconName ? ' btn-word-short' : ''));
         btn.setAttribute('type', 'button');
         var first = Array.from(word)[0] || '';
-        btn.appendChild(el('span', 'btn-word-cap', first));
-        btn.appendChild(document.createTextNode(word.slice(first.length)));
+        var home = btn;
+        if (iconName) {
+            var mark = icon(iconName, 12);
+            mark.classList.add('btn-word-mark');
+            btn.appendChild(mark);
+            home = el('span', 'btn-word-body');
+            btn.appendChild(home);
+        }
+        home.appendChild(el('span', 'btn-word-cap', first));
+        home.appendChild(document.createTextNode(word.slice(first.length)));
         return btn;
     }
 
@@ -1977,7 +1281,7 @@
     // on a read nobody asked for. While a request is in the air the button is disabled and says so to a screen reader (aria-busy=true;
     // at rest the attribute is absent), the kit keeps the word's rest ink (.btn-word[aria-busy=true]), and the dot beside it blinks.
     function refreshButton() {
-        var btn = wordButton('btn.refresh');
+        var btn = wordButton('btn.refresh', null, 'refresh');
         btn.disabled = inFlight;
         if (inFlight) btn.setAttribute('aria-busy', 'true');
         btn.setAttribute('data-focus', 'refresh');
@@ -1988,43 +1292,19 @@
         return btn;
     }
 
-    // The kit's mark tab (kit: mark tab; the comment that opens that section is its contract): the helpers that build a row of choices
-    // told by a mark and move the marks when the reader picks one. They stand together here and nothing else builds a tab, a mark, a
-    // dot, a number or a row, so the look stays the kit's. A part calls them and writes no look of its own on what they make: only its wiring and its place.
+    // The kit's mark tab (kit: mark tab; the comment that opens that section is its contract): the two helpers that build a row of choices
+    // told by a mark. They stand together here and nothing else builds a tab, a mark, a number or a row, so the look stays the kit's. A part
+    // calls them and writes no look of its own on what they make: only its wiring and its place. A pick redraws the row in the same order:
+    // the picked tab is told by its ground (aria-pressed), nothing slides and nothing grows.
     //   markTab({key, mark, name, count, pressed})  one tab; the caller adds its wiring (aria-label, title, data-focus, the click).
-    //   markTab({key, name, count, note, selected, ring}) one number tab (no mark: its number is it; a ring of ringGauge, and a tab with neither is
-    //                                               none of the kit's), a tab of a tablist: the rail's tab (kit: rail). Its number stands
-    //                                               inside the box of the ring (.tab-mark-ring > .tab-mark-count, the sign % in .tab-mark-unit; a
-    //                                               dash is the same span, with no unit), its short name as the badge in the gap of the ring (the
-    //                                               plain word of the chip in the narrow shell), its star on the lower edge of the badge (all
-    //                                               inside the box of the ring, so one transform moves them with it), and there is no dot.
-    //   markRow(tabs, tablist, still)               the row (.tab-mark-row) of the tabs given, in their order: a group, or a tablist; still: the
-    //                                               row shows no preview by the pointer (.tab-mark-still) until the part takes the class off.
-    //   markStill(row, still)                       puts the row's preview by the pointer off (still) or gives it back: the part does it at the first move.
-    //   markPreviewed(tab)                          whether the tab shows its preview now: the pointer on it (not in a still row), or the keyboard on it.
-    //   markPressed(e)                              whether a click is a press of the pointer (a mouse button, a finger), not the keyboard's.
-    //   markStart(row, fromKey, toKey, lit, pressed) the start state of a pick, on the marks of the tab left and the tab picked (pressed: the
-    //                                               ring of a rail row starts from the press).
-    //   settleMarks()                               takes the start state off at the next frame (render calls it after every drawing).
-    //   markWas(scope, rowSel, dim)                 the places of the tabs of the row the capsule names (rowSel: its selector, a row of markRow, in
-    //                                               the scope; they are found by key) before a drawing: one read of the layout (dim: and of
-    //                                               the opacity of the tabs that give way, for a second pick inside the movement).
-    //   markFlip(scope, rowSel, was)                after the drawing: one read, and each tab that moved slides from its old place to the new.
-    //   markSlide(scope, rowSel, flips, elapsed, shift) puts the shifts on the tabs of a drawing (kit: motion).
-    //   setVar(node, name, value)                   a custom property on a node's style (a plain style object takes it as a key).
-    // The head's families are the first use (renderHarnessSeg): the tabs it draws, and the ghosts it shows before the first answer; the
-    // window row's tabs (windowRow) are the number tab's.
-    // markTab: key is what markStart finds the tab by (the part's own name for it; a tab that is never picked has none); mark is a node
-    // of the caller's (the model's drawing, or the initial where it has none), which wears the kit's class here (a drawing takes its class
-    // through classList, as an svg's className is no string); name is the text; count, when it is a number, draws the dot (out of the
-    // reading order) and the number, and when it is anything else draws neither; pressed, true or false, is the choice's state (it is
-    // aria-pressed, which the kit's look reads), and left out it is a tab that is no choice (a ghost). The tab is a button of type
-    // "button" and nothing else is set on it: its name, its title, its focus key and its click are the caller's.
-    // The number tab (kit: mark tab, the second kind): markTab({key, name, count, note, selected, ring}) with no mark. Its number is its mark
-    // (no dot): count is a number or a short text (68%, a dash), and draws the number (anything else draws none); note, a
-    // sign (aria-hidden) that stands after the number, is the part's to ask for (* where the figure rests on a part of what it counts);
-    // selected, true or false, makes the tab a tab of a tablist (role="tab", aria-selected) and not a button of a group (aria-pressed: pressed).
-    // Such a tab wears .tab-mark-num besides .tab-mark.
+    //   markRow(tabs, tablist)                      the row (.tab-mark-row) of the tabs given, in their order: a group, or a tablist.
+    // The head's families are its use (renderHarnessSeg): the tabs it draws, and the ghosts it shows before the first answer.
+    // markTab: key is the tab's own key (data-mark-key; a tab that is never picked has none); mark is a node of the caller's (the model's
+    // drawing, or the initial where it has none), which wears the kit's class here (a drawing takes its class through classList, as an svg's
+    // className is no string); name is the text; count, when it is a number, draws the number after the name, and when it is anything else
+    // draws none; pressed, true or false, is the choice's state (aria-pressed, which the kit's look reads), and left out it is a tab that is no
+    // choice (a ghost). The tab is a button of type "button" and nothing else is set on it: its name, its title, its focus key and its click
+    // are the caller's.
     function markTab(spec) {
         var tab = el('button', 'tab-mark');
         tab.setAttribute('type', 'button');
@@ -2034,312 +1314,34 @@
             tab.setAttribute('role', 'tab');
             tab.setAttribute('aria-selected', spec.selected ? 'true' : 'false');
         }
-        var box = null;
         if (spec.mark) {
             spec.mark.classList.add('tab-mark-icon');
             tab.appendChild(spec.mark);
-        } else if (spec.ring) {
-            // The rail's tab (kit: rail), the number tab: its ring (ringGauge) stands in a box that holds the share, the name and the star too. A tab with
-            // no mark and no ring is no tab of the kit (the number tab without a ring was never drawn, and is gone).
-            tab.className += ' tab-mark-num tab-mark-rail';
-            box = el('span', 'tab-mark-ring');
-            box.appendChild(spec.ring);
-            tab.appendChild(box);
         }
         var nameNode = el('span', 'tab-mark-name', spec.name);
         var figure = typeof spec.count === 'number' && isFinite(spec.count) ? String(spec.count)
             : (typeof spec.count === 'string' ? spec.count : '');
-        if (box) {
-            // The rail's tab: the number is drawn inside the box of the ring (centred over it, so the box's one transform moves both), the
-            // sign % smaller after the digits; a dash (nothing read) is the same span with no unit, and wears the colours of a number (the meta
-            // ink at rest, the accent when picked). The short name (the badge in the gap of the ring) and the star (a bead on the lower edge of
-            // the badge) stand in the same box, so its one transform moves all of them. The row holds that box alone: no dot, no word after it.
-            if (figure !== '') {
-                var inside = /%$/.test(figure);
-                var share = el('span', 'tab-mark-count');
-                if (inside) {
-                    share.appendChild(document.createTextNode(figure.slice(0, -1)));
-                    share.appendChild(el('span', 'tab-mark-unit', '%'));
-                } else {
-                    share.appendChild(document.createTextNode(figure));
-                }
-                box.appendChild(share);
-            }
-            box.appendChild(nameNode);
-            if (spec.note) {
-                var star = el('span', 'tab-mark-note', spec.note);
-                star.setAttribute('aria-hidden', 'true');
-                box.appendChild(star);
-            }
-            return tab;
-        }
         tab.appendChild(nameNode);
-        if (figure !== '') {
-            var dot = el('span', 'tab-mark-dot', '·');
-            dot.setAttribute('aria-hidden', 'true');
-            tab.appendChild(dot);
-            tab.appendChild(el('span', 'tab-mark-count', figure));
-        }
+        if (figure !== '') tab.appendChild(el('span', 'tab-mark-count', figure));
         return tab;
     }
 
-    // markRow: the row of the tabs given, in their order. It is a group (role="group"), or, when the tabs are tabs of a tablist (selected),
-    // a tablist (tablist true); its name is the part's to give (aria-label), and so is its place (a class of its own beside
-    // .tab-mark-row: the head's .harness-seg, the window row's .wt-row), never a look.
-    function markRow(tabs, tablist, still) {
+    // markRow: the row of the tabs given, in their order (the order never changes with the pick). It is a group (role="group"), or, when the
+    // tabs are tabs of a tablist (selected), a tablist (tablist true); its name is the part's to give (aria-label), and so is its place (a class
+    // of its own beside .tab-mark-row: the head's .harness-seg), never a look.
+    function markRow(tabs, tablist) {
         var row = el('div', 'tab-mark-row');
-        if (still) row.className += ' tab-mark-still';
         row.setAttribute('role', tablist ? 'tablist' : 'group');
         tabs.forEach(function (tab) { row.appendChild(tab); });
         return row;
     }
 
-    // markStill: a row of the kit's gets its preview by the pointer back (still false: the class .tab-mark-still goes) or loses it again
-    // (still true). The part that put the row still takes it off at the first real move of the pointer.
-    function markStill(row, still) {
-        if (!row || !row.classList) return;
-        if (still) row.classList.add('tab-mark-still');
-        else row.classList.remove('tab-mark-still');
-    }
-
-    // Whether a tab shows its preview now: the pointer on it (:hover) or the keyboard on it (:focus-visible), the two ways the kit's
-    // stylesheet turns the mark of a tab not picked red. Each is asked on its own, and a page that cannot answer one says no to it. In a row
-    // that is still (markRow) the pointer shows no preview, so :hover is not asked.
-    function markPreviewed(tab) {
-        if (!tab || typeof tab.matches !== 'function') return false;
-        var row = tab.parentNode;
-        var still = !!(row && row.classList && typeof row.classList.contains === 'function' && row.classList.contains('tab-mark-still'));
-        return (still ? [':focus-visible'] : [':hover', ':focus-visible']).some(function (state) {
-            try {
-                return !!tab.matches(state);
-            } catch (err) {
-                return false;
-            }
-        });
-    }
-
-    // Whether a click is a press of the pointer (the mouse button or a finger): the tab was shown pressed when it came, and a rail row's ring
-    // was shrunk to --press. A click of the keyboard has no count (detail 0). markStart's `pressed` is this: the ring starts from that press.
-    function markPressed(e) {
-        return !!e && typeof e.detail === 'number' && e.detail > 0;
-    }
-
-    // The reader's own pick of a tab: the two marks that change are drawn in the look they had a moment ago - the mark of the tab
-    // picked (toKey) in the tab's ink (tab-mark-was-off) or, when lit says it was showing its preview at the click, in the preview's red at
-    // its size (tab-mark-was-lit), the mark of the tab left (fromKey) in the picked look (tab-mark-was-on) - and settleMarks takes that
-    // off at the next frame, so the mark's own transition (colour and size) carries each to its look now. A redraw inside the pick's span
-    // draws them so again, the transition starting as far on as the span has gone (the negative delay, as the window row's underline
-    // does); any other drawing (the 30 seconds', a window's pick) gives them none: fromKey is then empty. The picked tab's look itself
-    // is the markup's (aria-pressed). A rail row (kit: rail) picked by a press of the pointer (pressed, markPressed) starts its ring from the
-    // press (tab-mark-was-press, the ring at --press: it was shrunk when the button came up) and not from the preview's size, so the spring
-    // takes it from the press to its picked size in one go; its number and star start from the ink or the quiet look as the rest. A page with no frames to
-    // take it off with draws no start state: a mark must never stay in a look that is not its own. Under reduced motion drawMotion is off, and nothing is drawn either.
-    function markStart(row, fromKey, toKey, lit, pressed) {
-        if (!drawMotion || !fromKey || typeof window.requestAnimationFrame !== 'function') return;
-        for (var i = 0; i < row.childNodes.length; i++) {
-            var tab = row.childNodes[i];
-            var key = tab.getAttribute ? tab.getAttribute('data-mark-key') : null;
-            if (key === null) continue;
-            var was = key === toKey ? (lit ? 'tab-mark-was-lit' : 'tab-mark-was-off') : (key === fromKey ? 'tab-mark-was-on' : '');
-            if (!was) continue;
-            // The mark of a tab is its drawing (the first); the number tab has none, and its dot and its number are the mark.
-            var drawing = [];
-            var number = [];
-            for (var j = 0; j < tab.childNodes.length; j++) {
-                var part = tab.childNodes[j];
-                if (!part.classList) continue;
-                if (part.classList.contains('tab-mark-icon') || part.classList.contains('tab-mark-ring')) {
-                    drawing.push(part);
-                    // The share and the star of a rail tab stand in the box of its ring (kit: rail): they are the tab's number all the same.
-                    for (var k = 0; k < part.childNodes.length; k++) {
-                        var inner = part.childNodes[k];
-                        if (inner.classList && (inner.classList.contains('tab-mark-count') || inner.classList.contains('tab-mark-note'))) number.push(inner);
-                    }
-                } else if (part.classList.contains('tab-mark-dot') || part.classList.contains('tab-mark-count')) number.push(part);
-            }
-            // A rail tab (kit: rail) moves its ring (the size) and its number and star (the ink) together; any other tab, its drawing, or its number where it has none.
-            var railTab = !!tab.classList && tab.classList.contains('tab-mark-rail');
-            (railTab ? drawing.concat(number) : (drawing.length ? drawing : number)).forEach(function (mark) {
-                mark.classList.add(pressed && key === toKey && drawing.indexOf(mark) >= 0 ? 'tab-mark-was-press' : was);
-                if (drawElapsed) mark.style.transitionDelay = -drawElapsed + 'ms';
-                markStarts.push(mark);
-            });
-        }
-    }
-
-    // A custom property on a node's own style: the kit's motion reads its numbers from them (--i, --rail-rows, --rail-elapsed, --flip-x,
-    // --flip-y). A page whose style has no setProperty takes it as a key of the style.
+    // A custom property on a node's own style (the bars' grid reads its numbers from them: --q-cols, --q-bw, --q-bh). A page whose style has
+    // no setProperty takes it as a key of the style.
     function setVar(node, name, value) {
         if (!node || !node.style) return;
         if (typeof node.style.setProperty === 'function') node.style.setProperty(name, value);
         else node.style[name] = value;
-    }
-
-    // The same for taking a custom property off (a page whose style cannot take it off has nothing to take).
-    function varDrop(node, name) {
-        if (node && node.style && typeof node.style.removeProperty === 'function') node.style.removeProperty(name);
-    }
-
-    // The slide of the head's tabs when the reader's pick of a family puts the family picked first (FLIP). The places of the tabs are read
-    // twice and no more, and only at the pick: markWas(scope, rowSel) before the drawing (where each tab of the row stands, by its key, with what it is
-    // moving by now: a second pick in the middle of the slide starts from where the tab is seen) and markFlip(scope, rowSel, was) after it (how far each
-    // tab that stands elsewhere now has to come, kept by its key: {x, y, ride}; the tab picked rides, the others give way). The shifts are the
-    // pick's own and live in railFlips until the movement is over (a second pick inside the movement also reads, once, the opacity of the
-    // tabs that are dimming, markWas's dim: the next dimming starts from it, --yield-from). markSlide(scope, rowSel, flips, elapsed, shift) puts them on the tabs of a drawing: the
-    // shifts as --flip-x and --flip-y and the class .tab-mark-slide, whose keyframes (kit: motion) draw the tab at its old place and carry it to
-    // its own; the tab picked wears .tab-mark-ride (over the tabs it passes, until its own slide ends), the tabs that give way
-    // .tab-mark-yield (they dim for as long as it slides). A drawing inside the span of the movement (the chart's read, the poll) puts the same
-    // shifts on its new tabs and carries the slide on from where it was, reading no place at all: by the page's own clock when it has one
-    // (clockSet gives the animations the start time of the pick; shift is then 0), else by --rail-elapsed (shift: a negative delay). The slide
-    // is never started again, and once it has run its time (FLIP_MS) a drawing puts nothing. A page that cannot read a place slides nothing: a
-    // tab must never stay at a place that is not its own.
-    // The tabs of the row the capsule names (rowSel, its selector of a row of markRow) in a scope (by their key), or none where the scope cannot
-    // be asked: markWas, markFlip and markSlide read the same list. The kit names no class of a part: the row is the capsule's to name.
-    function markTabs(scope, rowSel) {
-        return scope && scope.querySelectorAll && rowSel ? scope.querySelectorAll(rowSel + ' [data-mark-key]') : [];
-    }
-
-    function markWas(scope, rowSel, dim) {
-        var was = {};
-        try {
-            var tabs = markTabs(scope, rowSel);
-            for (var i = 0; i < tabs.length; i++) {
-                if (typeof tabs[i].getBoundingClientRect !== 'function') continue;
-                var box = tabs[i].getBoundingClientRect();
-                was[tabs[i].getAttribute('data-mark-key')] = { left: box.left, top: box.top, dim: dim ? dimOf(tabs[i]) : undefined };
-            }
-        } catch (err) { /* no places to read: nothing slides */ }
-        return was;
-    }
-
-    // The look a tab that gives way has now (dim, the one read of an opacity the movement makes, and only for a second pick inside it): its
-    // opacity, as the next dimming starts from it (--yield-from). Only a tab that is dimming is asked; undefined is no say (it starts from 1).
-    function dimOf(tab) {
-        try {
-            if (!tab.classList || !tab.classList.contains('tab-mark-yield')) return undefined;
-            var seen = parseFloat(window.getComputedStyle(tab).opacity);
-            return isFinite(seen) ? String(Math.round(seen * 1000) / 1000) : undefined;
-        } catch (err) {
-            return undefined;
-        }
-    }
-
-    function markFlip(scope, rowSel, was) {
-        var flips = {};
-        try {
-            var tabs = markTabs(scope, rowSel);
-            for (var i = 0; i < tabs.length; i++) {
-                var key = tabs[i].getAttribute('data-mark-key');
-                var from = was[key];
-                if (!from || typeof tabs[i].getBoundingClientRect !== 'function') continue;
-                var to = tabs[i].getBoundingClientRect();
-                var dx = from.left - to.left;
-                var dy = from.top - to.top;
-                if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
-                // The tab picked is the one that rides to the front; the others that move are the ones that give way.
-                flips[key] = { x: dx.toFixed(1) + 'px', y: dy.toFixed(1) + 'px', ride: tabs[i].getAttribute('aria-pressed') === 'true', dim: from.dim };
-            }
-        } catch (err) { flips = {}; /* a place that could not be read: no tab slides */ }
-        return flips;
-    }
-
-    function markSlide(scope, rowSel, flips, elapsed, shift) {
-        if (elapsed >= FLIP_MS) return;
-        try {
-            var tabs = markTabs(scope, rowSel);
-            for (var i = 0; i < tabs.length; i++) {
-                var flip = flips[tabs[i].getAttribute('data-mark-key')];
-                if (!flip) continue;
-                setVar(tabs[i], '--flip-x', flip.x);
-                setVar(tabs[i], '--flip-y', flip.y);
-                if (shift) setVar(tabs[i], '--rail-elapsed', shift + 'ms');
-                tabs[i].classList.add('tab-mark-slide');
-                if (!flip.ride) {
-                    tabs[i].classList.add('tab-mark-yield');
-                    // A second pick inside the movement: the dimming starts from the look the tab had when it was picked.
-                    if (flip.dim !== undefined) setVar(tabs[i], '--yield-from', flip.dim);
-                    continue;
-                }
-                tabs[i].classList.add('tab-mark-ride');
-                // The end of its own slide gives the tab back to its layer; a slide that is cut short (the tab is drawn again) takes the class
-                // with the node, and the drawing puts it on its new one.
-                (function (tab) {
-                    tab.addEventListener('animationend', function ended(e) {
-                        // The tab's own slide (not an animation of a part of it, which is heard here too).
-                        if (e && ((e.animationName && e.animationName !== 'rail-slide') || (e.target && e.target !== tab))) return;
-                        tab.classList.remove('tab-mark-ride');
-                        if (typeof tab.removeEventListener === 'function') tab.removeEventListener('animationend', ended);
-                    });
-                })(tabs[i]);
-            }
-        } catch (err) { /* the tabs stand at their own places */ }
-    }
-
-    // The marks of the drawing that wear a start state lose it at the next frame. Their look is read first, while they still wear
-    // it, so the browser holds it as the look the change starts from (a mark born a moment ago has none, and would take its look
-    // now, at once); then the class goes, and the mark's own transition (colour and size) carries it to its look now. A page that
-    // cannot be read here still loses the class: no mark stays in a look that is not its own. A mark that was given a delay (a
-    // drawing inside the pick's span) loses that one a frame later, when its transition has begun with it: the mark's later
-    // changes (the preview of its tab) run with the sheet's own timing.
-    function settleMarks() {
-        var marks = markStarts;
-        markStarts = [];
-        if (!marks.length) return;
-        window.requestAnimationFrame(function () {
-            try {
-                marks.forEach(function (mark) {
-                    var look = window.getComputedStyle(mark);
-                    void look.transform;
-                    void look.color;
-                });
-            } catch (err) { /* no look to hold: the class goes all the same */ }
-            marks.forEach(function (mark) {
-                mark.classList.remove('tab-mark-was-off');
-                mark.classList.remove('tab-mark-was-lit');
-                mark.classList.remove('tab-mark-was-press');
-                mark.classList.remove('tab-mark-was-on');
-            });
-            var delayed = marks.filter(function (mark) { return !!mark.style.transitionDelay; });
-            if (delayed.length) {
-                window.requestAnimationFrame(function () {
-                    delayed.forEach(function (mark) { mark.style.transitionDelay = ''; });
-                });
-            }
-        });
-    }
-
-    // The width of the rail and its axis (kit: rail), the one read of the head's tabs at the end of a drawing and when the fonts are in (the words of a
-    // tab are wider or narrower by the font): the widest tab of the row is read into --rail-tab-w, and the rail's width (--rail-w) is what a ring needs at
-    // the axis of that tab, the same for every family, so the edge of the card does not move with the pick; the axis is the middle of the whole tab picked
-    // (--rail-axis), which stands first in the row, at the edge of the widget. The number of a tab holds two digits' room, so neither moves with the count
-    // of accounts (up to 99). Only the width of a tab is read, as the layout width of its box (offsetWidth: a slide or a start state moves
-    // and scales a tab, they never widen it, and the places of the tabs are not asked again: markWas and markFlip read them twice at the pick, no more).
-    // It is read right after markFlip, before the slide writes its classes, so the layout the pick's own read has just worked out answers it, and a
-    // drawing that is not a pick (the poll, the chart's read, a window's pick) asks for the layout once, as the fits that follow do. A page that cannot be
-    // asked, or tabs with no width (hidden), leave the tokens at their own values: the widest tab known, the axis in its middle.
-    var railFontsBound = false;
-
-    function railFit() {
-        try {
-            var tabs = markTabs(root, HEAD_ROW);
-            var html = document.documentElement;
-            var widest = 0;
-            var picked = 0;
-            for (var i = 0; i < tabs.length; i++) {
-                var w = tabs[i].offsetWidth;
-                if (!(w > 0)) continue;
-                if (w > widest) widest = w;
-                if (tabs[i].getAttribute('aria-pressed') === 'true') picked = w;
-            }
-            if (widest > 0) setVar(html, '--rail-tab-w', widest.toFixed(2) + 'px');
-            if (picked > 0) setVar(html, '--rail-axis', (picked / 2).toFixed(2) + 'px');
-            if (!railFontsBound && document.fonts && document.fonts.ready && typeof document.fonts.ready.then === 'function') {
-                railFontsBound = true;
-                document.fonts.ready.then(railFit);
-            }
-        } catch (err) {
-            // A layout that cannot be read leaves the rail at its own width and the axis in the middle of the widest tab.
-        }
     }
 
     // Colour alone says nothing to a screen reader, so a visible dot is either
@@ -2471,16 +1473,17 @@
             ? answer.plural_select : null;
     }
 
-    function readI18n() {
+    function readI18n(mine) {
         return request(I18N_ROUTE, { method: 'GET' }, I18N_TIMEOUT_MS).then(function (result) {
             var answer = null;
             if (result.ok) {
                 try { answer = JSON.parse(result.body); } catch (err) { answer = null; }
             }
+            if (stopped || mine !== generation) return;
             adoptI18n(answer);
             // The first screen waits for its text: it is drawn as soon as the text is here.
             if (i18n.en && !currentView && !stopped) rerender();
-        })['catch'](function () { i18n.asked = true; });
+        })['catch'](function () { if (!stopped && mine === generation) i18n.asked = true; });
     }
 
     // Before the text table has come (or when it could not): the one card the screen can be
@@ -3016,7 +2019,7 @@
         function sentence(h) {
             var when = formatResetAt(h.until);
             var end = when ? ' until ' + when
-                : (h.kind === 'cooldown' ? ', ' + (COOLDOWN_END[h.note] || COOLDOWN_END.not_reported) : '');
+                : (h.kind === 'cooldown' ? ', ' + t(COOLDOWN_END[h.note] || COOLDOWN_END.not_reported) : '');
             return kindWords(h) + ': ' + (modelLabel(h.models, h.omitted) || 'models not named') + end
                 + (h.stale ? ', reported by a stale reading' : '') + ' (' + scopeList(h.models, h.omitted) + ')';
         }
@@ -3375,9 +2378,9 @@
     }
 
     var COOLDOWN_END = {
-        unreadable: 'end time unreadable',
-        not_reported: 'no end time reported',
-        passed: 'its reported end has passed'
+        unreadable: 'cooldown.end_unreadable',
+        not_reported: 'cooldown.end_not_reported',
+        passed: 'cooldown.end_passed'
     };
 
     // One sentence per cooldown: what it holds, until when (or why not known)
@@ -3388,21 +2391,21 @@
             row.appendChild(icon('warn', 12));
             var body = el('span', 'quota-cooldown-body');
             row.appendChild(body);
-            var what = c.scope === 'models' ? (modelLabel(c.models, c.models_omitted) || 'some models') : 'whole account';
-            body.appendChild(el('span', null, 'Cooling down · ' + what));
-            var said = ['Cooling down', what];
-            var until = el('span', 'quota-when', ' · until ');
+            var what = c.scope === 'models' ? (modelLabel(c.models, c.models_omitted) || t('cooldown.some_models')) : t('cooldown.whole_account');
+            body.appendChild(el('span', null, t('cooldown.label') + ' · ' + what));
+            var said = [t('cooldown.label'), what];
+            var until = el('span', 'quota-when', ' · ' + t('cooldown.until', { when: '' }));
             if (c.until && appendStamp(until, c.until, 'warn', true)) {
                 body.appendChild(until);
-                said.push('until ' + formatResetAt(c.until) + ' ' + relTime(c.until));
+                said.push(t('cooldown.until', { when: formatResetAt(c.until) + ' ' + relTime(c.until) }));
             } else {
-                var end = COOLDOWN_END[c.until_note] || COOLDOWN_END.not_reported;
+                var end = t(COOLDOWN_END[c.until_note] || COOLDOWN_END.not_reported);
                 body.appendChild(el('span', 'quota-when', ' · ' + end));
                 said.push(end);
             }
             if (c.freshness && c.freshness !== 'fresh') {
                 var seen = relTime(c.observed_at);
-                var from = 'reported by a stale reading' + (seen ? ' observed ' + seen : '');
+                var from = t('cooldown.stale') + (seen ? ' ' + t('cooldown.observed', { when: seen }) : '');
                 body.appendChild(el('span', 'quota-when', ' · ' + from));
                 said.push(from);
             }
@@ -3438,7 +2441,7 @@
             var lead = live ? 'Model limit reached' : 'Reported model limit reached';
             body.appendChild(el('span', null, lead + ' · ' + what));
             var said = [lead, what];
-            var until = el('span', 'quota-when', unnamed ? ' · reported until ' : ' · until ');
+            var until = el('span', 'quota-when', unnamed ? ' · reported until ' : ' · ' + t('cooldown.until', { when: '' }));
             if (unnamed) {
                 if (e.resets_at && appendStamp(until, e.resets_at, false, true)) {
                     body.appendChild(until);
@@ -3457,7 +2460,7 @@
             }
             if (e.freshness && e.freshness !== 'fresh') {
                 var seen = relTime(e.observed_at);
-                var from = 'reported by a stale reading' + (seen ? ' observed ' + seen : '');
+                var from = t('cooldown.stale') + (seen ? ' ' + t('cooldown.observed', { when: seen }) : '');
                 body.appendChild(el('span', 'quota-when', ' · ' + from));
                 said.push(from);
             }
@@ -3690,8 +2693,13 @@
     // has a group; its id is read first, then its label.
     function groupName(g) {
         if (!(g.models || []).length && (!g.model_scope || g.model_scope === 'none')) return '';
-        var found = GROUP_WINDOW.exec(String(g.meaning || '').trim()) || GROUP_WINDOW.exec(String(g.label || '').trim());
-        return found ? found[1].trim() : '';
+        var byId = GROUP_WINDOW.exec(String(g.meaning || '').trim());
+        var byLabel = GROUP_WINDOW.exec(String(g.label || '').trim());
+        // An id that is a bare machine name ("claude_gpt_5h") yields to the label's own words ("Claude and GPT · 5 hours") where the label has them.
+        var bare = function (m) { return m[1].replace(/\s*[-_:\u00b7]$/, '').trim(); };
+        if (byId && byLabel && /^[a-z0-9_]+$/.test(bare(byId))) return bare(byLabel);
+        var found = byId || byLabel;
+        return found ? bare(found) : '';
     }
 
     // What tells a limit apart in its family besides its length: its group's name
@@ -3824,12 +2832,12 @@
     }
 
     var UNKNOWN_WORDS = {
-        not_read: 'no usable reading',
-        unreadable: 'its reading could not be read',
-        sources_disagree: 'its sources disagree',
-        reset_passed: 'its window reset after the last reading',
-        too_old: 'its last reading is older than the window',
-        no_reading_in_answer: 'no reading in this answer'
+        not_read: 'reading.why_not_read',
+        unreadable: 'reading.why_unreadable',
+        sources_disagree: 'reading.why_sources_disagree',
+        reset_passed: 'reading.why_reset_passed',
+        too_old: 'reading.why_too_old',
+        no_reading_in_answer: 'reading.why_no_reading_in_answer'
     };
 
     function originWords(origin) {
@@ -3846,25 +2854,23 @@
         var name = accountName(index, bar.account);
         if (bar.state === 'unknown') {
             var last = bar.last_reading;
-            return name + ' · ' + rowName + ': unknown — ' + (UNKNOWN_WORDS[bar.why] || 'no usable reading')
-                + (last && typeof last.left === 'number' ? '; last read '
-                    + exactPct(last.left * 100, last.left <= 0) + '% left ' + (relTime(last.observed_at) || '') : '')
-                + ' — unknown, not counted, never a zero';
+            return t('bar.unknown', { name: name, row: rowName, why: t(UNKNOWN_WORDS[bar.why] || 'reading.why_not_read') })
+                + (last && typeof last.left === 'number' ? '; ' + t('bar.last_read', {
+                    pct: exactPct(last.left * 100, last.left <= 0), when: relTime(last.observed_at) || '' }) : '')
+                + ' — ' + t('bar.not_counted');
         }
         var left = Math.max(0, Math.min(1, bar.left));
         var spent = !!bar.at_limit;
         if (bar.state === 'last_known') {
-            // What it had when it was read, dated: never a verdict on now.
-            var then = name + ': ' + exactPct(left * 100, spent) + '% left when last read'
-                + (spent ? ' (at the limit then)' : '') + (bar.restricted ? ' — restricted now' : '');
-            if (bar.resets_at) then += ' · reported reset ' + whenWords(bar.resets_at);
-            return then + ' · last known, read ' + (relTime(bar.observed_at) || 'at an unreported time')
-                + ' (' + originWords(bar.origin) + '), not current';
+            var then = t('bar.share_last', { name: name, pct: exactPct(left * 100, spent) })
+                + (spent ? ' (' + t('bar.limit_then') + ')' : '') + (bar.restricted ? ' — ' + t('aria_bar.restricted_now') : '');
+            if (bar.resets_at) then += ' · ' + t('bar.reported_reset', { when: whenWords(bar.resets_at) });
+            return then + ' · ' + t('bar.dated', { when: relTime(bar.observed_at) || t('reading.time_unknown'), origin: originWords(bar.origin) });
         }
-        var words = name + ': ' + exactPct(left * 100, spent) + '% left'
-            + (spent ? ' — at the limit' : '') + (bar.restricted ? ' — restricted now' : '');
-        if (bar.resets_at) words += ' · ' + (spent ? 'until ' : 'resets ') + whenWords(bar.resets_at);
-        if (bar.observed_at) words += ' · read ' + relTime(bar.observed_at);
+        var words = t('bar.share', { name: name, pct: exactPct(left * 100, spent) })
+            + (spent ? ' — ' + t('aria_bar.at_limit') : '') + (bar.restricted ? ' — ' + t('aria_bar.restricted_now') : '');
+        if (bar.resets_at) words += ' · ' + t(spent ? 'bar.until' : 'bar.resets', { when: whenWords(bar.resets_at) });
+        if (bar.observed_at) words += ' · ' + t('budget.read', { when: relTime(bar.observed_at) });
         return words;
     }
 
@@ -3878,11 +2884,6 @@
         return heldFlags(bar).length > 0 || (!bar.flags && !!bar.restricted);
     }
 
-    // The row of the bars goes sideways where its bars do not fit at their least width (kit: bars). Where it stands is kept by the limit's key through
-    // the redrawing (the whole tree is rebuilt every 30 seconds) and put back when the drawing is done (barsFit). Its edges fade, as the ladder's window of
-    // the rail does (kit: rail, the haze): the classes are put by the script where an edge is reached or left, and a row that fits wears none.
-    var barScroll = {};
-    var barsBound = false;
 
     // The chart is drawn to the room its card has (chartSize). The size it was drawn to is kept, and a window that changes its width afterwards draws it anew:
     // once in CHART_FIT_MS while the width keeps changing, and once more when it stops, the drawing being the one the poll makes (the pick, the focus and the chart's cursor are carried over).
@@ -3892,7 +2893,7 @@
     var chartFitTimer = 0;
     var fitDrawing = false;
     function chartFit() {
-        if (chartFitTimer) return;
+        if (stopped || chartFitTimer) return;
         chartFitTimer = setTimeout(function () {
             chartFitTimer = 0;
             if (stopped || !chartDrawn) return;
@@ -3907,228 +2908,8 @@
         }, CHART_FIT_MS);
     }
 
-    function barEdges(strip) {
-        var max = strip.scrollWidth - strip.clientWidth;
-        var over = max > 1;
-        var at = strip.scrollLeft || 0;
-        // A class is put on or taken off only where its state changes.
-        [['rail-scroll-x', over], ['rail-scroll-x-start', over && at <= 1], ['rail-scroll-x-end', over && at >= max - 1]].forEach(function (flag) {
-            if (hasClass(strip, flag[0]) !== flag[1]) classSet(strip, flag[0], flag[1]);
-        });
-    }
-
     // A bar that has opened (kit: bars) by the keyboard on it, or as the picked one, or as the first of those a pressed step of the ladder opened, is brought into the room of its row where its opening reaches past it (the row
     // goes sideways where it cannot hold the opening): inline 'nearest' and only then, block 'nearest' so that a page that shows the row does not jump. The edges are worked out after.
-    var barSeen = '';
-
-    function barBring(strip, bar) {
-        try {
-            // The first of the bars a pressed step opens is the one brought in (the others follow it in the row, which goes sideways where they do not fit).
-            var by = bar && bar.matches && (bar.matches(':focus-visible') || bar.classList.contains('sel')
-                || (bar.classList.contains('bar-on') && strip.querySelector('.bar-on') === bar));
-            if (by && bar.scrollIntoView) {
-                var room = strip.getBoundingClientRect();
-                var box = bar.getBoundingClientRect();
-                if (box.left < room.left - 0.5 || box.right > room.right + 0.5) bar.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-            }
-        } catch (err) {
-            // A layout that cannot be read leaves the row where it is: the keyboard's own scroll to the focus has brought the bar as it was.
-        }
-        barEdges(strip);
-    }
-
-    // The width a bar of the row has at rest (kit: bars, --bar-rest), written on the row: the liquid of a bar that opens keeps it. It is worked out from the row, not read
-    // off a bar (one may be open): the room less the gaps, shared by the bars, between --bar-min and --bar-max (each with the border a finger's bar wears, which
-    // is not drawn in).
-    function barRest(strip) {
-        try {
-            var style = window.getComputedStyle(strip);
-            var bars = strip.children || [];
-            var edge = bars.length ? window.getComputedStyle(bars[0]) : null;
-            var border = edge ? (parseFloat(edge.borderLeftWidth) || 0) + (parseFloat(edge.borderRightWidth) || 0) : 0;
-            var least = parseFloat(style.getPropertyValue('--bar-min'));
-            var most = parseFloat(style.getPropertyValue('--bar-max'));
-            if (!bars.length || !isFinite(least) || !isFinite(most)) return;
-            var share = (strip.clientWidth - (parseFloat(style.columnGap) || 0) * (bars.length - 1)) / bars.length;
-            var rest = Math.max(0, Math.min(Math.max(share, least + border), most + border) - border);
-            setVar(strip, '--bar-rest', rest.toFixed(2) + 'px');
-        } catch (err) {
-            // A layout that cannot be read leaves the token at its own value (the widest a bar rests): a bar that opens then keeps that.
-        }
-    }
-
-    // The one read of the layout for the rows of the bars, at the end of a drawing (with the ladder's fit) and when the width changes: the place each row
-    // had is put back, the width a bar rests at is written, and the edges are worked out again. No observer and no script by frames.
-    function barsFit() {
-        // The shell narrowed under 860px: the ladder is not drawn there, so a step pressed has nothing to be pressed again by: it lets go of its bars.
-        if (stepOn && narrowShell()) stepClear();
-        try {
-            var strips = rootAll('.bars');
-            for (var i = 0; i < strips.length; i++) {
-                var key = strips[i].getAttribute('data-strip');
-                if (key && barScroll[key] && strips[i].scrollLeft !== barScroll[key]) strips[i].scrollLeft = barScroll[key];
-                barRest(strips[i]);
-                // The row drawn anew moves nothing until its width is written: the styles are read once with it in place, and then it is let go.
-                if (hasClass(strips[i], 'bars-fitting')) {
-                    void strips[i].offsetWidth;
-                    classSet(strips[i], 'bars-fitting', false);
-                }
-                barEdges(strips[i]);
-                // Under a finger the picked bar is the open one: where the pick is new it is brought in (a redrawing alone does not take the row from where the reader left it).
-                if (selectedAccountKey && selectedAccountKey !== barSeen) {
-                    var picked = strips[i].querySelector('.bar.sel');
-                    if (picked) barBring(strips[i], picked);
-                }
-            }
-            barSeen = selectedAccountKey || '';
-            arrowFit();
-            if (!barsBound && window.addEventListener) {
-                barsBound = true;
-                window.addEventListener('resize', barsFit);
-                window.addEventListener('resize', chartFit);
-            }
-        } catch (err) {
-            // The haze and the kept place are a comfort: a layout that cannot be read leaves the row as it is.
-        }
-    }
-
-    // What a bar of an account opens to (kit: bars): hidden from a reader, who has the bar's aria-label. The account's name first, then by the state of the bar (the order
-    // of the classes it wears: unknown, was, spent, held (a held bar that is dated too, .held.last, says it is held back now, not the date alone), last, and a current one) what its limit is doing and when it was read, as the note and the ladder say it (untilWords,
-    // the age phrases of foot.read_ago and foot.read_just_now for a dated value). A line with nothing to say (no reset reported, or one that has passed; no time of reading) is not drawn.
-    function barOpened(bar, index, known) {
-        var box = el('span', 'bar-i');
-        box.setAttribute('aria-hidden', 'true');
-        var dated = bar.state === 'last_known';
-        var at = Date.parse(String(bar.resets_at || ''));
-        var until = isFinite(at) && at > Date.now() ? untilWords(at) : '';
-        var part = agePart(bar.observed_at);
-        var read = '';
-        if (part) {
-            if (dated) read = part.k === 'now' ? t('foot.read_just_now') : t('foot.read_ago', { age: agePhrase(part) });
-            else read = t('bar.read', { age: agoWords(bar.observed_at) });
-        }
-        var reset = until ? t('bar.reset_in', { 'in': until }) : '';
-        var lines = [[accountName(index, bar.account), 'bar-n']];
-        if (!known) lines.push([t('bar.no_data'), '']);
-        else if (bar.at_limit && dated) lines.push([t('bar.was_at_limit'), ''], [read, '']);
-        else if (bar.at_limit) lines.push([t('bar.at_limit'), 'bar-a'], [until ? t('plate.back', { n: 1, 'in': until }) : '', '']);
-        else if (bar.restricted && heldNow(bar)) lines.push([t('bar.restricted_now'), 'bar-a'], [reset, '']);
-        else if (dated) lines.push([read, ''], [reset, '']);
-        else lines.push([reset, ''], [read, '']);
-        lines.forEach(function (line) {
-            if (!line[0]) return;
-            var node = el('span', line[1], line[0]);
-            // The name of the account whole, for a name the opening cuts.
-            if (line[1] === 'bar-n') node.title = line[0];
-            box.appendChild(node);
-        });
-        return box;
-    }
-
-    // One bar per account the limit applies to, as tall as its share left,
-    // fullest first in the skill's order: hatched for a dated last-known
-    // value, the ink on its base when a restriction holds it back now or it
-    // is at the limit now (a dashed base when it was at the limit when last
-    // read), an outlined "?" (never a zero) for no usable value. A bar selects its
-    // account — the same selection the account list makes — and the bars of
-    // that account are marked in every window shown. A bar of an account opens to the
-    // side under the pointer (barOpened): it carries no title of its own, the opening
-    // would be covered by one in English; a bar of no account has nothing to open and keeps its title.
-    function barStrip(g, rowName, index) {
-        var bars = barsOf(g);
-        var strip = el('div', barStill ? 'bars bars-fitting bars-still' : 'bars bars-fitting');
-        strip.setAttribute('role', 'group');
-        strip.setAttribute('aria-label', rowName + ': each account’s share left, fullest first');
-        strip.setAttribute('data-strip', g.key);
-        strip.addEventListener('scroll', function () {
-            // A scroll that lands after a redraw took this row out must not write its place over the new row's (a page always has the property;
-            // a stand-in page may not, and is then taken as connected).
-            if (strip.isConnected === false) return;
-            barScroll[g.key] = strip.scrollLeft;
-            barEdges(strip);
-            arrowFit();
-        }, { passive: true });
-        // A bar that opens (or shuts) may take the row past its room (or give it back): where the move ends the edges are worked out again, on the end of the move alone.
-        strip.addEventListener('transitionend', function (e) {
-            if (strip.isConnected === false) return;
-            if (e && (e.propertyName === 'flex-basis' || e.propertyName === 'max-width')) {
-                barBring(strip, e.target);
-                arrowFit();
-            }
-        }, { passive: true });
-        // The keyboard on a bar opens it: where nothing moves (reduced motion) it is brought in at once, otherwise at the end of its move (above).
-        strip.addEventListener('focusin', function (e) {
-            if (strip.isConnected === false) return;
-            barBring(strip, e && e.target);
-        }, { passive: true });
-        // The step of the ladder that is pressed (stepAccounts): a step of one account is that account's pick (its bar wears .bar-on with .sel); a step of several lights their bars from the building
-        // (data-step-lit on them, data-step on the row) and opens none.
-        var opened = stepAccounts(g);
-        var lights = !!stepOn && !stepOn.account && opened.length > 0;
-        if (lights) strip.setAttribute('data-step', '1');
-        bars.forEach(function (bar, i) {
-            var known = bar.state !== 'unknown' && typeof bar.left === 'number' && isFinite(bar.left);
-            var cls = 'bar';
-            if (!known) cls += ' unknown';
-            if (bar.state === 'last_known') cls += ' last';
-            // A current reading at the limit is an empty track on the ink base (spent); a last-known zero stays
-            // hatched and dated, never current exhaustion — and wears its own
-            // mark, a dashed base (was), so it is told from an empty bar. No bar wears a colour of a state.
-            if (known && bar.at_limit && bar.state !== 'last_known') cls += ' spent';
-            if (known && bar.at_limit && bar.state === 'last_known') cls += ' was';
-            if (known && bar.restricted) cls += heldNow(bar) ? ' held restricted' : ' restricted';
-            var isSel = !!bar.account && bar.account === selectedAccountKey;
-            if (isSel) cls += ' sel';
-            var held = !!bar.account && opened.indexOf(bar.account) >= 0;
-            if (held && !lights) cls += ' bar-on';
-            var b = el('button', cls);
-            b.setAttribute('type', 'button');
-            if (held && lights) b.setAttribute('data-step-lit', '1');
-            if (!known) b.appendChild(el('span', 'sr-only', '?'));
-            b.setAttribute('data-focus', 'bar:' + g.key + ':' + (bar.account || i));
-            b.setAttribute('data-state', bar.state || 'current');
-            if (bar.account) b.setAttribute('data-account', bar.account);
-            if (known) {
-                var left = Math.max(0, Math.min(1, bar.left));
-                var pct = +(left * 100).toFixed(4);
-                if (left > 0) {
-                    var f = el('span', 'fill');
-                    f.style.height = pct + '%';
-                    b.appendChild(f);
-                }
-                // The number over the fill: the share left in percent, "<1" where it is something and rounds to nothing; the accounts' words say it for a reader.
-                var rounded = Math.round(left * 100);
-                // (and "99" where it is a little short of all and rounds to 100: the full bar alone says 100)
-                var value = el('span', 'bar-v' + (pct > 80 ? ' in' : ''), left > 0 && rounded === 0 ? '<1' : String(left < 1 && rounded >= 100 ? 99 : rounded));
-                value.setAttribute('aria-hidden', 'true');
-                value.style.bottom = pct > 80 ? 'calc(' + pct + '% - var(--bar-v-in))' : 'calc(' + pct + '% + var(--space-1h))';
-                b.appendChild(value);
-            }
-            var words = barWords(bar, index, rowName);
-            // The words of the opening (a bar of an account) stand where a title would, and in the reader's language; a bar of no account does not open and keeps its title.
-            if (bar.account) {
-                b.appendChild(barOpened(bar, index, known));
-                b.setAttribute('data-said', words);
-            } else {
-                b.title = words;
-            }
-            b.setAttribute('aria-label', words + (bar.account ? barPickWords(isSel) : ''));
-            b.setAttribute('aria-pressed', isSel ? 'true' : 'false');
-            if (bar.account) {
-                b.addEventListener('click', function (e) {
-                    e.stopPropagation();
-                    holdBarStill(e);
-                    selectAccount(bar.account === selectedAccountKey ? '' : bar.account,
-                        'bar:' + g.key + ':' + bar.account, g.key);
-                    restoreFocus('bar:' + g.key + ':' + bar.account);
-                });
-            } else {
-                b.disabled = true;
-            }
-            strip.appendChild(b);
-        });
-        return strip;
-    }
 
     // The list of accounts opens or shuts (the word over the bars, a row of the list, the "N more" of the notes). It is the one place that sets accountsOpen: opening measures the place the
     // list replaces now, and the drawing that follows plays the fold (accountsRun). The caller draws.
@@ -4138,6 +2919,15 @@
             var place = root && typeof root.querySelector === 'function' ? root.querySelector('.acc-main') : null;
             // Not rounded down: a pixel lost here is a pixel the widget loses while the list stands (rounded up to a hundredth).
             accountsSpace = place && typeof place.getBoundingClientRect === 'function' ? Math.ceil(place.getBoundingClientRect().height * 100) / 100 : 0;
+            // The word leaves the plate for the strip over the list (the plate is folded away while the list stands): the list is that much shorter, so the
+            // widget keeps its one height.
+            try {
+                var word = root.querySelector('[data-focus="accounts"]');
+                var air = parseFloat(window.getComputedStyle(document.documentElement).getPropertyValue('--space-1')) || 0;
+                if (word && accountsSpace) accountsSpace = Math.max(0, Math.floor((accountsSpace - word.getBoundingClientRect().height - air) * 100) / 100);
+            } catch (err) {
+                // A layout that cannot be read keeps the place's own height.
+            }
         }
         accountsOpen = open;
         accountsRun = open ? 'open' : 'shut';
@@ -4153,11 +2943,7 @@
     // `limitKey` is the limit whose bar selected the account; a row of the
     // account list passes none.
     function selectAccount(key, opener, limitKey) {
-        // Another account (a bar, a row of the list, a step of the rail, or the pick let go) lets the pressed card go: the chart leads, so the new card stands as a strip and the chart
-        // opens under its bar (foldPlay hands the card over). The same account (the poll, a second press of its bar) leaves the press as it is.
         if ((key || '') !== selectedAccountKey) cardReset();
-        // A pick of an account (or the pick let go) lets go of a step of several accounts that was lit; the step of one account (stepPress sets it before) is the pick itself.
-        if (stepOn && !stepOn.account) stepOn = null;
         selectedAccountKey = key || '';
         selectionOpener = selectedAccountKey ? (opener || '') : '';
         selectionLimit = selectedAccountKey ? (limitKey || '') : '';
@@ -4167,7 +2953,7 @@
         pickHome = selectedAccountKey ? pickAt : '';
         pickBare = selectedAccountKey ? '' : pickAt;
         diagnosticsOpen = false;
-        if (!selectInPlace(limitKey)) rerender();
+        rerender();
     }
 
     // The top bar of a limit: the first (the row goes fullest first) with a current reading, something left and no hold on it. A last-known bar (hatched: its value is not
@@ -4223,7 +3009,6 @@
             pickAuto = !!next;
             selectionOpener = next ? 'bar:' + g.key + ':' + next : '';
             selectionLimit = next ? g.key : '';
-            if (stepOn && stepOn.account && stepOn.account !== selectedAccountKey) stepOn = null;
             if (!next) card = null;
         }
         pickHome = selectedAccountKey ? here : '';
@@ -4231,71 +3016,19 @@
         // The line of the pick is drawn once for a pick that is new to the window on screen: at the opening, at a pick of a window or a family.
         if (moved && selectedAccountKey) {
             pickDue = true;
-            // The line is not owed for ever: from here the chart has WAIT_MAX_MS to come (waitArm), then the end state stands.
-            waitBy = Date.now() + WAIT_MAX_MS;
         }
         if (!selectedAccountKey) pickDue = false;
         return card;
     }
 
-    // Whether the chart is yet to come (a read in the air, or the chart of another limit that the drawing will ask for): the line of the pick waits for it, for a drawing in the middle of the
-    // line would take the layer off and show the end at once.
-    function chartPending() {
-        return inFlight || (!!currentView && chartMissing(currentView) && reserveUrl(true) !== chartAsked);
-    }
-
-    // At the end of a drawing that owes the line of the pick (pickDue): the arrow stays off (traceHold) while the line waits for the chart, then the line is drawn, once, by the plate that
-    // wears the pick. Where the chart is not over the plate (folded, or nothing picked in it), nothing is owed.
-    function pickTraceHold() {
-        if (pickDue) traceHold = true;
-    }
-
-    function pickTraceRun() {
-        if (!pickDue) return;
-        var plate = null;
-        var wrap = null;
-        try {
-            plate = root && root.querySelector ? root.querySelector('.wt-plate') : null;
-            var strip = plate ? plateBars(plate) : null;
-            wrap = plate ? plateKid(plate, 'tl-top') : null;
-            if (!plate || !strip || !wrap || !pickedIn(strip) || !blockOf(wrap)) {
-                pickDue = false;
-                traceHold = false;
-                waitStop(false);
-                return;
-            }
-            // The keyboard came into the plate (the focus restored by the drawing): the content keeps it, no stand-ins.
-            if (heldIn(waitBlock)) waitStop(false);
-            if (chartPending()) {
-                // The chart is yet to come: the line waits, but not past WAIT_MAX_MS (waitExpire), with stand-ins or without them.
-                if (!waitDeadline) waitArm();
-                return;
-            }
-            pickDue = false;
-            traceStart(plate, wrap, true);
-        } catch (err) {
-            // A layout that cannot be read owes nothing: the end state stands (the outline, the arrow).
-            pickDue = false;
-            traceHold = false;
-            try {
-                if (plate && wrap && blockOf(wrap)) traceRest(plate, wrap);
-            } catch (inner) { /* the next drawing builds it */ }
-        }
-    }
-
-    // What a bar of an account, or a row of the list, says besides its words: the pick it wears. The words stand apart in its `data-said` and the aria-label is the two put together,
-    // so a pick in its place (selectInPlace) changes the pick alone, whatever language the words are in. The one place the pick words are made, for a drawing (barStrip,
-    // renderAccounts) and for a pick in its place.
     function barPickWords(isSel) {
-        return isSel ? ' — selected' : ' — select this account';
+        return ' — ' + t(isSel ? 'pick.selected' : 'pick.select');
     }
 
     function rowPickWords(isOn) {
-        return isOn ? ' · selected' : '';
+        return isOn ? ' · ' + t('pick.selected') : '';
     }
 
-    // The folds the timeline (.tl-wrap > .tl-fold) and the account's card (.ins-wrap > .ins-fold) stand in: a node in a fold of one row, 1fr open and 0fr shut. `shut` makes it
-    // already shut and ready to open (it opens when .fold-shut is taken off in the next frame, selectInPlace).
     function foldOf(kind, node, shut) {
         var wrap = el('div', kind + '-wrap' + (shut ? ' fold-run fold-shut' : ''));
         var fold = el('div', kind + '-fold');
@@ -4304,1027 +3037,15 @@
         return wrap;
     }
 
-    // The first child of a node that wears a class, read from the children alone (null when there is none).
-    function plateKid(node, name) {
-        for (var i = 0; node && i < node.childNodes.length; i++) if (hasClass(node.childNodes[i], name)) return node.childNodes[i];
-        return null;
-    }
-
     // The bars of a plate and the bar of them that is picked (.sel).
     function plateBars(plate) {
-        return plateKid(plate, 'bars');
-    }
-
-    function pickedIn(strip) {
-        return plateKid(strip, 'sel');
-    }
-
-    // The motion of the folds belongs to the last pick: a newer pick, and any drawing of the page, cancels what is under way (the token, the timer), and the screen is the
-    // state the last pick (or drawing) left.
-    var foldToken = 0;
-    var foldTimer = 0;
-
-    function foldCancel(keepHold) {
-        foldToken++;
-        if (foldTimer) {
-            clearTimeout(foldTimer);
-            foldTimer = 0;
-        }
-        foldUnhook();
-        traceStop();
-        if (!keepHold) foldLetAll();
-    }
-
-    // While the folds of a pick go their way (the chart and the card shut where they stand, then open where they are to stand) the box that holds them keeps most of its height (.fold-held, its
-    // least is --fold-hold): the page does not fall to the plate and rise again, which a host that fits its frame to the page shows as everything under the widget going up and down. What is kept is
-    // FOLD_HOLD of the height the box had: the state the folds end in is not found under it (a pick lets the chart and the card stand at heights that differ by a tenth), so the hold
-    // is let go at the end with nothing moving. A pick on a pick goes on holding the first height; the hold goes with the motion (foldCancel without keepHold: a drawing of the page, which builds the box anew).
-    var FOLD_HOLD = 0.85;
-
-    function foldHold(box) {
-        if (!box || hasClass(box, 'fold-held')) return;
-        var height = box.getBoundingClientRect().height;
-        if (!(height > 0)) return;
-        setVar(box, '--fold-hold', (height * FOLD_HOLD).toFixed(1) + 'px');
-        classSet(box, 'fold-held', true);
-    }
-
-    function foldLet(box) {
-        if (!box || !hasClass(box, 'fold-held')) return;
-        classSet(box, 'fold-held', false);
-        varDrop(box, '--fold-hold');
-        // The hold was the only thing in the style attribute: the emptied attribute goes too, so the markup of the box is what a drawing makes anew (the same before a pick and after it).
-        if (typeof box.getAttribute === 'function' && typeof box.removeAttribute === 'function' && !box.getAttribute('style')) box.removeAttribute('style');
-    }
-
-    function foldLetAll() {
-        var held = rootAll('.fold-held');
-        for (var i = 0; i < held.length; i++) foldLet(held[i]);
-    }
-
-    // The one listener of the fold that is going its way (transitionend on its wrap): it is taken off when it has fired, when the timer ends the wait, and when a newer pick or a drawing cancels
-    // the motion (foldCancel), so a wrap that lives through many picks wears one at most, never a heap.
-    var foldHook = null;
-
-    function foldUnhook() {
-        var hook = foldHook;
-        foldHook = null;
-        if (!hook) return;
-        try { hook.node.removeEventListener('transitionend', hook.fn); } catch (err) { /* it goes with the node */ }
-    }
-
-    // `then` once the fold `node` has gone its way (its row's transition ends; a short timer ends it where the transition never starts), if no newer pick has come.
-    function foldWait(node, token, then) {
-        var over = false;
-        foldUnhook();
-        function end() {
-            if (over) return;
-            over = true;
-            foldUnhook();
-            if (foldTimer) {
-                clearTimeout(foldTimer);
-                foldTimer = 0;
-            }
-            if (token === foldToken) then();
-            landPoke();
-        }
-        function onEnd(e) {
-            if (e.target === node && e.propertyName === 'grid-template-rows') end();
-        }
-        try {
-            node.addEventListener('transitionend', onEnd);
-            foldHook = { node: node, fn: onEnd };
-        } catch (err) { /* the timer ends it */ }
-        foldTimer = setTimeout(end, 320);
-    }
-
-    // A reading of the 30-second poll that lands while a fold or the line is moving is held until the motion has ended (a drawing in the middle of it would jump the plate's height), and no longer
-    // than LAND_MAX_MS. Only the moment of the drawing moves: the poll reads as it did. A newer reading, a stop, or a read of a chart or a limit (reuse, which is the reader's own) drops or passes it.
-    var LAND_MAX_MS = 1000;
-    var landHeld = null;
-    var landTimer = 0;
-
-    // The line a drawing of the page owes (the opening, a pick of a window or a family: traceStart with `byPage`) does not hold the poll: it moves no height (a layer over the plate),
-    // and a family's slide has the poll drawn in the middle of it (the drawing takes the layer off and the end state stands, as the chart's arrival does). The folds and the line of the
-    // reader's press on a bar hold it.
-    var traceByPage = false;
-
-    function motionOn() {
-        return !!foldTimer || (!traceByPage && (!!traceTimer || !!traceLive));
-    }
-
-    function landRelease(go) {
-        if (landTimer) {
-            clearTimeout(landTimer);
-            landTimer = 0;
-        }
-        var held = landHeld;
-        landHeld = null;
-        if (go && held && held.mine === generation && !stopped) held.run();
-    }
-
-    function landWhenStill(run, mine) {
-        landRelease(false);
-        if (!motionOn()) {
-            run();
-            return;
-        }
-        landHeld = { run: run, mine: mine };
-        landTimer = setTimeout(function () {
-            landTimer = 0;
-            landRelease(true);
-        }, LAND_MAX_MS);
-    }
-
-    function landPoke() {
-        if (landHeld && !motionOn()) landRelease(true);
-    }
-
-    // The line of a pick (capsule: chart, kit: motion): from the foot of the picked bar a stem (a bar, no tip) runs down to the top edge of the chart's plate, and from that point
-    // two arms run round the plate's edge (half the line's width in, the middle of the line, with the plate's own corners) and meet at the point of the foot opposite the stem, the arms of one length. It is drawn on a layer of its own over the plate
-    // (.plate-trace, aria-hidden) by the kit's ring-sweep-arc, and at its end the layer is taken off and, in the same turn, the plate wears the same line as its outline (.tl-traced) and the bar
-    // the stem (.bar-arrow): no jump. A pick of the reader's draws it (a press on a bar, traceStart at the end of the folds) and so does the page's own pick (pickTraceRun: the opening,
-    // a pick of a window or a family; traceStart with `byPage`); any other drawing of the page builds the end state (the build, and barsFit for the arrow). A newer pick, and any
-    // drawing, takes the layer and the timer off (traceStop). `traceHold` keeps the arrow off while the folds of a pick are moving.
-    var traceHold = false;
-    var traceLive = null;
-    var traceTimer = 0;
-
-    // The arrows of a plate (svg.bar-arrow, children of the plate), all of them, never the first alone (hasClass reads an svg node by its class attribute).
-    function arrowsOf(plate) {
-        var out = [];
-        for (var i = 0; plate && i < plate.childNodes.length; i++) if (hasClass(plate.childNodes[i], 'bar-arrow')) out.push(plate.childNodes[i]);
-        return out;
-    }
-
-    // The plate of the timeline (.tl-block) in its fold (.tl-wrap > .tl-fold).
-    function blockOf(wrap) {
-        var fold = wrap && wrap.firstChild;
-        var block = fold && fold.firstChild;
-        return block && hasClass(block, 'tl-block') ? block : null;
-    }
-
-    function tokenNum(node, name, rest) {
-        try {
-            var ms = parseFloat(window.getComputedStyle(node).getPropertyValue(name));
-            return isFinite(ms) ? ms : rest;
-        } catch (err) {
-            return rest;
-        }
-    }
-
-    // The wait of the plate while its line is drawn (capsule: chart): the plate wears .tl-wait (its content hidden by visibility, the height the same, the nodes alive) and a layer of
-    // stand-ins of the same layout (.tl-skel, aria-hidden) stands over it. It is put before the folds of the pick open (foldPlay) or in the drawing that owes the line (renderReserve), and
-    // ends where the line ends (traceRest, `soft`): the layer fades and the content comes in by opacity (.sk-off, .tl-reveal, --dur-4), with no shift. A quicker pick, any drawing (the poll
-    // owes no line, so builds none) and reduced motion leave none: traceStop takes it off at once. Where the keyboard is inside the plate, none is put (the content keeps its focus).
-    var waitBlock = null;
-    var waitSkel = null;
-    var waitFade = null;
-    var waitTimer = 0;
-
-    function heldIn(node) {
-        try {
-            return !!node && !!document.activeElement && node !== document.activeElement && typeof node.contains === 'function' && node.contains(document.activeElement);
-        } catch (err) {
-            return false;
-        }
-    }
-
-    function waitOn(block) {
-        try {
-            if (!block || waitBlock === block || reducedMotion() || heldIn(block)) return;
-            waitStop(false);
-            var skel = el('div', 'tl-skel');
-            skel.setAttribute('aria-hidden', 'true');
-            var caps = el('div', 'sk-caps');
-            for (var i = 0; i < 4; i++) caps.appendChild(el('span', 'sk-cap'));
-            skel.appendChild(caps);
-            skel.appendChild(el('div', 'sk-field'));
-            skel.appendChild(el('div', 'sk-legend'));
-            skel.appendChild(el('div', 'sk-detail'));
-            block.appendChild(skel);
-            classSet(block, 'tl-wait', true);
-            waitBlock = block;
-            waitSkel = skel;
-            waitArm();
-        } catch (err) {
-            // A layer that cannot be built is not put: the content stands.
-        }
-    }
-
-    // The stand-ins (and the line that is owed) do not hang for ever: where the chart has not come in WAIT_MAX_MS (a read in the air, a chart asked for), they are taken off, the content shows,
-    // and the plate wears the end state of the line (the outline, the arrow). The count is from the pick (waitBy) for a line that is owed, else from the moment the wait is put.
-    var WAIT_MAX_MS = 4000;
-    var waitDeadline = 0;
-    var waitBy = 0;
-
-    function waitArm() {
-        if (waitDeadline) clearTimeout(waitDeadline);
-        var by = pickDue && waitBy ? waitBy : Date.now() + WAIT_MAX_MS;
-        waitDeadline = setTimeout(waitExpire, Math.max(0, by - Date.now()));
-    }
-
-    // The wait and the line that is owed end now: the stand-ins fade off, the outline and the arrow stand. Where the line is being drawn (traceLive) it ends the wait itself in a beat.
-    function waitExpire() {
-        if (waitDeadline) {
-            clearTimeout(waitDeadline);
-            waitDeadline = 0;
-        }
-        if (!pickDue && !waitBlock) return;
-        if (traceLive) return;
-        pickDue = false;
-        traceHold = false;
-        waitBy = 0;
-        try {
-            var plate = root && root.querySelector ? root.querySelector('.wt-plate') : null;
-            var wrap = plate ? plateKid(plate, 'tl-top') : null;
-            var strip = plate ? plateBars(plate) : null;
-            if (plate && wrap && blockOf(wrap) && strip && pickedIn(strip)) {
-                traceRest(plate, wrap, true);
-                return;
-            }
-        } catch (err) { /* a layout that cannot be read: the wait is simply taken off */ }
-        waitStop(true);
-    }
-
-    // The wait ends: at once, or `soft` (the line has met): the layer fades and the content comes in in --dur-4, then the layer is taken off.
-    function waitStop(soft) {
-        if (waitDeadline) {
-            clearTimeout(waitDeadline);
-            waitDeadline = 0;
-        }
-        waitDrop();
-        var block = waitBlock;
-        var skel = waitSkel;
-        waitBlock = null;
-        waitSkel = null;
-        if (!block) return;
-        classSet(block, 'tl-wait', false);
-        if (!soft || !skel || reducedMotion()) {
-            if (skel && skel.parentNode) skel.parentNode.removeChild(skel);
-            return;
-        }
-        classSet(skel, 'sk-off', true);
-        classSet(block, 'tl-reveal', true);
-        waitFade = { block: block, skel: skel };
-        waitTimer = setTimeout(waitDrop, tokenNum(block, '--dur-4', 180) + 30);
-    }
-
-    // What is left of a soft end (the layer going out, the content coming in) is taken off at once.
-    function waitDrop() {
-        if (waitTimer) {
-            clearTimeout(waitTimer);
-            waitTimer = 0;
-        }
-        if (!waitFade) return;
-        if (waitFade.skel.parentNode) waitFade.skel.parentNode.removeChild(waitFade.skel);
-        classSet(waitFade.block, 'tl-reveal', false);
-        waitFade = null;
-    }
-
-    // `keep`: the wait stands (the line is drawn over it: traceStart, traceRest, which ends it itself).
-    function traceStop(keep) {
-        if (traceTimer) {
-            clearTimeout(traceTimer);
-            traceTimer = 0;
-        }
-        if (traceLive && traceLive.parentNode) traceLive.parentNode.removeChild(traceLive);
-        traceLive = null;
-        traceHold = false;
-        if (!keep) waitStop(false);
-    }
-
-    // The device pixel. Every place and size of the line is worked out in whole device pixels (devSnap), so the live line and the plate's outline lie on the same pixels (DPR 1, 2, ...).
-    function devRatio() {
-        var d = window.devicePixelRatio;
-        return isFinite(d) && d > 0 ? d : 1;
-    }
-
-    function devSnap(v, d) {
-        return Math.round(v * d) / d;
-    }
-
-    // The width of the line (--trace-w) in whole device pixels, written on the root, where the bar's ring, the stem and the outline read it: 1.5px of the token is 2 pixels at DPR 1 and 3 at DPR 2.
-    var traceUnit = { d: 0, w: 0 };
-
-    function traceWidth() {
-        var d = devRatio();
-        if (traceUnit.d === d && traceUnit.w) return traceUnit.w;
-        var w = 1.5;
-        try {
-            var page = document.documentElement;
-            varDrop(page, '--trace-w');
-            var base = parseFloat(window.getComputedStyle(document.documentElement).getPropertyValue('--trace-w'));
-            if (isFinite(base) && base > 0) w = base;
-            w = Math.max(1, Math.round(w * d)) / d;
-            setVar(page, '--trace-w', w + 'px');
-        } catch (err) { /* the token stands as the style sheet has it */ }
-        traceUnit = { d: d, w: w };
-        return w;
-    }
-
-    // Where the line goes, read once, on the device pixel grid (devSnap) and in the layer's own pixels: the layer's origin is the plate's padding box moved to a whole device pixel (`ox`, `oy`: where the layer
-    // is put in the plate), so a whole number of device pixels in the layer is one on the screen. `cx` is the middle of the stem on the screen. The stem (`x`, from `y0` to `y1`) is the middle of the picked
-    // bar's liquid: it begins inside the bottom edge of the bar (its ring's width in) and ends inside the top line of the chart's plate (that line's width in), so no gap and nothing out of the line.
-    // The plate's line: the edges and corners of the plate (`l`, `r`, `t`, `b`: the middle of the line, half its width in; the radii less half of it). Null where the plate has no height or stands above the foot.
-    function traceGeo(plate, bar, block) {
-        var d = devRatio();
-        var w = traceWidth();
-        var pr = plate.getBoundingClientRect();
-        var ox = pr.left + plate.clientLeft;
-        var oy = pr.top + plate.clientTop;
-        var sx = devSnap(ox, d);
-        var sy = devSnap(oy, d);
-        var br = bar.getBoundingClientRect();
-        var kr = block.getBoundingClientRect();
-        var rest = parseFloat(bar.parentNode.style.getPropertyValue('--bar-rest'));
-        rest = isFinite(rest) && rest > 0 ? Math.min(rest, br.width) : br.width;
-        var left = devSnap(br.left + rest / 2 - w / 2, d);
-        var top = devSnap(kr.top, d);
-        var bottom = devSnap(kr.bottom, d);
-        var half = w / 2;
-        var style = window.getComputedStyle(block);
-        function radius(name) { return Math.max(0, (parseFloat(style.getPropertyValue(name)) || 0) - half); }
-        var geo = {
-            ox: sx - ox, oy: sy - oy, w: w, cx: left + half,
-            x: left + half - sx, y0: devSnap(br.bottom, d) - w - sy, y1: top + w - sy,
-            l: devSnap(kr.left, d) - sx + half, r: devSnap(kr.right, d) - sx - half, t: top - sy + half, b: bottom - sy - half,
-            tl: radius('border-top-left-radius'), tr: radius('border-top-right-radius'),
-            br: radius('border-bottom-right-radius'), bl: radius('border-bottom-left-radius')
-        };
-        return kr.height > 0 && geo.y1 > geo.y0 ? geo : null;
-    }
-
-    // The two arms of the line from the foot of the stem (xs, on the top edge) round the plate's edge, as paths, and their length. The meeting point (m, on the foot) is where the two lengths are equal
-    // (counted along the sides and the arcs of the corners, not the middle of the foot), so the arms are of one length and, run in one time, at one speed. The left arm goes anticlockwise, the right one is its mirror.
-    function traceArms(geo) {
-        var q = Math.PI / 2;
-        var xs = Math.max(geo.l + geo.tl, Math.min(geo.r - geo.tr, geo.x));
-        var h = geo.b - geo.t;
-        var a0 = (xs - geo.l - geo.tl) + q * geo.tl + (h - geo.tl - geo.bl) + q * geo.bl - (geo.l + geo.bl);
-        var b0 = (geo.r - geo.tr - xs) + q * geo.tr + (h - geo.tr - geo.br) + q * geo.br + (geo.r - geo.br);
-        var d = devRatio();
-        var m = Math.max(geo.l + geo.bl, Math.min(geo.r - geo.br, devSnap((b0 - a0) / 2, d)));
-        var left = 'M' + xs + ' ' + geo.t + 'H' + (geo.l + geo.tl) + 'A' + geo.tl + ' ' + geo.tl + ' 0 0 0 ' + geo.l + ' ' + (geo.t + geo.tl)
-            + 'V' + (geo.b - geo.bl) + 'A' + geo.bl + ' ' + geo.bl + ' 0 0 0 ' + (geo.l + geo.bl) + ' ' + geo.b + 'H' + m;
-        var right = 'M' + xs + ' ' + geo.t + 'H' + (geo.r - geo.tr) + 'A' + geo.tr + ' ' + geo.tr + ' 0 0 1 ' + geo.r + ' ' + (geo.t + geo.tr)
-            + 'V' + (geo.b - geo.br) + 'A' + geo.br + ' ' + geo.br + ' 0 0 1 ' + (geo.r - geo.br) + ' ' + geo.b + 'H' + m;
-        return { left: left, right: right, long: a0 + m };
-    }
-
-    // The one place the stem is made and taken (.bar-arrow, an svg of its own in the plate: a bar of the line's width, no tip; shown with no fade and taken in --dur-1). With `geo` (traceGeo): every arrow that stands in the
-    // plate is taken first, then the one new arrow is made, placed by the bar's liquid, shown where `on`. Without `geo`: every arrow is taken at once, or, with `fade`, put out (--dur-1)
-    // and taken at the end of the fade (its transitionend; a short timer where none comes). So a plate never has more than one, and none where nothing is picked.
-    var arrowTimer = 0;
-
-    function arrowSet(plate, geo, on, fade) {
-        if (arrowTimer) {
-            clearTimeout(arrowTimer);
-            arrowTimer = 0;
-        }
-        var old = arrowsOf(plate);
-        function take() {
-            if (arrowTimer) {
-                clearTimeout(arrowTimer);
-                arrowTimer = 0;
-            }
-            old.forEach(function (a) { if (a.parentNode) a.parentNode.removeChild(a); });
-        }
-        if (!geo && fade && old.length) {
-            old.forEach(function (a) {
-                classSet(a, 'on', false);
-                try {
-                    a.addEventListener('transitionend', function (e) {
-                        if (e.target === a && e.propertyName === 'opacity') take();
-                    });
-                } catch (err) { /* the timer takes it */ }
-            });
-            arrowTimer = setTimeout(take, tokenNum(plate, '--dur-1', 120) + 60);
-            return null;
-        }
-        take();
-        if (!geo) return null;
-        var long = geo.y1 - geo.y0;
-        var arrow = svgEl('svg', { 'class': on ? 'bar-arrow on' : 'bar-arrow', 'aria-hidden': 'true', focusable: 'false', width: geo.w, height: long });
-        arrow.appendChild(svgEl('rect', { 'class': 'arrow-stem', x: 0, y: 0, width: geo.w, height: long }));
-        arrow.style.left = (geo.ox + geo.x - geo.w / 2).toFixed(3) + 'px';
-        arrow.style.top = (geo.oy + geo.y0).toFixed(3) + 'px';
-        plate.appendChild(arrow);
-        return arrow;
-    }
-
-    // The arrow under the picked bar: there while the plate wears its outline, placed by the bar's liquid. Worked out again (arrowSet) at the end of a drawing and a resize (barsFit),
-    // when the row scrolls and when a bar of the row has gone its way. Hidden where the bar is scrolled out of its row; taken out where nothing is picked or the chart is not over
-    // the plate; kept (shown off) while the layer is drawn or the folds are moving.
-    function arrowFit() {
-        try {
-            var plate = root && root.querySelector ? root.querySelector('.wt-plate') : null;
-            if (!plate) return;
-            var strip = plateBars(plate);
-            var bar = strip ? pickedIn(strip) : null;
-            var block = blockOf(plateKid(plate, 'tl-top'));
-            var geo = bar && block && !traceHold && !traceLive ? traceGeo(plate, bar, block) : null;
-            if (!geo) {
-                if (traceHold || traceLive) arrowsOf(plate).forEach(function (a) { classSet(a, 'on', false); });
-                else arrowSet(plate, null, false, false);
-                return;
-            }
-            var room = strip.getBoundingClientRect();
-            arrowSet(plate, geo, geo.cx >= room.left && geo.cx <= room.right, false);
-        } catch (err) {
-            // A layout that cannot be read leaves the arrow as it stands.
-        }
-    }
-
-    // The end state of the line: the plate wears its outline, the arrow stands (the layer, if any, is taken off in this turn). `soft`: the line has met (it was drawn, or it could not be), so the
-    // wait of the plate ends in the same turn by its fade (waitStop); else (a drawing, a pick on a pick) it ends at once.
-    function traceRest(plate, wrap, soft) {
-        traceStop(true);
-        waitStop(!!soft);
-        var block = blockOf(wrap);
-        if (block) classSet(block, 'tl-traced', true);
-        arrowFit();
-    }
-
-    // The line of a pick that is let go, or of the pick that goes (a switch): the outline and the arrow are put out (they fade in --dur-1), and the arrow is taken at the end of the fade.
-    function traceFade(plate, wrap) {
-        var block = blockOf(wrap);
-        if (block) classSet(block, 'tl-traced', false);
-        arrowSet(plate, null, false, true);
-    }
-
-    // The pick is let go and the chart is back under the plate: nothing of the line stands, no arrow either (all of them are taken).
-    function traceClear(plate, wrap) {
-        traceStop();
-        var block = blockOf(wrap);
-        if (block) classSet(block, 'tl-traced', false);
-        arrowSet(plate, null, false, false);
-    }
-
-    // The layer of the line, from the places worked out (traceGeo): the stem from the foot of the bar down to the plate's top line, then the two arms from the foot of the stem round the plate, meeting opposite it
-    // (traceArms). `total` is the time of the whole line, shared out by length on this svg's own style, so the stem and the arms run at one speed (linear), and the arms in one time.
-    function traceLayer(plate, geo, total, cls) {
-        var svg = svgEl('svg', { 'class': cls, 'aria-hidden': 'true', focusable: 'false' });
-        svg.style.left = geo.ox.toFixed(3) + 'px';
-        svg.style.top = geo.oy.toFixed(3) + 'px';
-        var line = function (name, d) {
-            return svgEl('path', { 'class': name, d: d, pathLength: 100, 'stroke-dasharray': '100 100' });
-        };
-        var arms = traceArms(geo);
-        var stemLong = geo.y1 - geo.y0;
-        var stemMs = total * stemLong / (stemLong + arms.long);
-        setVar(svg, '--dur-trace-stem', stemMs.toFixed(2) + 'ms');
-        setVar(svg, '--dur-trace-arms', (total - stemMs).toFixed(2) + 'ms');
-        svg.appendChild(line('trace-stem', 'M' + geo.x + ' ' + geo.y0 + 'V' + geo.y1));
-        svg.appendChild(line('trace-arm', arms.left));
-        svg.appendChild(line('trace-arm', arms.right));
-        return svg;
-    }
-
-    // The line of a pick, drawn: the reader's (foldPlay, at the end of the folds) or the page's own (pickTraceRun, `byPage`: it holds no poll, motionOn). Where it cannot be drawn
-    // (reduced motion, a layout that cannot be read), the end state at once.
-    function traceStart(plate, wrap, byPage) {
-        traceStop(true);
-        traceByPage = !!byPage;
-        var geo = null;
-        try {
-            var block = blockOf(wrap);
-            var bar = pickedIn(plateBars(plate));
-            geo = !reducedMotion() && block && bar && typeof document.createElementNS === 'function' ? traceGeo(plate, bar, block) : null;
-            if (geo) {
-                // The wait stands before the line (foldPlay, renderReserve); where nothing put it, it is put now (waitOn does nothing where it stands).
-                waitOn(block);
-                var total = tokenNum(plate, '--dur-trace-stem', 160) + tokenNum(plate, '--dur-trace-arms', 320);
-                var svg = traceLayer(plate, geo, total, 'plate-trace');
-                plate.appendChild(svg);
-                traceLive = svg;
-                // The layer ends with the arms and a beat more; then the end state, in the same turn.
-                traceTimer = setTimeout(function () {
-                    traceTimer = 0;
-                    if (traceLive === svg) traceRest(plate, wrap, true);
-                    landPoke();
-                }, total + 30);
-                return;
-            }
-        } catch (err) {
-            // A layer that cannot be built is not drawn: the end state.
-        }
-        traceRest(plate, wrap, true);
-    }
-
-    // The number and the notes of the plate stand in the card of the account picked, where the card stands in the plate (right under the chart: plate > .ins-wrap > .ins-fold > .inspector;
-    // not on the plate of the billing-cycle budget). The real nodes move, none is copied (their handlers, their data-focus and dimOnItem go with them): the fact, the stamp, the chart word,
-    // the note of the accounts at the limit, the notes of the window (the accounts not read, the manual resets, the states) and the reset row stand in the card's summary (.kt-sum, first in
-    // .kt-pad), in the order of the markup; the strip wears a copy of the number ("5.53 of 16", aria-hidden) and, in the row of windows, a copy of the note's head. The scope stays in the plate,
-    // and so does the spoken summary (sr-only), so a reader hears the number with the card at rest. Where the card does not stand in the plate (Chart folded, a pick from the list, the budget plate) nothing moves. Where the card goes (a bar let go, another bar,
-    // a drawing), the nodes go back to the plate, to the place of the markup of limitRow.
-    var CARD_CLASS = { fact: 'wt-fact', stamp: 'wt-stamp', btn: 'l-chart', limit: 'wt-limit', foot: 'wt-foot', credits: 'family-credits', legend: 'lg', nx: 'nx' };
-    // The place of each class a child of the plate wears, in the order of the markup (cardRank reads it): the bars and the folds first, the scope and the spoken summary (sr-only)
-    // among the rest. A class not named here is one of the other notes, at the rank of the foot; the foot and the credits are read last, so a node that wears one of them and a class above keeps the class above.
-    var CARD_RANK = { 'bars': 0, 'tl-wrap': 0, 'ins-wrap': 0, 'wt-fact': 1, 'wt-scope': 2, 'wt-stamp': 3, 'l-chart': 4, 'sr-only': 5, 'wt-limit': 6, 'lg': 8, 'nx': 9, 'wt-foot': 7, 'family-credits': 7 };
-
-    function cardChild(parent, name) {
-        for (var i = 0; parent && i < parent.childNodes.length; i++) {
-            var n = parent.childNodes[i];
-            if (n.nodeType === 1 && hasClass(n, name)) return n;
-        }
-        return null;
-    }
-
-    // The card that stands in the plate, or null.
-    function cardInPlate(plate) {
-        var w = cardChild(plate, 'ins-wrap');
-        var f = w && cardChild(w, 'ins-fold');
-        return f ? cardChild(f, 'inspector') : null;
-    }
-
-    // The place of a child of the plate in the order of the markup: the bars and the folds, the fact, the model list, the stamp, the chart word, the spoken summary, the note, the other notes
-    // (the foot, the credits), the legend, the reset row, and what the plate is given later (the line of the pick) last.
-    function cardRank(n) {
-        if (n.nodeType !== 1) return 0;
-        if (String(n.tagName).toLowerCase() === 'svg') return 99;
-        var names = Object.keys(CARD_RANK);
-        for (var i = 0; i < names.length; i++) if (hasClass(n, names[i])) return CARD_RANK[names[i]];
-        return CARD_RANK[CARD_CLASS.foot];
-    }
-
-    function cardBack(plate, node, kind) {
-        for (var i = 0; i < plate.childNodes.length; i++) {
-            if (cardRank(plate.childNodes[i]) > CARD_RANK[CARD_CLASS[kind]]) {
-                plate.insertBefore(node, plate.childNodes[i]);
-                return;
-            }
-        }
-        plate.appendChild(node);
-    }
-
-    // The height of the place the chart holds in the plate, in px (0: none stands there, or it cannot be measured).
-    function cardRoomNow(card) {
-        try {
-            var plate = card && typeof card.closest === 'function' ? card.closest('.wt-plate') : null;
-            var wrap = plate ? cardChild(plate, 'tl-wrap') : null;
-            // Not rounded down: the body must fill the place to the pixel (rounded up to a hundredth).
-            return wrap && typeof wrap.getBoundingClientRect === 'function' ? Math.ceil(wrap.getBoundingClientRect().height * 100) / 100 : 0;
-        } catch (err) {
-            return 0;
-        }
-    }
-
-    // The card is up: pressed (the pin), under the pointer or with the focus in it. It stands in the place of the chart then (.kt-open, which the CSS reads).
-    function cardUp() {
-        return cardOpen || cardHover || cardFocus;
+        return plate && typeof plate.querySelector === 'function' ? plate.querySelector('.q-bars') : null;
     }
 
     // The pin, the pointer and the focus all let go (another account, another window or family): the card is at rest.
     function cardReset() {
         clearTimeout(cardLeave.hover);
         clearTimeout(cardLeave.focus);
-        cardOpen = false;
-        cardHover = false;
-        cardFocus = false;
-    }
-
-    // The body of an up card is as tall as the place of the chart less the strip the chart folds into and the gap under it (--kt-room, which the CSS reads): longer, it scrolls.
-    function cardRoomSet(card) {
-        try {
-            // Let go, the card keeps the measure while its body folds away, so the body holds its height to the end of the fold.
-            if (cardUp() && cardRoom > 0) setVar(card, '--kt-room', 'max(0px, calc(' + cardRoom + 'px - var(--kt-strip) - var(--kt-gap)))');
-            else if (cardUp()) varDrop(card, '--kt-room');
-        } catch (err) {
-            // A card that cannot say its room has no limit.
-        }
-    }
-
-    // The card goes up or down by its state (cardUp), `was` being what it was. Going up measures the place of the chart now, before the chart folds shut by the card's own state (the chart capsule);
-    // while the chart's row is still moving (a card let go a moment ago) the measure it has stays. A drawing that builds the card up carries the measure on (cardFold).
-    function cardShow(card, was) {
-        var up = cardUp();
-        var plate = null;
-        var wrap = null;
-        try {
-            plate = typeof card.closest === 'function' ? card.closest('.wt-plate') : null;
-            wrap = plate ? cardChild(plate, 'tl-wrap') : null;
-        } catch (err) {
-            // Nothing moves where the chart cannot be found.
-        }
-        if (up && !was) {
-            var room = wrap && hasClass(wrap, 'tl-yield') && cardRoom > 0 ? cardRoom : cardRoomNow(card);
-            if (room > 0 || !wrap) cardRoom = room;
-        }
-        // The line of the pick stands through the card (its outline folds with the chart into the strip, the stem stays under the bar); a line that is being drawn when the card comes is brought to its end state at once.
-        if (up && !was && plate && wrap && traceLive) traceRest(plate, wrap, true);
-        classSet(card, 'kt-open', up);
-        cardRoomSet(card);
-        // The chart's row moves by the card's state: its fold clips while it does (.tl-yield), and no longer.
-        if (wrap && up !== was) {
-            classSet(wrap, 'tl-yield', true);
-            clearTimeout(cardYield);
-            cardYield = setTimeout(function () { classSet(wrap, 'tl-yield', false); }, tokenNum(wrap, '--dur-5', 300) + 60);
-        }
-        var tg = typeof card.querySelector === 'function' ? card.querySelector('.kt-toggle') : null;
-        if (tg) tg.setAttribute('aria-expanded', up ? 'true' : 'false');
-    }
-
-    // The card is pressed or let go (the strip's button, the chart word of its summary). `keep`: the strip's own button lets go the pin only, a pointer or a focus still on the card holds it up (it goes down
-    // as they go); the chart word and another bar let it go for good.
-    function cardPress(card, open, keep) {
-        var was = cardUp();
-        cardOpen = open;
-        if (!open && !keep) {
-            clearTimeout(cardLeave.hover);
-            clearTimeout(cardLeave.focus);
-            cardHover = false;
-            cardFocus = false;
-        }
-        cardShow(card, was);
-    }
-
-    // The keyboard leaves the strip of the folded chart (it hides as the chart opens): the picked bar has it, and where the row has none picked, the plate itself (made focusable for the moment).
-    function chartStripLeave(plate) {
-        var bar = typeof plate.querySelector === 'function' ? plate.querySelector('.bars .bar.sel') : null;
-        if (bar && !bar.disabled) {
-            bar.focus();
-            return;
-        }
-        plate.setAttribute('tabindex', '-1');
-        plate.addEventListener('blur', function () { plate.removeAttribute('tabindex'); }, { once: true });
-        plate.focus();
-    }
-
-    // The strip the chart folds into while the account's card stands in its place (a button over the wrap's top, shown by the CSS once the card is up): the pointer on it, the keyboard focus in it or a press
-    // gives the chart back at once and lets the card's pin go, so the card goes down into its own strip and the chart opens again with its outline (cardPress). A finger and a narrow screen press only.
-    function chartStrip(name, wrap) {
-        var btn = el('button', 'tl-strip', t('chart.strip', { name: name }));
-        btn.setAttribute('type', 'button');
-        btn.setAttribute('aria-label', t('chart.strip_label', { name: name }));
-        btn.setAttribute('data-focus', 'chart-strip');
-        function back() {
-            try {
-                var plate = typeof btn.closest === 'function' ? btn.closest('.wt-plate') : null;
-                var card = plate ? cardInPlate(plate) : null;
-                if (card && cardUp()) {
-                    // The strip hides as the card goes down: a keyboard that is on it goes to the picked bar first (else the plate), so it is never left on the page.
-                    var held = document.activeElement === btn;
-                    cardPress(card, false);
-                    if (held) chartStripLeave(plate);
-                }
-            } catch (err) {
-                // A strip that cannot find its card gives nothing back.
-            }
-        }
-        btn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            back();
-        });
-        btn.addEventListener('pointerenter', function (e) {
-            if (e.pointerType !== 'touch' && cardHoverOk()) back();
-        });
-        btn.addEventListener('focusin', function (e) {
-            var seen = false;
-            try {
-                seen = !!(e.target && typeof e.target.matches === 'function' && e.target.matches(':focus-visible'));
-            } catch (err) {
-                seen = false;
-            }
-            if (seen) back();
-        });
-        // The keyboard that comes on the chart itself while the card stands over it (in the beat before the strip shows, the fold still takes the focus, and it hides under the focus
-        // as it goes) gives the chart back as the strip does, so the focus stays on the chart and is not lost with the fold.
-        if (wrap && typeof wrap.addEventListener === 'function') {
-            wrap.addEventListener('focusin', function (e) {
-                var seen = false;
-                try {
-                    seen = e.target !== btn && !!(e.target && typeof e.target.matches === 'function' && e.target.matches(':focus-visible'));
-                } catch (err) {
-                    seen = false;
-                }
-                if (seen) back();
-            });
-        }
-        return btn;
-    }
-
-    // A pointer that hovers and a screen wide enough for it (a finger and a narrow screen, up to HOVER_CARD_NARROW_MAX, press only).
-    function cardHoverOk() {
-        return mediaIs('(hover: hover) and (not (max-width: ' + HOVER_CARD_NARROW_MAX + 'px))');
-    }
-
-    // The pointer (kind 'hover') or the keyboard focus (kind 'focus') comes on the card or goes off it. On: the card is up at once; off: a beat of --dur-2 is kept, and a return within it cancels the going.
-    // Only the card in the plate goes up (outside it the CSS shows the card whole).
-    function cardHold(card, kind, on) {
-        try {
-            if (typeof card.closest !== 'function' || !card.closest('.wt-plate')) return;
-            clearTimeout(cardLeave[kind]);
-            if (on) {
-                if (kind === 'hover' && !cardHoverOk()) return;
-                var was = cardUp();
-                if (kind === 'hover') cardHover = true;
-                else cardFocus = true;
-                cardShow(card, was);
-                return;
-            }
-            cardLeave[kind] = setTimeout(function () {
-                // The card may have been drawn again meanwhile (the poll): the live one is the one to go down.
-                var live = cardLast && cardLast.isConnected ? cardLast : card;
-                var wasUp = cardUp();
-                if (kind === 'hover') cardHover = false;
-                else cardFocus = false;
-                cardShow(live, wasUp);
-            }, tokenNum(card, '--dur-2', 120));
-        } catch (err) {
-            // A card that cannot be told of the pointer is pressed only.
-        }
-    }
-
-    // The card goes (`fold` is its .ins-wrap): what it carries goes back to the plate. Called before the card is taken out, so the nodes never stand nowhere.
-    function cardGive(plate, fold) {
-        var sum = fold && typeof fold.querySelector === 'function' ? fold.querySelector('.kt-sum') : null;
-        if (!sum || !plate) return;
-        Object.keys(CARD_CLASS).forEach(function (kind) {
-            var node = sum.querySelector('.' + CARD_CLASS[kind]);
-            if (node && !cardChild(plate, CARD_CLASS[kind])) {
-                classSet(node, 'wt-carded', false);
-                cardBack(plate, node, kind);
-            }
-        });
-    }
-
-    // The card stands in the plate: it takes the nodes, once (a card that has its summary is left as it is).
-    function cardTake(plate) {
-        try {
-            if (!plate || hasClass(plate, 'wt-plate-cycle')) return;
-            var card = cardInPlate(plate);
-            if (!card || card.querySelector('.kt-sum')) return;
-            var top = cardChild(card, 'kt-top');
-            var pad = card.querySelector('.kt-pad');
-            var right = top && top.querySelector('.kt-right');
-            if (!top || !pad || !right) return;
-            var fact = cardChild(plate, 'wt-fact');
-            var stamp = cardChild(plate, 'wt-stamp');
-            var btn = cardChild(plate, 'l-chart');
-            var limit = cardChild(plate, 'wt-limit');
-            var foot = cardChild(plate, 'wt-foot');
-            var credits = cardChild(plate, 'family-credits');
-            var legend = cardChild(plate, 'lg');
-            var nx = cardChild(plate, 'nx');
-            // The strip: the share and the number in one cell, where "Clear" takes the place of both.
-            var pair = el('span', 'kt-pair');
-            var mini = el('span', 'kt-mini');
-            mini.setAttribute('aria-hidden', 'true');
-            var num = fact && fact.querySelector('.wt-num');
-            if (num) mini.appendChild(num.cloneNode(true));
-            var count = fact ? parseInt(fact.getAttribute('data-of'), 10) : 0;
-            if (count > 0) mini.appendChild(el('span', 'kt-of', t('acc.strip_of', { n: count })));
-            var lead = right.querySelector('.kt-lead');
-            right.insertBefore(pair, right.firstChild);
-            if (lead) pair.appendChild(lead);
-            pair.appendChild(mini);
-            // The summary: the fact, and on its right the stamp and the chart word, then the note, the notes of the window and the reset row, then a rule.
-            // The mark of what stands in the card (cardGive takes it off): the capsule of the window tabs styles the stamp there by it, with no class of the card in its selectors.
-            [fact, stamp, btn, limit, foot, credits, legend, nx].forEach(function (n) { if (n) classSet(n, 'wt-carded', true); });
-            var sum = el('div', 'kt-sum');
-            var row = el('div', 'kt-row');
-            var side = el('div', 'kt-side');
-            if (fact) row.appendChild(fact);
-            if (stamp) side.appendChild(stamp);
-            if (btn) side.appendChild(btn);
-            if (side.firstChild) row.appendChild(side);
-            sum.appendChild(row);
-            [limit, foot, credits, legend, nx].forEach(function (n) { if (n) sum.appendChild(n); });
-            pad.insertBefore(el('div', 'kt-rule'), pad.firstChild);
-            pad.insertBefore(sum, pad.firstChild);
-        } catch (err) {
-            // A card that cannot take them leaves them where they are.
-        }
-    }
-
-    // The timeline and the card of a pick on the plate. `wrap` is the timeline's fold (none where the chart is not shown), `olds` the folds of the cards that stand, `fresh` the new
-    // card's node (none for a pick let go). The timeline goes between under the plate and under the bars (.tl-top, and .wt-up on the plate for the area `chart`); the bars are
-    // already changed (they swap at once), so: what is to go shuts where it stands (--dur-5), then it is moved and what is new opens. A timeline under the bars that another
-    // bar is picked under shuts and opens again. With reduced motion, at once. A pick on a pick: the timers of the first are cancelled, the second goes on from the height it finds.
-    function foldPlay(plate, strip, wrap, olds, fresh, picked, prevKey, key) {
-        foldCancel(true);
-        var token = foldToken;
-        var table = plate.parentNode;
-        var up = !!wrap && wrap.parentNode === plate;
-        var goes = !!wrap && up !== picked;
-        var swaps = !!wrap && !goes && picked && prevKey !== key;
-        var calm = reducedMotion();
-        // The line of the pick (traceStart): the timeline moves, so the arrow stays off until the folds have gone their way; what stands of the line (outline, arrow) fades first (--dur-1),
-        // and then the folds begin. At the end of the folds: the line is drawn for a pick, and what is left of it is cleared for a pick let go.
-        var moves = !!wrap && (goes || swaps);
-        var lit = moves && !calm && (arrowsOf(plate).some(function (a) { return hasClass(a, 'on'); }) || (!!blockOf(wrap) && hasClass(blockOf(wrap), 'tl-traced')));
-        if (moves) traceHold = true;
-        function settle() {
-            if (!moves) return;
-            if (picked) traceStart(plate, wrap);
-            else traceClear(plate, wrap);
-        }
-        // The card that stands is pressed (the chart is shut under it) and another account is picked: the one motion of a card let go, so the document holds its height. The new card
-        // takes the old card's place in its fold, pressed with the old measure, and is let go at once: its body folds as the chart opens (the chart's row and the card's body move by
-        // the same --dur-5, the body as tall as the place of the chart), where a shut and an open fold one after the other would drop the page by the card and lift it back.
-        var hand = swaps && !!fresh && olds.length === 1 && !hasClass(olds[0], 'fold-shut') && !!olds[0].querySelector('.inspector.kt-open');
-        var shutting = [];
-        if (!calm && !hand) {
-            if ((goes || swaps) && !hasClass(wrap, 'fold-shut')) shutting.push(wrap);
-            olds.forEach(function (box) { if (!hasClass(box, 'fold-shut')) shutting.push(box); });
-        }
-        // What shuts is held up by the box it stands in until what opens has opened (a pick on a pick goes on from the hold the first one made).
-        if (shutting.length) foldHold(table);
-        function letGo() {
-            foldLet(table);
-        }
-        function handOver() {
-            var oldBox = olds[0];
-            var oldCard = oldBox.querySelector('.inspector');
-            var foldBox = oldCard ? oldCard.parentNode : null;
-            if (!foldBox || !hasClass(foldBox, 'ins-fold') || !fresh) return false;
-            cardGive(plate, oldBox);
-            classSet(fresh, 'kt-open', true);
-            var room = oldCard.style.getPropertyValue('--kt-room');
-            if (room) setVar(fresh, '--kt-room', room);
-            foldBox.replaceChild(fresh, oldCard);
-            cardTake(plate);
-            void plate.offsetHeight;
-            // The line of the pick comes to the chart with the stand-ins, as it does for a pick on a pick (traceRest).
-            if (!calm) waitOn(blockOf(wrap));
-            cardPress(fresh, false);
-            // The line is drawn by settle (a pick on a pick).
-            if (calm) {
-                settle();
-                letGo();
-            } else {
-                foldWait(wrap, token, function () {
-                    settle();
-                    letGo();
-                });
-            }
-            return true;
-        }
-        function open() {
-            if (hand && handOver()) return;
-            var opening = [];
-            // What the card that goes carries goes back to the plate first; the card that comes takes it from there (cardTake).
-            olds.forEach(function (box) {
-                cardGive(plate, box);
-                if (box.parentNode) box.parentNode.removeChild(box);
-            });
-            if (wrap && goes) {
-                if (picked) {
-                    classSet(wrap, 'tl-top', true);
-                    classSet(plate, 'wt-up', true);
-                    plate.insertBefore(wrap, strip.nextSibling);
-                } else {
-                    classSet(wrap, 'tl-top', false);
-                    classSet(plate, 'wt-up', false);
-                    table.insertBefore(wrap, plate.nextSibling);
-                }
-            }
-            if (wrap && (goes || swaps)) opening.push(wrap);
-            // The wait of the plate is put before its fold opens: the stand-ins are there as the plate comes, and the content comes in when the line has met (traceRest).
-            if (wrap && moves && picked && !calm) waitOn(blockOf(wrap));
-            if (fresh) {
-                var box = foldOf('ins', fresh, !calm);
-                if (wrap && wrap.parentNode === plate) plate.insertBefore(box, wrap.nextSibling);
-                else table.insertBefore(box, plate.nextSibling);
-                cardTake(plate);
-                opening.push(box);
-            }
-            if (calm) {
-                if (wrap) {
-                    classSet(wrap, 'fold-run', false);
-                    classSet(wrap, 'fold-shut', false);
-                }
-                settle();
-                letGo();
-                return;
-            }
-            if (!opening.length) {
-                letGo();
-                return;
-            }
-            opening.forEach(function (node) {
-                classSet(node, 'fold-run', true);
-                classSet(node, 'fold-shut', true);
-            });
-            void plate.offsetHeight;
-            opening.forEach(function (node) { classSet(node, 'fold-shut', false); });
-            foldWait(opening[0], token, function () {
-                opening.forEach(function (node) { classSet(node, 'fold-run', false); });
-                settle();
-                letGo();
-            });
-        }
-        function begin() {
-            if (shutting.length) {
-                shutting.forEach(function (node) {
-                    classSet(node, 'fold-run', true);
-                    classSet(node, 'fold-shut', true);
-                });
-                foldWait(shutting[0], token, open);
-            } else {
-                open();
-            }
-        }
-        if (lit) {
-            traceFade(plate, wrap);
-            foldTimer = setTimeout(function () {
-                foldTimer = 0;
-                if (token === foldToken) begin();
-            }, tokenNum(plate, '--dur-1', 120));
-        } else {
-            begin();
-        }
-        // A motion that never began (nothing to fold) leaves a held reading of the poll no reason to wait.
-        landPoke();
-    }
-
-    // The pick of an account on the plate of the window on screen (a bar, a step of one account), or the pick let go, with no drawing of the page: the bars wear .sel and their
-    // words, the step and the account's row wear their pressed, and the account's card stands (or is taken out) right under the plate, the same card renderInspector draws and in the
-    // place a drawing gives it, so the 30-second drawing builds the same screen. Returns false where the screen is not the one this reads (no plate, the pick from a row of the list, a card
-    // under a row, a bar not in the window, another family, a failed drawing, a layout that cannot be walked): the caller draws the page anew, as it always did. Nothing here moves.
-    function selectInPlace(limit) {
-        var key = selectedAccountKey;
-        var i;
-        try {
-            if (stopped || !drawnFrom || !root || typeof root.querySelector !== 'function' || !i18n.en) return false;
-            var group = drawnFrom.group;
-            if (!group || group.harness_id !== selectedHarness) return false;
-            var plate = root.querySelector('.wt-plate');
-            if (!plate || !plate.parentNode || hasClass(plate, 'wt-plate-cycle')) return false;
-            var strip = null;
-            for (i = 0; i < plate.childNodes.length; i++) if (hasClass(plate.childNodes[i], 'bars')) strip = plate.childNodes[i];
-            if (!strip) return false;
-            var account = null;
-            if (key) {
-                // The pick came from a bar of this window's row (or its step): else the card stands elsewhere and the page is drawn anew.
-                if (!limit || limit !== strip.getAttribute('data-strip')) return false;
-                (group.accounts || []).forEach(function (a) { if (a && a.key === key) account = a; });
-                var found = false;
-                for (i = 0; i < strip.childNodes.length; i++) if (strip.childNodes[i].getAttribute('data-account') === key) found = true;
-                if (!account || !found) return false;
-            }
-            // The cards that stand now are the ones under this plate, each in its fold (two while a last pick is still going out), or none (a card under a row of the list is drawn anew).
-            var olds = [];
-            var cards = root.querySelectorAll('section.inspector');
-            for (i = 0; i < cards.length; i++) {
-                var cardBox = cards[i].parentNode && cards[i].parentNode.parentNode;
-                if (!cardBox || !hasClass(cardBox, 'ins-wrap') || (cardBox.parentNode !== plate.parentNode && cardBox.parentNode !== plate)) return false;
-                olds.push(cardBox);
-            }
-            var wrap = root.querySelector('.tl-wrap');
-            var picked0 = pickedIn(strip);
-            var prevKey = picked0 ? String(picked0.getAttribute('data-account') || '') : '';
-            // The card of the account picked is made first: a card that cannot be drawn leaves the page to be drawn anew, before anything moves.
-            var fresh = null;
-            if (account) {
-                var holder = el('div', null);
-                renderInspector(holder, group, account, drawnFrom.ctx, drawnFrom.facets);
-                fresh = holder.firstChild;
-            }
-            // What syncSelection does at a drawing: the step of one account stands only while its account is the one picked.
-            if (stepOn && stepOn.account && stepOn.account !== key) stepOn = null;
-
-            var bars = root.querySelectorAll('.bar');
-            for (i = 0; i < bars.length; i++) {
-                var bar = bars[i];
-                var owner = bar.getAttribute('data-account');
-                if (!owner) continue;
-                var picked = !!key && owner === key;
-                if (hasClass(bar, 'sel') !== picked) classSet(bar, 'sel', picked);
-                bar.setAttribute('aria-pressed', picked ? 'true' : 'false');
-                bar.setAttribute('aria-label', String(bar.getAttribute('data-said') || '') + barPickWords(picked));
-                // The bar a step of one account holds is that account's bar alone (a step of several was let go by selectAccount, which called this).
-                if (!stepOn || stepOn.account) {
-                    var lit = !!stepOn && owner === stepOn.account && !!bar.parentNode && bar.parentNode.getAttribute('data-strip') === stepOn.limit;
-                    if (hasClass(bar, 'bar-on') !== lit) classSet(bar, 'bar-on', lit);
-                    // (and the light of a step of several accounts, let go by this pick, goes out)
-                    if (bar.removeAttribute) bar.removeAttribute('data-step-lit');
-                }
-            }
-            if ((!stepOn || stepOn.account) && strip.removeAttribute) strip.removeAttribute('data-step');
-            var steps = root.querySelectorAll('.rail-step');
-            for (i = 0; i < steps.length; i++) {
-                if (steps[i].getAttribute('aria-pressed') !== null) {
-                    steps[i].setAttribute('aria-pressed', stepOn && steps[i].getAttribute('data-focus') === stepOn.key ? 'true' : 'false');
-                }
-            }
-            var rows = root.querySelectorAll('.acc-row');
-            for (i = 0; i < rows.length; i++) {
-                var on = !!key && rows[i].getAttribute('data-focus') === 'acct:' + key;
-                if (hasClass(rows[i], 'active') !== on) classSet(rows[i], 'active', on);
-                rows[i].setAttribute('aria-pressed', on ? 'true' : 'false');
-                rows[i].setAttribute('aria-label', String(rows[i].getAttribute('data-said') || '') + rowPickWords(on));
-            }
-            // The timeline goes to its place (under the bars, or under the plate) and the card comes and goes, by the fold: shut where it stood, open where it stands.
-            foldPlay(plate, strip, wrap, olds, fresh, !!account, prevKey, key);
-            // The place the bars were brought to, and the edges of the rows, are worked out again (the picked bar is brought into its row).
-            barsFit();
-            return true;
-        } catch (err) {
-            // A page that cannot be walked, or a card that cannot be drawn: the page is drawn anew by the caller, which reads the same state.
-            return false;
-        }
     }
 
     // Clear and Escape drop the selection and give the keyboard back to the
@@ -5342,183 +3063,8 @@
         }
     }
 
-    // The figure: account-windows left now of the accounts the limit applies
-    // to, current readings only. With none current it is "—", never 0; a
-    // measured 0 (every current account at the limit) is a real 0.
-    function rowFigure(g) {
-        var m = g.measured || {};
-        var lk = g.last_known || {};
-        return { any: !!m.accounts, text: m.accounts ? windowsLeft(m) : '—', of: slotCount(g),
-                 lastKnown: lk.accounts ? lk : null };
-    }
-
-    // The bars of a limit by what each says now: at the limit (a current
-    // reading), held back now, at the limit when last read (dated, not
-    // exhaustion now), read earlier and not at the limit (dated, not held
-    // back: the plate says what it had), unknown.
-    function limitKinds(g) {
-        var bars = barsOf(g);
-        return {
-            spent: bars.filter(function (b) { return b.state === 'current' && b.at_limit; }),
-            held: bars.filter(function (b) { return b.state !== 'unknown' && heldNow(b) && !b.at_limit; }),
-            was: bars.filter(function (b) { return b.state === 'last_known' && b.at_limit; }),
-            last: bars.filter(function (b) { return b.state === 'last_known' && !b.at_limit && !heldNow(b); }),
-            unknown: bars.filter(function (b) { return b.state === 'unknown'; })
-        };
-    }
-
-    // The held bars by the reason that holds them: one group for each of one or two
-    // named reasons (in the order of FLAG_ORDER, the same on every drawing), else all
-    // in one — three reasons or more, or a bar whose reason is not named.
-    function heldGroups(held) {
-        if (!held.length) return [];
-        var by = {};
-        var unnamed = false;
-        held.forEach(function (b) {
-            var flags = heldFlags(b);
-            if (!flags.length) unnamed = true;
-            flags.forEach(function (f) { (by[f] = by[f] || []).push(b); });
-        });
-        var order = FLAG_ORDER;
-        var keys = Object.keys(by).sort(function (a, b) {
-            var i = order.indexOf(a);
-            var j = order.indexOf(b);
-            return (i < 0 ? order.length : i) - (j < 0 ? order.length : j) || compareText(a, b);
-        });
-        if (unnamed || keys.length > 2) return [{ word: t('legend.restricted'), flag: '', bars: held }];
-        return keys.map(function (f) { return { word: flagWord(f), flag: f, bars: by[f] }; });
-    }
-
-    // What the words under a limit's bars are made of: an item for each state the limit has that the rest of the screen does not say,
-    // in one order — held back (one item for each reason), at the limit when last read, read earlier and not at the limit (with the
-    // sum of what those accounts had). An item is its number and its words and nothing else: the bars above are its sample, the
-    // figure is the plate's, the accounts at the limit now are the plate's bubble over the bars (limitBubble: said there, so not
-    // twice) and the accounts not read are the note's under the windows, so an account with no usable reading has no item here
-    // (its bar is a "?"). The accounts an item counts are named in its hint, one line each (`lines`), never beside the number.
-    function limitLegend(g, index, rowName) {
-        var kinds = limitKinds(g);
-        var items = [];
-        var who = function (b) { return accountName(index, b.account); };
-        heldGroups(kinds.held).forEach(function (group) {
-            items.push({ k: 'held', n: group.bars.length, word: group.word,
-                lines: group.bars.map(function (b) {
-                    return who(b) + ' — ' + (group.flag ? group.word
-                        : (heldFlags(b).map(flagWord).join(', ') || 'restricted'));
-                }) });
-        });
-        // At the limit when last read: dated and muted, not exhaustion now.
-        if (kinds.was.length) {
-            items.push({ k: 'was', n: kinds.was.length, word: t('legend.was_at_limit'),
-                lines: kinds.was.map(function (b) {
-                    return who(b) + ' — at the limit when last read (' + (relTime(b.observed_at) || 'at an unreported time') + ')';
-                }) });
-        }
-        // Read earlier, not at the limit then and not held back: not current, so not in the figure, and what it had is said here.
-        // The plate lights the bars of these accounts when the engine named every one of them.
-        if (kinds.last.length) {
-            var had = kinds.last.reduce(function (sum, b) { return sum + Math.max(0, Math.min(1, b.left)); }, 0);
-            items.push({ k: 'last', n: kinds.last.length, word: t('legend.last'), extra: num(had, 2),
-                accounts: kinds.last.every(function (b) { return !!b.account; }) ? kinds.last.map(function (b) { return b.account; }) : null,
-                lines: kinds.last.map(function (b) {
-                    return who(b) + ' — last known, read ' + (relTime(b.observed_at) || 'at an unreported time');
-                }),
-                note: 'Read earlier and dated on its bar: not current, so not in the figure, never as 0.' });
-        }
-        return items;
-    }
-
-    // The next reported reset as the cells of the row under the legend — the time, how
-    // many accounts reset then (when more than one), how much a full refill gives back if
-    // nothing more is used before it — with the hint of the whole row; or the one cell that
-    // says no time is reported; or null. A cell is `pre`, the value `b` (the figure), `post`.
-    function limitReset(g) {
-        var m = g.measured || {};
-        if (g.next_reset && g.next_reset.at) {
-            var n = g.next_reset.accounts || 0;
-            var back = g.next_reset_returns >= 0.005 ? amountWords(g.next_reset_returns) : '';
-            var when = whenWords(g.next_reset.at);
-            var cells = [boldAt(t('reset.next', { when: when }), when)];
-            if (n > 1) cells.push(boldAt(t('reset.accounts', { n: n }), String(n)));
-            if (back) cells.push(boldAt(t('reset.if_unused', { amount: '+' + back }), '+' + back));
-            return { cells: cells, title: 'The soonest reported reset of a current account'
-                + (back ? ': a full refill then gives back the ' + back + ' account-windows '
-                    + (n === 1 ? 'it uses' : 'they use') + ' now, if nothing more is used before it' : '') + '.' };
-        }
-        if (m.accounts && g.reset_unknown === m.accounts) return { cells: [{ pre: t('reset.none') }], title: '' };
-        return null;
-    }
-
-    function cellText(cell) {
-        return (cell.pre || '') + (cell.b || '') + (cell.post || '');
-    }
-
-    // The accounts that reset at the soonest moment the row says ("next reset … · 3 accounts · +2.70 if unused"): of the bars, the
-    // current ones whose reset time can be read and falls in the engine's own group of the soonest: from the soonest on, to
-    // RESET_CLUSTER_SEC later (quota_summary.RESET_TOLERANCE_SEC: the engine counts the accounts, and what they give back, over that
-    // whole span, not over one instant). The bars carry their reset to the second, cut down, and the engine's moment carries the
-    // fraction of one, so a second before it is let in too.
-    // The row points at them only when they are the ones it counts: how many they are, and what a full refill gives back, 1 − left
-    // added over them, must be what the engine said (to a hundredth). Anything else, and the row says its words and points at no bar.
-    // Null then, and also when the row names no amount or no time.
+    // Nearby reset times form one ladder step; see ladderOf for display grouping.
     var RESET_CLUSTER_SEC = 120;
-    function nextReturn(g) {
-        var next = g.next_reset;
-        if (!next || !next.at || !(g.next_reset_returns >= 0.005)) return null;
-        var soonest = Date.parse(next.at);
-        if (!isFinite(soonest)) return null;
-        var hits = barsOf(g).filter(function (b) {
-            if (b.state !== 'current' || !b.account || typeof b.left !== 'number') return false;
-            var at = Date.parse(b.resets_at || '');
-            return isFinite(at) && at - soonest >= -1000 && at - soonest <= RESET_CLUSTER_SEC * 1000;
-        });
-        if (!hits.length || (typeof next.accounts === 'number' && next.accounts !== hits.length)) return null;
-        var back = hits.reduce(function (sum, b) { return sum + (1 - Math.max(0, Math.min(1, b.left))); }, 0);
-        if (Math.abs(back - g.next_reset_returns) > 0.01) return null;
-        return { accounts: hits.map(function (b) { return b.account; }) };
-    }
-
-    // The full phrases of a limit's states and reset, names and times in them, as the
-    // plate's note says them aloud (the screen reader's, after the word Chart). The screen carries the numbers;
-    // these are what they count.
-    function limitSpoken(g, index) {
-        var out = [];
-        var kinds = limitKinds(g);
-        var named = function (b) { return !!(b.account && index[b.account]); };
-        var spent = kinds.spent;
-        if (spent.length === 1 && named(spent[0])) {
-            out.push(accountName(index, spent[0].account) + ' at the limit'
-                + (spent[0].resets_at ? ' until ' + whenWords(spent[0].resets_at) : ''));
-        } else if (spent.length) {
-            out.push(spent.length + ' at the limit');
-        }
-        var held = kinds.held;
-        if (held.length) {
-            var flags = {};
-            held.forEach(function (b) { heldFlags(b).forEach(function (f) { flags[f] = true; }); });
-            var keys = Object.keys(flags);
-            var word = keys.length === 1 ? flagWord(keys[0]) : 'restricted';
-            out.push((held.length === 1 && named(held[0]) ? accountName(index, held[0].account) : held.length) + ' ' + word);
-        }
-        var wasSpent = kinds.was;
-        if (wasSpent.length) {
-            out.push((wasSpent.length === 1 && named(wasSpent[0]) ? accountName(index, wasSpent[0].account)
-                : wasSpent.length) + ' at the limit when last read'
-                + (wasSpent.length === 1 ? ' (' + (relTime(wasSpent[0].observed_at) || 'at an unreported time') + ')' : ''));
-        }
-        if (kinds.unknown.length) out.push(kinds.unknown.length + ' unknown — not counted');
-        var next = limitReset(g);
-        if (next) out.push(next.cells.map(cellText).join(' · '));
-        return out;
-    }
-
-    // "Lowest left" names a ranking, and its words say so. They stand in the hint of the plate's figure and in its spoken note: the plate
-    // draws no badge for it (the figure is the plate's, and each fact stands once).
-    function tightWords(g) {
-        return 'Lowest average share left among this family’s measured limits: a ranking, not a verdict'
-            + (scopeWords(g) ? '. It binds only its own ' + scopeWords(g) + ', not the family’s other models' : '')
-            + '.';
-    }
-
     // The figure of the plate, a number: its decimal point is the crimson ink, a span of its own (the same trick as the amount of a step of
     // the ladder), and the text of the node is the number whole. No point to colour (a dash, "<0.01", a word) and nothing is red.
     // A part that draws the same figure in its own classes (the chart's tiles) names them in `own` ({num, dot}); the plate's are the default.
@@ -5548,218 +3094,11 @@
         return node;
     }
 
-    // The fact of the plate, with no bubble: the window's name ("Weekly") and, with it, the figure (`figure`: l-fig, the number and its unit),
-    // which stands in the fact's own grid; the plate keeps both for its motion.
-    function factBubble(caption, figure) {
-        var bubble = el('div', 'wt-fact');
-        bubble.appendChild(el('div', 'wt-fact-cap', caption));
-        bubble.appendChild(figure);
-        return bubble;
-    }
-
-    // The accounts at the limit now, in words under the number row: "At the limit · 3", the first of them by name (to
-    // FOOT_NAMES, then "N more", which opens the account list, as the note's does), and in how long the soonest of them is back ("back in 9h";
-    // none, no tail). Only when there are such accounts; it takes the keyboard, and pointed at or focused it lights their bars (dimOnItem).
-    // Null when none is at the limit now. `spent` are the bars of limitKinds.
-    function limitBubble(spent, index, key, plate) {
-        if (!spent.length) return null;
-        var node = el('div', 'wt-limit');
-        var named = spent.filter(function (b) { return !!b.account; });
-        var shown = named.slice(0, FOOT_NAMES);
-        var said = shown.map(function (b) { return accountName(index, b.account); });
-        var nameless = spent.length - named.length;
-        // As the note's: the nameless are counted among the ones not named, but only when some are named (else the bubble has no names to follow).
-        var more = named.length - shown.length + (shown.length ? nameless : 0);
-        var soonest = null;
-        spent.forEach(function (b) {
-            var at = Date.parse(b.resets_at || '');
-            if (isFinite(at) && at > Date.now() && (soonest === null || at < soonest)) soonest = at;
-        });
-        var head = t('plate.at_limit', { n: spent.length });
-        var back = '';
-        if (soonest !== null) {
-            back = t('plate.back', { n: spent.length, 'in': untilWords(soonest) });
-        }
-        node.appendChild(headNode('b', 'wt-limit-head', head));
-        said.forEach(function (name, i) {
-            node.appendChild(document.createTextNode(' '));
-            node.appendChild(el('span', 'wt-who', i < said.length - 1 ? name + ',' : name));
-        });
-        node.setAttribute('tabindex', '0');
-        node.setAttribute('role', 'group');
-        node.setAttribute('aria-label', [head].concat(said, back ? [back] : []).join(', '));
-        node.setAttribute('data-k', 'limit');
-        node.setAttribute('data-focus', 'atlimit:' + key);
-        node.title = hintOf(spent.map(function (b) {
-            return accountName(index, b.account) + ' — at the limit' + (b.resets_at ? ' until ' + whenWords(b.resets_at) : '');
-        }));
-        // The plate dims to these accounts' bars when the engine named every one of them; else to the bars at the limit.
-        var own = named.length === spent.length ? named.map(function (b) { return b.account; }) : null;
-        if (own) node.setAttribute('data-accounts', JSON.stringify(own));
-        dimOnItem(node, plate, 'limit', function () { return plate; }, own);
-        if (more > 0) {
-            var rest = el('button', 'cover-link wt-foot-more', t('foot.more', { n: more }));
-            rest.setAttribute('type', 'button');
-            rest.setAttribute('data-focus', 'atlimit-more:' + key);
-            rest.setAttribute('aria-label', t('foot.more_label', { n: more }));
-            rest.addEventListener('click', function (e) {
-                e.stopPropagation();
-                accountsSet(true);
-                rerender();
-                restoreFocus('accounts');
-            });
-            node.appendChild(document.createTextNode(' '));
-            node.appendChild(rest);
-        }
-        if (back) {
-            node.appendChild(document.createTextNode(' · '));
-            node.appendChild(el('span', 'wt-limit-back', back));
-        }
-        return node;
-    }
-
-    // One row per limit: its bars, its fact, the words of what is not in the line and the next reported reset under them — and one control,
-    // in the same slot of every row, that shows its chart below (on the charted row, hides it).
-    // The row is the plate of the window row (windowPlate), the only one drawn, and the charted limit's: it stands under its window's tab, which
-    // already says the name and the average left. It has no ground and no box of its own. In the order of its markup (the order of the keyboard): the bars over
-    // the whole width; the fact (factBubble: the figure and its unit, with the window's name beside them), the model list (the scope row, windowPlate's, when
-    // the length has several limits), the stamp (how many accounts are read, and how old) and the chart word, in one row; then the notes, each on a line of its own: the
-    // accounts at the limit now (limitBubble), the accounts not read (windowFoot's note) and the family's manual resets (extras), the states and the reset.
-    // Its control is the kit's text action, the word "Chart", pressed while the chart is shown; the whole spoken summary is a note the word is described by.
-    // `caption` is the window's name for the fact's caption; `extras` are the parts windowPlate hands to it: scope, foot, credits.
-    function limitRow(g, name, chartKey, index, markTightest, stamp, caption, extras) {
-        var inChart = timelineOpen && g.key === chartKey;
-        var row = el('div', 'lrow' + (inChart ? ' sel' : '') + ' wt-plate');
-        var fig = rowFigure(g);
-        var m = g.measured || {};
-        row.appendChild(barStrip(g, name, index));
-
-        // The word is its own name (no aria-label, no title: kit: text action); aria-pressed says whether the chart is shown.
-        var chartBtn = wordButton('plate.chart');
-        chartBtn.className += ' l-chart';
-        chartBtn.setAttribute('data-focus', 'limit:' + g.key);
-        chartBtn.setAttribute('aria-pressed', inChart ? 'true' : 'false');
-        chartBtn.setAttribute('aria-describedby', 'quotas-win-say');
-        chartBtn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            // In a pressed card the word lets the card go and shows the chart (the chart folds shut under the pressed card by its state alone).
-            var held = typeof chartBtn.closest === 'function' ? chartBtn.closest('.kt-open') : null;
-            if (held) {
-                // The word hides as the card lets go: a keyboard that is on it goes to the picked bar first (else the plate), so it is never left on the page.
-                var plateHeld = null;
-                try {
-                    if (document.activeElement === chartBtn && typeof chartBtn.closest === 'function') plateHeld = chartBtn.closest('.wt-plate');
-                } catch (err) {
-                    plateHeld = null;
-                }
-                var chartWas = timelineOpen;
-                timelineOpen = true;
-                chartAsked = '';
-                chartCursor = null;
-                cardPress(held, false);
-                if (!chartWas) rerender();
-                if (plateHeld) {
-                    // A drawing makes the plate anew and puts the keyboard back by its key; where the keyboard is still on the page or on the node that went, it goes by the rule above.
-                    var kept = document.activeElement;
-                    if (plateHeld.isConnected === false) plateHeld = root.querySelector('.wt-plate');
-                    if (plateHeld && (focusLost(kept) || kept === chartBtn)) chartStripLeave(plateHeld);
-                }
-                return;
-            }
-            // The plate is the charted limit's: its word folds the timeline or unfolds it. Another window is picked in the window row
-            // (pickWindow), never here.
-            timelineOpen = !timelineOpen;
-            chartAsked = '';
-            chartCursor = null;
-            rerender();
-        });
-        // What the plate says in full, for a reader who hears it: a reader tabbing through the limits hears each one, then what the
-        // word does.
-        var spoken = [name];
-        if (scopeWords(g)) spoken.push(scopeWords(g));
-        spoken.push(fig.any ? fig.text + ' of ' + fig.of + ' account-windows left now' : 'no current reading');
-        if (fig.lastKnown) {
-            spoken.push('last known ' + num(fig.lastKnown.windows, 2) + ' account-windows, read '
-                + (relTime(fig.lastKnown.oldest_observed_at) || 'at an unreported time') + ', not counted');
-        }
-        spoken.push(t('win.say_current', { n: fig.of, current: m.accounts || 0 }));
-        limitSpoken(g, index).forEach(function (w) { spoken.push(w); });
-        restrictionWords(g).forEach(function (w) { spoken.push(w); });
-        if (restrictionWords(g).length && num(g.unrestricted_windows, 2)) {
-            spoken.push(num(g.unrestricted_windows, 2) + ' unrestricted');
-        }
-        coverageWords(g).forEach(function (w) { spoken.push(w); });
-        if (markTightest) spoken.push('lowest average share left in this family, a ranking, not a verdict');
-        var say = el('span', 'sr-only', spoken.join(' — '));
-        say.setAttribute('id', 'quotas-win-say');
-
-        // The figure says its unit by itself: account-windows of the accounts the limit applies to — "10.35 of 19 accounts".
-        // With no current reading it is a dash in the quiet ink, never a zero (the hint says so).
-        var figure = el('div', 'l-fig');
-        figure.appendChild(figureNode(fig.text, !fig.any));
-        figure.appendChild(el('span', 'meta-num of', ' ' + t('plate.of', { n: fig.of })));
-        figure.title = (fig.any ? '' : 'No current reading — not zero. ')
-            + 'Account-windows left now: the share each account read now has left of this limit, added up (a '
-            + 'full account counts 1), of the ' + plural(fig.of, 'account') + ' it applies to. Last-known and '
-            + 'unknown accounts are not counted, never as 0.'
-            + (markTightest ? ' ' + tightWords(g) : '');
-        var factNode = factBubble(caption || name, figure);
-        // The count the figure is of, for the copy of the number in the account card's strip ("5.53 of 16", cardTake): the caption is never parsed.
-        if (fig.of > 0) factNode.setAttribute('data-of', String(fig.of));
-        row.appendChild(factNode);
-        // The model list (windowPlate's scope row) stands after the fact, in the area beside it.
-        if (extras && extras.scope) row.appendChild(extras.scope);
-        // The stamp of the window (windowStamp) stands in the line of the model list, on its right, before the chart word.
-        if (stamp) {
-            stamp.className += ' wt-stamp';
-            row.appendChild(stamp);
-        }
-        row.appendChild(chartBtn);
-        row.appendChild(say);
-        var atLimit = limitBubble(limitKinds(g).spent, index, g.key, row);
-        if (atLimit) row.appendChild(atLimit);
-        // Under the number row, the notes: who is not read (the note, its hidden copy where this window has none) and the family's manual resets.
-        if (extras && extras.foot) row.appendChild(extras.foot);
-        if (extras && extras.credits) row.appendChild(extras.credits);
-
-        // Then the states, then the reset — each only when it has something to say. The note says the names and the age of the readings that are
-        // dated (last known), so where the note stands that item is not said again. "At the limit when last read" stays: it is another meaning,
-        // and it explains the dashed base of a bar, which the note does not.
-        var states = limitLegend(g, index, name);
-        if (extras && extras.foot) states = states.filter(function (item) { return item.k !== 'last'; });
-        var legend = legendNode(states, g.key);
-        if (legend) row.appendChild(legend);
-        var next = limitReset(g);
-        if (next) {
-            var reset = resetNode(next.cells, next.title);
-            var back = nextReturn(g);
-            if (back) {
-                // The row is the handle of the accounts that reset then: pointed at, focused or touched, it lights their bars. It keeps the
-                // keyboard through a redraw by its focus key, and says the names aloud.
-                reset.setAttribute('tabindex', '0');
-                reset.setAttribute('role', 'group');
-                reset.setAttribute('aria-label', next.cells.map(cellText).join(' · ') + ' — '
-                    + back.accounts.map(function (key) { return accountName(index, key); }).join(', '));
-                reset.setAttribute('data-k', 'reset');
-                reset.setAttribute('data-focus', 'nx:' + g.key);
-                reset.setAttribute('data-accounts', JSON.stringify(back.accounts));
-                dimOnItem(reset, row, 'reset', function () { return row; }, back.accounts);
-            }
-            // The ladder under the rings says the same on the wide shell: while it is drawn the row gives way to it (the mark; on the narrow shell the row stays).
-            if (ladderDrawn) {
-                reset.className += ' nx-in-ladder';
-                ladderLine = reset;
-            }
-            row.appendChild(reset);
-        }
-        return row;
-    }
-
     // A hint of one line for each account, to eight and then how many more; `note`,
     // when there is one, says what the kind of account means, after them.
     function hintOf(lines, note) {
         var shown = lines.slice(0, 8);
-        if (lines.length > 8) shown.push('+' + (lines.length - 8) + ' more');
+        if (lines.length > 8) shown.push(t('hint.more', { n: lines.length - 8 }));
         if (note) shown.push(note);
         return shown.join('\n');
     }
@@ -5967,7 +3306,7 @@
         too_old: 'foot.why_too_old',
         no_reading_in_answer: 'foot.why_no_reading_in_answer'
     };
-    var FOOT_NAMES = 3;
+    var FOOT_NAMES = 2;
 
     // The accounts of a window that have no current reading, in groups: those read before (last known) first, then those with none, a group
     // for each reason. `k` is the kind of bar the group's accounts are drawn with (last, unknown): what the plate dims to.
@@ -5995,7 +3334,7 @@
         (function visit(node) {
             for (var i = 0; i < node.childNodes.length && !found; i++) {
                 var child = node.childNodes[i];
-                if (hasClass(child, 'wt-plate')) found = child;
+                if (hasClass(child, 'q-plate')) found = child;
                 else visit(child);
             }
         })(section || from);
@@ -6030,7 +3369,6 @@
         foot.appendChild(headNode('span', 'wt-foot-head', t('foot.not_read', { n: unread.length })));
         foot.appendChild(document.createTextNode(' '));
         footGroups(unread).forEach(function (group, i) {
-            if (i) foot.appendChild(document.createTextNode(' · '));
             var words;
             if (group.kind === 'last_known') {
                 var dated = group.bars.map(function (b) { return b.observed_at; }).filter(Boolean).sort();
@@ -6048,9 +3386,11 @@
             }
             var span = el('span', 'wt-foot-g');
             span.setAttribute('data-k', group.k);
-            span.appendChild(document.createTextNode(words + ' · '));
+            // (the dot before a second group stands inside the group: a box, so it never opens a line alone)
+            span.appendChild(document.createTextNode((i ? '· ' : '') + words + ' · '));
             var named = group.bars.filter(function (b) { return !!b.account; });
-            var shown = named.slice(0, FOOT_NAMES);
+            // Few accounts are named; more are counted (the hint names them all, and the group lights their bars).
+            var shown = named.length <= FOOT_NAMES && named.length === group.bars.length ? named : [];
             var said = shown.map(function (b) { return accountName(index, b.account); });
             // The comma between names stands inside the name before it (a name is a box, and a line may break before a box, so a comma
             // outside would open a line): "name," then a space, and the last name has none.
@@ -6058,10 +3398,8 @@
                 if (j) span.appendChild(document.createTextNode(' '));
                 span.appendChild(el('span', 'wt-who', j < said.length - 1 ? name + ',' : name));
             });
-            // Bars the engine did not name (an older answer) are counted, not named.
-            var nameless = group.bars.length - named.length;
             if (!shown.length) {
-                said = [plural(nameless, 'account')];
+                said = [plural(group.bars.length, 'account')];
                 span.appendChild(el('span', 'wt-who', said[0]));
             }
             if (!hold) {
@@ -6070,27 +3408,12 @@
                 span.setAttribute('aria-label', words + ' — ' + said.join(', '));
                 span.setAttribute('data-focus', 'foot:' + group.kind);
                 // The plate dims to the group's own accounts when the engine named every one of them; else to the kind of bar they are.
-                var own = nameless ? null : group.bars.map(function (b) { return b.account; });
+                var own = named.length === group.bars.length ? group.bars.map(function (b) { return b.account; }) : null;
                 if (own) span.setAttribute('data-accounts', JSON.stringify(own));
                 dimOnItem(span, foot, group.k, function () { return platePanel(foot); }, own);
             }
+            if (i) foot.appendChild(document.createTextNode(' '));
             foot.appendChild(span);
-            var more = named.length - shown.length + (shown.length ? nameless : 0);
-            if (more > 0) {
-                var rest = el('button', 'cover-link wt-foot-more', t('foot.more', { n: more }));
-                rest.setAttribute('type', 'button');
-                if (!hold) {
-                    rest.setAttribute('data-focus', 'foot-more:' + group.kind);
-                    rest.setAttribute('aria-label', t('foot.more_label', { n: more }));
-                    rest.addEventListener('click', function (e) {
-                        e.stopPropagation();
-                        accountsSet(true);
-                        rerender();
-                        restoreFocus('accounts');
-                    });
-                }
-                foot.appendChild(rest);
-            }
         });
         return foot;
     }
@@ -6157,10 +3480,10 @@
     }
 
     function creditProvenance(credits) {
-        var text = credits.observed_at ? 'observed ' + whenWords(credits.observed_at) : 'observation time unavailable';
-        if (credits.source) text += ' · source ' + credits.source;
-        if (credits.label) text += ' · reported “' + credits.label + '”';
-        return text + '. The count does not say which limit a manual reset restores.';
+        var text = credits.observed_at ? t('cooldown.observed', { when: whenWords(credits.observed_at) }) : t('credits.time_unknown');
+        if (credits.source) text += ' · ' + t('credits.source', { source: credits.source });
+        if (credits.label) text += ' · ' + t('credits.reported', { label: credits.label });
+        return text + '. ' + t('credits.no_limit');
     }
 
     // The family's manual-reset credits as a node (the plate takes it under its notes), or null when the family reports none.
@@ -6217,9 +3540,7 @@
         if (unit === 'minor') {
             if (!parts || typeof item.decimal_places !== 'number' || item.decimal_places % 1 !== 0
                     || item.decimal_places < 0 || item.decimal_places > 12) {
-                return text + (cur ? ' ' + cur : '') + ' minor units ('
-                    + (item.decimal_places === null || item.decimal_places === undefined ? 'scale not reported'
-                        : 'reported scale ' + item.decimal_places + ', not formatted') + ')';
+                return t('money.unscaled', { amount: text + (cur ? ' ' + cur : ''), scale: item.decimal_places === null || item.decimal_places === undefined ? t('money.scale_unknown') : t('money.scale_raw', { n: item.decimal_places }) });
             }
             var places = item.decimal_places;
             var digits = parts[2].length > places ? parts[2] : new Array(places - parts[2].length + 2).join('0') + parts[2];
@@ -6288,9 +3609,8 @@
                             + (item.limit ? ' ' + t('res.of', { limit: moneyWords(item.limit, item) }) : '')
                             + (item.enabled === false ? ' (' + t('res.off') + ')' : '');
                     } else if (name === 'resets') {
-                        text = label + ': ' + (item.available_count === null ? t('res.count_unknown') : t('res.available', { n: item.available_count }))
-                            + ' (' + (item.usable_now === false ? t('res.usable_no') : item.usable_now === true
-                                ? t('res.usable_yes') : t('res.usable_unknown')) + ')';
+                        // A count is "usable now" only where the engine says so; else it is granted, not usable now or of unknown usability (never "available").
+                        text = label + ': ' + offerWords(item).v;
                     } else {
                         text = item.code + (item.detail ? ' — ' + engineWord(String(item.detail)) : '');
                     }
@@ -6344,44 +3664,6 @@
        ------------------------------------------------------------------ */
 
     var WINDOW_PLACES = [18000, 604800, 2592000];
-    // The longest part of the motion: the numbers' fade, and the bars' steps and growth together.
-    var MOTION_MS = 220;
-    // The whole movement of a family's pick ends within this many ms (kit: rail, motion): the tabs' slide (--dur-flip), the thread, the
-    // windows one after another, the ladder of resets after them (its head, up to four steps and the word "N more", numbered on from the windows), and the note and the
-    // note after the last row (the tokens of the motion group): 380 + 8 x 70 + 280 = 1220 ms with three windows, four steps and the word (the word's row is the note's). The stamp is not in the rail.
-    var RAIL_MOTION_MS = 1240;
-    // The slide of the head's tabs runs this long (--dur-flip, kit: motion): a drawing inside the span of the movement puts the slide on its tabs
-    // (markSlide) only while it is still running.
-    var FLIP_MS = 450;
-    // The keyframes of the movement (kit: motion): the animations of a drawing that clockSet gives the start time of the pick.
-    var RAIL_KEYFRAMES = ['rail-slide', 'rail-yield', 'rail-draw', 'rail-drop', 'rail-fade'];
-    // The sweep of the rings ends within this many ms of the pick (kit: ring, motion): the last row of a family comes down (--rail-row-at and
-    // --rail-row-step apart, up to five rows) and its ring sweeps for --dur-sweep: 380 + 4 x 70 + 650 = 1310 ms. A drawing inside the span keeps the sweep.
-    var SWEEP_MS = 1400;
-    var SWEEP_KEYFRAMES = ['ring-sweep-arc', 'ring-sweep-dot'];
-
-    // The page's own clock (document.timeline) now, in ms; null where the page has none (or it is not running).
-    function timelineNow() {
-        try {
-            var now = document.timeline ? document.timeline.currentTime : null;
-            return typeof now === 'number' && isFinite(now) ? now : null;
-        } catch (err) {
-            return null;
-        }
-    }
-
-    // Once per drawing of a movement, after it is made: every animation of the movement (by its keyframes' name, so no transition is
-    // touched) takes the time of the pick as its start time. The animations the drawing replaced were on that clock, so those that
-    // stand in their place are at the same moment of their course: no step, no restart, and nothing is run by a frame of ours. The rail, the sweep
-    // of the rings and the ladder each call it with their keyframes and the time of their own pick.
-    function clockSet(keyframes, start) {
-        try {
-            var running = document.getAnimations();
-            for (var i = 0; i < running.length; i++) {
-                if (keyframes.indexOf(running[i].animationName) >= 0) running[i].startTime = start;
-            }
-        } catch (err) { /* the animations go on by their own clock */ }
-    }
 
     function reducedMotion() {
         return mediaIs('(prefers-reduced-motion: reduce)');
@@ -6546,7 +3828,8 @@
                     limit: limit, share: null, state: 'unknown', observed_at: seen[0] || null,
                     ends_at: ends(bal) || ends(spend), demand: null };
         if (bal && bal.row.unlimited === true) {
-            out.state = !kept && bal.current ? 'unlimited' : 'unknown';
+            out.state = 'unlimited';
+            out.last_known = kept || !bal.current;
         } else if (left !== null && limit !== null && limit > 0) {
             out.share = Math.max(0, Math.min(1, left / limit));
             out.state = !kept && bal.current && spend.current ? 'current' : 'last_known';
@@ -6562,18 +3845,16 @@
     // One account's bar on the plate: its share left, with its money in the words.
     function budgetBar(c) {
         if (c.state === 'unlimited') {
-            return { account: c.key, state: 'unlimited', left: null,
-                     words: c.label + ': unlimited included usage — no share to show' };
+            return { account: c.key, state: 'unlimited', left: null, last_known: !!c.last_known,
+                     observed_at: c.observed_at, resets_at: c.ends_at,
+                     words: t('budget.unlimited_words', { name: c.label }) };
         }
         if (c.state === 'unknown') return { account: c.key, state: 'unknown', left: null, why: 'not_read' };
         var ends = c.ends_at ? whenWords(c.ends_at) : '';
-        var words = c.label + ': ' + exactPct(c.share * 100, c.share <= 0) + '% left'
-            + (c.state === 'last_known' ? ' when last read' : '')
-            + ' — ' + moneyShort(c.left, c.scale) + ' of ' + moneyShort(c.limit, c.scale)
-            + (ends ? ' · cycle ends ' + ends : '')
-            + (c.state === 'last_known'
-                ? ' · last known, read ' + (relTime(c.observed_at) || 'at an unreported time') + ', not current'
-                : (c.observed_at ? ' · read ' + relTime(c.observed_at) : ''));
+        var words = t(c.state === 'last_known' ? 'budget.share_last' : 'budget.share', { name: c.label, pct: exactPct(c.share * 100, c.share <= 0), left: moneyShort(c.left, c.scale), limit: moneyShort(c.limit, c.scale) })
+            + (ends ? ' · ' + t('budget.ends', { when: ends }) : '')
+            + (c.state === 'last_known' ? ' · ' + t('budget.last_read', { when: relTime(c.observed_at) || t('reading.time_unknown') })
+                : (c.observed_at ? ' · ' + t('budget.read', { when: relTime(c.observed_at) }) : ''));
         // Never at the limit: an included allowance used up is not a block (the pay-as-you-go spend
         // goes on), and the engine says its figures do not decide whether a request can run.
         return { account: c.key, state: c.state, left: c.share, at_limit: false, restricted: false,
@@ -6599,7 +3880,7 @@
         // One scale for the sum: the first account's. An account in another one is not added.
         var scale = null;
         reads.forEach(function (c) {
-            if (!scale && c.scale && (c.state === 'current' || c.state === 'unlimited')) scale = c.scale;
+            if (!scale && c.scale && (c.state === 'current' || (c.state === 'unlimited' && !c.last_known))) scale = c.scale;
         });
         reads.forEach(function (c) {
             if (c.state === 'current' && !sameScale(c.scale, scale)) {
@@ -6609,8 +3890,8 @@
         });
         var by = function (state) { return reads.filter(function (c) { return c.state === state; }); };
         var current = by('current');
-        var unlimited = by('unlimited');
-        var last = by('last_known');
+        var unlimited = by('unlimited').filter(function (c) { return !c.last_known; });
+        var last = by('last_known').concat(by('unlimited').filter(function (c) { return c.last_known; }));
         var unknown = by('unknown');
         var left = 0;
         var limit = 0;
@@ -6635,18 +3916,18 @@
         var legend = [];
         if (unlimited.length) {
             legend.push({ k: 'unlimited', n: unlimited.length, word: t('cycle.unlimited'),
-                lines: unlimited.map(function (c) { return c.label + ' — unlimited included usage'; }),
-                note: 'Unlimited included usage has no share: it is not in the figure, the average or the bars.' });
+                lines: unlimited.map(function (c) { return t('budget.unlimited_name', { name: c.label }); }),
+                note: t('budget.unlimited_note') });
         }
         if (last.length) {
             legend.push({ k: 'last', n: last.length, word: t('cycle.last_not_counted'),
                 lines: last.map(function (c) {
-                    return c.label + ' — last known, read ' + (relTime(c.observed_at) || 'at an unreported time');
+                    return t('reading.last_name', { name: c.label, when: relTime(c.observed_at) || t('reading.time_unknown') });
                 }),
-                note: 'Read earlier and dated on its bar: not current, so not in the figure or the average, never as 0.' });
+                note: t('budget.last_note') });
         }
         var reset = [{ pre: t('cycle.billing_cycle'),
-                       title: 'Included usage renews when an account’s own billing cycle ends — a cycle’s allowance, not a window of time.' }];
+                       title: t('budget.renewal') }];
         var soonest = null;
         var same = 0;
         current.forEach(function (c) {
@@ -6660,7 +3941,7 @@
             }
         });
         if (soonest !== null) {
-            var endsHint = 'The soonest billing-cycle end among the accounts read now; each account’s own is on its bar and its card.';
+            var endsHint = t('budget.soonest');
             var soonWhen = whenWords(new Date(soonest).toISOString());
             reset.push(Object.assign(boldAt(t('reset.next', { when: soonWhen }), soonWhen), { title: endsHint }));
             if (same > 1) reset.push(Object.assign(boldAt(t('reset.accounts', { n: same }), String(same)), { title: endsHint }));
@@ -6677,8 +3958,7 @@
         var onDemand = null;
         if (scale && demand > 0) {
             onDemand = { amount: moneyShort(demand, scale),
-                         title: 'Personal on-demand spending this cycle, added over ' + plural(payers, 'account')
-                             + '. It is spent beyond the included usage, not part of it; a team pool is not counted.' };
+                         title: t('budget.demand_title', { accounts: plural(payers, 'account') }) };
         }
 
         // What the status line of the section reads, as it does from a window's bars.
@@ -6686,7 +3966,7 @@
         var lastTimes = last.map(function (c) { return c.observed_at; }).filter(Boolean).sort();
         var key = 'cycle:' + hid;
         var status = {
-            bars: reads.map(function (c) { return { account: c.key, state: c.state === 'unlimited' ? 'current' : c.state }; }),
+            bars: reads.map(function (c) { return { account: c.key, state: c.state === 'unlimited' ? (c.last_known ? 'last_known' : 'current') : c.state }; }),
             observed: { newest_at: times[times.length - 1] || '', oldest_at: times[0] || '' },
             last_known: { oldest_observed_at: lastTimes[0] || '' }
         };
@@ -6710,58 +3990,14 @@
         var quota = (account && account.quota) || {};
         if (!quota.absence || quota.absence.action_kind !== 'source_missing' || (quota.constraints || []).length) return false;
         var c = cycleOf(account);
-        return !!c && (c.state === 'current' || c.state === 'unlimited');
-    }
-
-    // The plate of the budget, in the plate of a window: the figure, the accounts'
-    // bars, the words under them. It has no chart word: there is no history of money
-    // to draw. The mean share left is the tab's alone, as a window's is.
-    function cyclePlate(cycle, place, index, stamp, foot, credits) {
-        var plate = el('div', 'lrow wt-plate wt-plate-cycle');
-        plate.setAttribute('id', 'quotas-win-panel');
-        plate.setAttribute('role', 'tabpanel');
-        plate.setAttribute('aria-labelledby', 'quotas-win-' + place.seconds);
-        var drawn = cycle.bars.filter(function (b) { return b.state !== 'unlimited'; });
-        if (drawn.length) plate.appendChild(barStrip({ key: cycle.key, bars: drawn }, cycle.name + ' billing cycle', index));
-        var onlyUnlimited = !cycle.counted && cycle.unlimited.length > 0 && !cycle.lastKnown && !cycle.unknown;
-        var figure = el('div', 'l-fig');
-        figure.appendChild(figureNode(
-            cycle.counted ? moneyShort(cycle.left, cycle.scale) : (onlyUnlimited ? t('cycle.unlimited') : '—'),
-            !(cycle.counted || onlyUnlimited)));
-        figure.appendChild(el('span', 'meta-num of', ' ' + (cycle.counted ? t('cycle.left_of', { limit: moneyShort(cycle.limit, cycle.scale) })
-            : (onlyUnlimited ? t('cycle.included_usage') : t('common.no_current_reading')))));
-        figure.title = (cycle.counted || onlyUnlimited ? '' : 'No current reading — not zero. ')
-            + 'Included usage left now: the money each account read now has left of its billing cycle, added up, of what '
-            + 'their cycles allow (' + plural(cycle.counted, 'account') + '). It is a cycle’s allowance, not a window of '
-            + 'time, and it does not say whether a request can run. Last-known, unknown and unlimited accounts are not '
-            + 'counted, never as 0. The mean of each counted account’s share left (what it has left ÷ what its cycle allows) is on the tab.';
-        plate.appendChild(factBubble(t('cycle.period'), figure));
-        if (stamp) {
-            stamp.className += ' wt-stamp';
-            plate.appendChild(stamp);
-        }
-        // What is spent beyond the plan stands in the bubble of the accounts at the limit (the pale crimson), not as a red cell of the reset row.
-        if (cycle.onDemand) {
-            var over = el('div', 'wt-limit');
-            over.appendChild(headNode('b', 'wt-limit-head', t('plate.over_plan', { amount: cycle.onDemand.amount })));
-            over.title = cycle.onDemand.title;
-            plate.appendChild(over);
-        }
-        if (foot) plate.appendChild(foot);
-        if (credits) plate.appendChild(credits);
-        // The budget's legend is whole: it says "not counted" (money), which the note's words do not.
-        var legend = legendNode(cycle.legend, cycle.key);
-        if (legend) plate.appendChild(legend);
-        plate.appendChild(resetNode(cycle.reset));
-        plateMotion(plate);
-        return plate;
+        return !!c && (c.state === 'current' || (c.state === 'unlimited' && !c.last_known));
     }
 
     // Where a window's timeline stands, the budget says there is none.
     function cycleNote() {
         var box = el('div', 'tl-block');
         var note = el('div', 'meta-line reserve-note', t('cycle.no_timeline'));
-        note.title = 'Money is read as it stands now. No history of it is kept, so there is nothing to draw.';
+        note.title = t('budget.no_history');
         box.appendChild(note);
         return box;
     }
@@ -6770,30 +4006,18 @@
     // chart control keeps, so there is one, not two. It is answered with motion,
     // and it takes the graph back to this window from the combined view (that
     // choice is the graph's own: graphMode, which the window row never holds).
-    // A pick of a tab of the row says which place it left (`from`, the tab's key), whether it was showing its preview at the click (`lit`) and
-    // whether the pointer held it pressed (`pressed`, markPressed), for the kit's start state of the ring and the numbers; a pick of a scope
-    // (the same tab) says none of it, and moves no number.
-    function pickWindow(g, from, lit, pressed, sweep) {
+    function pickWindow(g) {
         // The pick of another limit moves the ladder of resets (it stands on the window picked); a press on the one that stands moves nothing.
+        // The ladder of another limit starts with no step lit and its few steps (qLit, qLadderAll).
         if (chartKeys[g.harness] !== g.key) {
-            ladderPending = true;
-            // The ladder of another window starts folded, at its start, with no step pressed.
-            ladderFold();
-            stepClear();
+            qLit = null;
+            qLadderAll = false;
         }
         if (chartKeys[g.harness] !== g.key) scheduleAll = false;
         chartKeys[g.harness] = g.key;
         graphMode = 'window';
         chartAsked = '';
         chartCursor = null;
-        markFrom = '';
-        markLit = false;
-        winFrom = from || '';
-        winLit = !!lit;
-        winPressed = !!pressed;
-        // The ring of the window picked draws its arc anew (kit: ring, sweep): a pick of a tab other than the one that stands, not of a scope.
-        sweepPending = sweep || '';
-        motionPending = true;
         rerender();
     }
 
@@ -6803,14 +4027,10 @@
         return !on || graphMode === 'joint';
     }
 
-    // The ladder of resets under the rings (kit: rail; the comment that opens that part of the section is its contract). It stands on the steps of the window
-    // picked, `g`, soonest first: of the bars, the current ones that name their account, have a number left and a reset still to come (a second back is let in:
-    // the clock of the reading and ours differ by that); a step is the soonest of those not taken yet and all that reset within RESET_CLUSTER_SEC after it (the
-    // engine's own group, as nextReturn takes it), with the accounts of it and what they give back, 1 - left added over them (the plate's "if unused"): the first
-    // step is the row of the next reset on the plate, in time and in amount. Then the NEIGHBOURING steps that say the same in how long (untilWords, taken from this very `now`
-    // as the filter is) are glued into one: the earliest moment (at, iso), the accounts of all (each once), the sum of what they give back, and the latest moment (last, lastIso; count
-    // is how many steps went into it); the first step may then be wider than the plate's row of the next reset (the same moment, the amount and the accounts no fewer). Null where the
-    // family has no window of bars to stand on (the billing-cycle budget of Cursor); {steps: [], now} where the window has bars and no reset to come.
+    // Ladder groups current account resets within 120 seconds, then merges adjacent
+    // steps with the same countdown label. Its sums are display groups, which can
+    // exceed the server's next_reset_returns or individual chart schedule events.
+    // The chart and next-reset row retain the server's original grouping.
     function ladderOf(g) {
         if (!g || g.cycle) return null;
         var now = Date.now();
@@ -6854,10 +4074,6 @@
 
     // The most steps the ladder draws, if the room allows; the rest of the resets (the steps over that number) are counted in "N more".
     var LADDER_STEPS = 4;
-    // The movement of the ladder for the reader's pick of a window ends within this many ms of the pick (kit: rail, motion): --ladder-at, the head, four steps and
-    // the word that counts what did not fit, a row after another (--rail-row-step), the last of them coming down for --dur-rail-row: 100 + 5 x 70 + 280 = 730 ms.
-    var LADDER_MS = 800;
-    var LADDER_KEYFRAMES = ['ladder-drop', 'ladder-leave'];
 
     // How long to a moment, said from the whole remainder and rounded down like a countdown: under a minute "<1m", under an hour the minutes ("40m"), under a day the hours
     // alone ("5h"), a day or more the days and the hours after them ("2d 5h"; "2d" when the hours are none). Written as the names of the windows are (5h, 7d: no space inside
@@ -6875,20 +4091,6 @@
         var days = Math.floor(hours / 24);
         var rest = hours - days * 24;
         return rest ? t('ladder.in_day_hour', { d: days, h: rest }) : t('ladder.in_day', { v: days });
-    }
-
-    // The amount of a step ("+2.70") with the decimal point in the crimson ink (a span of its own); the text of the node stays the amount.
-    function ladderAmount(amount) {
-        var node = el('span', 'rail-step-amount');
-        var at = amount.indexOf('.');
-        if (at < 0) {
-            node.appendChild(document.createTextNode(amount));
-            return node;
-        }
-        node.appendChild(document.createTextNode(amount.slice(0, at)));
-        node.appendChild(el('span', 'rail-step-dot', '.'));
-        node.appendChild(document.createTextNode(amount.slice(at + 1)));
-        return node;
     }
 
     // The classes a node wears, as one string: an html node (and the tests' nodes) keeps them in className; an svg node's className is an object, so its class attribute is read.
@@ -6915,11 +4117,6 @@
         else node.className = names.join(' ');
     }
 
-    // The widths the script mirrors from the stylesheet's @media, the only places it writes them: the shell is the narrow one up to NARROW_SHELL_MAX (the ladder is not drawn there), and the
-    // card of an account opens by the hover of a pointer on any screen that is not the narrow one up to HOVER_CARD_NARROW_MAX (a finger and a narrow screen press only). That one is asked as the
-    // stylesheet's own max-width, negated, so that no width falls between the two.
-    var NARROW_SHELL_MAX = 859.98;
-    var HOVER_CARD_NARROW_MAX = 520.98;
 
     // Whether a media query matches now (false where the page cannot ask).
     function mediaIs(query) {
@@ -6935,553 +4132,938 @@
         return root && typeof root.querySelectorAll === 'function' ? root.querySelectorAll(selector) : [];
     }
 
-    // The ladder's markup (kit: rail): the zone (the room the rail leaves under the rings), the ladder in it with its head, the window of its steps (every step of the
-    // picked window, each a tab stop whose pointer, keyboard and touch light the bars of its accounts on the plate, as the row of the next reset does) and the word under
-    // the window ("N more", or "less" while it is open). `base` is the number of the first row for the movement of a family's pick (--i): the rings' count, so the ladder
-    // comes down after them. It keeps what the fit needs in ladderZone (ladderFit reads the layout once, at the end of the drawing) and returns the zone, or null when the
-    // window has no ladder. Until the fit has run (a bare document has no layout) the first LADDER_STEPS stand and the word counts the rest. The word opens the ladder in
-    // its own place (ladderToggle): the steps stand in a window that scrolls (ladderOpen, ladderTop outlive the drawing, for the limit they were pressed on: ladderKey);
-    // nothing else on the page is touched.
-    function ladderNode(g, index, base) {
-        // The open ladder is the pressed limit's: the limit drawn is another (a row hidden, an answer that names no limit), so it stands folded.
-        if (ladderOpen && ladderKey !== g.key) ladderFold();
-        var plan = ladderOf(g);
-        if (!plan) return null;
-        var zone = el('div', 'rail-ladder-zone');
-        var ladder = el('div', 'rail-ladder');
-        ladder.setAttribute('role', 'group');
-        ladder.setAttribute('aria-label', t('ladder.title'));
-        var head = el('div', 'rail-ladder-title', t('ladder.title'));
-        head.setAttribute('aria-hidden', 'true');
-        setVar(head, '--i', String(base));
-        ladder.appendChild(head);
-        var scroll = el('div', 'rail-scroll rail-scroll-start rail-scroll-end');
-        var steps = [];
-        var none = false;
-        var total = plan.steps.length;
-        var extra = Math.max(0, total - LADDER_STEPS);
-        // Open across a drawing; the fit says again whether the window comes out.
-        var open = ladderOpen && total > 0;
-        if (!total) {
-            none = true;
-            var empty = el('div', 'rail-step rail-step-first');
-            empty.title = t('reset.none');
-            empty.appendChild(el('span', 'rail-step-none', t('ladder.none')));
-            setVar(empty, '--i', String(base + 1));
-            scroll.appendChild(empty);
-            steps.push(empty);
-        }
-        plan.steps.forEach(function (step, k) {
-            var node = el('div', 'rail-step focus-ring' + (k ? '' : ' rail-step-first') + (k >= LADDER_STEPS && !open ? ' rail-fit-off' : ''));
-            var amount = '+' + step.back.toFixed(2);
-            // Several moments glued into one: the first and the last of them ("Sun 1 Nov 12:31 – Sun 1 Nov 12:54"); one that reads the same at both ends stands as one.
-            var when = whenWords(step.iso);
-            var till = step.count > 1 ? whenWords(step.lastIso) : '';
-            if (till && till !== when) when += ' \u2013 ' + till;
-            var words = t('ladder.step', { when: when, accounts: plural(step.accounts.length, 'account'),
-                names: step.accounts.map(function (key) { return accountName(index, key); }).join(', '), amount: amount });
-            node.setAttribute('tabindex', '0');
-            node.setAttribute('aria-label', words);
-            node.title = words;
-            node.setAttribute('data-k', 'reset');
-            // The key follows the step's earliest moment, not its place in the list: the gluing of neighbours changes with the clock, the places shift, the moment stays.
-            node.setAttribute('data-focus', stepKey(g, step));
-            node.setAttribute('data-accounts', JSON.stringify(step.accounts));
-            // A step with accounts is a button that lights the bars of its accounts on the plate, or picks the one account (Enter and Space as a button's; the second press, or another step, lets go of them).
-            if (step.accounts.length) {
-                node.setAttribute('role', 'button');
-                node.setAttribute('aria-pressed', stepOn && stepOn.key === stepKey(g, step) ? 'true' : 'false');
-                node.addEventListener('click', function (e) {
-                    e.stopPropagation();
-                    stepPress(g, step, node);
-                });
-                node.addEventListener('keydown', function (e) {
-                    if (!e || e.repeat || (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar')) return;
-                    // (Space would scroll the page; Enter would reach the keys the page itself keeps)
-                    e.preventDefault();
-                    e.stopPropagation();
-                    stepPress(g, step, node);
-                });
-            } else {
-                node.setAttribute('role', 'group');
-            }
-            // The steps past the ones that stand at first come with the last of them (the delay has a ceiling).
-            setVar(node, '--i', String(base + 1 + Math.min(k, LADDER_STEPS)));
-            var bead = el('span', 'rail-bead');
-            bead.setAttribute('aria-hidden', 'true');
-            node.appendChild(bead);
-            node.appendChild(el('span', 'rail-step-time', untilWords(step.at, plan.now)));
-            node.appendChild(ladderAmount(amount));
-            // The plate is found when the pointer or the keyboard comes (the ladder is drawn before it). The list of the step is the window it stands in.
-            dimOnItem(node, scroll, 'reset', function () { return platePanel(node); }, step.accounts);
-            scroll.appendChild(node);
-            steps.push(node);
-        });
-        ladder.appendChild(scroll);
-        // The word under the window: "N more" for the resets that did not fit (there for the resets over LADDER_STEPS at once, the fit sets the rest), "less" while the
-        // ladder is open. A button that opens and folds the ladder in its own place; the keyboard stays on it (the same node).
-        var more = el('button', 'rail-more' + (extra ? '' : ' rail-more-void'), open ? t('ladder.less') : t('foot.more', { n: extra || 1 }));
-        more.setAttribute('type', 'button');
-        more.setAttribute('data-focus', 'rs-more');
-        more.setAttribute('aria-expanded', open ? 'true' : 'false');
-        // It comes down last, after the last step that stands (the fit puts the number again, if some steps did not fit).
-        setVar(more, '--i', String(base + 1 + (none ? 1 : Math.min(total, LADDER_STEPS))));
-        if (extra) more.setAttribute('aria-label', open ? t('ladder.less_label') : t('ladder.more_label', { n: extra }));
-        var state = { box: zone, head: head, scroll: scroll, steps: steps, more: more, total: total, key: g.key, none: none, base: base, rows: 1 + Math.min(steps.length, LADDER_STEPS),
-            n: Math.min(total, LADDER_STEPS), max: 0 };
-        more.addEventListener('click', function (e) {
-            e.stopPropagation();
-            ladderToggle(state);
-        });
-        // The edges of the window (the haze) follow the scroll: a class changes only where an edge is reached or left, and nothing runs by frames.
-        scroll.addEventListener('scroll', function () {
-            var top = scroll.scrollTop;
-            if (typeof top !== 'number' || !ladderOpen) return;
-            ladderTop = top;
-            ladderEdges(state, top);
-        }, { passive: true });
-        ladder.appendChild(more);
-        zone.appendChild(ladder);
-        ladderLast = ladder;
-        // The reader's pick of a window: the steps that stood fade at once, over the new ones (the old ladder's node, kept by render()).
-        if (ladderOut) {
-            ladderOut.className = 'rail-ladder rail-ladder-out';
-            ladderOut.setAttribute('aria-hidden', 'true');
-            ladderOut.setAttribute('inert', '');
-            if (ladderShift) setVar(ladderOut, '--ladder-elapsed', ladderShift + 'ms');
-            zone.appendChild(ladderOut);
-            ladderDrop(ladderOut, Math.max(0, LADDER_MS - ladderShift));
-            ladderOut = null;
-        }
-        if (ladderMotion && !railMotion) {
-            ladder.className += ' rail-ladder-moving';
-            if (ladderShift) setVar(ladder, '--ladder-elapsed', ladderShift + 'ms');
-        }
-        ladderZone = state;
-        return zone;
+    /* ------------------------------------------------------------------
+       The quota plate (the owner's approved composition, 8 Nov 2026).
+
+       Left, the rail: one ring per limit of the family — a window and, where
+       the engine scopes a limit to models, that scope ("5h", "7d", "Fable 7d",
+       "Gemini 5h") — on a capsule that is a button; the picked one is crimson.
+       The figure in the ring is the limit's average share left over the
+       accounts read now (the skill's average_remaining_pct; "—" with none,
+       never 0), digits and % one unit. Under the rings, the ladder of resets
+       of the picked limit (ladderOf): when, and how many account-windows come
+       back if unused. On a phone the rings stand in a row and the ladder in a
+       row under them.
+
+       Right, the plate of the picked limit: its window and scope said once, the
+       opened account's card at the left and every account's bar (no figure in a
+       bar: the card says the exact share), then the history and the details.
+       The bars keep one meaning at any number: --bar-max wide while they fit,
+       narrower down to --bar-min, then another row (qBarsFit); the opened bar
+       is outlined and moves nothing. Nothing here sums unlike limits, turns an
+       unknown into 0 or says a quota is a dispatch.
+       ------------------------------------------------------------------ */
+
+    // The step of the ladder the reader lit ({limit, at}), and whether the ladder shows every step.
+    var qLit = null;
+    var qLadderAll = false;
+
+    // A ring's own short name: the window ("5h", "7d") and, for a limit scoped to models, that scope before it ("Fable 7d").
+    function ringName(g, tab, names) {
+        if (g.cycle) return t('ring.cycle');
+        var len = shortLength(tab.seconds);
+        var scope = scopeLabel(g, names, tab);
+        // (the window stays on the line of the scope's last word: a name that wraps breaks before "Claude and", never before "7d")
+        return scope && scope !== t('scope.all_models') ? t('ring.scoped', { scope: scope, len: len }).replace(/ (\S+)$/, '\u00a0$1') : len;
     }
 
-    // The old ladder that fades over the new one leaves the page when its fade is over, or at the end of the span of the movement if the page runs no animation: its steps are out of the keyboard
-    // and the reader meanwhile (inert, aria-hidden), but a browser with no inert would stop at them. A drawing inside the span puts the node again and sets the end for the same moment.
-    function ladderDrop(node, ms) {
-        var drop = function () {
-            if (ladderKept === node) ladderKept = null;
-            if (node.parentNode) node.parentNode.removeChild(node);
-        };
-        if (typeof node.addEventListener === 'function' && !node.getAttribute('data-leaving')) {
-            node.setAttribute('data-leaving', '1');
-            node.addEventListener('animationend', function (e) {
-                if (e && ((e.animationName && e.animationName !== 'ladder-leave') || (e.target && e.target !== node))) return;
-                drop();
-            });
-        }
-        setTimeout(drop, ms);
-    }
-
-    // Whether the shell is the narrow one (under 860px): the ladder is not drawn there and there is nothing to fit.
-    function narrowShell() {
-        return mediaIs('(max-width: ' + NARROW_SHELL_MAX + 'px)');
-    }
-
-    // The haze of the window's edges: none over the start while the window stands at its start, none under the end while it stands at its end (classes the
-    // stylesheet reads; a class is put on or taken off only where the edge changes).
-    function ladderEdges(z, top) {
-        var start = top <= 1;
-        var end = top >= z.max - 1;
-        if (hasClass(z.scroll, 'rail-scroll-start') !== start) classSet(z.scroll, 'rail-scroll-start', start);
-        if (hasClass(z.scroll, 'rail-scroll-end') !== end) classSet(z.scroll, 'rail-scroll-end', end);
-    }
-
-    // The data-focus key of a step: it follows the step's earliest moment, not its place in the list (the gluing of neighbours changes with the clock, the moment stays).
-    function stepKey(g, step) {
-        return 'rs:' + g.key + '@' + step.iso;
-    }
-
-    // The accounts of the step that is pressed, for the limit `g`, from the steps the ladder stands on now: none where no step is pressed, the press was on another limit, the step has
-    // gone (its reset has come, or it was glued to an earlier one) or the shell is narrow (there is no ladder to press again). It reads and changes nothing: a step that a fresh answer no longer has is let go
-    // for good where the answer arrives (stepRelease), so it does not come back with a step of the same moment; an answer that failed says nothing of it, and the press stays.
-    function stepAccounts(g) {
-        if (!stepOn || stepOn.limit !== g.key || narrowShell()) return [];
-        var plan = ladderOf(g);
-        var found = [];
-        if (plan) plan.steps.forEach(function (step) { if (stepKey(g, step) === stepOn.key) found = step.accounts; });
-        return found;
-    }
-
-    // The let-go that stepAccounts only reads for, made where the answer arrives (land): the press whose step a fresh, whole answer no longer has is dropped. An answer that failed, a kept one and a
-    // limit the answer does not hold say nothing of it.
-    function stepRelease(view) {
-        if (!stepOn || narrowShell() || !view || view.transport_error || view.kept || view.ok === false) return;
-        var summary = view.reserve && view.reserve.summary;
-        var g = groupByKey((summary && summary.groups) || [], stepOn.limit);
-        if (g && !g.cycle && !stepAccounts(g).length) stepOn = null;
-    }
-
-    // Let go of the step pressed (a pick of a window or of a family, the shell narrowed): the drawing that follows builds the bars shut.
-    function stepClear() {
-        stepOn = null;
-        try {
-            var lit = rootAll('.bar-on');
-            for (var i = 0; i < lit.length; i++) classSet(lit[i], 'bar-on', false);
-            var lights = rootAll('[data-step],[data-step-lit]');
-            for (var k = 0; k < lights.length; k++) {
-                lights[k].removeAttribute('data-step');
-                lights[k].removeAttribute('data-step-lit');
-            }
-            var steps = rootAll('.rail-step[aria-pressed=true]');
-            for (var j = 0; j < steps.length; j++) steps[j].setAttribute('aria-pressed', 'false');
-        } catch (err) {
-            // A page that cannot be walked is drawn anew by the next drawing, which reads stepOn.
-        }
-    }
-
-    // The press of a step of several accounts, in its place, with no drawing of the page (the chart and the Details are not touched, and no bar opens: the light is the opacity of the others): the step
-    // pressed is let go by the second press, and the press on another step hands the light over. The steps wear aria-pressed, the plate's bars of the accounts named wear data-step-lit and their row data-step.
-    function stepShow(node, accounts) {
-        var steps = node.parentNode ? node.parentNode.childNodes : [];
-        for (var i = 0; i < steps.length; i++) {
-            if (steps[i].getAttribute && steps[i].getAttribute('aria-pressed') !== null) {
-                steps[i].setAttribute('aria-pressed', stepOn && steps[i].getAttribute('data-focus') === stepOn.key ? 'true' : 'false');
-            }
-        }
-        var plate = platePanel(node);
-        if (!plate || !plate.childNodes) return;
-        var strip = plateBars(plate);
-        if (!strip) return;
-        for (var k = 0; k < strip.childNodes.length; k++) {
-            var bar = strip.childNodes[k];
-            var on = !!bar.getAttribute && accounts.indexOf(bar.getAttribute('data-account')) >= 0;
-            // (the .bar-on of a step of one account, pressed before, goes with the hand-over; the pick stays)
-            if (hasClass(bar, 'bar-on')) classSet(bar, 'bar-on', false);
-            if (on) bar.setAttribute('data-step-lit', '1');
-            else if (bar.removeAttribute) bar.removeAttribute('data-step-lit');
-        }
-        if (accounts.length) strip.setAttribute('data-step', '1');
-        else strip.removeAttribute('data-step');
-    }
-
-    // A step of one account is the press on that account's bar: the same selectAccount (the bar picked is open and red, as a press on the bar makes it), the step held in stepOn with the account
-    // (syncSelection lets it go as soon as the selection is another, or none). The press on it while its bar is picked lets the bar go. A step of several accounts only lights their bars and picks
-    // none; the next pick of an account (a bar, a row of the list, Clear, Escape: selectAccount) lets the step go.
-    function stepPress(g, step, node) {
-        var key = node.getAttribute('data-focus');
-        if (step.accounts.length === 1) {
-            var account = step.accounts[0];
-            var holds = selectedAccountKey === account;
-            stepOn = holds ? null : { key: key, limit: g.key, account: account };
-            selectAccount(holds ? '' : account, 'bar:' + g.key + ':' + account, g.key);
-            restoreFocus(key);
-            return;
-        }
-        var pressed = !(stepOn && stepOn.key === key);
-        stepOn = pressed ? { key: key, limit: g.key } : null;
-        stepShow(node, pressed ? step.accounts : []);
-    }
-
-    // The ladder folded: no open state, the scroll at its start, and no limit it stands open for.
-    function ladderFold() {
-        ladderOpen = false;
-        ladderTop = 0;
-        ladderKey = '';
-    }
-
-    // Put the text of a node only when it changes (the same words are not written again at a drawing).
-    function textSet(node, text) {
-        if (node.textContent !== text) node.textContent = text;
-    }
-
-    // The word under the window pressed: the ladder opens or folds where it stands (no drawing of the page: the plate, the graph and the Details are not touched). It folds back
-    // to the first steps and to the start of its scroll; it opens by the steps past the ones that stood coming down one after another (only the ones in sight). It is open only
-    // if the layout brings the window out (ladderLayout folds it again where there is no room).
-    function ladderToggle(z) {
-        if (ladderOpen) {
-            // (the node's offset goes with its steps in a browser; it is put back to the start here for the nodes that keep it)
-            if (ladderTop > 0) z.scroll.scrollTop = 0;
-            ladderFold();
-        } else {
-            ladderOpen = true;
-            ladderKey = z.key;
-            ladderTop = 0;
-        }
-        ladderLayout(z, true);
-    }
-
-    // The layout of the ladder (kit: rail), for a drawing (ladderFit) and for the word under the window (ladderToggle): ONE read of the layout (the height of the zone and of the
-    // parts, all in the same pass) says how many steps stand whole in the room between the last ring and the foot of the card, and how high the open window can be: at most
-    // --ladder-window steps, and never more than the room (the word under it keeps its own); the classes are put first, so the read sees every part, and written after it, with no
-    // second read. The word "N more" counts the steps that do not stand (all of them less those that do) and is shown only where its press opens the window: where not even one step
-    // stands in it the word is not drawn, and a press that finds no room folds the state again (it does not open by itself when the room is back). Open, the window shows every step.
-    // The ladder never stretches the card: the zone adds nothing to the height of the rail and cuts what is past its edge. Where not even one step and the word stand, the ladder is
-    // not drawn, and where no step stands the plate keeps its own row of the next reset. No observer of the size and no script by frames: the 30 s poll draws again and fits again.
-    // Where nothing is measured (the narrow shell has no ladder, a bare document has no layout) the state and the place of the scroll are kept as they are.
-    function ladderLayout(z, clicked) {
-        var wanted = ladderOpen;
-        // Put every part the read needs on: the head, the steps that can stand folded (one measures them all) and the word.
-        z.steps.forEach(function (node, i) { classSet(node, 'rail-fit-off', i >= LADDER_STEPS); classSet(node, 'rail-step-in', false); });
-        classSet(z.head, 'rail-fit-off', false);
-        classSet(z.more, 'rail-fit-off', false);
-        z.scroll.style.height = '';
-        var room = z.box.clientHeight;
-        var measured = typeof room === 'number' && room > 0 && !narrowShell();
-        var one = 0, win = 0, n = z.none ? z.steps.length : Math.min(z.total, LADDER_STEPS);
-        var showMore = !z.none && z.total > n, drawn = true, open = false;
-        if (measured) {
-            var avail = room - z.head.offsetHeight;
-            one = z.steps.length ? z.steps[0].offsetHeight : 0;
-            var tail = z.more.offsetHeight;
-            var fits = function (space) { return one > 0 ? Math.max(0, Math.floor(space / one)) : 0; };
-            // The window the word opens: 5.5 steps, or the room under the head and over the word; it comes out only if one step stands in it.
-            var per = 5.5;
-            try { per = parseFloat(getComputedStyle(z.box).getPropertyValue('--ladder-window')) || per; } catch (err) { /* the tests' nodes */ }
-            win = Math.floor(Math.min(per * one, avail - tail));
-            var opens = one > 0 && win >= one;
-            n = Math.min(z.steps.length, fits(avail));
-            showMore = false;
-            if (!z.none && (n < z.steps.length || z.total > LADDER_STEPS)) {
-                n = Math.min(z.steps.length, fits(avail - tail));
-                showMore = avail - n * one >= tail;
-            }
-            if (!z.none) n = Math.min(n, LADDER_STEPS);
-            // The word counts what does not stand, and only where it can open it.
-            showMore = showMore && opens && z.total > n;
-            open = wanted && opens && !z.none && z.total > n;
-            drawn = open || (avail >= 0 && (n > 0 || showMore));
-            // The window did not come out (no room, or no step left to open): the state is folded, and the next drawing does not open it by itself.
-            if (wanted && !open) ladderFold();
-        } else {
-            open = wanted && showMore;
-        }
-        var left = z.total - n;
-        z.n = n;
-        z.max = open && measured ? Math.max(0, z.total * one - win) : 0;
-        if (open && measured) z.scroll.style.height = win + 'px';
-        z.steps.forEach(function (node, i) { classSet(node, 'rail-fit-off', open ? !drawn : (i >= n || !drawn)); });
-        classSet(z.head, 'rail-fit-off', !drawn);
-        classSet(z.scroll, 'rail-scroll-on', open);
-        classSet(z.more, 'rail-fit-off', !(drawn && (open || showMore)));
-        classSet(z.more, 'rail-more-void', false);
-        z.more.setAttribute('aria-expanded', open ? 'true' : 'false');
-        // The word comes down after the last step that stands (its number in the movement of the rail).
-        setVar(z.more, '--i', String(z.base + 1 + n));
-        if (open) {
-            textSet(z.more, t('ladder.less'));
-            z.more.setAttribute('aria-label', t('ladder.less_label'));
-        } else if (drawn && showMore) {
-            textSet(z.more, t('foot.more', { n: left }));
-            z.more.setAttribute('aria-label', t('ladder.more_label', { n: left }));
-        }
-        // The window keeps the place it had (the new node of a drawing: the kept one) and the haze follows. The place is written only to an open window that has one, and never
-        // read back; where nothing is measured it is not touched (the narrow shell and back keeps it).
-        var top = 0;
-        if (measured) {
-            top = open ? Math.max(0, Math.min(ladderTop, z.max)) : 0;
-            ladderTop = top;
-            if (open && top > 0) z.scroll.scrollTop = top;
-        }
-        ladderEdges(z, top);
-        if (clicked && open && !reducedMotion()) {
-            // The ones in sight below the steps that stood (a step and a half more at most), one after another.
-            for (var i = z.n, j = 0; i < z.steps.length && j < 3; i++, j++) {
-                setVar(z.steps[i], '--j', String(j));
-                classSet(z.steps[i], 'rail-step-in', true);
-            }
-        }
-        // The row of the next reset on the plate gives way to the ladder only while the ladder shows the next reset.
-        if (!clicked && !(drawn && (n > 0 || open)) && ladderLine) classSet(ladderLine, 'nx-in-ladder', false);
-    }
-
-    // The fit of the ladder (kit: rail), at the end of a drawing and once for it. A drawing with no ladder leaves an open state nothing to stand on: it is folded.
-    function ladderFit() {
-        var z = ladderZone;
-        ladderZone = null;
-        if (!z) {
-            ladderFold();
-            return;
-        }
-        ladderLayout(z, false);
-    }
-
-    // The rail of windows (kit: rail; it returns the rail, a nav): the thread from the mark of the picked family (in the head) down to the first
-    // ring, the kit's row of number tabs with a ring (kit: mark tab; markTab, markRow, ringGauge) and, under it, the ladder of resets (the stamp and the note are not in the rail: the stamp
-    // stands in the plate, the note is returned through railNote and stands in the plate, under its number row). `groupOf(tab)` is the limit a tab opens on (null: the family reports no window at that place and no row is drawn for it; a window the
-    // reader hid in Rows is the family's still, and keeps a dotted row that says so); `parts` are what stands beside the tabs: `ladder` (the picked limit, which the ladder of resets
-    // stands on; none for the billing-cycle budget), `foot` (the note under the row of the picked window, or null), `accounts` (how many accounts the family has), `index` (the accounts by
-    // their key, for the names) and `failed` (the read failed: no tab wears the star, and nothing is told of who is not read).
-    function windowRow(hid, tabs, active, groupOf, parts) {
-        var rail = el('nav', 'rail');
-        rail.setAttribute('aria-label', t('rail.label'));
-        // The thread from the picked family's mark down to the first ring (kit: rail): out of the reading order, and on the wide shell only.
-        var lead = el('span', 'rail-lead');
-        lead.setAttribute('aria-hidden', 'true');
-        rail.appendChild(lead);
-        var items = [];
-        var spare = null;
-        var firstOn = false;
+    // The rings of every limit drawn (hidden ones stay in Rows), in the window order, the family-wide limit of a window first.
+    function ringLimits(tabs) {
+        var out = [];
         tabs.forEach(function (tab) {
-            var g = groupOf(tab);
-            // Only the windows the family reports have a row: a place it has no window for is not drawn at all (no grey place). A window
-            // the reader hid in Rows is reported still, so its row stays.
-            if (!g && !tab.hidden) return;
-            var on = !!g && tab === active;
-            var avg = g ? tabAverage(g) : '';
-            var incomplete = !parts.failed && windowIncomplete(g);
-            // A window that has accounts not read draws a note (windowFoot) whether it wears the star or not: the one that read none of
-            // them ("—", no star) has its note too, so the place is kept for it as well.
-            if (!parts.failed && g && !parts.foot && windowReading(g.cycle ? g.status : g).unread.length) {
-                // The longest of the notes the other windows would draw: the place the picked one keeps, unseen.
-                var copy = windowFoot(g.cycle ? g.status : g, parts.index, incomplete, true);
-                if (copy && (!spare || copy.textContent.length > spare.textContent.length)) spare = copy;
-            }
-            // The rail says the window short ("7D", "7д"); its full name is in the tab's label and title below.
-            // The ring sweeps (kit: ring) for the reader's pick: the ring of the window picked, or every ring as the rows of a family come down.
-            var sweeps = sweepOn && !!g && avg !== '—' && (sweepWho === 'all' || sweepWho === String(tab.seconds));
-            var ring = ringGauge(parseFloat(avg), g && avg !== '—' ? 'ok' : 'unknown', 'lg', true, sweeps);
-            if (sweeps) {
-                // A ring of a family's pick waits for its row (--i, the row's number, below); a drawing inside the span, with no clock, has gone on.
-                if (sweepWho === 'all') ring.classList.add('ring-sweep-row');
-                if (sweepShift) setVar(ring, '--sweep-elapsed', sweepShift + 'ms');
-            }
-            var btn = markTab({ key: tab.seconds, name: shortLength(tab.seconds), count: g ? avg : '—', note: incomplete ? '*' : '', selected: on,
-                ring: ring });
-            btn.className += ' wt-tab';
-            // The row's number in the rail: the windows come down one after another by it (kit: rail, motion).
-            setVar(btn, '--i', String(items.length));
-            btn.setAttribute('id', 'quotas-win-' + tab.seconds);
-            if (!g) {
-                // A window the reader hid in Rows: its row stays, dotted, with its hint. aria-disabled, not disabled: a disabled button shows no hint.
-                var said = tab.name + ' — ' + t('win.hidden_in_rows');
-                btn.setAttribute('aria-disabled', 'true');
-                btn.setAttribute('tabindex', '-1');
-                btn.setAttribute('aria-label', said);
-                btn.title = said;
-            } else {
-                // The billing-cycle budget (Cursor) is counted over its status, in a window's own shape: the same "N of M read" as the stamp's.
-                var r = g.cycle ? (g.status ? windowReading(g.status) : null) : windowReading(g);
-                // What the tab says to a reader who does not see it: the average, and over how many accounts it was read.
-                var spoken = avg === '—' ? t('win.none', { name: tab.name })
-                    : (r ? t('win.avg_read', { name: tab.name, avg: avg, read: r.read, n: r.total }) : t('win.avg', { name: tab.name, avg: avg }));
-                if (r && parts.accounts && r.total < parts.accounts) spoken += '; ' + t('win.applies', { m: r.total, n: parts.accounts });
-                btn.setAttribute('tabindex', on ? '0' : '-1');
-                btn.setAttribute('aria-controls', 'quotas-win-panel');
-                // The place of a billing-cycle budget (cycleBudget) says what it is, not a window of time.
-                var hint = g.cycle ? g.note : '';
-                btn.setAttribute('aria-label', hint ? spoken + ' — ' + hint : spoken);
-                btn.setAttribute('data-focus', 'win:' + hid + ':' + tab.seconds);
-                btn.title = hint || spoken;
-                if (on && parts.foot) btn.setAttribute('aria-describedby', 'quotas-foot');
-                btn.addEventListener('click', function (e) {
-                    e.stopPropagation();
-                    // A budget is not a limit to pick: its place is the only one it has.
-                    if (!g.cycle && pickable(on)) pickWindow(g, on || !active ? '' : String(active.seconds), markPreviewed(btn), markPressed(e), on ? '' : String(tab.seconds));
-                });
-            }
-            if (!items.length) firstOn = on;
-            items.push(btn);
+            tab.groups.forEach(function (g) { out.push({ g: g, tab: tab }); });
+            // A window whose every limit the reader hid in Rows is the family's still: its place stays, dotted, and says so; a place it has no window for is
+            // not drawn at all (no grey place).
+            if (!tab.groups.length && tab.hidden) out.push({ g: null, tab: tab });
         });
-        // A first ring that is picked has grown (--mark-on): the thread from the mark ends over it, as high as it has grown.
-        if (firstOn) lead.className += ' rail-lead-on';
-        var row = markRow(items, true);
-        row.className += ' wt-row';
-        row.setAttribute('aria-label', t('win.row'));
-        arrowRow(row, ['ArrowLeft', 'ArrowRight']);
-        // The reader's own pick of a window (winFrom: the one left): the kit draws the rings and numbers that change in the look they had a
-        // moment ago, and render() has settleMarks take that off at the next frame.
-        markStart(row, winFrom, active ? String(active.seconds) : '', winLit, winPressed);
-        rail.appendChild(row);
-        // The ladder of resets (kit: rail) stands under the rings, last in the rail (no foot): the window picked has it, the billing-cycle budget has not. The pick of a family
-        // brings it down after the rings (its rows are numbered on from theirs).
-        ladderZone = null;
-        ladderDrawn = false;
-        ladderLine = null;
-        var ladder = parts.ladder ? ladderNode(parts.ladder, parts.index, railMotion ? items.length : 0) : null;
-        if (ladder) {
-            rail.appendChild(ladder);
-            ladderDrawn = true;
-        }
-        // The note under the row is the picked window's. Where another window of the family has a note (accounts not read: the star on its
-        // tab, or the dash of a window that read none) and this one does not, the place of the note stays, unseen (a hidden copy of the
-        // longest note the others would draw), so the plate does not jump as the reader moves along the row; with no note in the row
-        // there is none.
-        // It does not fit the narrow rail (the names of the accounts are long), so it stands in the plate, under the number row (railNote: renderReserve
-        // hands it to the plate).
-        var foot = parts.foot || spare;
-        railNote = foot || null;
-        if (foot) {
-            // Only the reader's own pick moves it: it rises in, and a redraw inside the pick's span carries it on from where it was. The pick
-            // of a family moves it with the rail (it fades in after the last window, kit: rail), not on its own; it is out of the rail's
-            // tree, so it carries the rail's numbers (--rail-rows, --rail-elapsed) itself.
-            if (drawMotion && parts.foot && !railMotion) {
-                if (drawElapsed) foot.style.animationDelay = -drawElapsed + 'ms';
-            } else if (railMotion && parts.foot) {
-                foot.className += ' wt-foot-in';
-                setVar(foot, '--rail-rows', String(items.length + (ladderZone ? ladderZone.rows : 0)));
-                if (railShift) setVar(foot, '--rail-elapsed', railShift + 'ms');
+        return out;
+    }
+
+    function limitRail(hid, tabs, shown, ctx, failed) {
+        var rail = el('nav', 'q-rail');
+        rail.setAttribute('aria-label', t('rail.label'));
+        var rings = el('div', 'q-rings');
+        rings.setAttribute('role', 'group');
+        rings.setAttribute('aria-label', t('win.row'));
+        // How many accounts the family's widest window applies to: a limit that applies to fewer says so to a reader.
+        var widest = Math.max.apply(null, [0].concat(ringLimits(tabs).map(function (item) { return item.g && !item.g.cycle ? slotCount(item.g) : 0; })));
+        ringLimits(tabs).forEach(function (item) {
+            var g = item.g;
+            if (!g) {
+                var hidden = el('button', 'q-ring q-ring-hidden');
+                hidden.setAttribute('type', 'button');
+                hidden.setAttribute('aria-disabled', 'true');
+                hidden.setAttribute('tabindex', '-1');
+                var said = item.tab.name + ' — ' + t('win.hidden_in_rows');
+                hidden.setAttribute('aria-label', said);
+                hidden.title = said;
+                var hg = el('span', 'q-gauge');
+                hg.appendChild(ringGauge(NaN, 'unknown', 'lg'));
+                hidden.appendChild(hg);
+                var htx = el('span', 'q-ring-tx');
+                htx.appendChild(el('span', 'q-ring-name', shortLength(item.tab.seconds)));
+                htx.appendChild(el('span', 'q-ring-sub', t('win.hidden_in_rows')));
+                hidden.appendChild(htx);
+                rings.appendChild(hidden);
+                return;
             }
-        }
-        // How many of the window's accounts are read, and how old the reading is (the stamp), is not in the rail: it stands in the row of the figure of the plate (limitRow).
-        // The reader's own pick of a family (railMotion): the thread is drawn, the windows come down one after another and the foot comes
-        // last (kit: rail, motion, which reads --i of each row and --rail-rows). A drawing inside the movement's span carries it on from
-        // where it was (--rail-elapsed). Any other drawing wears none of it.
-        if (railMotion) {
-            rail.className += ' rail-moving';
-            setVar(rail, '--rail-rows', String(items.length + (ladderZone ? ladderZone.rows : 0)));
-            if (railShift) setVar(rail, '--rail-elapsed', railShift + 'ms');
-        }
+            var on = g === shown;
+            var avg = tabAverage(g);
+            var name = ringName(g, item.tab, ctx.names);
+            var b = el('button', 'q-ring' + (on ? ' on' : ''));
+            b.setAttribute('type', 'button');
+            b.setAttribute('aria-pressed', on ? 'true' : 'false');
+            b.setAttribute('data-focus', 'ring:' + hid + ':' + g.key);
+            b.setAttribute('data-limit', g.key);
+            var r = windowReading(g.cycle ? g.status : g);
+            var full = ctx.names[g.key] || name;
+            var spoken = avg === '—' ? t('win.none', { name: full })
+                : (r ? t('win.avg_read', { name: full, avg: avg, read: r.read, n: r.total }) : t('win.avg', { name: full, avg: avg }));
+            if (r && !g.cycle && widest && r.total < widest) spoken += '; ' + t('win.applies', { m: r.total, n: widest });
+            var hint = g.cycle ? g.note : scopeWords(g);
+            b.setAttribute('aria-label', hint ? spoken + ' — ' + hint : spoken);
+            b.title = hint ? spoken + ' — ' + hint : spoken;
+            var gauge = el('span', 'q-gauge');
+            var pct = g.measured && g.measured.accounts ? g.measured.average_remaining_pct : NaN;
+            gauge.appendChild(ringGauge(pct, typeof pct === 'number' && isFinite(pct) ? 'ok' : 'unknown', 'lg'));
+            var pc = el('span', 'q-pc', avg);
+            pc.setAttribute('aria-hidden', 'true');
+            gauge.appendChild(pc);
+            b.appendChild(gauge);
+            var tx = el('span', 'q-ring-tx');
+            var nameNode = el('span', 'q-ring-name', name);
+            // A limit with accounts not read wears the star its note under the plate explains.
+            if (!failed && windowIncomplete(g.cycle ? g.status : g)) nameNode.appendChild(el('span', 'q-star', '*'));
+            tx.appendChild(nameNode);
+            tx.appendChild(el('span', 'q-ring-sub', t('ring.avg_left')));
+            tx.appendChild(el('span', 'q-ring-val', avg === '—' ? avg : t('ring.avg_short', { avg: avg })));
+            b.appendChild(tx);
+            b.addEventListener('click', function (e) {
+                e.stopPropagation();
+                // A budget is not a limit to pick: its ring is the only one it has.
+                if (!g.cycle && pickable(on)) {
+                    qLit = null;
+                    qLadderAll = false;
+                    pickWindow(g);
+                    restoreFocus('ring:' + hid + ':' + g.key);
+                }
+            });
+            rings.appendChild(b);
+        });
+        arrowRow(rings, ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']);
+        rail.appendChild(rings);
+        if (shown && !shown.cycle) rail.appendChild(resetLadder(shown, ctx));
         return rail;
     }
 
-    // Which limit of the length is shown, among the length's own: the scope
-    // row is a filter of the plate, not another step. It is the kit's segment in its pill variant, the one the graph's "Period" is: the picked
-    // option stands white on the segment's grey.
-    function scopeRow(ctx, tab, g) {
-        var box = el('div', 'seg wt-scope');
+    function resetLadder(g, ctx) {
+        var box = el('div', 'q-ladder');
         box.setAttribute('role', 'group');
-        box.setAttribute('aria-label', t('scope.row'));
-        tab.groups.forEach(function (sg) {
-            var on = sg.key === g.key;
-            var btn = el('button', 'seg-opt btn-compact hover-quiet wt-scope-opt' + (on ? ' active' : ''), scopeLabel(sg, ctx.names, tab));
-            btn.setAttribute('type', 'button');
-            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-            btn.setAttribute('data-focus', 'scope:' + sg.key);
-            if (scopeWords(sg)) btn.title = scopeWords(sg);
-            btn.addEventListener('click', function (e) {
+        box.setAttribute('aria-label', t('ladder.label', { name: ctx.names[g.key] || '' }));
+        box.appendChild(el('h4', 'q-ladder-title', t('ladder.title')));
+        var lad = ladderOf(g);
+        var steps = lad ? lad.steps : [];
+        // Refresh the selected step from this drawing's ladder, before its bars.
+        if (qLit && qLit.limit === g.key) {
+            var picked = steps.find(function (st) { return st.at === qLit.at; });
+            if (picked) qLit.accounts = picked.accounts.slice();
+            else qLit = null;
+        }
+        if (!steps.length) {
+            box.appendChild(el('span', 'q-ladder-none', t('ladder.none')));
+            return box;
+        }
+        var max = qLadderAll ? steps.length : LADDER_STEPS;
+        steps.slice(0, max).forEach(function (st) {
+            var key = 'step:' + g.key + ':' + st.at;
+            var on = !!qLit && qLit.limit === g.key && qLit.at === st.at;
+            var names = st.accounts.map(function (a) { return accountName(ctx.index, a); });
+            var amount = '+' + st.back.toFixed(st.back >= 10 ? 0 : 1);
+            var when = untilWords(st.at, lad.now);
+            var b = el('button', 'q-step' + (on ? ' on' : ''));
+            b.setAttribute('type', 'button');
+            b.setAttribute('aria-pressed', on ? 'true' : 'false');
+            b.setAttribute('data-focus', key);
+            var said = t('ladder.step', { when: whenWords(st.iso), accounts: plural(st.accounts.length, 'account'), names: names.join(', '), amount: amount });
+            b.setAttribute('aria-label', said);
+            b.title = said;
+            b.appendChild(el('span', 'q-step-dot'));
+            b.appendChild(el('span', 'q-step-when', when));
+            b.appendChild(el('span', 'q-step-back', st.accounts.length > 1 ? t('ladder.back_n', { amount: amount, n: st.accounts.length }) : amount));
+            b.addEventListener('click', function (e) {
                 e.stopPropagation();
-                if (pickable(on)) pickWindow(sg);
+                qLit = on ? null : { limit: g.key, at: st.at, accounts: st.accounts.slice() };
+                if (qLit && st.accounts.length === 1) {
+                    selectAccount(st.accounts[0], key, g.key);
+                } else {
+                    rerender();
+                }
+                restoreFocus(key);
             });
-            box.appendChild(btn);
+            box.appendChild(b);
         });
+        if (steps.length > LADDER_STEPS) {
+            var more = el('button', 'q-ladder-more', qLadderAll ? t('ladder.less') : t('foot.more', { n: steps.length - max }));
+            more.setAttribute('type', 'button');
+            more.setAttribute('aria-expanded', qLadderAll ? 'true' : 'false');
+            more.setAttribute('aria-label', qLadderAll ? t('ladder.less_label') : t('ladder.more_label', { n: steps.length - max }));
+            more.setAttribute('data-focus', 'ladder-more:' + g.key);
+            more.addEventListener('click', function (e) {
+                e.stopPropagation();
+                qLadderAll = !qLadderAll;
+                rerender();
+                restoreFocus('ladder-more:' + g.key);
+            });
+            box.appendChild(more);
+        }
         return box;
     }
 
-    // The plate of the picked window: its limit row, once. With motion the
-    // content comes in (the bars grow from their base, a step apart).
-    function windowPlate(ctx, tab, g, chartKey, markTightest, stamp, foot, credits) {
-        var scope = tab.groups.length > 1 ? scopeRow(ctx, tab, g) : null;
-        var plate = limitRow(g, ctx.names[g.key], chartKey, ctx.index, markTightest, stamp, tab.name,
-            { scope: scope, foot: foot, credits: credits });
+    // The accounts of the lit step of this limit, or null.
+    function litOf(g) {
+        return qLit && qLit.limit === g.key ? qLit.accounts : null;
+    }
+
+    function barKindOf(bar) {
+        var known = bar.state !== 'unknown' && typeof bar.left === 'number' && isFinite(bar.left);
+        return {
+            known: known,
+            last: known && bar.state === 'last_known',
+            spent: known && !!bar.at_limit && bar.state !== 'last_known',
+            was: known && !!bar.at_limit && bar.state === 'last_known',
+            held: known && !!bar.restricted && heldNow(bar) && !bar.at_limit
+        };
+    }
+
+    function quotaBars(g, rowName, index, family) {
+        var bars = barsOf(g);
+        var col = el('div', 'q-bcol');
+        var strip = el('div', 'q-bars');
+        strip.setAttribute('role', 'group');
+        strip.setAttribute('aria-label', t('bars.label', { name: rowName }));
+        strip.setAttribute('data-strip', g.key);
+        strip.setAttribute('data-n', String(bars.length));
+        var lit = litOf(g);
+        if (lit) strip.setAttribute('data-step', '1');
+        var seen = {};
+        bars.forEach(function (bar, i) {
+            var k = barKindOf(bar);
+            var acc = bar.account && family ? accountIn(family.accounts || [], bar.account) : null;
+            var off = !!acc && acc.enabled === false;
+            var cls = 'q-bar';
+            if (!k.known) cls += ' unknown';
+            if (k.last) cls += ' last';
+            if (k.spent) cls += ' spent';
+            if (k.was) cls += ' was';
+            if (k.held) cls += ' held';
+            // Restricted is said apart from held: a restriction the engine reports may hold the account now (held) or not.
+            if (k.known && bar.restricted) cls += ' restricted';
+            if (off) cls += ' off';
+            var isSel = !!bar.account && bar.account === selectedAccountKey;
+            if (isSel) cls += ' sel';
+            if (lit && bar.account && lit.indexOf(bar.account) >= 0) cls += ' lit';
+            seen[!k.known ? 'unknown' : k.last ? 'last' : k.spent ? 'spent' : k.held ? 'held' : 'cur'] = true;
+            if (off) seen.off = true;
+            var b = el('button', cls);
+            b.setAttribute('type', 'button');
+            b.setAttribute('data-focus', 'bar:' + g.key + ':' + (bar.account || i));
+            b.setAttribute('data-state', bar.state || 'current');
+            if (bar.account) b.setAttribute('data-account', bar.account);
+            if (k.known) {
+                var share = Math.max(0, Math.min(1, bar.left));
+                b.setAttribute('data-share', String(share));
+                if (share > 0) {
+                    var f = el('span', 'q-fill' + (share >= 0.999 ? ' full' : ''));
+                    f.style.height = (+(share * 100).toFixed(2)) + '%';
+                    b.appendChild(f);
+                }
+            } else {
+                var q = el('span', 'q-unk', '?');
+                q.setAttribute('aria-hidden', 'true');
+                b.appendChild(q);
+            }
+            var words = barWords(bar, index, rowName) + (off ? ' · ' + t('card.state_off') : '');
+            b.setAttribute('aria-label', words + (bar.account ? barPickWords(isSel) : ''));
+            b.setAttribute('aria-pressed', isSel ? 'true' : 'false');
+            b.title = words;
+            if (bar.account) {
+                b.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    if (qLit && qLit.limit === g.key && qLit.accounts.indexOf(bar.account) < 0) qLit = null;
+                    // A press on the picked bar lets the pick go (the card then asks for one); on another bar it picks that account.
+                    selectAccount(bar.account === selectedAccountKey ? '' : bar.account, 'bar:' + g.key + ':' + bar.account, g.key);
+                    restoreFocus('bar:' + g.key + ':' + bar.account);
+                });
+            } else {
+                b.disabled = true;
+            }
+            strip.appendChild(b);
+        });
+        col.appendChild(strip);
+        // The legend says only the states that stand in the row: green is what is left (no key for it).
+        var keys = el('div', 'q-keys');
+        [['held', 'k-held', 'keys.held'], ['spent', 'k-spent', 'keys.spent'], ['last', 'k-last', 'keys.last'],
+            ['unknown', 'k-unknown', 'keys.unknown'], ['off', 'k-off', 'keys.off']].forEach(function (x) {
+            if (!seen[x[0]]) return;
+            var s = el('span', 'q-key');
+            var sw = el('i', 'q-sw ' + x[1]);
+            sw.setAttribute('aria-hidden', 'true');
+            s.appendChild(sw);
+            s.appendChild(document.createTextNode(t(x[2])));
+            keys.appendChild(s);
+        });
+        if (keys.firstChild) col.appendChild(keys);
+        return col;
+    }
+
+    // The selected account’s state; the projection does not name applicable hold causes.
+    function cardState(ctx, g, bar, account, k) {
+        if (account && account.enabled === false) return ['off', t('card.state_off')];
+        if (!k.known) return ['unknown', t('card.state_unknown')];
+        if (k.last) return ['last', t('card.state_last')];
+        if (k.spent) return ['limit', t('card.state_limit')];
+        // The projection marks the hold but does not identify its applicable blockers.
+        if (k.held) return ['held', t('card.state_held')];
+        return null;
+    }
+
+    // One dated line of the card's resources: "Bonus resets: 2 usable now · just now".
+    function resLine(box, k, v, tail, cls, title) {
+        var d = el('div', 'q-rl' + (cls ? ' ' + cls : ''));
+        d.appendChild(el('span', 'q-rk', k));
+        d.appendChild(document.createTextNode(' '));
+        d.appendChild(el(cls === 'ok' ? 'b' : 'span', 'q-rv', v));
+        (tail || []).forEach(function (part) {
+            if (!part) return;
+            d.appendChild(el('span', 'q-ra', ' · '));
+            d.appendChild(el('span', 'q-ra q-u', part));
+        });
+        if (title) d.title = title;
+        box.appendChild(d);
+    }
+
+    // What one reset offer says: a count with unknown usability is "granted", never "available"; a reported 0 is a zero.
+    function offerWords(o) {
+        var n = o.available_count;
+        if (typeof n !== 'number' || !isFinite(n)) return { v: t('res.count_unknown'), cls: 'unk' };
+        if (n === 0) return { v: t('card.none_zero'), cls: '' };
+        if (o.usable_now === true) return { v: t('card.offer_usable', { n: n }), cls: 'ok' };
+        if (o.usable_now === false) return { v: t('card.offer_not_usable', { n: n }), cls: '' };
+        return { v: t('card.offer_unknown', { n: n }), cls: '' };
+    }
+
+    // The account's manual reset offers (resources.resets), else the legacy count (quota.reset_credits): one source, never both.
+    function resetLines(account) {
+        var r = account && account.resources && account.resources.resets;
+        var out = [];
+        if (r && r.state && r.state !== 'not_reported' && Array.isArray(r.rows)) {
+            var kept = r.state === 'last_known';
+            var age = agoWords(r.observed_at) || t('card.age_unknown');
+            if (!r.rows.length) {
+                out.push({ k: t('card.bonus'), v: t('card.none_offered'), tail: [kept ? t('card.last_known') : '', age], cls: kept ? 'unk' : '' });
+                return out;
+            }
+            r.rows.forEach(function (o) {
+                var w = offerWords(o);
+                var old = kept || o.state === 'last_known';
+                var exp = NaN;
+                (o.grants || []).forEach(function (gr) {
+                    var at = Date.parse(gr && gr.expires_at || '');
+                    if (gr && gr.available_count > 0 && isFinite(at) && at > Date.now() && !(at >= exp)) exp = at;
+                });
+                if (old && o.usable_now === true) w = { v: t('card.offer_usable_then', { n: o.available_count }), cls: '' };
+                var label = r.rows.length > 1 && o.label ? engineWord(String(o.label)) : t('card.bonus');
+                out.push({ k: label, v: w.v, cls: old ? 'unk' : w.cls,
+                    tail: [o.reason ? String(o.reason) : '', isFinite(exp) && !old ? t('card.expires_in', { when: untilWords(exp) }) : '',
+                        old ? t('card.last_known') : '', age],
+                    title: t('card.offer_title') });
+            });
+            return out;
+        }
+        var c = account && account.quota && account.quota.reset_credits;
+        if (c && c.reason !== 'not_reported' && c.state) {
+            var last = c.state === 'last_known';
+            var cage = c.observed_at ? (agoWords(c.observed_at) || t('card.age_unknown')) : t('card.age_unknown');
+            var line = { k: t('card.bonus'), tail: [], cls: 'unk', title: creditProvenance(c) };
+            if ((c.state === 'current' || last) && creditCount(c.count)) {
+                line.v = c.count === 0 ? t('card.none_zero') : t('card.reported_unknown', { n: c.count });
+                line.tail = [last ? t('card.last_known') : '', cage];
+                line.cls = last ? 'unk' : '';
+            } else if (c.state === 'unreadable') {
+                line.v = t('credits.acc_unreadable');
+            } else if (c.state === 'conflict') {
+                line.v = t('credits.acc_conflict');
+            } else {
+                line.v = t('card.unknown');
+            }
+            out.push(line);
+        }
+        return out;
+    }
+
+    // The account's credit balances (resources.balances), each as dated; the included budget is the limit itself and stays off this list.
+    function creditLines(account) {
+        var f = account && account.resources && account.resources.balances;
+        var out = [];
+        if (!f || !f.state || f.state === 'not_reported' || !Array.isArray(f.rows)) return out;
+        var age = agoWords(f.observed_at) || t('card.age_unknown');
+        f.rows.forEach(function (row) {
+            if (!row || row.usage_kind === 'included') return;
+            var old = f.state === 'last_known' || row.state === 'last_known';
+            var amount = row.unlimited ? t('cycle.unlimited') : (row.amount === null || row.amount === undefined ? '' : moneyWords(row.amount, row));
+            var label = engineWord(String(row.label || '')) || t('card.credits');
+            out.push({ k: label, v: amount || t('res.amount_unknown'), cls: !amount || old ? 'unk' : '',
+                tail: [row.scope === 'team' ? t('card.team') : '', old ? t('card.last_known') : '', age],
+                title: label + ': ' + (amount || t('res.amount_unknown')) + (row.note ? ' · ' + engineWord(String(row.note)) : '') });
+        });
+        return out;
+    }
+
+    function cardResources(card, account) {
+        var lines = resetLines(account).concat(creditLines(account));
+        if (!lines.length) return;
+        var box = el('div', 'q-res');
+        box.setAttribute('role', 'group');
+        box.setAttribute('aria-label', t('card.res_label'));
+        lines.forEach(function (x) { resLine(box, x.k + ':', x.v, x.tail, x.cls, x.title); });
+        card.appendChild(box);
+    }
+
+    // The opened account: its name and address, its share of the picked limit, when that limit comes back, its plan and how old the reading is, its bonus resets and
+    // credits as dated, and the account's full details under one button (renderInspector, the same card the list opens).
+    function accountCard(ctx, g, family) {
+        var account = selectedAccountKey && family ? accountIn(family.accounts || [], selectedAccountKey) : null;
+        var bar = account ? barOf(g, account.key) : null;
+        var card = el('section', 'q-card');
+        card.setAttribute('aria-label', t('acc.card_label'));
+        card.setAttribute('aria-live', 'polite');
+        if (!account) {
+            card.className += ' q-card-none';
+            card.appendChild(el('div', 'q-al', t('card.pick')));
+            return card;
+        }
+        var k = bar ? barKindOf(bar) : { known: false };
+        var head = el('div', 'q-card-head');
+        // The account's state, as its full card says it: the dot, and its word for a reader who does not see it.
+        var tone = accountTone(account, (currentView && currentView.facets) || {});
+        var nm = el('div', 'q-an');
+        var dot = stateDot(tone, true);
+        classSet(dot, 'q-dot', true);
+        nm.appendChild(dot);
+        nm.appendChild(el('span', 'sr-only', toneWord(tone)));
+        nm.appendChild(document.createTextNode(String(account.label || account.email || account.key)));
+        nm.title = String(account.label || '');
+        head.appendChild(nm);
+        var clear = el('button', 'q-clear');
+        clear.setAttribute('type', 'button');
+        clear.setAttribute('data-focus', 'inspector-clear');
+        clear.setAttribute('aria-label', t('acc.clear_label'));
+        clear.title = t('acc.clear_label');
+        clear.appendChild(icon('close', 12));
+        clear.addEventListener('click', function (e) {
+            e.stopPropagation();
+            qLit = null;
+            clearAccount();
+        });
+        head.appendChild(clear);
+        card.appendChild(head);
+        if (account.email && account.email !== account.label) {
+            var em = el('div', 'q-em', account.email);
+            em.title = account.email;
+            card.appendChild(em);
+        }
+        var l1 = el('div', 'q-al q-share');
+        var budget = g.cycle ? cycleOf(account) : null;
+        var unlimited = budget && budget.state === 'unlimited';
+        if (unlimited) {
+            l1.appendChild(el('b', 'q-big', t('cycle.unlimited')));
+            l1.appendChild(document.createTextNode(' ' + t('cycle.included_usage')));
+        } else if (k.known && budget && budget.scale && budget.left !== null && budget.limit) {
+            l1.appendChild(el('b', 'q-big', moneyShort(budget.left, budget.scale)));
+            l1.appendChild(document.createTextNode(' ' + t('cycle.left_of', { limit: moneyShort(budget.limit, budget.scale) })));
+        } else if (k.known) {
+            l1.appendChild(el('b', 'q-big', leftPct(Math.max(0, Math.min(1, bar.left)) * 100) + '%'));
+            l1.appendChild(document.createTextNode(' ' + t('card.left')));
+        } else {
+            l1.appendChild(el('b', 'q-big', '?'));
+            l1.appendChild(document.createTextNode(' ' + t('card.no_reading')));
+        }
+        var tag = unlimited && budget.last_known ? ['last', t('card.state_last')]
+            : bar && !unlimited ? cardState(ctx, g, bar, account, k) : null;
+        if (tag) {
+            l1.appendChild(document.createTextNode(' '));
+            l1.appendChild(el('span', 'q-st q-st-' + tag[0], tag[1]));
+        }
+        card.appendChild(l1);
+        var l2 = el('div', 'q-al');
+        var at = bar ? Date.parse(bar.resets_at || '') : NaN;
+        if ((k.known || unlimited) && isFinite(at) && at > Date.now() - 1000) {
+            l2.appendChild(el('span', 'q-u', t(g.cycle ? 'card.cycle_ends_in' : (k.spent ? 'card.back_in' : 'card.resets_in'), { when: untilWords(at) })));
+            l2.appendChild(el('span', 'q-ck', ' · ' + clockAt(bar.resets_at)));
+            l2.title = whenWords(bar.resets_at);
+        } else if (!k.known && !unlimited) {
+            l2.textContent = !bar ? t('acc.lim_none') : account.signed_in === false ? t('card.signed_out') : t('card.not_read');
+        } else {
+            l2.textContent = t('card.no_reset');
+        }
+        card.appendChild(l2);
+        var l3 = el('div', 'q-al');
+        if (account.plan) l3.appendChild(el('span', 'q-u', t('card.plan', { plan: planWord(account.plan, family) })));
+        var observed = bar && bar.observed_at ? bar.observed_at : quotaObservedAt(account);
+        var ago = agoWords(observed);
+        if (ago) {
+            if (l3.firstChild) l3.appendChild(document.createTextNode(' · '));
+            l3.appendChild(el('span', 'q-u', t('card.read', { when: ago })));
+        }
+        if (l3.firstChild) card.appendChild(l3);
+        // A cooldown the engine reports (the whole account's, or a model's) is said on the card's face, with its scope and its end.
+        var cool = el('div', 'q-cool');
+        renderCooldowns(cool, account.quota || {});
+        if (cool.firstChild) card.appendChild(cool);
+        cardResources(card, account);
+        // Everything else of the account under one button (the same state as its full card's Diagnostics, diagnosticsOpen).
+        var more = el('div', 'q-more');
+        var moreBtn = el('button', 'q-more-btn', t(diagnosticsOpen ? 'acc.less' : 'acc.more'));
+        moreBtn.setAttribute('type', 'button');
+        moreBtn.setAttribute('aria-expanded', diagnosticsOpen ? 'true' : 'false');
+        moreBtn.setAttribute('aria-label', t('acc.details', { name: account.label }));
+        moreBtn.setAttribute('data-focus', 'inspector-details');
+        moreBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            diagnosticsOpen = !diagnosticsOpen;
+            rerender();
+        });
+        more.appendChild(moreBtn);
+        if (diagnosticsOpen) {
+            var body = el('div', 'q-more-body');
+            cardDetails(body, family, account, ctx, (currentView && currentView.facets) || {});
+            more.appendChild(body);
+        }
+        card.appendChild(more);
+        return card;
+    }
+
+    // Everything else the engine says of the account, under the card's one button: its verification and state, every window of it, its resources as the engine dated them
+    // (spending and diagnostics too), its absence, cooldowns and model exhaustions, and its readings — the parts of the account's full card (renderInspector).
+    function cardDetails(box, family, account, ctx, facets) {
+        var quota = account.quota || {};
+        var meta = el('div', 'meta-line insp-meta');
+        if (account.kind !== 'profile') meta.appendChild(el('span', null, t('acc.vendor_cli')));
+        if (account.verification && account.verification.label) {
+            meta.appendChild(el('span', verificationFailed(account) ? 'meta-bad' : null, verifyWord(account.verification.label)));
+        }
+        var reason = inactiveReason(account, facets);
+        if (reason && reason !== 'failed') meta.appendChild(el('span', null, inactiveWord(reason)));
+        var observed = relTime(quotaObservedAt(account));
+        meta.appendChild(el('span', 'quota-observed', observed ? t('acc.quota_observed', { when: observed }) : t('acc.quota_unobserved')));
+        box.appendChild(meta);
+        var notes = el('div', 'meta-line insp-meta');
+        appendHarnessNotes(notes, family, facets);
+        if (notes.firstChild) box.appendChild(notes);
+        var echoes = quota.state === 'ok' && !!(quota.constraints && quota.constraints.length);
+        if (!echoes && !(quota.state === 'cooling' && cooldownsOf(quota, 'account').length)) box.appendChild(renderQuotaVerdict(quota));
+        renderAccountCredits(box, quota);
+        renderAccountResources(box, account.resources);
+        accountLimits(box, ctx, account);
+        if (!budgetOnly(account)) renderAbsence(box, account, quota.absence);
+        renderExhaustions(box, quota, false);
+        accountReadings(box, account);
+        if (account.caption) box.appendChild(el('div', 'acct-note muted', t('acc.credential', { caption: account.caption })));
+    }
+
+    // The figure: account-windows left now of the accounts the limit applies
+    // to, current readings only. With none current it is "—", never 0; a
+    // measured 0 (every current account at the limit) is a real 0.
+    function rowFigure(g) {
+        var m = g.measured || {};
+        var lk = g.last_known || {};
+        return { any: !!m.accounts, text: m.accounts ? windowsLeft(m) : '—', of: slotCount(g),
+                 lastKnown: lk.accounts ? lk : null };
+    }
+
+    // The bars of a limit by what each says now: at the limit (a current
+    // reading), held back now, at the limit when last read (dated, not
+    // exhaustion now), read earlier and not at the limit (dated, not held
+    // back: the plate says what it had), unknown.
+    function limitKinds(g) {
+        var bars = barsOf(g);
+        return {
+            spent: bars.filter(function (b) { return b.state === 'current' && b.at_limit; }),
+            held: bars.filter(function (b) { return b.state !== 'unknown' && heldNow(b) && !b.at_limit; }),
+            was: bars.filter(function (b) { return b.state === 'last_known' && b.at_limit; }),
+            last: bars.filter(function (b) { return b.state === 'last_known' && !b.at_limit && !heldNow(b); }),
+            unknown: bars.filter(function (b) { return b.state === 'unknown'; })
+        };
+    }
+
+    // The held bars by the reason that holds them: one group for each of one or two
+    // named reasons (in the order of FLAG_ORDER, the same on every drawing), else all
+    // in one — three reasons or more, or a bar whose reason is not named.
+    function heldGroups(held) {
+        if (!held.length) return [];
+        var by = {};
+        var unnamed = false;
+        held.forEach(function (b) {
+            var flags = heldFlags(b);
+            if (!flags.length) unnamed = true;
+            flags.forEach(function (f) { (by[f] = by[f] || []).push(b); });
+        });
+        var order = FLAG_ORDER;
+        var keys = Object.keys(by).sort(function (a, b) {
+            var i = order.indexOf(a);
+            var j = order.indexOf(b);
+            return (i < 0 ? order.length : i) - (j < 0 ? order.length : j) || compareText(a, b);
+        });
+        if (unnamed || keys.length > 2) return [{ word: t('legend.restricted'), flag: '', bars: held }];
+        return keys.map(function (f) { return { word: flagWord(f), flag: f, bars: by[f] }; });
+    }
+
+    // What the words under a limit's bars are made of: an item for each state the limit has that the rest of the screen does not say,
+    // in one order — held back (one item for each reason), at the limit when last read, read earlier and not at the limit (with the
+    // sum of what those accounts had). An item is its number and its words and nothing else: the bars above are its sample, the
+    // figure is the plate's, the accounts at the limit now are the plate's bubble over the bars (limitBubble: said there, so not
+    // twice) and the accounts not read are the note's under the windows, so an account with no usable reading has no item here
+    // (its bar is a "?"). The accounts an item counts are named in its hint, one line each (`lines`), never beside the number.
+    function limitLegend(g, index, rowName) {
+        var kinds = limitKinds(g);
+        var items = [];
+        var who = function (b) { return accountName(index, b.account); };
+        heldGroups(kinds.held).forEach(function (group) {
+            items.push({ k: 'held', n: group.bars.length, word: group.word,
+                lines: group.bars.map(function (b) {
+                    return who(b) + ' — ' + (group.flag ? group.word
+                        : (heldFlags(b).map(flagWord).join(', ') || t('state.restricted')));
+                }) });
+        });
+        // At the limit when last read: dated and muted, not exhaustion now.
+        if (kinds.was.length) {
+            items.push({ k: 'was', n: kinds.was.length, word: t('legend.was_at_limit'),
+                lines: kinds.was.map(function (b) {
+                    return t('reading.was_limit', { name: who(b), when: relTime(b.observed_at) || t('reading.time_unknown') });
+                }) });
+        }
+        // Read earlier, not at the limit then and not held back: not current, so not in the figure, and what it had is said here.
+        // The plate lights the bars of these accounts when the engine named every one of them.
+        if (kinds.last.length) {
+            var had = kinds.last.reduce(function (sum, b) { return sum + Math.max(0, Math.min(1, b.left)); }, 0);
+            items.push({ k: 'last', n: kinds.last.length, word: t('legend.last'), extra: num(had, 2),
+                accounts: kinds.last.every(function (b) { return !!b.account; }) ? kinds.last.map(function (b) { return b.account; }) : null,
+                lines: kinds.last.map(function (b) {
+                    return t('reading.last_name', { name: who(b), when: relTime(b.observed_at) || t('reading.time_unknown') });
+                }),
+                note: t('legend.last_note') });
+        }
+        return items;
+    }
+
+    // The next reported reset as the cells of the row under the legend — the time, how
+    // many accounts reset then (when more than one), how much a full refill gives back if
+    // nothing more is used before it — with the hint of the whole row; or the one cell that
+    // says no time is reported; or null. A cell is `pre`, the value `b` (the figure), `post`.
+    function limitReset(g) {
+        var m = g.measured || {};
+        if (g.next_reset && g.next_reset.at) {
+            var n = g.next_reset.accounts || 0;
+            var back = g.next_reset_returns >= 0.005 ? amountWords(g.next_reset_returns) : '';
+            var when = whenWords(g.next_reset.at);
+            var cells = [boldAt(t('reset.next', { when: when }), when)];
+            if (n > 1) cells.push(boldAt(t('reset.accounts', { n: n }), String(n)));
+            if (back) cells.push(boldAt(t('reset.if_unused', { amount: '+' + back }), '+' + back));
+            return { cells: cells, title: back ? t('reset.hint_amount', { amount: back }) : t('reset.hint') };
+        }
+        if (m.accounts && g.reset_unknown === m.accounts) return { cells: [{ pre: t('reset.none') }], title: '' };
+        return null;
+    }
+
+    function cellText(cell) {
+        return (cell.pre || '') + (cell.b || '') + (cell.post || '');
+    }
+
+    // The full phrases of a limit's states and reset, names and times in them, as the
+    // plate's note says them aloud (the screen reader's, after the word Chart). The screen carries the numbers;
+    // these are what they count.
+    function limitSpoken(g, index) {
+        var out = [];
+        var kinds = limitKinds(g);
+        var named = function (b) { return !!(b.account && index[b.account]); };
+        var spent = kinds.spent;
+        if (spent.length === 1 && named(spent[0])) {
+            out.push(t('state.named_limit', { name: accountName(index, spent[0].account) })
+                + (spent[0].resets_at ? ' ' + t('bar.until', { when: whenWords(spent[0].resets_at) }) : ''));
+        } else if (spent.length) {
+            out.push(t('state.named_limit', { name: spent.length }));
+        }
+        var held = kinds.held;
+        if (held.length) {
+            var flags = {};
+            held.forEach(function (b) { heldFlags(b).forEach(function (f) { flags[f] = true; }); });
+            var keys = Object.keys(flags);
+            var word = keys.length === 1 ? flagWord(keys[0]) : t('state.restricted');
+            out.push((held.length === 1 && named(held[0]) ? accountName(index, held[0].account) : held.length) + ' ' + word);
+        }
+        var wasSpent = kinds.was;
+        if (wasSpent.length) {
+            out.push(t('state.named_was_limit', { name: wasSpent.length === 1 && named(wasSpent[0]) ? accountName(index, wasSpent[0].account) : wasSpent.length })
+                + (wasSpent.length === 1 ? ' (' + (relTime(wasSpent[0].observed_at) || t('reading.time_unknown')) + ')' : ''));
+        }
+        if (kinds.unknown.length) out.push(t('state.unknown_count', { n: kinds.unknown.length }));
+        var next = limitReset(g);
+        if (next) out.push(next.cells.map(cellText).join(' · '));
+        return out;
+    }
+
+    // The accounts at the limit now, in words under the number row: "At the limit · 3", the first of them by name (to
+    // FOOT_NAMES, then "N more", which opens the account list, as the note's does), and in how long the soonest of them is back ("back in 9h";
+    // none, no tail). Only when there are such accounts; it takes the keyboard, and pointed at or focused it lights their bars (dimOnItem).
+    // Null when none is at the limit now. `spent` are the bars of limitKinds.
+    function limitBubble(spent, index, key, plate) {
+        if (!spent.length) return null;
+        var node = el('div', 'wt-limit');
+        var named = spent.filter(function (b) { return !!b.account; });
+        // Few are named; more are counted by the head alone (the hint names them all, and the bubble lights their bars).
+        var shown = named.length <= FOOT_NAMES && named.length === spent.length ? named : [];
+        var said = shown.map(function (b) { return accountName(index, b.account); });
+        var soonest = null;
+        spent.forEach(function (b) {
+            var at = Date.parse(b.resets_at || '');
+            if (isFinite(at) && at > Date.now() && (soonest === null || at < soonest)) soonest = at;
+        });
+        var head = t('plate.at_limit', { n: spent.length });
+        var back = '';
+        if (soonest !== null) {
+            back = t('plate.back', { n: spent.length, 'in': untilWords(soonest) });
+        }
+        node.appendChild(headNode('b', 'wt-limit-head', head));
+        said.forEach(function (name, i) {
+            node.appendChild(document.createTextNode(' '));
+            node.appendChild(el('span', 'wt-who', i < said.length - 1 ? name + ',' : name));
+        });
+        node.setAttribute('tabindex', '0');
+        node.setAttribute('role', 'group');
+        node.setAttribute('aria-label', [head].concat(said, back ? [back] : []).join(', '));
+        node.setAttribute('data-k', 'limit');
+        node.setAttribute('data-focus', 'atlimit:' + key);
+        node.title = hintOf(spent.map(function (b) {
+            return accountName(index, b.account) + ' — ' + t('aria_bar.at_limit') + (b.resets_at ? ' ' + t('bar.until', { when: whenWords(b.resets_at) }) : '');
+        }));
+        // The plate dims to these accounts' bars when the engine named every one of them; else to the bars at the limit.
+        var own = named.length === spent.length ? named.map(function (b) { return b.account; }) : null;
+        if (own) node.setAttribute('data-accounts', JSON.stringify(own));
+        dimOnItem(node, plate, 'limit', function () { return plate; }, own);
+        if (back) {
+            node.appendChild(document.createTextNode(' · '));
+            node.appendChild(el('span', 'wt-limit-back', back));
+        }
+        return node;
+    }
+
+    // "Lowest left" names a ranking, and its words say so. They stand in the hint of the plate's figure and in its spoken note: the plate
+    // draws no badge for it (the figure is the plate's, and each fact stands once).
+    function tightWords(g) {
+        return 'Lowest average share left among this family’s measured limits: a ranking, not a verdict'
+            + (scopeWords(g) ? '. It binds only its own ' + scopeWords(g) + ', not the family’s other models' : '')
+            + '.';
+    }
+
+    // Keep the current figure and coverage on the face; detailed explanations follow the bars, not ahead of the account the reader picked.
+    function quotaNotes(plate, key, notes) {
+        notes = notes.filter(Boolean);
+        if (!notes.length) return;
+        var detail = el('details', 'q-limit-details');
+        var summary = el('summary', '', t('plate.details'));
+        summary.setAttribute('data-focus', 'limit-details:' + key);
+        detail.appendChild(summary);
+        notes.forEach(function (note) {
+            classSet(note, 'q-note', true);
+            detail.appendChild(note);
+        });
+        detail.open = !!limitDetailsOpen[key];
+        detail.addEventListener('toggle', function () { limitDetailsOpen[key] = detail.open; });
+        plate.appendChild(detail);
+    }
+
+    // The plate of the billing-cycle budget (Cursor): the money its accounts read now have left of their cycles, said once, then the opened account and the bars,
+    // as a window's plate has them; no history (none of money is kept: cycleNote says so).
+    function cycleQuotaPlate(ctx, cycle, family, stamp, foot, credits, accWord) {
+        var plate = el('section', 'q-plate q-plate-cycle');
         plate.setAttribute('id', 'quotas-win-panel');
-        plate.setAttribute('role', 'tabpanel');
-        plate.setAttribute('aria-labelledby', 'quotas-win-' + tab.seconds);
-        if (scope) plate.className += ' wt-has-scope';
-        plateMotion(plate);
+        plate.setAttribute('aria-label', cycle.note);
+        var head = el('div', 'q-head');
+        head.appendChild(el('h3', 'q-title', t('plate.cycle')));
+        var chip = el('span', 'q-scope', t('cycle.included_usage'));
+        chip.title = cycle.note;
+        head.appendChild(chip);
+        if (stamp) {
+            classSet(stamp, 'q-stamp', true);
+            head.appendChild(stamp);
+        }
+        plate.appendChild(head);
+        var onlyUnlimited = !cycle.counted && cycle.unlimited.length > 0 && !cycle.lastKnown && !cycle.unknown;
+        var money = el('div', 'q-money');
+        money.appendChild(el('b', 'q-money-fig', cycle.counted ? moneyShort(cycle.left, cycle.scale) : (onlyUnlimited ? t('cycle.unlimited') : '—')));
+        money.appendChild(document.createTextNode(' ' + (cycle.counted ? t('cycle.left_of', { limit: moneyShort(cycle.limit, cycle.scale) })
+            : (onlyUnlimited ? t('cycle.included_usage') : t('common.no_current_reading')))));
+        money.title = t('plate.cycle_title');
+        var status = el('div', 'q-status');
+        status.appendChild(money);
+        if (cycle.onDemand) {
+            var over = el('div', 'q-note', t('plate.over_plan', { amount: cycle.onDemand.amount }));
+            over.title = cycle.onDemand.title;
+            status.appendChild(over);
+        }
+        plate.appendChild(status);
+        var group = { key: cycle.key, cycle: true, bars: cycle.bars };
+        var accts = el('div', 'q-accts' + (group.bars.length === 1 ? ' q-accts-one' : ''));
+        accts.appendChild(accountCard(ctx, group, family));
+        var col = quotaBars({ key: group.key, cycle: true, bars: group.bars.filter(function (b) { return b.state !== 'unlimited'; }) }, cycle.name, ctx.index, family);
+        var label = el('div', 'q-bhead');
+        label.appendChild(accWord || el('span', 'q-blabel', t('bars.title')));
+        col.insertBefore(label, col.firstChild);
+        accts.appendChild(col);
+        plate.appendChild(accts);
+        quotaNotes(plate, family.harness_id + '|' + cycle.key,
+            [resetNode(cycle.reset), foot, credits, legendNode(cycle.legend, cycle.key)]);
         return plate;
     }
 
-    // The plate's coming in, for the reader's own pick (drawMotion): its fact, its bubble of the accounts at the limit, the model list, the stamp and
-    // the two rows under the bars rise and the bars grow from their base, a step apart. A redraw nobody asked for (the poll) moves nothing.
-    // The plate of the billing-cycle budget comes in the same way.
-    function plateMotion(plate) {
-        if (!drawMotion) return;
-        plate.className += ' wt-in';
-        Array.prototype.forEach.call(plate.childNodes, function (part) {
-            if (hasClass(part, 'bars')) {
-                Array.prototype.forEach.call(part.childNodes, function (bar, i) {
-                    bar.style.animationDelay = (Math.min(i * 12, 80) - drawElapsed) + 'ms';
-                });
-            } else if (drawElapsed && hasAnyClass(part, ['l-fig', 'wt-fact', 'wt-limit', 'lg', 'nx', 'wt-scope', 'wt-stamp'])) {
-                part.style.animationDelay = -drawElapsed + 'ms';
+    // The title of a window's plate: a count of days, hours or minutes with the word window ("7-day window", "5-hour window"), the largest of the three
+    // that holds the length whole; a length none of them holds keeps the tab's own name ("Weekly window").
+    function plateTitle(tab) {
+        var sec = tab.seconds;
+        if (typeof sec === 'number' && sec > 0) {
+            if (sec % 86400 === 0) return t('plate.len_d', { n: sec / 86400 });
+            if (sec % 3600 === 0) return t('plate.len_h', { n: sec / 3600 });
+            if (sec % 60 === 0) return t('plate.len_m', { n: sec / 60 });
+        }
+        return t('plate.window', { len: tab.name });
+    }
+
+    // The plate of the picked limit: the head (its window, its scope), the stamp and the note of the accounts not read, the family's reset credits, then the opened account and the bars.
+    function quotaPlate(ctx, tab, g, family, stamp, foot, credits, accWord, markTightest) {
+        var plate = el('section', 'q-plate');
+        plate.setAttribute('id', 'quotas-win-panel');
+        plate.setAttribute('data-limit', g.key);
+        plate.setAttribute('aria-label', ctx.names[g.key] || '');
+        var head = el('div', 'q-head');
+        head.setAttribute('aria-describedby', 'quotas-win-say');
+        head.appendChild(el('h3', 'q-title', plateTitle(tab)));
+        var scope = scopeLabel(g, ctx.names, tab);
+        var own = scope && scope !== t('scope.all_models');
+        // A limit the engine scopes by model-id prefix ("gemini-") is every model of that family, the ones in no list too: "Gemini models", never a list
+        // of three; a limit scoped to named models is "<model> only".
+        var prefixes = (((g.scope || {}).prefixes || {}).names || []).filter(Boolean);
+        var chip = el('span', 'q-scope' + (own ? ' own' : ''), !own ? t('scope.all_models')
+            : prefixes.length ? t('plate.scope_models', { scope: scope }) : t('plate.scope_only', { scope: scope }));
+        if (prefixes.length) chip.title = t('plate.covers', { prefixes: prefixes.map(function (x) { return String(x) + '*'; }).join(', ') }) + (scopeWords(g) ? ' · ' + scopeWords(g) : '');
+        else if (scopeWords(g)) chip.title = scopeWords(g);
+        head.appendChild(chip);
+        if (stamp) {
+            classSet(stamp, 'q-stamp', true);
+            head.appendChild(stamp);
+        }
+        plate.appendChild(head);
+        // The status shows this limit's current account-windows (never a sum of unlike limits). Coverage stays in the head; the full explanations
+        // follow the account bars under Limit details, so a long stale/held roster does not push the controls off the phone's first screen.
+        var status = el('div', 'q-status');
+        plate.appendChild(status);
+        var fig = rowFigure(g);
+        var figure = el('div', 'l-fig q-fig');
+        figure.appendChild(figureNode(fig.text, !fig.any, { num: 'q-fig-num', dot: 'q-fig-dot' }));
+        figure.appendChild(el('span', 'meta-num of', ' ' + t('plate.of', { n: fig.of })));
+        figure.title = (fig.any ? '' : 'No current reading — not zero. ')
+            + 'Account-windows left now: the share each account read now has left of this limit, added up (a '
+            + 'full account counts 1), of the ' + plural(fig.of, 'account') + ' it applies to. Last-known and '
+            + 'unknown accounts are not counted, never as 0.'
+            + (markTightest ? ' ' + tightWords(g) : '');
+        if (fig.of > 0) figure.setAttribute('data-of', String(fig.of));
+        status.appendChild(figure);
+        // A limit the engine scopes by model prefix covers every model whose id starts so, the ones in no list too: said once, from the engine's own prefixes.
+        if (prefixes.length) {
+            var cov = el('div', 'q-cov', t('plate.covers', { prefixes: prefixes.map(function (p) { return String(p) + '*'; }).join(', ') }));
+            if (scopeWords(g)) cov.title = scopeWords(g);
+            status.appendChild(cov);
+        }
+        // What the plate says, whole, to a reader who does not see it: the limit, its account-windows left now, who is at the limit or held, the next reset.
+        var spoken = [ctx.names[g.key] || tab.name];
+        if (scopeWords(g)) spoken.push(scopeWords(g));
+        spoken.push(fig.any ? t('plate.current_words', { amount: fig.text, total: fig.of }) : 'no current reading');
+        if (fig.lastKnown) {
+            spoken.push(t('plate.last_words', { amount: num(fig.lastKnown.windows, 2), when: relTime(fig.lastKnown.oldest_observed_at) || t('reading.time_unknown') }));
+        }
+        spoken.push(t('win.say_current', { n: fig.of, current: (g.measured || {}).accounts || 0 }));
+        limitSpoken(g, ctx.index).forEach(function (w) { spoken.push(w); });
+        restrictionWords(g).forEach(function (w) { spoken.push(w); });
+        if (restrictionWords(g).length && num(g.unrestricted_windows, 2)) spoken.push(num(g.unrestricted_windows, 2) + ' unrestricted');
+        coverageWords(g).forEach(function (w) { spoken.push(w); });
+        if (markTightest) spoken.push('lowest average share left in this family, a ranking, not a verdict');
+        var say = el('span', 'sr-only', spoken.join(' — '));
+        say.setAttribute('id', 'quotas-win-say');
+        plate.appendChild(say);
+        plate.setAttribute('aria-describedby', 'quotas-win-say');
+        // Who is at the limit now, and when the first of them comes back; who is held and by what (the legend names them; under the pointer their bars light).
+        // (each of these notes wears q-note, the plate's one rule for them)
+        var atLimit = limitBubble(limitKinds(g).spent, ctx.index, g.key, plate);
+        var states = limitLegend(g, ctx.index, ctx.names[g.key] || tab.name);
+        if (foot) states = states.filter(function (item) { return item.k !== 'last'; });
+        var accts = el('div', 'q-accts' + (barsOf(g).length === 1 ? ' q-accts-one' : ''));
+        accts.appendChild(accountCard(ctx, g, family));
+        var col = quotaBars(g, ctx.names[g.key] || tab.name, ctx.index, family);
+        var label = el('div', 'q-bhead');
+        if (accWord) label.appendChild(accWord);
+        else label.appendChild(el('span', 'q-blabel', t('bars.title')));
+        col.insertBefore(label, col.firstChild);
+        accts.appendChild(col);
+        plate.appendChild(accts);
+        quotaNotes(plate, family.harness_id + '|' + g.key, [atLimit, foot, credits, legendNode(states, g.key)]);
+        return plate;
+    }
+
+    // The bars' grid: the most columns at --bar-max that fit, narrower down to --bar-min, then another row; every account stays on screen.
+    var Q_BAR_MIN = 20;
+    // Under a finger (a coarse pointer) a bar is at least this wide: the grid takes another row sooner.
+    var Q_BAR_MIN_TOUCH = 28;
+    var Q_BAR_MAX = 56;
+    var Q_BAR_GAP = 5;
+    var qFitBound = false;
+    function qBarsFit() {
+        if (stopped) return;
+        try {
+            var strips = rootAll('.q-bars');
+            var least = mediaIs('(pointer: coarse)') ? Q_BAR_MIN_TOUCH : Q_BAR_MIN;
+            for (var i = 0; i < strips.length; i++) {
+                var strip = strips[i];
+                var n = Number(strip.getAttribute('data-n')) || 0;
+                var w = strip.parentNode ? strip.parentNode.clientWidth : 0;
+                // The one bar of a one-account plate on a phone stands in a grid cell of its own (its column has no width of its own to read): one column, the widest bar.
+                if (n === 1 && !w) {
+                    setVar(strip, '--q-cols', '1');
+                    setVar(strip, '--q-bw', Q_BAR_MAX + 'px');
+                    setVar(strip, '--q-bh', '96px');
+                    continue;
+                }
+                if (!n || !w) continue;
+                var rows = 1;
+                var cols = n;
+                var bw = Q_BAR_MAX;
+                for (; rows <= n; rows++) {
+                    cols = Math.ceil(n / rows);
+                    bw = (w - (cols - 1) * Q_BAR_GAP) / cols;
+                    if (bw >= least) break;
+                }
+                bw = Math.max(Q_BAR_MIN, Math.floor(Math.min(Q_BAR_MAX, bw)));
+                var bh = rows === 1 ? 96 : rows === 2 ? 66 : rows === 3 ? 54 : 48;
+                setVar(strip, '--q-cols', String(cols));
+                setVar(strip, '--q-bw', bw + 'px');
+                setVar(strip, '--q-bh', bh + 'px');
             }
-        });
+            if (!qFitBound && window.addEventListener) {
+                qFitBound = true;
+                window.addEventListener('resize', qBarsFit);
+                window.addEventListener('resize', chartFit);
+            }
+        } catch (err) {
+            // A layout that cannot be read keeps the stylesheet's grid.
+        }
     }
 
     // The box the plate, the selected account's card and the timeline stand in.
@@ -7540,21 +5122,34 @@
             return ctx;
         }
         if (cycle) {
-            // No time window, but a budget per billing cycle: it takes the 30-day place and says what it is, and it is the one row:
-            // 5-hour and Weekly are not drawn (the family reports no window for them).
-            var places = windowTabs([], {}, {});
-            var place = places[WINDOW_PLACES.indexOf(CYCLE_PLACE)];
+            // No time window, but a budget per billing cycle: it has the one ring (Cycle) and its own plate, and it is the one row: 5-hour and Weekly are not drawn
+            // (the family reports no window for them).
             ctx.cycle = cycle;
-            railed(windowRow(hid, places, place, function (tab) {
-                return tab === place ? cycle.tab : null;
-            }, {
-                accounts: 0, index: ctx.index, failed: failed,
-                foot: failed ? null : windowFoot(cycle.status, ctx.index, windowIncomplete(cycle.tab)) }));
+            ctx.names[cycle.key] = cycle.name;
+            var cycleTab = { seconds: CYCLE_PLACE, name: cycle.name, groups: [cycle.tab] };
+            var cycleGroup = { key: cycle.key, cycle: true, bars: cycle.bars };
+            card = pickDecide(family, cycleGroup, hid + '|' + cycle.key, card, view);
+            ctx.card = card;
+            ctx.pickGroup = cycleGroup;
+            railed(limitRail(hid, [cycleTab], cycle.tab, ctx, failed));
             var cycleBox = limitsBox(family);
-            cycleBox.appendChild(cyclePlate(cycle, place, ctx.index, windowStamp(view, summary, cycle.status), railNote, familyCreditsNode(family)));
-            // The card of the account a bar of the budget selected stands right under the plate.
-            if (card && !card.drawn && card.limit === cycle.key) card.draw(cycleBox, ctx);
-            cycleBox.appendChild(cycleNote());
+            var cycleWord = null;
+            if (family && (family.accounts || []).length) {
+                cycleWord = wordButton('acc.word', { n: family.accounts.length });
+                cycleWord.setAttribute('data-focus', 'accounts');
+                cycleWord.setAttribute('aria-pressed', accountsOpen ? 'true' : 'false');
+                cycleWord.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    accountsSet(!accountsOpen);
+                    rerender();
+                    restoreFocus('accounts');
+                });
+            }
+            cycleBox.appendChild(cycleQuotaPlate(ctx, cycle, family, windowStamp(view, summary, cycle.status),
+                failed ? null : windowFoot(cycle.status, ctx.index, windowIncomplete(cycle.status)), familyCreditsNode(family), cycleWord));
+            if (card && !accountsOpen) card.drawn = true;
+            // (the note stands in the plate, where a window's history stands)
+            cycleBox.childNodes[cycleBox.childNodes.length - 1].appendChild(cycleNote());
             section.appendChild(cycleBox);
             parent.appendChild(section);
             return ctx;
@@ -7590,67 +5185,43 @@
         var active = null;
         tabs.forEach(function (tab) { if (groupByKey(tab.groups, chartKey)) active = tab; });
         var shown = active ? groupByKey(active.groups, chartKey) : null;
-        if (shown) scopePicks[hid + ':' + active.seconds] = shown.key;
         // The pick of the window on screen is decided here, before its plate is built (barStrip reads it): the top account unless the reader has picked or let go. The card of the
         // pick is the one this hands back (ctx.card: the drawing hands it on to the account list).
         if (shown) {
             card = pickDecide(family, shown, hid + '|' + shown.key, card, view);
             ctx.card = card;
         }
-        railed(windowRow(hid, tabs, active, function (tab) {
-            return tab === active ? shown
-                : (groupByKey(tab.groups, scopePicks[hid + ':' + tab.seconds]) || tab.groups[0] || null);
-        }, {
-            index: ctx.index, failed: failed, ladder: shown,
-            foot: shown && !failed ? windowFoot(shown, ctx.index, windowIncomplete(shown)) : null,
-            // How many accounts the family's widest window applies to: a window with fewer says so in its tab's label.
-            accounts: Math.max.apply(null, [0].concat(groups.map(slotCount)))
-        }));
+        // The word over the bars opens the list of accounts (and stays pressed while it is open): it heads the bars of the plate.
+        var accWord = null;
+        if (listable) {
+            accWord = wordButton('acc.word', { n: family.accounts.length });
+            accWord.setAttribute('data-focus', 'accounts');
+            accWord.setAttribute('aria-pressed', accountsOpen ? 'true' : 'false');
+            accWord.addEventListener('click', function (e) {
+                e.stopPropagation();
+                accountsSet(!accountsOpen);
+                rerender();
+                restoreFocus('accounts');
+            });
+        }
+        railed(limitRail(hid, tabs, shown, ctx, failed));
         if (shown) {
             // The limit the plate stands for: a row of the list picks its account on this limit's bar (renderAccounts), as the bar does.
             ctx.pickGroup = shown;
-            var shownPlate = windowPlate(ctx, active, shown, chartKey, shown.tightest && measuredGroups > 1, windowStamp(view, summary, shown),
-                railNote, familyCreditsNode(family));
-            table.appendChild(shownPlate);
-            // The timeline of the charted limit is one node in a fold (foldOf): right under its plate at rest; where a bar of the plate is picked
-            // it stands in the plate, right under the bars (.tl-top, the area `chart`) and the card of the account stands under the plate. Folded
-            // (the plate's word "Chart" not pressed), it leaves nothing behind. The place is worked out here from the pick, with no motion: the
-            // poll and a drawing nobody asked for build the same screen a pick on the plate (selectInPlace) arrives at.
-            var line = timelineOpen ? foldOf('tl', timelineBlock(ctx, shown), false) : null;
-            // The strip the chart folds into under the account's card (chartStrip), after the fold: the CSS shows it only while the card is up.
-            if (line) line.appendChild(chartStrip(ctx.names[shown.key] || '', line));
-            var barsOfPlate = plateBars(shownPlate);
-            var lifted = !!line && !!barsOfPlate && !!pickedIn(barsOfPlate);
-            if (lifted) {
-                line.className += ' tl-top';
-                shownPlate.className += ' wt-up';
-                // The plate wears the line of the pick (its outline) from the build; the arrow comes with barsFit. Where the line is yet to be drawn (pickDue: the opening, a pick of a window
-                // or a family) it wears none: the line draws it (pickTraceRun).
-                if (blockOf(line)) classSet(blockOf(line), 'tl-traced', !pickDue);
-                // And it waits behind the stand-ins until the line has met (waitOn; pickTraceRun / traceStart end it): the poll owes no line, so shows none.
-                if (blockOf(line) && pickDue) waitOn(blockOf(line));
-                shownPlate.insertBefore(line, barsOfPlate.nextSibling);
-            }
-            // The card of the account a bar of this limit selected stands right under the plate, in a fold of its own: under the chart in the plate (the plate's area `card`), and where
-            // there is no chart over it (Chart folded) in its own place under the plate, whole.
             if (hid + '|' + shown.key !== cardWhere) {
                 cardWhere = hid + '|' + shown.key;
                 cardReset();
             }
-            if (card && !card.drawn && card.limit === shown.key) {
-                var cardHolder = el('div', null);
-                card.draw(cardHolder, ctx);
-                if (cardHolder.firstChild) {
-                    var cardBox = foldOf('ins', cardHolder.firstChild, false);
-                    if (lifted) {
-                        shownPlate.insertBefore(cardBox, line.nextSibling);
-                        cardTake(shownPlate);
-                    } else {
-                        table.appendChild(cardBox);
-                    }
-                }
-            }
-            if (line && !lifted) table.appendChild(line);
+            var foot = failed ? null : windowFoot(shown, ctx.index, windowIncomplete(shown));
+            // While the list is open the plate is folded away: the word stands over the list then (accStrip, below), so it can shut it.
+            var shownPlate = quotaPlate(ctx, active, shown, family, windowStamp(view, summary, shown), foot, familyCreditsNode(family),
+                accountsOpen ? null : accWord, shown.tightest && measuredGroups > 1);
+            table.appendChild(shownPlate);
+            // The plate holds the opened account's card: the list draws its own only while it is open.
+            if (card && !accountsOpen) card.drawn = true;
+            // The history of the picked limit, the last part of its plate (the approved composition: one plate, the history under the bars).
+            var line = timelineOpen ? foldOf('tl', timelineBlock(ctx, shown), false) : null;
+            if (line) shownPlate.appendChild(line);
             (accPlace ? accPlace.firstChild : section).appendChild(table);
         } else {
             // Every limit hidden or none picked: no plate to hold the stamp and the credits, so they stand in the section, the stamp in the head, as where there is no window.
@@ -7668,7 +5239,6 @@
                 pickHome = '';
                 pickAt = '';
                 pickDue = false;
-                if (stepOn && stepOn.account) stepOn = null;
                 ctx.card = null;
             }
         }
@@ -7682,16 +5252,7 @@
             // The word over the bars, on the right (the text action of the plate's chart word): it opens the list and stays the same word, pressed while the list is open. Rows and the line of
             // coverage go to the head of the list (renderAccounts); with no plate drawn Rows stays here, the one way back to a hidden row.
             var accStrip = el('div', 'acc-strip');
-            var accWord = wordButton('acc.word', { n: family.accounts.length });
-            accWord.setAttribute('data-focus', 'accounts');
-            accWord.setAttribute('aria-pressed', accountsOpen ? 'true' : 'false');
-            accWord.addEventListener('click', function (e) {
-                e.stopPropagation();
-                accountsSet(!accountsOpen);
-                rerender();
-                restoreFocus('accounts');
-            });
-            accStrip.appendChild(accWord);
+            if (!shown || accountsOpen) accStrip.appendChild(accWord);
             var listFold = accFold('listfold', !accountsOpen);
             var toOpen = accountsOpen;
             // The drawing that follows an opening or a shutting stands in the state the motion starts from, and plays the fold on the next frame.
@@ -7705,7 +5266,7 @@
             listFold.firstChild.inert = !toOpen;
             ctx.listHost = listFold.firstChild;
             ctx.rowsNode = shown ? rowsNode : null;
-            section.appendChild(accStrip);
+            if (accStrip.firstChild) section.appendChild(accStrip);
             section.appendChild(accPlace);
             section.appendChild(listFold);
             if (!shown) section.appendChild(rowsNode);
@@ -8145,6 +5706,7 @@
         var shown = onHand ? drawnChart(chart) : null;
         var idle = paceIdle(shown);
 
+        box.appendChild(el('h4', 'q-hist-title', t('chart.history')));
         var controls = el('div', 'tl-controls wt-controls');
         controls.appendChild(segControl(t('chart.span'), HORIZONS.map(function (h) {
             return { key: h, name: h === '24h' ? t('chart.h24') : t('chart.d7'),
@@ -8684,11 +6246,10 @@
         });
         var recorded = typeof chart.past_points === 'number' ? chart.past_points : Math.max(0, (chart.past || []).length - 1);
         var box = el('div');
-        box.appendChild(el('p', 'chart-notes', 'The table lists ' + rows.length + ' of ' + recorded
-            + ' recorded changes; the chart and its cursor use all of them.'));
+        box.appendChild(el('p', 'chart-notes', t('table.changes', { n: rows.length, total: recorded })));
         var table = el('table', 'tbl');
         var head = el('tr');
-        ['Time', 'Recorded', 'No new use', 'Recent pace', 'Event'].forEach(function (h) {
+        [t('table.time'), t('table.recorded'), t('table.no_new_use'), t('table.recent_pace'), t('table.event')].forEach(function (h) {
             var th = el('th', null, h);
             th.setAttribute('scope', 'col');
             head.appendChild(th);
@@ -8729,14 +6290,13 @@
             if (!isFinite(at) || at < chart.now
                     || (row.scenario_no_new_use === undefined && row.scenario_recent_pace === undefined)) return;
             rows.push({ at: at, noUse: row.scenario_no_new_use, pace: row.scenario_recent_pace,
-                event: row.event === 'now' ? 'Future starts from current readings only' : (row.event || '') });
+                event: row.event === 'now' ? t('table.future_starts') : (row.event || '') });
         });
         rows.sort(function (a, b) { return a.at - b.at; });
         var box = el('div');
-        box.appendChild(el('p', 'chart-notes', 'The table lists ' + recorded.length + ' of ' + details.length
-            + ' recorded changes; the chart and its cursor use all of them. Carried ages are at the listed time.'));
+        box.appendChild(el('p', 'chart-notes', t('table.changes', { n: recorded.length, total: details.length }) + ' ' + t('table.carried')));
         var table = el('table', 'tbl'), thead = el('thead'), head = el('tr');
-        ['Time', 'History', 'No new use', 'Recent pace', 'Context'].forEach(function (text) {
+        [t('table.time'), t('table.history'), t('table.no_new_use'), t('table.recent_pace'), t('table.context')].forEach(function (text) {
             var th = el('th', null, text); th.setAttribute('scope', 'col'); head.appendChild(th);
         });
         thead.appendChild(head); table.appendChild(thead);
@@ -8778,9 +6338,9 @@
         var lo = Math.max(0, hi - SIGHTING_ROWS);
         var box = el('div', 'sightings');
         var table = el('table', 'tbl');
-        table.appendChild(el('caption', null, 'Seen at one sweep only · ' + (lo + 1) + '–' + hi + ' of ' + points.length));
+        table.appendChild(el('caption', null, t('sightings.caption', { lo: lo + 1, hi: hi, n: points.length })));
         var head = el('tr');
-        ['Time', 'Total', 'What was seen'].forEach(function (h) {
+        [t('table.time'), t('table.total'), t('table.what_was_seen')].forEach(function (h) {
             var th = el('th', null, h);
             th.setAttribute('scope', 'col');
             head.appendChild(th);
@@ -8793,8 +6353,8 @@
             var unsettled = p[1] === null || p[1] === undefined;
             var tr = el('tr');
             [momentWords(p[0]),
-             unsettled ? 'not settled' : num(p[1], 2),
-             unsettled ? 'sources disagree at this sweep' : 'seen at this sweep only'
+             unsettled ? t('sightings.unsettled') : num(p[1], 2),
+             unsettled ? t('sightings.disagree') : t('sightings.only')
             ].forEach(function (text) { tr.appendChild(el('td', null, text)); });
             body.appendChild(tr);
         });
@@ -8802,8 +6362,8 @@
         box.appendChild(table);
         if (pages > 1) {
             var nav = el('div', 'sightings-nav');
-            nav.appendChild(sightingsTurn('Older', 'Older sightings', 'sightings:older', 1, sightingsBack < pages - 1));
-            nav.appendChild(sightingsTurn('Newer', 'Newer sightings', 'sightings:newer', -1, sightingsBack > 0));
+            nav.appendChild(sightingsTurn(t('sightings.older'), t('sightings.older_label'), 'sightings:older', 1, sightingsBack < pages - 1));
+            nav.appendChild(sightingsTurn(t('sightings.newer'), t('sightings.newer_label'), 'sightings:newer', -1, sightingsBack > 0));
             box.appendChild(nav);
         }
         return box;
@@ -9255,8 +6815,9 @@
             var scale = rect && rect.width ? rect.width / W : 1;
             var inset = rect && plotBox ? rect.left - plotBox.left : 0;
             var drop = rect && plotBox ? rect.top - plotBox.top : 0;
-            var half = (tip.offsetWidth || 170) / 2;
             var room = plot.clientWidth || W * scale + 2 * inset;
+            tip.style.maxWidth = Math.max(0, room - 2 * inset) + 'px';
+            var half = (tip.offsetWidth || 170) / 2;
             tip.style.left = Math.max(inset + half, Math.min(room - inset - half, cx * scale + inset)) + 'px';
             tip.style.top = ((peak === null ? pt : peak) * scale + drop) + 'px';
             var tipBox = tip.getBoundingClientRect ? tip.getBoundingClientRect() : null;
@@ -9347,7 +6908,7 @@
             var rest = el('span', 'r');
             var parts = [];
             if (!known) {
-                parts.push([UNKNOWN_WORDS[bar.why] || t('acc.lim_no_usable'), '']);
+                parts.push([t(UNKNOWN_WORDS[bar.why] || 'acc.lim_no_usable'), '']);
             } else {
                 if (bar.resets_at) {
                     parts.push([t(bar.state === 'last_known' ? 'acc.lim_reported_reset' : (bar.at_limit ? 'acc.lim_until' : 'acc.lim_resets'),
@@ -9428,93 +6989,6 @@
         return hasOwn(VERIFY_WORDS, label) ? t(VERIFY_WORDS[label]) : label;
     }
 
-    // The account's share left in each window of its family, from the same bars accountLimits draws: the strip's lead (the first) and the row of windows shown under the pointer.
-    function peekOf(ctx, account) {
-        var out = [];
-        ((ctx && ctx.groups) || []).forEach(function (g) {
-            var bar = barOf(g, account.key);
-            if (!bar || bar.state === 'unknown' || typeof bar.left !== 'number') return;
-            out.push({ k: String(ctx.names[g.key] || ''), p: leftPct(bar.left * 100) + '%' });
-        });
-        return out;
-    }
-
-    // The card as the chart's plate holds it: a strip (.kt-top: the head, the lead window, the row of windows under the pointer, and the button over it all, which presses it open) and the
-    // rest of the card in a fold of its own (.kt-more). The press is kept in cardOpen, so a drawing builds the card as it stood; another account (selectAccount) lets it go, the window or the family changing too, so a new card is a strip and the chart stands under it. Outside the plate the CSS shows it whole and the button is hidden.
-    function cardFold(card, head, clear, pad, account, ctx) {
-        var top = el('div', 'kt-top');
-        var peek = peekOf(ctx, account);
-        var right = el('div', 'kt-right');
-        var lead = el('span', 'kt-lead');
-        if (peek.length) {
-            lead.textContent = peek[0].p;
-            lead.title = peek[0].k + ' ' + peek[0].p;
-        }
-        right.appendChild(lead);
-        right.appendChild(clear);
-        head.appendChild(right);
-        top.appendChild(head);
-        var tg = el('button', 'kt-toggle');
-        tg.setAttribute('type', 'button');
-        tg.setAttribute('aria-expanded', cardUp() ? 'true' : 'false');
-        tg.setAttribute('aria-label', t('acc.details', { name: account.label }));
-        tg.setAttribute('data-focus', 'inspector-toggle');
-        tg.addEventListener('click', function (e) {
-            e.stopPropagation();
-            cardPress(card, !cardOpen, true);
-        });
-        // A click on the up card's own ground (not on a button, a link, a field, a summary, and no selection made) pins it too: the pointer that came to the strip finds the strip gone up by the click.
-        card.addEventListener('click', function (e) {
-            try {
-                if (cardOpen || !cardUp()) return;
-                var hit = e.target && typeof e.target.closest === 'function' ? e.target.closest('a,button,input,select,textarea,summary,label,[role=button],[tabindex]') : null;
-                var chosen = window.getSelection ? String(window.getSelection()) : '';
-                if (!hit && !chosen) cardPress(card, true, true);
-            } catch (err) {
-                // A card that cannot be asked is pinned by its strip only.
-            }
-        });
-        // Under the pointer or with the keyboard focus in it the card goes up (a finger and a narrow screen: the strip's press only). The focus counts when the keyboard put it there (:focus-visible).
-        card.addEventListener('pointerenter', function (e) {
-            if (e.pointerType !== 'touch') cardHold(card, 'hover', true);
-        });
-        card.addEventListener('pointerleave', function (e) {
-            if (e.pointerType !== 'touch') cardHold(card, 'hover', false);
-        });
-        card.addEventListener('focusin', function (e) {
-            var seen = false;
-            try {
-                seen = !!(e.target && typeof e.target.matches === 'function' && e.target.matches(':focus-visible'));
-            } catch (err) {
-                seen = false;
-            }
-            if (seen) cardHold(card, 'focus', true);
-        });
-        card.addEventListener('focusout', function () {
-            if (cardFocus) cardHold(card, 'focus', false);
-        });
-        top.appendChild(tg);
-        var more = el('div', 'kt-more');
-        var clip = el('div', 'kt-clip');
-        clip.appendChild(pad);
-        more.appendChild(clip);
-        card.appendChild(top);
-        card.appendChild(more);
-        cardRoomSet(card);
-        cardLast = card;
-        // A card drawn again under a pointer that has gone meanwhile (the poll) gets no leave event: after a moment the pointer is asked, and a card it is not on goes down.
-        if (cardHover) {
-            setTimeout(function () {
-                try {
-                    if (cardHover && cardLast === card && card.isConnected && !card.matches(':hover')) cardHold(card, 'hover', false);
-                } catch (err) {
-                    // Nothing to ask: the pointer's leave event ends it.
-                }
-            }, 400);
-        }
-        return card;
-    }
-
     // The one control that opens the account's sheet, whichever card holds it (it is the same state, diagnosticsOpen): a button of the kit's pill that flips it and draws the page anew, and under it,
     // while it is open, the body that `fill` draws. `text` is the button's word, `label` what the screen reader says, `focus` the key that keeps the keyboard on it through the drawing.
     function diagFold(text, label, focus, fill) {
@@ -9547,6 +7021,7 @@
         var parts = [];
         if (c && c.state === 'unlimited') {
             parts.push([t('cycle.unlimited') + ' ' + t('cycle.included_usage'), 'insp-sum-lead']);
+            if (c.last_known) parts.push([t('acc.lim_last_known', { when: relTime(c.observed_at) || t('acc.lim_unreported') }), 'warn']);
         } else if (c && c.share !== null) {
             parts.push([leftPct(c.share * 100) + '%', 'insp-sum-lead']);
             if (c.scale && c.left !== null && c.limit) {
@@ -9573,13 +7048,20 @@
         return !!account && (liveWindows(account).length > 0 || staleWindows(account).length > 0);
     }
 
+    // The account's full card as it stands under its row of the list: the head, then everything it says, at once (no strip that rises under the pointer).
+    function flatCard(card, head, box) {
+        card.appendChild(head);
+        card.appendChild(box);
+        return card;
+    }
+
     function renderInspector(parent, group, account, ctx, facets) {
         var quota = account.quota || {};
         var overview = !!(ctx && ctx.groups.length);
         // No limit window to draw means no chart over the card (Cursor reports only its budget per billing cycle): the card stands whole under the budget's plate, so it is a strip and a fold (plainFold).
         // The strip speaks of the budget, so it is the card of an account that reads a budget and no window. An account that has windows but no overview to chart them keeps its whole card, and so does one that reads neither.
         var plain = !overview && !hasLimitWindows(account) && !!cycleOf(account);
-        var card = el('section', 'inspector' + (!plain && cardUp() ? ' kt-open' : ''));
+        var card = el('section', 'inspector');
         var box = el('div', 'kt-pad');
         card.setAttribute('aria-label', t('acc.card_label'));
         var head = el('div', 'split-row insp-head');
@@ -9661,7 +7143,7 @@
         if (!overview) {
             accountReadings(box, account);
             if (account.caption) box.appendChild(el('div', 'acct-note muted', t('acc.credential', { caption: account.caption })));
-            parent.appendChild(plain ? plainFold(card, head, box, account, verdict) : cardFold(card, head, clear, box, account, ctx));
+            parent.appendChild(plain ? plainFold(card, head, box, account, verdict) : flatCard(card, head, box));
             return;
         }
         box.appendChild(diagFold(t(diagnosticsOpen ? 'acc.hide_diag' : 'acc.diag'), t(diagnosticsOpen ? 'acc.diag_hide_label' : 'acc.diag_show_label'), 'inspector-diag', function (body) {
@@ -9672,7 +7154,7 @@
             if (all.firstChild) body.appendChild(all);
             if (account.caption) body.appendChild(el('div', 'acct-note muted', t('acc.credential', { caption: account.caption })));
         }));
-        parent.appendChild(cardFold(card, head, clear, box, account, ctx));
+        parent.appendChild(flatCard(card, head, box));
     }
 
     /* ------------------------------------------------------------------
@@ -9742,14 +7224,14 @@
             + ' minmax(96px,128px)';
         var table = el('div', 'acc-table');
         table.setAttribute('role', 'group');
-        table.setAttribute('aria-label', 'Accounts of ' + familyName(group) + ', share left in each limit');
+        table.setAttribute('aria-label', t('accounts.table', { name: familyName(group) }));
         var headRow = el('div', 'acc-headrow');
         headRow.style.gridTemplateColumns = template;
         headRow.setAttribute('aria-hidden', 'true');
         headRow.appendChild(el('span', null, t('acc.account')));
         groups.forEach(function (g) {
             var h = el('span', 'acc-cell', names[g.key]);
-            h.title = names[g.key] + ' — share left';
+            h.title = t('accounts.share_hint', { name: names[g.key] });
             headRow.appendChild(h);
         });
         headRow.appendChild(el('span', null, t('acc.state')));
@@ -9780,21 +7262,22 @@
                 var bar = barOf(g, account.key);
                 var text = '—';
                 var cls = 'acc-cell none';
-                var spoken = names[g.key] + ' no reading, may not apply';
+                var spoken = t('accounts.no_reading', { name: names[g.key] });
                 if (bar && bar.state !== 'unknown' && typeof bar.left === 'number') {
                     text = leftPct(bar.left * 100) + '%';
                     cls = 'acc-cell' + (bar.state === 'last_known' ? ' last'
                         : (bar.at_limit ? ' bad' : (heldNow(bar) ? ' held' : '')));
-                    spoken = names[g.key] + ' ' + text + ' left' + (bar.state === 'last_known'
-                        ? ', last known, read ' + (relTime(bar.observed_at) || 'at an unreported time') : '');
+                    spoken = t('accounts.left', { name: names[g.key], share: text }) + (bar.state === 'last_known'
+                        ? ', ' + t('accounts.last_read', { when: relTime(bar.observed_at) || t('reading.time_unknown') }) : '');
                 } else if (bar && bar.state === 'unlimited') {
-                    text = t('cycle.unlimited');
-                    cls = 'acc-cell';
-                    spoken = names[g.key] + ' unlimited, no share';
+                    text = t('cycle.unlimited') + (bar.last_known ? ' · ' + t('card.last_known') : '');
+                    cls = 'acc-cell' + (bar.last_known ? ' last' : '');
+                    spoken = t('accounts.unlimited', { name: names[g.key] })
+                        + (bar.last_known ? ', ' + t('accounts.last_read', { when: relTime(bar.observed_at) || t('reading.time_unknown') }) : '');
                 } else if (bar) {
                     text = '?';
                     cls = 'acc-cell unknown';
-                    spoken = names[g.key] + ' unknown, ' + (UNKNOWN_WORDS[bar.why] || 'no usable reading');
+                    spoken = t('accounts.unknown', { name: names[g.key], why: t(UNKNOWN_WORDS[bar.why] || 'reading.why_not_read') });
                 }
                 var c = el('span', cls, text);
                 c.setAttribute('data-limit', names[g.key]);
@@ -9867,9 +7350,10 @@
          [' spent', t('about.lg_spent')],
          [' unknown', t('about.lg_unknown')]].forEach(function (k) {
             var item = el('span', 'legend-item');
-            var cell = el('span', 'bar' + k[0]);
+            // A small bar of the plate's own look (.q-bar): the same fill, hatch, base and "?" the bars of the plate wear.
+            var cell = el('span', 'q-bar q-swatch' + k[0]);
             if (k[0] !== ' unknown' && k[0] !== ' spent') {
-                var f = el('span', 'fill');
+                var f = el('span', 'q-fill');
                 f.style.height = '62%';
                 cell.appendChild(f);
             }
@@ -9994,7 +7478,7 @@
     // One read of the whole projection: {view} to draw (with `why` when it
     // reports itself incomplete), or {why} when there is nothing to draw.
     // `withText`: the reading also asks for the text table (the plugin gives it with the view), for the screen whose table did not come by its own route.
-    function readView(reuse, withText) {
+    function readView(reuse, withText, mine) {
         var displayAtStart = displaySeq;
         var displayPending = displaySeq !== displaySettled;
         return request(reserveUrl(reuse) + (withText ? '&text=1' : ''), { method: 'GET' }, GET_TIMEOUT_MS).then(function (result) {
@@ -10011,7 +7495,7 @@
             // reason; with none and nothing to draw it is not a screen.
             var table = view.text;
             delete view.text;
-            if (withText) adoptI18n(table);
+            if (withText && !stopped && mine === generation) adoptI18n(table);
             var unexplained = !view.ok && !view.transport_error && !view.facet_note;
             if (unexplained && !hasContent(view)) return { view: null, why: t('why.incomplete') };
             if (currentView && (displayAtStart !== displaySeq || displayPending || displaySeq !== displaySettled)) {
@@ -10028,11 +7512,8 @@
         if (!got.view) {
             if (lastGood) safeRender(keptView(lastGood), got.why, actionText);
             else safeRender({ facets: {}, groups: [], daemon: {}, transport_error: 'widget route: ' + got.why }, '', actionText);
-            // A read that failed brings no chart: the stand-ins and the line that is owed end now, not at the deadline.
-            waitExpire();
             return;
         }
-        stepRelease(got.view);
         if (safeRender(got.view, got.why, actionText)) {
             lastGood = got.view;
             lastGoodAt = Date.now();
@@ -10058,18 +7539,17 @@
         if (stopped || inFlight) return;
         inFlight = true;
         if (!reuse) chartAsked = '';
-        // The busy mark of a poll that begins in the middle of a fold or the line is not drawn at once: that drawing would take the page anew and cut the motion (landWhenStill lands the reading after it).
         // A read for the chart (reuse) is asked for by the drawing that has just been made (askForChart): the mark is set on that screen (busyShow), and the page is drawn once more only when the chart has come.
         if (reuse) busyShow();
-        else if (!motionOn()) rerender();
+        else rerender();
         var mine = ++generation;
         // The text table is asked for with every ordinary reading (not with a chart or limit
         // switch): the language may have been changed, or a batch of the translation landed.
-        Promise.all([readView(!!reuse), reuse ? null : readI18n()]).then(function (both) {
+        Promise.all([readView(!!reuse, false, mine), reuse ? null : readI18n(mine)]).then(function (both) {
             // The table did not come by its own route (an error, nothing, an empty table): the reading is made once more with the table asked for in it, so the numbers are
             // never held back for the words. The plugin answers both routes; where it has no English at all there is nothing to say them with (below).
             if (i18n.en || stopped || mine !== generation) return both;
-            return readView(!!reuse, true).then(function (again) { return [again, null]; });
+            return readView(!!reuse, true, mine).then(function (again) { return [again, null]; });
         }).then(function (both) {
             var got = both[0];
             if (mine !== generation || stopped) return;
@@ -10078,14 +7558,10 @@
                 drawNoText(true);
                 return;
             }
-            // A reading of the poll (not a chart or limit switch, which the reader asked for) lands after the motion that is under way has ended, in a second at most (landWhenStill).
-            function apply() {
-                land(got, got.view ? '' : actionMessage);
-            }
-            if (reuse) apply();
-            else landWhenStill(apply, mine);
+            land(got, got.view ? '' : actionMessage);
         })['catch'](function (err) {
-            if (mine === generation) inFlight = false;
+            if (stopped || mine !== generation) return;
+            inFlight = false;
             failNow(err);
         });
     }
@@ -10094,7 +7570,6 @@
         try { console.error('claudexor quotas: reading not handled', err); } catch (e) { /* no console */ }
         actionMessage = t('act.failed_handle', { err: String((err && err.message) || err) });
         rerender();
-        waitExpire();
     }
 
     function unknownOutcome() {
@@ -10524,15 +7999,12 @@
         if (!group) {
             selectedHarness = '';
             selectedAccountKey = '';
-            if (stepOn && stepOn.account) stepOn = null;
             return { group: null, account: null };
         }
         selectedHarness = group.harness_id;
         var account = null;
         (group.accounts || []).forEach(function (a) { if (a && a.key === selectedAccountKey) account = a; });
         if (!account) selectedAccountKey = '';
-        // The step of one account (stepPress) stands only while its account is the one picked.
-        if (stepOn && stepOn.account && stepOn.account !== selectedAccountKey) stepOn = null;
         return { group: group, account: account };
     }
 
@@ -10555,17 +8027,6 @@
         btn.addEventListener('click', function (e) {
             e.stopPropagation();
             if (selectedHarness !== group.harness_id) {
-                // The family the reader leaves: its mark gives way as the mark of the one picked comes in. The tab picked may be
-                // showing its preview this moment (the pointer on it, or the keyboard): its mark is red, and starts from that red.
-                markFrom = selectedHarness;
-                markLit = markPreviewed(btn);
-                // The tabs are about to move under a pointer that stands still: no preview by the pointer until it moves (the keyboard's stays).
-                stillHold = true;
-                stillAt = e && typeof e.clientX === 'number' && typeof e.clientY === 'number' ? { x: e.clientX, y: e.clientY } : null;
-                // Only the family's marks move for it: the window row's numbers stay.
-                winFrom = '';
-                winLit = false;
-                winPressed = false;
                 selectedHarness = group.harness_id;
                 selectedAccountKey = '';
                 diagnosticsOpen = false;
@@ -10574,15 +8035,9 @@
                 pickBare = '';
                 pickAt = '';
                 chartCursor = null;
-                // The reader's own pick of a family: its window row and the tabs' marks answer with motion.
-                motionPending = true;
-                // And the rail moves in (kit: rail, motion): the tabs slide, the thread is drawn, the windows come down.
-                railPending = true;
-                // The ladder of another family starts folded, at its start, with no step pressed.
-                ladderFold();
-                stepClear();
-                // Every ring of the rail sweeps as its row comes down (kit: ring, sweep).
-                sweepPending = 'all';
+                // The ladder of another family starts with no step lit and its few steps.
+                qLit = null;
+                qLadderAll = false;
                 // The models a family lists are its own: another family starts on "any model".
                 modelChoice = '';
                 kindChoice = 'text';
@@ -10597,21 +8052,17 @@
     }
 
     // The families in the order the head shows them (familyOrder): the ones kept in the order they were seen, the ones not seen yet after them in
-    // the order of the answer, and the family picked moved to the front. What it returns is kept as the order the head shows now.
-    function orderedFamilies(groups, selected) {
+    // the order of the answer. A pick moves no tab: the order is the same whichever family is on screen, so the reader finds a family where it was.
+    function orderedFamilies(groups) {
         var byId = {};
         groups.forEach(function (group) { byId[group.harness_id] = group; });
         var ids = familyOrder.filter(function (id) { return !!byId[id]; });
         groups.forEach(function (group) { if (ids.indexOf(group.harness_id) < 0) ids.push(group.harness_id); });
-        var at = selected ? ids.indexOf(selected.harness_id) : -1;
-        if (at > 0) ids.unshift(ids.splice(at, 1)[0]);
         familyOrder = ids;
         return ids.map(function (id) { return byId[id]; });
     }
 
-    // The head's families: the kit's row of mark tabs (markRow), given the place the head wants for it (.harness-seg) and its name. The row's
-    // selector is the head's to give the kit's slide (markWas, markFlip, markSlide find the tabs of the row by it).
-    var HEAD_ROW = '.harness-seg';
+    // The head's families: the kit's row of mark tabs (markRow), given the place the head wants for it (.harness-seg) and its name.
 
     function renderHarnessSeg(parent, groups, selected, hasAnswer, facets) {
         var seg;
@@ -10625,110 +8076,19 @@
             }));
             seg.setAttribute('aria-label', 'Reading agent families');
         } else {
-            // The family picked stands first, the others after it in the order they had (the order in the markup is the order to read).
-            seg = markRow(orderedFamilies(groups, selected).map(function (group) { return familyTab(group, selected); }), false, stillHold);
-            stillRow = stillHold ? seg : null;
+            // The families in the order they were seen (the order in the markup is the order to read); the picked one wears its ground.
+            seg = markRow(orderedFamilies(groups).map(function (group) { return familyTab(group, selected); }), false);
             seg.setAttribute('aria-label', 'Agent family');
-            // The reader's own pick of a family (markFrom: the family left): the kit draws the marks that change in the look they had a
-            // moment ago, and render() has settleMarks take that off at the next frame.
-            markStart(seg, markFrom, selected ? selected.harness_id : '', markLit);
         }
         seg.className += ' harness-seg';
         parent.appendChild(seg);
     }
 
     function render(view, staleText, actionText) {
-        traceWidth();
         chartDrawn = null;
         currentView = view;
         staleMessage = staleText;
         actionMessage = actionText || '';
-        // Only a drawing that answers the reader's own pick moves; the redraw
-        // of fresh data (every 30 seconds) never does.
-        // The read the pick itself asks for (the chart of the new window) redraws
-        // within the motion's span: that drawing carries it on from where it was.
-        var stamp = Date.now();
-        // A drawing for a new width (chartFit) is nobody's pick: it moves nothing, and a movement in hand ends where it stands.
-        var calmDraw = reducedMotion() || fitDrawing;
-        drawMotion = false;
-        drawElapsed = 0;
-        if (!calmDraw) {
-            if (motionPending) {
-                drawMotion = true;
-                motionAt = stamp;
-            } else if (motionAt && stamp - motionAt < MOTION_MS) {
-                drawMotion = true;
-                drawElapsed = stamp - motionAt;
-            }
-        }
-        motionPending = false;
-        markStarts = [];
-        // The movement of a family's pick (railMotion): this drawing is the pick's own, or inside the span of the movement it began.
-        railMotion = false;
-        railElapsed = 0;
-        var railPick = false;
-        // A pick inside the span of the movement of the one before it (a quick second pick).
-        var railAgain = false;
-        if (!calmDraw) {
-            if (railPending) {
-                railMotion = true;
-                railPick = true;
-                railAgain = !!railMotionAt && stamp - railMotionAt < RAIL_MOTION_MS;
-                railMotionAt = stamp;
-                // The moment of the pick on the page's own clock, kept with the movement (clockSet).
-                railStart = timelineNow();
-            } else if (railMotionAt && stamp - railMotionAt < RAIL_MOTION_MS) {
-                railMotion = true;
-                railElapsed = stamp - railMotionAt;
-            }
-        }
-        // By the page's own clock a drawing of the movement puts no delay of its own (its animations are given the start time of the pick);
-        // a page with no clock, or no way to give it, goes on by the delay.
-        railClock = railMotion && railStart !== null && typeof document.getAnimations === 'function';
-        railShift = railClock ? 0 : railElapsed;
-        // The sweep of the rings (kit: ring, motion): this drawing is the pick's own, or inside the span of the sweep it began.
-        sweepOn = false;
-        var sweepElapsed = 0;
-        if (!calmDraw) {
-            if (sweepPending) {
-                sweepOn = true;
-                sweepWho = sweepPending;
-                sweepAt = stamp;
-                sweepStart = timelineNow();
-            } else if (sweepAt && stamp - sweepAt < SWEEP_MS) {
-                sweepOn = true;
-                sweepElapsed = stamp - sweepAt;
-            }
-        }
-        sweepPending = '';
-        sweepClock = sweepOn && sweepStart !== null && typeof document.getAnimations === 'function';
-        sweepShift = sweepClock ? 0 : sweepElapsed;
-        // The movement of the ladder of resets (kit: rail, motion): this drawing is the pick of a window's own, or inside the span of the movement it began.
-        // The poll and Refresh draw none of it.
-        ladderMotion = false;
-        var ladderElapsed = 0;
-        if (!calmDraw) {
-            if (ladderPending) {
-                ladderMotion = true;
-                ladderAt = stamp;
-                ladderStart = timelineNow();
-            } else if (ladderAt && stamp - ladderAt < LADDER_MS) {
-                ladderMotion = true;
-                ladderElapsed = stamp - ladderAt;
-            }
-        }
-        // The pick's own drawing keeps the node of the ladder that stood, to fade it over the new one (ladderNode); a drawing inside the span puts it again.
-        if (ladderPending && ladderMotion) ladderKept = ladderLast;
-        else if (!ladderMotion) ladderKept = null;
-        ladderOut = ladderKept;
-        ladderLast = null;
-        ladderPending = false;
-        ladderClock = ladderMotion && ladderStart !== null && typeof document.getAnimations === 'function';
-        ladderShift = ladderClock ? 0 : ladderElapsed;
-        // The shifts of the tabs belong to the movement: when it is over (or there is none) they go.
-        if (!railMotion) railFlips = {};
-        railPending = false;
-
         // The whole tree is rebuilt every 30 seconds; the keyboard focus and
         // the page's scroll are carried over by key.
         var was = document.activeElement;
@@ -10742,14 +8102,6 @@
         var dimmed = rootAll('[data-dim]');
         for (var d = 0; d < dimmed.length; d++) dimmed[d].removeAttribute('data-dim');
 
-        // The places of the family tabs before the drawing (one read), for the slide of the movement: the pick's own drawing alone reads them (the
-        // shifts are worked out once and kept); a drawing inside the span of the movement reads no place.
-        var flipWas = railPick ? markWas(root, HEAD_ROW, railAgain) : null;
-
-        // The drawing under way is not the screen a pick in its place (selectInPlace) may read; it is set again when this one has been drawn.
-        drawnFrom = null;
-        // The motion of the folds (selectInPlace) ends with the drawing: this one builds the state the pick left, with no motion.
-        foldCancel();
         rebuilding = true;
         try {
             root.textContent = '';
@@ -10800,10 +8152,6 @@
         root.appendChild(frame);
         var shell = shellBox;
         railBox = null;
-        railNote = null;
-        ladderZone = null;
-        ladderDrawn = false;
-        ladderLine = null;
 
         /* 2. Banners: a daemon that is down and a facet that did not answer
            say so in the open, for every family. */
@@ -10875,24 +8223,8 @@
 
         if (focusWas) restoreFocus(focusWas);
         restoreScroll(scrollWas);
-        // The pick works the shifts out (the places again, one read) and every drawing of the movement puts them on its tabs.
-        if (flipWas) railFlips = markFlip(root, HEAD_ROW, flipWas);
-        // The rail's width and axis from the tabs as drawn (before the slide writes its classes, so the layout markFlip has read answers it).
-        railFit();
-        if (railMotion) markSlide(root, HEAD_ROW, railFlips, railElapsed, railShift);
-        settleMarks();
-        if (railClock) clockSet(RAIL_KEYFRAMES, railStart);
-        if (sweepClock) clockSet(SWEEP_KEYFRAMES, sweepStart);
-        if (ladderClock) clockSet(LADDER_KEYFRAMES, ladderStart);
-        // What this drawing was made from, for a pick on the plate with no drawing (selectInPlace).
-        drawnFrom = ctx && selection.group ? { group: selection.group, ctx: ctx, facets: facets } : null;
-        // The bars' rows: their kept places put back and their edges worked out (one read of the layout, as the ladder's fit). The line of a pick the widget made (pickDue) keeps the arrow
-        // off until it is drawn (pickTraceRun, once the chart is in).
-        pickTraceHold();
-        barsFit();
-        pickTraceRun();
-        // The ladder's fit: the one read of the layout of the drawing (the card is in place now), after the movement is set up.
-        ladderFit();
+        // The bars' grid, from the room the plate leaves them (one read of the layout).
+        qBarsFit();
         askForChart();
     }
 
@@ -10954,39 +8286,9 @@
         safeRender(currentView || { facets: {}, groups: [], daemon: {} }, staleMessage, actionMessage);
     }
 
-    // The pointer's press on a bar (not the keyboard's, which has a detail of 0): the rows of bars are still until the pointer moves (barStill), so the bar that slides under the pointer as the pick moves
-    // the others does not open by it. The rows that stand wear the class now; a row drawn anew wears it from the flag (barStrip).
-    function holdBarStill(e) {
-        if (!e || !(e.detail > 0) || !root || typeof root.querySelectorAll !== 'function') return;
-        barStill = true;
-        barStillAt = typeof e.clientX === 'number' && typeof e.clientY === 'number' ? { x: e.clientX, y: e.clientY } : null;
-        var rows = rootAll('.bars');
-        for (var i = 0; i < rows.length; i++) classSet(rows[i], 'bars-still', true);
-    }
-
-    // The pointer may open the bars again: the flag goes and the rows that stand wear no more.
-    function releaseBarStill() {
-        barStill = false;
-        barStillAt = null;
-        var rows = rootAll('.bars-still');
-        for (var i = 0; i < rows.length; i++) classSet(rows[i], 'bars-still', false);
-    }
-
-    // The head's tabs wear their preview by the pointer again (kit: mark tab, a row that is still): the flag goes and the row drawn wears no more.
-    function releaseStill() {
-        stillHold = false;
-        stillAt = null;
-        markStill(stillRow, false);
-        stillRow = null;
-    }
-
     // A redraw under a resting pointer keeps the chart's cursor; once the
     // pointer moves anywhere but the chart, the cursor goes with it.
     function onDocumentPointer(e) {
-        // The first real move of the pointer after a pick of a family gives the head's tabs their preview back; a move that is none (the
-        // pointer where the click was) does not.
-        if (stillHold && !(stillAt && e && e.clientX === stillAt.x && e.clientY === stillAt.y)) releaseStill();
-        if (barStill && !(barStillAt && e && e.clientX === barStillAt.x && e.clientY === barStillAt.y)) releaseBarStill();
         if (!chartCursor || chartCursor.via !== 'pointer') return;
         var t = e.target;
         var inside = t && typeof t.closest === 'function' ? t.closest('.chart-plot') : null;
@@ -11012,18 +8314,23 @@
             restoreFocus('about');
         } else if (selectedAccountKey) {
             clearAccount();
-        } else if (stepOn) {
-            // No pick to let go: the step pressed is what Escape lets go of.
-            stepClear();
+        } else if (qLit) {
+            // No pick to let go: the step lit is what Escape lets go of.
+            qLit = null;
+            rerender();
         }
     }
 
     function stop() {
         stopped = true;
+        if (chartFitTimer) { clearTimeout(chartFitTimer); chartFitTimer = 0; }
+        if (qFitBound && window.removeEventListener) {
+            window.removeEventListener('resize', qBarsFit);
+            window.removeEventListener('resize', chartFit);
+            qFitBound = false;
+        }
         if (themeOff) { themeOff(); themeOff = null; }
         generation++;
-        landRelease(false);
-        foldUnhook();
         if (dataTimer !== null) { window.clearInterval(dataTimer); dataTimer = null; }
         document.removeEventListener('keydown', onDocumentKey);
         document.removeEventListener('pointermove', onDocumentPointer);

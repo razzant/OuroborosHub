@@ -82,6 +82,7 @@ class World:
             U.channel_post(*CHANNEL),
         )
         self.expected |= {ui.exact(chat) for chat, _ in [EXISTING_GROUP, *CHOOSABLE]}
+        self.expected.add(ui.exact(NEW_DM["id"]))
         self.arrived = True
 
     def crowd(self) -> None:
@@ -132,7 +133,7 @@ def test_groups_are_offered_by_exact_identity(host, world, page, record):
     record(f"offered-status-{host.engine}", offered)
     identities = [ui.identity(r) for r in offered]
     assert len(identities) == len(set(identities)), "a chat is offered twice (a topic is not a chat)"
-    assert set(identities) == world.expected, (f"offered {sorted(identities)}; no private chat, channel or anyone else's "
+    assert set(identities) == world.expected, (f"offered {sorted(identities)}; no unobserved chat, channel or anyone else's "
                                                f"chat may be offered: {sorted(set(identities) ^ world.expected)}")
     assert all(isinstance(r["label"], str) and set(r) >= {"account_id", "conversation_id", "label"} for r in offered)
     by_id = {r["conversation_id"]: r["label"] for r in offered}
@@ -141,7 +142,8 @@ def test_groups_are_offered_by_exact_identity(host, world, page, record):
         assert ui.names_id(label, chat), f"label {label!r} lacks the exact signed numeric id {chat}"
         assert title[:40] in label, f"label {label!r} lacks the title {title[:40]!r}"
     assert by_id[str(DUP_A[0])] != by_id[str(DUP_B[0])], "two same-named groups must stay tellable apart"
-    assert str(NEW_DM["id"]) not in by_id and str(CHANNEL[0]) not in by_id
+    assert by_id[str(NEW_DM["id"])] == f"Tom @tom_synthetic ({NEW_DM['id']})"
+    assert str(CHANNEL[0]) not in by_id
 
     ui.open_connect(page, host.url)
     listing = ui.telegram_rows(page)
@@ -180,6 +182,28 @@ def test_connect_only_the_chosen_group_and_it_starts_silent(host, world, page, r
     assert world.place_of(DUP_A[0]) is None, "the same-named group was connected with it"
     world.unchanged_existing()
     assert host.bot.sends == [], "a Silent place sent something to Telegram"
+
+
+def test_connect_only_the_observed_private_chat_by_numeric_id_and_keep_it_silent(host, world, page, record):
+    world.arrivals()
+    before = {p["place_id"] for p in host.places()}
+    assert world.place_of(NEW_DM["id"]) is None
+    ui.open_connect(page, host.url)
+    target = ui.row_with_id(ui.telegram_rows(page), NEW_DM["id"])
+    assert target["act"] == "connect" and "Tom @tom_synthetic" in target["label"]
+    focus = f'{ui.CONNECT} [data-connect-act="connect"][data-choice="{target["choice"]}"]'
+    record(f"private-offered-{host.engine}", {"row": target, "shots": page.shots("private-offered", focus=focus)})
+    with page.expect_request(lambda r: r.method == "POST" and r.url.endswith("/api/places")) as sent:
+        ui.press(page, target)
+    body = json.loads(sent.value.post_data)
+    assert (body["connector"], body["account_id"], body["conversation_id"]) == (
+        "telegram-bot", str(BOT_ID), str(NEW_DM["id"]))
+    assert ui.place_sheet(page)["state"] == ["silent"]
+    added = [p for p in host.places() if p["place_id"] not in before]
+    assert [(p["conversation_id"], p["state"]) for p in added] == [(str(NEW_DM["id"]), "silent")]
+    world.unchanged_existing()
+    assert host.bot.sends == []
+    record(f"private-connected-{host.engine}", {"body": body, "shots": page.shots("private-connected-silent")})
 
 
 # --- Open again and again: nothing is rewritten ---------------------------------------------------------
@@ -262,11 +286,12 @@ def test_membership_and_service_updates_move_the_offer_and_create_no_place_wake_
     absent(SERVICE[0], "service-remove")
     world.feed(U.service(*SERVICE, new_chat_members=[BOT]))
     present(SERVICE, SERVICE[1], "service-readd")
-    # only groups and supergroups: a channel and a private chat that blocked the bot are never offered
+    # Channels remain outside the chooser; a private chat blocking the bot leaves it.
     world.feed(U.membership(*CHANNEL, BOT, was="left", now="administrator", kind="channel"),
                U.membership(NEW_DM["id"], "", BOT, was="member", now="kicked", kind="private"))
     absent(CHANNEL[0], "channel")
     absent(NEW_DM["id"], "private")
+    world.expected.discard(ui.exact(NEW_DM["id"]))
     # a basic group with a Place of its own migrates to a supergroup
     world.feed(U.membership(*OLD_BASIC, BOT, was="left", now="member", kind="group"))
     present(OLD_BASIC, OLD_BASIC[1], "migration-source-before")

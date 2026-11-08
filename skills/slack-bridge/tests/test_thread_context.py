@@ -163,6 +163,8 @@ def test_later_page_failure_retains_received_history_and_precise_continuation(tm
                     "network": "transport_error", "timeout": "lookup_timeout"}[failure]
         assert thread["error"]["code"] == expected
         assert events[0]["text"] == "Yes, that one." and store.status()["inbox_delivered"] == 1
+        # The received prefix still names its author; this fixture's users.info answers for U1 only, so U2 stays unnamed.
+        assert thread.pop("authors") == [{"id": "U2", "name": None, "is_self": False}]
         assert snapshot(store)["thread"] == thread
     asyncio.run(run())
 
@@ -317,6 +319,9 @@ def test_root_message_reads_current_thread_or_singleton_before_submission(tmp_pa
         assert thread["status"] == "available" and thread["data"]["complete"] is True
         assert thread["data"]["thread_ts"] == original["ts"]
         assert thread["data"]["messages"] == messages
+        # Names come from the dated people observation beside the thread, not from the stored thread itself.
+        assert thread.pop("authors") == [{"id": user, "name": None, "is_self": False}
+                                         for user in ("U1", "U2")[:len(messages)]]
         assert snapshot(store)["thread"] == thread
         assert events[0]["text"] == original["text"] and len(reads) == 1
         # History is context, including a later cancellation, never more inbox work.

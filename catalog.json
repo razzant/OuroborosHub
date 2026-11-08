@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/2fda94daf27f1d04bc1e36debea3ee789056e4f5",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
   "skills": [
     {
@@ -37,7 +37,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "fa0940646cddbc63005c5ce59f4fc68c1a418c1d22b8da30d57fac71a494166e",
+          "sha256": "441086ebc944df4d1c1ccda2521fe06ec7cef2302505649187b9fb47d08e2e0a",
           "size": 5826
         },
         {
@@ -47,23 +47,23 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "c7808c8aae9b42cef310517f5a93f77c540ce1cf90ede5d8a6cf87ca7176372f",
-          "size": 4808
+          "sha256": "30817e1586b46ca2dd84c4fb6a0c94e6ddb730c71484766d9835764418c005f1",
+          "size": 5979
         },
         {
           "path": "scripts/a2a_daemon.py",
-          "sha256": "11bdf6683b75078e7b9e30fe12be69f14e80706ad2c29e542e4f2dabfac44280",
+          "sha256": "ba104be2d5838da37b6cf5ac9fe17718f8157bf7f57c2e862781e8b3a955bbfc",
           "size": 66465
         },
         {
           "path": "scripts/a2a_presence.py",
-          "sha256": "da5f4dda51dadea8527e4585cc86943929b9e30cce532ea51ae8e530eaf2091d",
-          "size": 8017
+          "sha256": "3b14cf290615980e1b65016c0750ac45eef38cce59bc6d3793a16dca87c1ea89",
+          "size": 8139
         },
         {
           "path": "tests/test_a2a_agent_card.py",
-          "sha256": "a0da576c9eacd494b87ea2b12f6f53819a9f371ff207d92ef84a01856314e924",
-          "size": 10068
+          "sha256": "743fd4e587370bf55ec4d9bf2d436620e4f637f5abcfa97579a24e0ea69a2b63",
+          "size": 10388
         },
         {
           "path": "tests/test_a2a_client_auth.py",
@@ -77,13 +77,18 @@
         },
         {
           "path": "tests/test_a2a_operation_ownership.py",
-          "sha256": "9b8cc501d60f87e94e76bac338f738b406237421cd4d7ada89e724c2ddaf63e2",
-          "size": 18079
+          "sha256": "4464effc26639631e63819833676a8c79d2d290910af3a23f3731f9b715c8dac",
+          "size": 20610
         },
         {
           "path": "tests/test_a2a_sdk_card_shape.py",
           "sha256": "02f99f4c1e970f1e993983e71bda2d24abd839f6ec0ff26dbf079a1fd1883a7f",
           "size": 3551
+        },
+        {
+          "path": "tests/test_a2a_settings_route.py",
+          "sha256": "2fc643d4507f19d6e9924d50e1e2231a288634be4a81a685815f45fe7d5b1186",
+          "size": 3771
         },
         {
           "path": "tests/test_a2a_stream_dispatch.py",
@@ -110,7 +115,7 @@
       "name": "a2a",
       "slug": "a2a",
       "type": "extension",
-      "version": "1.5.0",
+      "version": "1.5.2",
       "when_to_use": "User asks to communicate with another A2A-compatible agent, discover an agent card, send an A2A message, check A2A task status, or expose this Ouroboros instance as an A2A peer."
     },
     {
@@ -365,17 +370,17 @@
       "version": "0.6.1"
     },
     {
-      "description": "Local, Google and CalDAV calendars with account setup, event and calendar management, source-directed linked copies, recurrence, availability, reminders and a day/week widget.",
+      "description": "Единый календарь владельца — локальные календари, CalDAV (включая Яндекс) и Google с личным OAuth-клиентом; события, повторения, доступ, связанные копии, свободные окна, напоминания и виджет День/Неделя.",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "5448f18c06206b6a3558ac021effedfc5847c190448758badecbfe20bcc4a2a6",
-          "size": 52347
+          "sha256": "d3d34ac7c73a61ed73d9195123707213294f341a3354b58667e6e1a04c04d3f8",
+          "size": 55659
         },
         {
           "path": "accounts.py",
-          "sha256": "73e45637ce5d1ca5d06a46acfb433f7f429c9ec03cf16152b654c5a8bbb26e82",
-          "size": 12925
+          "sha256": "ab4212d0f68ba85f7d75ec6b08e2a10b241c17804183c9ef0666320892b3de92",
+          "size": 13059
         },
         {
           "path": "conflicts.py",
@@ -424,8 +429,8 @@
         },
         {
           "path": "reminders.py",
-          "sha256": "e885e12e182d947b0f3762623856ee296431c43bd09f715bba65d7727b743ea3",
-          "size": 25753
+          "sha256": "9d94d7fd9f5de52f21afc29323fe2b5ae7d627c05f976b4ce0f2cfdcf340591b",
+          "size": 26593
         },
         {
           "path": "routes.py",
@@ -434,13 +439,13 @@
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "cfdb72d6b5b4a5f25a60aa39335de5a69b78d8e09a2b008efddd92bb9805724d",
-          "size": 39256
+          "sha256": "a45293b5af5201ae27cb87bce9c2d150df9db5c1c01f9f924e3e4f007f815a08",
+          "size": 39416
         },
         {
           "path": "store.py",
-          "sha256": "205b56298aac02ad24001baea862e7eec6584baeb678f65eb9b576fc5d89cc3d",
-          "size": 73499
+          "sha256": "e98547fd5fb90446fa9f8de310edd8ec95523b8c0e331e09960c7efb9bf4dc4e",
+          "size": 74311
         },
         {
           "path": "tests/test_attendee_destinations.py",
@@ -494,13 +499,13 @@
         },
         {
           "path": "tests/test_calendar_connection_regressions.py",
-          "sha256": "dfb5468db23155cb3e31acecca9184bf4e090cfb499a68605d883d9dac422884",
-          "size": 10418
+          "sha256": "7c4808a12e8997a0825046bb928d559d899a3ca92ccc544fdcdd17f3cd074567",
+          "size": 23479
         },
         {
           "path": "tests/test_calendar_control_truth.py",
-          "sha256": "d1a398a537e2d096bf34e7f674542bea737596b9c96acf4d327a2d536f89b00a",
-          "size": 11859
+          "sha256": "5c3e2846117d234b73a8a0d11ca1373eedba3fa63e8b834b9d66fb870d943d1f",
+          "size": 17475
         },
         {
           "path": "tests/test_calendar_disconnect_effects.py",
@@ -509,8 +514,8 @@
         },
         {
           "path": "tests/test_calendar_lifecycle_custody.py",
-          "sha256": "f27f296208d6a6142d705689c153df52d069b745701a460ea69b840aecc363b7",
-          "size": 19598
+          "sha256": "aa5f52baccb5eea87affb459f99c9a433cd4373048ba287f192b0bb099b25c0d",
+          "size": 19716
         },
         {
           "path": "tests/test_calendar_lifecycle_invariants.py",
@@ -709,13 +714,13 @@
         },
         {
           "path": "tests/test_widget_browser.py",
-          "sha256": "36f99ab42df645eea57eb667879469a790d61c54203bd035f67bfbe4b038672d",
-          "size": 46546
+          "sha256": "12f74fb9f03fc322f17a76956c0bd41d648c2f480ad22445985c9be0788a6fae",
+          "size": 63613
         },
         {
           "path": "tests/test_widget_state_browser.py",
-          "sha256": "e5df5d175797dac21b5ad26dc470e8dab247dcb9306406f7a7cf04e8ed03b327",
-          "size": 11495
+          "sha256": "c61909bfa72da0973073addf4900b42b7026c4c5a9d0decd34f24ec6cb7a76b7",
+          "size": 20895
         },
         {
           "path": "tests/test_withdrawn_calendar_family.py",
@@ -734,8 +739,8 @@
         },
         {
           "path": "widget.js",
-          "sha256": "060042f4af72134b49c626ad8f1089e0280a216b84fa6eec59c957a17aa713d5",
-          "size": 97534
+          "sha256": "90951e3a8f5260bc87683dd2c13c532cc7c25abb2a5acb893440ca63ea8cf6ea",
+          "size": 114233
         }
       ],
       "install_specs": [
@@ -746,7 +751,8 @@
       "name": "calendar",
       "slug": "calendar",
       "type": "extension",
-      "version": "2.0.4"
+      "version": "2.0.5",
+      "when_to_use": "Владелец говорит «что у меня сегодня / завтра / на неделе», «поставь / создай / забей встречу, обед, тренировку на 16», «найди окно на час», «перенеси … на 17», «отмени …», «напомни о …», «покажи мою занятость в рабочем календаре», «обычно я завтракаю в 6:30» (служебное событие-распорядок), «подключи Яндекс / Google»."
     },
     {
       "description": "Opt-in check-in agreement. If you miss a check-in you promised, Ouroboros first tells you; only if you armed it may it then write once to one consenting contact.",
@@ -807,13 +813,13 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "4fa73a81facccd2b68f5392afb2f531bfd88772abff7fc240cbf240d56c13201",
-          "size": 24132
+          "sha256": "1f9d874f59432be179353d28783301e25d6e1a2d98477c8da6dd4c927051c600",
+          "size": 25649
         },
         {
           "path": "lib/connection.mjs",
-          "sha256": "4511ce6c4ab2c8586b3ab434668f85dceb1271b1149c627a22ee9af12fe9f674",
-          "size": 21275
+          "sha256": "6b6cfaf510ee1449624bed4681d82f64451a183d7b447b7718f503c6f2647e20",
+          "size": 25181
         },
         {
           "path": "lib/guard.mjs",
@@ -842,8 +848,8 @@
         },
         {
           "path": "lib/server.mjs",
-          "sha256": "9ca56a7b2b9f9157760b254c2fc0d5a9a9e20d4047c30968d2c29ceea5870b71",
-          "size": 36962
+          "sha256": "5d4d78fadfa9a86443d2fad5036c93d000dc7ba7acbae4c523b62a65935e01a5",
+          "size": 39629
         },
         {
           "path": "patches/LICENSE-Apache-2.0.txt",
@@ -886,7 +892,7 @@
       "slug": "chrome_browser",
       "title": "Chrome (shared tab)",
       "type": "script",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "when_to_use": "The owner wants work done in their own signed-in Chrome - in a tab they share and in background tabs for the same work - while they keep using the browser, and takes the page over by saying so when a login, a code or a decision is theirs."
     },
     {
@@ -919,18 +925,18 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "a5da18cb8ab94c86ce047a1371bd7cb2f622e895407fbbc499fe7e4038c81ed6",
-          "size": 90721
+          "sha256": "67998ede3e214b47b2091ca28d10e15835b9833155d662ce48eaf5a637f04854",
+          "size": 87712
         },
         {
           "path": "conftest.py",
-          "sha256": "f107a4f71f67b382fcb723aba58552e7502a2e41097786bd90b04ce87eba6202",
-          "size": 6186
+          "sha256": "d2e6a459c5c541ccfaad73c372447c216d3bc849b580fdcaff4571830385c36a",
+          "size": 7774
         },
         {
           "path": "plugin.py",
-          "sha256": "5a16174338742df246adae4bd80404ae8f301856eae35671c7e2d94a8b3957f3",
-          "size": 105341
+          "sha256": "22ba2ab63b72762121e033b38ad96971b60caa940082670b7845b5a2fe704863",
+          "size": 106280
         },
         {
           "path": "quota_analytics.py",
@@ -974,13 +980,13 @@
         },
         {
           "path": "strings_en.json",
-          "sha256": "53e7e3532b8643f3b58fb78bfb2a464589f00d06f40c36f345fec9b2b1f9169b",
-          "size": 33823
+          "sha256": "676e8d92d08c24512b36415f40224dd2d144fc46a4aa9c707dca8f838941bc80",
+          "size": 40272
         },
         {
           "path": "test_account_list.py",
-          "sha256": "cbf23cf6a8581f22e89b3f4e2ce8f6ac678a5193623bed01c5116de6fde25013",
-          "size": 23408
+          "sha256": "cc50ab45a3193e02bb9151d517f188b7b48578ecde8e37bc45030b15f67c5c93",
+          "size": 14226
         },
         {
           "path": "test_backend_repair.py",
@@ -989,23 +995,23 @@
         },
         {
           "path": "test_bar_pick.py",
-          "sha256": "4b9b036c8bef4397bb4b561a32d6a586c1d55a969b364afc6b61d0befd371b49",
-          "size": 58515
+          "sha256": "2adb20203df8deac081cf45eb5b6ee7a2f4390d6f3fbfeafad0191af5412e4b2",
+          "size": 17225
         },
         {
           "path": "test_bars.py",
-          "sha256": "f3682af67fa38632fe708fc97ed00214ae4c93d609b95a149b1e485304977486",
-          "size": 56668
+          "sha256": "5a2d5463f4ff8d8d72d9d8357e4cb8f436219eff3bdc2d342d4b0c5bab49e7e1",
+          "size": 19771
         },
         {
           "path": "test_card.py",
-          "sha256": "c891d8a3baa51412c82472763ad389bdc664dd61c63eb4d9d98672c2109589cd",
-          "size": 94578
+          "sha256": "e36e4c1fe91f42586650dcfaadad7561ca1e133aeaa660a84a4df9362168a3a0",
+          "size": 17913
         },
         {
           "path": "test_chart_polish.py",
-          "sha256": "b89837f8e80c46e0a7663a46cbb838444f3c3945dc0e657b0ea9a1c04e7dc8ee",
-          "size": 21115
+          "sha256": "1e5d2168b8e47eaa4a0368389f6b366f799bb7a878245ccdd696b070a5171074",
+          "size": 22096
         },
         {
           "path": "test_chip.py",
@@ -1014,8 +1020,8 @@
         },
         {
           "path": "test_clarity.py",
-          "sha256": "92ea4c296ee56739c290af6ba99b7998315c8f8715748ab3d374bc022a8a9ec0",
-          "size": 11585
+          "sha256": "c4a431e5effd5d67ba8b3551d2e486243782c528c9cf5d3aa0e2a18535b7c9b1",
+          "size": 10954
         },
         {
           "path": "test_coherent_history.py",
@@ -1024,13 +1030,13 @@
         },
         {
           "path": "test_constraint_freshness.py",
-          "sha256": "353e105c9552e68a48523e45fb8ad23a94c97c794ed3d9fd0b729f10f9cd59c6",
-          "size": 22173
+          "sha256": "b8165c51013c5a575d0428d7413841b6e22e64f8088e167b618d83f210895205",
+          "size": 22322
         },
         {
           "path": "test_family_tabs.py",
-          "sha256": "c6ad54b6692c53bfb0b085c9af4584b7696493f9130fdb6b001d0230221fe27a",
-          "size": 152576
+          "sha256": "1779f4de2386d3e2d7b2eb6e41e0d191f47aea0ba38fb03bf3e586f7fae5e424",
+          "size": 17558
         },
         {
           "path": "test_history_boundaries.py",
@@ -1039,18 +1045,18 @@
         },
         {
           "path": "test_history_widget.py",
-          "sha256": "5bb5972c519b9f19f82846505864b346d5dfc972423cec26dc09c92368aec51c",
-          "size": 10060
+          "sha256": "ebf42af9fe35a953382d07943a5cd8474b7a4b9bb6e72ea5b3a15b4fcfd0e222",
+          "size": 10774
         },
         {
           "path": "test_i18n.py",
-          "sha256": "5e81136bb238c630c2a349a39a27931ef3af398309909988278f98dc5bc0baf6",
-          "size": 40743
+          "sha256": "b67119cf77cc60d3336cc526420177b2169642f36aba63de284400bc7d68fabd",
+          "size": 45505
         },
         {
           "path": "test_inspector_placement.py",
-          "sha256": "1ad27b3dc771ec656a2d9532749fef9389fb86e6906768ca42a77925f59c85d3",
-          "size": 29580
+          "sha256": "61287f9ef83dbba9210bb5561cf41f2854ab64f1d5aeb517620cc298be801af0",
+          "size": 21744
         },
         {
           "path": "test_joint_math.py",
@@ -1074,13 +1080,13 @@
         },
         {
           "path": "test_model_holds.py",
-          "sha256": "edcdf7c997adc0cc2438f4ead88dd3de590862b7d976365d411974437c6eae67",
-          "size": 36880
+          "sha256": "2c434e303e1aebb71f119bb09f5c93d16f5e30f152b5dfbaff9fe2b19b86582d",
+          "size": 37219
         },
         {
           "path": "test_order_focus.py",
-          "sha256": "eb9f89ec439e6bff849f62822d00ac776a56a0accb61223d1b2a5cb5d8462696",
-          "size": 34459
+          "sha256": "b8057f4f880aad2733f18574931182bad47fa7cfacea4c8d2d50d08a37a242ce",
+          "size": 32643
         },
         {
           "path": "test_passive_quota_read.py",
@@ -1089,28 +1095,28 @@
         },
         {
           "path": "test_passive_widget.py",
-          "sha256": "b8b7d08208210315f95b56f09c640cf2dc33810581664b50470ea076c7959ed8",
-          "size": 7816
+          "sha256": "c5cc44e90c98f5d3086776b1fb48bd8d260328877940c169ad07a4ff99a034d5",
+          "size": 7883
         },
         {
           "path": "test_quotas.py",
-          "sha256": "5c28c70a41457497977c685c06ce28fc1242ef74076dee06dd51fc5a167861e7",
-          "size": 83486
+          "sha256": "6d3b35cda4cc0c1e4d0a75fb468e376f05c6c063c0ce1c79408746e7d29021b0",
+          "size": 83302
         },
         {
           "path": "test_r3.py",
-          "sha256": "c570e92832fd070572d6d5f89932a3ed69ade348fb735032425e9c9980b57af5",
-          "size": 68067
+          "sha256": "2688bb7626035d3d7242259e2942e4f06f8c7ede3d3a948834c819b978b9220c",
+          "size": 68065
         },
         {
           "path": "test_repair_r2.py",
-          "sha256": "0f469298cbe21912115c099def471fbff0810c635e3d71aee1a1876e94558f45",
-          "size": 18202
+          "sha256": "24218dd6da3202cdb0625ba30cfc3e1adb3f2e8d1773bc80f806136a0af5821f",
+          "size": 17565
         },
         {
           "path": "test_repair_r3.py",
-          "sha256": "78d02ed8966e7b1978940de4e6e657f4851a253d73229dfff968d7a3f1fabf35",
-          "size": 25920
+          "sha256": "1ae6edef4ac55223be5af27c0bcd0c981982df8a72fe40eda00852b81cbb10d6",
+          "size": 25936
         },
         {
           "path": "test_repair_r4.py",
@@ -1119,8 +1125,8 @@
         },
         {
           "path": "test_reserve.py",
-          "sha256": "f6cd3e0b8000fccc3a7597936d01e757e5acfdedf07e3983601a9deadae7d747",
-          "size": 232049
+          "sha256": "5b944ae28740b1dd94f18977e60b8bb0691231400bb12d9efa0f44ef2f741b9d",
+          "size": 228861
         },
         {
           "path": "test_reset_credits.py",
@@ -1149,8 +1155,8 @@
         },
         {
           "path": "test_shell_card.py",
-          "sha256": "6fc2f2f3262a3b6e7bd7bb1c56e9d1a95adb60ae2a6bfd599e64f7e3088fc19a",
-          "size": 8146
+          "sha256": "e664d373be021e9118123c9bb1fa486c94ea7985553ecd9606ce10cd414bec3e",
+          "size": 7745
         },
         {
           "path": "test_steady_snapshot_text.py",
@@ -1159,28 +1165,28 @@
         },
         {
           "path": "test_style_canons.py",
-          "sha256": "e2b09c0dc4a600cc8d1e250750ca75d1e38d1ae6f063aaed7d54e9fa7c584bd5",
-          "size": 81913
+          "sha256": "62111ca74eaa57a76037a062433543db6aa419d5dc56204ce4851985d5a5a475",
+          "size": 31453
         },
         {
           "path": "test_text_actions.py",
-          "sha256": "defb797f4099f42480bc8bdaac13e72f363b268ba02c3d554180131dc7ae79fc",
-          "size": 66594
+          "sha256": "e8cf4196e5e3da55264d31a9784eaddd421ba791478dcc6a2128de20bde7b6d2",
+          "size": 64006
         },
         {
           "path": "test_ui_timeline.py",
-          "sha256": "e20696055007d8a947f94ffb757c45dd64dfb0ba9295f7f057587da104ae0d2b",
-          "size": 32180
+          "sha256": "8416268ffb04d3c474b7789ef094cc4bbe183a3b1f3bf019256865e1a4470803",
+          "size": 32263
         },
         {
           "path": "test_window_tabs.py",
-          "sha256": "1213282df06b37ea5f1ba5b53c9c58fb996674a312485339f227c629ee5592df",
-          "size": 659514
+          "sha256": "79ff4fd8ac14c803f50339245f88f76b8cefb50a1fef0de0515e2a5be441d35c",
+          "size": 46040
         },
         {
           "path": "widget.js",
-          "sha256": "8bdb45cf34c33c8e627bbd73f93ba76c9df88c7b228b6bb75e64d2d5ed280478",
-          "size": 737588
+          "sha256": "6447ba666cd6616f0c47d2a81fc665eedc753f10e8f1cb7418c5cbc201cd7651",
+          "size": 511171
         }
       ],
       "name": "claudexor_quotas",
@@ -1348,8 +1354,8 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "320664ec3c6a48d98e42d47479e7f52cc9fd39e9f20b490c13450d66901ead64",
-          "size": 8178
+          "sha256": "dc54d2690b16ff9813a1b2c678efd403f1e93d33da76642e89ab7b46dfb0824e",
+          "size": 8239
         },
         {
           "path": "client.py",
@@ -1371,7 +1377,7 @@
       "slug": "email",
       "title": "Email tools",
       "type": "extension",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "when_to_use": "When the user wants to list unread emails, read email message contents, compose and send emails via standard IMAP/SMTP protocols, or test email server connectivity."
     },
     {
@@ -1382,18 +1388,18 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "570a61364972b55a8afeb1858cc1af6ba15feea731d081d40b9a1e8629b7a9b9",
-          "size": 10405
+          "sha256": "64283767fb92d5ad3c8ebb106cd60ddab79f04bb368b24fb6ed8254a836fd28e",
+          "size": 11299
         },
         {
           "path": "README.md",
-          "sha256": "c5fa6b9a57cfcca31c93f328a383467f4c19e4d215256778ffdb5ac710a3a6e8",
+          "sha256": "b0b576837bb119db74e7aaf5e93b7bf5d8fba156543937b0a559931bb9dc29d4",
           "size": 1918
         },
         {
           "path": "SKILL.md",
-          "sha256": "70c8eedb369d5cb9b6d620bee7886ab59b8bd8c9c0d5af765f8a9947677aaf0a",
-          "size": 36741
+          "sha256": "245872fdf7b9db2ddaa3562fe15527814394d8d0e6c809a4cfc0769f878a716c",
+          "size": 37333
         },
         {
           "path": "lib/accounts.py",
@@ -1412,8 +1418,8 @@
         },
         {
           "path": "lib/ews.py",
-          "sha256": "31f4babc333aecf8eeec9eff61be91df5f2aa3a633953b2c4a6c0660c913a3fd",
-          "size": 26072
+          "sha256": "9dc7e90b939c74368b68578cd3d33b73cae6d2f61b57ec1595590474fa193996",
+          "size": 26239
         },
         {
           "path": "lib/ews_operations.py",
@@ -1432,18 +1438,18 @@
         },
         {
           "path": "lib/gmail.py",
-          "sha256": "6396637d1a323d43127a1f32390a3ca2e1895efababb9e6f2bd1c1866fa7466f",
-          "size": 26192
+          "sha256": "7f125b48289a0fb1657cf4ae97b7f4c5988417ffb7355d8988f5353bd4ac9639",
+          "size": 26700
         },
         {
           "path": "lib/google_auth.py",
-          "sha256": "feb55d9da99a0ef50fdfe4548b6c6d46acbfc96fc8f848aa7ef68e42c7940dcc",
-          "size": 7762
+          "sha256": "388b3ad6126ed7a4c1b5d5cc054187695b428d7c4053be67742d91c4048d40da",
+          "size": 8092
         },
         {
           "path": "lib/host_adapter.py",
-          "sha256": "6b8acc07c0004a5e8f9ba7cfb1e3369587c8cdb8a08eb2b96a6d35f0df2afe9d",
-          "size": 43122
+          "sha256": "8bb7756585e155cae4c833cd986cfc0975a13ad51c660d28265a23bc907f3389",
+          "size": 43944
         },
         {
           "path": "lib/mime.py",
@@ -1472,8 +1478,8 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "5f59491a49f2f17e34af32db7dd3367fe427a11b392adb20babd5443069c418a",
-          "size": 12396
+          "sha256": "680bf6027ca28b443896a8725cc107c4eaf8f4d593dcb7eb078dde7ab8fda020",
+          "size": 12498
         },
         {
           "path": "scripts/email_daemon.py",
@@ -1492,8 +1498,8 @@
         },
         {
           "path": "tests/test_account_routes.py",
-          "sha256": "22b0fde3d08eaa593b1efed30128b3938f304ab76a286f2ea414b13211ab727a",
-          "size": 8766
+          "sha256": "f66caa8082d7d165b9e5d289111b0c14c6d5b5d91c9a0d64c0f82218b9410524",
+          "size": 9656
         },
         {
           "path": "tests/test_accounts.py",
@@ -1502,8 +1508,8 @@
         },
         {
           "path": "tests/test_accounts_browser.py",
-          "sha256": "c352f251d1817823fff52011f16099605dee996650a4cffcf677b71382001600",
-          "size": 20377
+          "sha256": "d7ef8a28861c51d94ae5cde1f26327a423c82bc8339e69843e83bdfaee61e96d",
+          "size": 20974
         },
         {
           "path": "tests/test_attachment_regressions.py",
@@ -1532,8 +1538,8 @@
         },
         {
           "path": "tests/test_context.py",
-          "sha256": "1dbcb38607d78affe9422e371a225625a8542e6989e281800e679abaada857d0",
-          "size": 8385
+          "sha256": "54297a332fc1d1705e9db4b4d6bdf555e12be73487cf88a56885a98dacdc7d5d",
+          "size": 9129
         },
         {
           "path": "tests/test_conversation_preparation.py",
@@ -1542,8 +1548,8 @@
         },
         {
           "path": "tests/test_declared_target_preparation.py",
-          "sha256": "63740faae96d1e8e978c320768f11bd320d61a8f542b68459175605065c9e4aa",
-          "size": 12638
+          "sha256": "29cca079dfefd606707a5342b78f07fb35a5c9a6c98ea500e247173c2cc0f883",
+          "size": 12743
         },
         {
           "path": "tests/test_deferred_observation_custody.py",
@@ -1587,8 +1593,8 @@
         },
         {
           "path": "tests/test_ews_structured_read.py",
-          "sha256": "17dc2b14fad6415a627db16ab84e24bf9c602a6655699f25be50e9e821e6daec",
-          "size": 9818
+          "sha256": "eacfdf5aae2ad11d09215fb231902e1f50989a8e934ee6b92aee60a4bb63e069",
+          "size": 10105
         },
         {
           "path": "tests/test_ews_tool_binding.py",
@@ -1602,13 +1608,13 @@
         },
         {
           "path": "tests/test_foundation.py",
-          "sha256": "0ede43ca79744746f255d4f730de85c1acf806e56a86a249a4e6bfb012d977ce",
+          "sha256": "50360a3b34c97577ab101cfae2bf8b7ef709cc1f7c34f3ea94ca83b06edc7e5f",
           "size": 13999
         },
         {
           "path": "tests/test_gmail.py",
-          "sha256": "f18e08579fbfaaef1503eb7250da28f29920820d2e078695fc58e654663e8b7f",
-          "size": 13800
+          "sha256": "667069e671f45effa85eee676761fd38289ea2749bfd0b9604f8563d4306bd45",
+          "size": 15818
         },
         {
           "path": "tests/test_gmail_draft_deletion.py",
@@ -1727,18 +1733,18 @@
         },
         {
           "path": "tests/test_write_targets.py",
-          "sha256": "252346b89d34f56bc8d64662c43f28ffaf22f966b650e5adf00117795bc66cfc",
-          "size": 28288
+          "sha256": "39443f2e5eef1058b5a316ace5d40e7bbfb3a25a8d1d5b996f8eade2ea6f692d",
+          "size": 28407
         },
         {
           "path": "ui/accounts.css",
-          "sha256": "33806e4a07315846df88bf2e85d892b7e2284c9581b83257a795169ea2c4bd15",
-          "size": 2554
+          "sha256": "e9d4a877bbc77e324db857373cfd06a289a38aa74f226d197946e6290630fb37",
+          "size": 2565
         },
         {
           "path": "ui/accounts.js",
-          "sha256": "71db70c5783a6f1899ddd9b34e7425f7334faff4241730b54b2c3e643f7246fc",
-          "size": 19541
+          "sha256": "7c05097d0e081f6ca84d6dbe98836a3b3946cc8944c935e2ef7a504e8485fdcc",
+          "size": 20290
         },
         {
           "path": "ui/icon.svg",
@@ -1757,7 +1763,7 @@
       "name": "email-presence",
       "slug": "email-presence",
       "type": "extension",
-      "version": "0.10.7"
+      "version": "0.10.9"
     },
     {
       "description": "GDELT Cloud geopolitical intelligence: conflict events, news stories, entity graph, energy infrastructure, macro-finance, prediction markets, and web research via MCP Progressive Discovery.",
@@ -1811,18 +1817,18 @@
       "files": [
         {
           "path": "HOST_CONTRACT.md",
-          "sha256": "1ec9ab306f89a5a93aeaaecbf4da5cb9e680513dde0d17a8e88251d989d36f4d",
-          "size": 8110
+          "sha256": "a50d3ce4c1c9334e50865621fe40a8241cc6a5d1a6f6361b3db02b3f278d80e2",
+          "size": 8973
         },
         {
           "path": "SETUP.md",
-          "sha256": "71bceacd266b0afe96d8a9334aa64b50cd19f2baa43ba58021142fc1fab8ff6e",
-          "size": 22338
+          "sha256": "2d3f6545cf7a3619e71a779003086520e2e0903491e3c738e2a3a9d75638c5b7",
+          "size": 22680
         },
         {
           "path": "SKILL.md",
-          "sha256": "61780da629e909b4333f331e03f32e69bb561ce2a1214e94cb954d0be972d21e",
-          "size": 6397
+          "sha256": "713d96a9ce8b9be61e043aad44a99cbbfa6ffdeb8d8007a5ba48a21172d7157b",
+          "size": 6593
         },
         {
           "path": "SOURCES.md",
@@ -1856,8 +1862,8 @@
         },
         {
           "path": "gh_presence/events.py",
-          "sha256": "07e5979856eb115190222aeab495f3a119265c66c68837a1d03135c107d52e4a",
-          "size": 8870
+          "sha256": "e3aa3b84e42e49ec8885480fbef5756a12f96eaffe46c155245ec942e8eca04b",
+          "size": 10797
         },
         {
           "path": "gh_presence/host.py",
@@ -1971,8 +1977,8 @@
         },
         {
           "path": "tests/test_transport.py",
-          "sha256": "72585a55d1fccfa2ca95ce440f96f0ad06b9b45a0348c09e439d98b93b0af214",
-          "size": 41934
+          "sha256": "ec7c493c4e3f97356ade5075331bef99cd04a7adb7fe3e3e6bf7da3b895e09ae",
+          "size": 46711
         },
         {
           "path": "ui/icon.svg",
@@ -1987,7 +1993,7 @@
       "name": "github",
       "slug": "github",
       "type": "extension",
-      "version": "0.1.4"
+      "version": "0.1.6"
     },
     {
       "description": "Universal Google Workspace integration for Google Sheets, Docs, Drive, Slides and Calendar via explicit OAuth or Service Account authentication.",
@@ -2784,17 +2790,17 @@
       "connects": [
         "Slack"
       ],
-      "description": "Slack connector for workspace places, with typed conversation facts, durable threaded replies, files, and live place-state delivery holds.",
+      "description": "Slack connector for workspace places, with typed conversation facts, durable replies, files, and live place-state delivery holds.",
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "e2caa725d4210f63a73a57d3240a888ec5aab1d654ce91afb42c9de90b1f4aaf",
-          "size": 1202
+          "sha256": "cac0703d14effc1975106ef17341e586df4f9963e18c346a5654444e78051d41",
+          "size": 8649
         },
         {
           "path": "SKILL.md",
-          "sha256": "472a6697161b7b8b9b31675da488490a92288dfe8181f02e8bb75cf8ea8e16c5",
-          "size": 51859
+          "sha256": "428fd72938a6a72af91ff7d98a615fae831da3502bf37435fec9382fb2dafff9",
+          "size": 62104
         },
         {
           "path": "lib/__init__.py",
@@ -2803,33 +2809,38 @@
         },
         {
           "path": "lib/directory.py",
-          "sha256": "8fa8e446cec4b23e4de7ce1d2e7ad65ed2b8d2a281212d0ab89897df42df339f",
-          "size": 7815
+          "sha256": "fdc41f5d649b3c5f045a6eed6072b0322d24718282b8496adb32311e760219d3",
+          "size": 7708
         },
         {
           "path": "lib/events.py",
-          "sha256": "324e215bdb727eaab862e517d63ea55556a322e3157acce85652832a7de5bfb6",
-          "size": 13326
+          "sha256": "5dc4b71d580777b8659d091c7dc54fee876e7e2bbd23c389d4fe4c2ec0c150dc",
+          "size": 16172
         },
         {
           "path": "lib/host_adapter.py",
-          "sha256": "7e0900db1ae99ca50a3be66f27fb9c6f543d985cf07ba539a0a25e35e53e5a93",
-          "size": 52729
+          "sha256": "8d8f6beb7ab17bb68a77ada4ff8efbd6f3576b5d8454eb369ee086f717829e04",
+          "size": 53264
         },
         {
           "path": "lib/local_settings.py",
-          "sha256": "dfcf6faef630b59357ba3f9a00ebe1ba7b4c5c973d6b4ed601c65c272d84fc4d",
-          "size": 1666
+          "sha256": "c5b2b29dca2a96076b322926d8a4e1a5f87d26d07c6a562e341018cddace6925",
+          "size": 3255
+        },
+        {
+          "path": "lib/people.py",
+          "sha256": "2b355bf33ce38aa615d56b270c145ae74488835617c6335bb37b4570277c4f17",
+          "size": 3068
         },
         {
           "path": "lib/presence.py",
-          "sha256": "df6ee395482a58e09323b14967f1690d281e874b5a638f63eb6c1c4f1aab6462",
-          "size": 9144
+          "sha256": "03056fe0720a57fa6b8a13f3dce064fa4f6f92ed2529ffedfaa22ca22d5e1e76",
+          "size": 11330
         },
         {
           "path": "lib/provider_context.py",
-          "sha256": "24e92f78df7e67bd524e256a7a2abf475f13047647bf73cbeed28b9682bb8482",
-          "size": 8771
+          "sha256": "61f511da49c125673ab06373f4051df69a8bc2b24463a5f191e2d25789665cb9",
+          "size": 16789
         },
         {
           "path": "lib/read_tools.py",
@@ -2838,8 +2849,8 @@
         },
         {
           "path": "lib/runtime.py",
-          "sha256": "3479fa995f0b154563b9e9bc528b86bb0b4388c2480e2d8bde62887b4109a167",
-          "size": 41418
+          "sha256": "f9e7e018adb304a20619e77ee291c1cb5bc9beb30850ac125f84ee420b42db36",
+          "size": 41932
         },
         {
           "path": "lib/slack_api.py",
@@ -2848,13 +2859,13 @@
         },
         {
           "path": "lib/socket_mode.py",
-          "sha256": "004db481f582501fcb9efd813718ce00ae0a1fe23a193032d4038a82cbac29bb",
-          "size": 5424
+          "sha256": "cee57e0372dbff4a42eab2d73f64739d853d7f9900ebe3e310a230cdf1e69c8e",
+          "size": 5685
         },
         {
           "path": "lib/store.py",
-          "sha256": "1c5ac8a1a57ebd241849b3f3a40e9c76866c087dc1a4e19cb597fe504c5351e8",
-          "size": 63907
+          "sha256": "a24ccaf16dccd4425bab9e6bcf2a1df99f9a0e114dc6f8c5c4880ff1a80c0b83",
+          "size": 66238
         },
         {
           "path": "lib/tool_results.py",
@@ -2868,43 +2879,33 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "3467f21f61f58e3032dd7c7fa364a9c941d09b1fb91d963410c2ec15bd5dfe43",
-          "size": 30120
+          "sha256": "2c3570cb24720353646b68378169151303f031ebcdc1767acc651ab3a98f3a39",
+          "size": 32353
         },
         {
           "path": "scripts/slack_daemon.py",
-          "sha256": "7b26c3cd5292929414768e39dd02dcbf0d69ab73c99dcd3878e00588b176069c",
-          "size": 4569
+          "sha256": "9604fb62373b5c0bd021f6022fc000c9d73c89418edf62e792d1ea2a9e2f28ea",
+          "size": 5363
         },
         {
           "path": "tests/INBOUND_LEASE.md",
-          "sha256": "6f6dab7fef712a11b7c4b984a880067234a90b4c0dcf7157b7555e39cb912762",
-          "size": 4020
-        },
-        {
-          "path": "tests/PRESENCE_PROCESS_CONSUMER.md",
-          "sha256": "5c29ea9b5973ca826e9358d72f5bc726367cef493f5a629eb2f9806dfb634bd4",
-          "size": 6847
+          "sha256": "f3baad68c7085e4b2fb38375de3422507f02493c04b343dd78071f1e6860bbd6",
+          "size": 3916
         },
         {
           "path": "tests/README.md",
-          "sha256": "dd4efd121cd18b9d6bb951a911dfba370325b76bb1135b4ca7bad614758e59d7",
-          "size": 6433
+          "sha256": "7aa8c6684e1dbe2251840508bed876aa621c87389ad407b24b1f462027a92c51",
+          "size": 6286
         },
         {
           "path": "tests/conftest.py",
-          "sha256": "1a80faab163899d6cfe2075ce93473de44cb18db17ba8d481f30965d0140e274",
-          "size": 987
-        },
-        {
-          "path": "tests/presence_process_host.py",
-          "sha256": "aa82396b436d2d6c124ac4effee5b85123e370f041f2973f96264d50f80282ac",
-          "size": 13644
+          "sha256": "a46b7f6d55ef28c86328cdb92063f906963c2fbe123f2150c861d09842275a5b",
+          "size": 992
         },
         {
           "path": "tests/test_conversation_facts.py",
-          "sha256": "f8ab9cbf146d6d15e61cc37aadc4516e8c3cb94fb685b74c3141fe8d0b379c13",
-          "size": 6256
+          "sha256": "0ebe392860691835b8ef606a48c54ae1be1ec98cbd6dda0e5ee116d24a711341",
+          "size": 16022
         },
         {
           "path": "tests/test_delivery_reporting.py",
@@ -2923,8 +2924,8 @@
         },
         {
           "path": "tests/test_host_adapter.py",
-          "sha256": "a0cc07f9adcdf2d356c35acf06356c27dc96b2350ffd21d2a253bbf5b3ff0fa8",
-          "size": 12770
+          "sha256": "78ecf37f5ac05c0ffdde3738ef3e54740d51c53c774485acda2931120297f582",
+          "size": 14185
         },
         {
           "path": "tests/test_host_refusals.py",
@@ -2957,9 +2958,14 @@
           "size": 14953
         },
         {
+          "path": "tests/test_mention_names.py",
+          "sha256": "3023fb2ddac93639b46354caaf7f3f18f991300e3c94852fd1fe52457446b614",
+          "size": 13486
+        },
+        {
           "path": "tests/test_message_deletion.py",
-          "sha256": "171da8187b3192f3c68dded875616674a4b5bd818f630e7d85d450a00c97b9f6",
-          "size": 7217
+          "sha256": "b3e686fa95591e3c9e445ac8b06ed7c885543e679f0da81fb6612d874eafe83b",
+          "size": 7876
         },
         {
           "path": "tests/test_message_format.py",
@@ -2968,43 +2974,38 @@
         },
         {
           "path": "tests/test_message_mentions.py",
-          "sha256": "2d2ff01e7ee560f858f0407e2b5e5de4b940a652e7dd2b477ed8b94b0c171382",
-          "size": 9925
+          "sha256": "0c4b508b9bde896c050fe89c75726816e63aa75208f331ee248541a7c7586042",
+          "size": 9936
         },
         {
           "path": "tests/test_message_revisions.py",
-          "sha256": "5a320cb1bb2bec8f3b114befa92b1c3f2fd0665151f0014f21513a98bc6dbdce",
-          "size": 6942
+          "sha256": "5d3f16168cfafa398324ce2bcc184f905fe7b4f05aafbf885f6e98faa64cc905",
+          "size": 10672
         },
         {
           "path": "tests/test_places.py",
-          "sha256": "e3330a6d768c5eb8ed0f66a60ed0c02af9039f0f863dc6666517dc8232f68b16",
-          "size": 11640
+          "sha256": "2e0c01e5dd02236849260da3d4154fc4ec827cab546f1174e14a327319132acd",
+          "size": 25193
         },
         {
           "path": "tests/test_presence_continuation.py",
-          "sha256": "ff3626f505d8b43f03f6771f3e58f311db182372d681d73f39119629df4cabec",
-          "size": 59192
-        },
-        {
-          "path": "tests/test_presence_process_consumer.py",
-          "sha256": "7d7ff7ae8e604e3cecdddc58f76c62130950f54aff3dbf716708bcf9296ed116",
-          "size": 44853
+          "sha256": "f566c0f805fd85715a80791c587e60f813593b93d0c8f6c1f5f7bd9308d41e7e",
+          "size": 59226
         },
         {
           "path": "tests/test_presence_v2_intake.py",
-          "sha256": "becf9b5c3233cbec9580938f43c8593b851ad432332abe1ae7ee69d98a0ca05a",
-          "size": 47140
+          "sha256": "7446026391fb0d837e050e2bd9b406fbfada60c19848afb74b97852a09b42259",
+          "size": 50230
         },
         {
           "path": "tests/test_provider_context.py",
-          "sha256": "3fecb638d592205aa7ab41ddc7f131015a63d9387e509a3642b55d18b515da57",
-          "size": 15055
+          "sha256": "f3a72333120cc9678f6441a991dbc373fca17d3625305d8a2e98b18ec3f65c61",
+          "size": 15072
         },
         {
           "path": "tests/test_reactions.py",
-          "sha256": "487f985f123cc97df31339951c672e790553676690b9508247107190b0b6b06e",
-          "size": 80095
+          "sha256": "bc3ac9d5ee33eb0b1725f648dd556c13cca2343190a9a7263e6ee2611be3d3cd",
+          "size": 86185
         },
         {
           "path": "tests/test_read_tools.py",
@@ -3013,8 +3014,8 @@
         },
         {
           "path": "tests/test_retained_custody.py",
-          "sha256": "f06760d30a8e59976a2793d1b6418d23098bfa9c2e7bc1c3906077e91f8dfbf7",
-          "size": 15165
+          "sha256": "da5c57d9adaab820a6dd540dc34d73421cd362bbe2b8630680be0e909fe72e6a",
+          "size": 17757
         },
         {
           "path": "tests/test_send_custody.py",
@@ -3028,13 +3029,13 @@
         },
         {
           "path": "tests/test_socket_mode.py",
-          "sha256": "0705fee16762875399b1a27b65289b06e85c501d193a442506b0a25f19ff2284",
-          "size": 2404
+          "sha256": "ef11c3e872f84cda36d6fa67cf1b1805d919288252e2716a443b2113a9110a89",
+          "size": 3564
         },
         {
           "path": "tests/test_thread_context.py",
-          "sha256": "73f2ece13f8f19beacb8d8accdd5166829d176a39f4c8a6af32af4375f49cbdd",
-          "size": 17582
+          "sha256": "7d628015456d12246a654603bf6c2c269d600655d18b33b507b7728dc1af6d20",
+          "size": 18069
         },
         {
           "path": "tests/test_tool_contract.py",
@@ -3048,8 +3049,8 @@
         },
         {
           "path": "tests/test_workers_plugin.py",
-          "sha256": "bcb43e367f77e82bb671f437b444a9f8bae38825ddece59bc46b2d1b14f9c0e8",
-          "size": 42187
+          "sha256": "def2e0c992798f50e3a1cb8ba5b7b41b9350a02873524cce97eabfa5002e9880",
+          "size": 42950
         },
         {
           "path": "ui/icon.svg",
@@ -3065,7 +3066,8 @@
       "name": "slack-bridge",
       "slug": "slack-bridge",
       "type": "extension",
-      "version": "1.9.3"
+      "version": "1.12.1",
+      "when_to_use": "User wants Ouroboros to receive Slack messages or files, reply in Slack conversations and threads, or send proactive Slack text messages."
     },
     {
       "description": "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders.",
@@ -3160,8 +3162,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "222d278dc71e2de3a1321d6436a596769daa660e0b7b2ec1a76ef35dc8161ab5",
-          "size": 9097
+          "sha256": "03264dafe03e2efb374c9f461e09351938a2cd67a31c6dea12dc42dbf52125bf",
+          "size": 11856
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -3175,18 +3177,18 @@
         },
         {
           "path": "README.md",
-          "sha256": "f8c90507e98f5aaa9287c8c75eaccc75f04e5879ab66591cffcbb3787a2e3775",
-          "size": 2190
+          "sha256": "b164869369fa2e9f50c5fbc95b40ab917ce67e3bf7d26d94770eaa67d0d3b7b5",
+          "size": 2226
         },
         {
           "path": "SKILL.md",
-          "sha256": "29d0a4bf7309fa49cb343368c5fff0bb1fb0b24190a18b00e0a79a1026d44222",
-          "size": 42999
+          "sha256": "5e2230ab4bf4235eab897062f6acfa3b10db8a559c2b82419c15742301442a7f",
+          "size": 45848
         },
         {
           "path": "plugin.py",
-          "sha256": "cc07ea6fecf3877db9d4022062efdde5ffff5a38b10d2ef618332e25334cfecf",
-          "size": 19563
+          "sha256": "6d80907140f48404dab53a3315f929f09fbe2b4d1fb62921cb1910b629640a5c",
+          "size": 20503
         },
         {
           "path": "telegram_bot/__init__.py",
@@ -3195,13 +3197,13 @@
         },
         {
           "path": "telegram_bot/api.py",
-          "sha256": "0526fb9be81680d2e260a23bf66a7f4af150538816777628fce90ecdf97cf328",
-          "size": 18870
+          "sha256": "cd9e35e7445d37d0a9e4fc79939e0747400479c5d7340a8ebae08844a605fee7",
+          "size": 19469
         },
         {
           "path": "telegram_bot/custody.py",
-          "sha256": "184b89d646b67eeb4ed89751bafb8ef3b22218b55d4860a6249b7974c168d2c1",
-          "size": 59127
+          "sha256": "323e54c20211a05573a0c1c53996c7eb20c0ed161c7deb016d935c8eff997dd4",
+          "size": 59132
         },
         {
           "path": "telegram_bot/delivery.py",
@@ -3210,13 +3212,13 @@
         },
         {
           "path": "telegram_bot/discovery.py",
-          "sha256": "a030d157acf9e80c2dd844af3c520c67560e9eddad7ba252d53f8fdb5e5c206a",
-          "size": 9852
+          "sha256": "22992aeee92d1e0f5c97490c6de0221936f32e7d8da7ac44c85d5aff93f6e4e8",
+          "size": 10823
         },
         {
           "path": "telegram_bot/events.py",
-          "sha256": "5d4ee5b7845af2a8f60a13e1bb5653ba15043be65c56902635686e2f1986388b",
-          "size": 19092
+          "sha256": "b15f6ff5a82e7fd37e00f17fc91e8807b451d2f2fb5380330016d7c8d1af5c81",
+          "size": 19967
         },
         {
           "path": "telegram_bot/formatting.py",
@@ -3230,8 +3232,8 @@
         },
         {
           "path": "telegram_bot/runtime.py",
-          "sha256": "7bb2b97b18289e572ed737fed076ca4dd16d36cba15fa22be68d453488d2edf7",
-          "size": 39730
+          "sha256": "9b7f9343be85ccba2073ce2c6bf9f731eda96bbf5422209935724ccf8e079287",
+          "size": 40496
         },
         {
           "path": "telegram_bot/settings.py",
@@ -3240,8 +3242,8 @@
         },
         {
           "path": "telegram_bot/tools.py",
-          "sha256": "819176f554b0c85fc86971b3862ea68f70471f5cfd446c30c6d5e6f440703f50",
-          "size": 14103
+          "sha256": "5637ed1d711783a0726f2a1d7879fcffaff53d0aeebd0335a0103ed1f78224b9",
+          "size": 16720
         },
         {
           "path": "tests/conftest.py",
@@ -3250,8 +3252,8 @@
         },
         {
           "path": "tests/test_api.py",
-          "sha256": "5a34bbe721b4cf5fc7e0c8472a4202899fe53ac28fffab40a551a1a046b3d2e6",
-          "size": 3599
+          "sha256": "0b9de7ceb88a7beea7f56f0beb44596f3b5d617f767ef7993935189c2852224e",
+          "size": 6070
         },
         {
           "path": "tests/test_context.py",
@@ -3270,8 +3272,8 @@
         },
         {
           "path": "tests/test_events.py",
-          "sha256": "8d95f5ef5948a32f820adfdef55a283cd526241eb73f754602871066f2b0ba8e",
-          "size": 10173
+          "sha256": "4f018352970f27c1f09febc4172a0350c32e17c2671464a36d662124e9a79296",
+          "size": 10700
         },
         {
           "path": "tests/test_formatted_delivery.py",
@@ -3285,8 +3287,8 @@
         },
         {
           "path": "tests/test_group_discovery.py",
-          "sha256": "a41581c5cd3237a53abdb56249fcc6938c68722f47e4c3e4e15e1a9aa534cf70",
-          "size": 30189
+          "sha256": "99b1cd45f63c1949bd6e4d65e4321e90e6c272771a44347747fc69cd91acfda3",
+          "size": 32361
         },
         {
           "path": "tests/test_host.py",
@@ -3325,8 +3327,8 @@
         },
         {
           "path": "tests/test_reactions.py",
-          "sha256": "1345adb3f2f7aa9831297c1ddbe4f9b88bb6326290687f765f6fea02da1da0d0",
-          "size": 101378
+          "sha256": "1a36d7640c1420d971df245f752cdb51a168a7a75d73860cea206c3c566ed146",
+          "size": 109725
         },
         {
           "path": "tests/test_retained_custody.py",
@@ -3340,8 +3342,8 @@
         },
         {
           "path": "tests/test_voice_audio.py",
-          "sha256": "b987ef9c4f43b4a6ac3c851d68588b21b6fd81a0c379a12cdf6f863e3d879019",
-          "size": 7399
+          "sha256": "e45ef98da76b197bd48968a3685d63e815a3a3430648985c8fa43db9846ac355",
+          "size": 11678
         },
         {
           "path": "tests/test_words.py",
@@ -3363,7 +3365,7 @@
       "name": "telegram-bot",
       "slug": "telegram-bot",
       "type": "extension",
-      "version": "0.10.4"
+      "version": "0.11.2"
     },
     {
       "connects": [
@@ -3373,8 +3375,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "23199e2be4ac50b4542a1e5cd206fa9ad4ba608deb9c26c6adf3eff4695520bb",
-          "size": 39483
+          "sha256": "ce9b1dc8088792a3b8ee9cedadcfcf026f7f5543d501eeadcf583caf1c3aad57",
+          "size": 42589
         },
         {
           "path": "plugin.py",
@@ -3398,8 +3400,8 @@
         },
         {
           "path": "tests/test_history_import.py",
-          "sha256": "084d14c89b5fd9b738297bee479783266c786b64617b984ab2d7114b3425589e",
-          "size": 97011
+          "sha256": "6e25b0f7d939455507ff3b088ba77ffd77a4ecef32001fae4df342e6373a3471",
+          "size": 98634
         },
         {
           "path": "tests/test_intake_loop.py",
@@ -3423,8 +3425,8 @@
         },
         {
           "path": "tests/test_participant_delivery.py",
-          "sha256": "c983eb4fd418ee8843fc15db5dce1ddd81b9c5191f85c7c684419f24c1e20a5a",
-          "size": 63948
+          "sha256": "31d521069cef1db954cc6e130f2afdfbcb309337549030f9408fd42305e8de57",
+          "size": 71061
         },
         {
           "path": "tests/test_participant_routes.py",
@@ -3478,18 +3480,18 @@
         },
         {
           "path": "userbot/history_import.py",
-          "sha256": "4affd37b91d4eee116f31598538cfd00759a27f6d1ce3324e7b79d5adeadd4cf",
-          "size": 52773
+          "sha256": "4425e5a7da660f25074450e1becee7fbc294e0ac9c08d8f1b09c8f692775737c",
+          "size": 53033
         },
         {
           "path": "userbot/normalize.py",
-          "sha256": "73294f0c99e9c190c887bfc660aefae9271f0dc49fa19f9243042d888248be35",
-          "size": 9069
+          "sha256": "0afc81779bded8045bf054d6f814f1aedaf7a7f19903cfd6931c1e148c9cd93c",
+          "size": 9463
         },
         {
           "path": "userbot/participant.py",
-          "sha256": "3b2fc078148413ac3124b8c3915fe1c9dc59cad5c22f4bc9791632edcac4e2b9",
-          "size": 49113
+          "sha256": "8e5507e70d75a05f2795f2f3964984393d6f5de62c5cef361698ff90c8c9c670",
+          "size": 50227
         },
         {
           "path": "userbot/participant_ops.py",
@@ -3503,13 +3505,13 @@
         },
         {
           "path": "userbot/participant_state.py",
-          "sha256": "08ad3a3efbb685ad1143f71b2ba901c3b90131b4a54c228646b20275ce80a0c3",
-          "size": 25377
+          "sha256": "a68f55f044a136389fc7a7a4db1e68e3364c365da9db4aed0485d032757faaba",
+          "size": 25873
         },
         {
           "path": "userbot/presence.py",
-          "sha256": "90e8fa93db61a542ae064eccfacb05e97faf97aec12011bfeb895c9a4d119e65",
-          "size": 25467
+          "sha256": "f69a9f148e74bde9cbc1c8ef36eb3ced61f71c34bf0a10ab4c2218539c1cff00",
+          "size": 25889
         },
         {
           "path": "userbot/runtime.py",
@@ -3556,7 +3558,7 @@
       "name": "telegram-user-session",
       "slug": "telegram-user-session",
       "type": "extension",
-      "version": "0.4.1"
+      "version": "0.4.3"
     },
     {
       "description": "Token Observatory — Liquid Glass dashboard for recorded Ouroboros token usage, tasks and models.",

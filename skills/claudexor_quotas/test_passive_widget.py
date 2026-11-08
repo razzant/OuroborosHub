@@ -24,7 +24,7 @@ NODE_PASSIVE = r"""
   let env = await boot(dedicated);
   assert.equal(problem(env),false,'catalog was intentionally not requested');
   assert.equal(classes(env.root,'banner').length,0);
-  assert.ok(classes(env.root,'lrow').length,'the complete quota reading is rendered');
+  assert.ok(classes(env.root,'q-plate').length,'the complete quota reading is rendered');
   assert.equal(classes(env.root,'tab-mark-name')[0].textContent,'Codex');
   assert.doesNotMatch(env.root.textContent,/Claudexor daemon is|Readings below are last known/);
   assert.ok(classes(env.root,'l-fig').some(n=>!n.textContent.startsWith('—')));
@@ -45,8 +45,8 @@ NODE_PASSIVE = r"""
   assert.doesNotMatch(classes(env.root,'inspector')[0].textContent,/catalog not read/);
   click(env,topKey);
   assert.equal(byFocus(env.root,'accounts').getAttribute('aria-pressed'),'false','a press on a row shuts the list');
-  assert.equal(classes(env.root,'inspector').length,1,'a press on the picked row keeps the pick and its card');
-  assert.doesNotMatch(classes(env.root,'inspector')[0].textContent,/catalog not read/);
+  assert.equal(classes(env.root,'q-card').filter((c)=>!/q-card-none/.test(c.className)).length,1,'a press on the picked row keeps the pick and its card');
+  assert.doesNotMatch(classes(env.root,'q-card')[0].textContent,/catalog not read/);
 
   for (const state of ['unknown','stopped']) {
     env=await boot(fixtures[state]);
@@ -98,10 +98,10 @@ NODE_PASSIVE = r"""
   assert.equal(problem(env),false);
   env.poll(); await settle();
   env.requests.at(-1).resolve(answer('bad gateway',502)); await settle();
-  assert.ok(classes(env.root,'lrow').length);
+  assert.ok(classes(env.root,'q-plate').length);
   assert.equal(problem(env),true);
   assert.match(env.root.textContent,/Reading could not be refreshed/);
-  assert.match(classes(env.root,'l-fig')[0].textContent,/— left of/);
+  assert.match(classes(env.root,'l-fig')[0].textContent,/— of \d+ account-windows? left/);
   const kept= (await boot(dedicated)).testHooks.keptView(dedicated);
   assert.equal(kept.cached.catalog,undefined,'omission never becomes a dated catalog read');
   assert.equal(kept.passive_read.mode,'unavailable');

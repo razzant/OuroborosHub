@@ -481,7 +481,7 @@ NODE_NO_OVERVIEW = r"""
   const route = JSON.parse(process.env.ROUTE);
   const env = await boot(route);
   // No limit to count: no rows, and the account list stands open on its own.
-  assert.equal(classes(env.root, 'lrow').length, 0);
+  assert.equal(classes(env.root, 'q-plate').length, 0);
   byFocus(env.root, 'acct:claude:bare').listeners.click[0]({ stopPropagation() {} });
   const card = classes(env.root, 'inspector')[0];
   // No Diagnostics to wait under: every reported exhaustion — the passed one
@@ -550,10 +550,13 @@ NODE_SECOND_FLOOR = r"""
     const row = byFocus(env.root, 'acct:claude:' + sid);
     if (row.getAttribute('aria-pressed') !== 'true') row.listeners.click[0]({ stopPropagation() {} });
     assert.equal(byFocus(env.root, 'acct:claude:' + sid).getAttribute('aria-pressed'), 'true', sid);
-    byFocus(env.root, 'inspector-diag').listeners.click[0]({ stopPropagation() {} });
+    // A press on another row shuts the list: the account's card then stands beside the bars, its details under its one button;
+    // the account picked already keeps the list open and its full card under its row, with its Diagnostics.
+    const more = byFocus(env.root, 'inspector-details') || byFocus(env.root, 'inspector-diag');
+    more.listeners.click[0]({ stopPropagation() {} });
     return env;
   };
-  const card = (env) => classes(env.root, 'inspector')[0];
+  const card = (env) => classes(env.root, 'q-card')[0] || classes(env.root, 'inspector')[0];
   // The current windows (the diagnostics list last-known readings apart).
   const current = (env) => classes(card(env), 'diag-block').find((b) => /^Current windows/.test(b.textContent));
   const linesOf = (env) => classes(current(env), 'win-line');

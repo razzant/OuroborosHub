@@ -84,10 +84,11 @@ def sync_account(store: Store, providers: Providers, account: Dict[str, Any], tz
             store.upsert_calendar({**cal, "role_visible": existing["role_visible"] if existing else True,
                                    "role_busy": existing["role_busy"] if existing else True,
                                    "role_publish": existing["role_publish"] if existing else False,
-                                   "publish_mode": existing["publish_mode"] if existing else "busy"})
+                                   "publish_mode": existing["publish_mode"] if existing else "busy"},
+                                  restore=True)  # lifts a disconnect's retirement after sign-in; an owner deletion's receipt keeps it
             stored = store.get_calendar(cal["id"])
             if stored is None or stored.get('deleted_at'):
-                continue  # disconnected while discovery was in flight
+                continue  # deleted by the owner, or disconnected while discovery was in flight
             report["calendars"] += 1
             state = store.get_sync_state(cal["id"])
             ctag = cal.get("ctag") or ""

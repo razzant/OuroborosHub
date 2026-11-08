@@ -1255,9 +1255,9 @@ NODE_ADVISORY_MATRIX = r"""
   assert.match(details.textContent, /0\.50 unrestricted/);
   // One plate at a time: every limit in turn, each plate's control with its whole spoken summary.
   const rows = plates(env);
-  const names = rows.map((r) => describedBy(r, classes(r, 'l-chart')[0]).split(' — ')[0]);
+  const names = rows.map((r) => describedBy(r, classes(r, 'q-head')[0]).split(' — ')[0]);
   assert.equal(new Set(names).size, names.length, names.join(' | '));
-  const heard = rows.map((r) => describedBy(r, classes(r, 'l-chart')[0])).join(' ');
+  const heard = rows.map((r) => describedBy(r, classes(r, 'q-head')[0])).join(' ');
   assert.match(heard, /models: m00, m01, .*m23 \+1 more/);
   // With a restriction present, the unrestricted account-windows stand beside it.
   assert.match(heard, /1 cooldown reported \(0\.70\)/);

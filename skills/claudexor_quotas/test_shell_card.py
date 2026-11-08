@@ -61,7 +61,7 @@ const click = (env, key) => byFocus(env.root, key).listeners.click[0]({ stopProp
   assert.deepEqual(kinds(env.root), ['control-bar', 'shell']);
   assert.ok(has(card, 'shell-card') && has(card.childNodes[0], 'draw-fault'), 'the fault is first in the card');
   assert.equal(classes(head, 'draw-fault').length, 0);
-  assert.ok(classes(card, 'lrow').length + classes(card, 'accounts').length, 'the screen before it is kept in the card');
+  assert.ok(classes(card, 'q-plate').length + classes(card, 'accounts').length, 'the screen before it is kept in the card');
   assert.deepEqual(kinds(frame), ['shell-card'], 'in its frame');
 
   // 4. A first answer that cannot be drawn: the waiting screen stays, the frame has no rail (the card has the whole width), and the
@@ -101,18 +101,16 @@ def test_the_head_stands_on_the_ground_and_everything_under_it_in_one_card():
     # The gap stands only between the top row and the card: a card alone (no top row) keeps the page's own edge.
     assert '".control-bar+.shell{margin-top:var(--shell-card-gap)}"' in css
     assert 'margin-top' not in rule
-    # The frame: one column without a rail, the rail and the card side by side with it (--rail-w, no gap), a block under 860px.
+    # The frame: one column without a rail; the rail of rings (--q-rail-w) and the card side by side with it, a block on a phone (520px and under).
     assert '".shell{display:grid;grid-template-columns:minmax(0,1fr);min-width:0}"' in css
-    assert '".shell.has-rail{grid-template-columns:var(--rail-w) minmax(0,1fr)}"' in css
-    # rule: the rail is what a ring needs at the axis of the widest tab of the head's row (114px until the script reads the row): half of that tab, half of the
-    # ring, the growth of the ring that is picked and the air at the card; not a fixed 72px, and not the widest tab and the gap of the page.
-    assert '--rail-tab-w:114px;--rail-air:var(--space-2);--rail-w:calc(var(--rail-tab-w) / 2 + var(--ring-box) / 2 + var(--ring-grow) + var(--rail-air));' in dark, 'the rail is as wide as the ring on the axis of the widest tab of the head asks: the same for every family'
-    assert '"@media(max-width:859.98px){.shell.has-rail{display:block}.has-rail>.shell-card{margin-top:var(--space-2)}}"' in css
+    assert '".shell.has-rail{grid-template-columns:var(--q-rail-w) minmax(0,1fr);column-gap:var(--space-2);align-items:start}"' in css
+    assert '--q-rail-w:96px;' in dark, 'the rail is as wide as the ring capsule with its longest short name (Claude and GPT 7d) asks'
+    assert '"@media(max-width:520.98px){.shell.has-rail{display:block}.has-rail>.shell-card{margin-top:var(--space-2)}}"' in css
     assert not re.search(r'"[^"]*\.(?:shell|rail)[^"]*:has\(', css), 'the frame is told by a class the script sets, not by :has'
     assert not re.search(r'#[0-9a-fA-F]{3,8}\b|rgba?\(|gradient\(|backdrop-filter|font-size', rule), rule
     # The capsule stands after the kit and before the others.
     assert css.index('/* kit: inputs */') < css.index('/* capsule: shell */') < css.index('/* capsule: head */')
-    assert css.index('/* kit: ring */') < css.index('/* kit: rail */') < css.index('/* capsule: shell */')
+    assert css.index('/* kit: ring */') < css.index('/* capsule: shell */')
 
     # The markup, in the widget's own run: the head outside the card, everything else inside it.
     widget = Path(__file__).with_name('widget.js').resolve()

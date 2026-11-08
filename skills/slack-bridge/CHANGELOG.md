@@ -1,5 +1,117 @@
 # Changelog
 
+## 1.12.1
+
+- `slack_api` declares which of its calls deliver words: the Slack Web API methods that post
+  or change a message (`chat.postMessage`, `chat.update`, `chat.postEphemeral`,
+  `chat.scheduleMessage`, `chat.meMessage`), with the destination channel, thread and text
+  at `body.channel`, `body.thread_ts` and `body.text`. A host that reads the `sends`
+  declaration treats those calls as messages to people: the Safety Supervisor judges them as
+  speech, the place's notes and Silent/Paused state apply, and a message the Supervisor could
+  not judge waits instead of leaving. On 4 November eight messages reached colleagues through
+  this generic tool after the dedicated send was held, because the host saw only a write.
+  Reactions, pins, bookmarks and reads are unchanged. A host that does not know the
+  declaration ignores it.
+
+## 1.12.0
+
+- `slack_reaction_add` and `slack_reaction_remove` declare `effect: gesture` and
+  `message: ts`, so a Host that knows gestures can offer a reaction on the waking message
+  beside `slack_send` as a third form of response, next to words and silence. Their
+  registered descriptions now say what a reaction is for and give `name` an example. On a
+  Host that predates gestures the unknown effect is an undeclared write, refused by Silent,
+  Paused and Advises as before; arguments, queue and receipts are unchanged.
+
+## 1.11.2
+
+- A thread reply is `my_thread` when this bot wrote the thread's root or a message of the
+  captured thread, and never `reply_to_me`. A Slack thread is flat: every reply names the
+  root's author as its `parent_user_id`, and no message names one it answers. Every reply
+  under a root the bot wrote was still reported as a reply to the bot, so the Host told
+  the model the event addressed it and kept the words as addressed to it: on 6 November a
+  message the owner wrote to a colleague in a thread Ouroboros had opened was answered and
+  turned into work. The place no longer declares or suggests `reply_to_me`; a place that
+  kept it without `my_thread` wakes on those replies again once My threads is checked.
+- Mentions and thread authors carry names. `message.mentions` lists each explicit mention
+  as `{id, name, is_self}`, and `conversation.thread_history.authors` the captured thread's
+  authors the same way, so a reader sees who is named and who said what without a lookup.
+  A name comes from one this credential observed within a day (an earlier `users.info`
+  read or the `slack_resolve` directory scan), else from one `users.info` read: at most
+  four at once, within one ten-second budget and none after Slack limits the rate, kept
+  as one small row per person. A person left unread is `null`. `provider_facts` are
+  unchanged.
+- A revision that changes only Slack's bookkeeping is not an edit. A root's thread state
+  (`reply_count`, `reply_users`, `reply_users_count`, `latest_reply`, `is_locked`, the
+  bot's `subscribed` and `last_read`, the root's own `thread_ts`), the editor's
+  `source_team` and `user_team`, and a regenerated `block_id` join `language` and
+  `edited`. Deleting a reply re-sends its root with only the read mark gone, and on
+  6 November that woke a turn as a new message from the root's author. Of the 1,009
+  revisions one install's bridge had accepted, 496 changed no words, files or
+  attachments; they are now ignored as `message_content_unchanged`. New words, files,
+  link unfurls and a deleted root's tombstone still reach the model.
+
+## 1.11.1
+
+- `from_bot` follows the author's account, not the client that posted. A person writing
+  through an app (an AI assistant posting as them, for example) carried `bot_id`,
+  `app_id` or `bot_profile` and was reported as a bot, so a direct message or a reply in
+  Ouroboros's own thread never woke it: in one colleague's DM, 8 of 42 messages, all of
+  them his substantive updates, waited for the next own wake. The account's `users.info`
+  `is_bot` now decides; the markers decide only when Slack names no person or the lookup
+  is unavailable. They stay visible as `provider_facts.posted_via_app` (stored rows keep
+  their earlier `actor_is_bot` name and are read the same way).
+
+## 1.11.0
+
+- A direct or group chat is one conversation: its top-level messages carry an empty
+  `thread_id` and the Host key `slack:<team>:<channel>:0`, which Ouroboros's own
+  top-level sends there already use. A top-level answer to a proactive DM therefore
+  sees it, and on a Host with continuation version 2 a second message reaches the
+  answer being prepared. Edits, deletions and reactions of
+  such a message, Ouroboros's own reactions included, land there too. A reply in a
+  thread keeps its thread, in a chat too; a top-level channel message still opens its
+  own thread, and a message or mention without a channel type keeps its per-message
+  conversation. The bridge decides this once, when an event is received, and inbound
+  readers take the conversation stored with it: the event, its queue lane, the reply
+  and its receipt, the thread read and the output identity. A reaction takes its
+  target's conversation from that message's retained record, and from one
+  `conversations.replies` read only when none is stored; the receipt of Ouroboros's
+  own top-level channel post uses the channel type stored from a received event.
+- The automatic answer to a top-level message of a direct or group chat is a plain
+  message in the chat, no longer a thread under it. `slack_send` still places a
+  message anywhere, with or without `thread_ts`.
+- The receipt of Ouroboros's own top-level channel post names the thread the post
+  opens once a received event has stated the channel's type, so the post is recorded
+  with the replies under it. A post sent in several parts, or into a channel no event
+  has described, stays at the channel's top level. Nothing a person sees changes.
+- A top-level message of a direct or group chat no longer reads
+  `conversations.replies`, which returned only that message.
+- Upgrade: events received before the update keep the conversation they were stored
+  with, and with it their retries, reply thread and output identity. Earlier
+  per-message conversations of a direct chat stay as the conversations of the threads
+  under those messages; the chat's own conversation starts with what Ouroboros sent
+  there at top level. Nothing is imported, renamed or resent. Rolling back to 1.10.1
+  or earlier while a top-level message that 1.11.0 stored for a direct or group chat
+  still waits makes a Host with continuation refuse that event, and the bridge
+  records it as failed, so roll back with no such message waiting.
+- Restores what 1.10.0 dropped. It was published from a local copy of 1.9.0, so it
+  reverted the changes of 1.9.1 to 1.9.3: hold lines that say what a hold means and
+  only the next step, a skill the Host refused waiting for its owner, and claims
+  that stay idle without write transactions (see 1.9.2 and 1.9.3).
+
+## 1.10.1
+
+- Every event carries `message.sent_at`, Slack's send time of its message (for a
+  reaction, when it was made), and an edited message `message.edited_at`, when its
+  words were last edited.
+
+## 1.10.0
+
+- New top-level posts in channels listed by exact ID (`SLACK_NEW_ROOT_CHANNELS`) carry
+  `signal.new_root`, an opt-in wake, sent only to Hosts that advertise
+  `presence_wake_signals: 1`. Published from a local copy of 1.9.0, this release
+  lacked the changes of 1.9.1 to 1.9.3, and so did 1.10.1.
+
 ## 1.9.3
 
 - A hold line says the state and the next step, not the Host's answer behind it. An

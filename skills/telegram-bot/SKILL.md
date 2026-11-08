@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.10.4
+version: 0.11.2
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -135,7 +135,21 @@ tools:
   target: chat_id
   conversation: chat_id
   thread: topic_id
+  sends:
+    when:
+      method: [editMessageText]
+    target: chat_id
+    conversation: chat_id
+    thread: topic_id
+    text: text
   description: Queue an edit of this bot's own message, or set or clear its reaction on a reachable message, with durable receipts.
+- name: telegram_react
+  effect: gesture
+  target: chat_id
+  conversation: chat_id
+  thread: topic_id
+  message: message_id
+  description: Set or clear this bot's reaction on an exact Telegram message; a gesture, not speech.
 - name: telegram_receipt
   effect: read
   target: []
@@ -184,7 +198,7 @@ It provides:
 The payload does not call the owner `/chat/inject` path, allocate synthetic
 internal chats, interpret owner commands, or create prompt envelopes. It uses
 only the reviewed `presence` Host permission. Connect a Telegram place with the
-bot account ID, or one group at a time (see
+bot account ID, or one chat at a time (see
 [Connecting groups](#connecting-groups-090)). On hosts advertising `places_version >= 1`, private chats,
 groups and channels are captured without a binding ID. A private chat carries
 the `direct_message` fact; the person opened that chat with the bot, and the
@@ -245,45 +259,49 @@ Telegram delivers far longer and larger recordings than the recognizer accepts;
 such a recording, like WAV, FLAC or AAC, is still staged whole, never cut, and
 stays only a file, and the tool's error says so.
 
-A recording Telegram declares larger than the Bot API's 20 MiB download limit
-is not downloaded: its attachment carries `status` `too_large` and a note, and
-the event goes on with the message reference instead of retrying forever.
-If the update omits the size and `getFile` later refuses an oversized file, the
-existing download retry path still holds that conversation; this version does
-not resolve that failure. Unknown-size recordings that download successfully
-remain supported.
+Any attachment (photo, document, voice or audio) that Telegram declares larger than
+the Bot API's 20 MiB download limit is not downloaded: it carries `status`
+`too_large` and a note, and the event goes on with the message reference instead
+of retrying forever, so a later message of the same chat is never held behind it.
+The same holds for a row stored by an earlier version with that size and no mark,
+and for a file whose size the update omitted when `getFile` refuses it as too big.
+Any other download failure still retries and keeps the event first in its chat.
 
 ## Connecting groups (0.9.0)
 
-Each group or supergroup the bot has been seen in is offered by name when you
-connect a Telegram place, so groups can be connected one at a time:
+Each private chat, group or supergroup the bot has seen is offered by name when
+you connect a Telegram place. Since 0.11.1 this includes private chats people
+have already opened with the bot, using their numeric chat IDs:
 
-1. Add the bot to the group. Telegram reports the addition to the bot
+1. Have the person open a private chat with the bot, or add the bot to a group.
+   Telegram reports a group addition to the bot
    (`my_chat_member`, which needs no admin right); any message the bot receives
    there also adds the group.
 2. In Ouroboros open Consciousness, choose **Connect a place**, then **Telegram**.
-   Beside **Whole account**, each group is listed as its title and numeric ID,
-   for example `Book club (-1001234567890)`.
-3. Choose **Connect** on that group. The new place starts Silent: it hears and
+   Beside **Whole account**, each chat is listed with its numeric ID:
+   `Book club (-1001234567890)` or `Mira Lee @mira (7001)`. A private chat uses
+   the person's observed first/last name and username when available.
+3. Choose **Connect** on that chat. The new place starts Silent: it hears and
    thinks there and sends nothing.
-4. Make the place Active on its sheet when the bot may speak in that group.
+4. Make the place Active on its sheet when the bot may speak there.
 
 The status route returns the list as `connect: [{account_id, conversation_id,
-label}]`: one row per group whatever its topics, ordered by title, without a
-limit. Private chats and channels are not listed. Only the bot that `getMe`
+label}]`: one row per chat whatever its topics, ordered by name, without a
+limit. Channels are not listed. Only the bot that `getMe`
 confirmed for the token configured now has a list. When the token is missing,
 when `getMe` has not confirmed the current token yet or refused it, or when the
 transport is not running, `connect` is `null`. The status names a stopped bot,
 missing token or unconfirmed identity; `runtime_state` and `last_error` retain
 transport errors instead of promising that waiting will fix them.
-Connect then reports the list as unavailable. A confirmed bot seen in no group
+Connect then reports the list as unavailable. A confirmed bot seen in no chat
 yet has `connect: []`. Reading the list makes no Telegram call.
 
 The list records what the bot has observed and does not check current membership.
 
 - Removing the bot (its status becomes `left` or `kicked`, or a service message
   names it as the member who left) takes the group off the list, and adding it
-  again brings it back. A rename updates the title. Telegram's update order
+  again brings it back. Blocking/unblocking the bot does the same for a private
+  chat. A rename updates the label. Telegram's update order
   decides, so an older message never undoes a later removal, rename or migration.
 - A group upgraded to a supergroup gets a new ID. The old ID leaves the list,
   and the supergroup appears once one of its own updates, which carry its type
@@ -292,11 +310,24 @@ The list records what the bot has observed and does not check current membership
 - Additions, removals, renames and migrations only update this list and the
   offset; they never become events, turns or places. Nothing is connected
   automatically, and the list never asks Telegram about members.
-- Messages from a group that has no place yet stay queued in custody while the
-  Host refuses them, and reach Ouroboros after you connect the group. The retry
+- Messages from a chat that has no place yet stay queued in custody while the
+  Host refuses them, and reach Ouroboros after you connect the chat. The retry
   back-off is unchanged, so the first of them can wait up to about four minutes.
 - A group from which the bot captured no message before 0.9.0 appears after the
   bot's next update there, for example a message that mentions the bot.
+- Upgrading to 0.11.1 makes one resumable pass over the retained inbox to add
+  previously seen private chats to the same `telegram_groups` projection. It
+  keeps one row per bot/chat with its latest name and membership evidence;
+  no second message history or contact registry is created. The existing rows,
+  receipts, offsets and connected places stay unchanged. The projection keeps
+  the existing custody lifetime, including removed chats' last evidence.
+  Status reads use this projection, never repeat the inbox pass. A large retained
+  inbox can delay the first startup; each transaction reads at most 200 rows.
+  Earlier versions did not record private-chat blocks: a chat reconstructed from
+  retained messages may still be offered after an old block, until a newer block,
+  unblock or message updates its evidence.
+- Rolling back to 0.11.0 keeps these private rows visible in the same chooser,
+  but that version no longer updates their names or block/unblock evidence.
 
 ## Retained input and late results
 
@@ -424,8 +455,9 @@ caption, original author/chat/message IDs, date, entities, and photo/document/
 voice/audio descriptors. Selected quotes and forwarding origins remain separate source
 facts; a forwarded author does not replace the current sender.
 
-Edits retain their original message id with `message.event_kind` set to
-`edited_message`. Reaction updates retain the target message id and the old/new
+Each message keeps Telegram's send time as `message.sent_at` (ISO, from its `date`;
+`sent_at_epoch` stays). Edits retain their original message id and send time with
+`message.event_kind` set to `edited_message` and `message.edited_at` from `edit_date`. Reaction updates retain the target message id and the old/new
 reaction arrays, with `event_kind` set to `message_reaction` and no synthetic
 message text. These are observations for model judgment, not automatic replies.
 
@@ -439,6 +471,20 @@ A reaction can be the whole social response: it shows you understood, saw or
 laughed without another message. It is optional, it is not speech, a read
 receipt or agreement, and an early gesture does not replace a promised result.
 This connector has no emoji dictionary and no required sequence of gestures.
+
+**As a response (0.11.0).** `telegram_react` declares `effect: gesture` with
+`message: message_id`. A Host that knows gestures can offer it beside
+`telegram_send` for the message that woke a turn, with `chat_id`, `topic_id` and
+`message_id` filled in. `action: set` takes one `emoji` or `custom_emoji_id`;
+`action: clear` takes neither. It calls `telegram_operation` with
+`method: setMessageReaction` and nothing else changed: the same checks and topic
+rules below, the same outbox row and receipt `telegram-operation:<request_id>`
+(one `request_id` names one operation whichever tool queued it), the same provider
+outcomes, and an unknown outcome is never sent again. `telegram_operation` stays a
+mixed `write` tool and keeps `setMessageReaction`. A Host that predates gestures
+reads `telegram_react` as an undeclared write: Silent, Paused and Advises refuse it
+as before, and it offers no reaction door. The reaction stays an act on that
+message, never the turn's words or evidence of finished work.
 
 **What this bot can read.** Telegram sends a bot reaction updates only when it is
 an administrator of the chat, and only as they happen. `message_reaction` names

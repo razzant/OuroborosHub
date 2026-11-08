@@ -81,40 +81,69 @@ it (`api.get_state_dir()`):
 ## What changed in 0.13.0
 
 A new look and a few new drawings for the widget; the numbers behind them
-(`quotas`, `refresh`, `display` and the legacy `prefs` routes, `quota_summary`,
-the collector, the history and the snapshot) are unchanged. Besides the widget
-the release adds one read-only route, `i18n`, and changes one field of `chip`.
+(`quota_summary`, the collector, history, snapshot and existing quota fields)
+are unchanged. `quotas?text=1` optionally adds the widget text table. The new
+`i18n` route reads that table and queues missing translations; catalog registration
+can wake the host’s translation generator. The release also changes one `chip` field.
 
-- **The rail of windows.** The row of window tabs is a rail, a column at the side
-  of the limits (under 860 px a row of capsules over them): a thread from the mark
-  of the picked family down to a ring for each window (5-hour, Weekly, 30-day). A
-  ring's arc runs from zero to the average share left of its window, the number
-  stands inside it with the window's short name as a badge in its gap; a star on
-  the badge still means the window rests on part of its accounts, a dash and no
-  star that none is read now. Picking a ring picks the window as the tab did.
-- **The ladder of resets.** Under the rings, "Resets" lists the picked window's
-  next reported resets, soonest first. A step shows how long to it ("40m", "5h",
-  "2d 5h") and what its accounts give back if unused (one minus the share left,
-  added over them, as the plate's "next reset" row says it); on hover and aloud it
-  names the moment in the reader's time zone and the accounts. Resets within two
-  minutes of the step's first are one step, as the plate's row takes them, and
-  neighbouring steps that read the same in how long are glued into one. Up to
-  four stand (fewer where the rail has no room for them); "N more" opens the rest
-  in a scrolling window, "less" folds it. A step is read from the bars the plate
-  already draws, so it adds no request; what a step gives back is added here, as
-  the server adds it for the plate's "next reset" row. Pointing
-  at, focusing or touching a step lights its accounts' bars on the plate;
-  pressing it keeps them lit, and a step of a single account selects that
-  account. A family with no window (see Cursor below) has no ladder, and neither
-  has a shell narrower than 860 px: there the plate keeps its "next reset" row.
-- **The account's card.** The card of the picked account comes up in the place of
-  the chart while it is pressed, pointed at or holds the keyboard focus, and the
-  chart folds to a strip that brings it back; at rest the card is a strip under the
-  plate. Picking another bar puts it down; a change of window or family lets it go.
+- **The head.** One capsule per family in a fixed order (the order the answer
+  lists them; a pick moves no tab): the vendor's mark, the name and the count of
+  accounts. The family on screen wears the crimson of the plate's pick (the same
+  colour as the picked ring and the opened account's card); on a phone (520 px and
+  under) the other families fold their names and keep their marks and counts, so the
+  row stays one line. About and Refresh stand at the right as words, Refresh with
+  its arrows (the word folds on a phone, the name stays for a reader).
+- **The rail of rings.** One ring per limit, in a column beside the plate (on a
+  phone, 520 px and under, a row of capsules over it): the window and, for a
+  limit scoped to models, that scope ("5h", "7d", "Fable 7d", "Claude and GPT
+  5h"). The ring's arc and the figure in it are the limit's average share left
+  (the skill's `average_remaining_pct`; "—" with none, never 0), its digits and %
+  one 12 px unit; a star says the limit rests on part of its accounts. A ring is a
+  button: pressed, it shows that limit (one read of its chart, with reuse). A
+  window the reader hid in Rows keeps a dotted ring. No limit is summed with another.
+- **The ladder of resets.** Under the rings, "Resets" lists the limit's next
+  reported resets, soonest first: how long to it ("40m", "5h", "2d 5h") and the
+  account-windows its accounts give back if unused (one minus the share left,
+  added over them); resets within two minutes are one step, neighbouring steps
+  that read the same are glued. Four stand, "N more" shows the rest. A step of
+  one account picks it; a step of several lights their bars and picks none.
+- **The plate.** The window and its scope said once ("7-day window · Fable
+  only"; a limit the engine scopes by model-id prefix is "Gemini models"), the
+  stamp ("Read 35 of 40 · just now") and the account-windows left
+  ("10.96 of 40 account-windows left"). The detailed explanations of spent limits,
+  missing readings, manual resets and restrictions sit under **Limit details**
+  after the bars; the disclosure stays open across redraws for that family/limit.
+  Notes name up to two accounts, else count them; their hints retain all names,
+  and hover or keyboard focus lights the corresponding bars. An engine prefix scope says the models it
+  covers ("Covers every gemini-* model", so a model in no list, such as Argon, is
+  never given a limit of its own). Then the opened account's card beside every
+  account's bar. A bar has no figure in it: green is what is left, amber
+  held by another limit, a red base at the limit (dashed when it was at the limit
+  when read), a hatch last known, "?" not read, grey switched off; a legend names
+  only the states in the row. Bars are 56 px down to 20 px, then wrap onto more
+  rows: every account stays on screen, and the picked bar is outlined and moves
+  nothing; under a finger (a coarse pointer) a bar is at least 28 px wide, so the
+  grid takes another row sooner. On a phone a plate of one account stands its card
+  and its bar side by side. The history is the plate's last part, always open,
+  under a hairline: its span, its future, Combined and the model choice, the plot
+  and its legend, the details folded.
+- **The account's card.** Its name, its address whole, its share of the limit
+  ("31% left", 14 px), when that limit comes back ("Resets in 1d 11h · 03:00"), its
+  plan and the age of the reading, its held state ("Held back", without guessing
+  another limit's scope or return time), cooldowns, and its dated bonus resets and credits:
+  the offers of `resources.resets` ("2 usable now", "2 granted · not usable now",
+  "2 granted · usability unknown" — a count is never "available" by itself; "none
+  offered", a reported 0, a last-known one dated), else the legacy
+  `quota.reset_credits` count (one source, never both); the credit balances of
+  `resources.balances` except the included budget (team balances say so, amounts
+  are the engine's strings scaled by their own decimal places, an amount not
+  reported is said, never 0). Nothing reported draws no line. Everything else of
+  the account is under "Account details". The top current account is picked at
+  the opening; × or a second press of its bar lets the pick go.
 - **Cursor's billing cycle.** Cursor reports included usage per billing cycle and
-  no time window. Its family has no window to draw, so the widget draws a plate in
-  the 30-day place: one bar per account with a pool, the money left ("$16.40 left
-  of $40.00") and the soonest cycle end. The figure adds only personal included
+  no time window. Its family has no window to draw, so the widget draws one ring
+  (Cycle) and a plate of money: one bar per account with a pool, the money left
+  ("$16.40 left of $40.00") and the soonest cycle end. The figure adds only personal included
   usage that is read now and stated in one currency and one decimal scale. A team
   pool is never taken for an account's own; a last-known reading and an unlimited
   pool are listed apart, and an account in another scale or with no usable reading
@@ -123,18 +152,17 @@ the release adds one read-only route, `i18n`, and changes one field of `chip`.
   plan this cycle ("Over plan · $21.65") is added the same way and stands apart,
   never inside the included usage. This is a cycle's allowance, not a window of
   time, and it does not say whether a request can run; there is no timeline of
-  money. The card of such an account (a budget and no limit windows) has no chart
-  under it: its strip shows the share left, the money and the next cycle end, and
-  the rest of the card (readings, resources, the credential) is folded under
-  "Account details". This sum is computed in the widget, as the ladder's sums
-  of what each step gives back are (see Reserve overview).
-- **Widget text and translation.** Every phrase the widget says is a key of
-  `strings_en.json`, which holds the English, one source of it. `GET i18n` returns
+  money. The card of such an account says its money left and when its cycle ends.
+  This sum is computed in the widget, as the ladder's sums of what each step
+  gives back are (see Reserve overview).
+- **Widget text and translation.** The rail, selected card, billing-cycle explanations and selection labels use
+  `strings_en.json` as their English source. Some older diagnostic prose still
+  uses English; provider labels and reasons remain provider data. `GET i18n` returns
   `en` (that table) and, when the install's language is not English, `strings`:
   the translation of these keys from the host's translation memory (`code:quotas.ui.*`),
   with the language, the memory's revision and its plural map. A phrase the
   translation lacks is said in English; keys not translated yet are queued with
-  the host (once per process and language). `register_catalog` hands the table
+  the host (after acceptance, per process and language; rejected batches are retried). `register_catalog` hands the table
   to the host's generator at load, so a language chosen later gets these rows in
   its first batch; it is best effort and the widget does not depend on it. The host's
   modules are used when present; without them the same memory is read through the
@@ -334,20 +362,13 @@ the routes, the tool, the collector or the history:
 - **One bar track.** Every row's bars stand on one track height (40 px),
   charted or not: the same share left is the same height in every row. (In
   0.8.0 the charted row's bars were 46 px and the others 28 px.)
-- **One control per plate: the word "Chart".** The plate's one control is a
-  word, "Chart" (in the install's language), the kit's text action: no frame,
-  no pill, no icon, and no "Show"/"Hide" swap. It stands at the right of the
-  plate, on the baseline of its figure. The chart is shown while the word is
-  pressed (`aria-pressed=true`: the word is in the primary ink, and its
-  capital turns red only under the pointer or the keyboard); pressing it
-  folds the timeline, pressing it again unfolds it, and the keyboard stays on
-  it through the redraw. The word is its own name, so it carries no
-  `aria-label` and no `title`; the plate's whole spoken summary (the limit's
-  name first, then the figure, what is not in the line, the reset) is a note
-  the word is described by (`aria-describedby`). The plate draws no name of
-  its own: its tab and the scope row say it. The timeline has no second
-  toggle of its own ("Hide timeline" is gone); folded, nothing stands under
-  the plate and the word is not pressed.
+- **One control per row, in one slot.** The chart toggle ("Show chart"; on
+  the charted row "Hide chart", which folds the timeline) is a button of one
+  width at the right edge of every row, so the toggles stand in one column.
+  It carries the row's spoken summary, as the name button did in 0.8.0. The
+  limit's name is text again. The timeline has no second toggle of its own
+  ("Hide timeline" is gone); folded, nothing stands under the rows and no row
+  is drawn as charted.
 - **Said once.** The unit line above the rows is gone: the figure says it
   itself ("10.35 of 19 accounts"), the title's tooltip and About say it in
   full. The future's assumption ("no new use · 2 current accounts keep their
@@ -355,19 +376,13 @@ the routes, the tool, the collector or the history:
   assumed") is its legend line
   under the chart, not a paragraph of its own as well; with no future drawn
   the legend says why. The charted row and its timeline share one shading
-  with no rule between them. The plate says each fact once as well: the
-  average share left is the window tab's alone (the plate has no "avg left"
-  line and no "lowest left" badge; that ranking is worded in the hint of the
-  figure and in the spoken summary), and how many accounts are read, and
-  which are not, are the stamp's and the note's above it.
-- **Narrow cards.** The plate is two columns, the figure and the word
-  "Chart", with the bars under both. At widget viewport widths of 640 px or
-  less, the strip of bars takes a full row (each bar widens to the room, and
-  the picked one grows along its height only); in a card narrower than about
-  390 px (the widget's own viewport at or under 360 px) the figure and its
-  unit may wrap inside their column, and the word keeps its place at the
-  right of the first line. There is no caption and no fixed control column to
-  make room for.
+  with no rule between them.
+- **Narrow cards.** At widget viewport widths of 640 px or less, the bars
+  take a full row and the caption sits below the figure, leaving room for
+  dense account strips below the figure and fixed control column. In a card
+  narrower than about 390 px (the widget's own viewport at or under 360 px) the figure and its caption each take a line of
+  their own under the name, and a long name or figure wraps instead of
+  running into its neighbour; the control keeps its slot.
 
 ## What changed in 0.8.0
 
@@ -375,15 +390,14 @@ One screen, one story per limit, instead of four panels side by side:
 
 - **The limits.** One row per limit of the chosen family: one bar per account
   (as in 0.7.0), the current figure ("10.35 of 19", "—" with no current
-  reading, never 0), and under the bars its tail — in words, only what is
-  not in the line (who is at the limit or held back, with a number each) —
-  and the **next reported reset with what it gives back if nothing more is
-  used** ("next reset Thu 8 Oct 22:59 · 3 accounts · +1.80 if unused";
-  `next_reset_returns`). A limit is picked in the row of windows above its
-  plate (and in the scope row, where a length has several limits); its
-  plate carries the timeline's chart control, the word "Chart" (pressed
-  while the limit is in the timeline; pressing it folds the timeline) — one
-  word, its spoken summary kept as a note it is described by.
+  reading, never 0) with the average or the dated "Last known" line under it,
+  and its tail — who is at the limit or held back, unknown accounts, and the
+  **next reported reset with what it gives back if nothing more is used**
+  ("next reset Thu 8 Oct 22:59 · 3 accounts · +1.80 if unused";
+  `next_reset_returns`). A limit's name selects it: it is underlined and
+  carries the timeline's chart mark with "Show chart" (on the limit in the
+  timeline, "Hide chart", which folds it) — one button, its spoken label
+  unchanged.
 - **The timeline**, open on every mount, stands directly under the selected
   limit's row (by default the family's "lowest left"): the recorded past and
   **one** future, chosen beside the chart — *No new use* (the default) or
@@ -458,10 +472,11 @@ family that reports no time window (Cursor), where it adds its accounts' persona
 included usage as "What changed in 0.13.0" describes (`quota_summary` carries
 those resources per account, dated, with no sum), and what each step of the
 ladder of resets gives back, one minus the share left, added over the step's
-accounts. The server reports the sum of the soonest reset only
-(`next_reset_returns`, the plate's "next reset" row), and the widget lights that
-row's accounts only when its own sum over them agrees; the other steps of the
-ladder have no figure of the server's to be held to.
+accounts. The ladder clusters resets within 120 seconds and merges adjacent
+clusters with the same countdown label. Its displayed step can therefore cover
+more accounts and return more than the next-reset row (`next_reset_returns`) or
+an individual event in the server’s `no_new_use` schedule. Those server values
+retain their original grouping; the ladder is not a second canonical schedule.
 
 **Unit — account-windows.** One account's remaining share of one limit counts
 1, whatever its plan: accounts with 40% and 70% left are 1.10 account-windows,
@@ -1139,59 +1154,16 @@ exhausted window is never reported as the default login's.
   About opens the system state and how to read the screen in place; Refresh
   is explicitly labelled. A family's button carries no colour for its worst
   account; a harness that is down or switched off says so.
-- **The limits**: the rail of windows (5-hour, Weekly, 30-day), each a ring with
-  the average share left of its window inside it and, on its badge, a star when that window
-  rests on part of its accounts (a dash and no star when none is read now);
-  across from the row the stamp of the picked window ("Read 14 of 16 · 18
-  min ago", or, after a failed read, "Claudexor not read now · all as read
-  3 min ago"; its hover says how many accounts of that window are read and
-  how old the oldest reading is — the exact reading times, the status read
-  and the time zone are in About, under Readings; the dot between the count
-  and the age blinks only while a Refresh the reader pressed is in the air,
-  never on the 30-second read); under the row, for a
-  picked window with accounts not read, the note "* Not read: last known (3
-  h) — claude5 · unreadable — claude12" (a group per reason, its first
-  three names and "N more", which opens the account list; a group lights
-  its own bars on the plate; none after a failed read); the title's tooltip
-  and About explain account-windows (a full account counts 1; limits are
-  never added). Then the picked window's plate: its name is its tab's
-  ("5-hour", "Weekly · Fable"; the plate draws none), the word "Chart" at
-  its right (pressed while the chart is shown; it folds and unfolds the
-  timeline), the figure — current readings only, large and thin ("10.35 of
-  19 accounts"; "— of 19 accounts" when none is current; a measured 0 stays
-  "0.00") — and one bar per account the limit applies to, as tall as its
-  share left on the same 40 px track and 0–100% scale in every row, fullest
-  first, one fixed strip width per slot count: solid for a current reading,
-  hatched for a dated last-known value, an outlined "?" (never an empty bar
-  or a zero) after the rest for an account with no usable value. What is not
-  in the line has the bar's ink on its base: a limit reached now is an empty
-  track with that base, a share held back by a restriction keeps its fill
-  and has it too, a value dated at the limit has a dashed base. No bar is
-  pink or amber and the plate has no colour of a state: it is told by the
-  form of the bars and by the words under them. Each bar names its account,
-  share, reset and age on hover and aloud, and selects that account. Under
-  the bars only what is not in the line is said, in words, each with its
-  number, and only when there is something to say: "3 at the limit" (the one
-  red figure of the plate), "1 disabled" (one item for each reason that
-  holds an account back), "1 at the limit when last read", "2 last known ·
-  1.40" (dated accounts not at the limit, with the sum of what they had); an
-  account with no usable value has no line (its bar is a "?" and the note
-  under the row of windows names it). Then the next reported reset with how
-  many accounts and what it gives back if unused. These words are handles of
-  the bars: pointed at, focused or touched, an item (and the reset row, where
-  the engine's count of accounts and of what they give back is exactly that
-  of the bars that reset then) steps the other bars back and lights its own.
-  The plate does not repeat the average (the window tab's), "lowest left"
-  (said in the figure's hint and aloud, not drawn) or how many are read (the
-  stamp's). Its shading continues into the timeline; its bar track stays the
-  same height as every other row.
-  Who stands in no row (switched off, or with no reading of these
-  limits here or in the history) is counted in one short link that opens the
-  account list, where they are named.
-- **The ladder of resets**, under the rings: the picked window's next reported
-  resets, soonest first, each with how long to it and what its accounts give back
-  if unused; a step lights its accounts' bars, a step of one account selects it.
-  See "What changed in 0.13.0".
+- **The limits**: the rail of rings, the ladder of resets and the plate of the
+  picked limit, as "What changed in 0.13.0" says. The stamp ("Read 14 of 16 · 18
+  min ago", or after a failed read "Claudexor not read now · all as read 3 min
+  ago") stands in the plate's head; its dot blinks only while a Refresh the reader
+  pressed is in the air. The note of the accounts not read ("* No fresh data · 2
+  read 3 h ago · claude5 · unreadable · claude12", the first three names and "N
+  more", which opens the account list) and the legend of the held and dated ones
+  light their own bars when pointed at, focused or touched. The plate's whole
+  spoken summary (the figure, who is at the limit, held or dated, the next reset
+  and what it gives back, "lowest left" as a ranking) is given to a screen reader.
 - **The billing-cycle budget** of a family with no time window (Cursor): in the
   30-day place, a plate with one bar per account, the money left of what the
   cycles allow, and no timeline. It is a cycle's allowance, not a window, and
@@ -1201,27 +1173,14 @@ exhausted window is never reported as the default login's.
   with each line's accounts and the future's assumptions, the checkpoints,
   the first two reported resets (the rest on request), and "Details, notes
   and data" folded. See "The timeline" above.
-- **One selected account**: a bar or a row of the account list selects it;
-  its bars are marked in every window shown (filled red and grown, no
-  outline; an unknown account's ring and "?" turn red and keep their
-  size). Its card: state dot, name, plan, "next
-  up", its e-mail, login kind, check and the age of its quota reading; its own
-  verdict where the lines do not already say it ("Limit reached · Resets …",
-  "Cooling down until …"); a line per limit (share left, reported reset, "last
-  known, read 21 min ago" or why it is unknown, a hold, and — only when its
-  own observed pace continued would reach the limit before that reset —
-  "would reach the limit ~Fri 9 Oct 08:53"); typed quota absences, cooldowns
-  (one sentence each: scope, end, provenance), model exhaustions that may
-  hold now, and fresh readings not counted with their reason. Diagnostics
-  unfolds every window as a line (its pool's chip, share left, share used in
-  words, why it is out and until when, or its reset), each last-known or
-  not-current reading, and every reported model exhaustion. Clear or Escape
-  drops the selection, the keyboard back on the bar or row that made it.
-  With no overview there is no Diagnostics: the card shows everything it
-  would hold — the windows whole, every reported model exhaustion (a passed
-  one and one naming no model too) and the credential. For an account with a
-  billing-cycle budget and no limit windows the card is a strip, and everything
-  else it holds stands folded under "Account details".
+- **One selected account**: a bar, a step or a row of the account list selects
+  it; its card (above) stands beside the bars. "Account details" unfolds its
+  check, login kind and quota age, its verdict, a line per limit (share left,
+  reset, last known or why unknown, a hold, and the pace that would reach the
+  limit before that reset), absences, model exhaustions, resources whole and every
+  reading. × or Escape drops the selection, the keyboard back on the bar or row
+  that made it. While the account list is open the plate is folded away and the
+  account's full card stands under its row.
 - **The account list**, folded under "Accounts · 19 accounts · 2 not running":
   one row per account in the engine's order — its share left in each limit
   (from the same bars; underlined when last known, "?" when unknown, "—" when
@@ -1234,17 +1193,12 @@ exhausted window is never reported as the default login's.
   row still says the failure, red ("not signed in · verification failed"),
   before anyone selects it. While the account list is not read now nothing
   is said not to run.
-- **One bar language**: every bar is as long (or tall) as the share LEFT on
-  one 0–100% scale, in one neutral ink, over a hairline base. What is not in
-  the line has the ink on its base, 3 px, in no colour of a state (no pink, no
-  amber): a share at its limit now has no fill but that base, a share held
-  back now keeps its fill and has it too (the words under the bars say why),
-  a last-known reading is hatched and muted and claims neither (at the limit
-  when last read, its base is dashed), a window with no usable ratio has no
-  bar at all. The pointer turns a bar to its ink; the picked bar is the
-  accent, filled and grown ×1.2 from its base, an empty one included. The
-  number beside a window's bar is the share used and says so
-  ("N% used"); the exact share left is on the bar's hover.
+- **One bar language**: every bar is as tall as the share LEFT on one 0–100%
+  scale, with no figure in it (the card and the bar's words say the exact
+  share): green left, amber held by another limit, a red base at the limit, a
+  hatch last known, "?" for no usable value (never a zero), grey switched off. A
+  window with no usable ratio has no bar at all. In the account's lines the
+  number beside a window's meter is the share used and says so ("N% used").
 - **Reset Times**: the moment a window resets and a cooldown ends, printed as
   a date and hour in tabular numerals — no per-second ticking.
 - **Honest live Refresh**: the explicit button performs one host POST and,

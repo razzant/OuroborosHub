@@ -16,34 +16,54 @@ def _load_settings(api) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        stored = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
+    return stored if isinstance(stored, dict) else {}
+
+
+# The keys the settings route stores (the form's fields and the documented, still-unused progress tunables).
+_SETTINGS_KEYS = (
+    "A2A_HOST",
+    "A2A_PORT",
+    "A2A_AGENT_NAME",
+    "A2A_AGENT_DESCRIPTION",
+    "A2A_MAX_CONCURRENT",
+    "A2A_RESPONSE_TIMEOUT_SEC",
+    "A2A_ALLOCATE_TIMEOUT_SEC",
+    "A2A_STREAM_DEADLINE_SEC",
+    "A2A_PROGRESS_POLL_SEC",
+    "A2A_HEARTBEAT_SEC",
+    "A2A_PROGRESS_ENRICH",
+    "A2A_SERVER_PASSWORD",
+)
+_SECRET_KEYS = frozenset({"A2A_SERVER_PASSWORD"})
 
 
 def _make_settings_save(api):
     async def _settings_save(request):
-        data = await request.json()
-        path = pathlib.Path(api.get_state_dir()) / "settings.json"
+        stored = _load_settings(api)
+        if str(getattr(request, "method", "POST") or "POST").upper() == "GET":
+            # Hydration read for the Settings form (CREATING_SKILLS): the stored non-secret values as strings, so the
+            # form shows what is saved and its Save never rewrites values the owner did not see.
+            return JSONResponse({key: str(stored[key]) for key in _SETTINGS_KEYS
+                                 if key not in _SECRET_KEYS and stored.get(key) is not None})
+        try:
+            data = await request.json()
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "message": "Invalid A2A settings payload."}, status_code=400)
+        if not isinstance(data, dict):
+            return JSONResponse({"ok": False, "message": "Invalid A2A settings payload."}, status_code=400)
+        merged = {key: value for key, value in stored.items() if key in _SETTINGS_KEYS}
+        for key in _SETTINGS_KEYS:
+            if key not in data:
+                continue
+            if key in _SECRET_KEYS and not str(data.get(key) or ""):
+                continue  # a password field hydrates empty: an untouched one keeps the saved password
+            merged[key] = data.get(key)
+        path = _state_file(api, "settings.json")
         path.parent.mkdir(parents=True, exist_ok=True)
-        allowed = {
-            "A2A_HOST",
-            "A2A_PORT",
-            "A2A_AGENT_NAME",
-            "A2A_AGENT_DESCRIPTION",
-            "A2A_MAX_CONCURRENT",
-            "A2A_RESPONSE_TIMEOUT_SEC",
-            "A2A_ALLOCATE_TIMEOUT_SEC",
-            "A2A_STREAM_DEADLINE_SEC",
-            "A2A_PROGRESS_POLL_SEC",
-            "A2A_HEARTBEAT_SEC",
-            "A2A_PROGRESS_ENRICH",
-            "A2A_GATEWAY_URL",
-            "A2A_TASK_TTL_HOURS",
-            "A2A_SERVER_PASSWORD",
-        }
-        payload = {key: data.get(key) for key in allowed if key in data}
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
         return JSONResponse({"ok": True, "message": "A2A settings saved. Toggle the skill to restart the server."})
     return _settings_save
 
@@ -89,7 +109,7 @@ def register(api):
             "required": ["url", "task_id"],
         },
     )
-    api.register_route("settings/save", handler=_make_settings_save(api), methods=("POST",))
+    api.register_route("settings/save", handler=_make_settings_save(api), methods=("GET", "POST"))
     api.register_settings_section(
         "a2a",
         title="A2A Server",
