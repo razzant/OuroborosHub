@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.10.7
+version: 0.11.1
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -136,6 +136,13 @@ tools:
   conversation: chat_id
   thread: topic_id
   description: Queue an edit of this bot's own message, or set or clear its reaction on a reachable message, with durable receipts.
+- name: telegram_react
+  effect: gesture
+  target: chat_id
+  conversation: chat_id
+  thread: topic_id
+  message: message_id
+  description: Set or clear this bot's reaction on an exact Telegram message; a gesture, not speech.
 - name: telegram_receipt
   effect: read
   target: []
@@ -256,7 +263,7 @@ Any other download failure still retries and keeps the event first in its chat.
 ## Connecting groups (0.9.0)
 
 Each private chat, group or supergroup the bot has seen is offered by name when
-you connect a Telegram place. Since 0.10.7 this includes private chats people
+you connect a Telegram place. Since 0.11.1 this includes private chats people
 have already opened with the bot, using their numeric chat IDs:
 
 1. Have the person open a private chat with the bot, or add the bot to a group.
@@ -301,7 +308,7 @@ The list records what the bot has observed and does not check current membership
   back-off is unchanged, so the first of them can wait up to about four minutes.
 - A group from which the bot captured no message before 0.9.0 appears after the
   bot's next update there, for example a message that mentions the bot.
-- Upgrading to 0.10.7 makes one resumable pass over the retained inbox to add
+- Upgrading to 0.11.1 makes one resumable pass over the retained inbox to add
   previously seen private chats to the same `telegram_groups` projection. It
   keeps one row per bot/chat with its latest name and membership evidence;
   no second message history or contact registry is created. The existing rows,
@@ -312,7 +319,7 @@ The list records what the bot has observed and does not check current membership
   Earlier versions did not record private-chat blocks: a chat reconstructed from
   retained messages may still be offered after an old block, until a newer block,
   unblock or message updates its evidence.
-- Rolling back to 0.10.6 keeps these private rows visible in the same chooser,
+- Rolling back to 0.11.0 keeps these private rows visible in the same chooser,
   but that version no longer updates their names or block/unblock evidence.
 
 ## Retained input and late results
@@ -457,6 +464,20 @@ A reaction can be the whole social response: it shows you understood, saw or
 laughed without another message. It is optional, it is not speech, a read
 receipt or agreement, and an early gesture does not replace a promised result.
 This connector has no emoji dictionary and no required sequence of gestures.
+
+**As a response (0.11.0).** `telegram_react` declares `effect: gesture` with
+`message: message_id`. A Host that knows gestures can offer it beside
+`telegram_send` for the message that woke a turn, with `chat_id`, `topic_id` and
+`message_id` filled in. `action: set` takes one `emoji` or `custom_emoji_id`;
+`action: clear` takes neither. It calls `telegram_operation` with
+`method: setMessageReaction` and nothing else changed: the same checks and topic
+rules below, the same outbox row and receipt `telegram-operation:<request_id>`
+(one `request_id` names one operation whichever tool queued it), the same provider
+outcomes, and an unknown outcome is never sent again. `telegram_operation` stays a
+mixed `write` tool and keeps `setMessageReaction`. A Host that predates gestures
+reads `telegram_react` as an undeclared write: Silent, Paused and Advises refuse it
+as before, and it offers no reaction door. The reaction stays an act on that
+message, never the turn's words or evidence of finished work.
 
 **What this bot can read.** Telegram sends a bot reaction updates only when it is
 an administrator of the chat, and only as they happen. `message_reaction` names

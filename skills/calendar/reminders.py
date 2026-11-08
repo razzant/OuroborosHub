@@ -14,6 +14,7 @@ import json
 import math
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -195,7 +196,8 @@ class NotifyChannel:
     """Loopback Host Service ``POST /notify``; feature-detected via ``GET /identity``."""
 
     def __init__(self, base_url: str = "", token: str = ""):
-        self.base_url = (base_url or os.environ.get("HOST_SERVICE_URL") or "").rstrip("/")
+        candidate = (base_url or os.environ.get("HOST_SERVICE_URL") or "").rstrip("/")
+        self.base_url = candidate if _loopback_http_url(candidate) else ""
         raw = token or os.environ.get("HOST_SERVICE_TOKEN") or ""
         self._token = _SkillToken(raw) if raw else None
         self._state: Optional[str] = None   # ready | no_route | no_grant | unreachable
@@ -263,7 +265,7 @@ class NotifyChannel:
         req.add_header("X-Skill-Token", self._token.use_in_request() if self._token is not None else "")
         req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=10) as resp:
+            with urllib.request.build_opener(urllib.request.ProxyHandler({}), _LoopbackRedirectHandler()).open(req, timeout=10) as resp:
                 raw = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             raise _HttpError(exc.code, exc.read().decode("utf-8", "replace") if exc.fp else "")
@@ -271,6 +273,23 @@ class NotifyChannel:
             return json.loads(raw) if raw else {}
         except ValueError:
             return {}  # malformed success response has unknown effect; send() never retries it
+
+
+def _loopback_http_url(value: str) -> bool:
+    """Host Service is loopback-only; never put the skill token on a remote URL."""
+    try:
+        parsed = urllib.parse.urlparse(value)
+    except ValueError:
+        return False
+    return (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+            and not parsed.username and not parsed.password)
+
+
+class _LoopbackRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _loopback_http_url(newurl):
+            raise urllib.error.URLError("Host Service redirect left loopback")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class _HttpError(Exception):

@@ -1,7 +1,7 @@
 ---
 name: calendar
 description: Единый календарь владельца — локальные календари, CalDAV (включая Яндекс) и Google с личным OAuth-клиентом; события, повторения, доступ, связанные копии, свободные окна, напоминания и виджет День/Неделя.
-version: 2.0.4
+version: 2.0.5
 type: extension
 runtime: python3
 entry: plugin.py
@@ -66,7 +66,7 @@ Registered create/update calls accept plain attendee address arrays directly. Ri
 
 Google-токены и введённые через форму CalDAV-пароли хранятся одним владельцем `credentials.py` в зашифрованном skill-state vault; прежние имена `google_tokens.enc`/`.salt` сохранены. Новый `google_tokens.key` хранится с правами0600 и должен сохраняться вместе с ciphertext при переносе установки. Он не скрывает данные от процессов владельца машины. Пароли/токены не возвращаются в status, инструментах или виджете. `accounts.py` владеет подключением и обнаружением, `tools.cal_settings` — отключением; `providers.py` и `providers_google.py` — провайдерными протоколами. Companion перечитывает credential custody на очередном проходе, без обязательного перезапуска после формы; старые секреты, переданные через environment, по-прежнему требуют reload/перезапуска при изменении.
 
-Отключение убирает использование выбранных credentials здесь, не отзывает доступ всего Google-проекта и не удаляет историю событий. Google project-wide revoke — отдельное действие с последствиями для других использующих проект подключений. Гранты, review, dependency readiness и включение навыка остаются отдельными условиями host.
+Отключение убирает использование выбранных credentials здесь, не отзывает доступ всего Google-проекта и не удаляет историю событий. Повторное подключение того же аккаунта (форма CalDAV/Яндекс, вход Google, `reload_google`/`reload_yandex`) возвращает скрытые отключением календари с прежними ролями, когда провайдер снова их показывает; после входа Google это делает очередной проход companion. Календарь, удалённый через `cal_manage`, не возвращают ни обычная синхронизация, ни `cal_calendars(refresh=true)`, ни повторное подключение, даже если провайдер ещё или снова показывает его по тому же адресу: это решает сохранённая квитанция удаления, а не время удаления и отключения. Google project-wide revoke — отдельное действие с последствиями для других использующих проект подключений. Гранты, review, dependency readiness и включение навыка остаются отдельными условиями host.
 
 ## Правила работы
 
@@ -177,3 +177,9 @@ Disconnect also withdraws waiting writes derived from that account's provider ob
 A withdrawn source observation finishes only an ordering barrier for a later independent command, which keeps its accepted snapshot; creation and split prerequisites still require confirmed provider outcomes. Deleting a source calendar retains the existing behavior for already-staged target writes, so those writes can settle and later independent copy edits remain usable; this is separate from account disconnection.
 
 Each new observation-derived intent retains one source-connection reference, typically 150–300 bytes. At 100 such writes per day that adds roughly 15–30 KB/day to the existing intent history. It shares that history's lifetime and skill-state removal, with no separate cache, cleaner or automatic history expiry.
+
+## Виджет календаря 2.0.5
+
+Виджет показывает человеческую дату в одной основной строке навигации: «Назад», «Сегодня», «Вперёд», «День/Неделя» и «+ Событие». Управление календарями, служебными событиями, масштабом, аккаунтами и синхронизацией находится во втором, более тихом слое. Календарные события и маршруты tools не изменились.
+
+Навигация сразу показывает в заголовке запрошенный день или неделю (месяц и год названы, где концы диапазона различаются), а прежний ответ остаётся подписанным, пока загружается новый. Ошибка возвращает заголовок и вид к фактически показанному, а «Повторить» запрашивает именно не загрузившийся период; неопределённый внешний эффект не считается выполненным. «День/Неделя» сохраняют прежний выбор: слежение за текущей датой (и после полуночи) или дату, закреплённую стрелками; «Сегодня» возвращает слежение. Узкие контейнеры (до 560 px) показывают повестку вместо тесной почасовой сетки: в «Дне» список дня, в «Неделе» дни недели с их событиями, включая многодневные, служебную занятость без названий и «обычно» отдельными строками; поворот телефона сразу меняет вид. Состояние фонового процесса видно, только когда он не отвечает или неизвестен. Широкий режим сохраняет Day/Week grid. Этот контракт описывает представление и состояние загрузки, а не подтверждение провайдерной записи.

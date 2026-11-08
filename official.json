@@ -21,7 +21,7 @@
       "recommended": false
     },
     {
-      "digest": "47825f8126a250e01e7afa067663888bb3315b2967a3c64dee021d2c602a9560",
+      "digest": "1df308334b4ff526182ccea2cdb247f787a717ab3a6b75d5c8728ce8b227507a",
       "name": "calendar",
       "recommended": false
     },
@@ -86,12 +86,12 @@
       "recommended": false
     },
     {
-      "digest": "17b2d08cca88f73ad3e9f17d7e87f5d04ecfbf9d61a65b2395f3bf4b61a3d073",
+      "digest": "4e520129bf22f3e3d4f4f59c4cce92c8bca110f4f8aaedfe3c74c372c3fb977d",
       "name": "slack-bridge",
       "recommended": false
     },
     {
-      "digest": "bff53c3b98c7d1429f8e64085861889236b21bd05020768101c807b531129894",
+      "digest": "89587f381b874af97b5ab4a7911999569914867a107b336819b4261eb554ecc9",
       "name": "telegram-bot",
       "recommended": false
     },

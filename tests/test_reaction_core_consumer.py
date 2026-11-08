@@ -604,7 +604,7 @@ def _reads(root):
     from ouroboros.extension_surface_names import extension_surface_name
 
     manifest = yaml.safe_load((ROOT / "skills/slack-bridge/SKILL.md").read_text(encoding="utf-8").split("---")[1])
-    bundle = SimpleNamespace(generation_digest="g", loaded_skill=SimpleNamespace(
+    bundle = registry._ExtensionRegistrations(generation_digest="g", loaded_skill=SimpleNamespace(
         manifest=SimpleNamespace(raw_extra={"tools": manifest["tools"]})))
     registry._extensions["slack-bridge"] = bundle
     tool = {"skill": "slack-bridge", "extension_generation": "g"}
@@ -1059,7 +1059,7 @@ def _guard(data, skill, short, args):
     from ouroboros.extension_surface_names import extension_surface_name
 
     manifest = yaml.safe_load((ROOT / "skills" / skill / "SKILL.md").read_text(encoding="utf-8").split("---")[1])
-    registry._extensions[skill] = SimpleNamespace(generation_digest="g", loaded_skill=SimpleNamespace(
+    registry._extensions[skill] = registry._ExtensionRegistrations(generation_digest="g", loaded_skill=SimpleNamespace(
         manifest=SimpleNamespace(raw_extra={"tools": manifest["tools"]})))
     ctx = SimpleNamespace(drive_root=data, task_id="caller", task_metadata={})
     return place_guard.dispatch_refusal(ctx, extension_surface_name(skill, short), args,

@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/2ffd3e22cdd91177324a63e70b9d77845923cda4",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/a81dcbb7dcacd51a133f83f90e55adc8a5703f89",
   "schema_version": 1,
   "skills": [
     {
@@ -370,17 +370,17 @@
       "version": "0.6.1"
     },
     {
-      "description": "Local, Google and CalDAV calendars with account setup, event and calendar management, source-directed linked copies, recurrence, availability, reminders and a day/week widget.",
+      "description": "Единый календарь владельца — локальные календари, CalDAV (включая Яндекс) и Google с личным OAuth-клиентом; события, повторения, доступ, связанные копии, свободные окна, напоминания и виджет День/Неделя.",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "5448f18c06206b6a3558ac021effedfc5847c190448758badecbfe20bcc4a2a6",
-          "size": 52347
+          "sha256": "d3d34ac7c73a61ed73d9195123707213294f341a3354b58667e6e1a04c04d3f8",
+          "size": 55659
         },
         {
           "path": "accounts.py",
-          "sha256": "73e45637ce5d1ca5d06a46acfb433f7f429c9ec03cf16152b654c5a8bbb26e82",
-          "size": 12925
+          "sha256": "ab4212d0f68ba85f7d75ec6b08e2a10b241c17804183c9ef0666320892b3de92",
+          "size": 13059
         },
         {
           "path": "conflicts.py",
@@ -429,8 +429,8 @@
         },
         {
           "path": "reminders.py",
-          "sha256": "e885e12e182d947b0f3762623856ee296431c43bd09f715bba65d7727b743ea3",
-          "size": 25753
+          "sha256": "9d94d7fd9f5de52f21afc29323fe2b5ae7d627c05f976b4ce0f2cfdcf340591b",
+          "size": 26593
         },
         {
           "path": "routes.py",
@@ -439,13 +439,13 @@
         },
         {
           "path": "scripts/worker.py",
-          "sha256": "cfdb72d6b5b4a5f25a60aa39335de5a69b78d8e09a2b008efddd92bb9805724d",
-          "size": 39256
+          "sha256": "a45293b5af5201ae27cb87bce9c2d150df9db5c1c01f9f924e3e4f007f815a08",
+          "size": 39416
         },
         {
           "path": "store.py",
-          "sha256": "205b56298aac02ad24001baea862e7eec6584baeb678f65eb9b576fc5d89cc3d",
-          "size": 73499
+          "sha256": "e98547fd5fb90446fa9f8de310edd8ec95523b8c0e331e09960c7efb9bf4dc4e",
+          "size": 74311
         },
         {
           "path": "tests/test_attendee_destinations.py",
@@ -499,13 +499,13 @@
         },
         {
           "path": "tests/test_calendar_connection_regressions.py",
-          "sha256": "dfb5468db23155cb3e31acecca9184bf4e090cfb499a68605d883d9dac422884",
-          "size": 10418
+          "sha256": "7c4808a12e8997a0825046bb928d559d899a3ca92ccc544fdcdd17f3cd074567",
+          "size": 23479
         },
         {
           "path": "tests/test_calendar_control_truth.py",
-          "sha256": "d1a398a537e2d096bf34e7f674542bea737596b9c96acf4d327a2d536f89b00a",
-          "size": 11859
+          "sha256": "5c3e2846117d234b73a8a0d11ca1373eedba3fa63e8b834b9d66fb870d943d1f",
+          "size": 17475
         },
         {
           "path": "tests/test_calendar_disconnect_effects.py",
@@ -514,8 +514,8 @@
         },
         {
           "path": "tests/test_calendar_lifecycle_custody.py",
-          "sha256": "f27f296208d6a6142d705689c153df52d069b745701a460ea69b840aecc363b7",
-          "size": 19598
+          "sha256": "aa5f52baccb5eea87affb459f99c9a433cd4373048ba287f192b0bb099b25c0d",
+          "size": 19716
         },
         {
           "path": "tests/test_calendar_lifecycle_invariants.py",
@@ -714,13 +714,13 @@
         },
         {
           "path": "tests/test_widget_browser.py",
-          "sha256": "36f99ab42df645eea57eb667879469a790d61c54203bd035f67bfbe4b038672d",
-          "size": 46546
+          "sha256": "12f74fb9f03fc322f17a76956c0bd41d648c2f480ad22445985c9be0788a6fae",
+          "size": 63613
         },
         {
           "path": "tests/test_widget_state_browser.py",
-          "sha256": "e5df5d175797dac21b5ad26dc470e8dab247dcb9306406f7a7cf04e8ed03b327",
-          "size": 11495
+          "sha256": "c61909bfa72da0973073addf4900b42b7026c4c5a9d0decd34f24ec6cb7a76b7",
+          "size": 20895
         },
         {
           "path": "tests/test_withdrawn_calendar_family.py",
@@ -739,8 +739,8 @@
         },
         {
           "path": "widget.js",
-          "sha256": "060042f4af72134b49c626ad8f1089e0280a216b84fa6eec59c957a17aa713d5",
-          "size": 97534
+          "sha256": "90951e3a8f5260bc87683dd2c13c532cc7c25abb2a5acb893440ca63ea8cf6ea",
+          "size": 114233
         }
       ],
       "install_specs": [
@@ -751,7 +751,8 @@
       "name": "calendar",
       "slug": "calendar",
       "type": "extension",
-      "version": "2.0.4"
+      "version": "2.0.5",
+      "when_to_use": "Владелец говорит «что у меня сегодня / завтра / на неделе», «поставь / создай / забей встречу, обед, тренировку на 16», «найди окно на час», «перенеси … на 17», «отмени …», «напомни о …», «покажи мою занятость в рабочем календаре», «обычно я завтракаю в 6:30» (служебное событие-распорядок), «подключи Яндекс / Google»."
     },
     {
       "description": "Opt-in check-in agreement. If you miss a check-in you promised, Ouroboros first tells you; only if you armed it may it then write once to one consenting contact.",
@@ -2733,13 +2734,13 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "1c9e6318c00a412e2c142f8fa4a041207f1ee37c2283bd1223e4d693df10df05",
-          "size": 7281
+          "sha256": "cac0703d14effc1975106ef17341e586df4f9963e18c346a5654444e78051d41",
+          "size": 8649
         },
         {
           "path": "SKILL.md",
-          "sha256": "b25b13fc221bd34a4ed5e395417f0ffb17b091cd1165a9de690a97ff78ed40ab",
-          "size": 61226
+          "sha256": "428fd72938a6a72af91ff7d98a615fae831da3502bf37435fec9382fb2dafff9",
+          "size": 62104
         },
         {
           "path": "lib/__init__.py",
@@ -2818,8 +2819,8 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "23e175a6b087a20054f4be7f78904a0f66799eb7b47a61b40457a842e406db0a",
-          "size": 31694
+          "sha256": "2c3570cb24720353646b68378169151303f031ebcdc1767acc651ab3a98f3a39",
+          "size": 32353
         },
         {
           "path": "scripts/slack_daemon.py",
@@ -2943,8 +2944,8 @@
         },
         {
           "path": "tests/test_reactions.py",
-          "sha256": "1249b082e497010e24b506b9364f1491177a8467edb9c487037fbc6906966f77",
-          "size": 82146
+          "sha256": "bc3ac9d5ee33eb0b1725f648dd556c13cca2343190a9a7263e6ee2611be3d3cd",
+          "size": 86185
         },
         {
           "path": "tests/test_read_tools.py",
@@ -3005,7 +3006,7 @@
       "name": "slack-bridge",
       "slug": "slack-bridge",
       "type": "extension",
-      "version": "1.11.2",
+      "version": "1.12.1",
       "when_to_use": "User wants Ouroboros to receive Slack messages or files, reply in Slack conversations and threads, or send proactive Slack text messages."
     },
     {
@@ -3101,8 +3102,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "cd5449871a7aca52884ba68d1c3ab90c607f90378199568c07e789e6698071d8",
-          "size": 10762
+          "sha256": "293c19249d5cbeeefce338790436f1b58d03d167777d39d07b61d5261d027990",
+          "size": 10681
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -3116,18 +3117,18 @@
         },
         {
           "path": "README.md",
-          "sha256": "9794b476e2174674646e3a513675db0315e2d3feb804f0dd736f6c10da1fddbc",
-          "size": 2226
+          "sha256": "5857066fb86d96b041411f46b718c6753e4cd75af083e293f27008d5c49fbf85",
+          "size": 2190
         },
         {
           "path": "SKILL.md",
-          "sha256": "47e1cdc3c3f3747bb5c8b1abaa49cdaada486c5fae8f3dbc5f6ecb14490ae862",
-          "size": 44487
+          "sha256": "45c4ac84db5050627489d8b18ba182f8710a122bad15efc995079010301b3485",
+          "size": 44473
         },
         {
           "path": "plugin.py",
-          "sha256": "70c6343585d7f242b11d16210aafbe2fe1183fab7b0e7c87f65852ca5443fa5d",
-          "size": 19569
+          "sha256": "4976223d84a35806aaf26b1b3e20a115b28e713370470bed39c00756ca5b3a3a",
+          "size": 20497
         },
         {
           "path": "telegram_bot/__init__.py",
@@ -3141,8 +3142,8 @@
         },
         {
           "path": "telegram_bot/custody.py",
-          "sha256": "323e54c20211a05573a0c1c53996c7eb20c0ed161c7deb016d935c8eff997dd4",
-          "size": 59132
+          "sha256": "184b89d646b67eeb4ed89751bafb8ef3b22218b55d4860a6249b7974c168d2c1",
+          "size": 59127
         },
         {
           "path": "telegram_bot/delivery.py",
@@ -3151,8 +3152,8 @@
         },
         {
           "path": "telegram_bot/discovery.py",
-          "sha256": "22992aeee92d1e0f5c97490c6de0221936f32e7d8da7ac44c85d5aff93f6e4e8",
-          "size": 10823
+          "sha256": "a030d157acf9e80c2dd844af3c520c67560e9eddad7ba252d53f8fdb5e5c206a",
+          "size": 9852
         },
         {
           "path": "telegram_bot/events.py",
@@ -3181,8 +3182,8 @@
         },
         {
           "path": "telegram_bot/tools.py",
-          "sha256": "819176f554b0c85fc86971b3862ea68f70471f5cfd446c30c6d5e6f440703f50",
-          "size": 14103
+          "sha256": "5637ed1d711783a0726f2a1d7879fcffaff53d0aeebd0335a0103ed1f78224b9",
+          "size": 16720
         },
         {
           "path": "tests/conftest.py",
@@ -3226,8 +3227,8 @@
         },
         {
           "path": "tests/test_group_discovery.py",
-          "sha256": "99b1cd45f63c1949bd6e4d65e4321e90e6c272771a44347747fc69cd91acfda3",
-          "size": 32361
+          "sha256": "a41581c5cd3237a53abdb56249fcc6938c68722f47e4c3e4e15e1a9aa534cf70",
+          "size": 30189
         },
         {
           "path": "tests/test_host.py",
@@ -3266,8 +3267,8 @@
         },
         {
           "path": "tests/test_reactions.py",
-          "sha256": "359bff076df7651207f6960e9b20537509b6ba702148ace3fbf86a5d6f7b0cfe",
-          "size": 101449
+          "sha256": "1a36d7640c1420d971df245f752cdb51a168a7a75d73860cea206c3c566ed146",
+          "size": 109725
         },
         {
           "path": "tests/test_retained_custody.py",
@@ -3304,7 +3305,7 @@
       "name": "telegram-bot",
       "slug": "telegram-bot",
       "type": "extension",
-      "version": "0.10.7"
+      "version": "0.11.0"
     },
     {
       "connects": [

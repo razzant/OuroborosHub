@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.11.2
+version: 1.12.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -96,15 +96,17 @@ tools:
     conversation: channel
     description: Queue deletion of an own Slack message by exact channel and timestamp.
   - name: slack_reaction_add
-    effect: write
+    effect: gesture
     target: channel
     conversation: channel
-    description: Queue adding this bot's reaction to an exact Slack message; a reaction is not speech.
+    message: ts
+    description: Queue adding this bot's reaction to an exact Slack message; a reaction is a gesture, not speech.
   - name: slack_reaction_remove
-    effect: write
+    effect: gesture
     target: channel
     conversation: channel
-    description: Queue removing this bot's reaction from an exact Slack message.
+    message: ts
+    description: Queue removing this bot's reaction from an exact Slack message; a gesture, not speech.
   - name: slack_pin_add
     effect: write
     target: channel
@@ -128,6 +130,13 @@ tools:
   - name: slack_api
     effect: write
     target: []
+    sends:
+      when:
+        path: [chat.postMessage, chat.update, chat.postEphemeral, chat.scheduleMessage, chat.meMessage]
+      target: body.channel
+      conversation: body.channel
+      thread: body.thread_ts
+      text: body.text
     description: Call an actual Slack Web API method with a model-selected read or durable write effect.
   - name: slack_receipt
     effect: read
@@ -515,6 +524,14 @@ A reaction can be the whole social response: it shows you understood, saw or
 laughed without another message. It is optional, it is not speech, a read
 receipt or agreement, and an early gesture does not replace a promised result.
 This bridge has no emoji dictionary and no required sequence of gestures.
+
+**As a response (1.12.0).** `slack_reaction_add` and `slack_reaction_remove`
+declare `effect: gesture` with `message: ts`. A Host that knows gestures can offer
+them beside `slack_send` for the message that woke a turn, with `channel` and that
+message's `ts` filled in. The reaction stays an act on that message, never the
+turn's words or evidence of finished work. A Host that predates gestures reads the
+unknown effect as an undeclared write: Silent, Paused and Advises refuse it as
+before, and it offers no reaction door. Arguments, queue and receipts are unchanged.
 
 **Incoming.** With a Host whose `/identity` says `presence_reaction_context: 1`
 (strictly that integer, read when the bridge meets the Host; a supported or

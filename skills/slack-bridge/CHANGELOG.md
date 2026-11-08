@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.12.1
+
+- `slack_api` declares which of its calls deliver words: the Slack Web API methods that post
+  or change a message (`chat.postMessage`, `chat.update`, `chat.postEphemeral`,
+  `chat.scheduleMessage`, `chat.meMessage`), with the destination channel, thread and text
+  at `body.channel`, `body.thread_ts` and `body.text`. A host that reads the `sends`
+  declaration treats those calls as messages to people: the Safety Supervisor judges them as
+  speech, the place's notes and Silent/Paused state apply, and a message the Supervisor could
+  not judge waits instead of leaving. On 4 November eight messages reached colleagues through
+  this generic tool after the dedicated send was held, because the host saw only a write.
+  Reactions, pins, bookmarks and reads are unchanged. A host that does not know the
+  declaration ignores it.
+
+## 1.12.0
+
+- `slack_reaction_add` and `slack_reaction_remove` declare `effect: gesture` and
+  `message: ts`, so a Host that knows gestures can offer a reaction on the waking message
+  beside `slack_send` as a third form of response, next to words and silence. Their
+  registered descriptions now say what a reaction is for and give `name` an example. On a
+  Host that predates gestures the unknown effect is an undeclared write, refused by Silent,
+  Paused and Advises as before; arguments, queue and receipts are unchanged.
+
 ## 1.11.2
 
 - A thread reply is `my_thread` when this bot wrote the thread's root or a message of the
