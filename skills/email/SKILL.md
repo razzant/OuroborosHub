@@ -1,6 +1,6 @@
 ---
 name: email
-version: 0.1.2
+version: 0.1.3
 title: Email tools
 type: extension
 description: "Email tools for tasks: read and send mail through IMAP/SMTP. Not a place: to let Ouroboros live in a mailbox use the Email connector (email-presence)."
@@ -50,6 +50,9 @@ tools:
         type: integer
         description: Maximum characters of body text/HTML to return before truncation.
   - name: email_send
+    effect: message
+    target: [to, cc, bcc]
+    text: body
     description: Compose and send an email via authenticated SMTP with optional reply-to threading headers.
     parameters:
       to:

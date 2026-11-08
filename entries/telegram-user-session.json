@@ -6,7 +6,7 @@
     "Telegram"
   ],
   "description": "Own Telegram user-account participant for Places: all or selected chats with exclusions, held work while a place is Silent or Paused, durable named MTProto operations (profile, chats, media, stickers, admin) and a four-tab account widget beside the separate bot connector. Uses actual account permissions, never strangers as owner.",
-  "digest": "6137dc5e9bf66cc297853b55fdb11074b05a716a245fd54cffe9ef27d0e094ca",
+  "digest": "23f095607c14edf554df887109f132f285740ed69f7934c593022bb45fa675e5",
   "icon": "ui/icon.svg",
   "install_specs": [
     {
@@ -31,6 +31,6 @@
     "path": "skills/telegram-user-session"
   },
   "type": "extension",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "withdrawn": null
 }

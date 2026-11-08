@@ -795,6 +795,14 @@ def test_mixed_tools_remain_write_and_email_covers_all_recipients():
         assert manifests[connector][name]["effect"] == "read"
     assert manifests["email-presence"]["email_send"]["effect"] == "message"
     assert manifests["email-presence"]["email_send"]["target"] == ["account_id", "to", "cc", "bcc"]
+    # A mixed tool stays a write and declares which calls deliver words: an edit of the bot's message, not a reaction.
+    sends = manifests["telegram-bot"]["telegram_operation"]["sends"]
+    assert (sends["when"], sends["target"], sends["text"]) == ({"method": ["editMessageText"]}, "chat_id", "text")
+    assert manifests["telegram-user-session"]["tg_edit"]["effect"] == "message"
+    tools = {row["name"]: row for row in builder.read_manifest(ROOT / "skills" / "email")["tools"]}
+    assert (tools["email_send"]["effect"], tools["email_send"]["target"], tools["email_send"]["text"]) == (
+        "message", ["to", "cc", "bcc"], "body")
+    assert "effect" not in tools["email_read"]  # the tools skill declares only its send
 
 
 def test_gestures_are_reactions_on_one_message_of_the_declared_conversation():
@@ -804,10 +812,11 @@ def test_gestures_are_reactions_on_one_message_of_the_declared_conversation():
     gestures = {(connector, name): row for connector, rows in manifests.items() for name, row in rows.items()
                 if row.get("effect") == "gesture"}
     assert set(gestures) == {("slack-bridge", "slack_reaction_add"), ("slack-bridge", "slack_reaction_remove"),
-                             ("telegram-bot", "telegram_react")}
+                             ("telegram-bot", "telegram_react"), ("telegram-user-session", "tg_react")}
     for key, row in gestures.items():
         targets = [row["target"]] if isinstance(row["target"], str) else row["target"]
         assert row.get("conversation") and row.get("message"), key
         assert set(targets) <= {"account_id", row["conversation"], row.get("thread", "")}, key
     assert gestures[("slack-bridge", "slack_reaction_add")]["message"] == "ts"
     assert gestures[("telegram-bot", "telegram_react")]["message"] == "message_id"
+    assert gestures[("telegram-user-session", "tg_react")]["message"] == "message_id"

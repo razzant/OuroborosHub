@@ -46,7 +46,7 @@
       "recommended": true
     },
     {
-      "digest": "0e56122071ec4f9d21c83b9835e7423c7c4cebd8e513d012778c65c49db1e351",
+      "digest": "d32c8fc9df7dc71e3aeb9f469667cf97896e64d7a3b369e62f735b8fbf72d755",
       "name": "email",
       "recommended": false
     },
@@ -91,7 +91,7 @@
       "recommended": false
     },
     {
-      "digest": "89587f381b874af97b5ab4a7911999569914867a107b336819b4261eb554ecc9",
+      "digest": "ed69097c6879530dc6e7966b5ddb8e2347603919d080a4aaba9c539f5f66e69b",
       "name": "telegram-bot",
       "recommended": false
     },
