@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.12.0
+
+- A download failure no longer holds a chat indefinitely. Telegram's own words decide: "file is too big" ends a file
+  `too_large` and an unreadable file_id ends it `failed` at once; the generic getFile 400 "wrong file_id or the
+  file is temporarily unavailable", a 5xx, a lost answer, a body cut short or of another size than getFile
+  declared (never staged) or an expired link retries with the event first in its chat and ends `failed` after 6
+  failures that say something about the file and at least 30 minutes since the first. A flood wait counts
+  nothing and stops the event's downloads for all of Telegram's delay; a refused token or a network that is down
+  counts nothing, so a sleeping Mac fails no file. 0.10.6 already stopped an oversized file from
+  holding its chat; other persistent, file-specific failures now have a bound.
+- Each `message.attachments` record says `staged`, `too_large`, `failed` or `unsupported` and keeps its
+  `file_id`; `note` is one factual sentence on why a file did not arrive, such as "600 MB; the cloud Bot API
+  gives bots files only up to 20 MB". Only staged files reach the Host. The 20 MiB limit is one constant, read
+  through the client of the configured Bot API server.
+- Video, video notes and GIF animations are staged up to that limit, captioned or not; a GIF is no longer also
+  staged as a document. Stickers, polls, locations, venues, contacts, dice, stories, paid media, games, invoices,
+  giveaways, checklists, and as `other` live photos, rich messages, shared users or chats and web app data,
+  arrive as `message.non_text` descriptions instead of being dropped; `event.text` stays the person's words.
+  Album members also carry `media_group_position`, counted in a new partial index of album messages that the
+  first start after updating builds once (0.5 s per million retained messages measured), and
+  `is_automatic_forward` is kept beside `forward_origin`, `quote` and `reply_to_message`.
+- `telegram_send` sends video, audio, voice, animation and albums of 2 to 10 files through the same outbox, with
+  a receipt part and delivery report per album message and typed refusals above Telegram's upload limits (50 MB,
+  10 MB per photo), for captions over 1024 characters and for album mixes Telegram does not allow. An album
+  Telegram accepted is never sent again; fewer or more messages than items, or no list, ends `uncertain`, and
+  the receipt's `confirmed_messages` lists those returned, as for any send not delivered.
+- New `telegram_typing` records a request (it answers `requested`) that the runtime shows as "typing…" in the
+  calling turn's own chat while its place may act, read before every showing, until the bot's next message there
+  is delivered, even one queued earlier, the turn's end or 2 minutes, all checked again just before each call.
+  It is not speech: no outbox row, receipt or report, and a restart never replays it.
+- A queued send, edit or automatic reply in a forum topic is held by that topic's own Silent or Paused place before
+  each part, as reactions already were; earlier versions read only the chat's place.
+- Top-level event keys are unchanged: a Host that does not know `non_text` ignores it, and events 0.10.6 stored
+  stay valid. Rolling back to 0.11.x reads every stored row; it ignores the two new custody tables and the album
+  index, fetches a `failed` record again, and ends a queued video, audio, voice, animation or album send failed
+  after the outbox's five attempts.
+
 ## 0.11.2
 
 - `telegram_operation` declares which of its calls deliver words: an

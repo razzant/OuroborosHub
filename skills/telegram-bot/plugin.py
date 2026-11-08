@@ -16,18 +16,26 @@ from starlette.responses import JSONResponse
 
 from .telegram_bot.custody import CustodyStore
 from .telegram_bot.delivery import tool_origin
-from .telegram_bot.formatting import prepare_text, prepare_caption
+from .telegram_bot.formatting import prepare_text
 from .telegram_bot.host import PresenceHostClient
 from .telegram_bot.runtime import TelegramTransportRuntime
 from .telegram_bot.settings import load_settings, normalize_words
 from .telegram_bot.tools import (
+    album_items,
+    frozen_caption,
     make_moderation_tool,
     make_operation_tool,
     make_react_tool,
     make_receipt_tool,
+    make_typing_tool,
+    upload_path,
+    ALBUM_KINDS,
     MODERATION_SCHEMA,
+    SEND_KINDS,
+    SendRefused,
     TELEGRAM_OPERATION_SCHEMA,
     TELEGRAM_REACT_SCHEMA,
+    TELEGRAM_TYPING_SCHEMA,
 )
 
 
@@ -230,6 +238,7 @@ def _make_telegram_send(api: Any):
         reply_to_message_id: str = "",
         request_id: str = "",
         markdown: bool = True,
+        items: Optional[list] = None,
     ) -> Dict[str, Any]:
         target = str(chat_id or "").strip()
         selected_kind = str(kind or "message").strip()
@@ -238,8 +247,8 @@ def _make_telegram_send(api: Any):
                 "ok": False,
                 "error": "chat_id must be an exact numeric Telegram id",
             }
-        if selected_kind not in {"message", "photo", "document"}:
-            return {"ok": False, "error": "kind must be message, photo, or document"}
+        if selected_kind not in SEND_KINDS:
+            return {"ok": False, "error": "kind must be " + ", ".join(SEND_KINDS)}
         if not isinstance(markdown, bool):
             return {"ok": False, "error": "markdown must be a boolean"}
         payload: Dict[str, Any] = {
@@ -252,23 +261,20 @@ def _make_telegram_send(api: Any):
             payload["topic_id"] = str(topic_id).strip()
         if reply_to_message_id not in (None, ""):
             payload["reply_to_message_id"] = str(reply_to_message_id).strip()
-        if selected_kind == "message":
-            if not str(text or "").strip():
-                return {"ok": False, "error": "text is required for a message"}
-            payload["text"] = str(text)
-            payload["_rendered_chunks"] = prepare_text(str(text), markdown=markdown)
-        else:
-            path = pathlib.Path(str(file_path or "")).expanduser()
-            if not path.is_file():
-                return {"ok": False, "error": "file_path must name an existing file"}
-            payload["file_path"] = str(path.resolve())
-            payload["caption"] = str(caption or text or "")
-            try:
-                payload["_rendered_caption"] = prepare_caption(
-                    payload["caption"], markdown=markdown
-                )
-            except ValueError as exc:
-                return {"ok": False, "error": str(exc)}
+        try:
+            if selected_kind == "message":
+                if not str(text or "").strip():
+                    return {"ok": False, "error": "text is required for a message"}
+                payload["text"] = str(text)
+                payload["_rendered_chunks"] = prepare_text(str(text), markdown=markdown)
+            elif selected_kind == "album":
+                payload["items"], payload["_rendered_items"] = album_items(items, str(caption or text or ""), markdown)
+            else:
+                payload["file_path"] = upload_path(selected_kind, file_path)
+                payload["caption"] = str(caption or text or "")
+                payload["_rendered_caption"] = frozen_caption(payload["caption"], markdown)
+        except SendRefused as refusal:
+            return refusal.answer()
         receipt = str(request_id or uuid.uuid4().hex).strip()
         inserted = CustodyStore.shared(
             pathlib.Path(api.get_state_dir()) / "custody.sqlite3"
@@ -411,10 +417,20 @@ def register(api: Any) -> None:
         "telegram_send",
         _make_telegram_send(api),
         description=(
-            "Durably queue a proactive Telegram text, photo, or document for an exact numeric "
-            "chat, with optional topic and reply ids. Standard Markdown is rendered by default; "
-            "set markdown=false for literal text. text/caption contain only display content. "
-            "Pass request_id as its own argument, not XML or text inside the caption."
+            "Durably queue a proactive Telegram send for an exact numeric chat, with optional topic and reply ids: "
+            "text, or a file as photo, document, video, audio, voice (OGG/Opus, MP3 or M4A), animation (GIF or "
+            "silent MP4) or album (2-10 items: photos with videos, or only audio, or only documents). A bot uploads "
+            "at most 50 MB per file and 10 MB per photo; a larger file or a caption over 1024 characters is refused, "
+            "never cut. Standard Markdown is rendered by default; set markdown=false for literal text. text/caption "
+            "contain only display content. Pass request_id as its own argument, not XML or text inside the caption. "
+            "An event.message.attachments record with status too_large (a bot downloads at most 20 MiB) or failed "
+            "did not reach you; it keeps file_id, file_name, file_size and a factual note. You may ask the sender to "
+            "share a download link in this conversation, open to no more people than already had the file, but never "
+            "ask anyone to publish private or work files openly, never post or forward the file or its link outside "
+            "this conversation's audience, and if the sender cannot share it that way, say so and leave it there. To "
+            "fetch a link shared that way: Yandex.Disk: GET https://cloud-api.yandex.net/v1/disk/public/resources/"
+            "download?public_key=<link> returns the download href; Google Drive over 100 MB: repeat with the confirm "
+            "token from its warning page; Dropbox: use dl=1."
         ),
         schema={
             "type": "object",
@@ -424,8 +440,24 @@ def register(api: Any) -> None:
                     "type": "string",
                     "description": "Displayed message content only; standard Markdown unless markdown=false.",
                 },
-                "kind": {"type": "string", "enum": ["message", "photo", "document"]},
+                "kind": {"type": "string", "enum": list(SEND_KINDS)},
                 "file_path": {"type": "string"},
+                "items": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 10,
+                    "description": "For kind=album: the files in order, each with its own optional caption.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "kind": {"type": "string", "enum": list(ALBUM_KINDS)},
+                            "file_path": {"type": "string"},
+                            "caption": {"type": "string"},
+                        },
+                        "required": ["kind", "file_path"],
+                    },
+                },
                 "caption": {
                     "type": "string",
                     "description": "Displayed media caption only, up to 1024 UTF-16 units after formatting. Tool fields belong in separate arguments.",
@@ -476,6 +508,20 @@ def register(api: Any) -> None:
             "the target's known topic_id, which is never invented."
         ),
         schema=TELEGRAM_REACT_SCHEMA,
+    )
+    api.register_tool(
+        "telegram_typing",
+        make_typing_tool(api),
+        description=(
+            "Ask for \u201ctyping\u2026\u201d in this turn's own Telegram chat while you are actually preparing a reply "
+            "there. The call only records the request (it answers requested): it is not speech, nothing is queued or "
+            "delivered, it has no receipt, and your reply is still yours to give. The transport shows it while this "
+            "turn runs and this place may act, until your next message delivered to this chat, even one you queued "
+            "before this call, the turn's end or about 2 minutes; call it again after an intermediate message if you "
+            "keep preparing the reply. A turn that does not call it shows nothing. In a forum topic pass the event's "
+            "topic_id."
+        ),
+        schema=TELEGRAM_TYPING_SCHEMA,
     )
     api.register_tool(
         "telegram_receipt",

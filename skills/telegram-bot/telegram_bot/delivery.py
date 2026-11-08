@@ -89,7 +89,8 @@ def delivery_report(delivery_id, payload, *, part_id, state, receipt=None, text=
     receipt = receipt or {}
     wire = receipt.get("_delivery") or {}
     message = {"kind": payload.get("kind", "message")}
-    for key in ("message_id", "date", "entities", "caption_entities", "photo", "document"):
+    for key in ("message_id", "date", "entities", "caption_entities", "photo", "document", "video", "audio", "voice",
+                "animation", "media_group_id"):
         if key in receipt:
             message[key] = receipt[key]
     if payload.get("file_path"):
@@ -107,7 +108,9 @@ def delivery_report(delivery_id, payload, *, part_id, state, receipt=None, text=
         if payload.get("original_delivery_id"):
             message["original_delivery_id"] = str(payload["original_delivery_id"])
     if error:
-        message.update(error=error, confirmed_parts=len(payload.get("_sent_messages") or []))
+        # Confirmed text chunks are _sent_messages; an album's messages Telegram returned are _sent_media.
+        confirmed = payload.get("_sent_messages") or payload.get("_sent_media")
+        message.update(error=error, confirmed_parts=len(confirmed) if isinstance(confirmed, list) else 0)
     return {
         "schema_version": 1, "delivery_id": delivery_id, "part_id": str(part_id),
         "state": state, "provider": "telegram", "account_id": str(reporting.get("account_id") or ""),
