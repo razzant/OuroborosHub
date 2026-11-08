@@ -2,8 +2,8 @@
   "category": [
     "planning"
   ],
-  "description": "Local, Google and CalDAV calendars with account setup, event and calendar management, source-directed linked copies, recurrence, availability, reminders and a day/week widget.",
-  "digest": "47825f8126a250e01e7afa067663888bb3315b2967a3c64dee021d2c602a9560",
+  "description": "Единый календарь владельца — локальные календари, CalDAV (включая Яндекс) и Google с личным OAuth-клиентом; события, повторения, доступ, связанные копии, свободные окна, напоминания и виджет День/Неделя.",
+  "digest": "1df308334b4ff526182ccea2cdb247f787a717ab3a6b75d5c8728ce8b227507a",
   "install_specs": [
     "icalendar",
     "python-dateutil",
@@ -17,6 +17,7 @@
     "path": "skills/calendar"
   },
   "type": "extension",
-  "version": "2.0.4",
+  "version": "2.0.5",
+  "when_to_use": "Владелец говорит «что у меня сегодня / завтра / на неделе», «поставь / создай / забей встречу, обед, тренировку на 16», «найди окно на час», «перенеси … на 17», «отмени …», «напомни о …», «покажи мою занятость в рабочем календаре», «обычно я завтракаю в 6:30» (служебное событие-распорядок), «подключи Яндекс / Google».",
   "withdrawn": null
 }

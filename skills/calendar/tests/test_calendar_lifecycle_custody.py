@@ -109,7 +109,8 @@ def disconnect(ctx, cid):
 
 
 def reconnect(ctx, account, calendar):
-    ctx.store.upsert_account(account); ctx.store.upsert_calendar(calendar)
+    # The reconnection's discovery observes the calendar again, as accounts.connect_caldav/reload_* do.
+    ctx.store.upsert_account(account); ctx.store.upsert_calendar(calendar, restore=True)
 
 
 def test_withdrawn_create_requires_explicit_edit_and_keeps_uid():

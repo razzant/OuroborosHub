@@ -149,7 +149,7 @@ class CalendarWidgetBrowserTests(BrowserCase):
                 });
                 return {ok: true, json: async () => ({anchor, days, now, timezone:'Asia/Dubai',
                     calendars:[], events:[{id:'e', title:'Meeting', start:'2026-09-27T18:00:00+04:00', end:'2026-09-27T19:00:00+04:00'}],
-                    hidden_busy:[], usual:[], accounts:[], sync:{companion:'ready'}})};
+                    hidden_busy:[], usual:[], accounts:[], sync:{companion:'alive'}})};
             }};
         }""", now)
         self.page.add_script_tag(content=WIDGET.read_text(encoding="utf-8"))
@@ -174,7 +174,8 @@ class CalendarWidgetBrowserTests(BrowserCase):
         self.assertGreater(first['lineTop'], 30)
         self.assertLess(first['lineTop'], first['height'])
         for button in ('Увеличить масштаб сетки', 'Уменьшить масштаб сетки', 'Уменьшить масштаб сетки'):
-            self.page.get_by_role('button', name=button).click()
+            self.page.get_by_role('button', name=button).focus()   # keyboard activation: a WebKit mouse click never leaves focus on a button, so focus is given explicitly
+            self.page.keyboard.press('Enter')
             p = self.position()
             self.assertEqual(p['day'], '2026-09-27')
             self.assertGreater(p['lineTop'], 30)
@@ -201,7 +202,7 @@ class CalendarWidgetBrowserTests(BrowserCase):
                 self.assertLess(p['lineTop'], p['height'])
                 if '23:55' in now:
                     self.assertGreater(p['height'] - p['lineTop'], 25)
-                self.page.get_by_role('button', name='›').click()
+                self.page.get_by_role('button', name='Следующий день').click()
                 self.assertEqual(self.page.locator('.now').count(), 0)
 
     def test_today_tracks_rollover_but_manual_navigation_pins_date(self):
@@ -220,9 +221,50 @@ class CalendarWidgetBrowserTests(BrowserCase):
         }""")
         self.page.get_by_role('button', name='Служебные').click()
         self.assertEqual(self.position()['day'], '2026-09-28')
-        self.page.get_by_role('button', name='‹').click()
+        self.page.get_by_role('button', name='Предыдущий день').click()
         self.assertEqual(self.page.locator('.now').count(), 0)
-        self.assertIn('2026-09-27', self.page.locator('.bar .title').inner_text())
+        self.assertIn('воскресенье, 27 сентября', self.page.locator('.bar .title').inner_text())
+
+    def test_navigation_shows_pending_target_and_rolls_back_after_error(self):
+        self.mount('2026-09-27T18:30:00+04:00')
+        self.page.evaluate("""() => {
+            const old = OuroborosWidget.fetch;
+            window.releaseNavigation = null; window.agendaPaths = []; window.navigationFails = true;
+            OuroborosWidget.fetch = path => {
+                agendaPaths.push(path);
+                if (navigationFails && path.includes('date=2026-09-28')) return new Promise(resolve => {
+                    window.releaseNavigation = () => resolve({ok: false, status: 503, json: async () => ({message: 'calendar unavailable'})});
+                });
+                return old(path);
+            };
+        }""")
+        next_button = self.page.get_by_role('button', name='Следующий день', exact=True)
+        next_button.focus()   # keyboard activation: a WebKit mouse click never leaves focus on a button, so focus is given explicitly
+        self.page.keyboard.press('Enter')
+        expect(self.page.locator('.status.pending')).to_contain_text('загружается понедельник, 28 сентября')
+        expect(self.page.locator('.bar .title')).to_contain_text('28 сентября')
+        self.assertTrue(self.page.evaluate("document.activeElement === document.querySelector('.primary-bar button[aria-label=\\\"Следующий день\\\"]')"))
+        self.page.evaluate('releaseNavigation()')
+        expect(self.page.locator('.msg.err')).to_contain_text('calendar unavailable')
+        expect(self.page.locator('.bar .title')).to_contain_text('воскресенье, 27 сентября')
+        # the retained body is named as what it is, and the day that failed is named too
+        expect(self.page.locator('.msg.err')).to_contain_text('Не загружено: понедельник, 28 сентября; на экране воскресенье, 27 сентября')
+        self.assertEqual(self.page.locator('.colhead').inner_text(), 'Вс 27.09')
+        self.navigation_retry_reloads_the_failed_day()
+
+    def navigation_retry_reloads_the_failed_day(self):
+        self.page.evaluate('navigationFails = false; agendaPaths.length = 0')
+        self.page.get_by_role('button', name='Повторить', exact=True).click()
+        expect(self.page.locator('.bar .title')).to_contain_text('понедельник, 28 сентября')
+        expect(self.page.locator('.colhead')).to_have_text('Вс 28.09')   # the fake labels every column «Вс»; the date is the body's
+        expect(self.page.locator('.msg.err')).to_have_count(0)
+        self.assertEqual(self.page.evaluate('agendaPaths'), ['/api/extensions/calendar/agenda?view=day&date=2026-09-28'])
+
+    def test_primary_composition_keeps_calendar_filters_quiet(self):
+        self.mount('2026-09-27T18:30:00+04:00')
+        expect(self.page.locator('.calendar-filters summary')).to_contain_text('Календари (0)')
+        self.assertEqual(self.page.locator('.calendar-filters .cals button').count(), 0)
+        expect(self.page.get_by_role('button', name='Следующий день', exact=True)).to_be_visible()
 
     def mount_recurring_card(self):
         self.mount('2026-09-27T18:30:00+04:00')
@@ -279,6 +321,21 @@ class SkillCase(BrowserCase):
         self.page.evaluate(BRIDGE, {"now": NOW, "calendars": CALENDARS, **cfg})
         self.page.add_script_tag(content=WIDGET.read_text(encoding="utf-8"))
         self.page.locator('.grid-scroll').wait_for()
+
+    def mount_week_agenda(self, events=(), hidden=(), usual=(), width=950, height=780, clock=False, now=NOW):
+        """The widget over WEEK_AGENDA, the Day/Week route below."""
+        if clock:
+            self.page.clock.install()
+        self.page.set_viewport_size({'width': width, 'height': height})
+        self.page.set_content('<!doctype html><div id="root"></div>')
+        self.page.evaluate(BRIDGE, {'now': now, 'calendars': CALENDARS,
+                                    'eventGet': {e['id']: {**e, 'description': '', 'location': '', 'reminders': [], 'attendees': []} for e in events}})
+        self.page.evaluate(WEEK_AGENDA, {'events': list(events), 'hidden': list(hidden), 'usual': list(usual)})
+        self.page.add_script_tag(content=WIDGET.read_text(encoding='utf-8'))
+        self.page.locator('.mobile-agenda, .grid-scroll').first.wait_for()
+
+    def agenda_queries(self):
+        return [{'view': c['query'].get('view'), 'date': c['query'].get('date')} for c in self.sent('agenda')]
 
     def sent(self, route):
         return self.page.evaluate('route => calls.filter(c => c.route === route)', route)
@@ -414,7 +471,7 @@ class AccountsBrowserTests(SkillCase):
         self.mount_skill(accounts=[existing])
         self.begin_route()
         self.open_accounts()
-        self.page.locator('summary').click()
+        self.page.locator('section.acc summary').click()
         self.page.get_by_label('Адрес установки', exact=True).fill('https://host.example.org/prefix')
         self.page.get_by_role('button', name='Подключить Google').click()
         waiting = self.page.locator('.acc-wait .wait')
@@ -569,7 +626,7 @@ class AccountsBrowserTests(SkillCase):
         self.mount_skill(accounts=accounts, calendars=cals, linkIssues=[issue], events=rows, eventGet=details)
         self.page.set_viewport_size({'width': 390, 'height': 900})
         self.open_accounts()
-        self.page.locator('summary').click()
+        self.page.locator('section.acc summary').click()
         self.page.get_by_label('Адрес установки', exact=True).fill('https://host.example.org/' + 'prefix/' * 10)
         self.page.get_by_label('Логин').fill(long_login)
         self.page.get_by_role('button', name='Подключить', exact=True).click()   # an error is on screen for the contrast check
@@ -710,6 +767,160 @@ class LinksBrowserTests(SkillCase):
         card.get_by_role('button', name='Применить').click()
         expect(card).to_have_count(0)
         self.assertEqual(self.sent('event/link')[-1]['body'], {'id': 'cp', 'action': 'detach', 'scope': 'all'})
+
+
+# The agenda route for Day and Week, answering like routes.agenda_payload: occurrences overlapping the range, service
+# events as untitled busy time. The hidden rows carry a title only to prove that the widget never shows one.
+WEEK_AGENDA = r"""cfg => {
+    const plus = (day, n) => { const d = new Date(day + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+    const within = (e, first, last) => e.start.slice(0, 16) < last + 'T00:00' && e.end.slice(0, 16) > first + 'T00:00';
+    window.agendaHold = null; window.agendaFail = null;   // agendaFail: a predicate on the query; a match answers 503
+    backend.today = '2026-09-27';
+    backend.routes.agenda = async query => {
+        if (window.agendaHold) await window.agendaHold;
+        if (window.agendaFail && window.agendaFail(query)) return reply({status: 'error', message: 'calendar unavailable'}, 503);
+        const anchor = query.date || backend.today, week = query.view === 'week';
+        const first = week ? plus(anchor, -((new Date(anchor + 'T00:00:00Z').getUTCDay() + 6) % 7)) : anchor;
+        const days = Array.from({length: week ? 7 : 1}, (_, i) => ({date: plus(first, i), weekday: ''})), last = plus(first, days.length);
+        return reply({status: 'ok', view: week ? 'week' : 'day', anchor, timezone: 'Asia/Dubai', now: backend.now, days,
+            calendars: backend.calendars, events: cfg.events.filter(e => within(e, first, last)),
+            hidden_busy: cfg.hidden.filter(e => within(e, first, last)), usual: (cfg.usual || []).filter(e => within(e, first, last)), link_issues: [],
+            sync: {pending: 0, conflict: 0, failed: 0, companion: 'alive'}, accounts: []});
+    };
+}"""
+
+
+class PhoneAgendaBrowserTests(SkillCase):
+    """At phone width the stylesheet hides the hour grid; Day and Week then list the same events as rows."""
+    EVENTS = [event_row('offsite', 'work', 'Work', title='Offsite', all_day=True, start='2026-09-22T00:00:00+04:00', end='2026-09-25T00:00:00+04:00'),
+              event_row('deploy', 'work', 'Work', title='Night deploy', start='2026-09-23T22:00:00+04:00', end='2026-09-24T02:00:00+04:00'),
+              event_row('conf', 'personal', 'Personal', title='Conference', start='2026-09-25T09:00:00+04:00', end='2026-09-27T18:00:00+04:00'),
+              event_row('plan', 'work', 'Work')]   # Planning, today 18:00–19:00
+    HIDDEN = [{'start': '2026-09-21T00:00:00+04:00', 'end': '2026-09-22T00:00:00+04:00', 'all_day': True, 'title': 'Dentist (private)'},
+              {'start': '2026-09-22T09:00:00+04:00', 'end': '2026-09-22T10:00:00+04:00', 'all_day': False, 'title': 'Therapy (private)'},
+              {'start': '2026-09-27T00:00:00+04:00', 'end': '2026-09-28T00:00:00+04:00', 'all_day': True}]
+    BUSY = 'Занято (служебное)'
+
+    def mount_agenda(self, width=390, height=844, usual=()):
+        self.mount_week_agenda(self.EVENTS, self.HIDDEN, usual, width, height)
+
+    def rows(self, scope='.mobile-agenda'):
+        return self.page.locator(scope + ' .mobile-event').evaluate_all(
+            "rows => rows.map(r => r.querySelector('.mobile-event-time').textContent + ' ' + r.querySelector('strong').textContent)")
+
+    def groups(self):
+        return self.page.locator('.mobile-day').evaluate_all("""groups => groups.map(g => [[...g.querySelector('h4').children].map(c => c.textContent).join(' '),
+            ...[...g.querySelectorAll('.mobile-event')].map(r => r.querySelector('.mobile-event-time').textContent + ' ' + r.querySelector('strong').textContent)])""")
+
+    def test_phone_day_and_week_list_every_covered_day_without_service_titles(self):
+        self.mount_agenda()
+        expect(self.page.locator('.mobile-agenda')).to_be_visible()
+        self.assertEqual(self.page.locator('.grid-scroll').count(), 0)
+        self.assertEqual(self.rows(), ['весь день ' + self.BUSY, 'до 18:00 Conference', '18:00–19:00 Planning'])
+        self.assertEqual(self.page.locator('.mobile-agenda button.mobile-event').count(), 2)   # busy time is not a control
+        self.shot('calendar-phone-day-light')
+        self.page.get_by_role('button', name='Неделя', exact=True).click()
+        expect(self.page.locator('.mobile-agenda h3')).to_have_text('Повестка недели')
+        expect(self.page.locator('.mobile-day')).to_have_count(7)
+        self.assertEqual(self.groups(), [
+            ['понедельник, 21 сентября', 'весь день ' + self.BUSY],
+            ['вторник, 22 сентября', 'весь день Offsite', '09:00–10:00 ' + self.BUSY],
+            ['среда, 23 сентября', 'весь день Offsite', 'с 22:00 Night deploy'],
+            ['четверг, 24 сентября', 'весь день Offsite', 'до 02:00 Night deploy'],
+            ['пятница, 25 сентября', 'с 09:00 Conference'],
+            ['суббота, 26 сентября', 'весь день Conference'],
+            ['воскресенье, 27 сентября сегодня', 'весь день ' + self.BUSY, 'до 18:00 Conference', '18:00–19:00 Planning']])
+        body = self.page.locator('body').inner_text()
+        self.assertNotIn('private', body)
+        self.assertEqual(self.page.evaluate("[...document.querySelectorAll('#root *')].filter(e => e.getBoundingClientRect().right > innerWidth + 1).length"), 0)
+        for theme in ('light', 'dark'):
+            self.page.evaluate('theme => setTheme(theme)', theme)
+            today = self.page.locator('.mobile-day.today h4').evaluate('e => [getComputedStyle(e).color, getComputedStyle(document.body).backgroundColor]')
+            self.assertGreaterEqual(self.page.evaluate(CONTRAST, today), 4.5, (theme, today))
+            self.shot(f'calendar-phone-week-{theme}')
+        self.page.evaluate("theme => setTheme(theme)", 'light')
+        self.page.locator('.mobile-day', has_text='26 сентября').get_by_role('button', name=re.compile('Conference')).click()
+        expect(self.page.get_by_placeholder('Название', exact=True)).to_have_value('Conference')
+        self.page.get_by_role('button', name='Отмена', exact=True).click()
+        expect(self.page.locator('.card')).to_have_count(0)
+
+    def test_phone_routines_are_ordinary_rows_while_the_grid_keeps_its_bands(self):
+        usual = [event_row('walk', 'personal', 'Personal', title='Walk', availability='soft', start='2026-09-27T17:00:00+04:00', end='2026-09-27T18:30:00+04:00'),
+                 event_row('read', 'personal', 'Personal', title='Reading', availability='soft', start='2026-09-27T18:30:00+04:00', end='2026-09-27T19:30:00+04:00')]
+        self.mount_agenda(usual=usual)
+        boxes = """rows => rows.map(r => { const b = r.getBoundingClientRect(), s = getComputedStyle(r);
+            return {text: r.querySelector('strong').textContent, top: b.top, bottom: b.bottom, position: s.position, border: s.borderLeftStyle}; })"""
+        for view in ('День', 'Неделя'):
+            with self.subTest(view=view):
+                self.page.get_by_role('button', name=view, exact=True).click()
+                scope = '.mobile-day.today' if view == 'Неделя' else '.mobile-agenda'
+                expect(self.page.locator(scope + ' .mobile-event')).to_have_count(5)
+                self.assertEqual(self.rows(scope), ['весь день ' + self.BUSY, 'до 18:00 Conference', '17:00–18:30 Обычно · Walk',
+                                                    '18:00–19:00 Planning', '18:30–19:30 Обычно · Reading'])
+                rows = self.page.locator(scope + ' .mobile-event').evaluate_all(boxes)
+                for above, below in zip(rows, rows[1:]):
+                    self.assertLessEqual(above['bottom'], below['top'], (above, below))   # one row under another, never on top
+                routines = [r for r in rows if r['text'].startswith('Обычно')]
+                self.assertEqual({(r['position'], r['border']) for r in routines}, {('static', 'dotted')})
+        self.shot('calendar-phone-routines')
+        self.page.set_viewport_size({'width': 1024, 'height': 768})
+        self.page.get_by_role('button', name='День', exact=True).click()
+        band = self.page.locator('.col > .usual', has_text='Walk')
+        expect(band).to_be_visible()
+        self.assertEqual(band.evaluate('e => [getComputedStyle(e).position, e.style.top]'), ['absolute', str(17 * 44) + 'px'])
+        self.shot('calendar-desktop-routine-bands')
+
+    def test_phone_week_navigation_keeps_focus_shows_loading_and_an_empty_week(self):
+        self.mount_agenda()
+        self.page.get_by_role('button', name='Неделя', exact=True).click()
+        expect(self.page.locator('.mobile-day')).to_have_count(7)
+        self.page.evaluate('() => { window.agendaHold = new Promise(resolve => { window.releaseAgenda = resolve; }); }')   # returns nothing to wait for
+        self.page.get_by_role('button', name='Следующая неделя', exact=True).focus()   # keyboard activation: a WebKit mouse click never leaves focus on a button, so focus is given explicitly
+        self.page.keyboard.press('Enter')
+        expect(self.page.locator('.status.pending')).to_contain_text('загружается')
+        expect(self.page.locator('.mobile-day')).to_have_count(7)   # the shown week stays while the next one loads
+        self.assertTrue(self.page.evaluate("document.activeElement.getAttribute('aria-label') === 'Следующая неделя'"))
+        self.page.evaluate('window.agendaHold = null; releaseAgenda()')
+        expect(self.page.locator('.mobile-agenda .status')).to_have_text('На этой неделе встреч нет')
+        expect(self.page.locator('.mobile-day')).to_have_count(0)
+        expect(self.page.locator('.bar .title')).to_contain_text('28')
+        self.assertTrue(self.page.evaluate("document.activeElement.getAttribute('aria-label') === 'Следующая неделя'"))
+        self.page.get_by_role('button', name='Сегодня', exact=True).click()
+        expect(self.page.locator('.mobile-day.today')).to_have_count(1)
+
+    def test_crossing_the_phone_width_swaps_grid_and_agenda_at_once(self):
+        self.mount_agenda(width=844, height=390)   # a phone held sideways is wide enough for the grid
+        self.page.get_by_role('button', name='Неделя', exact=True).click()
+        expect(self.page.locator('.grid.week')).to_be_visible()
+        self.page.set_viewport_size({'width': 390, 'height': 844})
+        expect(self.page.locator('.mobile-day')).to_have_count(7)   # long before the 30-second refresh
+        self.assertEqual(self.page.locator('.grid-scroll').count(), 0)
+        self.page.set_viewport_size({'width': 844, 'height': 390})
+        expect(self.page.locator('.grid.week')).to_be_visible()
+        expect(self.page.locator('.mobile-agenda')).to_have_count(0)
+
+    def test_phone_toolbar_keeps_related_controls_together_and_hides_grid_scale(self):
+        self.mount_agenda()
+        day = self.page.get_by_role('button', name='День', exact=True).bounding_box()
+        week = self.page.get_by_role('button', name='Неделя', exact=True).bounding_box()
+        self.assertEqual(day['y'], week['y'])
+        expect(self.page.locator('.scale')).not_to_be_visible()
+        self.assertLess(self.page.locator('.mobile-agenda').bounding_box()['y'], 260)
+        self.page.set_viewport_size({'width': 1024, 'height': 768})
+        expect(self.page.locator('.scale')).to_be_visible()
+
+    def test_long_event_keeps_visible_label_and_day_specific_time_after_grid_scroll(self):
+        self.mount_agenda(width=1024, height=768)
+        self.page.evaluate("backend.now = '2026-09-26T18:30:00+04:00'")
+        self.page.get_by_role('button', name='Предыдущий день', exact=True).click()   # Saturday is the middle of the still-running Conference
+        expect(self.page.locator('.bar .title')).to_contain_text('26 сентября')
+        event = self.page.locator('.ev', has_text='Conference')
+        expect(event.locator('.m')).to_contain_text('весь день')
+        expect(self.page.locator('.list .row', has_text='Conference').locator('.when')).to_have_text('весь день')
+        grid = self.page.locator('.grid-scroll')
+        grid.evaluate('e => { e.scrollTop = 600; }')
+        self.page.wait_for_function("() => { const g=document.querySelector('.grid-scroll').getBoundingClientRect(); const t=document.querySelector('.ev .t').getBoundingClientRect(); return t.top>=g.top && t.bottom<g.bottom; }")
+        self.shot('calendar-long-event-visible-label')
 
 
 if __name__ == '__main__':
