@@ -3162,8 +3162,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "03264dafe03e2efb374c9f461e09351938a2cd67a31c6dea12dc42dbf52125bf",
-          "size": 11856
+          "sha256": "bcace3436ea8a3702054aec77af575e1b742114e51f308e393165c467207b65c",
+          "size": 15354
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -3177,18 +3177,18 @@
         },
         {
           "path": "README.md",
-          "sha256": "b164869369fa2e9f50c5fbc95b40ab917ce67e3bf7d26d94770eaa67d0d3b7b5",
-          "size": 2226
+          "sha256": "2c07795168e61967bf18fc3d2f308cb714c9078b709d834f6f166e588f2941c3",
+          "size": 2323
         },
         {
           "path": "SKILL.md",
-          "sha256": "5e2230ab4bf4235eab897062f6acfa3b10db8a559c2b82419c15742301442a7f",
-          "size": 45848
+          "sha256": "1c98ccce03634e2972c1f2e4d0c5880ea48c767683f412b5bed4fa6d10dc047b",
+          "size": 46397
         },
         {
           "path": "plugin.py",
-          "sha256": "6d80907140f48404dab53a3315f929f09fbe2b4d1fb62921cb1910b629640a5c",
-          "size": 20503
+          "sha256": "4f98c79ace30e3c8bd6f493a373b2f3eb4dd395441b928ad54fab2de381af0b9",
+          "size": 23447
         },
         {
           "path": "telegram_bot/__init__.py",
@@ -3197,18 +3197,18 @@
         },
         {
           "path": "telegram_bot/api.py",
-          "sha256": "cd9e35e7445d37d0a9e4fc79939e0747400479c5d7340a8ebae08844a605fee7",
-          "size": 19469
+          "sha256": "b75ab4bed28e89fcb0a3e05a1b4754585edac72beec11450881b40215d4550d0",
+          "size": 28212
         },
         {
           "path": "telegram_bot/custody.py",
-          "sha256": "323e54c20211a05573a0c1c53996c7eb20c0ed161c7deb016d935c8eff997dd4",
-          "size": 59132
+          "sha256": "978ef79bd36c46bf5eb583c306a7104592dbb8253495f8c8e5b1d2daabd467fb",
+          "size": 67003
         },
         {
           "path": "telegram_bot/delivery.py",
-          "sha256": "8ec4d56b44e0a5766195f5bdb23c63c093693cfd2f45e77b43a0fe32b79bf488",
-          "size": 5906
+          "sha256": "5bf96820d12f35408ead0836d36524f63976208aa1e7fbc99d84175021b826e6",
+          "size": 6179
         },
         {
           "path": "telegram_bot/discovery.py",
@@ -3217,8 +3217,8 @@
         },
         {
           "path": "telegram_bot/events.py",
-          "sha256": "b15f6ff5a82e7fd37e00f17fc91e8807b451d2f2fb5380330016d7c8d1af5c81",
-          "size": 19967
+          "sha256": "f89f9006a2e83d4f0c311786117563d1ab5ab59cb50db25959d79400647732cb",
+          "size": 30200
         },
         {
           "path": "telegram_bot/formatting.py",
@@ -3232,8 +3232,8 @@
         },
         {
           "path": "telegram_bot/runtime.py",
-          "sha256": "9b7f9343be85ccba2073ce2c6bf9f731eda96bbf5422209935724ccf8e079287",
-          "size": 40496
+          "sha256": "bb2f2f716fa5b9d01db7d6e079a70d40340da3f3bf1043eeff2752373b9b906b",
+          "size": 53662
         },
         {
           "path": "telegram_bot/settings.py",
@@ -3242,13 +3242,18 @@
         },
         {
           "path": "telegram_bot/tools.py",
-          "sha256": "5637ed1d711783a0726f2a1d7879fcffaff53d0aeebd0335a0103ed1f78224b9",
-          "size": 16720
+          "sha256": "80f2ef7d24ed4f0edca574f31742eacb2ab683b7540c842f0e2c74141095d0a4",
+          "size": 23183
         },
         {
           "path": "tests/conftest.py",
           "sha256": "8078258e03839bb1d325f812bb83839aa3b905c12ebcabe35945a13eb736b0af",
           "size": 236
+        },
+        {
+          "path": "tests/fake_bot_api.py",
+          "sha256": "fe953cca43505c4b1ace6a8f52d1521416b861c82955ff5242bac540649e27b7",
+          "size": 7162
         },
         {
           "path": "tests/test_api.py",
@@ -3262,13 +3267,18 @@
         },
         {
           "path": "tests/test_custody.py",
-          "sha256": "aa44035faaecdcaa2a600d28309f8cad1e3ba7f82771ba4dca7c5aec9843b763",
-          "size": 14258
+          "sha256": "4375004cfe44d2d55ed2af4bb1f4c51b9cb76801a18ab3ca71b97305fdfd9e69",
+          "size": 15395
         },
         {
           "path": "tests/test_delivery_reports.py",
           "sha256": "c07a1b2f14982f91e4d19a3df504e0d3a4097b762babde279c3df183ac9e4331",
           "size": 13048
+        },
+        {
+          "path": "tests/test_download_outcomes.py",
+          "sha256": "29cc4f288ca3c667657ecc3052e052cedc0f468e69fdca0df2704e1a3398ac4c",
+          "size": 23961
         },
         {
           "path": "tests/test_events.py",
@@ -3301,6 +3311,11 @@
           "size": 3696
         },
         {
+          "path": "tests/test_inbound_kinds.py",
+          "sha256": "7eebb213b26d19d26cc31aa59d97e6cfc29031b71ec3a7b392b7dcb83737fd34",
+          "size": 15669
+        },
+        {
           "path": "tests/test_kept_connection.py",
           "sha256": "4c73e59e1796e53ebb6f106b16fd04f2a0fe852210800c59b8556a3cdd101bc1",
           "size": 14871
@@ -3309,6 +3324,11 @@
           "path": "tests/test_moderation.py",
           "sha256": "3d5bc3167f8523f174f4ecd489de33ebeb196f548d829ce2392fa10fb87f7bb0",
           "size": 5392
+        },
+        {
+          "path": "tests/test_outbound_media.py",
+          "sha256": "45abd7290db364c5d07ed8086f8bc0a1670cfddc47cd98e572c9f024d587d534",
+          "size": 19178
         },
         {
           "path": "tests/test_places.py",
@@ -3341,9 +3361,14 @@
           "size": 23428
         },
         {
+          "path": "tests/test_typing.py",
+          "sha256": "ab2e5c44598a4026a9de98d2c3ab13da24224d7edc77e1e054556b0de642d10e",
+          "size": 13833
+        },
+        {
           "path": "tests/test_voice_audio.py",
-          "sha256": "e45ef98da76b197bd48968a3685d63e815a3a3430648985c8fa43db9846ac355",
-          "size": 11678
+          "sha256": "ba410db016d3d7a253f7ef331014818115bea3e4e77f11b8b2b8f9caa51dfc07",
+          "size": 11813
         },
         {
           "path": "tests/test_words.py",
@@ -3365,7 +3390,7 @@
       "name": "telegram-bot",
       "slug": "telegram-bot",
       "type": "extension",
-      "version": "0.11.2"
+      "version": "0.12.0"
     },
     {
       "connects": [

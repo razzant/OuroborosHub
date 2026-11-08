@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from typing import Sequence, Any, Dict, Iterator, List, Optional
 
 from . import discovery
-from .events import TelegramEvent
+from .events import ALBUM_POSITION_KEY, TelegramEvent
 from .formatting import prepare_text
 
 
@@ -92,10 +92,40 @@ CREATE TABLE IF NOT EXISTS telegram_messages(
 _MESSAGES_FORUM_INDEX = """
 CREATE INDEX IF NOT EXISTS telegram_messages_forum
     ON telegram_messages(account_id, chat_id, message_id) WHERE chat_forum IS NOT NULL"""
+# An album member's place counts only that album's earlier members, not the chat's history; album rows only.
+# The query repeats the index's media_group_id<>'' term: without it SQLite cannot use a partial index.
+_MESSAGES_ALBUM_INDEX = """
+CREATE INDEX IF NOT EXISTS telegram_messages_album
+    ON telegram_messages(account_id, chat_id, media_group_id, message_id) WHERE media_group_id<>''"""
+_ALBUM_EARLIER = ("SELECT COUNT(*) FROM telegram_messages WHERE account_id=? AND chat_id=? AND media_group_id=? "
+                  "AND media_group_id<>'' AND message_id<?")
 _REMEMBER_MESSAGE = """
 INSERT OR REPLACE INTO telegram_messages(
     account_id, chat_id, message_id, topic_id, chat_forum, author_id, author_name, is_self, text, media_group_id
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+# One row per attachment whose download failed: how often while Telegram answered the bot (own_failures, from
+# first_failed_at) and the newest failure of any kind. The runtime turns it into a terminal record (runtime.py).
+_DOWNLOAD_FAILURES_TABLE = """
+CREATE TABLE IF NOT EXISTS download_failures(
+    event_id TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    own_failures INTEGER NOT NULL DEFAULT 0,
+    first_failed_at REAL NOT NULL DEFAULT 0,
+    last_failed_at REAL NOT NULL,
+    last_error TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(event_id, ordinal)
+)"""
+# A model's request to show "typing…" in its turn's conversation. Not custody: the runtime empties it when it
+# starts, so a request is never replayed after a restart, and nothing here is a receipt or a delivery.
+_TYPING_TABLE = """
+CREATE TABLE IF NOT EXISTS typing_requests(
+    chat_id TEXT NOT NULL,
+    topic_id TEXT NOT NULL DEFAULT '',
+    turn_ref TEXT NOT NULL,
+    source_event_id TEXT NOT NULL DEFAULT '',
+    requested_at REAL NOT NULL,
+    PRIMARY KEY(chat_id, topic_id, turn_ref)
+)"""
 # Rows with an unacknowledged report always have a due time, so acknowledged history is not expanded.
 _HELD_REPORTS = (
     "SELECT COUNT(*) FROM outbox, json_each(outbox.reports_json) AS entry WHERE outbox.report_due_at>0 "
@@ -153,6 +183,21 @@ def _remember_event(conn: sqlite3.Connection, event: TelegramEvent) -> None:
         name or str((actor.get("sender_chat") or {}).get("title") or ""), 0, event.text,
         str(event.message.get("media_group_id") or ""),
     ))
+
+
+def _with_album_position(conn: sqlite3.Connection, event: TelegramEvent) -> TelegramEvent:
+    """Its 1-based place among the album's members this bot received, which are retained one per committed update.
+
+    Telegram delivers an album's members as separate updates in message order, possibly in different getUpdates
+    batches; each is committed with its offset before the next is read, so the earlier members are already here.
+    """
+    group = str(event.message.get("media_group_id") or "")
+    if not group:
+        return event
+    earlier = conn.execute(
+        _ALBUM_EARLIER, (event.account_id, event.conversation_id, group, int(event.message["message_id"])),
+    ).fetchone()[0]
+    return replace(event, message={**event.message, ALBUM_POSITION_KEY: int(earlier) + 1})
 
 
 def _retained_message(conn: sqlite3.Connection, account_id: str, chat_id: str, message_id: Any) -> Optional[sqlite3.Row]:
@@ -307,6 +352,7 @@ class CustodyStore:
                 if "reaction" in event.message:
                     event = _with_reaction_target(conn, event)
                 else:
+                    event = _with_album_position(conn, event)
                     _remember_event(conn, event)
                 cursor = conn.execute(
                     """
@@ -464,6 +510,82 @@ class CustodyStore:
                 released[table] = cursor.rowcount
             conn.commit()
         return released
+
+    def checkpoint_inbox(self, event_id: str, payload: Dict[str, Any]) -> None:
+        """Keep a leased event's decided attachment outcomes, so every later attempt submits the same record."""
+        with self._connect() as conn:
+            conn.execute("UPDATE inbox SET payload_json=? WHERE event_id=? AND state='leased'", (_json(payload), event_id))
+
+    def download_failure(self, event_id: str, ordinal: int) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM download_failures WHERE event_id=? AND ordinal=?",
+                               (event_id, int(ordinal))).fetchone()
+        return dict(row) if row is not None else None
+
+    def note_download_failure(self, event_id: str, ordinal: int, *, error: str, counted: bool,
+                              now: float) -> Dict[str, Any]:
+        """One more failed download of this attachment; ``counted`` when it says something about the file."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO download_failures(event_id, ordinal, own_failures, first_failed_at, last_failed_at,
+                                              last_error)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_id, ordinal) DO UPDATE SET
+                    own_failures=own_failures + excluded.own_failures,
+                    first_failed_at=CASE WHEN first_failed_at=0 THEN excluded.first_failed_at
+                                         ELSE first_failed_at END,
+                    last_failed_at=excluded.last_failed_at, last_error=excluded.last_error
+                """,
+                (event_id, int(ordinal), int(counted), now if counted else 0.0, now, str(error)[:500]),
+            )
+            return dict(conn.execute("SELECT * FROM download_failures WHERE event_id=? AND ordinal=?",
+                                     (event_id, int(ordinal))).fetchone())
+
+    def forget_download_failures(self, event_id: str) -> None:
+        with self._connect() as conn:
+            if conn.execute("SELECT 1 FROM download_failures WHERE event_id=? LIMIT 1", (event_id,)).fetchone():
+                conn.execute("DELETE FROM download_failures WHERE event_id=?", (event_id,))
+
+    def request_typing(self, *, chat_id: str, topic_id: str, turn_ref: str, source_event_id: str) -> None:
+        """Ask the runtime to show "typing…" for this turn; a repeated call renews its two-minute window."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO typing_requests(chat_id, topic_id, turn_ref, source_event_id, requested_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (str(chat_id), str(topic_id or ""), str(turn_ref), str(source_event_id or ""), time.time()),
+            )
+
+    def typing_requests(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT * FROM typing_requests ORDER BY requested_at")]
+
+    def forget_typing(self, rows: Sequence[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        with self._connect() as conn:
+            conn.executemany(
+                "DELETE FROM typing_requests WHERE chat_id=? AND topic_id=? AND turn_ref=? AND requested_at=?",
+                [(row["chat_id"], row["topic_id"], row["turn_ref"], row["requested_at"]) for row in rows],
+            )
+
+    def clear_typing(self) -> None:
+        with self._connect() as conn:
+            if conn.execute("SELECT 1 FROM typing_requests LIMIT 1").fetchone():
+                conn.execute("DELETE FROM typing_requests")
+
+    def turn_live(self, source_event_id: str, turn_ref: str) -> bool:
+        """Whether that turn may still answer, by this transport's own records of it.
+
+        Its ``/presence/turn`` request is still open (the event's inbox row is leased), or the Host's version-2
+        continuation or a work reference named ``turn_ref`` is still observed.
+        """
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT 1 FROM inbox WHERE event_id=? AND state='leased' UNION ALL "
+                "SELECT 1 FROM presence_work WHERE work_ref=? AND state IN ('pending','leased') LIMIT 1",
+                (str(source_event_id or ""), str(turn_ref or "")),
+            ).fetchone() is not None
 
     def mark_inbox_failed(
         self, event_id: str, *, reason: str, receipt: Optional[Dict[str, Any]] = None
@@ -885,17 +1007,21 @@ class CustodyStore:
         """Retain confirmed text chunks before attempting the next provider call.
 
         ``sent`` remembers a just-confirmed own message: its exact creation receipt is what
-        later identifies a reaction on it as a reaction on this bot's words.
+        later identifies a reaction on it as a reaction on this bot's words. An album confirms
+        several at once: then ``report`` and ``sent`` are lists, one entry per message.
         """
+        reports = report if isinstance(report, list) else [report] if report else []
+        rows = sent if isinstance(sent, list) else [sent] if sent else []
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "UPDATE outbox SET payload_json=? WHERE delivery_id=? AND state='leased'",
                 (_json(payload), delivery_id),
             )
-            if sent:
-                conn.execute(_REMEMBER_MESSAGE, sent)
-            self._add_reports(conn, delivery_id, [report] if report else [])
+            for row in rows:
+                if row:
+                    conn.execute(_REMEMBER_MESSAGE, row)
+            self._add_reports(conn, delivery_id, [entry for entry in reports if entry])
             conn.commit()
 
     def mark_delivered(
@@ -983,6 +1109,9 @@ class CustodyStore:
         payload = json.loads(row["payload_json"])
         reaction = payload.get("kind") == "operation" and payload.get("method") == "setMessageReaction"
         reporting = payload.get("_reporting") or {}
+        # Until a row is delivered its provider receipt is empty; the messages Telegram confirmed so far, such as an
+        # accepted album's that ended uncertain, are in this same record.
+        confirmed = next((payload[key] for key in ("_sent_messages", "_sent_media") if key in payload), None)
         return {
             # -1: the outbox has not yet asked this Host.
             **({"history_limitation": "Host history for reactions is unavailable: this receipt stays local."}
@@ -993,6 +1122,8 @@ class CustodyStore:
             "attempts": int(row["attempts"]),
             "delivered_at": _timestamp(row["delivered_at"]),
             "provider_receipt": json.loads(row["provider_receipt_json"] or "{}"),
+            **({"confirmed_messages": confirmed if isinstance(confirmed, list) else [confirmed]}
+               if confirmed is not None and row["state"] != "delivered" else {}),
             "error": str(row["last_error"]),
             "delivery_reporting": payload.get("_reporting", {"version": 0, "status": "legacy_unconfirmed"}),
             "history_reports": json.loads(row["reports_json"]),
@@ -1116,6 +1247,12 @@ class CustodyStore:
                 + _MESSAGES_TABLE
                 + ";"
                 + _MESSAGES_FORUM_INDEX
+                + ";"
+                + _MESSAGES_ALBUM_INDEX
+                + ";"
+                + _DOWNLOAD_FAILURES_TABLE
+                + ";"
+                + _TYPING_TABLE
             )
             conn.execute("BEGIN IMMEDIATE")
             columns = {r[1] for r in conn.execute("PRAGMA table_info(outbox)")}

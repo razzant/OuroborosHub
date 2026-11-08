@@ -309,6 +309,23 @@ def test_releasing_stale_leases_keeps_send_checkpoints_reports_and_receipts(tmp_
     assert again.payload["_sent_messages"] == sent and again.attempts == lease.attempts + 1
 
 
+def test_a_text_send_that_ended_failed_still_names_the_chunks_telegram_confirmed(tmp_path):
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+    assert store.enqueue_outbox("send-1", {
+        "kind": "message", "chat_id": "4", "text": "first second",
+        "_rendered_chunks": [{"text": "first", "parse_mode": ""}, {"text": "second", "parse_mode": ""}],
+    })
+    lease = store.claim_outbox()
+    sent = [{"message_id": 71, "date": 2, "text": "first"}]
+    store.checkpoint_outbox("send-1", {**lease.payload, "_sent_messages": sent})
+    assert store.delivery_receipt("send-1")["confirmed_messages"] == sent  # so far, while the row is still leased
+    store.mark_outbox_failed("send-1", reason="TelegramApiError: Telegram sendMessage failed (403): Forbidden")
+    receipt = store.delivery_receipt("send-1")
+    assert (receipt["state"], receipt["provider_receipt"], receipt["confirmed_messages"]) == ("failed", {}, sent)
+    assert store.enqueue_outbox("send-2", {"kind": "message", "chat_id": "4", "text": "none"})
+    assert "confirmed_messages" not in store.delivery_receipt("send-2")  # nothing confirmed, nothing named
+
+
 def test_opening_the_store_for_status_or_tools_keeps_live_leases(tmp_path):
     store = CustodyStore(tmp_path / "custody.sqlite3")
     store.commit_update(50, _event(50))

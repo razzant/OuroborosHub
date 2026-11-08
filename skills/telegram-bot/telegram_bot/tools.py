@@ -6,8 +6,114 @@ import pathlib
 import re
 from typing import Any
 
+from .api import CLOUD_PHOTO_UPLOAD_LIMIT, CLOUD_UPLOAD_LIMIT, MEDIA_METHODS
 from .custody import CustodyStore
 from .delivery import tool_origin
+from .formatting import prepare_caption
+
+
+SEND_KINDS = ("message", *MEDIA_METHODS, "album")
+# sendMediaGroup takes these; photos and videos mix, audio and documents group only with their own kind.
+ALBUM_KINDS = ("photo", "video", "audio", "document")
+# Telegram plays a voice message from OGG/Opus, MP3 or M4A (https://core.telegram.org/bots/api#sendvoice).
+_VOICE_SUFFIXES = (".ogg", ".oga", ".opus", ".mp3", ".m4a")
+
+
+class SendRefused(ValueError):
+    """A typed refusal: nothing was queued, and ``code`` says which Bot API rule the request breaks."""
+
+    def __init__(self, code: str, message: str, **facts: Any):
+        super().__init__(message)
+        self.code = code
+        self.facts = facts
+
+    def answer(self) -> dict[str, Any]:
+        return {"ok": False, "code": self.code, "error": str(self), **self.facts}
+
+
+def upload_path(kind: str, file_path: Any) -> str:
+    """An existing file within the cloud Bot API's upload limit for ``kind``; refused, never cut."""
+    path = pathlib.Path(str(file_path or "")).expanduser()
+    if not path.is_file():
+        raise SendRefused("file_missing", "file_path must name an existing file")
+    size, limit = path.stat().st_size, CLOUD_PHOTO_UPLOAD_LIMIT if kind == "photo" else CLOUD_UPLOAD_LIMIT
+    if size > limit:
+        raise SendRefused("file_too_large", f"{path.name} is {size:,} bytes; the Bot API accepts a {kind} of at most "
+                          f"{limit // (1024 * 1024)} MB from a bot. Not queued.", size_bytes=size, limit_bytes=limit)
+    if kind == "voice" and not path.name.lower().endswith(_VOICE_SUFFIXES):
+        raise SendRefused("voice_format", "Telegram plays a voice message from OGG/Opus, MP3 or M4A; send this file "
+                          "as audio or document. Not queued.")
+    return str(path.resolve())
+
+
+def frozen_caption(caption: str, markdown: bool) -> dict[str, str]:
+    try:
+        return prepare_caption(caption, markdown=markdown)
+    except ValueError as exc:
+        raise SendRefused("caption_too_long", str(exc)) from exc
+
+
+def album_items(items: Any, caption: str, markdown: bool) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The album as queued and as it will be sent, after Telegram's composition rules (sendMediaGroup)."""
+    if not isinstance(items, list) or not 2 <= len(items) <= 10:
+        raise SendRefused("album_size", "an album has 2 to 10 items. Not queued.")
+    if any(not isinstance(item, dict) for item in items):
+        raise SendRefused("album_item", "each album item is {kind, file_path, caption}. Not queued.")
+    kinds = [str(item.get("kind") or "") for item in items]
+    other = next((kind for kind in kinds if kind not in ALBUM_KINDS), None)
+    if other is not None:
+        raise SendRefused("album_kind", f"an album holds photo, video, audio or document items; send {other or 'that'} "
+                          "on its own. Not queued.")
+    if not (set(kinds) <= {"photo", "video"} or len(set(kinds)) == 1):
+        raise SendRefused("album_mixed", "Telegram groups photos with videos, audio only with audio and documents only "
+                          "with documents. Not queued.")
+    captions = [str(item.get("caption") or "") for item in items]
+    if caption and any(captions):
+        raise SendRefused("album_caption", "give the album one caption, or captions on its items, not both. Not queued.")
+    captions[0] = captions[0] or caption
+    queued = [{"kind": kind, "file_path": upload_path(kind, item.get("file_path")), "caption": text}
+              for kind, item, text in zip(kinds, items, captions)]
+    return queued, [{**item, "caption": frozen_caption(item["caption"], markdown)} for item in queued]
+
+
+TELEGRAM_TYPING_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "chat_id": {"type": "string", "description": "This turn's own Telegram chat ID, as in the event."},
+        "topic_id": {"type": "integer", "description": "This turn's forum topic, as in the event; omit outside a forum topic."},
+    },
+    "required": ["chat_id"],
+}
+
+
+def make_typing_tool(api: Any):
+    """Ask the runtime to show "typing…" for the calling turn. The call records a request and contacts no one, so it
+    answers ``requested``. Not speech: no outbox row, no receipt, no delivery report."""
+    def telegram_typing(ctx: Any = None, *, chat_id: str, topic_id: int | None = None) -> dict[str, Any]:
+        metadata = getattr(ctx, "task_metadata", None) or {}
+        event = (metadata.get("presence") or {}).get("event") or {} if isinstance(metadata, dict) else {}
+        turn = str(getattr(ctx, "task_id", "") or "").strip()
+        own_chat, own_topic = str(event.get("conversation_id") or ""), str(event.get("thread_id") or "")
+        if event.get("provider") != "telegram" or not turn or not own_chat:
+            return {"ok": False, "code": "no_turn", "error": "typing shows only during a Telegram Presence turn, in "
+                    "its own chat. Nothing was shown."}
+        if str(chat_id or "").strip() != own_chat or (topic_id not in (None, "") and str(topic_id) != own_topic):
+            where = f"chat {own_chat}" + (f", topic {own_topic}" if own_topic else "")
+            return {"ok": False, "code": "other_conversation", "error": f"typing shows only in this turn's {where}. "
+                    "Nothing was shown."}
+        store = CustodyStore.shared(pathlib.Path(api.get_state_dir()) / "custody.sqlite3")
+        source = str(event.get("source_event_id") or "")
+        if not store.turn_live(source, turn):
+            return {"ok": False, "code": "turn_ended", "error": "this turn is no longer live here. Nothing was shown."}
+        # The forum topic of the turn's event, never a reply chain (events.py keeps that as reply_chain_id).
+        store.request_typing(chat_id=own_chat, topic_id=own_topic, turn_ref=turn, source_event_id=source)
+        return {"ok": True, "typing": "requested", "chat_id": own_chat, **({"topic_id": int(own_topic)} if own_topic else {}),
+                "note": "Nothing was sent yet. The transport shows it while this turn runs and this place may act, until "
+                        "your next message here is delivered (one already queued counts: ask again after it), the turn's "
+                        "end or about 2 minutes. It is not speech and does not replace a reply."}
+
+    return telegram_typing
 
 
 MODERATION_SCHEMA = {

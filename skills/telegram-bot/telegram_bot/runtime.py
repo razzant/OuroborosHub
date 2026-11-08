@@ -5,16 +5,18 @@ from __future__ import annotations
 import asyncio
 import pathlib
 import re
+import time
 from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
-from .api import TelegramClient, TelegramApiError, TelegramFileTooLarge, _split_text
+from .api import (MEDIA_METHODS, TelegramClient, TelegramApiError, TelegramFileTooLarge, TelegramFileUnavailable,
+                  _split_text)
 from .delivery import (REACTION_HISTORY_UNAVAILABLE, REACTION_REPORT_UNREADABLE, delivery_report,
                        is_reaction_report, reaction_receipt, typed_reaction_report)
 from .formatting import prepare_text, prepare_caption
 from .custody import REACTION_WITHHELD, CustodyStore, InboxLease, OutboxLease, _chat_forum
 from .discovery import group_sightings
-from .events import TOO_LARGE_NOTE, parse_telegram_update, too_large_marks
+from .events import parse_telegram_update, too_large_marks, too_large_note
 from .host import PresenceHostHTTPError, PresenceSubmission, PresenceWorkResult
 from .settings import load_settings
 
@@ -32,10 +34,27 @@ _REACTION_NOT_DONE = frozenset({401, 404, 429})
 _REACTION_MARKER = "_provider_call_started"
 # Telegram's answer that this token names no bot: revoked or wrong (401), or malformed (404).
 _TOKEN_REFUSED = frozenset({401, 404})
+# Attachment outcomes that are settled: never downloaded again, never passed to the Host as files.
+_NOT_STAGED = frozenset({"too_large", "failed", "unsupported"})
+# A download failure that may pass later keeps its event first in its conversation. It becomes a terminal
+# "failed" record only after this many failures that say something about the file, and at least this long after
+# the first of them: about 34 minutes at the inbox backoff, never sooner, while later messages of the chat wait.
+_DOWNLOAD_FAILURES_BEFORE_FAILED = 6
+_DOWNLOAD_FAILING_SECONDS = 1800.0
+# A download that got no answer at all counts against its file only if Telegram answered this bot's poll after
+# the file's previous failure and this recently: a sleeping Mac or a network still coming up holds nothing against it.
+_POLL_EVIDENCE_SECONDS = 120.0
+# "typing…": renewed this often (Telegram shows it about 5 s), for at most this long after the model asked.
+_TYPING_RENEW_SECONDS = 4.5
+_TYPING_CAP_SECONDS = 120.0
 
 
 class PlaceHeld(RuntimeError):
     """Unsent custody waits for the current place policy, without a provider failure."""
+
+
+class AlbumIncomplete(TelegramApiError):
+    """Telegram accepted an album (ok) but returned fewer messages than its items, or no list: never sent again."""
 
 
 class PresenceSubmitter(Protocol):
@@ -79,6 +98,11 @@ class TelegramTransportRuntime:
         self._last_error = ""
         # Telegram's yes that the store could not take yet, by delivery id. See _keep_known_reaction.
         self._unrecorded_reactions: Dict[str, Dict[str, Any]] = {}
+        # When getUpdates last answered: evidence that a download failing meanwhile is that file's own trouble.
+        self._provider_ok_at = 0.0
+        # Per conversation (chat_id, topic_id): the last "typing…" sent, and the last message this process delivered.
+        self._typing_sent_at: Dict[Tuple[str, str], float] = {}
+        self._delivered_at: Dict[Tuple[str, str], float] = {}
 
     async def run(self) -> None:
         self._stopping = False
@@ -92,6 +116,7 @@ class TelegramTransportRuntime:
             released = self.store.release_own_leases()
             if any(released.values()):
                 self._log("info", f"telegram-bot: released stale leases {released}")
+            self.store.clear_typing()  # a "typing…" request never outlives the runtime that would show it
             for index in range(self.inbox_workers):
                 workers.append(asyncio.create_task(
                     self._inbox_worker(), name=f"telegram-presence-inbox-{index}"
@@ -102,6 +127,7 @@ class TelegramTransportRuntime:
             workers.append(
                 asyncio.create_task(self._outbox_worker(), name="telegram-presence-outbox")
             )
+            workers.append(asyncio.create_task(self._typing_worker(), name="telegram-presence-typing"))
             await self._poll_loop()
         finally:
             self._stopping = True
@@ -185,6 +211,7 @@ class TelegramTransportRuntime:
                 updates = await client.get_updates(
                     offset=self.store.telegram_offset(), timeout_sec=25
                 )
+                self._provider_ok_at = time.time()
                 for update in updates:
                     update_id = _update_id(update)
                     if update_id is None:
@@ -197,6 +224,7 @@ class TelegramTransportRuntime:
                         places=bool(getattr(self.submitter, "places_version", 0)),
                         bot_username=username,
                         words=settings.get("words", []),
+                        download_limit=client.download_limit,
                     )
                     # A membership or service update notes its group and moves the offset only.
                     self.store.commit_update(update_id, event, group_sightings(update, account))
@@ -305,11 +333,13 @@ class TelegramTransportRuntime:
             raise
         except Exception as exc:
             # Retry, blocked (repair first) and untyped Host errors, whatever their
-            # HTTP status, keep the event first in its conversation with backoff.
+            # HTTP status, keep the event first in its conversation with backoff, as does a
+            # download that may still pass (Telegram's flood wait is honoured as a minimum).
+            wait = getattr(exc, "retry_after", None) or 0.0
             self.store.release_inbox(
                 lease.event_id,
                 reason=_error(exc),
-                retry_after_sec=_retry_delay(lease.attempts),
+                retry_after_sec=max(_retry_delay(lease.attempts), wait),
             )
             self._last_error = _error(exc)
             return True
@@ -351,6 +381,14 @@ class TelegramTransportRuntime:
                 )
 
     async def _stage_attachments(self, lease: InboxLease) -> List[pathlib.Path]:
+        """Download each attachment once, or settle why it is not a file; only staged files reach the Host.
+
+        A settled record (too_large, failed, unsupported) keeps its file_id, and its note says why in one factual
+        sentence (core contract). It is stored before the event is submitted, so every later attempt submits the
+        same event. A download that may still pass keeps the event first in its conversation until
+        ``_bounded_failure`` settles it, and the event waits the longest delay Telegram named. After a flood wait
+        (429) no further file is asked for; the files already fetched stay in staging for the next attempt.
+        """
         message = (
             lease.payload.get("message")
             if isinstance(lease.payload.get("message"), dict)
@@ -362,20 +400,19 @@ class TelegramTransportRuntime:
         client = await self._ready_client()
         if client is None:
             raise RuntimeError("telegram token is unavailable")
+        limit = client.download_limit
         event_dir = self.state_dir / "staging" / _safe_component(lease.event_id)
-        staged = []
+        staged, settled, waiting = [], False, None
         for index, attachment in enumerate(attachments):
-            if not isinstance(attachment, dict) or not attachment.get("file_id"):
+            if not isinstance(attachment, dict):
                 continue
-            if attachment.get("status") == "too_large":
-                # Telegram will never serve it; retrying would hold the conversation.
-                # The event keeps the reference and says why nothing was staged.
+            if attachment.get("status") in _NOT_STAGED or not attachment.get("file_id"):
                 continue
-            # A row stored before photos and documents carried the mark (0.10.5 and earlier),
-            # or a file Telegram refuses without having sized it: the same fact, said on the event.
-            marks = too_large_marks(_declared_size(attachment))
+            # A row stored before photos and documents carried the mark (0.10.5 and earlier): the same fact.
+            marks = too_large_marks(_declared_size(attachment), limit)
             if marks:
                 attachment.update(marks)
+                settled = True
                 continue
             name = _safe_filename(
                 str(attachment.get("file_name") or f"attachment-{index}")
@@ -384,11 +421,59 @@ class TelegramTransportRuntime:
             if not destination.is_file() or destination.stat().st_size == 0:
                 try:
                     await client.download_file(str(attachment["file_id"]), destination)
-                except TelegramFileTooLarge:
-                    attachment.update(status="too_large", note=TOO_LARGE_NOTE)
+                except TelegramFileTooLarge as exc:
+                    attachment.update(status="too_large", note=too_large_note(
+                        _declared_size(attachment), limit, exc.description if exc.error_code else ""))
+                    settled = True
                     continue
+                except TelegramFileUnavailable as exc:
+                    attachment.update(status="failed", note=f'Telegram answered "{exc.description}"')
+                    settled = True
+                    continue
+                except TelegramApiError as exc:
+                    note = self._bounded_failure(lease.event_id, index, exc)
+                    if note is None:
+                        if waiting is None or (exc.retry_after or 0) > (waiting.retry_after or 0):
+                            waiting = exc
+                        if exc.error_code == 429:
+                            break  # Telegram asked this bot to wait: nothing more is asked of it now
+                        continue  # the other files are still fetched now
+                    attachment.update(status="failed", note=note)
+                    settled = True
+                    continue
+            attachment["status"] = "staged"
             staged.append(destination)
+        if settled:
+            self.store.checkpoint_inbox(lease.event_id, lease.payload)
+        if waiting is not None:
+            raise waiting
+        self.store.forget_download_failures(lease.event_id)
         return staged
+
+    def _bounded_failure(self, event_id: str, ordinal: int, exc: TelegramApiError) -> Optional[str]:
+        """The note of this attachment's terminal ``failed`` record, or ``None`` while it is still retried.
+
+        Only a failure that says something about this file counts: Telegram answered and did not serve it, or
+        no answer came while Telegram answered this bot's polls. A flood wait, a refused token and a network that
+        is down count nothing. It ends after ``_DOWNLOAD_FAILURES_BEFORE_FAILED`` such failures and at least
+        ``_DOWNLOAD_FAILING_SECONDS`` after the first of them.
+        """
+        now = time.time()
+        code = exc.error_code
+        if code in (401, 429) or (code == 404 and exc.endpoint == "getFile"):
+            counted = False
+        elif code:
+            counted = True
+        else:
+            previous = self.store.download_failure(event_id, ordinal)
+            since = max(float(previous["last_failed_at"]) if previous else 0.0, now - _POLL_EVIDENCE_SECONDS)
+            counted = self._provider_ok_at >= since
+        record = self.store.note_download_failure(event_id, ordinal, error=_error(exc), counted=counted, now=now)
+        failing = now - float(record["first_failed_at"] or now)
+        if not counted or record["own_failures"] < _DOWNLOAD_FAILURES_BEFORE_FAILED or failing < _DOWNLOAD_FAILING_SECONDS:
+            return None
+        last = f'Telegram answered "{exc.description}"' if code else f"no answer ({exc.description})"
+        return f"not received after {record['own_failures']} attempts over {failing / 60:.0f} min; last: {last}"
 
     async def _work_worker(self) -> None:
         while not self._stopping:
@@ -501,9 +586,11 @@ class TelegramTransportRuntime:
             lease = replace(lease, payload={**lease.payload, "_reporting": await self._resolved_reporting(lease.payload)})
             self.store.checkpoint_outbox(lease.delivery_id, lease.payload)
             async def before_send():
-                await self._check_place(lease.payload)
+                # The row's own forum topic, as on the reaction path: a topic's place may hold what its chat allows.
+                await self._check_place(lease.payload, thread_id=str(lease.payload.get("topic_id") or ""))
 
-            receipt = await _deliver(client, lease, self.store, before_send=before_send, account_id=self._bot_id)
+            receipt = await _deliver(client, lease, self.store, before_send=before_send, account_id=self._bot_id,
+                                     delivered=self._note_delivered)
             self.store.mark_delivered(lease.delivery_id, provider_receipt=receipt)
             return True
         except PlaceHeld as exc:
@@ -515,11 +602,11 @@ class TelegramTransportRuntime:
             )
             raise
         except Exception as exc:
-            if (lease.payload.get("kind") == "operation" and isinstance(exc, TelegramApiError)
-                    and exc.error_code == 0):
+            if isinstance(exc, AlbumIncomplete) or (lease.payload.get("kind") == "operation"
+                                                    and isinstance(exc, TelegramApiError) and exc.error_code == 0):
                 # The provider may have accepted this mutation before the
-                # response was lost. Do not execute a second physical edit
-                # merely because this lease can be reclaimed.
+                # response was lost, and Telegram did accept this album. Do not
+                # execute a second physical call merely because this lease can be reclaimed.
                 payload = self.store.outbox_payload(lease.delivery_id)
                 report = delivery_report(lease.delivery_id, payload, part_id="status",
                                          state="uncertain", error=_error(exc))
@@ -540,6 +627,83 @@ class TelegramTransportRuntime:
                 )
             self._last_error = _error(exc)
             return True
+
+    def _note_delivered(self, chat_id: str, topic_id: Any) -> None:
+        """A message of this bot reached that conversation: a "typing…" asked for before it has ended."""
+        self._delivered_at[(str(chat_id), str(topic_id or ""))] = time.time()
+
+    async def _typing_worker(self) -> None:
+        while not self._stopping:
+            try:
+                await self.process_typing()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._log("warning", f"telegram-bot: typing indicator skipped: {_error(exc)}")
+            await self._pause(1.0)
+
+    async def process_typing(self) -> int:
+        """Show "typing…" once per conversation that a live turn asked for; returns how many were sent.
+
+        Not speech and not custody: no outbox row, receipt or delivery report. A request ends at the first message
+        delivered to its conversation after it, when its turn is no longer live, after ``_TYPING_CAP_SECONDS``, when
+        the place may not act there now (read before every showing), or at any Telegram refusal, including 429,
+        which is never retried. The first three are checked again after the awaited client and place reads, just
+        before the call. Several turns asking for one conversation share one renewal. An idle check is a plain read.
+        """
+        requests = self.store.typing_requests()
+        if not requests:
+            self._typing_sent_at.clear()
+            return 0
+
+        def over(row: Dict[str, Any], key: Tuple[str, str], now: float) -> bool:
+            return (now - float(row["requested_at"]) > _TYPING_CAP_SECONDS
+                    or self._delivered_at.get(key, 0.0) >= float(row["requested_at"])
+                    or not self.store.turn_live(row["source_event_id"], row["turn_ref"]))
+
+        now = time.time()
+        ended: List[Dict[str, Any]] = []
+        live: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for row in requests:
+            key = (str(row["chat_id"]), str(row["topic_id"] or ""))
+            if over(row, key, now):
+                ended.append(row)
+            else:
+                live.setdefault(key, []).append(row)
+        sent = 0
+        for key, rows in live.items():
+            last = self._typing_sent_at.get(key)
+            if last is not None and now - last < _TYPING_RENEW_SECONDS:
+                continue
+            try:
+                client = await self._ready_client()
+                if client is None:
+                    raise RuntimeError("telegram token is unavailable")
+                # Every showing: Silent, Paused or another current place policy stops it.
+                await self._check_place({"chat_id": key[0]}, thread_id=key[1])
+                # A reply delivered, the turn's end or the cap met during those awaits ends a request unsent.
+                at = time.time()
+                stale = [row for row in rows if over(row, key, at)]
+                if stale:
+                    ended.extend(stale)
+                    rows = [row for row in rows if row not in stale]
+                    if not rows:
+                        continue
+                # Only a forum topic is a thread; a turn's topic_id is never a reply chain (events.py).
+                await client.send_chat_action(key[0], "typing", topic_id=int(key[1]) if key[1] else None)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._log("info", f"telegram-bot: typing stopped for chat {key[0]}: {_error(exc)}")
+                ended.extend(rows)
+                continue
+            self._typing_sent_at[key] = at
+            sent += 1
+        if ended:
+            self.store.forget_typing(ended)
+            for key in {(str(row["chat_id"]), str(row["topic_id"] or "")) for row in ended} - set(live):
+                self._typing_sent_at.pop(key, None)
+        return sent
 
     async def _resolved_reporting(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         reporting = dict(payload.get("_reporting") or {"version": 0})
@@ -705,6 +869,7 @@ def _own_message(account_id: str, chat_id: str, topic_id: Any, result: Dict[str,
 
 async def _deliver(
     client: TelegramClient, lease: OutboxLease, store: CustodyStore, *, before_send=None, account_id: str = "",
+    delivered: Callable[[str, Any], None] = lambda _chat, _topic: None,
 ) -> Dict[str, Any]:
     payload = lease.payload
     kind = str(payload.get("kind") or "message")
@@ -750,6 +915,7 @@ async def _deliver(
                 lease.delivery_id, {**payload, "_sent_messages": messages}, report=report,
                 sent=_own_message(account_id, chat_id, topic_id, result, chunk["text"]),
             )
+            delivered(chat_id, topic_id)
         return {"kind": kind, "messages": messages}
     if kind == "moderation":
         if before_send:
@@ -778,7 +944,10 @@ async def _deliver(
             report=report,
         )
         return {"kind": kind, "method": method, "result": result}
-    if kind not in {"photo", "document"}:
+    if kind == "album":
+        return await _deliver_album(client, lease, store, before_send=before_send, account_id=account_id,
+                                    delivered=delivered)
+    if kind not in MEDIA_METHODS:
         raise ValueError(f"unsupported Telegram outbox kind: {kind}")
     if payload.get("_sent_media"):
         return {"kind": kind, "message": payload["_sent_media"]}
@@ -805,7 +974,57 @@ async def _deliver(
     result = {key: value for key, value in result.items() if key != "_delivery"}
     store.checkpoint_outbox(lease.delivery_id, {**payload, "_sent_media": result}, report=report,
                             sent=_own_message(account_id, chat_id, topic_id, result, caption["text"]))
+    delivered(chat_id, topic_id)
     return {"kind": kind, "message": result}
+
+
+async def _deliver_album(
+    client: TelegramClient, lease: OutboxLease, store: CustodyStore, *, before_send=None, account_id: str = "",
+    delivered: Callable[[str, Any], None] = lambda _chat, _topic: None,
+) -> Dict[str, Any]:
+    """One sendMediaGroup call; each message Telegram returns gets its own receipt part and delivery report.
+
+    Telegram's ok is kept as ``_sent_media`` before anything else, so an accepted album is never sent again.
+    """
+    payload = lease.payload
+    if "_sent_media" in payload:
+        return _album_receipt(payload["_sent_media"], payload.get("_rendered_items") or payload.get("items") or [])
+    chat_id = str(payload.get("chat_id") or "").strip()
+    topic_id = _optional_int(payload.get("topic_id"))
+    items = payload.get("_rendered_items")
+    if items is None:
+        items = [{"kind": item["kind"], "file_path": item["file_path"],
+                  "caption": prepare_caption(str(item.get("caption") or ""), markdown=payload.get("markdown", False))}
+                 for item in payload.get("items") or []]
+        payload = {**payload, "_rendered_items": items}
+        store.checkpoint_outbox(lease.delivery_id, payload)
+    if before_send:
+        await before_send()
+    results = await client.send_media_group(chat_id, items, topic_id=topic_id,
+                                            reply_to_message_id=_optional_int(payload.get("reply_to_message_id")))
+    messages, reports, rows = [], [], []
+    for index, result in enumerate(results):
+        # Keep extra provider messages too; there is no input file to attribute to them.
+        item = items[index] if index < len(items) else {
+            "kind": next((kind for kind in MEDIA_METHODS if kind in result), "unknown"), "file_path": ""}
+        wire = result.get("_delivery") or {}
+        reports.append(delivery_report(lease.delivery_id, {**payload, "kind": item["kind"], "file_path": item["file_path"]},
+                                       part_id=index, state="delivered", receipt=result, text=wire.get("text", ""),
+                                       fmt=wire.get("format", "plain")))
+        message = {key: value for key, value in result.items() if key != "_delivery"}
+        messages.append(message)
+        rows.append(_own_message(account_id, chat_id, topic_id, message, wire.get("text", "")))
+    store.checkpoint_outbox(lease.delivery_id, {**payload, "_sent_media": messages}, report=reports, sent=rows)
+    delivered(chat_id, topic_id)
+    return _album_receipt(messages, items)
+
+
+def _album_receipt(messages: List[Dict[str, Any]], items: Sequence[Any]) -> Dict[str, Any]:
+    """Any count mismatch keeps every returned message and ends ``AlbumIncomplete`` without a resend."""
+    if len(messages) != len(items):
+        raise AlbumIncomplete("sendMediaGroup", f"Telegram accepted the album and returned {len(messages)} messages "
+                              f"for {len(items)} items; completeness is unknown, and it is not sent again")
+    return {"kind": "album", "messages": messages}
 
 
 def _update_id(update: Dict[str, Any]) -> Optional[int]:

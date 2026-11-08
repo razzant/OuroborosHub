@@ -273,7 +273,9 @@ class WorkflowTests(unittest.TestCase):
         consumers = {path.relative_to(ROOT).as_posix() for path in (ROOT / 'tests').glob('test_*_core_consumer.py')
                      if 'CORE_ENV = "OUROBOROS_PRESENCE_CORE_ROOT"' in path.read_text(encoding='utf-8')}
         self.assertEqual(consumers, {'tests/test_slack_conversation_core_consumer.py', 'tests/test_reaction_core_consumer.py',
-                                     'tests/test_gesture_core_consumer.py', 'tests/test_voice_attachment_core_consumer.py'})
+                                     'tests/test_gesture_core_consumer.py', 'tests/test_voice_attachment_core_consumer.py',
+                                     'tests/test_telegram_bot_media_core_consumer.py',
+                                     'tests/test_telegram_bot_typing_core_consumer.py'})
         # Every suite that runs one of them requires the core, and no other suite does.
         listing = [suite for suite, spec in ci_checks.SUITES.items() if consumers & set(spec['tests'])]
         required = [suite for suite, spec in ci_checks.SUITES.items()

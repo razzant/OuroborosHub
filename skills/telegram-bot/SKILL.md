@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.11.2
+version: 0.12.0
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -124,7 +124,7 @@ tools:
   target: chat_id
   conversation: chat_id
   thread: topic_id
-  description: Queue a proactive Telegram text, photo, or document for durable delivery.
+  description: Queue a proactive Telegram text, photo, document, video, audio, voice, animation or album for durable delivery.
 - name: telegram_moderate
   effect: write
   target: chat_id
@@ -150,6 +150,12 @@ tools:
   thread: topic_id
   message: message_id
   description: Set or clear this bot's reaction on an exact Telegram message; a gesture, not speech.
+- name: telegram_typing
+  effect: write
+  target: chat_id
+  conversation: chat_id
+  thread: topic_id
+  description: Ask for "typing…" in this turn's own chat while actually preparing a reply; a request, not speech, no receipt.
 - name: telegram_receipt
   effect: read
   target: []
@@ -188,10 +194,10 @@ It provides:
   to their queues when the runtime starts again, with attempts unchanged (this
   assumes one runtime per state dir: a reload that overlaps a still-running
   runtime can resend a row, as a lease expiry would, only sooner);
-- inbound photo/document/voice/audio staging through Telegram `getFile`;
-- outbound text, photo, and document provider helpers with durable receipts;
-- a namespaced `telegram_send` tool for proactive text/photo/document delivery
-  to exact numeric chat, topic, and message ids;
+- inbound file staging through Telegram `getFile` and plain descriptions of other content;
+- outbound text, photo, document, video, audio, voice, animation and album sends with durable receipts;
+- a namespaced `telegram_send` tool for proactive delivery to exact numeric chat,
+  topic, and message ids, and `telegram_typing` for a turn's "typing…";
 - a bounded poller and fixed worker set; and
 - an operational Widget showing provider and custody state.
 
@@ -220,52 +226,82 @@ history the account can see.
 Older hosts retain the previous event filtering and receive the already-saved
 `binding_id` from local settings. Deferred references, offsets, staged files and
 delivery identities survive the upgrade. Before each outgoing message part or
-mutation the worker re-reads the place, including a private chat's place.
+mutation the worker re-reads the place of its chat or forum topic, including a private chat's place.
 Silent/Paused or an unavailable lookup holds the queued bytes and receipts
 without consuming retries; Active resumes, and an unavailable lookup clears once
 Ouroboros answers. When Ouroboros refuses the skill itself (its grant,
 enablement, review or token), the hold lasts until its access is fixed in Skills.
 
-Supported v1 Telegram content is text/caption, photos, documents, voice
-messages, audio files, edited messages, and message-reaction provider facts. See
-[Voice and audio (0.10.1)](#voice-and-audio-0101). Reaction updates require the bot to be an administrator
+Messages, edits and reactions: [Incoming content (0.12.0)](#incoming-content-0120). Reaction updates require the bot to be an administrator
 in the chat and an explicit Bot API `allowed_updates` subscription; Telegram
 does not deliver bot-authored reactions as user reactions. See
 [Reactions](#reactions-0100).
 
-## Voice and audio (0.10.1)
+## Incoming content (0.12.0)
 
-A voice message or audio file arrives like a photo or document: its original
-bytes are downloaded unchanged and handed to the Host as an ordinary staged
-attachment, never cut, converted or transcribed here. A voice-only message with
-no caption is now delivered rather than dropped; its event text stays empty (or
-the caption), and `message.attachments` names `kind` `voice` or `audio`,
-Telegram's `mime_type`, `file_size` and, when Telegram gives it,
-`duration_sec`. The staged name keeps a suffix matching that type (`.ogg` for a
-voice message, the audio file's own name otherwise), because the Host classifies
-a staged file by its bytes and recognizes some audio only with its usual suffix.
-Wake facts are unchanged: a recording wakes exactly as the same message with no
-words would (`any_message`, `direct_message` in a private chat, `reply_to_me`).
-Nothing in a recording can be a mention or a word signal.
+Every message a person sends is an event; `event.text` is only their words or caption, never made up.
+Files are `message.attachments` records (`kind`, `file_id`, `file_name`, `mime_type`, `file_size`, 0 if
+unknown, `duration_sec` for sound and video): photo, document, voice, audio, video, video_note and animation
+(a GIF, not also as a document), captioned or not, downloaded unchanged and staged; nothing is cut,
+converted or transcribed. A fetched record says `status: staged`. One that did not arrive keeps its `file_id`,
+and `note` says why in one factual sentence:
 
-This connector makes no speech-to-text claim. Whether anything listens is the
-answering model's choice: with the optional local `whisper-voice` skill enabled
-it can call `transcribe_attachment` with the attachment's manifest ordinal.
-On this path that tool currently takes Ogg, MP3 and MP4/M4A audio of at most
-384 KiB and 60 seconds. Whisper also lists WebM, but the Host classifies staged
-WebM bytes as `video/webm` whatever the file name and the tool refuses that, so
-WebM from Telegram stays only a file (Telegram voice messages are Ogg).
-Telegram delivers far longer and larger recordings than the recognizer accepts;
-such a recording, like WAV, FLAC or AAC, is still staged whole, never cut, and
-stays only a file, and the tool's error says so.
+- `too_large`: declared above the 20 MiB the Bot API serves a bot (the configured server's limit), or
+  `getFile` answered "file is too big". Never fetched.
+- `failed`: `getFile` answered that the file_id cannot be read, or a failure that may pass kept recurring.
+- `unsupported`: reserved for a declared file this connector does not fetch.
 
-Any attachment (photo, document, voice or audio) that Telegram declares larger than
-the Bot API's 20 MiB download limit is not downloaded: it carries `status`
-`too_large` and a note, and the event goes on with the message reference instead
-of retrying forever, so a later message of the same chat is never held behind it.
-The same holds for a row stored by an earlier version with that size and no mark,
-and for a file whose size the update omitted when `getFile` refuses it as too big.
-Any other download failure still retries and keeps the event first in its chat.
+Only staged files reach the Host's attachment manifest. Telegram's description decides, not its status code:
+the generic 400 "wrong file_id or the file is temporarily unavailable" usually passes and is retried, like a
+5xx, a lost or cut-off answer or an expired link, while the event stays first in its chat. A failure counts only
+when Telegram answered without serving the file, or no whole answer came while getUpdates answered; a flood wait
+(429: the event asks nothing more until it passes), a refused token or a network that is down counts nothing, so
+a sleeping Mac fails no file. After 6 counted failures and 30 minutes since the first, the record ends `failed`
+and the chat moves on. Settled records and fetched files are kept, so a retry, a Host's too, submits the same
+event and asks Telegram only about the rest.
+
+Anything else is `message.non_text`: `[{"kind", "description"}]`, plain words as Telegram reports them, up to
+4000 characters: sticker (emoji and set; not fetched), poll, location, venue, contact, dice, story, paid_media
+(paid files Telegram gives are attachments), game, invoice, giveaway,
+checklist, and `other` for a live photo (its photo is an attachment), rich message, shared users or chats and
+web app data. A live location's later positions are edits, not events. `forward_origin`,
+`is_automatic_forward`, `quote` and `reply_to_message` stay as Telegram sent them. An album member keeps
+`media_group_id` and a 1-based `media_group_position` counted from the members this bot retained (one
+update each, in message order, even across getUpdates batches).
+
+Voice and audio keep a suffix the Host recognizes (`.ogg` for voice) and are not transcribed here. Nothing
+but text can be a mention or a word signal. Storage: every file is fetched before the Host decides attention,
+up to 20 MiB each in this skill's staging folder until the Host takes the event, and the Host keeps its own
+copy with the event whether or not it wakes a turn.
+
+## Outgoing media and typing (0.12.0)
+
+`telegram_send` takes `kind` `message`, `photo`, `document`, `video`, `audio`, `voice` (OGG/Opus, MP3 or
+M4A), `animation` or `album`: `items` of 2 to 10 files, photos with videos, audio or documents only with their
+own kind; a top-level `caption` goes on the first item. Files and captions are checked before queueing: 10 MB
+per photo, 50 MB per other file, 1024 visible characters per caption. A refusal is typed (`code`
+`file_too_large`, `caption_too_long`, `voice_format`, `album_size`, `album_item`, `album_kind`, `album_mixed`,
+`album_caption`, `file_missing`) and queues nothing. An album is one outbox row and one `sendMediaGroup` call;
+each message returned gets its own receipt entry, `/presence/delivery` report (`part_id` 0, 1, …) and
+own-message record. Retries and `request_id` deduplication are the outbox's. Once Telegram answers ok, the album
+is never sent again: fewer or more messages than items, or no list, ends the row `uncertain` with those returned
+in its receipt's `confirmed_messages`, as for any send not delivered.
+
+`telegram_typing` records a request for "typing…" in the calling turn's own chat or forum topic, never a
+reply chain, when the model is actually preparing a reply there, and answers `typing: requested`. It is not
+speech: no outbox row, receipt or delivery report. The runtime renews `sendChatAction` about every 4.5 seconds,
+once per conversation however many turns asked, while the turn is live by this transport's records (its
+`/presence/turn` request open or its work reference observed), reading the place before every showing. It ends
+at this bot's first message delivered there, even one queued earlier, at turn end, after 2 minutes, when the
+place may not act (Silent, Paused or unread), or at any Telegram refusal, including 429, never retried; the
+first three are checked again just before each call. The model may ask again after an intermediate message. A
+restart discards requests. Turns that do not ask show nothing; no Host capability is needed.
+
+Large files: `telegram_send`'s registered description, the only connector text every Telegram focus receives
+whatever its notes say, lets the model ask a `too_large` or `failed` file's sender to share a download link
+there, open to no more people than had the file, never to publish private or work files or pass them beyond
+that audience, with fetch recipes for Yandex.Disk, Google Drive (confirm token over 100 MB) and Dropbox
+(`dl=1`). No own Bot API server runs.
 
 ## Connecting groups (0.9.0)
 
@@ -447,12 +483,12 @@ value names a reply chain, not a topic, so the reply stays in the chat's
 conversation (`topic_id` null, replies sent without a topic) and the raw value is
 kept as `message.reply_chain_id`. Reaction updates carry no topic; a reaction uses
 the topic of its exact retained target and otherwise the chat's conversation (see
-[Reactions](#reactions-0100)). Album members keep Telegram's `media_group_id`.
+[Reactions](#reactions-0100)).
 Text and caption entities retain their original UTF-16 offsets, hidden link
 URLs, and text-mention user facts.
 When Telegram supplies a replied-to message, the event includes its text or
-caption, original author/chat/message IDs, date, entities, and photo/document/
-voice/audio descriptors. Selected quotes and forwarding origins remain separate source
+caption, original author/chat/message IDs, date, entities, file descriptors and
+`non_text`. Selected quotes and forwarding origins remain separate source
 facts; a forwarded author does not replace the current sender.
 
 Each message keeps Telegram's send time as `message.sent_at` (ISO, from its `date`;
@@ -462,8 +498,7 @@ reaction arrays, with `event_kind` set to `message_reaction` and no synthetic
 message text. These are observations for model judgment, not automatic replies.
 
 Reply context comes only from that incoming update. It does not fetch history,
-follow nested reply chains, or download the replied-to message's media. Direct
-photo/document/voice/audio attachments continue through the existing staging path.
+follow nested reply chains, or download the replied-to message's media.
 
 ## Reactions (0.10.0)
 
@@ -572,7 +607,7 @@ which reports only its own running process's bot.
 | True | `delivered`, `effect: applied` | Telegram accepted this set for the requested message. It does not say what it replaced. |
 | 400 or 403 | `failed`, once, with Telegram's description | The next queued item proceeds at once. |
 | Lost or unreadable response, 5xx, any code not listed here such as 408 | `uncertain`, once | Never sent again, including after a restart mid-call. |
-| Earlier attempt ended with no answer: expired or stopped lease, or a cancel; or 0.9.0 made it and kept no proof it did nothing ([Upgrading to 0.10.0](#upgrading-to-0100)) | `uncertain`, with no call | The next queued item proceeds at once. A row without a recorded result may have reached Telegram. |
+| Earlier attempt ended with no answer: expired or stopped lease, or a cancel; or 0.9.0 made it and kept no proof it did nothing ([Earlier upgrades](#earlier-upgrades)) | `uncertain`, with no call | The next queued item proceeds at once. A row without a recorded result may have reached Telegram. |
 | 401, 404, 429 | retried, bounded | Telegram answered that it did not do this now. No effect is claimed meanwhile. |
 
 A cancel or crash just before the call also ends `uncertain`, since the row cannot
@@ -730,18 +765,6 @@ a timeout or unknown network response never triggers that fallback. The ordinary
 bounded outbox retry policy and its documented unknown-acceptance duplicate risk
 remain unchanged. See `FORMATTER_PROVENANCE.md` for the included helper source.
 
-## Upgrading to 0.5.0
-
-- The payload content hash changes, so each install needs a fresh owner review
-  and grant before the new version runs.
-- Updates already queued before the upgrade keep their old conversation keys; a
-  reply chain that was keyed by its `message_thread_id` is a separate history
-  once, and new updates use the chat's key.
-- A binding pinned to an exact thread that was created for a reply chain no
-  longer matches: those events now carry an empty thread and the Host refuses
-  them (403). Re-check such bindings and use the chat-level conversation.
-- Reactions in forums stay on the chat's conversation (`:0`), not the topic.
-
 ## Identity (0.6.2)
 
 When `/identity` advertises `presence_identity: 1`, the status route and every
@@ -749,64 +772,23 @@ turn event declare `identity.sends_as` with the bot id and `@username` returned
 by Telegram `getMe`, and `kind: bot`. This is the sending credential, separate
 from the incoming message's actor. Older hosts receive no identity key.
 
-## Upgrading to 0.7.0
+## Earlier upgrades
 
-- Private chats people open with the bot are now captured on Places hosts with
-  the `direct_message` fact, and replies to them pass the same place check as
-  groups instead of being held as unsupported. Add `direct_message` to the
-  place's wakes if private chats should wake Ouroboros; existing wake lists are
-  not changed by the upgrade.
-- Updates already acknowledged before the upgrade are not fetched again, so
-  earlier private messages are not replayed.
-
-## Upgrading to 0.8.0
-
-- Early answers need a Host that lists `2` in `presence_continuation_versions`;
-  with any other Host the requests are unchanged.
-- The custody database keeps its layout. Queued events keep their order, events
-  submitted before the upgrade are never submitted again, and outputs already
-  queued keep their delivery identities, so a later poll naming one of them
-  through another reference sends nothing new.
-
-## Upgrading to 0.9.0
-
-- The custody file gains a `telegram_groups` table on first start. The groups of
-  events already in the inbox, in every state, are added once, in short batches;
-  inbox, work and outbox rows, leases, receipts and the offset stay unchanged.
-  An event whose bot or chat cannot be read is not assigned to any bot; the
-  status counts such events as `group_backfill_unreadable`.
-- This one-time pass finishes before the skill starts. Large retained inboxes
-  can delay that first start; short batches bound lock time, not total work.
-  Later status reads use the group projection and never repeat the history scan.
-- `getUpdates` also requests `my_chat_member`. Telegram applies the new
-  subscription to updates created after it, so an addition made before the
-  upgrade is not reported.
-
-## Upgrading to 0.10.0
-
-- `getUpdates` also requests `message_reaction_count`. Telegram applies it to
-  updates created after it.
-- A reaction row that 0.9.0 left leased, or released after a restart or cancel,
-  has no record of whether Telegram took it. It ends `uncertain` without another
-  call. Edit, send and moderation rows keep their existing handling.
-- 0.9.0 marked nothing before asking Telegram and kept only the newest attempt's
-  error. A reaction row it released for a retry is sent again only when that error
-  proves its one counted attempt did nothing: Telegram answered 400, 401, 403, 404
-  or 429, or the call was never made (no token, a failed `getMe` or
-  `deleteWebhook`). Any other answer, such as 408, 5xx or an unreadable
-  `error_code`, a hold that replaced the error, or more than one counted attempt
-  ends `uncertain` without another call, whatever happens to this version's first
-  attempt. A row 0.9.0 never attempted, or only held, is sent as usual.
-- Attempts 0.9.0 makes during a rollback are judged the same way. Each reaction row
-  keeps the attempt count this version last left it with, so on return any attempt
-  counted since then is 0.9.0's; a hold gives its attempt back in either version.
-  0.9.0 reads neither that count nor the send marker, so while it runs it may repeat
-  a reaction this version was sending when it stopped.
-- The custody file gains a `telegram_messages` table on first start. It starts
-  empty: messages received or sent earlier stay unknown as reaction targets, and
-  nothing is backfilled.
-- Without `presence_reaction_context: 1` on the Host, reactions stop reaching it and
-  stay in custody. Without `presence_explicit_completion: 1`, own reactions stop being
-  reported as deliveries, and reports frozen before the upgrade wait unsent (see
-  [Reactions](#reactions-0100)). The promise that a reaction alone never wakes anyone
-  needs an updated Host and this version together.
+- 0.5.0: a reply chain once keyed by its `message_thread_id` became the chat's conversation; a binding pinned
+  to such a thread no longer matches.
+- 0.7.0: private chats are captured with `direct_message` (add it to a place's wakes to be woken); earlier
+  private messages are not replayed.
+- 0.8.0: early answers need a Host listing `2` in `presence_continuation_versions`; queued events, submitted
+  events and delivery identities are unchanged.
+- 0.9.0: the custody file gains `telegram_groups`, filled once before the first start (unreadable events
+  count as `group_backfill_unreadable`); `getUpdates` also requests `my_chat_member` for later updates.
+- 0.10.0: `getUpdates` also requests `message_reaction_count`, and the custody file gains `telegram_messages`,
+  empty at first. A reaction row 0.9.0 left leased or released has no proof whether Telegram took it: it is
+  sent again only when its one counted attempt provably did nothing (Telegram answered 400, 401, 403, 404 or
+  429, or no call was made) and otherwise ends `uncertain` without a call; a row 0.9.0 never attempted is sent
+  as usual. Each row keeps the attempt count this version left, so attempts 0.9.0 makes after a rollback are
+  judged the same way; 0.9.0 may repeat a reaction this version was sending. Host capabilities:
+  [Reactions](#reactions-0100).
+- 0.12.0: the custody file gains `download_failures` and `typing_requests`, which earlier versions ignore.
+  Queued rows keep their shape (a GIF queued as a document stays one; a 0.10.6 note stays as written). After a
+  rollback 0.11 fetches a `failed` record again.
