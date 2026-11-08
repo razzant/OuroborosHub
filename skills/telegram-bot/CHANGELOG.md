@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.2
+
+- `telegram_operation` declares which of its calls deliver words: an
+  `editMessageText` call (`method`) changes what people read, so a Host that knows
+  the `sends` field treats it as a message to `chat_id`, with its words at `text`,
+  and judges, guards and holds it like `telegram_send`. A reaction
+  (`setMessageReaction`) stays a write here and keeps `telegram_react` as its
+  gesture door. A Host that does not know the field ignores it.
+
 ## 0.11.1
 
 - Connect now offers private chats the bot has already seen, labelled with the

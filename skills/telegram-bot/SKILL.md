@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.11.1
+version: 0.11.2
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -135,6 +135,13 @@ tools:
   target: chat_id
   conversation: chat_id
   thread: topic_id
+  sends:
+    when:
+      method: [editMessageText]
+    target: chat_id
+    conversation: chat_id
+    thread: topic_id
+    text: text
   description: Queue an edit of this bot's own message, or set or clear its reaction on a reachable message, with durable receipts.
 - name: telegram_react
   effect: gesture
