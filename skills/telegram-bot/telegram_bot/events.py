@@ -8,18 +8,36 @@ from datetime import datetime, timezone
 import re
 from typing import Any, Dict, Optional, Sequence, Tuple
 
+from .api import CLOUD_DOWNLOAD_LIMIT
+
 
 # Chats a bot can be part of. A private chat is one person who started the bot.
 _PLACE_CHAT_TYPES = frozenset({"private", "group", "supergroup", "channel"})
-# getFile serves at most this much; a larger file can never be downloaded by a bot.
-BOT_API_DOWNLOAD_LIMIT = 20 * 1024 * 1024
-TOO_LARGE_NOTE = ("Not staged: larger than the Bot API's 20 MiB download limit. "
-                  "The Telegram message reference is retained.")
+# getFile serves at most this much; a larger file can never be downloaded by a bot (api.CLOUD_DOWNLOAD_LIMIT).
+BOT_API_DOWNLOAD_LIMIT = CLOUD_DOWNLOAD_LIMIT
+# The core contract's optional event.message key: [{"kind": word, "description": plain text}] for what a message
+# holds that neither event.text nor an attachments record carries. The one place this name is spelled.
+NON_TEXT_KEY = "non_text"
+_NON_TEXT_CHARS = 4000
 
 
-def too_large_marks(size: int) -> Dict[str, str]:
+def _megabytes(size: int) -> str:
+    return f"{size / 1e6:.0f} MB" if size >= 10_000_000 else f"{size / 1e6:.1f} MB" if size >= 1_000_000 else f"{size:,} bytes"
+
+
+def too_large_note(size: int = 0, limit: int = CLOUD_DOWNLOAD_LIMIT, telegram_said: str = "") -> str:
+    """One factual sentence on why the file did not arrive (core contract); no advice to anyone."""
+    rule = f"the cloud Bot API gives bots files only up to {limit // (1024 * 1024)} MB"
+    if size > limit:
+        return f"{_megabytes(size)}; {rule}"
+    return f'Telegram answered "{telegram_said}"; {rule}' if telegram_said else f"Over the limit; {rule}"
+
+
+def too_large_marks(size: int, limit: int = CLOUD_DOWNLOAD_LIMIT) -> Dict[str, str]:
     """Telegram never serves a bot a file above the download limit; retrying it would hold its conversation."""
-    return {"status": "too_large", "note": TOO_LARGE_NOTE} if size > BOT_API_DOWNLOAD_LIMIT else {}
+    return {"status": "too_large", "note": too_large_note(size, limit)} if size > limit else {}
+
+
 # The Host classifies a staged file by its bytes, but an MP3 without an ID3 tag or an
 # M4A under a generic MP4 brand is only recognized with its usual suffix.
 _AUDIO_SUFFIXES = {
@@ -28,6 +46,15 @@ _AUDIO_SUFFIXES = {
     "audio/flac": ".flac", "audio/x-flac": ".flac", "audio/wav": ".wav", "audio/x-wav": ".wav",
     "audio/webm": ".webm",
 }
+# Message content the Bot API (10.3) names that this connector does not describe further: kind "other".
+# A live photo also sets photo, which arrives as the photo attachment.
+_OTHER_CONTENT = ("live_photo", "rich_message", "users_shared", "chat_shared", "web_app_data")
+# event.message's 1-based place of a message in its album, counted by custody (CustodyStore.commit_update).
+ALBUM_POSITION_KEY = "media_group_position"
+_VIDEO_SUFFIXES = {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
+                   "video/x-matroska": ".mkv", "video/mpeg": ".mpeg", "image/gif": ".gif"}
+_OPTIONAL_ATTACHMENT_KEYS = frozenset({"duration_sec", "status", "note"})
+
 
 @dataclass(frozen=True)
 class TelegramAttachment:
@@ -37,16 +64,16 @@ class TelegramAttachment:
     file_name: str
     mime_type: str
     file_size: int
-    # duration_sec is voice and audio only; status and note mark a file above the Bot API
-    # download limit. All three are omitted from the dict when absent, so an ordinary photo
-    # or document keeps its exact earlier shape.
+    # duration_sec is a recording's or video's. status (too_large, failed or unsupported; staged once fetched)
+    # and note, one factual sentence on why no file arrived, follow the core contract. All three are omitted
+    # when absent, so an ordinary photo or document keeps its exact earlier shape.
     duration_sec: Optional[int] = None
     status: Optional[str] = None
     note: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {key: value for key, value in asdict(self).items()
-                if value is not None or key not in {"duration_sec", "status", "note"}}
+                if value is not None or key not in _OPTIONAL_ATTACHMENT_KEYS}
 
 
 @dataclass(frozen=True)
@@ -73,6 +100,7 @@ class TelegramEvent:
 def parse_telegram_update(
     update: Dict[str, Any], *, bot_account_id: str, management_group_id: str = "",
     places: bool = False, bot_username: str = "", words: Sequence[str] = (),
+    download_limit: int = CLOUD_DOWNLOAD_LIMIT,
 ) -> Optional[TelegramEvent]:
     """Return one factual external-message event or ``None`` for unsupported updates."""
     if not isinstance(update, dict):
@@ -154,7 +182,8 @@ def parse_telegram_update(
         "supergroup",
     }:
         conversation_fact["configured_room"] = "management_group"
-    attachments = _attachments(message)
+    attachments = _attachments(message, download_limit)
+    described = _non_text(message)
     message_fact = {
         "event_kind": event_kind,
         "message_id": message_id,
@@ -165,14 +194,18 @@ def parse_telegram_update(
     }
     if raw_thread_id is not None and topic_id is None:
         message_fact["reply_chain_id"] = raw_thread_id
-    for key in ("entities", "caption_entities", "quote", "forward_origin", "media_group_id"):
+    for key in ("entities", "caption_entities", "quote", "forward_origin", "is_automatic_forward", "media_group_id"):
         if key in message:
             message_fact[key] = deepcopy(message[key])
+    if described:
+        message_fact[NON_TEXT_KEY] = described
     reply = message.get("reply_to_message")
     if isinstance(reply, dict):
         message_fact["reply_to_message"] = _reply_context(reply)
-    if not text.strip() and not attachments:
+    if not text.strip() and not attachments and not described:
         return None
+    if event_kind.startswith("edited_") and not text.strip() and not attachments and described[0]["kind"] == "location":
+        return None  # a live location's position refresh edits the message that already arrived
 
     return TelegramEvent(
         source_event_id=f"telegram:{bot_id}:{update_id}",
@@ -345,28 +378,14 @@ def _time_facts(sent_epoch: Optional[int], edited_epoch: Optional[int] = None) -
     return {key: value for key, epoch in times if epoch and (value := _iso_time(epoch))}
 
 
-def _attachments(message: Dict[str, Any]) -> Tuple[TelegramAttachment, ...]:
+def _attachments(message: Dict[str, Any], limit: int = CLOUD_DOWNLOAD_LIMIT) -> Tuple[TelegramAttachment, ...]:
     result = []
-    photos = message.get("photo")
-    if isinstance(photos, list):
-        choices = [
-            item for item in photos if isinstance(item, dict) and item.get("file_id")
-        ]
-        if choices:
-            photo = choices[-1]
-            result.append(
-                TelegramAttachment(
-                    kind="photo",
-                    file_id=str(photo.get("file_id")),
-                    file_unique_id=str(photo.get("file_unique_id") or ""),
-                    file_name=f"photo-{photo.get('file_unique_id') or photo.get('file_id')}.jpg",
-                    mime_type="image/jpeg",
-                    file_size=_integer(photo.get("file_size")) or 0,
-                    **too_large_marks(_integer(photo.get("file_size")) or 0),
-                )
-            )
+    photo = _photo(message.get("photo"), limit)
+    if photo is not None:
+        result.append(photo)
     document = message.get("document")
-    if isinstance(document, dict) and document.get("file_id"):
+    # Telegram repeats an animation as document for older clients: the same file, staged once as animation.
+    if isinstance(document, dict) and document.get("file_id") and not _file(message.get("animation")):
         result.append(
             TelegramAttachment(
                 kind="document",
@@ -375,17 +394,180 @@ def _attachments(message: Dict[str, Any]) -> Tuple[TelegramAttachment, ...]:
                 file_name=str(document.get("file_name") or "document"),
                 mime_type=str(document.get("mime_type") or "application/octet-stream"),
                 file_size=_integer(document.get("file_size")) or 0,
-                **too_large_marks(_integer(document.get("file_size")) or 0),
+                **too_large_marks(_integer(document.get("file_size")) or 0, limit),
             )
         )
     for kind in ("voice", "audio"):
         item = message.get(kind)
         if isinstance(item, dict) and item.get("file_id"):
-            result.append(_sound(kind, item))
+            result.append(_sound(kind, item, limit))
+    for kind in ("video", "video_note", "animation"):
+        if _file(message.get(kind)):
+            result.append(_moving(kind, message[kind], limit))
+    paid = message.get("paid_media")
+    for item in (paid.get("paid_media") if isinstance(paid, dict) else None) or []:
+        attachment = _paid(item, limit) if isinstance(item, dict) else None
+        if attachment is not None:
+            result.append(attachment)
     return tuple(result)
 
 
-def _sound(kind: str, item: Dict[str, Any]) -> TelegramAttachment:
+def _file(value: Any) -> bool:
+    return isinstance(value, dict) and bool(value.get("file_id"))
+
+
+def _photo(photos: Any, limit: int) -> Optional[TelegramAttachment]:
+    choices = [item for item in photos if _file(item)] if isinstance(photos, list) else []
+    if not choices:
+        return None
+    photo = choices[-1]
+    size = _integer(photo.get("file_size")) or 0
+    return TelegramAttachment(
+        kind="photo",
+        file_id=str(photo.get("file_id")),
+        file_unique_id=str(photo.get("file_unique_id") or ""),
+        file_name=f"photo-{photo.get('file_unique_id') or photo.get('file_id')}.jpg",
+        mime_type="image/jpeg",
+        file_size=size,
+        **too_large_marks(size, limit),
+    )
+
+
+def _moving(kind: str, item: Dict[str, Any], limit: int) -> TelegramAttachment:
+    """A video, round video note or GIF animation: its own bytes within the limit, captioned or not."""
+    unique = str(item.get("file_unique_id") or "")
+    mime = str(item.get("mime_type") or "video/mp4")  # a video note names none: Telegram records it as MPEG-4
+    name = "" if kind == "video_note" else str(item.get("file_name") or "")
+    name = name or f"{kind}-{unique or item.get('file_id')}"
+    suffix = _VIDEO_SUFFIXES.get(mime.split(";", 1)[0].strip().lower(), "")
+    if suffix and not name.lower().endswith(suffix):
+        name += suffix
+    size = _integer(item.get("file_size")) or 0
+    duration = _integer(item.get("duration"))
+    return TelegramAttachment(
+        kind=kind, file_id=str(item.get("file_id")), file_unique_id=unique, file_name=name, mime_type=mime,
+        file_size=size, duration_sec=duration if duration is not None and duration >= 0 else None,
+        **too_large_marks(size, limit),
+    )
+
+
+def _paid(item: Dict[str, Any], limit: int) -> Optional[TelegramAttachment]:
+    """A paid photo or video that Telegram gives the bot as a file; a preview has none (see ``_non_text``)."""
+    if item.get("type") == "photo":
+        return _photo(item.get("photo"), limit)
+    if item.get("type") == "video" and _file(item.get("video")):
+        return _moving("video", item["video"], limit)
+    return None
+
+
+def _quoted(value: Any) -> str:
+    return f'"{value}"' if str(value or "").strip() else ""
+
+
+def _join(*parts: Any) -> str:
+    return " ".join(str(part) for part in parts if str(part if part is not None else "").strip())
+
+
+def _poll(poll: Dict[str, Any]) -> str:
+    options = "; ".join(_quoted(option.get("text")) for option in poll.get("options") or [] if isinstance(option, dict))
+    flags = ", ".join(flag for flag, on in (("anonymous", poll.get("is_anonymous")), ("closed", poll.get("is_closed")),
+                                            ("multiple answers", poll.get("allows_multiple_answers"))) if on)
+    return _join(f"{poll.get('type') or 'regular'} poll", _quoted(poll.get("question")),
+                 f"options: {options}" if options else "", f"({flags})" if flags else "",
+                 f"explanation: {_quoted(poll.get('explanation'))}" if poll.get("explanation") else "")
+
+
+def _place(location: Any) -> str:
+    location = location if isinstance(location, dict) else {}
+    if location.get("latitude") is None or location.get("longitude") is None:
+        return ""
+    extra = [f"accuracy {location['horizontal_accuracy']} m" if location.get("horizontal_accuracy") else "",
+             f"live for {location['live_period']} s" if location.get("live_period") else ""]
+    extra = [part for part in extra if part]
+    return _join(f"latitude {location['latitude']}, longitude {location['longitude']}",
+                 f"({', '.join(extra)})" if extra else "")
+
+
+def _paid_media(paid: Dict[str, Any]) -> str:
+    items = []
+    for item in paid.get("paid_media") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "preview":
+            size = f"{item['width']}x{item['height']}" if item.get("width") and item.get("height") else ""
+            items.append(_join("preview without a file", size, f"{item['duration']} s" if item.get("duration") else ""))
+        else:
+            items.append(str(item.get("type") or "item"))
+    stars = f"for {paid['star_count']} Telegram Stars" if paid.get("star_count") is not None else ""
+    return _join("paid media", stars, f"({len(items)} items: {', '.join(items)})" if items else "")
+
+
+def _non_text(message: Dict[str, Any]) -> list:
+    """What a message holds besides its words and files, as Telegram reports it, in plain words (core contract).
+
+    A poll's question or a contact's name are the sender's, kept here and never as event text.
+    """
+    described = []
+
+    def add(kind: str, description: str) -> None:
+        if description.strip():
+            if len(description) > _NON_TEXT_CHARS:
+                description = description[:_NON_TEXT_CHARS - 12] + " [shortened]"
+            described.append({"kind": kind, "description": description})
+
+    sticker = message.get("sticker")
+    if isinstance(sticker, dict):
+        shape = "video" if sticker.get("is_video") else "animated" if sticker.get("is_animated") else ""
+        add("sticker", _join(sticker.get("emoji"), shape, "sticker",
+                             f"from set {_quoted(sticker.get('set_name'))}" if sticker.get("set_name") else ""))
+    if isinstance(message.get("poll"), dict):
+        add("poll", _poll(message["poll"]))
+    venue = message.get("venue")
+    if isinstance(venue, dict):
+        where = _place(venue.get("location"))
+        add("venue", _join(_quoted(venue.get("title")), venue.get("address"), f"({where})" if where else ""))
+    elif isinstance(message.get("location"), dict):
+        add("location", _place(message["location"]))
+    contact = message.get("contact")
+    if isinstance(contact, dict):
+        add("contact", _join(contact.get("first_name"), contact.get("last_name"), contact.get("phone_number"),
+                             f"(Telegram user {contact['user_id']})" if contact.get("user_id") else ""))
+    dice = message.get("dice")
+    if isinstance(dice, dict):
+        add("dice", _join(dice.get("emoji"), f"rolled {dice['value']}" if dice.get("value") is not None else ""))
+    story = message.get("story")
+    if isinstance(story, dict):
+        chat = story.get("chat") if isinstance(story.get("chat"), dict) else {}
+        add("story", _join("story", story.get("id"), "from", _quoted(chat.get("title")) or chat.get("first_name"),
+                           f"@{chat['username']}" if chat.get("username") else "",
+                           f"(chat {chat['id']})" if chat.get("id") else ""))
+    if isinstance(message.get("paid_media"), dict):
+        add("paid_media", _paid_media(message["paid_media"]))
+    game = message.get("game")
+    if isinstance(game, dict):
+        add("game", _join("game", _quoted(game.get("title")), game.get("description")))
+    invoice = message.get("invoice")
+    if isinstance(invoice, dict):
+        amount = invoice.get("total_amount")
+        add("invoice", _join("invoice", _quoted(invoice.get("title")), invoice.get("description"),
+                             f"total_amount {amount} {invoice.get('currency') or ''}".strip() if amount is not None else ""))
+    for field in ("giveaway", "giveaway_winners"):
+        giveaway = message.get(field)
+        if isinstance(giveaway, dict):
+            add("giveaway", _join("giveaway winners" if field == "giveaway_winners" else "giveaway",
+                                  f"{giveaway['winner_count']} winners" if giveaway.get("winner_count") else "",
+                                  f"prize: {giveaway['prize_description']}" if giveaway.get("prize_description") else ""))
+    checklist = message.get("checklist")
+    if isinstance(checklist, dict):
+        tasks = "; ".join(_quoted(task.get("text")) for task in checklist.get("tasks") or [] if isinstance(task, dict))
+        add("checklist", _join("checklist", _quoted(checklist.get("title")), f"tasks: {tasks}" if tasks else ""))
+    for field in _OTHER_CONTENT:
+        if field in message:
+            add("other", f"Telegram {field.replace('_', ' ')} (not described by this connector)")
+    return described
+
+
+def _sound(kind: str, item: Dict[str, Any], limit: int = CLOUD_DOWNLOAD_LIMIT) -> TelegramAttachment:
     """A voice message or audio file as an ordinary attachment: its bytes, never words."""
     unique = str(item.get("file_unique_id") or "")
     mime = str(item.get("mime_type") or ("audio/ogg" if kind == "voice" else "application/octet-stream"))
@@ -405,7 +587,7 @@ def _sound(kind: str, item: Dict[str, Any]) -> TelegramAttachment:
         mime_type=mime,
         file_size=size,
         duration_sec=duration if duration is not None and duration >= 0 else None,
-        **too_large_marks(size),
+        **too_large_marks(size, limit),
     )
 
 
@@ -435,6 +617,9 @@ def _reply_context(reply: Dict[str, Any]) -> Dict[str, Any]:
     attachments = _attachments(reply)
     if attachments:
         snapshot["attachments"] = [item.to_dict() for item in attachments]
+    described = _non_text(reply)
+    if described:
+        snapshot[NON_TEXT_KEY] = described
     return snapshot
 
 

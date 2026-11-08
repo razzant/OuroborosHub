@@ -119,7 +119,8 @@ def test_recording_above_the_bot_api_limit_is_reported_not_retried(tmp_path):
     big = {**VOICE, "file_size": BOT_API_DOWNLOAD_LIMIT + 1}
     event = parse_telegram_update(_update(voice=big), bot_account_id="9")
     attachment = event.message["attachments"][0]
-    assert attachment["status"] == "too_large" and "20 MiB" in attachment["note"]
+    assert attachment["status"] == "too_large"
+    assert attachment["note"] == "21 MB; the cloud Bot API gives bots files only up to 20 MB"  # one factual sentence
     runtime, submitter, clients = _runtime(tmp_path)
     runtime.store.commit_update(7, event)
     assert asyncio.run(runtime.process_one_inbox())
@@ -168,7 +169,7 @@ def test_a_row_stored_before_the_mark_is_reported_not_retried(tmp_path):
     assert clients == [] or clients[0].downloads == []
     sent, staged = submitter.calls[0]
     assert staged == () and sent["message"]["attachments"][0]["status"] == "too_large"
-    assert "20 MiB" in sent["message"]["attachments"][0]["note"]
+    assert sent["message"]["attachments"][0]["note"] == "21 MB; the cloud Bot API gives bots files only up to 20 MB"
 
 
 class _RefusingClient(RuntimeClient):
