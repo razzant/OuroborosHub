@@ -1,0 +1,19 @@
+{
+  "category": [
+    "computer",
+    "ouroboros"
+  ],
+  "description": "Use morluto/rea for evidence-grounded analysis of shipped binaries, packages, browser runtimes, captures, and reconstruction tasks without copying its large runtime into Ouroboros.",
+  "digest": "1259c519f9b2d2250f9a9e36fdd139b77f2db6f636b70835949be381d3fb9b50",
+  "name": "rea-reverse-engineering",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/rea-reverse-engineering"
+  },
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "Use when a claim depends on a shipped artifact, binary or package behavior, decompilation, runtime observation, browser capture, or a version comparison that ordinary source-repository tools cannot establish.",
+  "withdrawn": null
+}
