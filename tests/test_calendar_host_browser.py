@@ -5,15 +5,21 @@ serves the core's own web modules, answers the widget lease controls the core as
 passes the skill's real routes to the browser. Only the edges to Google and to a CalDAV server are replaced.
 """
 import asyncio
+import errno
+import http.client
 import json
 import mimetypes
 import os
 import shutil
+import socket
+import struct
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -69,10 +75,18 @@ def request_class():
     return HostRequest
 
 
+# Socket write failures that mean the client closed its end. Nothing broader: other OSError/ConnectionError stays an error.
+DISCONNECTED = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
+def encode(body):
+    return body if isinstance(body, bytes) else (body if isinstance(body, str) else json.dumps(body)).encode()
+
+
 @contextmanager
 def serve(core, routes_api):
     """The page, the lease controls and one skill's routes on a loopback port."""
-    state = {'posts': [], 'reads': [], 'responses': [], 'errors': []}
+    state = {'posts': [], 'reads': [], 'responses': [], 'errors': [], 'disconnects': []}
     request = request_class()
 
     class Handler(BaseHTTPRequestHandler):
@@ -80,14 +94,22 @@ def serve(core, routes_api):
             pass
 
         def send(self, body, mime='application/json', status=200):
-            if not isinstance(body, bytes):
-                body = (body if isinstance(body, str) else json.dumps(body)).encode()
-            self.send_response(status)
-            self.send_header('Content-Type', mime)
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            if self.command != 'HEAD':
-                self.wfile.write(body)
+            body = encode(body)
+            try:
+                self.send_response(status)
+                self.send_header('Content-Type', mime)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                if self.command != 'HEAD':
+                    self.wfile.write(body)
+            except DISCONNECTED as exc:
+                # The browser went away while its answer was being written (a closed page or context, an abandoned
+                # fetch): the answer existed, only its delivery failed. Kept apart from errors, with what was sent.
+                state['disconnects'].append((self.command, self.path, status, type(exc).__name__))
+                self.close_connection = True
+            except Exception as exc:   # any other failure to write stays an error
+                state['errors'].append(repr(exc))
+                raise
 
         def dispatch(self):
             url = urlsplit(self.path)
@@ -109,17 +131,21 @@ def serve(core, routes_api):
             if url.path.startswith(prefix) and name in routes_api.routes:
                 body = json.loads(raw or b'{}')
                 (state['posts'] if self.command == 'POST' else state['reads']).append((name, body) if self.command == 'POST' else name)
-                try:
+                try:   # the route and its answer; any exception here, a ConnectionError raised by the route included, is an error
                     result = asyncio.run(routes_api.routes[name](request(body, {k: v[-1] for k, v in parse_qs(url.query).items()}, self.headers, self.command)))
                     state['responses'].append((name, result.status_code, result.body))
-                    return self.send(result.body, status=result.status_code)
+                    answer = encode(result.body)
                 except Exception as exc:
                     state['errors'].append(repr(exc))
                     return self.send({'error': str(exc)}, status=500)
+                return self.send(answer, status=result.status_code)
             return self.send({'error': 'not found'}, status=404)
         do_GET = do_POST = do_HEAD = dispatch
 
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    # Handler threads are not daemons, so server_close() joins every request still running: a late route finishes, and
+    # records its outcome, before the fixture inspects the state or deletes the store the route writes to.
+    server.daemon_threads = False
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -676,3 +702,259 @@ def test_all_day_title_card_keeps_dates_after_owner_zone_change(temporal_host, t
             assert context.outside == []
         finally:
             browser.close()
+
+
+# The host server's own account of failures: a client that leaves while its answer is written is a disconnect; a route
+# that fails, whatever it raises, and any other write failure are errors, which every fixture above asserts away.
+LARGE = 64 << 20   # bytes, far beyond either kernel's loopback buffers: this write cannot complete once the reader is gone
+
+
+class Answer:
+    def __init__(self, body, status_code=200):
+        self.body, self.status_code = body, status_code
+
+
+async def small(request):
+    return Answer(b'{"ok": true}')
+
+
+async def large(request):
+    return Answer(bytes(LARGE))
+
+
+@pytest.fixture
+def bare_server(tmp_path):
+    """serve() alone over a stand-in route table: no core, skill store or browser."""
+    sys.path.insert(0, TESTS)
+    table = SimpleNamespace(routes={'small': small, 'large': large})
+    try:
+        with serve(tmp_path, table) as (state, _, port):
+            yield table.routes, state, port
+    finally:
+        sys.path.remove(TESTS)
+
+
+def wait_for(condition, seconds=10):
+    deadline = time.monotonic() + seconds
+    while not condition():
+        assert time.monotonic() < deadline, 'the host server did not reach the expected state'
+        time.sleep(0.01)
+
+
+def get(port, name):
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+    try:
+        connection.request('GET', '/api/extensions/calendar/' + name)
+        reply = connection.getresponse()
+        return reply.status, reply.read()
+    finally:
+        connection.close()
+
+
+def held_route(routes, name):
+    """A route that answers LARGE only once the test releases it, so the client can leave first."""
+    entered, release = threading.Event(), threading.Event()
+
+    async def held(request):
+        entered.set()
+        assert release.wait(10), 'the test never released the route'
+        return Answer(bytes(LARGE))
+    routes[name] = held
+    return entered, release
+
+
+def assert_left_cleanly(state, port, name, departures=('BrokenPipeError', 'ConnectionResetError')):
+    """One recorded departure for the answered route, no error, and the next request is served as usual."""
+    wait_for(lambda: state['disconnects'])
+    [(method, path, status, kind)] = state['disconnects']
+    assert (method, path, status) == ('GET', '/api/extensions/calendar/' + name, 200) and kind in departures
+    assert [(n, code) for n, code, _ in state['responses']] == [(name, 200)]
+    assert get(port, 'small') == (200, b'{"ok": true}')
+    assert state['errors'] == [] and len(state['disconnects']) == 1
+
+
+def test_host_server_records_a_client_reset_mid_answer_apart_from_errors(bare_server):
+    routes, state, port = bare_server
+    client = socket.create_connection(('127.0.0.1', port), timeout=10)
+    try:
+        client.sendall(b'GET /api/extensions/calendar/large HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n')
+        received = b''
+        while not received.partition(b'\r\n\r\n')[2]:   # the status line, headers and the first body bytes have arrived
+            chunk = client.recv(65536)
+            assert chunk, 'the server closed before writing its answer'
+            received += chunk
+        assert received.split(b'\r\n', 1)[0].endswith(b' 200 OK')
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))   # leave with a reset, as a killed tab does
+    finally:
+        client.close()
+    assert_left_cleanly(state, port, 'large')
+
+
+def test_host_server_records_a_client_gone_before_its_answer_apart_from_errors(bare_server):
+    routes, state, port = bare_server
+    entered, release = held_route(routes, 'held')
+    client = socket.create_connection(('127.0.0.1', port), timeout=10)
+    client.sendall(b'GET /api/extensions/calendar/held HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n')
+    assert entered.wait(10)
+    client.close()   # an ordinary close while the route is still working
+    release.set()
+    assert_left_cleanly(state, port, 'held')
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_host_server_records_a_closed_browser_apart_from_errors(bare_server, tmp_path, engine):
+    """The real engines: a page's fetch is still being answered when its browser closes."""
+    core_root()   # opt in like the other browser checks
+    from playwright.sync_api import sync_playwright
+    routes, state, port = bare_server
+    entered, release = held_route(routes, 'held')
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True, downloads_path=str(tmp_path / 'downloads'))
+        try:
+            page = browser.new_page()
+            page.goto(f'http://127.0.0.1:{port}/api/extensions/calendar/small')
+            page.evaluate("() => { fetch('/api/extensions/calendar/held'); }")
+            assert entered.wait(10)
+        finally:
+            browser.close()
+    release.set()
+    state['responses'].pop(0)   # the page itself
+    assert_left_cleanly(state, port, 'held')
+
+
+@pytest.mark.parametrize('failure, departure', [
+    (BrokenPipeError(errno.EPIPE, 'Broken pipe'), True),
+    (ConnectionResetError(errno.ECONNRESET, 'Connection reset by peer'), True),
+    (ConnectionAbortedError(errno.ECONNABORTED, 'Software caused connection abort'), True),
+    (ConnectionRefusedError(errno.ECONNREFUSED, 'Connection refused'), False),   # a ConnectionError, not a departure
+    (TimeoutError('timed out'), False),
+    (OSError(errno.EIO, 'Input/output error'), False),
+])
+def test_host_server_counts_only_client_departures_as_disconnects(bare_server, failure, departure):
+    from http.server import BaseHTTPRequestHandler as base
+    routes, state, port = bare_server
+    with patch.object(base, 'flush_headers', side_effect=failure):   # the headers' write is where the socket answers
+        with pytest.raises((http.client.HTTPException, OSError)):
+            get(port, 'small')
+        wait_for(lambda: state['disconnects'] or state['errors'])
+    assert get(port, 'small') == (200, b'{"ok": true}')   # the sibling request is served as usual
+    expected = [('GET', '/api/extensions/calendar/small', 200, type(failure).__name__)]
+    assert (state['disconnects'], state['errors']) == ((expected, []) if departure else ([], [repr(failure)]))
+
+
+@pytest.mark.parametrize('failure', [
+    RuntimeError('the route broke'),
+    ConnectionError('the provider connection failed'),   # raised by the route's own provider call, not by the client leaving
+    BrokenPipeError(errno.EPIPE, 'Broken pipe'),
+    ConnectionResetError(errno.ECONNRESET, 'Connection reset by peer'),
+], ids=lambda failure: type(failure).__name__)
+def test_host_server_keeps_route_failures_as_errors(bare_server, failure):
+    routes, state, port = bare_server
+
+    async def broken(request):
+        raise failure
+    routes['broken'] = broken
+    assert get(port, 'broken') == (500, json.dumps({'error': str(failure)}).encode())
+    assert state['errors'] == [repr(failure)] and state['disconnects'] == [] and state['responses'] == []
+
+
+def test_host_server_keeps_an_unwritable_answer_an_error(bare_server):
+    routes, state, port = bare_server
+
+    async def unserializable(request):
+        return Answer({'when': object()})
+    routes['unserializable'] = unserializable
+    status, body = get(port, 'unserializable')
+    assert status == 500 and 'not JSON serializable' in json.loads(body)['error']
+    assert len(state['errors']) == 1 and state['errors'][0].startswith('TypeError(') and state['disconnects'] == []
+
+
+@contextmanager
+def held_until_joined():
+    """A route held until serve()'s exit joins the very handler thread running it.
+
+    The route is still running when the exit starts, and resumes only when that exit waits for its thread, so an exit
+    that does not wait finds it unfinished every time. On leaving, the route is released and its thread joined in any
+    case, before the caller removes what the route writes to."""
+    entered, release, held = threading.Event(), threading.Event(), []
+    join = threading.Thread.join
+
+    def joining(thread, *args, **kwargs):
+        if any(thread is handler for handler in held):
+            release.set()   # serve()'s exit is waiting for this handler: let its route finish
+        return join(thread, *args, **kwargs)
+
+    def hold():
+        held.append(threading.current_thread())   # the route runs on its handler's thread
+        entered.set()
+        assert release.wait(10), "serve() never joined the handler running this route"
+    try:
+        with patch.object(threading.Thread, 'join', joining):
+            yield hold, entered
+    finally:
+        release.set()
+        for handler in held:
+            join(handler, 10)
+
+
+def answer_of(client):
+    received = b''
+    while chunk := client.recv(65536):
+        received += chunk
+    return received
+
+
+def test_serve_exit_waits_for_a_late_route_before_its_store_is_removed():
+    """The real draft route still writing the store when serve() exits: it completes first, then the store goes."""
+    sys.path.insert(0, TESTS)
+    from test_calendar_round2 import FakeAPI, RouteAPI
+    import routes
+    import tools
+    fake = FakeAPI()
+    ctx = tools.Context(fake)
+    try:
+        api = RouteAPI()
+        routes.register_routes(api, lambda: tools.Context(fake))
+        draft = api.routes['draft']
+        value = {'event': {'title': 'Late'}, 'inputs': {'title': 'Late'}}
+        payload = json.dumps({'draft': value}).encode()
+        with held_until_joined() as (hold, entered):
+            async def late_draft(request):
+                hold()
+                return await draft(request)
+            api.routes['draft'] = late_draft
+            with serve(Path(ctx.state_dir), api) as (state, _, port):
+                client = socket.create_connection(('127.0.0.1', port), timeout=10)
+                client.sendall(b'POST /api/extensions/calendar/draft HTTP/1.1\r\nHost: 127.0.0.1\r\n'
+                               b'Content-Length: %d\r\n\r\n%s' % (len(payload), payload))
+                assert entered.wait(10)
+            try:   # serve() has returned: the route has answered and recorded its outcome
+                assert [(name, code) for name, code, _ in state['responses']] == [('draft', 200)] and state['errors'] == []
+                assert answer_of(client).split(b'\r\n', 1)[0].endswith(b' 200 OK')
+            finally:
+                client.close()
+            assert tools.Context(fake).store.get_setting('widget_draft') == value
+    finally:
+        shutil.rmtree(ctx.state_dir)   # as every fixture does after serve(): nothing writes into it any more
+        sys.path.remove(TESTS)
+
+
+def test_serve_exit_keeps_a_late_route_failure_visible(tmp_path):
+    """A route that fails while serve() closes is in the errors before any fixture asserts them away."""
+    sys.path.insert(0, TESTS)
+    try:
+        with held_until_joined() as (hold, entered):
+            async def late_failure(request):
+                hold()
+                raise RuntimeError('failed while the server closed')
+            with serve(tmp_path, SimpleNamespace(routes={'late': late_failure})) as (state, _, port):
+                client = socket.create_connection(('127.0.0.1', port), timeout=10)
+                client.sendall(b'GET /api/extensions/calendar/late HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n')
+                assert entered.wait(10)
+            try:
+                assert state['errors'] == ["RuntimeError('failed while the server closed')"] and state['disconnects'] == []
+                assert answer_of(client).split(b'\r\n', 1)[0].endswith(b' 500 Internal Server Error')
+            finally:
+                client.close()
+    finally:
+        sys.path.remove(TESTS)
