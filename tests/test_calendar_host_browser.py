@@ -409,7 +409,7 @@ def test_google_sign_in_returns_through_the_host_page_and_only_then_counts(skill
             popup.goto(query['redirect_uri'][0] + '?' + urlencode({'code': 'test-code', 'state': query['state'][0]}))
             expect(popup.locator('[data-return-status]')).to_have_attribute('data-tone', 'ok')
             expect(popup.locator('[data-return-account]')).to_have_text('owner@example.test')
-            frame.get_by_role('button', name='Проверить').click()
+            # Polling may already have removed the pending-only button; the connection is the outcome to await.
             expect(frame.locator('.msg.ok')).to_contain_text('owner@example.test')
             expect(waiting).to_have_count(0)
             row = frame.locator('section.acc .acc-row')
