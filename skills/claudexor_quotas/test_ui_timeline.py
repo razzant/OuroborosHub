@@ -79,7 +79,7 @@ function click(env, key) {
 const text = (n) => n.textContent;
 function indexOf(root, cls) { return walk(root).findIndex((n) => String(n.className || '').split(/\s+/).includes(cls)); }
 (async () => {
-  const fx = JSON.parse(process.env.UI_FIXTURE);
+  const fx = JSON.parse(require('fs').readFileSync(process.env.UI_FIXTURE_FILE, 'utf8'));
   const mode = process.env.UI_CASE;
   // Answers by what the URL asks for, as the route does.
   function answer(url) {
@@ -504,18 +504,21 @@ function indexOf(root, cls) { return walk(root).findIndex((n) => String(n.classN
 
 
 @pytest.fixture(scope="module")
-def fixture_json(tmp_path_factory):
-    return json.dumps(_views(tmp_path_factory.mktemp("uitimeline")))
+def fixture_file(tmp_path_factory):
+    directory = tmp_path_factory.mktemp("uitimeline")
+    path = directory / "views.json"
+    path.write_text(json.dumps(_views(directory)), encoding="utf-8")
+    return str(path)
 
 
 @pytest.mark.parametrize("case", ["composition", "switch", "hidden_rows", "model", "model_ignored", "no_choice", "money",
                                   "captions", "idle", "how", "joint_unit"])
-def test_calm_timeline(fixture_json, case):
+def test_calm_timeline(fixture_file, case):
     node = _node()
     assert node is not None, "Node is required"
     harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
     widget = Path(os.environ.get("UI_WIDGET_PATH", Path(__file__).with_name("widget.js"))).resolve()
     result = subprocess.run([str(node), "-e", harness + NODE_UI], cwd=Path(__file__).parent,
-                            env={**os.environ, "WIDGET_PATH": str(widget), "UI_CASE": case, "UI_FIXTURE": fixture_json},
+                            env={**os.environ, "WIDGET_PATH": str(widget), "UI_CASE": case, "UI_FIXTURE_FILE": fixture_file},
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr

@@ -340,7 +340,7 @@
         // nothing, so it stays dimmed to the blink's low end (--blink-dim): the reduced pair of the blink is a still dim dot.
         ".btn-word-mark{display:inline-block;vertical-align:-3px;margin-right:var(--space-1)}",
         ".btn-word-short{position:relative}",
-        "@media(max-width:520.98px){.btn-word-short .btn-word-mark{margin-right:0}.btn-word-short .btn-word-body{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}}",
+        "@media(max-width:520.98px){.btn-word-short .btn-word-mark{margin-right:0}.btn-word-short .btn-word-body{position:absolute;left:0;top:0;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}}",
         "@media(prefers-reduced-motion:reduce){.btn-word,.btn-word-cap{transition:none}}",
         /* kit: mark tab */
         // The mark tab. What it is: a button that is one choice of a row, told by its mark: the model's mark (a drawing, or the initial where there is

@@ -40,7 +40,7 @@ const said = (env) => describedBy(env.root, classes(env.root, 'q-head')[0]);
 const noteOf = (r) => classes(r, 'wt-foot').filter((n) => !has(n, 'wt-foot-hold'))[0];
 
 (async () => {
-  const fx = JSON.parse(process.env.BARS_FIXTURE);
+  const fx = JSON.parse(require('fs').readFileSync(process.env.BARS_FIXTURE_FILE, 'utf8'));
   const only = (view) => view.reserve.summary.groups[0];
 
   // 1. One bar per account the limit applies to, as tall as its share left:
@@ -229,10 +229,12 @@ def test_real_widget_draws_each_share_to_scale(tmp_path):
     assert [s['left'] for s in shares] == [1, .5, .3, .25, .01, .0004, 0]
     widget_path = Path(__file__).with_name('widget.js').resolve()
     harness = test_quotas.NODE_WIDGET_MATRIX.split('(async () => {')[0]
+    fixture_file = tmp_path / 'bars.json'
+    fixture_file.write_text(json.dumps(fixture), encoding='utf-8')
     result = subprocess.run(
         [str(node), '-e', harness + NODE_BARS],
         cwd=widget_path.parent,
-        env={**dict(os.environ), 'WIDGET_PATH': str(widget_path), 'BARS_FIXTURE': json.dumps(fixture)},
+        env={**dict(os.environ), 'WIDGET_PATH': str(widget_path), 'BARS_FIXTURE_FILE': str(fixture_file)},
         text=True, capture_output=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -247,7 +249,8 @@ ROW_GEOMETRY = """() => {
     strip:rect(plate.querySelector('.q-bars')), bars:[...plate.querySelectorAll('.q-bars .q-bar')].map(rect),
     card:plate.querySelector('.q-card') ? rect(plate.querySelector('.q-card')) : null,
     keys:plate.querySelector('.q-keys') ? rect(plate.querySelector('.q-keys')) : null,
-    digits:[...plate.querySelectorAll('.q-bar')].some((b) => /\\d/.test(b.textContent))};
+    digits:[...plate.querySelectorAll('.q-bar')].some((b) => /\\d/.test(b.textContent)),
+    foldedNames:[...document.querySelectorAll('.btn-word-short .btn-word-body')].map(e => ({name:rect(e), button:rect(e.closest('button'))}))};
 }"""
 
 
@@ -277,6 +280,11 @@ def _assert_row_geometry(geometry):
     plate, strip = geometry['plate'], geometry['strip']
     assert len(geometry['bars']) == 41
     assert not geometry['digits'], 'no figure in a bar'
+    if geometry['width'] <= 520:
+        # The accessible-only word is positioned inside its control. Clipping
+        # alone can still contribute an offscreen box to WebKit's scroll width.
+        for item in geometry['foldedNames']:
+            assert item['button']['left'] <= item['name']['left'] <= item['name']['right'] <= item['button']['right'], item
 
     def separate(a, b):
         return (a['right'] <= b['left'] + tolerance or b['right'] <= a['left'] + tolerance

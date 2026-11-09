@@ -3,7 +3,7 @@
     "ouroboros"
   ],
   "description": "Claudexor quota dashboard and read-only quota_summary: sorted account bars, per-window and calibrated joint timelines, reported resets, measured pace, dated account resources and reversible row visibility. The optional granted context snapshot supplies the same figures at eligible host context tails; no routing, account changes or automatic provider refresh.",
-  "digest": "dea08f0616620db92304fdba4232bfc9ac4be20e7f260ceadeb04cbdb608458b",
+  "digest": "17b873460cf07cb350caa168ec0d637892a9e496527d73178365f3e36a7d6d7a",
   "name": "claudexor_quotas",
   "owner": "razzant",
   "schema_version": 2,

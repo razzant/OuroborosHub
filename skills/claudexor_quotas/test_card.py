@@ -94,7 +94,7 @@ const res = (env) => { const r = classes(env.root, 'q-res'); return r.length ? r
 const settle2 = async () => { for (let i = 0; i < 6; i++) await settle(); };
 
 (async () => {
-  const views = JSON.parse(process.env.CARD_VIEWS);
+  const views = JSON.parse(require('fs').readFileSync(process.env.CARD_VIEWS_FILE, 'utf8'));
   const both = views.both;
   // a view that carries the offers and the legacy counter at once: the card reads the offers alone
   both.groups[0].accounts.find((a) => a.key === 'codex:c2').quota.reset_credits = { state: 'current', count: both.legacy_count, observed_at: views.legacy.groups[0].accounts[1].quota.reset_credits.observed_at, source: 'fixture', label: '', reason: '' };
@@ -189,13 +189,15 @@ const settle2 = async () => { for (let i = 0; i < 6; i++) await settle(); };
 """
 
 
-def test_node_the_card_of_the_picked_account(base_view):
+def test_node_the_card_of_the_picked_account(base_view, tmp_path):
     # The views are built here, at the moment the card is drawn: an age the card says ("just now") is measured from this moment.
     node = _node()
     assert node is not None, "a Node runtime is required for widget tests"
     harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    fixture_file = tmp_path / "card-views.json"
+    fixture_file.write_text(json.dumps(_views(base_view)), encoding="utf-8")
     result = subprocess.run([str(node), "-e", harness + NODE_CARD], cwd=WIDGET.parent,
-                            env={**os.environ, "WIDGET_PATH": str(WIDGET), "CARD_VIEWS": json.dumps(_views(base_view))},
+                            env={**os.environ, "WIDGET_PATH": str(WIDGET), "CARD_VIEWS_FILE": str(fixture_file)},
                             capture_output=True, text=True, timeout=90, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
 
