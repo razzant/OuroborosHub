@@ -67,9 +67,14 @@ def test_model_cooldown_does_not_hold_another_pool(tmp_path, monkeypatch):
       const env = await boot(JSON.parse(process.env.ROUTE));
       const meterOf = (node) => classes(node, 'meter')[0];
       // 0.8.0: the selected account's diagnostics, one line per window.
-      for (const key of ['accounts', 'acct:claude:a', 'inspector-diag']) {
-        byFocus(env.root, key).listeners.click[0]({ stopPropagation() {} });
-      }
+      // The top account is already picked when the widget opens, so
+      // its row is pressed only when the pick is not there yet: a second press
+      // would clear it.
+      byFocus(env.root, 'accounts').listeners.click[0]({ stopPropagation() {} });
+      const row = byFocus(env.root, 'acct:claude:a');
+      if (row.getAttribute('aria-pressed') !== 'true') row.listeners.click[0]({ stopPropagation() {} });
+      assert.equal(byFocus(env.root, 'acct:claude:a').getAttribute('aria-pressed'), 'true');
+      byFocus(env.root, 'inspector-diag').listeners.click[0]({ stopPropagation() {} });
       const current = classes(env.root, 'diag-block').find((b) => /^Current windows/.test(b.textContent));
       const lines = classes(current, 'win-line');
       const scoped = lines.filter((l) => classes(l, 'win-tag')[0].title === 'scoped');
@@ -133,9 +138,14 @@ def test_two_scopes_that_print_one_name_are_two_pools(tmp_path, monkeypatch):
       const meterOf = (node) => classes(node, 'meter')[0];
       // 0.8.0: the selected account's diagnostics, one line per window, each
       // with its pool's chip.
-      for (const key of ['accounts', 'acct:claude:a', 'inspector-diag']) {
-        byFocus(env.root, key).listeners.click[0]({ stopPropagation() {} });
-      }
+      // The top account is already picked when the widget opens, so
+      // its row is pressed only when the pick is not there yet: a second press
+      // would clear it.
+      byFocus(env.root, 'accounts').listeners.click[0]({ stopPropagation() {} });
+      const row = byFocus(env.root, 'acct:claude:a');
+      if (row.getAttribute('aria-pressed') !== 'true') row.listeners.click[0]({ stopPropagation() {} });
+      assert.equal(byFocus(env.root, 'acct:claude:a').getAttribute('aria-pressed'), 'true');
+      byFocus(env.root, 'inspector-diag').listeners.click[0]({ stopPropagation() {} });
       const current = classes(env.root, 'diag-block').find((b) => /^Current windows/.test(b.textContent));
       const lines = classes(current, 'win-line');
       const wide = lines.filter((l) => classes(l, 'win-tag')[0].title === '7 day wide');

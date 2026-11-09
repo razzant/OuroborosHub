@@ -11,6 +11,7 @@ that only PluginAPI 2.1 hosts load; tests/memory_atlas checks its theme in a rea
 from __future__ import annotations
 
 import importlib.util
+import difflib
 import json
 import mimetypes
 import os
@@ -28,13 +29,13 @@ ROOT = Path(__file__).resolve().parents[1]
 LEGACY_REF = "3e71431e4fa790d7bea6169a83ad572bf7eb6f20"
 READY = {
     "cache_efficiency_snapshot": "#kpiRate",
-    "claudexor_quotas": ".quota-tile",
+    "claudexor_quotas": ".q-plate",
     "context-lens": ".row",
     "token-usage": ".to-total",
 }
 FOCUS = {
     "cache_efficiency_snapshot": "#chartCanvas",
-    "claudexor_quotas": "button",
+    'claudexor_quotas': '[data-focus="accounts"]',
     "context-lens": "select",
     "token-usage": "select",
 }
@@ -80,6 +81,23 @@ def theme_server():
     core = Path(configured).resolve()
     assert (core / "web/modules/widget_module.js").is_file()
     responses = json.loads((ROOT / "tests/fixtures/dashboard_theme_responses.json").read_text(encoding="utf-8"))
+    # The current quotas widget consumes a reserve projection as well as accounts.
+    accounts = responses["quota"]["groups"][0]["accounts"]
+    observed = datetime.now(timezone.utc).isoformat()
+    ends = (datetime.now(timezone.utc) + timedelta(days=3)).isoformat()
+    bars = [{"account": a["key"], "state": "current", "left": .7,
+             "at_limit": False, "restricted": False, "flags": [],
+             "observed_at": observed, "resets_at": ends} for a in accounts]
+    group = {"key": "claude|weekly|604800|-", "harness": "claude", "family": "Claude",
+             "label": "Weekly", "meaning": "weekly", "window_seconds": 604800,
+             "models": [], "model_scope": "none", "bars": bars, "slots": len(bars),
+             "measured": {"accounts": len(bars), "windows": .7 * len(bars), "average_remaining_pct": 70},
+             "observed": {"oldest_at": observed, "newest_at": observed},
+             "last_known": {"accounts": 0, "windows": 0}, "unknown": {"accounts": 0},
+             "coverage": {"measured": len(bars)}, "restrictions": {}}
+    responses["quota"]["reserve"] = {"summary": {"schema": 1, "groups": [group],
+        "reads": {"catalog": "ok", "accounts": "ok", "quota": "ok"}, "roster": "current",
+        "status_read_at": observed, "generated_at": observed}, "chart": None}
     cache = _load("_theme_cache_plugin", ROOT / "skills/cache_efficiency_snapshot/plugin.py")
     accounting = _load("_theme_token_accounting", ROOT / "skills/token-usage/accounting.py")
     snapshot = json.loads((ROOT / "skills/token-usage/fixtures/numeric_snapshot.json").read_text(encoding="utf-8"))
@@ -125,6 +143,9 @@ def theme_server():
                     return self.send(cache_data)
                 elif skill == "claudexor_quotas" and tail == "/quotas":
                     return self.send(responses["quota"])
+                elif skill == "claudexor_quotas" and tail == "/i18n":
+                    return self.send({"language": "", "revision": 0, "strings": {}, "en": json.loads(
+                        (ROOT / "skills/claudexor_quotas/strings_en.json").read_text())})
                 elif skill == "claudexor_quotas" and tail == "/preferences":
                     return self.send({"ok": True, "prefs": {}})
                 elif skill == "context-lens" and tail in ("/data", "/trajectory"):
@@ -138,7 +159,22 @@ def theme_server():
             return self.send({"error": "unmatched fixture " + path}, status=404)
 
         do_PUT = do_GET
-        do_POST = do_GET
+
+        def do_POST(self):
+            # Current classic mounts request a route lease before constructing
+            # the opaque frame. This fixture supplies the host response only;
+            # the real module still owns fetch relay, CSP and lease disposal.
+            path = urlsplit(self.path).path
+            if path.startswith("/api/widgets/asset-leases"):
+                payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
+                if path == "/api/widgets/asset-leases":
+                    assert payload.get("skill") in READY and payload.get("scope") == "routes"
+                    return self.send({"token": "theme-fixture", "base_url": "/api/widget-resources/theme-fixture/",
+                                      "renew_after": 3600, "expires_in": 7200})
+                if path == "/api/widgets/asset-leases/revoke":
+                    assert payload.get("token") == "theme-fixture"
+                    return self.send({"ok": True})
+            return self.do_GET()
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -165,7 +201,14 @@ def _exercise_selection(frame, skill):
         frame.locator('[data-mode="volume"]').click()
         frame.locator("#chartCanvas").press("ArrowRight")
     elif skill == "claudexor_quotas":
-        frame.locator('[data-focus="account-btn"]').click()
+        frame.locator('[data-focus="accounts"]').click()
+        # Accounts intentionally folds the plate. Capture the theme baseline
+        # only once that transition has ended, not during its two-frame start.
+        frame.wait_for_function("""() => {
+          const fold = document.querySelector('.acc-main');
+          return fold && fold.classList.contains('acc-shut') &&
+            !document.querySelector('.acc-run') && fold.getBoundingClientRect().height <= 1;
+        }""")
     elif skill == "context-lens":
         frame.locator('[data-focus="filter-model"]').select_option("vendor/model-a")
         frame.locator(".row").first.click()
@@ -227,7 +270,9 @@ def test_dashboard_theme_keeps_live_state_and_legacy_fallback(theme_server, brow
         assert page.evaluate("node => document.querySelector('iframe') === node", node)
         assert frame.evaluate("document.getElementById('root')===qaRoot && qaCanvases.every(c=>c.isConnected) && qaSvg.every(s=>s.isConnected)")
         assert frame.evaluate("document.activeElement===qaFocus && document.activeElement.value===qaValue")
-        assert frame.evaluate("document.body.innerText===qaText")
+        texts = frame.evaluate("({before:qaText,after:document.body.innerText})")
+        (evidence / f"{engine}-{skill}-{legacy}-{initial}-text.json").write_text(json.dumps(texts, ensure_ascii=False))
+        assert texts['before'] == texts['after'], '\n'.join(difflib.unified_diff(texts['before'].splitlines(), texts['after'].splitlines(), fromfile='before', tofile='after'))
         assert frame.evaluate("JSON.stringify(Array.from(document.querySelectorAll('details')).map(e=>e.open))===JSON.stringify(qaOpen)")
         assert frame.evaluate("getComputedStyle(document.documentElement).colorScheme") == ("dark" if legacy else other)
         after = frame.evaluate("qaCanvases.map(c=>c.toDataURL())")

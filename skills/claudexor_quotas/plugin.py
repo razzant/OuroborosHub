@@ -18,6 +18,12 @@ Every projection below preserves provenance: a facet that was not read or that
 failed is reported as such, never as an empty or zero value. The reserve
 overview, the chart and the model tool are one calculation (quota_summary.py)
 over the same status projection and the same history view.
+
+The widget speaks the language chosen in Ouroboros (the install-wide language): its English
+phrases are one file, strings_en.json, which this module registers with the host's translation
+generator (register_catalog, as the Telegram bridge does) and serves to the widget on the
+``i18n`` route together with whatever the install's translation memory holds for them. The
+skill ships no dictionary; with no language chosen, or no translation yet, the English stands.
 """
 
 from __future__ import annotations
@@ -163,12 +169,13 @@ def _request_json(
     path: str,
     method: str = "GET",
     timeout_sec: float = STATUS_TIMEOUT_SEC,
+    payload: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[Dict[str, Any]], str, int]:
     """Return one loopback JSON response without exposing host credentials,
     the error, and the HTTP status — 0 when the request never reached a host,
     NO_ANSWER_STATUS when it may have and no answer was read."""
     url = f"http://127.0.0.1:{port}{path}"
-    body = b"{}" if method == "POST" else None
+    body = json.dumps(payload).encode("utf-8") if payload is not None else (b"{}" if method == "POST" else None)
     headers = {"Accept": "application/json"}
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -1911,6 +1918,192 @@ def tool_answer(
     return answer
 
 
+# --- the widget's text -----------------------------------------------------------------------
+
+STRINGS_FILE = "strings_en.json"
+# The translation memory keeps these as ``code:quotas.ui.<key>`` (the core's own tables have other prefixes).
+I18N_PREFIX = "quotas.ui"
+I18N_NOTE = (
+    "Claudexor quota widget: limits, accounts, resets and cooldowns. Short labels (buttons, tabs, table headings, "
+    "legend) and sentences. Cursor, Claude Code, Codex, Antigravity stay as they are."
+)
+I18N_FALLBACK_TIMEOUT_SEC = 5.0
+_STRINGS_CACHE: Dict[str, Any] = {"stamp": None, "rows": {}}
+# Keys already reported as missing in this process, per language: reported once, not on every read.
+_REPORTED_MISSES: Dict[str, set] = {}
+
+
+def clean_strings(raw: Any) -> Dict[str, Any]:
+    """The phrases of a strings file that can be used: key -> text, or {one, other} for a phrase that
+    counts (its {n}). Anything else is left out."""
+    rows: Dict[str, Any] = {}
+    if not isinstance(raw, dict):
+        return rows
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key:
+            continue
+        if isinstance(value, str) and value.strip():
+            rows[key] = value
+        elif isinstance(value, dict) and isinstance(value.get("other"), str) and value["other"].strip():
+            rows[key] = {form: text for form, text in value.items() if form in ("one", "other") and isinstance(text, str)}
+    return rows
+
+
+def english_strings(path: Optional[Path] = None) -> Dict[str, Any]:
+    """The widget's English phrases: strings_en.json beside this file, the one source of them (the widget
+    gets them from the i18n route, the host's translation generator from register_catalog). An unreadable
+    file is no phrases, never an exception."""
+    target = Path(path) if path else Path(__file__).with_name(STRINGS_FILE)
+    try:
+        stat = target.stat()
+        stamp = (str(target), stat.st_mtime_ns, stat.st_size)
+        if _STRINGS_CACHE["stamp"] == stamp:
+            return _STRINGS_CACHE["rows"]
+        rows = clean_strings(json.loads(target.read_text(encoding="utf-8")))
+    except Exception:
+        return {}
+    _STRINGS_CACHE.update(stamp=stamp, rows=rows)
+    return rows
+
+
+def _english_text(value: Any) -> str:
+    return value if isinstance(value, str) else str((value or {}).get("other") or "")
+
+
+def catalog_rows() -> Dict[str, str]:
+    """key -> English sentence, as the translation generator takes a table: a phrase that counts is given in
+    its general form ({n} accounts) and comes back as one form for each plural category of the language."""
+    return {key: _english_text(value) for key, value in english_strings().items()}
+
+
+def _host_i18n() -> Tuple[Any, Any, Any]:
+    """The host's translation memory, generator and English test — Nones outside the host (an older host, a test)."""
+    try:
+        from ouroboros import i18n_memory as memory
+        from ouroboros import ui_translation as translation
+        from ouroboros.ui_language import is_english
+        return memory, translation, is_english
+    except Exception:
+        return None, None, None
+
+
+def register_catalog() -> bool:
+    """Hand the English table to the host's generator, so a language chosen at any time gets these rows in its
+    first batch (a table registered after the choice is queued at once). Best effort: the widget does not need it."""
+    _memory, translation, _is_english = _host_i18n()
+    if translation is None:
+        return False
+    try:
+        translation.register_catalog(I18N_PREFIX, catalog_rows, I18N_NOTE)
+    except Exception:
+        return False
+    return True
+
+
+def _from_entries(entries: Any, english: Dict[str, Any]) -> Dict[str, Any]:
+    """Our keys' translations out of a memory's entries: a text, or the forms of a phrase that counts."""
+    found: Dict[str, Any] = {}
+    if not isinstance(entries, dict):
+        return found
+    prefix = f"code:{I18N_PREFIX}."
+    for key in english:
+        entry = entries.get(prefix + key)
+        if not isinstance(entry, dict):
+            continue
+        if isinstance(entry.get("text"), str):
+            found[key] = entry["text"]
+        elif isinstance(entry.get("forms"), dict):
+            forms = {str(cat): text for cat, text in entry["forms"].items() if isinstance(text, str)}
+            if forms:
+                found[key] = {"forms": forms}
+    return found
+
+
+def _missing_items(tag: str, english: Dict[str, Any], have: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The keys not translated yet and not yet reported in this process, as the host's miss queue takes them."""
+    seen = _REPORTED_MISSES.setdefault(tag, set())
+    fresh = [key for key in english if key not in have and key not in seen]
+    return [{"key": f"code:{I18N_PREFIX}.{key}",
+             "context": {"source": _english_text(english[key]), "table": I18N_PREFIX, "role": "quotas"}}
+            for key in fresh]
+
+
+def _accept_missing(tag: str, items: List[Dict[str, Any]], answer: Any) -> bool:
+    # The host returns a count, not accepted IDs. Only a fully accepted batch can
+    # be deduplicated safely; partial/rejected batches remain eligible for retry.
+    accepted = answer.get("accepted") if isinstance(answer, dict) else None
+    if type(accepted) is int and accepted == len(items):
+        prefix = f"code:{I18N_PREFIX}."
+        _REPORTED_MISSES.setdefault(tag, set()).update(item["key"][len(prefix):] for item in items)
+    return type(accepted) is int and accepted > 0
+
+
+def _view_from_memory(view: Dict[str, Any], english: Dict[str, Any], root: Path,
+                      memory: Any, translation: Any, is_english: Any) -> None:
+    tag = memory.current_language()
+    if not tag or is_english(tag):
+        return
+    doc = memory.cached_memory(root, tag) or {}
+    strings = _from_entries(doc.get("entries"), english)
+    view.update(language=tag, revision=int(doc.get("revision") or 0),
+                plural_select=doc.get("plural_select"), strings=strings)
+    items = _missing_items(tag, english, strings)
+    woke = False
+    for start in range(0, len(items), 200):
+        batch = items[start:start + 200]
+        woke = _accept_missing(tag, batch, memory.record_missing(root, tag, batch)) or woke
+    if woke:
+        translation.on_language_event("missing", root, tag)
+
+
+def _view_from_loopback(view: Dict[str, Any], english: Dict[str, Any], port: int) -> None:
+    """Without the host's modules: the same memory through the gateway's own routes (GET /api/ui/i18n,
+    POST /api/ui/i18n/missing). Loopback needs no password."""
+    payload, _error, _status = _request_json(port, "/api/ui/i18n", timeout_sec=I18N_FALLBACK_TIMEOUT_SEC)
+    if not payload:
+        return
+    tag = str(payload.get("language") or "")
+    if not tag or payload.get("english") or tag.lower().split("-")[0] == "en":
+        return
+    strings = _from_entries(payload.get("entries"), english)
+    view.update(language=tag, revision=int(payload.get("revision") or 0),
+                plural_select=payload.get("plural_select"), strings=strings)
+    items = _missing_items(tag, english, strings)
+    for start in range(0, len(items), 200):
+        batch = items[start:start + 200]
+        answer, error, status = _request_json(port, "/api/ui/i18n/missing", method="POST",
+                                              timeout_sec=I18N_FALLBACK_TIMEOUT_SEC,
+                                              payload={"language": tag, "items": batch})
+        if not error and 200 <= status < 300:
+            _accept_missing(tag, batch, answer)
+
+
+def i18n_view(api: Any) -> Dict[str, Any]:
+    """The widget's text table: ``en`` — the English of every phrase (strings_en.json) — always, and, when the
+    install has chosen a language other than English, ``strings`` — the translation memory's rendering of our
+    keys (a text, or {forms} for a phrase that counts) — with the language, the memory's revision and its plural
+    map. A language with no translation yet has empty ``strings``: English, and the misses are queued."""
+    english = english_strings()
+    view: Dict[str, Any] = {"language": "", "revision": 0, "plural_select": None, "en": english, "strings": {}}
+    try:
+        info = api.get_runtime_info() or {}
+    except Exception:
+        info = {}
+    data_dir = str(info.get("data_dir") or "") if isinstance(info, dict) else ""
+    if not data_dir:  # not the host's own runtime: nothing to read a language from
+        return view
+    try:
+        memory, translation, is_english = _host_i18n()
+        if memory is not None:
+            _view_from_memory(view, english, Path(data_dir), memory, translation, is_english)
+        else:
+            _view_from_loopback(view, english, _server_port(api))
+    except Exception as exc:
+        api.log("error", f"claudexor i18n read failed: {type(exc).__name__}: {exc}")
+        return {"language": "", "revision": 0, "plural_select": None, "en": english, "strings": {}}
+    return view
+
+
 def _query(request: Any, name: str) -> str:
     params = getattr(request, "query_params", None)
     if params is None and isinstance(request, dict):
@@ -1952,6 +2145,10 @@ def register(api: Any) -> None:
         # widget draws nothing from them and saves none; they are still sent,
         # and the prefs route still keeps them, for an older widget.
         view["prefs"] = read_prefs(api)
+        if _query(request, "text") == "1":
+            # The widget whose text table did not come by the i18n route asks for it with the reading, so the numbers
+            # are never held back for the words.
+            view["text"] = i18n_view(api)
         horizon = _query(request, "horizon")
         try:
             view["reserve"] = reserve_view(
@@ -2110,6 +2307,11 @@ def register(api: Any) -> None:
     def chip_route(_request: Any) -> Dict[str, Any]:
         return quota_chip.chip(quotas_route({"query_params": {"reuse": "1", "chart": "0"}}))
 
+    def i18n_route(_request: Any) -> Dict[str, Any]:
+        return i18n_view(api)
+
+    register_catalog()
+    api.register_route("i18n", i18n_route, methods=("GET",))
     api.register_route("chip", chip_route, methods=("GET",))
     api.register_route("quotas", quotas_route, methods=("GET",))
     api.register_route("refresh", refresh_route, methods=("POST",))

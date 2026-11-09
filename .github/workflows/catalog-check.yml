@@ -127,6 +127,17 @@ jobs:
           version=$(python -c "import json; print(json.load(open('skills/chrome_browser/pins.json'))['npm']['@playwright/mcp']['version'])")
           npm install --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/chrome-browser-npm" "@playwright/mcp@$version"
           echo "OUROBOROS_CHROME_NODE_MODULES=$RUNNER_TEMP/chrome-browser-npm/node_modules" >> "$GITHUB_ENV"
+      # The quota widget's Node harnesses and real-browser cases: Node and Playwright's Chromium and WebKit. Without them
+      # its tests fail (QUOTAS_REQUIRE_RUNTIME in scripts/ci_checks.py); they never skip.
+      - uses: actions/setup-node@v4
+        if: matrix.suite == 'claudexor-quotas'
+        with:
+          node-version: '24'
+      - name: Install Playwright and its browsers for claudexor-quotas
+        if: matrix.suite == 'claudexor-quotas'
+        run: |
+          python -m pip install 'playwright>=1.50,<2'
+          python -m playwright install --with-deps chromium webkit
       - name: Run the selected hosted suite with its runtime dependencies
         env:
           SUITE: ${{ matrix.suite }}

@@ -51,7 +51,7 @@ class SelectionTests(unittest.TestCase):
             'smart_lists': {'smart-lists', 'widgets'}, 'gigasearch': {'gigasearch'},
             'cache_efficiency_snapshot': {'cache-efficiency', 'widgets'}, 'calendar': {'calendar-skill', 'widgets'},
             'slack-bridge': {'slack-bridge'}, 'telegram-bot': {'telegram-bot'}, 'keenable': {'keenable'},
-            'perplexity': {'perplexity'}, '2gis': {'2gis'}, 'whoop-health': {'whoop-health'}, 'claudexor_quotas': {'widgets'},
+            'perplexity': {'perplexity'}, '2gis': {'2gis'}, 'whoop-health': {'whoop-health'}, 'claudexor_quotas': {'widgets', 'claudexor-quotas'},
             'context-lens': {'widgets'}, 'memory-atlas': {'memory-atlas', 'widgets'}, 'token-usage': {'widgets'},
             'office_reader': {'office-reader'}, 'science_search': {'science-search'},
             'science_digest': {'science-digest'},

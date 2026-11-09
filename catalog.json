@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/4cdc8c81d29f19a825faa29deb4e688d2f5f167b",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/a25a77fbe150265bb57220efd2f24ccb41b1e97d",
   "schema_version": 1,
   "skills": [
     {
@@ -925,13 +925,18 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "94d5d91268ae349f4a8df694f006a5b02dec022e509188cd58650f81631ba18e",
-          "size": 79807
+          "sha256": "67998ede3e214b47b2091ca28d10e15835b9833155d662ce48eaf5a637f04854",
+          "size": 87712
+        },
+        {
+          "path": "conftest.py",
+          "sha256": "d2e6a459c5c541ccfaad73c372447c216d3bc849b580fdcaff4571830385c36a",
+          "size": 7774
         },
         {
           "path": "plugin.py",
-          "sha256": "05adffa1108c178506c685594ced4a0fcfa509fd30f038574f6d7528008c74a6",
-          "size": 96330
+          "sha256": "22ba2ab63b72762121e033b38ad96971b60caa940082670b7845b5a2fe704863",
+          "size": 106280
         },
         {
           "path": "quota_analytics.py",
@@ -940,8 +945,8 @@
         },
         {
           "path": "quota_chip.py",
-          "sha256": "cc91359851dfe49c7857e99e33ba7a806f8ecb0aeebe343788bd4b74a409664c",
-          "size": 2213
+          "sha256": "71645b880e4f14f83f2acab6558c4f7d00c2b84231cb25bee5775c11fb63c958",
+          "size": 2864
         },
         {
           "path": "quota_context.py",
@@ -974,24 +979,49 @@
           "size": 159900
         },
         {
+          "path": "strings_en.json",
+          "sha256": "676e8d92d08c24512b36415f40224dd2d144fc46a4aa9c707dca8f838941bc80",
+          "size": 40272
+        },
+        {
+          "path": "test_account_list.py",
+          "sha256": "cc50ab45a3193e02bb9151d517f188b7b48578ecde8e37bc45030b15f67c5c93",
+          "size": 14226
+        },
+        {
           "path": "test_backend_repair.py",
           "sha256": "ea95c7200cf887c8eb65d9fedd18b1988fcf123c61a7c95c1951d8f22b5cb127",
           "size": 9447
         },
         {
+          "path": "test_bar_pick.py",
+          "sha256": "2adb20203df8deac081cf45eb5b6ee7a2f4390d6f3fbfeafad0191af5412e4b2",
+          "size": 17225
+        },
+        {
           "path": "test_bars.py",
-          "sha256": "87d109aeb7af9ea272af8f72911e5e0514f8a1b5c13968653cdcea0169b6f2ad",
-          "size": 16053
+          "sha256": "cfc501ed996d0be3a5bfe9846d9fa6ad25b48d28b6a21f28f1bccc9f6408a21b",
+          "size": 20950
+        },
+        {
+          "path": "test_card.py",
+          "sha256": "61bf712cae137aab7b1a76bc04d80fbca8b34c2069f43492d8c7b3e83592b863",
+          "size": 18082
+        },
+        {
+          "path": "test_chart_polish.py",
+          "sha256": "1e5d2168b8e47eaa4a0368389f6b366f799bb7a878245ccdd696b070a5171074",
+          "size": 22096
         },
         {
           "path": "test_chip.py",
-          "sha256": "c2e89e8ad4e8b487330cff5867accefcc91577742c34f27e5488d0912f713c2d",
-          "size": 2779
+          "sha256": "fd5925b3ee6c951bd1f95628718def2629c62c027fb57138e70e2625c4935af8",
+          "size": 3597
         },
         {
           "path": "test_clarity.py",
-          "sha256": "862779db2ff2cd524cb42c28ec9a4db26c0a5a1aa0ea613ebd1c38140ffd6839",
-          "size": 9288
+          "sha256": "c4a431e5effd5d67ba8b3551d2e486243782c528c9cf5d3aa0e2a18535b7c9b1",
+          "size": 10954
         },
         {
           "path": "test_coherent_history.py",
@@ -1000,8 +1030,13 @@
         },
         {
           "path": "test_constraint_freshness.py",
-          "sha256": "eaae58f46675c46dace5aa8a222397102731d5c5c04d96ea30af85b8ff2430ce",
-          "size": 21302
+          "sha256": "b8165c51013c5a575d0428d7413841b6e22e64f8088e167b618d83f210895205",
+          "size": 22322
+        },
+        {
+          "path": "test_family_tabs.py",
+          "sha256": "1779f4de2386d3e2d7b2eb6e41e0d191f47aea0ba38fb03bf3e586f7fae5e424",
+          "size": 17558
         },
         {
           "path": "test_history_boundaries.py",
@@ -1010,13 +1045,18 @@
         },
         {
           "path": "test_history_widget.py",
-          "sha256": "110c5e5a6e838bccb933b81d1e7ab10d13f25ad733c26208d837eeffc68a5171",
-          "size": 9511
+          "sha256": "ebf42af9fe35a953382d07943a5cd8474b7a4b9bb6e72ea5b3a15b4fcfd0e222",
+          "size": 10774
+        },
+        {
+          "path": "test_i18n.py",
+          "sha256": "b67119cf77cc60d3336cc526420177b2169642f36aba63de284400bc7d68fabd",
+          "size": 45505
         },
         {
           "path": "test_inspector_placement.py",
-          "sha256": "751f1e484ffd110acedcd28c77f445886dc71aea3e5206677f23ea7210eb9267",
-          "size": 18120
+          "sha256": "61287f9ef83dbba9210bb5561cf41f2854ab64f1d5aeb517620cc298be801af0",
+          "size": 21744
         },
         {
           "path": "test_joint_math.py",
@@ -1040,13 +1080,13 @@
         },
         {
           "path": "test_model_holds.py",
-          "sha256": "fa990bec4a31fdcccaff519a653abfb989114116c3e27ee42b0904d4188a2b2a",
-          "size": 35641
+          "sha256": "2c434e303e1aebb71f119bb09f5c93d16f5e30f152b5dfbaff9fe2b19b86582d",
+          "size": 37219
         },
         {
           "path": "test_order_focus.py",
-          "sha256": "1e6e5c5d615909433713a09d1a99a16426ead83a77668db618b3f3d04ce47406",
-          "size": 29138
+          "sha256": "b8057f4f880aad2733f18574931182bad47fa7cfacea4c8d2d50d08a37a242ce",
+          "size": 32643
         },
         {
           "path": "test_passive_quota_read.py",
@@ -1055,38 +1095,38 @@
         },
         {
           "path": "test_passive_widget.py",
-          "sha256": "8b257a2f67881d0b7dd35cfa0a7160e90691c37a11f6afadeffd6d94c5a35652",
-          "size": 6674
+          "sha256": "c5cc44e90c98f5d3086776b1fb48bd8d260328877940c169ad07a4ff99a034d5",
+          "size": 7883
         },
         {
           "path": "test_quotas.py",
-          "sha256": "537f4a089cb83c8b4b94bf6ccb9242e5821ebd9f16273f60bfb679e1ec9d3859",
-          "size": 79320
+          "sha256": "6d3b35cda4cc0c1e4d0a75fb468e376f05c6c063c0ce1c79408746e7d29021b0",
+          "size": 83302
         },
         {
           "path": "test_r3.py",
-          "sha256": "583afa577d3d7094694058f049717826a5b5eda0646fbc350794d6e983e55b99",
-          "size": 67059
+          "sha256": "2688bb7626035d3d7242259e2942e4f06f8c7ede3d3a948834c819b978b9220c",
+          "size": 68065
         },
         {
           "path": "test_repair_r2.py",
-          "sha256": "552c6353282c973456fca3ac20390adf9a197583441b8b959e132334933a062d",
-          "size": 18211
+          "sha256": "24218dd6da3202cdb0625ba30cfc3e1adb3f2e8d1773bc80f806136a0af5821f",
+          "size": 17565
         },
         {
           "path": "test_repair_r3.py",
-          "sha256": "0d74640f493fdd7e250a8bdfc9f3dded3338b7f4587de498213885a19d052d58",
-          "size": 25357
+          "sha256": "1ae6edef4ac55223be5af27c0bcd0c981982df8a72fe40eda00852b81cbb10d6",
+          "size": 25936
         },
         {
           "path": "test_repair_r4.py",
-          "sha256": "b39de1ef67ecd4a9f6c700fdd7636f7de2a4355fc623b374dd9e0e52571d5bf3",
-          "size": 20205
+          "sha256": "8c636e9f70d1cd99d9f0a73d8ab1876d03cb4161625135a6f69d2272f2b01c5d",
+          "size": 20848
         },
         {
           "path": "test_reserve.py",
-          "sha256": "cad6099a564584a90b8c79238f41e70b1865eaf5a3c9d1635bf622ef8a891f77",
-          "size": 223000
+          "sha256": "5b944ae28740b1dd94f18977e60b8bb0691231400bb12d9efa0f44ef2f741b9d",
+          "size": 228861
         },
         {
           "path": "test_reset_credits.py",
@@ -1095,13 +1135,13 @@
         },
         {
           "path": "test_robust_widget.py",
-          "sha256": "fd7d7d755463be75283ed92648ea00bbebc956a7056c9be987e02c5d8fd34487",
-          "size": 13449
+          "sha256": "fb165dfef6fcd0443adfb78ac2ae4aae30458e9d196cb503159a967e4df6e202",
+          "size": 13871
         },
         {
           "path": "test_scope_identity.py",
-          "sha256": "f84d33ccee5d45533ede85a17afe6c77f3c57b5e7e2797472aead402b2f52a42",
-          "size": 10297
+          "sha256": "951eb422fc47ae7de40de3b031090f04a79d3629260fd28ea1fe70e9af5d0a7e",
+          "size": 11169
         },
         {
           "path": "test_scope_resources_context.py",
@@ -1110,8 +1150,13 @@
         },
         {
           "path": "test_semantic_repair.py",
-          "sha256": "4038885dd60251517795b74c694b654e839369dad47525ce33edefe37da8c56e",
-          "size": 14348
+          "sha256": "c65d2b961845a0d46701b3ce8505f2d26120b4bf0ed54bdc0850dfa1e96aad4a",
+          "size": 14350
+        },
+        {
+          "path": "test_shell_card.py",
+          "sha256": "e664d373be021e9118123c9bb1fa486c94ea7985553ecd9606ce10cd414bec3e",
+          "size": 7745
         },
         {
           "path": "test_steady_snapshot_text.py",
@@ -1119,20 +1164,35 @@
           "size": 3840
         },
         {
+          "path": "test_style_canons.py",
+          "sha256": "62111ca74eaa57a76037a062433543db6aa419d5dc56204ce4851985d5a5a475",
+          "size": 31453
+        },
+        {
+          "path": "test_text_actions.py",
+          "sha256": "e8cf4196e5e3da55264d31a9784eaddd421ba791478dcc6a2128de20bde7b6d2",
+          "size": 64006
+        },
+        {
           "path": "test_ui_timeline.py",
-          "sha256": "7cd9a8121f0e098738e6da7fda6fb06fc6c93e9ba16c5f37b6496c82b1c44498",
-          "size": 16448
+          "sha256": "fc1a0f3201b8ce2a5a2c5123a1814b6cabb3b74b1d5bf2f61438cfa401566fe0",
+          "size": 32420
+        },
+        {
+          "path": "test_window_tabs.py",
+          "sha256": "79ff4fd8ac14c803f50339245f88f76b8cefb50a1fef0de0515e2a5be441d35c",
+          "size": 46040
         },
         {
           "path": "widget.js",
-          "sha256": "0e6d43b9745d50307c75f33d78be4c3f32150413eca0cce812d9c0f4fd698266",
-          "size": 289731
+          "sha256": "bf81576fb760d95f3f4888ce8df723b3ca5de5a98ca9369f8870ad569d10afdd",
+          "size": 511184
         }
       ],
       "name": "claudexor_quotas",
       "slug": "claudexor_quotas",
       "type": "extension",
-      "version": "0.12.2",
+      "version": "0.13.0",
       "when_to_use": "The owner wants quota windows, resets and remaining reserve of the authorized Claudexor accounts; or, before choosing executors, the model wants measured reserve by family and limit. Advisory only: never a dispatch guarantee or a pin change."
     },
     {

@@ -28,6 +28,7 @@ function bootControlled(opts = {}) {
   const errors = [];
   const window = {
     fetch(url, init = {}) {
+      if (isI18n(url)) return Promise.resolve(response(I18N_ANSWER));
       const req = { url, method: init.method || 'GET', init };
       req.promise = new Promise((resolve, reject) => { req.resolve = resolve; req.reject = reject; });
       requests.push(req);
@@ -41,9 +42,12 @@ function bootControlled(opts = {}) {
     __ouroWidgetOnDispose(fn) { disposeHooks.push(fn); },
   };
   const quietConsole = { error: (...a) => errors.push(a.map(String).join(' ')), log() {}, warn() {} };
+  // The widget calls the bare setTimeout/clearTimeout too (the card's pin and leave timers, the landing hold), as it does in a
+  // browser frame; the sandbox hands them to the window's own, so a test that swaps window.setTimeout still steers them.
   const context = vm.createContext({
     window, document: made.document, console: quietConsole, Date, Math, Object, Array, String,
     Number, RegExp, Promise, setImmediate, JSON,
+    setTimeout: (cb, ms) => window.setTimeout(cb, ms), clearTimeout: (id) => window.clearTimeout(id),
   });
   vm.runInContext(instrumentedWidgetSource, context, { filename: 'widget.js' });
   return {

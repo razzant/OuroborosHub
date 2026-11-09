@@ -24,6 +24,11 @@ SUITES = {
                            'token-usage', 'smart_lists', 'calendar'],
                 'tests': ['tests/test_widget_theme_contracts.py', 'tests/test_dashboard_theme_browser.py'],
                 'shared': ['tests/fixtures/dashboard_theme_responses.json']},
+    # The quota widget's whole payload suite: its Node harnesses and its real Chromium and WebKit cases. catalog-check.yml
+    # gives it Node and Playwright's browsers; QUOTAS_REQUIRE_RUNTIME turns a skip for want of them into a failure.
+    'claudexor-quotas': {'skills': ['claudexor_quotas'], 'tests': ['skills/claudexor_quotas'],
+                         'dependencies': ['playwright>=1.50,<2'], 'cwd': 'skills/claudexor_quotas',
+                         'env': {'QUOTAS_REQUIRE_RUNTIME': '1'}},
     # The whole suite, real host and browsers included: catalog-check.yml gives this suite the pinned core (ATLAS_CORE),
     # its runtime and Playwright's browsers. Without them the suite stops with an error; it never skips.
     'memory-atlas': {'skills': ['memory-atlas'], 'tests': ['tests/memory_atlas'], 'dependencies': ['starlette']},

@@ -384,8 +384,18 @@ NODE_FRESHNESS = r"""
     const env = await boot(view);
     assert.equal(classes(env.root,'banner').length,0,name);
     click(env,'accounts');
-    click(env,'acct:'+view.groups[0].accounts[0].key);
-    const inspector = classes(env.root,'inspector')[0].textContent;
+    // The window on screen picks its top account from the first drawing (pickDecide), so this row is picked already and its card stands.
+    // Rule: a press on a row of the list picks that row's account (as its bar does) and shuts the list; the row no
+    // longer lets the pick go. Pressing the picked row therefore keeps the pick and its card, and the card is the one the test reads.
+    const rowKey = 'acct:'+view.groups[0].accounts[0].key;
+    assert.equal(byFocus(env.root,rowKey).getAttribute('aria-pressed'),'true',name+': the top account is picked already');
+    assert.equal(classes(env.root,'inspector').length,1,name+': its card stands already');
+    click(env,rowKey);
+    assert.equal(byFocus(env.root,'accounts').getAttribute('aria-pressed'),'false',name+': a press on a row shuts the list');
+    // Back on the plate, the picked account's card stands beside the bars; its full details are under its one button.
+    assert.equal(classes(env.root,'q-card').length,1,name+': the first press keeps the pick, its card stands');
+    click(env,'inspector-details');
+    const inspector = classes(env.root,'q-card')[0].textContent;
     const credits = classes(env.root,'account-credits')[0].textContent;
     assert.match(inspector,/its window reset after the last reading/,name);
     if (name === 'explicit') {

@@ -54,3 +54,21 @@ def test_chip_text_is_bounded_and_title_retains_all_families():
     result = chip({"ok": True, "reserve": {"summary": {"groups": groups}}})
     assert len(result["text"]) <= 24
     assert all(group["family"] in result["title"] for group in groups)
+
+
+def test_the_reset_in_the_chip_title_is_in_the_zone_of_this_machine(monkeypatch):
+    import time
+    from quota_chip import local_reset
+    monkeypatch.setenv("TZ", "Asia/Tokyo")
+    time.tzset()
+    try:
+        assert local_reset("2026-10-30T14:00:00.123456Z") == "2026-10-30 23:00 JST"
+        assert local_reset("2026-10-30T14:00:00+00:00") == "2026-10-30 23:00 JST"
+        assert local_reset("2026-10-18") == "2026-10-18"
+        assert local_reset("not a time") == "not a time"
+        assert local_reset(None) == "unknown"
+        # A moment the zone cannot hold (a "forever" marker in the year 9999 east of UTC) stays as it came: the chip is drawn, not dropped.
+        assert local_reset("9999-12-31T23:59:59Z") == "9999-12-31T23:59:59Z"
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()

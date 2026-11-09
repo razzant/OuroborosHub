@@ -254,6 +254,14 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/sla
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/telegram-bot/tests
 ```
 
+The `claudexor-quotas` suite needs Node 24, pytest, Playwright and its Chromium
+and WebKit builds. `OUROBOROSHUB_NODE` selects an existing Node executable;
+`PLAYWRIGHT_BROWSERS_PATH` selects the browser cache. Run with
+`QUOTAS_REQUIRE_RUNTIME=1 python -m pytest skills/claudexor_quotas` to fail on
+missing runtimes. `QUOTAS_RU_JSON` optionally supplies an installation-generated
+Russian translation memory for additional checks; CI covers translation behavior
+with synthetic memory, and skips only those optional memory-file checks.
+
 Telegram's opt-in real-host/browser qualification lives in
 [`tests/telegram_group_discovery`](tests/telegram_group_discovery/README.md).
 Set `TG_DISCOVERY_CORE`, `TG_DISCOVERY_VENV` and `PLAYWRIGHT_BROWSERS_PATH`, then

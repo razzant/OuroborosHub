@@ -220,9 +220,21 @@ NODE_R4 = r"""
   const section = process.env.R4_SECTION;
   const nowLabels = (env) => walk(env.root).filter((n) => n.getAttribute('class') === 'axis-text now')
     .map((n) => n.textContent);
-  // 0.8.0: the About button carries the pip that says a facet did not answer.
-  const problem = (env) => /\bhas-problem\b/.test(String(byFocus(env.root, 'about').className));
+  // About wears no pip and no colour (the kit's text action): the system's trouble is the note About's panel opens with, said
+  // only when the system is in trouble. Opened and closed again, the screen is as it was.
+  const problem = (env) => {
+    click(env, 'about');
+    const said = /Each facet the daemon did not answer/.test(env.root.textContent);
+    click(env, 'about');
+    return said;
+  };
   const text = (env) => env.root.textContent;
+  // The widget picks its top account at the opening: its card stands already, and a press on its row would let the pick go. So an account is pressed
+  // only when it is not the picked one yet.
+  const pick = (env, key) => {
+    if (byFocus(env.root, key).getAttribute('aria-pressed') !== 'true') click(env, key);
+    assert.equal(byFocus(env.root, key).getAttribute('aria-pressed'), 'true', key + ' is picked');
+  };
   let env;
 
   if (section === 'draw') {
@@ -286,7 +298,7 @@ NODE_R4 = r"""
     env = bootClock();
     await respond(env, fx.k1);
     click(env, 'accounts');
-    click(env, 'acct:codex:a');
+    pick(env, 'acct:codex:a');
     await settle();
     assert.match(text(env), /Verified live/);
     assert.match(text(env), /next up/);
@@ -341,7 +353,7 @@ NODE_R4 = r"""
     // that reported it.
     env = bootClock();
     await respond(env, fx.k2);
-    click(env, 'acct:codex:c');
+    pick(env, 'acct:codex:c');
     assert.match(text(env), /Cooling down/);
     env.clock.shift = 2 * 3600 * 1000;
     env.poll();
@@ -350,7 +362,7 @@ NODE_R4 = r"""
     assert.match(text(env), /No fresh reading — the cooldown last reported has ended/);
     env = bootClock();
     await respond(env, fx.k2);
-    click(env, 'acct:codex:c');
+    pick(env, 'acct:codex:c');
     env.clock.shift = 30 * 60 * 1000;
     env.poll();
     await respond(env, 'bad gateway', 502);

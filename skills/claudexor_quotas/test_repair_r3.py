@@ -326,6 +326,7 @@ function bootClock() {
   }
   const window = {
     fetch(url, init = {}) {
+      if (isI18n(url)) return Promise.resolve(response(I18N_ANSWER));
       const req = { url, method: init.method || 'GET', init };
       req.promise = new Promise((resolve, reject) => { req.resolve = resolve; req.reject = reject; });
       requests.push(req);
@@ -339,9 +340,12 @@ function bootClock() {
     __ouroWidgetOnDispose(fn) { disposeHooks.push(fn); },
   };
   const quietConsole = { error: (...a) => errors.push(a.map(String).join(' ')), log() {}, warn() {} };
+  // The widget calls the bare setTimeout/clearTimeout too (the card's pin and leave timers, the landing hold), as it does in a
+  // browser frame; the sandbox hands them to the window's own, so a test that swaps window.setTimeout still steers them.
   const context = vm.createContext({
     window, document: made.document, console: quietConsole, Date: ShiftedDate, Math, Object, Array,
     String, Number, RegExp, Promise, setImmediate, JSON,
+    setTimeout: (cb, ms) => window.setTimeout(cb, ms), clearTimeout: (id) => window.clearTimeout(id),
   });
   vm.runInContext(instrumentedWidgetSource, context, { filename: 'widget.js' });
   return { root: made.root, requests, errors, clock, poll: () => intervalCallback() };
@@ -394,9 +398,10 @@ const paceLines = (env) => walk(env.root).filter((n) => n.tagName === 'PATH'
   await respond(env, 'bad gateway', 502);
   assert.deepEqual(barStates(env), ['last_known', 'last_known']);
   // The figure is current only: "—", never 0; the kept values are the dated
-  // "Last known" line and the hatched bars.
-  assert.match(env.root.textContent, /— of 2/);
-  assert.match(env.root.textContent, /Last known 0\.70 · /);
+  // item of the legend ("2 last known · 0.70": the sum of what they had) and the hatched bars.
+  assert.match(env.root.textContent, /— of 2 account-windows left/);
+  assert.match(env.root.textContent, /2 last known · 0\.70/);
+  assert.equal(classes(env.root, 'l-sub').length, 0, 'no caption under the bars');
   assert.doesNotMatch(env.root.textContent, /0\.70 of 2|0\.00 of 2|incl\./);
   assert.match(spoken(env), /0 current of 2 accounts/);
   assert.doesNotMatch(spoken(env), /restricted now/);

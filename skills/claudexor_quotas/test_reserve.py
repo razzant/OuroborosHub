@@ -1519,6 +1519,30 @@ def test_tool_answer_is_bounded_filtered_and_honest_about_a_failed_read(tmp_path
 # The real widget, driven in-process by bundled Node (fake DOM, no browser)
 
 
+def with_i18n(stub):
+    """A page-side fake fetch (a JS function of the view) that also answers the widget's text table (the i18n
+    route): the English of the skill's own strings_en.json, no translation."""
+    texts = json.loads(Path(__file__).with_name("strings_en.json").read_text(encoding="utf-8"))
+    answer = json.dumps(json.dumps({"language": "", "revision": 0, "plural_select": None, "strings": {}, "en": texts}))
+    marker = "window.fetch = (url, options = {}) => {"
+    assert stub.count(marker) == 1 and stub.count("(view) => {") == 1
+    stub = stub.replace("(view) => {", "(view) => {\n  window.__i18n = " + answer + ";", 1)
+    return stub.replace(marker, marker + "\n    if (String(url).indexOf('/i18n') >= 0) return Promise.resolve("
+                        "{ ok: true, status: 200, text: async () => window.__i18n });")
+
+
+def _harness(test_quotas):
+    """The fake-DOM harness of the widget tests, with the one getter a real node has and the fake one lacks: nextSibling. The widget places the chart of the picked
+    account right under the bars of the plate by `bars.nextSibling` (insertBefore with none appends), so without it the fake plate would hold the chart last and the order
+    would be tested on a layout no browser draws. The same getter as the real one."""
+    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    siblinged = harness.replace("  get firstChild() { return this.childNodes[0] || null; }",
+                                "  get firstChild() { return this.childNodes[0] || null; }\n"
+                                "  get nextSibling() { const up = this.parentNode; return up ? (up.childNodes[up.childNodes.indexOf(this) + 1] || null) : null; }", 1)
+    assert siblinged != harness, "harness hook for nextSibling failed"
+    return siblinged
+
+
 def _node():
     candidates = [
         os.environ.get("OUROBOROSHUB_NODE", ""),
@@ -1550,9 +1574,8 @@ function click(env, key) {
   node.listeners.click[0]({ stopPropagation() {} });
 }
 const hasSvg = (root) => walk(root).some((n) => n.getAttribute('class') === 'chart-svg');
-// 0.8.0: a limit is one .lrow; its name button (data-focus "limit:<key>")
-// carries the whole spoken summary and shows the limit in the timeline.
-const rowOf = (env, key) => byFocus(env.root, 'limit:' + key).parentNode;
+// A limit is one plate, shown by its ring; the plate's head carries its whole spoken summary.
+const rowOf = (env, key) => showKey(env, key).parentNode;
 const has = (c, name) => String(c.className).split(/\s+/).includes(name);
 const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n) => n.getAttribute('class'));
 
@@ -1576,59 +1599,80 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
     // The figure is the skill's own current windows alone, of the accounts it
     // applies to; last-known windows are said under it, never added in.
     const row = rowOf(env, g.key);
-    // 0.8.1: the figure says its unit itself — "of N accounts" — in place of
+    // The figure says its unit itself — "N of M account-windows left" — in place of
     // the unit line the overview no longer carries above the rows.
     assert.equal(classes(row, 'l-fig')[0].textContent,
                  (g.measured.accounts ? g.measured.windows.toFixed(2) : '—') + ' of ' + g.slots
-                 + (g.slots === 1 ? ' account' : ' accounts'));
+                 + (g.slots === 1 ? ' account-window left' : ' account-windows left'));
     if (g.last_known && g.last_known.accounts) {
-      assert.match(classes(row, 'l-sub')[0].textContent, new RegExp('^Last known ' + g.last_known.windows.toFixed(2) + ' · '));
+      // Said once, in words: no caption under the bars; the dated values are the legend's item "N last known · sum" when they are not at
+      // the limit or held, and the plate's spoken summary always says them, not counted.
+      assert.equal(classes(row, 'l-sub').length, 0, 'no caption under the bars');
+      assert.match(describedBy(env.root, showKey(env, g.key)),
+                   new RegExp('last known ' + g.last_known.windows.toFixed(2) + ' account-windows, read .*, not counted'));
     }
   });
-  assert.match(text, /\d+ current · 1 last known \(2 h\)/);
+  // The stamp counts the accounts of the picked window that are read and dates the oldest reading; the note under the row, with the
+  // star the tab carries, names who has no fresh data ("Read 2 of 3 · just now" in the row of the plate's figure, "* No fresh data · 1 read 2 h ago · c3" under it).
+  // (the note stands in the plate, under its row of the figure and the stamp: the figure and the stamp first in the reading order of the page, the note after them)
+  assert.match(text, /Read \d+ of \d+ · [\s\S]*\d+ of \d+ account-windows left[\s\S]*\* No fresh data · 1 read 2 h ago · c3/);
   const stamp = classes(env.root, 'reserve-age')[0];
-  assert.match(stamp.title, /provider readings observed \d\d:\d\d/);
-  assert.match(stamp.title, /status read \d\d:\d\d/);
-  assert.match(stamp.title, /times in /);
+  assert.match(stamp.textContent, /^Read \d+ of \d+ · /);
+  assert.match(stamp.title, /^Accounts of this window read: \d+ of \d+ · /);
+  showKey(env, tight.key); // the loop above showed every limit in turn; the chart on hand is the tightest one's
   assert.ok(hasSvg(env.root), 'the timeline is open on every mount');
-  // 0.8.1: the timeline has one toggle, the charted row's own control; no
-  // second one inside the timeline, and no unit line above the rows.
-  assert.equal(byFocus(env.root, 'chart-toggle'), undefined);
+  // The history has no toggle of its own and stands open; no unit line above the plate.
+  assert.ok(byFocus(env.root, 'chart-toggle') === undefined);
   assert.equal(classes(env.root, 'chart-toggle').length, 0);
   assert.equal(classes(env.root, 'reserve-unit').length, 0);
   assert.doesNotMatch(text, /a full account counts 1/);
-  assert.match(classes(env.root, 'reserve-title')[0].title, /a full account counts 1/);
-  assert.equal(classes(env.root, 'l-chart').length, groups.length, 'one control per row');
-  assert.equal(classes(env.root, 'l-chart').filter((b) => has(b, 'on')).length, 1);
-  assert.equal(byFocus(env.root, 'limit:' + tight.key).textContent, 'Hide chart');
-  assert.equal(byFocus(env.root, 'limit:' + other.key).textContent, 'Show chart');
+  // No visible title line (the family chip names the reserve): the heading is for screen readers only,
+  // and the plate's figure carries the unit.
+  assert.ok(has(classes(env.root, 'reserve-title')[0], 'sr-only'));
+  assert.match(classes(env.root, 'l-fig')[0].title, /a full account counts 1/);
+  assert.ok(has(stamp, 'q-stamp') && has(stamp.parentNode, 'q-head') && classes(classes(env.root, 'q-rail')[0], 'reserve-age').length === 0,
+    'the stamp stands in the head of the plate, not in the rail of rings');
+  const plateNow = rowOf(env, tight.key);
+  const statusNow = classes(plateNow, 'q-status')[0];
+  assert.ok(plateNow.childNodes.indexOf(statusNow) === plateNow.childNodes.indexOf(classes(plateNow, 'q-head')[0]) + 1
+    && statusNow.childNodes[0] === classes(plateNow, 'l-fig')[0],
+    'the status line stands right under the head of the plate, the figure first in it');
+  assert.equal(classes(env.root, 'l-chart').length, 0, 'no word folds the history');
+  assert.equal(classes(env.root, 'q-ring').length, groups.length, 'one ring per limit');
+  assert.deepEqual(classes(env.root, 'q-ring').filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.getAttribute('data-limit')), [tight.key],
+    'the ring of the charted limit is the pressed one');
+  assert.equal(classes(env.root, 'q-plate').length, 1, 'only the picked limit has a plate');
   assert.equal(env.calls.length, 1, env.calls.map((c) => c.url).join());
   assert.ok(env.calls[0].url.startsWith(PREFIX + 'quotas?'));
   assert.doesNotMatch(env.calls[0].url, /chart=0|reuse=1/);
-  // The tightest row wears the mark, in words too, and is the one in the timeline.
-  const tightName = byFocus(env.root, 'limit:' + tight.key);
-  assert.equal(classes(rowOf(env, tight.key), 'rs-tight').length, 1);
-  assert.match(tightName.getAttribute('aria-label'), /lowest average share left in this family/);
-  assert.equal(tightName.getAttribute('aria-pressed'), 'true');
-  assert.ok(has(rowOf(env, tight.key), 'sel'));
-  // The timeline stands right under the selected limit's row.
-  const after = rowOf(env, tight.key).parentNode.childNodes;
-  assert.ok(has(after[after.indexOf(rowOf(env, tight.key)) + 1], 'tl-block'));
-  assert.equal(classes(rowOf(env, other.key), 'rs-tight').length, 0);
+  // The tightest row is the one in the timeline; its ranking is no badge on the plate (the percent is the window tab's alone), but the
+  // words stay for the ear: in the plate's spoken summary and in the figure's hint.
+  const tightName = showKey(env, tight.key);
+  assert.equal(classes(rowOf(env, tight.key), 'rs-tight').length, 0, 'no badge "lowest left" on the plate');
+  assert.match(describedBy(env.root, tightName), /lowest average share left in this family/);
+  assert.match(classes(rowOf(env, tight.key), 'l-fig')[0].title, /Lowest average share left among this family’s measured limits: a ranking, not a verdict/);
+  assert.equal(byFocus(env.root, 'ring:codex:' + tight.key).getAttribute('aria-pressed'), 'true');
+  // The history of the charted limit stands in its plate, under the bars (the fold .tl-wrap, the plate's last part), whatever account is picked.
+  const plateNode = rowOf(env, tight.key);
+  const fold = plateNode.childNodes[plateNode.childNodes.length - 1];
+  assert.ok(has(fold, 'tl-wrap'), 'the history stands in the plate, under the bars');
+  assert.equal(classes(fold, 'tl-block').length, 1);
+  assert.equal(classes(env.root, 'tl-block').length, 1, 'one timeline');
+  assert.equal(classes(env.root, 'rs-tight').length, 0, 'and no limit wears a badge');
   // One bar per account the limit applies to, as the skill sends them:
   // restricted ones marked, unknown ones outlined; the row says it in words.
-  const cells = classes(rowOf(env, tight.key), 'bar');
+  const cells = classes(classes(rowOf(env, tight.key), 'q-bars')[0], 'q-bar');  // the strip's, not the legend's
   assert.equal(cells.length, tight.bars.length);
   assert.equal(cells.filter((c) => has(c, 'unknown')).length, tight.bars.filter((b) => b.state === 'unknown').length);
   assert.equal(cells.filter((c) => has(c, 'last')).length, tight.bars.filter((b) => b.state === 'last_known').length);
   assert.equal(cells.filter((c) => has(c, 'restricted')).length, tight.bars.filter((b) => b.restricted).length);
   assert.ok(cells.filter((c) => has(c, 'restricted')).length > 0);
-  assert.match(tightName.getAttribute('aria-label'), /1 stale/);
-  assert.match(tightName.getAttribute('aria-label'), /1 cooldown reported \(0\.86\)/);
+  assert.match(describedBy(env.root, tightName), /1 stale/);
+  assert.match(describedBy(env.root, tightName), /1 cooldown reported \(0\.86\)/);
   assert.match(text, /cooling down/);
-  // The next reported reset stands in the row, with what it gives back.
-  assert.match(classes(rowOf(env, tight.key), 'l-tail')[0].textContent,
-               new RegExp('next reset .*\\+' + tight.next_reset_returns.toFixed(2) + ' if unused'));
+  // The next reported reset is the first step of the ladder in the rail, and the plate's spoken summary says it with what it gives back.
+  assert.match(describedBy(env.root, tightName), new RegExp('next reset .*\\+' + tight.next_reset_returns.toFixed(2) + ' if unused'));
+  assert.ok(classes(env.root, 'q-step').length >= 1, 'the ladder has the next reset');
 
   // 2. The timeline: the record behind now and one future ahead of it, from
   // the row's own figure, with its reset schedule and checkpoints; no estimate
@@ -1645,12 +1689,20 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   assert.equal((text.match(/refilled once at its next reported reset/g) || []).length, 1, 'said once on the open screen');
   assert.equal(classes(env.root, 'lead').length, 0);
   assert.match(text, /Reported resets · no new use/);
-  assert.match(text, /Left if nothing more is used: in 24 h ≈ /);
   assert.match(text, /Details, notes and data/);
   assert.match(text, /Recorded since /);
   assert.match(text, /times in /);
   const schedule = classes(env.root, 'schedule')[0];
   const sc = chart.scenarios.no_new_use;
+  // What is left at a few moments ahead is a caption over one white tile for each moment (no longer one line of text): the number whole in the
+  // tile, under it the moment and the total. The tiles are as many as the checkpoints, and the group is named for a screen reader.
+  const checkpointsBox = classes(env.root, 'checkpoints')[0];
+  assert.equal(classes(checkpointsBox, 'cp-cap')[0].textContent, 'Left if nothing more is used');
+  assert.equal(checkpointsBox.getAttribute('role'), 'group');
+  assert.equal(checkpointsBox.getAttribute('aria-label'), 'Left if nothing more is used');
+  assert.equal(classes(checkpointsBox, 'cp-tile').length, sc.checkpoints.length);
+  assert.ok(classes(checkpointsBox, 'cp-when').some((n) => n.textContent === 'in 24 h · of ' + chart.y_max), 'the 24 h moment names its total');
+  assert.ok(!/≈/.test(checkpointsBox.textContent), 'the approximate sign is gone: the number stands whole in its tile');
   const rowsShown = Math.min(2, sc.schedule.length);
   assert.equal(classes(schedule, 'n').filter((n) => n.tagName === 'TD').length, rowsShown * 3);
   if (sc.schedule.length) {
@@ -1666,7 +1718,9 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   const plot = byFocus(env.root, 'chart-plot');
   const readout = classes(env.root, 'chart-readout')[0];
   plot.listeners.focus[0]();
-  const name = classes(rowOf(env, tight.key), 'l-name-text')[0].textContent;
+  // The plate draws no name (its tab says it); the note its word is described by speaks it first.
+  const name = describedBy(env.root, showKey(env, tight.key)).split(' — ')[0];
+  assert.ok(name, 'the plate names its limit to a screen reader');
   assert.ok(readout.textContent.includes(name), readout.textContent);
   const historyNow = chart.history.details.at(-1);
   assert.match(readout.textContent, new RegExp('recorded ' + historyNow.value.toFixed(2) + ' of '
@@ -1675,7 +1729,10 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   assert.match(readout.textContent, new RegExp('no new use ' + tight.measured.windows.toFixed(2) + ' of '
     + chart.accounts + ' current accounts?'));
   const tipText = classes(env.root, 'chart-tip')[0].textContent;
-  assert.ok(tipText.includes(name + ' · account-windows left, scale ' + chart.y_max), tipText);
+  // rule: the tip is the moment, the figure, "of N" and the short name; the limit's name and the scale
+  // ("name · unit, scale N") are no longer written in it (the read-out above says the name; the chart's own axis says the scale).
+  assert.match(tipText, new RegExp('^\\d\\d:\\d\\d.*\\d\\.\\d\\d.*of ' + chart.y_max + '.*(?:recorded|carried)'), tipText);
+  assert.ok(!tipText.includes('scale'), tipText);
   plot.listeners.keydown[0]({ key: 'End', preventDefault() {} });
   assert.match(readout.textContent, /· scenario — .*no new use \d+\.\d\d of \d+ current accounts?/);
   plot.listeners.keydown[0]({ key: 'Home', preventDefault() {} });
@@ -1694,7 +1751,7 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
 
   // Choosing another limit (its row's name) asks once, with reuse, for that
   // limit's chart, and its timeline stands under its own row.
-  click(env, 'limit:' + other.key);
+  showKey(env, other.key);
   assert.match(env.root.textContent, /Loading the timeline for this limit/);
   await settle();
   assert.equal(env.calls.length, 2);
@@ -1702,34 +1759,19 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   assert.match(env.calls[1].url, new RegExp('group=' + encodeURIComponent(other.key).replace(/[|]/g, '\\|')));
   await settle();
   assert.equal(env.calls.length, 2, 'the fake host answers without it: not asked again');
-  click(env, 'limit:' + tight.key);
+  showKey(env, tight.key);
   await settle();
   click(env, 'horizon:24h');
   await settle();
   assert.match(env.calls.at(-1).url, /horizon=24h/);
 
-  // 3. Folding the timeline: the next timed read leaves the chart out (and
-  // the host answers without one); unfolding it asks once, with reuse.
-  const noChart = JSON.parse(JSON.stringify(fixture.view));
-  delete noChart.reserve.chart;
-  env = await boot((url) => (/chart=0/.test(url) ? noChart : fixture.view));
-  // 0.8.1: the charted row's own control folds it; folded, nothing stands
-  // under the row and no row is drawn as charted.
-  click(env, 'limit:' + tight.key);
-  assert.ok(!hasSvg(env.root));
-  assert.equal(classes(env.root, 'tl-block').length, 0);
-  assert.equal(byFocus(env.root, 'limit:' + tight.key).textContent, 'Show chart');
-  assert.equal(byFocus(env.root, 'limit:' + tight.key).getAttribute('aria-pressed'), 'false');
-  assert.equal(classes(env.root, 'sel').length, 0);
-  assert.equal(classes(env.root, 'l-chart').filter((b) => has(b, 'on')).length, 0);
+  // 3. The history has no fold: the timed read keeps asking for the chart of the limit on screen, with reuse, and the plate's history stays drawn.
+  env = await boot(fixture.view);
+  assert.ok(byFocus(env.root, 'limit:' + tight.key) === undefined, 'no word folds it');
   env.interval()();
   await settle();
-  assert.match(env.calls.at(-1).url, /chart=0/);
-  click(env, 'limit:' + tight.key);
-  await settle();
-  assert.match(env.calls.at(-1).url, /reuse=1/);
+  assert.doesNotMatch(env.calls.at(-1).url, /chart=0/);
   assert.ok(hasSvg(env.root));
-  assert.ok(has(rowOf(env, tight.key), 'sel'));
 
   // 4. The limit's details, notes and data table sit under the timeline;
   // open, they survive the timed redraw, with the keyboard on them. About
@@ -1774,6 +1816,8 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   assert.match(env.root.textContent, /Not tokens or hours/);
   assert.match(env.root.textContent, /never added together/);
   assert.match(env.root.textContent, /not a dispatch guarantee/);
+  // The About panel dates the readings (the stamp's hint says only how long ago): when the providers' were observed, when the status was read, the zone of the times.
+  assert.match(env.root.textContent, /Provider readings observed \d\d:\d\d.*status read \d\d:\d\d.*times in /);
 
   // 5. Warming up and an unavailable overview are said in words; the account
   // list stands open when there is no overview to fold it under.
@@ -1786,22 +1830,27 @@ const paths = (env) => walk(env.root).filter((n) => n.tagName === 'PATH').map((n
   env = await boot(fixture.failed);
   assert.match(env.root.textContent, /Reserve overview unavailable/);
   assert.match(env.root.textContent, /The account list below is unaffected/);
-  assert.equal(byFocus(env.root, 'accounts'), undefined);
+  assert.ok(byFocus(env.root, 'accounts') === undefined);
   assert.equal(classes(env.root, 'acc-row').length, 3);
 
   // 6. Two limits with one label, "7 day (Fable)", scoped to different models
   // stay two limits on screen, in words and in what a screen reader hears.
   env = await boot(fixture.scoped);
-  const rows = classes(env.root, 'lrow');
+  // One plate at a time: the two limits are two scopes of one window, each shown in turn.
+  const rows = plates(env);
   assert.equal(rows.length, 2);
-  // 0.8.1: the row's spoken summary is on its one control (.l-chart).
-  const heard = rows.map((r) => classes(r, 'l-chart')[0].getAttribute('aria-label'));
+  // The plate's spoken summary is the note its head is described by.
+  const heard = rows.map((r) => describedBy(r, classes(r, 'q-head')[0]));
   assert.match(heard[0], /models: fable-a, fable-b/);
   assert.match(heard[1], /models: fable-c, fable-d/);
-  const names = rows.map((r) => classes(r, 'l-name-text')[0].textContent);
+  const names = rows.map((r) => describedBy(r, classes(r, 'q-head')[0]).split(' — ')[0]);
   assert.notEqual(names[0], names[1]);
-  // Family accounts without a reading of the limit are said, not counted as zero.
-  assert.match(env.root.textContent, /0\.70 of 1/);
+  showKey(env, fixture.scoped.reserve.summary.groups.find((x) => x.tightest).key);
+  await settle();
+  // Family accounts without a reading of the limit are said, not counted as zero: each plate's figure is of
+  // the one account that reads the limit (the plates are read as they were drawn, one per scope).
+  assert.equal(classes(rows[0], 'l-fig')[0].textContent, '0.70 of 1 account-window left');
+  assert.match(env.root.textContent, /0\.40 of 1 account-window left/);
   assert.match(heard[0], /2 other accounts: no reading, limit may not apply/);
   const scopedTight = fixture.scoped.reserve.summary.groups.find((x) => x.tightest);
   assert.match(classes(env.root, 'tl-scope')[0].textContent, new RegExp('models: ' + scopedTight.models.join(', ')));
@@ -1944,7 +1993,7 @@ def test_real_widget_renders_the_skill_numbers_and_asks_for_charts_once(tmp_path
 
     node = _node()
     assert node is not None, "a Node runtime is required for widget tests"
-    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    harness = _harness(test_quotas)
     widget_path = Path(__file__).with_name("widget.js").resolve()
     result = subprocess.run(
         [str(node), "-e", textwrap.dedent(harness + NODE_RESERVE_MATRIX)],
@@ -2715,7 +2764,8 @@ const stateOf = (root, sid) => classes(byFocus(root, 'acct:claude:' + sid), 'acc
 async function opened(view, sid) {
   const env = await boot(view);
   click(env, 'accounts');
-  click(env, 'acct:claude:' + sid);
+  // The top account of the row is picked at the opening, its card stands under the plate; a press on the row of the account picked already would let it go.
+  if (byFocus(env.root, 'acct:claude:' + sid).getAttribute('aria-pressed') !== 'true') click(env, 'acct:claude:' + sid);
   return env;
 }
 
@@ -2779,9 +2829,9 @@ async function opened(view, sid) {
   ['bad', 'ended', 'split'].forEach((sid) => assert.doesNotMatch(said(sid), /100%|limit reached|alert/, sid));
   // The overview row agrees: one account at the limit, named, never a rounded "0%".
   const five = fx.route.reserve.summary.groups.find((g) => g.key.includes('|five_hour|'));
-  const row = byFocus(env.root, 'limit:' + five.key);
-  assert.match(row.getAttribute('aria-label'), /full at the limit until /);
-  assert.equal(classes(row.parentNode, 'bar').filter((c) => String(c.className).includes('spent')).length, 1);
+  const row = showKey(env, five.key);
+  assert.match(describedBy(env.root, row), /full at the limit until /);
+  assert.equal(classes(classes(row.parentNode, 'q-bars')[0], 'q-bar').filter((c) => String(c.className).includes('spent')).length, 1);
 
   // Finding 1, 0.8.0: a total seen at one sweep only holds for no stretch of
   // time. It is not drawn as a mark (no symbols on the chart); the record
@@ -2821,7 +2871,7 @@ def test_real_widget_final_repair_matrix(tmp_path, monkeypatch):
     node = _node()
     assert node is not None, "a Node runtime is required for widget tests"
     fixture = _final_fixture(tmp_path, monkeypatch)
-    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    harness = _harness(test_quotas)
     widget_path = Path(__file__).with_name("widget.js").resolve()
     result = subprocess.run(
         [str(node), "-e", textwrap.dedent(harness + NODE_FINAL_MATRIX)],
@@ -2839,7 +2889,7 @@ function click(env, key) {
   node.listeners.click[0]({ stopPropagation() {} });
 }
 const hasSvg = (root) => walk(root).some((n) => n.getAttribute('class') === 'chart-svg');
-const rowOf = (env, key) => byFocus(env.root, 'limit:' + key).parentNode;
+const rowOf = (env, key) => showKey(env, key).parentNode;
 
 // The host's appearance bridge, so a theme change can be sent to the widget.
 async function bootThemed(view) {
@@ -2851,6 +2901,7 @@ async function bootThemed(view) {
   let themeListener = null;
   const window = {
     fetch(url, options = {}) {
+      if (isI18n(url)) return Promise.resolve(response(I18N_ANSWER));
       calls.push({ url, method: options.method || 'GET' });
       return Promise.resolve(response(view));
     },
@@ -2862,8 +2913,11 @@ async function bootThemed(view) {
     __ouroWidgetOnDispose() {},
     OuroborosWidget: { onTheme(fn) { themeListener = fn; fn('light'); return () => { themeListener = null; }; } },
   };
+  // The widget calls the bare setTimeout/clearTimeout too (the card's pin and leave timers, the landing hold), as it does in a
+  // browser frame; the sandbox hands them to the window's own, so a test that swaps window.setTimeout still steers them.
   const context = vm.createContext({ window, document: made.document, console, Date, Math, Object,
-    Array, String, Number, RegExp, Promise, setImmediate });
+    Array, String, Number, RegExp, Promise, setImmediate,
+    setTimeout: (callback, ms) => window.setTimeout(callback, ms), clearTimeout: (id) => window.clearTimeout(id) });
   vm.runInContext(instrumentedWidgetSource, context, { filename: 'widget.js' });
   await settle();
   return { root: made.root, document: made.document, calls, interval: () => intervalCallback,
@@ -2878,38 +2932,43 @@ async function bootThemed(view) {
 
   // 1. Each new mount (0.8.0 defaults, never saved): the limits, the timeline
   // of the lowest-left limit open under its row with "no new use" and the
-  // limit's own span, the account list folded, no account selected, About shut.
+  // limit's own span, the account list folded, the top account of the row picked (its card stands under the plate), About shut.
   let env = await bootThemed(view);
   assert.ok(hasSvg(env.root), 'timeline open by default');
   assert.doesNotMatch(env.calls[0].url, /chart=0/);
   assert.equal(byFocus(env.root, 'scenario:no_new_use').getAttribute('aria-pressed'), 'true');
   assert.equal(byFocus(env.root, 'horizon:' + (tight.window_seconds > 86400 ? '7d' : '24h')).getAttribute('aria-pressed'), 'true');
-  assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-expanded'), 'false');
+  // The word "Accounts · N" over the bars is a pressed word (aria-pressed), not an expander; About stays an expander.
+  assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'false');
   assert.equal(byFocus(env.root, 'about').getAttribute('aria-expanded'), 'false');
-  assert.equal(classes(env.root, 'inspector').length, 0);
+  assert.equal(classes(env.root, 'q-card').length, 1, 'the top account is picked at the opening: its card stands beside the bars');
+  assert.equal(classes(env.root, 'q-card-none').length, 0);
   assert.equal(classes(env.root, 'win-line').length, 0);
 
   // Coverage in every row: the figure is of every account the limit applies
   // to, and the row says how many of them are current.
   groups.forEach((g) => {
-    const name = byFocus(env.root, 'limit:' + g.key);
-    assert.match(classes(name.parentNode, 'l-fig')[0].textContent, new RegExp(' of ' + g.slots + ' accounts?$'));
-    assert.match(name.getAttribute('aria-label'), new RegExp(g.measured.accounts + ' current of ' + g.slots + ' accounts'));
+    const name = showKey(env, g.key);
+    assert.match(classes(name.parentNode, 'l-fig')[0].textContent, new RegExp(' of ' + g.slots + ' account-windows? left$'));
+    // the noun takes the number's form (one account, two accounts); the word boundary keeps 'account' from passing for 'accounts'
+    assert.match(describedBy(env.root, name), new RegExp(g.measured.accounts + ' current of ' + g.slots + (g.slots === 1 ? ' account\\b' : ' accounts\\b')));
   });
-  // "lowest left": a ranking of averages, and said so.
-  const badge = classes(rowOf(env, tight.key), 'rs-tight')[0];
-  assert.equal(badge.textContent, 'lowest left');
-  assert.match(badge.title, /lowest average share left/i);
-  assert.match(badge.title, /a ranking, not a verdict/);
-  assert.match(byFocus(env.root, 'limit:' + tight.key).getAttribute('aria-label'), /lowest average share left in this family/);
+  // The ranking of averages is no badge on the plate (each fact once: the percent is the window tab's); it is said, as a ranking and
+  // not a verdict, in the figure's hint and in the plate's spoken summary.
+  assert.equal(classes(rowOf(env, tight.key), 'rs-tight').length, 0);
+  assert.doesNotMatch(rowOf(env, tight.key).textContent, /lowest left/);
+  assert.match(classes(rowOf(env, tight.key), 'l-fig')[0].title, /lowest average share left/i);
+  assert.match(classes(rowOf(env, tight.key), 'l-fig')[0].title, /a ranking, not a verdict/);
+  assert.match(describedBy(env.root, showKey(env, tight.key)), /lowest average share left in this family/);
   assert.doesNotMatch(allSpoken(env.root), /tightest/i);
   // What is not counted is said in short under the rows — never as zero —
-  // and the link opens the account list, which says it by name.
-  const cover = byFocus(env.root, 'cover');
-  assert.match(cover.getAttribute('aria-label'), /not counted/);
-  assert.match(cover.getAttribute('aria-label'), /never as zero/);
-  click(env, 'cover');
-  assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-expanded'), 'true');
+  // and the word "Accounts" opens the account list, whose head holds the line of coverage (.acc-cover, no cover link any more).
+  assert.ok(!byFocus(env.root, 'cover'), 'the cover link is gone: the line of coverage stands in the head of the list');
+  click(env, 'accounts');
+  assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'true');
+  const coverText = classes(classes(env.root, 'acc-list-head')[0], 'acc-cover').map((n) => n.textContent).join(' ');
+  assert.match(coverText, /not counted/);
+  assert.match(coverText, /never as zero/);
   assert.match(classes(env.root, 'acc-cover').map((n) => n.textContent).join(' '), /not counted, never as zero/);
   click(env, 'accounts');
 
@@ -2925,17 +2984,17 @@ async function bootThemed(view) {
   // its diagnostics open, the keyboard on them.
   click(env, 'accounts');
   click(env, 'acct:codex:c1');
-  click(env, 'inspector-diag');
+  click(env, 'inspector-details');
   assert.ok(classes(env.root, 'win-line').length > 0);
-  byFocus(env.root, 'inspector-diag').focus();
+  byFocus(env.root, 'inspector-details').focus();
   env.interval()();
   await settle();
-  assert.equal(byFocus(env.root, 'inspector-diag').getAttribute('aria-expanded'), 'true');
+  assert.equal(byFocus(env.root, 'inspector-details').getAttribute('aria-expanded'), 'true');
   assert.ok(classes(env.root, 'win-line').length > 0);
-  assert.equal(env.document.activeElement.getAttribute('data-focus'), 'inspector-diag');
+  assert.equal(env.document.activeElement.getAttribute('data-focus'), 'inspector-details');
   assert.equal(env.theme('dark'), 'dark');
   await settle();
-  assert.ok(classes(env.root, 'inspector').length);
+  assert.ok(classes(env.root, 'q-card').length);
 
   // 3. The timeline survives a poll and a theme change too, and says what it
   // assumes — in one line on the face, every caveat under its details.
@@ -2958,8 +3017,8 @@ async function bootThemed(view) {
   // session is kept.
   env = await bootThemed(view);
   assert.ok(hasSvg(env.root));
-  assert.equal(classes(env.root, 'inspector').length, 0);
-  assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-expanded'), 'false');
+  assert.equal(classes(env.root, 'q-card').length, 1, 'the top account is picked again');
+  assert.equal(byFocus(env.root, 'accounts').getAttribute('aria-pressed'), 'false');
 
   // 5. With no reserve overview the account list is all there is: open, and
   // a selected account shows its windows without a Diagnostics fold.
@@ -3020,7 +3079,7 @@ def test_real_widget_repair_matrix(tmp_path):
 
     node = _node()
     assert node is not None, "a Node runtime is required for widget tests"
-    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    harness = _harness(test_quotas)
     widget_path = Path(__file__).with_name("widget.js").resolve()
     result = subprocess.run(
         [str(node), "-e", textwrap.dedent(harness + NODE_REPAIR_MATRIX)],
@@ -3341,7 +3400,8 @@ const cooldownLines = (root) => classes(card(root), 'quota-cooldown').map((n) =>
 async function opened(view, sid, diagnostics) {
   const env = await boot(view);
   click(env, 'accounts');
-  click(env, 'acct:claude:' + sid);
+  // The top account of the row is picked at the opening, its card stands under the plate; a press on the row of the account picked already would let it go.
+  if (byFocus(env.root, 'acct:claude:' + sid).getAttribute('aria-pressed') !== 'true') click(env, 'acct:claude:' + sid);
   if (diagnostics) click(env, 'inspector-diag');
   return env;
 }
@@ -3424,11 +3484,11 @@ async function opened(view, sid, diagnostics) {
   // reserve holds the share back, and so does the window's line. The shared
   // week, which no cooldown covers, stays neutral everywhere.
   const keyOf = (part) => route.reserve.summary.groups.find((g) => g.key.includes(part)).key;
-  const heldCells = classes(byFocus(env.root, 'limit:' + keyOf('|weekly_scoped:Fable|')).parentNode, 'bar')
+  const heldCells = classes(classes(showKey(env, keyOf('|weekly_scoped:Fable|')).parentNode, 'q-bars')[0], 'q-bar')
     .filter((c) => !/\bunknown\b/.test(c.className));
   assert.equal(heldCells.length, 1);
   assert.match(heldCells[0].className, /\brestricted\b/);
-  assert.match(heldCells[0].title, /: 60% left — restricted now( · |$)/);
+  assert.match(heldCells[0].getAttribute('aria-label'), /: 60% left — restricted now( · | — select this account|$)/);  // (the words of a bar of an account are its aria-label, not a title)
   click(env, 'inspector-diag');
   const meterOf = (node) => classes(node, 'meter')[0];
   const lineOf = (label) => classes(card(env.root), 'win-line').find((l) => classes(l, 'win-tag')[0].title === label);
@@ -3480,7 +3540,7 @@ def test_real_widget_account_closure_matrix(tmp_path, monkeypatch):
     route, _tool = _route_and_tool(tmp_path / "route", monkeypatch, _closure_status())
     alias, _tool = _route_and_tool(tmp_path / "alias", monkeypatch, _alias_case("alias"))
     monkeypatch.undo()
-    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    harness = _harness(test_quotas)
     widget_path = Path(__file__).with_name("widget.js").resolve()
     result = subprocess.run(
         [str(node), "-e", textwrap.dedent(harness + NODE_CLOSURE_MATRIX)],
@@ -3605,7 +3665,7 @@ def test_real_widget_lists_single_sweep_sightings_and_never_draws_them(tmp_path)
     node = _node()
     assert node is not None, "a Node runtime is required for widget tests"
     view = _gap_singleton_view(tmp_path)
-    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    harness = _harness(test_quotas)
     widget_path = Path(__file__).with_name("widget.js").resolve()
     result = subprocess.run(
         [str(node), "-e", textwrap.dedent(harness + NODE_GAP_SINGLETON)],
@@ -3979,7 +4039,7 @@ def test_real_widget_pages_through_every_single_sweep_point(tmp_path):
                "view": _sightings_view(tmp_path / "week", -10800),
                "day": _sightings_view(tmp_path / "day", -10800, horizon="24h")}
     assert fixture["view"]["reserve"]["chart"]["horizon"] == "7d"
-    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    harness = _harness(test_quotas)
     widget_path = Path(__file__).with_name("widget.js").resolve()
     result = subprocess.run(
         [str(node), "-e", textwrap.dedent(harness + NODE_SIGHTINGS_PAGES)],
@@ -4026,95 +4086,64 @@ def _five_hour_and_weekly(directory):
 
 
 NODE_FIVE_HOUR_TO_WEEKLY = r"""
-const nameOf = (env, key) => byFocus(env.root, 'limit:' + key);
-const rowOf = (env, key) => nameOf(env, key).parentNode;
-const cueOf = (env, key) => classes(rowOf(env, key), 'l-chart')[0];
 const has = (c, name) => String(c.className).split(/\s+/).includes(name);
-const below = (env, key) => {
-  const row = rowOf(env, key);
-  const next = row.parentNode.childNodes[row.parentNode.childNodes.indexOf(row) + 1];
-  return next && String(next.className).split(/\s+/).includes('tl-block') ? next : null;
+const ringKey = (k) => 'ring:' + k.split('|')[0] + ':' + k;
+// The history of the limit on screen stands in its plate, under the bars (the fold .tl-wrap, the plate's last part).
+const below = () => {
+  const plate = classes(env.root, 'q-plate')[0];
+  const next = plate.childNodes[plate.childNodes.length - 1];
+  return next && has(next, 'tl-wrap') ? classes(next, 'tl-block')[0] || null : null;
 };
-function expectCharted(env, shown, other) {
-  assert.equal(nameOf(env, shown).getAttribute('aria-pressed'), 'true');
-  assert.equal(nameOf(env, other).getAttribute('aria-pressed'), 'false');
-  assert.equal(cueOf(env, shown).textContent, 'Hide chart');
-  assert.equal(cueOf(env, other).textContent, 'Show chart');
-  assert.ok(has(cueOf(env, shown), 'on') && !has(cueOf(env, other), 'on'));
-  assert.ok(has(rowOf(env, shown), 'sel') && !has(rowOf(env, other), 'sel'));
-  assert.match(nameOf(env, shown).getAttribute('aria-label'), / — its timeline is shown below$/);
-  assert.match(nameOf(env, other).getAttribute('aria-label'), / — show its timeline$/);
-  assert.ok(nameOf(env, shown).getAttribute('aria-label').startsWith(cueOf(env, shown).textContent + ' — '));
-  assert.ok(nameOf(env, other).getAttribute('aria-label').startsWith(cueOf(env, other).textContent + ' — '));
-  assert.ok(below(env, shown), 'the timeline stands under the charted limit');
-  assert.equal(below(env, other), null);
+let env;
+function expectShown(shown, other, named) {
+  // One plate: the shown limit's ring is pressed and the plate speaks its name first; the other ring is not pressed.
+  assert.equal(byFocus(env.root, ringKey(shown)).getAttribute('aria-pressed'), 'true');
+  assert.equal(byFocus(env.root, ringKey(other)).getAttribute('aria-pressed'), 'false');
+  assert.equal(classes(env.root, 'q-plate').length, 1);
+  assert.match(describedBy(env.root, classes(env.root, 'q-head')[0]), named);
+  assert.ok(below(), 'the history stands under the plate');
   assert.equal(classes(env.root, 'tl-block').length, 1);
+  assert.equal(classes(env.root, 'l-chart').length, 0, 'no word folds the history');
 }
 
 (async () => {
   const fx = JSON.parse(process.env.SWITCH_FIXTURE);
   const asked = (url) => decodeURIComponent(url);
-  const env = await boot((url) => (asked(url).includes('group=' + fx.week_key) ? fx.week : fx.five));
+  env = await boot((url) => (asked(url).includes('group=' + fx.week_key) ? fx.week : fx.five));
   const five = fx.five_key, week = fx.week_key;
 
-  // 0.8.1: the row's one control is the chart toggle in its own slot — a
-  // button with the chart mark and two words, one handler, the spoken
-  // summary — a direct child of the row beside the name, which is text.
-  [five, week].forEach((key) => {
-    const btn = nameOf(env, key);
-    assert.equal(btn.tagName, 'BUTTON');
-    assert.equal(btn.listeners.click.length, 1);
-    assert.equal(cueOf(env, key), btn, 'the control is the cue');
-    assert.ok(has(btn.parentNode, 'lrow'));
-    assert.equal(classes(btn.parentNode, 'l-chart').length, 1, 'one control per row');
-    assert.equal(walk(btn).filter((n) => n.tagName === 'SVG').length, 1, 'the chart mark');
-    assert.equal(walk(btn).filter((n) => n !== btn && n.tagName === 'BUTTON').length, 0);
-    assert.equal(classes(btn, 'l-name-text').length, 0, 'the name is not inside the control');
-    const name = classes(btn.parentNode, 'l-name')[0];
-    assert.notEqual(name.tagName, 'BUTTON');
-    assert.equal(name.listeners.click, undefined);
-    assert.match(classes(name, 'l-name-text')[0].textContent, key === five ? /^5-hour$/ : /^Weekly$/);
-  });
-  assert.equal(classes(env.root, 'chart-toggle').length, 0, 'no second toggle inside the timeline');
-  // The family's lowest-left limit, the 5-hour one, is charted first.
-  expectCharted(env, five, week);
+  assert.equal(classes(env.root, 'chart-toggle').length, 0, 'no toggle inside the history');
+  // The family's lowest-left limit, the 5-hour one, is shown first.
+  expectShown(five, week, /^5-hour — /);
   assert.equal(env.calls.length, 1);
 
-  // 5 hour -> weekly: the weekly name asks once, with reuse, for its chart
-  // over its own span, and its timeline replaces the 5-hour one.
-  nameOf(env, week).focus();
-  nameOf(env, week).listeners.click[0]({ stopPropagation() {} });
-  assert.match(below(env, week).textContent, /Loading the timeline for this limit/);
+  // 5 hour -> weekly: its ring asks once, with reuse, for its chart over its own span, and its history replaces the 5-hour one.
+  byFocus(env.root, ringKey(week)).focus();
+  showKey(env, week);
+  assert.match(below().textContent, /Loading the timeline for this limit/);
   await settle();
   assert.equal(env.calls.length, 2);
   const url = asked(env.calls[1].url);
   assert.ok(url.includes('group=' + week), url);
   assert.match(url, /horizon=7d/);
   assert.match(url, /reuse=1/);
-  expectCharted(env, week, five);
-  assert.ok(walk(below(env, week)).some((n) => n.getAttribute('class') === 'chart-svg'));
+  expectShown(week, five, /^Weekly — /);
+  assert.ok(walk(below()).some((n) => n.getAttribute('class') === 'chart-svg'));
   assert.equal(byFocus(env.root, 'horizon:7d').getAttribute('aria-pressed'), 'true');
-  assert.equal(env.document.activeElement.getAttribute('data-focus'), 'limit:' + week);
+  assert.equal(env.document.activeElement.getAttribute('data-focus'), ringKey(week), 'the keyboard stays on the ring it chose');
 
-  // ... and back: the 5-hour chart over 24 hours.
-  nameOf(env, five).focus();
-  nameOf(env, five).listeners.click[0]({ stopPropagation() {} });
+  // ... and back: the 5-hour chart over 24 hours. A second press of the ring on screen changes nothing.
+  byFocus(env.root, ringKey(five)).focus();
+  showKey(env, five);
   await settle();
   assert.match(asked(env.calls.at(-1).url), /horizon=24h/);
-  expectCharted(env, five, week);
-  assert.equal(env.document.activeElement.getAttribute('data-focus'), 'limit:' + five);
-
-  // On the charted limit the same button folds the timeline, and says so;
-  // folded, nothing stands under any row and no row is drawn as charted.
-  nameOf(env, five).listeners.click[0]({ stopPropagation() {} });
-  assert.equal(cueOf(env, five).textContent, 'Show chart');
-  assert.match(nameOf(env, five).getAttribute('aria-label'), /^Show chart — /);
-  assert.equal(nameOf(env, five).getAttribute('aria-pressed'), 'false');
-  assert.ok(!has(cueOf(env, five), 'on'));
-  assert.equal(walk(env.root).filter((n) => n.getAttribute('class') === 'chart-svg').length, 0);
-  assert.equal(below(env, five), null);
-  assert.equal(classes(env.root, 'tl-block').length, 0);
-  assert.equal(classes(env.root, 'sel').length, 0);
+  expectShown(five, week, /^5-hour — /);
+  assert.equal(env.document.activeElement.getAttribute('data-focus'), ringKey(five), 'the keyboard stays on the ring it chose');
+  const calls = env.calls.length;
+  byFocus(env.root, ringKey(five)).listeners.click[0]({ stopPropagation() {} });
+  await settle();
+  assert.equal(env.calls.length, calls);
+  expectShown(five, week, /^5-hour — /);
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
   process.exitCode = 1;
@@ -4128,7 +4157,7 @@ def test_real_widget_switches_from_the_five_hour_chart_to_the_weekly_one(tmp_pat
     node = _node()
     assert node is not None, "a Node runtime is required for widget tests"
     fixture = _five_hour_and_weekly(tmp_path)
-    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    harness = _harness(test_quotas)
     widget_path = Path(__file__).with_name("widget.js").resolve()
     result = subprocess.run(
         [str(node), "-e", textwrap.dedent(harness + NODE_FIVE_HOUR_TO_WEEKLY)],
@@ -4140,8 +4169,8 @@ def test_real_widget_switches_from_the_five_hour_chart_to_the_weekly_one(tmp_pat
 
 
 # A focused page button whose pages go (45 sightings, then 20 or fewer, then
-# none) hands the keyboard to the Details summary; a span left while its
-# chart had no sightings yet is still another list.
+# none) hands the keyboard to the summary of the fold they sit in, "How it is
+# counted"; a span left while its chart had no sightings yet is still another list.
 
 NODE_SIGHTINGS_FOCUS = r"""
 function click(env, key) {
@@ -4150,17 +4179,26 @@ function click(env, key) {
   node.listeners.click[0]({ stopPropagation() {} });
 }
 const details = (env) => classes(env.root, 'chart-table')[0];
+const fold = (env) => classes(env.root, 'chart-how')[0];
 const listed = (env) => classes(details(env), 'sightings')[0];
 const caption = (env) => walk(listed(env)).find((n) => n.tagName === 'CAPTION').textContent;
 const focused = (env) => env.document.activeElement;
 const inTree = (env, node) => walk(env.root).includes(node);
+// The sightings sit in the fold "How it is counted", itself in the Details: both are the reader's to open.
+function openBoth(env) {
+  details(env).open = true;
+  details(env).listeners.toggle[0]();
+  fold(env).open = true;
+  fold(env).listeners.toggle[0]();
+}
 // Nodes are compared by identity only: a failed deepEqual would print the tree.
 function onSummary(env) {
-  const summary = byFocus(env.root, 'chart-table');
+  const summary = byFocus(env.root, 'chart-how');
   const at = focused(env);
   assert.ok(summary && at === summary,
-    'the keyboard is on the Details summary, not on ' + (at && at.getAttribute('data-focus')));
+    'the keyboard is on the summary of the fold the sightings are in, not on ' + (at && at.getAttribute('data-focus')));
   assert.ok(inTree(env, at), 'the focus is on a node on the page');
+  assert.ok(walk(details(env)).includes(summary), 'and that summary is inside the Details');
 }
 function withPoints(view, points) {
   const out = JSON.parse(JSON.stringify(view));
@@ -4183,8 +4221,7 @@ async function poll(env) {
   // 45 → 20 or fewer → none, the keyboard on Older throughout.
   let current = fx.view;
   let env = await boot(() => current);
-  details(env).open = true;
-  details(env).listeners.toggle[0]();
+  openBoth(env);
   click(env, 'sightings:older');
   assert.equal(caption(env), 'Seen at one sweep only · 6–25 of 45');
   assert.equal(focused(env).getAttribute('data-focus'), 'sightings:older');
@@ -4196,6 +4233,7 @@ async function poll(env) {
   current = withPoints(fx.view, points.slice(-15));
   assert.deepEqual(await poll(env), asked, 'no other request');
   assert.equal(details(env).open, true);
+  assert.equal(fold(env).open, true, 'the fold stays as the reader had it');
   assert.ok(!byFocus(env.root, 'sightings:older'), 'no page buttons');
   assert.equal(caption(env), 'Seen at one sweep only · 1–15 of 15');
   onSummary(env);
@@ -4219,8 +4257,7 @@ async function poll(env) {
   let day = withPoints(fx.day, []);
   current = fx.view;
   env = await boot((url) => (/horizon=24h/.test(url) ? day : current));
-  details(env).open = true;
-  details(env).listeners.toggle[0]();
+  openBoth(env);
   click(env, 'sightings:older');
   assert.equal(caption(env), 'Seen at one sweep only · 6–25 of 45');
   click(env, 'horizon:24h');
@@ -4256,7 +4293,7 @@ def test_real_widget_keeps_the_keyboard_when_the_sightings_pages_go(tmp_path):
     fixture = {"view": _sightings_view(tmp_path / "week", -10800),
                "day": _sightings_view(tmp_path / "day", -10800, horizon="24h")}
     assert fixture["view"]["reserve"]["chart"]["horizon"] == "7d"
-    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    harness = _harness(test_quotas)
     widget_path = Path(__file__).with_name("widget.js").resolve()
     result = subprocess.run(
         [str(node), "-e", textwrap.dedent(harness + NODE_SIGHTINGS_FOCUS)],
