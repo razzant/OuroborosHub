@@ -321,9 +321,17 @@ def test_dense_rows_fit_real_iframe_around_responsive_breakpoints(tmp_path, engi
             # Both sides of every row breakpoint, the reported 521 px case,
             # the owner's normal card and narrow card widths.
             for width in (320, 343, 359, 360, 361, 519, 520, 521, 597, 598, 639, 640, 641, 678):
+                # innerWidth changes before the browser delivers resize. Observe
+                # that event after the widget's existing synchronous fit handler;
+                # an arbitrary sleep can sample the previous column widths.
+                frame.evaluate("""() => {
+                    window.quotaTestResizeWidth = null;
+                    window.addEventListener('resize', () => {
+                        window.quotaTestResizeWidth = innerWidth;
+                    }, {once: true});
+                }""")
                 page.locator('iframe').evaluate('(e, width) => { e.style.width = width + "px"; }', width)
-                frame.wait_for_function('(width) => innerWidth === width', arg=width)
-                frame.wait_for_timeout(50)
+                frame.wait_for_function('(width) => innerWidth === width && window.quotaTestResizeWidth === width', arg=width)
                 _assert_row_geometry(frame.evaluate(ROW_GEOMETRY))
             assert not errors, errors
         finally:
