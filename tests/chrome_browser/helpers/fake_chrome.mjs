@@ -10,12 +10,17 @@
 
 const pageTitle = (tab) => tab.title ?? '';
 
-export async function connectFakeChrome(WebSocket, relayUrl, { tabs = [], refuseAttach = new Map(), onCommand } = {}) {
+// answer(method, params, tabId): a DevTools result the test states for one command, or undefined for the default.
+export async function connectFakeChrome(WebSocket, relayUrl, { tabs = [], refuseAttach = new Map(), onCommand, answer } = {}) {
   const socket = new WebSocket(relayUrl);
   const commands = [];
   const known = new Map(tabs.map((tab) => [tab.id, { ...tab }]));
   const fetchAnswers = [];
   const bodies = new Map();
+  // The Fetch patterns Chrome holds for each tab's own session (each Fetch.enable replaces them), and the bodies of
+  // responses paused at the response stage, by their pause id.
+  const fetchPatterns = new Map();
+  const pausedBodies = new Map();
   let nextId = 1;
   await new Promise((resolve, reject) => {
     socket.once('open', resolve);
@@ -66,7 +71,10 @@ export async function connectFakeChrome(WebSocket, relayUrl, { tabs = [], refuse
     } else if (message.method === 'chrome.debugger.sendCommand') {
       const tab = known.get(tabId) || { id: tabId, url: 'about:blank', title: '' };
       const [, method, params] = message.params;
-      if (method === 'Target.getTargetInfo') {
+      const stated = answer?.(method, params, tabId);
+      if (stated !== undefined) {
+        result = stated;
+      } else if (method === 'Target.getTargetInfo') {
         result = { targetInfo: { targetId: `TARGET-${tabId}`, type: 'page', title: pageTitle(tab), url: tab.url, attached: true, canAccessOpener: false, browserContextId: 'CTX' } };
       } else if (method === 'Page.getFrameTree') {
         result = { frameTree: { frame: frameOf(tab), childFrames: [] } };
@@ -104,6 +112,18 @@ export async function connectFakeChrome(WebSocket, relayUrl, { tabs = [], refuse
         result = { body: body.toString('base64'), base64Encoded: true };
       } else if (method === 'Fetch.continueRequest' || method === 'Fetch.failRequest' || method === 'Fetch.fulfillRequest') {
         fetchAnswers.push({ method, requestId: params.requestId, errorReason: params.errorReason });
+      } else if (method === 'Fetch.enable' && !message.params[0].sessionId) {
+        // Without patterns, every request at the request stage.
+        fetchPatterns.set(tabId, params?.patterns?.length ? params.patterns : [{ urlPattern: '*', requestStage: 'Request' }]);
+      } else if (method === 'Fetch.disable' && !message.params[0].sessionId) {
+        fetchPatterns.delete(tabId);
+      } else if (method === 'Fetch.getResponseBody') {
+        const body = pausedBodies.get(params.requestId);
+        if (!body) {
+          send({ id: message.id, error: 'Can only get response body on requests captured after headers received.' });
+          return;
+        }
+        result = { body: body.toString('base64'), base64Encoded: true };
       }
     }
     send({ id: message.id, result });
@@ -112,6 +132,9 @@ export async function connectFakeChrome(WebSocket, relayUrl, { tabs = [], refuse
     send({ method: 'chrome.tabs.onCreated', params: [tab] });
   send({ method: 'extension.initialized', params: [] });
   const tabOf = (tabId) => known.get(tabId);
+  // Whether Chrome pauses a request of this resource type at this stage in this tab ('*' patterns only, as used here).
+  const pauses = (tabId, stage, resourceType) => (fetchPatterns.get(tabId) ?? []).some((pattern) =>
+    (pattern.requestStage ?? 'Request') === stage && (!pattern.resourceType || pattern.resourceType === resourceType));
 
   // What Chrome reports for one request, or for each hop of a redirect chain. Each entry of `hops` is a URL
   // or { url, method, postData, resourceType }. `frameId` defaults to the tab's main frame. With navigation:
@@ -119,6 +142,7 @@ export async function connectFakeChrome(WebSocket, relayUrl, { tabs = [], refuse
   // once Playwright has asked for them (its route is installed): that is the only way it learns of a request.
   const requestChain = (tabId, hops, { frameId = `TARGET-${tabId}`, navigation = false, requestId = `REQ-${nextId++}`, redirectStatus = 302 } = {}) => {
     let previous = null;
+    const paused = [];
     for (const hop of hops) {
       const { url, method = 'GET', postData, resourceType = navigation ? 'Document' : 'Fetch' } = typeof hop === 'string' ? { url: hop } : hop;
       const request = { url, method, headers: {}, ...(postData ? { hasPostData: true, postDataEntries: [{ bytes: Buffer.from(postData).toString('base64') }] } : {}), initialPriority: 'High', referrerPolicy: 'no-referrer' };
@@ -126,11 +150,28 @@ export async function connectFakeChrome(WebSocket, relayUrl, { tabs = [], refuse
         requestId, loaderId: navigation ? requestId : 'SUB', documentURL: url, request, timestamp: 1, wallTime: 1, initiator: { type: 'other' }, type: resourceType, frameId,
         ...(previous ? { redirectResponse: response(previous, redirectStatus), redirectHasExtraInfo: false } : {}),
       });
-      if (commands.some((command) => command.params?.[1] === 'Fetch.enable' && command.params?.[0]?.tabId === tabId))
-        emit(tabId, 'Fetch.requestPaused', { requestId: `PAUSED-${nextId++}`, networkId: requestId, request, frameId, resourceType });
+      if (pauses(tabId, 'Request', resourceType)) {
+        paused.push(`PAUSED-${nextId++}`);
+        emit(tabId, 'Fetch.requestPaused', { requestId: paused[paused.length - 1], networkId: requestId, request, frameId, resourceType });
+      }
       previous = url;
     }
-    return { requestId, lastUrl: previous };
+    return { requestId, lastUrl: previous, paused };
+  };
+  // A response at the response stage, if the tab's patterns ask for it: the pause id, or null when Chrome would not
+  // pause it. Its body is what Fetch.getResponseBody hands over for that pause. frameId null: Chrome names no frame;
+  // networkId null: Chrome reports no network request for it (seen for a link with the download attribute).
+  const responseStage = (tabId, networkId, url, { method = 'GET', status = 200, headers = {}, body, frameId = `TARGET-${tabId}`, resourceType = 'Document' } = {}) => {
+    if (!pauses(tabId, 'Response', resourceType))
+      return null;
+    const pauseId = `PAUSED-${nextId++}`;
+    if (body !== undefined)
+      pausedBodies.set(pauseId, Buffer.from(body));
+    emit(tabId, 'Fetch.requestPaused', {
+      requestId: pauseId, ...(networkId === null ? {} : { networkId }), request: { url, method, headers: {}, initialPriority: 'High', referrerPolicy: 'no-referrer' }, ...(frameId === null ? {} : { frameId }), resourceType,
+      responseStatusCode: status, responseStatusText: status === 200 ? 'OK' : String(status), responseHeaders: Object.entries(headers).map(([name, value]) => ({ name, value: String(value) })),
+    });
+    return pauseId;
   };
   const response = (url, status, headers = {}, mimeType = 'text/html') => ({ url, status, statusText: status === 200 ? 'OK' : String(status), headers, mimeType, connectionReused: false, connectionId: 0, encodedDataLength: 0, securityState: 'unknown', protocol: 'http/1.1' });
   const respond = (tabId, requestId, url, { status = 200, headers = {}, mimeType, body, frameId = `TARGET-${tabId}`, type = 'Document' } = {}) => {
@@ -191,6 +232,11 @@ export async function connectFakeChrome(WebSocket, relayUrl, { tabs = [], refuse
   };
   return {
     commands, fetchAnswers, emit, removeTab, tab: tabOf, requestChain, respond, failRequest, commit, navigation, onNextNavigate, navigatedWithinDocument, attachFrame, detachFrame, consoleCall, pageError,
+    responseStage, fetchPatterns: (tabId) => fetchPatterns.get(tabId) ?? null,
+    // frameId null: Chrome names no frame. sessionId: reported on a frame's or worker's own session, not the tab's.
+    downloadWillBegin: (tabId, { sessionId, frameId = `TARGET-${tabId}`, ...params }) => send({ method: 'chrome.debugger.onEvent',
+      params: [{ tabId, ...(sessionId ? { sessionId } : {}) }, 'Page.downloadWillBegin', { ...(frameId === null ? {} : { frameId }), ...params }] }),
+    downloadProgress: (tabId, params) => emit(tabId, 'Page.downloadProgress', params),
     detach: (tabId, reason) => send({ method: 'chrome.debugger.onDetach', params: [{ tabId }, reason] }),
     cdp: (method) => commands.filter((command) => command.method === 'chrome.debugger.sendCommand' && command.params?.[1] === method).map((command) => command.params?.[2]),
     close: (code = 1000, reason = 'fake Chrome closed') => socket.close(code, reason),

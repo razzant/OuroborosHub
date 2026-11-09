@@ -4,10 +4,12 @@
 // initialize and tools/list are passive: no relay, no socket, no browser, no profile, no
 // file is written. A browser session starts only inside an explicit browser_connect call.
 import { AsyncLocalStorage } from 'node:async_hooks';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { BrowserConnection, redact } from './connection.mjs';
-import { BrowserGuard } from './guard.mjs';
+import { BrowserGuard, INTAKE_MAX_FILES, INTAKE_MAX_BYTES } from './guard.mjs';
+import { DOWNLOAD_MAX_BYTES, DOWNLOAD_SETTLE_MS, MAX_BEGINS, MAX_CHAINS, MAX_RESPONSES, targetIdOf } from './download.mjs';
 import { createPointerHooks, InputFramePreparer, DELIVERY, unconfirmedInputMessage, unverifiedInputMessage } from './input.mjs';
 
 export const SERVER_NAME = 'chrome_browser';
@@ -33,6 +35,12 @@ export const NAVIGATION_TOOLS = new Set(['browser_navigate', 'browser_navigate_b
 // Tools that return records Playwright keeps from a tab's earlier documents (see withRecordChecks).
 export const RECORD_TOOLS = new Set(['browser_console_messages', 'browser_network_requests', 'browser_network_request']);
 
+// Tools that give the page files: the host admits and copies each named file first (see withFileIntake).
+export const FILE_TOOLS = new Set(['browser_file_upload', 'browser_drop']);
+
+// Tools that can capture the HTTP download they start, when asked to (see withDownloadCapture).
+export const DOWNLOAD_TOOLS = new Set(['browser_click']);
+
 // How long Playwright waits for a navigation. Upstream's 60 s plus its 5 s wait for "load" (pinned
 // coreBundle.js, Tab.navigate) outlasts the host's default 60 s MCP_TOOL_TIMEOUT_SEC, whose expiry ends
 // the task's session and with it the owner's approval. 45 s plus that 5 s leaves 10 s under the default
@@ -43,6 +51,8 @@ export const NAVIGATION_TIMEOUT_MS = 45_000;
 // The largest response body returned as an image: the host's image reader takes no larger file
 // (Ouroboros tools/vision.py, _VLM_MAX_FILE_BYTES).
 export const MAX_RESPONSE_IMAGE_BYTES = 20 * 1024 * 1024;
+// The largest other binary response body returned, as an embedded resource: the bound a file intake has.
+export const MAX_RESPONSE_BODY_BYTES = INTAKE_MAX_BYTES;
 
 // Parameters removed from the advertised schemas (or never advertised) and refused if sent anyway.
 const STRIPPED_PARAMETERS = {
@@ -86,6 +96,7 @@ export const SERVER_INSTRUCTIONS = [
   'Requests from attached tabs are checked by the host\'s request guard; a refused request fails with ERR_BLOCKED_BY_CLIENT and the reason is reported.',
   'The guard also decides which addresses you may open and which pages you may read (their address and any redirect on the way); if it refuses, nothing is opened, or the output is withheld with its reason.',
   'Console entries and network requests kept from a page you have left are judged by where they came from: those you may not read are withheld and counted, and the rest are returned.',
+  'A click expected to start a file download (a link or a form that returns a file) can be given captureDownload: true; the file\'s bytes then come back as a resource, Chrome\'s own download goes on, and the result says apart what was captured and what Chrome reported of its download.',
 ].join(' ');
 
 // The address upstream will open for a URL argument: Tab.checkUrlAndNavigate's own scheme
@@ -263,23 +274,60 @@ export function imageTypeOf(bytes) {
   return '';
 }
 
+// The media type an embedded resource is labelled with. A declared image type stays only on a supported
+// image (which goes out as an image anyway), so a host attaching images by type is never handed other bytes.
+function resourceMimeType(contentType) {
+  const declared = String(contentType ?? '').split(';')[0].trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/.test(declared) || declared.startsWith('image/'))
+    return 'application/octet-stream';
+  return declared;
+}
+
+// Exact bytes as an embedded resource (MCP BlobResourceContents) under a label the caller makes unique.
+function binaryResource(bytes, contentType, uri) {
+  return { uri, mimeType: resourceMimeType(contentType), blob: bytes.toString('base64') };
+}
+
 // Upstream saves a body that is not text to a file in the private folder and answers with that file's
 // bare relative path (pinned coreBundle.js, renderRequestPart and saveResponseBody), which the model
 // cannot open. The file named here is the one upstream just wrote, never a path read from any result. An
-// image goes out exactly as it came, in upstream's own image carrier; the file stays where upstream put it.
-export function describeSavedBody(fileName, contentType) {
+// image goes out exactly as it came, in upstream's own image carrier; other bytes up to the bound go out
+// exactly as they came in an embedded resource (MCP BlobResourceContents), labelled by the request's index
+// and the bytes' sha256 so two bodies never share a label. The file stays where upstream put it. Only a body
+// within the bound is read whole; of a larger one, only enough to tell an image.
+export function describeSavedBody(fileName, contentType, index = 0) {
   let bytes;
+  let size;
   try {
-    bytes = fs.readFileSync(fileName);
+    size = fs.statSync(fileName).size;
+    if (size <= Math.max(MAX_RESPONSE_IMAGE_BYTES, MAX_RESPONSE_BODY_BYTES)) {
+      bytes = fs.readFileSync(fileName);
+      size = bytes.length;
+    } else {
+      bytes = Buffer.alloc(12);
+      const fd = fs.openSync(fileName, 'r');
+      try {
+        bytes = bytes.subarray(0, fs.readSync(fd, bytes, 0, bytes.length, 0));
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
   } catch {
     return { text: '- Response body: saved by upstream, but it could not be read back here. It is not returned.' };
   }
   const type = imageTypeOf(bytes);
-  if (type && bytes.length <= MAX_RESPONSE_IMAGE_BYTES)
+  if (type && size <= MAX_RESPONSE_IMAGE_BYTES)
     return { image: { data: bytes, type }, text: '- Response body: the image is attached to this result' };
   const declared = String(contentType ?? '').split(';')[0].trim().slice(0, 100) || 'no declared type';
-  const why = type ? `larger than the ${MAX_RESPONSE_IMAGE_BYTES} bytes returned as an image` : 'not text or a supported image';
-  return { text: `- Response body: ${bytes.length} bytes (${declared}), ${why}. It is not returned here, and this server's private folder cannot be opened from here.` };
+  if (!type && size <= MAX_RESPONSE_BODY_BYTES) {
+    const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+    return {
+      resource: binaryResource(bytes, contentType, `chrome-browser://response-body/request-${index}/${sha256}`),
+      text: `- Response body: ${size} bytes (${declared}), attached to this result as a binary resource, sha256 ${sha256}`,
+    };
+  }
+  const why = type ? `larger than the ${MAX_RESPONSE_IMAGE_BYTES} bytes returned as an image` : `larger than the ${MAX_RESPONSE_BODY_BYTES} bytes returned as a binary resource`;
+  return { text: `- Response body: ${size} bytes (${declared}), ${why}. It is not returned here, and this server's private folder cannot be opened from here.` };
 }
 
 function guardBlocksSince(guard, mark) {
@@ -356,8 +404,40 @@ function withDeliveryNotes(name, result, deliveries) {
   return { ...result, content: [...(result.content || []), { type: 'text', text: `### Input delivery\n${lines.join('\n')}` }] };
 }
 
+// Why a download's bytes were not captured (download.mjs, CaptureWindow.report).
+const NOT_CAPTURED = {
+  reading: () => 'not returned: Chrome was still handing over the body when this call returned. The response goes on to Chrome\'s own download once it has been read.',
+  read_failed: (entry) => `not captured: Chrome did not hand over the body (${entry.response.error}). The response was passed on unchanged.`,
+  too_large: (entry) => `not captured: the response declared ${entry.response.declared} bytes, more than the ${DOWNLOAD_MAX_BYTES} read here. It was passed on unread.`,
+  unknown_length: () => 'not captured: the response declared no length (a chunked response, for example), so reading it could not be bounded beforehand. It was passed on unread.',
+  chunked: (entry) => `not captured: the response is sent with Transfer-Encoding ${entry.response.transfer.slice(0, 40)}, which overrides any Content-Length, so reading it could not be bounded beforehand. It was passed on unread.`,
+  over_read: (entry) => `not captured: Chrome handed over ${entry.response.size} bytes, more than the ${DOWNLOAD_MAX_BYTES} returned here, although the response declared ${entry.response.declared}. They were dropped, not returned.`,
+  encoded: (entry) => `not captured: the response is content-encoded (${entry.response.encoding.slice(0, 40)}), so the length Chrome would hand over is not declared. It was passed on unread.`,
+  ambiguous: () => 'not captured: another response or download in this call had the same address, so which bytes are this download\'s is uncertain. Nothing is attached for it.',
+  not_http: () => 'not captured: the page made it itself (a blob: or data: address); nothing was received over HTTP. Only HTTP responses are captured.',
+  not_seen: () => 'not captured: no response of it was seen in this tab\'s own session (it may come from a cross-origin frame, a service worker or a request made before this click).',
+  overflow: () => 'not captured: more document responses, downloads or requests came during this click than one capture keeps, so a response or download with the same address may have gone unrecorded. Nothing is attached for it.',
+  off_session: () => 'not captured: Chrome reported it on a frame\'s or worker\'s own session, not on the tab\'s session where responses are read, so no response can be tied to it. Nothing is attached for it.',
+  no_frame: () => 'not captured: Chrome did not name the frame of the download or of the response with its address, so the two cannot be tied together. Nothing is attached for it.',
+  other_frame: () => 'not captured: the response with its address came in another frame than the download, so the two cannot be tied together. Nothing is attached for it.',
+  no_request: () => 'not captured: Chrome reported no network request for its response (as for a link with the download attribute), so the addresses on the way to it cannot be checked. Nothing is attached for it.',
+  chain_incomplete: () => 'not captured: not every address on the way to its response was seen (its request began before this click, or its redirect hops were not all kept), so they cannot all be checked. Nothing is attached for it.',
+};
+
+// What Chrome reported of its own download, apart from any bytes captured: those show what the server sent, not
+// whether Chrome's file was written.
+function nativeDownloadLine(progress) {
+  if (progress?.state === 'completed')
+    return `  - Chrome's own download: completed, as Chrome reported${Number.isFinite(progress.receivedBytes) ? ` (${progress.receivedBytes} bytes)` : ''}. Where Chrome saved it is not known here.`;
+  if (progress?.state === 'canceled')
+    return '  - Chrome\'s own download: canceled, as Chrome reported.';
+  if (progress?.state === 'inProgress')
+    return `  - Chrome's own download: still in progress when this call returned (${progress.receivedBytes} of ${progress.totalBytes || 'an unknown number of'} bytes); whether it finishes is not known here.`;
+  return '  - Chrome\'s own download: unknown; Chrome reported no progress for it.';
+}
+
 // runtime: { bundle, utils, playwright } from loadPinnedPlaywright (loaded on first use).
-export function createServerCore({ loadRuntime, guardEnvironment, clientName = 'Ouroboros', approvalTtlMs, framePreparer = new InputFramePreparer() }) {
+export function createServerCore({ loadRuntime, guardEnvironment, clientName = 'Ouroboros', approvalTtlMs, framePreparer = new InputFramePreparer(), downloadSettleMs = DOWNLOAD_SETTLE_MS }) {
   let prepared = null;
   let connection = null;
   let guard = null;
@@ -368,7 +448,7 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
     const loaded = loadRuntime();
     const { tools } = loaded.bundle;
     const config = await upstreamConfig(tools);
-    const toolList = upstreamToolList(tools, config).map(withRecordChecks);
+    const toolList = upstreamToolList(tools, config).map(withRecordChecks).map((tool) => withFileIntake(tool, loaded.utils.z)).map((tool) => withDownloadCapture(tool, loaded.utils.z));
     const pointerHooks = createPointerHooks();
     tools.setPointerActionHooks(pointerHooks);
     const listed = [CONNECT_TOOL, DISCONNECT_TOOL, ...toolList.map((tool) => toMcpTool(loaded.utils.z, tool))];
@@ -379,6 +459,10 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
   // One call's decisions: the same address is asked once per call and asked again by the next
   // call, so the answer is the host's current one.
   const callDecisions = new AsyncLocalStorage();
+  // One call's embedded resources, returned after its output checks (none if its output is withheld).
+  const callResources = new AsyncLocalStorage();
+  // Labels of captured downloads, unique for this server's life.
+  let downloadCount = 0;
   const newDecisions = () => {
     const asked = new Map();
     return (url) => {
@@ -532,10 +616,227 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
     }
     if (!saved)
       return;
-    const body = describeSavedBody(saved.fileName, record?.existingResponse()?.headers()['content-type']);
+    const body = describeSavedBody(saved.fileName, record?.existingResponse()?.headers()['content-type'], params.index);
+    const resources = callResources.getStore();
+    if (body.resource && !resources) {
+      response.addTextResult('- Response body: binary, and this call has no way to return it. It is not returned.');
+      return;
+    }
     response.addTextResult(body.text);
     if (body.image)
       await response.registerImageResult(body.image.data, body.image.type);
+    if (body.resource)
+      resources.push(body.resource);
+  }
+
+  // Upload and drop take files from the host, never from a path read here: the host admits each named file as
+  // read_file would and retains a bounded copy (BrowserGuard.intakeFiles), and the page gets those exact bytes
+  // with the original file name through Playwright's own buffer branch (FileChooser.setFiles and Locator.drop
+  // with { name, buffer } payloads). "paths" keeps upstream's form, each string asked as { path }; "files" may
+  // also name the root the host reads it from. An empty or omitted selection (cancelling the chooser, a drop of
+  // data only) is upstream's own handler, unchanged. Admission comes before the chooser is consumed: a refusal
+  // leaves it open for another try.
+  function withFileIntake(tool, z) {
+    if (!FILE_TOOLS.has(tool.schema.name))
+      return tool;
+    const upload = tool.schema.name === 'browser_file_upload';
+    const how = `The host reads each file with its own file admission and keeps a copy; the page gets only that copy's bytes and the file's original name. At most ${INTAKE_MAX_FILES} files and ${INTAKE_MAX_BYTES} bytes in one call.`;
+    const inputSchema = tool.schema.inputSchema.extend({
+      paths: z.array(z.string()).max(INTAKE_MAX_FILES).optional().describe(upload
+        ? `Paths of the files to upload, as read_file takes them. If neither paths nor files is given, the file chooser is cancelled. ${how}`
+        : `Paths of the files to drop onto the element, as read_file takes them. ${how}`),
+      files: z.array(z.object({
+        path: z.string().min(1).describe('The file\'s path, as read_file takes it.'),
+        root: z.string().min(1).optional().describe('The root the host reads the path from, as read_file names it. Omit for the default.'),
+      }).strict()).max(INTAKE_MAX_FILES).optional().describe(`Instead of paths: the files with the root each is read from. ${how}`),
+    });
+    const description = upload ? tool.schema.description : tool.schema.description.replace('"paths" or "data"', '"paths", "files" or "data"');
+    return {
+      ...tool,
+      schema: { ...tool.schema, description, inputSchema },
+      handle: async (context, params, response, signal) => {
+        if (params.paths?.length && params.files?.length) {
+          response.addError('Give the files either as "paths" or as "files", not both. Nothing was done.');
+          return;
+        }
+        const entries = [...(params.paths ?? []).map((where) => ({ path: where })), ...(params.files ?? [])];
+        if (!entries.length)
+          return await tool.handle(context, { ...params, files: undefined }, response, signal);
+        const tab = await context.ensureTab();
+        // defineTabTool's own modal-state rule, which upstream's handler would have applied.
+        const chooser = tab.modalStates().find((state) => state.type === 'fileChooser');
+        if (upload && !chooser) {
+          response.addError(`Error: The tool "${tool.schema.name}" can only be used when there is related modal state present.`);
+          return;
+        }
+        if (!upload && tab.modalStates().length) {
+          response.addError(`Error: Tool "${tool.schema.name}" does not handle the modal state.`);
+          return;
+        }
+        response.setIncludeSnapshot();
+        const target = upload ? null : await tab.targetLocator(params);
+        const intake = await guard.intakeFiles(entries);
+        if (intake.block) {
+          response.addError(`${intake.block}\n${upload ? 'No file was given to the page; the file chooser is still open.' : 'Nothing was dropped.'}`);
+          return;
+        }
+        const payloads = intake.files.map(({ name, buffer }) => ({ name, buffer }));
+        // The code shows the names the page gets, not the bytes or any path.
+        const given = `[${intake.files.map((file, index) => `{ name: ${JSON.stringify(file.name)}, buffer: hostCopies[${index}] }`).join(', ')}]`;
+        if (upload) {
+          // The host may take a while: the page or the owner can have closed the chooser meanwhile.
+          if (!tab.modalStates().includes(chooser)) {
+            response.addError('BROWSER_FILE_CHOOSER_GONE: the file chooser closed while the host was reading the files. No file was given to the page.');
+            return;
+          }
+          response.addCode(`await fileChooser.setFiles(${given})`);
+          tab.clearModalState(chooser);
+          try {
+            await tab.waitForCompletion(async () => {
+              await chooser.fileChooser.setFiles(payloads);
+            });
+          } catch (e) {
+            tab.setModalState(chooser);
+            response.addError(e instanceof Error ? e.message : String(e));
+            return;
+          }
+        } else {
+          const payload = { files: payloads, ...(params.data ? { data: params.data } : {}) };
+          await tab.waitForCompletion(async () => {
+            await target.locator.drop(payload, tab.actionTimeoutOptions);
+          });
+          response.addCode(`await page.${target.resolved}.drop({ files: ${given}${params.data ? `, data: ${JSON.stringify(params.data)}` : ''} });`);
+        }
+        for (const file of intake.files)
+          response.addTextResult(`- Gave the page ${JSON.stringify(file.name)}: ${file.size} bytes, sha256 ${file.sha256}`);
+      },
+    };
+  }
+
+  // A click the agent expects to start a download can ask for its bytes. Only then, and only for that click in the tab
+  // it acts in, Chrome pauses this tab's document responses once more, at the response stage, and the server reads a
+  // body it can bound before letting the same response go on to Chrome's own download (download.mjs). Requests
+  // that Playwright routes still reach the host's request guard. Afterwards the server waits, at most
+  // downloadSettleMs, for Chrome to report each download it began, then restores Playwright's own interception and
+  // reports every download apart: the copy it kept (judged as a page's address is, then returned as an embedded
+  // resource) and what Chrome reported of its own.
+  function withDownloadCapture(tool, z) {
+    if (!DOWNLOAD_TOOLS.has(tool.schema.name))
+      return tool;
+    const inputSchema = tool.schema.inputSchema.extend({
+      captureDownload: z.boolean().optional().describe(`Set to true when this click is expected to start a file download over HTTP (a link or a form that returns a file). The server keeps a copy of the response as Chrome receives it, read once and not fetched again, and Chrome's own download goes on unchanged. A copy of at most ${DOWNLOAD_MAX_BYTES} bytes, whose response declares its length, is returned as an embedded resource with its sha256; the result says separately what Chrome reported of its own download. Only this click, in this tab; a download the page makes itself (blob: or data:) is not captured.`),
+    });
+    return {
+      ...tool,
+      schema: { ...tool.schema, inputSchema },
+      handle: async (context, params, response, signal) => {
+        const { captureDownload, ...upstreamParams } = params;
+        if (!captureDownload)
+          return await tool.handle(context, upstreamParams, response, signal);
+        const tab = await context.ensureTab();
+        // defineTabTool's own modal-state rule, before anything is changed.
+        if (tab.modalStates().length) {
+          response.addError(`Error: Tool "${tool.schema.name}" does not handle the modal state.`);
+          return;
+        }
+        const capture = connection.downloads();
+        let window;
+        try {
+          if (!capture)
+            throw new Error('BROWSER_DOWNLOAD_CAPTURE_UNAVAILABLE: the connection is not ready');
+          window = await capture.open(targetIdOf(tab.page));
+        } catch (error) {
+          response.addError(`${error.message}\nNothing was clicked.`);
+          return;
+        }
+        // Upstream looks for the current tab again (defineTabTool): it clicks in the tab the capture is open in.
+        const checked = Object.create(context, { ensureTab: { value: async () => tab } });
+        const addError = response.addError;
+        let failure = null;
+        let refused = false;
+        try {
+          response.addError = function(error) {
+            refused = true;
+            return addError.call(this, error);
+          };
+          try {
+            await tool.handle(checked, upstreamParams, response, signal);
+          } catch (error) {
+            failure = error;
+          } finally {
+            response.addError = addError;
+          }
+          // A click that failed may still have gone out: what Chrome already reported is said, without waiting.
+          await capture.settle(window, failure || refused ? 0 : downloadSettleMs, signal);
+        } finally {
+          await capture.close(window);
+        }
+        const report = window.report();
+        // A click that failed and began nothing is upstream's failure, unchanged.
+        if ((failure || refused) && !report.downloads.length && !report.elsewhere.length) {
+          if (failure)
+            throw failure;
+          return;
+        }
+        const text = await reportDownloads(report, failure || refused);
+        // Upstream answers a thrown error with that error's text alone (BrowserBackend.callTool), so a click that
+        // failed after a download began carries the report in it.
+        if (failure)
+          throw Object.assign(new Error(text), { toString: () => `${String(failure)}\n${text}` });
+        response.addTextResult(text);
+      },
+    };
+  }
+
+  async function reportDownloads(report, failed) {
+    const decide = callDecisions.getStore() ?? newDecisions();
+    const resources = callResources.getStore();
+    const lines = [];
+    for (const [index, entry] of report.downloads.entries()) {
+      const label = `- Download ${index + 1}`;
+      // The bytes and the name come from the download's address and every hop on the way to it.
+      const refusal = await firstRefusal([...(entry.response?.chain ?? []), entry.url], decide);
+      if (refusal) {
+        lines.push(`${label}: withheld: this task may not read ${refusal.where} (its address or a redirect hop on the way to it). ${refusal.block}`);
+        continue;
+      }
+      const from = entry.response
+        ? ` (${entry.response.method} ${entry.response.status}${entry.response.contentType ? `, ${entry.response.contentType.split(';')[0].trim().slice(0, 100)}` : ''})`
+        : '';
+      lines.push(`${label}: ${JSON.stringify(entry.suggestedFilename || 'unnamed')}, as Chrome names it, from ${addressLabel(entry.url)}${from}`);
+      if (entry.capture === 'captured') {
+        const { bytes, size, sha256, declared, contentType, continued, continueError } = entry.response;
+        const notes = [
+          ...(declared !== size ? [`The response declared ${declared} bytes.`] : []),
+          ...(continued === false ? [`Passing the response on to Chrome afterwards failed (${continueError}).`] : []),
+        ];
+        if (resources) {
+          resources.push(binaryResource(bytes, contentType, `chrome-browser://download/${++downloadCount}/${sha256}`));
+          lines.push(`  - Captured copy: ${size} bytes, sha256 ${sha256}, read once from the response as Chrome received it (not fetched again), attached to this result as a binary resource. It shows what the server sent, not that Chrome's own download finished.${notes.length ? ` ${notes.join(' ')}` : ''}`);
+        } else {
+          lines.push(`  - Captured copy: ${size} bytes, sha256 ${sha256}, but this call has no way to return it. It is not returned.${notes.length ? ` ${notes.join(' ')}` : ''}`);
+        }
+      } else {
+        lines.push(`  - Captured copy: ${NOT_CAPTURED[entry.capture](entry)}`);
+      }
+      lines.push(nativeDownloadLine(entry.native));
+    }
+    for (const entry of report.elsewhere) {
+      const refusal = await firstRefusal([entry.url], decide);
+      lines.push(refusal
+        ? `- A download in another tab: withheld: this task may not read ${refusal.where}. ${refusal.block}`
+        : `- A download began in another tab (${JSON.stringify(entry.suggestedFilename || 'unnamed')} from ${addressLabel(entry.url)}); not captured: capture covers only the tab this click acts in.`);
+    }
+    if (!report.downloads.length)
+      lines.push(failed
+        ? '- No download had begun in this tab when the click ended in an error; nothing was captured.'
+        : `- No download began in this tab within ${downloadSettleMs / 1000} s after the click; nothing was captured.`);
+    const { responses, begins, chains } = report.dropped;
+    if (responses + begins + chains)
+      lines.push(`- More came during this click than one capture keeps (${MAX_RESPONSES} document responses, ${MAX_BEGINS} downloads, ${MAX_CHAINS} document requests): ${responses} responses passed on unread, ${begins} downloads and ${chains} requests not recorded. No bytes were attached, since what was dropped could have shared an address.`);
+    if (report.restored === false)
+      lines.push('- Chrome did not confirm that this call\'s response interception was removed. Later document responses in this tab are still passed on unchanged.');
+    return lines.join('\n');
   }
 
   async function listTools() {
@@ -675,9 +976,10 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
     const outputPages = new Set(browserContext.pages());
     const rememberPage = (page) => outputPages.add(page);
     browserContext.on('page', rememberPage);
+    const resources = [];
     let result;
     try {
-      result = await callDecisions.run(decide, () => backend.callTool(name, params, signal));
+      result = await callDecisions.run(decide, () => callResources.run(resources, () => backend.callTool(name, params, signal)));
     } catch (error) {
       result = errorResult(String(error));
     } finally {
@@ -707,6 +1009,9 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
         : 'BROWSER_CONNECTION_CHANGED: The connection changed.';
       result = { ...result, content: [...(result.content || []), { type: 'text', text: `### Connection during call\n${note} This call was dispatched; the backend response does not establish all of its effects. Do not repeat it automatically. After new approval, take a fresh browser_snapshot and reassess.` }] };
     }
+    // Last, after every note: binary output the call kept for its result, unless that output was withheld.
+    if (!after && resources.length)
+      result = { ...result, content: [...(result.content || []), ...resources.map((resource) => ({ type: 'resource', resource }))] };
     return mergeTextParts(result);
   }
 
