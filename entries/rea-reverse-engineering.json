@@ -12,6 +12,7 @@
     "kind": "hosted",
     "path": "skills/rea-reverse-engineering"
   },
+  "title": "REA reverse engineering",
   "type": "instruction",
   "version": "0.1.0",
   "when_to_use": "Use when a claim depends on a shipped artifact, binary or package behavior, decompilation, runtime observation, browser capture, or a version comparison that ordinary source-repository tools cannot establish.",

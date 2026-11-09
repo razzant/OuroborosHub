@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/99063ee51b660263df56feb95b23e16af4d0fcaf",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/1a260f1f80a175024633fb9c9f43cbaecc8daf2a",
   "schema_version": 1,
   "skills": [
     {
@@ -2528,6 +2528,22 @@
       "type": "instruction",
       "version": "0.1.0",
       "when_to_use": "A person wants current public website information, such as flight fares, product prices, listings or availability, and Pomerado is connected or the owner wants help connecting it. Not for private data, website changes, account login or building tools."
+    },
+    {
+      "description": "Use morluto/rea for evidence-grounded analysis of shipped binaries, packages, browser runtimes, captures, and reconstruction tasks without copying its large runtime into Ouroboros.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "a2bce940719e7ef5249e49cdde7bb90ad46b2a1513bd4d05e5d2c28d0cbe8f00",
+          "size": 5910
+        }
+      ],
+      "name": "rea-reverse-engineering",
+      "slug": "rea-reverse-engineering",
+      "title": "REA reverse engineering",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "Use when a claim depends on a shipped artifact, binary or package behavior, decompilation, runtime observation, browser capture, or a version comparison that ordinary source-repository tools cannot establish."
     },
     {
       "description": "Оркестратор автоматического бронирования ресторанов: нормализует список ресторанов, формирует задачу для агента-исполнителя и валидирует результат.",
