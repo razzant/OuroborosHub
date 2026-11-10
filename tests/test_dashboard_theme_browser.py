@@ -28,13 +28,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 LEGACY_REF = "3e71431e4fa790d7bea6169a83ad572bf7eb6f20"
 READY = {
-    "cache_efficiency_snapshot": "#kpiRate",
+    "cache_efficiency_snapshot": ".kpi:nth-child(2) b",
     "claudexor_quotas": ".q-plate",
     "context-lens": ".row",
     "token-usage": ".to-total",
 }
 FOCUS = {
-    "cache_efficiency_snapshot": "#chartCanvas",
+    "cache_efficiency_snapshot": '[data-chart="volume"] [data-pick]',
     'claudexor_quotas': '[data-focus="accounts"]',
     "context-lens": "select",
     "token-usage": "select",
@@ -198,8 +198,8 @@ def browser(request, theme_server):
 
 def _exercise_selection(frame, skill):
     if skill == "cache_efficiency_snapshot":
-        frame.locator('[data-mode="volume"]').click()
-        frame.locator("#chartCanvas").press("ArrowRight")
+        frame.wait_for_function('() => document.querySelector(".kpi:nth-child(2) b")?.textContent.includes("%")')
+        frame.locator('[data-chart="volume"] [data-pick]').first.press("ArrowRight")
     elif skill == "claudexor_quotas":
         frame.locator('[data-focus="accounts"]').click()
         # Accounts intentionally folds the plate. Capture the theme baseline
@@ -293,7 +293,7 @@ def test_dashboard_theme_keeps_live_state_and_legacy_fallback(theme_server, brow
 
 @pytest.mark.parametrize("mode", ["trend", "volume"])
 @pytest.mark.parametrize("scale", [1, 2])
-def test_retained_cache_canvas_repaints_while_hidden(theme_server, browser, mode, scale):
+def test_retained_cache_svg_follows_theme_while_hidden(theme_server, browser, mode, scale):
     """Returning to a retained graph must match an ordinary visible repaint."""
     instance, _ = browser
     context = instance.new_context(viewport={"width": 1100, "height": 850}, device_scale_factor=scale)
@@ -303,8 +303,8 @@ def test_retained_cache_canvas_repaints_while_hidden(theme_server, browser, mode
         page.wait_for_function("() => window.ready === true")
         node = page.locator("iframe").element_handle()
         frame = node.content_frame()
-        frame.wait_for_function('() => document.querySelector("#kpiRate")?.textContent.includes("%")')
-        frame.locator(f'[data-mode="{mode}"]').click()
+        frame.wait_for_function('() => document.querySelector(".kpi:nth-child(2) b")?.textContent.includes("%")')
+        selector = '[data-chart="' + ('rate' if mode == 'trend' else 'volume') + '"] svg'
         page.mouse.move(0, 0)
         frame.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
 
@@ -312,7 +312,7 @@ def test_retained_cache_canvas_repaints_while_hidden(theme_server, browser, mode
             page.evaluate("t => ouroTheme.set(t)", value)
             frame.wait_for_function("t => document.documentElement.dataset.theme === t", arg=value, polling=25)
 
-        pixels = 'document.querySelector("canvas").toDataURL()'
+        pixels = "JSON.stringify([...document.querySelector('" + selector + "').querySelectorAll('*')].map(n=>[n.outerHTML,getComputedStyle(n).fill,getComputedStyle(n).stroke]))"
         theme("light")
         reference = frame.evaluate(pixels)
         theme("dark")
@@ -322,7 +322,7 @@ def test_retained_cache_canvas_repaints_while_hidden(theme_server, browser, mode
         frame.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
         assert page.evaluate('n => document.querySelector("iframe") === n', node)
         same_paint = frame.evaluate(pixels) == reference
-        assert same_paint, "hidden theme change must match visible canvas paint"
+        assert same_paint, "hidden theme change must match visible SVG geometry and colors"
         page.evaluate("async () => await disposeWidget()")
     finally:
         context.close()
@@ -330,8 +330,8 @@ def test_retained_cache_canvas_repaints_while_hidden(theme_server, browser, mode
 
 @pytest.mark.parametrize("mode", ["trend", "volume"])
 @pytest.mark.parametrize("initial_scale,new_scale", [(1, 2), (2, 1)])
-def test_cache_repaint_uses_the_scale_of_its_backing_canvas(theme_server, browser, mode, initial_scale, new_scale):
-    """Changing displays must not mix a new DPR with the existing canvas scale."""
+def test_cache_svg_preserves_logical_geometry_across_device_scale(theme_server, browser, mode, initial_scale, new_scale):
+    """SVG no longer has a backing canvas; theme and logical geometry survive DPR changes."""
     instance, engine = browser
     if engine != "chromium":
         pytest.skip("runtime DPR emulation uses Chromium CDP")
@@ -341,11 +341,11 @@ def test_cache_repaint_uses_the_scale_of_its_backing_canvas(theme_server, browse
         page.goto(theme_server["url"] + "/?skill=cache_efficiency_snapshot&theme=light")
         page.wait_for_function("() => window.ready === true")
         frame = page.locator("iframe").element_handle().content_frame()
-        frame.wait_for_function('() => document.querySelector("#kpiRate")?.textContent.includes("%")')
-        frame.locator(f'[data-mode="{mode}"]').click()
+        frame.wait_for_function('() => document.querySelector(".kpi:nth-child(2) b")?.textContent.includes("%")')
+        selector = '[data-chart="' + ('rate' if mode == 'trend' else 'volume') + '"] svg'
         page.mouse.move(0, 0)
         frame.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
-        pixels = 'document.querySelector("canvas").toDataURL()'
+        pixels = "JSON.stringify([...document.querySelector('" + selector + "').querySelectorAll('*')].map(n=>[n.outerHTML,getComputedStyle(n).fill,getComputedStyle(n).stroke]))"
         reference = frame.evaluate(pixels)
         frame.evaluate("() => {window.qaResizeCount=0; window.addEventListener('resize', () => qaResizeCount++);}")
         cdp = context.new_cdp_session(page)

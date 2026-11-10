@@ -1,1073 +1,249 @@
-/**
- * Cache Efficiency Snapshot — Standalone Module Widget
- * Theme-aware Dashboard with Canvas 2D Charts and Multi-Timeframe Analytics.
- * Zero external CDN dependencies.
- */
+/* Token usage and cache health: the selected dashboard D, using exact server intervals. */
 (function () {
+  'use strict';
   const root = document.getElementById('root');
   if (!root) return;
-
-  // Injected Scoped CSS
+  const nf = new Intl.NumberFormat('en-US');
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const fmt = n => n == null ? '—' : n >= 1e9 ? (n / 1e9).toFixed(2) + ' B' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' M' : n >= 1e3 ? (n / 1e3).toFixed(1) + ' K' : nf.format(n);
+  const pct = n => n == null ? '—' : n.toFixed(1) + '%';
+  const esc = x => String(x == null ? '' : x).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const clock = ts => new Intl.DateTimeFormat('en-GB', {timeZone: zone, hour:'2-digit', minute:'2-digit'}).format(new Date(ts));
+  const dateKey = ts => new Intl.DateTimeFormat('en-CA', {timeZone: zone, year:'numeric', month:'2-digit', day:'2-digit'}).format(new Date(ts));
+  const dayLabel = day => new Date(day + 'T12:00:00Z').toLocaleDateString('en-GB', {timeZone:'UTC', day:'numeric', month:'short'});
+  const timestamp = ts => dayLabel(dateKey(ts)) + ' ' + clock(ts);
+  const icons = {
+    refresh:'<path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 7a7 7 0 0 1 11.5-1.5L20 9M4 15l2.5 3.5A7 7 0 0 0 18 17"/>',
+    close:'<path d="m6 6 12 12M6 18 18 6"/>',
+  };
+  const icon = name => '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">'+icons[name]+'</svg>';
+  const presets = [['1H','1h'],['6H','6h'],['24H','24h'],['7D','Week'],['MONTH','Month'],['ALL','All']];
+  const state = {range:'24H', committed:null, pending:null, failed:null, snapshot:null, selected:null,
+    from:'', to:'', customOpen:false, models:false, coverage:false, status:'loading', message:'', page:0};
+  let detail = null, requestSeq = 0, detailSeq = 0, disposed = false, pendingTimer = 0;
+  let lastHeight = 0, lastWidth = 0, renderFrame = 0;
   const style = document.createElement('style');
   style.textContent = `
-    :root {
-      color-scheme: dark;
-      --ces-background: #0d0b0f; --ces-text: #f8fafc; --ces-value: #ffffff;
-      --ces-body: #e2e8f0; --ces-muted: #94a3b8; --ces-slate: #64748b;
-      --ces-green: #34d399; --ces-cyan: #38bdf8; --ces-violet: #a855f7;
-      --ces-accent: #e85d6f; --ces-danger: #f43f5e; --ces-error: #fca5a5; --ces-amber: #c69245;
-      --ces-ink-rgb: 255, 255, 255; --ces-base-rgb: 13, 11, 15;
-      --ces-surface-rgb: 23, 18, 28; --ces-tooltip-rgb: 17, 13, 22;
-      --ces-soft-accent-rgb: 240, 122, 134; --ces-accent-rgb: 232, 93, 111;
-      --ces-danger-rgb: 244, 63, 94; --ces-cyan-rgb: 56, 189, 248; --ces-shadow-rgb: 0, 0, 0;
-      --ces-grid: rgba(var(--ces-ink-rgb), 0.06);
-      --ces-crosshair: rgba(var(--ces-soft-accent-rgb), 0.45);
-    }
-    :root[data-theme=light] {
-      color-scheme: light;
-      --ces-background: #f8fafc; --ces-text: #18212f; --ces-value: #0f172a;
-      --ces-body: #334155; --ces-muted: #526174; --ces-slate: #64748b;
-      --ces-green: #047857; --ces-cyan: #0369a1; --ces-violet: #7e22ce;
-      --ces-accent: #b82f43; --ces-danger: #be123c; --ces-error: #9f1239; --ces-amber: #92600c;
-      --ces-ink-rgb: 15, 23, 42; --ces-base-rgb: 241, 245, 249;
-      --ces-surface-rgb: 255, 255, 255; --ces-tooltip-rgb: 255, 255, 255;
-      --ces-soft-accent-rgb: 184, 47, 67; --ces-accent-rgb: 184, 47, 67;
-      --ces-danger-rgb: 190, 18, 60; --ces-cyan-rgb: 3, 105, 161; --ces-shadow-rgb: 148, 163, 184;
-    }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body, #root {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'SF Pro Display', Inter, sans-serif;
-      background: var(--ces-background);
-      color: var(--ces-text);
-      width: 100%;
-      min-height: 100%;
-      overflow-x: hidden;
-      -webkit-font-smoothing: antialiased;
-    }
-    
-    #root { padding: 16px 18px; }
-    /* Layout */
-    .ces-container {
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-      width: 100%;
-      max-width: 1200px;
-      margin: 0 auto;
-    }
-
-    /* Glass Card */
-    .ces-card {
-      background: rgba(var(--ces-surface-rgb), 0.75);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      border: 1px solid rgba(var(--ces-soft-accent-rgb), 0.14);
-      border-radius: 12px;
-      padding: 14px 18px;
-      box-shadow: 0 8px 32px rgba(var(--ces-shadow-rgb), 0.36);
-      transition: border-color 0.2s ease, box-shadow 0.2s ease;
-    }
-    .ces-card:hover {
-      border-color: rgba(var(--ces-soft-accent-rgb), 0.28);
-      box-shadow: 0 10px 36px rgba(var(--ces-accent-rgb), 0.08);
-    }
-
-    /* Error Banner */
-    .ces-error-banner {
-      display: none;
-      background: rgba(var(--ces-danger-rgb), 0.16);
-      border: 1px solid rgba(var(--ces-danger-rgb), 0.45);
-      color: var(--ces-error);
-      padding: 10px 14px;
-      border-radius: 8px;
-      font-size: 0.8rem;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-    }
-
-    /* Header */
-    .ces-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 12px;
-    }
-    .ces-title-group {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    .ces-pulse {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: var(--ces-green);
-      box-shadow: 0 0 12px var(--ces-green);
-      animation: ces-pulse-glow 2s infinite ease-in-out;
-    }
-    @keyframes ces-pulse-glow {
-      0%, 100% { transform: scale(1); opacity: 0.85; }
-      50% { transform: scale(1.3); opacity: 1; box-shadow: 0 0 16px var(--ces-green); }
-    }
-    .ces-pulse.error {
-      background: var(--ces-danger);
-      box-shadow: 0 0 12px var(--ces-danger);
-      animation: none;
-    }
-    .ces-title {
-      font-size: 1.12rem;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      color: var(--ces-text);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .ces-subtitle {
-      font-size: 0.76rem;
-      color: var(--ces-muted);
-      margin-top: 2px;
-    }
-
-    /* Controls */
-    .ces-controls {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      flex-wrap: wrap;
-    }
-    .ces-timeframe-group {
-      display: inline-flex;
-      background: rgba(var(--ces-base-rgb), 0.85);
-      border: 1px solid rgba(var(--ces-ink-rgb), 0.08);
-      border-radius: 8px;
-      padding: 3px;
-    }
-    .ces-tf-btn {
-      background: transparent;
-      border: none;
-      color: var(--ces-muted);
-      font-size: 0.75rem;
-      font-weight: 600;
-      padding: 5px 12px;
-      border-radius: 6px;
-      cursor: pointer;
-      transition: all 0.15s ease;
-    }
-    .ces-tf-btn:hover {
-      color: var(--ces-text);
-      background: rgba(var(--ces-ink-rgb), 0.05);
-    }
-    .ces-tf-btn.active {
-      color: var(--ces-text);
-      background: rgba(var(--ces-accent-rgb), 0.22);
-      border: 1px solid rgba(var(--ces-accent-rgb), 0.4);
-      box-shadow: 0 0 10px rgba(var(--ces-accent-rgb), 0.25);
-    }
-
-    .ces-btn {
-      background: rgba(var(--ces-surface-rgb), 0.9);
-      border: 1px solid rgba(var(--ces-soft-accent-rgb), 0.2);
-      color: var(--ces-text);
-      font-size: 0.78rem;
-      font-weight: 600;
-      padding: 6px 14px;
-      border-radius: 8px;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      transition: all 0.2s ease;
-    }
-    .ces-btn:hover {
-      background: rgba(var(--ces-accent-rgb), 0.15);
-      border-color: rgba(var(--ces-accent-rgb), 0.45);
-    }
-    .ces-btn:active { transform: scale(0.97); }
-    .ces-btn.spinning svg {
-      animation: ces-spin 0.8s linear infinite;
-    }
-    @keyframes ces-spin { 100% { transform: rotate(360deg); } }
-
-    /* KPI Grid */
-    .ces-kpi-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 12px;
-    }
-    .ces-kpi-card {
-      position: relative;
-      overflow: hidden;
-      display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      gap: 8px;
-    }
-    .ces-kpi-card::before {
-      content: '';
-      position: absolute;
-      top: 0; left: 0; bottom: 0;
-      width: 4px;
-      border-radius: 4px 0 0 4px;
-    }
-    .ces-kpi-card.crimson::before { background: var(--ces-accent); box-shadow: 0 0 8px var(--ces-accent); }
-    .ces-kpi-card.cyan::before { background: var(--ces-cyan); box-shadow: 0 0 8px var(--ces-cyan); }
-    .ces-kpi-card.emerald::before { background: var(--ces-green); box-shadow: 0 0 8px var(--ces-green); }
-    .ces-kpi-card.violet::before { background: var(--ces-violet); box-shadow: 0 0 8px var(--ces-violet); }
-
-    .ces-kpi-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .ces-kpi-label {
-      font-size: 0.74rem;
-      font-weight: 600;
-      color: var(--ces-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-    }
-    .ces-kpi-badge {
-      font-size: 0.68rem;
-      font-weight: 700;
-      padding: 2px 7px;
-      border-radius: 10px;
-      background: rgba(var(--ces-ink-rgb), 0.08);
-      color: var(--ces-text);
-    }
-    .ces-kpi-val {
-      font-size: 1.75rem;
-      font-weight: 800;
-      letter-spacing: -0.03em;
-      color: var(--ces-value);
-      font-variant-numeric: tabular-nums;
-      display: flex;
-      align-items: baseline;
-      gap: 4px;
-    }
-    .ces-kpi-unit {
-      font-size: 0.95rem;
-      font-weight: 600;
-      color: var(--ces-muted);
-    }
-    .ces-kpi-sub {
-      font-size: 0.74rem;
-      color: var(--ces-muted);
-      display: flex;
-      align-items: center;
-      gap: 5px;
-    }
-
-    /* Chart Section */
-    .ces-chart-card {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .ces-chart-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 10px;
-    }
-    .ces-chart-title {
-      font-size: 0.92rem;
-      font-weight: 700;
-      color: var(--ces-text);
-    }
-    .ces-chart-mode-group {
-      display: inline-flex;
-      background: rgba(var(--ces-base-rgb), 0.85);
-      border: 1px solid rgba(var(--ces-ink-rgb), 0.08);
-      border-radius: 6px;
-      padding: 2px;
-    }
-    .ces-chart-mode-btn {
-      background: transparent;
-      border: none;
-      color: var(--ces-muted);
-      font-size: 0.72rem;
-      font-weight: 600;
-      padding: 4px 10px;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-    .ces-chart-mode-btn.active {
-      color: var(--ces-cyan);
-      background: rgba(var(--ces-cyan-rgb), 0.15);
-    }
-
-    .ces-canvas-wrap {
-      position: relative;
-      width: 100%;
-      height: 230px;
-      background: rgba(var(--ces-base-rgb), 0.5);
-      border-radius: 10px;
-      border: 1px solid rgba(var(--ces-ink-rgb), 0.04);
-      overflow: hidden;
-    }
-    canvas {
-      display: block;
-      width: 100%;
-      height: 100%;
-    }
-    .ces-tooltip {
-      position: absolute;
-      pointer-events: none;
-      display: none;
-      background: rgba(var(--ces-tooltip-rgb), 0.94);
-      backdrop-filter: blur(12px);
-      border: 1px solid rgba(var(--ces-soft-accent-rgb), 0.3);
-      box-shadow: 0 6px 20px rgba(var(--ces-shadow-rgb),0.6);
-      border-radius: 8px;
-      padding: 8px 12px;
-      font-size: 0.74rem;
-      color: var(--ces-text);
-      z-index: 100;
-      white-space: nowrap;
-      transform: translate(-50%, -110%);
-      transition: opacity 0.1s ease;
-    }
-
-    /* Model Table */
-    .ces-table td:first-child { min-width: 170px; max-width: 290px; overflow-wrap: anywhere; }
-    .ces-table-wrap {
-      overflow-x: auto;
-      margin-top: 6px;
-    }
-    table.ces-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.78rem;
-      text-align: left;
-    }
-    table.ces-table th {
-      padding: 8px 10px;
-      font-weight: 600;
-      color: var(--ces-muted);
-      text-transform: uppercase;
-      font-size: 0.68rem;
-      letter-spacing: 0.05em;
-      border-bottom: 1px solid rgba(var(--ces-ink-rgb), 0.08);
-      cursor: pointer;
-      user-select: none;
-    }
-    table.ces-table th:hover { color: var(--ces-text); }
-    table.ces-table td {
-      padding: 10px;
-      border-bottom: 1px solid rgba(var(--ces-ink-rgb), 0.04);
-      color: var(--ces-body);
-      font-variant-numeric: tabular-nums;
-    }
-    table.ces-table tr:hover td {
-      background: rgba(var(--ces-ink-rgb), 0.02);
-    }
-    .ces-bar-wrap {
-      width: 100%;
-      min-width: 90px;
-      height: 5px;
-      background: rgba(var(--ces-ink-rgb), 0.08);
-      border-radius: 3px;
-      overflow: hidden;
-      margin-top: 4px;
-    }
-    .ces-bar-fill {
-      height: 100%;
-      border-radius: 3px;
-      background: linear-gradient(90deg, var(--ces-accent), var(--ces-cyan));
-    }
-
-    /* Diagnostics Drawer */
-    details.ces-drawer {
-      border-top: 1px solid rgba(var(--ces-ink-rgb), 0.06);
-      padding-top: 8px;
-    }
-    summary.ces-drawer-summary {
-      font-size: 0.76rem;
-      font-weight: 600;
-      color: var(--ces-muted);
-      cursor: pointer;
-      list-style: none;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      user-select: none;
-    }
-    summary.ces-drawer-summary::-webkit-details-marker { display: none; }
-    summary.ces-drawer-summary:hover { color: var(--ces-text); }
-    .ces-drawer-content {
-      margin-top: 10px;
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 10px;
-      font-size: 0.74rem;
-      color: var(--ces-muted);
-    }
-    .ces-diag-item {
-      background: rgba(var(--ces-base-rgb), 0.6);
-      padding: 7px 10px;
-      border-radius: 6px;
-      border: 1px solid rgba(var(--ces-ink-rgb), 0.03);
-    }
-    .ces-diag-item b { color: var(--ces-text); }
-    .ces-note { color: var(--ces-muted); font-size: 12px; line-height: 1.5; }
-    .ces-route { display: block; color: var(--ces-muted); font-size: 12px; font-weight: 400; overflow-wrap: anywhere; margin-top: 4px; }
-    .ces-kpi-sub { flex-wrap: wrap; line-height: 1.4; }
-    .ces-tooltip { max-width: calc(100% - 16px); white-space: normal; transform: none; }
-    @media (max-width: 540px) {
-      #root { padding: 10px; }
-      .ces-card { padding: 12px; }
-      .ces-kpi-grid { grid-template-columns: 1fr; }
-      .ces-controls { width: 100%; }
-      .ces-tf-btn { padding: 7px 9px; }
-      .ces-table { min-width: 650px; }
-    }
-  `;
-  document.head.appendChild(style);
-
-  // App State
-  const state = {
-    timeframe: '24H',
-    chartMode: 'trend',
-    autoRefreshSec: 30,
-    pollTimer: null,
-    data: null,
-    loading: false,
-    errorMessage: '',
-    reqSequence: 0,
-    sortCol: 'prompt_tokens',
-    sortAsc: false,
-    disposed: false,
-  };
-
-  // Helpers
-  function formatTokens(val) {
-    if (val === null || val === undefined || !Number.isFinite(val)) return '—';
-    if (val >= 1e9) return (val / 1e9).toFixed(2) + ' B';
-    if (val >= 1e6) return (val / 1e6).toFixed(2) + ' M';
-    if (val >= 1e3) return (val / 1e3).toFixed(1) + ' K';
-    return Number(val).toLocaleString();
+:root{color-scheme:dark;--ink:#ededf1;--meta:#aaa7b2;--surface:#202023;--tray:#2a2830;--capsule:rgba(255,255,255,.07);--line:rgba(228,228,231,.14);--rose:#e9687c;--blue:#60a5fa;--mint:#40d9a2;--amber:#f4bd45;--focus:#ff9eaa;--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 22px rgba(0,0,0,.15)}
+:root[data-theme=light]{color-scheme:light;--ink:#25262b;--meta:#61616c;--surface:#fff;--tray:#f3f2f6;--capsule:#f2f1f4;--line:rgba(38,38,43,.14);--rose:#bb2850;--blue:#2e68d0;--mint:#178e70;--amber:#8a6100;--focus:#a3243b;--shadow:0 1px 2px rgba(28,33,51,.05),0 7px 18px rgba(28,33,51,.07)}
+*{box-sizing:border-box}html{overflow:hidden}html,body{margin:0;padding:0;min-height:0;background:transparent;color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;background:var(--capsule);border-radius:999px;min-height:36px;padding:7px 12px;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap}button:hover{background:var(--tray)}button:focus-visible,input:focus-visible,summary:focus-visible,.hit:focus-visible{outline:2px solid var(--focus);outline-offset:2px}button:disabled{opacity:.5;cursor:default}button.icon{width:38px;padding:0}
+.dash{padding:12px 14px 8px}.top{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}.title{font-size:16px;font-weight:600}.controls{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.range{display:flex;gap:2px;flex-wrap:wrap}.range button{min-height:36px;padding:5px 10px}.range button[aria-pressed=true]{background:var(--rose);color:#fff}.custom{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.custom[hidden]{display:none}.custom label{display:grid;gap:4px;flex:1;min-width:120px}.custom input{width:100%;min-width:0;border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:7px 8px;min-height:38px;font-size:12px}.scope{margin:8px 0 12px}.meta{color:var(--meta);font-size:12px}.notice{background:var(--tray);border-radius:12px;padding:9px 12px;margin-bottom:12px;font-size:12px;display:flex;justify-content:space-between;gap:8px;align-items:center}.notice.error{color:var(--rose)}.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0 0 12px}.kpi{background:var(--surface);border-radius:12px;padding:10px 11px;min-width:0;box-shadow:var(--shadow)}.kpi b{display:block;font-size:24px;line-height:1.3;font-variant-numeric:tabular-nums}.kpi span{display:block;margin-top:4px;color:var(--meta);font-size:12px;overflow-wrap:anywhere}
+.panels{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(220px,.85fr);gap:12px;align-items:start}.panel{background:var(--surface);border-radius:14px;padding:12px;min-width:0}.panel h2{font-size:14px;margin:0 0 8px;font-weight:600}.panel-head{display:flex;justify-content:space-between;gap:8px;align-items:center}.chart{width:100%;overflow:hidden}.chart svg{display:block;width:100%;height:auto}.axis{fill:var(--meta);font-size:12px}.grid{stroke:var(--line);stroke-dasharray:2 5}.bar-cache{fill:var(--blue)}.bar-fresh{fill:var(--rose)}.bar-unknown{fill:url(#tokenUnknown)}.point{fill:var(--mint)}.code-mark{stroke:var(--meta);stroke-dasharray:3 4;stroke-width:1}.hit{cursor:pointer}.hit:hover .hitbox,.hit.sel .hitbox{fill:rgba(233,104,124,.13)}.legend{display:flex;flex-wrap:wrap;gap:5px 13px;color:var(--meta);font-size:12px;margin-top:7px}.legend i{display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--blue);margin-right:5px}.legend i.fresh{background:var(--rose)}.legend i.unknown{background:repeating-linear-gradient(135deg,transparent,transparent 2px,var(--amber) 2px,var(--amber) 3px);border:1px solid var(--amber)}.rowline{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;padding:8px 0;border-top:1px solid var(--line)}.name{overflow-wrap:anywhere}.num{text-align:right;font-variant-numeric:tabular-nums}.sub{color:var(--meta);font-size:12px}.sub.right{text-align:right}.fold{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}.fold summary{cursor:pointer;color:var(--meta);min-height:36px;padding:6px 0}.fold p{color:var(--meta);font-size:12px;margin:8px 0}.inspector{margin-top:10px;background:var(--tray);border-radius:12px;padding:12px}.inspector-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.inspector-head b{font-size:14px}.hourly{display:flex;gap:2px;height:60px;align-items:end;margin:12px 0 4px}.hourly i{display:block;flex:1;min-width:1px;background:var(--blue);border-radius:2px 2px 0 0}.mini-labels,.pager,.footer{display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap}.mini-labels{color:var(--meta);font-size:12px}.pager{margin-top:8px}.pager button{min-height:32px}.footer{margin-top:12px}.footer button{background:none;box-shadow:none;padding:4px 0;color:var(--meta)}.empty{color:var(--meta);padding:22px 0;text-align:center}
+@media(max-width:520px){.panels{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:640px){.dash{padding:9px 10px 6px}.controls{flex:1 0 100%}.range{flex:1}.range button{min-height:44px;padding:5px 9px}.kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.kpi{padding:9px}.kpi b{font-size:24px}.panel{padding:10px}.custom input,button.icon,summary,.footer button{min-height:44px}.scope{margin-bottom:10px}}
+`;
+  document.head.append(style);
+  function theme(value) {document.documentElement.dataset.theme = value === 'light' ? 'light' : 'dark';}
+  theme(window.TOKEN_DASH_THEME || 'dark');
+  function problem(data) {
+    const q = data.quality || {}, h = q.history_index || {};
+    return data.status === 'degraded' || q.read_error || q.ledger_read_error || h.state === 'degraded' || h.state === 'unavailable'
+      ? (data.read_error || q.read_error || q.ledger_read_error || h.read_error || 'Incomplete reading') : '';
   }
-
-  function formatRate(value) {
-    return Number.isFinite(value) ? `${value.toFixed(2)}%` : 'Unavailable';
+  function queryString(selection) {
+    const q = new URLSearchParams({timeframe: selection.range, timezone: zone});
+    if (['7D','MONTH','ALL','CUSTOM'].includes(selection.range)) q.set('daily','1');
+    if (selection.range === 'CUSTOM') {q.set('from',selection.from);q.set('to',selection.to);}
+    return q;
   }
-
-  function escapeHtml(value) {
-    const node = document.createElement('span');
-    node.textContent = String(value);
-    return node.innerHTML;
+  async function getData(query) {
+    const response = await fetch('/api/extensions/cache_efficiency_snapshot/data?' + query);
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const data = await response.json();
+    const error = problem(data);
+    if (error) throw new Error(error);
+    return data;
   }
-
-  function counted(value, unit) {
-    return `${value.toLocaleString()} ${unit}${value === 1 ? '' : 's'}`;
-  }
-
-  function recordUnits(value) {
-    const units = [counted(value.request_count, 'request'), counted(value.session_count, 'session')];
-    if (value.other_count) units.push(counted(value.other_count, 'other record'));
-    return units.join(' · ');
-  }
-
-  function coverageText(value) {
-    return `${value.measured_records.toLocaleString()} / ${counted(value.total_records, 'record')} measured`;
-  }
-
-  // Bins are labelled in the viewer's own time zone, and the zone is named:
-  // unlabelled server (UTC) times read as local time and moved a drop by hours.
-  function zoneName() {
-    const minutes = -new Date().getTimezoneOffset();
-    const abs = Math.abs(minutes);
-    const offset = `UTC${minutes >= 0 ? '+' : '-'}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
-    let zone = '';
-    try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (err) { zone = ''; }
-    return zone ? `${zone} (${offset})` : offset;
-  }
-
-  function localStamp(iso, withYear) {
-    const date = new Date(iso);
-    if (Number.isNaN(date.getTime())) return String(iso || '');
-    const pad = value => String(value).padStart(2, '0');
-    const stamp = `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-    return withYear ? `${date.getFullYear()}-${stamp}` : stamp;
-  }
-
-  function bucketLabel(bucket) {
-    return localStamp(bucket.ts, Boolean(state.data && state.data.timeframe === 'ALL'));
-  }
-
-  function legendText() {
-    const base = state.chartMode === 'trend'
-      ? 'Gaps mean no comparable measurement. A measured zero is 0%.'
-      : 'Green: cache reads · Slate: other input · Amber: input with unknown cache reads. Unknown input volumes cannot be drawn.';
-    const marks = state.data && state.data.markers && state.data.markers.length
-      ? ' Dashed violet lines: first start of a new code version (a time mark, not a cause).' : '';
-    return `${base}${marks} Times: ${zoneName()}.`;
-  }
-
-  // Render Skeleton Layout
-  root.innerHTML = `
-    <div class="ces-container">
-      <div class="ces-error-banner" id="errorBanner">
-        <span id="errorText">Failed to load live metrics</span>
-        <button class="ces-btn" id="retryBtn" style="padding:4px 10px; font-size:0.72rem;">Retry</button>
-      </div>
-
-      <div class="ces-card ces-header">
-        <div class="ces-title-group">
-          <div class="ces-pulse" id="livePulse"></div>
-          <div>
-            <div class="ces-title">Cache Efficiency Snapshot</div>
-            <div class="ces-subtitle" id="timeRangeSub">Measured input tokens, cache reads and coverage</div>
-          </div>
-        </div>
-        <div class="ces-controls">
-          <div class="ces-timeframe-group" id="tfGroup">
-            <button class="ces-tf-btn" data-tf="1H">1H</button>
-            <button class="ces-tf-btn" data-tf="6H">6H</button>
-            <button class="ces-tf-btn active" data-tf="24H">24H</button>
-            <button class="ces-tf-btn" data-tf="7D">7D</button>
-            <button class="ces-tf-btn" data-tf="ALL">ALL</button>
-          </div>
-          <button class="ces-btn" id="refreshBtn">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
-            Refresh
-          </button>
-        </div>
-      </div>
-
-      <div class="ces-kpi-grid">
-        <div class="ces-card ces-kpi-card crimson">
-          <div class="ces-kpi-header">
-            <span class="ces-kpi-label">Cache Read Rate</span>
-            <span class="ces-kpi-badge" id="rateBadge">Token-Weighted</span>
-          </div>
-          <div class="ces-kpi-val"><span id="kpiRate">—</span></div>
-          <div class="ces-kpi-sub" id="kpiRateSub">Measured input only</div>
-        </div>
-
-        <div class="ces-card ces-kpi-card cyan">
-          <div class="ces-kpi-header">
-            <span class="ces-kpi-label">Known Cache Reads</span>
-            <span class="ces-kpi-badge" id="tokensRatioBadge">Tokens</span>
-          </div>
-          <div class="ces-kpi-val"><span id="kpiCacheReads">--</span></div>
-          <div class="ces-kpi-sub" id="kpiCachedSub">Cache-read measurements</div>
-        </div>
-
-        <div class="ces-card ces-kpi-card emerald">
-          <div class="ces-kpi-header">
-            <span class="ces-kpi-label">Measurement Coverage</span>
-            <span class="ces-kpi-badge" style="color:var(--ces-green)">Records</span>
-          </div>
-          <div class="ces-kpi-val"><span id="kpiCoverage">--</span></div>
-          <div class="ces-kpi-sub" id="kpiCoverageSub">Unknown measurements stay unknown</div>
-        </div>
-
-        <div class="ces-card ces-kpi-card violet">
-          <div class="ces-kpi-header">
-            <span class="ces-kpi-label">Known Input Volume</span>
-            <span class="ces-kpi-badge" id="recordsBadge">— records</span>
-          </div>
-          <div class="ces-kpi-val"><span id="kpiVolume">--</span></div>
-          <div class="ces-kpi-sub" id="kpiVolumeSub">Requests and sessions counted separately</div>
-        </div>
-      </div>
-
-      <div class="ces-card ces-chart-card">
-        <div class="ces-chart-header">
-          <div class="ces-chart-title" id="chartTitle">Cache-Read Rate Trend (%)</div>
-          <div class="ces-chart-mode-group">
-            <button class="ces-chart-mode-btn active" data-mode="trend">📈 Rate Trend</button>
-            <button class="ces-chart-mode-btn" data-mode="volume">📊 Token Volume</button>
-          </div>
-        </div>
-        <div class="ces-canvas-wrap" id="canvasWrap">
-          <canvas id="chartCanvas" tabindex="0" role="img" aria-label="Cache measurements by time. Use arrow keys or select a point to inspect."></canvas>
-          <div class="ces-tooltip" id="chartTooltip"></div>
-        </div>
-        <div class="ces-note" id="chartLegend">Gaps mean no comparable measurement. A measured zero is 0%.</div>
-        <div class="ces-note" id="chartReading" aria-live="polite">Select a point to inspect its measurements.</div>
-      </div>
-
-      <div class="ces-card">
-        <div class="ces-chart-title" style="margin-bottom:10px;">Model and Route Measurements</div>
-        <div class="ces-note">Session totals may span attempts and models; their label names the final reported model. A session recorded without a usage event shows only its route; its tokens are unknown here. Rates use only records with both input and cache-read measurements.</div>
-        <div class="ces-table-wrap">
-          <table class="ces-table" id="modelsTable">
-            <thead>
-              <tr>
-                <th data-sort="display_name">Model</th>
-                <th data-sort="total_records">Recorded Units</th>
-                <th data-sort="prompt_tokens">Known Input</th>
-                <th data-sort="cached_tokens">Known Cache Reads</th>
-                <th data-sort="rate">Read Rate</th>
-                <th data-sort="measured_records">Coverage</th>
-              </tr>
-            </thead>
-            <tbody id="modelsTbody">
-              <tr><td colspan="6" style="text-align:center; color:var(--ces-slate);">Loading analytics data...</td></tr>
-            </tbody>
-          </table>
-        </div>
-
-        <details class="ces-drawer" style="margin-top:14px;">
-          <summary class="ces-drawer-summary">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
-            Data Quality & System Diagnostics
-          </summary>
-          <div class="ces-drawer-content" id="diagnosticsContent">
-            <div class="ces-diag-item">Window Samples: <b id="diagWindow">--</b></div>
-            <div class="ces-diag-item">Retained Records: <b id="diagTotal">--</b></div>
-            <div class="ces-diag-item">Window Span: <b id="diagSpan">--</b></div>
-            <div class="ces-diag-item">Omitted Rows / Buckets / Marks: <b id="diagOmitted">--</b></div>
-          </div>
-          <div class="ces-note" id="retainedCoverage" style="margin-top:8px;"></div>
-        </details>
-      </div>
-    </div>
-  `;
-
-  // Canvas & Interaction Engine
-  const canvas = document.getElementById('chartCanvas');
-  const ctx = canvas.getContext('2d');
-  let paintDpr = 1;
-  const canvasWrap = document.getElementById('canvasWrap');
-  const tooltip = document.getElementById('chartTooltip');
-  let colors;
-  function readChartColors() {
-    const css = getComputedStyle(document.documentElement);
-    colors = {};
-    for (const name of ['background', 'muted', 'slate', 'green', 'cyan', 'violet', 'accent', 'amber', 'grid', 'crosshair']) {
-      colors[name] = css.getPropertyValue('--ces-' + name).trim();
-    }
-  }
-  readChartColors();
-
-  let mouseX = -1;
-  let isHovering = false;
-
-  function resizeCanvas() {
-    const rect = canvasWrap.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    if (typeof ctx.resetTransform === 'function') {
-      ctx.resetTransform();
-    } else {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-    }
-    ctx.scale(dpr, dpr);
-    paintDpr = dpr;
-    renderChart();
-  }
-
-  window.addEventListener('resize', resizeCanvas);
-
-  function inspectPointer(e) {
-    const rect = canvasWrap.getBoundingClientRect();
-    mouseX = e.clientX - rect.left;
-    isHovering = true;
-    renderChart();
-  }
-  canvasWrap.addEventListener('mousemove', inspectPointer);
-  canvasWrap.addEventListener('click', inspectPointer);
-  canvas.addEventListener('keydown', (event) => {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-    event.preventDefault();
-    const count = state.data?.buckets?.length || 0;
-    if (!count) return;
-    // Step by whole bins on the same centres both charts draw (see renderTrendChart).
-    const chartW = canvasWrap.getBoundingClientRect().width - 65;
-    const current = mouseX < 0 ? -1 : Math.round((mouseX - 45) / chartW * count - 0.5);
-    const next = Math.max(0, Math.min(count - 1, current + (event.key === 'ArrowRight' ? 1 : -1)));
-    mouseX = 45 + (next + 0.5) * chartW / count;
-    isHovering = true;
-    renderChart();
-  });
-
-  function clearInspection() {
-    isHovering = false;
-    mouseX = -1;
-    tooltip.style.display = 'none';
-    document.getElementById('chartReading').textContent = 'Select a point to inspect its measurements.';
-  }
-
-  canvasWrap.addEventListener('mouseleave', () => {
-    clearInspection();
-    renderChart();
-  });
-
-  function renderChart() {
-    // A retained frame can receive a theme while its host page is hidden.
-    // Its layout rect is then zero, but the canvas keeps its last paint size.
-    // Use the scale applied at resize, even if the display DPR since changed.
-    const w = canvas.width / paintDpr;
-    const h = canvas.height / paintDpr;
-    ctx.clearRect(0, 0, w, h);
-
-    if (!state.data || !state.data.buckets || state.data.buckets.length === 0) {
-      // Nothing left to inspect: a stale reading would describe a vanished bin.
-      clearInspection();
-      ctx.fillStyle = colors.slate;
-      ctx.font = '12px system-ui';
-      ctx.textAlign = 'center';
-      ctx.fillText(state.errorMessage ? 'Data unavailable: ' + state.errorMessage : 'No activity records in this timeframe', w / 2, h / 2);
-      return;
-    }
-
-    const buckets = state.data.buckets;
-    const padding = { top: 20, right: 20, bottom: 26, left: 45 };
-    const chartW = w - padding.left - padding.right;
-    const chartH = h - padding.top - padding.bottom;
-
-    if (state.chartMode === 'trend') {
-      renderTrendChart(buckets, padding, chartW, chartH, w, h);
-    } else {
-      renderVolumeChart(buckets, padding, chartW, chartH, w, h);
-    }
-  }
-
-  function drawAxes(buckets, points, pad, cw, ch, w, h, maximum, percentage) {
-    ctx.strokeStyle = colors.grid;
-    ctx.lineWidth = 1;
-    ctx.fillStyle = colors.muted;
-    ctx.font = '10px monospace';
-    ctx.textAlign = 'right';
-    for (let index = 0; index <= 4; index++) {
-      const y = pad.top + ch - index / 4 * ch;
-      ctx.beginPath();
-      ctx.moveTo(pad.left, y);
-      ctx.lineTo(pad.left + cw, y);
-      ctx.stroke();
-      ctx.fillText(percentage ? `${index * 25}%` : formatTokens(maximum * index / 4), pad.left - 6, y + 3);
-    }
-    ctx.textAlign = 'center';
-    const labelStep = Math.max(1, Math.ceil(buckets.length / Math.max(1, Math.floor(cw / 120))));
-    for (let index = 0; index < buckets.length; index += labelStep) {
-      const x = Math.max(75, Math.min(w - 65, points[index].x));
-      ctx.fillText(bucketLabel(buckets[index]), x, h - 8);
-    }
-  }
-
-  // A dashed line is the first start of new code: a time mark, not a cause.
-  function drawMarkers(count, pad, cw, ch) {
-    const marks = (state.data && state.data.markers) || [];
-    if (!marks.length) return;
-    ctx.save();
-    ctx.strokeStyle = colors.violet;
-    ctx.fillStyle = colors.violet;
-    ctx.setLineDash([4, 4]);
-    ctx.lineWidth = 1;
-    ctx.font = '10px monospace';
-    ctx.textAlign = 'left';
-    let labelEnd = -Infinity;
-    for (const mark of marks) {
-      const x = pad.left + mark.position * cw / count;
-      ctx.beginPath();
-      ctx.moveTo(x, pad.top);
-      ctx.lineTo(x, pad.top + ch);
-      ctx.stroke();
-      // A label that would overlap its neighbour is left to the inspection reading.
-      const text = mark.code.slice(0, 7);
-      const width = ctx.measureText(text).width;
-      const textX = Math.min(x + 3, pad.left + cw - width);
-      if (textX >= labelEnd + 6) {
-        ctx.fillText(text, textX, pad.top + 10);
-        labelEnd = textX + width;
-      }
-    }
-    ctx.restore();
-  }
-
-  function inspectChart(points, pad, cw, ch) {
-    if (!isHovering || !points.length) return;
-    const closest = points.reduce((best, point) => Math.abs(mouseX - point.x) < Math.abs(mouseX - best.x) ? point : best);
-    const data = closest.data;
-    const index = points.indexOf(closest);
-    const label = bucketLabel(data);
-    const marks = ((state.data && state.data.markers) || []).filter(mark => mark.position >= index && mark.position < index + 1);
-    const started = marks.length ? `New code started: ${marks.map(mark => `${mark.code} at ${localStamp(mark.ts, false).slice(6)}`).join(', ')}.` : '';
-    ctx.strokeStyle = colors.crosshair;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath();
-    ctx.moveTo(closest.x, pad.top);
-    ctx.lineTo(closest.x, pad.top + ch);
-    ctx.stroke();
-    ctx.setLineDash([]);
-    const measured = Number.isFinite(data.rate) ? ` (${formatTokens(data.eligible_cached_tokens)} / ${formatTokens(data.eligible_prompt_tokens)} measured)` : '';
-    const detail = data.total_records === 0 ? 'No activity' : `${formatRate(data.rate)}${measured} · ${coverageText(data)} · ${recordUnits(data)}`;
-    const unknown = `${counted(data.unknown_total_records, 'record')} with unknown input; ${data.unknown_read_records} with unknown cache reads`;
-    document.getElementById('chartReading').textContent = `${label}: ${detail}. ${unknown}.${started ? ' ' + started : ''}`;
-    tooltip.innerHTML = `<b>${escapeHtml(label)}</b><br>${escapeHtml(detail)}<br>Known input: ${formatTokens(data.prompt_tokens)}<br>Known cache reads: ${formatTokens(data.cached_tokens)}<br>${escapeHtml(unknown)}${started ? '<br>' + escapeHtml(started) : ''}`;
-    tooltip.style.display = 'block';
-    const width = tooltip.offsetWidth;
-    tooltip.style.left = `${Math.max(8, Math.min(closest.x - width / 2, canvasWrap.clientWidth - width - 8))}px`;
-    tooltip.style.top = '8px';
-  }
-
-  function renderTrendChart(buckets, pad, cw, ch, w, h) {
-    const points = buckets.map((data, index) => ({
-      x: pad.left + (index + 0.5) * cw / buckets.length,
-      y: Number.isFinite(data.rate) ? pad.top + ch - data.rate / 100 * ch : null,
-      data,
-    }));
-    drawAxes(buckets, points, pad, cw, ch, w, h, 100, true);
-    // Connect only adjacent measured bins; unavailable bins break the path.
-    ctx.beginPath();
-    let previous = null;
-    for (const point of points) {
-      if (point.y === null) { previous = null; continue; }
-      if (previous) ctx.lineTo(point.x, point.y);
-      else ctx.moveTo(point.x, point.y);
-      previous = point;
-    }
-    ctx.strokeStyle = colors.accent;
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
-    for (const point of points) {
-      if (point.y === null) continue;
-      ctx.beginPath();
-      ctx.arc(point.x, point.y, 3, 0, Math.PI * 2);
-      ctx.fillStyle = colors.background;
-      ctx.fill();
-      ctx.strokeStyle = colors.cyan;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-    }
-    if (!points.some(point => point.y !== null)) {
-      ctx.fillStyle = colors.muted;
-      ctx.textAlign = 'center';
-      ctx.fillText('No comparable cache measurements', pad.left + cw / 2, pad.top + ch / 2);
-    }
-    drawMarkers(buckets.length, pad, cw, ch);
-    inspectChart(points, pad, cw, ch);
-  }
-
-  function renderVolumeChart(buckets, pad, cw, ch, w, h) {
-    const maximum = Math.max(...buckets.map(bucket => bucket.prompt || 0), 1);
-    const step = cw / buckets.length;
-    const points = buckets.map((data, index) => ({x: pad.left + (index + 0.5) * step, data}));
-    drawAxes(buckets, points, pad, cw, ch, w, h, maximum, false);
-    buckets.forEach((bucket, index) => {
-      let y = pad.top + ch;
-      for (const [value, color] of [[bucket.cached, colors.green], [bucket.uncached, colors.slate], [bucket.unknown, colors.amber]]) {
-        const height = value / maximum * ch;
-        y -= height;
-        ctx.fillStyle = color;
-        ctx.fillRect(points[index].x - step * 0.32, y, step * 0.64, height);
-      }
-    });
-    drawMarkers(buckets.length, pad, cw, ch);
-    inspectChart(points, pad, cw, ch);
-  }
-
-  // Data Fetching
-  async function fetchData() {
-    if (state.disposed) return;
-    const seq = ++state.reqSequence;
-    state.loading = true;
-    const btn = document.getElementById('refreshBtn');
-    const pulse = document.getElementById('livePulse');
-    const errorBanner = document.getElementById('errorBanner');
-    const errorText = document.getElementById('errorText');
-
-    if (btn) btn.classList.add('spinning');
-
+  async function load(selection) {
+    if (disposed) return;
+    const seq = ++requestSeq;
+    clearTimeout(pendingTimer);
+    state.pending = selection; state.failed = null; state.status = 'loading'; state.message = ''; render();
     try {
-      const resp = await window.fetch(`/api/extensions/cache_efficiency_snapshot/data?timeframe=${state.timeframe}`);
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
+      const data = await getData(queryString(selection));
+      if (disposed || seq !== requestSeq) return;
+      if (data.status === 'loading') {
+        const h = data.quality?.history_index || {};
+        state.message = 'Loading available history · ' + nf.format(h.archives_done || 0) + ' / ' + nf.format(h.archives_total || 0) + ' archives';
+        render();
+        pendingTimer = setTimeout(() => load(selection), 1000);
+        return;
       }
-      const json = await resp.json();
-
-      if (seq === state.reqSequence) {
-        state.data = json;
-        state.errorMessage = '';
-        if (errorBanner) errorBanner.style.display = 'none';
-        if (pulse) pulse.classList.remove('error');
-        updateUI();
+      if (!data.summary || !Array.isArray(data.buckets)) throw new Error('Invalid reading');
+      state.snapshot = data; state.committed = {...selection}; state.range = selection.range;
+      state.pending = null; state.status = 'ready'; state.message = '';
+      if (selection.range === 'CUSTOM') state.customOpen = true;
+      if (!state.from) state.from = dateKey(data.start);
+      if (!state.to) state.to = dateKey(data.end);
+      state.page = Math.min(state.page, Math.max(0, data.buckets.length - 1));
+      if (state.selected && !data.buckets.some(b => b.ts === state.selected)) {state.selected = null; detail = null; ++detailSeq;}
+      render();
+    } catch (error) {
+      if (disposed || seq !== requestSeq) return;
+      state.pending = null; state.failed = selection; state.status = 'failed'; state.message = error.message; render();
+    }
+  }
+  function inInterval(marker, bucket) {
+    const t = Date.parse(marker.ts);
+    return t >= Date.parse(bucket.ts) && t < Date.parse(bucket.end_ts);
+  }
+  function bucketLabel(b, daily) {return daily ? dayLabel(b.day || dateKey(b.ts)) : clock(b.ts);}
+  function intervalLabel(b, daily) {
+    return daily ? dayLabel(b.day || dateKey(b.ts)) + (b.partial ? ' · partial day' : '') : timestamp(b.ts) + '–' + timestamp(b.end_ts);
+  }
+  async function loadDetail(bucket) {
+    const seq = ++detailSeq;
+    detail = {key:bucket.ts, data:null, error:'', loading:true}; render();
+    const q = new URLSearchParams({timeframe:'CUSTOM', from:bucket.ts, to:bucket.end_ts, timezone:zone, granularity:'hour'});
+    try {
+      const data = await getData(q);
+      if (disposed || seq !== detailSeq || state.selected !== bucket.ts) return;
+      if (data.status === 'loading') throw new Error('History is still loading; select the interval again shortly');
+      detail = {key:bucket.ts, data, error:'', loading:false}; render();
+    } catch (error) {
+      if (disposed || seq !== detailSeq) return;
+      detail = {key:bucket.ts, data:null, error:error.message, loading:false}; render();
+    }
+  }
+  function pick(key) {
+    if (state.selected === key) {state.selected = null; detail = null; ++detailSeq; render(); return;}
+    const b = state.snapshot?.buckets.find(b => b.ts === key);
+    if (!b) return;
+    state.selected = key;
+    if (state.snapshot.daily) loadDetail(b);
+    else {++detailSeq;detail = null;render();}
+  }
+  function visibleBuckets() {
+    const buckets = state.snapshot?.buckets || [];
+    const n = Math.max(5, Math.min(30, Math.floor((root.clientWidth || 600) / 27)));
+    const last = Math.max(0, buckets.length - state.page);
+    return {all:buckets, buckets:buckets.slice(Math.max(0,last-n),last), n};
+  }
+  function chart(buckets, kind, daily) {
+    if (!buckets.length) return '<div class="empty">No recorded usage in this interval</div>';
+    const panel = root.querySelector(kind === 'volume' ? '.volume-panel' : '.side-panel');
+    const width = Math.max(240, (panel?.clientWidth || root.clientWidth - 28) - 24);
+    const height = kind === 'volume' ? 205 : 130, left = 55, top = 12, plotHeight = height-44;
+    const band = (width-left-8)/buckets.length, bw = Math.min(38,band*.64);
+    const max = kind === 'volume' ? Math.max(1,...buckets.map(b=>b.prompt_tokens || 0)) : 100;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(max))), ceiling = Math.ceil(max/magnitude)*magnitude;
+    let body = '';
+    for (const f of [0,.5,1]) {
+      const y = top+(1-f)*plotHeight;
+      body += `<line class="grid" x1="${left}" x2="${width-8}" y1="${y}" y2="${y}"/><text class="axis" x="${left-7}" y="${y+4}" text-anchor="end">${kind==='volume'?(f?fmt(ceiling*f):'0'):f*100+'%'}</text>`;
+    }
+    if (kind==='rate') {
+      let connected=false,path='';
+      buckets.forEach((b,i)=>{if(b.cache_read_rate==null){connected=false;return;}path+=(connected?' L':' M')+(left+(i+.5)*band)+','+(top+(1-b.cache_read_rate/100)*plotHeight);connected=true;});
+      body+=`<path d="${path}" fill="none" stroke="var(--mint)" stroke-width="1.5" pointer-events="none"/>`;
+    }
+    buckets.forEach((b,i)=>{
+      const x = left+i*band+(band-bw)/2, label = bucketLabel(b,daily);
+      const cache = (b.eligible_cached_tokens || 0)/ceiling*plotHeight;
+      const fresh = (b.uncached_tokens || 0)/ceiling*plotHeight;
+      const unknown = (b.unknown_prompt_tokens || 0)/ceiling*plotHeight;
+      const measuredLabel = b.total_records ? `${fmt(b.prompt_tokens)} input · ${pct(b.cache_read_rate)} cache · ${b.unknown_read_records} unknown reads` : 'No recorded usage';
+      body += `<g class="hit ${state.selected===b.ts?'sel':''}" data-pick="${esc(b.ts)}" tabindex="0" role="button" aria-label="${esc(intervalLabel(b,daily)+' · '+measuredLabel)}"><title>${esc(intervalLabel(b,daily)+' · '+measuredLabel)}</title><rect class="hitbox" x="${left+i*band}" y="2" width="${band}" height="${height-4}" rx="5" fill="transparent"/>`;
+      if (kind === 'volume') {
+        body += `<rect class="bar-unknown" data-tokens="${b.unknown_prompt_tokens || 0}" x="${x}" y="${top+plotHeight-unknown}" width="${bw}" height="${unknown}"/><rect class="bar-cache" x="${x}" y="${top+plotHeight-unknown-cache}" width="${bw}" height="${cache}"/><rect class="bar-fresh" x="${x}" y="${top+plotHeight-unknown-cache-fresh}" width="${bw}" height="${fresh}" rx="2"/>`;
+      } else if (b.cache_read_rate != null) body += `<circle class="point" cx="${x+bw/2}" cy="${top+(1-b.cache_read_rate/100)*plotHeight}" r="3"/>`;
+      if (kind==='volume') for(const m of (state.snapshot.markers || []).filter(m=>inInterval(m,b))) {
+        const mx=left+(i+(Date.parse(m.ts)-Date.parse(b.ts))/(Date.parse(b.end_ts)-Date.parse(b.ts)))*band;
+        body+=`<line class="code-mark" x1="${mx}" x2="${mx}" y1="${height-31}" y2="${height-23}" pointer-events="none"/>`;
       }
-    } catch (err) {
-      console.error('[CacheEfficiency] Fetch error:', err);
-      if (seq === state.reqSequence) {
-        state.errorMessage = err.message || 'Connection failed';
-        if (errorBanner) {
-          errorBanner.style.display = 'flex';
-          if (errorText) errorText.textContent = `Error fetching data: ${state.errorMessage} (showing last known data)`;
+      // Label density changes; measurement intervals and selectable positions do not.
+      if (i===0 || i===buckets.length-1 || i % Math.ceil(buckets.length/5) === 0) body += `<text class="axis" x="${x+bw/2}" y="${height-8}" text-anchor="middle">${esc(label)}</text>`;
+      body += '</g>';
+    });
+    const defs = kind==='volume'?'<defs><pattern id="tokenUnknown" width="6" height="6" patternUnits="userSpaceOnUse"><path d="M0 6 6 0" stroke="var(--amber)" stroke-width="1.5"/></pattern></defs>':'';
+    return `<svg viewBox="0 0 ${width} ${height}" role="group" aria-label="${kind==='volume'?'Token volume':'Cache hit rate'}">${defs}${body}</svg>`;
+  }
+  function counts(s) {
+    return `${nf.format(s.request_count)} requests · ${nf.format(s.session_count)} sessions · ${nf.format(s.unknown_total_records)} unknown totals · ${nf.format(s.unknown_read_records)} unknown cache reads`;
+  }
+  function modelList(rows) {
+    const names=rows.map(r=>r.display_name||r.model);
+    return rows.map(r=>`<div class="rowline"><span class="name" title="${esc(r.model)}">${esc(names.filter(n=>n===(r.display_name||r.model)).length>1?r.model:r.display_name||r.model)}</span><span class="num">${fmt(r.prompt_tokens)}</span><span class="sub">${esc(r.provider)} · ${r.kind==='attempt'?'requests':r.kind==='subscription_session'?'sessions':esc(r.kind)} · ${nf.format(r.total_records)} records${r.unknown_read_records?' · '+nf.format(r.unknown_read_records)+' unknown reads':''}</span><span class="sub right">${pct(r.cache_read_rate)} hit</span></div>`).join('');
+  }
+  function inspector() {
+    const snap = state.snapshot, b = snap?.buckets.find(b=>b.ts===state.selected);
+    if (!b) return '';
+    const s = detail?.key===b.ts && detail.data ? detail.data.summary : b;
+    let body = `<div class="meta">${fmt(s.prompt_tokens)} input · ${pct(s.cache_read_rate)} from cache<br>${counts(s)}</div>`;
+    if (detail?.key===b.ts) {
+      if (detail.loading) body += '<p class="meta">Loading hourly detail…</p>';
+      else if (detail.error) body += `<p class="meta" role="alert">Detail unavailable: ${esc(detail.error)}</p>`;
+      else if (detail.data) {
+        const hours = detail.data.buckets, max = Math.max(1,...hours.map(h=>h.prompt_tokens||0));
+        body += '<div class="hourly">'+hours.map(h=>`<i data-ts="${esc(h.ts)}" data-tokens="${h.prompt_tokens==null?'':h.prompt_tokens}" title="${esc(intervalLabel(h,false)+' · '+fmt(h.prompt_tokens)+' input')}" style="height:${(h.prompt_tokens||0)/max*100}%;${h.total_records?'':'background:none;'}"></i>`).join('')+'</div>';
+        body += `<div class="mini-labels"><span>${hours[0]?clock(hours[0].ts):''}</span><span>Hourly observations</span><span>${hours.at(-1)?clock(hours.at(-1).end_ts):''}</span></div>`;
+        body += modelList(detail.data.models || []);
+      }
+    }
+    const marks = (detail?.key===b.ts && detail.data ? detail.data.markers : snap.markers || []).filter(m=>inInterval(m,b));
+    body += '<p class="meta">'+(marks.length?marks.map(m=>'Code start '+esc(m.code)+' at '+esc(clock(m.ts))).join(' · '):'No code change observed in this interval.')+'</p>';
+    return `<section class="inspector"><div class="inspector-head"><b>${esc(intervalLabel(b,snap.daily))}</b><button class="icon" data-act="clear" aria-label="Close details">${icon('close')}</button></div>${body}</section>`;
+  }
+  function coverage(snap) {
+    if (!snap) return '';
+    const q = snap.quality, h = q.history_index;
+    return `<p>${esc(q.coverage)}</p><p>${counts(snap.summary)}. ${nf.format(snap.summary.zero_volume_records)} measured zero-volume records.</p><p>${nf.format(q.models_omitted || 0)} model rows omitted · ${nf.format(q.buckets_omitted || 0)} time bins omitted · ${nf.format(q.markers_omitted || 0)} code marks omitted. Totals cover the full selected interval.</p>${h?`<p>History: ${esc(h.state)} · ${nf.format(h.archives_indexed || 0)} archives indexed.<br>Observed span: ${h.indexed_oldest_ts?esc(timestamp(h.indexed_oldest_ts)):'no recorded usage'} – ${h.indexed_newest_ts?esc(timestamp(h.indexed_newest_ts)):''}.<br>${nf.format(h.retained_sources_absent || 0)} indexed sources no longer on disk; their saved observations are retained.<br>${h.recovery?esc(h.recovery):''}</p>`:''}<p>Unclassified input has a known total but unknown cache reads. Empty bins are not proof of zero use. Code marks are observations, not causes. Output tokens are outside this view.</p>`;
+  }
+  function render() {
+    if (disposed) return;
+    const active = document.activeElement, focus = root.contains(active) ? active.id : '';
+    const snap = state.snapshot, s = snap?.summary;
+    const {all,buckets,n} = visibleBuckets();
+    const label = snap ? `${timestamp(snap.start)} – ${timestamp(snap.end)} · ${zone}` : 'Waiting for the first reading';
+    const loading = state.status==='loading';
+    root.innerHTML = `<article class="dash"><header class="top"><div class="title">Token usage & cache health</div><div class="controls"><div class="range" aria-label="Time range">${presets.map(([value,label])=>`<button data-range="${value}" aria-pressed="${state.range===value}">${label}</button>`).join('')}<button data-range="CUSTOM" aria-pressed="${state.range==='CUSTOM'}">Custom</button></div><button class="icon" data-act="refresh" aria-label="Refresh reading">${icon('refresh')}</button></div></header><div class="custom" ${state.customOpen?'':'hidden'}><label class="meta">From<input id="from" type="date" value="${esc(state.from)}"></label><label class="meta">To<input id="to" type="date" value="${esc(state.to)}"></label><button data-act="apply">Apply range</button></div><div class="scope meta">${esc(label)}</div>${loading?`<div class="notice" role="status">${esc(state.message || 'Updating '+(state.pending?.range||'')+'…')}${snap?' · previous reading retained':''}</div>`:state.status==='failed'?`<div class="notice error" role="alert"><span>Update failed · ${esc(state.message)}${snap?' · showing the last reading':''}</span><button data-act="retry">Retry</button></div>`:''}<section class="kpis"><div class="kpi"><b>${fmt(s?.prompt_tokens)}</b><span>input tokens</span></div><div class="kpi"><b>${pct(s?.cache_read_rate)}</b><span>cache hit rate · weighted</span></div><div class="kpi"><b>${s&&s.rate_records?fmt(s.uncached_tokens):s&&s.measured_records?fmt(0):'—'}</b><span>fresh / uncached input</span></div><div class="kpi"><b>${s?nf.format(s.measured_records)+' / '+nf.format(s.total_records):'—'}</b><span>measured records</span></div></section><div class="panels"><section class="panel volume-panel"><div class="panel-head"><h2>Token volume</h2><span class="meta">${snap?.daily?'daily input':'input per interval'}</span></div><div class="chart" data-chart="volume"></div><div class="legend"><span><i></i>Cache reads</span><span><i class="fresh"></i>Fresh input</span><span><i class="unknown"></i>Unclassified</span></div>${all.length>n?`<div class="pager"><button data-act="earlier" ${state.page+n>=all.length?'disabled':''}>Earlier</button><span class="meta">${buckets.length} / ${all.length} intervals</span><button data-act="later" ${state.page===0?'disabled':''}>Later</button></div>`:''}${inspector()}</section><section class="panel side-panel"><div class="panel-head"><h2>Cache hit rate</h2><span class="meta">0–100%</span></div><div class="chart" data-chart="rate"></div><div class="fold"><details data-fold="models" ${state.models?'open':''}><summary>Models & sources</summary>${modelList(snap?.models || [])}</details></div><div class="fold"><details data-fold="coverage" ${state.coverage?'open':''}><summary>Coverage & counting</summary>${coverage(snap)}</details></div></section></div>${s?`<div class="scope meta">${counts(s)}</div>`:''}<footer class="footer"><button data-act="coverage">About the data</button><span class="meta">${snap?'Last read '+clock(snap.generated_at):'No successful reading yet'}</span></footer></article>`;
+    root.querySelector('[data-chart="volume"]').innerHTML = chart(buckets,'volume',snap?.daily);
+    root.querySelector('[data-chart="rate"]').innerHTML = chart(buckets,'rate',snap?.daily);
+    root.querySelectorAll('[data-range]').forEach(b=>b.onclick=()=>{
+      if (b.dataset.range==='CUSTOM') {state.customOpen=true;render();root.querySelector('#from').focus();return;}
+      state.customOpen=false;state.selected=null;detail=null;++detailSeq;state.page=0;load({range:b.dataset.range});
+    });
+    root.querySelectorAll('[data-fold]').forEach(el=>el.addEventListener('toggle',()=>{state[el.dataset.fold]=el.open;resize();}));
+    for (const id of ['from','to']) root.querySelector('#'+id).oninput=e=>{state[id]=e.target.value;};
+    root.querySelectorAll('[data-pick]').forEach(el=>{
+      el.onclick=()=>pick(el.dataset.pick);
+      el.onkeydown=e=>{
+        if (e.key==='Enter'||e.key===' ') {e.preventDefault();pick(el.dataset.pick);}
+        if (e.key==='ArrowRight'||e.key==='ArrowLeft') {
+          e.preventDefault();const index=buckets.findIndex(b=>b.ts===el.dataset.pick), next=buckets[index+(e.key==='ArrowRight'?1:-1)];
+          if (next) {pick(next.ts);root.querySelector('[data-pick="'+CSS.escape(next.ts)+'"]')?.focus();}
         }
-        if (pulse) pulse.classList.add('error');
-      }
-    } finally {
-      if (seq === state.reqSequence) {
-        state.loading = false;
-        if (btn) btn.classList.remove('spinning');
-      }
-    }
-  }
-
-  function updateUI() {
-    if (!state.data || !state.data.summary) return;
-    const s = state.data.summary;
-    const q = state.data.quality || {};
-    const errorBanner = document.getElementById('errorBanner');
-    const errorText = document.getElementById('errorText');
-    const pulse = document.getElementById('livePulse');
-
-    if (state.data.status === 'degraded' || q.read_error) {
-      if (errorBanner) {
-        errorBanner.style.display = 'flex';
-        if (errorText) errorText.textContent = `Warning: Usage log read degraded (${q.read_error || 'partial read'}). Data may be incomplete.`;
-      }
-      if (pulse) pulse.classList.add('error');
-    }
-
-    // Rates use a matching measured subset; known token sums disclose missing records.
-    document.getElementById('kpiRate').textContent = formatRate(s.cache_read_rate);
-    document.getElementById('kpiRateSub').textContent = Number.isFinite(s.cache_read_rate)
-      ? `${formatTokens(s.eligible_cached_tokens)} cache reads / ${formatTokens(s.eligible_prompt_tokens)} input tokens in ${counted(s.rate_records, 'record')}`
-      : 'No record has both a positive input total and a cache-read measurement';
-    document.getElementById('kpiCacheReads').textContent = formatTokens(s.cached_tokens);
-    document.getElementById('tokensRatioBadge').textContent = `${s.unknown_read_records} unknown`;
-    document.getElementById('kpiCachedSub').textContent = 'Reported cache reads; unknown records excluded';
-    document.getElementById('kpiCoverage').textContent = `${s.measured_records} / ${s.total_records}`;
-    document.getElementById('kpiCoverageSub').textContent = `Records with both measurements · ${s.zero_volume_records} have zero input`;
-    document.getElementById('kpiVolume').textContent = formatTokens(s.prompt_tokens);
-    document.getElementById('recordsBadge').textContent = `${s.unknown_total_records} unknown`;
-    document.getElementById('kpiVolumeSub').textContent = recordUnits(s);
-    document.getElementById('timeRangeSub').textContent = `${state.data.timeframe === 'ALL' ? 'All retained records' : state.data.timeframe + ' window'} · measured input tokens and cache reads`;
-    document.getElementById('diagWindow').textContent = `${q.window_records || 0} records`;
-    document.getElementById('diagTotal').textContent = `${q.settled_records_total || 0} records`;
-    document.getElementById('diagOmitted').textContent = `${q.models_omitted || 0} rows / ${q.buckets_omitted || 0} buckets / ${q.markers_omitted || 0} code marks`;
-    document.getElementById('diagSpan').textContent = q.oldest_ts && q.newest_ts ? `${localStamp(q.oldest_ts, true).slice(0, 10)} → ${localStamp(q.newest_ts, true).slice(0, 10)}` : 'No activity';
-    document.getElementById('retainedCoverage').textContent = `${q.coverage || ''} Archives read: ${q.raw_stats?.archives_read || 0} · duplicate events skipped: ${q.raw_stats?.duplicate_events_skipped || 0} · sessions in this window without a usage event: ${q.sessions_without_usage_event || 0}.`;
-    document.getElementById('chartLegend').textContent = legendText();
-
-    // A poll keeps the selected point; renderChart re-inspects the nearest bin.
-    renderTable();
-    renderChart();
-  }
-
-  function renderTable() {
-    const tbody = document.getElementById('modelsTbody');
-    if (!tbody || !state.data || !state.data.models) return;
-
-    const models = [...state.data.models];
-    models.sort((a, b) => {
-      let va = a[state.sortCol];
-      let vb = b[state.sortCol];
-      if (va === null) return vb === null ? 0 : 1;
-      if (vb === null) return -1;
-      if (typeof va === 'string') return state.sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
-      return state.sortAsc ? (va - vb) : (vb - va);
+      };
     });
-
-    if (models.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--ces-slate);">No model activity in this timeframe</td></tr>';
-      return;
-    }
-
-    tbody.innerHTML = models.map(model => `
-      <tr>
-        <td style="font-weight:600; color:var(--ces-text);">
-          ${escapeHtml(model.model)}
-          <span class="ces-route">${escapeHtml(model.provider)} · ${model.kind !== 'subscription_session' ? escapeHtml(model.kind) : model.model === 'no usage event' ? 'Session · tokens not in the event log' : 'Session aggregate · final reported model'}</span>
-          ${model.rate === null ? '' : `<div class="ces-bar-wrap"><div class="ces-bar-fill" style="width:${model.rate}%"></div></div>`}
-        </td>
-        <td>${counted(model.total_records, model.kind === 'attempt' ? 'request' : model.kind === 'subscription_session' ? 'session' : 'record')}</td>
-        <td>${formatTokens(model.prompt_tokens)}</td>
-        <td style="color:var(--ces-cyan)">${formatTokens(model.cached_tokens)}</td>
-        <td><b style="color:var(--ces-accent)">${formatRate(model.rate)}</b><span class="ces-route">${model.rate === null ? 'No comparable input' : `${formatTokens(model.eligible_cached_tokens)} / ${formatTokens(model.eligible_prompt_tokens)} measured`}</span></td>
-        <td>${model.measured_records} / ${model.total_records}<span class="ces-route">${model.unknown_total_records} unknown input · ${model.unknown_read_records} unknown reads</span></td>
-      </tr>
-    `).join('');
-  }
-
-  // Event Listeners
-  document.getElementById('tfGroup').addEventListener('click', (e) => {
-    if (e.target.dataset.tf) {
-      document.querySelectorAll('#tfGroup .ces-tf-btn').forEach(b => b.classList.remove('active'));
-      e.target.classList.add('active');
-      state.timeframe = e.target.dataset.tf;
-      clearInspection();
-      fetchData();
-    }
-  });
-
-  document.getElementById('refreshBtn').addEventListener('click', () => {
-    fetchData();
-  });
-
-  const retryBtn = document.getElementById('retryBtn');
-  if (retryBtn) {
-    retryBtn.addEventListener('click', () => {
-      fetchData();
-    });
-  }
-
-  document.querySelector('.ces-chart-mode-group').addEventListener('click', (e) => {
-    if (e.target.dataset.mode) {
-      document.querySelectorAll('.ces-chart-mode-btn').forEach(b => b.classList.remove('active'));
-      e.target.classList.add('active');
-      state.chartMode = e.target.dataset.mode;
-      clearInspection();
-      document.getElementById('chartTitle').textContent = state.chartMode === 'trend' ? 'Cache-Read Rate Trend (%)' : 'Token Volume Composition';
-      document.getElementById('chartLegend').textContent = legendText();
-      renderChart();
-    }
-  });
-
-  document.querySelectorAll('table.ces-table th').forEach(th => {
-    th.addEventListener('click', () => {
-      const col = th.dataset.sort;
-      if (state.sortCol === col) {
-        state.sortAsc = !state.sortAsc;
-      } else {
-        state.sortCol = col;
-        state.sortAsc = false;
+    root.querySelectorAll('[data-act]').forEach(b=>b.onclick=()=>{
+      const act=b.dataset.act;
+      if (act==='clear') {state.selected=null;detail=null;++detailSeq;render();}
+      if (act==='coverage') {state.coverage=!state.coverage;render();}
+      if (act==='earlier'||act==='later') {state.page=Math.max(0,state.page+(act==='earlier'?n:-n));render();}
+      if (act==='refresh'||act==='retry') load(act==='retry'&&state.failed?state.failed:state.committed||{range:state.range});
+      if (act==='apply') {
+        if (!state.from||!state.to||state.from>state.to) {state.status='failed';state.message='Choose a valid date range';render();return;}
+        state.selected=null;detail=null;++detailSeq;state.page=0;load({range:'CUSTOM',from:state.from,to:state.to});
       }
-      renderTable();
     });
-  });
-
-  // Polling Lifecycle
-  function startPolling() {
-    stopPolling();
-    if (state.autoRefreshSec > 0) {
-      state.pollTimer = setInterval(fetchData, state.autoRefreshSec * 1000);
-    }
+    if (focus) root.querySelector('#'+focus)?.focus();
+    requestAnimationFrame(resize);
   }
-
-  function stopPolling() {
-    if (state.pollTimer) {
-      clearInterval(state.pollTimer);
-      state.pollTimer = null;
-    }
+  function resize() {
+    if (disposed) return;
+    const h=Math.ceil(root.getBoundingClientRect().height+8);
+    if (h!==lastHeight) {lastHeight=h;window.OuroborosWidget?.resize?.(h);}
   }
-
-  // Repaint only the existing canvas; controls, selection and scroll stay put.
-  const offTheme = window.OuroborosWidget && typeof window.OuroborosWidget.onTheme === 'function'
-    ? window.OuroborosWidget.onTheme(theme => {
-    if (state.disposed) return;
-    document.documentElement.dataset.theme = theme;
-    readChartColors();
-    renderChart();
-  }) : null;
-
-  // Widget Disposal Hook
-  window.__ouroWidgetOnDispose(function () {
-    state.disposed = true;
-    if (typeof offTheme === 'function') offTheme();
-    state.reqSequence += 1;
-    stopPolling();
-    window.removeEventListener('resize', resizeCanvas);
+  const offTheme=typeof window.OuroborosWidget?.onTheme==='function'?window.OuroborosWidget.onTheme(t=>theme(t?.theme||t)):null;
+  const observer=new ResizeObserver(()=>{
+    const w=root.clientWidth;
+    if (w!==lastWidth) {lastWidth=w;cancelAnimationFrame(renderFrame);renderFrame=requestAnimationFrame(render);}
+    else resize();
   });
-
-  // Initial Load
-  resizeCanvas();
-  fetchData();
-  startPolling();
+  observer.observe(root);
+  const timer=setInterval(()=>{if (!disposed&&!state.pending&&!state.failed&&!document.hidden) load(state.committed||{range:state.range});},30000);
+  function dispose(){disposed=true;++requestSeq;++detailSeq;clearInterval(timer);clearTimeout(pendingTimer);cancelAnimationFrame(renderFrame);observer.disconnect();if(typeof offTheme==='function')offTheme();}
+  if (typeof window.__ouroWidgetOnDispose==='function') window.__ouroWidgetOnDispose(dispose);
+  render();load({range:'24H'});
 })();

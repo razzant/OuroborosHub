@@ -1,11 +1,12 @@
 """High-performance, multi-timeframe cache efficiency analytics engine for Ouroboros.
 
 Everything comes from the event log (the live ``logs/events.jsonl`` plus its rotated
-``archive/events_*.jsonl`` files inside a bounded window): per-call ``llm_usage``
-events are requests; an ``llm_usage`` event carrying a Claudexor run receipt is a
-whole harness session, and a ``delegate_run_ledger_recorded`` event without one is a
-session whose tokens the log does not hold; ``worker_boot`` events mark when a new
-code version first started. Cores before the usage store (7.6.0 and older) still
+``archive/events_*.jsonl`` files): normal presets use a bounded in-memory window;
+explicit Custom ranges may use the atomic normalized history index. Per-call
+``llm_usage`` events are requests; an ``llm_usage`` event carrying a Claudexor run
+receipt is a whole harness session, and a ``delegate_run_ledger_recorded`` event
+without one is a session whose tokens the log does not hold; ``worker_boot`` events
+mark when new code started. Cores before the usage store (7.6.0 and older) still
 keep session tokens in a live ``state/usage_attempts.jsonl``, which is read while it
 keeps changing. Readers are incremental and thread-safe, measurements keep explicit
 coverage, and one HTTP endpoint feeds the module widget.
@@ -13,6 +14,7 @@ coverage, and one HTTP endpoint feeds the module widget.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -20,6 +22,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 TERMINAL_STATE = "settled"
 MAX_MODELS_RETURNED = 25
@@ -204,7 +207,8 @@ def _usage_event_identity(row: Mapping[str, Any]) -> str:
     facts = [row.get(key) for key in ("ts", "task_id", "model", "source", "prompt_tokens",
                                        "completion_tokens", "cached_tokens", "llm_call_id",
                                        "ledger_attempt_ids")]
-    return json.dumps(facts, sort_keys=True, default=str, separators=(",", ":"))
+    encoded = json.dumps(facts, sort_keys=True, default=str, separators=(",", ":"))
+    return "request:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _normalize_usage_event(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
@@ -311,6 +315,8 @@ class UsageEventsCache:
         self.boots: List[Dict[str, Any]] = []
         self.seen: set = set()
         self.archives: Dict[str, Tuple[int, int]] = {}
+        self.archive_directory_stamp = None
+        self.archive_scan_error = None
         self.raw_stats: Dict[str, int] = dict(_EMPTY_EVENT_STATS)
 
     def clear(self) -> None:
@@ -322,6 +328,8 @@ class UsageEventsCache:
             self.boots = []
             self.seen = set()
             self.archives = {}
+            self.archive_directory_stamp = None
+            self.archive_scan_error = None
             self.raw_stats = dict(_EMPTY_EVENT_STATS)
 
     def boot_snapshot(self) -> List[Dict[str, Any]]:
@@ -351,14 +359,21 @@ class UsageEventsCache:
 
     def _ingest_archives(self, archive_dir: Path, horizon: datetime, meta: Dict[str, Any]) -> None:
         try:
-            candidates = sorted(archive_dir.glob(USAGE_ARCHIVE_GLOB)) if archive_dir.is_dir() else []
+            stamp = archive_dir.stat().st_mtime_ns if archive_dir.is_dir() else None
+            # The core rotates immutable files by rename. Unchanged directories
+            # require neither a recursive scan nor one stat per historical file.
+            if stamp == self.archive_directory_stamp and not self.archive_scan_error:
+                return
+            candidates = sorted(archive_dir.glob(USAGE_ARCHIVE_GLOB)) if stamp is not None else []
         except OSError as exc:
-            meta["read_error"] = f"archive_error:{type(exc).__name__}"
+            self.archive_scan_error = meta["read_error"] = f"archive_error:{type(exc).__name__}"
             return
+        self.archive_scan_error = None
         for path in candidates:
             try:
                 stat = path.stat()
-            except OSError:
+            except OSError as exc:
+                self.archive_scan_error = meta["read_error"] = f"archive_stat_error:{type(exc).__name__}"
                 continue
             if datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc) < horizon:
                 continue
@@ -368,11 +383,12 @@ class UsageEventsCache:
             try:
                 data = path.read_bytes()
             except OSError as exc:
-                meta["read_error"] = f"archive_read_error:{type(exc).__name__}"
+                self.archive_scan_error = meta["read_error"] = f"archive_read_error:{type(exc).__name__}"
                 continue
             self._ingest_bytes(data)
             self.archives[str(path)] = identity
             self.raw_stats["archives_read"] += 1
+        self.archive_directory_stamp = stamp
 
     def _ingest_live(self, live_path: Path, meta: Dict[str, Any]) -> None:
         try:
@@ -461,19 +477,31 @@ class UsageEventsCache:
         # record can sit anywhere in the list; scan the whole list.
         if any(r["ts"] < horizon for r in [*self.records, *self.boots, *self.sessions.values()]):
             self.records = [r for r in self.records if r["ts"] >= horizon]
-            self.boots = [b for b in self.boots if b["ts"] >= horizon]
+            preceding = max((b for b in self.boots if b["ts"] < horizon), key=lambda b: b["ts"], default=None)
+            self.boots = ([preceding] if preceding else []) + [b for b in self.boots if b["ts"] >= horizon]
             self.sessions = {key: s for key, s in self.sessions.items() if s["ts"] >= horizon}
             self.seen = {r["identity"] for r in [*self.records, *self.boots]}
-        for key in list(self.archives):
-            try:
-                stale = datetime.fromtimestamp(Path(key).stat().st_mtime, tz=timezone.utc) < horizon
-            except OSError:
-                stale = True
-            if stale:
+        for key, (_, mtime_ns) in list(self.archives.items()):
+            if datetime.fromtimestamp(mtime_ns / 1e9, tz=timezone.utc) < horizon:
                 self.archives.pop(key, None)
 
 
 _EVENTS = UsageEventsCache()
+
+
+# Load the sibling without depending on a process-wide sys.path or plugin package name.
+_history_spec = importlib.util.spec_from_file_location(__name__ + "_history", Path(__file__).with_name("history.py"))
+_history_module = importlib.util.module_from_spec(_history_spec)
+_history_spec.loader.exec_module(_history_module)
+
+
+class HistoryIndex(_history_module.ArchiveIndex):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path, UsageEventsCache, _evidence_rank)
+
+
+_HISTORY: Optional[HistoryIndex] = None
+_HISTORY_PATH: Optional[Path] = None
 
 
 def _runtime_data_dir(api: Any) -> Optional[Path]:
@@ -613,87 +641,136 @@ def _version_markers(boots: List[Dict[str, Any]], start: datetime, now: datetime
     return markers[-MAX_MARKERS_RETURNED:], max(0, len(markers) - MAX_MARKERS_RETURNED)
 
 
+def _custom_bound(value: Any, *, end: bool = False, zone: str = "UTC") -> Optional[datetime]:
+    """Parse a Custom date in the owner's display zone, or an explicit ISO instant."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        if "T" in text:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+        local = datetime.fromisoformat(text).replace(tzinfo=ZoneInfo(zone))
+        if end:
+            local += timedelta(days=1)
+        return local.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _merge_history_records(current: List[Dict[str, Any]], historical: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge current and indexed rows without double-counting rotation seams."""
+    records: Dict[str, Dict[str, Any]] = {}
+    sessions: Dict[str, Dict[str, Any]] = {}
+    for record in [*historical, *current]:
+        identity = str(record.get("identity") or "")
+        if record.get("kind") == "subscription_session":
+            previous = sessions.get(identity)
+            if previous is None or _evidence_rank(record) > _evidence_rank(previous):
+                sessions[identity] = record
+        elif identity and identity not in records:
+            records[identity] = record
+    return [*records.values(), *sessions.values()]
+
+
 def calculate_analytics(
-    records: List[Dict[str, Any]],
-    timeframe: str = "24H",
-    meta: Optional[Dict[str, Any]] = None,
-    *,
-    now: Optional[datetime] = None,
-    boots: Optional[List[Dict[str, Any]]] = None,
+    records: List[Dict[str, Any]], timeframe: str = "24H", meta: Optional[Dict[str, Any]] = None,
+    *, now: Optional[datetime] = None, boots: Optional[List[Dict[str, Any]]] = None,
+    start_override: Optional[datetime] = None, end_override: Optional[datetime] = None,
+    calendar_daily: bool = False, zone: str = "UTC", hourly: bool = False,
 ) -> Dict[str, Any]:
+    """All consumers receive exact half-open intervals, never regrouped coarse bins."""
     tf = str(timeframe or "24H").upper().strip()
-    if tf not in ("1H", "6H", "24H", "7D", "ALL"):
+    if tf not in ("1H", "6H", "24H", "7D", "MONTH", "ALL", "CUSTOM"):
         tf = "24H"
     now = now or datetime.now(timezone.utc)
-    start, step = _get_timeframe_bounds(tf, now)
-    if tf == "ALL":
-        start = min((r["ts"] for r in records if r["ts"] < now), default=now)
-        span = (now - start).total_seconds()
+    end = min(end_override or now, now)
+    start, step = _get_timeframe_bounds(tf, end)
+    if tf == "CUSTOM":
+        start = start_override or end - timedelta(hours=24)
+        span = max(0.0, (end - start).total_seconds())
+        step = timedelta(minutes=5 if span <= 3600 else 30 if span <= 21600 else 60 if span <= 86400 else 360)
+        if hourly:
+            step = timedelta(hours=1)
+    elif tf == "MONTH":
+        start, step = end - timedelta(days=30), timedelta(days=1)
+    elif tf == "ALL":
+        start = min((r["ts"] for r in records if r["ts"] < end), default=end)
+        span = (end - start).total_seconds()
         step = timedelta(hours=1 if span <= 86400 else 6 if span <= 7 * 86400 else 12 if span <= 30 * 86400 else 24)
-    window = [r for r in records if start <= r["ts"] < now]
+    local_zone = ZoneInfo(zone)
+    daily = calendar_daily or tf == "MONTH"
+    # Explicit ISO bounds stay exact. Calendar bin edges may be clipped at either end.
+    if daily and tf in ("7D", "MONTH", "ALL"):
+        date = start.astimezone(local_zone).date() if tf == "ALL" else end.astimezone(local_zone).date() - timedelta(days=6 if tf == "7D" else 29)
+        start = datetime.combine(date, datetime.min.time(), tzinfo=local_zone).astimezone(timezone.utc)
+    window = [r for r in records if start <= r["ts"] < end]
     summary = _aggregate(window)
-
-    # Half-open intervals contain each observation once, including boundaries.
-    # ALL also retains empty intervals, so the chart cannot bridge unobserved time.
-    count = math.ceil((now - start).total_seconds() / step.total_seconds())
-    omitted = max(0, count - MAX_BUCKETS_RETURNED)
-    markers, markers_omitted = _version_markers(boots or [], start, now, step, omitted)
-    bucket_records: Dict[int, List[Dict[str, Any]]] = {i: [] for i in range(omitted, count)}
+    intervals = []
+    cursor = start
+    while cursor < end:
+        if daily:
+            next_date = cursor.astimezone(local_zone).date() + timedelta(days=1)
+            boundary = datetime.combine(next_date, datetime.min.time(), tzinfo=local_zone).astimezone(timezone.utc)
+        else:
+            boundary = cursor + step
+        stop = min(boundary, end)
+        intervals.append((cursor, stop))
+        cursor = stop
+    # Preserve all daily observations; the widget pages the plot, never silently drops history.
+    omitted = 0 if daily else max(0, len(intervals) - MAX_BUCKETS_RETURNED)
+    intervals = intervals[omitted:]
+    by_stamp = {begin: [] for begin, _ in intervals}
     groups: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+    from bisect import bisect_right
+    begins = [begin for begin, _ in intervals]
     for record in window:
-        index = int((record["ts"] - start).total_seconds() // step.total_seconds())
-        if index in bucket_records:
-            bucket_records[index].append(record)
-        key = (record["provider"], record["model"], record["kind"])
-        groups.setdefault(key, []).append(record)
-
+        index = bisect_right(begins, record["ts"]) - 1
+        if index >= 0 and record["ts"] < intervals[index][1]:
+            by_stamp[begins[index]].append(record)
+        groups.setdefault((record["provider"], record["model"], record["kind"]), []).append(record)
+    markers, markers_omitted = _version_markers(boots or [], start, end, step, 0)
+    for marker in markers:
+        stamp = datetime.fromisoformat(marker["ts"])
+        index = bisect_right(begins, stamp) - 1
+        marker["position"] = index + (stamp - intervals[index][0]).total_seconds() / (intervals[index][1] - intervals[index][0]).total_seconds() if index >= 0 else -1
     buckets = []
-    for index, members in bucket_records.items():
-        stamp = start + index * step
-        aggregate = _aggregate(members)
-        buckets.append({
-            **aggregate, "ts": stamp.isoformat(),
-            "label": stamp.strftime("%Y-%m-%d %H:%M" if tf == "ALL" else "%m-%d %H:%M"),
-            "rate": aggregate["cache_read_rate"],
-            "prompt": aggregate["prompt_tokens"],
-            "cached": aggregate["eligible_cached_tokens"],
-            "uncached": aggregate["uncached_tokens"],
-            "unknown": aggregate["unknown_prompt_tokens"],
-        })
-
-    models = []
-    for (provider, model, kind), members in groups.items():
-        aggregate = _aggregate(members)
-        models.append({
-            **aggregate, "provider": provider, "model": model, "kind": kind,
-            "display_name": _clean_model_display_name(model), "rate": aggregate["cache_read_rate"],
-        })
-    models.sort(key=lambda row: row["prompt_tokens"] or 0, reverse=True)
+    for begin, stop in intervals:
+        aggregate = _aggregate(by_stamp[begin])
+        local = begin.astimezone(local_zone)
+        buckets.append({**aggregate, "ts": begin.isoformat(), "end_ts": stop.isoformat(),
+                        "day": local.date().isoformat(),
+                        "label": local.strftime("%Y-%m-%d" if daily else "%Y-%m-%d %H:%M" if tf in ("ALL", "CUSTOM") else "%m-%d %H:%M"),
+                        "partial": daily and (local.time() != datetime.min.time() or stop.astimezone(local_zone).time() != datetime.min.time()),
+                        "rate": aggregate["cache_read_rate"], "prompt": aggregate["prompt_tokens"],
+                        "cached": aggregate["eligible_cached_tokens"], "uncached": aggregate["uncached_tokens"],
+                        "unknown": aggregate["unknown_prompt_tokens"]})
+    models = [{**_aggregate(rows), "provider": provider, "model": model, "kind": kind,
+               "display_name": _clean_model_display_name(model)}
+              for (provider, model, kind), rows in groups.items()]
+    for model in models:
+        model["rate"] = model["cache_read_rate"]
+    models.sort(key=lambda item: item["prompt_tokens"] or 0, reverse=True)
     quality = dict(meta or {})
-    quality.update({
-        "settled_records_total": len(records), "window_records": len(window),
-        "oldest_ts": min((r["ts"] for r in window), default=None),
-        "newest_ts": max((r["ts"] for r in window), default=None),
-        "models_omitted": max(0, len(models) - MAX_MODELS_RETURNED),
-        "buckets_omitted": omitted,
-        "markers_omitted": markers_omitted,
-        "sessions_without_usage_event": sum(r["kind"] == "subscription_session" and not r.get("token_facts", True)
-                                            for r in window),
-        "coverage": (
-            "Requests and harness sessions come from the event log (live log plus rotated archives "
-            f"within the last {USAGE_ARCHIVE_WINDOW_DAYS} days)"
-            + ("; a live JSONL ledger (cores before the usage store) adds its session tokens" if quality.get("ledger_live")
-               else "")
-            + ". A session recorded without measured tokens counts as unknown. Older history is not reconstructed."
-        ),
-    })
+    quality.update({"settled_records_total": len(records), "window_records": len(window),
+                    "oldest_ts": min((r["ts"] for r in window), default=None),
+                    "newest_ts": max((r["ts"] for r in window), default=None),
+                    "models_omitted": max(0, len(models) - MAX_MODELS_RETURNED),
+                    "buckets_omitted": omitted, "markers_omitted": markers_omitted,
+                    "sessions_without_usage_event": sum(r["kind"] == "subscription_session" and not r.get("token_facts", True) for r in window),
+                    "coverage": "Available event log observations; empty intervals mean no recorded usage, not proof of zero consumption. Harness sessions are attributed to their recorded observation time, not spread over their duration."
+                                + (" A live JSONL ledger adds its session tokens." if quality.get("ledger_live") else "")})
     for key in ("oldest_ts", "newest_ts"):
         quality[key] = quality[key].isoformat() if quality[key] else None
-    return {
-        "status": "degraded" if quality.get("read_error") else "ok", "timeframe": tf,
-        "summary": summary, "buckets": buckets, "models": models[:MAX_MODELS_RETURNED], "quality": quality,
-        "markers": markers,
-    }
+    history = quality.get("history_index") or {}
+    error = quality.get("read_error") or quality.get("ledger_read_error") or history.get("read_error")
+    if history.get("state") in ("degraded", "unavailable"):
+        error = error or "history_unavailable"
+    status = "degraded" if error else "loading" if history.get("state") in ("loading", "not_loaded") else "ok"
+    return {"status": status, "read_error": error, "timeframe": tf, "timezone": zone,
+            "start": start.isoformat(), "end": end.isoformat(), "daily": daily,
+            "generated_at": now.isoformat(), "summary": summary, "buckets": buckets,
+            "models": models[:MAX_MODELS_RETURNED], "quality": quality, "markers": markers}
 
 
 def _merge_ledger_sessions(records: List[Dict[str, Any]], ledger_rows: List[Dict[str, Any]],
@@ -715,8 +792,15 @@ def _ledger_is_live(ledger_path: Path, horizon: datetime) -> bool:
 
 
 def register(api: Any) -> None:
-    global _DATA_DIR
+    global _DATA_DIR, _HISTORY, _HISTORY_PATH
     _DATA_DIR = _runtime_data_dir(api)
+    history_path = (_DATA_DIR or Path(os.path.expanduser("~/Ouroboros/data"))) / "state" / "cache_efficiency_snapshot" / "history-index.json"
+    if _HISTORY is None or _HISTORY_PATH != history_path:
+        if _HISTORY is not None:
+            _HISTORY.close()
+        _HISTORY_PATH = history_path
+        _HISTORY = HistoryIndex(history_path)
+    history = _HISTORY
 
     def route_handler(request: Any = None) -> Dict[str, Any]:
         global _DATA_DIR
@@ -725,23 +809,43 @@ def register(api: Any) -> None:
         archive_dir = data_dir / "archive"
         ledger_path = data_dir / "state" / "usage_attempts.jsonl"
 
-        timeframe = "24H"
-        if request is not None:
-            if hasattr(request, "query_params"):
-                timeframe = request.query_params.get("timeframe", "24H")
-            elif isinstance(request, Mapping) and "query_params" in request:
-                timeframe = request["query_params"].get("timeframe", "24H")
-
-        records, meta = _EVENTS.update(events_path, archive_dir)
-        horizon = datetime.now(timezone.utc) - timedelta(days=USAGE_ARCHIVE_WINDOW_DAYS)
+        query = getattr(request, "query_params", None)
+        if query is None:
+            query = request.get("query_params", {}) if isinstance(request, Mapping) else {}
+        timeframe = str(query.get("timeframe", "24H")).upper().strip()
+        zone = str(query.get("timezone", "UTC"))
+        try:
+            ZoneInfo(zone)
+        except (KeyError, ValueError):
+            return {"status": "degraded", "read_error": "invalid_timezone"}
+        custom_from = _custom_bound(query.get("from"), zone=zone)
+        custom_to = _custom_bound(query.get("to"), end=True, zone=zone)
+        daily = str(query.get("daily", "0")).lower() in ("1", "true", "yes")
+        now = datetime.now(timezone.utc)
+        if timeframe == "CUSTOM" and (not custom_from or not custom_to or custom_from >= min(custom_to, now)):
+            return {"status": "degraded", "read_error": "invalid_custom_range"}
+        records, meta = _EVENTS.update(events_path, archive_dir, now=now)
+        horizon = now - timedelta(days=USAGE_ARCHIVE_WINDOW_DAYS)
         meta["ledger_path"] = str(ledger_path)
         meta["ledger_live"] = _ledger_is_live(ledger_path, horizon)
         if meta["ledger_live"]:
             sessions, ledger_meta = _CACHE.update(ledger_path)
             records = _merge_ledger_sessions(records, sessions, horizon)
             meta["ledger_read_error"] = ledger_meta.get("read_error")
-            meta["raw_stats"].update({f"ledger_{key}": value for key, value in ledger_meta["raw_stats"].items()})
-        return calculate_analytics(records, timeframe=timeframe, meta=meta, boots=_EVENTS.boot_snapshot())
+        boots = _EVENTS.boot_snapshot()
+        if timeframe in ("MONTH", "ALL") or (timeframe == "CUSTOM" and custom_from < horizon):
+            selected_start = custom_from if timeframe == "CUSTOM" else None
+            if timeframe == "MONTH":
+                date = now.astimezone(ZoneInfo(zone)).date() - timedelta(days=29)
+                selected_start = datetime.combine(date, datetime.min.time(), tzinfo=ZoneInfo(zone)).astimezone(timezone.utc)
+            records, history_boots, history_meta = history.request(
+                archive_dir, selected_start, min(custom_to or now, now), current=records)
+            boots += history_boots
+            meta["history_index"] = history_meta
+        return calculate_analytics(records, timeframe=timeframe, meta=meta, now=now, boots=boots,
+                                   start_override=custom_from, end_override=custom_to,
+                                   calendar_daily=daily, zone=zone,
+                                   hourly=str(query.get("granularity", "")) == "hour")
 
     api.register_route("data", route_handler, methods=("GET",))
     api.register_ui_tab(
@@ -752,6 +856,13 @@ def register(api: Any) -> None:
     )
     if hasattr(api, "on_unload") and callable(api.on_unload):
         try:
-            api.on_unload(lambda: (_EVENTS.clear(), _CACHE.clear()))
+            def cleanup() -> None:
+                global _HISTORY
+                history.close()
+                _EVENTS.clear()
+                _CACHE.clear()
+                if _HISTORY is history:
+                    _HISTORY = None
+            api.on_unload(cleanup)
         except Exception:
             pass

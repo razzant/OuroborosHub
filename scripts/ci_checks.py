@@ -19,7 +19,7 @@ SUITES = {
                     'dependencies': ['starlette']},
     'gigasearch': {'skills': ['gigasearch'], 'tests': ['skills/gigasearch/test_gigasearch.py']},
     'cache-efficiency': {'skills': ['cache_efficiency_snapshot'],
-                         'tests': ['skills/cache_efficiency_snapshot/test_cache_efficiency.py']},
+                         'tests': ['skills/cache_efficiency_snapshot/test_cache_efficiency.py', 'skills/cache_efficiency_snapshot/test_history.py']},
     'widgets': {'skills': ['cache_efficiency_snapshot', 'claudexor_quotas', 'context-lens', 'memory-atlas',
                            'token-usage', 'smart_lists', 'calendar'],
                 'tests': ['tests/test_widget_theme_contracts.py', 'tests/test_dashboard_theme_browser.py'],

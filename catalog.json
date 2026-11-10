@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/1a260f1f80a175024633fb9c9f43cbaecc8daf2a",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
   "skills": [
     {
@@ -340,34 +340,54 @@
       "version": "0.5.0"
     },
     {
-      "description": "Interactive cache observability dashboard with token-weighted read rates, separate request and session counts, measurement coverage, and Canvas charts.",
+      "description": "Token and cache dashboard with daily Week/Month/All bars, exact Custom dates, weighted hit rates, coverage and automatic archive backfill.",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "e5153f16ed06b57bad06b87058b15ffa8248934c63a62d1d13e813439ce4c006",
-          "size": 6709
+          "sha256": "ca1354fe6ebb2177a762875e341afc4046f78e50160b12e0c1e0c59bed6e21a7",
+          "size": 8810
+        },
+        {
+          "path": "history.py",
+          "sha256": "048d16038fc4e9a3a2d6154ab28dd426772935a362843c609d64fdc99883ba9b",
+          "size": 12692
         },
         {
           "path": "plugin.py",
-          "sha256": "0c07eb263b2f3fd984910da25653ea14a58922519c1811cc225f1af0e336112c",
-          "size": 34772
+          "sha256": "35caf936a37886b8689115fae39d4c893f07cb50c77eca046e0a3deafe2a86b6",
+          "size": 42251
         },
         {
           "path": "test_cache_efficiency.py",
-          "sha256": "57b35ec32b8d81a3380e022afe61e14f5ec9e17bd21c915dee855e3a9717c84a",
-          "size": 46470
+          "sha256": "f9f3a6b9dc720577a0bb155f6c491fd6bf3467284f86cd484529aabf4ec0b030",
+          "size": 48237
+        },
+        {
+          "path": "test_history.py",
+          "sha256": "013b34171ffd7dd7ee2f1b714599e92ced3a6bde5de070010232ac6bdfd27580",
+          "size": 13298
+        },
+        {
+          "path": "test_widget.cjs",
+          "sha256": "da7fb534640762ee3a4113cb6262b199db062e15dadc0bbfab4cb7141376d696",
+          "size": 8378
+        },
+        {
+          "path": "test_widget_data.py",
+          "sha256": "c812b7669fff10060f5a25752150e0c564c56c40eaee29ffef183df09d83b9e9",
+          "size": 2699
         },
         {
           "path": "widget.js",
-          "sha256": "44f1999be42475324ca7b3b0176662086ad4d317ddbc8a4d9a6b712232a507db",
-          "size": 41097
+          "sha256": "fc33db805b9b59f75e98400b5e1690e7027b6ee093dd854ae657a528c863e31b",
+          "size": 26257
         }
       ],
       "name": "cache_efficiency_snapshot",
       "slug": "cache_efficiency_snapshot",
       "title": "Cache Efficiency Snapshot",
       "type": "extension",
-      "version": "0.6.1"
+      "version": "0.7.0"
     },
     {
       "description": "Единый календарь владельца — локальные календари, CalDAV (включая Яндекс) и Google с личным OAuth-клиентом; события, повторения, доступ, связанные копии, свободные окна, напоминания и виджет День/Неделя.",
