@@ -71,18 +71,13 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
       }
       if (!data.summary || !Array.isArray(data.buckets)) throw new Error('Invalid reading');
       const error = problem(data);
-      if (error) {
-        // Partial measurements have their own dates and warning, never a success stamp.
-        // Keep the last successful snapshot separately while showing useful new facts.
-        state.partial = data; state.range = selection.range;
-        state.pending = null; state.failed = selection; state.status = 'failed'; state.message = error;
-        ++detailSeq; detail = null;
-        if (!data.buckets.some(b=>b.ts===state.selected)) state.selected = null;
-        render(); return;
-      }
-      state.partial = null;
-      state.snapshot = data; state.committed = {...selection}; state.range = selection.range;
-      state.pending = null; state.status = 'ready'; state.message = '';
+      // Every usable reading updates the same selection/detail lifecycle. Partial
+      // measurements keep their warning and never replace the successful snapshot.
+      state.partial = error ? data : null;
+      if (!error) {state.snapshot = data; state.committed = {...selection};}
+      state.range = selection.range; state.pending = null;
+      state.failed = error ? selection : null;
+      state.status = error ? 'failed' : 'ready'; state.message = error;
       if (selection.range === 'CUSTOM') state.customOpen = true;
       if (!state.from) state.from = dateKey(data.start);
       if (!state.to) state.to = dateKey(data.end);

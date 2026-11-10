@@ -369,8 +369,8 @@
         },
         {
           "path": "test_widget.cjs",
-          "sha256": "bf2d21d7dd1e0d1916ddef778f956e5fcd5d1630e5ec47f2668c42a6fdf1611d",
-          "size": 10778
+          "sha256": "9902020fe96fc13baf9fac30ceb9cf7f499b5a45da9a15ba949ffe119836e296",
+          "size": 11800
         },
         {
           "path": "test_widget_data.py",
@@ -379,8 +379,8 @@
         },
         {
           "path": "widget.js",
-          "sha256": "d916c2f3043ccadbc657fce6456e492a1416012ccdaec736494d76e272a1d7a5",
-          "size": 27854
+          "sha256": "6f13ef9e926733ca1ed27af7845196300adf43b4c2cd0bf2c0e19490329ca849",
+          "size": 27613
         }
       ],
       "name": "cache_efficiency_snapshot",
