@@ -18,7 +18,7 @@ const facts = [];
   try {for (const width of [1100,390]) for (const theme of ['dark','light']) {
    const context=await browser.newContext({viewport:{width,height:900},timezoneId:'Europe/Moscow',hasTouch:width===390,colorScheme:theme});
    const page=await context.newPage(), requests=[], errors=[];
-   let fail=false, historyLoading=false, detailFail=false, delay=null, detailDelay=null, refreshed=false;
+   let fail=false, historyLoading=false, detailFail=false, delay=null, detailDelay=null, refreshed=false, partial=true;
    page.on('pageerror',e=>errors.push(String(e)));
    await page.route('**/*',async route=>{
     const u=new URL(route.request().url());
@@ -31,12 +31,18 @@ const facts = [];
     let body=q.granularity==='hour'?(fixtures.DAY_DETAILS[q.from]||fixtures.DETAIL):fixtures[q.timeframe];
     if(refreshed&&q.timeframe==='CUSTOM')body=fixtures[q.granularity==='hour'?'DETAIL_REFRESH':'CUSTOM_REFRESH'];
     if(detailFail&&q.granularity==='hour')body={...body,quality:{...body.quality,history_index:{state:'degraded',read_error:'fixture_detail'}}};
+    if(partial)body={...body,status:'degraded',read_error:'fixture_partial'};
     if(historyLoading)body={...body,status:'loading',quality:{...body.quality,history_index:{state:'loading',archives_done:3,archives_total:10}}};
     return route.fulfill({contentType:'application/json',body:JSON.stringify(body)});
    });
    await page.goto('http://widget.test/');
-   await page.evaluate(theme=>{window.TOKEN_DASH_THEME=theme;window.heights=[];window.OuroborosWidget={resize:h=>window.heights.push(h),onTheme:fn=>{window.changeTheme=fn;return()=>window.offTheme=true;}};window.__ouroWidgetOnDispose=fn=>window.dispose=fn;},theme);
+   await page.evaluate(theme=>{window.TOKEN_DASH_THEME=theme;window.heights=[];window.OuroborosWidget={resize:h=>window.heights.push(h),onTheme:fn=>{window.changeTheme=fn;return()=>window.offTheme=true;}};window.__ouroWidgetOnDispose=fn=>window.dispose=fn;const schedule=window.setInterval;window.setInterval=(fn,ms)=>{if(ms===30000)window.pollOnce=fn;return schedule(fn,ms);};},theme);
    await page.addScriptTag({content:script});
+   await page.locator('.notice.error').waitFor();
+   assert.match(await page.locator('.notice').innerText(),/Partial reading.*fixture_partial/);
+   assert.match(await page.locator('.kpi b').first().innerText(),/3.4 K/);
+   assert.match(await page.locator('.footer').innerText(),/Partial read/);
+   partial=false;await page.evaluate(()=>pollOnce());
    await page.waitForFunction(()=>document.querySelector('.scope')?.textContent.includes('Europe/Moscow')&&!document.querySelector('.notice'));
    const root=page.locator('#root');
    await page.locator('[data-range="1H"]').click();
@@ -47,9 +53,10 @@ const facts = [];
    assert.equal(await page.locator('.code-mark').count(),1);
    assert.match(await root.innerText(),/2 unknown cache reads/);
    const selected=fixtures['1H'].buckets.find(b=>b.unknown_prompt_tokens===2000);
+   const requestsBeforeBin=requests.length;
    await page.locator('[data-chart="volume"] [data-pick="'+selected.ts+'"]').click();
    assert.match(await page.locator('.inspector').innerText(),/2.0 K input/);
-   assert.equal(requests.length,2); // Five-minute inspection needs no day request.
+   assert.equal(requests.length,requestsBeforeBin); // Five-minute inspection needs no day request.
    await page.locator('[data-fold="models"] summary').click();
    await page.waitForFunction(()=>document.querySelector('[data-fold="models"]').open);
    await page.locator('[data-act="refresh"]').click();
@@ -64,9 +71,13 @@ const facts = [];
    assert.equal(requests.length,count); // Editing is not a commit.
    fail=true;await page.locator('[data-act="apply"]').click();
    await page.locator('.notice.error').waitFor();assert.equal(await page.locator('.scope').first().innerText(),before);
-   fail=false;await page.locator('[data-act="retry"]').click();
+   fail=false;await page.evaluate(()=>pollOnce()); // Recover Custom, not the previous 1H.
    await page.waitForFunction(()=>document.querySelector('[data-range="CUSTOM"]').getAttribute('aria-pressed')==='true'&&!document.querySelector('.notice'));
    assert.equal(requests.at(-1).from,'2026-11-09');assert.equal(requests.at(-1).to,'2026-11-09');
+   fail=true;await page.locator('[data-act="refresh"]').click();
+   await page.locator('.notice.error').waitFor();
+   fail=false;await page.locator('[data-act="retry"]').click();
+   await page.waitForFunction(()=>!document.querySelector('.notice'));
    const daily=fixtures.CUSTOM.buckets[0];
    await page.locator('[data-chart="volume"] [data-pick]').first().click();
    await page.waitForFunction(()=>document.querySelector('.hourly'));
@@ -85,7 +96,8 @@ const facts = [];
    await page.locator('[data-act="clear"]').click();detailFail=true;
    await page.locator('[data-chart="volume"] [data-pick]').first().click();
    await page.waitForFunction(()=>document.querySelector('.inspector')?.textContent.includes('fixture_detail'));
-   assert.equal(await page.locator('.hourly').count(),0);detailFail=false;
+   assert.match(await page.locator('.inspector').innerText(),/Partial detail/);
+   assert.equal(await page.locator('.hourly i').count(),24);detailFail=false;
    historyLoading=true;await page.locator('[data-range="MONTH"]').click();
    await page.waitForFunction(()=>document.querySelector('.notice')?.textContent.includes('3 / 10 archives'));
    assert.equal(await page.locator('[data-range="CUSTOM"]').getAttribute('aria-pressed'),'true');

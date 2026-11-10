@@ -380,3 +380,40 @@ def test_old_unrotated_live_records_are_in_all_and_custom_incrementally(tmp_path
         assert plugin._EVENTS.raw_stats["total_lines_read"] == lines+1
     finally:
         unload[0]()
+
+
+@pytest.mark.parametrize("timeframe", ["1H", "6H", "24H", "7D", "CUSTOM"])
+def test_short_range_recovers_published_history_after_transient_error(tmp_path, monkeypatch, timeframe):
+    directory = tmp_path / "archive"
+    write_rows(directory / "events_01.jsonl", event())
+    write_rows(tmp_path / "logs/events.jsonl", event())
+    _, route, unload = api_for(tmp_path, monkeypatch)
+    try:
+        read_route(route, timeframe="MONTH", daily="1")
+        finish_index(plugin._HISTORY)
+        bad = directory / "events_02.jsonl"
+        write_rows(bad, event(ts=(NOW-timedelta(days=20)).isoformat(), ledger_attempt_ids=["recovered"]))
+        os.utime(bad, ((NOW-timedelta(days=20)).timestamp(),) * 2)
+        original = Path.open
+        def denied(path, *args, **kwargs):
+            if path == bad:
+                raise PermissionError("temporary fixture failure")
+            return original(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "open", denied)
+        plugin._HISTORY._last_check = 0
+        read_route(route, timeframe="MONTH", daily="1")
+        finish_index(plugin._HISTORY)
+        query = {"timeframe": timeframe, "daily": "1"}
+        if timeframe == "CUSTOM":
+            query.update({"from": (NOW-timedelta(hours=1)).isoformat(), "to": NOW.isoformat()})
+        assert read_route(route, **query)["status"] == "degraded"
+        monkeypatch.setattr(Path, "open", original)
+        plugin._HISTORY._last_check = 0
+        read_route(route, **query)
+        finish_index(plugin._HISTORY)
+        result = read_route(route, **query)
+        assert result["status"] == "ok"
+        assert result["quality"]["history_index"]["archives_indexed"] == 2
+        assert result["summary"]["request_count"] == 1
+    finally:
+        unload[0]()

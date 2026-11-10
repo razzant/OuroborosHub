@@ -119,7 +119,8 @@ comparison. Month, All and older Custom ranges use
 loads, incrementally parses and atomically saves normalized archive entries. GET
 reads a parsed timestamp-sorted snapshot, resolving the live overlay's session
 evidence before the range filter. Short ranges and selected-day detail use the
-same available historical winners. Unchanged polls do not decode and deduplicate
+same available historical winners and can recover that index after a transient
+read error on the existing background cadence. Unchanged polls do not decode and deduplicate
 all of history again. Changed archives still rebuild and persist the normalized
 index in the background; All aggregation remains proportional to its observations.
 Discovery checks for rotation every thirty seconds; raw
@@ -155,7 +156,9 @@ unknown cache reads is hatched, not silently dropped. Selected intraday bins use
 their own totals; a selected day requests its own hourly data, models and marks.
 Refreshing an open day invalidates and reloads its detail; current bucket totals
 remain visible meanwhile. Keyboard focus follows the exact chart/bin through
-asynchronous redraws. Read failures keep the last successful measurements with their dates and a Retry
-action. Native disclosure state survives refresh. Disposal stops polling, detaches
+asynchronous redraws. Usable partial measurements retain their own dates and an
+explicit warning, separately from the last successful snapshot. Transport failures
+keep the displayed reading. Retry and the existing thirty-second polling cadence
+both recover the failed selection. Native disclosure state survives refresh. Disposal stops polling, detaches
 the width observer and theme listener; plugin unload stops its archive worker.
 The existing host/owner launch policy is unchanged.

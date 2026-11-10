@@ -64,12 +64,14 @@ class ArchiveIndex:
         with self._lock:
             return self._select(start, end)
 
-    def available(self, start, end, *, current=()):
-        """Use the same already-published winners for short ranges and day detail."""
+    def available(self, start, end, *, current=(), archive_dir=None):
+        """Use published winners and keep their background recovery reachable."""
         with self._lock:
             if not self._meta["revision"]:
                 return None
-            return self._select(start, end, current)
+            if archive_dir is None:
+                return self._select(start, end, current)
+        return self.request(archive_dir, start, end, current=current)
 
     def _select(self, start, end, current=()):
         left = bisect_left(self._stamps, start) if start is not None else 0

@@ -344,18 +344,18 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "399f44f7118392d1da00dc8bafab7d55f4e9a59c4cb71bbcdc8cb0e620bf248b",
-          "size": 9324
+          "sha256": "a7878121ffe202cfd25611d0b1d37d90fa6d3592f247c5eb9b8c3d07a7d80160",
+          "size": 9583
         },
         {
           "path": "history.py",
-          "sha256": "fbd3be9b315d7025c211b28b2ab078283b9665e36bfb903ce80c2aed595f06a3",
-          "size": 13523
+          "sha256": "292ac23d184c2d331c4cb9cd5604a256eeba05a28747e259bbd5f1c588baf882",
+          "size": 13647
         },
         {
           "path": "plugin.py",
-          "sha256": "0009a5b53d43964bcc3396bde1a560ace5fdfdf14ba473a59bc8d75befa994f2",
-          "size": 43282
+          "sha256": "ff767442aaa4862d851fb79a39245df9dd913b40db538e56ee2792fd421251d5",
+          "size": 43349
         },
         {
           "path": "test_cache_efficiency.py",
@@ -364,13 +364,13 @@
         },
         {
           "path": "test_history.py",
-          "sha256": "67a9d69c76cf59a89c2641f5d58dcd629ba03bcdf4e9bdbfb5fb7cbd43cd6b5e",
-          "size": 17241
+          "sha256": "088bebb2206ee3859ecc41c3e65c285f7f8bf3f71723be531d62b4020f45bb87",
+          "size": 19010
         },
         {
           "path": "test_widget.cjs",
-          "sha256": "6efde6296bbc690cca86ef3cccad455f4dd9ed87a3191c5bd75006c60474c866",
-          "size": 9796
+          "sha256": "bf2d21d7dd1e0d1916ddef778f956e5fcd5d1630e5ec47f2668c42a6fdf1611d",
+          "size": 10778
         },
         {
           "path": "test_widget_data.py",
@@ -379,8 +379,8 @@
         },
         {
           "path": "widget.js",
-          "sha256": "ffc799cccd13b737273756fdd7b08899645887e5252d551390b68361d72786be",
-          "size": 27088
+          "sha256": "d916c2f3043ccadbc657fce6456e492a1416012ccdaec736494d76e272a1d7a5",
+          "size": 27854
         }
       ],
       "name": "cache_efficiency_snapshot",

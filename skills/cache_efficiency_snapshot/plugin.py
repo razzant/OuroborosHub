@@ -852,7 +852,8 @@ def register(api: Any) -> None:
             if timeframe == "7D" and daily:
                 date = now.astimezone(ZoneInfo(zone)).date() - timedelta(days=6)
                 selected_start = datetime.combine(date, datetime.min.time(), tzinfo=ZoneInfo(zone)).astimezone(timezone.utc)
-            available = history.available(selected_start, min(custom_to or now, now), current=records)
+            available = history.available(selected_start, min(custom_to or now, now),
+                                          current=records, archive_dir=archive_dir)
             if available is not None:
                 records, history_boots, history_meta = available
                 boots += history_boots

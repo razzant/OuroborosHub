@@ -18,7 +18,7 @@
   };
   const icon = name => '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">'+icons[name]+'</svg>';
   const presets = [['1H','1h'],['6H','6h'],['24H','24h'],['7D','Week'],['MONTH','Month'],['ALL','All']];
-  const state = {range:'24H', committed:null, pending:null, failed:null, snapshot:null, selected:null,
+  const state = {range:'24H', committed:null, pending:null, failed:null, snapshot:null, partial:null, selected:null,
     from:'', to:'', customOpen:false, models:false, coverage:false, status:'loading', message:'', page:0};
   let detail = null, requestSeq = 0, detailSeq = 0, disposed = false, pendingTimer = 0;
   let lastHeight = 0, lastWidth = 0, renderFrame = 0;
@@ -41,6 +41,7 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
     return data.status === 'degraded' || q.read_error || q.ledger_read_error || h.state === 'degraded' || h.state === 'unavailable'
       ? (data.read_error || q.read_error || q.ledger_read_error || h.read_error || 'Incomplete reading') : '';
   }
+  function reading() {return state.partial || state.snapshot;}
   function queryString(selection) {
     const q = new URLSearchParams({timeframe: selection.range, timezone: zone});
     if (['7D','MONTH','ALL','CUSTOM'].includes(selection.range)) q.set('daily','1');
@@ -51,8 +52,6 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
     const response = await fetch('/api/extensions/cache_efficiency_snapshot/data?' + query);
     if (!response.ok) throw new Error('HTTP ' + response.status);
     const data = await response.json();
-    const error = problem(data);
-    if (error) throw new Error(error);
     return data;
   }
   async function load(selection) {
@@ -71,6 +70,17 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
         return;
       }
       if (!data.summary || !Array.isArray(data.buckets)) throw new Error('Invalid reading');
+      const error = problem(data);
+      if (error) {
+        // Partial measurements have their own dates and warning, never a success stamp.
+        // Keep the last successful snapshot separately while showing useful new facts.
+        state.partial = data; state.range = selection.range;
+        state.pending = null; state.failed = selection; state.status = 'failed'; state.message = error;
+        ++detailSeq; detail = null;
+        if (!data.buckets.some(b=>b.ts===state.selected)) state.selected = null;
+        render(); return;
+      }
+      state.partial = null;
       state.snapshot = data; state.committed = {...selection}; state.range = selection.range;
       state.pending = null; state.status = 'ready'; state.message = '';
       if (selection.range === 'CUSTOM') state.customOpen = true;
@@ -105,7 +115,8 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
       const data = await getData(q);
       if (disposed || seq !== detailSeq || state.selected !== bucket.ts) return;
       if (data.status === 'loading') throw new Error('History is still loading; select the interval again shortly');
-      detail = {key:bucket.ts, data, error:'', loading:false}; render();
+      if (!data.summary || !Array.isArray(data.buckets)) throw new Error('Invalid detail reading');
+      detail = {key:bucket.ts, data, error:problem(data), loading:false}; render();
     } catch (error) {
       if (disposed || seq !== detailSeq) return;
       detail = {key:bucket.ts, data:null, error:error.message, loading:false}; render();
@@ -113,14 +124,14 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
   }
   function pick(key) {
     if (state.selected === key) {state.selected = null; detail = null; ++detailSeq; render(); return;}
-    const b = state.snapshot?.buckets.find(b => b.ts === key);
+    const b = reading()?.buckets.find(b => b.ts === key);
     if (!b) return;
     state.selected = key;
-    if (state.snapshot.daily) loadDetail(b);
+    if (reading().daily) loadDetail(b);
     else {++detailSeq;detail = null;render();}
   }
   function visibleBuckets() {
-    const buckets = state.snapshot?.buckets || [];
+    const buckets = reading()?.buckets || [];
     const n = Math.max(5, Math.min(30, Math.floor((root.clientWidth || 600) / 27)));
     const last = Math.max(0, buckets.length - state.page);
     return {all:buckets, buckets:buckets.slice(Math.max(0,last-n),last), n};
@@ -153,7 +164,7 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
       if (kind === 'volume') {
         body += `<rect class="bar-unknown" data-tokens="${b.unknown_prompt_tokens || 0}" x="${x}" y="${top+plotHeight-unknown}" width="${bw}" height="${unknown}"/><rect class="bar-cache" x="${x}" y="${top+plotHeight-unknown-cache}" width="${bw}" height="${cache}"/><rect class="bar-fresh" x="${x}" y="${top+plotHeight-unknown-cache-fresh}" width="${bw}" height="${fresh}" rx="2"/>`;
       } else if (b.cache_read_rate != null) body += `<circle class="point" cx="${x+bw/2}" cy="${top+(1-b.cache_read_rate/100)*plotHeight}" r="3"/>`;
-      if (kind==='volume') for(const m of (state.snapshot.markers || []).filter(m=>inInterval(m,b))) {
+      if (kind==='volume') for(const m of (reading().markers || []).filter(m=>inInterval(m,b))) {
         const mx=left+(i+(Date.parse(m.ts)-Date.parse(b.ts))/(Date.parse(b.end_ts)-Date.parse(b.ts)))*band;
         body+=`<line class="code-mark" x1="${mx}" x2="${mx}" y1="${height-31}" y2="${height-23}" pointer-events="none"/>`;
       }
@@ -172,14 +183,14 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
     return rows.map(r=>`<div class="rowline"><span class="name" title="${esc(r.model)}">${esc(names.filter(n=>n===(r.display_name||r.model)).length>1?r.model:r.display_name||r.model)}</span><span class="num">${fmt(r.prompt_tokens)}</span><span class="sub">${esc(r.provider)} · ${r.kind==='attempt'?'requests':r.kind==='subscription_session'?'sessions':esc(r.kind)} · ${nf.format(r.total_records)} records${r.unknown_read_records?' · '+nf.format(r.unknown_read_records)+' unknown reads':''}</span><span class="sub right">${pct(r.cache_read_rate)} hit<br>${fmt(r.cached_tokens)} known reads</span></div>`).join('');
   }
   function inspector() {
-    const snap = state.snapshot, b = snap?.buckets.find(b=>b.ts===state.selected);
+    const snap = reading(), b = snap?.buckets.find(b=>b.ts===state.selected);
     if (!b) return '';
     const s = detail?.key===b.ts && detail.data ? detail.data.summary : b;
     let body = `<div class="meta">${fmt(s.prompt_tokens)} input · ${pct(s.cache_read_rate)} from cache<br>${counts(s)}</div>`;
     if (detail?.key===b.ts) {
       if (detail.loading) body += '<p class="meta">Loading hourly detail…</p>';
-      else if (detail.error) body += `<p class="meta" role="alert">Detail unavailable: ${esc(detail.error)}</p>`;
-      else if (detail.data) {
+      else if (detail.error) body += `<p class="meta" role="alert">${detail.data?'Partial detail':'Detail unavailable'}: ${esc(detail.error)}</p>`;
+      if (!detail.loading && detail.data) {
         const hours = detail.data.buckets, max = Math.max(1,...hours.map(h=>h.prompt_tokens||0));
         body += '<div class="hourly">'+hours.map(h=>`<i data-ts="${esc(h.ts)}" data-tokens="${h.prompt_tokens==null?'':h.prompt_tokens}" title="${esc(intervalLabel(h,false)+' · '+fmt(h.prompt_tokens)+' input')}" style="height:${(h.prompt_tokens||0)/max*100}%;${h.total_records?'':'background:none;'}"></i>`).join('')+'</div>';
         body += `<div class="mini-labels"><span>${hours[0]?clock(hours[0].ts):''}</span><span>Hourly observations</span><span>${hours.at(-1)?clock(hours.at(-1).end_ts):''}</span></div>`;
@@ -203,11 +214,11 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
       : active.dataset.act ? '[data-act="'+active.dataset.act+'"]'
       : active.dataset.range ? '[data-range="'+active.dataset.range+'"]'
       : active.tagName==='SUMMARY' ? '[data-fold="'+active.parentElement.dataset.fold+'"] summary' : null;
-    const snap = state.snapshot, s = snap?.summary;
+    const snap = reading(), s = snap?.summary;
     const {all,buckets,n} = visibleBuckets();
     const label = snap ? `${timestamp(snap.start)} – ${timestamp(snap.end)} · ${zone}` : 'Waiting for the first reading';
     const loading = state.status==='loading';
-    root.innerHTML = `<article class="dash"><header class="top"><div class="title">Token usage & cache health</div><div class="controls"><div class="range" aria-label="Time range">${presets.map(([value,label])=>`<button data-range="${value}" aria-pressed="${state.range===value}">${label}</button>`).join('')}<button data-range="CUSTOM" aria-pressed="${state.range==='CUSTOM'}">Custom</button></div><button class="icon" data-act="refresh" aria-label="Refresh reading">${icon('refresh')}</button></div></header><div class="custom" ${state.customOpen?'':'hidden'}><label class="meta">From<input id="from" type="date" value="${esc(state.from)}"></label><label class="meta">To<input id="to" type="date" value="${esc(state.to)}"></label><button data-act="apply">Apply range</button></div><div class="scope meta">${esc(label)}</div>${loading?`<div class="notice" role="status">${esc(state.message || 'Updating '+(state.pending?.range||'')+'…')}${snap?' · previous reading retained':''}</div>`:state.status==='failed'?`<div class="notice error" role="alert"><span>Update failed · ${esc(state.message)}${snap?' · showing the last reading':''}</span><button data-act="retry">Retry</button></div>`:''}<section class="kpis"><div class="kpi"><b>${fmt(s?.prompt_tokens)}</b><span>input tokens</span></div><div class="kpi"><b>${pct(s?.cache_read_rate)}</b><span>cache hit rate · weighted</span></div><div class="kpi"><b>${s&&s.rate_records?fmt(s.uncached_tokens):s&&s.measured_records?fmt(0):'—'}</b><span>fresh / uncached input</span></div><div class="kpi"><b>${s?nf.format(s.measured_records)+' / '+nf.format(s.total_records):'—'}</b><span>measured records</span></div></section><div class="panels"><section class="panel volume-panel"><div class="panel-head"><h2>Token volume</h2><span class="meta">${snap?.daily?'daily input':'input per interval'}</span></div><div class="chart" data-chart="volume"></div><div class="legend"><span><i></i>Cache reads</span><span><i class="fresh"></i>Fresh input</span><span><i class="unknown"></i>Unclassified</span></div>${all.length>n?`<div class="pager"><button data-act="earlier" ${state.page+n>=all.length?'disabled':''}>Earlier</button><span class="meta">${buckets.length} / ${all.length} intervals</span><button data-act="later" ${state.page===0?'disabled':''}>Later</button></div>`:''}${inspector()}</section><section class="panel side-panel"><div class="panel-head"><h2>Cache hit rate</h2><span class="meta">0–100%</span></div><div class="chart" data-chart="rate"></div><div class="fold"><details data-fold="models" ${state.models?'open':''}><summary>Models & sources</summary>${modelList(snap?.models || [])}</details></div><div class="fold"><details data-fold="coverage" ${state.coverage?'open':''}><summary>Coverage & counting</summary>${coverage(snap)}</details></div></section></div>${s?`<div class="scope meta">${counts(s)}</div>`:''}<footer class="footer"><button data-act="coverage">About the data</button><span class="meta">${snap?'Last read '+clock(snap.generated_at):'No successful reading yet'}</span></footer></article>`;
+    root.innerHTML = `<article class="dash"><header class="top"><div class="title">Token usage & cache health</div><div class="controls"><div class="range" aria-label="Time range">${presets.map(([value,label])=>`<button data-range="${value}" aria-pressed="${state.range===value}">${label}</button>`).join('')}<button data-range="CUSTOM" aria-pressed="${state.range==='CUSTOM'}">Custom</button></div><button class="icon" data-act="refresh" aria-label="Refresh reading">${icon('refresh')}</button></div></header><div class="custom" ${state.customOpen?'':'hidden'}><label class="meta">From<input id="from" type="date" value="${esc(state.from)}"></label><label class="meta">To<input id="to" type="date" value="${esc(state.to)}"></label><button data-act="apply">Apply range</button></div><div class="scope meta">${esc(label)}</div>${loading?`<div class="notice" role="status">${esc(state.message || 'Updating '+(state.pending?.range||'')+'…')}${snap?' · previous reading retained':''}</div>`:state.status==='failed'?`<div class="notice error" role="alert"><span>${state.partial?'Partial reading':'Update failed'} · ${esc(state.message)}${snap&&!state.partial?' · showing the last reading':''}</span><button data-act="retry">Retry</button></div>`:''}<section class="kpis"><div class="kpi"><b>${fmt(s?.prompt_tokens)}</b><span>input tokens</span></div><div class="kpi"><b>${pct(s?.cache_read_rate)}</b><span>cache hit rate · weighted</span></div><div class="kpi"><b>${s&&s.rate_records?fmt(s.uncached_tokens):s&&s.measured_records?fmt(0):'—'}</b><span>fresh / uncached input</span></div><div class="kpi"><b>${s?nf.format(s.measured_records)+' / '+nf.format(s.total_records):'—'}</b><span>measured records</span></div></section><div class="panels"><section class="panel volume-panel"><div class="panel-head"><h2>Token volume</h2><span class="meta">${snap?.daily?'daily input':'input per interval'}</span></div><div class="chart" data-chart="volume"></div><div class="legend"><span><i></i>Cache reads</span><span><i class="fresh"></i>Fresh input</span><span><i class="unknown"></i>Unclassified</span></div>${all.length>n?`<div class="pager"><button data-act="earlier" ${state.page+n>=all.length?'disabled':''}>Earlier</button><span class="meta">${buckets.length} / ${all.length} intervals</span><button data-act="later" ${state.page===0?'disabled':''}>Later</button></div>`:''}${inspector()}</section><section class="panel side-panel"><div class="panel-head"><h2>Cache hit rate</h2><span class="meta">0–100%</span></div><div class="chart" data-chart="rate"></div><div class="fold"><details data-fold="models" ${state.models?'open':''}><summary>Models & sources</summary>${modelList(snap?.models || [])}</details></div><div class="fold"><details data-fold="coverage" ${state.coverage?'open':''}><summary>Coverage & counting</summary>${coverage(snap)}</details></div></section></div>${s?`<div class="scope meta">${counts(s)}</div>`:''}<footer class="footer"><button data-act="coverage">About the data</button><span class="meta">${snap?(state.partial?'Partial read ':'Last read ')+clock(snap.generated_at):'No successful reading yet'}</span></footer></article>`;
     root.querySelector('[data-chart="volume"]').innerHTML = chart(buckets,'volume',snap?.daily);
     root.querySelector('[data-chart="rate"]').innerHTML = chart(buckets,'rate',snap?.daily);
     root.querySelectorAll('[data-range]').forEach(b=>b.onclick=()=>{
@@ -231,7 +242,7 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
       if (act==='clear') {state.selected=null;detail=null;++detailSeq;render();}
       if (act==='coverage') {state.coverage=!state.coverage;render();}
       if (act==='earlier'||act==='later') {state.page=Math.max(0,state.page+(act==='earlier'?n:-n));render();}
-      if (act==='refresh'||act==='retry') load(act==='retry'&&state.failed?state.failed:state.committed||{range:state.range});
+      if (act==='refresh'||act==='retry') load(state.failed||state.committed||{range:state.range});
       if (act==='apply') {
         if (!state.from||!state.to||state.from>state.to) {state.status='failed';state.message='Choose a valid date range';render();return;}
         state.selected=null;detail=null;++detailSeq;state.page=0;load({range:'CUSTOM',from:state.from,to:state.to});
@@ -252,7 +263,7 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
     else resize();
   });
   observer.observe(root);
-  const timer=setInterval(()=>{if (!disposed&&!state.pending&&!state.failed&&!document.hidden) load(state.committed||{range:state.range});},30000);
+  const timer=setInterval(()=>{if (!disposed&&!state.pending&&!document.hidden) load(state.failed||state.committed||{range:state.range});},30000);
   function dispose(){disposed=true;++requestSeq;++detailSeq;clearInterval(timer);clearTimeout(pendingTimer);cancelAnimationFrame(renderFrame);observer.disconnect();if(typeof offTheme==='function')offTheme();}
   if (typeof window.__ouroWidgetOnDispose==='function') window.__ouroWidgetOnDispose(dispose);
   render();load({range:'24H'});
