@@ -20,6 +20,7 @@ spec.loader.exec_module(plugin)
 
 LedgerCache = plugin.LedgerCache
 UsageEventsCache = plugin.UsageEventsCache
+HistoryIndex = plugin.HistoryIndex
 session_key = plugin._session_identity
 _normalize_record = plugin._normalize_record
 _normalize_usage_event = plugin._normalize_usage_event
@@ -431,6 +432,36 @@ def test_missing_live_log_is_degraded_but_archives_still_count(tmp_path: Path) -
     assert meta["exists"] is False and meta["read_error"] == "file_not_found"
 
 
+def test_history_index_backfills_immutable_archives_once_and_preserves_identity(tmp_path: Path) -> None:
+    archive_dir = tmp_path / "archive"
+    old = archive_dir / "events_20260801T000000.jsonl"
+    write_rows(old, event(model="old", ts=(NOW - timedelta(days=20)).isoformat(), ledger_attempt_ids=["old"]))
+    index = HistoryIndex(tmp_path / "state" / "history-index.json")
+    records, boots, meta = index.update(archive_dir, NOW - timedelta(days=21), NOW)
+    assert [record["model"] for record in records] == ["old"]
+    assert boots == []
+    assert meta["archives_read_this_call"] == 1
+    assert (tmp_path / "state" / "history-index.json").is_file()
+
+    repeated, _, second = index.update(archive_dir, NOW - timedelta(days=21), NOW)
+    assert [record["identity"] for record in repeated] == [records[0]["identity"]]
+    assert second["archives_read_this_call"] == 0
+
+
+def test_custom_analytics_uses_half_open_bounds_and_regular_daily_bins() -> None:
+    start = NOW - timedelta(days=3)
+    records = normalized(
+        row(model="inside-start", ts=start.isoformat()),
+        row(model="inside", ts=(start + timedelta(days=1)).isoformat()),
+        row(model="at-end", ts=NOW.isoformat()),
+    )
+    response = calculate_analytics(records, timeframe="CUSTOM", start_override=start, end_override=NOW, now=NOW)
+    assert response["timeframe"] == "CUSTOM"
+    assert response["summary"]["total_records"] == 2
+    assert len(response["buckets"]) == 12  # 6-hour bins for a three-day Custom range
+    assert sum(bucket["total_records"] for bucket in response["buckets"]) == 2
+
+
 # ---------------------------------------------------------------------------
 # Sessions and code versions: also from the event log
 # ---------------------------------------------------------------------------
@@ -662,15 +693,24 @@ def test_a_mark_needs_only_a_different_predecessor_even_outside_the_window(monke
     assert many["quality"]["markers_omitted"] == 2
 
 
-def test_sessions_and_boots_leave_with_the_window(tmp_path: Path) -> None:
+def test_sessions_stay_while_unrotated_then_leave_with_the_archive_window(tmp_path: Path) -> None:
     live = tmp_path / "logs" / "events.jsonl"
     old = (NOW - timedelta(days=9)).isoformat()
     write_rows(live, session_event(ts=old, run_id="old"), ledger_event(ts=old, run_id="older"),
                {**boot("a" * 40, 0), "ts": old}, session_event(run_id="new"), boot("b" * 40, 5))
     cache = UsageEventsCache()
     records, meta = cache.update(live, tmp_path / "archive", now=NOW)
-    assert [r["identity"] for r in records] == [session_key("new")]
-    assert [b["sha"][:1] for b in cache.boot_snapshot()] == ["b"]
+    assert [r["identity"] for r in records] == [session_key("old"), session_key("older"), session_key("new")]
+    assert calculate_analytics(records, now=NOW)["summary"]["session_count"] == 1
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    live.rename(archive / "events_rotated.jsonl")
+    write_rows(live, session_event(run_id="newer"))
+    records, meta = cache.update(live, archive, now=NOW)
+    assert [r["identity"] for r in records] == [session_key("new"), session_key("newer")]
+    assert [b["sha"][:1] for b in cache.boot_snapshot()] == ["a", "b"]
+    marks = calculate_analytics(records, now=NOW, boots=cache.boot_snapshot())["markers"]
+    assert [m["code"] for m in marks] == ["b" * 9]
     assert meta["raw_stats"]["worker_boots"] == 2
 
 

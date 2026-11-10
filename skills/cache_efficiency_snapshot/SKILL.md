@@ -1,8 +1,8 @@
 ---
 name: cache_efficiency_snapshot
-version: 0.6.1
+version: 0.7.0
 title: Cache Efficiency Snapshot
-description: Interactive cache observability dashboard over the event log with token-weighted read rates, separate request and session counts, measurement coverage, code-version marks, and Canvas charts.
+description: Token and cache dashboard with exact intraday intervals, daily Week/Month/All bars, Custom dates, weighted cache hit rate, measurement coverage and automatic local archive indexing.
 type: extension
 runtime: python3
 entry: plugin.py
@@ -36,7 +36,8 @@ harness session. The core also writes a `delegate_run_ledger_recorded` event for
 every session it records; a session met only there counts with its route and
 time and unknown tokens. `worker_boot` events show when new code started. It
 reports input tokens and cache reads with explicit measurement coverage. It makes
-no model calls and changes no runtime state or task-card accounting.
+no model calls and changes no task-card accounting. Its only writes are its own
+normalized history index and recoverable copies of an unreadable index.
 
 From Ouroboros 7.7.0 the usage ledger lives in the core's SQLite store
 (`state/usage.sqlite`). The store keeps ordinary readers off its attempts table,
@@ -82,8 +83,18 @@ attribution of every token in that session.
 - `1H`: trailing hour in five-minute bins.
 - `6H`: trailing six hours in thirty-minute bins.
 - `24H` (default): trailing day in hourly bins.
-- `7D`: trailing week in six-hour bins.
-- `ALL`: all retained records, with adaptive hourly, six-hour, half-day or daily bins.
+- **Week** (`7D`): seven calendar dates including today, in daily bins.
+- **Month** (`MONTH`): thirty calendar dates including today, in daily bins.
+- **All** (`ALL`): available indexed observations, in daily bins; not a claim of lifetime completeness.
+- **Custom**: inclusive dates in the viewer's IANA time zone, committed with Apply.
+  Expanding into old history automatically starts a background backfill. The
+  previous successful view keeps its own dates while loading or after a failure.
+
+The API accepts `timeframe`, `timezone` (UTC when omitted), `daily=1`, and for
+Custom `from`/`to`. Date-only `to` includes that local date; an explicit ISO
+instant is exclusive. The widget's day detail uses exact ISO boundaries and
+`granularity=hour`, including 23/25-hour DST days. Without `daily=1`, 7D/All
+retain adaptive intraday bins for older API consumers.
 
 Intervals are half-open and have no artificial empty endpoint. Bins are
 labelled in the viewer's local time, and the chart names that time zone. The live
@@ -101,16 +112,35 @@ with strictly higher evidence; fields are never merged, summed or filled across
 events, and equal evidence keeps the first event. Two different normalized splits
 of one run are not reconciled: the first is kept and the other is counted as a
 skipped duplicate.
-Requests, sessions and starts are kept for the last seven days (the archive
-window). `ALL` therefore means all retained records, not a replay of older
-history. Diagnostics disclose archives read, duplicates skipped, sessions
-without a usage event and display limits (25 model/route rows, 120 latest time
-bins and the 60 latest code marks, each with an omitted count); headline totals
-still cover the selected retained window.
+The recent reader keeps seven days of archives plus the active log's observations
+(even if it has not rotated for longer), and a preceding worker start for version
+comparison. Month, All and older Custom ranges use
+`state/cache_efficiency_snapshot/history-index.json`. One owned background thread
+loads, incrementally parses and atomically saves normalized archive entries. GET
+reads a parsed timestamp-sorted snapshot, resolving the live overlay's session
+evidence before the range filter. Short ranges and selected-day detail use the
+same available historical winners and can recover that index after a transient
+read error on the existing background cadence. Unchanged polls do not decode and deduplicate
+all of history again. Changed archives still rebuild and persist the normalized
+index in the background; All aggregation remains proportional to its observations.
+Discovery checks for rotation every thirty seconds; raw
+archives are immutable under the core's rotation contract. Indexed measurements
+survive raw-source retirement, with absent-source counts disclosed. A damaged
+index is preserved beside its replacement and its recovery is shown.
+
+The index contains no raw prompts; request/session identities are hashes, with
+only times, source/model, counters and code-start facts retained. A saved index
+is a local projection, not a backup of the full logs. Backfill progress counts
+processed archives; observed extrema never prove continuous daily coverage.
+Unavailable, unobserved and not-yet-indexed dates are not zero consumption.
+Diagnostics disclose measurement coverage, malformed records and display limits:
+25 model/source rows and 60 code marks (with omitted counts). Daily charts page
+all dates without dropping them; only the legacy intraday API is limited to the
+latest 120 bins. Headline totals cover the full selected interval.
 
 ## Code-version marks
 
-A dashed violet line marks the first worker start on a commit different from the
+A short dashed tick marks the first worker start on a commit different from the
 previous start's commit. The earliest retained start marks nothing, and restarts
 on the same commit mark nothing. Inspecting a bin names the code that started
 inside it. A mark is a time, not a cause: a change next to it may come from a
@@ -120,8 +150,15 @@ model, task mix or provider change.
 
 The standalone module uses the owning extension fetch bridge, with no external
 CDN. Refresh is explicit and also runs every thirty seconds while mounted.
-Trend and token-volume views support pointer, touch and arrow-key inspection;
-coverage and unit explanations remain visible outside tooltips. Read failures
-show a warning while retaining the last successfully loaded measurements.
-The host disposal registrar stops polling and removes the resize listener.
+SVG token-volume and hit-rate views support pointer, touch and keyboard inspection;
+coverage, absolute known cache reads and unit explanations remain visible outside tooltips. Known input with
+unknown cache reads is hatched, not silently dropped. Selected intraday bins use
+their own totals; a selected day requests its own hourly data, models and marks.
+Refreshing an open day invalidates and reloads its detail; current bucket totals
+remain visible meanwhile. Keyboard focus follows the exact chart/bin through
+asynchronous redraws. Usable partial measurements retain their own dates and an
+explicit warning, separately from the last successful snapshot. Transport failures
+keep the displayed reading. Retry and the existing thirty-second polling cadence
+both recover the failed selection. Native disclosure state survives refresh. Disposal stops polling, detaches
+the width observer and theme listener; plugin unload stops its archive worker.
 The existing host/owner launch policy is unchanged.

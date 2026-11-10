@@ -40,7 +40,7 @@ def test_dashboard_payloads_keep_a_legacy_fallback_and_dispose_theme_listeners()
         assert "__ouroWidgetOnDispose" in widget
         # The bridge is optional, so the payload must not require it at parse/load.
         assert ("typeof window.OuroborosWidget.onTheme" in widget or "window.OuroborosWidget &&" in widget
-                or "OuroborosWidget.onTheme?.(" in widget)
+                or "OuroborosWidget.onTheme?.(" in widget or "typeof window.OuroborosWidget?.onTheme" in widget)
 
 
 def test_module_entry_dashboard_follows_the_host_theme_only_through_the_bridge():
