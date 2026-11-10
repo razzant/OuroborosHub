@@ -313,6 +313,7 @@ class UsageEventsCache:
         self.records: List[Dict[str, Any]] = []
         self.sessions: Dict[str, Dict[str, Any]] = {}
         self.boots: List[Dict[str, Any]] = []
+        self.live_identities: set = set()
         self.seen: set = set()
         self.archives: Dict[str, Tuple[int, int]] = {}
         self.archive_directory_stamp = None
@@ -326,6 +327,7 @@ class UsageEventsCache:
             self.records = []
             self.sessions = {}
             self.boots = []
+            self.live_identities = set()
             self.seen = set()
             self.archives = {}
             self.archive_directory_stamp = None
@@ -403,6 +405,7 @@ class UsageEventsCache:
         if self.file_identity != current_ident or stat.st_size < self.last_size:
             self.file_identity = current_ident
             self.last_size = 0
+            self.live_identities = set()
         if stat.st_size == self.last_size:
             return
         try:
@@ -417,10 +420,10 @@ class UsageEventsCache:
         if cut < 0:
             return  # Incomplete partial line: wait for its newline.
         complete = new_bytes[: cut + 1]
-        self._ingest_bytes(complete)
+        self._ingest_bytes(complete, live=True)
         self.last_size += len(complete)
 
-    def _ingest_bytes(self, data: bytes) -> None:
+    def _ingest_bytes(self, data: bytes, *, live: bool = False) -> None:
         for raw in data.splitlines():
             if not raw.strip():
                 continue
@@ -443,6 +446,8 @@ class UsageEventsCache:
             else:
                 self.raw_stats["non_usage_lines"] += 1
                 continue
+            if live and record is not None:
+                self.live_identities.add(record["identity"])
             if record is None:
                 self.raw_stats["unparsed_events"] += 1
             elif kind == BOOT_EVENT_TYPE:
@@ -476,10 +481,10 @@ class UsageEventsCache:
         # Archives are read in name order and the live tail last, so an expired
         # record can sit anywhere in the list; scan the whole list.
         if any(r["ts"] < horizon for r in [*self.records, *self.boots, *self.sessions.values()]):
-            self.records = [r for r in self.records if r["ts"] >= horizon]
+            self.records = [r for r in self.records if r["ts"] >= horizon or r["identity"] in self.live_identities]
             preceding = max((b for b in self.boots if b["ts"] < horizon), key=lambda b: b["ts"], default=None)
-            self.boots = ([preceding] if preceding else []) + [b for b in self.boots if b["ts"] >= horizon]
-            self.sessions = {key: s for key, s in self.sessions.items() if s["ts"] >= horizon}
+            self.boots = [b for b in self.boots if b is preceding or b["ts"] >= horizon or b["identity"] in self.live_identities]
+            self.sessions = {key: s for key, s in self.sessions.items() if s["ts"] >= horizon or key in self.live_identities}
             self.seen = {r["identity"] for r in [*self.records, *self.boots]}
         for key, (_, mtime_ns) in list(self.archives.items()):
             if datetime.fromtimestamp(mtime_ns / 1e9, tz=timezone.utc) < horizon:
@@ -842,6 +847,16 @@ def register(api: Any) -> None:
                 archive_dir, selected_start, min(custom_to or now, now), current=records)
             boots += history_boots
             meta["history_index"] = history_meta
+        else:
+            selected_start = custom_from if timeframe == "CUSTOM" else _get_timeframe_bounds(timeframe, now)[0]
+            if timeframe == "7D" and daily:
+                date = now.astimezone(ZoneInfo(zone)).date() - timedelta(days=6)
+                selected_start = datetime.combine(date, datetime.min.time(), tzinfo=ZoneInfo(zone)).astimezone(timezone.utc)
+            available = history.available(selected_start, min(custom_to or now, now), current=records)
+            if available is not None:
+                records, history_boots, history_meta = available
+                boots += history_boots
+                meta["history_index"] = history_meta
         return calculate_analytics(records, timeframe=timeframe, meta=meta, now=now, boots=boots,
                                    start_override=custom_from, end_override=custom_to,
                                    calendar_daily=daily, zone=zone,

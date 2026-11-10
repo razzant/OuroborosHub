@@ -693,14 +693,21 @@ def test_a_mark_needs_only_a_different_predecessor_even_outside_the_window(monke
     assert many["quality"]["markers_omitted"] == 2
 
 
-def test_sessions_and_boots_leave_with_the_window(tmp_path: Path) -> None:
+def test_sessions_stay_while_unrotated_then_leave_with_the_archive_window(tmp_path: Path) -> None:
     live = tmp_path / "logs" / "events.jsonl"
     old = (NOW - timedelta(days=9)).isoformat()
     write_rows(live, session_event(ts=old, run_id="old"), ledger_event(ts=old, run_id="older"),
                {**boot("a" * 40, 0), "ts": old}, session_event(run_id="new"), boot("b" * 40, 5))
     cache = UsageEventsCache()
     records, meta = cache.update(live, tmp_path / "archive", now=NOW)
-    assert [r["identity"] for r in records] == [session_key("new")]
+    assert [r["identity"] for r in records] == [session_key("old"), session_key("older"), session_key("new")]
+    assert calculate_analytics(records, now=NOW)["summary"]["session_count"] == 1
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    live.rename(archive / "events_rotated.jsonl")
+    write_rows(live, session_event(run_id="newer"))
+    records, meta = cache.update(live, archive, now=NOW)
+    assert [r["identity"] for r in records] == [session_key("new"), session_key("newer")]
     assert [b["sha"][:1] for b in cache.boot_snapshot()] == ["a", "b"]
     marks = calculate_analytics(records, now=NOW, boots=cache.boot_snapshot())["markers"]
     assert [m["code"] for m in marks] == ["b" * 9]

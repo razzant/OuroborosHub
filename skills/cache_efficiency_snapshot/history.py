@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import threading
 import time
+import tempfile
 
 
 class ArchiveIndex:
@@ -35,7 +36,8 @@ class ArchiveIndex:
         self._retry = False
 
     def close(self):
-        self._stop.set()
+        with self._lock:
+            self._stop.set()
         thread = self._thread
         if thread is not None:
             thread.join(timeout=2)
@@ -61,6 +63,13 @@ class ArchiveIndex:
         self._refresh(Path(archive_dir))
         with self._lock:
             return self._select(start, end)
+
+    def available(self, start, end, *, current=()):
+        """Use the same already-published winners for short ranges and day detail."""
+        with self._lock:
+            if not self._meta["revision"]:
+                return None
+            return self._select(start, end, current)
 
     def _select(self, start, end, current=()):
         left = bisect_left(self._stamps, start) if start is not None else 0
@@ -138,12 +147,22 @@ class ArchiveIndex:
 
     def _save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        temporary.write_text(json.dumps({"version": self.VERSION, "archives": self._entries},
-                                        ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        if not self._stop.is_set():
-            os.replace(temporary, self.path)
-            self._dirty = False
+        # A cancelled worker can still be unwinding I/O after unload. It must
+        # never share an open inode with a replacement worker's publication.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent,
+                                             prefix=self.path.name + ".", suffix=".tmp", delete=False) as stream:
+                temporary = Path(stream.name)
+                json.dump({"version": self.VERSION, "archives": self._entries}, stream,
+                          ensure_ascii=False, separators=(",", ":"))
+            with self._lock:
+                if not self._stop.is_set():
+                    os.replace(temporary, self.path)
+                    self._dirty = False
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def _build_snapshot(self):
         records, sessions, boots = {}, {}, {}

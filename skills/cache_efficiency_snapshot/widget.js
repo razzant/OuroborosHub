@@ -77,8 +77,13 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
       if (!state.from) state.from = dateKey(data.start);
       if (!state.to) state.to = dateKey(data.end);
       state.page = Math.min(state.page, Math.max(0, data.buckets.length - 1));
-      if (state.selected && !data.buckets.some(b => b.ts === state.selected)) {state.selected = null; detail = null; ++detailSeq;}
+      // A retained date is not a retained reading. Invalidate old in-flight detail
+      // before committing the new overview; its current bin is the interim truth.
+      ++detailSeq; detail = null;
+      const selected = data.buckets.find(b => b.ts === state.selected);
+      if (!selected) state.selected = null;
       render();
+      if (selected && data.daily) loadDetail(selected);
     } catch (error) {
       if (disposed || seq !== requestSeq) return;
       state.pending = null; state.failed = selection; state.status = 'failed'; state.message = error.message; render();
@@ -160,11 +165,11 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
     return `<svg viewBox="0 0 ${width} ${height}" role="group" aria-label="${kind==='volume'?'Token volume':'Cache hit rate'}">${defs}${body}</svg>`;
   }
   function counts(s) {
-    return `${nf.format(s.request_count)} requests · ${nf.format(s.session_count)} sessions · ${nf.format(s.unknown_total_records)} unknown totals · ${nf.format(s.unknown_read_records)} unknown cache reads`;
+    return `${fmt(s.cached_tokens)} known cache reads · ${nf.format(s.request_count)} requests · ${nf.format(s.session_count)} sessions · ${nf.format(s.unknown_total_records)} unknown totals · ${nf.format(s.unknown_read_records)} unknown cache reads`;
   }
   function modelList(rows) {
     const names=rows.map(r=>r.display_name||r.model);
-    return rows.map(r=>`<div class="rowline"><span class="name" title="${esc(r.model)}">${esc(names.filter(n=>n===(r.display_name||r.model)).length>1?r.model:r.display_name||r.model)}</span><span class="num">${fmt(r.prompt_tokens)}</span><span class="sub">${esc(r.provider)} · ${r.kind==='attempt'?'requests':r.kind==='subscription_session'?'sessions':esc(r.kind)} · ${nf.format(r.total_records)} records${r.unknown_read_records?' · '+nf.format(r.unknown_read_records)+' unknown reads':''}</span><span class="sub right">${pct(r.cache_read_rate)} hit</span></div>`).join('');
+    return rows.map(r=>`<div class="rowline"><span class="name" title="${esc(r.model)}">${esc(names.filter(n=>n===(r.display_name||r.model)).length>1?r.model:r.display_name||r.model)}</span><span class="num">${fmt(r.prompt_tokens)}</span><span class="sub">${esc(r.provider)} · ${r.kind==='attempt'?'requests':r.kind==='subscription_session'?'sessions':esc(r.kind)} · ${nf.format(r.total_records)} records${r.unknown_read_records?' · '+nf.format(r.unknown_read_records)+' unknown reads':''}</span><span class="sub right">${pct(r.cache_read_rate)} hit<br>${fmt(r.cached_tokens)} known reads</span></div>`).join('');
   }
   function inspector() {
     const snap = state.snapshot, b = snap?.buckets.find(b=>b.ts===state.selected);
@@ -192,7 +197,12 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
   }
   function render() {
     if (disposed) return;
-    const active = document.activeElement, focus = root.contains(active) ? active.id : '';
+    const active = document.activeElement;
+    const focus = !root.contains(active) ? null : active.id ? '#'+CSS.escape(active.id)
+      : active.dataset.pick ? '[data-chart="'+active.closest('[data-chart]').dataset.chart+'"] [data-pick="'+CSS.escape(active.dataset.pick)+'"]'
+      : active.dataset.act ? '[data-act="'+active.dataset.act+'"]'
+      : active.dataset.range ? '[data-range="'+active.dataset.range+'"]'
+      : active.tagName==='SUMMARY' ? '[data-fold="'+active.parentElement.dataset.fold+'"] summary' : null;
     const snap = state.snapshot, s = snap?.summary;
     const {all,buckets,n} = visibleBuckets();
     const label = snap ? `${timestamp(snap.start)} – ${timestamp(snap.end)} · ${zone}` : 'Waiting for the first reading';
@@ -212,7 +222,7 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
         if (e.key==='Enter'||e.key===' ') {e.preventDefault();pick(el.dataset.pick);}
         if (e.key==='ArrowRight'||e.key==='ArrowLeft') {
           e.preventDefault();const index=buckets.findIndex(b=>b.ts===el.dataset.pick), next=buckets[index+(e.key==='ArrowRight'?1:-1)];
-          if (next) {pick(next.ts);root.querySelector('[data-pick="'+CSS.escape(next.ts)+'"]')?.focus();}
+          if (next) {const kind=el.closest('[data-chart]').dataset.chart;pick(next.ts);root.querySelector('[data-chart="'+kind+'"] [data-pick="'+CSS.escape(next.ts)+'"]')?.focus();}
         }
       };
     });
@@ -227,7 +237,7 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
         state.selected=null;detail=null;++detailSeq;state.page=0;load({range:'CUSTOM',from:state.from,to:state.to});
       }
     });
-    if (focus) root.querySelector('#'+focus)?.focus();
+    if (focus) root.querySelector(focus)?.focus();
     requestAnimationFrame(resize);
   }
   function resize() {

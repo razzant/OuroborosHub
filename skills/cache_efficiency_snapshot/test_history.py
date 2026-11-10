@@ -1,5 +1,6 @@
 """Producer-to-route regressions for historical ranges and exact intervals."""
 import json
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -294,3 +295,88 @@ def test_index_holds_only_hashed_request_identity_not_task_id(tmp_path):
     assert rows[0]["identity"].startswith("request:")
     assert "private-example-task" not in index.path.read_text()
     index.close()
+
+
+def test_unload_with_an_open_save_cannot_corrupt_replacement_index(tmp_path, monkeypatch):
+    path = tmp_path / "history.json"
+    old, new = plugin.HistoryIndex(path), plugin.HistoryIndex(path)
+    old._entries = {"old": "x" * 10000}
+    new._entries = {"new": "saved"}
+    entered, release = threading.Event(), threading.Event()
+    original = json.dump
+    filenames = []
+    def held_dump(data, stream, **kwargs):
+        filenames.append(stream.name)
+        if threading.current_thread() is old._thread:
+            stream.write(" ")
+            stream.flush()
+            entered.set()
+            assert release.wait(5)
+        return original(data, stream, **kwargs)
+    monkeypatch.setattr(json, "dump", held_dump)
+    old._thread = threading.Thread(target=old._save)
+    old._thread.start()
+    try:
+        assert entered.wait(2)
+        old.close()  # Bounded join returns with the old file still open.
+        assert old._thread.is_alive()
+        new._save()
+        saved = path.read_bytes()
+    finally:
+        release.set()
+        old._thread.join(2)
+        new.close()
+    assert not old._thread.is_alive()
+    assert path.read_bytes() == saved
+    assert json.loads(saved)["archives"] == {"new": "saved"}
+    assert len(set(filenames)) == 2 and not list(tmp_path.glob("*.tmp"))
+
+
+def test_recent_detail_uses_available_global_winner_before_filter(tmp_path, monkeypatch):
+    horizon = NOW - timedelta(days=7)
+    strong = session_event(ts=(horizon-timedelta(minutes=1)).isoformat(),
+                           input_token_usage=measurement(None, None))
+    weak = session_event(ts=(horizon+timedelta(minutes=1)).isoformat())
+    other = session_event(ts=(horizon+timedelta(minutes=1)).isoformat(), run_id="different",
+                          prompt_tokens=100, cached_tokens=80)
+    old_source = tmp_path / "archive/events_01.jsonl"
+    write_rows(old_source, strong)
+    os.utime(old_source, ((horizon-timedelta(minutes=1)).timestamp(),) * 2)
+    write_rows(tmp_path / "archive/events_02.jsonl", weak, other)
+    write_rows(tmp_path / "logs/events.jsonl", event())
+    _, route, unload = api_for(tmp_path, monkeypatch)
+    try:
+        read_route(route, timeframe="MONTH", daily="1")
+        finish_index(plugin._HISTORY)
+        query = {"timeframe": "CUSTOM", "from": horizon.isoformat(),
+                 "to": (horizon+timedelta(hours=1)).isoformat(), "granularity": "hour"}
+        detail = read_route(route, **query)
+        assert detail["status"] == "ok"
+        assert detail["summary"]["session_count"] == 1
+        assert detail["summary"]["prompt_tokens"] == 100
+        assert sum(b["session_count"] for b in detail["buckets"]) == 1
+    finally:
+        unload[0]()
+
+
+def test_old_unrotated_live_records_are_in_all_and_custom_incrementally(tmp_path, monkeypatch):
+    live = tmp_path / "logs/events.jsonl"
+    old = event(ts=(NOW-timedelta(days=20)).isoformat(), ledger_attempt_ids=["old-live"])
+    write_rows(live, old, event())
+    _, route, unload = api_for(tmp_path, monkeypatch)
+    try:
+        read_route(route, timeframe="ALL", daily="1")
+        finish_index(plugin._HISTORY)
+        result = read_route(route, timeframe="ALL", daily="1")
+        assert result["status"] == "ok" and result["summary"]["request_count"] == 2
+        lines = plugin._EVENTS.raw_stats["total_lines_read"]
+        query = {"timeframe":"CUSTOM", "from":(NOW-timedelta(days=21)).isoformat(),
+                 "to":(NOW-timedelta(days=19)).isoformat()}
+        assert read_route(route, **query)["summary"]["prompt_tokens"] == 100
+        assert plugin._EVENTS.raw_stats["total_lines_read"] == lines
+        with live.open("a") as stream:
+            stream.write(json.dumps({**old, "ledger_attempt_ids":["old-live-2"]})+"\n")
+        assert read_route(route, **query)["summary"]["prompt_tokens"] == 200
+        assert plugin._EVENTS.raw_stats["total_lines_read"] == lines+1
+    finally:
+        unload[0]()

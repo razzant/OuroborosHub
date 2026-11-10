@@ -344,43 +344,43 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "ca1354fe6ebb2177a762875e341afc4046f78e50160b12e0c1e0c59bed6e21a7",
-          "size": 8810
+          "sha256": "399f44f7118392d1da00dc8bafab7d55f4e9a59c4cb71bbcdc8cb0e620bf248b",
+          "size": 9324
         },
         {
           "path": "history.py",
-          "sha256": "048d16038fc4e9a3a2d6154ab28dd426772935a362843c609d64fdc99883ba9b",
-          "size": 12692
+          "sha256": "fbd3be9b315d7025c211b28b2ab078283b9665e36bfb903ce80c2aed595f06a3",
+          "size": 13523
         },
         {
           "path": "plugin.py",
-          "sha256": "35caf936a37886b8689115fae39d4c893f07cb50c77eca046e0a3deafe2a86b6",
-          "size": 42251
+          "sha256": "0009a5b53d43964bcc3396bde1a560ace5fdfdf14ba473a59bc8d75befa994f2",
+          "size": 43282
         },
         {
           "path": "test_cache_efficiency.py",
-          "sha256": "f9f3a6b9dc720577a0bb155f6c491fd6bf3467284f86cd484529aabf4ec0b030",
-          "size": 48237
+          "sha256": "edbf0c6120f5e44e806a07519ac526ec7866bc8533d01d26b7ede9aba385b7af",
+          "size": 48689
         },
         {
           "path": "test_history.py",
-          "sha256": "013b34171ffd7dd7ee2f1b714599e92ced3a6bde5de070010232ac6bdfd27580",
-          "size": 13298
+          "sha256": "67a9d69c76cf59a89c2641f5d58dcd629ba03bcdf4e9bdbfb5fb7cbd43cd6b5e",
+          "size": 17241
         },
         {
           "path": "test_widget.cjs",
-          "sha256": "da7fb534640762ee3a4113cb6262b199db062e15dadc0bbfab4cb7141376d696",
-          "size": 8378
+          "sha256": "6efde6296bbc690cca86ef3cccad455f4dd9ed87a3191c5bd75006c60474c866",
+          "size": 9796
         },
         {
           "path": "test_widget_data.py",
-          "sha256": "c812b7669fff10060f5a25752150e0c564c56c40eaee29ffef183df09d83b9e9",
-          "size": 2699
+          "sha256": "ad8cc1d2d852ac7404169e40f5a8e92de658310ef9a1fa26f25da7041a420d2e",
+          "size": 3511
         },
         {
           "path": "widget.js",
-          "sha256": "fc33db805b9b59f75e98400b5e1690e7027b6ee093dd854ae657a528c863e31b",
-          "size": 26257
+          "sha256": "ffc799cccd13b737273756fdd7b08899645887e5252d551390b68361d72786be",
+          "size": 27088
         }
       ],
       "name": "cache_efficiency_snapshot",

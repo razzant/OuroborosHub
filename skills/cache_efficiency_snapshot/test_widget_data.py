@@ -39,6 +39,15 @@ def fixtures():
                             start_override=start, end_override=end, calendar_daily=True, zone="Europe/Moscow")
     result["DETAIL"] = plugin.calculate_analytics(records, "CUSTOM", now=NOW, boots=boots,
                             start_override=start, end_override=end, hourly=True, zone="Europe/Moscow")
+    late = plugin._normalize_usage_event({"ts": (start+timedelta(hours=10)).isoformat(),
+        "provider":"fixture", "model":"example/late", "prompt_tokens":900,
+        "cached_tokens":700, "ledger_attempt_ids":["late-arrival"]})
+    for name, daily in (("CUSTOM_REFRESH",True),("DETAIL_REFRESH",False)):
+        result[name] = plugin.calculate_analytics([*records,late], "CUSTOM", now=NOW, boots=boots,
+            start_override=start, end_override=end, calendar_daily=daily, hourly=not daily, zone="Europe/Moscow")
+    result["DAY_DETAILS"] = {b["ts"]:plugin.calculate_analytics(records,"CUSTOM",now=NOW,boots=boots,
+        start_override=datetime.fromisoformat(b["ts"]),end_override=datetime.fromisoformat(b["end_ts"]),
+        hourly=True,zone="Europe/Moscow") for b in result["MONTH"]["buckets"][-3:]}
     return result
 
 

@@ -112,13 +112,17 @@ with strictly higher evidence; fields are never merged, summed or filled across
 events, and equal evidence keeps the first event. Two different normalized splits
 of one run are not reconciled: the first is kept and the other is counted as a
 skipped duplicate.
-The recent reader keeps seven days plus one preceding worker start for version
+The recent reader keeps seven days of archives plus the active log's observations
+(even if it has not rotated for longer), and a preceding worker start for version
 comparison. Month, All and older Custom ranges use
 `state/cache_efficiency_snapshot/history-index.json`. One owned background thread
 loads, incrementally parses and atomically saves normalized archive entries. GET
 reads a parsed timestamp-sorted snapshot, resolving the live overlay's session
-evidence before the range filter. Unchanged polls do not decode and deduplicate
-all of history again. Discovery checks for rotation every thirty seconds; raw
+evidence before the range filter. Short ranges and selected-day detail use the
+same available historical winners. Unchanged polls do not decode and deduplicate
+all of history again. Changed archives still rebuild and persist the normalized
+index in the background; All aggregation remains proportional to its observations.
+Discovery checks for rotation every thirty seconds; raw
 archives are immutable under the core's rotation contract. Indexed measurements
 survive raw-source retirement, with absent-source counts disclosed. A damaged
 index is preserved beside its replacement and its recovery is shown.
@@ -146,10 +150,12 @@ model, task mix or provider change.
 The standalone module uses the owning extension fetch bridge, with no external
 CDN. Refresh is explicit and also runs every thirty seconds while mounted.
 SVG token-volume and hit-rate views support pointer, touch and keyboard inspection;
-coverage and unit explanations remain visible outside tooltips. Known input with
+coverage, absolute known cache reads and unit explanations remain visible outside tooltips. Known input with
 unknown cache reads is hatched, not silently dropped. Selected intraday bins use
 their own totals; a selected day requests its own hourly data, models and marks.
-Read failures keep the last successful measurements with their dates and a Retry
+Refreshing an open day invalidates and reloads its detail; current bucket totals
+remain visible meanwhile. Keyboard focus follows the exact chart/bin through
+asynchronous redraws. Read failures keep the last successful measurements with their dates and a Retry
 action. Native disclosure state survives refresh. Disposal stops polling, detaches
 the width observer and theme listener; plugin unload stops its archive worker.
 The existing host/owner launch policy is unchanged.
