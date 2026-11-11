@@ -9,17 +9,27 @@ import pathlib
 import re
 
 import httpx
-from typing import Any, Sequence
+from typing import Any, Awaitable, Sequence
 
 from .events import REACTION_EVENTS
 from .host_adapter import HostBindingTerminalError, HostOutput, HostRetryError, HostTurnStatus, PresenceHostAdapter
 from .provider_context import capture_context
-from .slack_api import SlackApiError, SlackClient, SlackConfigurationError, SlackMutationUncertain, chunk_message, mutation_may_have_applied
+from .slack_api import (
+    SlackApiError, SlackClient, SlackConfigurationError, SlackMutationUncertain, UploadInput, chunk_message,
+    mutation_may_have_applied,
+)
 from .socket_mode import SocketModeClient
-from .store import REACTION_WITHHELD, BridgeStore, InboxItem, InboxLeaseLost, OutboxItem
+from .store import REACTION_WITHHELD, BridgeStore, InboxItem, InboxLeaseLost, OutboxItem, OutboxLeaseLost
 
 log = logging.getLogger(__name__)
 _MAX_OUTBOX_ATTEMPTS = 5
+# Bound retransmitted traffic: recover at most twice, using a fresh slot each time.
+_MAX_UPLOAD_ATTEMPTS = 3
+# Failures before any request left this process: no provider effect is possible.
+_NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+# Slack answers that may change on retry, by their documented descriptions.
+_UPLOAD_TEMPORARY_ERRORS = frozenset({"internal_error", "fatal_error", "request_timeout", "service_unavailable"})
+_UPLOAD_MALFORMED_ERRORS = frozenset({"invalid_json", "invalid_response", "unknown_error", "missing_upload_url"})
 # Budget the Host's 1800-second initial request plus a recovery buffer. A worker
 # without a role refreshes once before its finite continuation poll; a companion
 # input claim ends at the durable reference and an observation claim gets its own
@@ -340,27 +350,128 @@ class InboundWorker:
         self.store.complete_inbox(item.row_id, item.lease_token)
 
 
-class PlaceHeld(RuntimeError):
-    """A policy hold before a visible provider effect; custody stays queued."""
+@dataclasses.dataclass
+class _UploadAttempt:
+    """What one claim of an upload row observed, kept as receipt facts, never as permission.
+
+    ``bytes`` is not_sent, sending, accepted, rejected (an HTTP answer other than 200),
+    length_mismatch or unknown; ``completion`` is not_sent, started, completed, refused,
+    not_applied (429, or a request that never left) or unknown.
+    """
+
+    number: int
+    index: int | None = None
+    phase: str = "input"
+    declared_length: int = 0
+    file_id: str = ""
+    bytes: str = "not_sent"
+    bytes_sent: int = 0
+    acknowledged_length: int | None = None
+    completion: str = "not_sent"
+    outcome: str = ""
+    failure: dict[str, Any] | None = None
+    # Set once the completion marker is durable: from then on nothing proves the file unshared.
+    completion_started: bool = False
+
+    def write(self) -> tuple[int | None, dict[str, Any]]:
+        facts: dict[str, Any] = {
+            "attempt": self.number, "phase": self.phase, "declared_length": self.declared_length,
+            "file_id": self.file_id, "bytes": self.bytes, "bytes_sent": self.bytes_sent,
+            "completion": self.completion,
+        }
+        if self.acknowledged_length is not None:
+            facts["acknowledged_length"] = self.acknowledged_length
+        if self.outcome:
+            facts["outcome"] = self.outcome
+        if self.failure:
+            facts["failure"] = dict(self.failure)
+        return self.index, facts
+
+    def fail(self, exc: BaseException, failure_class: str) -> str:
+        """Record this phase's failure without provider bodies or URLs; return its error code."""
+        error = (exc.error if isinstance(exc, SlackApiError) else
+                 str(exc) if isinstance(exc, SlackConfigurationError) else type(exc).__name__)
+        self.failure = {"phase": self.phase, "class": failure_class, "error": error}
+        if isinstance(exc, SlackApiError) and exc.status_code:
+            self.failure["http_status"] = exc.status_code
+        return error
+
+
+def _upload_failure(exc: BaseException, *, completion_started: bool) -> tuple[str, bool]:
+    """``(failure class, retry)`` for one upload attempt; a retry always takes a fresh slot.
+
+    Before the completion marker nothing has been shared: a transient answer or an
+    unknown transport outcome may retry, an explicit refusal is final. After it only
+    an answer proving the completion was not applied (429, or a request that never
+    left) may retry; anything else unknown stays uncertain.
+    """
+    if isinstance(exc, SlackConfigurationError):
+        return "local_input", False
+    if isinstance(exc, _NOT_SENT):
+        return "not_sent", True
+    if isinstance(exc, SlackApiError) and (exc.status_code == 429 or exc.error == "ratelimited"):
+        return "rate_limited", True
+    if completion_started:
+        if isinstance(exc, SlackApiError) and not mutation_may_have_applied(exc):
+            return "refused", False
+        return "unknown", False
+    if isinstance(exc, SlackApiError):
+        if exc.error == "upload_bytes_length_mismatch":
+            return "length_mismatch", True
+        if exc.status_code == 408 or exc.status_code >= 500 or exc.error in _UPLOAD_TEMPORARY_ERRORS:
+            return "provider_unavailable", True
+        if exc.error in _UPLOAD_MALFORMED_ERRORS:
+            return "malformed_response", True
+        return "refused", False
+    if isinstance(exc, (httpx.HTTPError, TimeoutError, OSError)):
+        return "transport_unknown", True
+    return "internal", True
+
+
+def _bytes_outcome(exc: BaseException, sent: int) -> str:
+    if isinstance(exc, SlackApiError) and exc.error == "upload_bytes_length_mismatch":
+        return "length_mismatch"
+    if isinstance(exc, SlackApiError) and exc.status_code:
+        return "rejected"
+    if not sent and isinstance(exc, (*_NOT_SENT, SlackConfigurationError)):
+        return "not_sent"
+    return "unknown"
+
+
+def _remove_staged(artifact: pathlib.Path) -> None:
+    """Remove a staged upload copy after its row's terminal checkpoint; never the caller's original."""
+    if not str(artifact) or artifact == pathlib.Path():
+        return  # A row without a staged path names no file.
+    try:
+        artifact.unlink(missing_ok=True)
+    except OSError:
+        log.warning("Slack staged mutation artifact cleanup failed: %s", artifact)
 
 
 class OutboundWorker:
+    # One claim's lease, and how often a running upload extends that same lease.
+    lease_seconds = 120.0
+    lease_renew_seconds = 30.0
+
     def __init__(self, store: BridgeStore, slack: SlackClient, host: Any = None) -> None:
         self.store = store
         self.slack = slack
         self.host = host
         self._report_task: asyncio.Task[None] | None = None
 
-    async def _held(self, item: OutboxItem, target: str) -> bool:
+    async def _place_hold(self, item: OutboxItem, target: str) -> str:
         check = getattr(self.host, "place_hold", None)
         if check is None:  # Legacy adapters do not advertise places.
-            return False
+            return ""
         # A member ID still needs conversations.open before it names a room.
         conversation = "" if target == "mutation" or target.startswith(("U", "W")) else target
         # A reaction is checked in the thread its receipt names; an unretained target stays the room's.
         retained = self._reaction_target(item) if conversation else None
         thread = str(retained["thread_ts"]) if retained else ""
-        reason = await check(item.provider_account_id, conversation, **({"thread_id": thread} if thread else {}))
+        return await check(item.provider_account_id, conversation, **({"thread_id": thread} if thread else {}))
+
+    async def _held(self, item: OutboxItem, target: str) -> bool:
+        reason = await self._place_hold(item, target)
         if reason:
             self.store.hold_outbox(item, reason)
             return True
@@ -426,7 +537,8 @@ class OutboundWorker:
         return self.store.retained_message(item.provider_account_id, str(item.payload.get("channel") or ""),
                                            str(item.payload.get("ts") or ""))
 
-    def _cancel_started_send(self, item: OutboxItem) -> None:
+    def _cancel_started_send(self, item: OutboxItem, *,
+                             upload_attempt: tuple[int | None, dict[str, Any]] | None = None) -> bool:
         try:
             self.store.fail_outbox(
                 item.row_id, item.lease_token, "send_cancelled_after_dispatch", state="uncertain",
@@ -434,18 +546,30 @@ class OutboundWorker:
                 report_payload=_delivery_report(item, "uncertain", error="send_cancelled_after_dispatch")
                 if item.kind == "text" else
                 self._reaction_report(item, "uncertain", error="send_cancelled_after_dispatch"),
+                upload_attempt=upload_attempt,
             )
         except Exception:
             # The durable attempt marker still prevents a resend if checkpointing
             # fails, or another worker has already recovered this expired lease.
             log.exception("Slack cancelled send %s could not checkpoint uncertainty", item.row_id)
+            return False
+        return True
 
     async def process_once(self) -> bool:
         # A slow callback keeps its own task while this worker continues sending.
         reported = self._advance_reporting()
-        item = self.store.claim_outbox(lease_seconds=120.0)
+        item = self.store.claim_outbox(lease_seconds=self.lease_seconds)
         if item is None:
             return reported
+        try:
+            return await self._process_claimed(item, reported)
+        except OutboxLeaseLost:
+            # Lease recovery or a newer claim owns this row now. Only that owner writes it
+            # or removes its staged file; this obsolete attempt ends without another write.
+            log.info("Slack outbox item %s lease lost; ending obsolete attempt", item.row_id)
+            return True
+
+    async def _process_claimed(self, item: OutboxItem, reported: bool) -> bool:
         item = dataclasses.replace(item, provider_account_id=(
             item.provider_account_id or str(self.store.runtime_value("workspace_id", ""))
         ))
@@ -486,6 +610,8 @@ class OutboundWorker:
             if send_started:
                 self._cancel_started_send(item)
             raise
+        except OutboxLeaseLost:
+            raise
         except SlackApiError as exc:
             uncertain = send_started and mutation_may_have_applied(exc)
             if uncertain or item.attempts >= _MAX_OUTBOX_ATTEMPTS:
@@ -505,7 +631,7 @@ class OutboundWorker:
             log.warning("Slack outbox item %s will retry: %s", item.row_id, exc)
             return True
         except Exception as exc:
-            before_request = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+            before_request = isinstance(exc, _NOT_SENT)
             uncertain = send_started and not before_request
             if uncertain or item.attempts >= _MAX_OUTBOX_ATTEMPTS:
                 state = "uncertain" if uncertain else "failed"
@@ -524,39 +650,204 @@ class OutboundWorker:
             log.warning("Slack outbox item %s will retry: %s", item.row_id, exc)
             return True
 
-    async def _process_mutation(self, item: OutboxItem) -> bool:
-        payload = item.payload
-        artifact = pathlib.Path(str(payload.get("path") or "")) if item.operation == "upload_file" else None
-        def cleanup_artifact() -> None:
-            if artifact is not None:
+    async def _keep_lease(self, item: OutboxItem, attempt: _UploadAttempt, work: Awaitable[bool]) -> bool:
+        """Run one upload attempt as a child task, extending this claim's lease while it runs.
+
+        The same lease is extended every ``lease_renew_seconds`` until the child ends,
+        and the child is joined on every exit: nothing outlives the attempt and the
+        lease costs no provider request. A refused extension (claim expired or
+        replaced) cancels the attempt before its completion marker, when nothing has
+        been shared. After the marker a live completion is never cut short; its own
+        checkpoint then finds the claim gone.
+        """
+        task = asyncio.ensure_future(work)
+        try:
+            while True:
+                done, _pending = await asyncio.wait({task}, timeout=self.lease_renew_seconds)
+                if done:
+                    return task.result()
                 try:
-                    artifact.unlink(missing_ok=True)
-                except OSError:
-                    log.warning("Slack staged mutation artifact cleanup failed: %s", artifact)
+                    self.store.renew_outbox_lease(item, lease_seconds=self.lease_seconds)
+                except OutboxLeaseLost:
+                    if attempt.completion_started:
+                        return await task
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    raise
+                except Exception:
+                    # A failed write is not lease loss; the attempt's next checkpoint decides.
+                    log.warning("Slack upload %s lease extension failed", item.request_id, exc_info=True)
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _process_upload(self, item: OutboxItem) -> bool:
+        """One physical upload of a staged file: a fresh slot, streamed bytes, then completion.
+
+        Each phase's facts are durable before the next provider phase, and writing them
+        checks this claim. Only completion shares the file, so the send marker is set
+        just before it, after a last Place check. Until the marker a failure that may
+        change on retry takes a fresh slot, at most three uploads in all; after it an
+        unknown outcome stays uncertain and is never repeated.
+        """
+        artifact = pathlib.Path(str(item.payload.get("path") or ""))
+        if item.attempts > _MAX_UPLOAD_ATTEMPTS:
+            # Earlier claims spent every upload, including any that stopped before a request.
+            self.store.fail_outbox(item.row_id, item.lease_token, "upload_attempts_exhausted",
+                                   result={"uncertain": False})
+            _remove_staged(artifact)
+            return True
+        attempt = _UploadAttempt(number=item.attempts)
+        return await self._keep_lease(item, attempt, self._upload_attempt(item, artifact, attempt))
+
+    async def _upload_attempt(self, item: OutboxItem, artifact: pathlib.Path, attempt: _UploadAttempt) -> bool:
+        payload = item.payload
+        filename = str(payload.get("filename") or "upload")
+        try:
+            source = UploadInput(artifact)
+        except SlackConfigurationError as exc:
+            # Absent, empty or unreadable before any provider request: a definite local refusal.
+            error = attempt.fail(exc, "local_input")
+            attempt.outcome = "failed"
+            self.store.fail_outbox(item.row_id, item.lease_token, error, result={"uncertain": False},
+                                   upload_attempt=attempt.write())
+            _remove_staged(artifact)
+            return True
+        with source:
+            try:
+                attempt.declared_length, attempt.phase = source.length, "slot"
+                attempt.index = self.store.record_upload_attempt(item, *attempt.write())
+                file_id, upload_url = await self.slack.allocate_upload(filename=filename, length=source.length)
+                attempt.file_id, attempt.phase = file_id, "bytes"
+                # The slot's identity is durable before any byte leaves.
+                attempt.index = self.store.record_upload_attempt(item, *attempt.write())
+                if await self._upload_held(item, attempt):
+                    return True
+                # Durable before the POST: from here a crash or lost claim must not read as unsent.
+                attempt.bytes = "sending"
+                try:
+                    attempt.index = self.store.record_upload_attempt(item, *attempt.write())
+                except BaseException:
+                    attempt.bytes = "not_sent"  # The POST never started.
+                    raise
+                try:
+                    attempt.acknowledged_length = await self.slack.send_upload_bytes(upload_url, source)
+                finally:
+                    attempt.bytes_sent = source.sent
+                attempt.bytes, attempt.phase = "accepted", "completion"
+                attempt.index = self.store.record_upload_attempt(item, *attempt.write())
+                if await self._upload_held(item, attempt):
+                    return True
+                attempt.completion = "started"
+                try:
+                    self.store.begin_send(item, upload_attempt=attempt.write())
+                except BaseException:
+                    attempt.completion = "not_sent"  # No marker, so no completion request.
+                    raise
+                attempt.completion_started = True
+                result = await self.slack.complete_upload(
+                    file_id=file_id, title=str(payload.get("title") or filename),
+                    channel=str(payload.get("channel") or ""), thread_ts=str(payload.get("thread_ts") or ""),
+                    initial_comment=str(payload.get("initial_comment") or ""),
+                )
+            except asyncio.CancelledError:
+                self._upload_cancelled(item, artifact, attempt)
+                raise
+            except OutboxLeaseLost:
+                raise
+            except Exception as exc:
+                return self._upload_failed(item, artifact, attempt, exc)
+        attempt.completion, attempt.outcome = "completed", "delivered"
+        try:
+            self.store.complete_outbox(item.row_id, item.lease_token, result=result, upload_attempt=attempt.write())
+        except OutboxLeaseLost:
+            log.warning("Slack upload %s attempt %s shared file %s after its claim was lost; "
+                        "the row's current owner keeps its receipt", item.request_id, attempt.number, file_id)
+            raise
+        except Exception:
+            # The share happened but is not recorded. The durable marker stays: lease
+            # recovery settles the row uncertain, and nothing is shared again.
+            log.exception("Slack upload %s shared file %s but its receipt could not be recorded",
+                          item.request_id, file_id)
+            return True
+        _remove_staged(artifact)
+        return True
+
+    async def _upload_held(self, item: OutboxItem, attempt: _UploadAttempt) -> bool:
+        """A Place hold after the slot was allocated: custody stays, this attempt's upload is spent."""
+        reason = await self._place_hold(item, item.target)
+        if not reason:
+            return False
+        attempt.outcome = "held"
+        attempt.failure = {"phase": attempt.phase, "class": "held", "error": reason}
+        self.store.hold_outbox(item, reason, spend_attempt=True, upload_attempt=attempt.write())
+        return True
+
+    def _upload_cancelled(self, item: OutboxItem, artifact: pathlib.Path, attempt: _UploadAttempt) -> None:
+        if attempt.completion_started:
+            # Cancellation never proves the completion did not share the file.
+            attempt.completion, attempt.outcome = "unknown", "uncertain"
+            attempt.failure = {"phase": "completion", "class": "cancelled", "error": "send_cancelled_after_dispatch"}
+            if self._cancel_started_send(item, upload_attempt=attempt.write()):
+                _remove_staged(artifact)
+            return
+        # Nothing was shared: the lease lapses and a later claim uploads again with a fresh slot.
+        if attempt.bytes == "sending":
+            attempt.bytes = "unknown" if attempt.bytes_sent else "not_sent"
+        attempt.outcome = "cancelled"
+        attempt.failure = {"phase": attempt.phase, "class": "cancelled", "error": "CancelledError"}
+        try:
+            self.store.record_upload_attempt(item, *attempt.write())
+        except Exception:
+            log.info("Slack upload %s cancelled attempt %s kept its earlier facts", item.request_id, attempt.number)
+
+    def _upload_failed(self, item: OutboxItem, artifact: pathlib.Path, attempt: _UploadAttempt,
+                       exc: BaseException) -> bool:
+        failure_class, retry = _upload_failure(exc, completion_started=attempt.completion_started)
+        error = attempt.fail(exc, failure_class)
+        # A malformed allocation can still have returned an identity. Keep that
+        # observation even when the upload URL was absent and no byte POST began.
+        if attempt.phase == "slot" and isinstance(exc, SlackApiError):
+            attempt.file_id = str(exc.details.get("file_id") or attempt.file_id)
+        if isinstance(exc, SlackApiError) and isinstance(exc.details.get("acknowledged_length"), int):
+            attempt.acknowledged_length = exc.details["acknowledged_length"]
+        if attempt.completion_started:
+            attempt.completion = "not_applied" if retry else "refused" if failure_class == "refused" else "unknown"
+        elif attempt.bytes == "sending":
+            attempt.bytes = _bytes_outcome(exc, attempt.bytes_sent)
+        if retry and item.attempts < _MAX_UPLOAD_ATTEMPTS:
+            attempt.outcome = "retry"
+            delay = (exc.retry_after if isinstance(exc, SlackApiError) and exc.retry_after
+                     else min(60.0, 2.0 ** min(item.attempts, 5)))
+            self.store.retry_outbox(item.row_id, item.lease_token, error, delay_seconds=delay,
+                                    upload_attempt=attempt.write())
+            log.warning("Slack upload %s attempt %s will retry with a fresh slot in %.0fs: %s",
+                        item.request_id, attempt.number, delay, error)
+            return True
+        uncertain = attempt.completion_started and failure_class == "unknown"
+        state = "uncertain" if uncertain else "failed"
+        attempt.outcome = state
+        if retry:
+            error = f"upload_attempts_exhausted: {error}"
+        self.store.fail_outbox(item.row_id, item.lease_token, error, state=state,
+                               result={"uncertain": uncertain}, upload_attempt=attempt.write())
+        _remove_staged(artifact)
+        log.warning("Slack upload %s ended %s at attempt %s: %s", item.request_id, state, attempt.number, error)
+        return True
+
+    async def _process_mutation(self, item: OutboxItem) -> bool:
+        if item.operation == "upload_file":
+            return await self._process_upload(item)
+        payload = item.payload
         send_started = False
         try:
             operation = item.operation
-            # Whole-upload custody is intentionally conservative: a crash may
-            # leave unshared staged bytes, but never permits an automatic resend.
-            # This is effect based, including a generic write made with GET.
+            # Effect based, including a generic write made with GET.
             self.store.begin_send(item, uncertain_report=self._reaction_report(
                 item, "uncertain", error="send_result_unrecorded"))
             send_started = True
-            if operation == "upload_file":
-                async def before_send():
-                    if await self._held(item, item.target):
-                        raise PlaceHeld()
-                guard = {"before_send": before_send} if getattr(self.host, "place_hold", None) else {}
-                result = await self.slack.upload_file(
-                    path=pathlib.Path(str(payload.get("path") or "")),
-                    filename=str(payload.get("filename") or "upload"),
-                    title=str(payload.get("title") or ""),
-                    channel=str(payload.get("channel") or ""),
-                    thread_ts=str(payload.get("thread_ts") or ""),
-                    initial_comment=str(payload.get("initial_comment") or ""),
-                    **guard,
-                )
-            elif operation == "update_message":
+            if operation == "update_message":
                 result = await self.slack.update_message(**payload)
             elif operation == "delete_message":
                 result = await self.slack.delete_message(**payload)
@@ -613,27 +904,23 @@ class OutboundWorker:
             self.store.complete_outbox(item.row_id, item.lease_token,
                                        provider_message_ts=str(result.get("ts") or "") if isinstance(result, dict) else "",
                                        report_payload=report, result=result)
-            cleanup_artifact()
             return True
-        except PlaceHeld:
-            return True  # _held retained the local artifact and released the lease.
         except asyncio.CancelledError:
             if send_started:
                 self._cancel_started_send(item)
-                cleanup_artifact()
+            raise
+        except OutboxLeaseLost:
             raise
         except SlackConfigurationError as exc:
-            # Mutation arguments/input were rejected before any provider request,
-            # despite the conservative marker already being persisted.
+            # Mutation arguments were rejected before any provider request (a method
+            # slack_api may not call included), despite the conservative marker.
             self.store.fail_outbox(item.row_id, item.lease_token, str(exc), state="failed",
                                    result={"uncertain": False},
                                    report_payload=self._reaction_report(item, "failed", error=str(exc)))
-            cleanup_artifact()
             return True
         except SlackMutationUncertain as exc:
             self.store.fail_outbox(item.row_id, item.lease_token, exc.error, state="uncertain", result={"uncertain": True},
                                    report_payload=self._reaction_report(item, "uncertain", error=exc.error))
-            cleanup_artifact()
             log.warning("Slack mutation %s is uncertain after provider acceptance boundary: %s", item.request_id, exc)
             return True
         except SlackApiError as exc:
@@ -648,7 +935,6 @@ class OutboundWorker:
                     self.store.fail_outbox(item.row_id, item.lease_token, exc.error, state="failed",
                                            result={"uncertain": False},
                                            report_payload=self._reaction_report(item, "failed", error=exc.error))
-                    cleanup_artifact()
                 else:
                     self.store.retry_outbox(item.row_id, item.lease_token, exc.error,
                                             delay_seconds=exc.retry_after or min(60.0, 2.0 ** min(item.attempts, 5)))
@@ -658,7 +944,6 @@ class OutboundWorker:
                 self.store.fail_outbox(item.row_id, item.lease_token, exc.error, state="uncertain",
                                        result={"uncertain": True},
                                        report_payload=self._reaction_report(item, "uncertain", error=exc.error))
-                cleanup_artifact()
                 return True
             if item.operation == "generic_api" or exc.error in {
                 "already_reacted", "message_not_found", "cant_update_message", "missing_scope",
@@ -670,28 +955,24 @@ class OutboundWorker:
                 self.store.fail_outbox(item.row_id, item.lease_token, exc.error, state="failed",
                                        result={"uncertain": False},
                                        report_payload=self._reaction_report(item, "failed", error=exc.error))
-                cleanup_artifact()
                 return True
             if item.attempts >= _MAX_OUTBOX_ATTEMPTS:
                 self.store.fail_outbox(item.row_id, item.lease_token, exc.error, state="failed",
                                        result={"uncertain": False},
                                        report_payload=self._reaction_report(item, "failed", error=exc.error))
-                cleanup_artifact()
                 return True
             self.store.retry_outbox(item.row_id, item.lease_token, exc.error, delay_seconds=exc.retry_after or min(60.0, 2.0 ** min(item.attempts, 5)))
             return True
         except Exception as exc:
-            before_request = isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+            before_request = isinstance(exc, _NOT_SENT)
             if send_started and not before_request:
                 self.store.fail_outbox(item.row_id, item.lease_token, str(exc), state="uncertain",
                                        result={"uncertain": True},
                                        report_payload=self._reaction_report(item, "uncertain", error=type(exc).__name__))
-                cleanup_artifact()
                 return True
             if item.attempts >= _MAX_OUTBOX_ATTEMPTS:
                 self.store.fail_outbox(item.row_id, item.lease_token, str(exc), state="failed", result={"uncertain": False},
                                        report_payload=self._reaction_report(item, "failed", error=type(exc).__name__))
-                cleanup_artifact()
                 return True
             self.store.retry_outbox(item.row_id, item.lease_token, str(exc), delay_seconds=min(60.0, 2.0 ** min(item.attempts, 5)))
             return True

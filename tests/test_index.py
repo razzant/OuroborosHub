@@ -801,6 +801,9 @@ def test_mixed_tools_remain_write_and_email_covers_all_recipients():
     sends = manifests["telegram-bot"]["telegram_operation"]["sends"]
     assert (sends["when"], sends["target"], sends["text"]) == ({"method": ["editMessageText"]}, "chat_id", "text")
     assert manifests["telegram-user-session"]["tg_edit"]["effect"] == "message"
+    upload = manifests["slack-bridge"]["slack_file_upload"]
+    assert (upload["effect"], upload["conversation"], upload["thread"], upload["text"]) == (
+        "message", "channel_id", "thread_ts", "initial_comment")
     tools = {row["name"]: row for row in builder.read_manifest(ROOT / "skills" / "email")["tools"]}
     assert (tools["email_send"]["effect"], tools["email_send"]["target"], tools["email_send"]["text"]) == (
         "message", ["to", "cc", "bcc"], "body")

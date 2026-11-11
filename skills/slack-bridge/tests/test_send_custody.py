@@ -295,15 +295,32 @@ def test_local_upload_input_refusal_is_failed_without_provider_request(tmp_path,
     elif input_state != "missing":
         artifact.write_bytes(b"" if input_state == "empty" else b"immutable upload")
     if input_state in {"permission", "read_error"}:
-        original = pathlib.Path.read_bytes
+        import lib.slack_api as slack_api
 
-        def unreadable(path):
-            if path == artifact:
-                error = PermissionError if input_state == "permission" else OSError
-                raise error("controlled local read failure")
-            return original(path)
+        class _Unreadable:
+            """Opens and sizes like the staged file; its first read fails."""
 
-        monkeypatch.setattr(pathlib.Path, "read_bytes", unreadable)
+            def __init__(self, handle):
+                self._handle = handle
+
+            def fileno(self):
+                return self._handle.fileno()
+
+            def read(self, _size=-1):
+                raise OSError("controlled local read failure")
+
+            def close(self):
+                self._handle.close()
+
+        def guarded_open(path, *args, **kwargs):
+            if pathlib.Path(path) == artifact:
+                if input_state == "permission":
+                    raise PermissionError("controlled local read failure")
+                return _Unreadable(open(path, *args, **kwargs))
+            return open(path, *args, **kwargs)
+
+        # The upload input opens the staged file through the module's ``open``.
+        monkeypatch.setattr(slack_api, "open", guarded_open, raising=False)
     asyncio.run(_local_refusal(
         tmp_path, "upload_file", {"path": str(artifact), "filename": "upload.txt", "channel": "C1"},
         "file must not be empty" if input_state == "empty" else "could not read upload input",
@@ -348,7 +365,59 @@ async def _local_refusal(tmp_path, operation, payload, error):
 
 
 @pytest.mark.parametrize("failure", [OSError, httpx.ReadTimeout])
-@pytest.mark.parametrize("phase", ["generic", "upload_url", "upload_bytes", "upload_complete"])
+@pytest.mark.parametrize("phase", ["upload_url", "upload_bytes"])
+def test_failure_before_upload_completion_retries_with_a_fresh_slot(tmp_path, failure, phase):
+    """Only completion shares a file: an earlier unknown outcome gets a new slot, never the old one."""
+    async def run():
+        store = BridgeStore(tmp_path)
+        artifact = tmp_path / "upload.txt"
+        _enqueue(store, 1, operation="upload", path=artifact)
+        calls, completed = [], []
+
+        def provider(request):
+            calls.append(request.url.path)
+            if request.url.path == "/api/files.getUploadURLExternal":
+                if phase == "upload_url" and len(calls) == 1:
+                    raise failure("provider dispatched; outcome unknown")
+                slot = f"F{sum(path.endswith('getUploadURLExternal') for path in calls)}"
+                return httpx.Response(200, json={"ok": True, "file_id": slot, "upload_url": f"https://uploads.example/{slot}"})
+            if request.url.host == "uploads.example":
+                assert request.content == b"immutable upload"
+                if phase == "upload_bytes" and request.url.path == "/F1":
+                    raise failure("provider dispatched; outcome unknown")
+                return httpx.Response(200, text="uploaded")
+            completed.append(json.loads(request.content)["files"][0]["id"])
+            return httpx.Response(200, json={"ok": True, "files": [{"id": completed[-1]}]})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
+            slack = SlackClient("xoxb-test", "xapp-test", http_client=http)
+            worker = OutboundWorker(store, slack)
+            assert await worker.process_once()
+            row = _row(store)
+            assert (row["state"], row["send_started"], row["attempts"]) == ("pending", 0, 1)
+            assert artifact.exists() and completed == []
+            await worker.aclose()
+            _expire(store)
+            restarted = OutboundWorker(BridgeStore(tmp_path), slack)
+            assert await restarted.process_once()
+            assert not await restarted.process_once()
+            await restarted.aclose()
+        final = "F2"  # A fresh slot either way: the failed one never got an ID, or got F1 and is abandoned.
+        assert completed == [final]
+        [part] = store.delivery_receipt("selection")["parts"]
+        assert (part["state"], part["attempts"]) == ("delivered", 2)
+        first, second = part["upload_attempts"]
+        assert first["outcome"] == "retry" and first["failure"]["class"] == "transport_unknown"
+        assert first["file_id"] == ("" if phase == "upload_url" else "F1")
+        assert (second["file_id"], second["outcome"]) == (final, "delivered")
+        assert store.claim_report() is None
+        assert not artifact.exists()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", [OSError, httpx.ReadTimeout])
+@pytest.mark.parametrize("phase", ["generic", "upload_complete"])
 def test_dispatched_failure_stays_uncertain_without_resend(tmp_path, failure, phase):
     async def run():
         store = BridgeStore(tmp_path)

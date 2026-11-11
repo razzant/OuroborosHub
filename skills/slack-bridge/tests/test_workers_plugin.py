@@ -526,17 +526,27 @@ def test_upload_queued_with_a_legacy_staged_name_is_delivered_as_stored(tmp_path
 
 def test_upload_completion_transport_loss_is_terminally_uncertain(tmp_path):
     class _UncertainSlack(_Slack):
-        async def upload_file(self, **_payload):
+        async def allocate_upload(self, **_arguments):
+            return "F1", "https://uploads.example/u"
+
+        async def send_upload_bytes(self, _upload_url, source):
+            return len(b"".join([chunk async for chunk in source.chunks()]))
+
+        async def complete_upload(self, **_payload):
             raise SlackMutationUncertain("complete_response_lost")
 
+    staged = tmp_path / "staged"
+    staged.write_bytes(b"staged bytes")
     store = BridgeStore(tmp_path)
     store.enqueue_mutation(
         request_id="upload-uncertain", operation="upload_file",
-        payload={"path": str(tmp_path / "staged"), "filename": "file.txt", "channel": "C1"},
+        payload={"path": str(staged), "filename": "file.txt", "channel": "C1"},
     )
     assert asyncio.run(OutboundWorker(store, _UncertainSlack()).process_once()) is True
     status = store.status()
     assert status["mutations_uncertain"] == 1 and status["mutations_pending"] == 0
+    [attempt] = store.delivery_receipt("upload-uncertain")["parts"][0]["upload_attempts"]
+    assert (attempt["file_id"], attempt["completion"], attempt["outcome"]) == ("F1", "unknown", "uncertain")
 
 
 def test_generic_write_transport_loss_is_uncertain_without_false_delivery(tmp_path):
