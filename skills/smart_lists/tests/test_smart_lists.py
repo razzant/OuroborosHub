@@ -217,7 +217,7 @@ class RegistrationTests(SkillCase):
         self.assertEqual(self.api.tools["add"]["schema"]["required"], ["group", "items", "request_id"])
         self.assertEqual({path: route["methods"] for path, route in self.api.routes.items()}, {
             "view": ("GET",), "edit": ("POST",), "group": ("POST",), "select": ("GET",), "store": ("POST",),
-            "export": ("GET",), "today": ("GET",), "check": ("POST",), "add": ("POST",)})
+            "export": ("GET",), "today": ("GET",), "board": ("GET",), "check": ("POST",), "add": ("POST",)})
         self.assertIn("even without", self.api.tools["add"]["description"])
         self.assertIn("even without saying 'add'", manifest_text())
         self.assertEqual(list(self.api.tabs), ["lists"])
@@ -230,8 +230,8 @@ class RegistrationTests(SkillCase):
         self.assertEqual(render, {"kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host", "span": 2, "height": 560})
         code = (SKILL_DIR / render["entry"]).read_text()
         self.assertIn("OuroborosWidget.fetch", code)
-        self.assertIn("today?timezone=", code)
-        self.assertIn("request('check'", code)
+        self.assertIn('"board?" + p', code)
+        self.assertIn('request("check"', code)
         self.assertNotIn("innerHTML", code)
 
     def test_today_is_a_projection_and_checkbox_uses_existing_completion(self):
@@ -494,7 +494,7 @@ class ToolFlowTests(SkillCase):
         self.assertEqual(result["added"][0]["source"], "chat")
 
         on_disk = json.loads(self.store_bytes().decode("utf-8"))
-        self.assertEqual(on_disk["schema_version"], 3)
+        self.assertEqual(on_disk["schema_version"], 4)
         self.assertIn(raw, [entry["text"] for entry in on_disk["entries"].values()])
 
         reloaded = self.fresh_api()  # independent module, same state directory
@@ -1261,7 +1261,7 @@ class LifecycleTests(SkillCase):
         self.assertEqual(json.loads(self.store_bytes())["schema_version"], 1, "reads never rewrite the store")
         self.ok("add", group="Home", request_id="new-1", items=[{"text": "eggs"}])
         upgraded = json.loads(self.store_bytes())
-        self.assertEqual((upgraded["schema_version"], upgraded["generation"]), (3, 1))
+        self.assertEqual((upgraded["schema_version"], upgraded["generation"]), (4, 1))
         self.assertIsNotNone(upgraded["retired_requests"], "unsafe legacy replay is retired")
         self.refused("add", "request_expired", group="Home", items=[{"text": "milk"}], request_id="old-1")
         self.assertRegex(upgraded["store_id"], r"^s_[0-9a-f]{16}$")
@@ -2031,7 +2031,7 @@ class ReplayFilterTests(SkillCase):
         self.assertTrue(self.ok("add", group="Home", items=[{"text": "milk"}], request_id="kept")["replayed"])
         self.ok("add", group="Home", items=[{"text": "eggs"}], request_id="new-1")
         upgraded = json.loads(self.store_bytes())
-        self.assertEqual(upgraded["schema_version"], 3)
+        self.assertEqual(upgraded["schema_version"], 4)
         self.assertNotIn("expired_requests", upgraded)
         self.refused("add", "request_expired", group="Home", items=[{"text": "x"}], request_id="old-b")
 

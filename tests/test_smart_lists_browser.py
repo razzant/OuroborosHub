@@ -7,6 +7,8 @@ OUROBOROS_LISTS_EVIDENCE_DIR optionally retains inspected screenshots/downloads.
 from __future__ import annotations
 
 import importlib.util
+import asyncio
+from starlette.datastructures import QueryParams
 import json
 import mimetypes
 import os
@@ -57,7 +59,7 @@ def lists_server(tmp_path):
     tool('group', action='create', name='Work')
     item = tool('add', group='Home / Groceries', items=[{'text':'Oat milk', 'due':'tomorrow'}],
                 request_id='browser-seed')['added'][0]['id']
-    state = {'reject':False, 'checks':[], 'errors':[]}
+    state = {'reject':False, 'reject_read':False, 'checks':[], 'errors':[]}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -77,6 +79,10 @@ def lists_server(tmp_path):
             url = urlsplit(self.path)
             if url.path == '/':
                 return self.send(HOST, 'text/html')
+            if url.path.startswith('/api/widgets/asset-leases'):
+                # Host-publication fixture; execute the real frame/bridge, not lease policy.
+                return self.send({'token':'fixture', 'base_url':'/api/widget-resources/fixture/',
+                                  'renew_after':60, 'expires_in':600, 'scope':'routes'})
             if url.path.startswith('/static/'):
                 web = core / 'web'
                 source = (web / url.path[len('/static/'):]).resolve()
@@ -93,9 +99,14 @@ def lists_server(tmp_path):
                         state['checks'].append(body)
                         if state['reject']:
                             return self.send({'ok':False,'error':'Synthetic refusal; nothing changed'})
+                    if name == 'board' and state['reject_read']:
+                        return self.send({'ok':False,'error':'Synthetic read refusal'})
                     try:
-                        return self.send(api.call_route(name, method='GET' if self.command == 'HEAD' else self.command, body=body,
-                            query={k:v[-1] for k,v in parse_qs(url.query).items()}))
+                        request = support.FakeRequest(body, method=self.command)
+                        request.query_params = QueryParams(url.query)
+                        result = api.routes[name]['handler'](request)
+                        if asyncio.iscoroutine(result): result = asyncio.run(result)
+                        return self.send(result)
                     except Exception as exc:
                         state['errors'].append(repr(exc))
                         return self.send({'error':str(exc)}, status=500)
@@ -134,36 +145,46 @@ def test_lists_registered_tools_and_real_widget(lists_server, tmp_path, engine, 
 
         def mount():
             page.goto(url)
-            page.wait_for_function('window.ready === true')
+            try:
+                page.wait_for_function('window.ready === true', timeout=10000)
+            except Exception:
+                print('MOUNT_ERRORS', errors, page.locator('body').inner_text())
+                raise
             frame = page.locator('iframe').element_handle().content_frame()
-            frame.wait_for_selector('.panel')
+            frame.wait_for_selector('header h2')
+            expect(frame.locator('.count')).not_to_be_empty()
             return frame
 
         try:
             frame = mount()
-            box = frame.locator(f'input[data-entry-id="{item}"]')
+            box = frame.locator(f'.item[data-id="{item}"] input')
             expect(box).not_to_be_checked()
             expect(frame.locator('.list')).to_contain_text('tomorrow')
             box.check()
-            expect(frame.locator(f'input[data-entry-id="{item}"]')).to_have_attribute('aria-label', 'Вернуть в дела: Oat milk')
+            expect(frame.locator('.item')).to_have_count(0)
             assert tool('read', status='done')['entries'][0]['id'] == item
             frame = mount()  # Persistence through a new opaque frame.
-            expect(frame.locator(f'input[data-entry-id="{item}"]')).to_be_checked()
-            frame.locator(f'input[data-entry-id="{item}"]').uncheck()
-            expect(frame.locator(f'input[data-entry-id="{item}"]')).to_have_attribute('aria-label', 'Отметить выполненным: Oat milk')
+            frame.get_by_label('Статус', exact=True).select_option('done')
+            expect(frame.locator(f'.item[data-id="{item}"] input')).to_be_checked()
+            frame.locator(f'.item[data-id="{item}"] input').uncheck()
+            expect(frame.locator('.item')).to_have_count(0)
+            frame.get_by_label('Статус', exact=True).select_option('open')
             assert tool('read')['entries'][0]['status'] == 'open'
+            expect(frame.locator(f'.item[data-id="{item}"] input')).not_to_be_checked()
             state['reject'] = True
-            frame.locator(f'input[data-entry-id="{item}"]').check()
+            state['reject_read'] = True
+            frame.locator(f'.item[data-id="{item}"] input').check()
             expect(frame.locator('.error')).to_contain_text('Synthetic refusal')
-            expect(frame.locator(f'input[data-entry-id="{item}"]')).not_to_be_checked()
+            expect(frame.locator(f'.item[data-id="{item}"] input')).not_to_be_checked()
             assert tool('read')['entries'][0]['status'] == 'open'
             state['reject'] = False
+            state['reject_read'] = False
             tool('update', entry_id=item, text='Oat milk, unsweetened', request_id='edit')
             tool('move', entry_ids=[item], to_group='Work', request_id='move')
             frame = mount()
-            frame.get_by_role('button', name='Home', exact=True).click()
+            frame.get_by_label('Группа', exact=True).select_option(label='Home')
             expect(frame.locator('.list input')).to_have_count(0)
-            frame.get_by_role('button', name='Work', exact=True).click()
+            frame.get_by_label('Группа', exact=True).select_option(label='Work')
             expect(frame.locator('.list')).to_contain_text('Oat milk, unsweetened')
             tool('delete', entry_ids=[item], request_id='trash')
             frame = mount()
@@ -176,8 +197,19 @@ def test_lists_registered_tools_and_real_widget(lists_server, tmp_path, engine, 
             expect(frame.locator('.list input')).to_have_count(100)
             frame.get_by_role('button', name='Показать ещё', exact=False).click()
             expect(frame.locator('.list input')).to_have_count(106)
-            frame.get_by_role('button', name='Увеличить текст списка').click()
-            expect(frame.locator('output')).to_have_text('17 px')
+            frame.get_by_role('button', name='Увеличить текст', exact=True).click()
+            assert frame.locator('.title').first.evaluate("n=>getComputedStyle(n).fontSize") == '17px'
+            tool('update', entry_id=item, details={'tags':['review','Nova'],'turn':'owner','references':[{'label':'Source','target':'https://example.org/source'}]})
+            frame.get_by_role('button',name='Обновить',exact=True).click()
+            frame.locator('.filters summary').click()
+            frame.locator('.tag-list').get_by_role('button',name='review',exact=True).click()
+            frame.locator('.tag-list').get_by_role('button',name='Nova',exact=True).click()
+            expect(frame.locator('.item')).to_have_count(1)
+            frame.locator('.item summary').click()
+            frame.locator('.reference').focus()
+            frame.evaluate('refresh()')
+            assert frame.evaluate('document.activeElement.type !== "checkbox"')
+            frame.locator('.filters summary').click()
             page.evaluate("ouroTheme.set('dark')")
             expect(frame.locator('html')).to_have_attribute('data-theme','dark')
             page.screenshot(path=str(evidence / f'lists-{engine}-{width}-dark.png'))
@@ -185,7 +217,7 @@ def test_lists_registered_tools_and_real_widget(lists_server, tmp_path, engine, 
             page.screenshot(path=str(evidence / f'lists-{engine}-{width}-light.png'))
             assert frame.evaluate('document.documentElement.scrollWidth <= innerWidth')
             with page.expect_download() as caught:
-                frame.get_by_role('button', name='Скачать резервную копию').click()
+                frame.get_by_role('button', name='Скачать копию').click()
             downloaded = evidence / f'lists-{engine}-{width}-export.json'
             assert caught.value.suggested_filename == 'smart-lists-export.json'
             caught.value.save_as(str(downloaded))

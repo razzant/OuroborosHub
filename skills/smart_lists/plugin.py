@@ -145,15 +145,16 @@ def tool_add(ctx: Any = None, **args: Any) -> str:
 
 
 def tool_read(ctx: Any = None, **args: Any) -> str:
-    return _run_tool(args, ("group", "status", "subtree", "limit", "offset"), lambda a: _service().read(
+    return _run_tool(args, ("group", "status", "subtree", "limit", "offset", "tags", "tag_mode", "turn", "query"), lambda a: _service().read(
         group=a.get("group", ""), status=a.get("status", "open"), subtree=a.get("subtree", True),
-        limit=a.get("limit", 100), offset=a.get("offset", 0)))
+        limit=a.get("limit", 100), offset=a.get("offset", 0), tags=a.get("tags"),
+        tag_mode=a.get("tag_mode", "all"), turn=a.get("turn", ""), query=a.get("query", "")))
 
 
 def tool_update(ctx: Any = None, **args: Any) -> str:
-    return _run_tool(args, ("entry_id", "text", "due", "clear_due", "request_id"), lambda a: _service().update(
+    return _run_tool(args, ("entry_id", "text", "due", "clear_due", "request_id", "details"), lambda a: _service().update(
         a.get("entry_id"), text=a.get("text"), due=a.get("due"), clear_due=a.get("clear_due", False),
-        request_id=a.get("request_id")))
+        request_id=a.get("request_id"), details=a.get("details")))
 
 
 def tool_complete(ctx: Any = None, **args: Any) -> str:
@@ -215,12 +216,27 @@ _DUE = {
                    "text and never interpreted. No reminder is created.",
 }
 
+_DETAILS = {
+    "type": "object", "additionalProperties": False,
+    "description": "Optional agent-maintained context, separate from the original text. On update, merge only supplied fields; [] clears tags/references and empty text clears a note/step. Capture key is creation-only. Record source evidence before marking work complete; a stopped or Done run is not completion of the obligation.",
+    "properties": {
+        "tags": {"type": "array", "items": {"type": "string", "maxLength": 60}, "maxItems": 20},
+        "turn": {"type": "string", "enum": ["unassigned", "owner", "agent", "other"], "description": "Who must take the next step, not a permanent assignee."},
+        "next_step": {"type": "string", "maxLength": 1000},
+        "note": {"type": "string", "maxLength": 1000, "description": "Current factual context or completion/cancellation evidence; not an invented status."},
+        "capture_key": {"type": "string", "maxLength": 200, "description": "Stable identity chosen for ONE obligation, not an entire thread. Reuse across digest runs; capture_exists names the existing entry, including done/trash. Never change the key to bypass that result."},
+        "references": {"type": "array", "maxItems": 12, "items": {
+            "type": "object", "additionalProperties": False, "required": ["label", "target"],
+            "properties": {"label": {"type": "string", "maxLength": 120}, "target": {"type": "string", "maxLength": 1000, "description": "Observed HTTP(S) URL, task:<id> or exact row: address. No guessed task UI URLs."}}}},
+    },
+}
+
 TOOLS = (
     (
         "add",
         tool_add,
         "Smart Lists: add entries to a list group when the owner clearly intends note capture, even without "
-        "the word 'add' (e.g. 'oat milk and AA batteries for Home / Groceries'); never capture items from passing "
+        "the word 'add' (e.g. 'oat milk and AA batteries for Home / Groceries'), or under the owner's explicit standing instruction to maintain commitments. Read SKILL.md for automatic capture; never capture items from passing "
         "conversation. Put the owner's wording for each item verbatim in text, one entry per item, keeping "
         "quantities and notes inside text. Repeated text is never merged: it is stored again and listed under "
         f"possible_duplicates (at most {lists_core.MAX_DUPLICATE_IDS} matching ids per new entry, with total and "
@@ -240,6 +256,7 @@ TOOLS = (
                         "properties": {
                             "text": {"type": "string", "description": "One item, verbatim."},
                             "due": _DUE,
+                            "details": _DETAILS,
                         },
                         "required": ["text"],
                         "additionalProperties": False,
@@ -269,6 +286,10 @@ TOOLS = (
                 "group": {"type": "string", "description": "Optional. " + _GROUP_REF + " Omit for all groups."},
                 "status": {"type": "string", "enum": ["open", "done", "deleted", "all"], "default": "open"},
                 "subtree": {"type": "boolean", "default": True, "description": "Include descendant groups."},
+                "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+                "tag_mode": {"type": "string", "enum": ["all", "any"], "default": "all"},
+                "turn": {"type": "string", "enum": ["", "unassigned", "owner", "agent", "other"]},
+                "query": {"type": "string", "description": "Substring in text, next step or note."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100},
                 "offset": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 0},
             },
@@ -278,8 +299,7 @@ TOOLS = (
     (
         "update",
         tool_update,
-        "Smart Lists: replace the text and/or due of one entry when the owner asks to change it. New text is "
-        "stored verbatim.",
+        "Smart Lists: update one entry's text, due or supplied details fields. With the owner's standing instruction to maintain their commitments, update next step/tags/whose turn/source references on actual evidence. Preserve original wording in text unless asked to rewrite it. Read the entry first; replace references with the complete intended list.",
         {
             "type": "object",
             "properties": {
@@ -287,6 +307,7 @@ TOOLS = (
                 "text": {"type": "string", "description": "New text, verbatim. Omit to keep."},
                 "due": _DUE,
                 "clear_due": {"type": "boolean", "default": False},
+                "details": _DETAILS,
                 "request_id": _REQUEST_ID,
             },
             "required": ["entry_id"],
@@ -678,6 +699,23 @@ def widget_today(timezone: str, offset: int = 0, group_id: str = "") -> Dict[str
             "archive_total": len(archived), "export_warning": _store_view(info)["export_warning"]}
 
 
+def widget_board(group="", status="open", tags=None, tag_mode="all", turn="", query="", offset=0):
+    result = _service().read(group=group, status=status, tags=tags, tag_mode=tag_mode,
+                             turn=turn, query=query, offset=offset, limit=100, board=True)
+    return {"ok": True, **result}
+
+
+async def route_board(request: Any) -> Dict[str, Any]:
+    try:
+        tags = request.query_params.getlist("tag")
+        return await asyncio.to_thread(widget_board, _query(request, "group"), _query(request, "status") or "open",
+            tags, _query(request, "tag_mode") or "all", _query(request, "turn"), _query(request, "query"),
+            int(_query(request, "offset") or "0"))
+    except (ValueError, ListError) as exc:
+        return {"ok": False, "code": exc.code if isinstance(exc, ListError) else "invalid_input",
+                "error": exc.message if isinstance(exc, ListError) else "Invalid filter"}
+
+
 async def route_today(request: Any) -> Dict[str, Any]:
     try:
         return await asyncio.to_thread(widget_today, _query(request, "timezone"),
@@ -740,6 +778,7 @@ ROUTES = (
     ("store", route_store, ("POST",)),
     ("export", route_export, ("GET",)),
     ("today", route_today, ("GET",)),
+    ("board", route_board, ("GET",)),
     ("check", route_check, ("POST",)),
     ("add", route_add, ("POST",)),
 )
