@@ -13,6 +13,8 @@ from lib.slack_api import (
     SlackClient,
     SlackConfigurationError,
     SlackMutationUncertain,
+    UploadInput,
+    UploadInputError,
     chunk_message,
     mutation_may_have_applied,
 )
@@ -260,11 +262,11 @@ async def _directory_pages_and_mutations_use_exact_slack_methods():
     assert all(path.startswith("/api/") for _, path, _, _ in calls)
 
 
-def test_external_upload_stages_three_provider_phases_and_keeps_completion_uncertain(tmp_path):
-    asyncio.run(_external_upload_stages_three_provider_phases_and_keeps_completion_uncertain(tmp_path))
+def test_external_upload_runs_three_provider_phases(tmp_path):
+    asyncio.run(_external_upload_runs_three_provider_phases(tmp_path))
 
 
-async def _external_upload_stages_three_provider_phases_and_keeps_completion_uncertain(tmp_path):
+async def _external_upload_runs_three_provider_phases(tmp_path):
     calls = []
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append((request.method, str(request.url), request.content, dict(request.headers)))
@@ -272,13 +274,17 @@ async def _external_upload_stages_three_provider_phases_and_keeps_completion_unc
             return httpx.Response(200, json={"ok": True, "upload_url": "https://uploads.example/upload", "file_id": "F1"})
         if request.url.host == "uploads.example":
             assert request.content == b"immutable bytes"
-            return httpx.Response(200, text="ok")
+            return httpx.Response(200, text="OK - 15")
         return httpx.Response(200, json={"ok": True, "files": [{"id": "F1"}]})
     source = tmp_path / "hello.txt"
     source.write_bytes(b"immutable bytes")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         slack = SlackClient("xoxb-test", "xapp-test", http_client=http)
-        result = await slack.upload_file(path=source, filename="hello.txt", channel="C1", thread_ts="1.0")
+        with UploadInput(source, chunk_bytes=4) as staged:
+            file_id, upload_url = await slack.allocate_upload(filename="hello.txt", length=staged.length)
+            acknowledged = await slack.send_upload_bytes(upload_url, staged)
+            result = await slack.complete_upload(file_id=file_id, title="hello.txt", channel="C1", thread_ts="1.0")
+    assert (file_id, acknowledged, staged.sent) == ("F1", 15, 15)
     assert result["files"][0]["id"] == "F1"
     assert calls[0][0] == "POST"
     assert calls[0][3]["content-type"].startswith("application/x-www-form-urlencoded")
@@ -286,7 +292,82 @@ async def _external_upload_stages_three_provider_phases_and_keeps_completion_unc
         "filename": ["hello.txt"], "length": [str(len(b"immutable bytes"))],
     }
     assert calls[1][1] == "https://uploads.example/upload"
-    assert json.loads(calls[2][2])["channel_id"] == "C1"
+    # Streamed with its declared length, not chunked, and without the bot credential.
+    assert calls[1][3]["content-length"] == "15" and "transfer-encoding" not in calls[1][3]
+    assert calls[1][3]["content-type"] == "application/octet-stream" and "authorization" not in calls[1][3]
+    assert json.loads(calls[2][2]) == {"files": [{"id": "F1", "title": "hello.txt"}], "channel_id": "C1",
+                                       "thread_ts": "1.0"}
+
+
+@pytest.mark.parametrize("status,body,error,acknowledged", [
+    (200, "OK - 15", None, 15),
+    (200, "uploaded", None, None),  # A 200 without a length statement is not refused.
+    (200, "OK - 3", "upload_bytes_length_mismatch", 3),
+    (201, "OK - 15", "upload_bytes_http_201", None),  # Only the documented 200 is accepted.
+    (302, "", "upload_bytes_http_302", None),  # Never followed, though the client follows redirects.
+    (503, "busy", "upload_bytes_http_503", None),
+])
+def test_upload_bytes_answer_is_judged_before_completion(tmp_path, status, body, error, acknowledged):
+    async def run():
+        requests = []
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(status, text=body, headers={"Location": "https://elsewhere.example/x"})
+        source = tmp_path / "bytes.bin"
+        source.write_bytes(b"immutable bytes")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True) as http:
+            slack = SlackClient("xoxb-test", "xapp-test", http_client=http)
+            with UploadInput(source) as staged:
+                if error is None:
+                    assert await slack.send_upload_bytes("https://uploads.example/F1", staged) == acknowledged
+                else:
+                    with pytest.raises(SlackApiError) as raised:
+                        await slack.send_upload_bytes("https://uploads.example/F1", staged)
+                    assert (raised.value.error, raised.value.status_code) == (error, status)
+                    if acknowledged is not None:
+                        assert raised.value.details == {"acknowledged_length": acknowledged}
+        assert [request.url.host for request in requests] == ["uploads.example"]
+    asyncio.run(run())
+
+
+def test_upload_input_refuses_before_any_request_and_never_sends_past_its_length(tmp_path):
+    with pytest.raises(SlackConfigurationError, match="could not read upload input"):
+        UploadInput(tmp_path / "absent.bin")
+    with pytest.raises(SlackConfigurationError, match="could not read upload input"):
+        UploadInput(tmp_path)
+    (tmp_path / "empty.bin").write_bytes(b"")
+    with pytest.raises(SlackConfigurationError, match="file must not be empty"):
+        UploadInput(tmp_path / "empty.bin")
+
+    async def drain(staged):
+        return b"".join([chunk async for chunk in staged.chunks()])
+
+    grows = tmp_path / "grows.bin"
+    grows.write_bytes(b"0123456789")
+    with UploadInput(grows, chunk_bytes=3) as staged:
+        with grows.open("ab") as handle:
+            handle.write(b"appended later")
+        assert asyncio.run(drain(staged)) == b"0123456789" and staged.sent == 10
+    shrinks = tmp_path / "shrinks.bin"
+    shrinks.write_bytes(b"0123456789")
+    with UploadInput(shrinks, chunk_bytes=3) as staged:
+        shrinks.write_bytes(b"0123")
+        with pytest.raises(UploadInputError, match="ended before its declared length"):
+            asyncio.run(drain(staged))
+        assert staged.sent == 4  # What the shorter file still had; the declared ten never left.
+
+
+def test_missing_upload_slot_fields_keep_only_the_identity():
+    async def run():
+        answers = iter([{"ok": True, "file_id": "F1"}, {"ok": True, "upload_url": "https://uploads.example/secret"}])
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda _request: httpx.Response(200, json=next(answers)))) as http:
+            slack = SlackClient("xoxb-test", "xapp-test", http_client=http)
+            for details in ({"file_id": "F1"}, {}):
+                with pytest.raises(SlackApiError) as raised:
+                    await slack.allocate_upload(filename="a.txt", length=1)
+                assert (raised.value.error, raised.value.details) == ("missing_upload_url", details)
+    asyncio.run(run())
 
 
 def test_dedicated_bookmark_declares_slack_link_type():

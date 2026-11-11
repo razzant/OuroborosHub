@@ -65,9 +65,32 @@ resending. Other cases cover cancellation, migration, stale leases and known
 no-effect retries. Local argument refusals and unreadable/empty upload input
 exercise the real client and worker: zero provider requests, a failed receipt,
 and no retry after restart or duplicate enqueue. OSError and lost-response
-controls at generic dispatch and all three upload phases stay uncertain without
-resending. This establishes the bridge's attempt boundary, not Slack
-exactly-once delivery.
+controls at generic dispatch and at upload completion stay uncertain without
+resending; the same faults at upload slot allocation or the byte POST, where
+nothing is shared yet, retry once with a fresh slot. This establishes the
+bridge's attempt boundary, not Slack exactly-once delivery.
+
+`test_upload_completion.py` owns completion response loss, 429, connection failure
+and explicit refusal, including fresh slot identities, phase facts and Retry-After.
+`test_upload_recovery.py` sends `slack_file_upload` through the store, the
+outbound worker and the real client to a real local upload host
+(`slack_upload_host.py`). The host's small socket buffers and paced reads make
+the client wait on actual backpressure; the Web API is scripted and records
+each shared file. Cases cover 5 B, 300 KiB and 48 MiB byte for byte, a failure
+before completion at every phase (each retried on a fresh slot, at most three
+uploads), unknown completions that stay uncertain, explicit refusals, Place
+holds before and after a slot, failed checkpoints, cancellation, a child process
+killed mid-body, before the completion marker and after the share, and rows
+from 1.12.1. Two workers share one store whose clock runs 60 times faster: a
+6 MiB body at 2 MiB/s, a slow answer and a slow completion each outlast the
+lease while the second worker keeps claiming, and the file is shared once.
+With the first worker's lease extension disabled, the second takes over and the
+first never begins completion. `test_generic_completion_refusal.py` checks that
+`slack_api` refuses `files.completeUploadExternal` in every spelling, verb and
+effect, queued rows included, without a provider request, and that other
+methods are unchanged. The providers are synthetic: these cases establish the
+bridge's attempt and ownership boundaries, not Slack's behavior or the network
+cause of a field failure.
 
 Proactive initiation, explicit manual author continuation, Stop/Panic,
 cancellation during core reacquisition and a Host process restart remain core

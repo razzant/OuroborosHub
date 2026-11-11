@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.12.1
+version: 1.12.2
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -80,6 +80,7 @@ tools:
     target: channel_id
     conversation: channel_id
     thread: thread_ts
+    text: initial_comment
     description: Stage immutable bytes and queue Slack External Upload API delivery.
   - name: slack_file_download
     effect: read
@@ -137,7 +138,7 @@ tools:
       conversation: body.channel
       thread: body.thread_ts
       text: body.text
-    description: Call an actual Slack Web API method with a model-selected read or durable write effect.
+    description: Call an actual Slack Web API method with a model-selected read or durable write effect; files.completeUploadExternal is refused, share files with slack_file_upload.
   - name: slack_receipt
     effect: read
     target: []
@@ -297,14 +298,60 @@ than followed, so the credential is never replayed to another origin and a
 login-page redirect is never staged as a file's bytes.
 
 Outbound `slack_file_upload` copies immutable bytes into the skill state
-directory at enqueue, then the companion runs Slack's current three-phase
-External Upload API (`files.getUploadURLExternal`, raw bytes POST,
-`files.completeUploadExternal`). A lost response after bytes or completion is
-recorded as `uncertain` and the upload is not started again; a completion
-request that never reached Slack (connection failure) retries the whole upload.
-The bridge never claims a provider-side exactly-once mutation. Each staged copy
-gets its own random file name: `request_id` stays an opaque dedupe key, and a retry
-with the same ID keeps the first copy's bytes.
+directory at enqueue; the companion then runs Slack's three-phase External
+Upload API. One physical upload allocates a fresh slot
+(`files.getUploadURLExternal`), streams the staged bytes to that slot's upload
+URL and completes it with `files.completeUploadExternal`, the only call that
+shares the file. Slack discards a slot that is never completed. The body is
+read from one open descriptor in 256 KiB writes, with the descriptor's length
+as Content-Length; it is never chunked and never sent on to a redirect. The
+client's 30-second timeout applies per write rather than to the whole file;
+an individual chunk can still time out on a sufficiently slow link. Only HTTP 200 counts as accepted, and
+an `OK - N` answer naming another length is refused before completion.
+
+Until completion starts nothing has been shared. A failure that may change on
+retry (a lost or malformed answer, a transport error, HTTP 408, 429 or 5xx,
+`internal_error`, a length mismatch) is retried automatically with a new slot,
+after any `Retry-After`. One request makes at most three physical uploads. A
+claim that stopped before any request counts as one, and so does a Place hold
+after a slot was allocated; a hold before the slot does not. An explicit
+refusal (for example `invalid_auth`, HTTP 413 or a redirect) is final, as is a
+staged copy that cannot be read. Immediately before completion, after a last
+Place check, the outbox marks the send. From then on an unknown outcome (answer
+lost, HTTP 408/5xx, malformed, `internal_error` or `fatal_error`, cancellation,
+a crash) stays `uncertain` and is never repeated. Only 429 or a request that
+never left (connection failure) shows that completion did not apply; those
+retry with a new slot. An old slot is never resumed: its URL is not posted to
+again and its unknown bytes are never completed.
+
+While an upload runs, its claim's 120-second lease is extended every 30
+seconds, through the body, a slow answer and completion, and the extension ends
+with the upload. A worker whose claim expired or was replaced before the
+completion marker stops there, without completing, writing to the row or
+removing the staged copy. A claim lost after the marker (a process stalled past
+its lease) does not interrupt the started completion: lease recovery settles
+the row `uncertain`, and the worker only logs its late result.
+
+`slack_receipt` lists each physical upload in `upload_attempts`: the attempt
+number, the provider `file_id` once Slack returned one, the last phase entered,
+`declared_length`, `bytes_sent` (handed to HTTP, an upper bound of what Slack
+received), `acknowledged_length`, the byte outcome (`not_sent`, `sending`,
+`accepted`, `rejected`, `length_mismatch`, `unknown`), the completion outcome
+(`not_sent`, `started`, `completed`, `refused`, `not_applied`, `unknown`), the
+attempt's outcome and a failure class with its provider error code. They are
+observations, recorded before each next phase but not atomically with provider
+answers: a delivered receipt can follow an attempt whose bytes are unknown, and
+an attempt cut short by a crash shows its last recorded phase. Upload URLs and
+response bodies are neither stored nor logged; the request log masks any URL
+that is not a Slack Web API method. A recorded file can be inspected with
+`slack_api` (`effect="read"`, `files.info`). The staged copy is removed when its
+current worker records a terminal state, and the caller's original file is never
+touched. A crash-recovered uncertain row can retain its staged copy for inspection.
+Completion without a requested channel keeps the file private at Slack;
+`completed` describes that API outcome, not evidence of sharing into a conversation.
+Each staged copy gets its own random file name: `request_id` stays an opaque
+dedupe key, and a retry with the same ID keeps the first copy's bytes. The
+bridge never claims a provider-side exactly-once mutation.
 
 `slack_list_conversations` and `slack_list_users` remain one-page low-level tools:
 follow `next_cursor` yourself and treat `complete=false` as incomplete.
@@ -660,6 +707,16 @@ new speech. The method/path validator
 rejects full URLs, traversal and malformed method names while leaving the
 provider's own scopes, method validation and errors authoritative.
 
+`slack_api` refuses exactly one method, `files.completeUploadExternal`, for every
+effect, HTTP verb and spelling of its name, before any request or queue entry,
+and also when an earlier version had queued it (`failed`, `uncertain: false`).
+That method shares uploaded files, with a comment, into conversations, and the
+generic tool did not declare such a share as a message. Since 1.12.2 two things
+are no longer possible: completing an upload that was started outside
+`slack_file_upload`, and sharing several such files with one call. Files are
+shared with `slack_file_upload`; slot allocation (`files.getUploadURLExternal`)
+and every other method remain available.
+
 Profile, conversation, history and thread reads use GET query parameters because
 Slack's read methods do not reliably consume JSON POST arguments; message sends
 continue to use POST JSON.
@@ -695,8 +752,9 @@ References: [conversations.list](https://docs.slack.dev/reference/methods/conver
   references. Output polling therefore never occupies an input worker, with
   any Host version.
 - Retryable refusals and connection failures before sending have at most five
-  attempts. An ambiguous write result ends `uncertain` on its first occurrence;
-  failed and uncertain items no longer block later messages in the same lane.
+  attempts; a file upload makes at most three physical uploads. An ambiguous
+  write result ends `uncertain` on its first occurrence; failed and uncertain
+  items no longer block later messages in the same lane.
 - Outgoing writes keep queue order within one lane. For sends and most mutations,
   a lane is one thread, or a conversation's top level. For reaction writes, it is
   the reacted message. A held or in-flight item holds back only its own lane.
@@ -725,7 +783,9 @@ form does not show, stores the channel IDs as a normalized list and refuses an
 invalid list with HTTP 400, leaving the file unchanged.
 
 Delivery is durable and retries are bounded. Immediately before a provider
-write, the outbox persists an attempt marker under its current lease. A lost
+write, the outbox persists an attempt marker under its current lease. For a
+file upload that write is the completion: slot and bytes precede the marker
+because they share nothing (see above). A lost
 response, HTTP 408/5xx, malformed response or ambiguous Slack internal error
 ends that item `uncertain` immediately. Cancellation after the marker does the
 same; an expired marked lease is recovered as uncertain, never as permission
@@ -737,7 +797,10 @@ If the client rejects mutation arguments locally, or cannot obtain nonempty
 bytes from a staged upload before any provider request, the receipt ends `failed`
 with `uncertain: false`. No provider request was sent, and the same request ID
 is not automatically retried. This applies only to those local refusals;
-an unclassified error after dispatch remains `uncertain`.
+an unclassified error after dispatch remains `uncertain`. Every outbox write
+under a claim checks that claim's token. A write from a claim that was replaced
+or recovered raises a typed lease loss: that attempt ends without another write,
+and the worker goes on with other rows.
 
 On upgrade, pre-marker leased rows are treated conservatively as started.
 Historical pending retries retain their queued identity; the new bridge cannot

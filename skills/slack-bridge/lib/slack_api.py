@@ -1,20 +1,71 @@
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import re
+import stat
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, AsyncIterator, Mapping, Sequence
 from urllib.parse import urlsplit
 
 import httpx
+
+
+class _MaskTransferUrls(logging.Filter):
+    """httpx logs every request URL at INFO, and an upload URL is a bearer capability.
+
+    A Slack Web API method URL stays readable; any other URL keeps only its scheme and host.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                f"{arg.scheme}://{arg.host}/[redacted]"
+                if isinstance(arg, httpx.URL) and not (arg.host == "slack.com" and arg.path.startswith("/api/"))
+                else arg
+                for arg in record.args
+            )
+        return True
+
+
+logging.getLogger("httpx").addFilter(_MaskTransferUrls())
 
 
 class SlackConfigurationError(RuntimeError):
     pass
 
 
+class SlackMethodReserved(SlackConfigurationError):
+    """A local refusal before any request: this method is made only by a dedicated tool."""
+
+    error = "reserved_for_slack_file_upload"
+
+
+# files.completeUploadExternal shares uploaded files, with an optional comment, into
+# conversations. Through slack_api that publication bypassed the message declaration
+# slack_file_upload carries. The name is compared case-insensitively so that no spelling of
+# it gets through; every other method, upload slot allocation included, stays available.
+_RESERVED_GENERIC_METHODS = frozenset({"files.completeuploadexternal"})
+
+
+def refuse_reserved_method(endpoint: str) -> None:
+    """Refuse a generic call to a method only a dedicated tool may make."""
+    if str(endpoint or "").lower() in _RESERVED_GENERIC_METHODS:
+        raise SlackMethodReserved(
+            "files.completeUploadExternal is not available through slack_api. Share a file "
+            "with slack_file_upload, which runs and records its own upload, and read that "
+            "upload's outcome with slack_receipt."
+        )
+
+
 TEXT_FORMATS = ("markdown", "mrkdwn", "plain")
+# Bytes read from the staged file per write. The client's 30-second write timeout
+# applies to each such write, so it bounds a stalled socket, not the whole file.
+UPLOAD_CHUNK_BYTES = 256 * 1024
+# The upload host answers an accepted body "OK - <bytes received>"; anything else
+# in a 200 answer is not a length statement.
+_UPLOAD_ACK = re.compile(r"OK\s*-\s*(\d+)")
 
 # The bot credential is attached to private-file reads, so the set of hosts that
 # may receive it is an exact allowlist, not "any HTTPS URL the payload named".
@@ -85,6 +136,80 @@ def mutation_may_have_applied(error: BaseException) -> bool:
         "invalid_json", "invalid_response", "unknown_error", "fatal_error",
         "internal_error", "request_timeout", "service_unavailable",
     }
+
+
+class UploadInputError(SlackConfigurationError):
+    """The staged bytes could not be read as opened; raised by our own reads only."""
+
+
+class UploadInput:
+    """One staged file, opened once for one upload attempt.
+
+    Its length is the open descriptor's (``fstat``): the same number is declared to
+    ``files.getUploadURLExternal`` and as the byte POST's Content-Length, and every
+    byte sent is read from this descriptor in bounded chunks. Opening, sizing and
+    reading the first chunk precede any provider request, so an absent, empty or
+    unreadable file is a local refusal. A read that fails later, or a file that
+    shrank, ends the attempt the same way after its slot was allocated.
+    """
+
+    def __init__(self, path: pathlib.Path | str, *, chunk_bytes: int = UPLOAD_CHUNK_BYTES) -> None:
+        self.chunk_bytes = max(1, int(chunk_bytes))
+        self.sent = 0
+        try:
+            self._file = open(path, "rb", buffering=0)
+        except OSError as exc:
+            raise SlackConfigurationError(f"could not read upload input: {exc}") from exc
+        try:
+            try:
+                info = os.fstat(self._file.fileno())
+            except OSError as exc:
+                raise SlackConfigurationError(f"could not read upload input: {exc}") from exc
+            if not stat.S_ISREG(info.st_mode):
+                raise SlackConfigurationError("could not read upload input: not a regular file")
+            self.length = int(info.st_size)
+            if self.length <= 0:
+                raise SlackConfigurationError("file must not be empty")
+            self._read(min(self.length, self.chunk_bytes))
+        except BaseException:
+            self.close()
+            raise
+
+    def _read(self, size: int) -> bytes:
+        try:
+            return self._file.read(size) or b""
+        except OSError as exc:
+            raise UploadInputError(f"could not read upload input: {exc}") from exc
+
+    async def chunks(self) -> AsyncIterator[bytes]:
+        """Exactly ``length`` bytes from the descriptor's start; ``sent`` counts those handed to HTTP."""
+        self.sent = 0
+        try:
+            self._file.seek(0)
+        except OSError as exc:
+            raise UploadInputError(f"could not read upload input: {exc}") from exc
+        while self.sent < self.length:
+            chunk = self._read(min(self.chunk_bytes, self.length - self.sent))
+            if not chunk:
+                raise UploadInputError("upload input ended before its declared length")
+            self.sent += len(chunk)
+            yield chunk
+
+    def close(self) -> None:
+        self._file.close()
+
+    def __enter__(self) -> "UploadInput":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+
+def _retry_after(response: httpx.Response) -> float:
+    try:
+        return float(response.headers.get("retry-after") or 0)
+    except ValueError:
+        return 0.0
 
 
 @dataclass(frozen=True)
@@ -296,11 +421,7 @@ class SlackClient:
             headers=headers,
             **arguments,
         )
-        retry_after = 0.0
-        try:
-            retry_after = float(response.headers.get("retry-after") or 0)
-        except ValueError:
-            retry_after = 0.0
+        retry_after = _retry_after(response)
         if response.status_code != 200:
             try:
                 details = response.json()
@@ -354,6 +475,8 @@ class SlackClient:
                               body: Mapping[str, Any] | None = None,
                               effect: str = "read") -> dict[str, Any]:
         selected, endpoint = self.normalize_method_path(method, path)
+        # Also refuses a row an earlier version queued, before any request.
+        refuse_reserved_method(endpoint)
         if effect not in {"read", "write"}:
             raise SlackConfigurationError("effect must be read or write")
         payload = dict(params or {}) if selected == "GET" else dict(body or {})
@@ -648,44 +771,65 @@ class SlackClient:
         )
         return staged[0]
 
-    async def upload_file(self, *, path: pathlib.Path, filename: str, title: str = "",
-                          channel: str = "", thread_ts: str = "", initial_comment: str = "", before_send=None) -> dict[str, Any]:
-        """Upload immutable bytes through Slack's current External Upload API."""
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            # This read precedes every provider request. Do not classify an
-            # OSError from any later upload phase as a local refusal.
-            raise SlackConfigurationError(f"could not read upload input: {exc}") from exc
-        if not data:
-            raise SlackConfigurationError("file must not be empty")
-        if before_send:
-            await before_send()
-        request = await self._post_form("files.getUploadURLExternal", {
-            "filename": str(filename), "length": str(len(data)),
+    # Slack's External Upload API in its three phases
+    # (https://docs.slack.dev/messaging/working-with-files/). The outbound worker runs
+    # them itself so that it can record each phase and keep its claim between them.
+
+    async def allocate_upload(self, *, filename: str, length: int) -> tuple[str, str]:
+        """One fresh slot from files.getUploadURLExternal: ``(file_id, upload_url)``.
+
+        Allocation shares nothing; Slack discards a slot that is never completed.
+        """
+        response = await self._post_form("files.getUploadURLExternal", {
+            "filename": str(filename), "length": str(int(length)),
         }, token=self.bot_token)
-        upload_url = str(request.get("upload_url") or "").strip()
-        file_id = str(request.get("file_id") or "").strip()
+        upload_url = str(response.get("upload_url") or "").strip()
+        file_id = str(response.get("file_id") or "").strip()
         if not upload_url or not file_id:
-            raise SlackApiError("missing_upload_url", details=request)
-        if before_send:
-            await before_send()
-        try:
-            response = await self._http.post(upload_url, content=data, headers={"Content-Type": "application/octet-stream"})
-        except (httpx.HTTPError, TimeoutError) as exc:
-            raise SlackMutationUncertain("upload_bytes_transport_uncertain") from exc
-        if response.status_code < 200 or response.status_code >= 300:
-            raise SlackApiError(f"upload_bytes_http_{response.status_code}", status_code=response.status_code)
-        payload: dict[str, Any] = {"files": [{"id": file_id, "title": str(title or filename)}]}
+            # The upload URL is a bearer capability: keep only the identity.
+            raise SlackApiError("missing_upload_url", details={"file_id": file_id} if file_id else {})
+        return file_id, upload_url
+
+    async def send_upload_bytes(self, upload_url: str, source: UploadInput) -> int | None:
+        """POST the staged bytes to one slot; return the length Slack acknowledged, if it stated one.
+
+        The body streams from the open descriptor with an explicit Content-Length and
+        no Transfer-Encoding, and a redirect is never followed. Only HTTP 200 counts
+        as accepted. An ``OK - N`` answer whose N is not the declared length is
+        refused here, before completion; another 200 body is not a length statement.
+        """
+        response = await self._http.post(
+            upload_url,
+            content=source.chunks(),
+            headers={"Content-Type": "application/octet-stream", "Content-Length": str(source.length)},
+            follow_redirects=False,
+        )
+        status = response.status_code
+        if status != 200:
+            raise SlackApiError(f"upload_bytes_http_{status}", status_code=status,
+                                retry_after=_retry_after(response))
+        body = response.content
+        match = _UPLOAD_ACK.fullmatch(body.decode("ascii", "replace").strip()) if len(body) <= 64 else None
+        acknowledged = int(match.group(1)) if match else None
+        if acknowledged is not None and acknowledged != source.length:
+            raise SlackApiError("upload_bytes_length_mismatch", status_code=status,
+                                details={"acknowledged_length": acknowledged})
+        return acknowledged
+
+    async def complete_upload(self, *, file_id: str, title: str, channel: str = "", thread_ts: str = "",
+                              initial_comment: str = "") -> dict[str, Any]:
+        """files.completeUploadExternal for one slot: the call that shares the file.
+
+        Slack documents it as callable once per slot; an unknown answer may already
+        have shared the file.
+        """
+        payload: dict[str, Any] = {"files": [{"id": str(file_id), "title": str(title)}]}
         if channel:
             payload["channel_id"] = str(channel)
         if thread_ts:
             payload["thread_ts"] = str(thread_ts)
         if initial_comment:
             payload["initial_comment"] = str(initial_comment)
-        # Completion shares the file; an unknown result must not start a fresh upload.
-        if before_send:
-            await before_send()
         return await self._mutate("files.completeUploadExternal", payload)
 
     async def resolve_target(self, target: str) -> str:

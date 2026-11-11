@@ -24,6 +24,7 @@ from .lib.slack_api import (
     TEXT_FORMATS,
     chunk_message,
     normalize_text_format,
+    refuse_reserved_method,
 )
 from .lib.store import BridgeStore
 from .lib.read_tools import register_read_tools
@@ -258,6 +259,8 @@ def _make_generic_api(api: Any):
     ) -> dict[str, Any]:
         try:
             selected, endpoint = SlackClient.normalize_method_path(method, path)
+            # Whatever effect or HTTP verb the caller names: nothing is read or queued.
+            refuse_reserved_method(endpoint)
             if effect not in {"read", "write"}:
                 raise SlackConfigurationError("effect must be read or write")
             if result_kind not in {"auto", "operation", "message"}:
@@ -321,7 +324,8 @@ def _register_mutation_tools(api: Any) -> None:
             "Call one actual Slack Web API method with the existing bot credential. "
             "Set effect=read for a provider read; effect=write uses the durable mutation outbox "
             "regardless of the HTTP GET/POST transport method. "
-            "Writes retain provider receipts or uncertainty. Never include token in params/body."
+            "Writes retain provider receipts or uncertainty. Never include token in params/body. "
+            "files.completeUploadExternal is refused here; share files with slack_file_upload."
         ),
         schema={
             "type": "object", "additionalProperties": False,

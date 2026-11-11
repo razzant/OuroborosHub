@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.12.2
+
+- File uploads now recover by themselves before anything is shared. Each physical upload takes
+  a fresh slot from `files.getUploadURLExternal`, streams the staged copy in 256 KiB writes with
+  its length declared, and ends with `files.completeUploadExternal`, the one call that shares the
+  file. A lost or malformed answer, a transport error, HTTP 408, 429 or 5xx, or a length mismatch
+  before completion is retried with a new slot, at most three uploads in all; an explicit refusal
+  or an unreadable staged copy is final. Once completion has started, an unknown outcome stays
+  `uncertain` and is never repeated, and only 429 or a request that never left retries. In 1.12.1
+  a failed byte transfer was recorded `uncertain` without its file ID and the file was never
+  sent: a 42 MiB upload ended that way ([Hub #301](https://github.com/razzant/OuroborosHub/issues/301));
+  its network cause is not established.
+- The byte transfer used a single write and could exceed the client's 30-second write timeout
+  on a healthy slow link once socket buffers filled. Each 256 KiB write now has its own
+  timeout. Only HTTP 200 counts as accepted, an `OK - N` answer naming another length is
+  refused before completion, and a redirect from the upload host is not followed.
+- A running upload keeps its claim: the 120-second lease is extended every 30 seconds through the
+  body, a slow answer and completion. Before, a second worker could settle the row `uncertain`
+  while the first went on to share the file, and the first worker's next write raised and ended
+  its loop ([Hub #123](https://github.com/razzant/OuroborosHub/issues/123) describes the class).
+  A worker whose claim lapsed or was replaced before completion now stops there and ends without
+  writing; every outbox write checks its claim and raises a typed `OutboxLeaseLost`.
+- `slack_receipt` lists each physical upload in `upload_attempts`, a new outbox column: the
+  provider `file_id`, phase, declared and sent lengths, byte and completion outcomes and a failure
+  class. An identity from an incomplete slot response is kept too; `completed` does not claim a
+  conversation share when no channel was requested. Upload URLs are not stored, and the request log now masks every URL that is not a Slack
+  Web API method, so an upload URL no longer reaches the companion log.
+- `slack_api` refuses `files.completeUploadExternal` for any effect, verb or spelling, including a
+  row an earlier version queued; files are shared with `slack_file_upload`. Completing an upload
+  started outside the bridge, or sharing several files in one call, is no longer possible. Slot
+  allocation and every other method are unchanged. The dedicated tool explicitly identifies
+  `initial_comment` as its message text for the Host.
+- Rows from earlier versions keep their outcomes: an `uncertain` upload stays so, an upload that
+  1.12.1 marked before its slot is recovered as `uncertain`, and a pending one continues under the
+  new rules.
+
 ## 1.12.1
 
 - `slack_api` declares which of its calls deliver words: the Slack Web API methods that post

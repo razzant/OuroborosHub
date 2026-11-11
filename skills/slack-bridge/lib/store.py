@@ -89,6 +89,44 @@ class InboxLeaseLost(RuntimeError):
     """The inbound attempt no longer owns its row; do not write with its token."""
 
 
+class OutboxLeaseLost(RuntimeError):
+    """The outbound attempt no longer owns its row (claim expired or replaced); do not write with its token."""
+
+
+def _merged_upload_attempts(raw: str, index: int | None, facts: Mapping[str, Any],
+                            now: float) -> tuple[str, int]:
+    """The row's upload facts with one attempt's entry added or replaced.
+
+    Only the claim that appended an entry rewrites it, by its index; every other
+    entry, an earlier attempt's unknown stage included, stays exactly as written.
+    """
+    try:
+        attempts = json.loads(raw) if raw else []
+    except json.JSONDecodeError:
+        attempts = [{"unreadable_facts": raw}]
+    if not isinstance(attempts, list):
+        attempts = [{"unreadable_facts": raw}]
+    entry = {**facts, "recorded_at": _iso(now)}
+    if index is not None and 0 <= index < len(attempts):
+        previous = attempts[index]
+        entry["started_at"] = previous.get("started_at", entry["recorded_at"]) if isinstance(previous, dict) \
+            else entry["recorded_at"]
+        attempts[index] = entry
+    else:
+        entry["started_at"] = entry["recorded_at"]
+        attempts.append(entry)
+        index = len(attempts) - 1
+    return json.dumps(attempts, ensure_ascii=False, separators=(",", ":")), index
+
+
+def _upload_attempts(raw: str) -> list[Any]:
+    try:
+        value = json.loads(raw) if raw else []
+    except json.JSONDecodeError:
+        return [{"unreadable_facts": raw}]
+    return value if isinstance(value, list) else [{"unreadable_facts": raw}]
+
+
 @dataclass(frozen=True)
 class InboxItem:
     row_id: int
@@ -441,6 +479,9 @@ class BridgeStore:
                 ("result_json", "TEXT NOT NULL DEFAULT ''"),
                 ("output_ref", "TEXT NOT NULL DEFAULT ''"),
                 ("send_started", "INTEGER NOT NULL DEFAULT 0"),
+                # Per-attempt facts an upload observed (slot identity, phase, lengths, byte and
+                # completion outcomes). Observations for receipts, never permission to resend.
+                ("upload_attempts_json", "TEXT NOT NULL DEFAULT ''"),
             ):
                 if name not in outbox_columns:
                     db.execute(f"ALTER TABLE outbox ADD COLUMN {name} {declaration}")
@@ -1014,25 +1055,71 @@ class BridgeStore:
             output_ref=str(claimed["output_ref"] or ""),
         )
 
-    def begin_send(self, item: OutboxItem, *, uncertain_report: Mapping[str, Any] | None = None) -> None:
+    def _outbox_write(self, row_id: int, lease_token: str, assignments: Sequence[str], values: Sequence[Any], *,
+                      upload_attempt: tuple[int | None, Mapping[str, Any]] | None = None,
+                      unexpired: bool = False, unstarted: bool = False,
+                      refusal: str = "Slack outbox lease no longer belongs to this worker") -> int | None:
+        """One compare-and-set write under this claim's token, or ``OutboxLeaseLost``.
+
+        ``unexpired`` also refuses a claim whose lease has run out even if no other
+        claim has replaced it yet. An ``upload_attempt`` is ``(index, facts)``: it is
+        merged into the row's upload facts in the same transaction, and the entry's
+        index is returned (a new entry when ``index`` is ``None``).
+        """
+        now = time.time()
+        where = "id=? AND state='leased' AND lease_token=?"
+        keys: tuple[Any, ...] = (row_id, lease_token)
+        if unexpired:
+            where, keys = where + " AND lease_until>?", (*keys, now)
+        if unstarted:
+            where += " AND send_started=0"
+        assignments, values, index = list(assignments), list(values), None
+        with self._connect() as db:
+            if upload_attempt is not None:
+                # Read and rewrite the facts under one write lock, so no other claim interleaves.
+                db.execute("BEGIN IMMEDIATE")
+                row = db.execute(f"SELECT upload_attempts_json FROM outbox WHERE {where}", keys).fetchone()
+                if row is None:
+                    raise OutboxLeaseLost(refusal)
+                merged, index = _merged_upload_attempts(str(row[0] or ""), upload_attempt[0], upload_attempt[1], now)
+                assignments.append("upload_attempts_json=?")
+                values.append(merged)
+            updated = db.execute(f"UPDATE outbox SET {','.join([*assignments, 'updated_at=?'])} WHERE {where}",
+                                 (*values, now, *keys))
+            if updated.rowcount != 1:
+                raise OutboxLeaseLost(refusal)
+        return index
+
+    def begin_send(self, item: OutboxItem, *, uncertain_report: Mapping[str, Any] | None = None,
+                   upload_attempt: tuple[int | None, Mapping[str, Any]] | None = None) -> None:
         """Durably mark one provider attempt before dispatch, under its live lease.
 
         The prepared uncertainty report is withheld while the request is live;
         crash recovery can publish it with the original identity and format.
-        A mutation that reports supplies its own.
+        A mutation that reports supplies its own. An upload marks only its
+        completion, the one call that shares, with that attempt's facts.
         """
-        now = time.time()
         report = item.delivery_report("uncertain", error="send_result_unrecorded") if item.kind == "text" else uncertain_report
-        with self._connect() as db:
-            changed = db.execute(
-                """UPDATE outbox SET send_started=1,provider_account_id=?,updated_at=?,
-                       report_payload_json=?,report_state=''
-                   WHERE id=? AND state='leased' AND lease_token=? AND lease_until>? AND send_started=0""",
-                (item.provider_account_id, now, json.dumps(report, ensure_ascii=False) if report else "",
-                 item.row_id, item.lease_token, now),
-            )
-            if changed.rowcount != 1:
-                raise RuntimeError("Slack send requires an unexpired, unstarted outbox lease")
+        self._outbox_write(
+            item.row_id, item.lease_token,
+            ("send_started=1", "provider_account_id=?", "report_payload_json=?", "report_state=''"),
+            (item.provider_account_id, json.dumps(report, ensure_ascii=False) if report else ""),
+            upload_attempt=upload_attempt, unexpired=True, unstarted=True,
+            refusal="Slack send requires an unexpired, unstarted outbox lease",
+        )
+
+    def renew_outbox_lease(self, item: OutboxItem, *, lease_seconds: float) -> None:
+        """Extend this claim's lease while its attempt runs; an expired or replaced claim is refused."""
+        self._outbox_write(item.row_id, item.lease_token, ("lease_until=?",), (time.time() + lease_seconds,),
+                           unexpired=True)
+
+    def record_upload_attempt(self, item: OutboxItem, index: int | None, facts: Mapping[str, Any]) -> int:
+        """Persist one upload attempt's facts under its unexpired claim; returns the entry's index.
+
+        Before each provider phase this is also the claim's ownership check.
+        """
+        return self._outbox_write(item.row_id, item.lease_token, (), (),
+                                  upload_attempt=(index, facts), unexpired=True) or 0
 
     def set_resolved_target(self, item: OutboxItem, channel: str, account: str) -> None:
         self._leased_update("outbox", item.row_id, item.lease_token,
@@ -1046,38 +1133,29 @@ class BridgeStore:
         provider_message_ts: str = "",
         report_payload: Mapping[str, Any] | None = None,
         result: Mapping[str, Any] | None = None,
+        upload_attempt: tuple[int | None, Mapping[str, Any]] | None = None,
     ) -> None:
-        now = time.time()
-        with self._connect() as db:
-            updated = db.execute(
-                """
-                UPDATE outbox
-                SET state='delivered', lease_token='', lease_until=0, send_started=0, last_error='',
-                    provider_message_ts=?, updated_at=?, report_payload_json=?,report_state=?,result_json=?
-                WHERE id=? AND state='leased' AND lease_token=?
-                """,
-                (str(provider_message_ts), now,
-                 json.dumps(report_payload, ensure_ascii=False) if report_payload else "",
-                 "pending" if report_payload else "", json.dumps(dict(result or {}), ensure_ascii=False), row_id, lease_token),
-            )
-            if updated.rowcount != 1:
-                raise RuntimeError(
-                    "Slack outbox lease no longer belongs to this worker"
-                )
+        self._outbox_write(
+            row_id, lease_token,
+            ("state='delivered'", "lease_token=''", "lease_until=0", "send_started=0", "last_error=''",
+             "provider_message_ts=?", "report_payload_json=?", "report_state=?", "result_json=?"),
+            (str(provider_message_ts), json.dumps(report_payload, ensure_ascii=False) if report_payload else "",
+             "pending" if report_payload else "", json.dumps(dict(result or {}), ensure_ascii=False)),
+            upload_attempt=upload_attempt,
+        )
 
     def fail_outbox(self, row_id: int, lease_token: str, error: str, *,
                     state: str = "failed", report_payload: Mapping[str, Any] | None = None,
-                    result: Mapping[str, Any] | None = None) -> None:
-        with self._connect() as db:
-            changed = db.execute(
-                """UPDATE outbox SET state=?,lease_token='',lease_until=0,send_started=0,last_error=?,updated_at=?,
-                       report_payload_json=?,report_state=?,result_json=? WHERE id=? AND state='leased' AND lease_token=?""",
-                (state, str(error)[:1000], time.time(),
-                 json.dumps(report_payload, ensure_ascii=False) if report_payload else "",
-                 "pending" if report_payload else "", json.dumps(dict(result or {}), ensure_ascii=False), row_id, lease_token),
-            )
-            if changed.rowcount != 1:
-                raise RuntimeError("Slack outbox lease no longer belongs to this worker")
+                    result: Mapping[str, Any] | None = None,
+                    upload_attempt: tuple[int | None, Mapping[str, Any]] | None = None) -> None:
+        self._outbox_write(
+            row_id, lease_token,
+            ("state=?", "lease_token=''", "lease_until=0", "send_started=0", "last_error=?",
+             "report_payload_json=?", "report_state=?", "result_json=?"),
+            (state, str(error)[:1000], json.dumps(report_payload, ensure_ascii=False) if report_payload else "",
+             "pending" if report_payload else "", json.dumps(dict(result or {}), ensure_ascii=False)),
+            upload_attempt=upload_attempt,
+        )
 
     def claim_report(self) -> dict[str, Any] | None:
         now, token = time.time(), uuid.uuid4().hex
@@ -1139,7 +1217,7 @@ class BridgeStore:
         with self._connect() as db:
             rows = db.execute(
                 """SELECT kind,operation,chunk_index,state,attempts,target,resolved_channel,
-                          provider_message_ts,result_json,last_error,report_state,report_error
+                          provider_message_ts,result_json,last_error,report_state,report_error,upload_attempts_json
                    FROM outbox WHERE request_id=? ORDER BY chunk_index""",
                 (str(request_id),),
             ).fetchall()
@@ -1152,7 +1230,10 @@ class BridgeStore:
                   "provider_message_ts": str(row["provider_message_ts"]),
                   "provider_result": json.loads(row["result_json"] or "{}"),
                   "error": str(row["last_error"]), "history_report_state": str(row["report_state"]),
-                  "history_report_error": str(row["report_error"])} for row in rows]
+                  "history_report_error": str(row["report_error"]),
+                  # Each physical upload's observed slot identity and phases; no upload URL is kept.
+                  **({"upload_attempts": _upload_attempts(str(row["upload_attempts_json"] or ""))}
+                     if row["operation"] == "upload_file" else {})} for row in rows]
         return {"request_id": str(request_id), "kind": str(rows[0]["kind"]),
                 "operation": str(rows[0]["operation"]), "parts": parts}
 
@@ -1163,36 +1244,31 @@ class BridgeStore:
         error: str,
         *,
         delay_seconds: float,
+        upload_attempt: tuple[int | None, Mapping[str, Any]] | None = None,
     ) -> None:
         """Retry only after the caller establishes no effect from this attempt."""
-        now = time.time()
-        with self._connect() as db:
-            updated = db.execute(
-                """
-                UPDATE outbox
-                SET state='pending', lease_token='', lease_until=0, available_at=?,
-                    last_error=?, updated_at=?,send_started=0,report_payload_json='',report_state=''
-                WHERE id=? AND state='leased' AND lease_token=?
-                """,
-                (
-                    now + max(0.0, delay_seconds),
-                    str(error)[:1000],
-                    now,
-                    row_id,
-                    lease_token,
-                ),
-            )
-            if updated.rowcount != 1:
-                raise RuntimeError(
-                    "Slack outbox lease no longer belongs to this worker"
-                )
+        self._outbox_write(
+            row_id, lease_token,
+            ("state='pending'", "lease_token=''", "lease_until=0", "available_at=?", "last_error=?",
+             "send_started=0", "report_payload_json=''", "report_state=''"),
+            (time.time() + max(0.0, delay_seconds), str(error)[:1000]),
+            upload_attempt=upload_attempt,
+        )
 
-    def hold_outbox(self, item: OutboxItem, reason: str) -> None:
-        """Keep custody and FIFO order without spending a provider attempt."""
-        self._leased_update("outbox", item.row_id, item.lease_token,
-                            "state='pending',lease_token='',lease_until=0,send_started=0,available_at=?,"
-                            "attempts=MAX(0,attempts-1),last_error=?",
-                            (time.time() + 5, reason))
+    def hold_outbox(self, item: OutboxItem, reason: str, *, spend_attempt: bool = False,
+                    upload_attempt: tuple[int | None, Mapping[str, Any]] | None = None) -> None:
+        """Keep custody and FIFO order; a hold before any provider effect spends no attempt.
+
+        ``spend_attempt`` keeps the attempt counted: an upload held after its slot was
+        allocated has used one of its physical uploads.
+        """
+        self._outbox_write(
+            item.row_id, item.lease_token,
+            ("state='pending'", "lease_token=''", "lease_until=0", "send_started=0", "available_at=?",
+             *(() if spend_attempt else ("attempts=MAX(0,attempts-1)",)), "last_error=?"),
+            (time.time() + 5, reason),
+            upload_attempt=upload_attempt,
+        )
 
     def _leased_update(
         self,
@@ -1210,7 +1286,7 @@ class BridgeStore:
                 (*values, now, row_id, lease_token),
             )
             if updated.rowcount != 1:
-                error_type = InboxLeaseLost if table == "inbox" else RuntimeError
+                error_type = InboxLeaseLost if table == "inbox" else OutboxLeaseLost
                 raise error_type(
                     f"Slack {table} lease no longer belongs to this worker"
                 )
@@ -1234,7 +1310,7 @@ class BridgeStore:
                 (state, str(error)[:1000], now, row_id, lease_token),
             )
             if updated.rowcount != 1:
-                error_type = InboxLeaseLost if table == "inbox" else RuntimeError
+                error_type = InboxLeaseLost if table == "inbox" else OutboxLeaseLost
                 raise error_type(
                     f"Slack {table} lease no longer belongs to this worker"
                 )
