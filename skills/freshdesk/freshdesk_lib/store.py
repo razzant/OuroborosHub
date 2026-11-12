@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS refs (ref TEXT PRIMARY KEY, source_event_id TEXT NOT 
 CREATE TABLE IF NOT EXISTS outputs (output_ref TEXT PRIMARY KEY, ticket_id TEXT NOT NULL, text TEXT NOT NULL,
     source_event_id TEXT NOT NULL DEFAULT '',
     state TEXT NOT NULL DEFAULT 'queued', request_id TEXT NOT NULL DEFAULT '', binding TEXT NOT NULL DEFAULT '',
-    detail TEXT NOT NULL DEFAULT '', due REAL NOT NULL DEFAULT 0);
+    detail TEXT NOT NULL DEFAULT '', due REAL NOT NULL DEFAULT 0, hold TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS contacts (id TEXT PRIMARY KEY, value TEXT NOT NULL, fetched REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS gaps (scope TEXT PRIMARY KEY, code TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '{}',
     at TEXT NOT NULL);
@@ -137,8 +137,10 @@ class Store:
         return None
 
     def finish(self, request_id: str, state: str, *, provider_id: str = "", result: dict | None = None,
-               ticket_id: str = "", report: bool = True) -> dict:
-        """Record an outcome. ``report``: words people read, reported to the host once per state."""
+               ticket_id: str = "", report: bool = True, own_key: str = "") -> dict:
+        """Record an outcome. ``report``: words people read, reported to the host once per state. ``own_key``: what
+        this call put in Freshdesk, never reported back as an arrival: a conversation entry id, or ``ticket:<id>``
+        for a ticket this connector opened."""
         assert state in FINAL_STATES, state
         with self.transaction() as db:
             db.execute("UPDATE journal SET state=?, provider_id=?, result=?, finished_at=?, "
@@ -146,10 +148,10 @@ class Store:
                        "WHERE request_id=?",
                        (state, str(provider_id or ""), dump(result or {}), now_iso(), str(ticket_id or ""),
                         str(ticket_id or ""), "pending" if report and state != "not_sent" else "none", request_id))
-            if provider_id and state in ("delivered", "accepted"):
+            if own_key and state in ("delivered", "accepted"):
                 row = db.execute("SELECT ticket_id FROM journal WHERE request_id=?", (request_id,)).fetchone()
                 db.execute("INSERT OR IGNORE INTO sent_entries(entry_id,ticket_id,request_id) VALUES(?,?,?)",
-                           (str(provider_id), row["ticket_id"] if row else "", request_id))
+                           (str(own_key), row["ticket_id"] if row else "", request_id))
         return self.journal(request_id)
 
     def release(self, request_id: str) -> None:
@@ -173,9 +175,6 @@ class Store:
 
     def own_entry(self, entry_id) -> bool:
         return self.one("SELECT 1 FROM sent_entries WHERE entry_id=?", (str(entry_id),)) is not None
-
-    def wrote_in(self, ticket_id) -> bool:
-        return self.one("SELECT 1 FROM sent_entries WHERE ticket_id=?", (str(ticket_id),)) is not None
 
     def pending_reports(self, limit: int = 20) -> list[sqlite3.Row]:
         return self.rows("SELECT * FROM journal WHERE report_state='pending' AND state IN "

@@ -7,7 +7,7 @@
     "Freshdesk"
   ],
   "description": "Freshdesk helpdesk tools and place: read and search tickets and the knowledge base, reply to customers and write notes, change fields by name, and hear new tickets, customer replies and teammates' notes.",
-  "digest": "659f5a127547b499d28c943328114b4453bfe132b0cf657f370e3a51b15a3ccc",
+  "digest": "43d5431ae3d4f686db07062bbe672514f5d45f1e47856f3eb54294524f9c3b31",
   "icon": "ui/icon.svg",
   "name": "freshdesk",
   "owner": "ouroboros-agent",

@@ -16,6 +16,7 @@ from .text import html_to_text
 
 PROVIDER = "freshdesk"
 NOTE = 2
+OUTBOUND_EMAIL = 10  # a ticket an agent opened by emailing a contact: its first words are the helpdesk's
 THREAD_CHAR_BOUND = 30_000
 WATCHED = (("status", "status", "Status"), ("priority", "priority", "Priority"), ("type", None, "Type"),
            ("group_id", "group", "Group"), ("responder_id", "agent", "Agent"), ("product_id", "product", "Product"),
@@ -23,10 +24,15 @@ WATCHED = (("status", "status", "Status"), ("priority", "priority", "Priority"),
 
 
 def parse_time(value: str) -> datetime | None:
+    """Freshdesk's time (documented as ``…Z`` UTC; older examples show offsets or fractions) in UTC, else None."""
+    text = str(value or "").strip()
+    if not text:
+        return None
     try:
-        return datetime.strptime(str(value or ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        moment = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text)
     except ValueError:
         return None
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
 
 
 def iso(value: str) -> str:
@@ -62,6 +68,8 @@ class Context:
         user = str(user_id or "")
         if not user:
             return {"platform": PROVIDER, "attribution": "unknown"}
+        if user == self.agent_id and incoming is not True:  # this agent, even when Freshdesk lists it nowhere (a collaborator)
+            return {"platform_actor_id": user, "display_name": self.agent.get("name") or self.agent_names.get(user) or "This agent"}
         if user in self.agent_names and incoming is not True:
             return {"platform_actor_id": user, "display_name": self.agent_names[user]}
         contact = self.contact(user) or {}
@@ -94,12 +102,24 @@ def describe_change(ctx: Context, before: dict, after: dict) -> list[str]:
 
 
 def _attachments(entry: dict) -> list[dict]:
-    return [{"name": a.get("name"), "mime_type": a.get("content_type"), "file_size": a.get("size"),
+    return [{"name": a.get("name"), "mime_type": a.get("content_type"), "file_size": a.get("file_size") or a.get("size"),
              "status": "available", "note": f"Read it with freshdesk_ticket stage_attachment_id={a.get('id')}."}
             for a in entry.get("attachments") or []]
 
 
-def _conversation(ctx: Context, ticket: dict, entries: list[dict]) -> dict:
+def _opener(ctx: Context, ticket: dict, own_ticket: bool) -> tuple[dict, str]:
+    """Who wrote the ticket's first words, as an event actor and a name for the thread: this agent for a ticket this
+    connector opened, the helpdesk (an agent Freshdesk does not name) for an outbound email, else the requester."""
+    if own_ticket:
+        name = ctx.agent.get("name") or "This agent"
+        return {"platform_actor_id": ctx.agent_id, "display_name": name}, name
+    if ticket.get("source") == OUTBOUND_EMAIL:
+        return {"platform": PROVIDER, "attribution": "unknown"}, "The helpdesk (outbound email)"
+    actor = ctx.actor(ticket.get("requester_id"), incoming=True)
+    return actor, actor.get("display_name") or ""
+
+
+def _conversation(ctx: Context, ticket: dict, entries: list[dict], opener: tuple[dict, str]) -> dict:
     requester = ctx.contact(str(ticket.get("requester_id") or "")) if ticket.get("requester_id") else {}
     messages, used, complete = [], 0, True
     for entry in reversed(entries):  # the newest first, so a bound keeps the most recent exchange
@@ -114,8 +134,8 @@ def _conversation(ctx: Context, ticket: dict, entries: list[dict]) -> dict:
                          "private": entry.get("private"), "text": text})
     messages.reverse()
     description = ticket.get("description_text") or html_to_text(ticket.get("description") or "")
-    opening = {"message_id": f"ticket:{ticket.get('id')}", "actor_id": str(ticket.get("requester_id") or ""),
-               "display_name": (requester or {}).get("name"), "sent_at": iso(ticket.get("created_at")),
+    opening = {"message_id": f"ticket:{ticket.get('id')}", "actor_id": str(opener[0].get("platform_actor_id") or ""),
+               "display_name": opener[1] or None, "sent_at": iso(ticket.get("created_at")),
                "text": f"{ticket.get('subject') or ''}\n\n{description}".strip()}
     history = {"status": "observed", "observed_at": datetime.now(timezone.utc).isoformat(),
                "data": {"messages": ([opening] if complete else []) + messages, "complete": complete}}
@@ -146,28 +166,33 @@ def ticket_events(ctx: Context, ticket: dict, previous: dict | None, entries: li
     """Events for one changed ticket.
 
     ``previous``: the stored snapshot (None on first sight); ``known``: entry id -> stored revision;
-    ``own_entries``: ids this connector sent (never reported back as arrivals).
+    ``own_entries``: what this connector put in Freshdesk (entry ids, ``ticket:<id>`` for tickets it opened), never
+    reported back as arrivals.
     """
     ticket_id = str(ticket.get("id"))
-    conversation = _conversation(ctx, ticket, entries)
+    own_ticket = f"ticket:{ticket_id}" in own_entries
+    opener = _opener(ctx, ticket, own_ticket)
+    conversation = _conversation(ctx, ticket, entries, opener)
     base = f"{PROVIDER}:{ctx.host}:{ticket_id}"
     events: list[dict] = []
     responder_is_me = str(ticket.get("responder_id") or "") == ctx.agent_id and bool(ctx.agent_id)
     first_sight = previous is None
     assigned_now = responder_is_me and (first_sight or str(previous.get("responder_id") or "") != ctx.agent_id)
-    pending_assigned = assigned_now
-    if first_sight and ctx.after_connection(ticket.get("created_at")):
+    pending_assigned = assigned_now and not (first_sight and own_ticket)  # opening it made it ours: not news
+    if first_sight and ctx.after_connection(ticket.get("created_at")) and not own_ticket:
         description = ticket.get("description_text") or html_to_text(ticket.get("description") or "")
         facts = ["any_message", "new_issue"] + (["assigned"] if pending_assigned else [])
         pending_assigned = False
-        events.append(_event(ctx, ticket, f"{base}:created", actor=ctx.actor(ticket.get("requester_id"), incoming=True),
+        events.append(_event(ctx, ticket, f"{base}:created", actor=opener[0],
                              text=f"{ticket.get('subject') or ''}\n\n{description}".strip(),
                              message={"message_id": f"ticket:{ticket_id}", "sent_at": iso(ticket.get("created_at")),
                                       "url": ticket_url(ctx.host, ticket_id), "source": ticket.get("source"),
-                                      "source_order": 0, "attachments": _attachments(ticket)},
+                                      "incoming": ticket.get("source") != OUTBOUND_EMAIL, "source_order": 0,
+                                      "attachments": _attachments(ticket)},
                              facts=facts, conversation=conversation))
-    wrote_before = False
-    for entry in sorted(entries, key=lambda e: (str(e.get("created_at") or ""), int(e.get("id") or 0))):
+    wrote_before = own_ticket
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    for entry in sorted(entries, key=lambda e: (parse_time(e.get("created_at")) or epoch, int(e.get("id") or 0))):
         entry_id = str(entry.get("id"))
         revision = str(entry.get("last_edited_at") or entry.get("updated_at") or entry.get("created_at") or "")
         author = str(entry.get("user_id") or "")

@@ -8,12 +8,14 @@ stays ``uncertain`` and is never sent again under that id: the mind reads the ti
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .client import NOT_SENT, RATE_LIMITED, UNKNOWN, FreshdeskError
+from .client import NOT_SENT, RATE_LIMITED, UNKNOWN, FreshdeskError, canonical_path
+from .events import parse_time
 from .host import HostUnavailable
 from .reads import ticket_url
 from .service import Service
@@ -70,6 +72,8 @@ def _form(body: dict) -> list:
             fields.extend((f"{key}[]", item) for item in value)
         elif isinstance(value, bool):
             fields.append((key, "true" if value else "false"))
+        elif isinstance(value, dict):
+            fields.append((key, json.dumps(value, ensure_ascii=False)))  # e.g. structured_body, as Freshdesk documents it
         else:
             fields.append((key, value))
     return fields
@@ -88,11 +92,15 @@ class Sends:
         self.service = service
 
     # -- the shared path ----------------------------------------------------------------------------------
-    def _gate(self, client, ticket_id) -> tuple[dict | None, str]:
-        """The place check immediately before an outward call: Silent or Paused holds it, no place lets it run.
-        Returns ``(refusal or None, place state)``."""
+    def _gate(self, client, ticket_id, *, require_place: bool = False) -> tuple[dict | None, str]:
+        """The place check immediately before an outward call: Silent or Paused holds it, no place lets a tool run
+        as an ordinary tool (``require_place``: an automatic post needs a connected place). Returns ``(refusal or
+        None, place state)``."""
         host = self.service.host
         if host is None:
+            if require_place:
+                return {"ok": False, "sent": False, "code": "place_unknown",
+                        "message": "No Ouroboros host to confirm the place; nothing was posted."}, "unknown"
             return None, "unchecked"
         ticket = str(ticket_id or "")
         try:
@@ -101,6 +109,9 @@ class Sends:
             return {"ok": False, "sent": False, "code": "place_unknown", "detail": exc.code,
                     "message": "Ouroboros could not confirm the Freshdesk place's state just before sending, so "
                                "nothing was sent. Try again shortly."}, "unknown"
+        if place["state"] == "unbound" and require_place:
+            return {"ok": False, "sent": False, "code": "place_not_connected",
+                    "message": "The Freshdesk place is no longer connected; nothing was posted."}, "unbound"
         if place["state"] in ("active", "unbound"):
             return None, place["state"]
         label = place.get("label") or "The Freshdesk place"
@@ -110,11 +121,18 @@ class Sends:
 
     def _deliver(self, ctx, *, tool: str, request_id, account_id, ticket_id, text: str, digest_args: dict, call,
                  readback=None, words: bool = True, success: str = "accepted", origin: str = "tool",
-                 gate_ticket=None, source_event_id: str = "") -> dict:
+                 gate_ticket=None, source_event_id: str = "", records: str = "entry", prepare=None,
+                 editing: bool = False) -> dict:
+        """``records``: what the answer's ``id`` is — ``entry`` (a reply, note or email on the ticket), ``ticket``
+        (a ticket this call opened) or ``none``; own entries and tickets are never reported back as arrivals.
+        ``prepare(client)``: reads the call needs, done before the place check so that check stays the last step
+        before the write; its refusal sends nothing."""
         request_id = _request_id(request_id)
         if not str(account_id or "").strip():
             raise FreshdeskError("account_id_required", "Give account_id: the helpdesk address this skill is "
                                  "connected to (freshdesk_status shows it).")
+        if ticket_id not in (None, "") and not str(ticket_id).strip().isdigit():
+            raise FreshdeskError("ticket_id_invalid", "ticket_id is a ticket number. Nothing was sent.")
         client = self.service.client()
         self.service.check_account(client, account_id)
         store = self.service.store()
@@ -131,7 +149,14 @@ class Sends:
                     return {"ok": False, "code": "in_flight", "message": "This call is still being sent or its "
                             "process ended mid-call; freshdesk_status shows its outcome.", "recorded": recorded}
                 return {"ok": recorded["state"] in ("delivered", "accepted"), "recorded": True, **recorded}
-            refusal, place_state = self._gate(client, gate_ticket if gate_ticket is not None else ticket_id)
+            if prepare is not None:
+                try:
+                    prepare(client)
+                except FreshdeskError as exc:  # a read failed or refused: nothing was written
+                    store.release(request_id)
+                    return {**exc.as_dict(), "sent": False, "request_id": request_id}
+            refusal, place_state = self._gate(client, gate_ticket if gate_ticket is not None else ticket_id,
+                                              require_place=origin == "automatic")
             if refusal:
                 store.release(request_id)
                 return {**refusal, "request_id": request_id}
@@ -147,12 +172,14 @@ class Sends:
                 candidates = []
                 if readback is not None:
                     try:
-                        candidates = [e for e in readback(client, agent, attempted) if not store.own_entry(e.get("id"))]
+                        candidates = [e for e in readback(client, agent, attempted)
+                                      if editing or not store.own_entry(e.get("id"))]  # an edit keeps the entry's id
                     except FreshdeskError:
                         candidates = []
                 if len(candidates) == 1:
                     found = candidates[0]
                     store.finish(request_id, success, provider_id=str(found.get("id") or ""), report=words,
+                                 own_key=str(found.get("id") or ""),
                                  result={"readback": True, "id": found.get("id"), "created_at": found.get("created_at")})
                     return {"ok": True, "state": success, "request_id": request_id, "entry_id": found.get("id"),
                             "note": "Freshdesk did not answer, but a readback found exactly one entry with this "
@@ -163,10 +190,23 @@ class Sends:
                         "candidates": [{"id": e.get("id"), "created_at": e.get("created_at")} for e in candidates],
                         "message": "Freshdesk may have applied this call but did not answer. Read the ticket before "
                                    "anything else; this request_id never sends again."}
+            except Exception as exc:  # a fault of this skill mid-call: whether Freshdesk got it is unknown
+                store.finish(request_id, "uncertain", result={"code": type(exc).__name__, "message": str(exc)[:300]},
+                             report=words)
+                return {"ok": False, "code": "uncertain", "request_id": request_id, "error": type(exc).__name__,
+                        "message": "This call failed inside the skill and may or may not have reached Freshdesk. Read "
+                                   "the ticket before anything else; this request_id never sends again."}
             data = response.data if isinstance(response.data, dict) else {}
             entry_id = data.get("id")
-            final_ticket = str(ticket_id or data.get("ticket_id") or (data.get("id") if tool == "freshdesk_email" else "") or "")
-            store.finish(request_id, success, provider_id=str(entry_id or ""), ticket_id=final_ticket, report=words,
+            if records == "ticket":  # the ticket's opening words: the thread names them ticket:<id>
+                final_ticket = str(entry_id or "")
+                own_key = provider_id = f"ticket:{entry_id}" if entry_id else ""
+            else:
+                final_ticket = str(ticket_id or data.get("ticket_id") or "")
+                own_key = str(entry_id or "") if records == "entry" else ""
+                provider_id = str(entry_id or "")
+            store.finish(request_id, success, provider_id=provider_id, ticket_id=final_ticket, report=words,
+                         own_key=own_key,
                          result={"status": response.status, "id": entry_id, "created_at": data.get("created_at")})
             self.service.note_limits(store, response.limits)
             out = {"ok": True, "state": success, "request_id": request_id, "id": entry_id}
@@ -181,22 +221,21 @@ class Sends:
     def _find_entry(client, ticket_id, agent, attempted, text, *, kind=None, private=None, attachments=0,
                     entry_id=None) -> list:
         """Readback candidates: entries of ``ticket_id`` by this agent, made after the attempt, of the same kind,
-        visibility and attachment count, with the same words. Only a single unclaimed candidate counts as proof."""
-        wanted = normalized(text)[:1000]
+        visibility and attachment count, with the same words, whole (a shared opening is no proof). Only a single
+        unclaimed candidate counts as proof."""
+        wanted = normalized(text)
         since = attempted - timedelta(minutes=5)  # tolerance for clock skew between this computer and Freshdesk
         found = []
         page = client.get(f"tickets/{int(ticket_id)}/conversations", {"per_page": 100})
         while True:
             for entry in page.data or []:
-                same_words = normalized(entry.get("body_text") or entry.get("body") or "")[:1000] == wanted
+                same_words = normalized(entry.get("body_text") or entry.get("body") or "") == wanted
                 if entry_id is not None:
                     if str(entry.get("id")) == str(entry_id) and same_words:
                         found.append(entry)
                     continue
-                created = entry.get("created_at") or ""
-                try:
-                    when = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-                except ValueError:
+                when = parse_time(entry.get("created_at"))
+                if when is None:
                     continue
                 if (str(entry.get("user_id")) == str(agent["id"]) and when >= since and same_words
                         and (kind is None or entry.get("source") == kind)
@@ -231,6 +270,7 @@ class Sends:
     def note(self, ctx=None, account_id: str = "", ticket_id=None, text: str = "", request_id: str = "",
              public: bool = False, notify=None, audience: str = "ticket", edit_note_id=None, html: bool = False,
              attachment_paths=None, origin: str = "tool", source_event_id: str = "") -> dict:
+        """``origin="automatic"``: a released output posted by the companion; it needs a connected place."""
         _need(ticket_id, "ticket_id")
         _need(text, "text")
         body_html = text if html else to_html(text)
@@ -251,10 +291,19 @@ class Sends:
                        "notify": notify, "edit": str(edit_note_id or ""),
                        "files": [(name, hashlib.sha256(data).hexdigest()) for _, name, data, _ in files]}
 
+        editing = edit_note_id not in (None, "")
+
+        def prepare(client):
+            note = self._note_of(client, ticket_id, edit_note_id)
+            if note is None:
+                raise FreshdeskError("note_not_in_ticket", f"Entry {edit_note_id} is not a note of ticket {ticket_id}.")
+            if bool(note.get("private")) == bool(public):  # an edit never changes who sees the note
+                shown, flag = ("private", "false") if note.get("private") else ("public", "true")
+                raise FreshdeskError("note_visibility_differs", f"Note {edit_note_id} is {shown} and an edit keeps "
+                                     f"that; pass public={flag} to edit it, or write a new note. Nothing was changed.")
+
         def call(client, agent):
-            if edit_note_id not in (None, ""):
-                if not self._belongs(client, ticket_id, edit_note_id):
-                    raise FreshdeskError("note_not_in_ticket", f"Entry {edit_note_id} is not a note of ticket {ticket_id}.")
+            if editing:
                 body = {"body": body_html}
                 if files:
                     return client.put(f"conversations/{int(edit_note_id)}", multipart=(_form(body), files))
@@ -263,14 +312,15 @@ class Sends:
                     "user_id": int(agent["id"]) if agent["id"].isdigit() else None}
             return self._post_words(client, f"tickets/{int(ticket_id)}/notes", body, files, text)
 
-        if edit_note_id not in (None, ""):
+        if editing:
             readback = lambda c, a, t: self._find_entry(c, ticket_id, a, t, text, entry_id=edit_note_id)  # noqa: E731
         else:
             readback = lambda c, a, t: self._find_entry(c, ticket_id, a, t, text, kind=2, private=not public,  # noqa: E731
                                                          attachments=len(files))
         return self._deliver(ctx, tool="freshdesk_note", request_id=request_id, account_id=account_id,
                              ticket_id=ticket_id, text=text, digest_args=digest_args, call=call, readback=readback,
-                             success="delivered", origin=origin, source_event_id=source_event_id)
+                             success="delivered", origin=origin, source_event_id=source_event_id,
+                             prepare=prepare if editing else None, editing=editing)
 
     @staticmethod
     def _agent_emails(client, notify) -> list:
@@ -284,13 +334,15 @@ class Sends:
         return emails
 
     @staticmethod
-    def _belongs(client, ticket_id, entry_id) -> bool:
+    def _note_of(client, ticket_id, entry_id) -> dict | None:
+        """The note ``entry_id`` of ticket ``ticket_id``, or None."""
         page = client.get(f"tickets/{int(ticket_id)}/conversations", {"per_page": 100})
         while True:
-            if any(str(e.get("id")) == str(entry_id) and e.get("source") == 2 for e in page.data or []):
-                return True
+            for entry in page.data or []:
+                if str(entry.get("id")) == str(entry_id) and entry.get("source") == 2:
+                    return entry
             if not page.next_url:
-                return False
+                return None
             page = client.next_page(page)
 
     @staticmethod
@@ -307,6 +359,8 @@ class Sends:
                 raise
         structured = {**{k: v for k, v in clean.items() if k != "body"},
                       "structured_body": {"body_contents": [{"type": "text", "data": {"content": text}}]}}
+        if files:
+            return client.post(path, multipart=(_form(structured), files))
         return client.post(path, structured)
 
     # -- freshdesk_email ----------------------------------------------------------------------------------
@@ -322,13 +376,26 @@ class Sends:
         elif ticket_id not in (None, ""):
             raise FreshdeskError("ticket_id_not_for_outbound", "op=outbound opens a new ticket: leave ticket_id out. "
                                  "The answer names the new ticket.")
-        if op in ("forward", "outbound") and not to_emails:
+        if op in ("forward", "reply_to_forward", "outbound") and not to_emails:
             raise FreshdeskError("to_emails_missing", f"op={op} needs to_emails.")
+        if op == "reply_to_forward" and (cc_emails or bcc_emails or from_email):
+            raise FreshdeskError("reply_to_forward_option_unsupported", "Freshdesk's reply to a forward takes only "
+                                 "to_emails; use op=forward to add cc or bcc. Nothing was sent.")
+        if op == "reply" and to_emails:  # Freshdesk would drop them and mail only the requester
+            raise FreshdeskError("to_emails_not_for_reply", "A reply goes to the ticket's requester; add others with "
+                                 "cc_emails or bcc_emails, or use op=forward. Nothing was sent.")
         if op == "outbound" and len(to_emails) != 1:
             raise FreshdeskError("to_emails_invalid", "An outbound email opens a ticket for one contact: give one "
                                  "address in to_emails and the rest in cc_emails.")
+        if op == "outbound" and (bcc_emails or from_email):
+            raise FreshdeskError("outbound_option_unsupported", "Freshdesk's outbound email takes no bcc_emails or "
+                                 "from_email: its sender is the mailbox email_config_id names. Nothing was sent.")
         if op == "outbound":
             _need(subject, "subject")
+            if email_config_id in (None, ""):
+                raise FreshdeskError("email_config_id_missing", "Freshdesk needs email_config_id, the mailbox that "
+                                     "sends it: freshdesk_ticket shows a ticket's email_config_id, and an administrator's "
+                                     "key lists them with freshdesk_get path=email_configs. Nothing was sent.")
         body_html = text if html else to_html(text)
         files = _files(attachment_paths)
         digest_args = {"op": op, "ticket": str(ticket_id or ""), "text": text, "html": bool(html), "to": to_emails,
@@ -351,11 +418,12 @@ class Sends:
             clean = {k: v for k, v in body.items() if v is not None}
             return client.post(path, multipart=(_form(clean), files)) if files else client.post(path, clean)
 
-        kind = {"reply": 0, "forward": 8, "reply_to_forward": 8}.get(op)
+        kind = {"reply": 0, "forward": 8}.get(op)  # a reply to a forward: Freshdesk's examples disagree on its kind
         readback = None if op == "outbound" else (lambda c, a, t: self._find_entry(
             c, ticket_id, a, t, text, kind=kind, private=False if op == "reply" else None, attachments=len(files)))
         return self._deliver(ctx, tool="freshdesk_email", request_id=request_id, account_id=account_id,
-                             ticket_id=ticket_id, text=text, digest_args=digest_args, call=call, readback=readback)
+                             ticket_id=ticket_id, text=text, digest_args=digest_args, call=call, readback=readback,
+                             records="ticket" if op == "outbound" else "entry")
 
     # -- freshdesk_update ---------------------------------------------------------------------------------
     def update(self, ctx=None, account_id: str = "", ticket_id=None, status=None, priority=None, type=None,
@@ -446,7 +514,7 @@ class Sends:
         method = str(method or "").upper()
         if method not in ("POST", "PUT", "DELETE"):
             raise FreshdeskError("method_invalid", "method is POST, PUT or DELETE; reads use freshdesk_get.")
-        clean_path = str(path or "").strip().removeprefix("/api/v2/").strip("/")
+        clean_path = canonical_path(path)  # the same spelling the client sends
         for methods, pattern, tool in SPEECH_ROUTES:
             if method in methods and pattern.match(clean_path):
                 raise FreshdeskError("words_need_typed_tool", (f"This call carries words to people; use {tool}."
@@ -466,7 +534,8 @@ class Sends:
         ticket_in_path = re.match(r"^tickets/(\d+)(?:/|$)", clean_path)
         result = self._deliver(ctx, tool="freshdesk_request", request_id=request_id, account_id=account_id,
                                ticket_id="", text="", digest_args=digest_args, call=call, words=False,
-                               success="delivered", gate_ticket=ticket_in_path.group(1) if ticket_in_path else "")
+                               success="delivered", gate_ticket=ticket_in_path.group(1) if ticket_in_path else "",
+                               records="ticket" if method == "POST" and clean_path == "tickets" else "none")
         if result.get("code") == "uncertain":
             result["message"] = ("Freshdesk may have applied this call but did not answer. Inspect the object with "
                                  "freshdesk_get before anything else; this request_id never repeats the call.")

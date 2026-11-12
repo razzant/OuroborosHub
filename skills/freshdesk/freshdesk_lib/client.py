@@ -27,6 +27,20 @@ HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.freshdesk\.com$")
 _NEXT_LINK = re.compile(r'<([^>]+)>\s*;\s*rel="?next"?', re.IGNORECASE)
 _PATH_RE = re.compile(r"^[A-Za-z0-9_\-/.]+$")
 
+
+def canonical_path(path: str) -> str:
+    """One spelling per endpoint (``tickets/1/reply``), so a refusal by path cannot be stepped around with ``//``,
+    ``./`` or ``.json``; anything else that is not a plain API path is refused."""
+    path = str(path or "").strip()
+    if path.startswith(API_PREFIX):
+        path = path[len(API_PREFIX):]
+    path = path.strip("/")
+    if path.endswith(".json"):
+        path = path[:-len(".json")]
+    if not path or not _PATH_RE.match(path) or any(part in ("", ".", "..") for part in path.split("/")):
+        raise FreshdeskError("path_invalid", f"Not a Freshdesk API path: {path!r}.")
+    return path
+
 # Whether Freshdesk may have applied a write when the call failed.
 NOT_SENT = "not_sent"          # refused before any effect (validation, permission, not found)
 RATE_LIMITED = "rate_limited"  # refused by the rate limit; nothing happened, retry after ``retry_after``
@@ -179,12 +193,7 @@ class Client:
 
     # -- URLs ---------------------------------------------------------------------------------------
     def url(self, path: str, params: dict | None = None) -> str:
-        path = (path or "").strip()
-        if path.startswith(API_PREFIX):
-            path = path[len(API_PREFIX):]
-        path = path.lstrip("/")
-        if not path or ".." in path or not _PATH_RE.match(path):
-            raise FreshdeskError("path_invalid", f"Not a Freshdesk API path: {path!r}.")
+        path = canonical_path(path)
         query = urllib.parse.urlencode(
             [(key, value) for key, value in (params or {}).items() if value is not None], doseq=True)
         return f"{self.origin}{API_PREFIX}{path}" + (f"?{query}" if query else "")

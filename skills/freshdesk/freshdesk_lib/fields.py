@@ -53,6 +53,13 @@ class FieldCatalog:
         self.by_type = {field.get("type"): field for field in self.fields if str(field.get("type", "")).startswith("default_")}
         self.custom = {field.get("name"): field for field in self.fields
                        if not field.get("default") and isinstance(field.get("name"), str)}
+        for field in list(self.custom.values()):  # a dependent field's lower levels are custom fields too
+            for level in field.get("nested_ticket_fields") or []:
+                if isinstance(level, dict) and isinstance(level.get("name"), str):
+                    self.custom.setdefault(level["name"], {
+                        "name": level["name"], "label": level.get("label"), "type": "nested_field_level",
+                        "level": level.get("level"), "parent": field.get("name"),
+                        "required_for_closure": bool(level.get("required_for_closure"))})
 
     @classmethod
     def load(cls, client) -> "FieldCatalog":
@@ -87,6 +94,8 @@ class FieldCatalog:
         for name, field in sorted(self.custom.items()):
             row = {"name": name, "label": field.get("label"), "type": field.get("type"),
                    "required_for_closure": bool(field.get("required_for_closure"))}
+            if field.get("parent"):
+                row.update(parent=field["parent"], level=field.get("level"))  # its choices depend on the parent's value
             choices = _choices(field)
             if choices:
                 row["choices"] = choices

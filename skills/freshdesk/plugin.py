@@ -107,7 +107,7 @@ def register(api):
                        ["account_id", "ticket_id", "text", "request_id"]))
     api.register_tool("freshdesk_email", handler=tool(sends.email), description=(
         "Email with explicit recipients: op=reply (a reply that adds cc/bcc), forward, reply_to_forward, or outbound "
-        "(a new ticket that emails one contact; Freshdesk opens it closed)."),
+        "(a new ticket that emails one contact from the mailbox email_config_id names; Freshdesk opens it closed)."),
         schema=_schema({"account_id": ACCOUNT, "op": {"type": "string", "enum": ["reply", "forward", "reply_to_forward",
                                                                                    "outbound"]},
                         "text": S, "request_id": REQUEST, "ticket_id": TICKET, "to_emails": STRINGS,

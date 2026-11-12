@@ -143,6 +143,16 @@ def test_an_unanswered_reply_found_by_readback_is_delivered_once(tools, fake):
     assert len(fake.conversations[ticket["id"]]) == 1
 
 
+def test_an_earlier_reply_with_the_same_opening_is_no_proof(tools, fake):
+    _, sends, _ = tools
+    ticket = fake.add_ticket(subject="Refund", description="please")
+    preamble = "Thank you for writing to us. " * 40  # longer than any prefix a comparison might stop at
+    fake.add_entry(ticket["id"], body=preamble + "Refund denied.", user_id=ME, incoming=False, source=0)
+    fake.fault("POST", r"/reply$", "server")
+    result = sends.reply(account_id=HOST, ticket_id=ticket["id"], text=preamble + "Refund approved.", request_id="p-1")
+    assert result["code"] == "uncertain" and result["candidates"] == []
+
+
 def test_an_unproven_reply_stays_uncertain_and_is_never_resent(tools, fake):
     _, sends, service = tools
     ticket = fake.add_ticket(subject="Slow", description="slow")
@@ -227,6 +237,20 @@ def test_two_matching_entries_are_candidates_not_proof(tools, fake):
     assert result["code"] == "uncertain" and len(result["candidates"]) == 2
 
 
+def test_a_chat_ticket_gets_structured_words_with_their_attachment(tools, fake, tmp_path):
+    _, sends, _ = tools
+    ticket = fake.add_ticket(subject="Chat", description="How do I export?", source=7)
+    steps = tmp_path / "steps.txt"
+    steps.write_text("1. Open settings\n")
+    result = sends.reply(account_id=HOST, ticket_id=ticket["id"], text="Here are the steps.", request_id="c-1",
+                         attachment_paths=[str(steps)])
+    assert result["ok"]
+    [entry] = fake.conversations[ticket["id"]]
+    assert entry["body_text"] == "Here are the steps." and [a["name"] for a in entry["attachments"]] == ["steps.txt"]
+    sent = fake.requests[-1]["body"]
+    assert "body" not in sent and '"body_contents"' in sent["structured_body"]  # JSON in the form, not a repr
+
+
 def test_a_note_edit_checks_the_note_belongs_to_the_ticket(tools, fake):
     _, sends, _ = tools
     ticket = fake.add_ticket(subject="A", description="b")
@@ -236,6 +260,37 @@ def test_a_note_edit_checks_the_note_belongs_to_the_ticket(tools, fake):
     assert refused["sent"] is False and refused["code"] == "note_not_in_ticket"
 
 
+def test_a_note_edit_keeps_who_sees_it(tools, fake):
+    _, sends, _ = tools
+    ticket = fake.add_ticket(subject="A", description="b")
+    public = fake.add_entry(ticket["id"], body="Shown to the customer", user_id=ME, incoming=False, private=False, source=2)
+    refused = sends.note(account_id=HOST, ticket_id=ticket["id"], text="Internal margin is high.", request_id="v-1",
+                         edit_note_id=public["id"])  # public defaults to false: the intent was a private text
+    assert refused["sent"] is False and refused["code"] == "note_visibility_differs"
+    assert fake.conversations[ticket["id"]][0]["body_text"] == "Shown to the customer"
+    edited = sends.note(account_id=HOST, ticket_id=ticket["id"], text="Shown, corrected", request_id="v-2",
+                        edit_note_id=public["id"], public=True)
+    assert edited["ok"] is True and [r["method"] for r in fake.requests][-1] == "PUT"
+
+
+def test_a_place_made_silent_during_the_reads_holds_the_edit(tools, fake):
+    _, sends, service = tools
+    ticket = fake.add_ticket(subject="A", description="b")
+    note = fake.add_entry(ticket["id"], body="Draft", user_id=ME, incoming=False, private=True, source=2)
+    order = []
+
+    class Host:
+        def place(self, *_):
+            order.append(("place", len(fake.requests)))
+            return {"state": "silent", "label": "Freshdesk"}
+
+    service.host = Host()
+    held = sends.note(account_id=HOST, ticket_id=ticket["id"], text="Final", request_id="s-1", edit_note_id=note["id"])
+    assert held["code"] == "place_silent" and fake.conversations[ticket["id"]][0]["body_text"] == "Draft"
+    reads = [r for r in fake.requests if r["path"].endswith("/conversations")]
+    assert reads and order[0][1] >= fake.requests.index(reads[-1]) + 1  # the place is checked after the reads
+
+
 def test_an_email_reply_can_add_recipients_and_outbound_opens_a_ticket(tools, fake):
     _, sends, _ = tools
     ticket = fake.add_ticket(subject="Invoice", description="need a copy")
@@ -243,15 +298,31 @@ def test_an_email_reply_can_add_recipients_and_outbound_opens_a_ticket(tools, fa
                         cc_emails=["accounts@example.com"], request_id="m-1")
     assert reply["ok"] is True and fake.requests[-1]["body"]["cc_emails"] == ["accounts@example.com"]
     outbound = sends.email(account_id=HOST, op="outbound", to_emails=["customer.two@example.org"],
-                           subject="Your order", text="It shipped today.", request_id="m-2")
+                           subject="Your order", text="It shipped today.", request_id="m-2", email_config_id=4001)
     assert outbound["ok"] is True and fake.tickets[outbound["ticket_id"]]["status"] == 5
     with pytest.raises(FreshdeskError):
         sends.email(account_id=HOST, op="outbound", to_emails=["a@example.com", "b@example.com"], subject="x",
-                    text="y", request_id="m-3")
+                    text="y", request_id="m-3", email_config_id=4001)
     with pytest.raises(FreshdeskError) as caught:
         sends.email(account_id=HOST, op="outbound", ticket_id=ticket["id"], to_emails=["a@example.com"],
-                    subject="x", text="y", request_id="m-4")
+                    subject="x", text="y", request_id="m-4", email_config_id=4001)
     assert caught.value.code == "ticket_id_not_for_outbound"
+
+
+@pytest.mark.parametrize("arguments, code", [
+    ({"op": "reply", "to_emails": ["colleague@example.net"]}, "to_emails_not_for_reply"),
+    ({"op": "outbound", "to_emails": ["a@example.com"], "subject": "x", "email_config_id": 4001,
+      "bcc_emails": ["b@example.com"]}, "outbound_option_unsupported"),
+    ({"op": "outbound", "to_emails": ["a@example.com"], "subject": "x"}, "email_config_id_missing"),
+])
+def test_a_recipient_freshdesk_would_drop_is_refused_before_sending(tools, fake, arguments, code):
+    _, sends, _ = tools
+    ticket = fake.add_ticket(subject="Invoice", description="need a copy")
+    sent_before = len(fake.requests)
+    with pytest.raises(FreshdeskError) as caught:
+        sends.email(account_id=HOST, text="y", request_id="w-1",
+                    ticket_id=ticket["id"] if arguments["op"] == "reply" else None, **arguments)
+    assert caught.value.code == code and len(fake.requests) == sent_before
 
 
 def test_update_sets_properties_by_name_and_checks_closure_first(tools, fake):
@@ -267,6 +338,18 @@ def test_update_sets_properties_by_name_and_checks_closure_first(tools, fake):
     done = sends.update(account_id=HOST, ticket_id=ticket["id"], status="Resolved",
                         custom_fields={"Refund reason": "duplicate charge"})
     assert done["status"]["label"] == "Resolved" and done["custom_fields"]["cf_refund_reason"] == "Duplicate charge"
+
+
+def test_a_dependent_fields_lower_levels_can_be_set(tools, fake):
+    reads, sends, _ = tools
+    listed = {row["name"]: row for row in reads.fields()["custom"]}
+    assert (listed["cf_subcategory"]["parent"], listed["cf_item"]["level"]) == ("cf_category", 3)
+    ticket = fake.add_ticket(subject="Broken", description="screen")
+    done = sends.update(account_id=HOST, ticket_id=ticket["id"],
+                        custom_fields={"Category": "Hardware", "cf_subcategory": "Laptop", "Item": "Screen"})
+    assert done["ok"] is True
+    assert {k: fake.tickets[ticket["id"]]["custom_fields"][k] for k in ("cf_category", "cf_subcategory", "cf_item")} == {
+        "cf_category": "Hardware", "cf_subcategory": "Laptop", "cf_item": "Screen"}
 
 
 def test_an_unknown_choice_refreshes_the_catalog_once_then_lists_choices(tools, fake):
@@ -286,12 +369,23 @@ def test_an_unknown_choice_refreshes_the_catalog_once_then_lists_choices(tools, 
     ("PUT", "conversations/9", {"body": "x"}, "freshdesk_note"),
     ("PUT", "tickets/merge", {"primary_id": 1, "ticket_ids": [2], "note_in_primary": "x"}, "freshdesk_note"),
     ("PUT", "tickets/bulk_update", {"bulk_action": {"ids": [1], "reply": {"body": "x"}}}, "freshdesk_reply"),
+    ("POST", "tickets/7/reply.json", {"body": "x"}, "freshdesk_reply"),  # other spellings of the same endpoint
+    ("POST", "/tickets/7/reply/", {"body": "x"}, "freshdesk_reply"),
 ])
 def test_the_generic_writer_refuses_every_call_that_carries_words(tools, method, path, body, tool):
     _, sends, _ = tools
     with pytest.raises(FreshdeskError) as caught:
         sends.request(account_id=HOST, method=method, path=path, body=body, request_id="g-1")
     assert caught.value.code == "words_need_typed_tool" and tool in caught.value.message
+
+
+@pytest.mark.parametrize("path", ["tickets//7/reply", "tickets/7/./reply", "tickets/../agents"])
+def test_an_odd_spelling_of_a_path_is_refused_before_sending(tools, fake, path):
+    _, sends, _ = tools
+    before = len(fake.requests)
+    with pytest.raises(FreshdeskError) as caught:
+        sends.request(account_id=HOST, method="POST", path=path, body={"body": "x"}, request_id="q-1")
+    assert caught.value.code == "path_invalid" and len(fake.requests) == before
 
 
 def test_the_generic_writer_creates_and_merges_without_reporting_words(tools, fake, ):

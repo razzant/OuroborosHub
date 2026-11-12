@@ -44,19 +44,24 @@ Ticket text is sent to the model provider this Ouroboros installation uses.
 - Just before each call that sends or changes something, the skill asks Ouroboros whether the place is Silent or
   Paused; if so, nothing is sent.
 - When longer work on a ticket ends with a final answer, the answer is posted on the ticket as a private note.
-  Customers receive only what Ouroboros explicitly sends with the reply or email tools.
+  Customers receive only what Ouroboros explicitly sends with the reply or email tools. A Silent or Paused place
+  keeps such a note until it is Active again; work begun before the place was removed is never posted.
+- Its own replies, notes and the tickets it opens (outbound emails) never come back to it as news; a customer's
+  answer to them is a reply on a ticket it wrote in.
 - The watcher checks Freshdesk once a minute (30–600 s) while the place is connected and spends at most a
   configurable share (25 % by default) of the account's per-minute API limit, which the helpdesk's other
   integrations share. It finds new entries because Freshdesk moves a ticket's `updated_at`; a change made and
-  reverted between two checks is not seen. Tickets and entries from before the connection are history.
+  reverted between two checks is not seen. Tickets and entries from before the connection are history, and a
+  place removed and connected again starts a new connection.
 
 ## First live check
 
-On the first helpdesk this runs against, keep the place Silent for a while and compare what the place shows with
+On the first helpdesk this runs against, first ask Ouroboros, before connecting the place, to write one private
+note and one reply on a test ticket whose requester is your own address (the tools work without a place; a Silent
+place would hold them). Then connect the place, keep it Silent for a while and compare what the place shows with
 the helpdesk: a new ticket, a customer reply, a private note that notifies the agent, and an assignment should each
 appear. If a customer reply never appears, Freshdesk did not move the ticket's `updated_at` for it; please report
-that, with the ticket's timeline, as an issue in this repository. Then try one note and one reply on a test ticket
-before making the place Active.
+that, with the ticket's timeline, as an issue in this repository. Make the place Active when this matches.
 
 ## Tests
 

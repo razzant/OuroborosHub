@@ -212,8 +212,7 @@ class Reads:
                 out["next_page"] = next_page
                 out["note"] = f"The thread continues: call again with page={next_page}."
             if stage_attachment_id not in (None, ""):
-                out["staged"] = self._stage(ticket, conversation_entries=entries, attachment_id=stage_attachment_id,
-                                            ticket_id=ticket_id)
+                out["staged"] = self._stage(ticket, attachment_id=stage_attachment_id, ticket_id=ticket_id)
             return out
         finally:
             store.close()
@@ -227,7 +226,8 @@ class Reads:
                               "email": requester.get("email")},
                 "source": catalog.named(ticket.get("source"), "source"),
                 "product": catalog.named(ticket.get("product_id"), "product"),
-                "company_id": ticket.get("company_id"), "cc_emails": ticket.get("cc_emails") or [],
+                "company_id": ticket.get("company_id"), "email_config_id": ticket.get("email_config_id"),
+                "cc_emails": ticket.get("cc_emails") or [],
                 "custom_fields": ticket.get("custom_fields") or {}, "fr_due_by": ticket.get("fr_due_by"),
                 "stats": ticket.get("stats"), "attachments": [_attachment(a) for a in ticket.get("attachments") or []]}
 
@@ -245,7 +245,7 @@ class Reads:
                 "to_emails": entry.get("to_emails") or [], "cc_emails": entry.get("cc_emails") or [],
                 "text": text, "attachments": [_attachment(a) for a in entry.get("attachments") or []]}
 
-    def _stage(self, ticket, *, conversation_entries, attachment_id, ticket_id) -> dict:
+    def _stage(self, ticket, *, attachment_id, ticket_id) -> dict:
         # Links expire: read the ticket's raw attachment records again, then fetch without the key.
         client = self.service.client()
         raw = list(ticket.get("attachments") or [])
@@ -259,7 +259,7 @@ class Reads:
         found = next((a for a in raw if str(a.get("id")) == str(attachment_id)), None)
         if not found or not found.get("attachment_url"):
             raise FreshdeskError("attachment_not_found", f"Ticket {ticket_id} has no attachment {attachment_id}.")
-        if int(found.get("size") or 0) > MAX_ATTACHMENT_BYTES:
+        if int(found.get("file_size") or found.get("size") or 0) > MAX_ATTACHMENT_BYTES:
             raise FreshdeskError("attachment_too_large", "The attachment is larger than 20 MB.")
         data, content_type = download(found["attachment_url"], MAX_ATTACHMENT_BYTES)
         return {**self.service.job_file(f"ticket-{ticket_id}", found.get("name") or "attachment", data),
@@ -325,7 +325,7 @@ class Reads:
 
 def _attachment(record: dict) -> dict:
     return {"id": record.get("id"), "name": record.get("name"), "content_type": record.get("content_type"),
-            "size": record.get("size")}
+            "size": record.get("file_size") or record.get("size")}
 
 
 def _public_agent(agent):

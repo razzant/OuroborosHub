@@ -21,10 +21,34 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 KEY = "fixture-api-key"
 ME = 9001
+CHAT = 7  # a webchat ticket: replies and notes take structured_body, never body
 
 
 def iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def form_fields(raw: bytes, content_type: str) -> dict:
+    """The plain fields of a multipart body (``name[]`` as lists) and its files as ``_files``."""
+    match = re.search(r"boundary=([^;]+)", content_type)
+    if not match:
+        return {}
+    fields: dict = {"_files": []}
+    for part in raw.split(b"--" + match.group(1).strip().encode()):
+        head, _, value = part.partition(b"\r\n\r\n")
+        name = re.search(rb'name="([^"]*)"', head)
+        if not name:
+            continue
+        value = value[:-2] if value.endswith(b"\r\n") else value
+        filename = re.search(rb'filename="([^"]*)"', head)
+        key = name.group(1).decode("utf-8")
+        if filename:
+            fields["_files"].append({"name": filename.group(1).decode("utf-8"), "size": len(value)})
+        elif key.endswith("[]"):
+            fields.setdefault(key[:-2], []).append(value.decode("utf-8"))
+        else:
+            fields[key] = value.decode("utf-8")
+    return fields
 
 
 def parse_iso(value: str) -> datetime:
@@ -56,6 +80,10 @@ TICKET_FIELDS = [
      "required_for_closure": True, "choices": ["Duplicate charge", "Not as described", "Other"]},
     {"id": 21, "name": "cf_order_number", "label": "Order number", "type": "custom_text", "default": False,
      "required_for_closure": False},
+    {"id": 22, "name": "cf_category", "label": "Category", "type": "nested_field", "default": False,
+     "required_for_closure": False, "choices": [{"Hardware": [{"Laptop": ["Screen", "Battery"]}, {"Printer": []}]}],
+     "nested_ticket_fields": [{"id": 5, "name": "cf_subcategory", "label": "Subcategory", "level": 2, "ticket_field_id": 22},
+                              {"id": 6, "name": "cf_item", "label": "Item", "level": 3, "ticket_field_id": 22}]},
 ]
 
 
@@ -114,7 +142,8 @@ class FakeFreshdesk:
                       "tags": list(tags), "cc_emails": list(cc_emails), "fwd_emails": [], "reply_cc_emails": list(cc_emails),
                       "custom_fields": {"cf_refund_reason": None, "cf_order_number": None},
                       "created_at": iso(moment), "updated_at": iso(moment), "due_by": iso(moment + timedelta(days=1)),
-                      "fr_due_by": iso(moment + timedelta(hours=4)), "is_escalated": False, "attachments": []}
+                      "fr_due_by": iso(moment + timedelta(hours=4)), "is_escalated": False, "attachments": [],
+                      "email_config_id": 4001}
             self.tickets[ticket_id] = ticket
             self.conversations[ticket_id] = []
             return ticket
@@ -180,7 +209,7 @@ class FakeFreshdesk:
         if raw and "json" in (handler.headers.get("Content-Type") or ""):
             body = json.loads(raw.decode("utf-8"))
         elif raw:
-            body = {"_multipart": raw}
+            body = {**form_fields(raw, handler.headers.get("Content-Type") or ""), "_multipart": raw}
         with self.lock:
             self.requests.append({"method": method, "path": parts.path, "query": query, "body": body})
             self.rate_used += 1
@@ -246,6 +275,9 @@ class FakeFreshdesk:
             if method == "POST" and p == "tickets":
                 return 201, self._create(body), {}
             if method == "POST" and p == "tickets/outbound_email":
+                if not body.get("email_config_id"):  # mandatory per Freshdesk's reference
+                    return 400, {"description": "Validation failed", "errors": [
+                        {"field": "email_config_id", "message": "It should not be blank", "code": "missing_field"}]}, {}
                 ticket = self._create({**body, "status": body.get("status", 5), "source": 10})
                 ticket["responder_id"] = ME
                 return 201, ticket, {}
@@ -253,6 +285,16 @@ class FakeFreshdesk:
                 for ticket_id in body.get("ticket_ids", []):
                     self.tickets[int(ticket_id)]["status"] = 5
                 return 204, None, {}
+            edit = re.fullmatch(r"conversations/(\d+)", p)
+            if method == "PUT" and edit:
+                entry = next((e for rows in self.conversations.values() for e in rows if e["id"] == int(edit.group(1))), None)
+                if entry is None:
+                    return 404, {"message": "Not found"}, {}
+                text = re.sub(r"<[^>]+>", "", str(body.get("body") or ""))
+                moment = iso(self.tick())
+                entry.update(body=f"<div>{text}</div>", body_text=text, updated_at=moment, last_edited_at=moment)
+                self.tickets[entry["ticket_id"]]["updated_at"] = moment
+                return 200, dict(entry), {}
             match = re.fullmatch(r"tickets/(\d+)(?:/(\w+))?", p)
             if match:
                 return self._ticket_route(method, int(match.group(1)), match.group(2), body, query, path)
@@ -356,17 +398,30 @@ class FakeFreshdesk:
                 headers["Link"] = f'<http://127.0.0.1:{self.server.server_address[1]}{path}?{following}>; rel="next"'
             return 200, [dict(r) for r in rows[(page - 1) * per_page: page * per_page]], headers
         if method == "POST" and action in ("reply", "notes", "forward"):
-            text = re.sub(r"<[^>]+>", "", str(body.get("body") or "")) if isinstance(body, dict) else ""
+            if ticket["source"] == CHAT and action != "forward" and "body" in body:
+                return 400, {"description": "Validation failed", "errors": [{
+                    "field": "body", "code": "invalid_value",
+                    "message": "Use structured_body for a webchat or mobile SDK ticket"}]}, {}
+            text = re.sub(r"<[^>]+>", "", str(body.get("body") or ""))
+            if "structured_body" in body:
+                structured = body["structured_body"]
+                structured = json.loads(structured) if isinstance(structured, str) else structured
+                text = " ".join(part["data"]["content"] for part in structured["body_contents"])
+            files = [{"id": 70000 + n, "name": f["name"], "size": f["size"], "content_type": "text/plain"}
+                     for n, f in enumerate(body.get("_files") or [])]
+            user = int(body.get("user_id", ME))
             if action == "notes":
-                entry = self.add_entry(ticket_id, body=text, user_id=body.get("user_id", ME), incoming=False,
-                                       private=body.get("private", True), source=2, to_emails=body.get("notify_emails", ()))
+                private = body.get("private", True)
+                entry = self.add_entry(ticket_id, body=text, user_id=user, incoming=False,
+                                       private=private if isinstance(private, bool) else private == "true", source=2,
+                                       to_emails=body.get("notify_emails", ()), attachments=files)
             elif action == "forward":
-                entry = self.add_entry(ticket_id, body=text, user_id=body.get("user_id", ME), incoming=False,
-                                       private=True, source=8, to_emails=body.get("to_emails", ()))
+                entry = self.add_entry(ticket_id, body=text, user_id=user, incoming=False,
+                                       private=True, source=8, to_emails=body.get("to_emails", ()), attachments=files)
             else:
                 requester = self.contacts.get(ticket["requester_id"], {})
-                entry = self.add_entry(ticket_id, body=text, user_id=body.get("user_id", ME), incoming=False,
-                                       private=False, source=0, to_emails=[requester.get("email")])
+                entry = self.add_entry(ticket_id, body=text, user_id=user, incoming=False,
+                                       private=False, source=0, to_emails=[requester.get("email")], attachments=files)
             return 201, dict(entry), {}
         raise KeyError(action)
 

@@ -3,7 +3,8 @@
 The cutoff between history and events is the connection time by Freshdesk's own clock (its ``Date`` header);
 tickets and entries written before it are history, never events. A walk lists tickets updated since the
 watermark (minus an overlap), oldest first, and anchors each next request by time, not by page offset, so a ticket
-updated during the walk cannot slip between pages. Changed tickets are stored as dirty work before the watermark
+updated during the walk cannot slip between pages; only a page that does not get past the second after its
+start (a bulk update) is followed by page number. Changed tickets are stored as dirty work before the watermark
 moves; their conversations are read and turned into events across restarts. Requests are paced by a share of the
 account's per-minute limit that Freshdesk reports in its headers.
 """
@@ -16,6 +17,7 @@ from email.utils import parsedate_to_datetime
 
 from .client import FreshdeskError
 from .events import Context, parse_time, ticket_events
+from .service import CONTACT_TTL
 from .status import identity
 from .store import dump
 
@@ -78,6 +80,17 @@ def baseline(client, store) -> str:
     return connected
 
 
+def disconnect(store) -> bool:
+    """The place was removed: a later connection is a new one, so what happens until then stays history. Events
+    already heard while connected stay queued. Returns whether there was a connection to end."""
+    if not store.meta("connected_at"):
+        return False
+    with store.transaction() as db:
+        db.execute("DELETE FROM meta WHERE key IN ('connected_at', 'watermark', 'walk')")
+        db.execute("DELETE FROM dirty")
+    return True
+
+
 def walk(client, store, budget: Budget) -> dict:
     """List changed tickets into ``dirty``; advance the watermark only when the walk is complete."""
     watermark = parse_time(store.meta("watermark") or "") or datetime.now(timezone.utc)
@@ -102,9 +115,10 @@ def walk(client, store, budget: Budget) -> dict:
                            "queued=excluded.queued, snapshot=excluded.snapshot",
                            (ticket_id, updated, time.time(), dump(row)))
                 found += 1
-        stamps = sorted(str(row.get("updated_at") or "") for row in rows if row.get("updated_at"))
-        if stamps and (not cursor.get("newest") or stamps[-1] > cursor["newest"]):
-            cursor["newest"] = stamps[-1]
+        stamps = sorted(moment for moment in (parse_time(row.get("updated_at")) for row in rows) if moment)
+        newest = parse_time(cursor.get("newest") or "")
+        if stamps and (newest is None or stamps[-1] > newest):
+            cursor["newest"] = _z(stamps[-1])
         if len(rows) < PAGE_SIZE:
             if cursor.get("newest"):
                 store.set_meta("watermark", cursor["newest"])
@@ -112,14 +126,17 @@ def walk(client, store, budget: Budget) -> dict:
             store.set_meta("last_walk", _z(datetime.now(timezone.utc)))
             store.resolve("walk")
             return {"complete": True, "changed": found}
-        if stamps[0] == stamps[-1]:
-            cursor["page"] += 1  # a whole page shares one time: only then page by number
+        last = stamps[-1] if stamps else None
+        since = parse_time(cursor["since"])
+        if last is not None and since is not None and last - timedelta(seconds=1) > since:
+            # Re-anchor by time one second before the page's last stamp: later rows of that second are re-read.
+            cursor = {"since": _z(last - timedelta(seconds=1)), "page": 1, "newest": cursor.get("newest")}
+        else:
+            cursor["page"] += 1  # the page did not get past the second it started in: page by number
             if cursor["page"] > PAGE_CAP:
                 store.gap("walk", "provider_page_cap", {"since": cursor["since"]})
-                cursor = {"since": stamps[-1], "page": 1, "newest": cursor.get("newest")}
-        else:
-            cursor = {"since": _z(parse_time(stamps[-1]) - timedelta(seconds=1)), "page": 1,
-                      "newest": cursor.get("newest")}
+                skip_to = (last or since or datetime.now(timezone.utc)) + timedelta(seconds=1)
+                cursor = {"since": _z(skip_to), "page": 1, "newest": cursor.get("newest")}
         store.set_meta("walk", cursor)
     return {"complete": False, "changed": found}
 
@@ -144,19 +161,31 @@ def process(service, client, store, budget: Budget, *, capabilities: dict | None
     claim = identity(agent) if (capabilities or {}).get("presence_identity") == 1 else None
 
     def contact(user_id):
-        if not budget.take(1) and not store.one("SELECT 1 FROM contacts WHERE id=?", (str(user_id),)):
-            return {}
+        cached = store.one("SELECT value, fetched FROM contacts WHERE id=?", (str(user_id),))
+        known = json.loads(cached["value"]) if cached else {}
+        if cached and time.time() - cached["fetched"] < CONTACT_TTL:
+            return known  # a cached name costs no credit
+        if not budget.take(1):
+            return known
         try:
             return service.contact(client, store, user_id)
         except FreshdeskError:
-            return {}
+            return known
 
     ctx = Context(host=client.host, agent=agent, catalog=catalog, contact=contact, connected_at=connected,
                   identity=claim)
     done = 0
     for row in store.rows("SELECT * FROM dirty ORDER BY updated_at, ticket_id LIMIT ?", (limit,)):
         ticket = json.loads(row["snapshot"])
-        entries = _conversation(client, store, budget, row["ticket_id"])
+        try:
+            entries = _conversation(client, store, budget, row["ticket_id"])
+        except FreshdeskError as exc:
+            if exc.status not in (403, 404):
+                raise  # the helpdesk or the network: the whole cycle waits
+            # This ticket alone is gone (deleted, spam) or out of the agent's scope: note it and go on.
+            store.gap(f"ticket:{row['ticket_id']}", "ticket_unreadable", {"status": exc.status})
+            store.db.execute("DELETE FROM dirty WHERE ticket_id=? AND updated_at=?", (row["ticket_id"], row["updated_at"]))
+            continue
         if entries is None:
             break
         stored = store.one("SELECT snapshot FROM tickets WHERE id=?", (row["ticket_id"],))

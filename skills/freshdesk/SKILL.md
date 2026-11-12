@@ -125,29 +125,43 @@ ticket number). The watcher checks Freshdesk every minute while the place is con
 - other property changes (status, priority, group, tags…): no words and no wake; a focus working on that ticket
   hears them as background. Choosing "Any ticket activity" wakes on them too.
 
-Tickets and entries from before the connection are history: they appear in the thread, never as new events.
-Customer entries are marked unauthenticated (an email sender is not verified). The watcher finds new entries
-because Freshdesk moves a ticket's `updated_at`; a change made and reverted between two checks is not seen.
+Tickets and entries from before the connection are history: they appear in the thread, never as new events. A
+place removed and connected again is a new connection. What this skill itself sent, and tickets it opened (an
+outbound email, a created ticket), never come back as arrivals; a reply on such a ticket is `my_thread`. A ticket a
+colleague opened by outbound email starts with the helpdesk's words, not the customer's. Customer entries are marked
+unauthenticated (an email sender is not verified). The watcher finds new entries because Freshdesk moves a ticket's
+`updated_at`; a change made and reverted between two checks is not seen. A ticket deleted or moved out of this
+agent's scope before it was read is skipped and noted in `freshdesk_status`.
 This version is checked against a faithful stand-in of Freshdesk's API, not yet against a live helpdesk.
 
 ## Words and changes
 
 - `freshdesk_reply` emails the ticket's requester (and the ticket's existing CCs). `freshdesk_note` writes a
   private note, or a public one with `public=true`; to mail agents about it pass their emails in `notify` with
-  `audience="notify"`. `freshdesk_email` sends with explicit recipients: a reply that adds cc/bcc, a forward, or
-  an outbound email that opens a new ticket. Customers hear only what these tools send. When longer work on a
-  ticket ends with a final answer, that answer is posted on the ticket as a private note, not emailed.
+  `audience="notify"`; `edit_note_id` edits a note and keeps who sees it (say `public=true` for a public note).
+  `freshdesk_email` sends with explicit recipients: a reply that adds cc/bcc (a reply always goes to the requester:
+  to write to someone else use a forward), a forward, a reply to a forward (to_emails only), or an outbound email
+  that opens a new ticket from the mailbox `email_config_id` names (`freshdesk_ticket` shows a ticket's
+  `email_config_id`). A recipient Freshdesk would drop is refused, never ignored. Customers hear only what these
+  tools send. When longer work on a ticket ends with a final answer, that answer is posted on the ticket as a
+  private note, not emailed; it waits while the place is Silent or Paused and goes out when it is Active again,
+  but work begun before the place was removed is never posted, even after it is connected again.
 - Every call that sends or changes something takes `account_id` (the helpdesk address) and, for words, a
   `request_id` you keep for that exact message. Repeating it returns the recorded outcome and never sends twice.
 - `uncertain` means Freshdesk may have applied the call but did not answer. Read the ticket before anything else;
   that `request_id` never sends again. A single entry found by readback with the same author, kind, visibility,
   attachments and words counts as delivered; several candidates are listed for you to judge.
-- A Silent or Paused place holds every call aimed at it; nothing is sent and the request id stays free.
+- A Silent or Paused place holds every call aimed at it; nothing is sent and the request id stays free. The
+  place is checked just before the write, after any reads the call needs.
 - Names work where Freshdesk uses numbers: statuses (custom ones too), priorities, groups, agents, types and custom
-  fields; `freshdesk_fields` lists them. Closing a ticket checks the fields Freshdesk requires first.
+  fields, including the lower levels of a dependent field; `freshdesk_fields` lists them. Closing a ticket checks
+  the fields Freshdesk requires first.
 - `freshdesk_get` and `freshdesk_request` reach the rest of the API (contacts, companies, time entries,
-  satisfaction ratings, merges, deletions, article drafts). `freshdesk_request` refuses calls that carry words
-  and names the tool to use. A created ticket may trigger the helpdesk's own notification emails.
+  satisfaction ratings, merges, deletions, article drafts). `freshdesk_request` refuses the calls a typed tool
+  here sends (replies, notes, forwards, outbound email, note edits) and names that tool. Other endpoints that
+  carry words, such as forum posts or messaging-channel messages, have no typed tool here: they go out through
+  `freshdesk_request` as writes, and the place's state holds them like any write. A created ticket may trigger
+  the helpdesk's own notification emails.
 - Canned responses, the groups list and other agents' details are open only to an administrator's key; groups and
   agents still have names through `freshdesk_fields`.
 

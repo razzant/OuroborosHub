@@ -19,7 +19,7 @@ from freshdesk_lib.presence import Presence  # noqa: E402
 from freshdesk_lib.sends import Sends  # noqa: E402
 from freshdesk_lib.service import KEY_SETTING, Service, read_settings  # noqa: E402
 from freshdesk_lib.store import Store, now_iso  # noqa: E402
-from freshdesk_lib.watcher import Budget, baseline, process, walk  # noqa: E402
+from freshdesk_lib.watcher import Budget, baseline, disconnect, process, walk  # noqa: E402
 
 STALE_SENDING_SECONDS = 600  # a tool call still "sending" after this long ended with its process: outcome unknown
 
@@ -45,10 +45,13 @@ def single_instance(path: Path):
         handle.close()
 
 
-def recover(store: Store) -> None:
-    """Calls a process left mid-way long ago: their effect is unknown, never resent."""
+def recover(store: Store, *, starting: bool = False) -> None:
+    """Calls a process left mid-way long ago: their effect is unknown, never resent. At start, events this companion
+    was offering when it ended go back to the head of their ticket (the host keeps a resent event's identity)."""
     from datetime import datetime, timezone
 
+    if starting:
+        store.db.execute("UPDATE inbox SET state='ready', due=0 WHERE state='submitting'")
     cutoff = time.time() - STALE_SENDING_SECONDS
     for row in store.interrupted_sends():
         try:
@@ -71,9 +74,9 @@ def run(state_dir: str, stop: threading.Event) -> None:
     sends = Sends(service)
     store = Store(state_dir)
     presence = None
-    capabilities, checked, next_walk = {}, 0.0, 0.0
+    capabilities, checked, next_walk, last_place = {}, 0.0, 0.0, ""
     try:
-        recover(store)
+        recover(store, starting=True)
         while not stop.is_set():
             try:
                 settings = read_settings(state_dir)
@@ -88,17 +91,22 @@ def run(state_dir: str, stop: threading.Event) -> None:
                     presence = Presence(store, host, sends=sends, account=client.host)
                 if not capabilities.get("ready") or time.time() - checked > 600:
                     capabilities, checked = presence.negotiate(), time.time()
+                    recover(store)
                 if not capabilities.get("ready"):
                     note(store, "host_capability_gap", text="Host too old",
                          title="This Ouroboros lacks: " + ", ".join(capabilities.get("missing") or []))
                     stop.wait(60)
                     continue
+                place = presence.place_state()
+                if place == "active" and last_place != "active":
+                    presence.resume_held()
+                last_place = place
                 presence.report_receipts()
                 presence.poll_refs()
                 presence.deliver_outputs()
                 presence.dispatch()
-                place = presence.place_state()
                 if place == "unbound":
+                    disconnect(store)  # a reconnect starts a new connection: the time between stays history
                     note(store, "no_place", text="Not listening",
                          title="Connect the Freshdesk place to hear new tickets and replies.")
                     stop.wait(5)
