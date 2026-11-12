@@ -1,0 +1,2488 @@
+diff --git a/tests/test_builtin_skill_source.py b/tests/test_builtin_skill_source.py
+index 5b315e9c6..8aa756979 100644
+--- a/tests/test_builtin_skill_source.py
++++ b/tests/test_builtin_skill_source.py
+@@ -333,7 +333,7 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
+     installed = _write_skill(drive_root / "skills" / "native", "telegram", version="1.2.0")
+     (installed / ".seed-origin").write_text("seeded_from=test\n", encoding="utf-8")
+     assert _reseed(seed_dir, drive_root) == 1
+-    assert "version: 1.3.7" in (installed / "SKILL.md").read_text(encoding="utf-8")
++    assert "version: 1.4.0" in (installed / "SKILL.md").read_text(encoding="utf-8")
+     for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_quiz.py", "lib/telegram_state.py"):
+         assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
+ 
+diff --git a/tests/test_telegram_handoff_routing.py b/tests/test_telegram_handoff_routing.py
+new file mode 100644
+index 000000000..e4ba5d773
+--- /dev/null
++++ b/tests/test_telegram_handoff_routing.py
+@@ -0,0 +1,356 @@
++"""Telegram ``hand_to_main`` one level past the Host's accepted row: Main's routing acts on it.
++
++The owner writes in a connected Telegram place; the place focus hands the exact words to Main; the
++supervisor intake consumes them; Main's routing decision calls a real tool on existing Project work.
++
++Real: the Host Service app and its ``/chat/inject`` acceptance (the canonical owner row), the skill's
++place runner, focus custody and ``hand_to_main`` tool (``env`` from ``tests.test_telegram_places``), a
++real ``LocalChatBridge`` inbox, the supervisor intake ``server._process_bridge_updates`` with
++``_route_owner_message`` and ``_decision_turn_metadata``, the tool functions ``tell_task``,
++``resume_task`` and ``continue_task``, ``supervisor.events.dispatch_event`` into steering, mind
++controls, the owner Pause fence, the queue and continuation admission, the owner mailbox,
++``send_with_budget`` -> ``LocalChatBridge.send_message`` -> ``chat.outbound``, the skill's outbound
++handler and its place runner/outbox.
++
++Doubles: the place mind (``env``'s scripted ``Model``); the Main routing model (``MainTurn``: it
++stands where the intake calls ``handle_chat_direct``, builds the direct turn's ``ToolContext`` from
++the metadata routing produced, and a scripted choice calls one real tool; ``LLMClient`` raises); the
++Telegram wire; the Host's Panic door and decision ingress (``env``'s recorded ``host_post``); and a
++thread that runs at once.
++"""
++from __future__ import annotations
++
++import asyncio
++import copy
++import json
++import sys
++import time
++from types import SimpleNamespace
++
++import pytest
++
++from ouroboros.task_results import load_task_result, write_task_result
++from ouroboros.tool_call_log import invocation_scope
++from tests._budget_pause_exact_helpers import _install_queue
++from tests.test_project_routing_v664 import _ImmediateThread
++from tests import test_telegram_places as places_suite
++from tests.test_telegram_places import OWNER, _ctx, _message, _poll, _receive, _run, _tool, _wait
++
++pytestmark = pytest.mark.serial
++env = places_suite.env  # the shared place fixture: Host app, place, scripted focus, recorded wire
++
++FOCUS_REPLY = "Passed to Main."
++
++
++class MainTurn:
++    """Main's routing turn with the model replaced by ``choose(ctx)``.
++
++    Called exactly where the real intake calls ``ctx.handle_chat_direct``. The tool context carries
++    the routing metadata as given; its event queue is the real supervisor dispatch. ``meanwhile``
++    runs while the turn is still undecided; ``reply`` is then sent through the real send seam.
++    """
++
++    def __init__(self, root):
++        self.root, self.sup = root, None
++        self.calls, self.events, self.results = [], [], []
++        self.choose, self.reply, self.meanwhile = None, "", None
++
++    def __call__(self, chat_id, text, image_data=None, *, task_constraint=None, task_metadata=None):
++        from ouroboros.tools.registry import ToolContext
++        from supervisor import message_bus
++        from supervisor.events import dispatch_event
++
++        turn = f"main-turn-{len(self.calls) + 1}"
++        self.calls.append({"turn": turn, "chat_id": chat_id, "text": text, "image_data": image_data,
++                           "metadata": copy.deepcopy(task_metadata)})
++
++        def emit(event):
++            self.events.append(copy.deepcopy(event))
++            dispatch_event(event, self.sup)
++
++        ctx = ToolContext(repo_dir=self.root, drive_root=self.root, task_id=turn, current_chat_id=chat_id,
++                          task_metadata=dict(task_metadata or {}), is_direct_chat=True,
++                          event_queue=SimpleNamespace(put_nowait=emit))
++        if self.meanwhile is not None:
++            self.meanwhile()
++        with invocation_scope({"tool_call_id": f"{turn}:call-1"}):
++            self.results.append(self.choose(ctx))
++        if self.reply:
++            message_bus.send_with_budget(chat_id, self.reply, task_id=turn)
++
++
++@pytest.fixture
++def main(env, monkeypatch):
++    """Supervisor queue/state, one Project, a real bridge behind the Host, and Main's scripted turn."""
++    from ouroboros import event_bus, projects_registry
++    from ouroboros.llm import LLMClient
++    from ouroboros.utils import append_jsonl
++    from supervisor import message_bus
++
++    root = env.root
++    queue, _state, workers = _install_queue(root, monkeypatch)
++    monkeypatch.setattr(message_bus, "DATA_DIR", root)
++    bridge = message_bus.LocalChatBridge()
++    frames = []
++    bridge._broadcast_fn = frames.append
++    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
++    env.app.state.host_service_context.bridge_getter = lambda: bridge  # the Host now feeds the real inbox
++    bus = event_bus.EventBus()
++    monkeypatch.setattr(event_bus, "_GLOBAL_BUS", bus)
++    outbound = []
++    bus.subscribe("telegram", "chat.outbound", outbound.append)
++
++    def no_model(*_args, **_kwargs):
++        raise AssertionError("no model call: Main's routing choice is scripted")
++
++    async def no_model_async(*_args, **_kwargs):
++        no_model()
++
++    monkeypatch.setattr(LLMClient, "chat", no_model)
++    monkeypatch.setattr(LLMClient, "chat_async", no_model_async)
++    monkeypatch.setattr("ouroboros.server_owner_routing.threading", SimpleNamespace(Thread=_ImmediateThread))
++    settings = env.api.state_dir / "settings.json"
++    settings.write_text(json.dumps({**json.loads(settings.read_text(encoding="utf-8")),
++                                    "TELEGRAM_MIRROR_MODE": "main"}), encoding="utf-8")
++    project = projects_registry.create_project(root, "bench", name="Benchmarks")
++    turn = MainTurn(root)
++    live = {"owner_id": 1, "owner_chat_id": 1}
++    turn.sup = SimpleNamespace(
++        DRIVE_ROOT=root, PENDING=workers.PENDING, RUNNING=workers.RUNNING, WORKERS=workers.WORKERS,
++        BUDGET_ROOT_FENCES=queue.BUDGET_ROOT_FENCES, bridge=bridge, handle_chat_direct=turn,
++        load_state=lambda: dict(live), update_state=lambda fn: (fn(live), live)[1],
++        consciousness=SimpleNamespace(inject_observation=lambda *_: None, pause=lambda: None, resume=lambda: None),
++        get_chat_agent=lambda: SimpleNamespace(_busy=False), send_with_budget=message_bus.send_with_budget,
++        append_jsonl=append_jsonl, persist_queue_snapshot=queue.persist_queue_snapshot, sort_pending=lambda: None,
++        kill_workers=lambda *_a, **_k: None)
++    return SimpleNamespace(root=root, bridge=bridge, frames=frames, outbound=outbound, turn=turn, workers=workers,
++                           queue=queue, project=project, chat=int(project["chat_id"]), pid=str(project["id"]),
++                           settings=settings)
++
++
++def _project_task(main, task_id, **fields):
++    return {"id": task_id, "type": "task", "root_task_id": task_id, "chat_id": main.chat, "project_id": main.pid,
++            "title": "Bench run", "text": "Run the bench suite", **fields}
++
++
++def _hand_off(env, main, words, mid, update_id):
++    """The owner writes in the place chat, the focus hands it to Main, the supervisor intake consumes it."""
++    import server
++    from supervisor.message_ingress import accepted_chat_message
++
++    handed = []
++
++    def during(task):
++        if task["metadata"]["presence"]["observed_text"] == words:
++            handed.append(_tool(env, "hand_to_main", _ctx(task["id"], task)))
++
++    env.model.during, env.model.reply = during, FOCUS_REPLY
++    _receive(env, _message(mid, words), update_id)
++    _run(env, lambda: handed and any(FOCUS_REPLY in d["text"] for d in env.wire.sent()))
++    client_id = f"tg:{OWNER}:{mid}"
++    assert handed[0]["ok"] and handed[0]["client_message_id"] == client_id, handed
++    row = accepted_chat_message(env.root, OWNER, client_id)
++    assert row and row["text"] == words and row["source"] == "skill:telegram"
++    assert row["transport"]["kind"] == "telegram" and main.turn.calls == [], "routing is still pending"
++    server._process_bridge_updates(main.bridge, 0, main.turn.sup, timeout=1)
++    assert main.bridge.get_updates(offset=0, timeout=0) == [], "consumed once, nothing handed back"
++    [call] = main.turn.calls
++    assert (call["chat_id"], call["text"], call["image_data"]) == (OWNER, words, None), "the owner's words only"
++    metadata = call["metadata"]
++    assert metadata["origin_message_ref"]["client_message_id"] == client_id and metadata["work_kind"] == "owner"
++    assert metadata["routing_contract"]["source_lane"] == "main"
++    assert main.pid in [p["project_id"] for p in metadata["main_routing_manifest"]["projects"]]
++    assert not _handler_errors(env.root)
++    return row, call
++
++
++def _handler_errors(root):
++    path = root / "logs" / "supervisor.jsonl"
++    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line] if path.exists() else []
++    return [r for r in rows if r.get("type") in {"worker_event_handler_error", "unknown_worker_event"}]
++
++
++def _mind_outcome(root, turn):
++    """The supervisor's control outcome, as the deciding turn reads it from its own mailbox."""
++    from ouroboros.owner_mailbox import drain_owner_entries
++
++    [entry] = drain_owner_entries(root, turn)
++    assert entry["kind"] == "task_message" and entry["provenance"] == "system"
++    return json.loads(entry["text"])
++
++
++def _mirror(env, main, turn, reply):
++    """Every published ``chat.outbound`` through the skill's real handler, then a place runner turn."""
++    from ouroboros.places import conversation_chat_id
++
++    handler = env.plugin._make_outbound(env.api)
++    for event in list(main.outbound):
++        asyncio.run(handler(event))
++    _run(env, lambda: True)  # the place runner and outbox get their turn after the mirror
++    texts = [d["text"] for d in env.wire.sent() if d["chat_id"] == str(OWNER)]
++    assert sum(reply in text for text in texts) == 1, texts
++    [event] = [e for e in main.outbound if e.get("text") == reply]
++    assert event["chat_id"] == OWNER and event["transport"]["kind"] == "telegram" and event["task_id"] == turn
++    assert not env.tp.room_event(env.api, event), "Main's chat is not a place room"
++    room = env.model.tasks[-1]["metadata"]["presence"]["event"]["conversation_key"]
++    assert env.tp.room_event(env.api, {"chat_id": conversation_chat_id(room)}), "the exclusion covers rooms only"
++    outbox = env.tp._rows(env.api, "SELECT task_id, state FROM outbox", ())
++    assert outbox and {r["state"] for r in outbox} == {"done"} and turn not in {r["task_id"] for r in outbox}, \
++        "the place outbox holds only the focus's own reply, never Main's"
++    assert not [m for _level, m in env.api.logs if "outbound error" in m]
++    return texts
++
++
++# ---- RUNNING: tell_task -> steering -> the running task's mailbox ----------------------------------
++
++@pytest.mark.parametrize("mirror_mode", ["main", "all"])
++def test_running_project_work_gets_a_relay_of_the_owners_exact_telegram_words(env, main, mirror_mode):
++    from ouroboros.owner_mailbox import drain_owner_entries
++    from ouroboros.owner_relay import held_owner_messages
++    from ouroboros.project_dialogue import latest_chat_annotations
++    from ouroboros.tools.control_relay import _tell_task
++
++    words = "Tell the bench run to stop after this epoch"
++    note = "Owner relay: stop the bench run at the next epoch boundary."
++    main.settings.write_text(json.dumps({**json.loads(main.settings.read_text(encoding="utf-8")),
++                                         "TELEGRAM_MIRROR_MODE": mirror_mode}), encoding="utf-8")
++    task = _project_task(main, "bench-run", drive_root=str(main.root))
++    main.workers.RUNNING["bench-run"] = {"task": task, "started_at": time.time()}
++    write_task_result(main.root, "bench-run", "running", chat_id=main.chat, project_id=main.pid,
++                      root_task_id="bench-run")
++    held = {}
++
++    def choose(ctx):
++        held.update(held_owner_messages(ctx))
++        return _tell_task(ctx, "bench-run", note=note, quote=list(held))
++
++    main.turn.choose, main.turn.reply = choose, "Told the bench run to stop after this epoch."
++    row, call = _hand_off(env, main, words, 50, 7)
++    client_id = row["client_message_id"]
++
++    assert [r["client_message_id"] for r in held.values()] == [client_id], "Main holds only the accepted row"
++    assert main.turn.results == ["Message written to bench-run; relay_id=" + main.turn.events[0]["relay_id"]
++                                 + ". Read acknowledgement follows when it drains."]
++    [relay] = drain_owner_entries(main.root, "bench-run")
++    assert relay["kind"] == "relay_entry" and relay["text"] == note, "the model's note keeps its own voice"
++    [quote] = relay["relay"]["quotes"]
++    assert quote["text"] == words, "the quote is the owner's exact words, not the note"
++    assert quote["source"]["client_message_id"] == client_id and quote["source"]["chat_id"] == OWNER
++    assert [r["client_message_id"] for r in relay["owner_rows"]] == [client_id]
++    assert relay["owner_rows"][0]["text"] == row["text"] and relay["owner_rows"][0]["ts"] == row["ts"]
++    [steer] = main.turn.events
++    assert steer["type"] == "steer_task" and steer["client_message_id"] == client_id, "attributed, not invented"
++    assert steer["issuer"]["kind"] == "owner_turn" and steer["chat_id"] == OWNER
++    receipt = latest_chat_annotations(main.root)[client_id]
++    assert (receipt["action"], receipt["target"], receipt["status"]) == ("steer_task", "bench-run", "delivered")
++    texts = _mirror(env, main, call["turn"], main.turn.reply)
++    if mirror_mode == "main":
++        assert not any(words in text for text in texts), "the owner's own words are never mirrored back"
++
++
++# ---- PAUSED: resume_task -> handle_mind_task_control -> the queue --------------------------------
++
++def test_paused_project_work_is_resumed_through_the_real_queue_while_fast_controls_stay_live(env, main):
++    """Also (5): while Main's turn is still undecided, the poller serves /panic and a quiz tap at once."""
++    from ouroboros.owner_pause import fence_closed, read_fence
++    from ouroboros.room_reader import is_reading
++    from ouroboros.tools.control_mind import _resume_task
++    from supervisor.owner_pause_control import request_owner_pause
++
++    task = _project_task(main, "bench-paused", _attempt=1, admitted_dispatch="none")
++    main.workers.PENDING.append(task)
++    write_task_result(main.root, "bench-paused", "scheduled", chat_id=main.chat, project_id=main.pid,
++                      root_task_id="bench-paused")
++    assert request_owner_pause("bench-paused", request_id="owner-pause")["ok"]
++    assert fence_closed(read_fence(main.root, "bench-paused"))
++    assert not is_reading(main.root, "bench-paused", task, running=True)
++    reason = "The owner asked in Telegram to resume the bench run."
++    served = {}
++    main.turn.choose = lambda ctx: json.loads(_resume_task(ctx, "bench-paused", reason))
++    main.turn.reply = "Resumed the bench run."
++    main.turn.meanwhile = lambda: served.update(_fast_controls(env))
++    row, call = _hand_off(env, main, "Resume the paused bench run", 51, 8)
++
++    assert served == {"panic": 1, "quiz": 1}, "fast controls did not wait for Main's routing"
++    assert main.turn.results[0]["status"] == "requested" and main.turn.results[0]["transport"] == "live"
++    [control] = main.turn.events
++    assert (control["type"], control["action"], control["actor_task_id"]) == (
++        "mind_task_control", "resume_task", call["turn"])
++    outcome = _mind_outcome(main.root, call["turn"])
++    assert outcome["outcome"]["ok"], outcome
++    fence = read_fence(main.root, "bench-paused")
++    assert not fence_closed(fence) and fence["resume_actor"]["task_id"] == call["turn"]
++    [queued] = [t for t in main.workers.PENDING if t["id"] == "bench-paused"]
++    assert not queued.get("_owner_hold") and not main.workers.RUNNING
++    assert is_reading(main.root, "bench-paused", queued, running=True), "the resumed root reads its room again"
++    _mirror(env, main, call["turn"], main.turn.reply)
++
++
++def _fast_controls(env):
++    """One poller pass over an owner /panic and a quiz tap; returns what reached the Host's doors."""
++    quiz = sys.modules[env.plugin.__package__ + ".lib.telegram_quiz"]
++    token = quiz.mint_token("asker", "q-tap")
++    quiz.remember_quiz(env.api, token, {"task_id": "asker", "quiz_id": "q-tap", "chat_id": OWNER, "message_id": 300,
++                                        "options": ["Yes", "No"], "text": "Proceed?"})
++    tap = {"id": "cb1", "data": f"qz:{token}:0", "from": {"id": OWNER},
++           "message": {"message_id": 300, "chat": {"id": OWNER, "type": "private"}}}
++    env.wire.updates.append([_poll(20, _message(60, "/panic")), _poll(21, callback_query=tap)])
++
++    def counts():
++        return {"panic": [p.get("text") for path, p in env.injects if path == "/chat/inject"].count("/panic"),
++                "quiz": [path for path, _p in env.injects].count("/chat/decision")}
++
++    async def scenario():
++        poller = asyncio.create_task(env.plugin._poller(env.api))
++        try:
++            await _wait(lambda: counts() == {"panic": 1, "quiz": 1})
++        finally:
++            poller.cancel()
++            await asyncio.gather(poller, return_exceptions=True)
++
++    asyncio.run(scenario())
++    return counts()
++
++
++# ---- ENDED: continue_task -> admit_continuation -> one successor ---------------------------------
++
++def test_ended_project_work_gets_one_successor_attributed_to_the_routed_owner_turn(env, main):
++    from ouroboros.task_results import STATUS_CANCELLED, STATUS_RUNNING
++    from ouroboros.tools.control_mind import _continue_task
++
++    write_task_result(main.root, "bench-ended", STATUS_RUNNING, chat_id=main.chat, project_id=main.pid,
++                      root_task_id="bench-ended", title="Bench run", deadline_at="2099-01-01T00:00:00+00:00",
++                      origin_message_text="Run the bench suite",
++                      origin_message_ref={"chat_id": main.chat, "client_message_id": "bench-origin"},
++                      billing_group={"billing_group_id": "bench-ended", "billing_group_limit_usd": 20.0,
++                                     "billing_group_limit_source": "initial_task_admission",
++                                     "billing_group_limit_revision": "admission-1"})
++    write_task_result(main.root, "bench-ended", STATUS_CANCELLED, result="interrupted",
++                      cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"})
++    reason = "The owner asked in Telegram to continue the interrupted bench run."
++    main.turn.choose = lambda ctx: json.loads(_continue_task(ctx, "bench-ended", reason))
++    main.turn.reply = "Continuing the bench run."
++    row, call = _hand_off(env, main, "Continue the interrupted bench run", 52, 9)
++
++    [control] = main.turn.events
++    assert (control["action"], control["task_id"], control["actor_task_id"]) == (
++        "continue_task", "bench-ended", call["turn"])
++    outcome = _mind_outcome(main.root, call["turn"])["outcome"]
++    assert outcome["ok"] and outcome["replay"] is False, outcome
++    successor = outcome["successor_task_id"]
++    [admitted] = [t for t in main.workers.PENDING if t["id"] == successor]
++    assert successor.startswith("bench-ended-c") and admitted["predecessor_task_id"] == "bench-ended"
++    assert (admitted["chat_id"], admitted["project_id"]) == (main.chat, main.pid), "it stays Project work"
++    claim = load_task_result(main.root, "bench-ended")["continued_by"]
++    assert claim["successor_task_id"] == successor
++    assert claim["by"]["actor"] == "ouroboros" and claim["by"]["task_id"] == call["turn"]
++    assert claim["by"]["text"] == reason
++    stored = load_task_result(main.root, successor)
++    assert stored["status"] == "scheduled" and stored["continuation_admission"]["by"]["task_id"] == call["turn"]
++    assert call["metadata"]["origin_message_ref"]["client_message_id"] == row["client_message_id"], \
++        "the turn credited with the Continue is the one routing started for the accepted Telegram row"
++    from supervisor.events import dispatch_event
++
++    dispatch_event(copy.deepcopy(control), main.turn.sup)  # a redelivered control reuses its one successor
++    assert [t["id"] for t in main.workers.PENDING] == [successor] and not _handler_errors(main.root)
++    _mirror(env, main, call["turn"], main.turn.reply)
+diff --git a/tests/test_telegram_i18n.py b/tests/test_telegram_i18n.py
+index f6724bbe7..9288602e9 100644
+--- a/tests/test_telegram_i18n.py
++++ b/tests/test_telegram_i18n.py
+@@ -237,7 +237,7 @@ def test_settings_form_no_longer_offers_a_bridge_language(plugin, tmp_path):
+     captured = {}
+     api.register_supervised_task = lambda *args, **kwargs: None
+     api.subscribe_event = lambda *args, **kwargs: None
+-    api.register_route = lambda *args, **kwargs: None
++    api.register_route = api.register_tool = lambda *args, **kwargs: None
+     api.register_settings_section = lambda name, **kwargs: captured.update(kwargs)
+     plugin.register_miniapp = lambda _api: None
+     plugin.register(api)
+diff --git a/tests/test_telegram_place_custody.py b/tests/test_telegram_place_custody.py
+new file mode 100644
+index 000000000..b3406b43d
+--- /dev/null
++++ b/tests/test_telegram_place_custody.py
+@@ -0,0 +1,371 @@
++"""Place custody is not permission to acknowledge or reroute an unreadable update.
++
++Uses the real Telegram skill/Host fixture with private SQLite files. The provider and
++model remain doubles; these checks do not claim a live Telegram outage was exercised.
++"""
++from __future__ import annotations
++
++import asyncio
++import contextlib
++import json
++import sqlite3
++import time
++from pathlib import Path, PurePosixPath, PureWindowsPath
++
++import pytest
++
++from tests import test_telegram_places as places_suite
++from tests.test_telegram_places import BOT, GUEST, OWNER, _custody, _message, _receive, _run
++
++pytestmark = pytest.mark.serial
++env = places_suite.env
++
++
++def test_absent_custody_reads_do_not_create_a_database(env):
++    path = env.tp._path(env.api)
++    assert not path.exists()
++    assert not env.tp.retained(env.api, 1)
++    assert not env.tp.room_event(env.api, {"chat_id": 1})
++    assert env.tp.status(env.api)["inbox_open"] == 0
++    assert not path.exists() and str(path) not in env.tp._READY
++
++
++@pytest.mark.parametrize("broken", ["corrupt", "missing_schema"])
++@pytest.mark.parametrize("lane", ["main", "place"])
++def test_unreadable_existing_custody_never_falls_back_to_main_or_repairs_on_read(env, broken, lane):
++    path = env.tp._path(env.api)
++    if broken == "corrupt":
++        path.write_bytes(b"retained unreadable custody bytes")
++    else:
++        with sqlite3.connect(path) as conn:
++            conn.execute("CREATE TABLE preserved (id INTEGER)")
++    before = path.read_bytes()
++    settings = env.api.state_dir / "settings.json"
++    settings.write_text(json.dumps({**json.loads(settings.read_text()), "TELEGRAM_ORDINARY_CHAT": lane}),
++                        encoding="utf-8")
++    with pytest.raises(env.tp.PlaceCustodyUnavailable) as error:
++        asyncio.run(env.tp.offer(env.api, 1, _message(10, "Retained words"), owner=True))
++    assert isinstance(error.value.__cause__, sqlite3.Error)
++    with pytest.raises(sqlite3.Error):
++        env.tp.room_event(env.api, {"chat_id": 1})
++    assert "custody unreadable" in env.tp.status(env.api)["error"]
++    assert env.bridge.messages == [] and env.model.tasks == []
++    assert str(path) not in env.tp._ROOMS and str(path) not in env.tp._READY
++    assert path.read_bytes() == before
++    if broken == "missing_schema":
++        with sqlite3.connect(path) as conn:
++            assert conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("preserved",)]
++
++
++def test_passive_custody_connection_is_readonly_even_when_schema_is_healthy(env):
++    env.tp.commit(env.api, 1, _message(10, "Keep me"), owner=True, lane="presence")
++    env.tp._READY.clear()  # another process may be the first reader after Restart
++    assert env.tp.retained(env.api, 1)
++    with env.tp._db(env.api, create=False) as conn:
++        with pytest.raises(sqlite3.OperationalError, match="readonly"):
++            conn.execute("DELETE FROM inbox")
++    assert env.tp.retained(env.api, 1)
++    assert str(env.tp._path(env.api)) not in env.tp._READY
++
++
++@pytest.mark.parametrize("failure", ["read_after_rollback", "write"])
++def test_poller_never_acknowledges_past_failed_custody_and_keeps_the_completed_prefix(env, monkeypatch, failure):
++    from tests.test_telegram_places import OWNER, _poll, _wait
++
++    path = env.tp._path(env.api)
++    original_commit = env.tp.commit
++    if failure == "read_after_rollback":
++        path.write_bytes(b"unreadable previous Place custody")
++        settings = env.api.state_dir / "settings.json"
++        settings.write_text(json.dumps({"TELEGRAM_CHAT_ID": str(OWNER), "TELEGRAM_ORDINARY_CHAT": "main"}))
++    else:
++        def unavailable(*args, **kwargs):
++            raise OSError("disk unavailable before custody write")
++        monkeypatch.setattr(env.tp, "commit", unavailable)
++    updates = [_poll(1, _message(10, "/panic")), _poll(2, _message(11, "Retain these words")),
++               _poll(3, _message(12, "Later words"))]
++    offsets, original_get = [], env.wire.get_updates
++
++    async def observed_get(offset):
++        offsets.append(offset)
++        return await original_get(offset)
++
++    monkeypatch.setattr(env.wire, "get_updates", observed_get)
++    env.wire.updates = [updates]
++    with pytest.raises(env.tp.PlaceCustodyUnavailable):
++        asyncio.run(asyncio.wait_for(env.plugin._poller(env.api), timeout=5))
++    assert offsets == [0], "no second provider request can acknowledge the failed update"
++    assert json.loads((env.api.state_dir / "poll_offset.json").read_text())["offset"] == 2
++    assert json.loads((env.api.state_dir / "bridge_status.json").read_text())["reason_code"] == "place_custody_unavailable"
++    assert [p["text"] for route, p in env.injects if route == "/chat/inject"] == ["/panic"]
++    assert env.bridge.messages == [] and env.model.tasks == []
++    assert not any("update processing failed" in message for _, message in env.api.logs)
++
++    # An operator repairs the private test store before the skill restarts; no automatic repair.
++    if failure == "read_after_rollback":
++        path.rename(path.with_suffix(".broken"))
++        (env.api.state_dir / "settings.json").write_text(json.dumps(
++            {"TELEGRAM_CHAT_ID": str(OWNER), "TELEGRAM_ORDINARY_CHAT": "place"}))
++    monkeypatch.setattr(env.tp, "commit", original_commit)
++    env.wire.updates = [updates[1:]]
++
++    async def recover():
++        poller = asyncio.create_task(env.plugin._poller(env.api))
++        try:
++            await _wait(lambda: env.plugin._load_offset(env.api) == 4)
++        finally:
++            poller.cancel()
++            await asyncio.gather(poller, return_exceptions=True)
++
++    asyncio.run(recover())
++    assert offsets[1] == 2, "restart begins at the first unacknowledged message"
++    assert [p["text"] for route, p in env.injects if route == "/chat/inject"] == ["/panic"], "no repeated control"
++    assert [r["update_id"] for r in env.tp._rows(env.api, "SELECT update_id FROM inbox ORDER BY update_id")] == [2, 3]
++
++
++def test_failed_safe_offset_write_stops_without_a_new_provider_ack(env, monkeypatch):
++    from tests.test_telegram_places import _poll
++
++    env.tp._path(env.api).write_bytes(b"unreadable custody")
++    env.wire.updates = [[_poll(1, _message(10, "Do not drop me"))]]
++    offsets, original = [], env.wire.get_updates
++
++    async def get_updates(offset):
++        offsets.append(offset)
++        return await original(offset)
++
++    def full_disk(*args):
++        raise OSError("cannot checkpoint offset")
++
++    monkeypatch.setattr(env.wire, "get_updates", get_updates)
++    monkeypatch.setattr(env.plugin, "_save_offset", full_disk)
++    with pytest.raises(OSError, match="cannot checkpoint offset"):
++        asyncio.run(asyncio.wait_for(env.plugin._poller(env.api), timeout=5))
++    assert offsets == [0] and env.injects == [] and env.bridge.messages == []
++    assert not (env.api.state_dir / "poll_offset.json").exists()
++
++
++def test_post_commit_error_keeps_one_source_when_redelivered_after_mode_rollback(env, monkeypatch):
++    from tests.test_telegram_places import OWNER
++
++    async def unknown(*args):
++        return "unknown", {"code": "host_unavailable"}
++
++    def failed_note(*args):
++        raise sqlite3.OperationalError("cannot record note")
++
++    monkeypatch.setattr(env.tp, "place_lookup", unknown)
++    monkeypatch.setattr(env.tp, "_note_undecided", failed_note)
++    message = _message(10, "Already committed")
++    with pytest.raises(env.tp.PlaceCustodyUnavailable):
++        asyncio.run(env.tp.offer(env.api, 1, message, owner=True))
++    assert env.tp.retained(env.api, 1)
++    (env.api.state_dir / "settings.json").write_text(json.dumps(
++        {"TELEGRAM_CHAT_ID": str(OWNER), "TELEGRAM_ORDINARY_CHAT": "main"}))
++    assert asyncio.run(env.tp.offer(env.api, 1, message, owner=True))
++    assert len(env.tp._rows(env.api, "SELECT * FROM inbox")) == 1
++    assert env.injects == [] and env.bridge.messages == []
++
++
++# ---- staged bytes, per-chat order of undecided words, the known rooms -------------------------
++
++_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"{p}{n}" for p in ("COM", "LPT") for n in range(10))}
++
++
++def _confinement_faults(path: Path, folder: Path) -> list[str]:
++    """Why writing ``path`` would not be one plain file of ``folder`` on Windows or POSIX."""
++    leaf, faults = path.name, []
++    windows = PureWindowsPath(leaf)
++    if path.parent != folder:
++        faults.append("outside its staging folder")
++    if not windows.name == leaf == PurePosixPath(leaf).name or windows.anchor or leaf in {"", ".", ".."}:
++        faults.append("not one plain component")
++    if ":" in leaf:
++        faults.append("drive or stream")
++    if windows.stem.upper() in _DEVICE_NAMES:
++        faults.append("device name")
++    return faults
++
++
++def _stage_guarded(env, monkeypatch, update_id, message):
++    """``stage_files`` with every write checked BEFORE it happens: a name that would leave the
++    private staging file (drive, share, traversal, stream, device) is refused unwritten, so this
++    is safe against unfixed code on Windows too; a confined write still really happens."""
++    folder, real_write, attempts = env.api.state_dir / "places_staging" / str(update_id), Path.write_bytes, []
++
++    def write_bytes(self, data):
++        attempts.append(self)
++        faults = _confinement_faults(self, folder)
++        assert not faults, f"refused before writing {str(self)!r}: {faults}"
++        return real_write(self, data)
++
++    with monkeypatch.context() as guarded:
++        guarded.setattr(Path, "write_bytes", write_bytes)
++        staged = asyncio.run(env.tp.stage_files(env.api, lambda: env.wire, update_id, message))
++    assert attempts == [Path(staged[0]["path"])] and attempts[0].read_bytes() == b"file bytes"
++    return folder, staged
++
++
++def _document(display, caption="Please read this"):
++    document = _message(20, "", document={"file_id": "f1", "file_name": display, "file_size": 10}, caption=caption)
++    document.pop("text")
++    return document
++
++
++@pytest.mark.parametrize("display", ["logs.txt", "..\\..\\settings.json", "C:\\review-target.txt",
++                                     "\\\\server\\share\\x.txt", "notes.txt:hidden", "CON"])
++def test_staged_bytes_take_no_native_path_from_the_display_name_and_the_host_stages_them(env, monkeypatch, display):
++    document = _document(display)
++    _receive(env, document, 9)
++    folder, staged = _stage_guarded(env, monkeypatch, 9, document)
++    path = Path(staged[0]["path"])
++    assert [p for p in env.api.state_dir.rglob("*") if p.is_file() and "places_staging" in p.parts] == [path]
++    assert (PureWindowsPath("C:\\state\\places_staging\\9") / path.name).parent == PureWindowsPath("C:\\state\\places_staging\\9")
++    assert staged[0]["name"] == display, "the display name is kept as metadata"
++    if display == "logs.txt":
++        assert path.name.endswith(".txt"), "a plain extension still names the bytes' type for the Host"
++    _run(env, lambda: env.wire.sent())
++    task = env.model.tasks[0]
++    assert task["metadata"]["presence"]["event"]["message"]["attachments"][0]["name"] == display
++    manifest = task.get("attachment_manifest") or []
++    assert [row.get("status") for row in manifest] == ["staged"] and Path(manifest[0]["abs_path"]).read_bytes() == b"file bytes"
++    assert [m for m, _d in env.wire.calls].count("download") == 1, "the staged bytes were reused, not fetched again"
++    assert not folder.exists(), "staging is released once the Host answered"
++
++
++@pytest.mark.parametrize("staged_under", ["advanced", "cyber_pro"])
++@pytest.mark.parametrize("display", [".env", ".env.local", "prod.env", ".env.example"])
++def test_the_hosts_own_secret_name_rule_still_judges_the_senders_file_name(env, monkeypatch, display, staged_under):
++    """In the ordinary Access the Host refuses a dotenv-named file, as it did when the sender's
++    name was the staged basename; its example form stays admitted. Staging under Cyber Pro
++    (which refuses nothing) and admitting after a Restart into the ordinary Access still refuses."""
++    from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
++
++    document = _document(display, caption="Use these settings")
++    _receive(env, document, 9)
++    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: staged_under)
++    _stage_guarded(env, monkeypatch, 9, document)
++    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
++    assert not mode_has_unrestricted_agency("advanced") and mode_has_unrestricted_agency("cyber_pro")
++    _run(env, lambda: _custody(env, "SELECT state FROM inbox")[0]["state"] in {"settled", "rejected"})
++    row = _custody(env, "SELECT * FROM inbox")[0]
++    receipt = json.loads(row["receipt_json"])
++    assert json.loads(row["staged_json"])[0]["name"] == display, "the sender's name stays metadata"
++    if display == ".env.example":  # not a secret shape: admitted, as before
++        assert row["state"] == "settled" and len(env.model.tasks) == 1
++        assert [r["status"] for r in env.model.tasks[0]["attachment_manifest"]] == ["staged"]
++        return
++    assert (row["state"], receipt.get("code"), receipt.get("disposition")) == (
++        "rejected", "presence_attachment_admission_rejected", "rejected"), "the same admission as before"
++    [refused] = receipt["attachment_manifest"]
++    assert (refused["status"], refused["reason"]) == ("rejected", "secret_source") and "dotenv secret" in refused["rule"]
++    assert env.model.tasks == [] and env.wire.sent() == [] and env.injects == [] and env.bridge.messages == []
++
++
++def _scripted_lookup(monkeypatch, env, roads):
++    looked = []
++
++    async def lookup(_api, chat_id):
++        looked.append(chat_id)
++        return roads.get(chat_id, ("unknown", {"code": "places_unavailable"}))
++
++    monkeypatch.setattr(env.tp, "place_lookup", lookup)
++    return looked
++
++
++def _lanes(env):
++    return {r["update_id"]: (r["lane"], r["state"]) for r in _custody(env, "SELECT update_id, lane, state FROM inbox")}
++
++
++def test_a_failed_classic_relay_keeps_its_chats_later_words_behind_it_and_leaves_others_free(env, monkeypatch):
++    roads = {}
++    looked = _scripted_lookup(monkeypatch, env, roads)
++    _receive(env, _message(60, "Start the bench run"), 20)
++    _receive(env, _message(61, "Cancel that request"), 21)  # behind the undecided first one, never asked
++    env.tp.commit(env.api, 22, _message(70, "A guest's words", chat=GUEST), owner=False, lane="")
++    assert looked == [OWNER]
++    roads.update({OWNER: ("none", {}), GUEST: ("none", {})})  # the place was disconnected meanwhile
++    real, relayed = env.runner.classic, []
++
++    async def classic(update_id, message):
++        relayed.append(update_id)
++        if relayed == [20]:
++            raise RuntimeError("Main's ingress refused once")
++        return await real(update_id, message)
++
++    env.runner.classic = classic
++    _run(env, lambda: True)
++    assert relayed == [20] and env.bridge.messages == [], "the later words never overtake a failed relay"
++    assert _lanes(env) == {20: ("", "pending"), 21: ("", "pending"), 22: ("classic", "ignored")}
++    assert looked == [OWNER, OWNER, GUEST], "another chat is resolved while this one waits; 21 is not asked"
++    assert _custody(env, "SELECT available_at FROM inbox WHERE update_id=20")[0]["available_at"] > time.time()
++
++    _receive(env, _message(62, "/panic"), 23)  # a fast control never waits behind custody
++    assert [p["text"] for route, p in env.injects if route == "/chat/inject"] == ["/panic"]
++    _run(env, lambda: True)  # the head's retry is not due yet: its chat stays held, on every road
++    assert relayed == [20] and env.bridge.messages == [] and looked.count(OWNER) == 2
++
++    env.tp._exec(env.api, "UPDATE inbox SET available_at=0 WHERE update_id=20")
++    _run(env, lambda: len(env.bridge.messages) == 2)
++    assert [m["text"] for m in env.bridge.messages] == ["Start the bench run", "Cancel that request"]
++    assert relayed == [20, 20, 21] and 23 not in _lanes(env)
++
++
++@pytest.mark.parametrize("road", ["main", "place"])
++def test_a_due_later_message_never_overtakes_its_chats_waiting_undecided_head(env, monkeypatch, road):
++    roads = {}
++    looked = _scripted_lookup(monkeypatch, env, roads)
++    _receive(env, _message(60, "Start the bench run"), 20)
++    _run(env, lambda: True)  # still unreadable: the head's next question is deferred
++    assert _custody(env, "SELECT available_at FROM inbox WHERE update_id=20")[0]["available_at"] > time.time()
++    _receive(env, _message(61, "Cancel that request"), 21)  # due at once, behind the waiting head
++    roads[OWNER] = ("none", {}) if road == "main" else ("place", {"place_id": env.place.place_id, "state": "active"})
++    _run(env, lambda: True)
++    assert _lanes(env) == {20: ("", "pending"), 21: ("", "pending")}, "nothing about 21 is decided first"
++    assert looked == [OWNER, OWNER] and env.bridge.messages == [] and env.model.tasks == []
++
++    env.tp._exec(env.api, "UPDATE inbox SET available_at=0 WHERE update_id=20")
++    if road == "main":
++        _run(env, lambda: len(env.bridge.messages) == 2)
++        assert [m["text"] for m in env.bridge.messages] == ["Start the bench run", "Cancel that request"]
++    else:
++        _run(env, lambda: {state for _lane, state in _lanes(env).values()} == {"settled"})
++        arrivals = [row["client_message_id"] for row in places_suite._chat_rows(env.root) if row.get("direction") == "in"]
++        assert arrivals == [f"telegram:{OWNER}:60", f"telegram:{OWNER}:61"] and env.bridge.messages == []
++
++
++def test_new_events_extend_the_known_rooms_without_rereading_retained_custody(env, monkeypatch):
++    from ouroboros.places import conversation_chat_id
++
++    statements, real_db = [], env.tp._db
++
++    @contextlib.contextmanager
++    def traced(api, *, create=True):
++        with real_db(api, create=create) as conn:
++            conn.set_trace_callback(statements.append)
++            yield conn
++
++    monkeypatch.setattr(env.tp, "_db", traced)
++
++    def scans():
++        return [sql for sql in statements if "SELECT DISTINCT conversation_key" in sql]
++
++    owner_room = conversation_chat_id(f"telegram:{BOT}:{OWNER}:0")
++    guest_room = conversation_chat_id(f"telegram:{BOT}:{GUEST}:0")
++    _receive(env, _message(50, "First words"), 7)
++    _run(env, lambda: env.wire.sent())
++    assert env.tp.room_event(env.api, {"chat_id": owner_room}) and len(scans()) == 1, "read cold once"
++    for update_id, mid, text in ((8, 51, "Second words"), (9, 52, "Third words")):
++        _receive(env, _message(mid, text), update_id)
++        _run(env, lambda uid=update_id: _custody(env, "SELECT state FROM inbox WHERE update_id=?", (uid,))[0]["state"]
++             == "settled")
++        assert env.tp.room_event(env.api, {"chat_id": owner_room})  # the mirror asks on every outbound row
++    env.tp.commit(env.api, 10, _message(53, "A guest arrives", chat=GUEST), owner=False, lane="presence",
++                  place_id=env.place.place_id)
++    assert not env.tp.room_event(env.api, {"chat_id": guest_room}), "not a room before its event froze"
++    _run(env, lambda: _custody(env, "SELECT state FROM inbox WHERE update_id=10")[0]["state"] == "settled")
++    assert env.tp.room_event(env.api, {"chat_id": guest_room}), "a new conversation joins the known rooms"
++    assert len(scans()) == 1, "repeated events never reread the retained inbox"
++    env.tp._ROOMS.clear()  # a restarted skill rebuilds the set from custody
++    assert env.tp.room_event(env.api, {"chat_id": guest_room}) and env.tp.room_event(env.api, {"chat_id": owner_room})
++    assert len(scans()) == 2
+diff --git a/tests/test_telegram_place_dispatch.py b/tests/test_telegram_place_dispatch.py
+new file mode 100644
+index 000000000..e45989b02
+--- /dev/null
++++ b/tests/test_telegram_place_dispatch.py
+@@ -0,0 +1,325 @@
++"""The Telegram place tools through the production tool dispatcher.
++
++A genuine extension is loaded by ``extension_loader.load_extension`` from the real skill
++payload (its ``lib/`` and ``plugin.py``) with the real manifest's ``tools:`` effects and
++place contribution; its entry registers exactly the production tool handlers, without
++the bridge's pollers. Calls go through ``ToolRegistry.execute_result`` with a real
++``ToolContext`` inside real Host focus turns, so the production order applies: Advises
++(Observe) refusal and the Silent/Paused place guard, liveness, the real Safety check
++(only its model call is stubbed), the handler, and the typed reading of an ``ok:false``
++body. Telegram is a recorded wire; the owner ingress is the Host's real ``/chat/inject``.
++"""
++from __future__ import annotations
++
++import asyncio
++import json
++import re
++import shutil
++import sys
++import time
++from pathlib import Path
++from types import SimpleNamespace
++
++import httpx
++import pytest
++
++from ouroboros import extension_loader, places
++from ouroboros.gateway import host_service
++from ouroboros.presence_runner import build_presence_result_event, run_presence_turn
++from ouroboros.skill_loader import (SkillReviewState, find_skill, save_enabled, save_review_state,
++                                    save_skill_grants, skill_state_dir)
++from ouroboros.task_results import write_task_result
++from ouroboros.tools.registry import ToolContext, ToolRegistry
++from tests._shared import clean_extension_runtime_state
++
++pytestmark = pytest.mark.serial
++
++SKILL = Path(__file__).resolve().parents[1] / "skills" / "telegram"
++BOT, OWNER, GUEST = "777", 42, 99
++ENTRY = '''
++from .lib import telegram_actions
++from . import plugin as classic
++
++CLIENT = None
++
++
++def register(api):
++    telegram_actions.register_tools(api, client_factory=lambda: CLIENT, relay=classic._relay_owner_message,
++                                    owner=lambda: str(classic._load_settings(api).get("TELEGRAM_CHAT_ID") or ""))
++'''
++
++
++def _frontmatter_block(name: str) -> str:
++    text = (SKILL / "SKILL.md").read_text(encoding="utf-8")
++    match = re.search(rf"^{name}:\n(?:  .*\n)+", text, re.M)
++    assert match, name
++    return match.group(0)
++
++
++class Wire:
++    def __init__(self):
++        self.calls, self.next_id = [], 500
++
++    async def call(self, method, *, data=None, files=None, timeout=30):
++        self.calls.append((method, dict(data or {})))
++        if method == "setMessageReaction":
++            return {"ok": True, "result": True}
++        self.next_id += 1
++        return {"ok": True, "result": {"message_id": self.next_id, "date": 1_800_000_000}}
++
++    async def download_photo(self, _file_id):
++        return "aGVsbG8=", "image/jpeg"
++
++    async def download_file(self, _file_id):
++        return b"bytes"
++
++    async def send_message(self, chat_id, text, parse_mode="HTML"):
++        return (await self.call("sendMessage", data={"chat_id": str(chat_id), "text": text}))["result"]["message_id"]
++
++
++class Api:
++    """The runner's view of the same skill state the loaded extension uses."""
++
++    def __init__(self, state_dir, data_dir):
++        self.state_dir, self.data_dir = Path(state_dir), Path(data_dir)
++
++    def get_state_dir(self):
++        return str(self.state_dir)
++
++    def get_runtime_info(self):
++        return {"data_dir": str(self.data_dir)}
++
++    def get_skill_token(self):
++        return SimpleNamespace(use_in_request=lambda: "synthetic")
++
++    def log(self, *_args):
++        pass
++
++
++class Bridge:
++    def __init__(self):
++        self.messages = []
++
++    def enqueue_local_message(self, text, **kwargs):
++        self.messages.append({"text": text, **kwargs})
++
++
++class Model:
++    def __init__(self, root):
++        self.root, self.tasks, self.during = root, [], None
++
++    def handle_task(self, task):
++        self.tasks.append(task)
++        if self.during is not None:
++            self.during(task)
++        ctx = ToolContext(repo_dir=self.root, drive_root=self.root, budget_drive_root=str(self.root),
++                          task_id=task["id"], task_metadata=task["metadata"])
++        result = build_presence_result_event(task, "Noted.", ctx, terminal_origin="model_final")
++        write_task_result(self.root, task["id"], "completed", metadata=task["metadata"],
++                          terminal_origin="model_final", result="Noted.")
++        return [result]
++
++
++@pytest.fixture
++def env(tmp_path, monkeypatch):
++    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
++    clean_extension_runtime_state()
++    root = tmp_path / "data"
++    root.mkdir()
++    monkeypatch.setattr("ouroboros.config.DATA_DIR", root)
++    repo = tmp_path / "skills"
++    skill_dir = repo / "telegram"
++    shutil.copytree(SKILL / "lib", skill_dir / "lib")
++    shutil.copytree(SKILL / "scripts", skill_dir / "scripts")
++    shutil.copy(SKILL / "plugin.py", skill_dir / "plugin.py")
++    (skill_dir / "dispatch_entry.py").write_text(ENTRY, encoding="utf-8")
++    (skill_dir / "SKILL.md").write_text(
++        "---\nname: telegram\ndescription: Telegram place tools under the production dispatcher.\nversion: 1.4.0\n"
++        "type: extension\nentry: dispatch_entry.py\nplugin_api: \"2.0\"\n"
++        "permissions: [net, read_settings, inject_chat, presence, tool]\nenv_from_settings: [TELEGRAM_BOT_TOKEN]\n"
++        f"icon: message-circle\n{_frontmatter_block('tools')}{_frontmatter_block('contributes')}---\nbody\n",
++        encoding="utf-8")
++    loaded = find_skill(root, "telegram", repo_path=str(repo))
++    save_enabled(root, "telegram", True)
++    save_review_state(root, "telegram", SkillReviewState(status="pass", content_hash=loaded.content_hash))
++    # The owner's grant, as the Skills tab writes it: the token key and the gated permissions.
++    save_skill_grants(root, "telegram", ["TELEGRAM_BOT_TOKEN"], content_hash=loaded.content_hash,
++                      requested_keys=["TELEGRAM_BOT_TOKEN"], granted_permissions=["inject_chat", "presence"],
++                      requested_permissions=["inject_chat", "presence"])
++    loaded = find_skill(root, "telegram", repo_path=str(repo))
++    assert extension_loader.load_extension(loaded, lambda: {}, drive_root=root, _force_in_process=True) is None
++    entry = next(m for m in list(sys.modules.values()) if (getattr(m, "__file__", "") or "").endswith("dispatch_entry.py"))
++    package = entry.__name__  # the loader imports the entry as its package
++    tp, classic = sys.modules[package + ".lib.telegram_places"], sys.modules[package + ".plugin"]
++    state_dir = skill_state_dir(root, "telegram")  # the loaded PluginAPI's own state dir
++    (state_dir / "settings.json").write_text(json.dumps({"TELEGRAM_CHAT_ID": str(OWNER),
++                                                         "TELEGRAM_ORDINARY_CHAT": "place"}), encoding="utf-8")
++    bridge, wire, model = Bridge(), Wire(), Model(root)
++    entry.CLIENT = wire
++    app = host_service.create_host_service_app(root, bridge_getter=lambda: bridge)
++    transport = httpx.ASGITransport(app=app)
++
++    async def authenticated(*_args):
++        return "telegram", {}
++
++    async def host_post(_api, path, payload):  # the classic relay's real Host ingress
++        async with httpx.AsyncClient(transport=transport, base_url="http://host") as client:
++            response = await client.post(path, json=payload, headers={"X-Skill-Token": "synthetic"})
++        return response.status_code, response.json()
++
++    monkeypatch.setattr(host_service, "_authenticated", authenticated)
++    monkeypatch.setattr(classic, "_host_post", host_post)
++    monkeypatch.setattr(classic, "_telegram_client", lambda *_a, **_kw: wire)
++    monkeypatch.setattr(tp, "_TRANSPORT", transport)
++    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
++    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance",
++                        lambda _root: {"status": "available", "remaining_usd": 5, "settled_usd": 0})
++    calls = []
++
++    def llm_check(tool_name, arguments, messages, ctx, resolved_binding=None):
++        calls.append(tool_name)
++        return True, ""
++
++    monkeypatch.setattr("ouroboros.safety._run_llm_check", llm_check)
++    app.state.host_service_context.presence_runner = lambda **kw: run_presence_turn(
++        repo_dir=root, drive_root=root, agent_factory=lambda **_kw: model, **kw)
++    api = Api(state_dir, root)
++    tp.remember_bot(api, {"id": int(BOT), "username": "obot"})
++    place = places.connect_place(root, connector="telegram", provider="telegram", account_id=BOT,
++                                 wakes=["direct_message"])
++    places.edit_place(root, place.place_id, "confirm_owner_account", author="owner", platform_actor_id=str(OWNER))
++    yield SimpleNamespace(root=root, tp=tp, classic=classic, bridge=bridge, wire=wire, model=model, place=place,
++                          app=app, safety_calls=calls, api=api)
++    clean_extension_runtime_state()
++
++
++def _name(short):
++    return extension_loader.extension_surface_name("telegram", short)
++
++
++def _dispatch(env, task, short, **args):
++    """One production dispatch: a real ToolContext for the host's own task record."""
++    registry = ToolRegistry(repo_dir=env.root, drive_root=env.root)
++    registry.set_context(ToolContext(repo_dir=env.root, drive_root=env.root, budget_drive_root=str(env.root),
++                                     task_id=task["id"], task_metadata=task["metadata"],
++                                     current_chat_id=task.get("chat_id")))
++    return registry.execute_result(_name(short), args)
++
++
++def _focus(env, chat, mid, text, during):
++    """Run one real Host focus for a private message and call ``during(task)`` inside it."""
++    message = {"message_id": mid, "date": int(time.time()), "chat": {"id": chat, "type": "private"},
++               "from": {"id": chat, "first_name": "Ann" if chat == OWNER else "Guest"}, "text": text}
++    env.tp.commit(env.api, mid, message, owner=chat == OWNER, lane="presence", place_id=env.place.place_id)
++    results = {}
++    env.model.during = lambda task: results.update(during(task) or {})
++    runner = env.tp.Runner(env.api, client_factory=lambda: env.wire, classic=None)
++
++    async def drive():
++        deadline = time.monotonic() + 20
++        while time.monotonic() < deadline and not results:
++            await runner.tick()
++            await asyncio.sleep(0.05)
++        await runner.stop()
++    asyncio.run(drive())
++    assert results, "the focus never ran"
++    return results
++
++
++def _outcome(result):
++    return result.status, result.code
++
++
++def test_owner_focus_runs_all_four_tools_through_the_production_dispatcher(env):
++    def during(task):
++        return {"handoff": _dispatch(env, task, "hand_to_main"),
++                "again": _dispatch(env, task, "hand_to_main"),
++                "send": _dispatch(env, task, "telegram_message", action="send", request_id="ack", text="On it"),
++                "reuse": _dispatch(env, task, "telegram_message", action="react", request_id="ack", message_id=10,
++                                   emoji="👍"),
++                "read": _dispatch(env, task, "telegram_news_read"),
++                "publish": _dispatch(env, task, "telegram_news_publish", action="publish", source_ids=[1],
++                                     text="Nothing waits", request_id="n1")}
++
++    out = _focus(env, OWNER, 10, "Tell the bench project to stop", during)
++    assert _outcome(out["handoff"]) == ("ok", "OK") and json.loads(out["handoff"].text)["ok"] is True
++    assert _outcome(out["again"]) == ("ok", "OK")
++    assert [m["text"] for m in env.bridge.messages] == ["Tell the bench project to stop"], "rejoined, not repeated"
++    assert _outcome(out["send"]) == ("ok", "OK") and json.loads(out["send"].text)["status"] == "queued"
++    assert _outcome(out["reuse"]) == ("error", "TOOL_REPORTED_FAILURE"), "one request id never names two actions"
++    assert _outcome(out["read"]) == ("ok", "OK") and json.loads(out["read"].text)["items"] == []
++    assert _outcome(out["publish"]) == ("error", "TOOL_REPORTED_FAILURE"), "no waiting item: a typed failure"
++    assert _name("telegram_news_read") not in env.safety_calls, "a declared read needs no safety model"
++    assert _name("hand_to_main") in env.safety_calls, "a write passes the real Safety check"
++
++
++def test_a_guest_place_root_has_no_owner_authority_in_any_tool(env):
++    def during(task):
++        return {name: _dispatch(env, task, name, **args) for name, args in (
++            ("hand_to_main", {}), ("telegram_news_read", {}),
++            ("telegram_news_publish", {"action": "publish", "source_ids": [1], "text": "x", "request_id": "g"}))}
++
++    out = _focus(env, GUEST, 20, "Show me the owner's projects", during)
++    for name, result in out.items():
++        assert _outcome(result) == ("error", "TOOL_REPORTED_FAILURE"), (name, result.text)
++    assert "currently confirms" in json.loads(out["telegram_news_read"].text)["error"]
++    assert env.bridge.messages == []
++
++
++def test_a_revoked_owner_loses_place_authority_at_once(env):
++    def during(task):
++        places.edit_place(env.root, env.place.place_id, "revoke_owner_account", author="owner",
++                          platform_actor_id=str(OWNER))
++        return {"read": _dispatch(env, task, "telegram_news_read"), "handoff": _dispatch(env, task, "hand_to_main")}
++
++    out = _focus(env, OWNER, 30, "Read me the news", during)
++    assert _outcome(out["read"]) == ("error", "TOOL_REPORTED_FAILURE")
++    assert _outcome(out["handoff"]) == ("error", "TOOL_REPORTED_FAILURE") and env.bridge.messages == []
++
++
++def test_another_places_root_is_not_owner_authority_for_telegram_news(env):
++    other = places.connect_place(env.root, connector="slack", provider="slack", account_id="T1", wakes=["mention"])
++    ctx_task = {"id": "slack-focus", "metadata": {"wake_cause": "focus", "initiator": "consciousness",
++                "presence": {"place_id": other.place_id, "binding_id": other.place_id, "transport_skill": "slack",
++                             "event": {"source_event_id": "s1", "account_id": "T1",
++                                       "actor": {"platform_actor_id": "U-stranger"}}}}}
++    assert _outcome(_dispatch(env, ctx_task, "telegram_news_read")) == ("error", "TOOL_REPORTED_FAILURE")
++    places.edit_place(env.root, other.place_id, "confirm_owner_account", author="owner",
++                      platform_actor_id="U-stranger", account_id="T1")
++    assert _outcome(_dispatch(env, ctx_task, "telegram_news_read")) == ("ok", "OK"), "a confirmed owner there"
++    owner_turn = {"id": "owner-turn", "metadata": {}}
++    assert _outcome(_dispatch(env, owner_turn, "telegram_news_read")) == ("ok", "OK"), "an ordinary owner root"
++
++
++@pytest.mark.parametrize("state", ["silent", "paused"])
++def test_silent_and_paused_places_hold_every_non_read_tool(env, state):
++    def during(task):
++        places.edit_place(env.root, env.place.place_id, "set_state", author="owner", state=state)
++        return {name: _dispatch(env, task, name, **args) for name, args in (
++            ("hand_to_main", {}), ("telegram_message", {"action": "send", "request_id": "s", "text": "x"}),
++            ("telegram_news_publish", {"action": "skip", "source_ids": [1], "reason": "r"}),
++            ("telegram_news_read", {}))}
++
++    out = _focus(env, OWNER, 40, "Do it while I set the place " + state, during)
++    for name in ("hand_to_main", "telegram_message", "telegram_news_publish"):
++        assert _outcome(out[name]) == ("blocked", "RESOURCE_CONSTRAINT_BLOCKED"), (name, out[name].text)
++        assert "Silent or Paused" in out[name].text
++    assert _outcome(out["telegram_news_read"]) == ("ok", "OK"), "a declared read is not held"
++    assert env.bridge.messages == [] and not [c for c in env.wire.calls if c[0] == "sendMessage"]
++
++
++def test_observe_autonomy_permits_only_the_declared_read(env, monkeypatch):
++    monkeypatch.setattr("ouroboros.config.get_consciousness_autonomy", lambda: "observe")
++
++    def during(task):
++        assert task["metadata"]["consciousness_autonomy"] == "observe", "the Host stamped the level itself"
++        return {name: _dispatch(env, task, name, **args) for name, args in (
++            ("hand_to_main", {}), ("telegram_message", {"action": "send", "request_id": "o", "text": "x"}),
++            ("telegram_news_publish", {"action": "skip", "source_ids": [1], "reason": "r"}),
++            ("telegram_news_read", {}))}
++
++    out = _focus(env, OWNER, 50, "Watch only", during)
++    for name in ("hand_to_main", "telegram_message", "telegram_news_publish"):
++        assert _outcome(out[name]) == ("blocked", "RESOURCE_CONSTRAINT_BLOCKED") and "Advises" in out[name].text
++    assert _outcome(out["telegram_news_read"]) == ("ok", "OK")
++    assert env.bridge.messages == []
+diff --git a/tests/test_telegram_place_mirror.py b/tests/test_telegram_place_mirror.py
+new file mode 100644
+index 000000000..0af408453
+--- /dev/null
++++ b/tests/test_telegram_place_mirror.py
+@@ -0,0 +1,218 @@
++"""What reaches the owner's Telegram from the host: mirror modes and curated Project news.
++
++The outbound half of the place work, beside the inbound place lane in
++``tests/test_telegram_places.py`` (whose ``env`` fixture it shares: the real Host Service app, a
++connected Telegram place, the recorded Telegram wire). Events come from the real ``LocalChatBridge``
++emitters through the real event bus to the skill's real handlers; nothing is hand-built that the
++host would publish itself.
++"""
++from __future__ import annotations
++
++import asyncio
++import json
++from types import SimpleNamespace
++
++import pytest
++
++from ouroboros import places
++from ouroboros.task_results import write_task_result
++from tests import test_telegram_places as places_suite
++from tests.test_telegram_places import OWNER, _run, _tool
++
++pytestmark = pytest.mark.serial
++env = places_suite.env  # the shared place fixture
++
++
++def test_project_news_is_what_a_mind_selects_never_raw_rows_or_helpers(env, monkeypatch):
++    from ouroboros import event_bus, projects_registry
++    from supervisor import message_bus
++
++    project = projects_registry.create_project(env.root, "bench", name="Benchmarks")
++    bus = event_bus.EventBus()
++    monkeypatch.setattr(event_bus, "_GLOBAL_BUS", bus)
++    monkeypatch.setattr(message_bus, "DATA_DIR", env.root)
++    published = []
++    for topic in ("chat.outbound", "chat.photo", "chat.video", "chat.document"):
++        bus.subscribe("telegram", topic, lambda e, topic=topic: published.append((topic, e)))
++    bridge = message_bus.LocalChatBridge({})
++    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
++    write_task_result(env.root, "bench-root", "running", metadata={})
++    write_task_result(env.root, "bench-child", "running", metadata={"parent_task_id": "bench-root",
++                                                                    "delegation_role": "subagent"})
++    # The production send seam: the row is written first and its address rides the event.
++    message_bus.send_with_budget(project["chat_id"], "Run 3 finished: 71%", task_id="bench-root")
++    message_bus.send_with_budget(project["chat_id"], "child chatter", task_id="bench-child",
++                                 progress_meta={"delegation_role": "subagent", "parent_task_id": "bench-root"})
++    bridge.send_photo(OWNER, b"\x89PNG", caption="child plot", task_id="bench-child")
++    bridge.send_video(OWNER, b"video", caption="child video", task_id="bench-child")
++    bridge.send_document(OWNER, b"doc", filename="child.txt", task_id="bench-child")
++    bridge.send_photo(OWNER, b"\x89PNG", caption="root plot", task_id="main-1")
++    handlers = {"chat.outbound": env.plugin._make_outbound(env.api), "chat.photo": env.plugin._make_photo(env.api),
++                "chat.video": env.plugin._make_video(env.api), "chat.document": env.plugin._make_document(env.api)}
++    for topic, event in published:
++        asyncio.run(handlers[topic](event))
++    media = [(topic, e.get("task_id")) for topic, e in published if topic != "chat.outbound"]
++    assert media == [("chat.photo", "bench-child"), ("chat.video", "bench-child"), ("chat.document", "bench-child"),
++                     ("chat.photo", "main-1")], "the real emitter now names each media producer"
++    sent_media = [(m, d.get("caption") or d.get("filename")) for m, d in env.wire.calls
++                  if m in {"sendPhoto", "sendVideo", "sendDocument"}]
++    assert sent_media == [("sendPhoto", "root plot")], "a delegated child's media stays with its root"
++    root_ctx = SimpleNamespace(task_id="owner-turn", task_metadata={}, task_contract={}, task_depth=0)
++    waiting = _tool(env, "telegram_news_read", root_ctx)
++    assert [item["text"] for item in waiting["items"]] == ["Run 3 finished: 71%"], "only the Project root's own row"
++    child_ctx = SimpleNamespace(task_id="c", task_metadata={"parent_task_id": "owner-turn"}, task_contract={}, task_depth=1)
++    assert _tool(env, "telegram_news_read", child_ctx)["ok"] is False
++    item = waiting["items"][0]["id"]
++    news = _tool(env, "telegram_news_publish", root_ctx, action="publish", source_ids=[item],
++                 text="Benchmarks: run 3 reached 71%.", request_id="bench-3")
++    assert news["status"] == "queued"
++    again = _tool(env, "telegram_news_publish", root_ctx, action="publish", source_ids=[item],
++                  text="Benchmarks: run 3 reached 71%.", request_id="bench-3")
++    assert again["status"] == "already_queued"
++    places.edit_place(env.root, env.place.place_id, "disconnect", author="owner")  # no place: the bridge's own message
++    _run(env, lambda: "Benchmarks: run 3 reached 71%." in [d["text"] for d in env.wire.sent()])
++    assert [d["text"] for d in env.wire.sent()].count("Benchmarks: run 3 reached 71%.") == 1
++    assert _tool(env, "telegram_news_read", root_ctx)["pending"] == 0
++
++
++def test_connected_main_mode_sends_main_and_questions_never_projects_helpers_or_owner_words(env, monkeypatch):
++    from ouroboros import event_bus, projects_registry
++    from supervisor import message_bus
++
++    settings = {"TELEGRAM_CHAT_ID": str(OWNER), "TELEGRAM_ORDINARY_CHAT": "place", "TELEGRAM_MIRROR_MODE": "main"}
++    (env.api.state_dir / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
++    project = projects_registry.create_project(env.root, "bench", name="Benchmarks")
++    bus = event_bus.EventBus()
++    monkeypatch.setattr(event_bus, "_GLOBAL_BUS", bus)
++    monkeypatch.setattr(message_bus, "DATA_DIR", env.root)
++    bridge = message_bus.LocalChatBridge({})
++    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
++    published = []
++    for topic in ("chat.outbound", "chat.photo", "chat.video", "chat.document", "chat.quiz"):
++        bus.subscribe("telegram", topic, lambda e, topic=topic: published.append((topic, e)))
++    for task_id, meta in (("main-1", {}), ("bench-root", {}),
++                          ("bench-child", {"parent_task_id": "bench-root", "delegation_role": "subagent"})):
++        write_task_result(env.root, task_id, "running", metadata=meta)
++    bridge.activate_update_transport({"chat_id": OWNER, "transport": {"kind": "telegram", "conversation_id": str(OWNER)}})
++    child = {"delegation_role": "subagent", "parent_task_id": "bench-root"}
++    message_bus.send_with_budget(1, "Web Main reply", task_id="main-1")
++    message_bus.send_with_budget(OWNER, "Telegram Main reply", task_id="main-1")
++    message_bus.send_with_budget(project["chat_id"], "Raw project row", task_id="bench-root")
++    message_bus.send_with_budget(project["chat_id"], "child chatter", task_id="bench-child", progress_meta=child)
++    message_bus.send_with_budget(1, "child row in Main", task_id="bench-child", progress_meta=child)
++    bridge.send_message(1, "child card", task_id="bench-child", progress_meta={**child, "subagent_event": "running"})
++    message_bus.send_with_budget(1, "Note for the bench task", task_id="main-1", role="system", system_type="relay_entry",
++                                 progress_meta={"relay": {"text": "the owner's web words", "attachments": [],
++                                                          "source": {"chat_id": 1, "label": "Main"}}})
++    bridge.send_photo(1, b"\x89PNG", caption="Main plot", task_id="main-1")
++    bridge.send_photo(1, b"\x89PNG", caption="child plot", task_id="bench-child")
++    bridge.send_document(1, b"doc", filename="main.txt", task_id="main-1")
++    bridge.send_photo(project["chat_id"], b"\x89PNG", caption="project plot", task_id="bench-root")
++    from ouroboros.owner_quiz import record_asked
++
++    record_asked(env.root, "bench-root", quiz_id="q1", question="Proceed with run 4?", options=["Yes", "No"],
++                 assumption="Run 4 waits until you answer.", chat_id=project["chat_id"])
++    ok, why = bridge.send_quiz(project["chat_id"], "q1", "Proceed with run 4?", [{"label": "Yes"}, {"label": "No"}],
++                               assumption="Run 4 waits until you answer.", task_id="bench-root")
++    assert ok, why
++    handlers = {"chat.outbound": env.plugin._make_outbound(env.api), "chat.photo": env.plugin._make_photo(env.api),
++                "chat.video": env.plugin._make_video(env.api), "chat.document": env.plugin._make_document(env.api),
++                "chat.quiz": env.plugin._make_quiz(env.api)}
++    for topic, event in published:
++        asyncio.run(handlers[topic](event))
++    asyncio.run(handlers["chat.outbound"]({"chat_id": 1, "role": "user", "text": "the owner's web words"}))
++    texts = [d["text"] for d in env.wire.sent()]
++    assert texts.count("Web Main reply") == texts.count("Telegram Main reply") == 1, texts
++    assert any("Proceed with run 4?" in t for t in texts), "a Project's question still reaches the owner"
++    for absent in ("Raw project row", "child chatter", "child row in Main", "child card", "Note for the bench task",
++                   "the owner's web words"):
++        assert not any(absent in t for t in texts), absent
++    media = [(m, d.get("caption") or d.get("filename")) for m, d in env.wire.calls if m in {"sendPhoto", "sendDocument"}]
++    assert media == [("sendPhoto", "Main plot"), ("sendDocument", "main.txt")], media
++    root_ctx = SimpleNamespace(task_id="owner-turn", task_metadata={}, task_contract={}, task_depth=0)
++    items = _tool(env, "telegram_news_read", root_ctx)["items"]
++    assert [i["text"] for i in items] == ["Raw project row", "project plot"], "only the Project root's own rows"
++    photo = items[1]["refs"]
++    # The host row address is the stable source; its stored row carries the download address.
++    assert photo["kind"] == "photo" and photo["row_address"].startswith("row:") and photo["mime"] == "image/png"
++    news = _tool(env, "telegram_news_publish", root_ctx, action="publish", source_ids=[i["id"] for i in items],
++                 text="Benchmarks: run 3 done; plot attached in the Project.", request_id="bench-news")
++    assert news["status"] == "queued"
++    places.edit_place(env.root, env.place.place_id, "set_state", author="owner", state="active")
++    _run(env, lambda: any("run 3 done" in d["text"] for d in env.wire.sent()))
++    assert [m for m, _d in env.wire.calls].count("sendPhoto") == 1, "news never re-sends a Project's media"
++
++
++def test_main_mode_ranks_the_real_destination_above_a_telegram_origin_and_keeps_helpers_out(env, monkeypatch):
++    from ouroboros import event_bus, projects_registry
++    from supervisor import message_bus
++
++    project = projects_registry.create_project(env.root, "bench", name="Benchmarks")
++    bus = event_bus.EventBus()
++    monkeypatch.setattr(event_bus, "_GLOBAL_BUS", bus)
++    monkeypatch.setattr(message_bus, "DATA_DIR", env.root)
++    bridge = message_bus.LocalChatBridge({})
++    monkeypatch.setattr(message_bus, "_BRIDGE", bridge)
++    published = []
++    for topic in ("chat.outbound", "chat.document", "chat.links"):
++        bus.subscribe("telegram", topic, lambda e, topic=topic: published.append((topic, e)))
++    for task_id, meta in (("main-1", {}), ("bench-root", {}),
++                          ("bench-child", {"parent_task_id": "bench-root", "delegation_role": "subagent"})):
++        write_task_result(env.root, task_id, "running", metadata=meta)
++    telegram = {"kind": "telegram", "conversation_id": str(OWNER)}
++    # A Project whose work began from Telegram keeps that reply transport on its own room.
++    bridge.activate_update_transport({"chat_id": project["chat_id"], "transport": telegram})
++    bridge.activate_update_transport({"chat_id": OWNER, "transport": telegram})
++    message_bus.send_with_budget(project["chat_id"], "Raw row of a Telegram-born project", task_id="bench-root")
++    bridge.send_document(project["chat_id"], b"x", filename="project.csv", task_id="bench-root")
++    message_bus.send_with_budget(1, "Benchmarks finished", task_id="bench-root", role="system",
++                                 system_type="project_completion_summary",
++                                 progress_meta={"completion_notice": {"neutral": False, "detail": "Run 4 finished",
++                                                                      "phase": "done"}, "target_label": "Benchmarks"})
++    message_bus.send_with_budget(1, "Benchmarks needs your decision on run 5.", task_id="bench-root",
++                                 system_type="main_notice")
++    message_bus.send_with_budget(OWNER, "Answer to your Telegram request", task_id="main-1")
++    bridge.send_links(1, [{"label": "Report", "url": "https://example.com/report"}], title="Root links", task_id="main-1")
++    bridge.send_links(1, [{"label": "Scratch", "url": "https://example.com/scratch"}], title="Child links",
++                      task_id="bench-child")
++    links = [e for topic, e in published if topic == "chat.links"]
++    assert [e["task_id"] for e in links] == ["main-1", "bench-child"] and all(e.get("row_address") for e in links), \
++        "the real links emitter now names its producer"
++
++    def deliver(mode):
++        settings = {"TELEGRAM_CHAT_ID": str(OWNER), "TELEGRAM_ORDINARY_CHAT": "place", "TELEGRAM_MIRROR_MODE": mode,
++                    "TELEGRAM_NOTIFY_TASKS": "on"}
++        (env.api.state_dir / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
++        env.wire.calls.clear()
++        handlers = {"chat.outbound": env.plugin._make_outbound(env.api), "chat.document": env.plugin._make_document(env.api),
++                    "chat.links": env.plugin._make_links(env.api)}
++        for topic, event in published:
++            asyncio.run(handlers[topic](event))
++        return ([d["text"] for d in env.wire.sent()],
++                [d.get("filename") for m, d in env.wire.calls if m == "sendDocument"])
++
++    texts, files = deliver("main")
++    assert texts.count("Answer to your Telegram request") == 1, "a handoff answer in the owner's chat still goes"
++    assert texts.count("Benchmarks needs your decision on run 5.") == 1, "a deliberate Main notice is Main speech"
++    assert texts.count("Root links") == 1
++    for absent in ("Raw row of a Telegram-born project", "Benchmarks finished", "Run 4 finished", "Child links"):
++        assert not any(absent in t for t in texts), (absent, texts)
++    assert files == [], "a Project room's file never mirrors, whatever transport its room kept"
++    classic_texts, classic_files = deliver("all")  # the classic mode is unchanged: it still mirrors them
++    assert "Raw row of a Telegram-born project" in classic_texts and "Child links" in classic_texts
++    assert any("Run 4 finished" in t for t in classic_texts) and classic_files == ["project.csv"]
++
++
++def test_news_read_discloses_items_that_expired_unreviewed_and_where_every_row_lives(env, monkeypatch):
++    from ouroboros import projects_registry
++
++    project = projects_registry.create_project(env.root, "bench", name="Benchmarks")
++    monkeypatch.setattr(env.tn, "KEEP_PENDING", 2)
++    for index in range(3):
++        assert env.tn.capture(env.api, {"chat_id": project["chat_id"], "text": f"Run {index} done",
++                                        "task_id": "bench-root", "row_address": f"row:{index}@t#000000000000"})
++    root_ctx = SimpleNamespace(task_id="owner-turn", task_metadata={}, task_contract={}, task_depth=0)
++    view = _tool(env, "telegram_news_read", root_ctx)
++    assert [i["text"] for i in view["items"]] == ["Run 1 done", "Run 2 done"] and view["pending"] == 2
++    assert view["expired"] == 1 and "unreviewed" in view["coverage"], "an empty list never reads as all reviewed"
++    assert {i["chat_id"] for i in view["items"]} == {project["chat_id"]}, "each item names its Project room"
+diff --git a/tests/test_telegram_place_settings_browser.py b/tests/test_telegram_place_settings_browser.py
+new file mode 100644
+index 000000000..c75b42821
+--- /dev/null
++++ b/tests/test_telegram_place_settings_browser.py
+@@ -0,0 +1,187 @@
++"""Telegram mode selection through the real Settings SPA and settings writer.
++
++The server is an isolated candidate. Its extension inventory is a fixture built
++by the production Telegram register() call and the production settings-schema
++validator; pollers and the Mini App companion are not started. Browser form
++requests invoke the production settings handler against private state. This
++proves rendering/hydration/save/return, not a live bot, extension startup,
++native picker popups or Place activation.
++"""
++from __future__ import annotations
++
++import asyncio
++import hashlib
++import json
++import os
++from concurrent.futures import ThreadPoolExecutor
++from pathlib import Path
++
++import pytest
++from starlette.requests import Request
++
++from ouroboros.extension_ui_validation import validate_settings_schema
++from tests.test_telegram_format_parity import _load_skill
++from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
++
++
++class SettingsCapture:
++    def __init__(self, root):
++        self.root = root
++        self.sections = []
++        self.routes = {}
++
++    def get_state_dir(self):
++        return str(self.root)
++
++    def get_runtime_info(self):
++        return {"data_dir": str(self.root / "host")}
++
++    def get_settings(self, _keys):
++        return {}
++
++    def log(self, *_args):
++        pass
++
++    def register_supervised_task(self, *_args, **_kwargs):
++        pass
++
++    def subscribe_event(self, *_args, **_kwargs):
++        pass
++
++    def register_tool(self, *_args, **_kwargs):
++        pass
++
++    def register_route(self, name, handler, **_kwargs):
++        self.routes[name] = handler
++
++    def register_settings_section(self, section_id, *, title, schema):
++        # The same validated render production registration serves.
++        self.sections.append({"key": f"telegram:{section_id}", "skill": "telegram", "section_id": section_id,
++                              "title": title, "render": validate_settings_schema(schema)})
++
++
++@pytest.mark.ui_browser
++@pytest.mark.serial
++def test_telegram_place_modes_hydrate_save_and_return_in_settings(direct_server_with_data, tmp_path, monkeypatch):
++    from playwright.sync_api import expect, sync_playwright
++
++    plugin, _ = _load_skill()
++    api = SettingsCapture(tmp_path / "telegram-state")
++    api.root.mkdir()
++    baseline = {"TELEGRAM_CHAT_ID": "42", "TELEGRAM_MIRROR_MODE": "telegram_only",
++                "TELEGRAM_ORDINARY_CHAT": "main", "TELEGRAM_SUBAGENT_CARDS": "off",
++                "TELEGRAM_MINIAPP_ENABLED": "off", "fixture_keep": "preserved"}
++    state = api.root / "settings.json"
++    state.write_text(json.dumps(baseline), encoding="utf-8")
++    monkeypatch.setattr(plugin, "register_miniapp", lambda _api: None)
++    plugin.register(api)
++    assert len(api.sections) == 1
++    writes, requests = [], []
++
++    def inventory(route):
++        response = route.fetch()
++        data = response.json()
++        data.setdefault("live", {})["settings_sections"] = api.sections
++        route.fulfill(response=response, json=data)
++
++    def form_route(route):
++        method = route.request.method
++        body = route.request.post_data_json if method == "POST" else {}
++
++        async def run_handler():
++            async def receive():
++                return {"type": "http.request", "body": json.dumps(body).encode(), "more_body": False}
++
++            request = Request({"type": "http", "method": method, "headers": [],
++                               "client": ("127.0.0.1", 10000)}, receive)
++            return await api.routes["settings/save"](request)
++
++        # Playwright's sync dispatcher owns this thread's running loop.
++        with ThreadPoolExecutor(1) as pool:
++            result = pool.submit(asyncio.run, run_handler()).result(timeout=30)
++        requests.append({"method": method, "status": result.status_code})
++        if method == "POST":
++            writes.append({"request": body, "status": result.status_code})
++        route.fulfill(status=result.status_code, content_type="application/json", body=result.body)
++
++    output = Path(os.environ.get("OUROBOROS_UI_EVIDENCE_OUT") or tmp_path / "screenshots")
++    output.mkdir(parents=True, exist_ok=True)
++    observations = []
++    candidate = direct_server_with_data["repo_dir"]
++    sources = {name: hashlib.sha256((candidate / name).read_bytes()).hexdigest() for name in (
++        "skills/telegram/plugin.py", "skills/telegram/scripts/telegram_settings.py", "web/modules/settings.js",
++        "ouroboros/extension_ui_validation.py", "tests/test_telegram_place_settings_browser.py")}
++    try:
++        with sync_playwright() as pw:
++            for engine, width, height in (("chromium", 1512, 949), ("webkit", 1512, 949), ("webkit", 390, 844)):
++                browser = getattr(pw, engine).launch(headless=True)
++                try:
++                    page = browser.new_page(viewport={"width": width, "height": height})
++                    errors, console_errors, failed_responses = [], [], []
++                    page.on("pageerror", lambda error: errors.append(str(error)))
++                    page.on("console", lambda msg: console_errors.append(msg.text) if msg.type == "error" else None)
++                    page.on("response", lambda r: failed_responses.append(f"{r.status} {r.request.method} {r.url}")
++                            if r.status >= 400 else None)
++                    page.route("**/api/extensions", inventory)
++                    page.route("**/api/extensions/telegram/settings/save", form_route)
++                    page.goto(direct_server_with_data["url"] + "/#settings", wait_until="domcontentloaded")
++                    page.wait_for_selector("#page-settings", timeout=30000)
++                    page.locator('[data-settings-tab="advanced"]').click()
++                    form = page.locator('[data-extension-settings-form][data-skill="telegram"][data-route="settings/save"]')
++                    ordinary = form.locator('[name="TELEGRAM_ORDINARY_CHAT"]')
++                    mirror = form.locator('[name="TELEGRAM_MIRROR_MODE"]')
++                    expect(ordinary).to_have_value("main", timeout=30000)
++                    expect(mirror).to_have_value("telegram_only")
++                    ordinary.select_option("place")
++                    mirror.select_option("main")
++                    form.get_by_role("button", name="Save Telegram settings", exact=True).click()
++                    expect(form.locator("[data-extension-settings-status]")).to_contain_text("saved", timeout=10000)
++                    saved = json.loads(state.read_text(encoding="utf-8"))
++                    assert saved["TELEGRAM_ORDINARY_CHAT"] == "place" and saved["TELEGRAM_MIRROR_MODE"] == "main"
++                    assert saved["TELEGRAM_CHAT_ID"] == "42" and saved["fixture_keep"] == "preserved"
++                    assert saved["TELEGRAM_MINIAPP_ENABLED"] == "off" and saved["TELEGRAM_SUBAGENT_CARDS"] == "off"
++                    for theme in ("light", "dark"):
++                        page.evaluate("theme => { localStorage.setItem('ouroboros.theme', theme); }", theme)
++                        page.reload(wait_until="domcontentloaded")
++                        page.wait_for_selector("#page-settings", timeout=30000)
++                        page.locator('[data-settings-tab="advanced"]').click()
++                        expect(ordinary).to_have_value("place", timeout=30000)
++                        expect(mirror).to_have_value("main")
++                        ordinary.evaluate("el => el.scrollIntoView({block: 'center'})")
++                        page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
++                        facts = form.evaluate("""el => ({width: el.clientWidth, scroll: el.scrollWidth,
++                            viewport: document.documentElement.clientWidth, page_scroll: document.documentElement.scrollWidth,
++                            painted_theme: document.documentElement.dataset.theme || '',
++                            fields: [...el.querySelectorAll('select')].map(x => {
++                                const box = x.getBoundingClientRect(), field = x.closest('.ui-field');
++                                return {name: x.name, value: x.value, label: field?.querySelector(':scope > span')?.textContent.trim() || '',
++                                        selected: x.selectedOptions[0]?.textContent || '', left: box.left, right: box.right,
++                                        width: box.width, height: box.height,
++                                        help: field?.querySelector('.ui-field-help')?.textContent.trim() || ''};
++                            })})""")
++                        assert facts["scroll"] <= facts["width"] + 1, facts
++                        # The 390px risk: a long native option label must not push its select off-screen.
++                        assert all(0 <= x["left"] and x["right"] <= facts["viewport"] + 1 for x in facts["fields"]), facts
++                        stem = f"telegram-settings-{engine}-{width}-{theme}"
++                        page.screenshot(path=str(output / f"{stem}.png"))
++                        form.screenshot(path=str(output / f"{stem}-form.png"))
++                        observations.append({"engine": engine, "browser_version": browser.version,
++                                             "viewport": [width, height], "theme": theme,
++                                             "screenshots": [f"{stem}.png", f"{stem}-form.png"], **facts})
++                    ordinary.select_option("main")
++                    mirror.select_option("telegram_only")
++                    form.get_by_role("button", name="Save Telegram settings", exact=True).click()
++                    expect(form.locator("[data-extension-settings-status]")).to_contain_text("saved")
++                    restored = json.loads(state.read_text(encoding="utf-8"))
++                    assert all(restored[key] == value for key, value in baseline.items())
++                    assert not errors, errors
++                    observations.append({"engine": engine, "viewport": [width, height], "console_errors": console_errors,
++                                         "failed_responses": failed_responses})
++                finally:
++                    browser.close()
++    finally:
++        # Written on red too: a failure keeps its machine evidence.
++        (output / "observation.json").write_text(json.dumps({
++            "scope": __doc__, "candidate_identity": direct_server_with_data["candidate_identity"],
++            "candidate_version": direct_server_with_data["candidate_version"], "source_sha256": sources,
++            "observations": observations, "form_requests": requests, "writes": writes}, indent=2), encoding="utf-8")
+diff --git a/tests/test_telegram_places.py b/tests/test_telegram_places.py
+new file mode 100644
+index 000000000..c9d5d6cf6
+--- /dev/null
++++ b/tests/test_telegram_places.py
+@@ -0,0 +1,920 @@
++"""Telegram private chats as Places against the real Host Service app.
++
++The Host runs in process (ASGI) on a private data root: real place admission,
++capture, wake decision, turn custody, live-author mail, work views, delivery
++receipts and the owner chat ingress (``/chat/inject`` into the canonical store,
++with a recording bridge in place of the supervisor). Only the model (a scripted
++agent) and Telegram (a recorded wire) are doubles; no network, no live bot. The
++bridge's own handler, runner and tools are the production code.
++"""
++from __future__ import annotations
++
++import asyncio
++import copy
++import json
++import sys
++import threading
++import time
++from pathlib import Path
++from types import SimpleNamespace
++
++import httpx
++import pytest
++
++from ouroboros import places
++from ouroboros.gateway import host_service
++from ouroboros.presence_runner import build_presence_result_event, run_presence_turn
++from ouroboros.task_results import write_task_result
++from tests.test_telegram_format_parity import _load_skill
++
++# The shared native-skill loader replaces its package entries in sys.modules.
++pytestmark = pytest.mark.serial
++
++BOT, OWNER, GUEST = "777", 42, 99
++
++
++class Token:
++    def use_in_request(self):
++        return "synthetic-skill-token"
++
++
++class Api:
++    def __init__(self, state_dir: Path, data_dir: Path):
++        self.state_dir, self.data_dir = state_dir, data_dir
++        self.logs, self.tasks, self.tools = [], {}, {}
++        state_dir.mkdir(parents=True, exist_ok=True)
++
++    def get_state_dir(self):
++        return str(self.state_dir)
++
++    def get_runtime_info(self):
++        return {"data_dir": str(self.data_dir)}
++
++    def get_settings(self, _keys):
++        return {"TELEGRAM_BOT_TOKEN": "synthetic-token"}
++
++    def get_skill_token(self):
++        return Token()
++
++    def log(self, level, message):
++        self.logs.append((level, message))
++
++    def register_supervised_task(self, name, factory, **_kwargs):
++        self.tasks[name] = factory
++
++    def register_tool(self, name, handler, **kwargs):
++        self.tools[name] = (handler, kwargs)
++
++
++class Wire:
++    """Recorded Telegram Bot API; scripted failures pop in order, ``after_send`` observes sends."""
++
++    def __init__(self):
++        self.calls, self.failures, self.next_id, self.updates = [], [], 500, []
++        self.after_send = None
++        self.download_failures = []
++
++    async def call(self, method, *, data=None, files=None, timeout=30):
++        self.calls.append((method, dict(data or {})))
++        if self.failures:
++            failure = self.failures.pop(0)
++            if isinstance(failure, BaseException):
++                raise failure
++            if isinstance(failure, dict):
++                return failure
++        if method == "setMessageReaction":
++            return {"ok": True, "result": True}
++        self.next_id += 1
++        result = {"ok": True, "result": {"message_id": self.next_id, "date": 1_800_000_000}}
++        if method == "sendMessage" and self.after_send is not None:
++            self.after_send(data)
++        return result
++
++    async def send_message(self, chat_id, text, parse_mode="HTML"):
++        return (await self.call("sendMessage", data={"chat_id": str(chat_id), "text": text}))["result"]["message_id"]
++
++    async def send_message_with_inline_keyboard(self, chat_id, text, keyboard, parse_mode="HTML"):
++        return await self.send_message(chat_id, text)
++
++    async def answer_callback_query(self, callback_query_id, *, text=""):
++        self.calls.append(("answerCallbackQuery", {"callback_query_id": callback_query_id}))
++
++    async def edit_message_text_with_inline_keyboard(self, chat_id, message_id, text, keyboard, parse_mode="HTML"):
++        self.calls.append(("editMessageText", {"chat_id": str(chat_id), "message_id": message_id}))
++        return True
++
++    async def send_document(self, chat_id, data, *, filename="file", caption=""):
++        await self.call("sendDocument", data={"chat_id": str(chat_id), "filename": filename})
++
++    async def send_photo(self, chat_id, image_base64, *, caption="", mime="image/png", parse_mode="HTML"):
++        await self.call("sendPhoto", data={"chat_id": str(chat_id), "caption": caption})
++
++    async def get_updates(self, offset):
++        await asyncio.sleep(0.02)
++        return self.updates.pop(0) if self.updates else []
++
++    async def download_photo(self, _file_id):
++        self.calls.append(("download", {}))
++        while getattr(self, "download_gate", None) is not None and not self.download_gate.is_set():
++            await asyncio.sleep(0.05)  # a slow Telegram file server
++        if self.download_failures:
++            raise self.download_failures.pop(0)
++        return "aGVsbG8=", "image/jpeg"
++
++    async def download_file(self, _file_id):
++        self.calls.append(("download", {}))
++        if self.download_failures:
++            raise self.download_failures.pop(0)
++        return b"file bytes"
++
++    def sent(self):
++        return [data for method, data in self.calls if method == "sendMessage"]
++
++
++class Model:
++    """A scripted mind: records each focus, optionally holds it open as a live author."""
++
++    def __init__(self, root: Path):
++        self.root, self.tasks, self.reply = root, [], "Seen: {text}"
++        self.hold = threading.Event()
++        self.hold.set()
++        self.during = None  # called with the task while the focus is open
++
++    def handle_task(self, task):
++        self.tasks.append(task)
++        self._owner_message_admission_lock = threading.RLock()
++        self._accepting_owner_messages, self._busy, self._current_task_id = True, True, task["id"]
++        if self.during is not None:
++            self.during(task)
++        self.hold.wait(20)
++        self._accepting_owner_messages = self._busy = False
++        from ouroboros.tools.registry import ToolContext
++
++        text = self.reply.format(text=task["metadata"]["presence"]["observed_text"])
++        ctx = ToolContext(repo_dir=self.root, drive_root=self.root, budget_drive_root=self.root,
++                          task_id=task["id"], task_metadata=task["metadata"])
++        # The agent's own finalization mints the canonical output identity, as in production.
++        result = build_presence_result_event(task, text, ctx, terminal_origin="model_final")
++        write_task_result(self.root, task["id"], "completed", metadata=task["metadata"],
++                          terminal_origin="model_final", result=text)
++        return [result]
++
++
++class Bridge:
++    """The supervisor seam behind the Host's real ``/chat/inject`` acceptance."""
++
++    def __init__(self):
++        self.messages = []
++
++    def enqueue_local_message(self, text, **kwargs):
++        self.messages.append({"text": text, **kwargs})
++
++
++def _message(mid, text="Hello there", *, chat=OWNER, sender=None, **extra):
++    sender = OWNER if sender is None and chat == OWNER else (sender or chat)
++    return {"message_id": mid, "date": int(time.time()), "chat": {"id": chat, "type": "private"},
++            "from": {"id": sender, "first_name": "Ann" if sender == OWNER else "Guest"}, "text": text, **extra}
++
++
++@pytest.fixture
++def env(tmp_path, monkeypatch):
++    plugin, telegram_api = _load_skill()
++    package = plugin.__package__
++    tp, ta, tn = (sys.modules[f"{package}.lib.{name}"] for name in ("telegram_places", "telegram_actions", "telegram_news"))
++    state = sys.modules[package + ".lib.telegram_state"]
++    root = tmp_path / "data"
++    root.mkdir()
++    bridge = Bridge()
++    app = host_service.create_host_service_app(root, bridge_getter=lambda: bridge)
++    # The Host confines staged files to this skill's own state root, as in production.
++    api = Api(app.state.host_service_context.skills_state_dir / "telegram", root)
++    (api.state_dir / "settings.json").write_text(json.dumps({"TELEGRAM_CHAT_ID": str(OWNER),
++                                                          "TELEGRAM_ORDINARY_CHAT": "place"}), encoding="utf-8")
++    for module, name, value in ((tp, "_BOT", {}), (tp, "_IDENTITY", {"at": 0.0, "body": {}}), (tp, "_READY", set()),
++                                (tp, "_ROOMS", {}), (tp, "HOLD_RECHECK_SEC", 0.2)):
++        monkeypatch.setattr(module, name, value)
++    tp.remember_bot(api, {"id": int(BOT), "username": "obot"})
++
++    async def authenticated(*_args):
++        return "telegram", {}
++
++    monkeypatch.setattr(host_service, "_authenticated", authenticated)
++    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
++    monkeypatch.setattr("ouroboros.presence_admission.focus_allowance",
++                        lambda _root: {"status": "available", "remaining_usd": 5, "settled_usd": 0})
++    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_kw: (True, ""))
++    model = Model(root)
++    app.state.host_service_context.presence_runner = lambda **kw: run_presence_turn(
++        repo_dir=root, drive_root=root, agent_factory=lambda **_kw: model, **kw)
++    transport = httpx.ASGITransport(app=app)
++    monkeypatch.setattr(tp, "_TRANSPORT", transport)
++    wire = Wire()
++    monkeypatch.setattr(plugin, "_telegram_client", lambda *_a, **_kw: wire)
++    injects = []
++
++    async def host_post(_api, path, payload):
++        injects.append((path, payload))
++        if path == "/chat/inject" and payload.get("text") != "/panic":  # the real owner ingress
++            async with httpx.AsyncClient(transport=transport, base_url="http://host") as client:
++                response = await client.post(path, json=payload, headers={"X-Skill-Token": "synthetic"})
++            return response.status_code, response.json()
++        return 202, {"ok": True, "status": "queued"}
++
++    monkeypatch.setattr(plugin, "_host_post", host_post)
++    place = places.connect_place(root, connector="telegram", provider="telegram", account_id=BOT,
++                                 wakes=["direct_message"])
++    places.edit_place(root, place.place_id, "confirm_owner_account", author="owner",
++                      platform_actor_id=str(OWNER), label="Ann")
++    ta.register(api, client_factory=lambda: wire, relay=plugin._relay_owner_message, owner=lambda: str(OWNER))
++    runner = tp.Runner(api, client_factory=lambda: wire, classic=_classic(plugin, api, wire))
++    return SimpleNamespace(plugin=plugin, tp=tp, ta=ta, tn=tn, state=state, api=api, root=root, model=model,
++                           wire=wire, injects=injects, place=place, runner=runner, app=app, bridge=bridge,
++                           telegram_api=telegram_api)
++
++
++def _classic(plugin, api, wire):
++    async def classic(update_id, message):
++        return await plugin._relay_owner_message(api, wire, message, update_id, message.get("text", ""), "", "en")
++    return classic
++
++
++def _receive(env, message, update_id):
++    asyncio.run(env.plugin._handle_owner_message(env.api, env.wire, {"message": message}, update_id,
++                                                 "full_access", "en"))
++
++
++def _custody(env, sql, args=()):
++    return env.tp._rows(env.api, sql, args)
++
++
++async def _drain(env, until, *, timeout=15.0):
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        await env.runner.tick()
++        if until():
++            return
++        await asyncio.sleep(0.05)
++    facts = {table: _custody(env, f"SELECT * FROM {table}") for table in ("inbox", "work", "outbox", "reports", "gaps")}
++    raise AssertionError(f"runner did not reach the expected state: {facts} logs={env.api.logs}")
++
++
++def _run(env, until, timeout=15.0):
++    async def go():
++        try:
++            await _drain(env, until, timeout=timeout)
++        finally:
++            await env.runner.stop()
++    asyncio.run(go())
++
++
++async def _wait(condition, timeout=15.0):
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        if condition():
++            return
++        await asyncio.sleep(0.05)
++    raise AssertionError("condition not reached")
++
++
++def _chat_rows(root):
++    from ouroboros import dialogue_store
++    return [entry.row for entry in dialogue_store.iter_rows(root, "chat")]
++
++
++def _poll(update_id, message=None, **kind):
++    return {"update_id": update_id, **({"message": message} if message else {}), **kind}
++
++
++def _ctx(task_id, task=None):
++    return SimpleNamespace(task_id=task_id, task_metadata=(task or {}).get("metadata") or {},
++                           task_contract=(task or {}).get("task_contract") or {}, task_depth=0)
++
++
++def _tool(env, name, ctx, **args):
++    handler, _spec = env.api.tools[name]
++    result = handler(ctx, **args)
++    return json.loads(asyncio.run(result) if asyncio.iscoroutine(result) else result)
++
++
++# ---- the place lane ------------------------------------------------------------------------
++
++def test_owner_text_is_a_real_place_turn_with_its_own_room_and_one_receipted_reply(env):
++    env.state._remember_message(env.api, OWNER, 30, {"row_address": "row:1@t#123456789abc", "task_id": "w1",
++                                                     "kind": "message"})
++    reply = {"message_id": 30, "from": {"id": int(BOT), "is_bot": True}, "text": "Main said this"}
++    _receive(env, _message(50, "Explain it", reply_to_message=reply), 7)
++    assert env.injects == [], "a connected chat's ordinary words never take the classic Main road"
++    _run(env, lambda: env.wire.sent() and not _custody(env, "SELECT 1 FROM reports WHERE done=0"))
++
++    task = env.model.tasks[0]
++    event = task["metadata"]["presence"]["event"]
++    assert task["metadata"]["presence"]["observed_text"] == "Explain it"
++    assert event["source_event_id"] == f"telegram:{OWNER}:50" and event["conversation_key"] == f"telegram:{BOT}:{OWNER}:0"
++    assert set(event["facts"]) == {"direct_message", "reply_to_me"}
++    assert event["message"]["reply_to"]["text"] == "Main said this"
++    assert event["message"]["reply_to"]["reference"] == {"state": "known", "host_reference": "row:1@t#123456789abc",
++                                                         "kind": "message"}
++    assert task["metadata"]["focus"]["actor"]["owner_confirmed"] is True
++    sent = env.wire.sent()
++    assert len(sent) == 1 and "Seen: Explain it" in sent[0]["text"] and sent[0]["reply_to_message_id"] == 50
++    receipts = [row for row in _chat_rows(env.root) if row.get("type") == "presence_delivery"]
++    assert [r["transport"]["delivery"]["state"] for r in receipts] == ["delivered"]
++    room = places.conversation_chat_id(event["conversation_key"])
++    assert {row["chat_id"] for row in _chat_rows(env.root)} == {room}, "the place room is its own history"
++    assert env.tp.room_event(env.api, {"chat_id": room}) and not env.tp.room_event(env.api, {"chat_id": room + 1})
++    inbox = _custody(env, "SELECT * FROM inbox")[0]  # the same answer again: one output identity, one send
++    env.runner._settle_turn(inbox, 200, json.loads(inbox["receipt_json"]))
++    _run(env, lambda: True)
++    assert len(env.wire.sent()) == 1
++
++
++def test_second_message_reaches_the_live_author_while_the_poller_keeps_serving_fast_controls(env):
++    from ouroboros.owner_mailbox import _mailbox_path
++
++    env.model.hold.clear()  # the first focus stays open as the conversation's author
++    env.wire.updates = [[_poll(1, _message(10, "First thought"))]]
++    quiz = sys.modules[env.plugin.__package__ + ".lib.telegram_quiz"]
++    for card, quiz_id in ((300, "q-tap"), (301, "q-reply")):
++        quiz.remember_quiz(env.api, quiz.mint_token("asker", quiz_id), {
++            "task_id": "asker", "quiz_id": quiz_id, "chat_id": OWNER, "message_id": card,
++            "options": ["Yes", "No"], "text": "Proceed?"})
++    tap = {"id": "cb1", "data": f"qz:{quiz.mint_token('asker', 'q-tap')}:0", "from": {"id": OWNER},
++           "message": {"message_id": 300, "chat": {"id": OWNER, "type": "private"}}}
++    document = _message(11, "", document={"file_id": "f1", "file_name": "logs.txt", "file_size": 10},
++                        caption="Also check these logs")
++    document.pop("text")
++
++    async def scenario():
++        poller = asyncio.create_task(env.plugin._poller(env.api))
++        runner = asyncio.create_task(env.runner.run())
++        try:
++            await _wait(lambda: env.model.tasks)
++            author = env.model.tasks[0]["id"]
++            env.wire.updates.append([_poll(2, document), _poll(3, _message(12, "/panic")),
++                                     _poll(4, _message(13, "/menu")), _poll(5, callback_query=tap),
++                                     _poll(6, _message(14, "The second one, please", reply_to_message={"message_id": 301}))])
++            await _wait(lambda: any(payload.get("text") == "/panic" for _path, payload in env.injects))
++            await _wait(lambda: [path for path, _p in env.injects].count("/chat/decision") == 2)
++            header, _keyboard = env.plugin._build_menu_keyboard("full_access", env.plugin._poller_preferences(env.api)[4])
++            await _wait(lambda: header in [data["text"] for data in env.wire.sent()])
++            assert not env.model.hold.is_set() and len(env.model.tasks) == 1, "fast controls did not wait for the turn"
++            mailbox = _mailbox_path(env.root, author)
++            await _wait(lambda: mailbox.exists() and "Also check these logs" in mailbox.read_text())
++            # The Host files the mail, then answers the request: the custody row settles right after.
++            await _wait(lambda: _custody(env, "SELECT state FROM inbox WHERE update_id=2")[0]["state"] == "settled")
++            second = _custody(env, "SELECT * FROM inbox WHERE update_id=2")[0]
++            assert json.loads(second["receipt_json"])["outcome"] == "silent"
++            mail = json.loads(json.loads(mailbox.read_text().splitlines()[-1])["text"])
++            held = [row for row in mail.get("attachment_manifest") or [] if row.get("status") == "staged"]
++            assert held and all(Path(row["abs_path"]).is_file() for row in held), "the Host holds its own copy"
++            assert not (env.api.state_dir / "places_staging" / "2").exists(), "ours is released after capture"
++            env.model.hold.set()
++            await _wait(lambda: any("First thought" in data["text"] for data in env.wire.sent()))
++        finally:
++            env.model.hold.set()
++            for task in (poller, runner):
++                task.cancel()
++            await asyncio.gather(poller, runner, return_exceptions=True)
++
++    asyncio.run(scenario())
++    assert len(env.model.tasks) == 1, "the second message joined the open focus as context, not a new turn"
++    assert [p for path, p in env.injects if path == "/chat/inject" and p.get("text") != "/panic"] == []
++    decisions = [p for path, p in env.injects if path == "/chat/decision"]
++    assert decisions[1]["comment"] == "The second one, please", "a quiz reply stays the owner's verbatim answer"
++    assert not _custody(env, "SELECT 1 FROM inbox WHERE update_id IN (3,4,5,6)"), "fast paths never enter custody"
++    assert json.loads((env.api.state_dir / "poll_offset.json").read_text())["offset"] == 7
++
++
++def test_photo_caption_quote_reach_the_host_as_separate_facts_and_bytes_are_reused(env):
++    message = _message(70, "", photo=[{"file_id": "small"}, {"file_id": "big", "file_unique_id": "u1", "width": 9}],
++                       caption="What is this?", quote={"text": "the part I mean"})
++    message.pop("text")
++    _receive(env, message, 11)
++    _run(env, lambda: env.wire.sent())
++    task = env.model.tasks[0]
++    presence = task["metadata"]["presence"]
++    assert presence["observed_text"] == "What is this?"
++    facts = presence["event"]["message"]
++    assert facts["quote"] == {"text": "the part I mean"}
++    assert facts["attachments"][0]["file_unique_id"] == "u1" and facts["attachments"][0]["staged"] is True
++    manifest = task.get("attachment_manifest") or []
++    assert [row.get("status") for row in manifest] == ["staged"] and Path(manifest[0]["abs_path"]).is_file()
++    assert [m for m, _d in env.wire.calls].count("download") == 1
++    assert not (env.api.state_dir / "places_staging" / "11").exists(), "staging is released after the answer"
++
++
++def test_a_download_that_fails_before_admission_keeps_the_file_and_a_refused_one_is_named(env):
++    tg = env.telegram_api
++    photo = _message(71, "", photo=[{"file_id": "big", "file_unique_id": "u2"}], caption="See photo")
++    photo.pop("text")
++    env.wire.download_failures = [tg.TelegramTransportError("Telegram file download timed out.")]
++    _receive(env, photo, 12)
++    _run(env, lambda: _custody(env, "SELECT error FROM inbox")[0]["error"].startswith("before_answer"))
++    assert env.model.tasks == [] and _custody(env, "SELECT staged_json FROM inbox")[0]["staged_json"] == ""
++    env.tp._exec(env.api, "UPDATE inbox SET state='submitting'")  # the runner then stopped
++    env.runner = env.tp.Runner(env.api, client_factory=lambda: env.wire, classic=_classic(env.plugin, env.api, env.wire))
++    assert env.tp.recover(env.api)["turns_rejoined"] == 1
++    env.tp._exec(env.api, "UPDATE inbox SET available_at=0")
++    _run(env, lambda: env.wire.sent())
++    assert [row.get("status") for row in env.model.tasks[0].get("attachment_manifest") or []] == ["staged"]
++    document = _message(72, "", document={"file_id": "gone", "file_name": "old.pdf", "file_size": 5}, caption="Old file")
++    document.pop("text")
++    env.wire.download_failures = [tg.TelegramRequestRejected("Telegram file download returned HTTP 400", status_code=400)]
++    _receive(env, document, 13)
++    _run(env, lambda: len(env.model.tasks) == 2)
++    second = env.model.tasks[1]
++    attachment = second["metadata"]["presence"]["event"]["message"]["attachments"][0]
++    assert attachment["staged"] is False and "provider_refused" in attachment["unavailable"]
++    assert not [row for row in second.get("attachment_manifest") or [] if row.get("status") == "staged"]
++
++
++def test_reload_never_resends_an_uncertain_unconfirmed_or_in_flight_part(env):
++    tp, tg = env.tp, env.telegram_api
++    text = "\n\n".join(f"Paragraph {i} " + "word " * 700 for i in range(3))
++    assert tp.enqueue(env.api, "out-1", update_id=1, chat_id=OWNER, reply_to=5, task_id="t1", source_event_id="e1",
++                      text=text, reporting=1)
++    assert not tp.enqueue(env.api, "out-1", update_id=1, chat_id=OWNER, reply_to=5, task_id="t1",
++                          source_event_id="e1", text=text, reporting=1), "one output identity, one row"
++    env.wire.failures = [None, tg.TelegramTransportError("read timed out", maybe_sent=True)]
++    _run(env, lambda: _custody(env, "SELECT state FROM outbox")[0]["state"] == "uncertain")
++    assert len(env.wire.sent()) == 2
++    states = [(r["part_id"], r["state"]) for r in _custody(env, "SELECT * FROM reports ORDER BY rowid")]
++    assert states == [("0", "delivered"), ("1", "uncertain")]
++    tp.enqueue(env.api, "out-2", update_id=2, chat_id=OWNER, reply_to=0, task_id="t1", source_event_id="e2",
++               text="Short", reporting=1)
++    tp._exec(env.api, "UPDATE outbox SET state='sending', sending_part=0 WHERE delivery_id='out-2'")
++    assert tp.recover(env.api)["parts_uncertain"] == 1, "a part found in flight after a stop is uncertain"
++    tp.enqueue(env.api, "out-3", update_id=3, chat_id=OWNER, reply_to=0, task_id="t1", source_event_id="e3",
++               text="No id", reporting=1)
++    env.wire.failures = [{"ok": True, "result": {}}]  # accepted, but no message identity
++    _run(env, lambda: _custody(env, "SELECT state FROM outbox WHERE delivery_id='out-3'")[0]["state"] == "uncertain")
++    tp.enqueue(env.api, "out-4", update_id=4, chat_id=OWNER, reply_to=0, task_id="t1", source_event_id="e4",
++               text="Again", reporting=0)
++    env.wire.failures = [tg.TelegramTransportError("connect failed", maybe_sent=False)]
++    _run(env, lambda: _custody(env, "SELECT state FROM outbox WHERE delivery_id='out-4'")[0]["state"] == "done",
++         timeout=20)
++    texts = [d["text"] for d in env.wire.sent()]
++    assert texts.count("Short") == 0 and texts.count("No id") == 1 and texts.count("Again") == 2
++
++
++def test_the_place_is_read_again_before_every_part(env):
++    text = "\n\n".join(f"Paragraph {i} " + "word " * 700 for i in range(2))
++    env.tp.enqueue(env.api, "two-parts", update_id=1, chat_id=OWNER, reply_to=0, task_id="t", source_event_id="e",
++                   text=text, reporting=0)
++    env.wire.after_send = lambda _data: places.edit_place(env.root, env.place.place_id, "set_state",
++                                                          author="owner", state="silent")
++    _run(env, lambda: _custody(env, "SELECT state FROM outbox")[0]["state"] == "held")
++    assert len(env.wire.sent()) == 1, "Silent after the first part holds the second"
++    env.wire.after_send = None
++    places.edit_place(env.root, env.place.place_id, "set_state", author="owner", state="active")
++    _run(env, lambda: _custody(env, "SELECT state FROM outbox")[0]["state"] == "done")
++    assert len(env.wire.sent()) == 2
++
++
++def test_a_request_lost_in_flight_rejoins_its_turn_instead_of_new_work(env):
++    _receive(env, _message(80, "Only once"), 12)
++    _run(env, lambda: env.wire.sent())
++    env.tp._exec(env.api, "UPDATE inbox SET state='submitting' WHERE update_id=12")
++    assert env.tp.recover(env.api)["turns_rejoined"] == 1
++    _run(env, lambda: _custody(env, "SELECT state FROM inbox")[0]["state"] == "settled")
++    assert len(env.model.tasks) == 1 and len(env.wire.sent()) == 1
++
++
++def test_a_lost_answer_then_disconnect_keeps_the_place_road(env):
++    _receive(env, _message(81, "Mine to keep"), 14)
++    env.model.hold.clear()
++
++    async def lose_the_answer():
++        await _drain(env, lambda: env.model.tasks)
++        await env.runner.stop()  # the runner died while the Host had the turn
++    asyncio.run(lose_the_answer())
++    places.edit_place(env.root, env.place.place_id, "disconnect", author="owner")
++    env.model.hold.set()
++    assert env.tp.recover(env.api)["turns_rejoined"] == 1
++    _run(env, lambda: "place_not_connected" in _custody(env, "SELECT error FROM inbox")[0]["error"])
++    row = _custody(env, "SELECT * FROM inbox")[0]
++    assert row["lane"] == "presence" and row["state"] == "pending"
++    assert env.injects == [] and env.bridge.messages == [], "an admitted place message is never rerouted to Main"
++
++
++def test_silent_holds_paused_and_off_hear_and_disconnect_rolls_back_new_messages_only(env, monkeypatch):
++    root, place = env.root, env.place
++    places.edit_place(root, place.place_id, "set_state", author="owner", state="silent")
++    env.tp.enqueue(env.api, "held-1", update_id=1, chat_id=OWNER, reply_to=0, task_id="t", source_event_id="e",
++                   text="Later", reporting=0)
++    _run(env, lambda: _custody(env, "SELECT state FROM outbox")[0]["state"] == "held")
++    assert env.wire.sent() == [] and _custody(env, "SELECT attempts FROM outbox")[0]["attempts"] == 0
++    places.edit_place(root, place.place_id, "set_state", author="owner", state="paused")
++    _receive(env, _message(90, "While paused"), 13)
++    monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: False)
++    places.edit_place(root, place.place_id, "set_state", author="owner", state="active")
++    _receive(env, _message(91, "While consciousness is off"), 14)
++    _run(env, lambda: env.wire.sent() and len(_custody(env, "SELECT 1 FROM inbox WHERE state='settled'")) == 2)
++    assert env.model.tasks == [] and [d["text"] for d in env.wire.sent()] == ["Later"]
++    heard = [json.loads(r["receipt_json"])["outcome"] for r in _custody(env, "SELECT * FROM inbox ORDER BY update_id")]
++    assert heard == ["silent", "silent"]
++    env.tp.enqueue(env.api, "held-2", update_id=14, chat_id=OWNER, reply_to=0, task_id="t", source_event_id="e",
++                   text="Owed reply", reporting=0)
++    places.edit_place(root, place.place_id, "disconnect", author="owner")
++    refs = env.state._message_refs(env.api)
++    _receive(env, _message(92, "Back to Main"), 15)
++    _run(env, lambda: _custody(env, "SELECT state FROM outbox WHERE delivery_id='held-2'")[0]["state"] == "held")
++    assert [m["text"] for m in env.bridge.messages] == ["Back to Main"], "a new message after rollback goes to Main"
++    assert "Owed reply" not in [d["text"] for d in env.wire.sent()], "owed place replies stay held, not rerouted"
++    assert set(refs) <= set(env.state._message_refs(env.api)), "rollback keeps the reference map"
++
++
++def test_an_unreadable_or_refused_place_answer_never_sends_the_owner_to_main(env, monkeypatch):
++    real = env.tp._host
++    answers = iter([(503, {"code": "places_unavailable", "disposition": "retry"}),
++                    (403, {"code": "presence_auth_blocked", "disposition": "blocked"})])
++
++    async def flaky(api, method, path, **kwargs):
++        if path == "/presence/place":
++            answer = next(answers, None)
++            if answer is not None:
++                return answer
++        return await real(api, method, path, **kwargs)
++
++    monkeypatch.setattr(env.tp, "_host", flaky)
++    _receive(env, _message(95, "Are you there?"), 16)
++    assert _custody(env, "SELECT lane FROM inbox")[0]["lane"] == ""
++    _receive(env, _message(96, "And now?"), 17)  # an earlier undecided message keeps this one behind it
++    _run(env, lambda: len(env.model.tasks) == 2, timeout=25)
++    assert env.injects == [] and env.bridge.messages == []
++    assert any("not sent to Main" in message for _level, message in env.api.logs)
++    assert [t["metadata"]["presence"]["observed_text"] for t in env.model.tasks] == ["Are you there?", "And now?"]
++
++
++# ---- owner handoff --------------------------------------------------------------------------
++
++def test_handoff_gives_main_only_the_owners_exact_words_through_the_real_ingress(env):
++    from supervisor.message_ingress import accepted_chat_message
++
++    env.state._remember_message(env.api, OWNER, 30, {"row_address": "row:9@t#123456789abc", "kind": "message"})
++    results = {}
++
++    def during(task):
++        if task["metadata"]["presence"]["observed_text"] != "Tell the bench project to stop":
++            return
++        tid = task["id"]
++        results["first"] = _tool(env, "hand_to_main", _ctx(tid, task))
++        results["again"] = _tool(env, "hand_to_main", _ctx(tid, task))
++        write_task_result(env.root, "child-1", "running", metadata={**task["metadata"], "parent_task_id": tid})
++        results["child"] = _tool(env, "hand_to_main", _ctx("child-1", task))
++        promoted = {k: v for k, v in task["metadata"].items() if k != "wake_cause"}
++        write_task_result(env.root, "promoted-1", "running", metadata=promoted)
++        results["promoted"] = _tool(env, "hand_to_main", _ctx("promoted-1", task))
++        results["wrong"] = _tool(env, "hand_to_main", _ctx("someone-else", task))
++        places.edit_place(env.root, env.place.place_id, "revoke_owner_account", author="owner",
++                          platform_actor_id=str(OWNER))
++        results["revoked"] = _tool(env, "hand_to_main", _ctx(tid, task))
++        places.edit_place(env.root, env.place.place_id, "confirm_owner_account", author="owner",
++                          platform_actor_id=str(OWNER))
++        env.tp.commit(env.api, 99, _message(77, "Later, never delivered here"), owner=True, lane="presence",
++                      place_id=env.place.place_id)
++        results["undelivered"] = _tool(env, "hand_to_main", _ctx(tid, task), source_event_id=f"telegram:{OWNER}:77")
++
++    env.model.during = during
++    reply = {"message_id": 30, "from": {"id": int(BOT), "is_bot": True}, "text": "Bench project: running"}
++    _receive(env, _message(50, "Tell the bench project to stop", reply_to_message=reply), 7)
++    _run(env, lambda: env.wire.sent())
++    assert results["first"]["ok"] and results["first"]["client_message_id"] == f"tg:{OWNER}:50"
++    assert results["again"]["ok"] and results["again"]["client_message_id"] == results["first"]["client_message_id"]
++    assert len(env.bridge.messages) == 1, "a repeated handoff rejoins the accepted message"
++    accepted = env.bridge.messages[0]
++    assert accepted["text"] == "Tell the bench project to stop" and accepted["transport"]["kind"] == "telegram"
++    assert accepted["client_message_id"] == f"tg:{OWNER}:50" and accepted["source"] == "skill:telegram"
++    assert "Bench project: running" not in json.dumps(accepted, default=str), "the quoted bot text is not the owner's"
++    row = accepted_chat_message(env.root, OWNER, f"tg:{OWNER}:50")
++    assert row and row["text"] == "Tell the bench project to stop", "the canonical owner row exists"
++    for key in ("child", "promoted", "wrong", "revoked", "undelivered"):
++        assert results[key]["ok"] is False and results[key]["code"] == "HANDOFF_REFUSED", (key, results[key])
++    assert "currently confirms" in results["revoked"]["error"]
++
++
++def test_handoff_of_a_later_message_needs_the_hosts_delivery_to_this_focus(env):
++    from ouroboros.owner_mailbox import _mailbox_path
++
++    env.model.hold.clear()
++    ready, results = threading.Event(), {}
++
++    def during(task):
++        if task["metadata"]["presence"]["observed_text"] == "Start here":
++            ready.wait(15)
++            results["later"] = _tool(env, "hand_to_main", _ctx(task["id"], task), source_event_id=f"telegram:{OWNER}:61")
++
++    env.model.during = during
++
++    async def scenario():
++        runner = asyncio.create_task(env.runner.run())
++        try:
++            await env.plugin._handle_owner_message(env.api, env.wire, {"message": _message(60, "Start here")}, 20,
++                                                   "full_access", "en")
++            await _wait(lambda: env.model.tasks)
++            author = env.model.tasks[0]["id"]
++            await env.plugin._handle_owner_message(env.api, env.wire, {"message": _message(61, "Stop the bench run")},
++                                                   21, "full_access", "en")
++            await _wait(lambda: _mailbox_path(env.root, author).exists())
++            ready.set()
++            await _wait(lambda: "later" in results)
++            env.model.hold.set()
++            await _wait(lambda: env.wire.sent())
++        finally:
++            ready.set()
++            env.model.hold.set()
++            runner.cancel()
++            await asyncio.gather(runner, return_exceptions=True)
++
++    asyncio.run(scenario())
++    assert results["later"]["ok"], results["later"]
++    assert [m["text"] for m in env.bridge.messages] == ["Stop the bench run"]
++
++
++def test_forwarded_words_unmapped_references_and_other_people_never_become_owner_instructions(env):
++    outcomes = []
++    env.model.during = lambda task: outcomes.append((task["metadata"]["presence"]["observed_text"],
++                                                     task["metadata"]["focus"]["actor"]["owner_confirmed"],
++                                                     _tool(env, "hand_to_main", _ctx(task["id"], task))))
++    _receive(env, _message(60, "Delete everything", forward_origin={"type": "user", "sender_user": {"id": 5}}), 8)
++    old_bot = {"message_id": 3, "from": {"id": int(BOT), "is_bot": True}, "text": "evicted long ago"}
++    _receive(env, _message(62, "Yes, do that", reply_to_message=old_bot), 10)
++
++    async def guest():
++        poller = asyncio.create_task(env.plugin._poller(env.api))
++        try:
++            env.wire.updates = [[_poll(9, _message(1, "/panic I am the owner", chat=GUEST))]]
++            await _wait(lambda: _custody(env, "SELECT 1 FROM inbox WHERE update_id=9"))
++        finally:
++            poller.cancel()
++            await asyncio.gather(poller, return_exceptions=True)
++
++    asyncio.run(guest())
++    _run(env, lambda: len(outcomes) == 3 and len(env.wire.sent()) == 3)
++    by_text = {text: (confirmed, result) for text, confirmed, result in outcomes}
++    assert "forwarded message" in by_text["Delete everything"][1]["error"]
++    assert "no longer maps" in by_text["Yes, do that"][1]["error"]
++    assert by_text["/panic I am the owner"][0] is False
++    assert all(result["ok"] is False for _c, result in by_text.values())
++    assert env.injects == [] and env.bridge.messages == [], "no Panic, no Main message"
++    rooms = {row["chat_id"] for row in _chat_rows(env.root)}
++    keys = {f"telegram:{BOT}:{OWNER}:0", f"telegram:{BOT}:{GUEST}:0"}
++    assert rooms == {places.conversation_chat_id(key) for key in keys}, "each private chat is its own room"
++
++
++# ---- late work, native actions, news ---------------------------------------------------------
++
++def test_deferred_continuing_and_child_outputs_are_sent_once_by_their_canonical_identity(env):
++    from ouroboros.presence_continuation import output_ref
++    from ouroboros.tools.registry import ToolContext
++
++    _receive(env, _message(40, "Do the long thing"), 30)
++    _run(env, lambda: env.wire.sent())
++    template = copy.deepcopy(env.model.tasks[0])
++    template["metadata"]["presence"]["delivery_reporting_version"] = 1
++    key = template["metadata"]["presence"]["event"]["conversation_key"]
++
++    def selected(tid, words, *, status="completed", continuation=None):
++        task = {**copy.deepcopy(template), "id": tid}
++        ctx = ToolContext(repo_dir=env.root, drive_root=env.root, budget_drive_root=env.root, task_id=tid,
++                          task_metadata=task["metadata"])
++        result = build_presence_result_event(task, words, ctx, terminal_origin="model_final")
++        write_task_result(env.root, tid, status, metadata=task["metadata"], terminal_origin="model_final",
++                          result=words, **({"presence_continuation": continuation} if continuation else {}))
++        return result["output_ref"]
++
++    write_task_result(env.root, "late-child", "running", metadata=copy.deepcopy(template["metadata"]))
++    released = output_ref("continuing", "released-selection", key)
++    selected("continuing", "Final words", continuation={
++        "initial": {"work_ref": "late-child"}, "child_work_ref": "late-child",
++        "outputs": [{"output_ref": released, "outcome": "message", "text": "Early words"}]})
++    legacy_meta = {k: v for k, v in copy.deepcopy(template["metadata"]).items()  # no output identity was minted
++                   if not k.startswith("presence_") or k == "presence_event_identity"}
++    write_task_result(env.root, "legacy", "completed", metadata=legacy_meta, terminal_origin="model_final",
++                      result="Unidentified words")
++    for ref in ("continuing", "legacy"):
++        env.tp._observe_ref(env.api, ref, 30, env.place.place_id)
++    _run(env, lambda: {"Early words", "Final words"} <= {d["text"] for d in env.wire.sent()}
++         and _custody(env, "SELECT state FROM work WHERE ref='late-child'"))
++    assert _custody(env, "SELECT state FROM work WHERE ref='late-child'")[0]["state"] == "observe", "pending child"
++    selected("late-child", "Child words")
++    env.tp._exec(env.api, "UPDATE work SET available_at=0")
++    _run(env, lambda: "Child words" in {d["text"] for d in env.wire.sent()})
++    env.tp._exec(env.api, "UPDATE work SET state='observe', available_at=0")  # polled again: nothing new is sent
++    _run(env, lambda: not _custody(env, "SELECT 1 FROM work WHERE state='observe'"))
++    texts = [d["text"] for d in env.wire.sent()]
++    assert texts.count("Early words") == texts.count("Final words") == texts.count("Child words") == 1
++    legacy = json.loads(_custody(env, "SELECT last_json FROM work WHERE ref='legacy'")[0]["last_json"])
++    assert legacy["output_ref"] == "" and "Unidentified words" not in texts, legacy
++    assert legacy["outcome"] == "message", "the Host selected it, but without an identity"
++    assert _custody(env, "SELECT ref FROM gaps WHERE ref='work:legacy'"), "a recorded gap, never sent"
++
++
++def test_native_send_edit_and_react_act_only_in_this_place_chat_with_receipts(env):
++    tg, results = env.telegram_api, {}
++
++    def during(task):
++        ctx = _ctx(task["id"], task)
++        results["send"] = _tool(env, "telegram_message", ctx, action="send", request_id="ack", text="On it")
++        results["rejoin"] = _tool(env, "telegram_message", ctx, action="send", request_id="ack", text="On it")
++        results["changed"] = _tool(env, "telegram_message", ctx, action="send", request_id="ack", text="Other")
++        results["react"] = _tool(env, "telegram_message", ctx, action="react", request_id="r1", message_id=45,
++                                 emoji="👍")
++        results["edit_owner"] = _tool(env, "telegram_message", ctx, action="edit", request_id="e0", message_id=45,
++                                      text="Not mine to edit")
++
++    env.model.during = during
++    _receive(env, _message(45, "Please acknowledge"), 31)
++    _run(env, lambda: len(env.wire.sent()) == 2 and not _custody(env, "SELECT 1 FROM reports WHERE done=0"))
++    assert results["send"]["status"] == "queued" and results["rejoin"]["status"] == "already_queued"
++    assert results["changed"]["ok"] is False and results["edit_owner"]["ok"] is False
++    assert results["react"]["ok"] and [m for m, _d in env.wire.calls].count("setMessageReaction") == 1
++    assert [d["text"] for d in env.wire.sent()].count("On it") == 1
++    task = env.model.tasks[0]
++    ctx = _ctx(task["id"], task)
++    sent_ids = [int(key.split(":")[1]) for key, record in env.state._message_refs(env.api).items()
++                if record.get("kind") == "place_tool"]
++    env.wire.failures = [tg.TelegramTransportError("read timed out", maybe_sent=True)]
++    first = _tool(env, "telegram_message", ctx, action="edit", request_id="e1", message_id=sent_ids[0], text="Done")
++    again = _tool(env, "telegram_message", ctx, action="edit", request_id="e1", message_id=sent_ids[0], text="Done")
++    assert first["ok"] is False and "UNCERTAIN" in first["code"] and again["state"] == "uncertain"
++    assert [m for m, _d in env.wire.calls].count("editMessageText") == 1, "an uncertain edit is never repeated"
++    read = _tool(env, "telegram_message", ctx, action="read", request_id="ack")
++    assert read["state"] == "done" and read["receipts"][0]["message_id"] in sent_ids
++    origins = [json.loads(r["payload_json"])["origin"]["kind"] for r in _custody(env, "SELECT * FROM reports")]
++    assert origins.count("tool") >= 2 and "automatic" in origins
++    places.edit_place(env.root, env.place.place_id, "set_state", author="owner", state="silent")
++    held = _tool(env, "telegram_message", ctx, action="react", request_id="r2", message_id=45, emoji="🔥")
++    assert held["ok"] is False and "silent" in held["error"]
++
++
++# ---- connected mirror mode, atomic custody, identities, ordering --------------------------
++
++def test_a_failed_receipt_write_rolls_back_and_the_part_is_never_resent(env, monkeypatch):
++    import sqlite3
++
++    tp = env.tp
++    tp.enqueue(env.api, "atomic", update_id=1, chat_id=OWNER, reply_to=0, task_id="t", source_event_id="e",
++               text="Exactly once", reporting=1)
++    real = tp.report
++
++    def full_disk(conn, **_kwargs):
++        raise sqlite3.OperationalError("database or disk is full")
++
++    monkeypatch.setattr(tp, "report", full_disk)
++    _run(env, lambda: env.wire.sent() and any("send failed" in m for _l, m in env.api.logs))
++    row = _custody(env, "SELECT * FROM outbox WHERE delivery_id='atomic'")[0]
++    assert (row["state"], row["sending_part"], row["next_part"]) == ("sending", 0, 0), "progress rolled back with it"
++    assert _custody(env, "SELECT * FROM reports") == []
++    monkeypatch.setattr(tp, "report", real)
++    _run(env, lambda: True)
++    assert len(env.wire.sent()) == 1, "a part left in flight is not sent again by a live runner"
++    assert tp.recover(env.api)["parts_uncertain"] == 1
++    assert [(r["part_id"], r["state"]) for r in _custody(env, "SELECT * FROM reports")] == [("0", "uncertain")]
++
++
++def test_one_request_id_names_one_action_and_an_edit_needs_its_exact_message(env):
++    results = {}
++
++    def during(task):
++        ctx = _ctx(task["id"], task)
++        say = lambda **args: _tool(env, "telegram_message", ctx, **args)  # noqa: E731
++        results["send"] = say(action="send", request_id="x", text="First words")
++        results["as_edit"] = say(action="edit", request_id="x", message_id=46, text="Other")
++        results["as_react"] = say(action="react", request_id="x", message_id=46, emoji="👍")
++        results["other_words"] = say(action="send", request_id="x", text="Second words")
++        results["same"] = say(action="send", request_id="x", text="First words")
++        results["read"] = say(action="read", request_id="x")
++
++    env.model.during = during
++    _receive(env, _message(46, "Ack please"), 32)
++    _run(env, lambda: len(env.wire.sent()) == 2)
++    assert results["send"]["status"] == "queued" and results["same"]["status"] == "already_queued"
++    for key in ("as_edit", "as_react", "other_words"):
++        assert results[key]["ok"] is False and "different request" in results[key]["error"], key
++    assert results["read"]["action"] == "send"
++    task = env.model.tasks[0]
++    ctx = _ctx(task["id"], task)
++    bot_id = next(int(k.split(":")[1]) for k, r in env.state._message_refs(env.api).items() if r.get("kind") == "place_tool")
++    env.wire.failures = [{"ok": True, "result": True}]  # an inline-style answer names no message
++    vague = _tool(env, "telegram_message", ctx, action="edit", request_id="e-vague", message_id=bot_id, text="Done")
++    assert vague["ok"] is False and "UNCERTAIN" in vague["code"]
++    env.wire.failures = [{"ok": True, "result": {"message_id": bot_id, "chat": {"id": OWNER}}}]
++    exact = _tool(env, "telegram_message", ctx, action="edit", request_id="e-exact", message_id=bot_id, text="Done")
++    assert exact["ok"] is True and exact["state"] == "delivered"
++    root_ctx = SimpleNamespace(task_id="owner-turn", task_metadata={}, task_contract={}, task_depth=0)
++    with env.tp._tx(env.api) as conn:
++        conn.execute("INSERT INTO news(address,chat_id,project,task_id,ts,text,at) VALUES ('row:a',2000,'P','r','',"
++                     "'item',0)")
++    item = _custody(env, "SELECT id FROM news")[0]["id"]
++    publish = lambda text: _tool(env, "telegram_news_publish", root_ctx, action="publish",  # noqa: E731
++                                 source_ids=[item], text=text, request_id="n1")
++    assert publish("News A")["status"] == "queued"
++    assert publish("News A")["status"] == "already_queued"
++    assert publish("News B")["ok"] is False, "changed words under the same news id refuse"
++
++
++def test_a_slow_first_download_never_lets_the_next_message_overtake_it(env):
++    photo = _message(73, "", photo=[{"file_id": "big", "file_unique_id": "u3"}], caption="First, with a photo")
++    photo.pop("text")
++    env.wire.download_gate = threading.Event()
++    _receive(env, photo, 40)
++    _receive(env, _message(74, "Second, words only"), 41)
++
++    async def scenario():
++        runner = asyncio.create_task(env.runner.run())
++        try:
++            await asyncio.sleep(3.0)  # twice the timer the old ordering trusted
++            states = {r["update_id"]: r["state"] for r in _custody(env, "SELECT update_id, state FROM inbox")}
++            assert states == {40: "submitting", 41: "pending"}, states
++            assert env.model.tasks == [], "nothing reached the Host before the first message's capture"
++            env.wire.download_gate.set()
++            await _wait(lambda: len(_custody(env, "SELECT 1 FROM inbox WHERE state='settled'")) == 2)
++        finally:
++            env.wire.download_gate.set()
++            runner.cancel()
++            await asyncio.gather(runner, return_exceptions=True)
++
++    asyncio.run(scenario())
++    arrivals = [row["client_message_id"] for row in _chat_rows(env.root) if row.get("direction") == "in"]
++    assert arrivals == [f"telegram:{OWNER}:73", f"telegram:{OWNER}:74"], "captured in arrival order"
++
++
++def test_an_unknown_bot_identity_holds_the_message_instead_of_guessing_main(env, monkeypatch):
++    monkeypatch.setattr(env.tp, "_BOT", {})
++    (env.api.state_dir / "bot_identity.json").unlink()
++    _receive(env, _message(5, "Before the bot is known"), 3)
++    row = _custody(env, "SELECT lane, state, error FROM inbox")[0]
++    assert (row["lane"], row["state"]) == ("", "pending") and "bot_identity_unknown" in row["error"]
++    _run(env, lambda: True)
++    assert env.injects == [] and env.bridge.messages == [] and env.model.tasks == []
++    env.tp.remember_bot(env.api, {"id": int(BOT), "username": "obot"})
++    env.tp._exec(env.api, "UPDATE inbox SET available_at=0")
++    _run(env, lambda: env.wire.sent())
++    assert [t["metadata"]["presence"]["observed_text"] for t in env.model.tasks] == ["Before the bot is known"]
++
++
++def test_a_redelivered_update_keeps_its_place_road_after_the_owner_switches_back_to_main(env, monkeypatch):
++    from supervisor.message_ingress import accepted_chat_message
++
++    real_save, lost = env.plugin._save_offset, []
++
++    def offset_lost_once(api, offset):
++        if not lost:
++            lost.append(offset)
++            raise OSError("offset not saved: disk full")
++        real_save(api, offset)
++
++    monkeypatch.setattr(env.plugin, "_save_offset", offset_lost_once)
++    env.wire.updates = [[_poll(1, _message(10, "Place words"))]]
++
++    async def crash_after_commit():
++        poller = asyncio.create_task(env.plugin._poller(env.api))
++        await _wait(lambda: poller.done())
++        assert isinstance(poller.exception(), OSError), "the offset write failed after the commit"
++    asyncio.run(crash_after_commit())
++    assert _custody(env, "SELECT update_id, lane FROM inbox") == [{"update_id": 1, "lane": "presence"}]
++    assert not (env.api.state_dir / "places.sqlite").stat().st_size == 0
++    settings = {"TELEGRAM_CHAT_ID": str(OWNER), "TELEGRAM_ORDINARY_CHAT": "main"}  # the owner rolls back
++    (env.api.state_dir / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
++    env.wire.updates = [[_poll(1, _message(10, "Place words")), _poll(2, _message(11, "New words after the switch"))]]
++
++    async def redeliver():
++        poller = asyncio.create_task(env.plugin._poller(env.api))
++        runner = asyncio.create_task(env.runner.run())
++        try:
++            await _wait(lambda: [m["text"] for m in env.bridge.messages] == ["New words after the switch"]
++                        and any("Seen: Place words" in d["text"] for d in env.wire.sent()))
++        finally:
++            for task in (poller, runner):
++                task.cancel()
++            await asyncio.gather(poller, runner, return_exceptions=True)
++    asyncio.run(redeliver())
++    assert accepted_chat_message(env.root, OWNER, f"tg:{OWNER}:10") is None, "no second, Main copy of the place words"
++    assert [m["text"] for m in env.bridge.messages] == ["New words after the switch"], "a new message is classic"
++    assert [t["metadata"]["presence"]["observed_text"] for t in env.model.tasks] == ["Place words"]
++    assert json.loads((env.api.state_dir / "poll_offset.json").read_text())["offset"] == 3
++
++
++def test_an_edit_cut_off_by_a_restart_becomes_uncertain_with_its_report_and_is_never_repeated(env):
++    results = {}
++    env.model.during = lambda task: results.update(task=task, send=_tool(
++        env, "telegram_message", _ctx(task["id"], task), action="send", request_id="ack", text="On it"))
++    _receive(env, _message(47, "Acknowledge, then fix it"), 33)
++    _run(env, lambda: len(env.wire.sent()) == 2)
++    task = results["task"]
++    bot_id = next(int(k.split(":")[1]) for k, r in env.state._message_refs(env.api).items() if r.get("kind") == "place_tool")
++    env.wire.failures = [asyncio.CancelledError()]  # the process stops while Telegram holds the edit
++    with pytest.raises(asyncio.CancelledError):
++        _tool(env, "telegram_message", _ctx(task["id"], task), action="edit", request_id="fix", message_id=bot_id,
++              text="Fixed")
++    delivery = f"tool:{task['id']}:fix"
++    assert _custody(env, "SELECT state FROM actions WHERE delivery_id=?", (delivery,))[0]["state"] == "sending"
++    assert env.tp.recover(env.api)["actions_uncertain"] == 1
++    assert _custody(env, "SELECT state FROM actions WHERE delivery_id=?", (delivery,))[0]["state"] == "uncertain"
++    report = json.loads(_custody(env, "SELECT payload_json FROM reports WHERE delivery_id=?", (delivery,))[0]["payload_json"])
++    assert report["state"] == "uncertain" and report["message"]["method"] == "editMessageText"
++    assert report["origin"] == {"kind": "tool", "task_id": task["id"], "source_event_id": f"telegram:{OWNER}:47"}
++    again = _tool(env, "telegram_message", _ctx(task["id"], task), action="edit", request_id="fix", message_id=bot_id,
++                  text="Fixed")
++    assert again["state"] == "uncertain" and [m for m, _d in env.wire.calls].count("editMessageText") == 1
+diff --git a/tests/test_telegram_quiz_state.py b/tests/test_telegram_quiz_state.py
+index bb0c03fb9..92e963b77 100644
+--- a/tests/test_telegram_quiz_state.py
++++ b/tests/test_telegram_quiz_state.py
+@@ -307,7 +307,7 @@ def test_the_manifest_declares_every_topic_register_subscribes(tmp_path):
+     api = Api(tmp_path)
+     api.register_supervised_task = lambda *args, **kwargs: None
+     api.subscribe_event = lambda topic, handler: api.subscriptions.append(topic)
+-    api.register_route = api.register_settings_section = lambda *args, **kwargs: None
++    api.register_route = api.register_settings_section = api.register_tool = lambda *args, **kwargs: None
+     plugin.register_miniapp = lambda _api: None
+     plugin.register(api)
+     assert "chat.quiz_state" in api.subscriptions
+diff --git a/tests/test_telegram_settings.py b/tests/test_telegram_settings.py
+index 48c162dad..ddd9ad01e 100644
+--- a/tests/test_telegram_settings.py
++++ b/tests/test_telegram_settings.py
+@@ -282,7 +282,7 @@ def test_bridge_status_reports_deferred_validation_as_degraded(tmp_path: Path) -
+     )
+     response = asyncio.run(plugin._make_status(_RouteApi(tmp_path))(None))
+     body = json.loads(response.body)
+-    assert set(body) == {"bridge", "mini_app"}
++    assert set(body) == {"bridge", "mini_app", "places"}
+     assert body["bridge"] == {
+         "state": "degraded",
+         "owner_bound": True,
+@@ -306,7 +306,7 @@ def test_combined_status_has_only_bounded_bridge_and_mini_app_sections(tmp_path:
+     })
+     response = asyncio.run(plugin._make_status(_RouteApi(tmp_path))(None))
+     body = json.loads(response.body)
+-    assert set(body) == {"bridge", "mini_app"}
++    assert set(body) == {"bridge", "mini_app", "places"}
+     assert body["bridge"] == {
+         "state": "ready",
+         "owner_bound": True,
+@@ -319,6 +319,13 @@ def test_combined_status_has_only_bounded_bridge_and_mini_app_sections(tmp_path:
+         "platform", "reason_code", "updated_at_epoch", "last_ready_at_epoch",
+         "attempt", "next_retry_at_epoch", "security",
+     }
++    # The place lane's readiness: the ids a place connection needs and custody counts, nothing secret.
++    assert set(body["places"]) == {
++        "bot_account_id", "bot_username", "owner_chat_id", "host_gaps", "inbox_open", "inbox_undecided",
++        "observing", "outbox_waiting", "outbox_held", "outbox_uncertain", "outbox_failed",
++        "reports_pending", "output_gaps", "news_waiting", "last_error",
++    }
++    assert body["places"]["owner_chat_id"] == "42" and "token" not in json.dumps(body["places"]).lower()
+ 
+ 
+ @pytest.mark.parametrize("host,marker", [("127.0.0.1", ""), ("127.0.0.1", "1"), ("203.0.113.7", "")])
