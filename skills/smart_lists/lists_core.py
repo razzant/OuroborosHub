@@ -1062,6 +1062,8 @@ def _replay_result(value: Any, doc: Dict[str, Any], paths: Optional[Dict[str, st
                 copy.update(_group_view(doc["groups"][object_id], paths))
             elif _ENTRY_ID_RE.fullmatch(object_id) or _GROUP_ID_RE.fullmatch(object_id):
                 copy = {"id": object_id, "gone": True}
+        if isinstance(copy.get("entry"), dict) and copy["entry"].get("id") in doc["entries"]:
+            copy["entry"] = _full_entry(doc["entries"][copy["entry"]["id"]], paths)
         return copy
     return value
 
@@ -1185,7 +1187,7 @@ def _op_set_done(doc: Dict[str, Any], entry_ids: List[str], done: bool, now: str
     changed, unchanged = [], []
     for entry in entries:
         wanted = "done" if done else "open"
-        if entry["stage"] == ("done" if done else "todo"):
+        if _status(entry) == wanted:
             unchanged.append(entry["id"])
             continue
         entry["stage"] = "done" if done else "todo"
