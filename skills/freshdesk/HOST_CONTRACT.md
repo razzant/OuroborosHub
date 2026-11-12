@@ -55,6 +55,11 @@ Freshdesk's `Date` header at connect; a message written in that very second coun
   `ticket:<id>`, as the thread history does. Residual: a create Freshdesk applied without answering stays
   `uncertain` and unrecorded, so its ticket can come back as a new ticket (an outbound one attributed to the
   helpdesk, a `POST tickets` one to its requester).
+- A property change this connector makes (`freshdesk_update`, `PUT tickets/<id>`) is folded into the snapshots the
+  watcher compares: only the properties it wrote (and the due times Freshdesk derives), so a colleague's change in
+  the same minute stays an event; a ticket opened before the connection that the watcher never read is recorded
+  as seen, so taking it does not wake as "first seen assigned". The ticket's update time is left alone, so its
+  thread is still read on the next walk.
 - Notes this connector creates are recorded by id; its edits by id and new revision, so a colleague's later edit
   of the same note (attributed to `last_edited_user_id`) is still an event. Freshdesk's answer to an edit carries
   no edit time, so after an edit the connector reads the note back once and records the revision the listing

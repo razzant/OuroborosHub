@@ -457,6 +457,9 @@ class Sends:
         _need(ticket_id, "ticket_id")
         if not str(account_id or "").strip():
             raise FreshdeskError("account_id_required", "Give account_id: the helpdesk address (freshdesk_status).")
+        if not str(ticket_id).strip().isdigit():
+            raise FreshdeskError("ticket_id_invalid", "ticket_id is a ticket number. Nothing was changed.")
+        ticket_id = str(int(ticket_id))
         client = self.service.client()
         self.service.check_account(client, account_id)
         store = self.service.store()
@@ -498,13 +501,16 @@ class Sends:
                 applied = all(after.get(k) == v for k, v in body.items() if k != "custom_fields") and all(
                     (after.get("custom_fields") or {}).get(k) == v for k, v in (body.get("custom_fields") or {}).items())
                 if applied:
-                    store.fold_own_change(ticket_id, _watched(after))
+                    store.fold_own_change(ticket_id, _sent(body, after, skip=("tags",) if tags_add or tags_remove else ()),
+                                          answer=after, tags_add=tags_add, tags_remove=tags_remove)
                 return {"ok": applied, "code": "applied_after_timeout" if applied else "uncertain",
                         "message": "Freshdesk did not answer; reading the ticket back shows the change "
                                    + ("was applied." if applied else "was not (yet) applied. Read it again before retrying."),
                         "error": exc.as_dict()}
             self.service.note_limits(store, response.limits)
-            store.fold_own_change(ticket_id, _watched(response.data or {}))  # its own change is not news
+            store.fold_own_change(ticket_id, _sent(body, response.data, skip=("tags",) if tags_add or tags_remove else ()),
+                                  answer=response.data if isinstance(response.data, dict) else {},
+                                  tags_add=tags_add, tags_remove=tags_remove)  # its own change is not news
             catalog = self.service.catalog(client, store)
             ticket = response.data or {}
             return {"ok": True, "ticket_id": ticket.get("id"), "url": ticket_url(client.host, ticket.get("id")),
@@ -580,15 +586,19 @@ class Sends:
         if method == "PUT" and ticket and result.get("ok") and isinstance(answered.get("data"), dict):
             store = self.service.store()  # a property change made here is this skill's own, not news
             try:
-                store.fold_own_change(ticket.group(1), _watched(answered["data"]))
+                store.fold_own_change(ticket.group(1), _sent(body, answered["data"]), answer=answered["data"])
             finally:
                 store.close()
         return result
 
 
-def _watched(ticket: dict) -> dict:
-    """The properties the watcher compares, as this answer states them."""
-    return {key: ticket[key] for key, _, _ in WATCHED if isinstance(ticket, dict) and key in ticket}
+def _sent(body, answer, *, skip=()) -> dict:
+    """The watched properties this call wrote, as Freshdesk's answer states them (the due times too: Freshdesk derives
+    them from what was written). Anything else in the answer may be a colleague's change and stays news."""
+    if not isinstance(body, dict) or not isinstance(answer, dict):
+        return {}
+    keys = [key for key, _, _ in WATCHED if key not in skip and (key in body or key in ("due_by", "fr_due_by"))]
+    return {key: answer[key] for key in keys if key in answer}
 
 
 def _need(value, name: str) -> None:

@@ -491,3 +491,23 @@ def test_an_uncertain_outbound_email_queues_no_receipt(tools, fake):
         assert store.journal("o-u")["report_state"] == "none"  # no conversation to report it into
     finally:
         store.close()
+
+
+def test_an_edit_revision_another_request_claimed_is_no_proof(tools, fake):
+    _, sends, service = tools
+    ticket = fake.add_ticket(subject="A", description="b")
+    note = fake.add_entry(ticket["id"], body="Final handoff", user_id=ME, incoming=False, private=True, source=2)
+
+    def another_request_of_ours_edits():  # same words, a new revision, this agent as editor, already recorded
+        moment = fake.iso_now()
+        fake.conversations[ticket["id"]][0].update(last_edited_at=moment, last_edited_user_id=ME)
+        store = service.store()
+        try:
+            store.mark_own(f"{note['id']}:{moment}", str(ticket["id"]), "other-request")
+        finally:
+            store.close()
+
+    fake.fault("PUT", r"/conversations/\d+$", "server", meanwhile=another_request_of_ours_edits)
+    result = sends.note(account_id=HOST, ticket_id=ticket["id"], text="Final handoff", request_id="c-10",
+                        edit_note_id=note["id"])
+    assert result["code"] == "uncertain"

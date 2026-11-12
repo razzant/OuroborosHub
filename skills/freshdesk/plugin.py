@@ -69,8 +69,9 @@ def register(api):
         schema=_schema({"refresh": B}))
     api.register_tool("freshdesk_find", handler=tool(reads.find), description=(
         "Find tickets. By names (status, priority, group, agent incl. 'me'/'unassigned', type, tag, dates YYYY-MM-DD, "
-        "custom fields) it searches; by requester, company, view or updated_since it lists. Search returns at most 300 "
-        "tickets, lags a few minutes and cannot search subject or description text."),
+        "custom fields) it searches; by requester, company, view or updated_since it lists; the two cannot be mixed "
+        "in one call (a listed ticket shows its status). Search returns at most 300 tickets, lags a few minutes and "
+        "cannot search subject or description text."),
         schema=_schema({"account_id": S, "query": S, "status": NAME_OR_ID, "priority": NAME_OR_ID,
                         "group": NAME_OR_ID, "agent": NAME_OR_ID, "type": S, "tag": S, "created_after": S,
                         "created_before": S, "updated_after": S, "updated_before": S, "due_before": S,

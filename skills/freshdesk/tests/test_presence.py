@@ -201,11 +201,18 @@ def test_an_event_offered_when_the_companion_ended_is_offered_again(wired):
     presence.dispatch()
     drain(presence)
     assert [t["event"]["source_event_id"] for t in host.turns] == ["a1"]
-    queue(store, "b1", 2, 2)  # a companion that ends after its connection ended: the event ends with it
-    store.db.execute("UPDATE inbox SET state='submitting' WHERE source_event_id='b1'")
-    store.db.execute("DELETE FROM meta WHERE key='connected_at'")
+    queue(store, "b1", 2, 2)  # offered under a connection that ended and came back: the event ends with it
+    store.db.execute("UPDATE inbox SET state='submitting', connection='2026-01-05T09:00:00Z' "
+                     "WHERE source_event_id='b1'")
+    store.set_meta("connected_at", "2026-01-05T10:00:00Z")
     companion.recover(store, starting=True)
     assert store.one("SELECT state FROM inbox WHERE source_event_id='b1'")["state"] == "ended"
+    queue(store, "c1", 3, 3)  # no connection at all now
+    store.db.execute("UPDATE inbox SET state='submitting', connection='2026-01-05T10:00:00Z' "
+                     "WHERE source_event_id='c1'")
+    store.db.execute("DELETE FROM meta WHERE key='connected_at'")
+    companion.recover(store, starting=True)
+    assert store.one("SELECT state FROM inbox WHERE source_event_id='c1'")["state"] == "ended"
 
 
 def test_a_released_output_is_posted_once_as_a_private_note_and_reported(wired, fake):
@@ -459,3 +466,21 @@ def test_an_answer_that_returns_after_a_reconnect_is_not_offered_again(wired):
     presence.dispatch()
     drain(presence)
     assert [t["event"]["source_event_id"] for t in host.turns] == ["a1"]  # offered once, never again
+
+
+def test_an_output_whose_note_was_recorded_uncertain_stays_uncertain(wired, fake):
+    import hashlib
+    presence, host, _, store = wired
+    ticket = fake.add_ticket(subject="A", description="b")
+    store.db.execute("INSERT INTO outputs(output_ref, ticket_id, text, source_event_id) VALUES('o-9', ?, 'Text', 'e9')",
+                     (str(ticket["id"]),))
+    from freshdesk_lib.store import digest
+    request_id = "output:" + hashlib.sha256(b"o-9").hexdigest()[:40]
+    same_call = digest({"ticket": str(ticket["id"]), "text": "Text", "html": False, "public": False, "notify": [],
+                        "edit": "", "files": []})  # the companion ended mid-call; recover() recorded it uncertain
+    store.db.execute("INSERT INTO journal(request_id, tool, digest, host, agent_id, ticket_id, state, attempted_at) "
+                     "VALUES(?, 'freshdesk_note', ?, ?, '9001', ?, 'uncertain', '2026-01-05T09:00:00Z')",
+                     (request_id, same_call, HOST, str(ticket["id"])))
+    presence.deliver_outputs()
+    row = store.one("SELECT state FROM outputs WHERE output_ref='o-9'")
+    assert row["state"] == "uncertain" and fake.conversations[ticket["id"]] == []

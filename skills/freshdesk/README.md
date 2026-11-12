@@ -49,7 +49,8 @@ Ticket text is sent to the model provider this Ouroboros installation uses.
   while the place is Silent or Paused stays with you in the room (Circles) as a held reply and is not posted later;
   work begun before the place was removed is never posted.
 - Its own replies, notes, note edits, property changes and the tickets it opens (outbound emails) never come back to
-  it as news; a customer's answer to them is a reply on a ticket it wrote in.
+  it as news, and taking an older ticket does not wake it as newly assigned; a colleague's change in the same minute
+  still does. A customer's answer to its words is a reply on a ticket it wrote in.
 - The watcher checks Freshdesk once a minute (30–600 s) while the place is connected and spends at most a
   configurable share (25 % by default) of the account's per-minute API limit, which the helpdesk's other
   integrations share. It finds new entries because Freshdesk moves a ticket's `updated_at`; a change made and

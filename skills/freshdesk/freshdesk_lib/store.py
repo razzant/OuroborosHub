@@ -53,6 +53,15 @@ CREATE TABLE IF NOT EXISTS gaps (scope TEXT PRIMARY KEY, code TEXT NOT NULL, det
 FINAL_STATES = ("delivered", "accepted", "failed", "uncertain", "not_sent")
 
 
+def _parse(value: str) -> datetime:
+    text = str(value or "").strip()
+    try:
+        moment = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text)
+    except ValueError:
+        return datetime.max.replace(tzinfo=timezone.utc)  # unknown: treated as not before the connection
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -176,18 +185,36 @@ class Store:
         """Claims left ``sending`` by a process that ended mid-call: their outcome is unknown."""
         return [self.journal_row(r) for r in self.rows("SELECT * FROM journal WHERE state='sending'")]
 
-    def fold_own_change(self, ticket_id, values: dict) -> None:
-        """A property change this skill made, folded into the stored and the queued snapshot of a ticket the watcher
-        already knows, so it never comes back as news. The update time is left alone: the next walk still lists the
-        ticket and reads its thread, so a customer reply that came just before is not lost."""
-        if not values:
-            return
+    def fold_own_change(self, ticket_id, sent: dict, *, answer: dict, tags_add=(), tags_remove=()) -> None:
+        """A property change this skill made, so it never comes back as news.
+
+        ``sent``: only the properties this call wrote (as Freshdesk's answer states them), so a colleague's change in
+        the same minute is still news; tags added or removed apply to each snapshot's own list. A ticket the watcher
+        knows has them folded into its stored and queued snapshot. A ticket it has never read, opened before the
+        connection, is recorded as seen now (the whole answer): taking an old ticket does not wake as "first seen
+        assigned". The update time is left alone, so the next walk still reads the thread and a customer reply that
+        came just before is not lost."""
+        ticket_id = str(ticket_id)
+        added, removed = list(tags_add or []), set(tags_remove or [])
         with self.transaction() as db:
+            known = False
             for table, key in (("tickets", "id"), ("dirty", "ticket_id")):
-                row = db.execute(f"SELECT snapshot FROM {table} WHERE {key}=?", (str(ticket_id),)).fetchone()
-                if row is not None:
-                    snapshot = {**json.loads(row["snapshot"] or "{}"), **values}
-                    db.execute(f"UPDATE {table} SET snapshot=? WHERE {key}=?", (dump(snapshot), str(ticket_id)))
+                row = db.execute(f"SELECT snapshot FROM {table} WHERE {key}=?", (ticket_id,)).fetchone()
+                if row is None:
+                    continue
+                known = known or table == "tickets"
+                snapshot = {**json.loads(row["snapshot"] or "{}"), **sent}
+                if added or removed:
+                    kept = [tag for tag in snapshot.get("tags") or [] if tag not in removed]
+                    snapshot["tags"] = kept + [tag for tag in added if tag not in kept]
+                db.execute(f"UPDATE {table} SET snapshot=? WHERE {key}=?", (dump(snapshot), ticket_id))
+            connected = db.execute("SELECT value FROM meta WHERE key='connected_at'").fetchone()
+            cutoff = json.loads(connected["value"]) if connected else ""
+            opened = str((answer or {}).get("created_at") or "")
+            if not known and answer and (not cutoff or (opened and _parse(opened) < _parse(cutoff))):
+                seen = {k: v for k, v in answer.items() if k not in ("description", "description_text")}
+                db.execute("INSERT OR IGNORE INTO tickets(id, updated_at, snapshot, first_seen) VALUES(?,?,?,?)",
+                           (ticket_id, "", dump(seen), now_iso()))
 
     def mark_own(self, key: str, ticket_id: str, request_id: str) -> None:
         """One more key for what a call wrote (an edit as the listing shows it), never reported back as news."""

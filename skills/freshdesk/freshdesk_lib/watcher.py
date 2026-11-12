@@ -202,6 +202,12 @@ def process(service, client, store, budget: Budget, *, capabilities: dict | None
             continue
         if entries is None:
             break
+        # A change this skill made while the thread was read is folded into the queued row: compare that, not the
+        # copy read before (else the own change would read as reversed, then as news).
+        fresh = store.one("SELECT snapshot FROM dirty WHERE ticket_id=? AND updated_at=?",
+                          (row["ticket_id"], row["updated_at"]))
+        if fresh is not None:
+            ticket = json.loads(fresh["snapshot"])
         stored = store.one("SELECT snapshot FROM tickets WHERE id=?", (row["ticket_id"],))
         previous = json.loads(stored["snapshot"]) if stored else None
         known, previous_to = {}, {}

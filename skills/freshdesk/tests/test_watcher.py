@@ -295,6 +295,58 @@ def test_this_skills_own_property_change_is_not_news_but_a_colleagues_is(fake, d
     assert change["message"]["non_text"][0]["description"] == "Priority: Low → Urgent"
 
 
+def test_a_colleagues_change_in_the_same_minute_is_not_absorbed(fake, desk):
+    connect(fake, desk)
+    ticket = fake.add_ticket(subject="Refund", description="please", status=2)
+    assert len(cycle(desk)) == 1
+    fake.tickets[ticket["id"]].update(responder_id=ME, priority=4, updated_at=fake.iso_now())  # a colleague
+    assert Sends(desk).update(account_id=HOST, ticket_id=ticket["id"], status="Pending")["ok"]  # this skill
+    [change] = cycle(desk)
+    assert change["facts"] == ["assigned"]
+    assert change["message"]["non_text"][0]["description"] == "Priority: Low → Urgent; Agent: — → Desk Agent"
+
+
+def test_taking_an_older_ticket_never_read_does_not_wake_as_assigned(fake, desk):
+    old = fake.add_ticket(subject="Backlog", description="from before")
+    long_ago = "2026-01-01T00:00:00Z"
+    fake.tickets[old["id"]].update(created_at=long_ago, updated_at=long_ago)
+    connect(fake, desk)
+    assert Sends(desk).update(account_id=HOST, ticket_id=old["id"], agent="me", status="Pending")["ok"]
+    assert cycle(desk) == []  # its own assignment of a ticket it had not read is not "first seen assigned"
+    fake.tickets[old["id"]].update(priority=3, updated_at=fake.iso_now())
+    [change] = cycle(desk)
+    assert change["message"]["non_text"][0]["description"] == "Priority: Low → High" and change["facts"] == []
+
+
+def test_an_own_change_made_while_the_ticket_is_processed_is_not_reversed(fake, desk, monkeypatch):
+    import freshdesk_lib.watcher as watcher_module
+    connect(fake, desk)
+    ticket = fake.add_ticket(subject="Refund", description="please", status=2)
+    assert len(cycle(desk)) == 1
+    fake.add_entry(ticket["id"], body="Any news?", user_id=501, incoming=True, source=1)
+    reading = watcher_module._conversation
+
+    def read_then_update(client, store, budget, ticket_id):
+        entries = reading(client, store, budget, ticket_id)
+        if ticket_id == str(ticket["id"]):  # this skill changes the ticket while the watcher reads its thread
+            assert Sends(desk).update(account_id=HOST, ticket_id=ticket["id"], status="Pending")["ok"]
+        return entries
+
+    monkeypatch.setattr(watcher_module, "_conversation", read_then_update)
+    assert [e["facts"] for e in cycle(desk)] == [["any_message"]]  # the reply; no reversed status change
+    monkeypatch.setattr(watcher_module, "_conversation", reading)
+    assert cycle(desk) == []  # nor the own change afterwards
+
+
+def test_a_change_through_the_generic_writer_is_not_news(fake, desk):
+    connect(fake, desk)
+    ticket = fake.add_ticket(subject="Refund", description="please", status=2)
+    assert len(cycle(desk)) == 1
+    done = Sends(desk).request(account_id=HOST, method="PUT", path=f"tickets/{ticket['id']}", body={"status": 3},
+                               request_id="g-1")
+    assert done["ok"] and cycle(desk) == []
+
+
 def test_an_edit_made_while_no_place_was_connected_is_history(fake, desk):
     connect(fake, desk)
     ticket = fake.add_ticket(subject="A", description="b")
