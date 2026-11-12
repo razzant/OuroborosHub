@@ -92,10 +92,12 @@ class HostLink:
         return data
 
     def check(self, binding: dict, account_id: str, conversation_id: str, thread_id: str) -> dict:
+        """The retained binding's verdict. A 400 (``place_binding_invalid``: it no longer fits this connector or
+        destination) is a verdict too, not an outage: the output stays held instead of retrying forever."""
         status, data = self.request("GET", "/presence/place", params={
             "provider": PROVIDER, "account_id": account_id, "conversation_id": conversation_id,
             "thread_id": thread_id, "operation": "check", "binding": json.dumps(binding, separators=(",", ":"))})
-        if status not in (200, 404, 409) or not isinstance(data, dict):
+        if status not in (200, 400, 404, 409) or not isinstance(data, dict):
             raise HostUnavailable("check_unavailable", status, data)
         return data
 

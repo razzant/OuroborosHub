@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .client import NOT_SENT, RATE_LIMITED, UNKNOWN, FreshdeskError, canonical_path
-from .events import parse_time
+from .events import entry_revision, parse_time
 from .host import HostUnavailable
 from .reads import ticket_url
 from .service import Service
@@ -121,12 +121,12 @@ class Sends:
 
     def _deliver(self, ctx, *, tool: str, request_id, account_id, ticket_id, text: str, digest_args: dict, call,
                  readback=None, words: bool = True, success: str = "accepted", origin: str = "tool",
-                 gate_ticket=None, source_event_id: str = "", records: str = "entry", prepare=None,
-                 editing: bool = False) -> dict:
-        """``records``: what the answer's ``id`` is — ``entry`` (a reply, note or email on the ticket), ``ticket``
-        (a ticket this call opened) or ``none``; own entries and tickets are never reported back as arrivals.
-        ``prepare(client)``: reads the call needs, done before the place check so that check stays the last step
-        before the write; its refusal sends nothing."""
+                 gate_ticket=None, source_event_id: str = "", records: str = "entry", prepare=None) -> dict:
+        """``records``: what the answer's ``id`` is — ``entry`` (a reply, note or email on the ticket), ``edit`` (a
+        note this call edited: recorded with its new revision, so a colleague's later edit is still news),
+        ``ticket`` (a ticket this call opened) or ``none``; own entries and tickets are never reported back as
+        arrivals. ``prepare(client)``: reads the call needs, done before the place check so that check stays the
+        last step before the write; its refusal sends nothing."""
         request_id = _request_id(request_id)
         if not str(account_id or "").strip():
             raise FreshdeskError("account_id_required", "Give account_id: the helpdesk address this skill is "
@@ -172,14 +172,14 @@ class Sends:
                 candidates = []
                 if readback is not None:
                     try:
-                        candidates = [e for e in readback(client, agent, attempted)
-                                      if editing or not store.own_entry(e.get("id"))]  # an edit keeps the entry's id
+                        candidates = [e for e in readback(client, agent, attempted)  # an edit keeps the entry's id
+                                      if records == "edit" or not store.own_entry(e.get("id"))]
                     except FreshdeskError:
                         candidates = []
                 if len(candidates) == 1:
                     found = candidates[0]
                     store.finish(request_id, success, provider_id=str(found.get("id") or ""), report=words,
-                                 own_key=str(found.get("id") or ""),
+                                 own_key=self._own_key(records, found),
                                  result={"readback": True, "id": found.get("id"), "created_at": found.get("created_at")})
                     return {"ok": True, "state": success, "request_id": request_id, "entry_id": found.get("id"),
                             "note": "Freshdesk did not answer, but a readback found exactly one entry with this "
@@ -203,7 +203,7 @@ class Sends:
                 own_key = provider_id = f"ticket:{entry_id}" if entry_id else ""
             else:
                 final_ticket = str(ticket_id or data.get("ticket_id") or "")
-                own_key = str(entry_id or "") if records == "entry" else ""
+                own_key = self._own_key(records, data)
                 provider_id = str(entry_id or "")
             store.finish(request_id, success, provider_id=provider_id, ticket_id=final_ticket, report=words,
                          own_key=own_key,
@@ -218,11 +218,19 @@ class Sends:
             store.close()
 
     @staticmethod
+    def _own_key(records: str, entry: dict) -> str:
+        """What ``sent_entries`` keeps for a written entry: its id, or for an edit its id and new revision."""
+        if not entry.get("id") or records not in ("entry", "edit"):
+            return ""
+        return f"{entry['id']}:{entry_revision(entry)}" if records == "edit" else str(entry["id"])
+
+    @staticmethod
     def _find_entry(client, ticket_id, agent, attempted, text, *, kind=None, private=None, attachments=0,
-                    entry_id=None) -> list:
+                    entry_id=None, before=None) -> list:
         """Readback candidates: entries of ``ticket_id`` by this agent, made after the attempt, of the same kind,
-        visibility and attachment count, with the same words, whole (a shared opening is no proof). Only a single
-        unclaimed candidate counts as proof."""
+        visibility and attachment count, with the same words, whole (a shared opening is no proof). For an edit
+        (``entry_id``), the note must show a revision other than ``before`` (its version before the call) and at
+        least the attachments it had plus the new ones. Only a single unclaimed candidate counts as proof."""
         wanted = normalized(text)
         since = attempted - timedelta(minutes=5)  # tolerance for clock skew between this computer and Freshdesk
         found = []
@@ -231,7 +239,9 @@ class Sends:
             for entry in page.data or []:
                 same_words = normalized(entry.get("body_text") or entry.get("body") or "") == wanted
                 if entry_id is not None:
-                    if str(entry.get("id")) == str(entry_id) and same_words:
+                    edited = before is not None and entry_revision(entry) != before["revision"]
+                    if (str(entry.get("id")) == str(entry_id) and same_words and edited
+                            and len(entry.get("attachments") or []) >= before["attachments"] + attachments):
                         found.append(entry)
                     continue
                 when = parse_time(entry.get("created_at"))
@@ -292,6 +302,7 @@ class Sends:
                        "files": [(name, hashlib.sha256(data).hexdigest()) for _, name, data, _ in files]}
 
         editing = edit_note_id not in (None, "")
+        before: dict = {}  # the note as it was before the edit, for an honest readback
 
         def prepare(client):
             note = self._note_of(client, ticket_id, edit_note_id)
@@ -301,6 +312,7 @@ class Sends:
                 shown, flag = ("private", "false") if note.get("private") else ("public", "true")
                 raise FreshdeskError("note_visibility_differs", f"Note {edit_note_id} is {shown} and an edit keeps "
                                      f"that; pass public={flag} to edit it, or write a new note. Nothing was changed.")
+            before.update(revision=entry_revision(note), attachments=len(note.get("attachments") or []))
 
         def call(client, agent):
             if editing:
@@ -313,14 +325,15 @@ class Sends:
             return self._post_words(client, f"tickets/{int(ticket_id)}/notes", body, files, text)
 
         if editing:
-            readback = lambda c, a, t: self._find_entry(c, ticket_id, a, t, text, entry_id=edit_note_id)  # noqa: E731
+            readback = lambda c, a, t: self._find_entry(c, ticket_id, a, t, text, entry_id=edit_note_id,  # noqa: E731
+                                                         before=before, attachments=len(files))
         else:
             readback = lambda c, a, t: self._find_entry(c, ticket_id, a, t, text, kind=2, private=not public,  # noqa: E731
                                                          attachments=len(files))
         return self._deliver(ctx, tool="freshdesk_note", request_id=request_id, account_id=account_id,
                              ticket_id=ticket_id, text=text, digest_args=digest_args, call=call, readback=readback,
                              success="delivered", origin=origin, source_event_id=source_event_id,
-                             prepare=prepare if editing else None, editing=editing)
+                             prepare=prepare if editing else None, records="edit" if editing else "entry")
 
     @staticmethod
     def _agent_emails(client, notify) -> list:
@@ -464,7 +477,12 @@ class Sends:
             except FreshdeskError as exc:
                 if exc.effect != UNKNOWN:
                     raise
-                after = client.get(f"tickets/{int(ticket_id)}").data or {}
+                try:
+                    after = client.get(f"tickets/{int(ticket_id)}").data or {}
+                except FreshdeskError as read_error:  # the change may stand; never report it as not sent
+                    return {"ok": False, "code": "uncertain", "error": exc.as_dict(), "readback": read_error.as_dict(),
+                            "message": "Freshdesk may have applied this change, and reading the ticket back also "
+                                       "failed. Read the ticket before retrying."}
                 applied = all(after.get(k) == v for k, v in body.items() if k != "custom_fields") and all(
                     (after.get("custom_fields") or {}).get(k) == v for k, v in (body.get("custom_fields") or {}).items())
                 return {"ok": applied, "code": "applied_after_timeout" if applied else "uncertain",

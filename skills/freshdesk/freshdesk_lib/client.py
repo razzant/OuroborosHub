@@ -32,11 +32,15 @@ def canonical_path(path: str) -> str:
     """One spelling per endpoint (``tickets/1/reply``), so a refusal by path cannot be stepped around with ``//``,
     ``./`` or ``.json``; anything else that is not a plain API path is refused."""
     path = str(path or "").strip()
-    if path.startswith(API_PREFIX):
-        path = path[len(API_PREFIX):]
-    path = path.strip("/")
-    if path.endswith(".json"):
-        path = path[:-len(".json")]
+    while True:  # to a fixed point: the client spells it again before sending, and must get the same path
+        before = path
+        if path.startswith(API_PREFIX):
+            path = path[len(API_PREFIX):]
+        path = path.strip("/")
+        if path.endswith(".json"):
+            path = path[:-len(".json")]
+        if path == before:
+            break
     if not path or not _PATH_RE.match(path) or any(part in ("", ".", "..") for part in path.split("/")):
         raise FreshdeskError("path_invalid", f"Not a Freshdesk API path: {path!r}.")
     return path
@@ -250,6 +254,9 @@ class Client:
             sent = isinstance(reason, (ConnectionResetError, RemoteDisconnected))
             raise FreshdeskError("unreachable", f"Freshdesk could not be reached: {reason}.",
                                  effect=UNKNOWN if writes and sent else NOT_SENT) from exc
+        except OSError as exc:  # TLS, broken pipe and the like mid-exchange: a write may have arrived
+            raise FreshdeskError("network_error", f"The connection to Freshdesk failed: {type(exc).__name__}.",
+                                 effect=UNKNOWN if writes else NOT_SENT) from exc
         limits = rate_limits(answer_headers)
         found = _NEXT_LINK.search(answer_headers.get("link", ""))
         return Response(status, _decode(raw), answer_headers, limits, found.group(1) if found else "")

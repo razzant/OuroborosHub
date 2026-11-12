@@ -144,8 +144,9 @@ This version is checked against a faithful stand-in of Freshdesk's API, not yet 
   that opens a new ticket from the mailbox `email_config_id` names (`freshdesk_ticket` shows a ticket's
   `email_config_id`). A recipient Freshdesk would drop is refused, never ignored. Customers hear only what these
   tools send. When longer work on a ticket ends with a final answer, that answer is posted on the ticket as a
-  private note, not emailed; it waits while the place is Silent or Paused and goes out when it is Active again,
-  but work begun before the place was removed is never posted, even after it is connected again.
+  private note, not emailed. An answer that finishes while the place is Silent or Paused is held: it stays with the
+  owner in the room and is not posted later. Work begun before the place was removed is never posted, even after
+  it is connected again.
 - Every call that sends or changes something takes `account_id` (the helpdesk address) and, for words, a
   `request_id` you keep for that exact message. Repeating it returns the recorded outcome and never sends twice.
 - `uncertain` means Freshdesk may have applied the call but did not answer. Read the ticket before anything else;

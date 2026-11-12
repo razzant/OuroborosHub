@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fake_freshdesk import KEY, FakeFreshdesk  # noqa: E402
+from freshdesk_lib.host import HostUnavailable  # noqa: E402
 from freshdesk_lib.presence import Presence  # noqa: E402
 from freshdesk_lib.sends import Sends  # noqa: E402
 from freshdesk_lib.service import Service, write_settings  # noqa: E402
@@ -32,14 +33,22 @@ class ScriptedHost:
         self.revision = 1  # the place's connection; a disconnect and reconnect makes a new one
         self.turns, self.reports, self.works = [], [], {}
         self.answers: dict = {}
+        self.calls: list = []  # the order of bind and turn calls
+        self.down = False  # the Host Service does not answer
+        self.invalid = False  # the host calls a retained binding invalid
 
     def identity(self):
         return self.identity_answer
 
     def place(self, account_id, conversation_id="", thread_id=""):
+        if self.down:
+            raise HostUnavailable("host_unreachable")
         return {"state": self.state, "label": "Freshdesk"}
 
     def bind(self, account_id, conversation_id, thread_id, *, require_place=True):
+        if self.down:
+            raise HostUnavailable("host_unreachable")
+        self.calls.append(("bind", conversation_id))
         if self.state == "unbound":
             return {"ok": True, "allowed": False, "binding": None, "state": "unknown", "code": "place_not_connected"}
         return {"ok": True, "allowed": self.state == "active", "state": self.state, "binding": {
@@ -48,11 +57,16 @@ class ScriptedHost:
             "connected_revision": self.revision}}
 
     def check(self, binding, account_id, conversation_id, thread_id):
+        if self.down:
+            raise HostUnavailable("host_unreachable")
+        if self.invalid:
+            return {"ok": False, "code": "place_binding_invalid", "disposition": "rejected"}
         if binding["connected_revision"] != self.revision or self.state == "unbound":
             return {"ok": True, "allowed": False, "state": "disconnected", "code": "place_disconnected"}
         return {"ok": True, "allowed": self.state == "active", "state": self.state, "code": f"place_{self.state}"}
 
     def turn(self, payload):
+        self.calls.append(("turn", payload["event"]["source_event_id"]))
         self.turns.append(payload)
         answer = self.answers.get(payload["event"]["source_event_id"], (200, {"status": "completed", "outcome": "silent"}))
         return answer() if callable(answer) else answer
@@ -286,3 +300,84 @@ def test_a_bound_output_is_posted_while_its_place_stays_active(wired, fake):
     drain(presence)
     presence.deliver_outputs()
     assert [(e["body_text"], e["private"]) for e in fake.conversations[ticket["id"]]] == [("Done.", True)]
+
+
+def bound(presence, host):
+    host.identity_answer = {**CAPABLE, "presence_place_binding_version": 1}
+    assert presence.negotiate()["place_binding"] is True
+
+
+def test_the_place_is_bound_before_the_event_is_offered(wired, fake):
+    presence, host, _, store = wired
+    bound(presence, host)
+    ticket = fake.add_ticket(subject="Refund", description="please")
+    queue(store, "e1", ticket["id"], 1)
+    host.down = True  # the host does not answer the bind: the event waits rather than going out unbound
+    presence.dispatch()
+    drain(presence)
+    assert host.turns == [] and store.one("SELECT state FROM inbox WHERE source_event_id='e1'")["state"] == "ready"
+    host.down = False
+    store.db.execute("UPDATE inbox SET due=0")
+    presence.dispatch()
+    drain(presence)
+    assert host.calls == [("bind", str(ticket["id"])), ("turn", "e1")]
+
+
+def test_a_binding_the_host_calls_invalid_holds_the_output(wired, fake):
+    presence, host, _, store = wired
+    bound(presence, host)
+    ticket = fake.add_ticket(subject="Refund", description="please")
+    queue(store, "e1", ticket["id"], 1)
+    host.answers["e1"] = (200, {"status": "completed", "outcome": "message", "text": "Done.", "output_ref": "t:final",
+                                "turn_ref": "t", "continuation_version": 2})
+    presence.dispatch()
+    drain(presence)
+    host.invalid = True
+    presence.deliver_outputs()
+    row = store.one("SELECT state, hold FROM outputs WHERE output_ref='t:final'")
+    assert (row["state"], row["hold"]) == ("held", "place_binding_invalid") and fake.conversations[ticket["id"]] == []
+
+
+def test_a_host_blip_keeps_the_output_queued_and_it_goes_out_later(wired, fake):
+    presence, host, _, store = wired
+    ticket = fake.add_ticket(subject="A", description="b")
+    store.db.execute("INSERT INTO outputs(output_ref, ticket_id, text, source_event_id) VALUES('o-3', ?, 'Text', 'e3')",
+                     (str(ticket["id"]),))
+    host.down = True
+    presence.deliver_outputs()
+    row = store.one("SELECT state, due FROM outputs WHERE output_ref='o-3'")
+    assert row["state"] == "queued" and row["due"] > time.time()
+    host.down = False
+    store.db.execute("UPDATE outputs SET due=0")
+    presence.deliver_outputs()
+    assert [e["body_text"] for e in fake.conversations[ticket["id"]]] == ["Text"]
+
+
+def test_an_output_held_at_its_own_check_goes_out_once_the_place_is_active(wired, fake):
+    presence, host, _, store = wired
+    ticket = fake.add_ticket(subject="A", description="b")
+    store.db.execute("INSERT INTO outputs(output_ref, ticket_id, text, source_event_id) VALUES('o-4', ?, 'Text', 'e4')",
+                     (str(ticket["id"]),))
+    host.state = "silent"  # the place turned Silent between the host's release and this post
+    presence.deliver_outputs()
+    assert store.one("SELECT state FROM outputs WHERE output_ref='o-4'")["state"] == "held"
+    assert presence.resume_held() == 1  # still Silent: it is held again, nothing posted
+    presence.deliver_outputs()
+    assert fake.conversations[ticket["id"]] == []
+    host.state = "active"
+    presence.resume_held()
+    presence.deliver_outputs()
+    assert [e["body_text"] for e in fake.conversations[ticket["id"]]] == ["Text"]
+    assert store.gaps() == []  # its hold is over
+
+
+def test_an_invalid_binding_is_a_verdict_and_an_outage_is_not():
+    from freshdesk_lib.host import HostLink
+
+    def answering(status, body):
+        return HostLink(lambda: "fixture-skill-token", transport=lambda *_: (status, body))
+
+    verdict = answering(400, {"ok": False, "code": "place_binding_invalid", "disposition": "rejected"})
+    assert verdict.check({"version": 1}, HOST, "1", "1")["code"] == "place_binding_invalid"
+    with pytest.raises(HostUnavailable):
+        answering(503, {"ok": False}).check({"version": 1}, HOST, "1", "1")

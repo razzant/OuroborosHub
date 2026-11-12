@@ -35,6 +35,11 @@ def parse_time(value: str) -> datetime | None:
     return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
 
 
+def entry_revision(entry: dict) -> str:
+    """Which version of a conversation entry this is: its last edit, else its update or creation time."""
+    return str(entry.get("last_edited_at") or entry.get("updated_at") or entry.get("created_at") or "")
+
+
 def iso(value: str) -> str:
     """Freshdesk's ``…Z`` as ``datetime.isoformat()`` writes it, which the host reads as a time with a zone."""
     moment = parse_time(value)
@@ -166,8 +171,9 @@ def ticket_events(ctx: Context, ticket: dict, previous: dict | None, entries: li
     """Events for one changed ticket.
 
     ``previous``: the stored snapshot (None on first sight); ``known``: entry id -> stored revision;
-    ``own_entries``: what this connector put in Freshdesk (entry ids, ``ticket:<id>`` for tickets it opened), never
-    reported back as arrivals.
+    ``own_entries``: what this connector put in Freshdesk, never reported back as arrivals: entry ids it created,
+    ``<entry id>:<revision>`` for its edits (a colleague's later edit of the same note is news), ``ticket:<id>`` for
+    tickets it opened.
     """
     ticket_id = str(ticket.get("id"))
     own_ticket = f"ticket:{ticket_id}" in own_entries
@@ -194,15 +200,17 @@ def ticket_events(ctx: Context, ticket: dict, previous: dict | None, entries: li
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     for entry in sorted(entries, key=lambda e: (parse_time(e.get("created_at")) or epoch, int(e.get("id") or 0))):
         entry_id = str(entry.get("id"))
-        revision = str(entry.get("last_edited_at") or entry.get("updated_at") or entry.get("created_at") or "")
+        revision = entry_revision(entry)
         author = str(entry.get("user_id") or "")
         own = entry_id in own_entries
         is_new = entry_id not in known
         edited = not is_new and known.get(entry_id) != revision
-        report = (is_new or edited) and not own and (edited or ctx.after_connection(entry.get("created_at")))
+        report = ((is_new and not own and ctx.after_connection(entry.get("created_at")))
+                  or (edited and f"{entry_id}:{revision}" not in own_entries))
         if report:
+            wrote = wrote_before or (edited and (author == ctx.agent_id or own))  # an edit of this agent's own entry
             events.append(_entry_event(ctx, ticket, base, entry, revision=revision, edited=edited,
-                                       wrote_before=wrote_before, assigned=pending_assigned, conversation=conversation))
+                                       wrote_before=wrote, assigned=pending_assigned, conversation=conversation))
             pending_assigned = False
         if author == ctx.agent_id or own:
             wrote_before = True
@@ -234,8 +242,10 @@ def _entry_event(ctx: Context, ticket: dict, base: str, entry: dict, *, revision
                  wrote_before: bool, assigned: bool, conversation: dict) -> dict:
     entry_id = str(entry.get("id"))
     author = str(entry.get("user_id") or "")
+    editor = str(entry.get("last_edited_user_id") or "") if edited else ""
+    speaker = editor or author  # an edit is the editor's words, not the original author's
     facts = ["any_message"]
-    if wrote_before and author != ctx.agent_id:
+    if wrote_before and speaker != ctx.agent_id:
         facts.append("my_thread")
     email = str(ctx.agent.get("email") or "").lower()
     notified = {str(e).lower() for e in entry.get("to_emails") or []}
@@ -251,9 +261,10 @@ def _entry_event(ctx: Context, ticket: dict, base: str, entry: dict, *, revision
                "to_emails": entry.get("to_emails") or [], "attachments": _attachments(entry),
                "source_order": int(entry_id) if entry_id.isdigit() else 0}
     source_event_id = f"{base}:entry:{entry_id}"
+    actor = ctx.actor(author, incoming=entry.get("incoming")) if speaker == author else ctx.actor(speaker)
     if edited:
         message["edited_at"] = iso(entry.get("last_edited_at") or entry.get("updated_at"))
         source_event_id = f"{base}:entry:{entry_id}:edit:{revision}"
-    return _event(ctx, ticket, source_event_id, actor=ctx.actor(author, incoming=entry.get("incoming")),
+    return _event(ctx, ticket, source_event_id, actor=actor,
                   text=entry.get("body_text") or html_to_text(entry.get("body") or ""), message=message,
                   facts=facts, conversation=conversation)

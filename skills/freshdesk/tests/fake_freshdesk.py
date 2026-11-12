@@ -52,7 +52,8 @@ def form_fields(raw: bytes, content_type: str) -> dict:
 
 
 def parse_iso(value: str) -> datetime:
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    """``…Z``, with or without fractions of a second."""
+    return datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value).astimezone(timezone.utc)
 
 
 TICKET_FIELDS = [
@@ -292,7 +293,10 @@ class FakeFreshdesk:
                     return 404, {"message": "Not found"}, {}
                 text = re.sub(r"<[^>]+>", "", str(body.get("body") or ""))
                 moment = iso(self.tick())
-                entry.update(body=f"<div>{text}</div>", body_text=text, updated_at=moment, last_edited_at=moment)
+                added = [{"id": 71000 + n, "name": f["name"], "size": f["size"], "content_type": "text/plain"}
+                         for n, f in enumerate(body.get("_files") or [])]
+                entry.update(body=f"<div>{text}</div>", body_text=text, updated_at=moment, last_edited_at=moment,
+                             last_edited_user_id=ME, attachments=list(entry.get("attachments") or []) + added)
                 self.tickets[entry["ticket_id"]]["updated_at"] = moment
                 return 200, dict(entry), {}
             match = re.fullmatch(r"tickets/(\d+)(?:/(\w+))?", p)

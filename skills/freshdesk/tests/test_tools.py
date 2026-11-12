@@ -273,6 +273,22 @@ def test_a_note_edit_keeps_who_sees_it(tools, fake):
     assert edited["ok"] is True and [r["method"] for r in fake.requests][-1] == "PUT"
 
 
+def test_an_unapplied_note_edit_is_no_proof_and_an_applied_one_is(tools, fake, tmp_path):
+    _, sends, _ = tools
+    ticket = fake.add_ticket(subject="A", description="b")
+    note = fake.add_entry(ticket["id"], body="Draft handoff", user_id=ME, incoming=False, private=True, source=2)
+    log = tmp_path / "handoff.pdf"
+    log.write_bytes(b"%PDF-1.4 handoff")
+    fake.fault("PUT", r"/conversations/\d+$", "server")  # refused before it changed anything
+    failed = sends.note(account_id=HOST, ticket_id=ticket["id"], text="Draft handoff", request_id="e-1",
+                        edit_note_id=note["id"], attachment_paths=[str(log)])
+    assert failed["code"] == "uncertain" and fake.conversations[ticket["id"]][0]["attachments"] == []
+    fake.fault("PUT", r"/conversations/\d+$", "drop_after_apply")  # applied, answer lost
+    applied = sends.note(account_id=HOST, ticket_id=ticket["id"], text="Final handoff", request_id="e-2",
+                         edit_note_id=note["id"], attachment_paths=[str(log)])
+    assert applied["ok"] is True and "readback" in applied["note"]
+
+
 def test_a_place_made_silent_during_the_reads_holds_the_edit(tools, fake):
     _, sends, service = tools
     ticket = fake.add_ticket(subject="A", description="b")
@@ -313,7 +329,12 @@ def test_an_email_reply_can_add_recipients_and_outbound_opens_a_ticket(tools, fa
     ({"op": "reply", "to_emails": ["colleague@example.net"]}, "to_emails_not_for_reply"),
     ({"op": "outbound", "to_emails": ["a@example.com"], "subject": "x", "email_config_id": 4001,
       "bcc_emails": ["b@example.com"]}, "outbound_option_unsupported"),
+    ({"op": "outbound", "to_emails": ["a@example.com"], "subject": "x", "email_config_id": 4001,
+      "from_email": "sales@example.com"}, "outbound_option_unsupported"),
     ({"op": "outbound", "to_emails": ["a@example.com"], "subject": "x"}, "email_config_id_missing"),
+    ({"op": "reply_to_forward"}, "to_emails_missing"),
+    ({"op": "reply_to_forward", "to_emails": ["vendor@example.org"], "cc_emails": ["b@example.com"]},
+     "reply_to_forward_option_unsupported"),
 ])
 def test_a_recipient_freshdesk_would_drop_is_refused_before_sending(tools, fake, arguments, code):
     _, sends, _ = tools
@@ -321,8 +342,17 @@ def test_a_recipient_freshdesk_would_drop_is_refused_before_sending(tools, fake,
     sent_before = len(fake.requests)
     with pytest.raises(FreshdeskError) as caught:
         sends.email(account_id=HOST, text="y", request_id="w-1",
-                    ticket_id=ticket["id"] if arguments["op"] == "reply" else None, **arguments)
+                    ticket_id=None if arguments["op"] == "outbound" else ticket["id"], **arguments)
     assert caught.value.code == code and len(fake.requests) == sent_before
+
+
+def test_an_unanswered_update_whose_readback_fails_is_uncertain(tools, fake):
+    _, sends, _ = tools
+    ticket = fake.add_ticket(subject="Invoice", description="need a copy")
+    fake.fault("PUT", rf"/tickets/{ticket['id']}$", "drop_after_apply")
+    fake.fault("GET", rf"/tickets/{ticket['id']}$", "server")
+    result = sends.update(account_id=HOST, ticket_id=ticket["id"], priority="High")
+    assert result["code"] == "uncertain" and result["ok"] is False and fake.tickets[ticket["id"]]["priority"] == 3
 
 
 def test_update_sets_properties_by_name_and_checks_closure_first(tools, fake):
@@ -370,6 +400,7 @@ def test_an_unknown_choice_refreshes_the_catalog_once_then_lists_choices(tools, 
     ("PUT", "tickets/merge", {"primary_id": 1, "ticket_ids": [2], "note_in_primary": "x"}, "freshdesk_note"),
     ("PUT", "tickets/bulk_update", {"bulk_action": {"ids": [1], "reply": {"body": "x"}}}, "freshdesk_reply"),
     ("POST", "tickets/7/reply.json", {"body": "x"}, "freshdesk_reply"),  # other spellings of the same endpoint
+    ("POST", "tickets/7/reply.json.json", {"body": "x"}, "freshdesk_reply"),
     ("POST", "/tickets/7/reply/", {"body": "x"}, "freshdesk_reply"),
 ])
 def test_the_generic_writer_refuses_every_call_that_carries_words(tools, method, path, body, tool):

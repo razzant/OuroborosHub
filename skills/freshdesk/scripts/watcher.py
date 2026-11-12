@@ -74,7 +74,7 @@ def run(state_dir: str, stop: threading.Event) -> None:
     sends = Sends(service)
     store = Store(state_dir)
     presence = None
-    capabilities, checked, next_walk, last_place = {}, 0.0, 0.0, ""
+    capabilities, checked, next_walk = {}, 0.0, 0.0
     try:
         recover(store, starting=True)
         while not stop.is_set():
@@ -98,9 +98,8 @@ def run(state_dir: str, stop: threading.Event) -> None:
                     stop.wait(60)
                     continue
                 place = presence.place_state()
-                if place == "active" and last_place != "active":
-                    presence.resume_held()
-                last_place = place
+                if place == "active":
+                    presence.resume_held()  # one UPDATE of held rows; a hold made this very cycle is caught next time
                 presence.report_receipts()
                 presence.poll_refs()
                 presence.deliver_outputs()

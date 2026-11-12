@@ -61,7 +61,7 @@ class Presence:
 
     # -- intake -----------------------------------------------------------------------------------------------
     def settle(self) -> None:
-        for future, (event_id, ticket_id) in list(self.inflight.items()):
+        for future, (event_id, ticket_id, binding) in list(self.inflight.items()):
             if not future.done():
                 continue
             del self.inflight[future]
@@ -69,12 +69,13 @@ class Presence:
                 status, data = future.result()
             except HostUnavailable as exc:
                 status, data = 0, {"disposition": "retry", "code": exc.code}
-            self.accept(event_id, ticket_id, status, data if isinstance(data, dict) else {})
+            self.accept(event_id, ticket_id, status, data if isinstance(data, dict) else {}, binding=binding)
 
     def dispatch(self) -> int:
-        """Offer each ticket's oldest open event, at most ``MAX_IN_FLIGHT`` tickets at a time."""
+        """Offer each ticket's oldest open event, at most ``MAX_IN_FLIGHT`` tickets at a time. The place binding is
+        captured before the offer, so whatever the turn releases later belongs to the connection that heard it."""
         self.settle()
-        busy = {ticket for _, ticket in self.inflight.values()}
+        busy = {ticket for _, ticket, _ in self.inflight.values()}
         offered, heads = 0, set()
         for row in self.store.rows("SELECT * FROM inbox WHERE state IN ('ready','submitting','blocked') ORDER BY seq"):
             if row["ticket_id"] in heads:
@@ -84,16 +85,23 @@ class Presence:
                 continue
             if len(self.inflight) >= MAX_IN_FLIGHT:
                 break
+            try:
+                binding = self._bind(row["ticket_id"])
+            except HostUnavailable:  # offer it once the host answers again
+                self.store.db.execute("UPDATE inbox SET due=? WHERE source_event_id=?",
+                                      (time.time() + 5, row["source_event_id"]))
+                continue
             payload = {"event": json.loads(row["event"]), "staged_files": [], "continuation_version": 2,
                        "delivery_reporting_version": 1}
             self.store.db.execute("UPDATE inbox SET state='submitting', attempts=attempts+1 WHERE source_event_id=?",
                                   (row["source_event_id"],))
-            self.inflight[self.pool.submit(self.host.turn, payload)] = (row["source_event_id"], row["ticket_id"])
+            self.inflight[self.pool.submit(self.host.turn, payload)] = (row["source_event_id"], row["ticket_id"],
+                                                                         binding)
             busy.add(row["ticket_id"])
             offered += 1
         return offered
 
-    def accept(self, event_id: str, ticket_id: str, status: int, data: dict) -> None:
+    def accept(self, event_id: str, ticket_id: str, status: int, data: dict, *, binding: str = "") -> None:
         """Follow the answer's ``disposition``; HTTP status alone decides nothing (core returns 409 for retained,
         blocked and retry alike). An answer without a disposition is a turn's answer only with 200; otherwise, like
         an unknown disposition, it stays retryable."""
@@ -115,7 +123,6 @@ class Presence:
         if state in ("accepted", "retained"):
             self.store.resolve(f"event:{event_id}")
             refs, outputs = self._refs(data), self._outputs(event_id, data)
-            binding = self._bind(ticket_id) if refs or outputs else ""
             for ref, kind in refs:
                 self.store.db.execute("INSERT OR IGNORE INTO refs(ref, source_event_id, ticket_id, kind, due, binding) "
                                       "VALUES(?,?,?,?,?,?)", (str(ref), event_id, ticket_id, kind, time.time() + 5, binding))
@@ -161,14 +168,12 @@ class Presence:
                                   "VALUES(?,?,?,?,?)", (ref, ticket_id, text, event_id, binding))
 
     def _bind(self, ticket_id: str) -> str:
-        """The place this ticket's later output belongs to, captured when the work is queued. A host without
-        binding (or unreachable now) leaves it empty: delivery then needs the place to be Active at that moment."""
+        """The place this ticket's later output belongs to, captured when its event is offered. A host without
+        binding leaves it empty: delivery then needs the place to be Active at that moment. An unreachable host
+        raises ``HostUnavailable``: the event waits rather than going out unbound."""
         if not self.binding:
             return ""
-        try:
-            answer = self.host.bind(self.account, ticket_id, ticket_id, require_place=True)
-        except HostUnavailable:
-            return ""
+        answer = self.host.bind(self.account, ticket_id, ticket_id, require_place=True)
         if isinstance(answer.get("binding"), dict):
             return dump(answer["binding"])
         return dump({"unbound": str(answer.get("code") or "place_not_connected")})
@@ -225,6 +230,7 @@ class Presence:
                 result = {"ok": False, "code": type(exc).__name__}
             if result.get("ok"):
                 state = "delivered"
+                self.store.resolve(f"output:{row['output_ref']}")  # an earlier hold of it is over
             elif result.get("code") in ("rate_limited", "place_unknown", "in_flight"):  # nothing sent: try later
                 self.store.db.execute("UPDATE outputs SET due=? WHERE output_ref=?",
                                       (time.time() + float(result.get("retry_after") or 30), row["output_ref"]))
@@ -240,9 +246,10 @@ class Presence:
                                   (state, request_id, dump(result)[:2000], hold, row["output_ref"]))
 
     def resume_held(self) -> int:
-        """When the place turns Active again, outputs held only because it was Silent or Paused go out (the core's
-        held projection keeps the answer; the current state decides). Work of a place disconnected since stays held:
-        its binding check refuses it again."""
+        """Called while the place is Active: outputs this companion held because the place turned Silent or Paused
+        between the host releasing them and their post go out now. (An answer the host itself holds, because the
+        place was Silent or Paused when it was projected, never reaches this queue: it stays with the owner in the
+        room.) Work of a place disconnected since stays held: its binding check refuses it again."""
         cursor = self.store.db.execute("UPDATE outputs SET state='queued', due=0, hold='' WHERE state='held' AND "
                                        "hold IN ('place_silent', 'place_paused')")
         return cursor.rowcount

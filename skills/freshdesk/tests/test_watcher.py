@@ -225,7 +225,67 @@ def test_a_ticket_deleted_before_it_was_read_does_not_hold_up_the_others(fake, d
         events = [json.loads(r["event"]) for r in store.rows("SELECT event FROM inbox ORDER BY seq")]
         assert [e["conversation_id"] for e in events] == [str(real["id"])]
         assert store.one("SELECT COUNT(*) AS n FROM dirty")["n"] == 0
-        assert {g["code"] for g in store.gaps()} == {"ticket_unreadable"}
+        skipped = store.meta("skipped_tickets")
+        assert (skipped["count"], skipped["last"]) == (1, str(spam["id"]))
+        assert store.gaps() == []  # a fact in freshdesk_status, not a lasting "needs attention"
+    finally:
+        store.close()
+
+
+def test_a_burst_with_fractional_seconds_is_walked_to_the_end(fake, desk):
+    fake.tick = lambda seconds=1: fake.clock
+    tickets = [fake.add_ticket(subject=f"T{n}", description="x") for n in range(150)]
+    del fake.tick
+    connect(fake, desk)
+    moment = fake.iso_now()[:-1] + ".017Z"  # Freshdesk's reference shows milliseconds in some answers
+    for ticket in tickets:
+        fake.tickets[ticket["id"]]["updated_at"] = moment
+    client, store = desk.client(), desk.store()
+    try:
+        budget = plenty(store)
+        assert walk(client, store, budget)["complete"]
+        assert store.one("SELECT COUNT(*) AS n FROM dirty")["n"] == 150 and budget.spent < 30
+    finally:
+        store.close()
+
+
+def test_a_colleagues_edit_of_a_note_this_skill_wrote_is_news(fake, desk):
+    connect(fake, desk)
+    ticket = fake.add_ticket(subject="Refund", description="please")
+    assert len(cycle(desk)) == 1
+    sends = Sends(desk)
+    note = sends.note(account_id=HOST, ticket_id=ticket["id"], text="Handing over", request_id="n-1")
+    assert note["ok"] and cycle(desk) == []  # its own note is not news
+    assert sends.note(account_id=HOST, ticket_id=ticket["id"], text="Handing over to billing", request_id="n-2",
+                      edit_note_id=note["id"])["ok"]
+    assert cycle(desk) == []  # nor its own edit
+    edited_at = fake.iso_now()
+    entry = fake.conversations[ticket["id"]][0]
+    entry.update(body_text="STOP: legal hold", body="<div>STOP: legal hold</div>", last_edited_at=edited_at,
+                 updated_at=edited_at, last_edited_user_id=LEAD, to_emails=["desk.agent@example.net"])
+    fake.tickets[ticket["id"]]["updated_at"] = edited_at
+    [event] = cycle(desk)
+    assert event["source_event_id"].endswith(f":entry:{note['id']}:edit:{edited_at}")
+    assert event["actor"] == {"platform_actor_id": str(LEAD), "display_name": "Team Lead"}
+    assert event["facts"] == ["any_message", "my_thread", "mention"] and event["text"] == "STOP: legal hold"
+
+
+def test_a_removed_place_ends_the_events_it_had_not_handed_over(fake, desk):
+    connect(fake, desk)
+    fake.add_ticket(subject="One", description="a")
+    fake.add_ticket(subject="Two", description="b")
+    client, store = desk.client(), desk.store()
+    try:
+        baseline(client, store)
+        budget = plenty(store)
+        walk(client, store, budget)
+        process(desk, client, store, budget, capabilities={"presence_identity": 1})
+        first = store.one("SELECT source_event_id FROM inbox ORDER BY seq")["source_event_id"]
+        store.db.execute("UPDATE inbox SET state='blocked' WHERE source_event_id=?", (first,))
+        store.gap(f"event:{first}", "place_not_connected")
+        assert disconnect(store) is True
+        assert {r["state"] for r in store.rows("SELECT state FROM inbox")} == {"ended"}
+        assert store.meta("connection_ended")["events_not_offered"] == 2 and store.gaps() == []
     finally:
         store.close()
 

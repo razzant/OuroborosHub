@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 from .client import FreshdeskError
-from .events import Context, parse_time, ticket_events
+from .events import Context, entry_revision, parse_time, ticket_events
 from .service import CONTACT_TTL
 from .status import identity
 from .store import dump
@@ -81,13 +81,19 @@ def baseline(client, store) -> str:
 
 
 def disconnect(store) -> bool:
-    """The place was removed: a later connection is a new one, so what happens until then stays history. Events
-    already heard while connected stay queued. Returns whether there was a connection to end."""
+    """The place was removed: a later connection is a new one, so what happens until then stays history, and events
+    of the ended connection that the host has not taken are not offered after a reconnect (their thread would be
+    stale; a colleague may have answered meanwhile). Returns whether there was a connection to end."""
     if not store.meta("connected_at"):
         return False
     with store.transaction() as db:
+        dropped = db.execute("SELECT COUNT(*) AS n FROM inbox WHERE state IN ('ready', 'blocked')").fetchone()["n"]
+        db.execute("DELETE FROM gaps WHERE scope IN (SELECT 'event:' || source_event_id FROM inbox "
+                   "WHERE state IN ('ready', 'blocked'))")
+        db.execute("UPDATE inbox SET state='ended' WHERE state IN ('ready', 'blocked')")
         db.execute("DELETE FROM meta WHERE key IN ('connected_at', 'watermark', 'walk')")
         db.execute("DELETE FROM dirty")
+    store.set_meta("connection_ended", {"at": _z(datetime.now(timezone.utc)), "events_not_offered": dropped})
     return True
 
 
@@ -128,9 +134,10 @@ def walk(client, store, budget: Budget) -> dict:
             return {"complete": True, "changed": found}
         last = stamps[-1] if stamps else None
         since = parse_time(cursor["since"])
-        if last is not None and since is not None and last - timedelta(seconds=1) > since:
+        anchor = _z(last - timedelta(seconds=1)) if last is not None else ""
+        if since is not None and anchor and parse_time(anchor) > since:  # compared as sent: whole seconds
             # Re-anchor by time one second before the page's last stamp: later rows of that second are re-read.
-            cursor = {"since": _z(last - timedelta(seconds=1)), "page": 1, "newest": cursor.get("newest")}
+            cursor = {"since": anchor, "page": 1, "newest": cursor.get("newest")}
         else:
             cursor["page"] += 1  # the page did not get past the second it started in: page by number
             if cursor["page"] > PAGE_CAP:
@@ -182,8 +189,10 @@ def process(service, client, store, budget: Budget, *, capabilities: dict | None
         except FreshdeskError as exc:
             if exc.status not in (403, 404):
                 raise  # the helpdesk or the network: the whole cycle waits
-            # This ticket alone is gone (deleted, spam) or out of the agent's scope: note it and go on.
-            store.gap(f"ticket:{row['ticket_id']}", "ticket_unreadable", {"status": exc.status})
+            # This ticket alone is gone (deleted, spam) or out of the agent's scope: a fact, not a fault; go on.
+            skipped = store.meta("skipped_tickets") or {"count": 0}
+            store.set_meta("skipped_tickets", {"count": int(skipped.get("count") or 0) + 1, "last": row["ticket_id"],
+                                               "status": exc.status, "at": _z(datetime.now(timezone.utc))})
             store.db.execute("DELETE FROM dirty WHERE ticket_id=? AND updated_at=?", (row["ticket_id"], row["updated_at"]))
             continue
         if entries is None:
@@ -210,7 +219,7 @@ def process(service, client, store, budget: Budget, *, capabilities: dict | None
                                                                      if k not in ("description", "description_text")}),
                         _z(datetime.now(timezone.utc))))
             for entry in entries:
-                revision = str(entry.get("last_edited_at") or entry.get("updated_at") or entry.get("created_at") or "")
+                revision = entry_revision(entry)
                 db.execute("INSERT INTO entries(id, ticket_id, revision, user_id, created_at, to_emails) "
                            "VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, "
                            "to_emails=excluded.to_emails",

@@ -44,8 +44,9 @@ Ticket text is sent to the model provider this Ouroboros installation uses.
 - Just before each call that sends or changes something, the skill asks Ouroboros whether the place is Silent or
   Paused; if so, nothing is sent.
 - When longer work on a ticket ends with a final answer, the answer is posted on the ticket as a private note.
-  Customers receive only what Ouroboros explicitly sends with the reply or email tools. A Silent or Paused place
-  keeps such a note until it is Active again; work begun before the place was removed is never posted.
+  Customers receive only what Ouroboros explicitly sends with the reply or email tools. An answer that finishes
+  while the place is Silent or Paused stays with you in the room (Circles) as a held reply and is not posted later;
+  work begun before the place was removed is never posted.
 - Its own replies, notes and the tickets it opens (outbound emails) never come back to it as news; a customer's
   answer to them is a reply on a ticket it wrote in.
 - The watcher checks Freshdesk once a minute (30–600 s) while the place is connected and spends at most a

@@ -36,6 +36,7 @@ class Reads:
             out = {"ok": True, "helpdesk": settings["domain"] or None, "settings": settings,
                    "agent": _public_agent(store.meta("agent")), "agent_change": store.meta("agent_changed"),
                    "limits": store.meta("limits"), "watcher": store.meta("watcher"), "gaps": store.gaps(),
+                   "skipped_tickets": store.meta("skipped_tickets"), "connection_ended": store.meta("connection_ended"),
                    "detection_note": "New replies and notes are found when Freshdesk moves the ticket's updated_at; "
                                      "a change reverted between two polls is not seen."}
             if request_id:
