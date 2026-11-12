@@ -8,13 +8,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
-import { NODE_MODULES, requirePinnedInstall } from './helpers/env.mjs';
+import { NODE_MODULES, requirePinnedInstall, scratchDir } from './helpers/env.mjs';
 import { startMockGuard } from './helpers/mock_guard.mjs';
+import { retainingIntake, sha256 } from './helpers/mock_intake.mjs';
 import { connectFakeChrome } from './helpers/fake_chrome.mjs';
 import { parseGuardEndpoint } from '../../skills/chrome_browser/lib/guard.mjs';
 import { loadPinnedPlaywright, PINS } from '../../skills/chrome_browser/lib/pinned.mjs';
-import { argumentRefusal, createServerCore, describePrivateFiles, describeSavedBody, imageTypeOf, upstreamConfig, MAX_RESPONSE_IMAGE_BYTES, NAVIGATION_TIMEOUT_MS } from '../../skills/chrome_browser/lib/server.mjs';
+import { argumentRefusal, createServerCore, describePrivateFiles, describeSavedBody, imageTypeOf, upstreamConfig, MAX_RESPONSE_IMAGE_BYTES, MAX_RESPONSE_BODY_BYTES, NAVIGATION_TIMEOUT_MS } from '../../skills/chrome_browser/lib/server.mjs';
 import { MAX_DOCUMENT_ADDRESSES } from '../../skills/chrome_browser/lib/connection.mjs';
+import { DOWNLOAD_MAX_BYTES, MAX_BEGINS, MAX_CHAINS, MAX_RESPONSES, RESPONSE_STAGE_PATTERN } from '../../skills/chrome_browser/lib/download.mjs';
 
 requirePinnedInstall();
 const TOKEN = 'e'.repeat(64);
@@ -54,7 +56,7 @@ test.afterEach(async () => {
 });
 
 // A server with the host's guard (the mock's table) and an owner who approved in a stand-in Chrome.
-async function connected({ decide = refuseForbidden, tabs = [{ id: TAB, url: `${ALLOWED}/start`, title: 'Start', windowId: 1, index: 0, active: true }], refuseAttach, guardDelayMs = 0, prepare, onCommand } = {}) {
+async function connected({ decide = refuseForbidden, tabs = [{ id: TAB, url: `${ALLOWED}/start`, title: 'Start', windowId: 1, index: 0, active: true }], refuseAttach, guardDelayMs = 0, prepare, onCommand, answer, downloadSettleMs } = {}) {
   const world = {};
   const guard = await startMockGuard({ token: TOKEN, decide: (message) => decide(message, world), delayMs: guardDelayMs });
   cleanups.push(() => guard.close());
@@ -62,10 +64,11 @@ async function connected({ decide = refuseForbidden, tabs = [{ id: TAB, url: `${
     loadRuntime: () => runtime,
     guardEnvironment: { configured: true, endpoint: parseGuardEndpoint(guard.endpoint), token: TOKEN },
     framePreparer: { prepare: async (page) => { await prepare?.(page, world); return { prepared: false }; } },
+    ...(downloadSettleMs ? { downloadSettleMs } : {}),
   });
   cleanups.push(() => core.shutdown());
   const link = textOf(await core.callTool('browser_connect')).split('\n').find((line) => line.startsWith('chrome-extension://'));
-  const chrome = await connectFakeChrome(runtime.utils.ws, new URL(link).searchParams.get('mcpRelayUrl'), { tabs, refuseAttach, onCommand: onCommand && ((...command) => onCommand(world, ...command)) });
+  const chrome = await connectFakeChrome(runtime.utils.ws, new URL(link).searchParams.get('mcpRelayUrl'), { tabs, refuseAttach, onCommand: onCommand && ((...command) => onCommand(world, ...command)), answer });
   cleanups.push(async () => chrome.close());
   Object.assign(world, {
     guard, core, chrome, link,
@@ -1301,7 +1304,7 @@ test('a document with too many addresses to check has its console records refuse
   assert.match(result, /BROWSER_RECORD_ORIGIN_UNKNOWN/);
 });
 
-test('bodies: an image arrives as an image, other binary is described, text stays text, and no bare path remains', async () => {
+test('bodies: an image arrives as an image, other binary as an embedded resource, text stays text, and no bare path remains', async () => {
   const { chrome, call, settle, core } = await connected();
   const bodies = [
     { path: '/picture.png', headers: { 'content-type': 'image/png' }, body: PNG },
@@ -1326,9 +1329,22 @@ test('bodies: an image arrives as an image, other binary is described, text stay
     assert.deepEqual([image?.mimeType, image?.data], ['image/png', PNG.toString('base64')], `${what}: exact bytes in the protocol's image part`);
     assert.match(textOf(result), /- Response body: the image is attached to this result/, what);
   }
-  assert.match(textOf(pdf), /- Response body: 15 bytes \(application\/pdf\), not text or a supported image\./);
-  assert.match(textOf(notReally), /- Response body: 12 bytes \(image\/png\), not text or a supported image\./);
-  assert.ok(pdf.content.every((part) => part.type === 'text'));
+  for (const [what, result, bytes, index, mimeType, declared] of [
+    ['pdf', pdf, Buffer.from('%PDF-1.7 binary'), 3, 'application/pdf', 'application/pdf'],
+    // Declared an image, but not one: never labelled an image, so a host attaching images by type is not handed it.
+    ['notReally', notReally, Buffer.from('not an image'), 4, 'application/octet-stream', 'image/png'],
+  ]) {
+    assert.equal(result.isError, undefined, what);
+    const hash = sha256(bytes);
+    assert.deepEqual(result.content.map((part) => part.type), ['text', 'resource'], `${what}: the text, then the resource, last`);
+    assert.deepEqual(result.content[1].resource, { uri: `chrome-browser://response-body/request-${index}/${hash}`, mimeType, blob: bytes.toString('base64') }, `${what}: exact bytes`);
+    assert.match(textOf(result), new RegExp(`- Response body: ${bytes.length} bytes \\(${declared.replace('/', '\\/')}\\), attached to this result as a binary resource, sha256 ${hash}`), what);
+  }
+  assert.ok(picture.content.every((part) => part.type !== 'resource'), 'an image stays in the image carrier only');
+  // The pinned SDK's own tools/call result check takes the resource as the protocol's BlobResourceContents.
+  const sdk = new runtime.utils.Server({ name: 'check', version: '1' }, { capabilities: { tools: {} } });
+  sdk.setRequestHandler(runtime.utils.CallToolRequestSchema, async () => pdf);
+  assert.deepEqual(await sdk._requestHandlers.get('tools/call')({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'browser_network_request', arguments: {} } }, {}), pdf);
   for (const [what, result] of [['picture', picture], ['pdf', pdf], ['notReally', notReally]])
     assert.doesNotMatch(textOf(result), /output\/response-/, `${what}: no bare private path`);
   assert.equal(textOf(plain), '### Result\nREADABLE TEXT BODY');
@@ -1337,7 +1353,7 @@ test('bodies: an image arrives as an image, other binary is described, text stay
   assert.ok(saved.some((name) => name.startsWith('response-') && name.endsWith('.png')), 'the raw originals stay where upstream put them');
 });
 
-test('saved bodies: formats by content, and an image too large to return is described', () => {
+test('saved bodies: formats by content, bounded reads, collision-safe labels, and a body too large to return is described', (t) => {
   assert.equal(imageTypeOf(PNG), 'png');
   assert.equal(imageTypeOf(Buffer.from([0xff, 0xd8, 0xff, 0xe0])), 'jpeg');
   assert.equal(imageTypeOf(Buffer.from('GIF89a..')), 'gif');
@@ -1348,9 +1364,588 @@ test('saved bodies: formats by content, and an image too large to return is desc
   cleanups.push(async () => fs.rmSync(dir, { recursive: true, force: true }));
   const big = path.join(dir, 'big.png');
   fs.writeFileSync(big, Buffer.concat([PNG, Buffer.alloc(MAX_RESPONSE_IMAGE_BYTES)]));
+  const huge = path.join(dir, 'huge.bin');
+  fs.writeFileSync(huge, Buffer.alloc(MAX_RESPONSE_BODY_BYTES + 1, 7));
+  const whole = t.mock.method(fs, 'readFileSync');
   const described = describeSavedBody(big, 'image/png');
   assert.equal(described.image, undefined);
+  assert.equal(described.resource, undefined, 'too large for an image is not sent another way');
   assert.match(described.text, /larger than the 20971520 bytes returned as an image/);
+  const tooLarge = describeSavedBody(huge, 'application/zip');
+  assert.equal(tooLarge.resource, undefined);
+  assert.match(tooLarge.text, /^- Response body: 20971521 bytes \(application\/zip\), larger than the 20971520 bytes returned as a binary resource\. It is not returned here/);
+  assert.equal(whole.mock.callCount(), 0, 'a body over the bound is never read whole');
+  whole.mock.restore();
+  // The label names the request and the bytes: different bytes or another request never share one.
+  const one = path.join(dir, 'one.bin');
+  const two = path.join(dir, 'two.bin');
+  fs.writeFileSync(one, 'first body');
+  fs.writeFileSync(two, 'second body');
+  const labels = [describeSavedBody(one, '', 5), describeSavedBody(two, '', 5), describeSavedBody(one, '', 6)].map((body) => body.resource.uri);
+  assert.equal(new Set(labels).size, 3, labels.join(' '));
+  for (const [declared, mimeType] of [['', 'application/octet-stream'], ['Application/ZIP; charset=x', 'application/zip'], ['image/avif', 'application/octet-stream'], ['not a type', 'application/octet-stream'], ['a/b\nc', 'application/octet-stream']])
+    assert.equal(describeSavedBody(one, declared, 1).resource.mimeType, mimeType, JSON.stringify(declared));
+});
+
+test('bodies: a binary resource is not returned when the call\'s output is withheld', async () => {
+  const { chrome, call, settle, core } = await connected({ onCommand: ({ chrome: fake }, method, params) => {
+    // While Chrome hands over the body, the tab moves on to a page the task may not read.
+    if (method === 'chrome.debugger.sendCommand' && params?.[1] === 'Network.getResponseBody')
+      fake.navigation(TAB, [`${FORBIDDEN}/moved`]);
+  } });
+  const { requestId } = chrome.requestChain(TAB, [`${ALLOWED}/archive.zip`]);
+  chrome.respond(TAB, requestId, `${ALLOWED}/archive.zip`, { headers: { 'content-type': 'application/zip' }, mimeType: 'application/zip', body: Buffer.from('PK-ARCHIVE-BYTES'), type: 'Fetch' });
+  await settle();
+  const result = await call('browser_network_request', { index: 1, part: 'response-body' });
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /The call ran, but its output is withheld: this task may not read https:\/\/forbidden\.example\/moved/);
+  assert.ok(result.content.every((part) => part.type === 'text'), 'no resource');
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(Buffer.from('PK-ARCHIVE-BYTES').toString('base64')));
+  assert.ok(fs.readdirSync(core.connection.outputDir()).some((name) => name.startsWith('response-') && name.endsWith('.zip')), 'the body was read and saved: only its return was withheld');
+});
+
+// What Chrome says while Playwright sets a file input through its buffer branch: the chooser's element, its
+// document's frame, and the input the retargeting finds (pinned coreBundle.js, CRPage._onFileChooserOpened,
+// _getOwnerFrame and ElementHandle._setInputFiles). The page itself is not run: the test states its answers.
+// With state.detached the input is gone from the page when Playwright looks for it.
+const fileInputAnswers = (state) => (method, params) => {
+  if (method === 'DOM.resolveNode')
+    return { object: { type: 'object', subtype: 'node', className: 'HTMLInputElement', objectId: 'node-chooser' } };
+  if (method === 'DOM.describeNode')
+    return { node: { nodeId: 1, backendNodeId: 1, nodeType: 1, nodeName: 'HTML', localName: 'html', nodeValue: '', frameId: `TARGET-${TAB}` } };
+  if (method === 'Runtime.callFunctionOn' && JSON.stringify(params).includes('!!element3.multiple'))
+    return { result: { type: 'boolean', value: false } };
+  if (method === 'Runtime.callFunctionOn' && JSON.stringify(params).includes('Non-multiple file input'))
+    return state.detached ? { result: { type: 'undefined' } } : { result: { type: 'object', subtype: 'node', className: 'HTMLInputElement', objectId: 'node-input' } };
+  return undefined;
+};
+
+async function withIntake({ admit, tamper } = {}) {
+  const work = scratchDir('upload-work');
+  const kept = scratchDir('upload-kept');
+  fs.writeFileSync(path.join(work, 'photo.png'), PNG);
+  fs.writeFileSync(path.join(work, 'secret.txt'), 'NOT FOR THE PAGE');
+  const intake = retainingIntake({ dir: kept, roots: { work }, admit: admit ?? ((entry) => (entry.path.endsWith('secret.txt') ? 'READ_BLOCKED: this task may not read that file' : '')) });
+  const decide = (message, world) => {
+    if (message.action !== 'file_intake')
+      return refuseForbidden(message);
+    const answer = intake(message);
+    return world.tamper && answer.files ? { ...answer, files: answer.files.map((file) => ({ ...file, sha256: sha256(Buffer.from('something else')) })) } : answer;
+  };
+  const input = {};
+  const world = await connected({ decide, answer: fileInputAnswers(input) });
+  // The same object decide is handed, so a test can change what the host answers.
+  return Object.assign(world, { tamper, input, work, kept, intake, tab: () => world.core.connection.backend()._context.currentTab() });
+}
+
+const chooserOf = (tab) => tab.modalStates().find((state) => state.type === 'fileChooser');
+const setInputFilesCalls = (chrome) => chrome.cdp('Runtime.callFunctionOn').filter((params) => JSON.stringify(params).includes('setInputFiles'));
+
+test('upload: the host admits and copies each file first; a refusal leaves the chooser open, and the page gets only the copy\'s bytes and name', async () => {
+  const world = await withIntake();
+  const { chrome, call, settle, work, kept, intake, tab } = world;
+  chrome.emit(TAB, 'Page.fileChooserOpened', { frameId: `TARGET-${TAB}`, mode: 'selectSingle', backendNodeId: 42 });
+  const chooser = await waitFor(() => chooserOf(tab()), 'the chooser as a modal state');
+  // Refused by the host: nothing reaches the page, and the same chooser is still there to use.
+  const refused = await call('browser_file_upload', { paths: [path.join(work, 'secret.txt')] });
+  assert.equal(refused.isError, true);
+  assert.match(textOf(refused), /^### Error\nREAD_BLOCKED: this task may not read that file\nNo file was given to the page; the file chooser is still open\./);
+  assert.equal(chooserOf(tab()), chooser);
+  // A copy that is not what the host stated: the same.
+  world.tamper = true;
+  const tampered = await call('browser_file_upload', { paths: [path.join(work, 'photo.png')] });
+  assert.match(textOf(tampered), /^### Error\nBROWSER_FILE_INTAKE_MISMATCH: the host's retained copy of file 1 does not have the sha256 the host stated/);
+  assert.equal(chooserOf(tab()), chooser);
+  world.tamper = false;
+  const both = await call('browser_file_upload', { paths: ['a'], files: [{ path: 'b' }] });
+  assert.match(textOf(both), /^### Error\nGive the files either as "paths" or as "files", not both\. Nothing was done\./);
+  assert.equal(setInputFilesCalls(chrome).length, 0, 'nothing was given to the page');
+  // Admitted, but the page lost its input: Playwright's error, and the chooser is back for another try.
+  world.input.detached = true;
+  const detached = await call('browser_file_upload', { paths: [path.join(work, 'photo.png')] });
+  assert.match(textOf(detached), /^### Error\n.*not attached/);
+  assert.equal(chooserOf(tab()), chooser, 'restored as upstream restores it');
+  world.input.detached = false;
+  // Admitted: the root goes to the host as named, the copy's bytes and the original name to the page.
+  const given = await call('browser_file_upload', { files: [{ path: 'photo.png', root: 'work' }] });
+  assert.equal(given.isError, undefined, textOf(given));
+  assert.equal(sectionOf(given, 'Ran Playwright code'), '```js\nawait fileChooser.setFiles([{ name: "photo.png", buffer: hostCopies[0] }])\n```');
+  assert.equal(sectionOf(given, 'Result'), `- Gave the page "photo.png": ${PNG.length} bytes, sha256 ${sha256(PNG)}`);
+  assert.equal(chooserOf(tab()), undefined, 'the chooser was used');
+  assert.deepEqual(intake.asked.map((message) => message.files), [
+    [{ path: path.join(work, 'secret.txt') }], [{ path: path.join(work, 'photo.png') }], [{ path: path.join(work, 'photo.png') }], [{ path: 'photo.png', root: 'work' }],
+  ], 'paths are asked as { path }, files as named; nothing out of form reached the host');
+  const [sent] = setInputFilesCalls(chrome);
+  const wire = JSON.stringify(sent);
+  assert.ok(wire.includes(PNG.toString('base64')) && wire.includes('"photo.png"') && wire.includes('image/png'), 'Playwright\'s buffer branch: name, type and bytes');
+  assert.equal(setInputFilesCalls(chrome).length, 1);
+  assert.equal(chrome.cdp('DOM.setFileInputFiles').length, 0, 'never the path branch, which hands Chrome a local path');
+  const everything = JSON.stringify(chrome.commands) + JSON.stringify([refused, tampered, detached, given]);
+  for (const where of [work, kept])
+    assert.ok(!everything.includes(where), `no path under ${where} reaches Chrome or a result`);
+  assert.doesNotMatch(everything, /NOT FOR THE PAGE|Tk9UIEZPUiBUSEUgUEFHRQ/);
+  await settle();
+});
+
+test('upload: an omitted selection cancels as upstream does, and nothing without a chooser asks the host', async () => {
+  const { chrome, call, intake, tab } = await withIntake();
+  const none = await call('browser_file_upload', { paths: ['photo.png'] });
+  assert.match(textOf(none), /^### Error\nError: The tool "browser_file_upload" can only be used when there is related modal state present\./);
+  chrome.emit(TAB, 'Page.fileChooserOpened', { frameId: `TARGET-${TAB}`, mode: 'selectSingle', backendNodeId: 42 });
+  await waitFor(() => chooserOf(tab()), 'the chooser as a modal state');
+  const cancelled = await call('browser_file_upload', {});
+  assert.equal(cancelled.isError, undefined, textOf(cancelled));
+  assert.equal(sectionOf(cancelled, 'Ran Playwright code'), '```js\nawait fileChooser.setFiles(undefined)\n```');
+  assert.equal(chooserOf(tab()), undefined);
+  assert.deepEqual(intake.asked, [], 'the host was never asked');
+  assert.equal(setInputFilesCalls(chrome).length, 0);
+});
+
+test('drop: files are the host\'s copies as { name, buffer }, a refusal drops nothing, and a data-only drop is upstream\'s', async () => {
+  const { call, work, intake, tab } = await withIntake();
+  // The element and Playwright's pointer path below Locator.drop are not driven here (no page runs); the
+  // adapter's payload to it is recorded instead. Its file conversion is the one the upload test exercises.
+  const dropped = [];
+  tab().targetLocator = async (params) => ({ locator: { drop: async (payload, options) => dropped.push({ payload, options, target: params.target }) }, resolved: "locator('#drop')" });
+  const refused = await call('browser_drop', { target: '#drop', paths: [path.join(work, 'secret.txt')] });
+  assert.match(textOf(refused), /^### Error\nREAD_BLOCKED: this task may not read that file\nNothing was dropped\./);
+  assert.equal(dropped.length, 0);
+  const given = await call('browser_drop', { target: '#drop', paths: [path.join(work, 'photo.png')], data: { 'text/plain': 'caption' } });
+  assert.equal(given.isError, undefined, textOf(given));
+  assert.deepEqual(dropped[0].payload, { files: [{ name: 'photo.png', buffer: PNG }], data: { 'text/plain': 'caption' } });
+  assert.ok(Buffer.isBuffer(dropped[0].payload.files[0].buffer));
+  assert.equal(sectionOf(given, 'Ran Playwright code'), '```js\nawait page.locator(\'#drop\').drop({ files: [{ name: "photo.png", buffer: hostCopies[0] }], data: {"text/plain":"caption"} });\n```');
+  assert.equal(sectionOf(given, 'Result'), `- Gave the page "photo.png": ${PNG.length} bytes, sha256 ${sha256(PNG)}`);
+  const asked = intake.asked.length;
+  const dataOnly = await call('browser_drop', { target: '#drop', data: { 'text/plain': 'only data' } });
+  assert.equal(dataOnly.isError, undefined, textOf(dataOnly));
+  assert.deepEqual(dropped[1].payload, { data: { 'text/plain': 'only data' } }, 'upstream\'s own payload');
+  assert.equal(intake.asked.length, asked, 'a data-only drop asks the host nothing');
+  const tooMany = await call('browser_drop', { target: '#drop', paths: Array.from({ length: 17 }, (_, index) => `/x/${index}`) });
+  assert.match(textOf(tooMany), /^### Error\nInvalid arguments for tool "browser_drop"/);
+  assert.equal(intake.asked.length, asked);
+  assert.equal(dropped.length, 2);
+});
+
+// A click that starts a download, as Chrome reports one (#294 probe: Chrome for Testing 156 through the official
+// extension 0.5.0): the document request, paused at the request stage while Playwright routes, so the host decides
+// it; its response, paused at the response stage only if Chrome was asked to, and passed on when that pause is
+// continued; then the navigation ends as a download: the request is aborted for the page, and Chrome reports the
+// download on the tab's own session. It waits for each answer Chrome would wait for. What Chrome does is the test's
+// statement of it. end: the last download state Chrome reports ('' for none after inProgress, null for no progress).
+// responseFrameId / beginFrameId: the frame Chrome names for the response and for the download (null: none);
+// beginSession: the download reported on that child session instead of the tab's; announce false: the request itself
+// is not reported (as one made before the capture opened), and with networkless also no network id for its response
+// (as Chrome for Testing 156 reports a link with the download attribute).
+function downloadFlow(world, { tabId = TAB, hops, method = 'GET', postData, status = 200, headers = {}, body = '', guid = `GUID-${hops.at(-1)}`, suggestedFilename = 'file.bin', frameId = `TARGET-${tabId}`, end = 'completed', beginUrl, redirects = [],
+  responseFrameId = frameId, beginFrameId = frameId, beginSession, announce = true, networkless = false } = {}) {
+  const { chrome } = world;
+  const answered = (id) => waitFor(() => chrome.fetchAnswers.find((answer) => answer.requestId === id), `Chrome's pause ${id} answered`);
+  return (async () => {
+    const steps = hops.map((url, index) => (index ? { url, resourceType: 'Document' } : { url, method, postData, resourceType: 'Document' }));
+    const { requestId, lastUrl, paused } = announce ? chrome.requestChain(tabId, steps, { navigation: true, frameId }) : { requestId: networkless ? null : `UNSEEN-${hops.at(-1)}`, lastUrl: hops.at(-1), paused: [] };
+    const decisions = await Promise.all(paused.map(answered));
+    if (decisions.some((decision) => decision.method === 'Fetch.failRequest')) {
+      chrome.failRequest(tabId, requestId, 'net::ERR_BLOCKED_BY_CLIENT');
+      return { requestId, decisions, blocked: true };
+    }
+    // A redirect's own response, if Chrome pauses it, before the response of the last hop.
+    const redirectPauses = redirects.map((url) => chrome.responseStage(tabId, requestId, url, { status: 302, headers: { Location: lastUrl }, frameId })).filter(Boolean);
+    await Promise.all(redirectPauses.map(answered));
+    const responsePause = chrome.responseStage(tabId, requestId, lastUrl, { method, status, headers, body, frameId: responseFrameId });
+    if (responsePause)
+      await answered(responsePause);
+    if (requestId)
+      chrome.failRequest(tabId, requestId, 'net::ERR_ABORTED', { canceled: true });
+    const size = Buffer.byteLength(body);
+    chrome.downloadWillBegin(tabId, { frameId: beginFrameId, sessionId: beginSession, guid, url: beginUrl ?? lastUrl, suggestedFilename });
+    if (end !== null)
+      chrome.downloadProgress(tabId, { guid, state: 'inProgress', receivedBytes: 0, totalBytes: size });
+    if (end)
+      chrome.downloadProgress(tabId, { guid, state: end, receivedBytes: end === 'completed' ? size : 0, totalBytes: size });
+    return { requestId, decisions, responsePause, redirectPauses };
+  })();
+}
+
+// A connection whose shown page has loaded, as an owner's page has: upstream's click waits up to 10 s for "load"
+// after a navigation request (pinned coreBundle.js, waitForCompletion).
+async function downloadReady(options) {
+  const world = await connected(options);
+  world.chrome.navigation(TAB, [`${ALLOWED}/start`]);
+  await world.settle();
+  return world;
+}
+
+// Stands in for the element upstream's click resolves: its click runs the flows in order, after the click returned
+// (within: before it returns, so that everything happens while the capture is surely open).
+function clickStartingDownloads(world, ...flows) {
+  return clickWith(world, false, flows);
+}
+function clickWithin(world, ...flows) {
+  return clickWith(world, true, flows);
+}
+function clickWith(world, within, flows) {
+  const tab = world.core.connection.backend()._context.currentTab();
+  const done = [];
+  const run = async () => {
+    const out = [];
+    for (const flow of flows)
+      out.push(await flow());
+    return out;
+  };
+  tab.targetLocator = async () => ({
+    locator: { click: async () => { done.push(run()); if (within) await done.at(-1); } },
+    selector: '#export',
+  });
+  return async () => (await Promise.all(done)).flat();
+}
+
+const PLAYWRIGHT_FETCH = { handleAuthRequests: true, patterns: [{ urlPattern: '*', requestStage: 'Request' }] };
+const WITH_RESPONSES = { ...PLAYWRIGHT_FETCH, patterns: [...PLAYWRIGHT_FETCH.patterns, RESPONSE_STAGE_PATTERN] };
+const attachment = (name, bytes, more = {}) => ({ 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="${name}"`, 'Content-Length': bytes.length, ...more });
+
+test('download: a click asked to capture keeps the response once, as Chrome received it, while Chrome\'s own download goes on; the two are reported apart', async () => {
+  const world = await downloadReady();
+  const { chrome, call, guard } = world;
+  assert.deepEqual(chrome.cdp('Fetch.enable'), [PLAYWRIGHT_FETCH], 'Playwright\'s routing, which the guard installed');
+  const ZIP = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0x0d, 0x0a]), Buffer.from('draft export')]);
+  const finished = clickStartingDownloads(world, () => downloadFlow(world, {
+    hops: [`${ALLOWED}/api/drafts/1/export`], method: 'POST', postData: 'format=zip', headers: attachment('draft-1.zip', ZIP), body: ZIP, suggestedFilename: 'draft-1.zip',
+  }));
+  const result = await call('browser_click', { target: '#export', captureDownload: true });
+  const [flow] = await finished();
+  assert.equal(result.isError, undefined, textOf(result));
+  const hash = sha256(ZIP);
+  assert.deepEqual(result.content.filter((part) => part.type === 'resource').map((part) => part.resource),
+    [{ uri: `chrome-browser://download/1/${hash}`, mimeType: 'application/zip', blob: ZIP.toString('base64') }], 'exact bytes, labelled by the bytes');
+  assert.equal(result.content.at(-1).type, 'resource', 'after every note');
+  assert.equal(sectionOf(result, 'Result'), [
+    `- Download 1: "draft-1.zip", as Chrome names it, from ${ALLOWED}/api/drafts/1/export (POST 200, application/zip)`,
+    `  - Captured copy: ${ZIP.length} bytes, sha256 ${hash}, read once from the response as Chrome received it (not fetched again), attached to this result as a binary resource. It shows what the server sent, not that Chrome's own download finished.`,
+    `  - Chrome's own download: completed, as Chrome reported (${ZIP.length} bytes). Where Chrome saved it is not known here.`,
+  ].join('\n'));
+  // The host decided the request itself, at the request stage, while the capture was open: its body included.
+  assert.ok(guard.messages().some((message) => message?.url === `${ALLOWED}/api/drafts/1/export` && message.method === 'POST' && message.post_data === 'format=zip' && message.resource_type === 'document'));
+  assert.deepEqual(flow.decisions.map((decision) => decision.method), ['Fetch.continueRequest']);
+  // That very response was read once and continued once, by the server alone: nothing failed, fulfilled or asked again.
+  assert.deepEqual(chrome.cdp('Fetch.getResponseBody'), [{ requestId: flow.responsePause }]);
+  assert.deepEqual(chrome.fetchAnswers.filter((answer) => answer.requestId === flow.responsePause).map((answer) => answer.method), ['Fetch.continueRequest']);
+  assert.ok(chrome.fetchAnswers.every((answer) => answer.method === 'Fetch.continueRequest'), 'no failRequest or fulfillRequest');
+  assert.equal(chrome.cdp('Network.getResponseBody').length, 0);
+  // Chrome got Playwright's patterns plus the response stage for the click, and Playwright's own command back after it.
+  assert.deepEqual(chrome.cdp('Fetch.enable'), [PLAYWRIGHT_FETCH, WITH_RESPONSES, PLAYWRIGHT_FETCH]);
+  assert.deepEqual(chrome.fetchPatterns(TAB), PLAYWRIGHT_FETCH.patterns);
+
+  // A link through a redirect, with no attachment header (<a download>): read because its length is declared, and
+  // its redirect's own response passed on unread. The next capture's label never repeats an earlier one.
+  const CSV = Buffer.from('id;name\r\n1;Δ\r\n');
+  const again = clickStartingDownloads(world, () => downloadFlow(world, {
+    hops: [`${ALLOWED}/files/latest`, `${ALLOWED}/files/report.csv`], redirects: [`${ALLOWED}/files/latest`],
+    headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Length': CSV.length }, body: CSV, suggestedFilename: 'report.csv',
+  }));
+  const second = await call('browser_click', { target: '#export', captureDownload: true });
+  const [link] = await again();
+  assert.equal(second.isError, undefined, textOf(second));
+  assert.deepEqual(second.content.filter((part) => part.type === 'resource').map((part) => part.resource),
+    [{ uri: `chrome-browser://download/2/${sha256(CSV)}`, mimeType: 'text/csv', blob: CSV.toString('base64') }]);
+  assert.match(sectionOf(second, 'Result'), new RegExp(`^- Download 1: "report\\.csv", as Chrome names it, from ${ALLOWED.replace(/\./g, '\\.')}/files/report\\.csv \\(GET 200, text/csv\\)\n  - Captured copy: ${CSV.length} bytes`));
+  assert.deepEqual(chrome.cdp('Fetch.getResponseBody').map((params) => params.requestId), [flow.responsePause, link.responsePause], 'the redirect\'s response was not read');
+  assert.deepEqual(link.redirectPauses.map((id) => chrome.fetchAnswers.filter((answer) => answer.requestId === id).map((answer) => answer.method)), [['Fetch.continueRequest']]);
+  assert.deepEqual(chrome.cdp('Fetch.enable').slice(-2), [WITH_RESPONSES, PLAYWRIGHT_FETCH]);
+});
+
+test('download: the host decides every request while a capture is open, and Playwright\'s own Fetch changes then keep their request stage and come back exactly', async () => {
+  const world = await downloadReady({ downloadSettleMs: 300 });
+  const { chrome, call, page } = world;
+  const context = page().context();
+  const finished = clickWithin(world, async () => {
+    // Playwright stops routing and routes again while the capture is open: Chrome keeps the response stage throughout,
+    // and never Playwright's request stage without Playwright.
+    await context.unrouteAll();
+    await context.route('**/*', world.core.guard.routeHandler());
+    return await downloadFlow(world, { hops: [`${FORBIDDEN}/export.zip`], headers: attachment('x.zip', Buffer.from('x')), body: 'x' });
+  });
+  const result = await call('browser_click', { target: '#export', captureDownload: true });
+  const [flow] = await finished();
+  assert.equal(flow.blocked, true);
+  assert.deepEqual(flow.decisions.map((decision) => [decision.method, decision.errorReason]), [['Fetch.failRequest', 'BlockedByClient']], 'refused at the request stage, as without a capture');
+  assert.equal(chrome.cdp('Fetch.getResponseBody').length, 0);
+  assert.deepEqual(chrome.cdp('Fetch.enable'), [PLAYWRIGHT_FETCH, WITH_RESPONSES, { patterns: [RESPONSE_STAGE_PATTERN] }, WITH_RESPONSES, PLAYWRIGHT_FETCH]);
+  assert.equal(chrome.cdp('Fetch.disable').length, 0, 'Playwright\'s disable became the response stage alone while the capture was open');
+  assert.equal(sectionOf(result, 'Result'), '- No download began in this tab within 0.3 s after the click; nothing was captured.');
+  assert.match(sectionOf(result, 'Requests the guard refused while this call ran'), /^- GET https:\/\/forbidden\.example\/export\.zip: REFUSED_BY_HOST/);
+  // Afterwards the route still decides, and Chrome pauses nothing at the response stage.
+  const { paused } = chrome.requestChain(TAB, [`${FORBIDDEN}/later`]);
+  const later = await waitFor(() => chrome.fetchAnswers.find((answer) => answer.requestId === paused[0]), 'the later request decided');
+  assert.deepEqual([later.method, later.errorReason], ['Fetch.failRequest', 'BlockedByClient']);
+  assert.equal(chrome.responseStage(TAB, 'NOT-ASKED', `${ALLOWED}/page`), null);
+  // Without captureDownload a click asks Chrome for nothing more.
+  const enables = chrome.cdp('Fetch.enable').length;
+  clickStartingDownloads(world);
+  const plain = await call('browser_click', { target: '#export' });
+  assert.equal(plain.isError, undefined, textOf(plain));
+  assert.equal(chrome.cdp('Fetch.enable').length, enables);
+  assert.doesNotMatch(textOf(plain), /Download|captured/);
+});
+
+test('download: what was not captured is said so with its reason, nothing uncertain gets bytes, and Chrome\'s own state is reported apart', async () => {
+  const world = await downloadReady({ downloadSettleMs: 300, tabs: [
+    { id: TAB, url: `${ALLOWED}/start`, title: 'Start', windowId: 1, index: 0, active: true },
+    { id: 8, url: `${ALLOWED}/other`, title: 'Other', windowId: 1, index: 1, active: false },
+  ] });
+  const { chrome, call } = world;
+  const SAME = `${ALLOWED}/export/same.bin`;
+  const PAGE = Buffer.from('<!doctype html><title>Export ready</title>');
+  const finished = clickWithin(world,
+    () => downloadFlow(world, { hops: [`${ALLOWED}/big.bin`], headers: attachment('big.bin', [], { 'Content-Length': DOWNLOAD_MAX_BYTES + 1 }), body: 'not read', suggestedFilename: 'big.bin', end: 'canceled' }),
+    () => downloadFlow(world, { hops: [`${ALLOWED}/stream.csv`], headers: { 'Content-Type': 'text/csv', 'Content-Disposition': 'attachment' }, body: 'a,b', suggestedFilename: 'stream.csv', end: '' }),
+    // Chunked, with a Content-Length too: Transfer-Encoding wins in HTTP, so the length bounds nothing.
+    () => downloadFlow(world, { hops: [`${ALLOWED}/chunks.csv`], headers: { 'Content-Type': 'text/csv', 'Content-Disposition': 'attachment', 'Transfer-Encoding': 'chunked', 'Content-Length': 3 }, body: 'c,d', suggestedFilename: 'chunks.csv' }),
+    // A server that sends more than it declared: what Chrome hands over is measured, and more than the bound is dropped.
+    () => downloadFlow(world, { hops: [`${ALLOWED}/liar.bin`], headers: attachment('liar.bin', Buffer.from('ten bytes!')), body: Buffer.alloc(DOWNLOAD_MAX_BYTES + 1, 0x61), suggestedFilename: 'liar.bin' }),
+    () => downloadFlow(world, { hops: [`${ALLOWED}/packed.txt`], headers: { 'Content-Type': 'text/plain', 'Content-Encoding': 'gzip', 'Content-Length': 3 }, body: 'gz!', suggestedFilename: 'packed.txt', end: null }),
+    () => downloadFlow(world, { hops: [SAME], headers: attachment('same.bin', Buffer.from('one')), body: 'one', guid: 'G-1', suggestedFilename: 'same.bin' }),
+    () => downloadFlow(world, { hops: [SAME], headers: attachment('same.bin', Buffer.from('two')), body: 'two', guid: 'G-2', suggestedFilename: 'same (1).bin' }),
+    // A page the click opened, read because it might have been a download, and never returned.
+    async () => {
+      const { requestId, lastUrl, paused } = chrome.requestChain(TAB, [{ url: `${ALLOWED}/ready`, resourceType: 'Document' }], { navigation: true });
+      await Promise.all(paused.map((id) => waitFor(() => chrome.fetchAnswers.find((answer) => answer.requestId === id), id)));
+      const pause = chrome.responseStage(TAB, requestId, lastUrl, { headers: { 'Content-Type': 'text/html', 'Content-Length': PAGE.length }, body: PAGE });
+      assert.ok(pause, 'Chrome paused the page at the response stage');
+      await waitFor(() => chrome.fetchAnswers.find((answer) => answer.requestId === pause), 'page continued');
+      return { pause };
+    },
+    async () => {
+      // Made by the page itself, and one in another tab: no response of either is seen here.
+      chrome.downloadWillBegin(TAB, { guid: 'G-blob', url: `blob:${ALLOWED}/5d2c`, suggestedFilename: 'made-here.bin' });
+      chrome.downloadProgress(TAB, { guid: 'G-blob', state: 'completed', receivedBytes: 4, totalBytes: 4 });
+      chrome.downloadWillBegin(TAB, { guid: 'G-frame', url: `${ALLOWED}/framed.pdf`, suggestedFilename: 'framed.pdf' });
+      chrome.downloadWillBegin(8, { guid: 'G-other', url: `${ALLOWED}/other.zip`, suggestedFilename: 'other.zip' });
+      chrome.downloadProgress(8, { guid: 'G-other', state: 'completed', receivedBytes: 1, totalBytes: 1 });
+      // Chrome's reports so far have reached the server before the click returns.
+      await world.settle();
+      return {};
+    });
+  const result = await call('browser_click', { target: '#export', captureDownload: true });
+  const flows = await finished();
+  assert.equal(result.isError, undefined, textOf(result));
+  assert.ok(result.content.every((part) => part.type !== 'resource'), 'no bytes for any of them');
+  assert.ok(JSON.stringify(result).length < 20_000, 'the over-read body is not in the result');
+  for (const secret of ['one', 'two', 'gz!', 'a,b', 'c,d', PAGE.toString()])
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(Buffer.from(secret).toString('base64').replace(/[+/=]/g, '\\$&')));
+  assert.equal(sectionOf(result, 'Result'), [
+    `- Download 1: "big.bin", as Chrome names it, from ${ALLOWED}/big.bin (GET 200, application/zip)`,
+    `  - Captured copy: not captured: the response declared ${DOWNLOAD_MAX_BYTES + 1} bytes, more than the ${DOWNLOAD_MAX_BYTES} read here. It was passed on unread.`,
+    '  - Chrome\'s own download: canceled, as Chrome reported.',
+    `- Download 2: "stream.csv", as Chrome names it, from ${ALLOWED}/stream.csv (GET 200, text/csv)`,
+    '  - Captured copy: not captured: the response declared no length (a chunked response, for example), so reading it could not be bounded beforehand. It was passed on unread.',
+    '  - Chrome\'s own download: still in progress when this call returned (0 of 3 bytes); whether it finishes is not known here.',
+    `- Download 3: "chunks.csv", as Chrome names it, from ${ALLOWED}/chunks.csv (GET 200, text/csv)`,
+    '  - Captured copy: not captured: the response is sent with Transfer-Encoding chunked, which overrides any Content-Length, so reading it could not be bounded beforehand. It was passed on unread.',
+    '  - Chrome\'s own download: completed, as Chrome reported (3 bytes). Where Chrome saved it is not known here.',
+    `- Download 4: "liar.bin", as Chrome names it, from ${ALLOWED}/liar.bin (GET 200, application/zip)`,
+    `  - Captured copy: not captured: Chrome handed over ${DOWNLOAD_MAX_BYTES + 1} bytes, more than the ${DOWNLOAD_MAX_BYTES} returned here, although the response declared 10. They were dropped, not returned.`,
+    `  - Chrome's own download: completed, as Chrome reported (${DOWNLOAD_MAX_BYTES + 1} bytes). Where Chrome saved it is not known here.`,
+    `- Download 5: "packed.txt", as Chrome names it, from ${ALLOWED}/packed.txt (GET 200, text/plain)`,
+    '  - Captured copy: not captured: the response is content-encoded (gzip), so the length Chrome would hand over is not declared. It was passed on unread.',
+    '  - Chrome\'s own download: unknown; Chrome reported no progress for it.',
+    `- Download 6: "same.bin", as Chrome names it, from ${ALLOWED}/export/same.bin`,
+    '  - Captured copy: not captured: another response or download in this call had the same address, so which bytes are this download\'s is uncertain. Nothing is attached for it.',
+    '  - Chrome\'s own download: completed, as Chrome reported (3 bytes). Where Chrome saved it is not known here.',
+    `- Download 7: "same (1).bin", as Chrome names it, from ${ALLOWED}/export/same.bin`,
+    '  - Captured copy: not captured: another response or download in this call had the same address, so which bytes are this download\'s is uncertain. Nothing is attached for it.',
+    '  - Chrome\'s own download: completed, as Chrome reported (3 bytes). Where Chrome saved it is not known here.',
+    '- Download 8: "made-here.bin", as Chrome names it, from an address with the blob: scheme',
+    '  - Captured copy: not captured: the page made it itself (a blob: or data: address); nothing was received over HTTP. Only HTTP responses are captured.',
+    '  - Chrome\'s own download: completed, as Chrome reported (4 bytes). Where Chrome saved it is not known here.',
+    `- Download 9: "framed.pdf", as Chrome names it, from ${ALLOWED}/framed.pdf`,
+    '  - Captured copy: not captured: no response of it was seen in this tab\'s own session (it may come from a cross-origin frame, a service worker or a request made before this click).',
+    '  - Chrome\'s own download: unknown; Chrome reported no progress for it.',
+    `- A download began in another tab ("other.zip" from ${ALLOWED}/other.zip); not captured: capture covers only the tab this click acts in.`,
+  ].join('\n'));
+  // Only what could be bounded was read: the over-reporting body, the two same-address bodies and the page. Every
+  // pause was continued once.
+  const pauses = flows.map((flow) => flow.responsePause ?? flow.pause).filter(Boolean);
+  assert.equal(pauses.length, 8);
+  assert.deepEqual(chrome.cdp('Fetch.getResponseBody').map((params) => params.requestId), [pauses[3], pauses[5], pauses[6], pauses[7]]);
+  for (const pause of pauses)
+    assert.deepEqual(chrome.fetchAnswers.filter((answer) => answer.requestId === pause).map((answer) => answer.method), ['Fetch.continueRequest'], pause);
+  assert.deepEqual(chrome.fetchPatterns(TAB), PLAYWRIGHT_FETCH.patterns);
+  assert.deepEqual(chrome.fetchPatterns(8), PLAYWRIGHT_FETCH.patterns, 'the other tab never had the response stage');
+});
+
+test('download: a copy is judged by its own address and every hop on the way, and none is returned when the call\'s output is withheld', async () => {
+  const world = await downloadReady({ onCommand: ({ chrome: fake, moveOn }, method, params) => {
+    // While Chrome hands over the body, the tab moves on to a page the task may not read.
+    if (moveOn && method === 'chrome.debugger.sendCommand' && params?.[1] === 'Fetch.getResponseBody')
+      fake.navigation(TAB, [`${FORBIDDEN}/moved`]);
+  } });
+  const { chrome, call } = world;
+  const BYTES = Buffer.from('PK-SECRET-ARCHIVE');
+  // An allowed address that redirects to one the task may not read: the hop is not routed, so the request went out.
+  const finished = clickStartingDownloads(world, () => downloadFlow(world, {
+    hops: [`${ALLOWED}/export`, `${FORBIDDEN}/archive.zip`], headers: attachment('archive.zip', BYTES), body: BYTES, suggestedFilename: 'archive.zip',
+  }));
+  const result = await call('browser_click', { target: '#export', captureDownload: true });
+  await finished();
+  assert.equal(result.isError, undefined, textOf(result));
+  assert.equal(sectionOf(result, 'Result'), '- Download 1: withheld: this task may not read https://forbidden.example/archive.zip (its address or a redirect hop on the way to it). REFUSED_BY_HOST: https://forbidden.example');
+  assert.ok(result.content.every((part) => part.type !== 'resource'));
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(BYTES.toString('base64')));
+  // An allowed download, but the page this call worked in became one the task may not read: nothing of it is returned.
+  world.moveOn = true;
+  const moved = clickStartingDownloads(world, () => downloadFlow(world, { hops: [`${ALLOWED}/fine.zip`], headers: attachment('fine.zip', BYTES), body: BYTES }));
+  const withheld = await call('browser_click', { target: '#export', captureDownload: true });
+  await moved();
+  assert.equal(withheld.isError, true);
+  assert.match(textOf(withheld), /The call ran, but its output is withheld: this task may not read https:\/\/forbidden\.example\/moved/);
+  assert.ok(withheld.content.every((part) => part.type === 'text'), 'no resource');
+  assert.doesNotMatch(JSON.stringify(withheld), new RegExp(BYTES.toString('base64')));
+  assert.deepEqual(chrome.fetchPatterns(TAB), PLAYWRIGHT_FETCH.patterns);
+});
+
+test('download: no bytes without a certain tie: a frame unnamed or different, a download on a session other than the tab\'s, a request not seen from its start or not reported at all', async () => {
+  const world = await downloadReady({ downloadSettleMs: 300 });
+  const { chrome, call } = world;
+  const bytes = (name) => Buffer.from(`bytes of ${name}`);
+  const flow = (name, more = {}) => () => downloadFlow(world, { hops: [`${ALLOWED}/${name}`], headers: attachment(name, bytes(name)), body: bytes(name), suggestedFilename: name, ...more });
+  const finished = clickWithin(world,
+    flow('control.zip'),
+    flow('unnamed-response-frame.zip', { responseFrameId: null }),
+    flow('unnamed-download-frame.zip', { beginFrameId: null }),
+    flow('other-frame.zip', { responseFrameId: 'FRAME-OTHER' }),
+    flow('child-session.zip', { beginSession: 'CHILD-SESSION-1' }),
+    flow('unseen-request.zip', { announce: false }),
+    flow('download-attribute.txt', { announce: false, networkless: true }),
+    async () => { await world.settle(); return {}; });
+  const result = await call('browser_click', { target: '#export', captureDownload: true });
+  await finished();
+  assert.equal(result.isError, undefined, textOf(result));
+  assert.deepEqual(result.content.filter((part) => part.type === 'resource').map((part) => part.resource.blob), [bytes('control.zip').toString('base64')], 'only the control');
+  for (const name of ['unnamed-response-frame.zip', 'unnamed-download-frame.zip', 'other-frame.zip', 'child-session.zip', 'unseen-request.zip', 'download-attribute.txt'])
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(bytes(name).toString('base64').replace(/[+/=]/g, '\\$&')), name);
+  const lines = sectionOf(result, 'Result').split('\n');
+  const copy = (name) => lines[lines.findIndex((line) => line.includes(`"${name}"`)) + 1];
+  assert.match(copy('control.zip'), /^  - Captured copy: \d+ bytes, sha256 [0-9a-f]{64}, read once/);
+  for (const name of ['unnamed-response-frame.zip', 'unnamed-download-frame.zip'])
+    assert.equal(copy(name), '  - Captured copy: not captured: Chrome did not name the frame of the download or of the response with its address, so the two cannot be tied together. Nothing is attached for it.', name);
+  assert.equal(copy('other-frame.zip'), '  - Captured copy: not captured: the response with its address came in another frame than the download, so the two cannot be tied together. Nothing is attached for it.');
+  assert.equal(copy('child-session.zip'), '  - Captured copy: not captured: Chrome reported it on a frame\'s or worker\'s own session, not on the tab\'s session where responses are read, so no response can be tied to it. Nothing is attached for it.');
+  assert.equal(copy('unseen-request.zip'), '  - Captured copy: not captured: not every address on the way to its response was seen (its request began before this click, or its redirect hops were not all kept), so they cannot all be checked. Nothing is attached for it.');
+  assert.equal(copy('download-attribute.txt'), '  - Captured copy: not captured: Chrome reported no network request for its response (as for a link with the download attribute), so the addresses on the way to it cannot be checked. Nothing is attached for it.');
+  assert.doesNotMatch(textOf(result), /More came during this click/);
+});
+
+test('download: when a limit drops what a capture observes, no download gets bytes, even one left with a single match', async () => {
+  const world = await downloadReady({ downloadSettleMs: 300 });
+  const { chrome, call } = world;
+  const BYTES = Buffer.from('the only kept match');
+  const answered = (id) => waitFor(() => chrome.fetchAnswers.find((answer) => answer.requestId === id), id);
+  const reported = async () => { await world.settle(); return {}; };
+  const expectNoBytes = (result, what, dropped) => {
+    assert.equal(result.isError, undefined, textOf(result));
+    assert.ok(result.content.every((part) => part.type !== 'resource'), `${what}: no bytes`);
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(BYTES.toString('base64')), what);
+    const text = sectionOf(result, 'Result');
+    assert.match(text, /^- Download 1: "kept\.zip", as Chrome names it, from https:\/\/allowed\.example\/kept\.zip\n  - Captured copy: not captured: more document responses, downloads or requests came during this click than one capture keeps, so a response or download with the same address may have gone unrecorded\. Nothing is attached for it\.\n/, what);
+    assert.match(text, new RegExp(`\\n- More came during this click than one capture keeps \\(${MAX_RESPONSES} document responses, ${MAX_BEGINS} downloads, ${MAX_CHAINS} document requests\\): ${dropped}\\. No bytes were attached, since what was dropped could have shared an address\\.$`), what);
+  };
+  // Responses: the kept one first, then fillers up to the limit; the competitor with the same address is dropped.
+  let competitor;
+  let finished = clickWithin(world,
+    () => downloadFlow(world, { hops: [`${ALLOWED}/kept.zip`], headers: attachment('kept.zip', BYTES), body: BYTES, suggestedFilename: 'kept.zip', end: null }),
+    async () => {
+      for (let index = 1; index < MAX_RESPONSES; index += 1)
+        await answered(chrome.responseStage(TAB, `FILL-${index}`, `${ALLOWED}/fill-${index}`, { headers: { 'Content-Type': 'text/html' } }));
+      competitor = chrome.responseStage(TAB, 'COMPETITOR', `${ALLOWED}/kept.zip`, { headers: attachment('kept.zip', Buffer.from('competing bytes')), body: 'competing bytes' });
+      await answered(competitor);
+      chrome.downloadProgress(TAB, { guid: `GUID-${ALLOWED}/kept.zip`, state: 'completed', receivedBytes: BYTES.length, totalBytes: BYTES.length });
+      return {};
+    },
+    reported);
+  expectNoBytes(await call('browser_click', { target: '#export', captureDownload: true }), 'responses', '1 responses passed on unread, 0 downloads and 0 requests not recorded');
+  await finished();
+  assert.ok(!chrome.cdp('Fetch.getResponseBody').some((params) => params.requestId === competitor), 'the dropped competitor was passed on unread');
+  assert.deepEqual(chrome.fetchAnswers.filter((answer) => answer.requestId === competitor).map((answer) => answer.method), ['Fetch.continueRequest']);
+  // Downloads: the kept one first, then fillers up to the limit; a second download of the same address is dropped.
+  finished = clickWithin(world,
+    () => downloadFlow(world, { hops: [`${ALLOWED}/kept.zip`], headers: attachment('kept.zip', BYTES), body: BYTES, suggestedFilename: 'kept.zip' }),
+    async () => {
+      for (let index = 1; index < MAX_BEGINS; index += 1)
+        chrome.downloadWillBegin(TAB, { guid: `FILL-${index}`, url: `blob:${ALLOWED}/fill-${index}`, suggestedFilename: `fill-${index}` });
+      chrome.downloadWillBegin(TAB, { guid: 'TWIN', url: `${ALLOWED}/kept.zip`, suggestedFilename: 'kept (1).zip' });
+      return {};
+    },
+    reported);
+  expectNoBytes(await call('browser_click', { target: '#export', captureDownload: true }), 'downloads', '0 responses passed on unread, 1 downloads and 0 requests not recorded');
+  await finished();
+  // Requests: more document requests than are kept, the download's own among those dropped.
+  finished = clickWithin(world,
+    async () => {
+      for (let index = 0; index < MAX_CHAINS; index += 1)
+        chrome.emit(TAB, 'Network.requestWillBeSent', { requestId: `CHAIN-${index}`, loaderId: `CHAIN-${index}`, documentURL: `${ALLOWED}/c-${index}`, request: { url: `${ALLOWED}/c-${index}`, method: 'GET', headers: {} }, timestamp: 1, wallTime: 1, initiator: { type: 'other' }, type: 'Document', frameId: 'NO-SUCH-FRAME' });
+      return {};
+    },
+    () => downloadFlow(world, { hops: [`${ALLOWED}/kept.zip`], headers: attachment('kept.zip', BYTES), body: BYTES, suggestedFilename: 'kept.zip' }),
+    reported);
+  expectNoBytes(await call('browser_click', { target: '#export', captureDownload: true }), 'requests', '0 responses passed on unread, 0 downloads and 1 requests not recorded');
+  await finished();
+  assert.deepEqual(chrome.fetchPatterns(TAB), PLAYWRIGHT_FETCH.patterns);
+});
+
+test('download: one capture at a time, only on browser_click; a failed click waits for nothing, and the capture always closes', async () => {
+  const world = await downloadReady({ downloadSettleMs: 1500 });
+  const { chrome, call, core } = world;
+  const { tools } = await core.listTools();
+  assert.deepEqual(tools.filter((tool) => tool.inputSchema.properties?.captureDownload).map((tool) => tool.name), ['browser_click']);
+  assert.equal(tools.find((tool) => tool.name === 'browser_click').inputSchema.properties.captureDownload.type, 'boolean');
+  // A second capture while the first is open is refused before anything is clicked.
+  let clicks = 0;
+  const tab = core.connection.backend()._context.currentTab();
+  tab.targetLocator = async () => ({ locator: { click: async () => { clicks += 1; } }, selector: '#export' });
+  const first = call('browser_click', { target: '#export', captureDownload: true });
+  await waitFor(() => chrome.cdp('Fetch.enable').length === 2, 'the first capture open');
+  const second = await call('browser_click', { target: '#export', captureDownload: true });
+  assert.equal(second.isError, true);
+  assert.match(textOf(second), /^### Error\nBROWSER_DOWNLOAD_CAPTURE_BUSY: another call is capturing a download on this connection\nNothing was clicked\./);
+  const done = await first;
+  assert.equal(clicks, 1);
+  assert.equal(sectionOf(done, 'Result'), '- No download began in this tab within 1.5 s after the click; nothing was captured.');
+  // A click that fails and began nothing: upstream's error alone, no wait, and Playwright's patterns are back.
+  tab.targetLocator = async () => ({ locator: { click: async () => { throw new Error('Timeout 5000ms exceeded.'); } }, selector: '#export' });
+  let started = Date.now();
+  const failed = await call('browser_click', { target: '#export', captureDownload: true });
+  assert.ok(Date.now() - started < 1500, 'no wait for a download after a failed click');
+  assert.equal(textOf(failed), '### Error\nError: Timeout 5000ms exceeded.');
+  assert.deepEqual(chrome.cdp('Fetch.enable').slice(-2), [WITH_RESPONSES, PLAYWRIGHT_FETCH]);
+  // A click that fails after its download began: the error, then what Chrome already reported, and the copy.
+  const BYTES = Buffer.from('half-way');
+  tab.targetLocator = async () => ({ locator: { click: async () => {
+    await downloadFlow(world, { hops: [`${ALLOWED}/late.bin`], headers: attachment('late.bin', BYTES), body: BYTES, suggestedFilename: 'late.bin', end: '' });
+    // Chrome's reports so far have reached the server before the click fails.
+    await world.settle();
+    throw new Error('Timeout 5000ms exceeded.');
+  } }, selector: '#export' });
+  started = Date.now();
+  const late = await call('browser_click', { target: '#export', captureDownload: true });
+  assert.ok(Date.now() - started < 1500, 'no wait after a failed click');
+  assert.equal(late.isError, true);
+  assert.equal(textOf(late), [
+    '### Error',
+    'Error: Timeout 5000ms exceeded.',
+    `- Download 1: "late.bin", as Chrome names it, from ${ALLOWED}/late.bin (GET 200, application/zip)`,
+    `  - Captured copy: ${BYTES.length} bytes, sha256 ${sha256(BYTES)}, read once from the response as Chrome received it (not fetched again), attached to this result as a binary resource. It shows what the server sent, not that Chrome's own download finished.`,
+    `  - Chrome's own download: still in progress when this call returned (0 of ${BYTES.length} bytes); whether it finishes is not known here.`,
+  ].join('\n'));
+  assert.deepEqual(late.content.filter((part) => part.type === 'resource').map((part) => part.resource.blob), [BYTES.toString('base64')]);
+  assert.deepEqual(chrome.fetchPatterns(TAB), PLAYWRIGHT_FETCH.patterns);
+  // Chrome refuses the response stage: nothing is clicked, and its answer is quoted.
+  core.connection.downloads()._send = async () => { throw new Error('Fetch.enable: Not allowed'); };
+  clicks = 0;
+  tab.targetLocator = async () => ({ locator: { click: async () => { clicks += 1; } }, selector: '#export' });
+  const unavailable = await call('browser_click', { target: '#export', captureDownload: true });
+  assert.match(textOf(unavailable), /^### Error\nBROWSER_DOWNLOAD_CAPTURE_UNAVAILABLE: Chrome did not accept the response-stage interception \(Fetch\.enable: Not allowed\)\nNothing was clicked\./);
+  assert.equal(clicks, 0);
 });
 
 test('file lines: only generated lines naming a file really in the folder change, and the folder is not listed', (t) => {
@@ -1394,6 +1989,15 @@ test('the tools stay offered, and arguments the server does not take are refused
     assert.ok(tools.some((tool) => tool.name === name), `${name} is offered`);
   assert.ok(tools.every((tool) => !tool.inputSchema.properties?.filename), 'no tool advertises a filename');
   assert.ok(tools.every((tool) => !tool.inputSchema.properties?._meta), 'no tool advertises _meta');
+  // Files for the page: upstream's "paths" kept, "files" added with an optional root, both bounded.
+  for (const name of ['browser_file_upload', 'browser_drop']) {
+    const { properties } = tools.find((tool) => tool.name === name).inputSchema;
+    assert.deepEqual([properties.paths.maxItems, properties.paths.items, properties.files.maxItems], [16, { type: 'string' }, 16], name);
+    assert.deepEqual(properties.files.items, { type: 'object', properties: properties.files.items.properties, required: ['path'], additionalProperties: false }, name);
+    assert.deepEqual(Object.keys(properties.files.items.properties), ['path', 'root'], name);
+    assert.match(properties.paths.description, /The host reads each file with its own file admission and keeps a copy; the page gets only that copy's bytes and the file's original name\. At most 16 files and 20971520 bytes in one call\./, name);
+  }
+  assert.match(tools.find((tool) => tool.name === 'browser_drop').description, /At least one of "paths", "files" or "data" must be provided\./);
   // Refusing an argument never takes an advertised one.
   for (const tool of tools) {
     for (const property of Object.keys(tool.inputSchema.properties ?? {}))

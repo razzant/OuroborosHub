@@ -5,14 +5,23 @@
 //   arm:      {"armed": true, "token": T}                                   -> {"armed": true}
 //   request:  {"url", "method", "post_data", "resource_type", "body_present", "token"} -> {"block": ""} or {"block": "<reason>"}
 //   evaluate: {"action": "evaluate", "url", "token"}                          -> {"block": ""} or {"block": "<reason>"}
+//   intake:   {"action": "file_intake", "files": [{"path", "root"?}], "token"}
+//             -> {"block": "", "files": [{"path": <retained absolute copy>, "name": <original basename>, "size", "sha256"}]}
+//                or {"block": "<reason>"}
 // A request is allowed only when the answer's block is exactly "", and arming succeeds only
 // when armed is exactly true. Every other outcome fails closed. Neither the token nor a
 // request body is ever logged, echoed in an error or passed to another process.
+//
+// File intake: the host admits each named file as read_file would and keeps a bounded copy; its
+// answer names that copy, never the bytes. Only the copies are read here, each checked against the
+// size and sha256 the host stated. A path the agent named is never opened by this server.
 //
 // The request message also carries the host's target decision for an address no route sees:
 // a navigation target before it is opened, and a page's address and redirect hops before its
 // content is returned. It is sent as the GET of a document with no body, the same line the
 // route sends for a navigation, so the host answers with the same predicate either way.
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 
@@ -24,6 +33,9 @@ export const GUARD_TIMEOUT_MS = 10_000;
 export const GUARD_MAX_RESPONSE_BYTES = 64 * 1024;
 // The host reads at most this many bytes per line; a larger body is described, not sent.
 export const GUARD_MAX_LINE_BYTES = 32 * 1024 * 1024;
+// Agreed with the host for one file intake: at most this many files, and bytes in all.
+export const INTAKE_MAX_FILES = 16;
+export const INTAKE_MAX_BYTES = 20 * 1024 * 1024;
 
 export class GuardError extends Error {
   constructor(code, message) {
@@ -130,6 +142,76 @@ function blockOf(answer) {
   throw new GuardError('BROWSER_GUARD_PROTOCOL', 'the answer has no block string');
 }
 
+const nonEmptyString = (value) => typeof value === 'string' && value !== '' && !value.includes('\0');
+
+// What the agent named, in the host's request form, or the reason it cannot be asked.
+function intakeRequest(entries) {
+  if (!Array.isArray(entries) || !entries.length)
+    return { problem: 'no file was named' };
+  if (entries.length > INTAKE_MAX_FILES)
+    return { problem: `${entries.length} files were named; at most ${INTAKE_MAX_FILES} can be given in one call` };
+  const files = [];
+  for (const entry of entries) {
+    if (!entry || !nonEmptyString(entry.path) || (entry.root !== undefined && !nonEmptyString(entry.root)))
+      return { problem: 'each file needs a non-empty path, and a root, when given, must be a non-empty string' };
+    files.push(entry.root === undefined ? { path: entry.path } : { path: entry.path, root: entry.root });
+  }
+  return { files };
+}
+
+// The host's answer for a successful intake, one retained copy per file named, or the reason it is not one.
+// A name is the page's file name only: a basename, with no separator or control character.
+function retainedCopies(answer, count) {
+  const files = answer.files;
+  if (!Array.isArray(files) || files.length !== count)
+    return { problem: `it names ${Array.isArray(files) ? files.length : 'no list of'} retained files for the ${count} named` };
+  let total = 0;
+  for (const [index, file] of files.entries()) {
+    const ok = file && typeof file === 'object'
+      && nonEmptyString(file.path) && path.isAbsolute(file.path)
+      && nonEmptyString(file.name) && file.name !== '.' && file.name !== '..' && !/[/\\\u0000-\u001f\u007f]/.test(file.name)
+      && Number.isSafeInteger(file.size) && file.size >= 0
+      && typeof file.sha256 === 'string' && /^[0-9a-f]{64}$/.test(file.sha256);
+    if (!ok)
+      return { problem: `retained file ${index + 1} is not an absolute path with a basename, a size and a sha256` };
+    total += file.size;
+  }
+  if (total > INTAKE_MAX_BYTES)
+    return { problem: `the retained files hold ${total} bytes, more than the ${INTAKE_MAX_BYTES} agreed` };
+  return { files: files.map(({ path: where, name, size, sha256 }) => ({ path: where, name, size, sha256 })) };
+}
+
+// Exactly the bytes the host retained: a regular file (the last component not a link) of the stated
+// size, with the stated sha256. Reads at most size + 1 bytes.
+async function readRetained(file) {
+  let handle;
+  try {
+    handle = await fs.promises.open(file.path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+    const stat = await handle.stat();
+    if (!stat.isFile())
+      return { problem: 'is not a regular file' };
+    if (stat.size !== file.size)
+      return { problem: `has ${stat.size} bytes, not the ${file.size} the host stated` };
+    const buffer = Buffer.alloc(file.size);
+    let offset = 0;
+    while (offset < file.size) {
+      const { bytesRead } = await handle.read(buffer, offset, file.size - offset, offset);
+      if (!bytesRead)
+        return { problem: `ended after ${offset} of the ${file.size} bytes the host stated` };
+      offset += bytesRead;
+    }
+    if ((await handle.read(Buffer.alloc(1), 0, 1, file.size)).bytesRead)
+      return { problem: `holds more than the ${file.size} bytes the host stated` };
+    if (crypto.createHash('sha256').update(buffer).digest('hex') !== file.sha256)
+      return { problem: 'does not have the sha256 the host stated' };
+    return { buffer };
+  } catch (error) {
+    return { problem: `could not be read (${error.code || 'error'})` };
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
 export class BrowserGuard {
   constructor({ endpoint, token, timeoutMs = GUARD_TIMEOUT_MS, exchangeImpl = exchange }) {
     this._endpoint = endpoint;
@@ -207,6 +289,36 @@ export class BrowserGuard {
     } catch (error) {
       return `${error.code || 'BROWSER_GUARD_UNAVAILABLE'}: the request guard did not answer, so the address was treated as refused`;
     }
+  }
+
+  // The host's admission of files for the page (see the header). entries: [{ path, root? }] as the agent
+  // named them. Resolves { block: '', files: [{ name, buffer, size, sha256 }] }, in the order named, or
+  // { block: reason }. Never throws; any doubt is a refusal, and then no file is read at all.
+  async intakeFiles(entries) {
+    const request = intakeRequest(entries);
+    if (request.problem)
+      return { block: `BROWSER_FILE_INTAKE_INVALID: ${request.problem}.` };
+    let block;
+    let answer;
+    try {
+      answer = await this._send({ action: 'file_intake', files: request.files, token: this._token });
+      block = blockOf(answer);
+    } catch (error) {
+      return { block: `${error.code || 'BROWSER_GUARD_UNAVAILABLE'}: the request guard did not answer the file intake, so no file was given to the page` };
+    }
+    if (block)
+      return { block };
+    const retained = retainedCopies(answer, request.files.length);
+    if (retained.problem)
+      return { block: `BROWSER_GUARD_PROTOCOL: the host's file intake answer is not in the agreed form (${retained.problem}), so no file was given to the page` };
+    const files = [];
+    for (const [index, file] of retained.files.entries()) {
+      const read = await readRetained(file);
+      if (read.problem)
+        return { block: `BROWSER_FILE_INTAKE_MISMATCH: the host's retained copy of file ${index + 1} ${read.problem}, so no file was given to the page` };
+      files.push({ name: file.name, buffer: read.buffer, size: file.size, sha256: file.sha256 });
+    }
+    return { block: '', files };
   }
 
   // Body facts for the request message, as agreed with the host:

@@ -20,7 +20,7 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 # Tests each file must still run. Node counts a file that registers none as one passing test, so an emptied file would pass.
-MINIMUM_TESTS = {'unit_guard.test.mjs': 10, 'unit_input.test.mjs': 10, 'unit_click_once.test.mjs': 5, 'unit_patch_pinned.test.mjs': 9, 'unit_server.test.mjs': 46}
+MINIMUM_TESTS = {'unit_guard.test.mjs': 14, 'unit_input.test.mjs': 10, 'unit_click_once.test.mjs': 5, 'unit_patch_pinned.test.mjs': 9, 'unit_server.test.mjs': 57}
 FILES = tuple(MINIMUM_TESTS)
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 # Node's spec reporter ends with "ℹ tests 29", "ℹ pass 29", ... (the symbol is a letter to \w, so it is matched as a word).

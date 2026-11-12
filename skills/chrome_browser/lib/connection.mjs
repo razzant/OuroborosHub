@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DownloadCapture } from './download.mjs';
 
 export const APPROVAL_TTL_MS = 15 * 60 * 1000;
 
@@ -132,6 +133,8 @@ export class BrowserConnection {
     this._generation = 0;
     this._diagnostic = null;
     this._relay = null;
+    // The capture of a download the agent's click starts, for the current relay (download.mjs).
+    this._downloads = null;
     this._browser = null;
     this._backend = null;
     this._url = '';
@@ -191,6 +194,10 @@ export class BrowserConnection {
     return this._state === 'ready' ? this._context : null;
   }
 
+  downloads() {
+    return this._state === 'ready' ? this._downloads : null;
+  }
+
   _event(name, detail = {}) {
     this.events.push({ at: Date.now(), name, ...detail });
     if (this.events.length > 200)
@@ -228,12 +235,15 @@ export class BrowserConnection {
     this._attachRefusals = [];
     recordAttachRefusals(relay, this._attachRefusals);
     observeRelay(relay, this, generation);
+    // Before Playwright connects, so that its first Fetch.enable is recorded.
+    const downloads = new DownloadCapture(relay);
     await relay.start();
     if (!this._current(generation)) {
       relay.stop();
       return { status: 'superseded' };
     }
     this._relay = relay;
+    this._downloads = downloads;
     this._url = relay.connectPageUrl(this._clientName);
     this._state = 'pending';
     this._reason = '';
@@ -475,6 +485,8 @@ export class BrowserConnection {
     const backend = this._backend;
     const browser = this._browser;
     const relay = this._relay;
+    this._downloads?.dispose();
+    this._downloads = null;
     this._backend = null;
     this._browser = null;
     this._relay = null;

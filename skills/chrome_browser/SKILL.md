@@ -2,7 +2,7 @@
 name: chrome_browser
 title: Chrome (shared tab)
 description: Work in the owner's own Chrome through Microsoft's official Playwright Extension - the tab they share plus background tabs for the same work, trusted input in background tabs, and handback by plain conversation.
-version: 0.2.1
+version: 0.3.0
 type: script
 runtime: node
 os: [darwin, linux, win32]
@@ -10,7 +10,7 @@ license: MIT AND Apache-2.0
 permissions: [net, fs, subprocess]
 when_to_use: The owner wants work done in their own signed-in Chrome - in a tab they share and in background tabs for the same work - while they keep using the browser, and takes the page over by saying so when a login, a code or a decision is theirs.
 model_experience:
-  what_model_sees: Once the owner has imported this skill's server under Settings → Advanced → MCP Servers and enabled it, 25 tools named mcp_chrome_browser__*. Two are this skill's (browser_connect, browser_disconnect) and 23 are the official Playwright MCP 0.0.84 tools (browser_snapshot, browser_click, browser_type, browser_fill_form, browser_tabs, browser_take_screenshot and others). Action results are short Playwright markdown with the Playwright code that ran, the page address and title when they changed, and any dialog. browser_snapshot returns the page's accessibility snapshot inline, and screenshots arrive as image content. Installing the skill alone adds no tool.
+  what_model_sees: Once the owner has imported this skill's server under Settings → Advanced → MCP Servers and enabled it, 25 tools named mcp_chrome_browser__*. Two are this skill's (browser_connect, browser_disconnect) and 23 are the official Playwright MCP 0.0.84 tools (browser_snapshot, browser_click, browser_type, browser_fill_form, browser_tabs, browser_take_screenshot and others). Action results are short Playwright markdown with the Playwright code that ran, the page address and title when they changed, and any dialog. browser_click also takes captureDownload, which returns the file an HTTP download click starts as an embedded resource. browser_snapshot returns the page's accessibility snapshot inline, and screenshots arrive as image content. Installing the skill alone adds no tool.
   token_effect: About 25 tool schemas wherever the host loads this server's tools. Each snapshot costs what the page's accessibility tree contains; screenshots cost an image.
 timeout_sec: 60
 scripts:
@@ -110,8 +110,13 @@ The skill uses Microsoft's unchanged **Playwright Extension** and the official
    when they changed, and any dialog. A failed action returns its error. Call
    `browser_snapshot` to see the page afterwards. Results point at no file: a screenshot, or a
    response body from `browser_network_request` that is an image, is attached as an image;
-   another binary body is described and not returned; and console output is read with
-   `browser_console_messages`. For other
+   another binary body of at most 20 MiB is attached as an embedded resource (an MCP blob with
+   its media type, named in the text with its sha256), and a larger one is described and not
+   returned; and console output is read with `browser_console_messages`. To give a page files,
+   use `browser_file_upload` once its file chooser is open, or `browser_drop`, with `paths` or
+   `files` (`{path, root}` as `read_file` takes them): the host admits and copies each file, and
+   the page gets only that copy's bytes and the original file name. To get the file a link or
+   form downloads, call `browser_click` with `captureDownload: true` (see "Downloads"). For other
    pages of the same work, open background tabs with `browser_tabs` action `new` (optionally
    with a `url`); `select` changes which tab the agent acts in, not which tab the owner sees.
 4. **Handback.** When the owner says they will do something themselves - a login, a
@@ -168,6 +173,10 @@ owner's shared tab and tabs a page opened stay open.
 | `BROWSER_INPUT_NOT_VERIFIED` | A click went out once, but its delivery could not be checked (the page refused the check, or the document changed, for example because the click navigated). It was not sent again. | `browser_snapshot` to see its effect. |
 | `BROWSER_TAB_CHANGED` | The tab this call was checked for closed, or stopped being current, while the host was being asked. Nothing was done, in it or in the tab current now. | `browser_snapshot` to see which tab is current, then decide. |
 | `BROWSER_RECORD_ORIGIN_UNKNOWN` | A page made more redirects than are kept for checking (512 addresses per document), so its console entries cannot be judged and are withheld. | Read the page itself; a new document starts fresh. |
+| `BROWSER_FILE_INTAKE_INVALID` / `_MISMATCH` | No file, more than 16, an empty path or root (`_INVALID`, not sent to the host); or the host's retained copy is not the size or sha256 it stated, or cannot be read (`_MISMATCH`). The host's own refusal of a file is shown verbatim. The page got nothing, and an open file chooser stays open. | Name readable files, at most 16 and 20 MiB together; report a mismatch. |
+| `BROWSER_GUARD_PROTOCOL` | The host's file-intake response is malformed. No file bytes reached the page. | Report the protocol mismatch; do not bypass admission. |
+| `BROWSER_FILE_CHOOSER_GONE` | The file chooser closed while the host was reading the files. The page got nothing. | `browser_snapshot`, then open the chooser again if needed. |
+| `BROWSER_DOWNLOAD_CAPTURE_BUSY` / `_UNAVAILABLE` | `captureDownload` while another capturing click runs on this connection (`_BUSY`); or the tab could not be matched to the extension's tab, or Chrome refused the response-stage interception, whose answer is quoted (`_UNAVAILABLE`). Nothing was clicked. | Wait for the other call, or click without `captureDownload` and tell the owner the file is in their Downloads. |
 | `BROWSER_ARGUMENT_REFUSED` | `filename` (results come inline), `isolatedContext` (owner's profile only) or `_meta` (upstream's output options `cwd`, `raw` and `json`; results always come in the advertised form). | Drop the argument. |
 | `CHROME_BROWSER_NOT_INSTALLED` / `_PIN_MISMATCH` / `_PATCH_FAILED` | The dependency is missing or not exactly the pinned files. | Re-enable the skill; check `setup.mjs status`. |
 
@@ -203,6 +212,62 @@ and its delivery is unknown. Checking and unchecking also verify the new state
 the same call (it does for a checkbox replaced right after the click that still shows the
 old state), the call ends with Playwright's timeout error instead, and the click is not
 repeated.
+
+## Downloads
+
+Chrome saves a download where the owner's Chrome saves downloads (or asks, if they set it to);
+this server cannot change that, and Playwright never sees the download. When the agent expects a
+click to start one - a link or a form that returns a file - it calls `browser_click` with
+`captureDownload: true`. For that click only, in the tab it acts in:
+
+- Chrome pauses that tab's document responses once more, after their headers arrive (Fetch,
+  response stage, on the tab's one debugger session, which Playwright shares). The patterns Chrome
+  holds there are Playwright's own, unchanged, plus that one; afterwards Chrome gets Playwright's last
+  command back exactly. Requests that Playwright routes still reach the host's guard at the
+  request stage, including while Playwright changes its own interception; the unrouted cases
+  below remain exceptions.
+- A successful response that declares its length, at most 20 MiB, is not sent in chunks
+  (`Transfer-Encoding` overrides any `Content-Length`) and is not content-encoded is read once
+  (`Fetch.getResponseBody`), then the same response is continued. It is never fetched again, failed or
+  fulfilled, so Chrome's own download gets the server's one response. Any other response is continued
+  unread, since reading it cannot be bounded beforehand (Chrome hands over a whole body at once). That
+  bounds what is asked for, not what a server sending more than it declared makes Chrome hold: what
+  Chrome hands over is measured again, and more than 20 MiB is dropped and never returned.
+  Bodies are buffered whole; up to 64 eligible responses, including ordinary pages, may be held
+  during the window (up to 1.25 GiB before overhead). This is not a streaming transfer.
+- The server then waits, at most 15 s, for Chrome to report each download it began and its end.
+  A download gets the bytes only when its tie to one response is certain: Chrome reported it on the
+  tab's own session; exactly one response read in this tab has its address (or a redirect hop on the
+  way) and no other download of the click shares it; Chrome named the frame of both and it is the same
+  frame; every address on the way to that response was seen from its first request; and nothing this
+  capture observes was dropped at its limits (64 document responses, 64 downloads, 256 document
+  requests), since a dropped one could have shared the address. Anything less certain gets no bytes
+  and says why. The address and every hop are judged by the guard, as a page's are, before the bytes
+  are returned.
+
+The result lists each download: Chrome's suggested name and the address, then the **captured copy**
+(`N bytes, sha256 ...`, attached as an embedded resource `chrome-browser://download/<n>/<sha256>`
+with its media type; an `image/*` type is labelled `application/octet-stream`) or why it was not
+captured, and separately **Chrome's own download**: `completed` or `canceled` as Chrome reported it,
+`still in progress` when the call returned, or `unknown` when Chrome reported nothing. The copy shows
+what the server sent; it is not evidence that Chrome's file was written, and where Chrome saved it is
+not known here. A click that started nothing waits the full 15 s and says so.
+
+Not captured: downloads the page makes itself (`blob:`, `data:`; reported as such, no page
+instrumentation), downloads in another tab or a popup the click opened (reported when Chrome says
+so), responses seen only in a cross-origin frame's or a service worker's session, responses over the
+bounds above, and a link with the `download` attribute: Chrome for Testing 156 reports its response
+with no network request, so the addresses on the way to it cannot be checked. That request also
+carries no network id, which Playwright continues without its route (pinned `coreBundle.js`,
+`CRNetworkManager._onRequestPaused`), so the host's guard is not asked about it before it is sent;
+that is not new with this capture, and only its address is judged before anything is returned. A
+download the owner starts in the same tab during that click cannot be told apart from the agent's.
+Checked headless only (Chrome for Testing 156, Web Store extension 0.5.0 loaded unpacked with
+file-URL access off): GET, cookie-authenticated GET, POST form and a 12 MiB body, plus a real
+editor's GET link and POST form export, were each captured byte-exact, from one server response, and
+Chrome's own file had the same bytes. Chunked, gzip-encoded, 21 MiB and `download`-attribute
+responses were not returned, and Chrome's file still completed. Stable Chrome, a headed session, the
+Web Store install itself, Windows and Linux were not tested.
 
 ## Request guard
 
@@ -300,8 +365,16 @@ the route are not judged; the agent cannot act in that moment.
   setting is lowered below about 50 s, the host's timeout comes first and the approval is lost.
   Other calls are not covered by this bound.
 - **Not offered:** `browser_run_code_unsafe` (it runs arbitrary code inside this server,
-  outside the guard) and `browser_close` (replaced by `browser_disconnect`). Local files
-  can be uploaded only from this server's private session folder, so in practice not.
+  outside the guard) and `browser_close` (replaced by `browser_disconnect`).
+- **Files for a page come only through the host.** `browser_file_upload` and `browser_drop`
+  ask the host's file intake (at most 16 files and 20 MiB per call) and give the page the
+  retained copies, never a path; this server opens no path the agent names. If the host does
+  not answer the intake in the agreed form, nothing is given and the chooser stays open. Real
+  headless extension checks covered Unicode/multiple files, refused-then-valid chooser reuse,
+  page drop, and a PNG saved and reopened in TinyMCE 8.10.1. Its HTTP ZIP exports became Core
+  task artifacts and remained readable after disconnect. These file operations require a Core
+  with task-bound `file_intake` and embedded-resource artifact registration; older Core versions
+  do not gain those capabilities from installing this skill.
 - **Child process:** the only one is Playwright's own `sw_vers -productVersion` on macOS
   when it connects (for its user-agent string). The skill starts no browser or helper.
 - **Files:** a private session folder in the system temp directory, removed when the
@@ -309,16 +382,18 @@ the route are not judged; the agent cannot act in that moment.
   server leaves the folder behind, and nothing removes it later. Upstream keeps a copy of each
   screenshot there, a log of the pages' console messages, and each binary response body
   read with `browser_network_request`. Results do not point at these files: they say the
-  screenshot or image is attached, that a binary body is not returned, or that new console
+  screenshot or image is attached, that a binary body is attached as a resource or is not
+  returned, or that new console
   entries are read with `browser_console_messages`. Also Playwright's temporary artifacts
   folder (removed on disconnect) and, on disconnect, Playwright's attempt to delete a browser
   descriptor it never created under `~/Library/Caches/ms-playwright/b`.
-- **Downloads** are not taken over: the connection sets no download folder
+- **Downloads** are not redirected: the connection sets no download folder
   (`connectOverCDP` with `noDefaults` keeps the browser's own download handling), so
   Chrome saves a page's download where it saves the owner's downloads, and the session
   folder never holds it. In the headless QA, a download the agent's click started and
   one the owner started both landed in Chrome's default Downloads folder and stayed after
-  the session ended. The result of the click does not mention the download.
+  the session ended. A click's result mentions a download only when it was given
+  `captureDownload` (see "Downloads"); a capture keeps a copy and leaves Chrome's file where it is.
 
 ## Provenance
 
