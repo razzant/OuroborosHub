@@ -191,8 +191,8 @@ class Store:
         ``sent``: only the properties this call wrote (as Freshdesk's answer states them), so a colleague's change in
         the same minute is still news; tags added or removed apply to each snapshot's own list. A ticket the watcher
         knows has them folded into its stored and queued snapshot. A ticket it has never read, opened before the
-        connection, is recorded as seen now (the whole answer): taking an old ticket does not wake as "first seen
-        assigned". The update time is left alone, so the next walk still reads the thread and a customer reply that
+        connection, is recorded as seen now (the whole answer) when this call assigned it: taking an old ticket does
+        not wake as "first seen assigned". The update time is left alone, so the next walk still reads the thread and a customer reply that
         came just before is not lost."""
         ticket_id = str(ticket_id)
         added, removed = list(tags_add or []), set(tags_remove or [])
@@ -211,7 +211,10 @@ class Store:
             connected = db.execute("SELECT value FROM meta WHERE key='connected_at'").fetchone()
             cutoff = json.loads(connected["value"]) if connected else ""
             opened = str((answer or {}).get("created_at") or "")
-            if not known and answer and (not cutoff or (opened and _parse(opened) < _parse(cutoff))):
+            # Only a call that assigned the ticket makes it seen: another write leaves it unread, so a colleague's
+            # assignment in the same minute still wakes as "first seen assigned".
+            took = "responder_id" in sent
+            if not known and took and answer and (not cutoff or (opened and _parse(opened) < _parse(cutoff))):
                 seen = {k: v for k, v in answer.items() if k not in ("description", "description_text")}
                 db.execute("INSERT OR IGNORE INTO tickets(id, updated_at, snapshot, first_seen) VALUES(?,?,?,?)",
                            (ticket_id, "", dump(seen), now_iso()))

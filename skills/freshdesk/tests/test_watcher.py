@@ -318,6 +318,17 @@ def test_taking_an_older_ticket_never_read_does_not_wake_as_assigned(fake, desk)
     assert change["message"]["non_text"][0]["description"] == "Priority: Low → High" and change["facts"] == []
 
 
+def test_a_colleague_assigning_an_older_unread_ticket_still_wakes_after_an_own_status_change(fake, desk):
+    old = fake.add_ticket(subject="Backlog", description="from before")
+    long_ago = "2026-01-01T00:00:00Z"
+    fake.tickets[old["id"]].update(created_at=long_ago, updated_at=long_ago)
+    connect(fake, desk)
+    fake.tickets[old["id"]].update(responder_id=ME, updated_at=fake.iso_now())  # a colleague assigns it
+    reply = fake.add_entry(old["id"], body="Still waiting", user_id=501, incoming=True, source=1)
+    assert Sends(desk).update(account_id=HOST, ticket_id=old["id"], status="Pending")["ok"]  # this skill, no agent
+    assert facts(cycle(desk)) == [(f"{old['id']}:entry:{reply['id']}", ["any_message", "assigned"])]
+
+
 def test_an_own_change_made_while_the_ticket_is_processed_is_not_reversed(fake, desk, monkeypatch):
     import freshdesk_lib.watcher as watcher_module
     connect(fake, desk)
