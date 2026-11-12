@@ -73,10 +73,17 @@ the cache nor written to it). Without such a count, or with a write that with
 the known reads exceeds the input total, that unread input is unclassified, like
 input whose reads are unknown: no write is guessed and nothing unknown is called
 uncached. The volume bars stack unclassified input, cache reads, cache writes
-and uncached input, so the parts add up to the input total; the headline shows
-"—" for writes and uncached input when no record reports a write count. Records
-written before 13 Oct 2026 may carry 0 for a count their provider did not
-report. Writes are shown in tokens only; the money is on the core's Costs page,
+and uncached input, so the parts add up to the input total. The headline shows
+"—" for cache writes when no record reports a usable write count and for
+uncached input when no measured record does; each of the two cards names how
+many of the window's records it covers when that is not all of them.
+Known cache writes count every write a record reports and its input can hold,
+like known cache reads, so a write of a record whose reads are unknown is among
+them while its input stays unclassified in the bars; unknown cache writes count
+the records they do not cover. Records
+written by a core older than 7.7.0 may carry 0 for a count their provider did
+not report; such a 0 counts as reported, so that record's unread input is drawn
+as uncached input. Writes are shown in tokens only; the money is on the core's Costs page,
 which counts single model calls by their start time (not harness sessions), so
 its token figures differ from these.
 

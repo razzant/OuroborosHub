@@ -632,7 +632,7 @@ def _aggregate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "uncached_input_tokens": unread - written if counted else None,
         "unclassified_tokens": sum(totals) - cached - unread,
         "write_records": len(counted),
-        "unknown_write_records": len(records) - len(counted),
+        "unknown_write_records": len(records) - len(writes),  # the records known cache writes do not cover
         "unknown_prompt_tokens": sum(totals) - prompt,
         "cache_read_rate": round(cached / prompt * 100, 2) if prompt else None,
         "measured_records": sum(r["measured"] for r in records),

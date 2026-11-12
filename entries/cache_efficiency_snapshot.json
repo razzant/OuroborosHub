@@ -3,7 +3,7 @@
     "ouroboros"
   ],
   "description": "Token and cache dashboard with daily Week/Month/All bars, exact Custom dates, weighted hit rates, cache writes, coverage and automatic archive backfill.",
-  "digest": "c8638b5f66a8fb9297ab0f3db8cbf1d3c0fb4272a259e67f09634d53fd495fac",
+  "digest": "1e343671a725e97e0dfa31806702d6f20a2a3e6bcbf814f004dbb6d784477d2b",
   "name": "cache_efficiency_snapshot",
   "owner": "razzant",
   "schema_version": 2,

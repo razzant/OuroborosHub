@@ -222,7 +222,7 @@ def test_cache_writes_split_the_unread_input_of_measured_records() -> None:
     assert records[3]["cache_write_tokens"] == 30
     response = calculate_analytics(records, timeframe="1H", now=NOW)
     summary = response["summary"]
-    assert (summary["eligible_write_tokens"], summary["write_records"], summary["unknown_write_records"]) == (30, 1, 3)
+    assert (summary["eligible_write_tokens"], summary["write_records"], summary["unknown_write_records"]) == (30, 1, 2)
     assert summary["uncached_input_tokens"] == 100 - 60 - 30  # only a record that reports its writes has uncached input
     # Unknown reads (90) and the unread input of the records without a usable write count (30, 10) are unclassified.
     assert summary["unclassified_tokens"] == 90 + 30 + 10 and summary["unknown_prompt_tokens"] == 90
