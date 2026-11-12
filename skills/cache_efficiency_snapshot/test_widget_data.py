@@ -16,12 +16,13 @@ def fixtures():
         stamp = NOW - timedelta(days=i, minutes=37)
         raw = {"type": "llm_usage", "ts": stamp.isoformat(), "task_id": "synthetic",
                "model": "example/model-one", "provider": "fixture", "prompt_tokens": 1000 + i,
-               "cached_tokens": 600, "ledger_attempt_ids": [str(i)]}
+               "cached_tokens": 600, "cache_write_tokens": 50, "ledger_attempt_ids": [str(i)]}
         records.append(plugin._normalize_usage_event(raw))
-    for i, (total, cached) in enumerate(((2000, None), (None, None), (0, 0), (100, 0), (300, 270))):
+    for i, (total, cached, written) in enumerate(((2000, None, None), (None, None, None), (0, 0, 0), (100, 0, None),
+                                                  (300, 270, 20))):
         records.append(plugin._normalize_usage_event({"ts": (NOW - timedelta(minutes=10+i*5)).isoformat(),
             "provider": "fixture", "model": "example/edge", "prompt_tokens": total,
-            "cached_tokens": cached, "ledger_attempt_ids": ["edge-"+str(i)]}))
+            "cached_tokens": cached, "cache_write_tokens": written, "ledger_attempt_ids": ["edge-"+str(i)]}))
     # Exact source identity must not collapse identical short model labels.
     for i in range(28):
         records.append(plugin._normalize_usage_event({"ts": (NOW - timedelta(minutes=25)).isoformat(),

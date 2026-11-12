@@ -228,8 +228,7 @@ def _normalize_usage_event(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     prompt = _token_count(row.get("prompt_tokens"))
     cached = _token_count(row.get("cached_tokens"))
     write = _token_count(row.get("cache_write_tokens"))
-    if prompt is not None and cached is not None and cached > prompt:
-        cached = None  # Inconsistent measurements are unknown, never clipped or guessed.
+    cached, write = _consistent(prompt, cached, write)
     measured = prompt is not None and cached is not None
     return {
         "ts": stamp, "kind": "attempt", "provider": provider, "model": model,
@@ -548,6 +547,17 @@ def _token_count(value: Any) -> Optional[int]:
     return int(value)
 
 
+def _consistent(prompt: Optional[int], cached: Optional[int],
+                write: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
+    """Counts the input total cannot hold are unknown, never clipped or guessed: reads above the input, or a write
+    that with the known reads exceeds it."""
+    if prompt is not None and cached is not None and cached > prompt:
+        cached = None
+    if prompt is not None and write is not None and write + (cached or 0) > prompt:
+        write = None
+    return cached, write
+
+
 def _normalize_record(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     stamp = _parse_timestamp(row)
     if stamp is None:
@@ -577,8 +587,7 @@ def _normalize_record(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     else:
         prompt = cached = write = None
 
-    if prompt is not None and cached is not None and cached > prompt:
-        cached = None  # Inconsistent measurements are unknown, never clipped or guessed.
+    cached, write = _consistent(prompt, cached, write)
     measured = prompt is not None and cached is not None
     record = {
         "ts": stamp, "kind": kind, "provider": provider, "model": model,
@@ -599,6 +608,12 @@ def _aggregate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     eligible = [r for r in records if r["eligible"]]
     prompt = sum(r["prompt_tokens"] for r in eligible)
     cached = sum(r["cached_tokens"] for r in eligible)
+    # The input a measured record did not read from the cache is what it wrote there plus uncached input. A record
+    # that reports no write count keeps all of its unread input as uncached input and is counted apart; so does a
+    # write its input cannot hold, which an index saved before that rule may still carry.
+    counted = [r for r in eligible if r.get("cache_write_tokens") is not None
+               and r["cached_tokens"] + r["cache_write_tokens"] <= r["prompt_tokens"]]
+    written = sum(r["cache_write_tokens"] for r in counted)
     return {
         "total_records": len(records),
         "request_count": sum(r["kind"] == "attempt" for r in records),
@@ -609,6 +624,10 @@ def _aggregate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "eligible_prompt_tokens": prompt,
         "eligible_cached_tokens": cached,
         "uncached_tokens": prompt - cached,
+        "eligible_write_tokens": written,
+        "uncached_input_tokens": prompt - cached - written,
+        "write_records": len(counted),
+        "unknown_write_records": len(eligible) - len(counted),
         "unknown_prompt_tokens": sum(totals) - prompt,
         "cache_read_rate": round(cached / prompt * 100, 2) if prompt else None,
         "measured_records": sum(r["measured"] for r in records),

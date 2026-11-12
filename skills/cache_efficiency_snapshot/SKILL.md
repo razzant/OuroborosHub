@@ -1,8 +1,8 @@
 ---
 name: cache_efficiency_snapshot
-version: 0.7.0
+version: 0.8.0
 title: Cache Efficiency Snapshot
-description: Token and cache dashboard with exact intraday intervals, daily Week/Month/All bars, Custom dates, weighted cache hit rate, measurement coverage and automatic local archive indexing.
+description: Token and cache dashboard with exact intraday intervals, daily Week/Month/All bars, Custom dates, weighted cache hit rate, cache writes, measurement coverage and automatic local archive indexing.
 type: extension
 runtime: python3
 entry: plugin.py
@@ -35,7 +35,7 @@ requests. An `llm_usage` event carrying a Claudexor run receipt is one whole
 harness session. The core also writes a `delegate_run_ledger_recorded` event for
 every session it records; a session met only there counts with its route and
 time and unknown tokens. `worker_boot` events show when new code started. It
-reports input tokens and cache reads with explicit measurement coverage. It makes
+reports input tokens, cache reads and cache writes with explicit measurement coverage. It makes
 no model calls and changes no task-card accounting. Its only writes are its own
 normalized history index and recoverable copies of an unreadable index.
 
@@ -66,6 +66,16 @@ counters. Other harnesses' session counters do not establish an inclusive total
 (Claude's input excludes cache reads and names no cache writes), so those
 sessions stay unknown, as does a session recorded without a usage event. There
 is no guess based on model names or on which count is larger.
+
+The input of the measured records splits into cache reads, cache writes and
+uncached input (neither read from the cache nor written to it), and the volume
+bars stack these parts with the unclassified input, so they add up to the
+input total. A cache write is what a record reports writing; a record without a
+write count keeps all of its unread input as uncached input and is counted as an
+unknown cache write. A write that with the known reads exceeds the input total is
+unknown, never clipped. OpenAI-style caches report no writes. Writes are shown
+in tokens only: some providers price a written token above an input token, and
+the money stays on the core's Costs page.
 
 Known-token totals exclude unknown records, whose counts remain visible. The
 coverage card counts records with both valid measurements, including measured

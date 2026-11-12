@@ -211,6 +211,37 @@ def test_mixed_coverage_uses_same_eligible_rows_for_numerator_and_denominator() 
     assert records == original
 
 
+def test_cache_writes_split_the_unread_input_of_measured_records() -> None:
+    records = normalized(
+        row(model="written", prompt_tokens=100, cached_tokens=60, cache_write_tokens=30),
+        row(model="no-write-count", prompt_tokens=50, cached_tokens=20, cache_write_tokens=None),
+        row(model="impossible-write", prompt_tokens=40, cached_tokens=30, cache_write_tokens=20),
+        row(model="unknown-read", input_token_usage=measurement(90, None, 30)),
+    )
+    assert records[2]["cache_write_tokens"] is None  # reads and writes above the input: unknown, never clipped
+    assert records[3]["cache_write_tokens"] == 30
+    response = calculate_analytics(records, timeframe="1H", now=NOW)
+    summary = response["summary"]
+    assert (summary["eligible_write_tokens"], summary["write_records"], summary["unknown_write_records"]) == (30, 1, 2)
+    assert summary["uncached_input_tokens"] == 190 - 110 - 30
+    assert summary["uncached_tokens"] == 80  # input not read from the cache, its writes included, as before
+    bucket, = [item for item in response["buckets"] if item["total_records"]]
+    layers = ("eligible_cached_tokens", "eligible_write_tokens", "uncached_input_tokens", "unknown_prompt_tokens")
+    assert sum(bucket[key] for key in layers) == bucket["prompt_tokens"] == 280  # the bars add up to the input
+    rows = {item["model"]: item for item in response["models"]}
+    assert rows["written"]["eligible_write_tokens"] == 30 and rows["written"]["write_records"] == 1
+    assert rows["no-write-count"]["unknown_write_records"] == 1
+    # An index saved before the rule may hold a write its input cannot hold, or no write field at all.
+    stale = dict(records[0], cache_write_tokens=50)
+    bare = {key: value for key, value in records[1].items() if key != "cache_write_tokens"}
+    summary = calculate_analytics([stale, bare], timeframe="1H", now=NOW)["summary"]
+    assert (summary["eligible_write_tokens"], summary["unknown_write_records"]) == (0, 2)
+    assert summary["uncached_input_tokens"] == 70
+    event_write = _normalize_usage_event(event(prompt_tokens=100, cached_tokens=90, cache_write_tokens=20))
+    assert event_write["cache_write_tokens"] is None and event_write["cached_tokens"] == 90
+    assert _normalize_usage_event(event(prompt_tokens=100, cached_tokens=70, cache_write_tokens=30))["cache_write_tokens"] == 30
+
+
 def test_zero_read_zero_volume_unknown_and_idle_are_different() -> None:
     cases = [
         (measurement(100, 0), 0.0, 1, 1, 0),
