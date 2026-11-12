@@ -1,0 +1,23 @@
+{
+  "category": [
+    "messaging",
+    "business"
+  ],
+  "connects": [
+    "Freshdesk"
+  ],
+  "description": "Freshdesk helpdesk tools and place: read and search tickets and the knowledge base, reply to customers and write notes, change fields by name, and hear new tickets, customer replies and teammates' notes.",
+  "digest": "001d02fb3c560402e9053119e6510a18214ef24fe9e4bb67d85de169881a2363",
+  "icon": "ui/icon.svg",
+  "name": "freshdesk",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/freshdesk"
+  },
+  "type": "extension",
+  "version": "0.1.0",
+  "when_to_use": "User wants Ouroboros to work in a Freshdesk helpdesk: read, search or summarize tickets, look up customers or knowledge-base articles, reply to customers, write notes, change ticket fields, or be present in the helpdesk and hear new tickets and replies.",
+  "withdrawn": null
+}

@@ -275,7 +275,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(consumers, {'tests/test_slack_conversation_core_consumer.py', 'tests/test_reaction_core_consumer.py',
                                      'tests/test_gesture_core_consumer.py', 'tests/test_voice_attachment_core_consumer.py',
                                      'tests/test_telegram_bot_media_core_consumer.py',
-                                     'tests/test_telegram_bot_typing_core_consumer.py'})
+                                     'tests/test_telegram_bot_typing_core_consumer.py',
+                                     'tests/test_freshdesk_core_consumer.py'})
         # Every suite that runs one of them requires the core, and no other suite does.
         listing = [suite for suite, spec in ci_checks.SUITES.items() if consumers & set(spec['tests'])]
         required = [suite for suite, spec in ci_checks.SUITES.items()
