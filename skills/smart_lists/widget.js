@@ -124,7 +124,7 @@ dialog::backdrop{background:var(--shade)}
 .dialoghead{display:flex;align-items:center;gap:12px;padding:18px 22px;border-bottom:1px solid var(--line);flex:none}
 .dialoghead .close{margin-left:auto;border-color:transparent;background:none;font-size:20px;line-height:1;padding:5px 9px}
 .badge{font-size:12px;padding:5px 9px;background:var(--well);border-radius:5px;color:var(--muted)}
-.dialogbody{display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:28px;padding:22px;overflow:auto;min-height:0;flex:1}
+.dialogbody{display:grid;grid-template-columns:minmax(0,1fr) 220px;gap:28px;padding:22px;overflow:auto;min-height:0;flex:1 1 auto}
 .dialogbody>section,.dialogbody>aside{min-width:0}
 .titlebox{display:block;width:calc(100% + 14px);margin:-4px -7px 18px;padding:3px 6px;border:1px solid transparent;border-radius:7px;background:none;resize:none;overflow:hidden;font-size:21px;line-height:1.4;font-weight:700}
 .titlebox:hover,.titlebox:focus{border-color:var(--line)}

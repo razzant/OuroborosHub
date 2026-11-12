@@ -1,7 +1,7 @@
 ---
 name: smart_lists
 description: "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and an agent-maintained commitment board with tags, whose turn, next step and source references. No network, purchases or reminders."
-version: 0.6.1
+version: 0.6.2
 type: extension
 runtime: python3
 entry: plugin.py
@@ -261,7 +261,9 @@ the host retains that preference. The default two-column span can otherwise show
 only part of the board, with horizontal scrolling on narrow cards. The four columns
 are To do, In progress, Review and Done; groups remain in storage for legacy
 callers but do not divide the board. Explicit task tags filter all columns
-together. Cards open a full entry, including description and every reference.
+together. Cards open a full entry, including description and every reference. The detail
+window sizes its body from the content and scrolls within the frame between the
+fixed header and footer, avoiding a zero flex-basis collapse in macOS WebKit.
 Archive is a separate view; trash is a separate undoable deletion. The widget
 does not call a model or run a task. The download button returns a complete
 checksummed export. Its outer size remains controlled by the host Widgets layout.

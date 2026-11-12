@@ -364,6 +364,18 @@ def open_card(frame, entry_id):
     card = frame.locator('dialog')
     expect(card).to_be_visible()
     expect(card.get_by_role('button', name='Готово')).to_be_enabled()
+    # Visibility alone also passes for the 44px collapsed body in macOS WKWebView.
+    frame.wait_for_timeout(150)
+    geometry = card.evaluate('''dialog => {
+        const body = dialog.querySelector('.dialogbody').getBoundingClientRect();
+        const head = dialog.querySelector('.dialoghead').getBoundingClientRect();
+        const foot = dialog.querySelector('.dialogfoot').getBoundingClientRect();
+        return {visible: Math.min(body.bottom, foot.top, innerHeight)
+                    - Math.max(body.top, head.bottom, 0),
+                viewport: innerHeight, top: head.top, bottom: foot.bottom};
+    }''')
+    assert geometry['visible'] >= min(240, geometry['viewport'] * .3), geometry
+    assert geometry['top'] >= 0 and geometry['bottom'] <= geometry['viewport'], geometry
     return card
 
 

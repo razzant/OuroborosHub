@@ -3125,8 +3125,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "af0d414d7fe062b14e56c3f5d1a2a7c7cf6f10680ee0c3690d1a24a8dcde2a04",
-          "size": 31424
+          "sha256": "0c48439c62fac48a2b31380e00eac29b047962d0ad71367e088d4809142539fb",
+          "size": 31593
         },
         {
           "path": "entry_details.py",
@@ -3180,14 +3180,14 @@
         },
         {
           "path": "widget.js",
-          "sha256": "de44bd70c54314f1cf8d811f7748eb7806a58bc5a10ede54664e3bd04eea8992",
-          "size": 72773
+          "sha256": "13387c668a018eafedef4b44ed0f4401b8589e529d60e951b986558fe35521b6",
+          "size": 72780
         }
       ],
       "name": "smart_lists",
       "slug": "smart_lists",
       "type": "extension",
-      "version": "0.6.1"
+      "version": "0.6.2"
     },
     {
       "description": "Inspect, filter, sort, group, and aggregate CSV and XLSX tables while reporting truncation and non-numeric values honestly.",
