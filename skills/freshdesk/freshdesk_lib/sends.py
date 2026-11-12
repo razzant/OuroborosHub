@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .client import NOT_SENT, RATE_LIMITED, UNKNOWN, FreshdeskError, canonical_path
-from .events import entry_revision, parse_time
+from .events import WATCHED, entry_revision, parse_time
 from .host import HostUnavailable
 from .reads import ticket_url
 from .service import Service
@@ -173,7 +173,7 @@ class Sends:
                 if readback is not None:
                     try:
                         candidates = [e for e in readback(client, agent, attempted)  # an edit keeps the entry's id
-                                      if records == "edit" or not store.own_entry(e.get("id"))]
+                                      if not store.own_entry(self._own_key(records, e) or e.get("id"))]
                     except FreshdeskError:
                         candidates = []
                 if len(candidates) == 1:
@@ -237,7 +237,8 @@ class Sends:
     def _find_entry(client, ticket_id, agent, attempted, text, *, kind=None, private=None, attachments=0,
                     entry_id=None, before=None) -> list:
         """Readback candidates: entries of ``ticket_id`` by this agent, made after the attempt, of the same kind,
-        visibility and attachment count, with the same words, whole (a shared opening is no proof). For an edit
+        visibility and attachment count, with the same words, whole (a shared opening is no proof); ``text`` is the
+        HTML that was sent, compared with the stored HTML through the same converter (paragraphs and lists too). For an edit
         (``entry_id``), the note must show a revision other than ``before`` (its version before the call) and at
         least the attachments it had plus the new ones. Only a single unclaimed candidate counts as proof."""
         wanted = normalized(text)
@@ -245,11 +246,13 @@ class Sends:
         found = []
         page = client.get(f"tickets/{int(ticket_id)}/conversations", {"per_page": 100})
         while True:
-            for entry in page.data or []:
-                same_words = normalized(entry.get("body_text") or entry.get("body") or "") == wanted
+            for entry in page.data or []:  # both sides through this skill's converter, as HTML
+                same_words = normalized(entry.get("body") or entry.get("body_text") or "") == wanted
                 if entry_id is not None:
                     edited = before is not None and entry_revision(entry) != before["revision"]
+                    editor = str(entry.get("last_edited_user_id") or "")
                     if (str(entry.get("id")) == str(entry_id) and same_words and edited
+                            and (not editor or editor == str(agent["id"]))  # a colleague's edit is not ours
                             and len(entry.get("attachments") or []) >= before["attachments"] + attachments):
                         found.append(entry)
                     continue
@@ -282,7 +285,7 @@ class Sends:
 
         return self._deliver(ctx, tool="freshdesk_reply", request_id=request_id, account_id=account_id,
                              ticket_id=ticket_id, text=text, digest_args=digest_args, call=call,
-                             readback=lambda c, a, t: self._find_entry(c, ticket_id, a, t, text, kind=0, private=False,
+                             readback=lambda c, a, t: self._find_entry(c, ticket_id, a, t, body_html, kind=0, private=False,
                                                                      attachments=len(files)))
 
     # -- freshdesk_note -----------------------------------------------------------------------------------
@@ -334,10 +337,10 @@ class Sends:
             return self._post_words(client, f"tickets/{int(ticket_id)}/notes", body, files, text)
 
         if editing:
-            readback = lambda c, a, t: self._find_entry(c, ticket_id, a, t, text, entry_id=edit_note_id,  # noqa: E731
+            readback = lambda c, a, t: self._find_entry(c, ticket_id, a, t, body_html, entry_id=edit_note_id,  # noqa: E731
                                                          before=before, attachments=len(files))
         else:
-            readback = lambda c, a, t: self._find_entry(c, ticket_id, a, t, text, kind=2, private=not public,  # noqa: E731
+            readback = lambda c, a, t: self._find_entry(c, ticket_id, a, t, body_html, kind=2, private=not public,  # noqa: E731
                                                          attachments=len(files))
         return self._deliver(ctx, tool="freshdesk_note", request_id=request_id, account_id=account_id,
                              ticket_id=ticket_id, text=text, digest_args=digest_args, call=call, readback=readback,
@@ -442,7 +445,7 @@ class Sends:
 
         kind = {"reply": 0, "forward": 8}.get(op)  # a reply to a forward: Freshdesk's examples disagree on its kind
         readback = None if op == "outbound" else (lambda c, a, t: self._find_entry(
-            c, ticket_id, a, t, text, kind=kind, private=False if op == "reply" else None, attachments=len(files)))
+            c, ticket_id, a, t, body_html, kind=kind, private=False if op == "reply" else None, attachments=len(files)))
         return self._deliver(ctx, tool="freshdesk_email", request_id=request_id, account_id=account_id,
                              ticket_id=ticket_id, text=text, digest_args=digest_args, call=call, readback=readback,
                              records="ticket" if op == "outbound" else "entry")
@@ -494,11 +497,14 @@ class Sends:
                                        "failed. Read the ticket before retrying."}
                 applied = all(after.get(k) == v for k, v in body.items() if k != "custom_fields") and all(
                     (after.get("custom_fields") or {}).get(k) == v for k, v in (body.get("custom_fields") or {}).items())
+                if applied:
+                    store.fold_own_change(ticket_id, _watched(after))
                 return {"ok": applied, "code": "applied_after_timeout" if applied else "uncertain",
                         "message": "Freshdesk did not answer; reading the ticket back shows the change "
                                    + ("was applied." if applied else "was not (yet) applied. Read it again before retrying."),
                         "error": exc.as_dict()}
             self.service.note_limits(store, response.limits)
+            store.fold_own_change(ticket_id, _watched(response.data or {}))  # its own change is not news
             catalog = self.service.catalog(client, store)
             ticket = response.data or {}
             return {"ok": True, "ticket_id": ticket.get("id"), "url": ticket_url(client.host, ticket.get("id")),
@@ -553,10 +559,14 @@ class Sends:
             raise FreshdeskError("words_need_typed_tool", "A bulk update that replies carries words; reply per ticket with freshdesk_reply.")
         digest_args = {"method": method, "path": clean_path, "body": body}
 
+        answered: dict = {}
+
         def call(client, agent):
             if method == "DELETE":
                 return client.delete(clean_path)
-            return client.post(clean_path, body) if method == "POST" else client.put(clean_path, body)
+            response = client.post(clean_path, body) if method == "POST" else client.put(clean_path, body)
+            answered["data"] = response.data
+            return response
 
         ticket_in_path = re.match(r"^tickets/(\d+)(?:/|$)", clean_path)
         result = self._deliver(ctx, tool="freshdesk_request", request_id=request_id, account_id=account_id,
@@ -566,7 +576,19 @@ class Sends:
         if result.get("code") == "uncertain":
             result["message"] = ("Freshdesk may have applied this call but did not answer. Inspect the object with "
                                  "freshdesk_get before anything else; this request_id never repeats the call.")
+        ticket = re.fullmatch(r"tickets/(\d+)", clean_path)
+        if method == "PUT" and ticket and result.get("ok") and isinstance(answered.get("data"), dict):
+            store = self.service.store()  # a property change made here is this skill's own, not news
+            try:
+                store.fold_own_change(ticket.group(1), _watched(answered["data"]))
+            finally:
+                store.close()
         return result
+
+
+def _watched(ticket: dict) -> dict:
+    """The properties the watcher compares, as this answer states them."""
+    return {key: ticket[key] for key, _, _ in WATCHED if isinstance(ticket, dict) and key in ticket}
 
 
 def _need(value, name: str) -> None:

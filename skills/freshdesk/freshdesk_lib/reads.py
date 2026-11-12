@@ -94,20 +94,29 @@ class Reads:
              agent=None, type=None, tag=None, created_after=None, created_before=None, updated_after=None,
              updated_before=None, due_before=None, custom_fields=None, requester_email=None, requester_id=None,
              company_id=None, view=None, updated_since=None, page: int = 1) -> dict:
+        listing = any(v not in (None, "") for v in (requester_email, requester_id, company_id, view, updated_since))
+        searching = bool(query) or bool(custom_fields) or any(v not in (None, "") for v in (
+            status, priority, group, agent, type, tag, created_after, created_before, updated_after, updated_before,
+            due_before))
+        if listing and searching:  # Freshdesk has no single call for both; never drop a filter silently
+            raise FreshdeskError("filters_conflict", "Freshdesk lists tickets by requester, company, view or "
+                                 "updated_since, and searches by properties (status, priority, group, agent, "
+                                 "type, tag, dates, custom fields, query), but not both in one call. List by "
+                                 "requester and read each ticket's status in the result, or search by the "
+                                 "properties without the requester. Nothing was read.")
         client = self.service.client()
         self.service.check_account(client, account_id)
         store = self.service.store()
         try:
             catalog = self.service.catalog(client, store)
             page = max(1, int(page or 1))
-            listing = any(v not in (None, "") for v in (requester_email, requester_id, company_id, view, updated_since))
             if listing:
                 params = {"email": requester_email, "requester_id": requester_id, "company_id": company_id,
                           "filter": view, "updated_since": updated_since, "order_by": "updated_at",
                           "order_type": "desc", "per_page": 30, "page": page}
                 response = client.get("tickets", params)
-                rows, total, note = response.data or [], None, ("Without updated_since Freshdesk lists only tickets "
-                                                                "created in the last 30 days.")
+                rows, total = response.data or [], None
+                note = None if updated_since else "Without updated_since Freshdesk lists only tickets created in the last 30 days."
             else:
                 text = query.strip() if query else self._compile(catalog, client, store, status=status,
                                                                   priority=priority, group=group, agent=agent,

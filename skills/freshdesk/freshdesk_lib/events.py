@@ -197,6 +197,7 @@ def ticket_events(ctx: Context, ticket: dict, previous: dict | None, entries: li
                                       "attachments": _attachments(ticket)},
                              facts=facts, conversation=conversation))
     wrote_before = own_ticket
+    edited_own = {key.partition(":")[0] for key in own_entries if ":" in key and not key.startswith("ticket:")}
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     for entry in sorted(entries, key=lambda e: (parse_time(e.get("created_at")) or epoch, int(e.get("id") or 0))):
         entry_id = str(entry.get("id"))
@@ -206,13 +207,16 @@ def ticket_events(ctx: Context, ticket: dict, previous: dict | None, entries: li
         is_new = entry_id not in known
         edited = not is_new and known.get(entry_id) != revision
         report = ((is_new and not own and ctx.after_connection(entry.get("created_at")))
-                  or (edited and f"{entry_id}:{revision}" not in own_entries))
+                  or (edited and ctx.after_connection(revision) and f"{entry_id}:{revision}" not in own_entries))
+        # This agent wrote in the ticket when it wrote this entry, or edited it (through this skill or as itself).
+        participated = (author == ctx.agent_id or own or entry_id in edited_own
+                        or str(entry.get("last_edited_user_id") or "") == ctx.agent_id)
         if report:
-            wrote = wrote_before or (edited and (author == ctx.agent_id or own))  # an edit of this agent's own entry
+            wrote = wrote_before or (edited and participated)  # an edit of an entry this agent wrote or edited
             events.append(_entry_event(ctx, ticket, base, entry, revision=revision, edited=edited,
                                        wrote_before=wrote, assigned=pending_assigned, conversation=conversation))
             pending_assigned = False
-        if author == ctx.agent_id or own:
+        if participated:
             wrote_before = True
 
     if previous is not None:

@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS dirty (ticket_id TEXT PRIMARY KEY, updated_at TEXT NO
     snapshot TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS inbox (source_event_id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL, seq INTEGER NOT NULL,
     event TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'ready', response TEXT NOT NULL DEFAULT '{}',
-    due REAL NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0);
+    due REAL NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, connection TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS inbox_ready ON inbox(state, ticket_id, seq);
 CREATE TABLE IF NOT EXISTS refs (ref TEXT PRIMARY KEY, source_event_id TEXT NOT NULL, ticket_id TEXT NOT NULL,
     kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', due REAL NOT NULL DEFAULT 0,
@@ -148,6 +148,9 @@ class Store:
                        "WHERE request_id=?",
                        (state, str(provider_id or ""), dump(result or {}), now_iso(), str(ticket_id or ""),
                         str(ticket_id or ""), "pending" if report and state != "not_sent" else "none", request_id))
+            # A receipt names its conversation: a call that ended with no ticket (an outbound email whose answer
+            # was lost) has none to report into.
+            db.execute("UPDATE journal SET report_state='none' WHERE request_id=? AND ticket_id=''", (request_id,))
             if own_key and state in ("delivered", "accepted"):
                 row = db.execute("SELECT ticket_id FROM journal WHERE request_id=?", (request_id,)).fetchone()
                 db.execute("INSERT OR IGNORE INTO sent_entries(entry_id,ticket_id,request_id) VALUES(?,?,?)",
@@ -172,6 +175,19 @@ class Store:
     def interrupted_sends(self) -> list[dict]:
         """Claims left ``sending`` by a process that ended mid-call: their outcome is unknown."""
         return [self.journal_row(r) for r in self.rows("SELECT * FROM journal WHERE state='sending'")]
+
+    def fold_own_change(self, ticket_id, values: dict) -> None:
+        """A property change this skill made, folded into the stored and the queued snapshot of a ticket the watcher
+        already knows, so it never comes back as news. The update time is left alone: the next walk still lists the
+        ticket and reads its thread, so a customer reply that came just before is not lost."""
+        if not values:
+            return
+        with self.transaction() as db:
+            for table, key in (("tickets", "id"), ("dirty", "ticket_id")):
+                row = db.execute(f"SELECT snapshot FROM {table} WHERE {key}=?", (str(ticket_id),)).fetchone()
+                if row is not None:
+                    snapshot = {**json.loads(row["snapshot"] or "{}"), **values}
+                    db.execute(f"UPDATE {table} SET snapshot=? WHERE {key}=?", (dump(snapshot), str(ticket_id)))
 
     def mark_own(self, key: str, ticket_id: str, request_id: str) -> None:
         """One more key for what a call wrote (an edit as the listing shows it), never reported back as news."""

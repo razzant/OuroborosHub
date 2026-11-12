@@ -43,12 +43,13 @@ Ticket text is sent to the model provider this Ouroboros installation uses.
   decides.
 - Just before each call that sends or changes something, the skill asks Ouroboros whether the place is Silent or
   Paused; if so, nothing is sent.
-- When longer work on a ticket ends with a final answer, the answer is posted on the ticket as a private note.
-  Customers receive only what Ouroboros explicitly sends with the reply or email tools. An answer that finishes
+- When longer work on a ticket ends with a final answer, the answer is posted on the ticket as a private note. This
+  skill addresses customers only through the reply and email tools; a public note is shown to the requester, and the
+  helpdesk's own notifications can still mail a customer when a ticket is opened or resolved. An answer that finishes
   while the place is Silent or Paused stays with you in the room (Circles) as a held reply and is not posted later;
   work begun before the place was removed is never posted.
-- Its own replies, notes and the tickets it opens (outbound emails) never come back to it as news; a customer's
-  answer to them is a reply on a ticket it wrote in.
+- Its own replies, notes, note edits, property changes and the tickets it opens (outbound emails) never come back to
+  it as news; a customer's answer to them is a reply on a ticket it wrote in.
 - The watcher checks Freshdesk once a minute (30–600 s) while the place is connected and spends at most a
   configurable share (25 % by default) of the account's per-minute API limit, which the helpdesk's other
   integrations share. It finds new entries because Freshdesk moves a ticket's `updated_at`; a change made and
@@ -62,11 +63,11 @@ On the first helpdesk this runs against:
 1. Before connecting the place, ask Ouroboros to write one private note, edit it and send one reply on a test
    ticket whose requester is your own address. The tools work without a place; a Silent place would hold them.
 2. Connect the place and keep it Silent for a while. Compare what the place shows with the helpdesk: a new ticket,
-   a customer reply, a private note that notifies the agent and an assignment should each appear. If a customer
-   reply never appears, Freshdesk did not move the ticket's `updated_at` for it; please report that, with the
-   ticket's timeline, as an issue in this repository.
-3. Make the place Active, have Ouroboros write and edit one more note on the test ticket, and check that neither
-   comes back to it as news.
+   a customer reply, a private note that notifies the agent and an assignment should each appear, and no earlier
+   reply should come back later as an edit. If a customer reply never appears, Freshdesk did not move the ticket's
+   `updated_at` for it; please report that, with the ticket's timeline, as an issue in this repository.
+3. Make the place Active, have Ouroboros write and edit one more note and change the test ticket's status, and
+   check that none of these comes back to it as news.
 
 ## Tests
 

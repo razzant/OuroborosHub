@@ -224,6 +224,9 @@ class FakeFreshdesk:
             return self._answer(handler, 429, {"message": "Rate limit exceeded"},
                                 {"Retry-After": str(fault.get("retry_after", 2))})
         if fault and fault["kind"] == "server":
+            if fault.get("meanwhile"):  # something else happens in the helpdesk while this call fails
+                with self.lock:
+                    fault["meanwhile"]()
             return self._answer(handler, 500, {"message": "Internal error"})
         if fault and fault["kind"] == "slow":
             time.sleep(fault.get("seconds", 3))
@@ -291,13 +294,14 @@ class FakeFreshdesk:
                 entry = next((e for rows in self.conversations.values() for e in rows if e["id"] == int(edit.group(1))), None)
                 if entry is None:
                     return 404, {"message": "Not found"}, {}
-                text = re.sub(r"<[^>]+>", "", str(body.get("body") or ""))
+                raw = str(body.get("body") or "")
+                text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw)).strip()
                 moment = iso(self.tick())
                 added = [{"id": 71000 + n, "name": f["name"], "size": f["size"], "content_type": "text/plain"}
                          for n, f in enumerate(body.get("_files") or [])]
                 # As Freshdesk documents it: the listing shows the edit in last_edited_at (updated_at stays), and the
                 # answer to the PUT carries neither last_edited_at nor last_edited_user_id.
-                entry.update(body=f"<div>{text}</div>", body_text=text, last_edited_at=moment,
+                entry.update(body=f"<div>{raw}</div>", body_text=text, last_edited_at=moment,
                              last_edited_user_id=ME, attachments=list(entry.get("attachments") or []) + added)
                 self.tickets[entry["ticket_id"]]["updated_at"] = moment
                 return 200, {k: v for k, v in entry.items() if k not in ("last_edited_at", "last_edited_user_id")}, {}
@@ -408,7 +412,8 @@ class FakeFreshdesk:
                 return 400, {"description": "Validation failed", "errors": [{
                     "field": "body", "code": "invalid_value",
                     "message": "Use structured_body for a webchat or mobile SDK ticket"}]}, {}
-            text = re.sub(r"<[^>]+>", "", str(body.get("body") or ""))
+            raw = str(body.get("body") or "")  # Freshdesk keeps the HTML it was sent; body_text flattens it
+            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw)).strip()
             if "structured_body" in body:
                 structured = body["structured_body"]
                 structured = json.loads(structured) if isinstance(structured, str) else structured
@@ -428,6 +433,8 @@ class FakeFreshdesk:
                 requester = self.contacts.get(ticket["requester_id"], {})
                 entry = self.add_entry(ticket_id, body=text, user_id=user, incoming=False,
                                        private=False, source=0, to_emails=[requester.get("email")], attachments=files)
+            if raw:
+                entry["body"] = f"<div>{raw}</div>"
             return 201, dict(entry), {}
         raise KeyError(action)
 

@@ -289,6 +289,24 @@ def test_an_unapplied_note_edit_is_no_proof_and_an_applied_one_is(tools, fake, t
     assert applied["ok"] is True and "readback" in applied["note"]
 
 
+def test_a_colleagues_edit_during_a_failed_edit_is_no_proof(tools, fake, tmp_path):
+    _, sends, _ = tools
+    ticket = fake.add_ticket(subject="A", description="b")
+    note = fake.add_entry(ticket["id"], body="Draft handoff", user_id=ME, incoming=False, private=True, source=2)
+    mine = tmp_path / "mine.txt"
+    mine.write_text("mine")
+
+    def colleague_edits():  # same words, a new revision and an attachment, by someone else
+        entry = fake.conversations[ticket["id"]][0]
+        entry.update(last_edited_at=fake.iso_now(), last_edited_user_id=9002,
+                     attachments=[{"id": 72000, "name": "colleague.txt", "size": 9, "content_type": "text/plain"}])
+
+    fake.fault("PUT", r"/conversations/\d+$", "server", meanwhile=colleague_edits)
+    result = sends.note(account_id=HOST, ticket_id=ticket["id"], text="Draft handoff", request_id="c-9",
+                        edit_note_id=note["id"], attachment_paths=[str(mine)])
+    assert result["code"] == "uncertain" and result["candidates"] == []
+
+
 def test_a_place_made_silent_during_the_reads_holds_the_edit(tools, fake):
     _, sends, service = tools
     ticket = fake.add_ticket(subject="A", description="b")
@@ -441,3 +459,35 @@ def test_a_different_helpdesk_in_account_id_is_refused(tools, fake):
     with pytest.raises(FreshdeskError) as caught:
         sends.reply(account_id="other.freshdesk.com", ticket_id=ticket["id"], text="x", request_id="x-1")
     assert caught.value.code == "account_mismatch" and fake.conversations[ticket["id"]] == []
+
+
+def test_find_refuses_to_drop_filters_freshdesk_cannot_combine(tools, fake):
+    reads, _, _ = tools
+    before = len(fake.requests)
+    with pytest.raises(FreshdeskError) as caught:
+        reads.find(account_id=HOST, status="Open", requester_email="customer.one@example.com")
+    assert caught.value.code == "filters_conflict" and len(fake.requests) == before
+    listed = reads.find(account_id=HOST, requester_email="customer.one@example.com", updated_since="2026-01-01T00:00:00Z")
+    assert listed["ok"] and listed["note"] is None
+
+
+def test_a_multi_paragraph_reply_is_found_by_readback(tools, fake):
+    _, sends, _ = tools
+    ticket = fake.add_ticket(subject="Refund", description="please")
+    fake.fault("POST", r"/reply$", "drop_after_apply")
+    result = sends.reply(account_id=HOST, ticket_id=ticket["id"], request_id="m-p",
+                         text="Thank you for waiting.\n\n- the first charge is refunded\n- the second charge is refunded")
+    assert result["ok"] is True and "readback" in result["note"]
+
+
+def test_an_uncertain_outbound_email_queues_no_receipt(tools, fake):
+    _, sends, service = tools
+    fake.fault("POST", r"/outbound_email$", "server")
+    result = sends.email(account_id=HOST, op="outbound", to_emails=["customer.two@example.org"], subject="Order",
+                         text="It shipped.", request_id="o-u", email_config_id=4001)
+    assert result["code"] == "uncertain"
+    store = service.store()
+    try:
+        assert store.journal("o-u")["report_state"] == "none"  # no conversation to report it into
+    finally:
+        store.close()

@@ -125,28 +125,28 @@ ticket number). The watcher checks Freshdesk every minute while the place is con
 - other property changes (status, priority, group, tags…): no words and no wake; a focus working on that ticket
   hears them as background. Choosing "Any ticket activity" wakes on them too.
 
-Tickets and entries from before the connection are history: they appear in the thread, never as new events. A
-place removed and connected again is a new connection. What this skill itself sent, and tickets it opened (an
-outbound email, a created ticket), never come back as arrivals; a reply on such a ticket is `my_thread`. A ticket a
-colleague opened by outbound email starts with the helpdesk's words, not the customer's. Customer entries are marked
-unauthenticated (an email sender is not verified). The watcher finds new entries because Freshdesk moves a ticket's
-`updated_at`; a change made and reverted between two checks is not seen. A ticket deleted or moved out of this
-agent's scope before it was read is skipped and noted in `freshdesk_status`.
-This version is checked against a faithful stand-in of Freshdesk's API, not yet against a live helpdesk.
+Tickets and entries from before the connection are history: they appear in the thread, never as new events. A place
+removed and connected again is a new connection. What this skill itself sent, its note edits and property changes,
+and tickets it opened (an outbound email, a created ticket), never come back as arrivals; a reply on such a ticket is
+`my_thread`. A ticket a colleague opened by outbound email starts with the helpdesk's words, not the customer's.
+Customer entries are marked unauthenticated (an email sender is not verified). The watcher finds new entries because
+Freshdesk moves a ticket's `updated_at`; a change made and reverted between two checks is not seen. A ticket deleted
+or moved out of this agent's scope before it was read is skipped and noted in `freshdesk_status`. This version is
+checked against a faithful stand-in of Freshdesk's API, not yet against a live helpdesk.
 
 ## Words and changes
 
-- `freshdesk_reply` emails the ticket's requester (and the ticket's existing CCs). `freshdesk_note` writes a
-  private note, or a public one with `public=true`; to mail agents about it pass their emails in `notify` with
+- `freshdesk_reply` emails the ticket's requester (and the ticket's existing CCs). `freshdesk_note` writes a private
+  note, or a public one with `public=true`; to mail agents about it pass their emails in `notify` with
   `audience="notify"`; `edit_note_id` edits a note and keeps who sees it (say `public=true` for a public note).
   `freshdesk_email` sends with explicit recipients: a reply that adds cc/bcc (a reply always goes to the requester:
   to write to someone else use a forward), a forward, a reply to a forward (to_emails only), or an outbound email
   that opens a new ticket from the mailbox `email_config_id` names (`freshdesk_ticket` shows a ticket's
-  `email_config_id`). A recipient Freshdesk would drop is refused, never ignored. Customers hear only what these
-  tools send. When longer work on a ticket ends with a final answer, that answer is posted on the ticket as a
-  private note, not emailed. An answer that finishes while the place is Silent or Paused is held: it stays with the
-  owner in the room and is not posted later. Work begun before the place was removed is never posted, even after
-  it is connected again.
+  `email_config_id`). A recipient Freshdesk would drop is refused, never ignored. This skill addresses customers only
+  through these tools (a public note is shown to the requester; the helpdesk's own notifications may also mail). When
+  longer work on a ticket ends with a final answer, that answer is posted on the ticket as a private note, not
+  emailed. An answer that finishes while the place is Silent or Paused is held: it stays with the owner in the room
+  and is not posted later. Work begun before the place was removed is never posted, even after it is connected again.
 - Every call that sends or changes something takes `account_id` (the helpdesk address) and, for words, a
   `request_id` you keep for that exact message. Repeating it returns the recorded outcome and never sends twice.
 - `uncertain` means Freshdesk may have applied the call but did not answer. Read the ticket before anything else;

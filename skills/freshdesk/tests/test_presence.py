@@ -194,12 +194,18 @@ def test_an_event_offered_when_the_companion_ended_is_offered_again(wired):
     companion = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(companion)
     presence, host, _, store = wired
+    store.set_meta("connected_at", "2026-01-05T09:00:00Z")  # the connection that heard it still stands
     queue(store, "a1", 1, 1)
-    store.db.execute("UPDATE inbox SET state='submitting'")
+    store.db.execute("UPDATE inbox SET state='submitting', connection='2026-01-05T09:00:00Z'")
     companion.recover(store, starting=True)
     presence.dispatch()
     drain(presence)
     assert [t["event"]["source_event_id"] for t in host.turns] == ["a1"]
+    queue(store, "b1", 2, 2)  # a companion that ends after its connection ended: the event ends with it
+    store.db.execute("UPDATE inbox SET state='submitting' WHERE source_event_id='b1'")
+    store.db.execute("DELETE FROM meta WHERE key='connected_at'")
+    companion.recover(store, starting=True)
+    assert store.one("SELECT state FROM inbox WHERE source_event_id='b1'")["state"] == "ended"
 
 
 def test_a_released_output_is_posted_once_as_a_private_note_and_reported(wired, fake):
@@ -427,3 +433,29 @@ def test_a_removed_place_offers_nothing_and_ends_answers_that_settle_late(wired)
     cycle(presence, store)
     assert {r["state"] for r in store.rows("SELECT state FROM inbox")} == {"ended"} and host.turns == []
     assert store.meta("connection_ended")["events_not_offered"] == 4
+
+
+def test_an_event_whose_place_went_away_is_not_offered(wired, fake):
+    presence, host, _, store = wired
+    bound(presence, host)
+    ticket = fake.add_ticket(subject="Refund", description="please")
+    queue(store, "e1", ticket["id"], 1)
+    host.state = "unbound"  # removed between the cycle's place read and this offer
+    presence.dispatch()
+    drain(presence)
+    row = store.one("SELECT state, due FROM inbox WHERE source_event_id='e1'")
+    assert host.turns == [] and row["state"] == "ready" and row["due"] > time.time()
+
+
+def test_an_answer_that_returns_after_a_reconnect_is_not_offered_again(wired):
+    presence, host, _, store = wired
+    store.set_meta("connected_at", "2026-01-05T09:00:00Z")
+    queue(store, "a1", 1, 1)
+    host.answers["a1"] = (429, {"ok": False, "code": "presence_capacity_full", "disposition": "retry"})
+    presence.dispatch()
+    store.set_meta("connected_at", "2026-01-05T10:00:00Z")  # removed and connected again while the turn ran
+    drain(presence)
+    assert store.one("SELECT state FROM inbox WHERE source_event_id='a1'")["state"] == "ended"
+    presence.dispatch()
+    drain(presence)
+    assert [t["event"]["source_event_id"] for t in host.turns] == ["a1"]  # offered once, never again

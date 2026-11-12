@@ -50,8 +50,9 @@ def recover(store: Store, *, starting: bool = False) -> None:
     was offering when it ended go back to the head of their ticket (the host keeps a resent event's identity)."""
     from datetime import datetime, timezone
 
-    if starting:
-        store.db.execute("UPDATE inbox SET state='ready', due=0 WHERE state='submitting'")
+    if starting:  # without a connection now, what was being offered belonged to one that ended
+        store.db.execute("UPDATE inbox SET state=?, due=0 WHERE state='submitting'",
+                         ("ready" if store.meta("connected_at") else "ended",))
     cutoff = time.time() - STALE_SENDING_SECONDS
     for row in store.interrupted_sends():
         try:

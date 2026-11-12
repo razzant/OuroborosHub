@@ -88,13 +88,16 @@ class Presence:
             try:
                 binding = self._bind(row["ticket_id"])
             except HostUnavailable:  # offer it once the host answers again
+                binding = None
+            if binding is None or '"unbound"' in binding:  # no host now, or the place went away just now
                 self.store.db.execute("UPDATE inbox SET due=? WHERE source_event_id=?",
                                       (time.time() + 5, row["source_event_id"]))
                 continue
             payload = {"event": json.loads(row["event"]), "staged_files": [], "continuation_version": 2,
                        "delivery_reporting_version": 1}
-            self.store.db.execute("UPDATE inbox SET state='submitting', attempts=attempts+1 WHERE source_event_id=?",
-                                  (row["source_event_id"],))
+            self.store.db.execute("UPDATE inbox SET state='submitting', attempts=attempts+1, connection=? "
+                                  "WHERE source_event_id=?",
+                                  (self.store.meta("connected_at") or "", row["source_event_id"]))
             self.inflight[self.pool.submit(self.host.turn, payload)] = (row["source_event_id"], row["ticket_id"],
                                                                          binding)
             busy.add(row["ticket_id"])
@@ -120,6 +123,14 @@ class Presence:
             state, due = "ready", time.time() + retry
         else:
             state, due = "accepted", 0
+        if state in ("ready", "blocked"):  # to be offered again: only while the connection that heard it lasts
+            offered = self.store.one("SELECT connection FROM inbox WHERE source_event_id=?", (event_id,))
+            if offered is not None and offered["connection"] != (self.store.meta("connected_at") or ""):
+                state, due = "ended", 0
+                self.store.resolve(f"event:{event_id}")
+                ended = self.store.meta("connection_ended") or {}
+                self.store.set_meta("connection_ended", {**ended, "events_not_offered":
+                                                         int(ended.get("events_not_offered") or 0) + 1})
         if state in ("accepted", "retained"):
             self.store.resolve(f"event:{event_id}")
             refs, outputs = self._refs(data), self._outputs(event_id, data)
@@ -228,6 +239,8 @@ class Presence:
                 result = {"ok": False, "code": "place_unknown"}
             except Exception as exc:  # a refused argument or a store error: keep it visible, never resend blindly
                 result = {"ok": False, "code": type(exc).__name__}
+            if not result.get("code") and result.get("recorded"):
+                result = {**result, "code": result.get("state")}  # a call recorded earlier states its outcome
             if result.get("ok"):
                 state = "delivered"
                 self.store.resolve(f"output:{row['output_ref']}")  # an earlier hold of it is over

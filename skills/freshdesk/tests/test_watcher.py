@@ -270,6 +270,50 @@ def test_a_colleagues_edit_of_a_note_this_skill_wrote_is_news(fake, desk):
     assert event["facts"] == ["any_message", "my_thread", "mention"] and event["text"] == "STOP: legal hold"
 
 
+def test_editing_a_colleagues_note_makes_the_ticket_one_this_agent_wrote_in(fake, desk):
+    connect(fake, desk)
+    ticket = fake.add_ticket(subject="Refund", description="please")
+    note = fake.add_entry(ticket["id"], body="Customer called", user_id=LEAD, incoming=False, private=True, source=2)
+    assert len(cycle(desk)) == 2
+    assert Sends(desk).note(account_id=HOST, ticket_id=ticket["id"], text="Customer called twice", request_id="n-9",
+                            edit_note_id=note["id"])["ok"]
+    assert cycle(desk) == []  # its own edit is not news
+    answer = fake.add_entry(ticket["id"], body="Any update?", user_id=501, incoming=True, source=1)
+    assert facts(cycle(desk)) == [(f"{ticket['id']}:entry:{answer['id']}", ["any_message", "my_thread"])]
+
+
+def test_this_skills_own_property_change_is_not_news_but_a_colleagues_is(fake, desk):
+    connect(fake, desk)
+    ticket = fake.add_ticket(subject="Refund", description="please", status=2)
+    assert len(cycle(desk)) == 1
+    answer = fake.add_entry(ticket["id"], body="Any news?", user_id=501, incoming=True, source=1)
+    assert Sends(desk).update(account_id=HOST, ticket_id=ticket["id"], agent="me", status="Pending")["ok"]
+    events = cycle(desk)  # the customer's reply that came just before still arrives; the own change does not
+    assert facts(events) == [(f"{ticket['id']}:entry:{answer['id']}", ["any_message"])]
+    fake.tickets[ticket["id"]].update(priority=4, updated_at=fake.iso_now())
+    [change] = cycle(desk)
+    assert change["message"]["non_text"][0]["description"] == "Priority: Low → Urgent"
+
+
+def test_an_edit_made_while_no_place_was_connected_is_history(fake, desk):
+    connect(fake, desk)
+    ticket = fake.add_ticket(subject="A", description="b")
+    note = fake.add_entry(ticket["id"], body="Draft", user_id=LEAD, incoming=False, private=True, source=2)
+    assert len(cycle(desk)) == 2
+    store = desk.store()
+    try:
+        assert disconnect(store) is True
+    finally:
+        store.close()
+    edited_at = fake.iso_now()
+    fake.conversations[ticket["id"]][0].update(body_text="Final", body="<div>Final</div>", last_edited_at=edited_at,
+                                               last_edited_user_id=LEAD)
+    fake.tickets[ticket["id"]]["updated_at"] = edited_at
+    fake.settle()
+    assert cycle(desk) == []  # the new connection's cutoff makes that edit history
+    assert note["id"]
+
+
 def test_a_removed_place_ends_the_events_it_had_not_handed_over(fake, desk):
     connect(fake, desk)
     fake.add_ticket(subject="One", description="a")
