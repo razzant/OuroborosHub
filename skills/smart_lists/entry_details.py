@@ -4,6 +4,7 @@ from urllib.parse import urlsplit
 
 FIELDS = {"tags", "turn", "next_step", "references", "note", "capture_key"}
 TURNS = ("unassigned", "owner", "agent", "other")
+MAX_DETAILS_CHARS = 128000
 
 
 def text(value, maximum):
@@ -30,8 +31,8 @@ def tags(value):
 def clean(value):
     if not isinstance(value, dict) or set(value) - FIELDS:
         raise ValueError("unknown entry details fields")
-    if len(json.dumps(value, ensure_ascii=False)) > 4000:
-        raise ValueError("entry details exceed 4000 characters in total")
+    if len(json.dumps(value, ensure_ascii=False)) > MAX_DETAILS_CHARS:
+        raise ValueError(f"entry details exceed {MAX_DETAILS_CHARS} characters in total")
     result = {}
     for key, item in value.items():
         if key == "tags":
@@ -41,8 +42,8 @@ def clean(value):
                 raise ValueError("turn must be unassigned, owner, agent or other")
             result[key] = item
         elif key == "references":
-            if not isinstance(item, list) or len(item) > 12:
-                raise ValueError("references must contain at most 12 objects")
+            if not isinstance(item, list) or len(item) > 100:
+                raise ValueError("references must contain at most 100 objects")
             refs = []
             for ref in item:
                 if not isinstance(ref, dict) or set(ref) != {"label", "target"}:
@@ -71,4 +72,4 @@ def matches(entry, selected_tags, tag_mode, turn, query):
         return False
     if turn and detail.get("turn", "unassigned") != turn:
         return False
-    return not query or query.casefold() in (entry["text"] + " " + detail.get("next_step", "") + " " + detail.get("note", "")).casefold()
+    return not query or query.casefold() in (entry["text"] + " " + entry.get("description", "") + " " + detail.get("next_step", "") + " " + detail.get("note", "")).casefold()

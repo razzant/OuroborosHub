@@ -4,7 +4,7 @@ import copy
 import json
 from unittest import mock
 from starlette.datastructures import QueryParams
-from test_smart_lists import SkillCase, FakeRequest
+from test_smart_lists import SkillCase, FakeRequest, downgrade_entries
 
 
 class AgentDetailsTests(SkillCase):
@@ -56,7 +56,7 @@ class AgentDetailsTests(SkillCase):
 
     def test_schema3_read_only_upgrade_preserves_bloom_and_records(self):
         self.add('Work','Old text')
-        doc=json.loads(self.store_bytes());doc['schema_version']=3
+        doc=downgrade_entries(json.loads(self.store_bytes()),3)
         core=self.module.lists_core
         bits = core._bloom_decode(doc['retired_requests'])
         core._bloom_add(bits, core._request_digest('old-request'))
@@ -70,7 +70,7 @@ class AgentDetailsTests(SkillCase):
         eid=next(iter(doc['entries']))
         self.ok('update',entry_id=eid,details={'turn':'owner'})
         after=json.loads(self.store_bytes())
-        self.assertEqual(after['schema_version'],4)
+        self.assertEqual(after['schema_version'],5)
         self.assertEqual(after['retired_requests'],before['retired_requests'])
         self.assertEqual(after['groups'],before['groups'])
         self.assertEqual(after['entries'][eid]['text'],'Old text')
@@ -94,16 +94,17 @@ class AgentDetailsTests(SkillCase):
         before=self.store_bytes()
         result=asyncio.run(self.api.routes['board']['handler'](request))
         self.assertTrue(result['ok'],result)
-        self.assertEqual((len(result['entries']),result['total']),(100,100))
+        self.assertEqual((len(result['stages']['todo']['entries']),result['stages']['todo']['total']),(100,100))
         self.assertEqual(result['revision']['generation'],json.loads(before)['generation'])
         self.assertEqual(before,self.store_bytes())
         self.assertEqual(result['available_tags'],['keep','skip'])
-        self.assertEqual(result['filter_groups'][0]['name'],'Work')
+        self.assertNotIn('filter_groups',result)
 
     def test_merge_total_size_validation(self):
         entry=self.capture(note='n'*1000,next_step='x'*1000)['added'][0]
         before=self.store_bytes()
-        self.refused('update','invalid_input',entry_id=entry['id'],details={'references':[{'label':'L','target':'https://example.org/'+('x'*950)}]*3})
+        with mock.patch.object(self.module.lists_core.entry_details, 'MAX_DETAILS_CHARS', 4000):
+            self.refused('update','invalid_input',entry_id=entry['id'],details={'references':[{'label':'L','target':'https://example.org/'+('x'*950)}]*3})
         self.assertEqual(before,self.store_bytes())
 
     def test_trash_only_tag_available_beyond_first_page(self):
@@ -120,7 +121,7 @@ class AgentDetailsTests(SkillCase):
         ids=self.add('Work','open','done','trash')
         self.ok('complete',entry_ids=[ids[1]])
         self.ok('delete',entry_ids=[ids[2]])
-        doc=json.loads(self.store_bytes());doc['schema_version']=3
+        doc=downgrade_entries(json.loads(self.store_bytes()),3)
         raw=json.dumps(doc,ensure_ascii=False,indent=1).encode()
         self.state_dir.joinpath('store.json').write_bytes(raw)
         meta_path=self.state_dir/'store_meta.json';meta=json.loads(meta_path.read_text())
@@ -128,6 +129,9 @@ class AgentDetailsTests(SkillCase):
         self.ok('read',status='all');self.assertEqual(raw,self.store_bytes())
         self.ok('group',action='create',name='Another')
         after=json.loads(self.store_bytes())
-        self.assertEqual(after['entries'],doc['entries'])
+        for eid, old in doc['entries'].items():
+            self.assertEqual(after['entries'][eid]['text'],old['text'])
+            self.assertEqual(after['entries'][eid]['stage'],'done' if old['status']=='done' else 'todo')
+            self.assertEqual(after['entries'][eid].get('details'),old.get('details'))
         self.assertEqual(after['requests'],doc['requests'])
         self.assertEqual(after['retired_requests'],doc['retired_requests'])

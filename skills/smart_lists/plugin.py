@@ -145,21 +145,78 @@ def tool_add(ctx: Any = None, **args: Any) -> str:
 
 
 def tool_read(ctx: Any = None, **args: Any) -> str:
-    return _run_tool(args, ("group", "status", "subtree", "limit", "offset", "tags", "tag_mode", "turn", "query"), lambda a: _service().read(
+    return _run_tool(args, ("group", "status", "subtree", "limit", "offset", "tags", "tag_mode", "turn", "query", "archive"), lambda a: _service().read(
         group=a.get("group", ""), status=a.get("status", "open"), subtree=a.get("subtree", True),
         limit=a.get("limit", 100), offset=a.get("offset", 0), tags=a.get("tags"),
-        tag_mode=a.get("tag_mode", "all"), turn=a.get("turn", ""), query=a.get("query", "")))
+        tag_mode=a.get("tag_mode", "all"), turn=a.get("turn", ""), query=a.get("query", ""),
+        archive=a.get("archive", "all")))
+
+
+def tool_entry(ctx: Any = None, **args: Any) -> str:
+    """Lossless field pages; never pass a complete card through _tool_json truncation."""
+    def call(a: Dict[str, Any]) -> Dict[str, Any]:
+        field, offset = a.get("field", "overview"), a.get("offset", 0)
+        if field not in ("overview", "text", "due", "tags", "description", "note", "next_step", "capture_key", "references", "group_path"):
+            raise ListError("invalid_input", "invalid entry field")
+        if type(offset) is not int or offset < 0 or offset > lists_core.MAX_GROUPS * (lists_core.MAX_NAME_CHARS + 3):
+            raise ListError("invalid_input", "invalid entry offset")
+        read = _service().read_entry(a.get("entry_id"))
+        entry = read["entry"]
+        details = entry["details"]
+        common = {"id": entry["id"], "field": field, "revision": read["revision"]}
+        if field == "overview":
+            return {**common, "entry": {key: entry[key] for key in ("id", "stage", "status", "group_id", "source", "created_at", "updated_at", "completed_at", "archived_at", "deleted_at")},
+                    "turn": details["turn"], "due_at": (entry["due"] or {}).get("at"),
+                    "text_length": len(entry["text"]), "due_length": len((entry["due"] or {}).get("raw", "")),
+                    "tag_count": len(details["tags"]),
+                    "description_length": len(entry["description"]),
+                    "group_path_length": len(entry["group_path"]),
+                    "reference_count": len(details["references"])}
+        if field == "tags":
+            value = details["tags"]
+        elif field == "references":
+            value = details["references"]
+        elif field == "due":
+            value = (entry["due"] or {}).get("raw", "")
+        elif field in ("text", "description", "group_path"):
+            value = entry[field]
+        else:
+            value = details.get(field, "")
+        # A control character may occupy six escaped JSON bytes. Pages stay
+        # below the host's 15 KB result cap for every valid field value.
+        size = 1 if field in ("tags", "references") else 500
+        part = value[offset:offset + size]
+        return {**common, "value": part, "offset": offset,
+                "next_offset": min(len(value), offset + len(part)), "total": len(value)}
+
+    try:
+        unknown = set(args) - {"entry_id", "field", "offset"}
+        if unknown:
+            raise ListError("invalid_input", f"unsupported arguments {sorted(unknown)}")
+        payload = {"ok": True, **call(args)}
+    except ListError as exc:
+        payload = {"ok": False, "error": exc.as_dict()}
+    rendered = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if len(rendered.encode("utf-8")) > MAX_TOOL_RESULT_BYTES:
+        return json.dumps({"ok": False, "error": {"code": "response_limit", "message": "entry field page exceeds tool limit"}})
+    return rendered
 
 
 def tool_update(ctx: Any = None, **args: Any) -> str:
-    return _run_tool(args, ("entry_id", "text", "due", "clear_due", "request_id", "details"), lambda a: _service().update(
+    return _run_tool(args, ("entry_id", "text", "due", "clear_due", "request_id", "details", "stage", "description", "expected"), lambda a: _service().update(
         a.get("entry_id"), text=a.get("text"), due=a.get("due"), clear_due=a.get("clear_due", False),
-        request_id=a.get("request_id"), details=a.get("details")))
+        request_id=a.get("request_id"), details=a.get("details"), stage=a.get("stage"),
+        description=a.get("description"), expected=a.get("expected")))
 
 
 def tool_complete(ctx: Any = None, **args: Any) -> str:
     return _run_tool(args, ("entry_ids", "done", "request_id"), lambda a: _service().complete(
         a.get("entry_ids"), done=a.get("done", True), request_id=a.get("request_id")))
+
+
+def tool_archive(ctx: Any = None, **args: Any) -> str:
+    return _run_tool(args, ("entry_id", "archived", "expected", "request_id"), lambda a: _service().archive(
+        a.get("entry_id"), a.get("archived"), a.get("expected"), request_id=a.get("request_id")))
 
 
 def tool_move(ctx: Any = None, **args: Any) -> str:
@@ -225,7 +282,7 @@ _DETAILS = {
         "next_step": {"type": "string", "maxLength": 1000},
         "note": {"type": "string", "maxLength": 1000, "description": "Current factual context or completion/cancellation evidence; not an invented status."},
         "capture_key": {"type": "string", "maxLength": 200, "description": "Stable identity chosen for ONE obligation, not an entire thread. Reuse across digest runs; capture_exists names the existing entry, including done/trash. Never change the key to bypass that result."},
-        "references": {"type": "array", "maxItems": 12, "items": {
+        "references": {"type": "array", "maxItems": 100, "items": {
             "type": "object", "additionalProperties": False, "required": ["label", "target"],
             "properties": {"label": {"type": "string", "maxLength": 120}, "target": {"type": "string", "maxLength": 1000, "description": "Observed HTTP(S) URL, task:<id> or exact row: address. No guessed task UI URLs."}}}},
     },
@@ -257,6 +314,8 @@ TOOLS = (
                             "text": {"type": "string", "description": "One item, verbatim."},
                             "due": _DUE,
                             "details": _DETAILS,
+                            "stage": {"type": "string", "enum": list(lists_core.STAGES)},
+                            "description": {"type": "string", "maxLength": lists_core.MAX_DESCRIPTION_CHARS},
                         },
                         "required": ["text"],
                         "additionalProperties": False,
@@ -285,6 +344,7 @@ TOOLS = (
             "properties": {
                 "group": {"type": "string", "description": "Optional. " + _GROUP_REF + " Omit for all groups."},
                 "status": {"type": "string", "enum": ["open", "done", "deleted", "all"], "default": "open"},
+                "archive": {"type": "string", "enum": ["all", "active", "archived"], "default": "all"},
                 "subtree": {"type": "boolean", "default": True, "description": "Include descendant groups."},
                 "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
                 "tag_mode": {"type": "string", "enum": ["all", "any"], "default": "all"},
@@ -295,6 +355,16 @@ TOOLS = (
             },
             "additionalProperties": False,
         },
+    ),
+    (
+        "entry",
+        tool_entry,
+        "Smart Lists: lossless full-card field pages. Read overview, then page text, due, tags, description, note, next_step, capture_key, group_path and references by next_offset until total. Compare revision on every page; if it changes, restart the read. Never replace references using a shortened read result.",
+        {"type": "object", "properties": {
+            "entry_id": {"type": "string"},
+            "field": {"type": "string", "enum": ["overview", "text", "due", "tags", "description", "note", "next_step", "capture_key", "references", "group_path"], "default": "overview"},
+            "offset": {"type": "integer", "minimum": 0, "default": 0}},
+         "required": ["entry_id"], "additionalProperties": False},
     ),
     (
         "update",
@@ -308,6 +378,9 @@ TOOLS = (
                 "due": _DUE,
                 "clear_due": {"type": "boolean", "default": False},
                 "details": _DETAILS,
+                "stage": {"type": "string", "enum": list(lists_core.STAGES)},
+                "description": {"type": "string", "maxLength": lists_core.MAX_DESCRIPTION_CHARS},
+                "expected": {"type": "object", "description": "Optional prior values for exactly the updated fields; use for replacing metadata after a fresh full entry read."},
                 "request_id": _REQUEST_ID,
             },
             "required": ["entry_id"],
@@ -329,6 +402,17 @@ TOOLS = (
             "required": ["entry_ids"],
             "additionalProperties": False,
         },
+    ),
+    (
+        "archive",
+        tool_archive,
+        "Smart Lists: archive or restore one task without changing its stage or deleting it. Read entry first and pass expected.archived_at from that read; an overlapping change is refused.",
+        {"type": "object", "properties": {
+            "entry_id": {"type": "string"}, "archived": {"type": "boolean"},
+            "expected": {"type": "object", "properties": {"archived_at": {"type": ["string", "null"]}},
+                         "required": ["archived_at"], "additionalProperties": False},
+            "request_id": _REQUEST_ID},
+         "required": ["entry_id", "archived", "expected", "request_id"], "additionalProperties": False},
     ),
     (
         "move",
@@ -619,12 +703,29 @@ def _query(request: Any, name: str) -> str:
         return ""
 
 
+def _query_tags(request: Any) -> list:
+    params = request.query_params
+    if hasattr(params, "getlist"):
+        return params.getlist("tag")
+    value = params.get("tag", [])
+    return value if isinstance(value, list) else ([value] if value else [])
+
+
 async def route_view(request: Any) -> Dict[str, Any]:
     return await asyncio.to_thread(widget_view)
 
 
 async def route_edit(request: Any) -> Dict[str, Any]:
     body = await _json_body(request)
+    if "changes" in body:
+        try:
+            result = await asyncio.to_thread(_service().edit_fields, body.get("entry_id"),
+                                             body.get("changes"), body.get("expected"),
+                                             request_id=body.get("request_id"))
+            return {"ok": True, "entry": result["entry"], "changed": result["changed"],
+                    "replayed": result.get("replayed", False)}
+        except ListError as exc:
+            return {"ok": False, "code": exc.code, "error": exc.message, "conflicts": exc.fields}
     return await asyncio.to_thread(_widget_mutation, lambda service: service.edit(
         body.get("entry_id"), text=body.get("text") or "", due=body.get("due") or "",
         clear_due=_truthy(body.get("clear_due")), status=body.get("status") or "",
@@ -705,12 +806,47 @@ def widget_board(group="", status="open", tags=None, tag_mode="all", turn="", qu
     return {"ok": True, **result}
 
 
+async def route_entry(request: Any) -> Dict[str, Any]:
+    try:
+        return {"ok": True, **await asyncio.to_thread(_service().read_entry, _query(request, "entry_id"))}
+    except ListError as exc:
+        return {"ok": False, "code": exc.code, "error": exc.message}
+
+
+async def route_archive(request: Any) -> Dict[str, Any]:
+    body = await _json_body(request)
+    try:
+        result = await asyncio.to_thread(_service().archive, body.get("entry_id"), body.get("archived"),
+                                         body.get("expected"), request_id=body.get("request_id"))
+        return {"ok": True, "entry": result["entry"], "replayed": result.get("replayed", False)}
+    except ListError as exc:
+        return {"ok": False, "code": exc.code, "error": exc.message, "conflicts": exc.fields}
+
+
+async def route_archive_view(request: Any) -> Dict[str, Any]:
+    try:
+        result = await asyncio.to_thread(_service().kanban, archive=True,
+            tags=_query_tags(request), turn=_query(request, "turn"), query=_query(request, "query"),
+            offsets={"archive": int(_query(request, "offset") or "0")},
+            limit=int(_query(request, "limit") or "100"))
+        return {"ok": True, **result}
+    except (ValueError, ListError) as exc:
+        return {"ok": False, "code": exc.code if isinstance(exc, ListError) else "invalid_input",
+                "error": exc.message if isinstance(exc, ListError) else "Invalid filter"}
+
+
+async def route_archive_dispatch(request: Any) -> Dict[str, Any]:
+    return await (route_archive(request) if request.method == "POST" else route_archive_view(request))
+
+
 async def route_board(request: Any) -> Dict[str, Any]:
     try:
-        tags = request.query_params.getlist("tag")
-        return await asyncio.to_thread(widget_board, _query(request, "group"), _query(request, "status") or "open",
-            tags, _query(request, "tag_mode") or "all", _query(request, "turn"), _query(request, "query"),
-            int(_query(request, "offset") or "0"))
+        tags = _query_tags(request)
+        offsets = {stage: int(_query(request, "offset_" + stage) or "0") for stage in lists_core.STAGES}
+        result = await asyncio.to_thread(_service().kanban, tags=tags, turn=_query(request, "turn"),
+                                         query=_query(request, "query"), offsets=offsets,
+                                         limit=int(_query(request, "limit") or "100"))
+        return {"ok": True, **result}
     except (ValueError, ListError) as exc:
         return {"ok": False, "code": exc.code if isinstance(exc, ListError) else "invalid_input",
                 "error": exc.message if isinstance(exc, ListError) else "Invalid filter"}
@@ -779,6 +915,8 @@ ROUTES = (
     ("export", route_export, ("GET",)),
     ("today", route_today, ("GET",)),
     ("board", route_board, ("GET",)),
+    ("entry", route_entry, ("GET",)),
+    ("archive", route_archive_dispatch, ("GET", "POST")),
     ("check", route_check, ("POST",)),
     ("add", route_add, ("POST",)),
 )
@@ -794,7 +932,7 @@ WIDGET_RENDER: Dict[str, Any] = {
 
 
 def register(api: Any) -> None:
-    """PluginAPI entry point: one store, nine tools, nine routes, one widget."""
+    """PluginAPI entry point: one store, eleven tools, twelve routes, one widget."""
     global _SERVICE
     _SERVICE = lists_core.SmartLists(Path(api.get_state_dir()))
     for name, handler, description, schema in TOOLS:
@@ -802,7 +940,7 @@ def register(api: Any) -> None:
     for path, handler, methods in ROUTES:
         api.register_route(path, handler, methods=methods)
     api.register_ui_tab("lists", "Smart Lists", icon="📋", render=WIDGET_RENDER)
-    api.log("info", "smart_lists registered: local store, 9 tools, 9 routes, Today widget")
+    api.log("info", "smart_lists registered: local store, 11 tools, 12 routes, Kanban widget")
 
 
 __all__ = ["register"]
