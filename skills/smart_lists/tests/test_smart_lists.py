@@ -238,7 +238,7 @@ class RegistrationTests(SkillCase):
 
     def test_widget_uses_a_reviewed_module_and_registered_routes(self):
         render = self.api.tabs["lists"]["render"]
-        self.assertEqual(render, {"kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host", "span": 2, "height": 560})
+        self.assertEqual(render, {"kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host", "span": 2, "height": 940})
         self.assertTrue((SKILL_DIR / render["entry"]).is_file())
 
     def test_today_is_a_projection_and_checkbox_uses_existing_completion(self):

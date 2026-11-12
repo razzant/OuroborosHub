@@ -1,7 +1,7 @@
 ---
 name: smart_lists
 description: "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and an agent-maintained commitment board with tags, whose turn, next step and source references. No network, purchases or reminders."
-version: 0.6.0
+version: 0.6.1
 type: extension
 runtime: python3
 entry: plugin.py
@@ -33,7 +33,7 @@ ui_tab:
     start: auto
     appearance: host
     span: 2
-    height: 560
+    height: 940
 ---
 
 # Smart Lists
@@ -245,17 +245,20 @@ Unknown arguments are refused rather than ignored.
 | `read` | Group tree and paginated entries; historical `status` open/done/deleted/all, plus `archive` all/active/archived. A summary can be shortened to fit the tool response cap. |
 | `entry` | Lossless card read. `overview` gives identity, stage, timestamps and field counts; page `text`, `due`, `tags`, `description`, `references`, `group_path`, `note`, `next_step` and `capture_key` with `next_offset`. Each page carries the store revision. Restart if it changes during a multi-page read. Read every reference page before replacing links. |
 | `update` | Edit text/due/stage/description or merge supplied details fields of one entry. `expected` may supply the prior values of exactly those fields for conflict detection. Arrays replace the entire array; a fresh `entry` read and `expected.details.references` are required practice before replacing existing links. |
-| `complete` | Mark entries Done, or reopen them to To do with `done: false`. |
+| `complete` | Mark entries Done; `done: false` reopens Done to To do and leaves already-open stages unchanged. |
 | `archive` | Archive or restore one task without changing its stage, using `expected.archived_at` from a fresh entry read. |
 | `move` | Move entries to another group. |
 | `delete` | `action` `delete` (to the trash), `undo`, or `erase` (trashed entries only, permanent). |
 | `group` | `create`, `rename`, `move` (never under its own descendant) or `delete` (empty groups only) a group. |
-| `select` | Read-only open entries of a group and all its descendants in tree order; `limit` ≤ 500 and `offset` page through them. Returns shown count, total, truncation flag and `next_offset`; e.g. to prepare a shopping run. |
+| `select` | Read-only active, non-archived open entries of a group and all its descendants in tree order; `limit` ≤ 500 and `offset` page through them. Returns shown count, total, truncation flag and `next_offset`; e.g. to prepare a shopping run. |
 | `store` | `status`, `init`, `export` or `restore` (`file`, `replace`) the whole store. |
 
 ## Widget
 
-The module widget requests a wide card and fixed-height frame. The four columns
+The module widget requests a 940px-high frame and the widest supported default span.
+For a desktop overview choose **Widget options → Size → Full width** once;
+the host retains that preference. The default two-column span can otherwise show
+only part of the board, with horizontal scrolling on narrow cards. The four columns
 are To do, In progress, Review and Done; groups remain in storage for legacy
 callers but do not divide the board. Explicit task tags filter all columns
 together. Cards open a full entry, including description and every reference.
@@ -279,7 +282,10 @@ The new widget uses these exact JSON shapes:
 `POST check` retains its entry id, boolean done and request-id contract. Older `GET today` (including local-day rollover),
 `GET view`, `POST edit`, `POST group`, `GET select`, `POST store`, `GET export`
 and composer `POST add` stay supported. No task runner or Slack API is called
-by these routes.
+by these routes. Legacy `today` and `view` exclude explicitly archived entries before
+counts and pagination; `select` excludes them too. Their entry rows retain `stage`
+and `archived_at`. The old Today date-based completed-history section remains distinct
+from explicit task archival; `read(archive="all")` still includes both active and archived entries.
 
 ## Agent-maintained commitments
 
@@ -378,6 +384,9 @@ requests; the widget itself never reads the host's private task database.
   host's 15k cap). Oversized summary arrays carry `result_counts` with total, shown
   and truncated; read/select expose `next_offset` to continue. Long scalar
   fields are shortened only when needed and named in `truncated_fields`.
+  Nested reference/tag summaries also carry path-keyed `result_counts`; use the
+  lossless `entry` field pages for the complete arrays. Tool summaries never replace
+  a full card read when preparing an expected-value edit.
 
 ## Boundaries
 

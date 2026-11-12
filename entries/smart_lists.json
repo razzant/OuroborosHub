@@ -2,8 +2,8 @@
   "category": [
     "planning"
   ],
-  "description": "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders.",
-  "digest": "c6215c526fe7779cfabbe6b5346c5ba58baf0cada426d3b7d381b7e7b4ac0be6",
+  "description": "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a four-column kanban widget with tags, expandable cards and a separate task archive. No network, purchases or reminders.",
+  "digest": "e8ec33bb6d75558e6d1be26a2b4001441c016e8bc99903d38dcf6d15cc0c5e67",
   "name": "smart_lists",
   "owner": "kazzand",
   "schema_version": 2,
@@ -12,6 +12,6 @@
     "path": "skills/smart_lists"
   },
   "type": "extension",
-  "version": "0.5.0",
+  "version": "0.6.1",
   "withdrawn": null
 }

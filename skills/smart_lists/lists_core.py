@@ -1099,12 +1099,13 @@ def _replay_known_request(doc: Dict[str, Any], op: str, fingerprint: str, reques
     return None
 
 
-def _tree_rows(doc: Dict[str, Any], root_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def _tree_rows(doc: Dict[str, Any], root_id: Optional[str] = None, *, active_only: bool = False) -> List[Dict[str, Any]]:
     paths = _paths(doc)
     grouped = _entries_by_group(doc)
     rows = []
     for group, depth in _tree_order(doc, root_id):
-        entries = grouped.get(group["id"], [])
+        entries = [entry for entry in grouped.get(group["id"], [])
+                   if not active_only or not entry.get("archived_at") or entry.get("deleted_at")]
         live = [entry for entry in entries if not entry.get("deleted_at")]
         rows.append({
             "id": group["id"],
@@ -1875,7 +1876,7 @@ class SmartLists:
                     entry["details"] = merged
                     entry["updated_at"] = _now()
                     changed.append("details")
-            return {"op": "update", "entry": _entry_view(_entry(doc, entry_ids[0]), _paths(doc)), "changed": changed}
+            return {"op": "update", "entry": _full_entry(_entry(doc, entry_ids[0]), _paths(doc)), "changed": changed}
 
         return self.store.mutate("update", params, apply, request_id)
 
@@ -1956,7 +1957,7 @@ class SmartLists:
                     changed.append("status")
             if target is not None and _op_move(doc, ids, target, now)[0]:
                 changed.append("group")
-            return {"op": "edit", "entry": _entry_view(_entry(doc, ids[0]), _paths(doc)), "changed": changed}
+            return {"op": "edit", "entry": _full_entry(_entry(doc, ids[0]), _paths(doc)), "changed": changed}
 
         return self.store.mutate("edit", params, apply, request_id)
 
@@ -2279,7 +2280,7 @@ class SmartLists:
         return self.store.read(view)
 
     def select(self, group: Any, *, offset: Any = 0, limit: Any = MAX_READ_LIMIT) -> Dict[str, Any]:
-        """Read-only: open entries of a group and all its descendants, in tree order."""
+        """Read-only: active open entries of a group and its descendants, in tree order."""
         ref = _ref_text(group)
         if not _is_int(offset) or not 0 <= offset <= MAX_ENTRIES:
             raise _invalid(f"offset must be an integer from 0 to {MAX_ENTRIES}")
@@ -2293,10 +2294,10 @@ class SmartLists:
             order = _tree_order(doc, root["id"])
             entries = [
                 {"entry_id": entry["id"], "text": entry["text"], "group_path": paths[group["id"]],
-                 "due": entry.get("due")}
+                 "due": entry.get("due"), "stage": entry["stage"], "archived_at": entry.get("archived_at")}
                 for group, _depth in order
                 for entry in grouped.get(group["id"], [])
-                if _status(entry) == "open" and not entry.get("deleted_at")
+                if _status(entry) == "open" and not entry.get("deleted_at") and not entry.get("archived_at")
             ]
             total = len(entries)
             return {
@@ -2315,11 +2316,11 @@ class SmartLists:
 
     def overview(self, *, open_limit: int = 200, done_limit: int = 50, deleted_limit: int = 50) -> Dict[str, Any]:
         def view(doc: Dict[str, Any]) -> Dict[str, Any]:
-            rows = _tree_rows(doc)
+            rows = _tree_rows(doc, active_only=True)
             grouped = _entries_by_group(doc)
             paths = _paths(doc)
             ordered = [entry for row in rows for entry in grouped.get(row["id"], [])]
-            live = [entry for entry in ordered if not entry.get("deleted_at")]
+            live = [entry for entry in ordered if not entry.get("deleted_at") and not entry.get("archived_at")]
             open_entries = [entry for entry in live if _status(entry) == "open"]
             done_entries = sorted(
                 (entry for entry in live if _status(entry) == "done"),

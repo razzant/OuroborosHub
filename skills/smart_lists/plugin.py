@@ -97,6 +97,31 @@ def _tool_json(payload: Dict[str, Any]) -> str:
             if key == "groups":
                 result["groups_truncated"] = True
             continue
+        # One card may contain 100 short references: no individual string needs
+        # shortening, but their combined JSON still exceeds the tool budget.
+        nested_arrays = []
+
+        def arrays(node: Any, path: str = "") -> None:
+            if isinstance(node, dict):
+                for field, value in node.items():
+                    child = f"{path}.{field}" if path else field
+                    if field in {"references", "tags"} and isinstance(value, list) and value:
+                        nested_arrays.append((node, field, value, child))
+                    elif isinstance(value, (dict, list)) and field not in {"result_counts", "truncated_fields"}:
+                        arrays(value, child)
+            elif isinstance(node, list):
+                for index, value in enumerate(node):
+                    arrays(value, f"{path}[{index}]")
+
+        arrays(result)
+        if nested_arrays:
+            parent, field, values, path = max(nested_arrays,
+                key=lambda item: len(json.dumps(item[2], ensure_ascii=False).encode("utf-8")))
+            count = counts.setdefault(path, {"total": len(values), "shown": len(values), "truncated": False})
+            del values[len(values) // 2:]
+            count.update(shown=len(values), truncated=True)
+            result["full_entry_reader"] = "entry(entry_id=<id>, field=<field>, offset=0); follow next_offset"
+            continue
         # A path can contain hundreds of group names. Bound scalar values too.
         strings = []
 
@@ -452,7 +477,7 @@ TOOLS = (
     (
         "select",
         tool_select,
-        "Smart Lists: read-only selection of the open entries in a group and all of its sub-groups, in tree order, "
+        "Smart Lists: read-only selection of active, non-archived open entries in a group and all of its sub-groups, in tree order, "
         "for example to prepare a shopping run. Returns at most 500 entries with total, truncated and "
         "next_offset; pass next_offset as offset to fetch the next page. "
         "It never buys, orders, reminds or changes anything.",
@@ -521,6 +546,7 @@ def _entry_rows(entries: Iterable[Dict[str, Any]], stamp: Optional[Tuple[str, st
     rows = []
     for entry in entries:
         row = {"id": entry["id"], "item": entry["text"], "group": entry["group_path"],
+               "stage": entry["stage"], "archived_at": entry.get("archived_at"),
                "due": (entry.get("due") or {}).get("raw", "")}
         if stamp:
             row[stamp[0]] = entry.get(stamp[1]) or ""
@@ -661,6 +687,7 @@ def widget_selection(group: Any) -> Dict[str, Any]:
         return {"ok": False, "error": exc.message, "warning": exc.message, "scope": "", "count": 0, "total": 0,
                 "truncated": False, "rows": []}
     rows = [{"id": entry["entry_id"], "item": entry["text"], "group": entry["group_path"],
+             "stage": entry["stage"], "archived_at": entry.get("archived_at"),
              "due": (entry.get("due") or {}).get("raw", "")} for entry in result["entries"]]
     warning = (f"Showing the first {result['count']} of {result['total']} open entries."
                if result["truncated"] else "")
@@ -927,7 +954,7 @@ EXPORT_FILENAME = "smart-lists-export.json"
 # Mirrored verbatim in SKILL.md ``ui_tab.render``; a test keeps the two equal.
 WIDGET_RENDER: Dict[str, Any] = {
     "kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host",
-    "span": 2, "height": 560,
+    "span": 2, "height": 940,
 }
 
 
