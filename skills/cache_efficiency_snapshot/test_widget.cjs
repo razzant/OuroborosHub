@@ -58,7 +58,7 @@ const facts = [];
    assert.equal(await page.locator('.bar-unknown[data-tokens="2000"]').count(),1);
    assert.equal(await page.locator('.bar-write[data-tokens="20"]').count(),1);
    assert.equal(await page.locator('.bar-write[data-tokens="50"]').count(),1);
-   assert.match(await page.locator('[data-chart="volume"] [data-pick]').filter({has:page.locator('.bar-write[data-tokens="20"]')}).getAttribute('aria-label'),/20 written to cache/);
+   assert.match(await page.locator('[data-chart="volume"] [data-pick]').filter({has:page.locator('.bar-write[data-tokens="20"]')}).getAttribute('aria-label'),/20 known cache writes/);
    assert.equal(await page.locator('.code-mark').count(),1);
    assert.match(await root.innerText(),/2 unknown cache reads/);
    const selected=fixtures['1H'].buckets.find(b=>b.unknown_prompt_tokens===2000);

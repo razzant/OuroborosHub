@@ -227,6 +227,7 @@ def test_cache_writes_split_the_unread_input_of_measured_records() -> None:
     # Unknown reads (90) and the unread input of the records without a usable write count (30, 10) are unclassified.
     assert summary["unclassified_tokens"] == 90 + 30 + 10 and summary["unknown_prompt_tokens"] == 90
     assert summary["uncached_tokens"] == 80  # input not read from the cache, its writes included, as before
+    assert summary["cache_write_tokens"] == 30 + 30  # every known write, the unclassified record's included, as reads
     bucket, = [item for item in response["buckets"] if item["total_records"]]
     layers = ("unclassified_tokens", "eligible_cached_tokens", "eligible_write_tokens", "uncached_input_tokens")
     assert sum(bucket[key] for key in layers) == bucket["prompt_tokens"] == 280  # the bars add up to the input

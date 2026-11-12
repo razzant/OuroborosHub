@@ -605,6 +605,8 @@ def _aggregate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     """One arithmetic owner for headlines, route rows and time buckets."""
     totals = [r["prompt_tokens"] for r in records if r["prompt_tokens"] is not None]
     reads = [r["cached_tokens"] for r in records if r["cached_tokens"] is not None]
+    writes = [r["cache_write_tokens"] for r in records if r.get("cache_write_tokens") is not None and (
+        r["prompt_tokens"] is None or r["cache_write_tokens"] + (r["cached_tokens"] or 0) <= r["prompt_tokens"])]
     eligible = [r for r in records if r["eligible"]]
     prompt = sum(r["prompt_tokens"] for r in eligible)
     cached = sum(r["cached_tokens"] for r in eligible)
@@ -622,6 +624,7 @@ def _aggregate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "other_count": sum(r["kind"] not in ("attempt", "subscription_session") for r in records),
         "prompt_tokens": sum(totals) if totals else None,
         "cached_tokens": sum(reads) if reads else None,
+        "cache_write_tokens": sum(writes) if writes else None,  # every known write, as known reads count every read
         "eligible_prompt_tokens": prompt,
         "eligible_cached_tokens": cached,
         "uncached_tokens": prompt - cached,
