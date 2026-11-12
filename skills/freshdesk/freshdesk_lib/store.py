@@ -173,6 +173,12 @@ class Store:
         """Claims left ``sending`` by a process that ended mid-call: their outcome is unknown."""
         return [self.journal_row(r) for r in self.rows("SELECT * FROM journal WHERE state='sending'")]
 
+    def mark_own(self, key: str, ticket_id: str, request_id: str) -> None:
+        """One more key for what a call wrote (an edit as the listing shows it), never reported back as news."""
+        if key:
+            self.db.execute("INSERT OR IGNORE INTO sent_entries(entry_id,ticket_id,request_id) VALUES(?,?,?)",
+                            (str(key), str(ticket_id or ""), request_id))
+
     def own_entry(self, entry_id) -> bool:
         return self.one("SELECT 1 FROM sent_entries WHERE entry_id=?", (str(entry_id),)) is not None
 

@@ -295,10 +295,12 @@ class FakeFreshdesk:
                 moment = iso(self.tick())
                 added = [{"id": 71000 + n, "name": f["name"], "size": f["size"], "content_type": "text/plain"}
                          for n, f in enumerate(body.get("_files") or [])]
-                entry.update(body=f"<div>{text}</div>", body_text=text, updated_at=moment, last_edited_at=moment,
+                # As Freshdesk documents it: the listing shows the edit in last_edited_at (updated_at stays), and the
+                # answer to the PUT carries neither last_edited_at nor last_edited_user_id.
+                entry.update(body=f"<div>{text}</div>", body_text=text, last_edited_at=moment,
                              last_edited_user_id=ME, attachments=list(entry.get("attachments") or []) + added)
                 self.tickets[entry["ticket_id"]]["updated_at"] = moment
-                return 200, dict(entry), {}
+                return 200, {k: v for k, v in entry.items() if k not in ("last_edited_at", "last_edited_user_id")}, {}
             match = re.fullmatch(r"tickets/(\d+)(?:/(\w+))?", p)
             if match:
                 return self._ticket_route(method, int(match.group(1)), match.group(2), body, query, path)

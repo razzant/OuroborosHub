@@ -381,3 +381,49 @@ def test_an_invalid_binding_is_a_verdict_and_an_outage_is_not():
     assert verdict.check({"version": 1}, HOST, "1", "1")["code"] == "place_binding_invalid"
     with pytest.raises(HostUnavailable):
         answering(503, {"ok": False}).check({"version": 1}, HOST, "1", "1")
+
+
+def companion_module():
+    spec = importlib.util.spec_from_file_location("freshdesk_companion_cycle", ROOT / "scripts" / "watcher.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_hold_made_during_an_active_cycle_goes_out_on_the_next(wired, fake):
+    presence, host, _, store = wired
+    cycle = companion_module().presence_cycle
+    ticket = fake.add_ticket(subject="A", description="b")
+    store.db.execute("INSERT INTO outputs(output_ref, ticket_id, text, source_event_id) VALUES('o-5', ?, 'Text', 'e5')",
+                     (str(ticket["id"]),))
+    flips = iter(["silent"])  # the owner made the place Silent right after this cycle read it as Active
+    helpdesk_wide = host.place
+
+    def place(account_id, conversation_id="", thread_id=""):
+        state = next(flips, None) if conversation_id else None
+        return {"state": state, "label": "Freshdesk"} if state else helpdesk_wide(account_id, conversation_id, thread_id)
+
+    host.place = place
+    assert cycle(presence, store) == "active"
+    assert store.one("SELECT state FROM outputs WHERE output_ref='o-5'")["state"] == "held"
+    assert cycle(presence, store) == "active"  # Active again: released on this very next cycle
+    assert [e["body_text"] for e in fake.conversations[ticket["id"]]] == ["Text"]
+
+
+def test_a_removed_place_offers_nothing_and_ends_answers_that_settle_late(wired):
+    presence, host, _, store = wired
+    cycle = companion_module().presence_cycle
+    store.set_meta("connected_at", "2026-01-05T09:00:00Z")
+    queue(store, "a1", 1, 1)
+    queue(store, "a2", 1, 2)
+    queue(store, "b1", 2, 3)
+    queue(store, "c1", 3, 4)
+    store.db.execute("UPDATE inbox SET state='submitting' WHERE source_event_id='c1'")  # in flight at the removal
+    host.state = "unbound"
+    assert cycle(presence, store) == "unbound"
+    drain(presence)
+    assert host.turns == [] and store.meta("connected_at") is None
+    store.db.execute("UPDATE inbox SET state='ready' WHERE source_event_id='c1'")  # its answer came back as retry
+    cycle(presence, store)
+    assert {r["state"] for r in store.rows("SELECT state FROM inbox")} == {"ended"} and host.turns == []
+    assert store.meta("connection_ended")["events_not_offered"] == 4

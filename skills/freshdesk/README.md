@@ -57,12 +57,16 @@ Ticket text is sent to the model provider this Ouroboros installation uses.
 
 ## First live check
 
-On the first helpdesk this runs against, first ask Ouroboros, before connecting the place, to write one private
-note and one reply on a test ticket whose requester is your own address (the tools work without a place; a Silent
-place would hold them). Then connect the place, keep it Silent for a while and compare what the place shows with
-the helpdesk: a new ticket, a customer reply, a private note that notifies the agent, and an assignment should each
-appear. If a customer reply never appears, Freshdesk did not move the ticket's `updated_at` for it; please report
-that, with the ticket's timeline, as an issue in this repository. Make the place Active when this matches.
+On the first helpdesk this runs against:
+
+1. Before connecting the place, ask Ouroboros to write one private note, edit it and send one reply on a test
+   ticket whose requester is your own address. The tools work without a place; a Silent place would hold them.
+2. Connect the place and keep it Silent for a while. Compare what the place shows with the helpdesk: a new ticket,
+   a customer reply, a private note that notifies the agent and an assignment should each appear. If a customer
+   reply never appears, Freshdesk did not move the ticket's `updated_at` for it; please report that, with the
+   ticket's timeline, as an issue in this repository.
+3. Make the place Active, have Ouroboros write and edit one more note on the test ticket, and check that neither
+   comes back to it as news.
 
 ## Tests
 

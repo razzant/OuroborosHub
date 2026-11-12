@@ -81,20 +81,25 @@ def baseline(client, store) -> str:
 
 
 def disconnect(store) -> bool:
-    """The place was removed: a later connection is a new one, so what happens until then stays history, and events
-    of the ended connection that the host has not taken are not offered after a reconnect (their thread would be
-    stale; a colleague may have answered meanwhile). Returns whether there was a connection to end."""
-    if not store.meta("connected_at"):
-        return False
+    """The place is gone: a later connection is a new one, so what happens until then stays history, and events of
+    the ended connection that the host has not taken are not offered after a reconnect (their thread would be stale;
+    a colleague may have answered meanwhile). Called on every cycle without a place, so an answer that settles late
+    (``retry``, ``blocked``) is ended too. Returns whether a connection ended now."""
     with store.transaction() as db:
-        dropped = db.execute("SELECT COUNT(*) AS n FROM inbox WHERE state IN ('ready', 'blocked')").fetchone()["n"]
-        db.execute("DELETE FROM gaps WHERE scope IN (SELECT 'event:' || source_event_id FROM inbox "
-                   "WHERE state IN ('ready', 'blocked'))")
-        db.execute("UPDATE inbox SET state='ended' WHERE state IN ('ready', 'blocked')")
-        db.execute("DELETE FROM meta WHERE key IN ('connected_at', 'watermark', 'walk')")
-        db.execute("DELETE FROM dirty")
-    store.set_meta("connection_ended", {"at": _z(datetime.now(timezone.utc)), "events_not_offered": dropped})
-    return True
+        waiting = db.execute("SELECT COUNT(*) AS n FROM inbox WHERE state IN ('ready', 'blocked')").fetchone()["n"]
+        if waiting:
+            db.execute("DELETE FROM gaps WHERE scope IN (SELECT 'event:' || source_event_id FROM inbox "
+                       "WHERE state IN ('ready', 'blocked'))")
+            db.execute("UPDATE inbox SET state='ended' WHERE state IN ('ready', 'blocked')")
+        connected = db.execute("SELECT 1 FROM meta WHERE key='connected_at'").fetchone() is not None
+        if connected:
+            db.execute("DELETE FROM meta WHERE key IN ('connected_at', 'watermark', 'walk')")
+            db.execute("DELETE FROM dirty")
+    if connected or waiting:
+        before = {} if connected else (store.meta("connection_ended") or {})
+        store.set_meta("connection_ended", {"at": before.get("at") or _z(datetime.now(timezone.utc)),
+                                            "events_not_offered": int(before.get("events_not_offered") or 0) + waiting})
+    return connected
 
 
 def walk(client, store, budget: Budget) -> dict:

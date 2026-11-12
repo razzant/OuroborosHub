@@ -270,7 +270,7 @@ def test_a_note_edit_keeps_who_sees_it(tools, fake):
     assert fake.conversations[ticket["id"]][0]["body_text"] == "Shown to the customer"
     edited = sends.note(account_id=HOST, ticket_id=ticket["id"], text="Shown, corrected", request_id="v-2",
                         edit_note_id=public["id"], public=True)
-    assert edited["ok"] is True and [r["method"] for r in fake.requests][-1] == "PUT"
+    assert edited["ok"] is True and fake.conversations[ticket["id"]][0]["body_text"] == "Shown, corrected"
 
 
 def test_an_unapplied_note_edit_is_no_proof_and_an_applied_one_is(tools, fake, tmp_path):

@@ -63,6 +63,24 @@ def recover(store: Store, *, starting: bool = False) -> None:
                          report=row["tool"] != "freshdesk_request")
 
 
+def presence_cycle(presence: Presence, store: Store) -> str:
+    """One pass of the Presence side; returns the place state. Receipts, late work and output delivery always run
+    (an output then meets its own checks). Events are offered only while the place exists; without it the ended
+    connection's queue is closed instead, after recording answers that arrived meanwhile."""
+    place = presence.place_state()
+    if place == "active":
+        presence.resume_held()  # one UPDATE of held rows; a hold made this very cycle is caught next time
+    presence.report_receipts()
+    presence.poll_refs()
+    presence.deliver_outputs()
+    if place == "unbound":
+        presence.settle()
+        disconnect(store)  # a reconnect starts a new connection: the time between stays history
+    else:
+        presence.dispatch()
+    return place
+
+
 def note(store: Store, state: str, **extra) -> None:
     store.set_meta("watcher", {"state": state, "at": now_iso(), **extra})
 
@@ -97,15 +115,8 @@ def run(state_dir: str, stop: threading.Event) -> None:
                          title="This Ouroboros lacks: " + ", ".join(capabilities.get("missing") or []))
                     stop.wait(60)
                     continue
-                place = presence.place_state()
-                if place == "active":
-                    presence.resume_held()  # one UPDATE of held rows; a hold made this very cycle is caught next time
-                presence.report_receipts()
-                presence.poll_refs()
-                presence.deliver_outputs()
-                presence.dispatch()
+                place = presence_cycle(presence, store)
                 if place == "unbound":
-                    disconnect(store)  # a reconnect starts a new connection: the time between stays history
                     note(store, "no_place", text="Not listening",
                          title="Connect the Freshdesk place to hear new tickets and replies.")
                     stop.wait(5)

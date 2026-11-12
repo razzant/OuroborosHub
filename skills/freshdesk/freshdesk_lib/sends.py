@@ -208,6 +208,15 @@ class Sends:
             store.finish(request_id, success, provider_id=provider_id, ticket_id=final_ticket, report=words,
                          own_key=own_key,
                          result={"status": response.status, "id": entry_id, "created_at": data.get("created_at")})
+            if records == "edit" and entry_id:
+                # Freshdesk's answer to an edit carries no edit time; the listing the watcher reads does. Record the
+                # edit as the listing shows it, so this skill's own edit never comes back to it as news.
+                try:
+                    listed = self._note_of(client, final_ticket, entry_id)
+                except FreshdeskError:
+                    listed = None
+                if listed:
+                    store.mark_own(self._own_key("edit", listed), final_ticket, request_id)
             self.service.note_limits(store, response.limits)
             out = {"ok": True, "state": success, "request_id": request_id, "id": entry_id}
             if final_ticket:

@@ -30,7 +30,7 @@ events of the ended connection the host has not taken are not offered again (`fr
 | --- | --- | --- |
 | ticket created after the connection, not by this connector | subject and description; an outbound email's actor is the helpdesk (`attribution: unknown`, `incoming: false`), not the customer | `any_message`, `new_issue` (+ `assigned`) |
 | new reply or note (not sent by this connector) | its text | `any_message` (+ `my_thread` if this agent wrote earlier in the ticket, `mention` if a note's notify list holds its email, `assigned`) |
-| note edited | the new text, `message.edited_at` | `any_message` (+ `mention` only if newly notified) |
+| note edited (not by this connector) | the new text, `message.edited_at`; the actor is the editor (`last_edited_user_id`) | `any_message` (+ `my_thread` if this agent wrote earlier or wrote the note, `mention` only if newly notified, `assigned`) |
 | property change | empty; `message.non_text` names the change | `[]`, or `assigned` when the responder becomes this agent |
 | older ticket first seen assigned to this agent | empty; "first seen now, assignment time unknown" | `assigned` |
 
@@ -56,8 +56,9 @@ Freshdesk's `Date` header at connect; a message written in that very second coun
   `uncertain` and unrecorded, so its ticket can come back as a new ticket (an outbound one attributed to the
   helpdesk, a `POST tickets` one to its requester).
 - Notes this connector creates are recorded by id; its edits by id and new revision, so a colleague's later edit
-  of the same note (attributed to `last_edited_user_id`) is still an event. An edit's readback needs a new
-  revision and at least the note's attachments plus the new ones.
+  of the same note (attributed to `last_edited_user_id`) is still an event. Freshdesk's answer to an edit carries
+  no edit time, so after an edit the connector reads the note back once and records the revision the listing
+  shows. An edit's readback needs a new revision and at least the note's attachments plus the new ones.
 - Readback after a call Freshdesk did not answer proves delivery only when exactly one entry not claimed by another
   journal row matches author, kind, visibility, attachment count and the whole words, made after the attempt (five
   minutes of clock skew allowed). Otherwise the call stays `uncertain` and lists the candidates.
