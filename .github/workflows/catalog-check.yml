@@ -103,7 +103,7 @@ jobs:
       # routes in child processes. They import nothing beyond each suite's dependencies, so the checkout is all they
       # need. Without it the suite fails; they never skip.
       - name: Check out the pinned core for the Presence consumers
-        if: contains(fromJSON('["slack-bridge", "telegram-bot", "telegram-user-session"]'), matrix.suite)
+        if: contains(fromJSON('["freshdesk", "slack-bridge", "telegram-bot", "telegram-user-session"]'), matrix.suite)
         uses: actions/checkout@v4
         with:
           repository: razzant/ouroboros
@@ -111,7 +111,7 @@ jobs:
           path: presence-core
           persist-credentials: false
       - name: Name that core for the Presence consumers
-        if: contains(fromJSON('["slack-bridge", "telegram-bot", "telegram-user-session"]'), matrix.suite)
+        if: contains(fromJSON('["freshdesk", "slack-bridge", "telegram-bot", "telegram-user-session"]'), matrix.suite)
         run: echo "OUROBOROS_PRESENCE_CORE_ROOT=$GITHUB_WORKSPACE/presence-core" >> "$GITHUB_ENV"
       # The Chrome adapter's tests are Node's own. They need Node and the exact npm closure skills/chrome_browser/pins.json
       # records; the version is read from that file, and the tests verify every pinned file by hash. A different closure

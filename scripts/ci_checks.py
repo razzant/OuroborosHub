@@ -50,6 +50,8 @@ SUITES = {
     'email-presence': {'skills': ['email-presence'], 'tests': ['skills/email-presence/tests'],
                        'dependencies': ['httpx', 'starlette', 'requests', 'requests-ntlm', 'defusedxml'], 'cwd': 'skills/email-presence',
                        'core_env': 'OUROBOROS_SOURCE_DIR', 'env': {'OUROBOROS_RUN_MAIL_BROWSER': '1'}},
+    'freshdesk': {'skills': ['freshdesk'], 'tests': ['skills/freshdesk/tests', 'tests/test_freshdesk_core_consumer.py'],
+                  'dependencies': ['httpx', 'starlette', 'websockets'], 'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT'},
     'agentrq-bridge': {'skills': ['agentrq-bridge'], 'tests': ['skills/agentrq-bridge/tests'],
                       'dependencies': ['starlette']},
     'github': {'skills': ['github'], 'tests': ['skills/github/tests'],
