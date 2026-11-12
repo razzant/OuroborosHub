@@ -608,12 +608,13 @@ def _aggregate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     eligible = [r for r in records if r["eligible"]]
     prompt = sum(r["prompt_tokens"] for r in eligible)
     cached = sum(r["cached_tokens"] for r in eligible)
-    # The input a measured record did not read from the cache is what it wrote there plus uncached input. A record
-    # that reports no write count keeps all of its unread input as uncached input and is counted apart; so does a
-    # write its input cannot hold, which an index saved before that rule may still carry.
-    counted = [r for r in eligible if r.get("cache_write_tokens") is not None
+    # A measured record that reports a write count its input can hold splits its unread input into cache writes and
+    # uncached input. Without such a count that input is unclassified, as input with unknown reads is: no write is
+    # guessed and nothing unknown is called uncached. An index saved before the fit rule is checked here too.
+    counted = [r for r in records if r["measured"] and r.get("cache_write_tokens") is not None
                and r["cached_tokens"] + r["cache_write_tokens"] <= r["prompt_tokens"]]
     written = sum(r["cache_write_tokens"] for r in counted)
+    unread = sum(r["prompt_tokens"] - r["cached_tokens"] for r in counted)
     return {
         "total_records": len(records),
         "request_count": sum(r["kind"] == "attempt" for r in records),
@@ -624,10 +625,11 @@ def _aggregate(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "eligible_prompt_tokens": prompt,
         "eligible_cached_tokens": cached,
         "uncached_tokens": prompt - cached,
-        "eligible_write_tokens": written,
-        "uncached_input_tokens": prompt - cached - written,
+        "eligible_write_tokens": written if counted else None,
+        "uncached_input_tokens": unread - written if counted else None,
+        "unclassified_tokens": sum(totals) - cached - unread,
         "write_records": len(counted),
-        "unknown_write_records": len(eligible) - len(counted),
+        "unknown_write_records": len(records) - len(counted),
         "unknown_prompt_tokens": sum(totals) - prompt,
         "cache_read_rate": round(cached / prompt * 100, 2) if prompt else None,
         "measured_records": sum(r["measured"] for r in records),

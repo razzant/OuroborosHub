@@ -67,15 +67,18 @@ counters. Other harnesses' session counters do not establish an inclusive total
 sessions stay unknown, as does a session recorded without a usage event. There
 is no guess based on model names or on which count is larger.
 
-The input of the measured records splits into cache reads, cache writes and
-uncached input (neither read from the cache nor written to it), and the volume
-bars stack these parts with the unclassified input, so they add up to the
-input total. A cache write is what a record reports writing; a record without a
-write count keeps all of its unread input as uncached input and is counted as an
-unknown cache write. A write that with the known reads exceeds the input total is
-unknown, never clipped. OpenAI-style caches report no writes. Writes are shown
-in tokens only: some providers price a written token above an input token, and
-the money stays on the core's Costs page.
+A measured record that reports a cache-write count splits the input it did
+not read from the cache into cache writes and uncached input (neither read from
+the cache nor written to it). Without such a count, or with a write that with
+the known reads exceeds the input total, that unread input is unclassified, like
+input whose reads are unknown: no write is guessed and nothing unknown is called
+uncached. The volume bars stack unclassified input, cache reads, cache writes
+and uncached input, so the parts add up to the input total; the headline shows
+"—" for writes and uncached input when no record reports a write count. Records
+written before 13 Oct 2026 may carry 0 for a count their provider did not
+report. Writes are shown in tokens only; the money is on the core's Costs page,
+which counts single model calls by their start time (not harness sessions), so
+its token figures differ from these.
 
 Known-token totals exclude unknown records, whose counts remain visible. The
 coverage card counts records with both valid measurements, including measured

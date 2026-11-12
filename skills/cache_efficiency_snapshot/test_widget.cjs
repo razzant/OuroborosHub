@@ -45,6 +45,7 @@ const facts = [];
    assert.equal(await page.locator('.kpi span').nth(2).innerText(),'cache writes');
    assert.equal(await page.locator('.kpi b').nth(2).innerText(),String(fixtures['24H'].summary.eligible_write_tokens));
    assert.equal(await page.locator('.kpi span').nth(3).innerText(),'uncached input');
+   assert.equal(await page.locator('.kpi b').nth(3).innerText(),String(fixtures['24H'].summary.uncached_input_tokens));
    assert.match(await page.locator('.legend').first().innerText(),/Cache reads\s+Cache writes\s+Uncached input\s+Unclassified/);
    assert.match(await page.locator('.footer').innerText(),/Partial read/);
    partial=false;await page.evaluate(()=>pollOnce());

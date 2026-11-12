@@ -222,21 +222,27 @@ def test_cache_writes_split_the_unread_input_of_measured_records() -> None:
     assert records[3]["cache_write_tokens"] == 30
     response = calculate_analytics(records, timeframe="1H", now=NOW)
     summary = response["summary"]
-    assert (summary["eligible_write_tokens"], summary["write_records"], summary["unknown_write_records"]) == (30, 1, 2)
-    assert summary["uncached_input_tokens"] == 190 - 110 - 30
+    assert (summary["eligible_write_tokens"], summary["write_records"], summary["unknown_write_records"]) == (30, 1, 3)
+    assert summary["uncached_input_tokens"] == 100 - 60 - 30  # only a record that reports its writes has uncached input
+    # Unknown reads (90) and the unread input of the records without a usable write count (30, 10) are unclassified.
+    assert summary["unclassified_tokens"] == 90 + 30 + 10 and summary["unknown_prompt_tokens"] == 90
     assert summary["uncached_tokens"] == 80  # input not read from the cache, its writes included, as before
     bucket, = [item for item in response["buckets"] if item["total_records"]]
-    layers = ("eligible_cached_tokens", "eligible_write_tokens", "uncached_input_tokens", "unknown_prompt_tokens")
+    layers = ("unclassified_tokens", "eligible_cached_tokens", "eligible_write_tokens", "uncached_input_tokens")
     assert sum(bucket[key] for key in layers) == bucket["prompt_tokens"] == 280  # the bars add up to the input
     rows = {item["model"]: item for item in response["models"]}
     assert rows["written"]["eligible_write_tokens"] == 30 and rows["written"]["write_records"] == 1
     assert rows["no-write-count"]["unknown_write_records"] == 1
+    assert rows["no-write-count"]["eligible_write_tokens"] is None and rows["no-write-count"]["uncached_input_tokens"] is None
     # An index saved before the rule may hold a write its input cannot hold, or no write field at all.
     stale = dict(records[0], cache_write_tokens=50)
     bare = {key: value for key, value in records[1].items() if key != "cache_write_tokens"}
     summary = calculate_analytics([stale, bare], timeframe="1H", now=NOW)["summary"]
-    assert (summary["eligible_write_tokens"], summary["unknown_write_records"]) == (0, 2)
-    assert summary["uncached_input_tokens"] == 70
+    assert (summary["eligible_write_tokens"], summary["uncached_input_tokens"], summary["unknown_write_records"]) == (None, None, 2)
+    assert summary["unclassified_tokens"] == 40 + 30
+    # A measured record of no input that reports no writes is a known zero, not an unknown.
+    zero = calculate_analytics(normalized(row(prompt_tokens=0, cached_tokens=0, cache_write_tokens=0)), now=NOW)["summary"]
+    assert (zero["eligible_write_tokens"], zero["uncached_input_tokens"], zero["write_records"]) == (0, 0, 1)
     event_write = _normalize_usage_event(event(prompt_tokens=100, cached_tokens=90, cache_write_tokens=20))
     assert event_write["cache_write_tokens"] is None and event_write["cached_tokens"] == 90
     assert _normalize_usage_event(event(prompt_tokens=100, cached_tokens=70, cache_write_tokens=30))["cache_write_tokens"] == 30

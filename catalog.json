@@ -344,8 +344,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "abef79fc11923a418b57535a1d389900c1b35198777ddb817bcc32558715ad8e",
-          "size": 10284
+          "sha256": "b296d9335d164e6703a95f2ec1c828772b0d840bfde70db85f5d07469bd79afc",
+          "size": 10516
         },
         {
           "path": "history.py",
@@ -354,13 +354,13 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "d4245154e1ddf7a53aad3ee586974602c45c4d23f35001f40ea9cd7c58107aca",
-          "size": 44411
+          "sha256": "bda3e998104577a15c4b46bb72cb7431770079d3649187580503ac701e02cb02",
+          "size": 44619
         },
         {
           "path": "test_cache_efficiency.py",
-          "sha256": "d0ff5f4b4ededee2bf9cd5111c6a577a0e00f2c19fbfa81b7c3b505739737ef9",
-          "size": 51055
+          "sha256": "d823eb0b339f4ee4b0c285270650f63abf44607a1ec2f8fe22969b83992826e8",
+          "size": 51829
         },
         {
           "path": "test_history.py",
@@ -369,8 +369,8 @@
         },
         {
           "path": "test_widget.cjs",
-          "sha256": "38c5454b333ed60668051cd4f6792742e3ea945e7ef0a1bcbaa231c448644466",
-          "size": 12628
+          "sha256": "018f767842de4241dfcba782f99ceba7ddc8df8ad30f29799c448c0e10eed9e9",
+          "size": 12748
         },
         {
           "path": "test_widget_data.py",
@@ -379,8 +379,8 @@
         },
         {
           "path": "widget.js",
-          "sha256": "8043ec352ebe919b30c7963277ba8af0b2e19af16b6690757c6176bc76f7afa7",
-          "size": 28812
+          "sha256": "708c1aa3144dcc6d9832532a8eed94b849f6a70765cd30d3d3828353b5b36162",
+          "size": 28960
         }
       ],
       "name": "cache_efficiency_snapshot",
