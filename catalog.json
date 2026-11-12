@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/b93977fc411a7f17761f01c02ac4c3a3262f551f",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
   "skills": [
     {
@@ -3121,22 +3121,37 @@
       "when_to_use": "User wants Ouroboros to receive Slack messages or files, reply in Slack conversations and threads, or send proactive Slack text messages."
     },
     {
-      "description": "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a Today checklist widget with local-day rollover. No network, purchases or reminders.",
+      "description": "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a four-column kanban widget with tags, expandable cards and a separate task archive. No network, purchases or reminders.",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "900f3db11a8e120b6bcb9843e86c757f42b393a18e62415c202d7facc89091f5",
-          "size": 24099
+          "sha256": "af0d414d7fe062b14e56c3f5d1a2a7c7cf6f10680ee0c3690d1a24a8dcde2a04",
+          "size": 31424
+        },
+        {
+          "path": "entry_details.py",
+          "sha256": "09ebab1141cbe55db1e6c9800db555e57888f028a559f78fba35ef8bb5fb2bba",
+          "size": 3433
         },
         {
           "path": "lists_core.py",
-          "sha256": "da1303e9470cad69fd7ba51bea68ff76fe108d7444a2fdd9e5ba8c00ed07b5ec",
-          "size": 95744
+          "sha256": "1a51e3ed4253edc649762326f4a916bfbaf0b9c02bc4f8d009f520ade0f24f12",
+          "size": 115929
         },
         {
           "path": "plugin.py",
-          "sha256": "d32e0e6a5f6b83a63e676068ea981d82ac7f28f34e75974b27d68f9f180f30e9",
-          "size": 37401
+          "sha256": "0bf05faa5ca822ea694b25436a756fd0e96e8fe085b4a87ba37d113b775b42e6",
+          "size": 50710
+        },
+        {
+          "path": "tests/KANBAN_API.md",
+          "sha256": "52a9aa14e31631926eb230ca568c06cb41bd5e5efc8c967bf57632ec3a9051d7",
+          "size": 3405
+        },
+        {
+          "path": "tests/test_agent_details.py",
+          "sha256": "bb1f8f278547dd57271734f0984bc0cc4fe048e2ee991e4fda0c5498b31b5b11",
+          "size": 8028
         },
         {
           "path": "tests/test_capture_route.py",
@@ -3144,25 +3159,35 @@
           "size": 2480
         },
         {
+          "path": "tests/test_kanban.py",
+          "sha256": "d608f5843d89b580981462e42d5fd7365cb9de56c99aed0f5de0112a1cf74a92",
+          "size": 13826
+        },
+        {
           "path": "tests/test_read_tree_budget.py",
           "sha256": "e1596a20e32103c9454ad2deb705aa4269b833176e013f231ff4e485b7fab7f8",
           "size": 1176
         },
         {
+          "path": "tests/test_recovery.py",
+          "sha256": "47e2d496a25755cdbbe3011debb7423281f549743248046b42cf8a3ec2eb1b1b",
+          "size": 7225
+        },
+        {
           "path": "tests/test_smart_lists.py",
-          "sha256": "560b89223608bc49972d0526906f0695f6447e9238f6b83892b540fe55186143",
-          "size": 120083
+          "sha256": "30cf548db07d3d6505bc8559c2beccfb6c4d41023c7c724f74c07df8b4c8bcf9",
+          "size": 120474
         },
         {
           "path": "widget.js",
-          "sha256": "821b309f938a3b5abb48ae2f80e6cf762cee20638d6d0cea3742dfd1df048040",
-          "size": 14121
+          "sha256": "de44bd70c54314f1cf8d811f7748eb7806a58bc5a10ede54664e3bd04eea8992",
+          "size": 72773
         }
       ],
       "name": "smart_lists",
       "slug": "smart_lists",
       "type": "extension",
-      "version": "0.4.0"
+      "version": "0.6.1"
     },
     {
       "description": "Inspect, filter, sort, group, and aggregate CSV and XLSX tables while reporting truncation and non-numeric values honestly.",
