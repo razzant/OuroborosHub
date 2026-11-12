@@ -171,8 +171,9 @@ model, task mix or provider change.
 The standalone module uses the owning extension fetch bridge, with no external
 CDN. Refresh is explicit and also runs every thirty seconds while mounted.
 SVG token-volume and hit-rate views support pointer, touch and keyboard inspection;
-coverage, absolute known cache reads and unit explanations remain visible outside tooltips. Known input with
-unknown cache reads is hatched, not silently dropped. Selected intraday bins use
+coverage, absolute known cache reads and unit explanations remain visible outside tooltips. Known input whose
+class is unknown (unknown cache reads, or unread input without a usable cache-write count) is hatched, not silently
+dropped. Selected intraday bins use
 their own totals; a selected day requests its own hourly data, models and marks.
 Refreshing an open day invalidates and reloads its detail; current bucket totals
 remain visible meanwhile. Keyboard focus follows the exact chart/bin through

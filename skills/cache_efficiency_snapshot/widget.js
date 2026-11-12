@@ -185,7 +185,7 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
     const snap = reading(), b = snap?.buckets.find(b=>b.ts===state.selected);
     if (!b) return '';
     const s = detail?.key===b.ts && detail.data ? detail.data.summary : b;
-    let body = `<div class="meta">${fmt(s.prompt_tokens)} input · ${pct(s.cache_read_rate)} from cache${s.cache_write_tokens!=null?' · '+fmt(s.cache_write_tokens)+' known cache writes':''}<br>${counts(s)}</div>`;
+    let body = `<div class="meta">${fmt(s.prompt_tokens)} input · ${pct(s.cache_read_rate)} from cache<br>${counts(s)}</div>`;  // the counts line names the writes
     if (detail?.key===b.ts) {
       if (detail.loading) body += '<p class="meta">Loading hourly detail…</p>';
       else if (detail.error) body += `<p class="meta" role="alert">${detail.data?'Partial detail':'Detail unavailable'}: ${esc(detail.error)}</p>`;
