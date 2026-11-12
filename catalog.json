@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/b87ad12d0a460c748c847754baac4de7635a3ad0",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/e38711f6776e6355d453fe252d5e4d10b98953fb",
   "schema_version": 1,
   "skills": [
     {
@@ -1784,6 +1784,140 @@
       "slug": "email-presence",
       "type": "extension",
       "version": "0.10.9"
+    },
+    {
+      "connects": [
+        "Freshdesk"
+      ],
+      "description": "Freshdesk helpdesk tools and place: read and search tickets and the knowledge base, reply to customers and write notes, change fields by name, and hear new tickets, customer replies and teammates' notes.",
+      "files": [
+        {
+          "path": "HOST_CONTRACT.md",
+          "sha256": "28a7cf1dbec9f07dc0830fb33c5f41fc4c95c4185641b5e40e565495a5e5f32d",
+          "size": 7787
+        },
+        {
+          "path": "README.md",
+          "sha256": "32f5f640b434c71ff88bd0619fd3624bb7a1a73dbf244b5629f566ed08680c88",
+          "size": 5908
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "b3b528694a4dfe0dca322dd31bc36f7e5cf550b0415080eb7f0d0199034649e2",
+          "size": 10185
+        },
+        {
+          "path": "freshdesk_lib/__init__.py",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0
+        },
+        {
+          "path": "freshdesk_lib/client.py",
+          "sha256": "ed2c6c1f81d9048a4c3b887abc0bb0be3f717401c746313ba7cd533bc22b28f4",
+          "size": 15231
+        },
+        {
+          "path": "freshdesk_lib/events.py",
+          "sha256": "69568792222fbc010683db11c7fec485201647670194ceb7a79ad2308a783aef",
+          "size": 16426
+        },
+        {
+          "path": "freshdesk_lib/fields.py",
+          "sha256": "e8b2d6fc736e263eaf6fdd69a878a0a4857d6f745aa0e2a05826dec1a420ad74",
+          "size": 9475
+        },
+        {
+          "path": "freshdesk_lib/host.py",
+          "sha256": "4e2fb0294c446956b82e7b40c41e84ee2c3106ca2503bff0506bd27874dc78ee",
+          "size": 5817
+        },
+        {
+          "path": "freshdesk_lib/presence.py",
+          "sha256": "8140edd49eddb771dee4f6b644a2c0beeae2a4ad0833a743667ca59d80dc322b",
+          "size": 17993
+        },
+        {
+          "path": "freshdesk_lib/reads.py",
+          "sha256": "599ab624d230778dd1baba462e2cb7873f2a582a06427f863df2304ca0242ac2",
+          "size": 20659
+        },
+        {
+          "path": "freshdesk_lib/sends.py",
+          "sha256": "a5c4009e0071bdb9d6fc06ad13b48b39e99d0425df0917fbcab2c20d1469aa52",
+          "size": 39318
+        },
+        {
+          "path": "freshdesk_lib/service.py",
+          "sha256": "d96adee2359894cfee205109cb61fc8d5c9a5dba6076ca653fdc023ea67e98e4",
+          "size": 8994
+        },
+        {
+          "path": "freshdesk_lib/status.py",
+          "sha256": "0c9903432cf8958807a0a70bc89a636013221c6cd513cf0187c38f93050f1840",
+          "size": 2880
+        },
+        {
+          "path": "freshdesk_lib/store.py",
+          "sha256": "e140a151165997928c624b9dd1cfacda178cde5456f084e94c8991643bc96ee5",
+          "size": 14444
+        },
+        {
+          "path": "freshdesk_lib/text.py",
+          "sha256": "a7bc7ae0ddda85acfb2c648d909b9596599a75333df6a158507b77d12954d535",
+          "size": 2812
+        },
+        {
+          "path": "freshdesk_lib/watcher.py",
+          "sha256": "a6dd42b78a218e1b46ec2a4f1f55c00c4fc5efaab46762b9b176c13f21ffe1d8",
+          "size": 13678
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "946b360c0d65e4fd5f3a490c896ba0c8d55e20aaad89846cb26dc94f8c4fc005",
+          "size": 13085
+        },
+        {
+          "path": "scripts/watcher.py",
+          "sha256": "e053731feb7ff636f20f40bdad42f67bbdcc58f1abee68e17b8eade7df0598ad",
+          "size": 7904
+        },
+        {
+          "path": "tests/fake_freshdesk.py",
+          "sha256": "e996bbbcdb22bf874c587d1bdeda162a1ad41c0145b5032f28f95cbc9d442351",
+          "size": 27058
+        },
+        {
+          "path": "tests/test_client.py",
+          "sha256": "9b9db3c743c9bb5f01c243f7c5c0014b824630412b4ec01c1e3de223bf79c67f",
+          "size": 8080
+        },
+        {
+          "path": "tests/test_presence.py",
+          "sha256": "72ee8bdf8543e5eff6e8542e36d0160e744ff152b7fba2e500428ebcf415315f",
+          "size": 24085
+        },
+        {
+          "path": "tests/test_tools.py",
+          "sha256": "5b54447bd00557140ac5f01dc1519daf6a9c8ffff0aa39930122a3a6ce3e3c6f",
+          "size": 28260
+        },
+        {
+          "path": "tests/test_watcher.py",
+          "sha256": "7f9688ee16697d0510059ed8a5080738213342f5ce4e0a0a553b022d2f954395",
+          "size": 21717
+        },
+        {
+          "path": "ui/icon.svg",
+          "sha256": "84affc890f774d1431753a40e1502c1cb5c899e56b4c24887aa58d7f0c0868f8",
+          "size": 414
+        }
+      ],
+      "icon": "ui/icon.svg",
+      "name": "freshdesk",
+      "slug": "freshdesk",
+      "type": "extension",
+      "version": "0.1.0",
+      "when_to_use": "User wants Ouroboros to work in a Freshdesk helpdesk: read, search or summarize tickets, look up customers or knowledge-base articles, reply to customers, write notes, change ticket fields, or be present in the helpdesk and hear new tickets and replies."
     },
     {
       "description": "GDELT Cloud geopolitical intelligence: conflict events, news stories, entity graph, energy infrastructure, macro-finance, prediction markets, and web research via MCP Progressive Discovery.",
