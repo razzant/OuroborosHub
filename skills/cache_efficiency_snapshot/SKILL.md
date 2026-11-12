@@ -78,9 +78,9 @@ and uncached input, so the parts add up to the input total. The headline shows
 uncached input when no measured record does; each of the two cards names how
 many of the window's records it covers when that is not all of them.
 Known cache writes count every write a record reports and its input can hold,
-like known cache reads, so a write of a record whose reads are unknown is among
-them while its input stays unclassified in the bars; unknown cache writes count
-the records they do not cover. Records
+like known cache reads, so a write of a record whose reads or input total are
+unknown is among them but is not drawn (the bars hold the writes of measured
+records only); unknown cache writes count the records they do not cover. Records
 written by a core older than 7.7.0 may carry 0 for a count their provider did
 not report; such a 0 counts as reported, so that record's unread input is drawn
 as uncached input. Writes are shown in tokens only; the money is on the core's Costs page,

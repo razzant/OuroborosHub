@@ -19,7 +19,7 @@ def fixtures():
                "cached_tokens": 600, "cache_write_tokens": 50, "ledger_attempt_ids": [str(i)]}
         records.append(plugin._normalize_usage_event(raw))
     for i, (total, cached, written) in enumerate(((2000, None, None), (None, None, None), (0, 0, 0), (100, 0, None),
-                                                  (300, 270, 20))):
+                                                  (300, 270, 20), (90, None, 30))):
         records.append(plugin._normalize_usage_event({"ts": (NOW - timedelta(minutes=10+i*5)).isoformat(),
             "provider": "fixture", "model": "example/edge", "prompt_tokens": total,
             "cached_tokens": cached, "cache_write_tokens": written, "ledger_attempt_ids": ["edge-"+str(i)]}))

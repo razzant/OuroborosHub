@@ -40,10 +40,10 @@ const facts = [];
    await page.addScriptTag({content:script});
    await page.locator('.notice.error').waitFor();
    assert.match(await page.locator('.notice').innerText(),/Partial reading.*fixture_partial/);
-   assert.match(await page.locator('.kpi b').first().innerText(),/3.4 K/);
+   assert.match(await page.locator('.kpi b').first().innerText(),/3.5 K/);
    // Cache writes are their own headline and layer, in tokens only.
    const day=fixtures['24H'].summary, of=n=>` · ${n} of ${day.total_records} records`;
-   assert.equal(await page.locator('.kpi span').nth(2).innerText(),'cache writes'+of(day.total_records-day.unknown_write_records));
+   assert.equal(await page.locator('.kpi span').nth(2).innerText(),'known cache writes'+of(day.total_records-day.unknown_write_records));
    assert.equal(await page.locator('.kpi b').nth(2).innerText(),String(fixtures['24H'].summary.cache_write_tokens));
    assert.equal(await page.locator('.kpi span').nth(3).innerText(),'uncached input'+of(day.write_records));
    assert.equal(await page.locator('.kpi b').nth(3).innerText(),String(fixtures['24H'].summary.uncached_input_tokens));
@@ -63,7 +63,12 @@ const facts = [];
    assert.equal(await page.locator('[data-chart="volume"] [data-pick][aria-label*="29 unknown writes"]').count(),1);
    assert.match(await page.locator('[data-chart="volume"] [data-pick]').filter({has:page.locator('.bar-write[data-tokens="20"]')}).getAttribute('aria-label'),/20 known cache writes/);
    assert.equal(await page.locator('.code-mark').count(),1);
-   assert.match(await root.innerText(),/2 unknown cache reads/);
+   assert.match(await root.innerText(),/3 unknown cache reads/);
+   // A known write of a record whose reads are unknown is in the text figures, not in the drawn split.
+   const unread=page.locator('[data-chart="volume"] [data-pick][aria-label*="30 known cache writes"]');
+   assert.equal(await unread.count(),1);
+   assert.equal(await unread.locator('.bar-write').getAttribute('data-tokens'),'0');
+   assert.equal(await unread.locator('.bar-unknown').getAttribute('data-tokens'),'90');
    const selected=fixtures['1H'].buckets.find(b=>b.unknown_prompt_tokens===2000);
    const requestsBeforeBin=requests.length;
    await page.locator('[data-chart="volume"] [data-pick="'+selected.ts+'"]').click();
