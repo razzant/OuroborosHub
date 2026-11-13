@@ -1,0 +1,23 @@
+{
+  "category": [
+    "messaging"
+  ],
+  "connects": [
+    "Phone"
+  ],
+  "description": "Phone calls through a SIP line over UDP, IPv4 and G.711 (a SIP provider or cloud PBX that supports them, or a Twilio SIP Domain). Ouroboros places and answers calls, and Live Conversation holds the conversation on the owner's voice engine (Gemini Live, Grok or OpenAI Realtime, with its key). The line enforces limits on numbers, call length and calls per day; no packages to install.",
+  "digest": "76701423a2f9edcc4171d1d722575c2a3e969f0b92b0c1cbe34b530c5a3e4789",
+  "icon": "ui/icon.svg",
+  "name": "telephony",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/telephony"
+  },
+  "title": "Phone line",
+  "type": "extension",
+  "version": "0.2.0",
+  "when_to_use": "The owner asks Ouroboros to phone someone (a clinic, a restaurant, a shop, a person) or to answer calls to a phone line, and a SIP account (at a SIP provider or cloud PBX that works over UDP, IPv4 and G.711, or a Twilio SIP Domain) is set up in this skill.",
+  "withdrawn": null
+}

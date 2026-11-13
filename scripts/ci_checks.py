@@ -68,6 +68,13 @@ SUITES = {
                                         'tests/test_voice_attachment_core_consumer.py'],
                               'dependencies': ['telethon>=1.45,<2', 'PySocks>=1.7.1', 'httpx', 'starlette'],
                               'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT'},
+    # The phone line's call bridge runs against a real core's live-call doors (LiveCallHub and the peer socket pump) and its
+    # Presence event is parsed by that core's parser. Those pins need a newer core than the Presence consumers' one, so
+    # catalog-check.yml gives this suite its own (TELEPHONY_CORE_REPO). TELEPHONY_REQUIRE_CORE turns a skip for want of the
+    # core or of its doors into a failure.
+    'telephony': {'skills': ['telephony'], 'tests': ['skills/telephony/tests'],
+                  'dependencies': ['starlette', 'uvicorn', 'websockets'],
+                  'core_env': 'TELEPHONY_CORE_REPO', 'env': {'TELEPHONY_REQUIRE_CORE': '1'}},
     '2gis': {'skills': ['2gis'], 'tests': ['tests/test_2gis.py']},
     'keenable': {'skills': ['keenable'], 'tests': ['tests/test_keenable_transport.py', 'tests/test_keenable_widget.py'],
                  'shared': ['tests/fixtures/keenable/']},

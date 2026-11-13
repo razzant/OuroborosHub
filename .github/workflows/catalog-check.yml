@@ -113,6 +113,21 @@ jobs:
       - name: Name that core for the Presence consumers
         if: contains(fromJSON('["freshdesk", "slack-bridge", "telegram-bot", "telegram-user-session"]'), matrix.suite)
         run: echo "OUROBOROS_PRESENCE_CORE_ROOT=$GITHUB_WORKSPACE/presence-core" >> "$GITHUB_ENV"
+      # The phone line's bridge tests drive this core's real live-call doors (LiveCallHub, the peer socket pump) and parse its
+      # Presence event with the core's own parser (parse_presence_event, PluginAPI 2.4), which the Presence consumers' core above
+      # predates. The tests import nothing beyond the suite's dependencies, so the checkout is all they need. Without it the
+      # suite fails; its core pins never skip (TELEPHONY_REQUIRE_CORE in scripts/ci_checks.py).
+      - name: Check out the pinned core for telephony
+        if: matrix.suite == 'telephony'
+        uses: actions/checkout@v4
+        with:
+          repository: razzant/ouroboros
+          ref: 33eb58b4fbca849328426cfcd7a64e054f923741
+          path: telephony-core
+          persist-credentials: false
+      - name: Name that core for telephony
+        if: matrix.suite == 'telephony'
+        run: echo "TELEPHONY_CORE_REPO=$GITHUB_WORKSPACE/telephony-core" >> "$GITHUB_ENV"
       # The Chrome adapter's tests are Node's own. They need Node and the exact npm closure skills/chrome_browser/pins.json
       # records; the version is read from that file, and the tests verify every pinned file by hash. A different closure
       # fails them; they never skip.

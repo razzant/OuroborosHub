@@ -309,6 +309,17 @@ ATLAS_CORE=/path/to/ouroboros PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:c
 starts the same host to look at and prints `READY <url>`; open `<url>/#widgets` and press Start on
 Memory Atlas.
 
+The `telephony` job runs the phone line's call bridge against the real live-call doors (`LiveCallHub` and
+the peer socket pump) of the core pinned for it in `catalog-check.yml` and named by `TELEPHONY_CORE_REPO`.
+That core is newer than the Presence consumers' one, which lacks `parse_presence_event` and PluginAPI 2.4.
+`TELEPHONY_REQUIRE_CORE=1` turns a missing core, or a missing starlette, uvicorn or websockets, into a
+failure instead of a skip. Locally:
+
+```bash
+python -m pip install pytest starlette uvicorn websockets
+TELEPHONY_CORE_REPO=/path/to/ouroboros TELEPHONY_REQUIRE_CORE=1 PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/telephony/tests
+```
+
 The hub tests include mocked GitHub APIs for owner authorization, signals and
 catalog-to-mirror sequencing. The release-identity test compares all hosted skills
 with the core checkout selected by `OUROBOROS_IDENTITY_CORE_ROOT`, using the test
