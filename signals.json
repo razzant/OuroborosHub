@@ -1,6 +1,6 @@
 {
   "author_repos": {},
-  "generated_at": "2026-11-12T15:16:54.582785Z",
+  "generated_at": "2026-11-13T12:19:55.396433Z",
   "schema_version": 1,
   "skills": {
     "2gis": {
@@ -103,6 +103,11 @@
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/167",
       "votes": 0
     },
+    "freshdesk": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/307",
+      "votes": 0
+    },
     "gdelt-mcp": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/168",
@@ -184,9 +189,9 @@
       "votes": 0
     },
     "rea-reverse-engineering": {
-      "comments": 0,
+      "comments": 1,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/300",
-      "votes": 0
+      "votes": 1
     },
     "restaurant_booking": {
       "comments": 0,
