@@ -298,6 +298,31 @@ class WorkflowTests(unittest.TestCase):
                            env={**os.environ, 'GITHUB_WORKSPACE': str(root), 'GITHUB_ENV': str(output)})
             self.assertEqual(output.read_text(encoding='utf-8'), f'OUROBOROS_PRESENCE_CORE_ROOT={root / "presence-core"}\n')
 
+    def test_telephony_runs_against_its_own_pinned_core_and_never_skips_for_want_of_it(self):
+        hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']
+        checkout = next(step for step in hosted['steps'] if step.get('with', {}).get('path') == 'telephony-core')
+        name = next(step for step in hosted['steps'] if step.get('name') == 'Name that core for telephony')
+        condition = "matrix.suite == 'telephony'"
+        self.assertEqual((checkout['if'], name['if']), (condition, condition))
+        self.assertEqual(checkout['with']['repository'], 'razzant/ouroboros')
+        self.assertRegex(checkout['with']['ref'], r'^[a-f0-9]{40}$')
+        self.assertEqual(checkout['with']['persist-credentials'], 'false')
+        steps = hosted['steps']
+        self.assertLess(steps.index(checkout), steps.index(name))
+        self.assertLess(steps.index(name), len(steps) - 1)  # both precede the suite run
+        # The suite names that core, and a skip for want of it or of its doors is a failure.
+        suite = ci_checks.SUITES['telephony']
+        self.assertEqual((suite['core_env'], suite['env']), ('TELEPHONY_CORE_REPO', {'TELEPHONY_REQUIRE_CORE': '1'}))
+        # Not a Presence consumer: it must not ride on that core's condition.
+        self.assertNotEqual(suite.get('core_env'), 'OUROBOROS_PRESENCE_CORE_ROOT')
+        with tempfile.TemporaryDirectory(prefix='hub telephony workflow ') as tmp:
+            root = Path(tmp)
+            output = root / 'environment'
+            # Execute the actual shell step.
+            subprocess.run(['/bin/sh', '-c', name['run']], check=True, capture_output=True, text=True,
+                           env={**os.environ, 'GITHUB_WORKSPACE': str(root), 'GITHUB_ENV': str(output)})
+            self.assertEqual(output.read_text(encoding='utf-8'), f'TELEPHONY_CORE_REPO={root / "telephony-core"}\n')
+
     def test_chrome_browser_workflow_installs_node_and_the_npm_closure_its_pins_record(self):
         hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']
         node = next(step for step in hosted['steps'] if step.get('uses') == 'actions/setup-node@v4')

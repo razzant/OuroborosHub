@@ -28,7 +28,7 @@ def consumer_core():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('fixture', encoding='utf-8')
         with patch.dict(os.environ, {'OUROBOROS_SOURCE_DIR': str(core), 'OUROBOROS_THEME_CORE_ROOT': str(core),
-                                     'OUROBOROS_PRESENCE_CORE_ROOT': str(core)}):
+                                     'OUROBOROS_PRESENCE_CORE_ROOT': str(core), 'TELEPHONY_CORE_REPO': str(core)}):
             yield core
 
 
@@ -58,7 +58,7 @@ class SelectionTests(unittest.TestCase):
             'github': {'github'},
             'telegram-user-session': {'telegram-user-session'},
             'email-presence': {'email-presence'}, 'agentrq-bridge': {'agentrq-bridge'},
-            'chrome_browser': {'chrome-browser'}, 'freshdesk': {'freshdesk'},
+            'chrome_browser': {'chrome-browser'}, 'freshdesk': {'freshdesk'}, 'telephony': {'telephony'},
         }
         for skill, expected in consumers.items():
             with self.subTest(skill=skill):
@@ -139,7 +139,7 @@ class SelectionTests(unittest.TestCase):
         for name, key in [('email-presence', 'OUROBOROS_SOURCE_DIR'), ('calendar-skill', 'OUROBOROS_THEME_CORE_ROOT'),
                           ('slack-bridge', 'OUROBOROS_PRESENCE_CORE_ROOT'), ('telegram-bot', 'OUROBOROS_PRESENCE_CORE_ROOT'),
                           ('telegram-user-session', 'OUROBOROS_PRESENCE_CORE_ROOT'),
-                          ('freshdesk', 'OUROBOROS_PRESENCE_CORE_ROOT')]:
+                          ('freshdesk', 'OUROBOROS_PRESENCE_CORE_ROOT'), ('telephony', 'TELEPHONY_CORE_REPO')]:
             with self.subTest(suite=name), consumer_core() as core, patch.object(ci.subprocess, 'run') as run:
                 for value in ('', str(core / 'missing')):
                     with patch.dict(os.environ, {key: value}), self.assertRaisesRegex(RuntimeError, key):
