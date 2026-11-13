@@ -3259,8 +3259,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "dab327b1d0875e044025b390c63d36de48b8410563c5c2ce1a54d7654e832899",
-          "size": 36567
+          "sha256": "4031741b602fb2ce0da713e9bc3b55bbf1be9ea608502b882ec04df4c72fabd5",
+          "size": 36785
         },
         {
           "path": "entry_details.py",
@@ -3314,8 +3314,8 @@
         },
         {
           "path": "widget.js",
-          "sha256": "fe5e626a142590c8dcfa31a17ebc83636042ddc968577ac9a05d8af39aaa1ca2",
-          "size": 95887
+          "sha256": "77f9ba21715a3e4dcee3acd10703880c84f49e483c9cc259d20c65d3d819fdbc",
+          "size": 97238
         }
       ],
       "name": "smart_lists",

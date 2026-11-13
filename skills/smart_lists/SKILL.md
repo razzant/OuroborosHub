@@ -223,8 +223,10 @@ never breaks the widget later. Checked:
   after 50,000 retired ids, 0.65% after 100,000, 4% after 150,000);
   `store` → `status` reports `replay.retired_ids_estimate` and
   `replay.false_refusal_rate`, and the refusal names the rate once it reaches
-  1%. The widget supplies a fresh request id for each save, stage move and
-  archive move, and repeats an unconfirmed one under the same id and body.
+  1%. The widget supplies a fresh request id for each save, creation, stage move
+  and archive move. It repeats an unconfirmed card save or creation under the
+  same id and body; an unconfirmed board drag, restore or archive move is never
+  resent: the widget reads the store again and shows what it holds.
 - After the full record is evicted, a retry is refused even if the entry
   survives: its old arguments are no longer available to check for conflict.
   Reusing the same id with changed text must never silently report success.
@@ -289,8 +291,9 @@ draft is never overwritten silently; the card says that another window keeps it 
 cleared it. A write refused that way is not sent again by itself; the owner's next
 change on the card writes the form again. A link typed but not added is never added
 or dropped by itself: closing asks first, and «Готово» or «В архив» keep the card open
-saying so. Saving a task does not wait for the draft: if the draft write fails, the
-save still goes and the card says the draft is not saved; a new task is created only
+saying so. Saving a task first waits for the draft write that records its request to
+finish, but does not depend on it: if that write fails, the save still goes and the
+card says the draft is not saved; a new task is created only
 after the draft holds its request, so a repeat cannot make a second one.
 The guarantee is limited: the host waits at most one second for this write when the
 page is left, so it is best effort, and only the last draft the slot confirmed is

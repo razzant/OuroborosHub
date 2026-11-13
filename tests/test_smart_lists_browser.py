@@ -145,6 +145,19 @@ def lists(tmp_path):
                         return self.send({'error': 'synthetic outage'}, status=503)
                     if fault[2] == 'refused':
                         return self.send({'ok': False, 'error': 'Synthetic refusal; nothing changed'})
+                    if fault[2] == 'late':  # no answer now; the store applies it after the widget's check read
+                        def apply_later(body=body, query=url.query, route=api.routes[name]['handler']):
+                            time.sleep(0.8)
+                            try:
+                                request = support.FakeRequest(body, method=method)
+                                request.query_params = QueryParams(query)
+                                result = route(request)
+                                if asyncio.iscoroutine(result):
+                                    asyncio.run(result)
+                            except Exception as exc:
+                                state['errors'].append(repr(exc))
+                        threading.Thread(target=apply_later, daemon=True).start()
+                        return self.send({'error': 'synthetic outage'}, status=503)
                 # Only the route and its answer's serialization are the skill's; writing the
                 # answer to the socket happens after this block, in send().
                 try:
@@ -654,12 +667,13 @@ def test_unanswered_write_is_checked_first_and_never_repeated_under_a_new_id(lis
             expect(card).to_be_hidden()
             assert len(edits()) == 1 and lists.entry(target)['description'] == 'Первая правка'
 
-            # The write never arrived: said plainly, the draft stays, and nothing is sent again by itself.
+            # The write never arrived: the check read finds the old value, which does not prove it never will.
+            # The draft stays, nothing is sent again by itself, and «Готово» repeats the very request.
             card = open_card(frame, target)
             card.get_by_label('Описание').fill('Вторая правка')
             lists.fail('POST', 'edit', 'lost')
             card.get_by_role('button', name='Готово').click()
-            expect(card.locator('.dialogfoot .note')).to_contain_text('запись осталась прежней')
+            expect(card.locator('.dialogfoot .note')).to_contain_text('в задаче пока прежние значения')
             expect(card.get_by_label('Описание')).to_have_value('Вторая правка')
             session.page.wait_for_timeout(400)
             assert len(edits()) == 2 and lists.entry(target)['description'] == 'Первая правка'
@@ -667,6 +681,7 @@ def test_unanswered_write_is_checked_first_and_never_repeated_under_a_new_id(lis
             card.get_by_role('button', name='Готово').click()
             expect(card).to_be_hidden()
             assert len(edits()) == 3 and lists.entry(target)['description'] == 'Вторая правка'
+            assert edits()[2][2] == edits()[1][2], 'the unconfirmed write is repeated as itself'
 
             # Neither the write nor the check got through: the next attempt is the very same request.
             card = open_card(frame, target)
@@ -1712,6 +1727,144 @@ def test_an_unadded_link_is_never_added_or_dropped_by_closing_saving_or_archivin
             card.get_by_label('Закрыть').click()
             expect(card).to_be_hidden()
             wait_until(lambda: lists.read('draft')['draft'] is None)
+        finally:
+            session.close()
+
+
+@ENGINES
+def test_a_new_card_keeps_what_was_chosen_before_it_has_a_title(lists, engine):
+    from playwright.sync_api import sync_playwright, expect
+    lists.add([{'text': 'Уже на доске', 'tags': ['дом']}])
+    status = lambda card: card.locator('.dialogfoot [role="status"]')
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = frame.locator('dialog')
+            # Opened under a tag filter and closed untouched: the filter's tag is not input, so nothing is kept.
+            frame.locator('#filters').get_by_role('button', name='дом', exact=True).click()
+            frame.get_by_role('button', name='+ Задача').click()
+            expect(card).to_be_visible()
+            assert chips(card) == ['дом']
+            card.get_by_label('Закрыть').click()
+            expect(card).to_be_hidden()
+            frame.locator('#filters').get_by_role('button', name='дом', exact=True).click()
+            frame.wait_for_timeout(300)
+            assert not lists.calls('POST', 'draft')
+
+            # Everything but a title: a confirmed tag, the turn, a due date and the stage are input to keep.
+            frame.get_by_role('button', name='+ Задача').click()
+            add_tag(card, 'срочно')
+            wait_until(lambda: kept(lists).get('form', {}).get('tags') == ['срочно'], 'a tag alone is kept')
+            card.get_by_label('Чей следующий ход').select_option('agent')
+            card.get_by_label('Срок').fill('в пятницу')
+            card.get_by_label('Стадия').select_option('review')
+            wait_until(lambda: kept(lists).get('form', {}).get('stage') == 'review', 'the chosen fields are kept')
+            assert {key: kept(lists)['form'][key] for key in ('tags', 'turn', 'due')} == \
+                {'tags': ['срочно'], 'turn': 'agent', 'due': 'в пятницу'}
+            # × asks instead of dropping them.
+            card.get_by_label('Закрыть').click()
+            expect(status(card)).to_have_text('Задача ещё не создана.')
+            expect(card).to_be_visible()
+            # Leaving keeps them and creates nothing; continuing brings every one back.
+            frame = leave_and_return(session)
+            assert not lists.calls('POST', 'add')
+            expect(frame.locator('.draftbar')).to_contain_text('Есть несохранённая новая задача')
+            card = resume(frame)
+            assert chips(card) == ['срочно']
+            expect(card.get_by_label('Чей следующий ход')).to_have_value('agent')
+            expect(card.get_by_label('Срок')).to_have_value('в пятницу')
+            expect(card.get_by_label('Стадия')).to_have_value('review')
+            card.get_by_label('Название задачи').fill('Названа после возврата')
+            card.get_by_role('button', name='Создать').click()
+            expect(card).to_be_hidden()
+            board = lists.read('board', 'limit=100')
+            (made,) = [entry['id'] for stage in board['stages'].values() for entry in stage['entries']
+                       if entry['text'] == 'Названа после возврата']
+            stored = lists.entry(made)
+            assert (stored['stage'], stored['due']['raw'], stored['details']['tags'], stored['details']['turn']) == \
+                ('review', 'в пятницу', ['срочно'], 'agent')
+            wait_until(lambda: lists.read('draft')['draft'] is None, 'the created card cleared the slot')
+        finally:
+            session.close()
+
+
+@ENGINES
+def test_a_late_edit_an_equal_refusal_and_a_failed_draft_write_leave_the_save_honest(lists, engine):
+    from playwright.sync_api import sync_playwright, expect
+    target, second = lists.add([{'text': 'Поздняя правка', 'description': 'Было'},
+                                {'text': 'Та же правка', 'description': 'Было'}])
+    edits = lambda: lists.calls('POST', 'edit')
+    note = lambda card: card.locator('.dialogfoot .note')
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            # No answer, the check read still finds the old value, and the write lands after that read.
+            # Not proof that nothing was saved: «Готово» repeats the very request, which the store answers as a replay.
+            card = open_card(frame, target)
+            card.get_by_label('Описание').fill('Дошло позже')
+            lists.fail('POST', 'edit', 'late')
+            card.get_by_role('button', name='Готово').click()
+            expect(note(card)).to_contain_text('Сохранение не подтверждено')
+            expect(note(card)).not_to_contain_text('осталась прежней')
+            wait_until(lambda: lists.entry(target)['description'] == 'Дошло позже', 'the late write landed')
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert len(edits()) == 2 and edits()[1][2] == edits()[0][2], 'repeated as itself, not under a new id'
+
+            # Refused because the store moved, but to exactly what the form holds: no field to choose, it is saved.
+            card = open_card(frame, second)
+            card.get_by_label('Описание').fill('Одинаково')
+            lists.update(second, description='Одинаково')
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert edits()[-1][2]['expected'] == {'description': 'Было'}, 'that save was refused as built'
+            assert lists.entry(second)['description'] == 'Одинаково'
+
+            # The draft refuses the write that holds the request: the save still goes, after that write settled.
+            card = open_card(frame, target)
+            card.get_by_label('Описание').fill('Сохранится без черновика')
+            wait_until(lambda: kept(lists).get('form', {}).get('description') == 'Сохранится без черновика')
+            lists.fail('POST', 'draft', {'ok': False, 'code': 'draft_too_large', 'error': 'too large'})
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(target)['description'] == 'Сохранится без черновика'
+            calls = lists.state['calls']
+            refused = [at for at, call in enumerate(calls) if call[:2] == ('POST', 'draft')
+                       and ((call[2].get('draft') or {}).get('pending') or None)]
+            last_edit = max(at for at, call in enumerate(calls) if call[:2] == ('POST', 'edit'))
+            assert refused and refused[-1] < last_edit, 'the draft write holding the request went first'
+            wait_until(lambda: lists.read('draft')['draft'] is None, 'the saved card cleared the slot')
+        finally:
+            session.close()
+
+
+@ENGINES
+def test_this_windows_own_late_draft_write_is_taken_as_its_own(lists, engine):
+    from playwright.sync_api import sync_playwright, expect
+    (target,) = lists.add([{'text': 'Свой поздний черновик', 'description': 'Было'}])
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            foot = card.locator('.dialogfoot')
+            text = card.get_by_label('Описание')
+            text.fill('Первая версия')
+            wait_until(lambda: kept(lists).get('form', {}).get('description') == 'Первая версия')
+            # The write gets no answer, the check read fails too, and the write lands afterwards.
+            lists.fail('POST', 'draft', 'late')
+            lists.fail('GET', 'draft', 'lost')
+            text.fill('Вторая версия')
+            expect(foot).to_contain_text('Черновик не сохранён')
+            wait_until(lambda: kept(lists).get('form', {}).get('description') == 'Вторая версия', 'the late write landed')
+            # That revision is this window's own: the next change writes over it, nothing says another window cleared it.
+            text.fill('Третья версия')
+            wait_until(lambda: kept(lists).get('form', {}).get('description') == 'Третья версия',
+                       "the next write takes the slot this window wrote")
+            expect(foot).to_contain_text('Черновик сохранён')
+            expect(foot).not_to_contain_text('другом окне')
         finally:
             session.close()
 

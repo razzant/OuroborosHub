@@ -1085,8 +1085,11 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   const isDirty = (key) => !same(draftWire(key), stored[key](card.base));
   function dirtyKeys() {
     if (!card.id) {
-      // A task that does not exist yet has nothing to lose until it is named or described.
-      const started = card.draft.text.trim() || card.draft.description.trim() || card.ops.length;
+      // A task that does not exist yet has nothing to lose until something is put in it: a name, a
+      // description, a link, or a tag, turn, due date or stage other than what the card opened with.
+      const from = card.start || newDraft(BLANK);
+      const started = card.draft.text.trim() || card.draft.description.trim() || card.ops.length
+        || ["stage", "tags", "turn", "due"].some((key) => !same(draftWire(key), wire[key](from[key])));
       return started ? [...SCALARS, "references"].filter(isDirty) : [];
     }
     return [...SCALARS, "references"].filter(isDirty);
@@ -1480,6 +1483,12 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
         // built on the values read now.
         card.pending = null;
         const read = await pull(true).then(() => true, () => false);
+        if (read && !Object.keys(card.conflicts).length) {
+          // Moved elsewhere to just what the form shows: nothing to choose, and nothing left to save.
+          if (!dirtyKeys().length) return (card.saved = true);
+          card.error = "Не сохранено: задачу изменили в другом месте, её значения перечитаны. Правки остались в форме: нажми «Готово» ещё раз.";
+          return false;
+        }
         card.error = read
           ? "Не сохранено: часть полей изменили в другом месте. Отмеченные поля показывают оба значения."
           : "Не сохранено: часть полей изменили в другом месте, а свежие значения не прочитались. Правки остались в форме.";
@@ -1503,9 +1512,11 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
         landed(op, fresh);
         return true;
       }
-      card.pending = null;
+      // The check read still shows the old values, yet the request may land later: the
+      // outcome stays unknown, so the next «Готово» repeats it as itself.
+      card.pending = op;
       rebase(fresh);
-      card.error = "Не сохранено: Smart Lists не ответил, запись осталась прежней. Правки остались в форме.";
+      card.error = "Сохранение не подтверждено: Smart Lists не ответил, и в задаче пока прежние значения. Правки остались в форме. «Готово» отправит тот же запрос ещё раз, дубля не будет.";
       return false;
     }
   }
@@ -1632,7 +1643,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       if (fresh && error.unknown && !!fresh.archived_at === archived) ok = true;
       else
         card.error = error.unknown
-          ? "Не подтверждено: Smart Lists не ответил" + (fresh ? ", задача осталась где была." : ". Проверь задачу на доске перед повтором.")
+          ? "Не подтверждено: Smart Lists не ответил" + (fresh ? ", задача пока там, где была, но перемещение ещё может дойти. Проверь задачу на доске перед повтором." : ". Проверь задачу на доске перед повтором.")
           : error.code === "field_conflict" ? "Не выполнено: задачу уже переместили в другом месте."
           : `Не выполнено: ${said(error)}.`;
     }
@@ -1694,7 +1705,8 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   async function openNew() {
     if (card || !(await slotFree()) || card) return;
     // A task made while a tag filter is on starts with those tags, so it stays in view.
-    showCard({ draft: { ...newDraft(BLANK), tags: [...view.tags] } });
+    const start = { ...newDraft(BLANK), tags: [...view.tags] };
+    showCard({ start, draft: { ...start, tags: [...start.tags] } });
     inputs.text.focus();
   }
   // Closing clears the draft slot: everything is saved, or the owner discarded it.
@@ -1819,10 +1831,12 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       } catch (error) {
         const current = error.unknown ? await call("draft") : error.code === "draft_conflict" ? error.answer?.current : null;
         if (!current) throw error;
-        if (slot.ids.has(current.write_id) && JSON.stringify(current.draft) === text) {
-          slot.rev = current.revision; // this very form, written from here, answered late
-          slot.held = text;
-          return true;
+        if (slot.ids.has(current.write_id)) {
+          // The slot's newest write is this window's own, answered late: its revision is ours to replace.
+          slot.rev = current.revision;
+          slot.held = JSON.stringify(current.draft);
+          if (slot.held === text) return true;
+          continue;
         }
         if (current.revision === slot.rev) continue; // lost on the way while the slot stayed as it was
         learn(current);
