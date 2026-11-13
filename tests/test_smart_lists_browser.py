@@ -1,7 +1,8 @@
 """Opt-in: the real Smart Lists widget in the real module frame, over the registered routes.
 
-Set OUROBOROS_THEME_CORE_ROOT to a core checkout; a Playwright WebKit (and, when
-installed, Chromium) is required. The widget source is mounted by the core's own
+Set OUROBOROS_THEME_CORE_ROOT to a core checkout; Playwright WebKit (the macOS app's
+engine) is then required and a missing one fails. Chromium runs when installed and is
+skipped only when Playwright has no Chromium build on this machine. The widget source is mounted by the core's own
 ``mountModuleWidget`` in its sandboxed frame and talks to the skill's registered
 tools and routes over a private temporary store. No installed skill, account,
 owner data or model is used; every task here is invented.
@@ -15,6 +16,7 @@ import json
 import mimetypes
 import os
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -66,8 +68,9 @@ def lists(tmp_path):
     spec.loader.exec_module(support)
     api = support.FakePluginAPI(tmp_path / 'state')
     support.load_plugin().register(api)
-    # calls: every skill request the frame made; faults: one-shot outages a test queues.
-    state = {'calls': [], 'faults': [], 'errors': [], 'widget_faults': []}
+    # calls: every skill request the frame made; faults: one-shot outages a test queues;
+    # errors: a route handler that raised; disconnects: answers the browser closed before reading.
+    state = {'calls': [], 'faults': [], 'errors': [], 'widget_faults': [], 'disconnects': []}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -76,12 +79,18 @@ def lists(tmp_path):
         def send(self, body, content_type='application/json', status=200):
             if not isinstance(body, bytes):
                 body = (body if isinstance(body, str) else json.dumps(body)).encode('utf-8')
-            self.send_response(status)
-            self.send_header('Content-Type', content_type)
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            if self.command != 'HEAD':
-                self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                if self.command != 'HEAD':
+                    self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                # The browser went away (a page closing with a request in flight): the answer
+                # has no reader. That is transport, not a skill failure, and is only recorded.
+                state['disconnects'].append(f'{self.command} {self.path}')
+                self.close_connection = True
 
         def dispatch(self):
             url = urlsplit(self.path)
@@ -112,24 +121,32 @@ def lists(tmp_path):
                 fault = next((f for f in state['faults'] if f[0] == method and f[1] == name), None)
                 if fault:
                     state['faults'].remove(fault)
+                    if isinstance(fault[2], dict):  # a typed answer the store gives in a state a test cannot make
+                        return self.send(fault[2])
+                    if fault[2] == 'slow':  # the store answers, late enough for the owner to keep typing
+                        time.sleep(1.5)
                     if fault[2] == 'lost':  # never reached the store
                         return self.send({'error': 'synthetic outage'}, status=503)
                     if fault[2] == 'refused':
                         return self.send({'ok': False, 'error': 'Synthetic refusal; nothing changed'})
+                # Only the route and its answer's serialization are the skill's; writing the
+                # answer to the socket happens after this block, in send().
                 try:
                     request = support.FakeRequest(body, method=method)
                     request.query_params = QueryParams(url.query)
                     result = api.routes[name]['handler'](request)
                     if asyncio.iscoroutine(result):
                         result = asyncio.run(result)
-                    if fault:  # 'unanswered': the store applied it, the answer was lost
-                        return self.send({'error': 'synthetic outage'}, status=503)
                     if hasattr(result, 'body'):
-                        return self.send(bytes(result.body), status=result.status_code)
-                    return self.send(result)
+                        answer, status = bytes(result.body), result.status_code
+                    else:
+                        answer, status = json.dumps(result).encode('utf-8'), 200
                 except Exception as exc:
                     state['errors'].append(repr(exc))
                     return self.send({'error': str(exc)}, status=500)
+                if fault and fault[2] == 'unanswered':  # the store applied it, the answer was lost
+                    return self.send({'error': 'synthetic outage'}, status=503)
+                return self.send(answer, status=status)
             return self.send({'error': 'not found'}, status=404)
 
         do_GET = dispatch
@@ -148,7 +165,7 @@ def lists(tmp_path):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield Lists(tool, state, f'http://127.0.0.1:{server.server_port}', tmp_path)
+        yield Lists(tool, state, f'http://127.0.0.1:{server.server_port}', tmp_path, api)
     finally:
         server.shutdown()
         server.server_close()
@@ -161,8 +178,8 @@ def lists(tmp_path):
 class Lists:
     """One private store behind the registered tools and routes, and browsers pointed at it."""
 
-    def __init__(self, tool, state, url, tmp_path):
-        self.tool, self.state, self.url, self.tmp = tool, state, url, tmp_path
+    def __init__(self, tool, state, url, tmp_path, api):
+        self.tool, self.state, self.url, self.tmp, self.api = tool, state, url, tmp_path, api
         self.evidence = Path(os.environ.get('OUROBOROS_LISTS_EVIDENCE_DIR', str(tmp_path / 'evidence')))
         self.evidence.mkdir(parents=True, exist_ok=True)
         self._serial = 0
@@ -214,9 +231,11 @@ class Lists:
     def open(self, pw, engine, shape=OWNER, theme='light'):
         try:
             browser = getattr(pw, engine).launch(headless=True)
-        except Exception as exc:  # an engine this machine does not have is not a widget failure
-            if "Executable doesn't exist" in str(exc):
-                pytest.skip(f'Playwright {engine} is not installed')
+        except Exception as exc:
+            # WebKit is the engine the owner's app uses, so without it this suite proves nothing:
+            # that is a failure. Only a Chromium build this machine never installed is skipped.
+            if engine == 'chromium' and "Executable doesn't exist" in str(exc):
+                pytest.skip('Playwright chromium is not installed')
             raise
         width, height = shape['viewport']
         context = browser.new_context(viewport={'width': width, 'height': height}, accept_downloads=True,
@@ -280,6 +299,17 @@ def balanced():
         items.append({'text': text, 'stage': 'todo' if index == 3 else 'done', 'archived': True,
                       'tags': ['дизайн' if index % 2 else 'бэкенд', 'архив']})
     return items
+
+
+def chips(card):
+    """The tag tokens the card shows, in order."""
+    return card.locator('.tagchip > span').all_inner_texts()
+
+
+def add_tag(card, text):
+    box = card.get_by_label('Теги')
+    box.fill(text)
+    box.press('Enter')
 
 
 def column(frame, stage):
@@ -390,7 +420,7 @@ def test_card_saves_only_what_changed_and_archive_keeps_the_task_whole(lists, en
             frame = session.mount()
             card = open_card(frame, first)
             expect(card.get_by_label('Название задачи')).to_have_value('Сверить два отчёта')
-            expect(card.get_by_label('Description')).to_have_value(lists.entry(first)['description'])
+            expect(card.get_by_label('Описание')).to_have_value(lists.entry(first)['description'])
             expect(card.locator('.ref')).to_have_count(3)
             assert card.locator('.ref b').all_inner_texts() == ['Ссылка', 'Telegram', 'PR']
             session.shot(f'card-{engine}-light.png')
@@ -400,9 +430,14 @@ def test_card_saves_only_what_changed_and_archive_keeps_the_task_whole(lists, en
             assert session.page.evaluate('window.opened') == ['https://code.example.org/team/app/pull/1']
 
             text = 'Сверить цифры за октябрь.\nИсточник: https://docs.example.org/report.'
-            card.get_by_label('Description').fill(text)
+            card.get_by_label('Описание').fill(text)
             expect(card.locator('.links a')).to_have_text('↗ docs.example.org/report')
-            card.get_by_label('Теги').fill('бэкенд, Отчёты, отчёты')
+            assert chips(card) == ['бэкенд', 'ревью']
+            card.get_by_role('button', name='Убрать тег: ревью').click()
+            add_tag(card, 'Отчёты')
+            add_tag(card, 'отчёты')  # the same tag in another case is already there
+            assert chips(card) == ['бэкенд', 'Отчёты']
+            expect(card.get_by_label('Теги')).to_have_value('')
             card.get_by_label('Адрес ссылки').fill('просто слова')
             card.get_by_role('button', name='Добавить').click()
             expect(card.locator('.addrow + .note')).to_contain_text('https://')
@@ -476,7 +511,8 @@ def test_card_saves_only_what_changed_and_archive_keeps_the_task_whole(lists, en
             expect(frame.locator('.task')).to_have_count(before)
             frame.get_by_role('button', name='+ Задача').click()
             expect(card.locator('.dialoghead .hint')).to_have_text('Новая задача')
-            expect(card.get_by_label('Теги')).to_have_value('дом')
+            assert chips(card) == ['дом']
+            expect(card.get_by_label('Теги')).to_have_value('')
             card.get_by_role('button', name='Создать').click()
             expect(card.locator('.dialogfoot .note')).to_have_text('У задачи должно быть название.')
             assert not lists.calls('POST', 'add')
@@ -502,7 +538,7 @@ def test_draft_outlives_refresh_and_a_concurrent_change_is_shown_not_overwritten
         try:
             frame = session.mount()
             card = open_card(frame, target)
-            draft = card.get_by_label('Description')
+            draft = card.get_by_label('Описание')
             draft.fill('Черновик, который ещё не сохранён.')
             draft.evaluate('node => { node.focus(); node.setSelectionRange(8, 8); }')
             # Meanwhile the agent adds a source and takes the next step: fields this form did not touch.
@@ -544,19 +580,20 @@ def test_draft_outlives_refresh_and_a_concurrent_change_is_shown_not_overwritten
 
             # No refresh in between: the store itself refuses the stale write and nothing is applied.
             card = open_card(frame, target)
-            card.get_by_label('Теги').fill('моё, срочно')
+            add_tag(card, 'моё')
+            add_tag(card, 'срочно')
             card.get_by_label('Срок').fill('к пятнице')
             lists.update(target, details={'tags': ['агент']})
             card.get_by_role('button', name='Готово').click()
             expect(card.locator('.dialogfoot .note')).to_contain_text('Не сохранено: часть полей изменили в другом месте')
             tags_note = card.locator('.field', has=frame.locator('#sl-tags')).locator('.note')
-            expect(tags_note.locator('.theirs')).to_have_text('агент')
+            expect(tags_note.locator('.theirs')).to_have_text('«агент»')
             stored = lists.entry(target)
             assert stored['details']['tags'] == ['агент'] and stored['due'] is None, 'a refused write changes nothing'
-            expect(card.get_by_label('Теги')).to_have_value('моё, срочно')
+            assert chips(card) == ['дизайн', 'моё', 'срочно']
             expect(card.get_by_label('Срок')).to_have_value('к пятнице')
             tags_note.get_by_role('button', name='Взять это значение').click()
-            expect(card.get_by_label('Теги')).to_have_value('агент')
+            assert chips(card) == ['агент']
             card.get_by_role('button', name='Готово').click()
             expect(card).to_be_hidden()
             stored = lists.entry(target)
@@ -593,7 +630,7 @@ def test_unanswered_write_is_checked_first_and_never_repeated_under_a_new_id(lis
             edits = lambda: lists.calls('POST', 'edit')
             # The store applied the write but its answer was lost: the widget reads, finds it, and closes.
             card = open_card(frame, target)
-            card.get_by_label('Description').fill('Первая правка')
+            card.get_by_label('Описание').fill('Первая правка')
             lists.fail('POST', 'edit', 'unanswered')
             card.get_by_role('button', name='Готово').click()
             expect(card).to_be_hidden()
@@ -601,11 +638,11 @@ def test_unanswered_write_is_checked_first_and_never_repeated_under_a_new_id(lis
 
             # The write never arrived: said plainly, the draft stays, and nothing is sent again by itself.
             card = open_card(frame, target)
-            card.get_by_label('Description').fill('Вторая правка')
+            card.get_by_label('Описание').fill('Вторая правка')
             lists.fail('POST', 'edit', 'lost')
             card.get_by_role('button', name='Готово').click()
             expect(card.locator('.dialogfoot .note')).to_contain_text('запись осталась прежней')
-            expect(card.get_by_label('Description')).to_have_value('Вторая правка')
+            expect(card.get_by_label('Описание')).to_have_value('Вторая правка')
             session.page.wait_for_timeout(400)
             assert len(edits()) == 2 and lists.entry(target)['description'] == 'Первая правка'
             session.shot(f'unanswered-{engine}-light.png')
@@ -615,7 +652,7 @@ def test_unanswered_write_is_checked_first_and_never_repeated_under_a_new_id(lis
 
             # Neither the write nor the check got through: the next attempt is the very same request.
             card = open_card(frame, target)
-            card.get_by_label('Description').fill('Третья правка')
+            card.get_by_label('Описание').fill('Третья правка')
             lists.fail('POST', 'edit', 'unanswered')
             lists.fail('GET', 'entry', 'lost')
             card.get_by_role('button', name='Готово').click()
@@ -641,7 +678,7 @@ def test_unanswered_write_is_checked_first_and_never_repeated_under_a_new_id(lis
 
             # A refusal is not an outage: it is shown as one and the form is kept.
             card = open_card(frame, target)
-            card.get_by_label('Description').fill('Четвёртая правка')
+            card.get_by_label('Описание').fill('Четвёртая правка')
             lists.fail('POST', 'edit', 'refused')
             card.get_by_role('button', name='Готово').click()
             expect(card.locator('.dialogfoot .note')).to_have_text('Не сохранено: Synthetic refusal; nothing changed.')
@@ -768,7 +805,7 @@ def test_phone_width_scrolls_only_the_board_and_the_longest_task_stays_inside_it
             assert body.evaluate('node => node.scrollWidth <= node.clientWidth'), 'nothing widens the card'
             assert body.evaluate('node => node.scrollHeight > node.clientHeight'), 'the card scrolls, not the page'
             expect(card.get_by_label('Название задачи')).to_have_value(title)
-            expect(card.get_by_label('Description')).to_have_value(description)
+            expect(card.get_by_label('Описание')).to_have_value(description)
             expect(card.locator('.ref')).to_have_count(6)
             card.get_by_role('button', name='Показать все 100').click()
             expect(card.locator('.ref')).to_have_count(100)
@@ -823,14 +860,14 @@ def test_keyboard_reaches_every_card_and_dragging_changes_the_stage_once(lists, 
             # Escape never throws a draft away: it asks, and a second Escape goes back to editing.
             page.keyboard.press('Enter')
             expect(card.get_by_role('button', name='Готово')).to_be_enabled()
-            card.get_by_label('Description').fill('Незаконченная мысль')
+            card.get_by_label('Описание').fill('Незаконченная мысль')
             page.keyboard.press('Escape')
             expect(card.locator('.dialogfoot [role="status"]')).to_have_text('Правки не сохранены.')
             expect(card).to_be_visible()
             page.keyboard.press('Escape')
             expect(card.get_by_role('button', name='Готово')).to_be_visible()
-            expect(card.get_by_label('Description')).to_have_value('Незаконченная мысль')
-            card.get_by_label('Description').press('Control+Enter')
+            expect(card.get_by_label('Описание')).to_have_value('Незаконченная мысль')
+            card.get_by_label('Описание').press('Control+Enter')
             expect(card).to_be_hidden()
             assert lists.entry(ids[0])['description'] == 'Незаконченная мысль'
 
@@ -892,3 +929,241 @@ def test_keyboard_reaches_every_card_and_dragging_changes_the_stage_once(lists, 
             expect(page.locator('iframe')).to_have_count(0)
         finally:
             session.close()
+
+
+# ---------------------------------------------------------------- 0.6.3 repairs
+# These drive only what every version of the card has (the description by id,
+# the link row, Готово and В архив), so the same cases show the defect before the repair.
+
+@ENGINES
+def test_untouched_tags_come_back_exactly_with_commas_and_newlines(lists, engine):
+    from playwright.sync_api import sync_playwright, expect
+    tags = ['Research, Development', 'Q4, 2026', 'ops', 'строка\nвторая']
+    (target,) = lists.add([{'text': 'Теги с запятыми', 'tags': tags, 'description': 'Исходное описание'}])
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            expect(card.locator('.dialogfoot [role="status"]')).to_have_text('')
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert not lists.calls('POST', 'edit'), 'opening and closing a card writes nothing'
+            assert lists.entry(target)['details']['tags'] == tags
+
+            card = open_card(frame, target)
+            card.locator('#sl-description').fill('Новое описание')
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(target)['details']['tags'] == tags
+            assert lists.calls('POST', 'edit')[-1][2]['changes'] == {'description': 'Новое описание'}
+        finally:
+            session.close()
+
+
+@ENGINES
+def test_edits_typed_while_saving_or_archiving_stay_on_screen(lists, engine):
+    from playwright.sync_api import sync_playwright, expect
+    first, second, third = lists.add([{'text': f'Задача {n}', 'description': 'Было'} for n in (1, 2, 3)])
+    status = lambda card: card.locator('.dialogfoot [role="status"]')
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            # Готово: the first part is saved, the part typed while it was away stays a draft.
+            card = open_card(frame, first)
+            text = card.locator('#sl-description')
+            text.fill('Первая часть')
+            lists.fail('POST', 'edit', 'slow')
+            card.get_by_role('button', name='Готово').click()
+            expect(status(card)).to_have_text('Сохраняю…')
+            text.fill('Первая часть и продолжение')
+            expect(status(card)).not_to_have_text('Сохраняю…')
+            frame.wait_for_timeout(300)
+            expect(card).to_be_visible()
+            expect(text).to_have_value('Первая часть и продолжение')
+            assert lists.entry(first)['description'] == 'Первая часть'
+            expect(card.locator('.field', has=frame.locator('#sl-description')).locator('.note')).to_be_hidden()
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(first)['description'] == 'Первая часть и продолжение'
+
+            # В архив with an unsaved edit: typing during that save keeps the task where it is.
+            card = open_card(frame, second)
+            text = card.locator('#sl-description')
+            text.fill('Вторая')
+            lists.fail('POST', 'edit', 'slow')
+            card.get_by_role('button', name='В архив').click()
+            expect(status(card)).to_have_text('Сохраняю…')
+            text.fill('Вторая и ещё')
+            expect(status(card)).not_to_have_text('Сохраняю…')
+            frame.wait_for_timeout(300)
+            expect(card).to_be_visible()
+            expect(text).to_have_value('Вторая и ещё')
+            stored = lists.entry(second)
+            assert stored['description'] == 'Вторая' and stored['archived_at'] is None
+            assert not lists.calls('POST', 'archive')
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(second)['description'] == 'Вторая и ещё'
+
+            # Typing while the archive move itself is away: the move lands, the draft stays.
+            card = open_card(frame, third)
+            text = card.locator('#sl-description')
+            lists.fail('POST', 'archive', 'slow')
+            card.get_by_role('button', name='В архив').click()
+            expect(status(card)).to_have_text('Сохраняю…')
+            text.fill('Во время переноса')
+            expect(status(card)).not_to_have_text('Сохраняю…')
+            frame.wait_for_timeout(300)
+            expect(card).to_be_visible()
+            expect(text).to_have_value('Во время переноса')
+            stored = lists.entry(third)
+            assert stored['archived_at'] and stored['description'] == 'Было'
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            stored = lists.entry(third)
+            assert stored['archived_at'] and stored['description'] == 'Во время переноса'
+        finally:
+            session.close()
+
+
+@ENGINES
+def test_a_refused_retry_of_an_unconfirmed_edit_lets_keep_mine_save(lists, engine):
+    from playwright.sync_api import sync_playwright, expect
+    (target,) = lists.add([{'text': 'Спорное описание', 'description': 'Исходное'}])
+    edits = lambda: lists.calls('POST', 'edit')
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            card.locator('#sl-description').fill('Моя правка')
+            lists.fail('POST', 'edit', 'lost')   # no answer, and it never reached the store
+            lists.fail('GET', 'entry', 'lost')   # the check read fails too: the outcome stays unknown
+            card.get_by_role('button', name='Готово').click()
+            expect(card.locator('.dialogfoot .note')).to_contain_text('Сохранение не подтверждено')
+            assert len(edits()) == 1
+            lists.update(target, description='Правка агента')
+            card.get_by_role('button', name='Готово').click()
+            note = card.locator('.field', has=frame.locator('#sl-description')).locator('.note')
+            expect(note.locator('.theirs')).to_have_text('Правка агента')
+            assert len(edits()) == 2 and edits()[1][2] == edits()[0][2], 'the unknown write is repeated as itself'
+            note.get_by_role('button', name='Оставить моё').click()
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(target)['description'] == 'Моя правка'
+            last = edits()[-1][2]
+            assert last['request_id'] != edits()[0][2]['request_id']
+            assert last['expected'] == {'description': 'Правка агента'}
+            assert len(edits()) == 3
+        finally:
+            session.close()
+
+
+@ENGINES
+def test_an_uppercase_link_scheme_is_saved_in_canonical_form(lists, engine):
+    from playwright.sync_api import sync_playwright, expect
+    (target,) = lists.add([{'text': 'Ссылка заглавными'}])
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            card.get_by_label('Адрес ссылки').fill('HTTPS://Code.Example.org/Team/App/pull/9?Q=A')
+            card.get_by_role('button', name='Добавить').click()
+            expect(card.locator('.ref')).to_have_count(1)
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            (ref,) = lists.entry(target)['details']['references']
+            assert ref['target'] == 'https://Code.Example.org/Team/App/pull/9?Q=A'
+            # What the store would refuse is refused here, before anything is sent.
+            card = open_card(frame, target)
+            for refused in ('https:code.example.org/x', 'https://@code.example.org/x', 'HTTPS://user:pw@code.example.org/'):
+                card.get_by_label('Адрес ссылки').fill(refused)
+                card.get_by_role('button', name='Добавить').click()
+                expect(card.locator('.addrow + .note')).to_contain_text('https://')
+                expect(card.locator('.ref')).to_have_count(1)
+        finally:
+            session.close()
+
+
+@ENGINES
+def test_tag_tokens_selects_and_store_state_read_as_the_card_is_meant(lists, engine):
+    from playwright.sync_api import sync_playwright, expect
+    (target,) = lists.add([{'text': 'Токены', 'tags': ['Research, Development', 'ops']}])
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            assert chips(card) == ['Research, Development', 'ops']
+            # Every control in the side column has the inputs' height.
+            heights = card.locator('aside select, aside input').evaluate_all(
+                'nodes => nodes.map(node => node.getBoundingClientRect().height)')
+            assert max(heights) - min(heights) <= 2, heights
+            expect(card.get_by_text('Описание', exact=True)).to_be_visible()
+            add_tag(card, 'A, B')
+            card.get_by_role('button', name='Убрать тег: ops').click()
+            card.get_by_label('Теги').fill('черновик')  # typed, never confirmed with Enter
+            assert chips(card) == ['Research, Development', 'A, B']
+            session.shot(f'tags-{engine}-light.png')
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(target)['details']['tags'] == ['Research, Development', 'A, B', 'черновик']
+
+            # A store the owner can only fix through the chat is described, not quoted from the agent's API.
+            # The board read that follows the save has landed once the new tag is on the tile.
+            expect(frame.locator(f'.task[data-id="{target}"] .tag', has_text='черновик')).to_have_count(1)
+            lists.fail('GET', 'board', {'ok': False, 'code': 'store_not_initialized',
+                                        'error': 'No Smart Lists store exists in this installation yet'})
+            frame.get_by_role('button', name='Ещё действия').click()
+            frame.get_by_role('menuitem', name='Обновить').click()
+            expect(frame.locator('.alert')).to_contain_text('Списка ещё нет')
+            assert 'No Smart Lists' not in frame.locator('.alert').inner_text()
+        finally:
+            session.close()
+
+
+def test_fixture_reports_route_failures_and_only_records_a_closed_connection(lists):
+    """The fixture's own boundary: a skill route that raises is an error teardown reports;
+    a browser that hangs up before reading an answer is not."""
+    import socket
+    import struct
+    import urllib.error
+    import urllib.request
+
+    # A genuine failure inside a registered route is still caught, answered 500 and recorded.
+    real = lists.api.routes['board']['handler']
+
+    def broken(request):
+        raise RuntimeError('route failed on purpose')
+
+    lists.api.routes['board']['handler'] = broken
+    try:
+        with pytest.raises(urllib.error.HTTPError) as answer:
+            urllib.request.urlopen(f'{lists.url}{PREFIX}board?limit=1')
+        assert answer.value.code == 500
+    finally:
+        lists.api.routes['board']['handler'] = real
+    assert lists.state['errors'] == ["RuntimeError('route failed on purpose')"]
+    lists.state['errors'].clear()  # asserted here; teardown would otherwise (rightly) fail on it
+
+    # A client that resets its connection while the route works: the write fails, nothing is an error.
+    lists.fail('GET', 'board', 'slow')
+    client = socket.create_connection(('127.0.0.1', urlsplit(lists.url).port))
+    before = len(lists.calls('GET', 'board'))
+    client.sendall(f'GET {PREFIX}board?limit=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n'.encode())
+    # Hang up only once the server holds the request (it records it, then the slow route sleeps 1.5 s).
+    deadline = time.monotonic() + 10
+    while len(lists.calls('GET', 'board')) == before and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert len(lists.calls('GET', 'board')) == before + 1, 'the server received the request'
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))  # close with RST
+    client.close()
+    while not lists.state['disconnects'] and time.monotonic() < deadline:
+        time.sleep(0.05)  # the route answers after its sleep, into the reset socket
+    assert lists.state['disconnects'] == [f'GET {PREFIX}board?limit=1']
+    assert lists.state['errors'] == []
+    # The server keeps answering.
+    assert lists.read('board', 'limit=1')['ok'] is True

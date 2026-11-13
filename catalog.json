@@ -3259,33 +3259,28 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "0c48439c62fac48a2b31380e00eac29b047962d0ad71367e088d4809142539fb",
-          "size": 31593
+          "sha256": "610b953966c6be72d927bd36f3e7ef2724706234c407a813d45a3ba5526d58fe",
+          "size": 32505
         },
         {
           "path": "entry_details.py",
-          "sha256": "09ebab1141cbe55db1e6c9800db555e57888f028a559f78fba35ef8bb5fb2bba",
-          "size": 3433
+          "sha256": "b2d8d5362ff145f074170edcaea17caeb168a9af63807ccd0f1aecb25cba70fe",
+          "size": 3737
         },
         {
           "path": "lists_core.py",
-          "sha256": "1a51e3ed4253edc649762326f4a916bfbaf0b9c02bc4f8d009f520ade0f24f12",
-          "size": 115929
+          "sha256": "b898374b0db7672a08cf30f22d72674d918a7b941b6483d6b55da61c00d6f7a4",
+          "size": 116238
         },
         {
           "path": "plugin.py",
-          "sha256": "0bf05faa5ca822ea694b25436a756fd0e96e8fe085b4a87ba37d113b775b42e6",
-          "size": 50710
-        },
-        {
-          "path": "tests/KANBAN_API.md",
-          "sha256": "52a9aa14e31631926eb230ca568c06cb41bd5e5efc8c967bf57632ec3a9051d7",
-          "size": 3405
+          "sha256": "d1b595c1314a1f6e6b289d5652e5f98b148d33b28631665320c49abf03a7fe06",
+          "size": 51826
         },
         {
           "path": "tests/test_agent_details.py",
-          "sha256": "bb1f8f278547dd57271734f0984bc0cc4fe048e2ee991e4fda0c5498b31b5b11",
-          "size": 8028
+          "sha256": "afad4824fb1582f4c4526fd24ef642c32e15fc0e959a88e6eedc6d96cf889500",
+          "size": 8913
         },
         {
           "path": "tests/test_capture_route.py",
@@ -3308,20 +3303,25 @@
           "size": 7225
         },
         {
+          "path": "tests/test_review_repairs.py",
+          "sha256": "ac9edc7ecfcef3838a50bfc4fcf167a2651d86aeca4b7d054838541ce1ad622d",
+          "size": 10514
+        },
+        {
           "path": "tests/test_smart_lists.py",
-          "sha256": "30cf548db07d3d6505bc8559c2beccfb6c4d41023c7c724f74c07df8b4c8bcf9",
-          "size": 120474
+          "sha256": "a4cd4bc7ab0e0ebaf8548151d03c0caa017d1e4a4658901160f5340abdbf086c",
+          "size": 121098
         },
         {
           "path": "widget.js",
-          "sha256": "13387c668a018eafedef4b44ed0f4401b8589e529d60e951b986558fe35521b6",
-          "size": 72780
+          "sha256": "d8b4b558b0ebf70d5368a630d3f1990a7ff28a1687525e24b41689831520317f",
+          "size": 79307
         }
       ],
       "name": "smart_lists",
       "slug": "smart_lists",
       "type": "extension",
-      "version": "0.6.2"
+      "version": "0.6.3"
     },
     {
       "description": "Inspect, filter, sort, group, and aggregate CSV and XLSX tables while reporting truncation and non-numeric values honestly.",

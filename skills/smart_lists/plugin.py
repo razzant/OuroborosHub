@@ -177,6 +177,10 @@ def tool_read(ctx: Any = None, **args: Any) -> str:
         archive=a.get("archive", "all")))
 
 
+def _render(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 def tool_entry(ctx: Any = None, **args: Any) -> str:
     """Lossless field pages; never pass a complete card through _tool_json truncation."""
     def call(a: Dict[str, Any]) -> Dict[str, Any]:
@@ -195,6 +199,8 @@ def tool_entry(ctx: Any = None, **args: Any) -> str:
                     "text_length": len(entry["text"]), "due_length": len((entry["due"] or {}).get("raw", "")),
                     "tag_count": len(details["tags"]),
                     "description_length": len(entry["description"]),
+                    "note_length": len(details["note"]), "next_step_length": len(details["next_step"]),
+                    "capture_key_length": len(details.get("capture_key", "")),
                     "group_path_length": len(entry["group_path"]),
                     "reference_count": len(details["references"])}
         if field == "tags":
@@ -207,10 +213,23 @@ def tool_entry(ctx: Any = None, **args: Any) -> str:
             value = entry[field]
         else:
             value = details.get(field, "")
-        # A control character may occupy six escaped JSON bytes. Pages stay
-        # below the host's 15 KB result cap for every valid field value.
-        size = 1 if field in ("tags", "references") else 500
-        part = value[offset:offset + size]
+        if field not in ("tags", "references"):
+            # A control character may occupy six escaped JSON bytes, so 500
+            # characters stay below the host's 15 KB result cap.
+            part = value[offset:offset + 500]
+            return {**common, "value": part, "offset": offset,
+                    "next_offset": min(len(value), offset + len(part)), "total": len(value)}
+        # Whole items, as many as fit the result's byte budget; the empty page
+        # is measured with next_offset at its widest value, the total.
+        frame = _render({"ok": True, **common, "value": [], "offset": offset,
+                         "next_offset": len(value), "total": len(value)})
+        room, part = MAX_TOOL_RESULT_BYTES - len(frame), []
+        for item in value[offset:]:
+            cost = len(_render(item)) + (1 if part else 0)
+            if part and cost > room:
+                break
+            part.append(item)
+            room -= cost
         return {**common, "value": part, "offset": offset,
                 "next_offset": min(len(value), offset + len(part)), "total": len(value)}
 
@@ -221,7 +240,7 @@ def tool_entry(ctx: Any = None, **args: Any) -> str:
         payload = {"ok": True, **call(args)}
     except ListError as exc:
         payload = {"ok": False, "error": exc.as_dict()}
-    rendered = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    rendered = _render(payload).decode("utf-8")
     if len(rendered.encode("utf-8")) > MAX_TOOL_RESULT_BYTES:
         return json.dumps({"ok": False, "error": {"code": "response_limit", "message": "entry field page exceeds tool limit"}})
     return rendered
@@ -374,7 +393,7 @@ TOOLS = (
                 "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
                 "tag_mode": {"type": "string", "enum": ["all", "any"], "default": "all"},
                 "turn": {"type": "string", "enum": ["", "unassigned", "owner", "agent", "other"]},
-                "query": {"type": "string", "description": "Substring in text, next step or note."},
+                "query": {"type": "string", "description": "Case-insensitive substring in text, description, next step or note."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100},
                 "offset": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 0},
             },
@@ -384,7 +403,7 @@ TOOLS = (
     (
         "entry",
         tool_entry,
-        "Smart Lists: lossless full-card field pages. Read overview, then page text, due, tags, description, note, next_step, capture_key, group_path and references by next_offset until total. Compare revision on every page; if it changes, restart the read. Never replace references using a shortened read result.",
+        "Smart Lists: lossless full-card field pages. Read overview (identity, stage, timestamps and every field length), then page text, due, tags, description, note, next_step, capture_key, group_path and references by next_offset until total: text fields 500 characters a page, tags and references as many whole items as fit one result. Compare revision on every page; if it changes, restart the read. Never replace references using a shortened read result.",
         {"type": "object", "properties": {
             "entry_id": {"type": "string"},
             "field": {"type": "string", "enum": ["overview", "text", "due", "tags", "description", "note", "next_step", "capture_key", "references", "group_path"], "default": "overview"},
@@ -405,7 +424,7 @@ TOOLS = (
                 "details": _DETAILS,
                 "stage": {"type": "string", "enum": list(lists_core.STAGES)},
                 "description": {"type": "string", "maxLength": lists_core.MAX_DESCRIPTION_CHARS},
-                "expected": {"type": "object", "description": "Optional prior values for exactly the updated fields; use for replacing metadata after a fresh full entry read."},
+                "expected": {"type": "object", "description": "Optional prior values for exactly the updated fields, as read: text, description and stage as text; due as null, the raw text or the stored {raw, at?} object (\"\" from an entry page also means unset); details.<field> as stored. A value that differs from the store is a field_conflict; a malformed one is invalid_input. Use for replacing metadata after a fresh full entry read."},
                 "request_id": _REQUEST_ID,
             },
             "required": ["entry_id"],
@@ -825,12 +844,6 @@ def widget_today(timezone: str, offset: int = 0, group_id: str = "") -> Dict[str
             "next_offset": offset + len(rows),
             "archive": _entry_rows(archived[:50], ("completed", "completed_at")) if offset == 0 else [],
             "archive_total": len(archived), "export_warning": _store_view(info)["export_warning"]}
-
-
-def widget_board(group="", status="open", tags=None, tag_mode="all", turn="", query="", offset=0):
-    result = _service().read(group=group, status=status, tags=tags, tag_mode=tag_mode,
-                             turn=turn, query=query, offset=offset, limit=100, board=True)
-    return {"ok": True, **result}
 
 
 async def route_entry(request: Any) -> Dict[str, Any]:

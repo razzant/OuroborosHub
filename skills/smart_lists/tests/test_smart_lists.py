@@ -239,7 +239,10 @@ class RegistrationTests(SkillCase):
     def test_widget_uses_a_reviewed_module_and_registered_routes(self):
         render = self.api.tabs["lists"]["render"]
         self.assertEqual(render, {"kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host", "span": 2, "height": 940})
-        self.assertTrue((SKILL_DIR / render["entry"]).is_file())
+        code = (SKILL_DIR / render["entry"]).read_text(encoding="utf-8")
+        self.assertIn("host.fetch(API + path", code)
+        for unsafe in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
+            self.assertNotIn(unsafe, code)
 
     def test_today_is_a_projection_and_checkbox_uses_existing_completion(self):
         self.ok("group", action="create", name="Home")
@@ -426,18 +429,22 @@ class RegistrationTests(SkillCase):
     def test_payload_imports_no_network_process_or_host_settings(self):
         allowed = {"__future__", "asyncio", "copy", "json", "pathlib", "typing", "importlib", "hashlib", "os", "re", "zoneinfo",
                    "secrets", "tempfile", "threading", "contextlib", "datetime", "fcntl", "msvcrt", "errno",
-                   "time", "math", "base64", "zlib", "starlette"}
-        for name in ("plugin.py", "lists_core.py"):
+                   "time", "math", "base64", "zlib", "starlette", "urllib"}
+        for name in ("plugin.py", "lists_core.py", "entry_details.py"):
             tree = ast.parse((SKILL_DIR / name).read_text(encoding="utf-8"))
             imported = set()
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     imported.update(alias.name.split(".")[0] for alias in node.names)
+                    self.assertFalse(any(alias.name.startswith("urllib") for alias in node.names), name)
                 elif isinstance(node, ast.ImportFrom) and node.level == 0:
                     imported.add(node.module.split(".")[0])
                     if node.module.startswith("starlette"):
                         self.assertEqual(node.module, "starlette.responses")
                         self.assertEqual([alias.name for alias in node.names], ["JSONResponse"])
+                    if node.module.startswith("urllib"):  # parsing only, never urllib.request
+                        self.assertEqual(node.module, "urllib.parse", name)
+                        self.assertEqual([alias.name for alias in node.names], ["urlsplit"], name)
                 elif isinstance(node, ast.Attribute):
                     self.assertNotIn(node.attr, {"get_settings", "send_ws_message"}, name)
             self.assertLessEqual(imported, allowed, name)

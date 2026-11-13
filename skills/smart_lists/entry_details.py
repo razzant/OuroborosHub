@@ -51,7 +51,11 @@ def clean(value):
                 label, target = text(ref["label"], 120), text(ref["target"], 1000)
                 if not label.strip() or not target.strip() or any(ord(c) < 32 for c in target):
                     raise ValueError("reference label/target must be nonblank, without target control characters")
-                if target.startswith(("https://", "http://")):
+                scheme = target.split("://", 1)[0] if "://" in target else ""
+                if scheme.lower() in ("http", "https"):
+                    # The scheme is case-insensitive (RFC 3986); store its canonical
+                    # lowercase form. Host, path, query and fragment stay exact.
+                    target = scheme.lower() + target[len(scheme):]
                     parsed = urlsplit(target)
                     if not parsed.hostname or parsed.username or parsed.password:
                         raise ValueError("reference must be an HTTP(S) URL without credentials")

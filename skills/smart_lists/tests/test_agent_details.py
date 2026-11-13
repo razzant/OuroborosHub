@@ -15,7 +15,7 @@ class AgentDetailsTests(SkillCase):
     def capture(self, key='thread:one:decision', request='capture-1', **details):
         return self.tool('add', group='Work', request_id=request, items=[{
             'text': 'Проверить результат', 'details': {
-                'capture_key': key, 'tags': ['Nova', 'review'], 'turn': 'owner',
+                'capture_key': key, 'tags': ['Research', 'review'], 'turn': 'owner',
                 'next_step': 'Ответить в исходном треде',
                 'references': [{'label': 'Исходный запрос', 'target': 'https://example.org/thread/1'},
                                {'label': 'Работа', 'target': 'task:abc'}], **details}}])
@@ -27,10 +27,10 @@ class AgentDetailsTests(SkillCase):
         replay=self.capture()
         self.assertTrue(replay['replayed'])
         self.assertEqual(replay['added'][0]['details'], entry['details'])
-        self.ok('update', entry_id=entry['id'], details={'turn':'agent', 'note':'Owner answered', 'tags':['Nova','nova','FIX']})
-        shown=self.ok('read', tags=['nova','fix'], turn='agent', query='answered')['entries']
+        self.ok('update', entry_id=entry['id'], details={'turn':'agent', 'note':'Owner answered', 'tags':['Research','research','FIX']})
+        shown=self.ok('read', tags=['research','fix'], turn='agent', query='answered')['entries']
         self.assertEqual(len(shown),1)
-        self.assertEqual(shown[0]['details']['tags'],['Nova','FIX'])
+        self.assertEqual(shown[0]['details']['tags'],['Research','FIX'])
         self.assertEqual(len(shown[0]['details']['references']),2)
         self.assertEqual(self.ok('read', tags=['missing'],tag_mode='any')['total'],0)
         doc=json.loads(self.store_bytes())
@@ -107,14 +107,23 @@ class AgentDetailsTests(SkillCase):
             self.refused('update','invalid_input',entry_id=entry['id'],details={'references':[{'label':'L','target':'https://example.org/'+('x'*950)}]*3})
         self.assertEqual(before,self.store_bytes())
 
-    def test_trash_only_tag_available_beyond_first_page(self):
+    def test_tags_beyond_the_first_page_are_offered_and_trash_tags_are_not(self):
         for batch in range(2):
             self.ok('add',group='Work',request_id=f'trash-{batch}',items=[{'text':f'item-{batch}-{i}'} for i in range(60)])
-        entry=self.capture(tags=['trash-only'])['added'][0]
-        self.ok('delete',entry_ids=[entry['id']])
-        board=self.module.widget_board(status='deleted')
-        self.assertIn('trash-only',board['available_tags'])
-        self.assertEqual(board['entries'][0]['id'],entry['id'])
+        late=self.capture(tags=['late-only'])['added'][0]
+        archived=self.capture(key='thread:one:archived',request='capture-archived',tags=['archive-only'])['added'][0]
+        self.ok('archive',entry_id=archived['id'],archived=True,expected={'archived_at':None},request_id='to-archive')
+        trashed=self.capture(key='thread:one:trashed',request='capture-trashed',tags=['trash-only'])['added'][0]
+        self.ok('delete',entry_ids=[trashed['id']])
+        board=self.api.call_route('board','GET',query={'limit':'1'})
+        self.assertIn('late-only',board['available_tags'])
+        self.assertNotIn('archive-only',board['available_tags'])
+        self.assertNotIn('trash-only',board['available_tags'])
+        chosen=self.api.call_route('board','GET',query={'tag':'late-only'})
+        self.assertEqual([e['id'] for e in chosen['stages']['todo']['entries']],[late['id']])
+        shelf=self.api.call_route('archive','GET',query={'limit':'1'})
+        self.assertEqual(shelf['available_tags'],['archive-only'])
+        self.assertEqual(self.ok('read',status='deleted',tags=['trash-only'])['entries'][0]['id'],trashed['id'])
 
     def test_schema3_matching_sentinel_full_records_survive(self):
         import hashlib

@@ -146,7 +146,13 @@ dialog::backdrop{background:var(--shade)}
 .addrow{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
 .addrow input{min-width:0;flex:2 1 180px;background:var(--bg);border:1px solid var(--line);padding:7px;border-radius:6px}
 .addrow input.short{flex:1 1 120px}
-aside select,aside input{width:100%;background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:7px}
+aside select,aside input{width:100%;min-height:36px;background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:7px}
+aside select{-webkit-appearance:none;appearance:none;padding-right:28px;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 15px) 55%,calc(100% - 10px) 55%;background-size:5px 5px;background-repeat:no-repeat}
+.tagbox{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px}
+.tagbox:empty{display:none}
+.tagchip{display:inline-flex;align-items:center;max-width:100%;min-width:0;font-size:12px;line-height:18px;padding:2px 0 2px 8px;border-radius:5px;background:var(--well)}
+.tagchip span{white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}
+.tagchip button{border:0;background:none;color:var(--muted);padding:0 7px;line-height:18px;flex:none}
 aside .hint{margin:-12px 0 20px}
 .context p{margin:0 0 6px;font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere}
 .note{font-size:12px;margin-top:8px;padding:8px 10px;border-radius:6px;background:var(--warn);border:1px solid var(--warnline);overflow-wrap:anywhere}
@@ -208,6 +214,15 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       unknown: !refused && !(response.status >= 400 && response.status < 500),
     });
   }
+  // Store states the owner can act on; the agent's own wording names its tools.
+  const STORE_HINT = {
+    store_not_initialized: "Списка ещё нет. Попроси Ouroboros в чате создать его или восстановить из сохранённой копии.",
+    store_missing: "Файл со списками пропал, хотя раньше был сохранён. Пустой список вместо него не создан. Попроси Ouroboros в чате восстановить копию.",
+    store_unreadable: "Файл со списками не читается. Он не изменён. Попроси Ouroboros в чате разобраться.",
+    store_mismatch: "Файл со списками не совпадает с последним сохранением. Он не изменён. Попроси Ouroboros в чате восстановить нужную копию.",
+    store_busy: "Списки сейчас заняты другим процессом. Попробуй ещё раз через минуту.",
+  };
+  const said = (error) => STORE_HINT[error.code] || error.message;
   const post = (path, text) =>
     call(path, { method: "POST", headers: { "content-type": "application/json" }, body: text });
   const readEntry = async (id) => (await call("entry?entry_id=" + encodeURIComponent(id))).entry;
@@ -226,6 +241,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   let archive = null; // last complete archive read
   const counts = { stages: null, stagesAt: "", archived: null, archivedAt: "" }; // unfiltered
   let loadError = "";
+  let storeState = false; // loadError is a store state, not a passing fault
   let disposed = false;
   let serial = 0;
   let loading = false;
@@ -476,13 +492,15 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       if (mode === "board") board = data;
       else archive = data;
       loadError = "";
+      storeState = false;
       render();
       await readCounts(mode, data, wasFiltered);
       if (disposed || mine !== serial) return;
       if (card?.id && !card.busy && !card.loading && !card.unread) pull().catch(() => {}).then(paintCard);
     } catch (error) {
       if (disposed || mine !== serial) return;
-      loadError = error.message;
+      loadError = said(error);
+      storeState = !!STORE_HINT[error.code];
     } finally {
       if (mine === serial) {
         loading = false;
@@ -677,7 +695,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       ? board ? "Доска не обновлена: показаны прежние данные." : "Доска не загружена."
       : archive ? "Архив не обновлён: показаны прежние данные." : "Архив не загружен.";
     alertBox.hidden = !loadError;
-    alertText.textContent = loadError ? `${stale} Причина: ${loadError}.` : "";
+    alertText.textContent = !loadError ? "" : storeState ? loadError : `${stale} Причина: ${loadError}.`;
     alertRetry.disabled = loading;
     renderFilters();
     if (onBoard) renderBoard();
@@ -790,7 +808,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       notify(
         error.unknown ? `${subject}: Smart Lists не ответил, результат неизвестен. Данные перечитаны — проверь задачу.`
           : error.code === "field_conflict" ? `${subject}: задача уже изменена в другом месте. Данные перечитаны.`
-          : `${subject}: ${error.message}`,
+          : `${subject}: ${said(error)}`,
         { alert: true },
       );
     } finally {
@@ -815,7 +833,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       const entry = await readEntry(id);
       if (entry.archived_at) await setArchived(id, false, entry.archived_at, stage, false);
     } catch (error) {
-      notify(`Задача не возвращена: ${error.message}`, { alert: true });
+      notify(`Задача не возвращена: ${said(error)}`, { alert: true });
     }
   }
   async function restoreRow(id, control) {
@@ -933,7 +951,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   main.append(inputs.text, slots.text);
   const descriptionBox = el("textarea", "description");
   descriptionBox.maxLength = LIMIT.description;
-  const descriptionField = field(main, "Description", "description", descriptionBox);
+  const descriptionField = field(main, "Описание", "description", descriptionBox);
   const descriptionLinks = el("div", "links");
   descriptionField.insertBefore(descriptionLinks, slots.description);
 
@@ -967,10 +985,18 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   const stageBox = el("select");
   for (const [value, name] of STAGES) stageBox.append(new Option(name, value));
   field(side, "Стадия", "stage", stageBox);
+  // Tags are whole tokens: a stored tag may hold any text, commas included,
+  // and an untouched one is sent back exactly as it came.
   const tagsBox = el("input");
   tagsBox.autocomplete = "off";
-  field(side, "Теги", "tags", tagsBox);
-  side.append(el("p", "hint", "Через запятую. Эти же теги фильтруют доску."));
+  tagsBox.maxLength = LIMIT.tag;
+  tagsBox.placeholder = "Новый тег";
+  const tagsField = field(side, "Теги", "tags", tagsBox);
+  const tagList = el("div", "tagbox");
+  tagList.setAttribute("role", "list");
+  tagList.setAttribute("aria-label", "Список тегов");
+  tagsField.insertBefore(tagList, tagsBox);
+  side.append(el("p", "hint", "Enter добавляет тег целиком. Эти же теги фильтруют доску."));
   const turnBox = el("select");
   for (const [value, name] of TURNS) turnBox.append(new Option(name, value));
   field(side, "Чей следующий ход", "turn", turnBox);
@@ -1006,16 +1032,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     stage: (value) => value,
     turn: (value) => value,
     due: (value) => value.trim() || null,
-    tags: (value) => {
-      const seen = new Set(), list = [];
-      for (const part of value.split(",")) {
-        const tag = part.trim();
-        if (!tag || seen.has(lower(tag))) continue;
-        seen.add(lower(tag));
-        list.push(tag);
-      }
-      return list;
-    },
+    tags: (value) => [...value],
   };
   const stored = {
     text: (entry) => entry.text ?? "",
@@ -1026,7 +1043,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     tags: (entry) => entry.details?.tags ?? [],
     references: (entry) => entry.details?.references ?? [],
   };
-  const formOf = { tags: (value) => value.join(", "), due: (value) => value ?? "" };
+  const formOf = { tags: (value) => [...value], due: (value) => value ?? "" };
   const formValue = (key, entry) => (formOf[key] ? formOf[key](stored[key](entry)) : stored[key](entry));
   const inDetails = (key) => key === "tags" || key === "turn" || key === "references";
 
@@ -1049,10 +1066,56 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     }
     return [...SCALARS, "references"].filter(isDirty);
   }
-  const unsaved = () => !!card && (dirtyKeys().length > 0 || !!card.pending || !!card.creating);
+  const unsaved = () =>
+    !!card && (dirtyKeys().length > 0 || !!card.pending || !!card.creating || !!tagsBox.value.trim());
+
+  function paintTags() {
+    sync(tagList, card.draft.tags, (tag) => lower(tag), () => {
+        const chip = el("span", "tagchip");
+        chip.setAttribute("role", "listitem");
+        const drop = button("", "×");
+        drop.onclick = () => {
+          card.draft.tags = card.draft.tags.filter((item) => lower(item) !== lower(chip.dataset.key));
+          paintTags();
+          touched();
+          tagsBox.focus();
+        };
+        chip.append(el("span"), drop);
+        return chip;
+      }, (chip, tag) => {
+        if (chip.firstChild.textContent !== tag) chip.firstChild.textContent = tag;
+        chip.lastChild.setAttribute("aria-label", `Убрать тег: ${tag}`);
+        chip.title = tag.length > 24 ? tag : "";
+      });
+  }
+  // The typed tag joins the draft whole; false when it cannot.
+  function takeTag() {
+    const tag = tagsBox.value.trim();
+    if (!tag) return true;
+    if (card.draft.tags.some((item) => lower(item) === lower(tag))) {
+      tagsBox.value = ""; // already there: nothing to add
+      return true;
+    }
+    const problem = card.draft.tags.length >= LIMIT.tags ? `У задачи уже ${LIMIT.tags} тегов, больше не поместится.`
+      : tag.length > LIMIT.tag ? `Тег длиннее ${LIMIT.tag} символов.`
+      : "";
+    if (problem) {
+      card.error = problem;
+      paintCard();
+      return false;
+    }
+    card.draft.tags = [...card.draft.tags, tag];
+    tagsBox.value = "";
+    paintTags();
+    touched();
+    return true;
+  }
 
   function fill(keys = SCALARS) {
-    for (const key of keys) inputs[key].value = card.draft[key];
+    for (const key of keys) {
+      if (key === "tags") paintTags();
+      else inputs[key].value = card.draft[key];
+    }
     grow(inputs.text, 180);
     grow(inputs.description, 360);
   }
@@ -1064,8 +1127,12 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   // Adopt a fresh read of the entry. Untouched fields follow the store; a
   // field edited here keeps its draft and, if the store moved under it,
   // shows both values and asks which one stays.
-  function rebase(fresh, saved = []) {
+  // `sent` holds what this form's own answered write carried: the store
+  // showing those values is that write, not a change made elsewhere, so a
+  // field typed in again meanwhile simply stays a draft.
+  function rebase(fresh, saved = [], sent = {}) {
     const changed = [];
+    const ours = (key, after) => Object.prototype.hasOwnProperty.call(sent, key) && same(after, sent[key]);
     for (const key of SCALARS) {
       const before = stored[key](card.base), after = stored[key](fresh), mine = wire[key](card.draft[key]);
       const untouched = same(mine, before);
@@ -1074,13 +1141,14 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
         // An untouched field over an unchanged value keeps its exact stored text.
         if (untouched && same(before, after) && !saved.includes(key)) continue;
         const value = formValue(key, fresh);
-        if (card.draft[key] !== value) changed.push(key);
+        if (!same(card.draft[key], value)) changed.push(key);
         card.draft[key] = value;
-      } else if (!same(before, after)) card.conflicts[key] = formValue(key, fresh);
+      } else if (ours(key, after)) delete card.conflicts[key];
+      else if (!same(before, after)) card.conflicts[key] = formValue(key, fresh);
     }
     const before = stored.references(card.base), after = stored.references(fresh);
     if (saved.includes("references")) card.ops = [];
-    else if (card.ops.length && !same(before, after)) card.refsMoved = true;
+    else if (card.ops.length && !same(before, after) && !ours("references", after)) card.refsMoved = true;
     // Drop steps the store already holds, so they do not read as unsaved.
     card.ops = card.ops.filter((op) =>
       op.drop ? after.some((ref) => ref.target === op.target && ref.label === op.label)
@@ -1108,6 +1176,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   function describe(key, value) {
     if (key === "stage") return STAGE_NAME[value] || value;
     if (key === "turn") return TURN_NAME[value] || value;
+    if (key === "tags") return value.length ? value.map((tag) => `«${tag}»`).join(" ") : "(без тегов)";
     return value === "" ? "(пусто)" : value;
   }
   function paintConflict(key) {
@@ -1120,7 +1189,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     slot.dataset.shown = JSON.stringify(theirs);
     const take = button("", "Взять это значение");
     take.onclick = () => {
-      card.draft[key] = theirs;
+      card.draft[key] = Array.isArray(theirs) ? [...theirs] : theirs;
       delete card.conflicts[key];
       fill([key]);
       paintCard();
@@ -1265,6 +1334,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     paintCard();
   }
   for (const key of SCALARS) {
+    if (key === "tags") continue;
     inputs[key].addEventListener("input", () => {
       if (!card) return;
       card.draft[key] = inputs[key].value;
@@ -1278,6 +1348,12 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   stageBox.addEventListener("change", () => {
     if (card?.id && !card.busy && !Object.keys(card.conflicts).length) commit(["stage"]);
   });
+  tagsBox.addEventListener("input", () => card && touched());
+  tagsBox.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.isComposing || event.metaKey || event.ctrlKey) return;
+    event.preventDefault();
+    if (card) takeTag();
+  });
   inputs.text.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
     event.preventDefault();
@@ -1286,16 +1362,18 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   });
 
   function addRef() {
-    const raw = addUrl.value.trim();
+    // The store lowercases the scheme and keeps the rest exactly; so does this.
+    const raw = addUrl.value.trim().replace(/^https?(?=:\/\/)/i, (scheme) => scheme.toLowerCase());
     let url = null;
     try {
       url = new URL(raw);
     } catch {
       /* refused below */
     }
+    const authority = raw.replace(/^https?:\/\//, "").split(/[/?#]/)[0];
     const list = draftRefs();
     const problem =
-      !url || !/^https?:$/.test(url.protocol) || !url.hostname || url.username || url.password
+      !url || !/^https?:\/\//.test(raw) || !url.hostname || url.username || url.password || authority.includes("@")
         ? "Нужен адрес, который начинается с https:// или http://, без логина и пароля."
       : raw.length > LIMIT.target ? `Адрес длиннее ${LIMIT.target} символов.`
       : list.some((ref) => ref.target === raw) ? "Эта ссылка уже прикреплена."
@@ -1333,11 +1411,10 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     if (keys.includes("text") && !draft.text.trim()) return "У задачи должно быть название.";
     if (keys.includes("text") && draft.text.length > LIMIT.text) return `Название длиннее ${LIMIT.text} символов.`;
     if (keys.includes("description") && draft.description.length > LIMIT.description)
-      return `Description длиннее ${LIMIT.description} символов.`;
+      return `Описание длиннее ${LIMIT.description} символов.`;
     if (keys.includes("tags")) {
-      const list = wire.tags(draft.tags);
-      if (list.length > LIMIT.tags) return `Тегов больше ${LIMIT.tags}.`;
-      if (list.some((tag) => tag.length > LIMIT.tag)) return `Тег длиннее ${LIMIT.tag} символов.`;
+      if (draft.tags.length > LIMIT.tags) return `Тегов больше ${LIMIT.tags}.`;
+      if (draft.tags.some((tag) => tag.length > LIMIT.tag)) return `Тег длиннее ${LIMIT.tag} символов.`;
     }
     return "";
   }
@@ -1345,7 +1422,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   // sent are now clean; a field typed in while the request was away stays a draft.
   function landed(op, entry) {
     card.pending = null;
-    rebase(entry, op.keys.filter((key) => same(draftWire(key), op.sent[key])));
+    rebase(entry, op.keys.filter((key) => same(draftWire(key), op.sent[key])), op.sent);
     card.saved = true;
     refresh();
   }
@@ -1355,13 +1432,19 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       return true;
     } catch (error) {
       if (error.code === "field_conflict") {
-        await pull(true).catch(() => {});
-        card.error = "Не сохранено: часть полей изменили в другом месте. Отмеченные поля показывают оба значения.";
+        // The store refused it, so this request never applied (a repeat that
+        // had applied would answer as a replay). The next save is a new request
+        // built on the values read now.
+        card.pending = null;
+        const read = await pull(true).then(() => true, () => false);
+        card.error = read
+          ? "Не сохранено: часть полей изменили в другом месте. Отмеченные поля показывают оба значения."
+          : "Не сохранено: часть полей изменили в другом месте, а свежие значения не прочитались. Правки остались в форме.";
         return false;
       }
       if (!error.unknown) {
         card.pending = null;
-        card.error = `Не сохранено: ${error.message}.`;
+        card.error = `Не сохранено: ${said(error)}.`;
         return false;
       }
       // No answer. Reading is safe, so find out what the store holds now.
@@ -1394,7 +1477,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
         card.error = "Создание не подтверждено: Smart Lists не ответил. «Создать» отправит тот же запрос ещё раз, дубля не будет.";
       else {
         card.creating = null;
-        card.error = `Задача не создана: ${error.message}.`;
+        card.error = `Задача не создана: ${said(error)}.`;
       }
       return false;
     }
@@ -1407,6 +1490,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   // Save what is unsaved. True when the store now holds everything in the form.
   async function commit(only) {
     if (!card || card.busy || card.gone || card.failed) return false;
+    if (!takeTag()) return false;
     if (Object.keys(card.conflicts).length) {
       card.error = "Сначала выбери в отмеченных полях, какое значение оставить.";
       paintCard();
@@ -1433,7 +1517,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
           if (card.draft.text.trim() === fresh.text) card.draft.text = fresh.text;
           fill(["text"]);
         } catch (error) {
-          card.error = `Задача создана, но не прочитана: ${error.message}. Остальные поля ещё не сохранены.`;
+          card.error = `Задача создана, но не прочитана: ${said(error)}. Остальные поля ещё не сохранены.`;
           return false;
         }
       }
@@ -1456,14 +1540,25 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       }
     }
   }
+  // Typed while a save or an archive move was away: the form stays open.
+  const LATER = "Сохранено. Правки, сделанные во время сохранения, ещё не сохранены: нажми «Готово» ещё раз.";
   async function done() {
     if (!card || card.busy || card.loading) return;
     if (card.gone || card.failed) return closeCard();
-    if (await commit()) closeCard();
+    if (!(await commit()) || !card) return;
+    if (!unsaved()) return closeCard();
+    card.error = LATER;
+    paintCard();
   }
   async function toggleArchive() {
     if (!card?.id || card.busy) return;
-    if (unsaved() && !(await commit())) return;
+    if (unsaved()) {
+      if (!(await commit()) || !card) return;
+      if (unsaved()) {
+        card.error = "Сохранено, но в архив задача пока не перенесена: правки, сделанные во время сохранения, ещё не сохранены.";
+        return paintCard();
+      }
+    }
     const id = card.id, archived = !card.base.archived_at, was = card.base.archived_at ?? null, stage = card.base.stage;
     card.busy = true;
     card.error = "";
@@ -1471,7 +1566,8 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     const text = JSON.stringify({ entry_id: id, archived, expected: { archived_at: was }, request_id: requestId() });
     let ok = false;
     try {
-      await post("archive", text);
+      const answer = await post("archive", text);
+      if (card?.id === id) rebase(answer.entry);
       ok = true;
     } catch (error) {
       let fresh = null;
@@ -1482,13 +1578,19 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
         card.error = error.unknown
           ? "Не подтверждено: Smart Lists не ответил" + (fresh ? ", задача осталась где была." : ". Проверь задачу на доске перед повтором.")
           : error.code === "field_conflict" ? "Не выполнено: задачу уже переместили в другом месте."
-          : `Не выполнено: ${error.message}.`;
+          : `Не выполнено: ${said(error)}.`;
     }
     card.busy = false;
     if (!ok) return paintCard();
-    closeCard();
-    notify(archived ? "Перемещено в архив" : `Возвращено в ${STAGE_NAME[stage]}`,
-      archived ? { label: "Вернуть", run: () => undoArchive(id, stage) } : null);
+    const moved = archived ? "Перемещено в архив" : `Возвращено в ${STAGE_NAME[stage]}`;
+    if (unsaved()) {
+      // Edits made while the move was away stay on screen over the moved task.
+      card.error = `${moved}. Правки, сделанные за это время, ещё не сохранены.`;
+      paintCard();
+    } else {
+      closeCard();
+      notify(moved, archived ? { label: "Вернуть", run: () => undoArchive(id, stage) } : null);
+    }
     refresh();
   }
 
@@ -1500,6 +1602,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     card.opener = document.activeElement;
     addUrl.value = "";
     addName.value = "";
+    tagsBox.value = "";
     body.scrollTop = 0;
     paintCard();
     if (!dialog.open) dialog.showModal();
@@ -1522,7 +1625,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       if (error.code === "not_found") card.gone = true;
       else {
         card.failed = true;
-        card.error = `Карточка не открылась: ${error.message}. Закрой её и открой ещё раз.`;
+        card.error = `Карточка не открылась: ${said(error)}. Закрой её и открой ещё раз.`;
       }
     }
     paintCard();
@@ -1530,7 +1633,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   function openNew() {
     if (card) return;
     // A task made while a tag filter is on starts with those tags, so it stays in view.
-    showCard({ draft: { ...newDraft(BLANK), tags: view.tags.join(", ") } });
+    showCard({ draft: { ...newDraft(BLANK), tags: [...view.tags] } });
     inputs.text.focus();
   }
   function closeCard() {

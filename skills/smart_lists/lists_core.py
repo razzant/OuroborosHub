@@ -1145,6 +1145,22 @@ _EDIT_DETAIL_FIELDS = {"tags", "turn", "next_step", "note", "references"}
 _DETAIL_DEFAULTS = {"tags": [], "turn": "unassigned", "next_step": "", "note": "", "references": []}
 
 
+def _expected_due(value: Any) -> Optional[str]:
+    """The raw due text an expected value names; None means unset.
+
+    Every shape a reader returns is accepted: null or "" (unset; the entry
+    page's text for no due), the raw text, or the stored ``{"raw", "at"?}``
+    object from read/board/entry. Only ``raw`` is compared, as on write."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        return value
+    if (isinstance(value, dict) and isinstance(value.get("raw"), str) and set(value) <= {"raw", "at"}
+            and isinstance(value.get("at", ""), str)):
+        return value["raw"] or None
+    raise _invalid("expected.due must be null, the raw due text or the stored {raw, at?} object")
+
+
 def _check_expected(entry: Dict[str, Any], expected: Dict[str, Any]) -> None:
     if not isinstance(expected, dict) or set(expected) - _EDIT_FIELDS - {"archived_at"}:
         raise _invalid("expected has unsupported fields")
@@ -1158,10 +1174,11 @@ def _check_expected(entry: Dict[str, Any], expected: Dict[str, Any]) -> None:
                 current = entry.get("details", {}).get(field, _DETAIL_DEFAULTS[field])
                 if current != previous:
                     conflicts.append(f"details.{field}")
-        else:
-            current = (entry.get("due") or {}).get("raw") if key == "due" else entry.get(key)
-            if current != value:
+        elif key == "due":
+            if (entry.get("due") or {}).get("raw") != _expected_due(value):
                 conflicts.append(key)
+        elif entry.get(key) != value:
+            conflicts.append(key)
     if conflicts:
         raise ListError("field_conflict", "The entry changed in: " + ", ".join(conflicts), conflicts)
 
@@ -2161,7 +2178,7 @@ class SmartLists:
     # -- reads ---------------------------------------------------------------
 
     def read(self, *, group: Any = "", status: Any = "open", subtree: Any = True, limit: Any = 100,
-             offset: Any = 0, tags: Any = None, tag_mode: str = "all", turn: str = "", query: str = "", board: bool = False,
+             offset: Any = 0, tags: Any = None, tag_mode: str = "all", turn: str = "", query: str = "",
              archive: str = "all") -> Dict[str, Any]:
         ref = _optional_ref(group, field="group")
         try:
@@ -2211,13 +2228,6 @@ class SmartLists:
                 "total": len(selected),
                 "truncated": len(selected) > offset + limit,
             }
-            if board:
-                available = {}
-                for entry in doc["entries"].values():
-                    for tag in entry.get("details", {}).get("tags", []):
-                        available.setdefault(tag.casefold(), tag)
-                result["available_tags"] = sorted(available.values(), key=str.casefold)
-                result["filter_groups"] = [{"id": row["id"], "name": paths[row["id"]]} for row in _tree_rows(doc)]
             return result
 
         return self.store.read(view)
