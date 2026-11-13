@@ -268,9 +268,9 @@ Set `TG_DISCOVERY_CORE`, `TG_DISCOVERY_VENV` and `PLAYWRIGHT_BROWSERS_PATH`, the
 run its `run.sh` with an evidence directory. It checks the existing Places picker
 against synthetic Bot API updates and an upgrade from 0.8, without live credentials.
 
-The selected `calendar-skill` and `email-presence` CI jobs check out the exact core
-pinned in `catalog-check.yml`, install its Python runtime requirements and
-Chromium/WebKit, and exercise the real Host Service and widget bridge with fake
+The selected `calendar-skill`, `email-presence` and `smart-lists` CI jobs check out
+the exact core pinned in `catalog-check.yml`, install its Python runtime requirements
+and Chromium/WebKit, and exercise the real Host Service and widget bridge with fake
 providers. Missing core or browsers fail those jobs. For local backend-only
 calendar checks, which do not qualify its widget or sign-in return:
 
@@ -329,8 +329,8 @@ Chromium and WebKit:
 OUROBOROS_THEME_CORE_ROOT=/path/to/ouroboros python -m pytest -p no:cacheprovider -q tests/test_dashboard_theme_browser.py tests/test_calendar_host_browser.py tests/test_smart_lists_browser.py
 ```
 
-These standalone invocations are local opt-ins; Calendar's selected CI job requires
-its browser suite. Smart Lists' optional manifest probe separately uses
+These standalone invocations are local opt-ins; the selected Calendar and Smart Lists
+CI jobs require their browser suites. Smart Lists' optional manifest probe separately uses
 `OUROBOROS_CORE_ROOT`. Skips in optional suites do not qualify missing consumers.
 
 ## License
