@@ -17,8 +17,10 @@ SUITES = {
                    'dependencies': ['httpx', 'starlette']},
     # The browser regressions mount the widget through the core's own module bridge in Chromium and WebKit:
     # catalog-check.yml gives this suite the mail/calendar core pin, its runtime and both browsers.
+    # SMART_LISTS_REQUIRE_BROWSERS turns a skip for want of Playwright or Chromium into a failure.
     'smart-lists': {'skills': ['smart_lists'], 'tests': ['skills/smart_lists/tests', 'tests/test_smart_lists_browser.py'],
-                    'dependencies': ['starlette'], 'core_env': 'OUROBOROS_THEME_CORE_ROOT'},
+                    'dependencies': ['starlette'], 'core_env': 'OUROBOROS_THEME_CORE_ROOT',
+                    'env': {'SMART_LISTS_REQUIRE_BROWSERS': '1'}},
     'gigasearch': {'skills': ['gigasearch'], 'tests': ['skills/gigasearch/test_gigasearch.py']},
     'cache-efficiency': {'skills': ['cache_efficiency_snapshot'],
                          'tests': ['skills/cache_efficiency_snapshot/test_cache_efficiency.py', 'skills/cache_efficiency_snapshot/test_history.py', 'tests/test_cache_dashboard_browser.py'],

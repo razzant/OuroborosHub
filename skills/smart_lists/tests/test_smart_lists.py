@@ -228,7 +228,7 @@ class RegistrationTests(SkillCase):
         self.assertEqual({path: route["methods"] for path, route in self.api.routes.items()}, {
             "view": ("GET",), "edit": ("POST",), "group": ("POST",), "select": ("GET",), "store": ("POST",),
             "export": ("GET",), "today": ("GET",), "board": ("GET",), "entry": ("GET",),
-            "archive": ("GET", "POST"), "check": ("POST",), "add": ("POST",)})
+            "archive": ("GET", "POST"), "check": ("POST",), "add": ("POST",), "draft": ("GET", "POST")})
         self.assertIn("even without", self.api.tools["add"]["description"])
         self.assertIn("even without saying 'add'", manifest_text())
         self.assertEqual(list(self.api.tabs), ["lists"])

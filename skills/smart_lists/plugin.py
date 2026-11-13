@@ -3,8 +3,10 @@
 Agent tools and widget routes are thin adapters over ``lists_core.SmartLists``;
 both read and write the same authoritative ``store.json`` in the skill state
 directory (plus its content-free sentinel and the ``backups/`` folder that
-exports and pre-restore copies go to). The skill has no network access and no
-other side effects: nothing is purchased, ordered, scheduled or sent anywhere.
+exports and pre-restore copies go to). The widget's ``draft`` route keeps one
+unsaved card form in ``widget_draft.json`` beside them, never in the store. The
+skill has no network access and no other side effects: nothing is purchased,
+ordered, scheduled or sent anywhere.
 
 Widget forms use their own result targets, so a top-level ``error`` on refusal
 makes the form fail visibly without replacing the lists table. The poll refreshes
@@ -879,6 +881,22 @@ async def route_archive_dispatch(request: Any) -> Dict[str, Any]:
     return await (route_archive(request) if request.method == "POST" else route_archive_view(request))
 
 
+async def route_draft(request: Any) -> Dict[str, Any]:
+    """The card editor's one unsaved form; it never touches the lists themselves."""
+    slot = _service().draft
+    try:
+        if request.method != "POST":
+            return {"ok": True, **await asyncio.to_thread(slot.read)}
+        body = await _json_body(request)
+        return {"ok": True, **await asyncio.to_thread(
+            slot.write, body.get("expected_revision"), body.get("write_id"), body.get("draft"),
+            replace_unreadable=body.get("replace_unreadable") is True)}
+    except lists_core.DraftConflict as exc:
+        return {"ok": False, "code": exc.code, "error": exc.message, "current": exc.current}
+    except ListError as exc:
+        return {"ok": False, "code": exc.code, "error": exc.message}
+
+
 async def route_board(request: Any) -> Dict[str, Any]:
     try:
         tags = _query_tags(request)
@@ -943,7 +961,7 @@ async def route_add(request: Any) -> Any:
         return JSONResponse({"ok": True, "notice": f"Added to {result['group']['path']}",
                              "entry_id": result["added"][0]["id"]})
     except ListError as exc:
-        return JSONResponse({"ok": False, "error": exc.message}, status_code=400)
+        return JSONResponse({"ok": False, "code": exc.code, "error": exc.message}, status_code=400)
 
 
 ROUTES = (
@@ -959,6 +977,7 @@ ROUTES = (
     ("archive", route_archive_dispatch, ("GET", "POST")),
     ("check", route_check, ("POST",)),
     ("add", route_add, ("POST",)),
+    ("draft", route_draft, ("GET", "POST")),
 )
 
 
@@ -972,7 +991,7 @@ WIDGET_RENDER: Dict[str, Any] = {
 
 
 def register(api: Any) -> None:
-    """PluginAPI entry point: one store, eleven tools, twelve routes, one widget."""
+    """PluginAPI entry point: one store, eleven tools, thirteen routes, one widget."""
     global _SERVICE
     _SERVICE = lists_core.SmartLists(Path(api.get_state_dir()))
     for name, handler, description, schema in TOOLS:
@@ -980,7 +999,7 @@ def register(api: Any) -> None:
     for path, handler, methods in ROUTES:
         api.register_route(path, handler, methods=methods)
     api.register_ui_tab("lists", "Smart Lists", icon="📋", render=WIDGET_RENDER)
-    api.log("info", "smart_lists registered: local store, 11 tools, 12 routes, Kanban widget")
+    api.log("info", "smart_lists registered: local store, 11 tools, 13 routes, Kanban widget")
 
 
 __all__ = ["register"]

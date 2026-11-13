@@ -1400,6 +1400,48 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Write a temporary file next to ``path``, flush it to disk, then rename it over ``path``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    _fsync_dir(path.parent)
+
+
+@contextmanager
+def _file_locked(thread_lock: Any, lock_path: Path, timeout: float, busy: Callable[[], ListError]) -> Iterator[None]:
+    """Hold ``thread_lock`` and an exclusive lock on ``lock_path``; one deadline covers both."""
+    deadline = time.monotonic() + timeout
+    if not thread_lock.acquire(timeout=timeout):
+        raise busy()
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "a+b") as handle:
+            delay = 0.005
+            while not _try_file_lock(handle):
+                if time.monotonic() >= deadline:
+                    raise busy()
+                time.sleep(delay)
+                delay = min(delay * 2, 0.05)
+            try:
+                yield
+            finally:
+                _release_file_lock(handle)
+    finally:
+        thread_lock.release()
+
+
 class ListStore:
     """The single authoritative JSON document under the skill state dir."""
 
@@ -1419,24 +1461,8 @@ class ListStore:
     def _locked(self) -> Iterator[None]:
         # One deadline for both locks, so a caller never waits longer than
         # LOCK_TIMEOUT_SEC in total (below the host's tool timeout).
-        deadline = time.monotonic() + LOCK_TIMEOUT_SEC
-        if not self._thread_lock.acquire(timeout=LOCK_TIMEOUT_SEC):
-            raise _busy()
-        try:
-            self.state_dir.mkdir(parents=True, exist_ok=True)
-            with open(self._lock_path, "a+b") as handle:
-                delay = 0.005
-                while not _try_file_lock(handle):
-                    if time.monotonic() >= deadline:
-                        raise _busy()
-                    time.sleep(delay)
-                    delay = min(delay * 2, 0.05)
-                try:
-                    yield
-                finally:
-                    _release_file_lock(handle)
-        finally:
-            self._thread_lock.release()
+        with _file_locked(self._thread_lock, self._lock_path, LOCK_TIMEOUT_SEC, _busy):
+            yield
 
     def _meta_bytes(self) -> Optional[bytes]:
         try:
@@ -1474,21 +1500,7 @@ class ListStore:
         return self._load_raw()[0]
 
     def _write_atomic(self, path: Path, data: bytes) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            _replace(tmp, path)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-        _fsync_dir(path.parent)
+        _atomic_write(path, data)
 
     def _write_meta(self, doc: Dict[str, Any], *, content_sha256: str, last_export: Any = _KEEP,
                     pending: Optional[Dict[str, Any]] = None) -> None:
@@ -1762,9 +1774,141 @@ class ListStore:
 # Service used by tools and routes
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# The card editor's unsaved draft
+# ---------------------------------------------------------------------------
+
+DRAFT_FILE = "widget_draft.json"
+DRAFT_LOCK_FILE = "widget_draft.lock"
+DRAFT_ASIDE_PREFIX = "widget_draft.unreadable-"
+MAX_DRAFT_BYTES = 4 * 1024 * 1024
+DRAFT_LOCK_TIMEOUT_SEC = 2.0
+_DRAFT_KEYS = {"v", "entry_id", "title", "base", "form", "ops", "conflicts", "refs_moved", "unread", "pending",
+               "creating", "typed"}
+_DRAFT_FORM_TEXT = ("text", "description", "stage", "turn", "due")
+_EMPTY_DRAFT_SLOT = {"revision": "", "write_id": None, "saved_at": None, "draft": None}
+
+
+def _draft_shape_ok(value: Any) -> bool:
+    """The widget's card snapshot, checked for shape only: a half-typed field may still be
+    longer than the store accepts, and it is kept as typed rather than cut."""
+    if value is None:
+        return True
+    if not isinstance(value, dict) or set(value) != _DRAFT_KEYS or value["v"] != 1:
+        return False
+    form, typed, pending = value["form"], value["typed"], value["pending"]
+    return (
+        (value["entry_id"] is None or isinstance(value["entry_id"], str)) and isinstance(value["title"], str)
+        and (value["base"] is None or isinstance(value["base"], dict))
+        and isinstance(form, dict) and set(form) == {*_DRAFT_FORM_TEXT, "tags"}
+        and all(isinstance(form[key], str) for key in _DRAFT_FORM_TEXT)
+        and isinstance(form["tags"], list) and all(isinstance(tag, str) for tag in form["tags"])
+        and isinstance(value["ops"], list) and all(isinstance(op, dict) for op in value["ops"])
+        and isinstance(value["conflicts"], dict)
+        and isinstance(value["refs_moved"], bool) and isinstance(value["unread"], bool)
+        and (pending is None or (isinstance(pending, dict) and set(pending) == {"keys", "sent", "text"}
+                                 and isinstance(pending["text"], str) and isinstance(pending["sent"], dict)
+                                 and isinstance(pending["keys"], list)))
+        and (value["creating"] is None or isinstance(value["creating"], str))
+        and isinstance(typed, dict) and set(typed) == {"tag", "url", "label"}
+        and all(isinstance(item, str) for item in typed.values())
+    )
+
+
+class DraftConflict(ListError):
+    """The slot no longer holds the revision a write was based on; ``current`` is what it holds."""
+
+    def __init__(self, current: Dict[str, Any]) -> None:
+        super().__init__("draft_conflict", "The card draft was changed elsewhere since it was read; nothing was written.")
+        self.current = current
+
+
+class DraftSlot:
+    """One unsaved card form for the widget, kept apart from the store.
+
+    It never reads or writes ``store.json``, its sentinel, backups or the store lock, so saving a
+    half-typed card changes no list, no generation and no export, and never waits behind the store.
+    Every write names the revision it replaces (compare-and-set): a late write, or one from a
+    second window, is refused instead of overwriting a newer draft or reviving a cleared one.
+    Clearing writes a new revision holding ``draft: null``.
+    """
+
+    def __init__(self, state_dir: Any) -> None:
+        self.state_dir = Path(state_dir)
+        self.path = self.state_dir / DRAFT_FILE
+        self._lock_path = self.state_dir / DRAFT_LOCK_FILE
+        self._thread_lock = threading.Lock()
+
+    def _locked(self) -> Any:
+        return _file_locked(self._thread_lock, self._lock_path, DRAFT_LOCK_TIMEOUT_SEC, lambda: ListError(
+            "draft_busy", "The card draft is being saved by another request; nothing was changed. Try again."))
+
+    def _current(self) -> Dict[str, Any]:
+        try:
+            raw = self.path.read_bytes()
+        except FileNotFoundError:
+            return dict(_EMPTY_DRAFT_SLOT)
+        try:
+            doc = json.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError):
+            doc = None
+        if not (isinstance(doc, dict) and isinstance(doc.get("revision"), str) and doc["revision"]
+                and isinstance(doc.get("write_id"), str) and isinstance(doc.get("saved_at"), str)
+                and _draft_shape_ok(doc.get("draft"))):
+            raise ListError("draft_unreadable", "The saved card draft cannot be read; the file was left unchanged.")
+        return {key: doc[key] for key in ("revision", "write_id", "saved_at", "draft")}
+
+    def read(self) -> Dict[str, Any]:
+        with self._locked():
+            return self._current()
+
+    def _aside_path(self) -> Path:
+        """A name no earlier set-aside copy has; chosen under the draft lock, so nothing overwrites it."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        while True:
+            path = self.state_dir / f"{DRAFT_ASIDE_PREFIX}{stamp}-{secrets.token_hex(3)}.json"
+            if not path.exists():
+                return path
+
+    def write(self, expected: Any, write_id: Any, draft: Any, *, replace_unreadable: bool = False) -> Dict[str, Any]:
+        if not isinstance(expected, str) or len(expected) > 64:
+            raise _invalid("expected_revision must be the revision text the draft was read at")
+        if not isinstance(write_id, str) or not 0 < len(write_id) <= 64:
+            raise _invalid("write_id must be a short nonempty text")
+        if not _draft_shape_ok(draft):
+            raise _invalid("draft must be null or a card snapshot of the widget's shape")
+        revision = secrets.token_hex(8)
+        doc = {"note": "Smart Lists widget: one unsaved card form. Not part of the lists or their exports.",
+               "revision": revision, "write_id": write_id, "saved_at": _now(), "draft": draft}
+        try:
+            data = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        except (UnicodeEncodeError, ValueError, RecursionError) as exc:
+            raise _invalid("draft must be valid Unicode JSON") from exc
+        if len(data) > MAX_DRAFT_BYTES:
+            raise ListError("draft_too_large", f"The card draft exceeds {MAX_DRAFT_BYTES // (1024 * 1024)} MiB; "
+                                               "the previous draft was kept.")
+        aside = None
+        with self._locked():
+            try:
+                current = self._current()
+            except ListError as exc:
+                if exc.code != "draft_unreadable" or not replace_unreadable:
+                    raise
+                # Only on an explicit request: the unreadable bytes keep a file of their own, never erased.
+                aside = self._aside_path()
+                _replace(str(self.path), aside)
+            else:
+                if current["revision"] != expected:
+                    raise DraftConflict(current)
+            _atomic_write(self.path, data)
+        return {"revision": revision, "write_id": write_id, "saved_at": doc["saved_at"],
+                **({"set_aside": aside.name} if aside else {})}
+
+
 class SmartLists:
     def __init__(self, state_dir: Any) -> None:
         self.store = ListStore(state_dir)
+        self.draft = DraftSlot(state_dir)
 
     # -- entries -------------------------------------------------------------
 

@@ -62,9 +62,10 @@ the draft.
   (`Home / Groceries / Dairy`). Names are unique among siblings
   (case-insensitive) and cannot contain `/`, which separates path segments.
   A group is addressed by id (`g_…`) or by its path.
-- **Entries** hold the item text, an `open`/`done` status, an optional due
-  value, their group, timestamps, optional `details` (below), and, once deleted, `deleted_at`. Entry ids
-  look like `e_…`.
+- **Entries** hold the item text, a description, a board stage (`todo`,
+  `in_progress`, `review` or `done`; the older `open`/`done` status is derived from it), an optional due
+  value, their group, timestamps, `archived_at` once archived, optional `details` (below), and, once deleted,
+  `deleted_at`. Entry ids look like `e_…`.
 
 ## Owner policies enforced by the store
 
@@ -127,7 +128,7 @@ without `pending`. The replace is the commit point.
   `backups/export-<UTC time>-<random>.json` in the state directory and
   returns its path. It contains the whole store document — groups, every
   entry including the trash, due values, timestamps and the request journal —
-  plus `counts` and a SHA-256 checksum of the document. The widget's low-emphasis Download button uses the retained `GET export` route; the agent can also
+  plus `counts` and a SHA-256 checksum of the document. The widget's «Скачать копию» menu item uses the retained `GET export` route; the agent can also
   export using the `store` tool and help save a copy outside the skill directory.
   An older store's request journal is sanitized in the exported copy, without
   rewriting the live file: an erased entry's former plaintext must not travel
@@ -222,7 +223,8 @@ never breaks the widget later. Checked:
   after 50,000 retired ids, 0.65% after 100,000, 4% after 150,000);
   `store` → `status` reports `replay.retired_ids_estimate` and
   `replay.false_refusal_rate`, and the refusal names the rate once it reaches
-  1%. The widget supplies a fresh request id for each checkbox action.
+  1%. The widget supplies a fresh request id for each save, stage move and
+  archive move, and repeats an unconfirmed one under the same id and body.
 - After the full record is evicted, a retry is refused even if the entry
   survives: its old arguments are no longer available to check for conflict.
   Reusing the same id with changed text must never silently report success.
@@ -267,12 +269,39 @@ archive move answered after more typing leaves the card open with that newer dra
 window sizes its body from the content and scrolls within the frame between the
 fixed header and footer, avoiding a zero flex-basis collapse in macOS WebKit.
 Archive is a separate view; trash is a separate undoable deletion. The widget
-does not call a model or run a task. The download button returns a complete
+does not call a model or run a task. «Скачать копию» returns a complete
 checksummed export. Its outer size remains controlled by the host Widgets layout.
+
+An open card's unsaved form also lives in one draft slot, `widget_draft.json`:
+the fields as typed, a tag or link typed but not added, conflicts already shown,
+and a save or creation still unconfirmed with its original request. It is written
+as the form changes (one write at a time, then the newest form) and cleared once
+everything is saved or the owner discards the card. Leaving the Widgets page only
+writes the form there; it never saves the task. When the board opens again it
+offers «Продолжить» or «Удалить черновик», and other cards wait for that choice.
+Continuing reads the task again: untouched fields follow the store, typed ones stay,
+a conflict stays on screen, and a deleted task leaves the text readable while
+nothing is written back. Continuing repeats no write; «Готово» or «Создать» repeats
+an unconfirmed one with its original request id, which the store recognises while
+its replay window still holds that id. Deleting a draft does not undo a creation
+already sent. Each write names the slot revision it replaces, so another window's
+draft is never overwritten silently; the card says that another window keeps it or
+cleared it. A write refused that way is not sent again by itself; the owner's next
+change on the card writes the form again. A link typed but not added is never added
+or dropped by itself: closing asks first, and «Готово» or «В архив» keep the card open
+saying so. Saving a task does not wait for the draft: if the draft write fails, the
+save still goes and the card says the draft is not saved; a new task is created only
+after the draft holds its request, so a repeat cannot make a second one.
+The guarantee is limited: the host waits at most one second for this write when the
+page is left, so it is best effort, and only the last draft the slot confirmed is
+kept. A request cut off on the way may still have been applied. Going offline, a
+backend failure, closing the window or a crash can lose typing the slot has not
+confirmed. The draft is not part of the lists: the store, its generation, exports
+and agent tools never see it, and it never waits for the store lock.
 
 ## HTTP routes
 
-### Kanban widget contract (0.6.0)
+### Kanban widget contract
 
 All routes are under `/api/extensions/smart_lists/`. The existing routes remain.
 The new widget uses these exact JSON shapes:
@@ -282,6 +311,7 @@ The new widget uses these exact JSON shapes:
 - `GET entry?entry_id=e_...` returns `{ok:true, revision, entry:{id,text,description,stage,status,group_id,group_path,due,source,created_at,updated_at,completed_at,archived_at,deleted_at,details}}` with every reference and the complete note.
 - `POST edit` with `{entry_id,changes:{text?,description?,stage?,due?,details?:{tags?,turn?,next_step?,note?,references?}},expected:{matching fields},request_id}`. `due` is raw text or null; `expected.due` takes the same shapes as the `update` tool. `details` and `expected.details` carry only dirty detail keys. Every supplied `changes` leaf needs its prior value in `expected`, including null for an absent value. The response is `{ok:true,entry:full entry,changed:[field names],replayed:bool}`. An overlap returns `{ok:false,code:"field_conflict",error:string,conflicts:[field names]}` and applies nothing. An unrelated concurrent field write is retained. An identical successful retry with the same request id returns `replayed:true` before checking expected values. The legacy flat `POST edit` request and response remain supported; there `status:open` keeps an In progress or Review stage. Replays of edit and archive return the same full-card shape with current values.
 - `POST archive` with `{entry_id,archived:true|false,expected:{archived_at:null|string},request_id}` returns `{ok:true,entry:full entry,replayed:bool}`. It retains stage and all content. Archive conflicts use the same typed error. `POST check` remains the legacy complete/reopen toggle.
+- `GET draft` returns `{ok:true,revision,write_id,saved_at,draft:object|null}`; `revision` is `""` before the first write. `POST draft` with `{expected_revision,write_id,draft:object|null,replace_unreadable?}` replaces the slot only while it still holds `expected_revision`, otherwise `{ok:false,code:"draft_conflict",current:{revision,write_id,saved_at,draft}}`; `null` clears it under a new revision. Other refusals change nothing: `invalid_input` (not the widget's card shape), `draft_too_large` (over 4 MiB), `draft_busy` (its own lock, 2 s) and `draft_unreadable` (the file is left as is; `replace_unreadable:true` first moves it to a new `widget_draft.unreadable-<UTC time>-<random>.json`, never over an earlier one, and returns that name as `set_aside`).
 
 `POST check` retains its entry id, boolean done and request-id contract. Older `GET today` (including local-day rollover),
 `GET view`, `POST edit`, `POST group`, `GET select`, `POST store`, `GET export`
@@ -369,6 +399,8 @@ requests; the widget itself never reads the host's private task database.
   before refusing with `store_busy`, so tools, routes and other processes
   never lose each other's writes. `store_meta.json` is the sentinel described
   above and `backups/` holds exports and pre-replacement copies.
+- `widget_draft.json` holds the widget's one unsaved card form (see [Widget](#widget)),
+  at most 4 MiB, written atomically under its own `widget_draft.lock`.
 - Schema version 5. Compatible schema 1/2/3/4 records upgrade in memory and are
   rewritten on the next change: schema 1 gains a store id, generation and
   sentinel; schema 2's `expired_requests` digests become `retired_requests`.
@@ -380,11 +412,20 @@ requests; the widget itself never reads the host's private task database.
   3 and 4 stores retain full replay and their retired-id filter unchanged. Legacy
   `status=done` becomes `stage=done`; all other entries become `stage=todo`.
   The old status is then a derived API value. Reads do not save the migration.
-  Older readers refuse schema 5 stores/exports.
+  Older readers refuse schema 5 stores/exports. The upgrade is one-way and
+  makes no copy of its own: the first change after updating saves a 0.4.0 store
+  as schema 5, which 0.4.0 then refuses to read (it leaves the file untouched).
+  Export before updating; that export is what a return to 0.4.0 restores.
 - Limits: 500 groups, 5000 entries (deleted ones included until erased), 100
   items per call, 1000 characters per entry, 80 per group name, 120 per due
   value, 128 MiB per saved store and 256 MiB per export read for restore. A write
   exceeding the store limit is refused before the sentinel or store changes.
+- Every read (each board or archive page, an open card, an agent read) parses
+  and validates the whole `store.json` under the store lock, and the visible
+  widget reads the board again every 30 seconds. Review measurements on a Mac:
+  about 40 ms per board read at 1000 entries (1.6 MB), 0.2–0.6 s at 10–25 MB.
+  Toward the 128 MiB limit one read can outlast the widget's 12-second request
+  timeout and keep writers waiting until they refuse with `store_busy`.
 - Agent tool responses are JSON under 14,500 UTF-8 bytes (below the
   host's 15k cap). Oversized summary arrays carry `result_counts` with total, shown
   and truncated; read/select expose `next_offset` to continue. Long scalar
@@ -409,7 +450,7 @@ requests; the widget itself never reads the host's private task database.
   together. Afterwards the store is `uninitialized`, which is indistinguishable
   from a first run; the explicit `init` step is what keeps it from silently
   appearing empty. Only an export copied outside that directory (through the
-  widget's Download button, or the agent's `store` export and a separate copy)
+  widget's «Скачать копию», or the agent's `store` export and a separate copy)
   survives. The skill cannot
   write there itself and does not schedule exports.
 - Restoring after a `missing` store cannot carry over the request ids of the

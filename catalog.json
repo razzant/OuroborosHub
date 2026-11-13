@@ -3259,8 +3259,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "610b953966c6be72d927bd36f3e7ef2724706234c407a813d45a3ba5526d58fe",
-          "size": 32505
+          "sha256": "dab327b1d0875e044025b390c63d36de48b8410563c5c2ce1a54d7654e832899",
+          "size": 36567
         },
         {
           "path": "entry_details.py",
@@ -3269,13 +3269,13 @@
         },
         {
           "path": "lists_core.py",
-          "sha256": "b898374b0db7672a08cf30f22d72674d918a7b941b6483d6b55da61c00d6f7a4",
-          "size": 116238
+          "sha256": "5996f51181b63e3b0b4a8e5f1418c3d45babe633f47109285f0940cd094fe0c5",
+          "size": 123621
         },
         {
           "path": "plugin.py",
-          "sha256": "d1b595c1314a1f6e6b289d5652e5f98b148d33b28631665320c49abf03a7fe06",
-          "size": 51826
+          "sha256": "7b9695f642966cae2d6fe7a76da594119f9a2f341dc69fdf212914d7a7bba23d",
+          "size": 52791
         },
         {
           "path": "tests/test_agent_details.py",
@@ -3284,8 +3284,8 @@
         },
         {
           "path": "tests/test_capture_route.py",
-          "sha256": "3825796c7f9307d71707277b44d1d8b0c536ebb8ac68def7bb98bc742f158be3",
-          "size": 2480
+          "sha256": "b5e969f9c4c2cf78854226e2ff9fba8992e24319fca8480656a79ed4e13d019d",
+          "size": 2706
         },
         {
           "path": "tests/test_kanban.py",
@@ -3304,18 +3304,18 @@
         },
         {
           "path": "tests/test_review_repairs.py",
-          "sha256": "ac9edc7ecfcef3838a50bfc4fcf167a2651d86aeca4b7d054838541ce1ad622d",
-          "size": 10514
+          "sha256": "4c53d00bb876dfd2024baad8421d7a8725b92dc8b25d5ae016f60bde6498670b",
+          "size": 18618
         },
         {
           "path": "tests/test_smart_lists.py",
-          "sha256": "a4cd4bc7ab0e0ebaf8548151d03c0caa017d1e4a4658901160f5340abdbf086c",
-          "size": 121098
+          "sha256": "7a0f2fc3e71a1b9c2ef910756bb58e01020e6f247512b8866e86c47ad3daba93",
+          "size": 121124
         },
         {
           "path": "widget.js",
-          "sha256": "d8b4b558b0ebf70d5368a630d3f1990a7ff28a1687525e24b41689831520317f",
-          "size": 79307
+          "sha256": "fe5e626a142590c8dcfa31a17ebc83636042ddc968577ac9a05d8af39aaa1ca2",
+          "size": 95887
         }
       ],
       "name": "smart_lists",

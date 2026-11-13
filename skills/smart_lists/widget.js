@@ -1,9 +1,10 @@
 // Smart Lists board: a disposable view of the skill's one persistent store.
 // Four stage columns, explicit tag filters across all of them, one task card.
-// The frame keeps nothing but unsaved form drafts. Every write carries the
-// prior values it was based on, so a concurrent change is refused by the store
-// instead of being overwritten, and an unanswered write is never repeated
-// under a new request id.
+// The frame keeps nothing of its own: an open card's unsaved form is also
+// written to the skill's draft slot, so it outlives this view. Every write
+// carries the prior values it was based on, so a concurrent change is refused
+// by the store instead of being overwritten, and an unanswered write is never
+// repeated under a new request id.
 (() => {
   "use strict";
   const root = document.getElementById("root");
@@ -28,6 +29,11 @@
   const TURN_NAME = Object.fromEntries(TURNS);
   const PAGE = 100; // the board route's largest page
   const LIMIT = { text: 1000, description: 16000, due: 120, tags: 20, tag: 60, refs: 100, label: 120, target: 1000 };
+  // The store counts characters (code points); JavaScript's .length counts UTF-16 units, two per emoji.
+  const chars = (value) => [...value].length;
+  // An input's maxLength also counts UTF-16 units, so the cap leaves room for a full-length value made of
+  // astral characters; the exact limit is checked in characters before anything is sent.
+  const cap = (limit) => 2 * limit;
   const CARD_TAGS = 4;
   const REFS_SHOWN = 6;
 
@@ -82,9 +88,11 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .pop{position:absolute;right:0;top:calc(100% + 6px);z-index:4;display:flex;flex-direction:column;min-width:190px;padding:5px;background:var(--card);border:1px solid var(--line);border-radius:9px;box-shadow:0 8px 28px #0003}
 .pop button{border:0;background:none;text-align:left;padding:7px 10px;border-radius:6px}
 .pop button:hover:not(:disabled){background:var(--well)}
-.alert{display:flex;gap:10px;align-items:center;flex:none;font-size:13px;padding:8px 12px;border-radius:7px;background:var(--warn);border:1px solid var(--warnline);margin-top:-4px}
-.alert span{flex:1;min-width:0;overflow-wrap:anywhere}
-.alert button{font-size:12px;padding:3px 10px;flex:none}
+.alert,.draftbar{display:flex;gap:10px;align-items:center;flex:none;font-size:13px;padding:8px 12px;border-radius:7px;background:var(--warn);border:1px solid var(--warnline);margin-top:-4px}
+.alert span,.draftbar span{flex:1;min-width:0;overflow-wrap:anywhere}
+.alert button,.draftbar button{font-size:12px;padding:3px 10px;flex:none}
+.draftbar{flex-wrap:wrap}
+.draftbar span{flex-basis:220px}
 .filters{display:flex;align-items:flex-start;gap:7px;flex:none}
 .chips{display:flex;flex-wrap:wrap;gap:7px;min-width:0}
 .chips button{border-radius:20px;font-size:12px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -162,6 +170,7 @@ aside .hint{margin:-12px 0 20px}
 .dialogfoot{display:flex;gap:9px;align-items:center;flex-wrap:wrap;padding:14px 22px;border-top:1px solid var(--line);flex:none}
 .dialogfoot .note{flex:1 1 100%;margin:0 0 4px}
 .dialogfoot .hint{min-width:0}
+.draftnote:not(:empty)+.hint:not(:empty)::before{content:" · "}
 .primary{background:var(--accent);color:var(--bg);border-color:transparent;font-weight:500}
 .primary:hover:not(:disabled){border-color:transparent;filter:brightness(1.08)}
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:5;display:flex;gap:14px;align-items:center;max-width:calc(100% - 36px);background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:8px;font-size:12px}
@@ -190,7 +199,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   // Anything else (no answer, a timeout, a server fault, an unreadable body)
   // leaves the outcome of a write unknown: `unknown` says which.
   function failure(message, extra) {
-    return Object.assign(new Error(message), { code: "", conflicts: [], unknown: false }, extra);
+    return Object.assign(new Error(message), { code: "", conflicts: [], unknown: false, answer: null }, extra);
   }
   async function call(path, init) {
     let response;
@@ -212,6 +221,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       code: refused ? data.code || data.error?.code || "" : "",
       conflicts: refused && Array.isArray(data.conflicts) ? data.conflicts : [],
       unknown: !refused && !(response.status >= 400 && response.status < 500),
+      answer: refused ? data : null,
     });
   }
   // Store states the owner can act on; the agent's own wording names its tools.
@@ -281,6 +291,16 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   menu.append(menuButton, pop);
   top.append(el("h1", "", "Дела"), tabs, el("span", "spacer"), search, newTask, menu);
 
+  // A card form saved earlier and not finished: continued or deleted here, never applied by itself.
+  const draftBar = el("div", "draftbar");
+  draftBar.setAttribute("role", "status");
+  draftBar.hidden = true;
+  const draftText = el("span");
+  const draftResume = button("", "Продолжить");
+  const draftDrop = button("", "Удалить черновик");
+  const draftRetry = button("", "Повторить");
+  draftBar.append(draftText, draftResume, draftDrop, draftRetry);
+
   const alertBox = el("div", "alert");
   alertBox.setAttribute("role", "alert");
   alertBox.hidden = true;
@@ -339,7 +359,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     columns[stage] = { node, count, list, blank, seen, more };
     boardBox.append(node);
   }
-  root.append(top, alertBox, filters, boardBox, archiveBox, toast);
+  root.append(top, draftBar, alertBox, filters, boardBox, archiveBox, toast);
 
   // Reuse nodes by key so focus, hover and scroll survive every redraw. Keyed
   // nodes sit together, in front of `tail` when the container has other children.
@@ -942,7 +962,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   }
   inputs.text = el("textarea", "titlebox");
   inputs.text.rows = 1;
-  inputs.text.maxLength = LIMIT.text;
+  inputs.text.maxLength = cap(LIMIT.text);
   inputs.text.placeholder = "Название задачи";
   inputs.text.setAttribute("aria-label", "Название задачи");
   slots.text = el("div", "note");
@@ -950,7 +970,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   slots.text.style.margin = "-10px 0 18px";
   main.append(inputs.text, slots.text);
   const descriptionBox = el("textarea", "description");
-  descriptionBox.maxLength = LIMIT.description;
+  descriptionBox.maxLength = cap(LIMIT.description);
   const descriptionField = field(main, "Описание", "description", descriptionBox);
   const descriptionLinks = el("div", "links");
   descriptionField.insertBefore(descriptionLinks, slots.description);
@@ -969,7 +989,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   addUrl.setAttribute("aria-label", "Адрес ссылки");
   const addName = el("input", "short");
   addName.placeholder = "Подпись";
-  addName.maxLength = LIMIT.label;
+  addName.maxLength = cap(LIMIT.label);
   addName.setAttribute("aria-label", "Подпись ссылки, необязательно");
   const addButton = button("", "Добавить");
   addRow.append(addUrl, addName, addButton);
@@ -989,7 +1009,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   // and an untouched one is sent back exactly as it came.
   const tagsBox = el("input");
   tagsBox.autocomplete = "off";
-  tagsBox.maxLength = LIMIT.tag;
+  tagsBox.maxLength = cap(LIMIT.tag);
   tagsBox.placeholder = "Новый тег";
   const tagsField = field(side, "Теги", "tags", tagsBox);
   const tagList = el("div", "tagbox");
@@ -1001,7 +1021,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   for (const [value, name] of TURNS) turnBox.append(new Option(name, value));
   field(side, "Чей следующий ход", "turn", turnBox);
   const dueBox = el("input");
-  dueBox.maxLength = LIMIT.due;
+  dueBox.maxLength = cap(LIMIT.due);
   dueBox.placeholder = "Не задан";
   dueBox.autocomplete = "off";
   field(side, "Срок", "due", dueBox);
@@ -1017,9 +1037,13 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   const archiveButton = button("", "В архив");
   const status = el("span", "hint");
   status.setAttribute("role", "status");
+  // The draft slot's state and the store's, read as one line of text.
+  const draftNote = el("span", "draftnote");
+  const statusLine = el("span", "hint");
+  statusLine.append(draftNote, status);
   const discardButton = button("", "Не сохранять");
   const doneButton = button("primary", "Готово");
-  foot.append(footNote, archiveButton, el("span", "spacer"), status, discardButton, doneButton);
+  foot.append(footNote, archiveButton, el("span", "spacer"), statusLine, discardButton, doneButton);
   dialog.append(head, body, foot);
   root.append(dialog);
 
@@ -1031,7 +1055,8 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     description: (value) => value,
     stage: (value) => value,
     turn: (value) => value,
-    due: (value) => value.trim() || null,
+    // A blank date is no date; any other text goes as typed, as the store keeps it.
+    due: (value) => (value.trim() ? value : null),
     tags: (value) => [...value],
   };
   const stored = {
@@ -1097,7 +1122,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       return true;
     }
     const problem = card.draft.tags.length >= LIMIT.tags ? `У задачи уже ${LIMIT.tags} тегов, больше не поместится.`
-      : tag.length > LIMIT.tag ? `Тег длиннее ${LIMIT.tag} символов.`
+      : chars(tag) > LIMIT.tag ? `Тег длиннее ${LIMIT.tag} символов.`
       : "";
     if (problem) {
       card.error = problem;
@@ -1129,13 +1154,16 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   // shows both values and asks which one stays.
   // `sent` holds what this form's own answered write carried: the store
   // showing those values is that write, not a change made elsewhere, so a
-  // field typed in again meanwhile simply stays a draft.
+  // field typed in again meanwhile simply stays a draft. That holds even when
+  // it was typed back to the value it had before the write: it was sent, so
+  // it is not untouched.
   function rebase(fresh, saved = [], sent = {}) {
     const changed = [];
-    const ours = (key, after) => Object.prototype.hasOwnProperty.call(sent, key) && same(after, sent[key]);
+    const wasSent = (key) => Object.prototype.hasOwnProperty.call(sent, key);
+    const ours = (key, after) => wasSent(key) && same(after, sent[key]);
     for (const key of SCALARS) {
       const before = stored[key](card.base), after = stored[key](fresh), mine = wire[key](card.draft[key]);
-      const untouched = same(mine, before);
+      const untouched = same(mine, before) && !(wasSent(key) && !same(mine, sent[key]));
       if (saved.includes(key) || untouched || same(mine, after)) {
         delete card.conflicts[key];
         // An untouched field over an unchanged value keeps its exact stored text.
@@ -1189,6 +1217,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     slot.dataset.shown = JSON.stringify(theirs);
     const take = button("", "Взять это значение");
     take.onclick = () => {
+      acted();
       card.draft[key] = Array.isArray(theirs) ? [...theirs] : theirs;
       delete card.conflicts[key];
       fill([key]);
@@ -1197,6 +1226,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     };
     const keep = button("", "Оставить моё");
     keep.onclick = () => {
+      acted();
       delete card.conflicts[key];
       paintCard();
       inputs[key].focus();
@@ -1289,7 +1319,10 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     headId.textContent = isNew ? "Новая задача" : card.id;
     headState.hidden = !(card.gone || fresh.archived_at);
     headState.textContent = card.gone ? (fresh.deleted_at ? "В корзине" : "Удалена") : "В архиве";
-    body.inert = card.loading || shut;
+    body.inert = card.loading || card.failed;
+    // A task deleted elsewhere keeps the typed text readable and copyable; nothing here can change it.
+    for (const control of body.querySelectorAll("input, textarea")) control.readOnly = !!card.gone;
+    for (const control of body.querySelectorAll("select, button")) control.disabled = !!card.gone;
     for (const key of SCALARS) paintConflict(key);
     paintRefs();
     const details = fresh.details || {};
@@ -1311,7 +1344,10 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     const dirty = unsaved();
     const clash = Object.keys(card.conflicts).length > 0;
     footNote.hidden = !(card.error || card.gone);
-    footNote.textContent = card.error || (card.gone ? "Этой задачи больше нет на доске: её удалили. Вернуть из корзины можно через чат." : "");
+    footNote.textContent = card.error || (card.gone
+      ? "Этой задачи больше нет на доске: её удалили. Вернуть из корзины можно через чат."
+        + (formKept() ? " Набранный текст остаётся в черновике, пока ты его не удалишь." : "")
+      : "");
     archiveButton.hidden = isNew || shut || card.guard;
     archiveButton.textContent = fresh.archived_at ? "Вернуть на доску" : "В архив";
     archiveButton.disabled = card.busy || card.loading;
@@ -1321,13 +1357,16 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     doneButton.disabled = card.busy || card.loading;
     status.textContent = card.loading ? "Загружаю…"
       : card.busy ? "Сохраняю…"
-      : card.guard ? (isNew ? "Задача ещё не создана." : "Правки не сохранены.")
+      : card.guard ? (isNew ? "Задача ещё не создана." : unsaved() ? "Правки не сохранены." : "Ссылка набрана, но не добавлена.")
       : clash ? "Выбери, какое значение оставить"
       : dirty ? (isNew ? "" : "Есть несохранённые правки")
       : card.saved ? "Сохранено" : "";
+    keepDraft();
+    paintDraft();
   }
   // Any edit: the form is now ahead of the store.
   function touched() {
+    acted();
     card.saved = false;
     card.guard = false;
     card.addError = "";
@@ -1375,7 +1414,8 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     const problem =
       !url || !/^https?:\/\//.test(raw) || !url.hostname || url.username || url.password || authority.includes("@")
         ? "Нужен адрес, который начинается с https:// или http://, без логина и пароля."
-      : raw.length > LIMIT.target ? `Адрес длиннее ${LIMIT.target} символов.`
+      : chars(raw) > LIMIT.target ? `Адрес длиннее ${LIMIT.target} символов.`
+      : chars(addName.value.trim()) > LIMIT.label ? `Подпись длиннее ${LIMIT.label} символов.`
       : list.some((ref) => ref.target === raw) ? "Эта ссылка уже прикреплена."
       : list.length >= LIMIT.refs ? `У задачи уже ${LIMIT.refs} ссылок, больше не поместится.`
       : "";
@@ -1385,7 +1425,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       addUrl.focus();
       return;
     }
-    const label = (addName.value.trim() || url.hostname + (url.pathname === "/" ? "" : url.pathname)).slice(0, LIMIT.label);
+    const label = addName.value.trim() || [...(url.hostname + (url.pathname === "/" ? "" : url.pathname))].slice(0, LIMIT.label).join("");
     card.ops.push({ ref: { label, target: raw } });
     card.refsOpen = true;
     addUrl.value = "";
@@ -1394,6 +1434,8 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     addUrl.focus();
   }
   addButton.onclick = addRef;
+  // A link typed but not added yet is part of the form the draft slot keeps.
+  for (const input of [addUrl, addName]) input.addEventListener("input", () => card && (acted(), keepDraft()));
   // The frame's sandbox allows no form submission, so Enter is handled here.
   for (const input of [addUrl, addName])
     input.addEventListener("keydown", (event) => {
@@ -1409,13 +1451,14 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   function problems(keys) {
     const draft = card.draft;
     if (keys.includes("text") && !draft.text.trim()) return "У задачи должно быть название.";
-    if (keys.includes("text") && draft.text.length > LIMIT.text) return `Название длиннее ${LIMIT.text} символов.`;
-    if (keys.includes("description") && draft.description.length > LIMIT.description)
+    if (keys.includes("text") && chars(draft.text) > LIMIT.text) return `Название длиннее ${LIMIT.text} символов.`;
+    if (keys.includes("description") && chars(draft.description) > LIMIT.description)
       return `Описание длиннее ${LIMIT.description} символов.`;
     if (keys.includes("tags")) {
       if (draft.tags.length > LIMIT.tags) return `Тегов больше ${LIMIT.tags}.`;
-      if (draft.tags.some((tag) => tag.length > LIMIT.tag)) return `Тег длиннее ${LIMIT.tag} символов.`;
+      if (draft.tags.some((tag) => chars(tag) > LIMIT.tag)) return `Тег длиннее ${LIMIT.tag} символов.`;
     }
+    if (keys.includes("due") && chars(draft.due) > LIMIT.due) return `Срок длиннее ${LIMIT.due} символов.`;
     return "";
   }
   // What an answered write means for the form: fields still showing what was
@@ -1470,6 +1513,12 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     // The request is frozen at the first attempt: a retry after an unanswered
     // one repeats exactly it, and the store answers a repeat without a second task.
     card.creating ||= JSON.stringify({ text: card.draft.text.trim(), request_id: requestId() });
+    // It is in the draft slot before it is sent, so a view that goes away meanwhile
+    // leaves a card that repeats this very request instead of making a second task.
+    if (!(await addIsKept())) {
+      card.error = `Задача не создана: ${slot.state === "elsewhere" ? "черновик сейчас хранит другое окно" : "черновик не сохранился"}, поэтому запрос не отправлен.`;
+      return false;
+    }
     try {
       card.id = (await post("add", card.creating)).entry_id;
     } catch (error) {
@@ -1532,6 +1581,10 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
         from[key] = stored[key](card.base);
       }
       const op = { keys, sent, text: JSON.stringify({ entry_id: card.id, changes, expected, request_id: requestId() }) };
+      // Into the draft before it is sent: a view gone meanwhile leaves it to repeat as itself.
+      // The save does not depend on the draft, though: it goes even if that write failed.
+      card.pending = op;
+      await keepDraft();
       return await send(op);
     } finally {
       if (card) {
@@ -1542,16 +1595,19 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   }
   // Typed while a save or an archive move was away: the form stays open.
   const LATER = "Сохранено. Правки, сделанные во время сохранения, ещё не сохранены: нажми «Готово» ещё раз.";
+  const LINK_LEFT = "Ссылка набрана, но не добавлена: нажми «Добавить» или сотри её.";
   async function done() {
     if (!card || card.busy || card.loading) return;
     if (card.gone || card.failed) return closeCard();
+    acted();
     if (!(await commit()) || !card) return;
-    if (!unsaved()) return closeCard();
-    card.error = LATER;
+    if (!formKept()) return closeCard();
+    card.error = unsaved() ? LATER : LINK_LEFT;
     paintCard();
   }
   async function toggleArchive() {
     if (!card?.id || card.busy) return;
+    acted();
     if (unsaved()) {
       if (!(await commit()) || !card) return;
       if (unsaved()) {
@@ -1587,6 +1643,9 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       // Edits made while the move was away stay on screen over the moved task.
       card.error = `${moved}. Правки, сделанные за это время, ещё не сохранены.`;
       paintCard();
+    } else if (linkTyped()) {
+      card.error = `${moved}. ${LINK_LEFT}`;
+      paintCard();
     } else {
       closeCard();
       notify(moved, archived ? { label: "Вернуть", run: () => undoArchive(id, stage) } : null);
@@ -1597,19 +1656,21 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   function newDraft(entry) {
     return Object.fromEntries(SCALARS.map((key) => [key, formValue(key, entry)]));
   }
-  function showCard(state) {
+  function showCard(state, typed = { tag: "", url: "", label: "" }) {
+    acted(); // a card opened by the owner is a new form, with nothing yet to say about its draft
+    slot.state = "";
     card = { id: null, base: BLANK, draft: newDraft(BLANK), ops: [], conflicts: {}, error: "", addError: "", ...state };
     card.opener = document.activeElement;
-    addUrl.value = "";
-    addName.value = "";
-    tagsBox.value = "";
+    addUrl.value = typed.url;
+    addName.value = typed.label;
+    tagsBox.value = typed.tag;
     body.scrollTop = 0;
     paintCard();
     if (!dialog.open) dialog.showModal();
     fill();
   }
   async function openCard(id, title) {
-    if (card || drag) return;
+    if (card || drag || !(await slotFree()) || card || drag) return;
     showCard({ id, loading: true, draft: { ...newDraft(BLANK), text: title || "" } });
     try {
       const fresh = await readEntry(id);
@@ -1630,15 +1691,23 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     }
     paintCard();
   }
-  function openNew() {
-    if (card) return;
+  async function openNew() {
+    if (card || !(await slotFree()) || card) return;
     // A task made while a tag filter is on starts with those tags, so it stays in view.
     showCard({ draft: { ...newDraft(BLANK), tags: [...view.tags] } });
     inputs.text.focus();
   }
-  function closeCard() {
+  // Closing clears the draft slot: everything is saved, or the owner discarded it.
+  // A task deleted elsewhere cannot take the typed text, so that stays in the slot.
+  function closeCard(discard = false) {
     const opener = card?.opener, id = card?.id;
+    const kept = !discard && card?.gone && formKept() ? snapshot() : null;
     card = null;
+    persist(kept);
+    if (kept) slot.stored = kept;
+    // Another window's draft met while this card was open may be gone by now: look again.
+    if (!slot.mine && slot.stored) slot.ready = readDraftSlot();
+    renderDraftBar();
     if (dialog.open) dialog.close();
     const again = (id && root.querySelector(`[data-id="${CSS.escape(id)}"]`)) || (opener?.isConnected ? opener : newTask);
     (again.matches?.(".archrow") ? again.querySelector("button") : again).focus({ preventScroll: true });
@@ -1649,15 +1718,15 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       card.guard = false;
       return paintCard();
     }
-    if (!unsaved()) return closeCard();
+    if (!formKept()) return closeCard();
     card.guard = true;
     paintCard();
-    doneButton.focus();
+    (unsaved() ? doneButton : addButton).focus();
   }
   newTask.onclick = openNew;
   closeButton.onclick = askClose;
   doneButton.onclick = done;
-  discardButton.onclick = closeCard;
+  discardButton.onclick = () => closeCard(true);
   archiveButton.onclick = toggleArchive;
   dialog.addEventListener("cancel", (event) => {
     event.preventDefault();
@@ -1679,6 +1748,231 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     }
   });
 
+  // -------------------------------------------------------------- card draft
+
+  // The open card's unsaved form is also kept in the skill's one draft slot,
+  // next to the store but never in it. It is written as the form changes (one
+  // write at a time, then the newest form) and cleared once everything in it is
+  // saved or the owner discards it. Leaving the page only writes the form there:
+  // nothing is saved to the task by leaving. Each write names the slot revision
+  // it replaces, so a draft another window keeps is never overwritten silently,
+  // and a write whose answer was lost is settled by reading the slot.
+  const slot = { rev: null, mine: false, held: "", stored: null, problem: "", unreadable: false, blocked: false,
+                 ids: new Set(), next: undefined, run: null, state: "", ready: null, queued: 0, done: 0, waiters: [] };
+  const DRAFT_HINT = {
+    draft_busy: "черновик в этот момент записывал другой запрос",
+    draft_too_large: "он больше 4 МБ",
+    draft_unreadable: "прежний черновик не читается",
+  };
+  const draftSaid = (error) => DRAFT_HINT[error.code] || said(error);
+  const UNSENT_EDIT = "Сохранение не подтверждено: ответ Smart Lists не дошёл до прежнего вида. «Готово» отправит тот же запрос ещё раз, дубля не будет.";
+  const UNSENT_ADD = "Создание не подтверждено: ответ Smart Lists не дошёл до прежнего вида. «Создать» отправит тот же запрос ещё раз, дубля не будет.";
+  // Only what the form shows and builds its writes from; agent notes are read again.
+  const slim = (entry) => entry === BLANK ? null : {
+    id: entry.id, text: stored.text(entry), description: stored.description(entry), stage: stored.stage(entry),
+    due: entry.due ?? null, archived_at: entry.archived_at ?? null, deleted_at: entry.deleted_at ?? null,
+    updated_at: entry.updated_at ?? null, completed_at: entry.completed_at ?? null,
+    details: { tags: stored.tags(entry), turn: stored.turn(entry), references: stored.references(entry) },
+  };
+  // A link typed but not added is part of the form: never added by itself, never dropped by itself.
+  const linkTyped = () => !!addUrl.value.trim() || !!addName.value.trim();
+  // Worth keeping: anything not in the store yet, including such a link.
+  const formKept = () => unsaved() || linkTyped();
+  function snapshot() {
+    return {
+      v: 1, entry_id: card.id, title: card.draft.text.trim() || stored.text(card.base), base: slim(card.base),
+      form: { ...card.draft, tags: [...card.draft.tags] }, ops: card.ops, conflicts: card.conflicts,
+      refs_moved: !!card.refsMoved, unread: !!card.unread,
+      pending: card.pending ? { keys: card.pending.keys, sent: card.pending.sent, text: card.pending.text } : null,
+      creating: card.creating || null, typed: { tag: tagsBox.value, url: addUrl.value, label: addName.value },
+    };
+  }
+  // What the slot holds now. It is this window's to replace when empty or written from here.
+  function learn(current) {
+    slot.rev = current.revision;
+    slot.mine = current.draft === null || slot.ids.has(current.write_id);
+    slot.held = slot.mine ? JSON.stringify(current.draft) : "";
+    if (current.draft === null) slot.stored = null;
+    else if (!slot.mine) slot.stored = current.draft;
+    return slot.mine;
+  }
+  // One write; false when the slot moved elsewhere: another window keeps it, or it was cleared there.
+  // A write refused that way is never sent again by itself, not even over an empty slot: only the
+  // owner's next action on this card (`acted`) lets the form be written again.
+  async function writeSlot(value) {
+    const text = JSON.stringify(value);
+    if (slot.mine ? text === slot.held : value === null) return true;
+    if (slot.blocked) return false;
+    if (!slot.mine) {
+      if (!learn(await call("draft"))) return false;
+      if (text === slot.held) return true;
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const id = requestId();
+      slot.ids.add(id);
+      if (slot.ids.size > 64) slot.ids.delete(slot.ids.values().next().value);
+      try {
+        const answer = await post("draft", JSON.stringify({ expected_revision: slot.rev, write_id: id, draft: value }));
+        slot.rev = answer.revision;
+        slot.held = text;
+        return true;
+      } catch (error) {
+        const current = error.unknown ? await call("draft") : error.code === "draft_conflict" ? error.answer?.current : null;
+        if (!current) throw error;
+        if (slot.ids.has(current.write_id) && JSON.stringify(current.draft) === text) {
+          slot.rev = current.revision; // this very form, written from here, answered late
+          slot.held = text;
+          return true;
+        }
+        if (current.revision === slot.rev) continue; // lost on the way while the slot stayed as it was
+        learn(current);
+        slot.blocked = true;
+        return false;
+      }
+    }
+    throw failure("черновик не записался");
+  }
+  // The owner's own action on the open card: after a refused write, the next one may take the slot again.
+  const acted = () => (slot.blocked = false);
+  // Queue a form for the slot. The promise settles once that form, or a newer one that
+  // replaced it in the queue, was written or refused; typing after it is not waited for.
+  function persist(value) {
+    slot.next = value;
+    const turn = ++slot.queued;
+    slot.run ||= (async () => {
+      while (slot.next !== undefined) {
+        const next = slot.next, upto = slot.queued;
+        slot.next = undefined;
+        try {
+          slot.state = (await writeSlot(next)) ? (next ? "saved" : "") : slot.mine ? "cleared" : "elsewhere";
+        } catch (error) {
+          slot.state = `Черновик не сохранён: ${draftSaid(error)}.`;
+        }
+        slot.done = upto;
+        slot.waiters = slot.waiters.filter(([at, settle]) => (at <= upto ? (settle(), false) : true));
+        paintDraft();
+      }
+      slot.run = null;
+    })();
+    return new Promise((settle) => (slot.done >= turn ? settle() : slot.waiters.push([turn, settle])));
+  }
+  // The open form into the slot; once nothing in it is unsaved, the slot is cleared.
+  function keepDraft() {
+    if (!card || card.loading || card.failed) return slot.run || Promise.resolve();
+    return persist(formKept() ? snapshot() : null);
+  }
+  // True once the slot holds a form with this card's frozen add request.
+  async function addIsKept() {
+    await keepDraft();
+    return slot.mine && slot.held !== "" && JSON.parse(slot.held)?.creating === card?.creating;
+  }
+  function paintDraft() {
+    renderDraftBar();
+    if (!card) return;
+    draftNote.textContent = slot.state === "saved" ? "Черновик сохранён"
+      : slot.state === "elsewhere" ? "Черновик сейчас хранит другое окно: эти правки в нём не сохраняются"
+      : slot.state === "cleared" ? "Черновик очистили в другом окне: следующее изменение сохранит его снова"
+      : slot.state;
+  }
+  const short = (text) => ([...text].length > 80 ? [...text].slice(0, 80).join("") + "…" : text);
+  function renderDraftBar() {
+    const saved = slot.stored;
+    draftBar.hidden = !!card || !(saved || slot.problem);
+    draftResume.hidden = !saved;
+    draftDrop.hidden = !(saved || slot.unreadable);
+    draftRetry.hidden = !slot.problem || slot.unreadable;
+    const title = saved ? `«${short(saved.title) || "без названия"}»` : "";
+    draftText.textContent = saved
+      ? saved.entry_id ? `Есть несохранённые правки задачи ${title}.`
+        : saved.creating ? `Создание задачи ${title} не подтверждено. Её черновик сохранён.`
+        : `Есть несохранённая новая задача ${title}.`
+      : slot.unreadable ? "Сохранённый черновик карточки не читается. Файл не изменён."
+      : `Не удалось проверить, есть ли сохранённый черновик карточки: ${slot.problem}.`;
+  }
+  async function readDraftSlot() {
+    try {
+      learn(await call("draft"));
+      slot.problem = "";
+      slot.unreadable = false;
+    } catch (error) {
+      slot.problem = draftSaid(error);
+      slot.unreadable = error.code === "draft_unreadable";
+    }
+    renderDraftBar();
+  }
+  // One card at a time keeps the slot: a saved one is continued or deleted first.
+  async function slotFree() {
+    await slot.ready;
+    if (!slot.stored) return true;
+    notify("Сначала продолжи или удали сохранённый черновик карточки.", { alert: true });
+    draftResume.focus();
+    return false;
+  }
+  // Continue a saved card: the form as it was, over a fresh read of the task. An
+  // unconfirmed write is not sent again here; «Готово» repeats it as itself.
+  async function resumeDraft() {
+    const saved = slot.stored;
+    if (!saved || card || drag) return;
+    slot.stored = null;
+    if (!slot.mine) {
+      slot.mine = true; // the owner chose to continue it here
+      slot.held = JSON.stringify(saved);
+    }
+    const base = saved.base || BLANK;
+    showCard({ id: saved.entry_id, base, draft: { ...saved.form, tags: [...saved.form.tags] }, ops: saved.ops,
+      conflicts: saved.conflicts, refsMoved: saved.refs_moved, unread: saved.unread, pending: saved.pending,
+      creating: saved.creating, gone: !!base.deleted_at, loading: !!saved.entry_id && !saved.unread,
+      error: saved.pending ? UNSENT_EDIT : saved.creating && !saved.entry_id ? UNSENT_ADD : "" }, saved.typed);
+    card.opener = null;
+    if (!card.loading) return;
+    const id = card.id;
+    try {
+      const fresh = await readEntry(id);
+      if (card?.id !== id) return;
+      card.loading = false;
+      const op = card.pending;
+      if (op && op.keys.every((key) => same(stored[key](fresh), op.sent[key]))) {
+        card.error = "";
+        landed(op, fresh); // it had been applied before the view went away
+      } else rebase(fresh);
+    } catch (error) {
+      if (card?.id !== id) return;
+      card.loading = false;
+      if (error.code === "not_found") card.gone = true;
+      else if (!card.pending) card.error = `Задача не перечитана: ${said(error)}. Форма показана такой, какой была.`;
+    }
+    paintCard();
+  }
+  async function dropDraft() {
+    if (slot.unreadable) {
+      try {
+        const answer = await post("draft", JSON.stringify(
+          { expected_revision: "", write_id: requestId(), draft: null, replace_unreadable: true }));
+        Object.assign(slot, { rev: answer.revision, mine: true, held: "null", problem: "", unreadable: false });
+      } catch (error) {
+        notify(`Черновик не удалён: ${draftSaid(error)}`, { alert: true });
+      }
+      return renderDraftBar();
+    }
+    const saved = slot.stored;
+    if (!saved) return;
+    slot.stored = null;
+    if (!slot.mine) {
+      slot.mine = true; // the owner chose to delete what was read
+      slot.held = JSON.stringify(saved);
+    }
+    renderDraftBar();
+    await persist(null);
+    if (slot.held !== "null" && !slot.stored) {
+      slot.stored = saved; // not deleted: it stays offered
+      notify(slot.state || "Черновик не удалён.", { alert: true });
+    }
+    renderDraftBar();
+  }
+  draftResume.onclick = resumeDraft;
+  draftDrop.onclick = dropDraft;
+  draftRetry.onclick = () => (slot.ready = readDraftSlot());
+
   // --------------------------------------------------------------- lifecycle
 
   const stopTheme = host.onTheme?.((theme) => (document.documentElement.dataset.theme = theme));
@@ -1690,7 +1984,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   sizes.observe(boardBox);
   const idle = () => !disposed && !document.hidden && !loading && !writing && !drag && !card?.busy;
   const timer = setInterval(() => idle() && refresh(), 30000);
-  const onVisible = () => idle() && refresh();
+  const onVisible = () => (document.hidden ? keepDraft() : idle() && refresh());
   document.addEventListener("visibilitychange", onVisible);
   window.__ouroWidgetOnDispose?.(() => {
     disposed = true;
@@ -1703,7 +1997,10 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     sizes.disconnect();
     dragStop();
     stopTheme?.();
+    // Only the open form goes to the draft slot; leaving saves nothing to the task.
+    return keepDraft();
   });
+  slot.ready = readDraftSlot();
   render();
   refresh();
 })();

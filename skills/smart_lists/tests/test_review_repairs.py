@@ -1,5 +1,8 @@
-"""0.6.3 repairs: expected due shapes, HTTP(S) scheme case and packed agent pages."""
+"""0.6.3 repairs: expected due shapes, HTTP(S) scheme case, packed agent pages and the card draft slot."""
 import json
+import threading
+import time
+from unittest import mock
 
 from test_smart_lists import SkillCase
 
@@ -170,6 +173,142 @@ class PackedAgentPageTests(SkillCase):
             "text_length": 3, "due_length": 3, "description_length": 4, "note_length": 5,
             "next_step_length": 2, "capture_key_length": 3, "group_path_length": 4, "tag_count": 1,
             "reference_count": 0})
+
+
+def snapshot(**changes):
+    """A card form as the widget keeps it (invented content)."""
+    value = {"v": 1, "entry_id": None, "title": "Новая задача", "base": None,
+             "form": {"text": "Новая задача", "description": "Описание в работе", "stage": "todo",
+                      "turn": "unassigned", "due": "", "tags": []},
+             "ops": [], "conflicts": {}, "refs_moved": False, "unread": False, "pending": None, "creating": None,
+             "typed": {"tag": "", "url": "", "label": ""}}
+    value.update(changes)
+    return value
+
+
+class WidgetDraftTests(SkillCase):
+    """The card editor's draft slot sits beside the store, never in it, and is never overwritten blindly."""
+
+    def draft(self):
+        return self.api.call_route("draft", "GET")
+
+    def write(self, expected, draft, write_id="w1", **extra):
+        return self.api.call_route("draft", "POST", {"expected_revision": expected, "write_id": write_id,
+                                                     "draft": draft, **extra})
+
+    def store_files(self):
+        return {path.name: path.read_bytes() for path in self.state_dir.iterdir()
+                if path.is_file() and not path.name.startswith("widget_draft")}
+
+    def test_a_draft_round_trips_beside_the_store_without_touching_it(self):
+        self.ok("group", action="create", name="Inbox")
+        before = self.store_files()
+        empty = self.draft()
+        self.assertEqual((empty["ok"], empty["revision"], empty["draft"]), (True, "", None))
+        first = self.write("", snapshot())
+        self.assertTrue(first["ok"], first)
+        read = self.draft()
+        self.assertEqual((read["revision"], read["write_id"], read["draft"]), (first["revision"], "w1", snapshot()))
+        # A half-typed field longer than the store accepts is kept as typed, not cut.
+        long = snapshot(form={**snapshot()["form"], "description": "я" * 20000})
+        second = self.write(first["revision"], long, write_id="w2")
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(self.draft()["draft"]["form"]["description"], "я" * 20000)
+        cleared = self.write(second["revision"], None, write_id="w3")
+        self.assertTrue(cleared["ok"], cleared)
+        self.assertEqual((self.draft()["revision"], self.draft()["draft"]), (cleared["revision"], None))
+        # The store, its sentinel and lock are byte-identical; tools and exports never see the draft.
+        self.assertEqual(self.store_files(), before)
+        self.assertNotIn("Описание в работе", json.dumps(self.ok("read", group="Inbox"), ensure_ascii=False))
+        self.write(cleared["revision"], snapshot(), write_id="w4")
+        export = self.module._service().export_document()
+        self.assertNotIn("Описание в работе", json.dumps(export, ensure_ascii=False))
+
+    def test_a_write_based_on_an_older_revision_is_refused_with_what_the_slot_holds(self):
+        first = self.write("", snapshot(title="Первое окно"))
+        # A second window that read the slot empty cannot replace the first window's draft.
+        refused = self.write("", snapshot(title="Второе окно"), write_id="w2")
+        self.assertEqual((refused["ok"], refused["code"]), (False, "draft_conflict"))
+        self.assertEqual((refused["current"]["revision"], refused["current"]["write_id"]), (first["revision"], "w1"))
+        self.assertEqual(refused["current"]["draft"]["title"], "Первое окно")
+        cleared = self.write(first["revision"], None, write_id="w3")
+        # A late write made before the clear cannot bring the draft back.
+        late = self.write(first["revision"], snapshot(title="Поздняя запись"), write_id="w4")
+        self.assertEqual(late["code"], "draft_conflict")
+        self.assertIsNone(late["current"]["draft"])
+        self.assertEqual((self.draft()["revision"], self.draft()["draft"]), (cleared["revision"], None))
+
+    def test_refused_writes_keep_the_previous_draft_and_say_why(self):
+        kept = self.write("", snapshot())
+        path = self.state_dir / "widget_draft.json"
+        raw = path.read_bytes()
+        form = snapshot()["form"]
+        for value in ({**snapshot(), "extra": 1}, {**snapshot(), "v": 2}, "text", [],
+                      snapshot(form={**form, "tags": ["ok", 3]}), snapshot(form={**form, "due": None}),
+                      snapshot(typed={"tag": ""}), snapshot(pending={"keys": [], "sent": {}}),
+                      snapshot(title="\ud800")):
+            answer = self.write(kept["revision"], value, write_id="bad")
+            self.assertEqual((answer["ok"], answer["code"]), (False, "invalid_input"), value)
+        for expected, write_id in ((None, "w"), (5, "w"), (kept["revision"], ""), (kept["revision"], "x" * 65)):
+            answer = self.api.call_route("draft", "POST", {"expected_revision": expected, "write_id": write_id,
+                                                           "draft": None})
+            self.assertEqual(answer["code"], "invalid_input", (expected, write_id))
+        with mock.patch.object(self.module.lists_core, "MAX_DRAFT_BYTES", 2000):
+            answer = self.write(kept["revision"], snapshot(form={**form, "description": "x" * 3000}), write_id="big")
+        self.assertEqual(answer["code"], "draft_too_large")
+        self.assertEqual(path.read_bytes(), raw)
+        self.assertEqual(self.draft()["revision"], kept["revision"])
+
+    def test_the_store_lock_never_holds_the_draft_and_a_busy_draft_changes_nothing(self):
+        service = self.module._service()
+
+        def holding(lock_of):
+            held, release = threading.Event(), threading.Event()
+
+            def hold():
+                with lock_of():
+                    held.set()
+                    release.wait(10)
+            thread = threading.Thread(target=hold)
+            thread.start()
+            self.assertTrue(held.wait(5))
+            return lambda: (release.set(), thread.join(5))
+
+        done = holding(service.store._locked)  # the main store is busy, for example with an export
+        try:
+            started = time.monotonic()
+            answer = self.write("", snapshot())
+            self.assertTrue(answer["ok"], answer)
+            self.assertLess(time.monotonic() - started, 2)
+        finally:
+            done()
+        raw = service.draft.path.read_bytes()
+        with mock.patch.object(self.module.lists_core, "DRAFT_LOCK_TIMEOUT_SEC", 0.1):
+            done = holding(service.draft._locked)
+            try:
+                busy = self.write(answer["revision"], None, write_id="w2")
+            finally:
+                done()
+        self.assertEqual((busy["ok"], busy["code"]), (False, "draft_busy"))
+        self.assertEqual(service.draft.path.read_bytes(), raw)
+
+    def test_an_unreadable_draft_is_reported_and_set_aside_only_when_asked(self):
+        path = self.state_dir / "widget_draft.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"{not json")
+        self.assertEqual(self.draft()["code"], "draft_unreadable")
+        self.assertEqual(self.write("", snapshot())["code"], "draft_unreadable")
+        self.assertEqual(path.read_bytes(), b"{not json")
+        replaced = self.write("", None, write_id="w2", replace_unreadable=True)
+        self.assertTrue(replaced["ok"], replaced)
+        self.assertEqual((self.draft()["revision"], self.draft()["draft"]), (replaced["revision"], None))
+        # A second damaged file is set aside too, and the first one's bytes are never overwritten.
+        path.write_bytes(b"[also broken")
+        again = self.write("", None, write_id="w3", replace_unreadable=True)
+        self.assertTrue(again["ok"], again)
+        aside = {item.name: item.read_bytes() for item in self.state_dir.glob("widget_draft.unreadable*")}
+        self.assertEqual(sorted(aside.values()), [b"[also broken", b"{not json"])
+        self.assertEqual(aside, {replaced["set_aside"]: b"{not json", again["set_aside"]: b"[also broken"})
 
 
 if __name__ == "__main__":

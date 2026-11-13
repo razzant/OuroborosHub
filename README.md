@@ -270,8 +270,12 @@ against synthetic Bot API updates and an upgrade from 0.8, without live credenti
 
 The selected `calendar-skill`, `email-presence` and `smart-lists` CI jobs check out
 the exact core pinned in `catalog-check.yml`, install its Python runtime requirements
-and Chromium/WebKit, and exercise the real Host Service and widget bridge with fake
-providers. Missing core or browsers fail those jobs. For local backend-only
+and Chromium/WebKit. Calendar and mail exercise the real Host Service and widget
+bridge with fake providers. Smart Lists mounts its widget through that core's real
+module bridge (`widget_module.js`), served by a test HTTP server over the skill's
+routes registered on `FakePluginAPI`, without the Host Service. A missing core fails
+those jobs; so do missing Playwright or browsers (Smart Lists: `SMART_LISTS_REQUIRE_BROWSERS`,
+set by `scripts/ci_checks.py`). For local backend-only
 calendar checks, which do not qualify its widget or sign-in return:
 
 ```bash
