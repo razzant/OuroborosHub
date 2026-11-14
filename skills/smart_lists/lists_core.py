@@ -68,7 +68,15 @@ try:  # Windows cross-process lock.
 except ImportError:  # pragma: no cover - platform dependent
     msvcrt = None  # type: ignore[assignment]
 
-SCHEMA_VERSION = 3
+try:
+    from . import entry_details
+except ImportError:  # Standalone file loading is used by the existing tests.
+    import importlib.util as _details_util
+    _details_spec = _details_util.spec_from_file_location("smart_lists_details", Path(__file__).with_name("entry_details.py"))
+    entry_details = _details_util.module_from_spec(_details_spec)
+    _details_spec.loader.exec_module(entry_details)
+
+SCHEMA_VERSION = 5
 STORE_FILE = "store.json"
 LOCK_FILE = "store.lock"
 META_FILE = "store_meta.json"
@@ -86,7 +94,9 @@ MAX_REQUESTS = 500
 MAX_REQUESTS_ACCEPTED = 5000  # validation bound; saves trim to MAX_REQUESTS
 MAX_READ_LIMIT = 500
 MAX_DUPLICATE_IDS = 5
-MAX_IMPORT_BYTES = 64 * 1024 * 1024
+MAX_IMPORT_BYTES = 256 * 1024 * 1024
+MAX_STORE_BYTES = 128 * 1024 * 1024  # Keeps a complete indented export below the import bound.
+MAX_DESCRIPTION_CHARS = 16000
 MAX_LISTED_BACKUPS = 20
 MAX_STAMP_CHARS = 64
 MAX_SOURCE_CHARS = 32
@@ -105,6 +115,7 @@ BLOOM_HASHES = 7
 _BLOOM_BYTES = BLOOM_BITS // 8
 
 STATUSES = ("open", "done")
+STAGES = ("todo", "in_progress", "review", "done")
 GROUP_ACTIONS = ("create", "rename", "move", "delete")
 ENTRY_ACTIONS = ("delete", "undo", "erase")
 STORE_ACTIONS = ("status", "init", "export", "restore")
@@ -116,15 +127,16 @@ _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _EXPLICIT_OFFSET_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{3}(?:\d{3})?)?)?(?:Z|[+-]\d{2}:\d{2})$"
 )
-_ITEM_KEYS = {"text", "due"}
+_ITEM_KEYS = {"text", "due", "details", "description", "stage"}
 _HEX16_RE = re.compile(r"^[0-9a-f]{16}$")
 _HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 _DOC_KEYS = {"schema_version", "store_id", "generation", "next_seq", "groups", "entries", "requests", "updated_at"}
 _DOC_KEYS_BY_VERSION = {1: _DOC_KEYS | {"expired_requests"}, 2: _DOC_KEYS | {"expired_requests"},
-                        3: _DOC_KEYS | {"retired_requests"}}
+                        3: _DOC_KEYS | {"retired_requests"}, 4: _DOC_KEYS | {"retired_requests"},
+                        5: _DOC_KEYS | {"retired_requests"}}
 _GROUP_KEYS = {"id", "name", "parent_id", "created_at", "updated_at"}
-_ENTRY_KEYS = {"id", "seq", "group_id", "text", "status", "due", "source", "request_id", "created_at",
-               "updated_at", "completed_at", "deleted_at"}
+_ENTRY_KEYS = {"id", "seq", "group_id", "text", "stage", "description", "due", "source", "request_id", "created_at",
+               "updated_at", "completed_at", "archived_at", "deleted_at", "details"}
 _REQUEST_KEYS = {"op", "fingerprint", "at", "result"}
 _COUNT_KEYS = ("groups", "entries", "open", "done", "deleted")
 _ACTION_RESULT_KEYS = {"delete": "deleted", "undo": "undeleted", "erase": "erased"}
@@ -139,10 +151,11 @@ _STATE_BY_CODE = {
 class ListError(Exception):
     """A typed, owner-readable refusal. Nothing is written when it is raised."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, fields: Optional[List[str]] = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.fields = fields or []
 
     def as_dict(self) -> Dict[str, str]:
         return {"code": self.code, "message": self.message}
@@ -258,6 +271,22 @@ def clean_text(value: Any, *, field: str = "text") -> str:
     return _utf8(value, field)
 
 
+def clean_description(value: Any) -> str:
+    if not isinstance(value, str) or len(value) > MAX_DESCRIPTION_CHARS:
+        raise _invalid(f"description must be text of at most {MAX_DESCRIPTION_CHARS} characters")
+    return _utf8(value, "description")
+
+
+def clean_stage(value: Any) -> str:
+    if value not in STAGES:
+        raise _invalid(f"stage must be one of {list(STAGES)}")
+    return value
+
+
+def _status(entry: Dict[str, Any]) -> str:
+    return "done" if entry["stage"] == "done" else "open"
+
+
 def parse_due(value: Any) -> Optional[Dict[str, str]]:
     """Return ``{"raw", "at"?}``; ``at`` only for an explicit-offset date-time."""
     if value is None:
@@ -361,8 +390,11 @@ def _ref_key(ref: str) -> str:
 
 
 def _fingerprint(op: str, params: Dict[str, Any]) -> str:
-    canonical = json.dumps({"op": op, "params": params}, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    try:
+        canonical = json.dumps({"op": op, "params": params}, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    except (TypeError, ValueError, RecursionError, UnicodeError) as exc:
+        raise _invalid("request fields must be valid JSON and Unicode") from exc
 
 
 def _digest(document: Any) -> str:
@@ -498,6 +530,13 @@ def _check_group(group_id: Any, group: Any, groups: Dict[str, Any]) -> None:
         raise _Malformed(f"group {group_id!r} is malformed")
 
 
+def clean_details(value: Any) -> Dict[str, Any]:
+    try:
+        return entry_details.clean(value)
+    except (ValueError, UnicodeError) as exc:
+        raise _invalid(f"details: {exc}") from exc
+
+
 def _check_entry(entry_id: Any, entry: Any, groups: Dict[str, Any], next_seq: int) -> None:
     due = entry.get("due") if isinstance(entry, dict) else None
     if (
@@ -506,7 +545,10 @@ def _check_entry(entry_id: Any, entry: Any, groups: Dict[str, Any], next_seq: in
         or entry.get("id") != entry_id
         or not isinstance(entry.get("group_id"), str) or entry["group_id"] not in groups
         or not _written_by_cleaner(entry.get("text"), clean_text)
-        or entry.get("status") not in STATUSES
+        or entry.get("stage") not in STAGES
+        or "description" not in entry or not _written_by_cleaner(entry.get("description"), clean_description)
+        or "archived_at" not in entry or not _stamp_ok(entry.get("archived_at"))
+        or ("details" in entry and not _written_by_cleaner(entry["details"], clean_details))
         or not _is_int(entry.get("seq")) or not 1 <= entry["seq"] < next_seq
         or not (due is None or (isinstance(due, dict) and isinstance(due.get("raw"), str)
                                 and _written_by_cleaner(due, lambda value: parse_due(value["raw"]))))
@@ -523,8 +565,8 @@ def _check_entry(entry_id: Any, entry: Any, groups: Dict[str, Any], next_seq: in
 def _journal_entry(value: Any) -> bool:
     if not isinstance(value, dict) or not isinstance(value.get("id"), str) or not _ENTRY_ID_RE.fullmatch(value["id"]):
         return False
-    allowed = {"id", "text", "status", "group_id", "group_path", "due", "source", "created_at",
-               "updated_at", "completed_at", "deleted_at"}
+    allowed = {"id", "text", "status", "stage", "description", "group_id", "group_path", "due", "source", "created_at",
+               "updated_at", "completed_at", "archived_at", "deleted_at", "details"}
     required = {"id", "status", "group_id", "source", "created_at", "updated_at", "completed_at", "deleted_at"}
     if not required <= set(value) <= allowed:
         return False
@@ -534,8 +576,11 @@ def _journal_entry(value: Any) -> bool:
             and ("group_path" not in value or len(value["group_path"]) <= MAX_GROUPS * (MAX_NAME_CHARS + 3))
             and ("source" not in value or value["source"] is None or
                  (isinstance(value["source"], str) and len(value["source"]) <= MAX_SOURCE_CHARS))
-            and all(_stamp_ok(value[key]) for key in ("created_at", "updated_at", "completed_at", "deleted_at")
+            and all(_stamp_ok(value[key]) for key in ("created_at", "updated_at", "completed_at", "archived_at", "deleted_at")
                     if key in value)
+            and ("details" not in value or _written_by_cleaner(value["details"], clean_details))
+            and ("description" not in value or _written_by_cleaner(value["description"], clean_description))
+            and ("stage" not in value or value["stage"] in STAGES)
             and ("status" not in value or value["status"] in STATUSES)
             and ("group_id" not in value or _GROUP_ID_RE.fullmatch(value["group_id"]) is not None)
             and ("due" not in value or value["due"] is None or
@@ -576,7 +621,8 @@ def _journal_shape(op: str, result: Dict[str, Any]) -> bool:
         duplicates = result["possible_duplicates"]
         return (_journal_group(result["group"]) and _journal_entries(result["added"])
                 and bool(result["added"])
-                and all(item["group_id"] == result["group"]["id"] and item["status"] == "open"
+                and all(item["group_id"] == result["group"]["id"] and
+                        item["status"] == ("done" if item.get("stage") == "done" else "open")
                         for item in result["added"])
                 and isinstance(duplicates, list) and len(duplicates) <= MAX_BATCH
                 and all(isinstance(item, dict) and set(item) == {
@@ -595,9 +641,12 @@ def _journal_shape(op: str, result: Dict[str, Any]) -> bool:
                      isinstance(result["duplicates_omitted_on_replay"], bool)))
     if op in ("update", "edit"):
         return (fields == {"entry", "changed"} and _journal_entry(result["entry"])
-                and isinstance(result["changed"], list) and len(result["changed"]) <= 5
-                and all(isinstance(item, str) and item in {"text", "due", "status", "group"}
+                and isinstance(result["changed"], list) and len(result["changed"]) <= 12
+                and all(isinstance(item, str) and (item in {"text", "due", "status", "stage", "description", "group", "details"}
+                    or item in {"details.tags", "details.turn", "details.next_step", "details.note", "details.references"})
                         for item in result["changed"]))
+    if op == "archive":
+        return fields == {"entry"} and _journal_entry(result["entry"])
     if op in ("complete", "reopen", "move", "delete", "undo", "erase"):
         key = {"complete": "changed", "reopen": "changed", "move": "moved",
                "delete": "deleted", "undo": "undeleted", "erase": "erased"}[op]
@@ -658,10 +707,10 @@ def _check_document(doc: Any) -> Dict[str, Any]:
     unknown = sorted(str(key) for key in set(doc) - _DOC_KEYS_BY_VERSION[version])
     if unknown:
         raise _Malformed(f"it has unknown top-level fields {unknown[:5]}")
-    if version == SCHEMA_VERSION and "store_id" not in doc:
+    if version >= 3 and "store_id" not in doc:
         raise _Malformed("store_id is missing")
     _check_unicode(doc)
-    if version < SCHEMA_VERSION:
+    if version < 3:
         # 0.1.0 (schema 1) had no lineage, trash or expired ids; the 0.2.0
         # draft (schema 2) kept evicted ids as a digest list, folded into the
         # filter here. The upgrade is saved with the next change, never on a read.
@@ -692,6 +741,16 @@ def _check_document(doc: Any) -> Dict[str, Any]:
         doc.update(schema_version=SCHEMA_VERSION, retired_requests=_bloom_encode(bits))
         doc.setdefault("store_id", None)
         doc.setdefault("generation", 0)
+    if version <= 4:
+        # Keep legacy content and identities exactly; only replace the stored
+        # open/done status with its canonical stage. Reads do not save this.
+        doc = dict(doc, schema_version=SCHEMA_VERSION, entries=copy.deepcopy(doc.get("entries")))
+        if isinstance(doc["entries"], dict):
+            for entry in doc["entries"].values():
+                if isinstance(entry, dict) and entry.get("status") in STATUSES:
+                    entry["stage"] = "done" if entry.pop("status") == "done" else "todo"
+                    entry["description"] = ""
+                    entry["archived_at"] = None
     groups, entries, requests = doc.get("groups"), doc.get("entries"), doc.get("requests")
     if not all(isinstance(part, dict) for part in (groups, entries, requests)):
         raise _Malformed("groups, entries and requests must be objects")
@@ -724,6 +783,11 @@ def _check_document(doc: Any) -> Dict[str, Any]:
                 raise _Malformed(f"group {group_id!r} is part of a parent cycle")
             seen.add(current)
             current = groups[current].get("parent_id")
+    capture_keys = [entry.get("details", {}).get("capture_key") for entry in entries.values()
+                    if isinstance(entry, dict) and isinstance(entry.get("details", {}), dict)]
+    keys = [key for key in capture_keys if isinstance(key, str) and key]
+    if len(keys) != len(set(keys)):
+        raise _Malformed("duplicate capture_key")
     seqs = set()
     for entry_id, entry in entries.items():
         _check_entry(entry_id, entry, groups, next_seq)
@@ -835,8 +899,8 @@ def _counts(doc: Dict[str, Any]) -> Dict[str, int]:
     return {
         "groups": len(doc["groups"]),
         "entries": len(doc["entries"]),
-        "open": sum(1 for entry in live if entry["status"] == "open"),
-        "done": sum(1 for entry in live if entry["status"] == "done"),
+        "open": sum(1 for entry in live if _status(entry) == "open"),
+        "done": sum(1 for entry in live if _status(entry) == "done"),
         "deleted": len(doc["entries"]) - len(live),
     }
 
@@ -936,7 +1000,9 @@ def _entry_view(entry: Dict[str, Any], paths: Dict[str, str]) -> Dict[str, Any]:
     return {
         "id": entry["id"],
         "text": entry["text"],
-        "status": entry["status"],
+        "status": _status(entry),
+        "stage": entry["stage"],
+        "description": entry["description"],
         "group_id": entry["group_id"],
         "group_path": paths.get(entry["group_id"], ""),
         "due": entry.get("due"),
@@ -947,7 +1013,9 @@ def _entry_view(entry: Dict[str, Any], paths: Dict[str, str]) -> Dict[str, Any]:
         "created_at": entry.get("created_at"),
         "updated_at": entry.get("updated_at"),
         "completed_at": entry.get("completed_at"),
+        "archived_at": entry.get("archived_at"),
         "deleted_at": entry.get("deleted_at"),
+        **({"details": copy.deepcopy(entry["details"])} if "details" in entry else {}),
     }
 
 
@@ -969,7 +1037,7 @@ def _journal_result(value: Any) -> Any:
                                                     or value.get("duplicates_omitted_on_replay") is True)
         object_id = copy.get("id")
         if isinstance(object_id, str) and _ENTRY_ID_RE.fullmatch(object_id):
-            for key in ("text", "due", "group_path"):
+            for key in ("text", "due", "group_path", "details", "description"):
                 copy.pop(key, None)
         if isinstance(object_id, str) and _GROUP_ID_RE.fullmatch(object_id):
             copy.pop("name", None)
@@ -994,6 +1062,8 @@ def _replay_result(value: Any, doc: Dict[str, Any], paths: Optional[Dict[str, st
                 copy.update(_group_view(doc["groups"][object_id], paths))
             elif _ENTRY_ID_RE.fullmatch(object_id) or _GROUP_ID_RE.fullmatch(object_id):
                 copy = {"id": object_id, "gone": True}
+        if isinstance(copy.get("entry"), dict) and copy["entry"].get("id") in doc["entries"]:
+            copy["entry"] = _full_entry(doc["entries"][copy["entry"]["id"]], paths)
         return copy
     return value
 
@@ -1029,19 +1099,20 @@ def _replay_known_request(doc: Dict[str, Any], op: str, fingerprint: str, reques
     return None
 
 
-def _tree_rows(doc: Dict[str, Any], root_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def _tree_rows(doc: Dict[str, Any], root_id: Optional[str] = None, *, active_only: bool = False) -> List[Dict[str, Any]]:
     paths = _paths(doc)
     grouped = _entries_by_group(doc)
     rows = []
     for group, depth in _tree_order(doc, root_id):
-        entries = grouped.get(group["id"], [])
+        entries = [entry for entry in grouped.get(group["id"], [])
+                   if not active_only or not entry.get("archived_at") or entry.get("deleted_at")]
         live = [entry for entry in entries if not entry.get("deleted_at")]
         rows.append({
             "id": group["id"],
             "path": paths[group["id"]],
             "depth": depth,
-            "open": sum(1 for entry in live if entry["status"] == "open"),
-            "done": sum(1 for entry in live if entry["status"] == "done"),
+            "open": sum(1 for entry in live if _status(entry) == "open"),
+            "done": sum(1 for entry in live if _status(entry) == "done"),
             "deleted": len(entries) - len(live),
         })
     return rows
@@ -1069,15 +1140,75 @@ def _op_update(doc: Dict[str, Any], entry_id: str, text: Optional[str], due: Opt
     return changed
 
 
+_EDIT_FIELDS = {"text", "description", "stage", "due", "details"}
+_EDIT_DETAIL_FIELDS = {"tags", "turn", "next_step", "note", "references"}
+_DETAIL_DEFAULTS = {"tags": [], "turn": "unassigned", "next_step": "", "note": "", "references": []}
+
+
+def _expected_due(value: Any) -> Optional[str]:
+    """The raw due text an expected value names; None means unset.
+
+    Every shape a reader returns is accepted: null or "" (unset; the entry
+    page's text for no due), the raw text, or the stored ``{"raw", "at"?}``
+    object from read/board/entry. Only ``raw`` is compared, as on write."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        return value
+    if (isinstance(value, dict) and isinstance(value.get("raw"), str) and set(value) <= {"raw", "at"}
+            and isinstance(value.get("at", ""), str)):
+        return value["raw"] or None
+    raise _invalid("expected.due must be null, the raw due text or the stored {raw, at?} object")
+
+
+def _check_expected(entry: Dict[str, Any], expected: Dict[str, Any]) -> None:
+    if not isinstance(expected, dict) or set(expected) - _EDIT_FIELDS - {"archived_at"}:
+        raise _invalid("expected has unsupported fields")
+    detail_expected = expected.get("details", {})
+    if not isinstance(detail_expected, dict) or set(detail_expected) - _EDIT_DETAIL_FIELDS:
+        raise _invalid("expected.details has unsupported fields")
+    conflicts = []
+    for key, value in expected.items():
+        if key == "details":
+            for field, previous in value.items():
+                current = entry.get("details", {}).get(field, _DETAIL_DEFAULTS[field])
+                if current != previous:
+                    conflicts.append(f"details.{field}")
+        elif key == "due":
+            if (entry.get("due") or {}).get("raw") != _expected_due(value):
+                conflicts.append(key)
+        elif entry.get(key) != value:
+            conflicts.append(key)
+    if conflicts:
+        raise ListError("field_conflict", "The entry changed in: " + ", ".join(conflicts), conflicts)
+
+
+def _full_entry(entry: Dict[str, Any], paths: Dict[str, str]) -> Dict[str, Any]:
+    view = _entry_view(entry, paths)
+    view["details"] = {**copy.deepcopy(_DETAIL_DEFAULTS), **view.get("details", {})}
+    return view
+
+
+def _entry_summary(entry: Dict[str, Any], paths: Dict[str, str]) -> Dict[str, Any]:
+    details = entry.get("details", {})
+    return {"id": entry["id"], "text": entry["text"], "stage": entry["stage"],
+            "status": _status(entry), "description_preview": entry["description"][:200],
+            "group_id": entry["group_id"], "group_path": paths[entry["group_id"]],
+            "due": entry.get("due"), "details": {"tags": details.get("tags", []),
+            "turn": details.get("turn", "unassigned"), "reference_count": len(details.get("references", []))},
+            "created_at": entry.get("created_at"), "updated_at": entry.get("updated_at"),
+            "completed_at": entry.get("completed_at"), "archived_at": entry.get("archived_at")}
+
+
 def _op_set_done(doc: Dict[str, Any], entry_ids: List[str], done: bool, now: str) -> Tuple[List[Dict[str, Any]], List[str]]:
     entries = [_entry(doc, entry_id, live=True) for entry_id in entry_ids]
     changed, unchanged = [], []
     for entry in entries:
         wanted = "done" if done else "open"
-        if entry["status"] == wanted:
+        if _status(entry) == wanted:
             unchanged.append(entry["id"])
             continue
-        entry["status"] = wanted
+        entry["stage"] = "done" if done else "todo"
         entry["completed_at"] = now if done else None
         entry["updated_at"] = now
         changed.append(entry)
@@ -1125,7 +1256,7 @@ def _possible_duplicates(doc: Dict[str, Any], created: List[Dict[str, Any]]) -> 
     the oldest MAX_DUPLICATE_IDS ids per new entry, plus the full count."""
     same_text: Dict[Tuple[str, str], List[str]] = {}
     for other in sorted(doc["entries"].values(), key=lambda item: item["seq"]):
-        if other["status"] == "open" and not other.get("deleted_at"):
+        if _status(other) == "open" and not other.get("deleted_at"):
             same_text.setdefault((other["group_id"], _norm(other["text"])), []).append(other["id"])
     report = []
     for entry in created:
@@ -1148,13 +1279,13 @@ def parse_restore_payload(raw: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     truncated or edited file is refused instead of restored partially, and the
     document must pass the full ``_check_document`` validation.
     """
-    if len(raw) > MAX_IMPORT_BYTES:
-        raise ListError("invalid_export", f"the export is larger than {MAX_IMPORT_BYTES} bytes")
     try:
-        raw.encode("utf-8")
+        encoded = raw.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ListError("invalid_export", "the export text is not valid Unicode (an unpaired surrogate). "
                                           "Nothing was restored.") from exc
+    if len(encoded) > MAX_IMPORT_BYTES:
+        raise ListError("invalid_export", f"the export is larger than {MAX_IMPORT_BYTES} bytes")
     try:
         data = json.loads(raw)
     except (ValueError, RecursionError) as exc:
@@ -1269,6 +1400,48 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Write a temporary file next to ``path``, flush it to disk, then rename it over ``path``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    _fsync_dir(path.parent)
+
+
+@contextmanager
+def _file_locked(thread_lock: Any, lock_path: Path, timeout: float, busy: Callable[[], ListError]) -> Iterator[None]:
+    """Hold ``thread_lock`` and an exclusive lock on ``lock_path``; one deadline covers both."""
+    deadline = time.monotonic() + timeout
+    if not thread_lock.acquire(timeout=timeout):
+        raise busy()
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "a+b") as handle:
+            delay = 0.005
+            while not _try_file_lock(handle):
+                if time.monotonic() >= deadline:
+                    raise busy()
+                time.sleep(delay)
+                delay = min(delay * 2, 0.05)
+            try:
+                yield
+            finally:
+                _release_file_lock(handle)
+    finally:
+        thread_lock.release()
+
+
 class ListStore:
     """The single authoritative JSON document under the skill state dir."""
 
@@ -1288,24 +1461,8 @@ class ListStore:
     def _locked(self) -> Iterator[None]:
         # One deadline for both locks, so a caller never waits longer than
         # LOCK_TIMEOUT_SEC in total (below the host's tool timeout).
-        deadline = time.monotonic() + LOCK_TIMEOUT_SEC
-        if not self._thread_lock.acquire(timeout=LOCK_TIMEOUT_SEC):
-            raise _busy()
-        try:
-            self.state_dir.mkdir(parents=True, exist_ok=True)
-            with open(self._lock_path, "a+b") as handle:
-                delay = 0.005
-                while not _try_file_lock(handle):
-                    if time.monotonic() >= deadline:
-                        raise _busy()
-                    time.sleep(delay)
-                    delay = min(delay * 2, 0.05)
-                try:
-                    yield
-                finally:
-                    _release_file_lock(handle)
-        finally:
-            self._thread_lock.release()
+        with _file_locked(self._thread_lock, self._lock_path, LOCK_TIMEOUT_SEC, _busy):
+            yield
 
     def _meta_bytes(self) -> Optional[bytes]:
         try:
@@ -1343,21 +1500,7 @@ class ListStore:
         return self._load_raw()[0]
 
     def _write_atomic(self, path: Path, data: bytes) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            _replace(tmp, path)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-        _fsync_dir(path.parent)
+        _atomic_write(path, data)
 
     def _write_meta(self, doc: Dict[str, Any], *, content_sha256: str, last_export: Any = _KEEP,
                     pending: Optional[Dict[str, Any]] = None) -> None:
@@ -1410,6 +1553,8 @@ class ListStore:
         doc["generation"] = doc["generation"] + 1
         doc["updated_at"] = _now()
         data = (json.dumps(doc, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
+        if len(data) > MAX_STORE_BYTES:
+            raise ListError("limit", f"store would exceed {MAX_STORE_BYTES} bytes; no change was applied")
         self._write_meta(doc, content_sha256=_sha256(data), pending=pending)
         try:
             self._write_atomic(self.path, data)
@@ -1536,6 +1681,8 @@ class ListStore:
             path = None
             if to_file:
                 data = (json.dumps(envelope, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
+                if len(data) > MAX_IMPORT_BYTES:
+                    raise ListError("limit", "export exceeds the supported restore size; no export was written")
                 path = self._write_backup("export", data)
             record = {"at": envelope["exported_at"], "generation": doc["generation"],
                       "sha256": envelope["sha256"], "file": path.name if path else ""}
@@ -1557,6 +1704,10 @@ class ListStore:
         added to the retired-id filter, so a late retry is refused instead of
         applied again.
         """
+        try:
+            new_doc = _check_document(copy.deepcopy(new_doc))
+        except _Malformed as exc:
+            raise ListError("invalid_export", f"invalid store document: {exc}") from exc
         with self._io_guard(), self._locked():
             meta = self._read_meta()
             try:
@@ -1623,20 +1774,181 @@ class ListStore:
 # Service used by tools and routes
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# The card editor's unsaved draft
+# ---------------------------------------------------------------------------
+
+DRAFT_FILE = "widget_draft.json"
+DRAFT_LOCK_FILE = "widget_draft.lock"
+DRAFT_ASIDE_PREFIX = "widget_draft.unreadable-"
+MAX_DRAFT_BYTES = 4 * 1024 * 1024
+DRAFT_LOCK_TIMEOUT_SEC = 2.0
+_DRAFT_KEYS = {"v", "entry_id", "title", "base", "form", "ops", "conflicts", "refs_moved", "unread", "pending",
+               "creating", "typed"}
+_DRAFT_FORM_TEXT = ("text", "description", "stage", "turn", "due")
+_EMPTY_DRAFT_SLOT = {"revision": "", "write_id": None, "saved_at": None, "draft": None}
+
+
+def _draft_op_ok(op: Any) -> bool:
+    """A link step as the widget writes it: a drop of {target, label}, or a ref {label, target} to add."""
+    if not isinstance(op, dict):
+        return False
+    if set(op) == {"drop", "target", "label"}:
+        return op["drop"] is True and isinstance(op["target"], str) and isinstance(op["label"], str)
+    ref = op.get("ref")
+    return (set(op) == {"ref"} and isinstance(ref, dict) and set(ref) == {"label", "target"}
+            and isinstance(ref["label"], str) and isinstance(ref["target"], str))
+
+
+def _draft_shape_ok(value: Any) -> bool:
+    """The widget's card snapshot, checked for shape only: a half-typed field may still be
+    longer than the store accepts, and it is kept as typed rather than cut."""
+    if value is None:
+        return True
+    if not isinstance(value, dict) or set(value) != _DRAFT_KEYS or value["v"] != 1:
+        return False
+    form, typed, pending = value["form"], value["typed"], value["pending"]
+    return (
+        (value["entry_id"] is None or isinstance(value["entry_id"], str)) and isinstance(value["title"], str)
+        and (value["base"] is None or isinstance(value["base"], dict))
+        and isinstance(form, dict) and set(form) == {*_DRAFT_FORM_TEXT, "tags"}
+        and all(isinstance(form[key], str) for key in _DRAFT_FORM_TEXT)
+        and isinstance(form["tags"], list) and all(isinstance(tag, str) for tag in form["tags"])
+        and isinstance(value["ops"], list) and all(_draft_op_ok(op) for op in value["ops"])
+        and isinstance(value["conflicts"], dict)
+        and isinstance(value["refs_moved"], bool) and isinstance(value["unread"], bool)
+        and (pending is None or (isinstance(pending, dict) and set(pending) == {"keys", "sent", "text"}
+                                 and isinstance(pending["text"], str) and isinstance(pending["sent"], dict)
+                                 and isinstance(pending["keys"], list)))
+        and (value["creating"] is None or isinstance(value["creating"], str))
+        and isinstance(typed, dict) and set(typed) == {"tag", "url", "label"}
+        and all(isinstance(item, str) for item in typed.values())
+    )
+
+
+class DraftConflict(ListError):
+    """The slot no longer holds the revision a write was based on; ``current`` is what it holds."""
+
+    def __init__(self, current: Dict[str, Any]) -> None:
+        super().__init__("draft_conflict", "The card draft was changed elsewhere since it was read; nothing was written.")
+        self.current = current
+
+
+class DraftSlot:
+    """One unsaved card form for the widget, kept apart from the store.
+
+    It never reads or writes ``store.json``, its sentinel, backups or the store lock, so saving a
+    half-typed card changes no list, no generation and no export, and never waits behind the store.
+    Every write names the revision it replaces (compare-and-set): a late write, or one from a
+    second window, is refused instead of overwriting a newer draft or reviving a cleared one.
+    Clearing writes a new revision holding ``draft: null``.
+    """
+
+    def __init__(self, state_dir: Any) -> None:
+        self.state_dir = Path(state_dir)
+        self.path = self.state_dir / DRAFT_FILE
+        self._lock_path = self.state_dir / DRAFT_LOCK_FILE
+        self._thread_lock = threading.Lock()
+
+    def _locked(self) -> Any:
+        return _file_locked(self._thread_lock, self._lock_path, DRAFT_LOCK_TIMEOUT_SEC, lambda: ListError(
+            "draft_busy", "The card draft is being saved by another request; nothing was changed. Try again."))
+
+    def _current(self) -> Dict[str, Any]:
+        try:
+            raw = self.path.read_bytes()
+        except FileNotFoundError:
+            return dict(_EMPTY_DRAFT_SLOT)
+        try:
+            doc = json.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError):
+            doc = None
+        if not (isinstance(doc, dict) and isinstance(doc.get("revision"), str) and doc["revision"]
+                and isinstance(doc.get("write_id"), str) and isinstance(doc.get("saved_at"), str)
+                and "draft" in doc and _draft_shape_ok(doc["draft"])):
+            raise ListError("draft_unreadable", "The saved card draft cannot be read; the file was left unchanged.")
+        return {key: doc[key] for key in ("revision", "write_id", "saved_at", "draft")}
+
+    def read(self) -> Dict[str, Any]:
+        with self._locked():
+            return self._current()
+
+    def _aside_path(self) -> Path:
+        """A name no earlier set-aside copy has; chosen under the draft lock, so nothing overwrites it."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        while True:
+            path = self.state_dir / f"{DRAFT_ASIDE_PREFIX}{stamp}-{secrets.token_hex(3)}.json"
+            if not path.exists():
+                return path
+
+    def write(self, expected: Any, write_id: Any, draft: Any, *, replace_unreadable: bool = False) -> Dict[str, Any]:
+        if not isinstance(expected, str) or len(expected) > 64:
+            raise _invalid("expected_revision must be the revision text the draft was read at")
+        if not isinstance(write_id, str) or not 0 < len(write_id) <= 64:
+            raise _invalid("write_id must be a short nonempty text")
+        if not _draft_shape_ok(draft):
+            raise _invalid("draft must be null or a card snapshot of the widget's shape")
+        revision = secrets.token_hex(8)
+        doc = {"note": "Smart Lists widget: one unsaved card form. Not part of the lists or their exports.",
+               "revision": revision, "write_id": write_id, "saved_at": _now(), "draft": draft}
+        try:
+            data = json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        except (UnicodeEncodeError, ValueError, RecursionError) as exc:
+            raise _invalid("draft must be valid Unicode JSON") from exc
+        if len(data) > MAX_DRAFT_BYTES:
+            raise ListError("draft_too_large", f"The card draft exceeds {MAX_DRAFT_BYTES // (1024 * 1024)} MiB; "
+                                               "the previous draft was kept.")
+        aside = None
+        with self._locked():
+            try:
+                current = self._current()
+            except ListError as exc:
+                if exc.code != "draft_unreadable" or not replace_unreadable:
+                    raise
+                # Only on an explicit request: the unreadable bytes keep a file of their own, never erased.
+                aside = self._aside_path()
+                _replace(str(self.path), aside)
+            else:
+                if current["revision"] != expected:
+                    raise DraftConflict(current)
+            _atomic_write(self.path, data)
+        return {"revision": revision, "write_id": write_id, "saved_at": doc["saved_at"],
+                **({"set_aside": aside.name} if aside else {})}
+
+
 class SmartLists:
     def __init__(self, state_dir: Any) -> None:
         self.store = ListStore(state_dir)
+        self.draft = DraftSlot(state_dir)
 
     # -- entries -------------------------------------------------------------
 
     def add(self, group: Any, items: Any, *, request_id: Any = "") -> Dict[str, Any]:
         ref = _ref_text(group)
         cleaned = clean_items(items)
+        details = [clean_details(item.get("details", {})) if isinstance(item, dict) else {} for item in items]
+        stages = [clean_stage(item.get("stage", "todo")) if isinstance(item, dict) else "todo" for item in items]
+        descriptions = [clean_description(item.get("description", "")) if isinstance(item, dict) else "" for item in items]
         request_id = clean_request_id(request_id)
         params = {"group": _ref_key(ref),
                   "items": [{"text": text, "due": due["raw"] if due else None} for text, due in cleaned]}
 
+        if any(details):
+            params["details"] = details
+        if any(stage != "todo" for stage in stages):
+            params["stages"] = stages
+        if any(descriptions):
+            params["descriptions"] = descriptions
+
         def apply(doc: Dict[str, Any]) -> Dict[str, Any]:
+            existing = {e.get("details", {}).get("capture_key"): e["id"] for e in doc["entries"].values()}
+            batch_keys = set()
+            for detail in details:
+                key = detail.get("capture_key")
+                if key and (key in existing or key in batch_keys):
+                    raise ListError("capture_exists", f"Obligation already captured: {existing.get(key, 'another item in this batch')}. Read and update it; do not recreate closed or trashed work.")
+                if key:
+                    batch_keys.add(key)
             target = resolve_group(doc, ref)
             if len(doc["entries"]) + len(cleaned) > MAX_ENTRIES:
                 raise ListError("limit", f"the store holds at most {MAX_ENTRIES} entries, deleted ones included "
@@ -1645,21 +1957,25 @@ class SmartLists:
                 raise ListError("limit", "entry sequence has reached its safe counter limit; no entry was added")
             now = _now()
             created = []
-            for text, due in cleaned:
+            for (text, due), detail, stage, description in zip(cleaned, details, stages, descriptions):
                 entry = {
                     "id": _new_id(doc["entries"], "e_"),
                     "seq": doc["next_seq"],
                     "group_id": target["id"],
                     "text": text,
-                    "status": "open",
+                    "stage": stage,
+                    "description": description,
                     "due": due,
                     "source": "chat",
                     "request_id": request_id or None,
                     "created_at": now,
                     "updated_at": now,
-                    "completed_at": None,
+                    "completed_at": now if stage == "done" else None,
+                    "archived_at": None,
                     "deleted_at": None,
                 }
+                if detail:
+                    entry["details"] = detail
                 doc["next_seq"] += 1
                 doc["entries"][entry["id"]] = entry
                 created.append(entry)
@@ -1674,7 +1990,8 @@ class SmartLists:
         return self.store.mutate("add", params, apply, request_id)
 
     def update(self, entry_id: Any, *, text: Any = None, due: Any = None, clear_due: bool = False,
-               request_id: Any = "") -> Dict[str, Any]:
+               request_id: Any = "", details: Any = None, stage: Any = None,
+               description: Any = None, expected: Any = None) -> Dict[str, Any]:
         entry_ids = clean_entry_ids(entry_id)
         if len(entry_ids) != 1:
             raise _invalid("update changes exactly one entry")
@@ -1683,15 +2000,55 @@ class SmartLists:
         clear_due = _clean_flag(clear_due, "clear_due")
         if new_due is not None and clear_due:
             raise _invalid("give either due or clear_due, not both")
-        if new_text is None and new_due is None and not clear_due:
-            raise _invalid("nothing to change: give text, due or clear_due")
+        new_details = clean_details(details) if details is not None else None
+        new_stage = clean_stage(stage) if stage is not None else None
+        new_description = clean_description(description) if description is not None else None
+        if new_details is not None and "capture_key" in new_details:
+            raise _invalid("capture_key is fixed at creation; omit it when updating details")
+        if new_text is None and new_due is None and not clear_due and new_details is None and new_stage is None and new_description is None:
+            raise _invalid("nothing to change: give text, due, clear_due, details, stage or description")
+        if expected is not None:
+            proposed = {key for key, value in (("text", new_text), ("due", new_due if not clear_due else None),
+                       ("stage", new_stage), ("description", new_description), ("details", new_details)) if value is not None}
+            if clear_due:
+                proposed.add("due")
+            if not isinstance(expected, dict) or set(expected) != proposed or ("details" in proposed and
+                    (not isinstance(expected["details"], dict) or set(expected["details"]) != set(new_details))):
+                raise _invalid("expected must match updated fields")
         request_id = clean_request_id(request_id)
         params = {"entry_id": entry_ids[0], "text": new_text, "due": new_due["raw"] if new_due else None,
                   "clear_due": clear_due}
 
+        if new_details is not None:
+            params["details"] = new_details
+        if new_stage is not None:
+            params["stage"] = new_stage
+        if new_description is not None:
+            params["description"] = new_description
+        if expected is not None:
+            params["expected"] = expected
+
         def apply(doc: Dict[str, Any]) -> Dict[str, Any]:
+            if expected is not None:
+                _check_expected(_entry(doc, entry_ids[0], live=True), expected)
             changed = _op_update(doc, entry_ids[0], new_text, new_due, clear_due, _now())
-            return {"op": "update", "entry": _entry_view(_entry(doc, entry_ids[0]), _paths(doc)), "changed": changed}
+            entry = _entry(doc, entry_ids[0])
+            if new_stage is not None and entry["stage"] != new_stage:
+                entry["stage"] = new_stage
+                entry["completed_at"] = _now() if new_stage == "done" else None
+                entry["updated_at"] = _now()
+                changed.append("stage")
+            if new_description is not None and entry["description"] != new_description:
+                entry["description"] = new_description
+                entry["updated_at"] = _now()
+                changed.append("description")
+            if new_details is not None:
+                merged = clean_details({**entry.get("details", {}), **new_details})
+                if merged != entry.get("details", {}):
+                    entry["details"] = merged
+                    entry["updated_at"] = _now()
+                    changed.append("details")
+            return {"op": "update", "entry": _full_entry(_entry(doc, entry_ids[0]), _paths(doc)), "changed": changed}
 
         return self.store.mutate("update", params, apply, request_id)
 
@@ -1772,9 +2129,90 @@ class SmartLists:
                     changed.append("status")
             if target is not None and _op_move(doc, ids, target, now)[0]:
                 changed.append("group")
-            return {"op": "edit", "entry": _entry_view(_entry(doc, ids[0]), _paths(doc)), "changed": changed}
+            return {"op": "edit", "entry": _full_entry(_entry(doc, ids[0]), _paths(doc)), "changed": changed}
 
         return self.store.mutate("edit", params, apply, request_id)
+
+    def edit_fields(self, entry_id: Any, changes: Any, expected: Any, *, request_id: Any) -> Dict[str, Any]:
+        ids = clean_entry_ids(entry_id)
+        if len(ids) != 1 or not isinstance(changes, dict) or not changes or set(changes) - _EDIT_FIELDS:
+            raise _invalid("changes must contain supported fields for exactly one entry")
+        if not isinstance(expected, dict) or set(expected) != set(changes):
+            raise _invalid("expected must contain exactly the changed fields")
+        changes = dict(changes)
+        if "details" in changes:
+            detail_changes, detail_expected = changes["details"], expected["details"]
+            if (not isinstance(detail_changes, dict) or not detail_changes
+                    or set(detail_changes) - _EDIT_DETAIL_FIELDS or not isinstance(detail_expected, dict)
+                    or set(detail_expected) != set(detail_changes)):
+                raise _invalid("expected.details must match changed detail fields")
+            changes["details"] = clean_details(detail_changes)
+        if "text" in changes:
+            changes["text"] = clean_text(changes["text"])
+        if "description" in changes:
+            changes["description"] = clean_description(changes["description"])
+        if "stage" in changes:
+            changes["stage"] = clean_stage(changes["stage"])
+        if "due" in changes and changes["due"] is not None:
+            if not isinstance(changes["due"], str) or not changes["due"].strip():
+                raise _invalid("due must be raw text or null")
+            parse_due(changes["due"])
+        request_id = clean_request_id(request_id)
+        if not request_id:
+            raise _invalid("request_id is required")
+        params = {"entry_id": ids[0], "changes": changes, "expected": expected}
+
+        def apply(doc: Dict[str, Any]) -> Dict[str, Any]:
+            entry = _entry(doc, ids[0], live=True)
+            _check_expected(entry, expected)
+            now = _now()
+            changed = []
+            for field, value in changes.items():
+                if field == "details":
+                    merged = clean_details({**entry.get("details", {}), **value})
+                    for key in value:
+                        if entry.get("details", {}).get(key, _DETAIL_DEFAULTS[key]) != merged[key]:
+                            changed.append(f"details.{key}")
+                    if any(name.startswith("details.") for name in changed):
+                        entry["details"] = merged
+                elif field == "due":
+                    due_value = parse_due(value)
+                    if entry.get("due") != due_value:
+                        entry["due"] = due_value
+                        changed.append(field)
+                elif entry[field] != value:
+                    entry[field] = value
+                    changed.append(field)
+                    if field == "stage":
+                        entry["completed_at"] = now if value == "done" else None
+            if changed:
+                entry["updated_at"] = now
+            return {"op": "edit", "entry": _full_entry(entry, _paths(doc)), "changed": changed}
+
+        return self.store.mutate("edit", params, apply, request_id)
+
+    def archive(self, entry_id: Any, archived: Any, expected: Any, *, request_id: Any) -> Dict[str, Any]:
+        ids = clean_entry_ids(entry_id)
+        if len(ids) != 1 or not isinstance(archived, bool):
+            raise _invalid("archive needs one entry and archived true or false")
+        if not isinstance(expected, dict) or set(expected) != {"archived_at"}:
+            raise _invalid("expected.archived_at is required")
+        if not _stamp_ok(expected["archived_at"]):
+            raise _invalid("expected.archived_at must be null or a stored timestamp")
+        request_id = clean_request_id(request_id)
+        if not request_id:
+            raise _invalid("request_id is required")
+
+        def apply(doc: Dict[str, Any]) -> Dict[str, Any]:
+            entry = _entry(doc, ids[0], live=True)
+            _check_expected(entry, expected)
+            if bool(entry.get("archived_at")) != archived:
+                entry["archived_at"] = _now() if archived else None
+                entry["updated_at"] = _now()
+            return {"op": "archive", "entry": _full_entry(entry, _paths(doc))}
+
+        return self.store.mutate("archive", {"entry_id": ids[0], "archived": archived,
+                                             "expected": expected}, apply, request_id)
 
     # -- groups --------------------------------------------------------------
 
@@ -1895,10 +2333,20 @@ class SmartLists:
     # -- reads ---------------------------------------------------------------
 
     def read(self, *, group: Any = "", status: Any = "open", subtree: Any = True, limit: Any = 100,
-             offset: Any = 0) -> Dict[str, Any]:
+             offset: Any = 0, tags: Any = None, tag_mode: str = "all", turn: str = "", query: str = "",
+             archive: str = "all") -> Dict[str, Any]:
         ref = _optional_ref(group, field="group")
+        try:
+            selected_tags = entry_details.tags(tags or [])
+            query = entry_details.text(query, 1000)
+        except (ValueError, UnicodeError) as exc:
+            raise _invalid(str(exc)) from exc
+        if tag_mode not in ("all", "any") or turn not in ("",) + entry_details.TURNS:
+            raise _invalid("invalid tag_mode or turn filter")
         if status not in ("open", "done", "deleted", "all"):
             raise _invalid("status must be open, done, deleted or all")
+        if archive not in ("all", "active", "archived"):
+            raise _invalid("archive must be all, active or archived")
         subtree = _clean_flag(subtree, "subtree")
         if not _is_int(limit) or not 1 <= limit <= MAX_READ_LIMIT:
             raise _invalid(f"limit must be an integer from 1 to {MAX_READ_LIMIT}")
@@ -1906,9 +2354,15 @@ class SmartLists:
             raise _invalid(f"offset must be an integer from 0 to {MAX_ENTRIES}")
 
         def wanted(entry: Dict[str, Any]) -> bool:
+            if not entry_details.matches(entry, selected_tags, tag_mode, turn, query):
+                return False
+            if archive == "active" and entry.get("archived_at"):
+                return False
+            if archive == "archived" and not entry.get("archived_at"):
+                return False
             if status == "deleted":
                 return bool(entry.get("deleted_at"))
-            return not entry.get("deleted_at") and (status == "all" or entry["status"] == status)
+            return not entry.get("deleted_at") and (status == "all" or _status(entry) == status)
 
         def view(doc: Dict[str, Any]) -> Dict[str, Any]:
             root = resolve_group(doc, ref) if ref else None
@@ -1918,7 +2372,8 @@ class SmartLists:
             grouped = _entries_by_group(doc)
             paths = _paths(doc)
             selected = [entry for row in rows for entry in grouped.get(row["id"], []) if wanted(entry)]
-            return {
+            result = {
+                "revision": {"store_id": doc["store_id"], "generation": doc["generation"]},
                 "scope": paths[root["id"]] if root else "all groups",
                 "groups": rows[:200],
                 "groups_truncated": len(rows) > 200,
@@ -1928,11 +2383,69 @@ class SmartLists:
                 "total": len(selected),
                 "truncated": len(selected) > offset + limit,
             }
+            return result
+
+        return self.store.read(view)
+
+    def read_entry(self, entry_id: Any) -> Dict[str, Any]:
+        ids = clean_entry_ids(entry_id)
+        if len(ids) != 1:
+            raise _invalid("entry_id must name exactly one entry")
+
+        def view(doc: Dict[str, Any]) -> Dict[str, Any]:
+            return {"revision": {"store_id": doc["store_id"], "generation": doc["generation"]},
+                    "entry": _full_entry(_entry(doc, ids[0]), _paths(doc))}
+
+        return self.store.read(view)
+
+    def kanban(self, *, archive: bool = False, tags: Any = None, turn: str = "", query: str = "",
+               offsets: Optional[Dict[str, int]] = None, limit: int = 100) -> Dict[str, Any]:
+        try:
+            selected_tags = entry_details.tags(tags or [])
+            query = entry_details.text(query, 1000)
+        except (ValueError, UnicodeError) as exc:
+            raise _invalid(str(exc)) from exc
+        if turn not in ("",) + entry_details.TURNS:
+            raise _invalid("invalid turn filter")
+        if not _is_int(limit) or not 1 <= limit <= 100:
+            raise _invalid("limit must be an integer from 1 to 100")
+        offsets = offsets or {}
+        if set(offsets) - set(STAGES) - {"archive"} or any(not _is_int(value) or not 0 <= value <= MAX_ENTRIES
+                                                         for value in offsets.values()):
+            raise _invalid("invalid stage offsets")
+
+        def view(doc: Dict[str, Any]) -> Dict[str, Any]:
+            entries = [item for item in doc["entries"].values() if not item.get("deleted_at")
+                       and bool(item.get("archived_at")) == archive]
+            entries.sort(key=lambda item: item["seq"])
+            available = {}
+            for item in entries:
+                for tag in item.get("details", {}).get("tags", []):
+                    available.setdefault(tag.casefold(), tag)
+            selected = [item for item in entries if entry_details.matches(item, selected_tags, "all", turn, query)]
+            paths = _paths(doc)
+            result = {"revision": {"store_id": doc["store_id"], "generation": doc["generation"]},
+                      "available_tags": sorted(available.values(), key=str.casefold)}
+            if archive:
+                offset = offsets.get("archive", 0)
+                page = selected[offset:offset + limit]
+                result.update(entries=[_entry_summary(item, paths) for item in page], total=len(selected),
+                              next_offset=min(len(selected), offset + len(page)))
+            else:
+                stages = {}
+                for stage in STAGES:
+                    matching = [item for item in selected if item["stage"] == stage]
+                    offset = offsets.get(stage, 0)
+                    page = matching[offset:offset + limit]
+                    stages[stage] = {"entries": [_entry_summary(item, paths) for item in page],
+                                     "total": len(matching), "next_offset": min(len(matching), offset + len(page))}
+                result.update(stages=stages, selected_tags=selected_tags)
+            return result
 
         return self.store.read(view)
 
     def select(self, group: Any, *, offset: Any = 0, limit: Any = MAX_READ_LIMIT) -> Dict[str, Any]:
-        """Read-only: open entries of a group and all its descendants, in tree order."""
+        """Read-only: active open entries of a group and its descendants, in tree order."""
         ref = _ref_text(group)
         if not _is_int(offset) or not 0 <= offset <= MAX_ENTRIES:
             raise _invalid(f"offset must be an integer from 0 to {MAX_ENTRIES}")
@@ -1946,10 +2459,10 @@ class SmartLists:
             order = _tree_order(doc, root["id"])
             entries = [
                 {"entry_id": entry["id"], "text": entry["text"], "group_path": paths[group["id"]],
-                 "due": entry.get("due")}
+                 "due": entry.get("due"), "stage": entry["stage"], "archived_at": entry.get("archived_at")}
                 for group, _depth in order
                 for entry in grouped.get(group["id"], [])
-                if entry["status"] == "open" and not entry.get("deleted_at")
+                if _status(entry) == "open" and not entry.get("deleted_at") and not entry.get("archived_at")
             ]
             total = len(entries)
             return {
@@ -1968,14 +2481,14 @@ class SmartLists:
 
     def overview(self, *, open_limit: int = 200, done_limit: int = 50, deleted_limit: int = 50) -> Dict[str, Any]:
         def view(doc: Dict[str, Any]) -> Dict[str, Any]:
-            rows = _tree_rows(doc)
+            rows = _tree_rows(doc, active_only=True)
             grouped = _entries_by_group(doc)
             paths = _paths(doc)
             ordered = [entry for row in rows for entry in grouped.get(row["id"], [])]
-            live = [entry for entry in ordered if not entry.get("deleted_at")]
-            open_entries = [entry for entry in live if entry["status"] == "open"]
+            live = [entry for entry in ordered if not entry.get("deleted_at") and not entry.get("archived_at")]
+            open_entries = [entry for entry in live if _status(entry) == "open"]
             done_entries = sorted(
-                (entry for entry in live if entry["status"] == "done"),
+                (entry for entry in live if _status(entry) == "done"),
                 key=lambda entry: (entry.get("completed_at") or "", entry["seq"]),
                 reverse=True,
             )

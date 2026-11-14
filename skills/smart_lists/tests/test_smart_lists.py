@@ -67,6 +67,16 @@ def manifest_permissions() -> set:
     return {item.strip() for item in match.group(1).split(",") if item.strip()}
 
 
+def downgrade_entries(doc, version):
+    """Represent current synthetic entries as actual pre-kanban records."""
+    doc["schema_version"] = version
+    for entry in doc["entries"].values():
+        entry["status"] = "done" if entry.pop("stage") == "done" else "open"
+        entry.pop("description")
+        entry.pop("archived_at")
+    return doc
+
+
 def wants_ctx(handler) -> bool:
     """Mirror of the host rule: ctx is passed when the first parameter is a ctx slot."""
     params = list(inspect.signature(handler).parameters.values())
@@ -207,7 +217,7 @@ class SkillCase(unittest.TestCase):
 
 class RegistrationTests(SkillCase):
     def test_registers_declared_tools_routes_and_widget(self):
-        self.assertEqual(set(self.api.tools), {"add", "read", "update", "complete", "move", "group", "select",
+        self.assertEqual(set(self.api.tools), {"add", "read", "entry", "update", "complete", "archive", "move", "group", "select",
                                                "delete", "store"})
         for name, tool in self.api.tools.items():
             self.assertTrue(wants_ctx(tool["handler"]), name)
@@ -217,7 +227,8 @@ class RegistrationTests(SkillCase):
         self.assertEqual(self.api.tools["add"]["schema"]["required"], ["group", "items", "request_id"])
         self.assertEqual({path: route["methods"] for path, route in self.api.routes.items()}, {
             "view": ("GET",), "edit": ("POST",), "group": ("POST",), "select": ("GET",), "store": ("POST",),
-            "export": ("GET",), "today": ("GET",), "check": ("POST",), "add": ("POST",)})
+            "export": ("GET",), "today": ("GET",), "board": ("GET",), "entry": ("GET",),
+            "archive": ("GET", "POST"), "check": ("POST",), "add": ("POST",), "draft": ("GET", "POST")})
         self.assertIn("even without", self.api.tools["add"]["description"])
         self.assertIn("even without saying 'add'", manifest_text())
         self.assertEqual(list(self.api.tabs), ["lists"])
@@ -227,12 +238,11 @@ class RegistrationTests(SkillCase):
 
     def test_widget_uses_a_reviewed_module_and_registered_routes(self):
         render = self.api.tabs["lists"]["render"]
-        self.assertEqual(render, {"kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host", "span": 2, "height": 560})
-        code = (SKILL_DIR / render["entry"]).read_text()
-        self.assertIn("OuroborosWidget.fetch", code)
-        self.assertIn("today?timezone=", code)
-        self.assertIn("request('check'", code)
-        self.assertNotIn("innerHTML", code)
+        self.assertEqual(render, {"kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host", "span": 2, "height": 940})
+        code = (SKILL_DIR / render["entry"]).read_text(encoding="utf-8")
+        self.assertIn("host.fetch(API + path", code)
+        for unsafe in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
+            self.assertNotIn(unsafe, code)
 
     def test_today_is_a_projection_and_checkbox_uses_existing_completion(self):
         self.ok("group", action="create", name="Home")
@@ -419,18 +429,22 @@ class RegistrationTests(SkillCase):
     def test_payload_imports_no_network_process_or_host_settings(self):
         allowed = {"__future__", "asyncio", "copy", "json", "pathlib", "typing", "importlib", "hashlib", "os", "re", "zoneinfo",
                    "secrets", "tempfile", "threading", "contextlib", "datetime", "fcntl", "msvcrt", "errno",
-                   "time", "math", "base64", "zlib", "starlette"}
-        for name in ("plugin.py", "lists_core.py"):
+                   "time", "math", "base64", "zlib", "starlette", "urllib"}
+        for name in ("plugin.py", "lists_core.py", "entry_details.py"):
             tree = ast.parse((SKILL_DIR / name).read_text(encoding="utf-8"))
             imported = set()
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     imported.update(alias.name.split(".")[0] for alias in node.names)
+                    self.assertFalse(any(alias.name.startswith("urllib") for alias in node.names), name)
                 elif isinstance(node, ast.ImportFrom) and node.level == 0:
                     imported.add(node.module.split(".")[0])
                     if node.module.startswith("starlette"):
                         self.assertEqual(node.module, "starlette.responses")
                         self.assertEqual([alias.name for alias in node.names], ["JSONResponse"])
+                    if node.module.startswith("urllib"):  # parsing only, never urllib.request
+                        self.assertEqual(node.module, "urllib.parse", name)
+                        self.assertEqual([alias.name for alias in node.names], ["urlsplit"], name)
                 elif isinstance(node, ast.Attribute):
                     self.assertNotIn(node.attr, {"get_settings", "send_ws_message"}, name)
             self.assertLessEqual(imported, allowed, name)
@@ -494,7 +508,7 @@ class ToolFlowTests(SkillCase):
         self.assertEqual(result["added"][0]["source"], "chat")
 
         on_disk = json.loads(self.store_bytes().decode("utf-8"))
-        self.assertEqual(on_disk["schema_version"], 3)
+        self.assertEqual(on_disk["schema_version"], 5)
         self.assertIn(raw, [entry["text"] for entry in on_disk["entries"].values()])
 
         reloaded = self.fresh_api()  # independent module, same state directory
@@ -566,7 +580,7 @@ class ToolFlowTests(SkillCase):
         self.add("Home", "old secret", request_id="original")
         doc = json.loads(self.store_bytes())
         doc["requests"]["original"]["result"]["added"][0]["text"] = "old secret"
-        doc["schema_version"] = 2
+        downgrade_entries(doc, 2)
         doc.pop("retired_requests")
         doc["expired_requests"] = []
         other = pathlib.Path(self._tmp.name) / "restored"
@@ -1261,12 +1275,13 @@ class LifecycleTests(SkillCase):
         self.assertEqual(json.loads(self.store_bytes())["schema_version"], 1, "reads never rewrite the store")
         self.ok("add", group="Home", request_id="new-1", items=[{"text": "eggs"}])
         upgraded = json.loads(self.store_bytes())
-        self.assertEqual((upgraded["schema_version"], upgraded["generation"]), (3, 1))
+        self.assertEqual((upgraded["schema_version"], upgraded["generation"]), (5, 1))
         self.assertIsNotNone(upgraded["retired_requests"], "unsafe legacy replay is retired")
         self.refused("add", "request_expired", group="Home", items=[{"text": "milk"}], request_id="old-1")
         self.assertRegex(upgraded["store_id"], r"^s_[0-9a-f]{16}$")
         for eid, entry in legacy["entries"].items():
-            self.assertLessEqual(entry.items(), upgraded["entries"][eid].items())
+            self.assertEqual(upgraded["entries"][eid]["stage"], "done" if entry["status"] == "done" else "todo")
+            self.assertEqual(upgraded["entries"][eid]["text"], entry["text"])
         self.assertTrue((self.state_dir / "store_meta.json").exists())
         self.refused("store", "store_exists", action="init")
 
@@ -1611,7 +1626,7 @@ class ImportValidationTests(SkillCase):
         self.envelope = json.loads(pathlib.Path(exported["file"]).read_text())
 
         def legacy(doc):
-            doc["schema_version"] = 2
+            downgrade_entries(doc, 2)
             doc["expired_requests"] = []
             doc.pop("retired_requests", None)
             added = doc["requests"]["capture-1"]["result"]["added"]
@@ -2022,7 +2037,8 @@ class ReplayFilterTests(SkillCase):
         path = self.state_dir / "store.json"
         doc = json.loads(path.read_text())
         doc.pop("retired_requests")
-        doc.update(schema_version=2, expired_requests=[core._request_digest("old-a"), core._request_digest("old-b")])
+        downgrade_entries(doc, 2)
+        doc.update(expired_requests=[core._request_digest("old-a"), core._request_digest("old-b")])
         path.write_text(json.dumps(doc))
         self.mark_fixture_as_legacy_store()
         self.assertEqual(self.ok("store", action="status")["state"], "ready")
@@ -2031,7 +2047,7 @@ class ReplayFilterTests(SkillCase):
         self.assertTrue(self.ok("add", group="Home", items=[{"text": "milk"}], request_id="kept")["replayed"])
         self.ok("add", group="Home", items=[{"text": "eggs"}], request_id="new-1")
         upgraded = json.loads(self.store_bytes())
-        self.assertEqual(upgraded["schema_version"], 3)
+        self.assertEqual(upgraded["schema_version"], 5)
         self.assertNotIn("expired_requests", upgraded)
         self.refused("add", "request_expired", group="Home", items=[{"text": "x"}], request_id="old-b")
 

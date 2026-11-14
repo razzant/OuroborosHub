@@ -241,7 +241,7 @@ class WorkflowTests(unittest.TestCase):
         hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']
         checkout = next(step for step in hosted['steps'] if step.get('with', {}).get('path') == 'mail-calendar-core')
         install = next(step for step in hosted['steps'] if step.get('name') == 'Install the mail and calendar consumer runtime')
-        condition = "matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill'"
+        condition = "matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill' || matrix.suite == 'smart-lists'"
         self.assertEqual(checkout['if'], condition)
         self.assertEqual(install['if'], condition)
         self.assertEqual(checkout['with']['repository'], 'razzant/ouroboros')
