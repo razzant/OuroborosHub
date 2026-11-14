@@ -1155,7 +1155,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   // Adopt a fresh read of the entry. Untouched fields follow the store; a
   // field edited here keeps its draft and, if the store moved under it,
   // shows both values and asks which one stays.
-  // `sent` holds what this form's own answered write carried: the store
+  // `sent` holds what this form's own write carried, even if its answer was lost: the store
   // showing those values is that write, not a change made elsewhere, so a
   // field typed in again meanwhile simply stays a draft. That holds even when
   // it was typed back to the value it had before the write: it was sent, so
@@ -1201,7 +1201,11 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       throw error;
     }
     if (card?.id !== id || (card.busy && !force)) return;
-    rebase(fresh);
+    const op = card.pending;
+    if (op && op.keys.every((key) => same(stored[key](fresh), op.sent[key]))) {
+      card.error = "";
+      landed(op, fresh);
+    } else rebase(fresh, [], op ? op.sent : {});
   }
 
   function describe(key, value) {
@@ -1948,7 +1952,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       if (op && op.keys.every((key) => same(stored[key](fresh), op.sent[key]))) {
         card.error = "";
         landed(op, fresh); // it had been applied before the view went away
-      } else rebase(fresh);
+      } else rebase(fresh, [], op ? op.sent : {});
     } catch (error) {
       if (card?.id !== id) return;
       card.loading = false;
@@ -1958,6 +1962,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     paintCard();
   }
   async function dropDraft() {
+    acted(); // An explicit delete may try again after a previous draft write was refused.
     if (slot.unreadable) {
       try {
         const answer = await post("draft", JSON.stringify(
@@ -1979,7 +1984,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     await persist(null);
     if (slot.held !== "null" && !slot.stored) {
       slot.stored = saved; // not deleted: it stays offered
-      notify(slot.state || "Черновик не удалён.", { alert: true });
+      notify(slot.state.startsWith("Черновик") ? slot.state : "Черновик не удалён.", { alert: true });
     }
     renderDraftBar();
   }

@@ -1911,3 +1911,121 @@ def test_fixture_reports_route_failures_and_only_records_a_closed_connection(lis
     assert lists.state['errors'] == []
     # The server keeps answering.
     assert lists.read('board', 'limit=1')['ok'] is True
+
+
+@ENGINES
+@pytest.mark.parametrize('outcome,newer', [('unanswered', 'Было'), ('late', 'Было'), ('late', 'Дописано')])
+def test_poll_recognizes_an_unconfirmed_edit_without_losing_newer_typing(lists, engine, outcome, newer):
+    from playwright.sync_api import sync_playwright, expect
+    (target,) = lists.add([{'text': 'Неподтверждённая правка', 'description': 'Было'}])
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            text = card.get_by_label('Описание')
+            text.fill('Отправлено')
+            lists.fail('POST', 'edit', outcome)
+            if outcome == 'unanswered':
+                lists.fail('GET', 'entry', 'lost')
+            card.get_by_role('button', name='Готово').click()
+            expect(card.locator('.dialogfoot .note')).to_contain_text('Сохранение не подтверждено')
+            text.fill(newer)
+            wait_until(lambda: lists.entry(target)['description'] == 'Отправлено', 'the unanswered edit landed')
+            session.refresh(frame)
+            # The error clears only after pull recognized the pending write, so these checks cannot
+            # pass merely because the poll has not returned yet.
+            expect(card.locator('.dialogfoot .note')).to_be_hidden()
+            expect(text).to_have_value(newer)
+            expect(card.locator('.field .note:not([hidden])')).to_have_count(0)
+            assert len(lists.calls('POST', 'edit')) == 1, 'polling only reads'
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(target)['description'] == newer
+            edits = lists.calls('POST', 'edit')
+            assert len(edits) == 2
+            assert edits[-1][2]['expected'] == {'description': 'Отправлено'}
+            assert edits[-1][2]['changes'] == {'description': newer}
+        finally:
+            session.close()
+
+
+@ENGINES
+@pytest.mark.parametrize('reopen', [False, True], ids=['poll', 'resume'])
+def test_pending_sent_fields_survive_a_partial_match_while_foreign_changes_conflict(lists, engine, reopen):
+    from playwright.sync_api import sync_playwright, expect
+    (target,) = lists.add([{'text': 'Два поля', 'description': 'Было'}])
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            card.get_by_label('Описание').fill('Отправлено')
+            card.get_by_label('Срок').fill('Завтра')
+            lists.fail('POST', 'edit', 'unanswered')
+            lists.fail('GET', 'entry', 'lost')
+            card.get_by_role('button', name='Готово').click()
+            expect(card.locator('.dialogfoot .note')).to_contain_text('Сохранение не подтверждено')
+            card.get_by_label('Описание').fill('Было')
+            wait_until(lambda: kept(lists).get('form', {}).get('description') == 'Было')
+            pending = kept(lists)['pending']
+            lists.update(target, due='Через неделю')  # only one of our sent fields still matches
+            if reopen:
+                frame = leave_and_return(session)
+                card = resume(frame)
+            else:
+                session.refresh(frame)
+            expect(card.locator('.field .note:not([hidden])')).to_have_count(1)
+            expect(card.locator('.field .note:not([hidden]) .theirs')).to_have_text('Через неделю')
+            expect(card.get_by_label('Описание')).to_have_value('Было')
+            assert len(lists.calls('POST', 'edit')) == 1, 'neither polling nor resuming resends an unknown edit'
+            assert kept(lists)['pending']['text'] == pending['text'], 'partial match does not replace the request id'
+        finally:
+            session.close()
+
+
+@ENGINES
+@pytest.mark.parametrize('already_refused', [False, True], ids=['stale-bar', 'refused-card'])
+def test_delete_draft_is_a_fresh_action_after_a_conflict(lists, engine, already_refused):
+    from playwright.sync_api import sync_playwright, expect
+    (target,) = lists.add([{'text': 'Общий черновик', 'description': 'Было'}])
+    with sync_playwright() as pw:
+        one, two = lists.open(pw, engine), None
+        try:
+            frame = one.mount()
+            card = open_card(frame, target)
+            card.get_by_label('Описание').fill('Первый черновик')
+            wait_until(lambda: kept(lists).get('form', {}).get('description') == 'Первый черновик')
+            two = lists.open(pw, engine)
+            other = two.mount()
+            expect(other.locator('.draftbar')).to_be_visible()
+            if already_refused:
+                other_card = resume(other)
+                other_card.get_by_label('Описание').fill('Другое окно')
+                wait_until(lambda: kept(lists).get('form', {}).get('description') == 'Другое окно')
+                card.get_by_label('Описание').fill('Отказанная правка')
+                expect(card.locator('.dialogfoot')).to_contain_text('хранит другое окно')
+                card.get_by_label('Закрыть').click()
+                card.get_by_role('button', name='Не сохранять').click()
+                expect(card).to_be_hidden()
+                deleting = frame
+            else:
+                card.get_by_label('Описание').fill('Более свежий черновик')
+                wait_until(lambda: kept(lists).get('form', {}).get('description') == 'Более свежий черновик')
+                deleting = other
+                # A stale clear must first learn the newer draft, not erase it on the stale revision.
+                deleting.locator('.draftbar').get_by_role('button', name='Удалить черновик').click()
+                expect(deleting.locator('.draftbar')).to_be_visible()
+                assert kept(lists)['form']['description'] == 'Более свежий черновик'
+            bar = deleting.locator('.draftbar')
+            before = len(lists.calls('POST', 'draft'))
+            bar.get_by_role('button', name='Удалить черновик').click()
+            expect(bar).to_be_hidden()
+            wait_until(lambda: lists.read('draft')['draft'] is None, 'the explicit delete cleared the slot')
+            assert len(lists.calls('POST', 'draft')) == before + 1
+            assert deleting.locator('#toast').inner_text() not in ('cleared', 'elsewhere')
+            assert lists.entry(target)['description'] == 'Было', 'deleting a draft never edits the task'
+        finally:
+            one.close()
+            if two:
+                two.close()
