@@ -1789,6 +1789,17 @@ _DRAFT_FORM_TEXT = ("text", "description", "stage", "turn", "due")
 _EMPTY_DRAFT_SLOT = {"revision": "", "write_id": None, "saved_at": None, "draft": None}
 
 
+def _draft_op_ok(op: Any) -> bool:
+    """A link step as the widget writes it: a drop of {target, label}, or a ref {label, target} to add."""
+    if not isinstance(op, dict):
+        return False
+    if set(op) == {"drop", "target", "label"}:
+        return op["drop"] is True and isinstance(op["target"], str) and isinstance(op["label"], str)
+    ref = op.get("ref")
+    return (set(op) == {"ref"} and isinstance(ref, dict) and set(ref) == {"label", "target"}
+            and isinstance(ref["label"], str) and isinstance(ref["target"], str))
+
+
 def _draft_shape_ok(value: Any) -> bool:
     """The widget's card snapshot, checked for shape only: a half-typed field may still be
     longer than the store accepts, and it is kept as typed rather than cut."""
@@ -1803,7 +1814,7 @@ def _draft_shape_ok(value: Any) -> bool:
         and isinstance(form, dict) and set(form) == {*_DRAFT_FORM_TEXT, "tags"}
         and all(isinstance(form[key], str) for key in _DRAFT_FORM_TEXT)
         and isinstance(form["tags"], list) and all(isinstance(tag, str) for tag in form["tags"])
-        and isinstance(value["ops"], list) and all(isinstance(op, dict) for op in value["ops"])
+        and isinstance(value["ops"], list) and all(_draft_op_ok(op) for op in value["ops"])
         and isinstance(value["conflicts"], dict)
         and isinstance(value["refs_moved"], bool) and isinstance(value["unread"], bool)
         and (pending is None or (isinstance(pending, dict) and set(pending) == {"keys", "sent", "text"}
@@ -1854,7 +1865,7 @@ class DraftSlot:
             doc = None
         if not (isinstance(doc, dict) and isinstance(doc.get("revision"), str) and doc["revision"]
                 and isinstance(doc.get("write_id"), str) and isinstance(doc.get("saved_at"), str)
-                and _draft_shape_ok(doc.get("draft"))):
+                and "draft" in doc and _draft_shape_ok(doc["draft"])):
             raise ListError("draft_unreadable", "The saved card draft cannot be read; the file was left unchanged.")
         return {key: doc[key] for key in ("revision", "write_id", "saved_at", "draft")}
 

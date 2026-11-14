@@ -214,6 +214,12 @@ class WidgetDraftTests(SkillCase):
         second = self.write(first["revision"], long, write_id="w2")
         self.assertTrue(second["ok"], second)
         self.assertEqual(self.draft()["draft"]["form"]["description"], "я" * 20000)
+        # Both link steps the widget writes, with a label longer than a stored one may be, are kept as written.
+        steps = [{"drop": True, "target": "https://example.org/a", "label": "Было"},
+                 {"ref": {"label": "п" * 300, "target": "https://example.org/a"}}]
+        second = self.write(second["revision"], snapshot(ops=steps), write_id="w2b")
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(self.draft()["draft"]["ops"], steps)
         cleared = self.write(second["revision"], None, write_id="w3")
         self.assertTrue(cleared["ok"], cleared)
         self.assertEqual((self.draft()["revision"], self.draft()["draft"]), (cleared["revision"], None))
@@ -246,7 +252,12 @@ class WidgetDraftTests(SkillCase):
         for value in ({**snapshot(), "extra": 1}, {**snapshot(), "v": 2}, "text", [],
                       snapshot(form={**form, "tags": ["ok", 3]}), snapshot(form={**form, "due": None}),
                       snapshot(typed={"tag": ""}), snapshot(pending={"keys": [], "sent": {}}),
-                      snapshot(title="\ud800")):
+                      snapshot(title="\ud800"), snapshot(ops=[{}]), snapshot(ops=["drop"]),
+                      snapshot(ops=[{"drop": True, "target": "https://example.org/a"}]),
+                      snapshot(ops=[{"drop": False, "target": "https://example.org/a", "label": "A"}]),
+                      snapshot(ops=[{"ref": {"target": "https://example.org/a"}}]),
+                      snapshot(ops=[{"ref": {"label": 1, "target": "https://example.org/a"}}]),
+                      snapshot(ops=[{"ref": {"label": "A", "target": "https://example.org/a"}, "drop": True}])):
             answer = self.write(kept["revision"], value, write_id="bad")
             self.assertEqual((answer["ok"], answer["code"]), (False, "invalid_input"), value)
         for expected, write_id in ((None, "w"), (5, "w"), (kept["revision"], ""), (kept["revision"], "x" * 65)):
@@ -309,6 +320,21 @@ class WidgetDraftTests(SkillCase):
         aside = {item.name: item.read_bytes() for item in self.state_dir.glob("widget_draft.unreadable*")}
         self.assertEqual(sorted(aside.values()), [b"[also broken", b"{not json"])
         self.assertEqual(aside, {replaced["set_aside"]: b"{not json", again["set_aside"]: b"[also broken"})
+        # An envelope without its draft, and a draft whose link step is not one the widget writes, are
+        # unreadable too: reported as such and set aside on request, never a server error.
+        for number, damaged in enumerate(({"revision": "r", "write_id": "w", "saved_at": "t"},
+                                          {"revision": "r", "write_id": "w", "saved_at": "t",
+                                           "draft": snapshot(ops=[{}])})):
+            raw = json.dumps(damaged).encode()
+            path.write_bytes(raw)
+            self.assertEqual(self.draft()["code"], "draft_unreadable")
+            self.assertEqual(self.write("r", None, write_id=f"x{number}")["code"], "draft_unreadable")
+            self.assertEqual(path.read_bytes(), raw)
+            set_aside = self.write("", None, write_id=f"y{number}", replace_unreadable=True)
+            self.assertTrue(set_aside["ok"], set_aside)
+            self.assertEqual((self.state_dir / set_aside["set_aside"]).read_bytes(), raw)
+        # A slot cleared by the widget still holds `draft: null` and reads as empty.
+        self.assertIsNone(self.draft()["draft"])
 
 
 if __name__ == "__main__":

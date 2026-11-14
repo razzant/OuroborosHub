@@ -75,7 +75,7 @@ the draft.
 | Raw text | Entry text is stored exactly as given — no trimming, recasing, splitting or quantity parsing. |
 | No silent dedup | Adding text that is already open in the same group creates a second entry; the result lists it under `possible_duplicates` so the agent can mention it: per new entry, the 5 oldest matching open entry ids plus `total` and `truncated`, so the report stays small however many copies exist. |
 | Dates | A due value is read as an instant only when it is an ISO-8601 date-time with an explicit offset (`2026-10-01T18:00+03:00`, `…Z`); it is then stored as `at` next to the raw text. Anything else (`tomorrow`, `Friday`, `2026-10-01`) is kept only as raw text and never interpreted. No reminders are created. |
-| Idempotent requests | Mutations accept a `request_id`; the agent `add` tool requires one. A retry with the same id and arguments returns a replay result (`replayed: true`) without applying anything; entry fields show their current values, and an entry erased since then shows as `{"id", "gone": true}`. The same id with different arguments is refused (`request_conflict`). See [Replay window](#replay-window) for how long ids are remembered. |
+| Idempotent requests | Mutations accept a `request_id`; the agent `add` and `archive` tools require one. A retry with the same id and arguments returns a replay result (`replayed: true`) without applying anything; entry fields show their current values, and an entry erased since then shows as `{"id", "gone": true}`. The same id with different arguments is refused (`request_conflict`). See [Replay window](#replay-window) for how long ids are remembered. |
 
 ## Store lifecycle
 

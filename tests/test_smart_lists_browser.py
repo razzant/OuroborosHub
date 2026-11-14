@@ -668,12 +668,14 @@ def test_unanswered_write_is_checked_first_and_never_repeated_under_a_new_id(lis
             assert len(edits()) == 1 and lists.entry(target)['description'] == 'Первая правка'
 
             # The write never arrived: the check read finds the old value, which does not prove it never will.
-            # The draft stays, nothing is sent again by itself, and «Готово» repeats the very request.
+            # The note says only that the read did not confirm the write (the case with someone else's values
+            # is below). The draft stays, nothing is sent again by itself, and «Готово» repeats the very request.
             card = open_card(frame, target)
             card.get_by_label('Описание').fill('Вторая правка')
             lists.fail('POST', 'edit', 'lost')
             card.get_by_role('button', name='Готово').click()
-            expect(card.locator('.dialogfoot .note')).to_contain_text('в задаче пока прежние значения')
+            expect(card.locator('.dialogfoot .note')).to_contain_text('проверочное чтение не подтвердило запись')
+            expect(card.locator('.field .note:not([hidden])')).to_have_count(0)
             expect(card.get_by_label('Описание')).to_have_value('Вторая правка')
             session.page.wait_for_timeout(400)
             assert len(edits()) == 2 and lists.entry(target)['description'] == 'Первая правка'
@@ -738,6 +740,51 @@ def test_unanswered_write_is_checked_first_and_never_repeated_under_a_new_id(lis
             card.get_by_role('button', name='Не сохранять').click()
             expect(card).to_be_hidden()
             assert lists.entry(target)['description'] == 'Третья правка'
+
+            # The write never arrived and the agent changed every sent field meanwhile. The check read shows
+            # neither what was sent nor what the form started from, so the note claims only that the read did
+            # not confirm the write; the fields show the other values, and nothing is sent again by itself.
+            from starlette.responses import JSONResponse
+            real = lists.api.routes['edit']['handler']
+
+            def changed_elsewhere_then_unanswered(request):
+                lists.update(target, description='Версия агента', due='к понедельнику')
+                return JSONResponse({'error': 'synthetic outage'}, status_code=503)
+
+            card = open_card(frame, target)
+            card.get_by_label('Описание').fill('Пятая правка')
+            card.get_by_label('Срок').fill('к среде')
+            lists.api.routes['edit']['handler'] = changed_elsewhere_then_unanswered
+            try:
+                card.get_by_role('button', name='Готово').click()
+                expect(card.locator('.dialogfoot .note')).to_contain_text('Сохранение не подтверждено')
+            finally:
+                lists.api.routes['edit']['handler'] = real
+            expect(card.locator('.dialogfoot .note')).to_contain_text('проверочное чтение не подтвердило запись')
+            expect(card.locator('.dialogfoot .note')).not_to_contain_text('прежние значения')
+            expect(card.locator('.field .note:not([hidden]) .theirs')).to_have_text(['Версия агента', 'к понедельнику'])
+            expect(card.get_by_label('Описание')).to_have_value('Пятая правка')
+            expect(card.get_by_label('Срок')).to_have_value('к среде')
+            session.page.wait_for_timeout(400)
+            entry = lists.entry(target)
+            assert (entry['description'], entry['due']['raw']) == ('Версия агента', 'к понедельнику')
+            assert len(edits()) == 10, 'nothing is sent again by itself'
+            for _ in range(2):
+                card.get_by_role('button', name='Оставить моё').first.click()
+            expect(card.get_by_role('button', name='Оставить моё')).to_have_count(0)
+            # Keeping mine repeats the unknown request as itself; the store refuses it over the other values,
+            # and only the next «Готово» saves the form as a new request against what the store now holds.
+            card.get_by_role('button', name='Готово').click()
+            expect(card.locator('.dialogfoot .note')).to_contain_text('Не сохранено: задачу изменили в другом месте')
+            assert len(edits()) == 11 and edits()[10][2] == edits()[9][2], 'same request id and body'
+            assert lists.entry(target)['description'] == 'Версия агента'
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert len(edits()) == 12 and edits()[11][2]['request_id'] != edits()[9][2]['request_id']
+            assert edits()[11][2]['changes'] == {'description': 'Пятая правка', 'due': 'к среде'}
+            assert edits()[11][2]['expected'] == {'description': 'Версия агента', 'due': 'к понедельнику'}
+            entry = lists.entry(target)
+            assert (entry['description'], entry['due']['raw']) == ('Пятая правка', 'к среде')
 
             # A failed board read keeps the last board on screen and says it is stale.
             lists.fail('GET', 'board', 'refused')
@@ -2029,3 +2076,254 @@ def test_delete_draft_is_a_fresh_action_after_a_conflict(lists, engine, already_
             one.close()
             if two:
                 two.close()
+
+
+def poll(lists, session, frame):
+    """What the 30-second timer does, and wait until its read of the open entry has been applied."""
+    before = len(lists.calls('GET', 'entry'))
+    session.refresh(frame)
+    wait_until(lambda: len(lists.calls('GET', 'entry')) > before, 'the poll read the open entry again')
+    frame.wait_for_timeout(250)
+
+
+def link_names(card):
+    return card.locator('.ref .name').all_inner_texts()
+
+
+@ENGINES
+@pytest.mark.parametrize('steps,trigger', [('add-drop', 'save'), ('add-drop', 'poll'), ('add-drop', 'resume'),
+                                           ('relabel', 'stage'), ('relabel', 'poll'), ('relabel', 'resume')])
+def test_link_steps_keep_their_order_over_every_read_of_the_task(lists, engine, steps, trigger):
+    """A link added and then removed is gone; × and adding the same address again (the card's only way
+    to change a label) is a new label. Neither turns around when the card reads the task again."""
+    from playwright.sync_api import sync_playwright, expect
+    url = 'https://docs.example.org/spec'
+    start = [{'label': 'Старая подпись', 'target': url}] if steps == 'relabel' else []
+    (target,) = lists.add([{'text': 'Ссылки по порядку', 'description': 'Было', 'references': start}])
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            if steps == 'add-drop':
+                card.get_by_label('Адрес ссылки').fill('https://wrong.example.org/not-this')
+                card.get_by_label('Подпись ссылки, необязательно').fill('Не та ссылка')
+                card.get_by_role('button', name='Добавить').click()
+                card.get_by_role('button', name='Убрать ссылку: Не та ссылка').click()
+                card.get_by_label('Описание').fill('Дописано')
+                want, stored = [], []
+            else:
+                card.get_by_role('button', name='Убрать ссылку: Старая подпись').click()
+                card.get_by_label('Адрес ссылки').fill(url)
+                card.get_by_label('Подпись ссылки, необязательно').fill('Новая подпись')
+                card.get_by_role('button', name='Добавить').click()
+                want, stored = ['Новая подпись'], [{'label': 'Новая подпись', 'target': url}]
+            assert link_names(card) == want
+            if trigger == 'poll':
+                poll(lists, session, frame)
+            elif trigger == 'stage':
+                card.get_by_label('Стадия').select_option('in_progress')
+                wait_until(lambda: lists.entry(target)['stage'] == 'in_progress', 'the stage was saved at once')
+                frame.wait_for_timeout(400)
+            elif trigger == 'resume':
+                wait_until(lambda: len(kept(lists).get('ops', [])) == 2, 'the draft holds both link steps')
+                frame = leave_and_return(session)
+                card = resume(frame)
+                frame.wait_for_timeout(250)
+            if trigger != 'save':
+                assert link_names(card) == want, 'reading the task again changed the links'
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            entry = lists.entry(target)
+            assert entry['details'].get('references', []) == stored
+            if steps == 'add-drop':
+                assert entry['description'] == 'Дописано'
+            assert kept(lists) == {}, 'a card closed with everything saved leaves no draft'
+        finally:
+            session.close()
+
+
+@ENGINES
+@pytest.mark.parametrize('trigger', ['poll', 'resume', 'retry'])
+def test_keep_mine_is_saved_after_an_unconfirmed_edit_that_had_applied(lists, engine, trigger):
+    """The twin of the refused-retry case above, for a write that did reach the store: repeating it is
+    answered as a replay with the task as it is now, which already holds the change made elsewhere."""
+    from playwright.sync_api import sync_playwright, expect
+    (target,) = lists.add([{'text': 'Спорное описание', 'description': 'Исходное'}])
+    edits = lambda: lists.calls('POST', 'edit')
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            card.locator('#sl-description').fill('Моя правка')
+            lists.fail('POST', 'edit', 'unanswered')  # applied, the answer was lost
+            lists.fail('GET', 'entry', 'lost')        # and the check read failed: the outcome is unknown here
+            card.get_by_role('button', name='Готово').click()
+            expect(card.locator('.dialogfoot .note')).to_contain_text('Сохранение не подтверждено')
+            lists.update(target, description='Правка агента')
+            if trigger == 'poll':
+                poll(lists, session, frame)
+            elif trigger == 'resume':
+                wait_until(lambda: bool((kept(lists).get('pending') or {}).get('text')), 'the draft keeps the request')
+                frame = leave_and_return(session)
+                card = resume(frame)
+            else:
+                card.get_by_role('button', name='Готово').click()  # repeated as itself, answered as a replay
+                expect(card.locator('.dialogfoot .note')).to_contain_text('Сохранено не всё')
+                assert len(edits()) == 2 and edits()[1][2] == edits()[0][2]
+            note = card.locator('.field', has=frame.locator('#sl-description')).locator('.note')
+            expect(note.locator('.theirs')).to_have_text('Правка агента')
+            expect(card.locator('#sl-description')).to_have_value('Моя правка')
+            note.get_by_role('button', name='Оставить моё').click()
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(target)['description'] == 'Моя правка'
+            last = edits()[-1][2]
+            assert last['request_id'] != edits()[0][2]['request_id']
+            assert (last['changes'], last['expected']) == ({'description': 'Моя правка'}, {'description': 'Правка агента'})
+            # The unconfirmed request, its one repeat (answered as a replay) and the owner's choice.
+            assert len(edits()) == 3 and edits()[1][2] == edits()[0][2]
+            assert kept(lists) == {}
+        finally:
+            session.close()
+
+
+@ENGINES
+@pytest.mark.parametrize('outcome', ['unanswered', 'lost'])
+def test_repeating_an_unconfirmed_edit_never_writes_over_a_change_found_meanwhile(lists, engine, outcome):
+    """Answering the earlier request reads the task again; a second field changed elsewhere since then is
+    shown and waits for the owner's choice instead of being written over by the save that follows."""
+    from playwright.sync_api import sync_playwright, expect
+    (target,) = lists.add([{'text': 'Две правки', 'description': 'Было'}])
+    edits = lambda: lists.calls('POST', 'edit')
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            card.get_by_label('Описание').fill('Отправлено')
+            lists.fail('POST', 'edit', outcome)
+            lists.fail('GET', 'entry', 'lost')
+            card.get_by_role('button', name='Готово').click()
+            expect(card.locator('.dialogfoot .note')).to_contain_text('Сохранение не подтверждено')
+            card.get_by_label('Срок').fill('Завтра')
+            lists.update(target, due='Через неделю')
+            card.get_by_role('button', name='Готово').click()
+            note = card.locator('.field', has=frame.locator('#sl-due')).locator('.note')
+            expect(note.locator('.theirs')).to_have_text('Через неделю')
+            expect(card.locator('.dialogfoot .note')).to_contain_text('Сохранено не всё')
+            entry = lists.entry(target)
+            assert (entry['description'], entry['due']['raw']) == ('Отправлено', 'Через неделю')
+            assert len(edits()) == 2 and edits()[1][2]['request_id'] == edits()[0][2]['request_id']
+            note.get_by_role('button', name='Оставить моё').click()
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(target)['due']['raw'] == 'Завтра'
+            assert (edits()[-1][2]['changes'], edits()[-1][2]['expected']) == ({'due': 'Завтра'}, {'due': 'Через неделю'})
+            assert len(edits()) == 3 and kept(lists) == {}
+        finally:
+            session.close()
+
+
+@ENGINES
+def test_the_saves_own_check_read_keeps_a_field_typed_back_while_it_was_away(lists, engine):
+    """As the partial-match case above, but the change elsewhere lands before the save's own check read."""
+    from playwright.sync_api import sync_playwright, expect
+    from starlette.responses import JSONResponse
+    (target,) = lists.add([{'text': 'Два поля', 'description': 'Было'}])
+    real = lists.api.routes['edit']['handler']
+
+    def applied_then_changed_elsewhere_then_unanswered(request):
+        result = real(request)
+        if asyncio.iscoroutine(result):
+            result = asyncio.run(result)
+        assert result['ok'], result
+        lists.update(target, due='Через неделю')
+        time.sleep(1.5)  # the owner types meanwhile
+        return JSONResponse({'error': 'synthetic outage'}, status_code=503)
+
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            description = card.get_by_label('Описание')
+            description.fill('Отправлено')
+            card.get_by_label('Срок').fill('Завтра')
+            lists.api.routes['edit']['handler'] = applied_then_changed_elsewhere_then_unanswered
+            try:
+                card.get_by_role('button', name='Готово').click()
+                expect(card.locator('.dialogfoot [role="status"]')).to_have_text('Сохраняю…')
+                description.fill('Было')  # typed back to what it was before the save
+                expect(card.locator('.dialogfoot .note')).to_contain_text('Сохранение не подтверждено')
+            finally:
+                lists.api.routes['edit']['handler'] = real
+            expect(card.locator('.dialogfoot .note')).to_contain_text('в задаче сейчас только часть отправленного')
+            expect(card.locator('.field .note:not([hidden]) .theirs')).to_have_text(['Через неделю'])
+            expect(description).to_have_value('Было')
+            due = card.locator('.field', has=frame.locator('#sl-due')).locator('.note')
+            due.get_by_role('button', name='Взять это значение').click()
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            entry = lists.entry(target)
+            assert (entry['description'], entry['due']['raw']) == ('Было', 'Через неделю')
+            last = lists.calls('POST', 'edit')[-1][2]
+            assert (last['changes'], last['expected']) == ({'description': 'Было'}, {'description': 'Отправлено'})
+        finally:
+            session.close()
+
+
+@ENGINES
+@pytest.mark.parametrize('opened', ['open', 'resume'])
+def test_closing_while_the_card_reads_keeps_only_a_real_draft(lists, engine, opened):
+    from playwright.sync_api import sync_playwright, expect
+    (target,) = lists.add([{'text': 'Медленно открывается', 'description': 'Было'}])
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = frame.locator('dialog')
+            if opened == 'resume':
+                open_card(frame, target).get_by_label('Описание').fill('Черновик')
+                wait_until(lambda: kept(lists).get('form', {}).get('description') == 'Черновик')
+                frame = leave_and_return(session)
+                card = frame.locator('dialog')
+            lists.fail('GET', 'entry', 'slow')  # the entry read answers 1.5 s late
+            if opened == 'open':
+                frame.locator(f'.task[data-id="{target}"]').click()
+            else:
+                frame.locator('.draftbar').get_by_role('button', name='Продолжить').click()
+            expect(card.locator('.dialogfoot [role="status"]')).to_have_text('Загружаю…')
+            card.get_by_label('Закрыть').click()
+            frame.wait_for_timeout(2200)
+            if opened == 'open':  # nothing was typed: the card simply closes and keeps nothing
+                expect(card).to_be_hidden()
+                assert kept(lists) == {}
+            else:  # the continued draft is real: closing asks first and the draft stays
+                expect(card.locator('.dialogfoot [role="status"]')).to_have_text('Правки не сохранены.')
+                expect(card.get_by_role('button', name='Не сохранять')).to_be_visible()
+                assert kept(lists)['form']['description'] == 'Черновик'
+            assert lists.entry(target)['description'] == 'Было'
+        finally:
+            session.close()
+
+
+@ENGINES
+def test_a_new_task_keeps_its_title_exactly_as_typed(lists, engine):
+    from playwright.sync_api import sync_playwright, expect
+    title = '  Купить молоко  '
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            frame.get_by_role('button', name='+ Задача').click()
+            card = frame.locator('dialog')
+            card.get_by_label('Название задачи').fill(title)
+            card.get_by_role('button', name='Создать').click()
+            expect(card).to_be_hidden()
+            assert [call[2]['text'] for call in lists.calls('POST', 'add')] == [title]
+            assert not lists.calls('POST', 'edit'), 'the created title is not edited afterwards'
+            assert on_board(lists, title) == 1 and kept(lists) == {}
+        finally:
+            session.close()

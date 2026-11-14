@@ -307,8 +307,9 @@ _ENTRY_IDS = {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxI
               "description": "Entry ids (e_...) from add/read results."}
 _REQUEST_ID = {
     "type": "string",
-    "description": "Optional idempotency key (e.g. a UUID). A retry with the same id and arguments returns the "
-                   "first result without applying the change again; the same id with different arguments is refused "
+    "description": "Idempotency key (e.g. a UUID); required where the tool lists it as required. A retry with "
+                   "the same id and arguments returns the first result without applying the change again; the same id "
+                   "with different arguments is refused "
                    "(request_conflict), and so is an id retired from the replay journal (request_expired; rarely a "
                    "new id collides with one, then nothing was applied and a new id should be used).",
 }

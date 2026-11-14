@@ -1180,10 +1180,17 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     const before = stored.references(card.base), after = stored.references(fresh);
     if (saved.includes("references")) card.ops = [];
     else if (card.ops.length && !same(before, after) && !ours("references", after)) card.refsMoved = true;
-    // Drop steps the store already holds, so they do not read as unsaved.
-    card.ops = card.ops.filter((op) =>
-      op.drop ? after.some((ref) => ref.target === op.target && ref.label === op.label)
-        : !after.some((ref) => ref.target === op.ref.target));
+    // Replay the link steps in their order over the new list and keep only those that still
+    // change it: a step the store already holds is not unsaved, and steps that cancel each
+    // other out (a link added, then removed) leave nothing to save.
+    const listed = applyOps(after, []);
+    let held = listed;
+    card.ops = card.ops.filter((op) => {
+      const next = applyOps(held, [op]), changes = !same(next, held);
+      held = next;
+      return changes;
+    });
+    if (same(held, listed)) card.ops = [];
     if (!card.ops.length) card.refsMoved = false;
     card.base = fresh;
     card.gone = !!fresh.deleted_at;
@@ -1470,15 +1477,19 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   }
   // What an answered write means for the form: fields still showing what was
   // sent are now clean; a field typed in while the request was away stays a draft.
-  function landed(op, entry) {
+  // A replay answers with the entry as it is now, which may hold a later write from
+  // elsewhere: there a field is saved only where the store still shows what was sent.
+  function landed(op, entry, replayed = false) {
     card.pending = null;
-    rebase(entry, op.keys.filter((key) => same(draftWire(key), op.sent[key])), op.sent);
+    rebase(entry, op.keys.filter((key) => same(draftWire(key), op.sent[key])
+      && (!replayed || same(stored[key](entry), op.sent[key]))), op.sent);
     card.saved = true;
     refresh();
   }
   async function send(op) {
     try {
-      landed(op, (await post("edit", op.text)).entry);
+      const answer = await post("edit", op.text);
+      landed(op, answer.entry, answer.replayed === true);
       return true;
     } catch (error) {
       if (error.code === "field_conflict") {
@@ -1516,18 +1527,20 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
         landed(op, fresh);
         return true;
       }
-      // The check read still shows the old values, yet the request may land later: the
-      // outcome stays unknown, so the next «Готово» repeats it as itself.
+      // The check read does not show the whole write, yet the request may land later: the
+      // outcome stays unknown, so the next «Готово» repeats it as itself. A read that shows
+      // none of it says only that: those fields may hold the old values or someone else's.
       card.pending = op;
-      rebase(fresh);
-      card.error = "Сохранение не подтверждено: Smart Lists не ответил, и в задаче пока прежние значения. Правки остались в форме. «Готово» отправит тот же запрос ещё раз, дубля не будет.";
+      rebase(fresh, [], op.sent);
+      const part = op.keys.some((key) => same(stored[key](fresh), op.sent[key]));
+      card.error = `Сохранение не подтверждено: Smart Lists не ответил, и ${part ? "в задаче сейчас только часть отправленного" : "проверочное чтение не подтвердило запись"}. Правки остались в форме. «Готово» отправит тот же запрос ещё раз, дубля не будет.`;
       return false;
     }
   }
   async function create() {
     // The request is frozen at the first attempt: a retry after an unanswered
     // one repeats exactly it, and the store answers a repeat without a second task.
-    card.creating ||= JSON.stringify({ text: card.draft.text.trim(), request_id: requestId() });
+    card.creating ||= JSON.stringify({ text: card.draft.text, request_id: requestId() });
     // It is in the draft slot before it is sent, so a view that goes away meanwhile
     // leaves a card that repeats this very request instead of making a second task.
     if (!(await addIsKept())) {
@@ -1578,7 +1591,6 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
           const fresh = await readEntry(card.id);
           card.base = fresh; // the new task as stored; the rest of the form is still to save
           card.unread = false;
-          if (card.draft.text.trim() === fresh.text) card.draft.text = fresh.text;
           fill(["text"]);
         } catch (error) {
           card.error = `Задача создана, но не прочитана: ${said(error)}. Остальные поля ещё не сохранены.`;
@@ -1586,6 +1598,12 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
         }
       }
       if (card.pending && !(await send(card.pending))) return false;
+      // Answering the earlier write read the task again; a field changed elsewhere meanwhile
+      // waits for the owner's choice instead of being written over.
+      if (Object.keys(card.conflicts).length) {
+        card.error = "Сохранено не всё: часть полей изменили в другом месте. Выбери в отмеченных полях, какое значение оставить.";
+        return false;
+      }
       const keys = wanted();
       if (!keys.length) return true;
       const changes = {}, expected = {}, sent = {};
@@ -1686,7 +1704,9 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   }
   async function openCard(id, title) {
     if (card || drag || !(await slotFree()) || card || drag) return;
-    showCard({ id, loading: true, draft: { ...newDraft(BLANK), text: title || "" } });
+    // Until the read answers, the title from the board stands for the task: nothing is typed yet.
+    const known = { ...BLANK, text: title || "" };
+    showCard({ id, loading: true, base: known, draft: newDraft(known) });
     try {
       const fresh = await readEntry(id);
       if (card?.id !== id) return;

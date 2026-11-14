@@ -3259,8 +3259,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "4031741b602fb2ce0da713e9bc3b55bbf1be9ea608502b882ec04df4c72fabd5",
-          "size": 36785
+          "sha256": "00d72b21016f938ffacdddd7e17aa34b366ddff0735d5b0c2eef807bcb4c619e",
+          "size": 36799
         },
         {
           "path": "entry_details.py",
@@ -3269,13 +3269,13 @@
         },
         {
           "path": "lists_core.py",
-          "sha256": "5996f51181b63e3b0b4a8e5f1418c3d45babe633f47109285f0940cd094fe0c5",
-          "size": 123621
+          "sha256": "62e3b44a91616127a6404801e93c22119795cf1600e55f6d5fc1ec45aea8d406",
+          "size": 124177
         },
         {
           "path": "plugin.py",
-          "sha256": "7b9695f642966cae2d6fe7a76da594119f9a2f341dc69fdf212914d7a7bba23d",
-          "size": 52791
+          "sha256": "2a78d5d6f2dec8c0378fd814462d459ee7a0ef2a5d773da64f18e23726f50b5d",
+          "size": 52850
         },
         {
           "path": "tests/test_agent_details.py",
@@ -3304,8 +3304,8 @@
         },
         {
           "path": "tests/test_review_repairs.py",
-          "sha256": "4c53d00bb876dfd2024baad8421d7a8725b92dc8b25d5ae016f60bde6498670b",
-          "size": 18618
+          "sha256": "675e3e4be1029f53c4dafa265e67fb21e2cabbd48d2cf0ee49a74402e8708992",
+          "size": 20764
         },
         {
           "path": "tests/test_smart_lists.py",
@@ -3314,8 +3314,8 @@
         },
         {
           "path": "widget.js",
-          "sha256": "015d02d7cc589d483f0a1e0ba1991cd51220bb0be46890dcf05158cec342b952",
-          "size": 97602
+          "sha256": "54bf0b06564ed115002b44b447f9da40caec1d87819cd1639be2b68cfeb1ab52",
+          "size": 98993
         }
       ],
       "name": "smart_lists",
