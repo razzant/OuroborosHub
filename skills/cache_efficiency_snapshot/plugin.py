@@ -882,6 +882,16 @@ def register(api: Any) -> None:
                 records, history_boots, history_meta = available
                 boots += history_boots
                 meta["history_index"] = history_meta
+        # A full-history request starts an asynchronous backfill. Do not
+        # serialize and aggregate the live overlay on every one-second poll
+        # while the index is being built; the widget keeps its last committed
+        # reading and only needs progress until the worker publishes a snapshot.
+        history_state = (meta.get("history_index") or {}).get("state")
+        if (history_state in ("loading", "not_loaded") and timeframe in ("MONTH", "ALL")
+                and (meta.get("history_index") or {}).get("archives_done", 0) > 0):
+            return {"status": "loading", "read_error": None, "timeframe": timeframe,
+                    "timezone": zone, "generated_at": now.isoformat(),
+                    "quality": {"history_index": meta.get("history_index") or {}}}
         return calculate_analytics(records, timeframe=timeframe, meta=meta, now=now, boots=boots,
                                    start_override=custom_from, end_override=custom_to,
                                    calendar_daily=daily, zone=zone,
