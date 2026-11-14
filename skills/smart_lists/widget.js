@@ -1082,6 +1082,14 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     }
     return result;
   }
+  // What an address holds: the labels of the links stored under it, each once. Links are added and
+  // removed by exact pair, so a pair stored twice is one link here, never a second value.
+  const labelsAt = (list, target) =>
+    [...new Set(list.filter((ref) => ref.target === target).map((ref) => ref.label))].sort();
+  // The steps that turn one such value into another.
+  const linkSteps = (from, to, target) => [
+    ...from.filter((label) => !to.includes(label)).map((label) => ({ drop: true, target, label })),
+    ...to.filter((label) => !from.includes(label)).map((label) => ({ ref: { label, target } }))];
   const draftRefs = () => applyOps(stored.references(card.base), card.ops);
   const draftWire = (key) => (key === "references" ? draftRefs() : wire[key](card.draft[key]));
   const isDirty = (key) => !same(draftWire(key), stored[key](card.base));
@@ -1200,10 +1208,6 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   // changed here and differently elsewhere is asked about like any field: the form keeps the
   // owner's version until a choice is made.
   function relink(before, after, sentList) {
-    const at = (list, target) => list.filter((ref) => ref.target === target).map((ref) => ref.label).sort();
-    const steps = (from, to, target) => [
-      ...from.filter((label) => !to.includes(label)).map((label) => ({ drop: true, target, label })),
-      ...to.filter((label) => !from.includes(label)).map((label) => ({ ref: { label, target } }))];
     const mine = applyOps(before, card.ops), order = new Map();
     for (const op of card.ops) {
       const target = op.drop ? op.target : op.ref.target;
@@ -1212,17 +1216,17 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     }
     const asked = card.conflicts.references || [], clash = [], ops = [];
     for (const target of order.keys()) {
-      const want = at(mine, target), now = at(after, target), away = sentList && at(sentList, target);
-      const ours = !!away && same(now, away), was = ours ? now : at(before, target);
+      const want = labelsAt(mine, target), now = labelsAt(after, target), away = sentList && labelsAt(sentList, target);
+      const ours = !!away && same(now, away), was = ours ? now : labelsAt(before, target);
       const held = !!away && !same(want, away);
       if (same(want, now)) {
-        if (held) ops.push(...steps(away, want, target)); // nothing to save yet: these change nothing here
+        if (held) ops.push(...linkSteps(away, want, target)); // nothing to save yet: these change nothing here
         continue;
       }
       if (same(want, was) && !held) continue;
       if (asked.some((ref) => ref.target === target) || !same(now, was))
         clash.push(...(now.length ? now.map((label) => ({ target, label })) : [{ target, label: null }]));
-      ops.push(...steps(now, want, target));
+      ops.push(...linkSteps(now, want, target));
     }
     card.ops = ops;
     if (clash.length) card.conflicts.references = clash;
@@ -1269,6 +1273,11 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       if (key === "references") {
         const asked = new Set(theirs.map((ref) => ref.target));
         card.ops = card.ops.filter((op) => !asked.has(op.drop ? op.target : op.ref.target));
+        // A write still away carried something else there: the value taken is now the owner's version,
+        // kept as its steps from what was sent (they change nothing here), so it is saved over that
+        // write if it lands after all.
+        const away = card.pending?.sent.references, here = stored.references(card.base);
+        if (away) for (const target of asked) card.ops.push(...linkSteps(labelsAt(away, target), labelsAt(here, target), target));
         if (!isDirty("references")) card.refsMoved = false;
       } else card.draft[key] = Array.isArray(theirs) ? [...theirs] : theirs;
       delete card.conflicts[key];

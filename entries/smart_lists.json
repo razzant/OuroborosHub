@@ -3,7 +3,7 @@
     "planning"
   ],
   "description": "Personal lists in one skill-local store: a free group tree, verbatim entries captured from clear owner intent in chat, completion, moves and an undoable trash, a read-only subtree selection, checksummed export/restore with typed refusals for a missing store, and a four-column kanban widget with tags, expandable cards and a separate task archive. No network, purchases or reminders.",
-  "digest": "be15b31208f372e0c668ba59c2570da9220ade48ed1b906566e0999a1943d64a",
+  "digest": "fc2c80b16df06319184d3559c0549978ae6accdd1bc7bf533c5e085228fdde51",
   "name": "smart_lists",
   "owner": "kazzand",
   "schema_version": 2,

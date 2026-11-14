@@ -2647,6 +2647,113 @@ def test_a_link_change_taken_back_after_its_unconfirmed_write_is_not_what_stays_
 
 
 @ENGINES
+@pytest.mark.parametrize('case,then', [('relabel', 'retry'), ('remove', 'retry'), ('remove', 'poll'),
+                                       ('relabel', 'refused')])
+def test_a_link_value_taken_while_an_earlier_write_is_unconfirmed_is_what_stays_saved(lists, engine, case, then):
+    """A save that carried a link change got no answer and had not reached the store. The link then gets
+    another label elsewhere, and the owner answers «Взять это значение». That address was sent with something
+    else, so the value taken is the owner's version: if the store returns to what the old request expects,
+    «Готово» repeats that request as itself and then saves the value taken over it; a poll that sees the
+    return asks first. While the store still holds the value taken, the repeat is refused and nothing is left."""
+    from playwright.sync_api import sync_playwright, expect
+    old, mine = {'label': 'Старая подпись', 'target': SPEC}, {'label': 'Моя подпись', 'target': SPEC}
+    theirs = {'label': 'Подпись агента', 'target': SPEC}
+    carried = [mine] if case == 'relabel' else []
+    (target,) = lists.add([{'text': 'Выбор при неподтверждённой записи', 'references': [old]}])
+    edits = lambda: [call[2] for call in lists.calls('POST', 'edit')]
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            drop_link(card, old)
+            for ref in carried:
+                add_link(card, ref)
+            lists.fail('POST', 'edit', 'lost')  # never reached the store; the check read answers
+            card.get_by_role('button', name='Готово').click()
+            expect(card.locator('.dialogfoot .note')).to_contain_text('Сохранение не подтверждено')
+            lists.update(target, details={'references': [theirs]})
+            poll(lists, session, frame)
+            asked = card.locator('.field', has=frame.locator('.refs')).locator('.note', has=frame.locator('.theirs'))
+            expect(asked.locator('.theirs')).to_have_text(f'«Подпись агента» — {SPEC}')
+            asked.get_by_role('button', name='Взять это значение').click()
+            assert link_names(card) == ['Подпись агента']
+            if then != 'refused':
+                lists.update(target, details={'references': [old]})  # elsewhere: just what the old request expects
+            if then == 'poll':
+                poll(lists, session, frame)
+                expect(asked.locator('.theirs')).to_have_text(f'«Старая подпись» — {SPEC}')
+                assert link_names(card) == ['Подпись агента'], 'the value taken stays on screen until chosen again'
+                asked.get_by_role('button', name='Оставить моё').click()
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(target)['details']['references'] == [theirs], 'the card closed showing this link'
+            sent = edits()
+            assert sent[1] == sent[0], 'the unconfirmed request is repeated as itself'
+            assert sent[0]['changes'] == {'details': {'references': carried}}
+            if then == 'refused':
+                assert len(sent) == 2, 'the store already holds the value taken'
+            else:
+                assert len(sent) == 3 and sent[2]['request_id'] != sent[0]['request_id']
+                assert sent[2]['changes'] == {'details': {'references': [theirs]}}
+                assert sent[2]['expected'] == {'details': {'references': carried}}
+            assert kept(lists) == {}
+        finally:
+            session.close()
+
+
+@ENGINES
+@pytest.mark.parametrize('trigger', ['poll', 'resume'])
+def test_a_link_stored_twice_and_put_back_after_its_unconfirmed_removal_is_not_lost(lists, engine, trigger):
+    """The store accepts the same link twice (an agent may write it), and the card's × removes such a pair
+    together. The removal is saved without an answer, the owner adds the link again, and the task is read
+    again: the link put back is the owner's version. «Готово» repeats the removal as itself and then saves
+    the link, and a pair stored twice under an address the card did not touch is written back as it was."""
+    from playwright.sync_api import sync_playwright, expect
+    twin = {'label': 'Спецификация', 'target': SPEC}
+    other = {'label': 'Другая ссылка', 'target': 'https://other.example.org/page'}
+    spare = {'label': 'Черновик', 'target': 'https://other.example.org/draft'}
+    rest = [other, spare, dict(spare)]
+    (target,) = lists.add([{'text': 'Ссылка, записанная дважды', 'references': [twin, dict(twin), *rest]}])
+    stored = lambda: lists.entry(target)['details'].get('references', [])
+    assert stored() == [twin, twin, *rest], 'the store keeps both links of a pair'
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            card.get_by_role('button', name=f"Убрать ссылку: {twin['label']}").first.click()
+            assert link_names(card) == [ref['label'] for ref in rest]
+            lists.fail('POST', 'edit', 'lost')  # never reached the store; the check read answers
+            card.get_by_role('button', name='Готово').click()
+            expect(card.locator('.dialogfoot .note')).to_contain_text('Сохранение не подтверждено')
+            assert stored() == [twin, twin, *rest]
+            add_link(card, twin)
+            assert link_names(card) == [*(ref['label'] for ref in rest), twin['label']]
+            if trigger == 'poll':
+                poll(lists, session, frame)
+            else:
+                wait_until(lambda: bool(kept(lists).get('pending')) and any('ref' in op for op in kept(lists)['ops']),
+                           'the draft holds the request and the link put back')
+                frame = leave_and_return(session)
+                card = resume(frame)
+                frame.wait_for_timeout(250)
+            assert twin['label'] in link_names(card)
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert stored() == [*rest, twin], 'the card closed showing this link'
+            sent = [call[2] for call in lists.calls('POST', 'edit')]
+            assert len(sent) == 3 and sent[1] == sent[0], 'the unconfirmed request is repeated as itself, once'
+            assert sent[0]['changes'] == {'details': {'references': rest}}
+            assert sent[2]['request_id'] != sent[0]['request_id']
+            assert sent[2]['changes'] == {'details': {'references': [*rest, twin]}}
+            assert sent[2]['expected'] == {'details': {'references': rest}}
+            assert kept(lists) == {}
+        finally:
+            session.close()
+
+
+@ENGINES
 def test_a_new_task_keeps_its_title_exactly_as_typed(lists, engine):
     from playwright.sync_api import sync_playwright, expect
     title = '  Купить молоко  '

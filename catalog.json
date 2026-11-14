@@ -3314,8 +3314,8 @@
         },
         {
           "path": "widget.js",
-          "sha256": "644727dfe0bb72c0c045afd9c83e2be6729489a9e6fb95c6fdcc05f19d90182b",
-          "size": 101865
+          "sha256": "1ce53804379fa408f338c0dd431d1c52c4b363a3399d43891a8cd68667951ffe",
+          "size": 102627
         }
       ],
       "name": "smart_lists",
