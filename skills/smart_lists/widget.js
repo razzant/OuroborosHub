@@ -982,6 +982,8 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   refsBox.append(refsEmpty, refsAll);
   const refsNote = el("div", "note");
   refsNote.hidden = true;
+  slots.references = el("div", "note");
+  slots.references.hidden = true;
   const addRow = el("div", "addrow");
   const addUrl = el("input");
   addUrl.type = "url";
@@ -996,7 +998,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
   const addError = el("div", "note");
   addError.hidden = true;
   addError.setAttribute("role", "alert");
-  refsField.append(el("span", "label", "Связанные материалы"), refsBox, refsNote, addRow, addError);
+  refsField.append(el("span", "label", "Связанные материалы"), refsBox, refsNote, slots.references, addRow, addError);
   main.append(refsField);
   const contextField = el("div", "field context");
   contextField.append(el("span", "label", "Заметки агента"));
@@ -1076,7 +1078,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     let result = list.map((ref) => ({ label: ref.label, target: ref.target }));
     for (const op of ops) {
       if (op.drop) result = result.filter((ref) => !(ref.target === op.target && ref.label === op.label));
-      else if (!result.some((ref) => ref.target === op.ref.target)) result.push({ ...op.ref });
+      else if (!result.some((ref) => ref.target === op.ref.target && ref.label === op.ref.label)) result.push({ ...op.ref });
     }
     return result;
   }
@@ -1180,34 +1182,64 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     const before = stored.references(card.base), after = stored.references(fresh);
     if (saved.includes("references")) card.ops = [];
     else if (card.ops.length && !same(before, after) && !ours("references", after)) card.refsMoved = true;
-    // Replay the link steps in their order over the new list and keep only those that still
-    // change it: a step the store already holds is not unsaved, and steps that cancel each
-    // other out (a link added, then removed) leave nothing to save.
-    const listed = applyOps(after, []);
-    let held = listed;
-    card.ops = card.ops.filter((op) => {
-      const next = applyOps(held, [op]), changes = !same(next, held);
-      held = next;
-      return changes;
-    });
-    if (same(held, listed)) card.ops = [];
-    if (!card.ops.length) card.refsMoved = false;
+    relink(before, after, wasSent("references") ? sent.references : null);
     card.base = fresh;
+    if (!isDirty("references")) card.refsMoved = false;
     card.gone = !!fresh.deleted_at;
     fill(changed);
+  }
+  // The links this form changed, each by its address, as the end state the owner made, over the
+  // store's new list. An address is every link stored under it: the store allows several, and
+  // removing one of them is a change like any other. Steps that cancel out (a link added, then
+  // removed) leave nothing, so they never remove a link put there elsewhere meanwhile; one the
+  // store already holds is not unsaved.
+  // Where the store shows what this form's own write carried, that is where the form stands, so a
+  // step typed after the write still counts. While that write is away and carries something else
+  // than the form shows, the address was sent, so it is not untouched: the form's version stays as
+  // its steps from what was sent, and is saved over the write if it lands after all. An address
+  // changed here and differently elsewhere is asked about like any field: the form keeps the
+  // owner's version until a choice is made.
+  function relink(before, after, sentList) {
+    const at = (list, target) => list.filter((ref) => ref.target === target).map((ref) => ref.label).sort();
+    const steps = (from, to, target) => [
+      ...from.filter((label) => !to.includes(label)).map((label) => ({ drop: true, target, label })),
+      ...to.filter((label) => !from.includes(label)).map((label) => ({ ref: { label, target } }))];
+    const mine = applyOps(before, card.ops), order = new Map();
+    for (const op of card.ops) {
+      const target = op.drop ? op.target : op.ref.target;
+      order.delete(target); // an address takes the place of its last step
+      order.set(target, true);
+    }
+    const asked = card.conflicts.references || [], clash = [], ops = [];
+    for (const target of order.keys()) {
+      const want = at(mine, target), now = at(after, target), away = sentList && at(sentList, target);
+      const ours = !!away && same(now, away), was = ours ? now : at(before, target);
+      const held = !!away && !same(want, away);
+      if (same(want, now)) {
+        if (held) ops.push(...steps(away, want, target)); // nothing to save yet: these change nothing here
+        continue;
+      }
+      if (same(want, was) && !held) continue;
+      if (asked.some((ref) => ref.target === target) || !same(now, was))
+        clash.push(...(now.length ? now.map((label) => ({ target, label })) : [{ target, label: null }]));
+      ops.push(...steps(now, want, target));
+    }
+    card.ops = ops;
+    if (clash.length) card.conflicts.references = clash;
+    else delete card.conflicts.references;
   }
   // Read the open entry again. The quiet poll leaves a form alone while its
   // own write is away; a write that was refused reads regardless.
   async function pull(force = false) {
-    const id = card.id;
+    const opening = card;
     let fresh;
     try {
-      fresh = await readEntry(id);
+      fresh = await readEntry(opening.id);
     } catch (error) {
-      if (card?.id === id && error.code === "not_found") card.gone = true;
+      if (card === opening && error.code === "not_found") card.gone = true;
       throw error;
     }
-    if (card?.id !== id || (card.busy && !force)) return;
+    if (card !== opening || (card.busy && !force)) return;
     const op = card.pending;
     if (op && op.keys.every((key) => same(stored[key](fresh), op.sent[key]))) {
       card.error = "";
@@ -1219,6 +1251,8 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     if (key === "stage") return STAGE_NAME[value] || value;
     if (key === "turn") return TURN_NAME[value] || value;
     if (key === "tags") return value.length ? value.map((tag) => `«${tag}»`).join(" ") : "(без тегов)";
+    if (key === "references")
+      return value.map((ref) => (ref.label === null ? `${ref.target} — ссылки нет` : `«${ref.label}» — ${ref.target}`)).join("\n");
     return value === "" ? "(пусто)" : value;
   }
   function paintConflict(key) {
@@ -1232,18 +1266,22 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     const take = button("", "Взять это значение");
     take.onclick = () => {
       acted();
-      card.draft[key] = Array.isArray(theirs) ? [...theirs] : theirs;
+      if (key === "references") {
+        const asked = new Set(theirs.map((ref) => ref.target));
+        card.ops = card.ops.filter((op) => !asked.has(op.drop ? op.target : op.ref.target));
+        if (!isDirty("references")) card.refsMoved = false;
+      } else card.draft[key] = Array.isArray(theirs) ? [...theirs] : theirs;
       delete card.conflicts[key];
-      fill([key]);
+      if (key !== "references") fill([key]);
       paintCard();
-      inputs[key].focus();
+      (inputs[key] || addUrl).focus();
     };
     const keep = button("", "Оставить моё");
     keep.onclick = () => {
       acted();
       delete card.conflicts[key];
       paintCard();
-      inputs[key].focus();
+      (inputs[key] || addUrl).focus();
     };
     const row = el("div", "row");
     row.append(take, keep);
@@ -1337,7 +1375,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     // A task deleted elsewhere keeps the typed text readable and copyable; nothing here can change it.
     for (const control of body.querySelectorAll("input, textarea")) control.readOnly = !!card.gone;
     for (const control of body.querySelectorAll("select, button")) control.disabled = !!card.gone;
-    for (const key of SCALARS) paintConflict(key);
+    for (const key of [...SCALARS, "references"]) paintConflict(key);
     paintRefs();
     const details = fresh.details || {};
     const context = [];
@@ -1707,16 +1745,18 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
     // Until the read answers, the title from the board stands for the task: nothing is typed yet.
     const known = { ...BLANK, text: title || "" };
     showCard({ id, loading: true, base: known, draft: newDraft(known) });
+    // Answers belong to this very card: the same task closed and opened again is another form.
+    const opening = card;
     try {
       const fresh = await readEntry(id);
-      if (card?.id !== id) return;
+      if (card !== opening) return;
       card.base = fresh;
       card.draft = newDraft(fresh);
       card.gone = !!fresh.deleted_at;
       card.loading = false;
       fill();
     } catch (error) {
-      if (card?.id !== id) return;
+      if (card !== opening) return;
       card.loading = false;
       if (error.code === "not_found") card.gone = true;
       else {
@@ -1963,10 +2003,10 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
       error: saved.pending ? UNSENT_EDIT : saved.creating && !saved.entry_id ? UNSENT_ADD : "" }, saved.typed);
     card.opener = null;
     if (!card.loading) return;
-    const id = card.id;
+    const opening = card;
     try {
-      const fresh = await readEntry(id);
-      if (card?.id !== id) return;
+      const fresh = await readEntry(opening.id);
+      if (card !== opening) return;
       card.loading = false;
       const op = card.pending;
       if (op && op.keys.every((key) => same(stored[key](fresh), op.sent[key]))) {
@@ -1974,7 +2014,7 @@ dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
         landed(op, fresh); // it had been applied before the view went away
       } else rebase(fresh, [], op ? op.sent : {});
     } catch (error) {
-      if (card?.id !== id) return;
+      if (card !== opening) return;
       card.loading = false;
       if (error.code === "not_found") card.gone = true;
       else if (!card.pending) card.error = `Задача не перечитана: ${said(error)}. Форма показана такой, какой была.`;

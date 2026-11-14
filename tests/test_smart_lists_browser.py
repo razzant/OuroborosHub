@@ -77,8 +77,9 @@ def lists(tmp_path):
     api = support.FakePluginAPI(tmp_path / 'state')
     support.load_plugin().register(api)
     # calls: every skill request the frame made; faults: one-shot outages a test queues;
-    # errors: a route handler that raised; disconnects: answers the browser closed before reading.
-    state = {'calls': [], 'faults': [], 'errors': [], 'widget_faults': [], 'disconnects': []}
+    # errors: a route handler that raised; disconnects: answers the browser closed before reading;
+    # answered: every skill request of the frame whose answer was written back, in order.
+    state = {'calls': [], 'faults': [], 'errors': [], 'widget_faults': [], 'disconnects': [], 'answered': []}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -94,6 +95,9 @@ def lists(tmp_path):
                 self.end_headers()
                 if self.command != 'HEAD':
                     self.wfile.write(body)
+                path = urlsplit(self.path).path
+                if path.startswith(PREFIX) and self.headers.get('X-Fixture-Read') != '1':
+                    state['answered'].append(('GET' if self.command == 'HEAD' else self.command, path[len(PREFIX):]))
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 # The browser went away (a page closing with a request in flight): the answer
                 # has no reader. That is transport, not a skill failure, and is only recorded.
@@ -252,6 +256,10 @@ class Lists:
 
     def calls(self, method, name):
         return [call for call in self.state['calls'] if call[0] == method and call[1] == name]
+
+    def answered(self, method, name):
+        """How many of the frame's requests to this route have had their answer written back."""
+        return self.state['answered'].count((method, name))
 
     def fail(self, method, name, mode):
         self.state['faults'].append((method, name, mode))
@@ -754,6 +762,7 @@ def test_unanswered_write_is_checked_first_and_never_repeated_under_a_new_id(lis
             card = open_card(frame, target)
             card.get_by_label('Описание').fill('Пятая правка')
             card.get_by_label('Срок').fill('к среде')
+            boards = lambda: len(lists.calls('GET', 'board'))
             lists.api.routes['edit']['handler'] = changed_elsewhere_then_unanswered
             try:
                 card.get_by_role('button', name='Готово').click()
@@ -778,6 +787,7 @@ def test_unanswered_write_is_checked_first_and_never_repeated_under_a_new_id(lis
             expect(card.locator('.dialogfoot .note')).to_contain_text('Не сохранено: задачу изменили в другом месте')
             assert len(edits()) == 11 and edits()[10][2] == edits()[9][2], 'same request id and body'
             assert lists.entry(target)['description'] == 'Версия агента'
+            before = boards()
             card.get_by_role('button', name='Готово').click()
             expect(card).to_be_hidden()
             assert len(edits()) == 12 and edits()[11][2]['request_id'] != edits()[9][2]['request_id']
@@ -786,9 +796,20 @@ def test_unanswered_write_is_checked_first_and_never_repeated_under_a_new_id(lis
             entry = lists.entry(target)
             assert (entry['description'], entry['due']['raw']) == ('Пятая правка', 'к среде')
 
-            # A failed board read keeps the last board on screen and says it is stale.
+            # A failed board read keeps the last board on screen and says it is stale. The save above
+            # refreshed the board itself: the outage is queued only once that read was answered, so no
+            # read but the poll's own meets it. A poll while that refresh still reads is skipped, so it is
+            # asked for again until a board read follows the outage.
+            wait_until(lambda: boards() > before and lists.answered('GET', 'board') == boards(),
+                       "the save's own board read was answered")
             lists.fail('GET', 'board', 'refused')
-            session.refresh(frame)
+
+            def polled():
+                if not lists.state['faults']:
+                    return True  # a board read met the outage, and only a poll reads the board now
+                session.refresh(frame)
+                return False
+            wait_until(polled, 'a poll read the board and met the outage')
             expect(frame.locator('.alert')).to_contain_text('Доска не обновлена: показаны прежние данные')
             expect(frame.locator('.task')).to_have_count(23)
             frame.locator('.alert').get_by_role('button', name='Повторить').click()
@@ -2305,6 +2326,322 @@ def test_closing_while_the_card_reads_keeps_only_a_real_draft(lists, engine, ope
                 expect(card.get_by_role('button', name='Не сохранять')).to_be_visible()
                 assert kept(lists)['form']['description'] == 'Черновик'
             assert lists.entry(target)['description'] == 'Было'
+        finally:
+            session.close()
+
+
+def pump_until(page, check, what='the expected state', seconds=10):
+    """wait_until for a page whose requests the test routes: Playwright serves them only while it is called."""
+    deadline = time.monotonic() + seconds
+    while not check():
+        assert time.monotonic() < deadline, what
+        page.wait_for_timeout(50)
+
+
+@ENGINES
+@pytest.mark.parametrize('opened', ['open', 'resume'])
+@pytest.mark.parametrize('outcome', ['answer', 'failure'])
+def test_a_late_read_of_a_closed_card_never_changes_the_task_opened_again(lists, engine, opened, outcome):
+    """Closed while its first read was away, then the same task opened again and typed in: the late answer
+    or failure of that first read belongs to the closed card. The open one keeps its form and its draft."""
+    from playwright.sync_api import sync_playwright, expect
+    from starlette.responses import JSONResponse
+    (target,) = lists.add([{'text': 'Открыта второй раз', 'description': 'Было'}])
+    typed = 'Новый ввод после повторного открытия'
+    real = lists.api.routes['entry']['handler']
+    held, release = threading.Event(), threading.Event()
+
+    def first_read_held(request):
+        if held.is_set():
+            return real(request)
+        held.set()
+        assert release.wait(10), 'the test never released the first read'
+        return JSONResponse({'error': 'synthetic outage'}, status_code=503) if outcome == 'failure' else real(request)
+
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            # Every request passes through the test, so neither engine merges the second read of the
+            # same address into the first: the first can answer last, as it may on any network.
+            session.page.route('**/*', lambda route: route.continue_())
+            frame = session.mount()
+            if opened == 'resume':
+                open_card(frame, target).get_by_label('Описание').fill('Черновик')
+                pump_until(session.page, lambda: kept(lists).get('form', {}).get('description') == 'Черновик')
+                frame = leave_and_return(session)
+            card = frame.locator('dialog')
+            finished = []
+            session.page.on('requestfinished', lambda request: '/entry?' in request.url and finished.append(1))
+            lists.api.routes['entry']['handler'] = first_read_held
+            if opened == 'open':
+                frame.locator(f'.task[data-id="{target}"]').click()
+            else:
+                frame.locator('.draftbar').get_by_role('button', name='Продолжить').click()
+            expect(card.locator('.dialogfoot [role="status"]')).to_have_text('Загружаю…')
+            pump_until(session.page, held.is_set, 'the first read reached the store')
+            card.get_by_label('Закрыть').click()
+            if opened == 'resume':  # the continued draft is real: it is discarded on purpose
+                card.get_by_role('button', name='Не сохранять').click()
+            expect(card).to_be_hidden()
+            pump_until(session.page, lambda: kept(lists) == {}, 'nothing is kept from the closed card')
+
+            card = open_card(frame, target)
+            card.get_by_label('Описание').fill(typed)
+            pump_until(session.page, lambda: kept(lists).get('form', {}).get('description') == typed,
+                       'the new input is in the draft')
+            release.set()
+            pump_until(session.page, lambda: len(finished) == 2, 'the first read answered after the second')
+            session.page.wait_for_timeout(400)  # its answer reaches the frame through the host
+            expect(card.get_by_label('Описание')).to_have_value(typed)
+            expect(card.locator('.dialogfoot .note')).to_be_hidden()
+            expect(card.locator('.dialogbody')).not_to_have_attribute('inert', '')
+            assert kept(lists).get('form', {}).get('description') == typed, 'the draft still holds the new input'
+            assert not lists.calls('POST', 'edit')
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(target)['description'] == typed
+            assert lists.calls('POST', 'edit')[-1][2]['expected'] == {'description': 'Было'}
+        finally:
+            release.set()
+            lists.api.routes['entry']['handler'] = real
+            session.close()
+
+
+@ENGINES
+@pytest.mark.parametrize('case,trigger', [('relabel', 'poll'), ('relabel', 'save'), ('add', 'poll'),
+                                          ('add-drop', 'poll'), ('add-drop', 'save')])
+def test_one_address_changed_here_and_elsewhere_is_asked_about_and_a_cancelled_link_drops_nothing(
+        lists, engine, case, trigger):
+    """The card's link steps are kept by address. A label given here while the same address got another
+    one elsewhere stays on screen and is asked about like any field; a link added and removed again
+    here leaves nothing to save, even when the same link was added elsewhere meanwhile."""
+    from playwright.sync_api import sync_playwright, expect
+    url = 'https://docs.example.org/spec'
+    start = [{'label': 'Старая подпись', 'target': url}] if case == 'relabel' else []
+    (target,) = lists.add([{'text': 'Одна ссылка в двух местах', 'description': 'Было', 'references': start}])
+    theirs = [{'label': 'Подпись агента', 'target': url}]
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+
+            def add(label):
+                card.get_by_label('Адрес ссылки').fill(url)
+                card.get_by_label('Подпись ссылки, необязательно').fill(label)
+                card.get_by_role('button', name='Добавить').click()
+            if case == 'relabel':
+                card.get_by_role('button', name='Убрать ссылку: Старая подпись').click()
+                add('Моя подпись')
+            elif case == 'add':
+                add('Моя подпись')
+            else:
+                add('Подпись агента')
+                card.get_by_role('button', name='Убрать ссылку: Подпись агента').click()
+                card.get_by_label('Описание').fill('Дописано')
+            lists.update(target, details={'references': theirs})
+            edits = len(lists.calls('POST', 'edit'))
+            if trigger == 'poll':
+                poll(lists, session, frame)
+            else:
+                card.get_by_role('button', name='Готово').click()
+            asked = card.locator('.field', has=frame.locator('.refs')).locator('.note', has=frame.locator('.theirs'))
+            if case == 'add-drop':
+                if trigger == 'save':
+                    expect(card).to_be_hidden()
+                else:
+                    assert link_names(card) == ['Подпись агента']
+                    expect(asked).to_have_count(0)
+                    card.get_by_role('button', name='Готово').click()
+                    expect(card).to_be_hidden()
+                entry = lists.entry(target)
+                assert entry['details']['references'] == theirs, 'the link added elsewhere stays'
+                assert entry['description'] == 'Дописано'
+                assert kept(lists) == {}
+                return
+            expect(asked).to_contain_text('изменили в другом месте')
+            expect(asked.locator('.theirs')).to_have_text(f'«Подпись агента» — {url}')
+            assert link_names(card) == ['Моя подпись'], "the owner's label stays on screen"
+            assert lists.entry(target)['details']['references'] == theirs
+            if trigger == 'save':
+                assert len(lists.calls('POST', 'edit')) == edits + 1, 'the store refused the stale list'
+            card.get_by_role('button', name='Готово').click()
+            expect(card.locator('.dialogfoot .note')).to_contain_text('Сначала выбери')
+            wait_until(lambda: kept(lists).get('conflicts', {}).get('references') == [{'target': url,
+                       'label': 'Подпись агента'}], 'the question is kept with the draft')
+            sent = len(lists.calls('POST', 'edit'))
+            if case == 'relabel':
+                asked.get_by_role('button', name='Оставить моё').click()
+                expect(asked).to_have_count(0)
+                card.get_by_role('button', name='Готово').click()
+                expect(card).to_be_hidden()
+                assert lists.entry(target)['details']['references'] == [{'label': 'Моя подпись', 'target': url}]
+                last = lists.calls('POST', 'edit')[-1][2]
+                assert last['expected'] == {'details': {'references': theirs}}
+            else:
+                asked.get_by_role('button', name='Взять это значение').click()
+                expect(asked).to_have_count(0)
+                assert link_names(card) == ['Подпись агента']
+                card.get_by_role('button', name='Готово').click()
+                expect(card).to_be_hidden()
+                assert len(lists.calls('POST', 'edit')) == sent, 'nothing was left to save'
+                assert lists.entry(target)['details']['references'] == theirs
+            assert kept(lists) == {}
+        finally:
+            session.close()
+
+
+SPEC = 'https://docs.example.org/spec'
+SAME_ADDRESS = [{'label': label, 'target': SPEC} for label in ('Первая подпись', 'Вторая подпись', 'Третья подпись')]
+
+
+def drop_link(card, ref):
+    card.get_by_role('button', name=f"Убрать ссылку: {ref['label']}").click()
+
+
+def add_link(card, ref):
+    card.get_by_label('Адрес ссылки').fill(ref['target'])
+    card.get_by_label('Подпись ссылки, необязательно').fill(ref['label'])
+    card.get_by_role('button', name='Добавить').click()
+
+
+@ENGINES
+@pytest.mark.parametrize('removed,trigger', [('first', 'poll'), ('second', 'poll'), ('both', 'poll'),
+                                             ('second', 'resume')])
+def test_links_that_share_one_address_are_removed_one_by_one_over_every_read(lists, engine, removed, trigger):
+    """The store keeps several links with one address (an agent may write them). The card's × removes
+    exactly the one chosen, or each of them, and reading the task again brings none of them back."""
+    from playwright.sync_api import sync_playwright, expect
+    first, second = SAME_ADDRESS[:2]
+    other = {'label': 'Другая ссылка', 'target': 'https://other.example.org/page'}
+    (target,) = lists.add([{'text': 'Две ссылки одного адреса', 'references': [first, second, other]}])
+    gone = [first, second] if removed == 'both' else [first if removed == 'first' else second]
+    stays = [ref for ref in (first, second, other) if ref not in gone]
+    names = [ref['label'] for ref in stays]
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            for ref in gone:
+                drop_link(card, ref)
+            assert link_names(card) == names
+            if trigger == 'poll':
+                poll(lists, session, frame)
+            else:
+                wait_until(lambda: len(kept(lists).get('ops', [])) == len(gone), 'the draft holds the removal')
+                frame = leave_and_return(session)
+                card = resume(frame)
+                frame.wait_for_timeout(250)
+            assert link_names(card) == names, 'reading the task again brought a removed link back'
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(target)['details']['references'] == stays
+            (edit,) = lists.calls('POST', 'edit')
+            assert edit[2]['changes'] == {'details': {'references': stays}}
+            assert kept(lists) == {}
+        finally:
+            session.close()
+
+
+@ENGINES
+@pytest.mark.parametrize('choice', ['keep', 'take'])
+def test_links_of_one_address_changed_here_and_elsewhere_are_asked_about_together(lists, engine, choice):
+    """One of three links of an address removed here, another one elsewhere: the question shows every
+    link the store now holds there, and either answer leaves exactly the version chosen."""
+    from playwright.sync_api import sync_playwright, expect
+    first, second, third = SAME_ADDRESS
+    (target,) = lists.add([{'text': 'Три ссылки одного адреса', 'references': SAME_ADDRESS}])
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            drop_link(card, third)
+            lists.update(target, details={'references': [second, third]})
+            poll(lists, session, frame)
+            asked = card.locator('.field', has=frame.locator('.refs')).locator('.note', has=frame.locator('.theirs'))
+            expect(asked.locator('.theirs')).to_have_text(
+                f"«{second['label']}» — {SPEC} «{third['label']}» — {SPEC}")
+            assert link_names(card) == [second['label'], first['label']], "the owner's version stays on screen"
+            if choice == 'keep':
+                asked.get_by_role('button', name='Оставить моё').click()
+                card.get_by_role('button', name='Готово').click()
+                expect(card).to_be_hidden()
+                (edit,) = lists.calls('POST', 'edit')
+                assert edit[2]['expected'] == {'details': {'references': [second, third]}}
+                assert lists.entry(target)['details']['references'] == [second, first]
+            else:
+                asked.get_by_role('button', name='Взять это значение').click()
+                assert link_names(card) == [second['label'], third['label']]
+                card.get_by_role('button', name='Готово').click()
+                expect(card).to_be_hidden()
+                assert not lists.calls('POST', 'edit'), 'nothing was left to save'
+                assert lists.entry(target)['details']['references'] == [second, third]
+            assert kept(lists) == {}
+        finally:
+            session.close()
+
+
+@ENGINES
+@pytest.mark.parametrize('case,trigger', [('relabel-back', 'poll'), ('relabel-back', 'resume'),
+                                          ('add-remove', 'poll'), ('relabel-back', 'elsewhere')])
+def test_a_link_change_taken_back_after_its_unconfirmed_write_is_not_what_stays_saved(
+        lists, engine, case, trigger):
+    """A save that carried a link change got no answer and had not reached the store; the owner then puts
+    the link back as it was. That address was sent, so it is not untouched: reading the task again keeps
+    the owner's version, «Готово» repeats the request as itself, and what the form shows is saved over it.
+    A different label given elsewhere meanwhile is asked about, as for any field sent and typed back."""
+    from playwright.sync_api import sync_playwright, expect
+    old, mine = {'label': 'Старая подпись', 'target': SPEC}, {'label': 'Моя подпись', 'target': SPEC}
+    theirs = [{'label': 'Подпись агента', 'target': SPEC}]
+    start = [old] if case == 'relabel-back' else []
+    names = [ref['label'] for ref in start]
+    (target,) = lists.add([{'text': 'Отменённая правка ссылки', 'references': start}])
+    edits = lambda: [call[2] for call in lists.calls('POST', 'edit')]
+    with sync_playwright() as pw:
+        session = lists.open(pw, engine)
+        try:
+            frame = session.mount()
+            card = open_card(frame, target)
+            for ref in start:
+                drop_link(card, ref)
+            add_link(card, mine)
+            lists.fail('POST', 'edit', 'lost')  # never reached the store; the check read answers
+            card.get_by_role('button', name='Готово').click()
+            expect(card.locator('.dialogfoot .note')).to_contain_text('Сохранение не подтверждено')
+            assert lists.entry(target)['details'].get('references', []) == start
+            drop_link(card, mine)
+            for ref in start:
+                add_link(card, ref)
+            assert link_names(card) == names
+            if trigger == 'resume':
+                wait_until(lambda: len(kept(lists).get('ops', [])) == 4 and bool(kept(lists).get('pending')),
+                           'the draft holds the request and every link step')
+                frame = leave_and_return(session)
+                card = resume(frame)
+                frame.wait_for_timeout(250)
+            else:
+                if trigger == 'elsewhere':
+                    lists.update(target, details={'references': theirs})
+                poll(lists, session, frame)
+            assert link_names(card) == names, "reading the task again dropped the owner's last version"
+            if trigger == 'elsewhere':
+                asked = card.locator('.field', has=frame.locator('.refs')).locator('.note', has=frame.locator('.theirs'))
+                expect(asked.locator('.theirs')).to_have_text(f'«Подпись агента» — {SPEC}')
+                asked.get_by_role('button', name='Оставить моё').click()
+                card.get_by_role('button', name='Готово').click()  # the repeat is refused: the task moved
+                expect(card.locator('.dialogfoot .note')).to_contain_text('нажми «Готово» ещё раз')
+                assert link_names(card) == names
+            card.get_by_role('button', name='Готово').click()
+            expect(card).to_be_hidden()
+            assert lists.entry(target)['details'].get('references', []) == start
+            sent = edits()
+            assert len(sent) == 3 and sent[1] == sent[0], 'the unconfirmed request is repeated as itself, once'
+            assert sent[2]['request_id'] != sent[0]['request_id']
+            assert sent[2]['changes'] == {'details': {'references': start}}
+            assert sent[2]['expected'] == {'details': {'references': theirs if trigger == 'elsewhere' else [mine]}}
+            assert kept(lists) == {}
         finally:
             session.close()
 
