@@ -59,6 +59,10 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
     if (disposed) return;
     const seq = ++requestSeq;
     clearTimeout(pendingTimer);
+    // Commit the user's selection before the request returns. A slow All/Month
+    // history backfill must not leave the old range looking selected while the
+    // new request is already in flight.
+    state.range = selection.range;
     state.pending = selection; state.failed = null; state.status = 'loading'; state.message = ''; render();
     try {
       const data = await getData(queryString(selection));

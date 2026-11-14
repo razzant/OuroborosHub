@@ -1,6 +1,6 @@
 ---
 name: cache_efficiency_snapshot
-version: 0.8.0
+version: 0.8.1
 title: Cache Efficiency Snapshot
 description: Token and cache dashboard with exact intraday intervals, daily Week/Month/All bars, Custom dates, weighted cache hit rate, cache writes, measurement coverage and automatic local archive indexing.
 type: extension
