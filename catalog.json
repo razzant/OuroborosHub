@@ -340,54 +340,64 @@
       "version": "0.5.0"
     },
     {
-      "description": "Token and cache dashboard with daily Week/Month/All bars, exact Custom dates, weighted hit rates, cache writes, coverage and automatic archive backfill.",
+      "description": "Token and cache dashboard with exact intraday intervals, daily Week/Month/All bars, Custom dates, weighted cache hit rate, cache writes, measurement coverage and automatic local archive indexing.",
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "a4260ffb36defa3ef4fbf24dbef2dd066c2c4af995a91eddfcb1cc5b4b0ef363",
-          "size": 11136
+          "sha256": "2846e9ba521f81073b3e23a33f30adf334793013a52c6ec2786929c3f68e580a",
+          "size": 14863
         },
         {
           "path": "history.py",
-          "sha256": "292ac23d184c2d331c4cb9cd5604a256eeba05a28747e259bbd5f1c588baf882",
-          "size": 13647
+          "sha256": "50c49f4ee4165f0ceb91f85ae00fcd30f8de940a621d1ac2463f2f5434ba9c41",
+          "size": 80086
         },
         {
           "path": "plugin.py",
-          "sha256": "8791b775b9034225d695679f5a813cacf9fbf86c416c0d6d09f04c3d018e7e37",
-          "size": 45000
+          "sha256": "28d228d22a1f9f4da562cd3322619f5fc98f7c6accc8fe8604c7be8c2fb15b5c",
+          "size": 61866
         },
         {
           "path": "test_cache_efficiency.py",
-          "sha256": "e1259facf7ceb2e31980997a4e59183f9eefeda826e050d812acd706a964617c",
-          "size": 51948
+          "sha256": "3d54f8aad4e0cc934c2915df466d299736c50c6d4d00f87678591bf57fa4de1d",
+          "size": 65719
+        },
+        {
+          "path": "test_consistency.py",
+          "sha256": "2c00e07afe67586acadbb18b400fc396f5c8b83246d5c8b883f7abfafd423c83",
+          "size": 12345
         },
         {
           "path": "test_history.py",
-          "sha256": "088bebb2206ee3859ecc41c3e65c285f7f8bf3f71723be531d62b4020f45bb87",
-          "size": 19010
+          "sha256": "ae2086b71b56d71f53e1b192a73e068f4c4f422f198d0d9cb577e8ff46cfd51b",
+          "size": 44786
+        },
+        {
+          "path": "test_history_regressions.py",
+          "sha256": "89b4a150d092c70f5973fd5faaed10cc2c75edbd20e5f54a6cdacb0874d81ca4",
+          "size": 20321
         },
         {
           "path": "test_widget.cjs",
-          "sha256": "d02b3efe494e1e0b142c55dc6454ee8ff00b641d82f83a5164ca69189701354f",
-          "size": 13545
+          "sha256": "08d4275adc46e1b40c038651074c977e2b3d2167ff66f5d11c37a93e1f1711e3",
+          "size": 23939
         },
         {
           "path": "test_widget_data.py",
-          "sha256": "a47c1bbac20ddf848a2501ae3ff3df8773e0f33300d919cd6c96948d1b1bff9d",
-          "size": 3668
+          "sha256": "182f895b85e2b5caa9f866bc944f24295676feeb4ae5788181ae5b8b61aa76d5",
+          "size": 4065
         },
         {
           "path": "widget.js",
-          "sha256": "903e783f8296fa21588ac24be2de8d7d8d31c1f7973e3ce50108fa58220c2f49",
-          "size": 29777
+          "sha256": "896f863906967b36297985a441347b80db527208e824d73e7436903f418a8071",
+          "size": 36522
         }
       ],
       "name": "cache_efficiency_snapshot",
       "slug": "cache_efficiency_snapshot",
       "title": "Cache Efficiency Snapshot",
       "type": "extension",
-      "version": "0.8.0"
+      "version": "0.8.1"
     },
     {
       "description": "Единый календарь владельца — локальные календари, CalDAV (включая Яндекс) и Google с личным OAuth-клиентом; события, повторения, доступ, связанные копии, свободные окна, напоминания и виджет День/Неделя.",
