@@ -4,10 +4,15 @@ translation memory's rendering of it, and the real widget.js drawing Russian lab
 What is held here:
 - strings_en.json is the one source of the English: valid keys and placeholders, every key the widget asks for is
   in it, and the few phrases the widget keeps for its first screen (MIN_EN) are the table's own;
-- the plugin registers the table with the host's translation generator (register_catalog, prefix quotas.ui);
+- the plugin imports no host module and registers nothing with the host outside the PluginAPI: the i18n route reads
+  the language and its memory from the gateway's own GET /api/ui/i18n and reports what the memory lacks through the
+  gateway's POST /api/ui/i18n/missing (the host writes its queue); a host-global catalog is never touched;
 - the i18n route says nothing but English for English, and for a chosen language gives our keys out of the
-  translation memory (a text, or the forms of a phrase that counts), reports what is missing once, and falls back
-  on the gateway's own routes when the host's modules cannot be imported;
+  translation memory (a text, or the forms of a phrase that counts; an owner's or an import's pin as it is), shows
+  English for a generated entry of another English and reports it reworded, reports a missing phrase once, offers a
+  batch the host did not take whole once more after MISS_RETRY_SEC, reports a phrase again only after MISS_AGAIN_SEC or
+  when the memory shows a loss (Regenerate empties its refusals), and never writes on every reading or on every batch
+  the host's translator writes;
 - the real widget, given a Russian answer, draws Russian labels, the plural form of 1 / 3 / 5 accounts and the
   dates in Russian; a phrase the translation lacks stays English; with no text table at all it draws its one
   minimal card and a Retry.
@@ -90,9 +95,7 @@ def test_the_phrases_the_widget_keeps_for_its_first_screen_are_the_tables():
 
 def test_the_plugin_reads_the_one_file():
     assert plugin.english_strings() == plugin.clean_strings(STRINGS) == STRINGS
-    rows = plugin.catalog_rows()
-    assert set(rows) == set(STRINGS)
-    assert rows["n.account"] == "{n} accounts" and rows["btn.refresh"] == "Refresh"
+    assert plugin._english_text(STRINGS["n.account"]) == "{n} accounts" and STRINGS["btn.refresh"] == "Refresh"
     # a broken file is no phrases, never an exception
     assert plugin.english_strings(HERE / "missing.json") == {}
     assert plugin.clean_strings({"a.b": "x", "c.d": {"one": "1", "other": "n", "few": "?"}, "e.f": 3, "": "x"}) == \
@@ -100,37 +103,68 @@ def test_the_plugin_reads_the_one_file():
 
 
 # ---------------------------------------------------------------------------
-# the plugin and the host's translation memory (both replaced by small fakes)
+# the plugin and the gateway's interface-language routes (the gateway replaced by a faithful small fake)
+
+PREFIX = "code:quotas.ui."
 
 
-class FakeMemory:
-    def __init__(self, tag, doc=None):
-        self.tag, self.doc, self.recorded = tag, doc, []
-
-    def current_language(self):
-        return self.tag
-
-    def cached_memory(self, _root, _tag):
-        return self.doc
-
-    def record_missing(self, _root, tag, items):
-        self.recorded.append((tag, items))
-        return {"accepted": len(items), "dropped": 0, "pending": len(items)}
-
-
-class FakeTranslation:
-    def __init__(self):
-        self.catalogs, self.events = [], []
-
-    def register_catalog(self, prefix, table, note):
-        self.catalogs.append((prefix, table, note))
-
-    def on_language_event(self, event, _root, tag):
-        self.events.append((event, tag))
-
-
-def _english(tag):
+def _is_english(tag):
     return not tag or str(tag).lower().split("-")[0] == "en"
+
+
+class Gateway:
+    """The two routes of ouroboros/gateway/ui_i18n.py the plugin calls over loopback (``_request_json``), answered
+    as the host answers them: ``GET /api/ui/i18n`` is ``memory_payload`` (the language, the memory's revision, its
+    entries and plural map, ``english`` for English, ``memory_error`` for a memory it cannot read); ``POST
+    /api/ui/i18n/missing`` is ``record_missing`` behind the gateway's checks: a language that is not the current one
+    is a 409, English accepts nothing, at most 200 items are read, a key the memory refused or one the full queue
+    cannot take is dropped, a key already queued counts up (accepted) and every accepted call rewrites the queue.
+    ``fail`` answers the POSTs with one transport outcome instead."""
+
+    MAX_PENDING = 2000  # i18n_memory.MAX_PENDING
+
+    def __init__(self, language, doc=None, *, refused=(), memory_error=""):
+        self.language, self.doc, self.refused, self.memory_error = language, doc, set(refused), memory_error
+        self.pending, self.calls, self.writes, self.fail = {}, [], 0, None
+
+    def posts(self):
+        return [payload for method, _path, payload in self.calls if method == "POST"]
+
+    def __call__(self, port, path, method="GET", timeout_sec=0, payload=None):
+        self.calls.append((method, path, payload))
+        english = _is_english(self.language)
+        if (method, path) == ("GET", "/api/ui/i18n"):
+            doc = None if english or self.memory_error else self.doc
+            return {"language": self.language, "chosen": bool(self.language), "english": english,
+                    "revision": int(doc["revision"]) if doc else 0, "plural_select": doc.get("plural_select") if doc else None,
+                    "entries": doc["entries"] if doc else {}, "memory_error": self.memory_error,
+                    "stats": {"pending": len(self.pending), "refused": 0 if english else len(self.refused)}}, "", 200
+        if (method, path) == ("POST", "/api/ui/i18n/missing"):
+            if self.fail is not None:
+                return self.fail
+            if payload.get("language") != self.language:
+                return None, "HTTP 409 from /api/ui/i18n/missing", 409
+            items = payload["items"]
+            if english:
+                return {"accepted": 0, "dropped": len(items), "pending": 0}, "", 200
+            cleaned = [item for item in items[:200] if isinstance(item, dict)]
+            accepted = dropped = 0
+            for item in cleaned:
+                key = str(item.get("key") or "")
+                if not key or len(key) > 2000 or key in self.refused:
+                    dropped += 1
+                elif key in self.pending:
+                    self.pending[key]["count"] += 1
+                    accepted += 1
+                elif len(self.pending) >= self.MAX_PENDING:
+                    dropped += 1
+                else:
+                    self.pending[key] = {"context": item.get("context"), "count": 1}
+                    accepted += 1
+            self.writes += 1
+            return {"accepted": accepted, "dropped": dropped + len(items) - len(cleaned),
+                    "pending": len(self.pending)}, "", 200
+        raise AssertionError(f"the plugin asked the host for {method} {path}")
 
 
 class Host(_Host):
@@ -150,65 +184,87 @@ def ru_select():
 
 
 def ru_doc():
-    entry = "code:quotas.ui."
     return {"revision": 12, "plural_select": ru_select(), "entries": {
-        entry + "btn.about": {"text": "О виджете", "provenance": "generated"},
-        entry + "btn.refresh": {"text": "Обновить", "provenance": "generated"},
-        entry + "n.account": {"forms": {"one": "{n} аккаунт", "few": "{n} аккаунта", "many": "{n} аккаунтов",
-                                        "other": "{n} аккаунта"}, "provenance": "generated"},
+        PREFIX + "btn.about": {"text": "О виджете", "provenance": "generated", "source": STRINGS["btn.about"]},
+        PREFIX + "btn.refresh": {"text": "Обновить", "provenance": "generated", "source": "Refresh"},
+        PREFIX + "n.account": {"forms": {"one": "{n} аккаунт", "few": "{n} аккаунта", "many": "{n} аккаунтов",
+                                         "other": "{n} аккаунта"}, "provenance": "generated", "source": "{n} accounts"},
         "code:task.headline.done": {"text": "Готово", "provenance": "generated"},  # the core's, not ours
     }}
 
 
 @pytest.fixture
-def fakes(monkeypatch):
-    def install(tag, doc=None):
-        memory, translation = FakeMemory(tag, doc), FakeTranslation()
-        monkeypatch.setattr(plugin, "_host_i18n", lambda: (memory, translation, _english))
-        plugin._REPORTED_MISSES.clear()
-        return memory, translation
+def gateway(monkeypatch):
+    """Installs a fresh Gateway as the plugin's one way to the host, with this load's miss record empty."""
+    def install(language, doc=None, **kwargs):
+        fake = Gateway(language, doc, **kwargs)
+        monkeypatch.setattr(plugin, "_request_json", fake)
+        monkeypatch.setattr(plugin, "_MISSES", {}, raising=False)  # raising=False: the same tests can be run against an older plugin
+        return fake
     return install
 
 
-def test_the_plugin_registers_its_table_with_the_generator(tmp_path, fakes):
-    _memory, translation = fakes("")
+def test_the_plugin_imports_no_host_module_and_registers_no_host_catalog(tmp_path, gateway, monkeypatch):
+    # The plugin's source names no host module, and a load and a reading import none either (a host process has
+    # them importable: a fake host translation module here records any registration).
+    import builtins
+    import sys
+    import types
+    source = (HERE / "plugin.py").read_text(encoding="utf-8")
+    assert not re.search(r"^\s*(from|import)\s+ouroboros\b|import_module\(\s*['\"]ouroboros", source, re.M)
+    registered = []
+    fake = types.ModuleType("ouroboros.ui_translation")
+    fake.register_catalog = lambda *args, **kwargs: registered.append(args)
+    fake._EXTRA_CATALOGS = {}
+    monkeypatch.setitem(sys.modules, "ouroboros", types.ModuleType("ouroboros"))
+    monkeypatch.setitem(sys.modules, "ouroboros.ui_translation", fake)
+    imported = []
+    real_import = builtins.__import__
+
+    def watched(name, *args, **kwargs):
+        if name == "ouroboros" or name.startswith("ouroboros."):
+            imported.append(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", watched)
     host = Host(tmp_path)
+    fake_gateway = gateway("ru", ru_doc())
     plugin.register(host)
-    assert len(translation.catalogs) == 1
-    prefix, table, note = translation.catalogs[0]
-    assert prefix == "quotas.ui" and "quota" in note.lower() and len(note) < 400
-    assert table() == plugin.catalog_rows() and table()["plate.of"] == "of {n} account-windows left"
-    assert "i18n" in host.routes
-
-
-def test_registration_survives_a_host_without_the_generator(tmp_path, monkeypatch):
-    monkeypatch.setattr(plugin, "_host_i18n", lambda: (None, None, None))
-    host = Host(tmp_path)
-    plugin.register(host)  # no exception, and the route is there
-    assert "i18n" in host.routes
+    host.routes["i18n"]({})
+    for callback in host.unload:
+        callback()
+    assert imported == [] and registered == [] and fake._EXTRA_CATALOGS == {}
+    # everything the skill registered went through the API it was given, which unload tears down
+    assert set(host.routes) >= {"i18n", "quotas", "chip", "refresh", "prefs", "display"}
+    assert [path for _method, path, _payload in fake_gateway.calls] == \
+        ["/api/ui/i18n"] + ["/api/ui/i18n/missing"] * len(fake_gateway.posts())
 
 
 @pytest.mark.parametrize("tag", ["", "en", "en-GB"])
-def test_the_route_says_only_english_for_english(tmp_path, fakes, tag):
-    memory, translation = fakes(tag, ru_doc())
+def test_the_route_says_only_english_for_english(tmp_path, gateway, tag):
+    fake = gateway(tag, ru_doc())
     host = Host(tmp_path)
     plugin.register(host)
     answer = host.routes["i18n"]({})
     assert answer["language"] == "" and answer["strings"] == {} and answer["revision"] == 0
     assert answer["en"] == STRINGS
-    assert memory.recorded == [] and translation.events == []
+    assert fake.posts() == [] and fake.writes == 0
 
 
-def test_the_route_is_english_outside_the_hosts_own_runtime(tmp_path, fakes):
-    fakes("ru", ru_doc())
+def test_the_route_is_english_outside_the_hosts_own_runtime(tmp_path, gateway):
+    fake = gateway("ru", ru_doc())
     host = _Host(tmp_path)  # its runtime info has no data_dir: nothing to read a language from
     plugin.register(host)
     answer = host.routes["i18n"]({})
     assert answer["language"] == "" and answer["strings"] == {} and answer["en"] == STRINGS
+    assert fake.calls == []
 
 
-def test_the_route_gives_the_translation_of_our_keys_only(tmp_path, fakes):
-    memory, translation = fakes("ru", ru_doc())
+def test_the_route_gives_the_translation_of_our_keys_only_and_keeps_pins(tmp_path, gateway):
+    doc = ru_doc()
+    doc["entries"][PREFIX + "btn.retry"] = {"text": "Ещё раз", "provenance": "owner", "source": "Try again"}
+    doc["entries"][PREFIX + "min.title"] = {"text": "Квоты", "provenance": "imported"}
+    gateway("ru", doc)
     host = Host(tmp_path)
     plugin.register(host)
     answer = host.routes["i18n"]({})
@@ -217,15 +273,32 @@ def test_the_route_gives_the_translation_of_our_keys_only(tmp_path, fakes):
     assert answer["strings"]["btn.about"] == "О виджете"
     assert answer["strings"]["n.account"] == {"forms": {"one": "{n} аккаунт", "few": "{n} аккаунта",
                                                          "many": "{n} аккаунтов", "other": "{n} аккаунта"}}
-    assert set(answer["strings"]) == {"btn.about", "btn.refresh", "n.account"}  # nothing of the core's
+    # an owner's pin is shown whatever English it was made for, an import's as it is: never replaced by English
+    assert answer["strings"]["btn.retry"] == "Ещё раз" and answer["strings"]["min.title"] == "Квоты"
+    assert set(answer["strings"]) == {"btn.about", "btn.refresh", "n.account", "btn.retry", "min.title"}
     assert answer["en"] == STRINGS
 
 
-def test_the_reading_carries_the_text_table_only_when_asked_for_it(tmp_path, fakes, monkeypatch):
+def test_a_generated_translation_of_another_english_shows_english_and_is_reported_reworded(tmp_path, gateway):
+    doc = ru_doc()
+    doc["entries"][PREFIX + "btn.refresh"]["source"] = "Reload"  # the English it was made for
+    doc["entries"][PREFIX + "btn.about"]["source"] = "  " + STRINGS["btn.about"] + "\n"  # the same, spaced otherwise
+    fake = gateway("ru", doc)
+    host = Host(tmp_path)
+    plugin.register(host)
+    answer = host.routes["i18n"]({})
+    assert "btn.refresh" not in answer["strings"] and answer["strings"]["btn.about"] == "О виджете"
+    sent = {item["key"]: item["context"] for batch in fake.posts() for item in batch["items"]}
+    assert sent[PREFIX + "btn.refresh"] == {"source": "Refresh", "table": "quotas.ui", "note": plugin.I18N_NOTE,
+                                            "role": "quotas", "stale": True}
+    assert "stale" not in sent[PREFIX + "plate.of"] and PREFIX + "btn.about" not in sent
+
+
+def test_the_reading_carries_the_text_table_only_when_asked_for_it(tmp_path, gateway, monkeypatch):
     # a widget whose text table did not come by the i18n route asks for it with the reading (text=1): the numbers
     # are never held back for the words; a plain reading does not carry it
     from test_passive_quota_read import envelope
-    fakes("ru", ru_doc())
+    gateway("ru", ru_doc())
     monkeypatch.setattr(plugin, "_fetch_status", lambda _port: (envelope(), ""))
     host = Host(tmp_path)
     plugin.register(host)
@@ -240,61 +313,187 @@ def test_the_reading_carries_the_text_table_only_when_asked_for_it(tmp_path, fak
     assert asked["groups"] == plain["groups"], "the text does not change the reading"
 
 
-def test_what_is_missing_is_reported_once_and_wakes_the_generator(tmp_path, fakes):
-    memory, translation = fakes("ru", ru_doc())
+def test_what_is_missing_is_reported_once_and_never_on_every_reading_or_translated_batch(tmp_path, gateway):
+    fake = gateway("ru", ru_doc())
     host = Host(tmp_path)
     plugin.register(host)
     host.routes["i18n"]({})
-    assert len(memory.recorded) >= 3 and translation.events == [("missing", "ru")]
-    tag = memory.recorded[0][0]
-    items = [item for _tag, batch in memory.recorded for item in batch]
-    batches = len(memory.recorded)
-    assert tag == "ru" and len(items) == len(STRINGS) - 3
-    first = next(item for item in items if item["key"] == "code:quotas.ui.plate.of")
-    assert first["context"]["source"] == "of {n} account-windows left" and first["context"]["table"] == "quotas.ui"
-    host.routes["i18n"]({})  # the same misses are not reported again
-    assert len(memory.recorded) == batches and len(translation.events) == 1
+    batches = fake.posts()
+    items = [item for batch in batches for item in batch["items"]]
+    assert len(batches) >= 3 and all(len(batch["items"]) <= 200 and batch["language"] == "ru" for batch in batches)
+    assert {item["key"] for item in items} == {PREFIX + key for key in STRINGS} - {
+        PREFIX + "btn.about", PREFIX + "btn.refresh", PREFIX + "n.account"}
+    first = next(item for item in items if item["key"] == PREFIX + "plate.of")
+    assert first["context"] == {"source": "of {n} account-windows left", "table": "quotas.ui",
+                                "note": plugin.I18N_NOTE, "role": "quotas"}
+    plural = next(item for item in items if item["key"] == PREFIX + "win.avg_read")
+    assert plural["context"]["source"] == plugin._english_text(STRINGS["win.avg_read"])
+    assert fake.writes == len(batches) and len(fake.pending) == len(items)
+    for _ in range(5):  # the widget reads every 30 s: nothing more is written
+        host.routes["i18n"]({})
+    # the translator wrote a batch (the revision moved): the phrases still queued are not sent again
+    fake.doc["revision"] = 13
+    fake.doc["entries"][PREFIX + "plate.of"] = {"text": "из {n} аккаунт-окон", "provenance": "generated",
+                                                "source": "of {n} account-windows left"}
+    for _ in range(3):
+        host.routes["i18n"]({})
+    assert len(fake.posts()) == len(batches) and fake.writes == len(batches)
+    assert host.routes["i18n"]({})["strings"]["plate.of"] == "из {n} аккаунт-окон"
 
 
-def test_a_language_with_no_memory_yet_is_english_and_queues_everything(tmp_path, fakes):
-    memory, translation = fakes("de", None)
+def test_a_phrase_still_missing_is_reported_once_more_after_the_long_rest(gateway):
+    fake = gateway("ru", ru_doc())
+    english = plugin.english_strings()
+    plugin._view_from_gateway({}, english, 8765, now=0.0)
+    first = len(fake.posts())
+    plugin._view_from_gateway({}, english, 8765, now=plugin.MISS_AGAIN_SEC - 1)
+    assert len(fake.posts()) == first
+    plugin._view_from_gateway({}, english, 8765, now=plugin.MISS_AGAIN_SEC)
+    again = [item["key"] for batch in fake.posts()[first:] for item in batch["items"]]
+    assert len(again) == len(STRINGS) - 3 and len(fake.pending) == len(STRINGS) - 3  # queued ones counted up
+    plugin._view_from_gateway({}, english, 8765, now=plugin.MISS_AGAIN_SEC + 60)
+    assert len(fake.posts()) == 2 * first
+
+
+@pytest.mark.parametrize("loss", ["regenerate", "older_revision"])
+def test_a_memory_that_lost_phrases_has_them_reported_again(gateway, loss):
+    refused = PREFIX + "plate.of"
+    fake = gateway("ru", ru_doc(), refused=[refused])
+    english = plugin.english_strings()
+    plugin._view_from_gateway({}, english, 8765, now=0.0)
+    plugin._view_from_gateway({}, english, 8765, now=plugin.MISS_RETRY_SEC)  # the one retry of the batch taken in part
+    before = len(fake.posts())
+    assert refused not in fake.pending
+    plugin._view_from_gateway({}, english, 8765, now=plugin.MISS_RETRY_SEC + 30)
+    assert len(fake.posts()) == before, "a phrase the host refused rests"
+    if loss == "regenerate":
+        # Regenerate drops the generated entries and empties the refusals (the revision moves on): the three
+        # phrases shown before are missing, and the refused one may be taken now
+        fake.doc = {"revision": 14, "plural_select": ru_select(), "entries": {}}
+        fake.refused.clear()
+    else:
+        fake.doc = {"revision": 0, "plural_select": ru_select(), "entries": {}}  # a memory replaced
+    plugin._view_from_gateway({}, english, 8765, now=plugin.MISS_RETRY_SEC + 60)
+    sent = {item["key"] for batch in fake.posts()[before:] for item in batch["items"]}
+    lost = {PREFIX + "btn.about", PREFIX + "btn.refresh", PREFIX + "n.account"}
+    # every phrase still missing is reported once more, the one the host refused before too
+    assert lost <= sent and refused in sent and len(sent) == len(STRINGS)
+    assert (refused in fake.pending) == (loss == "regenerate"), "taken once its refusal is forgotten, not before"
+    plugin._view_from_gateway({}, english, 8765, now=plugin.MISS_RETRY_SEC + 90)
+    assert len({item["key"] for batch in fake.posts()[before:] for item in batch["items"]}) == len(STRINGS)
+
+
+def test_a_batch_the_host_took_in_part_is_offered_once_more_later_then_rests(gateway):
+    # The host answers counts, not which keys it dropped: a batch with one refused key is not taken whole. It is
+    # not sent again at the next reading, once more after MISS_RETRY_SEC, then it rests.
+    refused = PREFIX + "plate.of"
+    fake = gateway("ru", ru_doc(), refused=[refused])
+    english = plugin.english_strings()
+    plugin._view_from_gateway({}, english, 8765, now=1000.0)
+    first = fake.posts()
+    partial = [batch for batch in first if any(item["key"] == refused for item in batch["items"])]
+    assert len(partial) == 1 and len(first) > 1, "only the batch with the refused key was taken in part"
+    plugin._view_from_gateway({}, english, 8765, now=1030.0)
+    plugin._view_from_gateway({}, english, 8765, now=1000.0 + plugin.MISS_RETRY_SEC - 1)
+    assert fake.posts() == first, "not on every reading"
+    plugin._view_from_gateway({}, english, 8765, now=1000.0 + plugin.MISS_RETRY_SEC)
+    retry = fake.posts()[len(first):]
+    assert [item["key"] for batch in retry for item in batch["items"]] == [item["key"] for item in partial[0]["items"]]
+    for later in (2, 3, 10, 60):
+        plugin._view_from_gateway({}, english, 8765, now=1000.0 + later * plugin.MISS_RETRY_SEC)
+    assert len(fake.posts()) == len(first) + 1 and fake.writes == len(first) + 1
+
+
+@pytest.mark.parametrize("outcome", [
+    (None, "TimeoutError: timed out", plugin.NO_ANSWER_STATUS),   # may have reached the host: no answer read
+    (None, "ConnectionRefusedError: refused", 0),                # never reached it
+    (None, "HTTP 500 from /api/ui/i18n/missing", 500),
+    ({"accepted": "all"}, "", 200),                              # an answer that is not the host's counts
+])
+def test_a_batch_the_host_did_not_take_is_offered_once_more_after_the_delay(tmp_path, gateway, outcome):
+    fake = gateway("ru", ru_doc())
+    fake.fail = outcome
+    english = plugin.english_strings()
+    plugin._view_from_gateway({}, english, 8765, now=50.0)
+    first = len(fake.posts())
+    assert first >= 3
+    plugin._view_from_gateway({}, english, 8765, now=80.0)
+    assert len(fake.posts()) == first
+    fake.fail = None
+    plugin._view_from_gateway({}, english, 8765, now=50.0 + plugin.MISS_RETRY_SEC)
+    assert len(fake.posts()) == 2 * first and len(fake.pending) == len(STRINGS) - 3
+    plugin._view_from_gateway({}, english, 8765, now=50.0 + 5 * plugin.MISS_RETRY_SEC)
+    assert len(fake.posts()) == 2 * first
+
+
+def test_a_language_changed_between_the_read_and_the_report_is_not_resent_at_once(gateway, monkeypatch):
+    fake = gateway("ru", ru_doc())
+
+    def switched(port, path, method="GET", timeout_sec=0, payload=None):
+        answer = fake(port, path, method, timeout_sec, payload)
+        if method == "GET":
+            fake.language = "de"  # the owner chose another language just after the read
+        return answer
+
+    monkeypatch.setattr(plugin, "_request_json", switched)
+    english = plugin.english_strings()
+    plugin._view_from_gateway({}, english, 8765, now=0.0)
+    assert fake.posts() and fake.writes == 0  # every report answered 409: nothing queued under another language
+    monkeypatch.setattr(plugin, "_request_json", fake)
+    fake.language = "ru"
+    plugin._view_from_gateway({}, english, 8765, now=1.0)
+    posts = len(fake.posts())
+    plugin._view_from_gateway({}, english, 8765, now=plugin.MISS_RETRY_SEC + 1)
+    assert len(fake.posts()) > posts and fake.writes == len(fake.posts()) - posts
+
+
+def test_two_readings_at_once_never_claim_one_key_twice(gateway):
+    # The i18n route and a reading with text=1 run on route threads at once: each key is claimed by one of them.
+    import threading
+    gateway("ru", ru_doc())
+    english = plugin.english_strings()
+    wanted = {key: False for key in english}
+    start, claimed = threading.Barrier(4), []
+
+    def read():
+        start.wait()
+        claimed.append(plugin._claim_misses("ru", 12, 0, english, wanted, 10.0))
+
+    threads = [threading.Thread(target=read) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    keys = [item["key"] for batch in claimed for item in batch]
+    assert len(claimed) == 4 and len(keys) == len(set(keys)) == len(english)
+
+
+def test_a_language_with_no_memory_yet_is_english_and_queues_everything(tmp_path, gateway):
+    fake = gateway("de", None)
     host = Host(tmp_path)
     plugin.register(host)
     answer = host.routes["i18n"]({})
     assert answer["language"] == "de" and answer["strings"] == {} and answer["en"] == STRINGS
-    assert sum(len(batch) for _tag, batch in memory.recorded) == len(STRINGS)
+    assert sum(len(batch["items"]) for batch in fake.posts()) == len(STRINGS) == len(fake.pending)
 
 
-def test_a_broken_memory_never_breaks_the_route(tmp_path, fakes):
-    memory, _translation = fakes("ru", ru_doc())
-    memory.cached_memory = lambda *_: (_ for _ in ()).throw(ValueError("malformed"))
+def test_a_memory_the_host_cannot_read_reports_nothing(tmp_path, gateway):
+    fake = gateway("ru", ru_doc(), memory_error="ru.json: unreadable JSON")
+    host = Host(tmp_path)
+    plugin.register(host)
+    answer = host.routes["i18n"]({})
+    assert answer["language"] == "ru" and answer["strings"] == {} and answer["en"] == STRINGS
+    assert fake.posts() == []
+
+
+def test_a_broken_answer_never_breaks_the_route(tmp_path, gateway, monkeypatch):
+    gateway("ru", ru_doc())
+    monkeypatch.setattr(plugin, "_request_json", lambda *_a, **_k: (_ for _ in ()).throw(ValueError("malformed")))
     host = Host(tmp_path)
     plugin.register(host)
     answer = host.routes["i18n"]({})
     assert answer["language"] == "" and answer["strings"] == {} and answer["en"] == STRINGS
     assert any("i18n read failed" in message for _level, message in host.logs)
-
-
-def test_without_the_hosts_modules_the_gateways_routes_stand_in(tmp_path, monkeypatch):
-    monkeypatch.setattr(plugin, "_host_i18n", lambda: (None, None, None))
-    plugin._REPORTED_MISSES.clear()
-    calls = []
-
-    def fake_request(port, path, method="GET", timeout_sec=0, payload=None):
-        calls.append((method, path, payload))
-        if path == "/api/ui/i18n":
-            return {"language": "ru", "english": False, "revision": 5, "plural_select": ru_select(),
-                    "entries": ru_doc()["entries"]}, "", 200
-        return {"accepted": len(payload["items"])}, "", 200
-
-    monkeypatch.setattr(plugin, "_request_json", fake_request)
-    host = Host(tmp_path)
-    plugin.register(host)
-    answer = host.routes["i18n"]({})
-    assert answer["language"] == "ru" and answer["revision"] == 5 and answer["strings"]["btn.refresh"] == "Обновить"
-    posted = [c for c in calls if c[0] == "POST"]
-    assert len(posted) >= 3 and posted[0][1] == "/api/ui/i18n/missing"
-    assert posted[0][2]["language"] == "ru" and posted[0][2]["items"][0]["key"].startswith("code:quotas.ui.")
 
 
 # ---------------------------------------------------------------------------
@@ -685,34 +884,6 @@ def test_old_language_response_cannot_cross_page_lifecycle(tmp_path, path):
                                  'TEST_VIEW': json.dumps(_views(tmp_path)['n1'])},
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-def test_loopback_misses_retry_rejections_and_queue_all_chunks(tmp_path, monkeypatch):
-    monkeypatch.setattr(plugin, '_host_i18n', lambda: (None, None, None))
-    plugin._REPORTED_MISSES.clear()
-    rejected = True
-    batches = []
-
-    def request(port, path, method='GET', timeout_sec=0, payload=None):
-        if method == 'GET':
-            return {'language': 'ru', 'entries': {}}, '', 200
-        batch = payload['items']
-        batches.append(batch)
-        assert len(batch) <= 200
-        return ({'accepted': 0} if rejected else {'accepted': len(batch)}), '', 200
-
-    monkeypatch.setattr(plugin, '_request_json', request)
-    host = Host(tmp_path)
-    plugin.i18n_view(host)
-    assert not plugin._REPORTED_MISSES.get('ru')
-    rejected = False
-    batches.clear()
-    plugin.i18n_view(host)
-    assert {item['key'] for batch in batches for item in batch} == {'code:quotas.ui.' + k for k in STRINGS}
-    assert len(batches) >= 3
-    batches.clear()
-    plugin.i18n_view(host)
-    assert not batches
 
 
 def test_selection_and_billing_words_use_current_translation(tmp_path):

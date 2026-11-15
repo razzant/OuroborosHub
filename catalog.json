@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/aef40b73328422a626a769ad74c4cff0caa75fd6",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
   "skills": [
     {
@@ -955,8 +955,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "67998ede3e214b47b2091ca28d10e15835b9833155d662ce48eaf5a637f04854",
-          "size": 87712
+          "sha256": "30309ce74a1e570603732b5ce290dcbb3694935dd6cbd32c91e3e1b162c2b5d1",
+          "size": 94906
         },
         {
           "path": "conftest.py",
@@ -965,13 +965,13 @@
         },
         {
           "path": "plugin.py",
-          "sha256": "22ba2ab63b72762121e033b38ad96971b60caa940082670b7845b5a2fe704863",
-          "size": 106280
+          "sha256": "b0a142959b57840adb3851ad2be269c0d8e1566af85a28c3fb7798d98983a77c",
+          "size": 112403
         },
         {
           "path": "quota_analytics.py",
-          "sha256": "ba6f5cceea4003d6d9f5392f5e8792a8334d8ce46bda1aa24364a7219d378862",
-          "size": 34158
+          "sha256": "7892143a92d223a75a6b816c7d4824a8ca091308aa72b364cf74250568fe57e5",
+          "size": 38564
         },
         {
           "path": "quota_chip.py",
@@ -980,8 +980,8 @@
         },
         {
           "path": "quota_context.py",
-          "sha256": "348e8811f5d20d80174c0b6a362c4fbd8c4386f8ee64da967dfa855802692fcb",
-          "size": 19225
+          "sha256": "ab48170275b15a34e0e2bb6b13ec3a1b5d7902ea842079a655fae55c4254ad17",
+          "size": 27482
         },
         {
           "path": "quota_history.py",
@@ -995,23 +995,23 @@
         },
         {
           "path": "quota_resources.py",
-          "sha256": "c1dac4718f8efb2e37d160d2393bbf56edb862a35962c88d1d55ba333018484f",
-          "size": 13017
+          "sha256": "8e3bcd77638a4be8a80da7d8fc71f902fe29dc815b28e83aa9f57f1d4ca9c03e",
+          "size": 15437
         },
         {
           "path": "quota_scope.py",
-          "sha256": "00c11d7ddba9834996c7fbfd8bc9ad7743e149b28ab845f031d2aa5210213ba1",
-          "size": 8443
+          "sha256": "12cce96604e586e71f43fcaca1d257637679f9e276b5d3ec2457d0033f109c65",
+          "size": 11775
         },
         {
           "path": "quota_summary.py",
-          "sha256": "f5eacd6910df651aaad6e71e3ae82f6dcf78aa7f85a5e5d4b2e7c4e947f3a21b",
-          "size": 159900
+          "sha256": "9e0fea3ad63cb1a6bcc14345505ec571409be9c20a9c924d546bc35e10b517ad",
+          "size": 164286
         },
         {
           "path": "strings_en.json",
-          "sha256": "676e8d92d08c24512b36415f40224dd2d144fc46a4aa9c707dca8f838941bc80",
-          "size": 40272
+          "sha256": "9fafc7e1c08c076e60750f794698f73e09416b5c2e0736845724e4e4ec4d08c3",
+          "size": 41249
         },
         {
           "path": "test_account_list.py",
@@ -1035,8 +1035,8 @@
         },
         {
           "path": "test_card.py",
-          "sha256": "61bf712cae137aab7b1a76bc04d80fbca8b34c2069f43492d8c7b3e83592b863",
-          "size": 18082
+          "sha256": "6864300fac89ca44de17368fd1a12d555b9d178d6e7544e027644444c71834a5",
+          "size": 27981
         },
         {
           "path": "test_chart_polish.py",
@@ -1057,6 +1057,11 @@
           "path": "test_coherent_history.py",
           "sha256": "48d6e032f2638c34cd95a1731161aa307f11e62d4acaf516573b890a36036926",
           "size": 13564
+        },
+        {
+          "path": "test_consistency.py",
+          "sha256": "b34e816916cedceb2efea6a877a79be5f88f7f2ba7755f81949acf31437e0afd",
+          "size": 14878
         },
         {
           "path": "test_constraint_freshness.py",
@@ -1080,8 +1085,8 @@
         },
         {
           "path": "test_i18n.py",
-          "sha256": "b67119cf77cc60d3336cc526420177b2169642f36aba63de284400bc7d68fabd",
-          "size": 45505
+          "sha256": "7b271cc1c9ddeea18ca1ef130831c48f7c1fe5f0ebd195f09423d4fffb4383e8",
+          "size": 57332
         },
         {
           "path": "test_inspector_placement.py",
@@ -1104,6 +1109,11 @@
           "size": 8951
         },
         {
+          "path": "test_kept_chart.py",
+          "sha256": "030c152e57ac43bc1cc7ecc9d1c8c6f33c466e8cded3787e4671f5bc1c807ec8",
+          "size": 12876
+        },
+        {
           "path": "test_last_known.py",
           "sha256": "08f94201763b4ce4fa6ca885f0bc550b0076c4b3f49456559b70d35f042fc140",
           "size": 20630
@@ -1119,6 +1129,11 @@
           "size": 32643
         },
         {
+          "path": "test_part_holds.py",
+          "sha256": "12e31b4daca18be4a8e51d32ece192c7b872742d20edb8d41e24f25acce6aebb",
+          "size": 20975
+        },
+        {
           "path": "test_passive_quota_read.py",
           "sha256": "7969ca8461fd13d3c8cda01a67ed613fddef84000b2aa1e618d8ae605ce34467",
           "size": 12840
@@ -1130,13 +1145,23 @@
         },
         {
           "path": "test_quotas.py",
-          "sha256": "6d3b35cda4cc0c1e4d0a75fb468e376f05c6c063c0ce1c79408746e7d29021b0",
-          "size": 83302
+          "sha256": "72e7a7a61bd484b2af72ee42e6540f51c3bb858140b6ee98d032cb82a6289960",
+          "size": 91352
         },
         {
           "path": "test_r3.py",
-          "sha256": "2688bb7626035d3d7242259e2942e4f06f8c7ede3d3a948834c819b978b9220c",
-          "size": 68065
+          "sha256": "b87d2f783721c7a44ab7ec1e334675cfe191fe54b544c896e0f5c1d556f57c20",
+          "size": 69376
+        },
+        {
+          "path": "test_recent_pace_binding.py",
+          "sha256": "a52d7e53abe325bc5fd55944ba947645f994b586d37c9d0b44b3082dfa4a6ea8",
+          "size": 21461
+        },
+        {
+          "path": "test_recent_pace_widget.py",
+          "sha256": "fa99a285034dac000dc6a4fcb68ff849dacb65766767fece35d8eec4835e86c0",
+          "size": 11846
         },
         {
           "path": "test_repair_r2.py",
@@ -1169,14 +1194,19 @@
           "size": 13871
         },
         {
+          "path": "test_scope_contracts.py",
+          "sha256": "e7132e6c464f7656d91875c79394e37ca7e83154245e00b6450980a69b7586a6",
+          "size": 12825
+        },
+        {
           "path": "test_scope_identity.py",
           "sha256": "951eb422fc47ae7de40de3b031090f04a79d3629260fd28ea1fe70e9af5d0a7e",
           "size": 11169
         },
         {
           "path": "test_scope_resources_context.py",
-          "sha256": "b6c4bcbf88abbe87e79fc0d1426dc6fcfb845a125f999f77bc9a6e33cbefc338",
-          "size": 13434
+          "sha256": "f024ae56e0385290ca761e2df3e4b51bbf75fbfc82cf9ee937b044cfc08b97ee",
+          "size": 18517
         },
         {
           "path": "test_semantic_repair.py",
@@ -1187,6 +1217,11 @@
           "path": "test_shell_card.py",
           "sha256": "e664d373be021e9118123c9bb1fa486c94ea7985553ecd9606ce10cd414bec3e",
           "size": 7745
+        },
+        {
+          "path": "test_snapshot_boundaries.py",
+          "sha256": "f6b99bd66ae6cd18edcb8422e1d57d6c3cf3321dc88320db78946292fd58b8d3",
+          "size": 8677
         },
         {
           "path": "test_steady_snapshot_text.py",
@@ -1215,14 +1250,14 @@
         },
         {
           "path": "widget.js",
-          "sha256": "bf81576fb760d95f3f4888ce8df723b3ca5de5a98ca9369f8870ad569d10afdd",
-          "size": 511184
+          "sha256": "563680b2c7db683470421f8b4c57ee5849c8814acbc8a30327b08a71807e6421",
+          "size": 524625
         }
       ],
       "name": "claudexor_quotas",
       "slug": "claudexor_quotas",
       "type": "extension",
-      "version": "0.13.0",
+      "version": "0.13.1",
       "when_to_use": "The owner wants quota windows, resets and remaining reserve of the authorized Claudexor accounts; or, before choosing executors, the model wants measured reserve by family and limit. Advisory only: never a dispatch guarantee or a pin change."
     },
     {

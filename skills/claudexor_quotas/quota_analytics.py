@@ -13,8 +13,9 @@ reads the same :class:`quota_summary.SummaryState` the reserve is built from
   and the two conditional futures (no new use; at the measured pace, work
   frozen while any binding window is exhausted).
 * ``window`` — the same two futures for the selected window alone, but with
-  that window's account held to the other binding windows too, so nothing is
-  drained from a window while no work can run.
+  that window's account held to the other binding windows it reports too, so
+  nothing is drained from a window while no work can run. A window an account
+  has no reading of (here or in its kept history) is not assumed to bind it.
 
 The algebra is quota_joint; this module only reads history into it. Nothing
 here is stored, written or sent; it never refreshes a provider.
@@ -56,34 +57,46 @@ UNIT_NOTE = "shares of the shortest window (its length names the unit)"
 # Which windows bind, which history is needed
 
 
+def _applicability(calc: "qs.GroupCalc", model: Optional[str], kind: str) -> Optional[bool]:
+    """Whether one window governs a request ``(model, kind)`` by the engine's
+    own rule (quota_scope.applies); None when its scope cannot be read."""
+    if calc.scope_info is None:
+        # Old series retain their scope token, not the lost model list.
+        # A legacy model digest without a new-field suffix proves just
+        # one thing: it never governed an unspecified-model request.
+        # Keep it for display; named requests and new tokens stay unknown.
+        legacy_model_digest = (len(calc.scope) == 10
+                               and all(c in "0123456789abcdef" for c in calc.scope))
+        return False if model is None and legacy_model_digest else None
+    return quota_scope.applies(calc.scope_info, model, kind)
+
+
+def scope_groups(state: "qs.SummaryState", harness: str, model: Optional[str],
+                 kind: str) -> Tuple[List["qs.GroupCalc"], List["qs.GroupCalc"]]:
+    """The family's windows that govern a request ``(model, kind)``, shortest
+    first, and the windows whose scope could not be read (never counted as
+    vendor-wide, and never as not binding either)."""
+    out: List[qs.GroupCalc] = []
+    unknown: List[qs.GroupCalc] = []
+    for calc in state.groups:
+        if calc.harness != harness or not calc.window:
+            continue
+        verdict = _applicability(calc, model, kind)
+        if verdict is None:
+            unknown.append(calc)
+        elif verdict:
+            out.append(calc)
+    out.sort(key=lambda c: (c.window or 0, c.key))
+    return out, unknown
+
+
 def binding_groups(state: "qs.SummaryState", harness: str, model: Optional[str],
                    kind: str) -> Tuple[List["qs.GroupCalc"], int]:
     """The family's windows that govern a request ``(model, kind)`` by the
     engine's own rule (quota_scope.applies), shortest first, and how many
     windows' scope could not be read (never counted as vendor-wide)."""
-    out: List[qs.GroupCalc] = []
-    unreadable = 0
-    for calc in state.groups:
-        if calc.harness != harness or not calc.window:
-            continue
-        if calc.scope_info is None:
-            # Old series retain their scope token, not the lost model list.
-            # A legacy model digest without a new-field suffix proves just
-            # one thing: it never governed an unspecified-model request.
-            # Keep it for display; named requests and new tokens stay unknown.
-            legacy_model_digest = (len(calc.scope) == 10
-                                   and all(c in "0123456789abcdef" for c in calc.scope))
-            if model is None and legacy_model_digest:
-                continue
-            unreadable += 1
-            continue
-        verdict = quota_scope.applies(calc.scope_info, model, kind)
-        if verdict is None:
-            unreadable += 1
-        elif verdict:
-            out.append(calc)
-    out.sort(key=lambda c: (c.window or 0, c.key))
-    return out, unreadable
+    out, unknown = scope_groups(state, harness, model, kind)
+    return out, len(unknown)
 
 
 def extend_requests(wanted: Dict[Tuple[str, str], float], groups: Sequence["qs.GroupCalc"],
@@ -405,10 +418,17 @@ def _joint_history(accounts: Sequence[_Account], keys: Sequence[str], start: flo
 
 
 def _scenario(trajs: Sequence[Tuple[qj.Trajectory, List[qj.Win]]], held: int, joint: bool,
-              now: float, end: float, horizon: str) -> Dict[str, Any]:
+              now: float, end: float, horizon: str,
+              classes: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     """One conditional future in the shape the widget already draws: its
     line, its schedule of reported resets (what each gives back in this
-    scenario), checkpoints and — at pace — when accounts run out."""
+    scenario), checkpoints and — at pace — when accounts run out.
+
+    ``classes`` (the pace future only, one per trajectory, see _pace_class)
+    says why each account that is not drained is not: ``zero`` (a measured
+    pace with no growth), ``held`` (a measured positive pace held by a limit
+    or a scope) or ``unknown`` (no measured pace). ``held`` stays the count
+    of every account not drained, as before; these three split it."""
     line = qj.total_line(trajs, now, end, joint)
     def values(t, right):
         return [qj.contribution(tr, w, t, right, joint) for tr, w in trajs]
@@ -459,7 +479,7 @@ def _scenario(trajs: Sequence[Tuple[qj.Trajectory, List[qj.Win]]], held: int, jo
             reset_ahead = any(j.key == key and j.t > at for j in tr.jumps)
             runs_out.append({"at": round(at), "reset_reported": reset_ahead, "after_refill": refilled})
     runs_out.sort(key=lambda row: row["at"])
-    return {
+    out = {
         "line": [[qs._instant(t), rounded(v)] for t, v in line], "accounts": len(trajs),
         "coverage": [{"at": qs._instant(t), "known": sum(v is not None for v in values(t, True)),
                       "unknown": sum(v is None for v in values(t, True))} for t in sorted({t for t, _v in line})],
@@ -470,6 +490,36 @@ def _scenario(trajs: Sequence[Tuple[qj.Trajectory, List[qj.Win]]], held: int, jo
         "later": later,
         "checkpoints": checkpoints, "runs_out": runs_out,
     }
+    if classes is not None:
+        why = Counter(classes)
+        out["zero_growth"] = why["zero"]
+        out["pace_held"] = why["held"]
+        out["pace_unknown"] = why["unknown"] + held
+    return out
+
+
+def _pace_class(traj: qj.Trajectory, wins: Sequence[qj.Win], own: Optional[str] = None) -> str:
+    """Why one account's pace future is what it is: ``drain`` (it runs at its
+    measured pace), else ``zero``, ``held`` or ``unknown`` (see _scenario).
+    ``own`` is the selected window's own measured pace (``positive``,
+    ``zero`` or ``unknown``) for a per-window future; without it (Combined)
+    an account whose every binding window has a measured pace and none grew
+    is ``zero``, any other ``unknown`` — the same rule simulate runs by."""
+    if traj.paced:
+        return "drain"
+    if own is None:
+        return "zero" if all(w.rate is not None for w in wins) else "unknown"
+    return {"zero": "zero", "positive": "held"}.get(own, "unknown")
+
+
+def _own_pace(member: Optional["qs.Member"]) -> str:
+    """One account's measured pace of one window, as simulate would read it:
+    ``positive``, ``zero`` (measured, no growth) or ``unknown``."""
+    rate = member.rate if member is not None else {}
+    value = rate.get("windows_per_hour") if rate.get("state") == "ok" else None
+    if value is None:
+        return "unknown"
+    return "positive" if value / qj.HOUR > qj.EPS else "zero"
 
 
 def _futures(accounts: Sequence[Tuple[_Account, List[qj.Win]]], joint: bool, now: float, end: float,
@@ -483,7 +533,8 @@ def _futures(accounts: Sequence[Tuple[_Account, List[qj.Win]]], joint: bool, now
                 trajs.append((traj, wins))
         if not trajs:
             return None
-        out[name] = _scenario(trajs, held_extra, joint, now, end, horizon)
+        classes = [_pace_class(tr, ws) for tr, ws in trajs] if pace else None
+        out[name] = _scenario(trajs, held_extra, joint, now, end, horizon, classes)
     return out
 
 
@@ -543,7 +594,8 @@ def build(state: "qs.SummaryState", chart: Optional["qs.GroupCalc"], horizon: st
     now = state.now
     span = qs.HORIZONS.get(horizon, qs.HORIZONS["24h"])
     start, end = now - span, float(round(now + span))
-    wins, unreadable = binding_groups(state, chart.harness, model, kind)
+    wins, unknown = scope_groups(state, chart.harness, model, kind)
+    unreadable = len(unknown)
     by_key = {g.key: g for g in wins}
     scope = {"model": model, "request_kind": kind, "basis": "quota_block",
              "echo": bool(echo and echo.get("stated")), "unreadable_windows": unreadable,
@@ -553,7 +605,7 @@ def build(state: "qs.SummaryState", chart: Optional["qs.GroupCalc"], horizon: st
     keys = [g.key for g in wins]
     # --- the selected window alone, coupled to its account's binding windows
     out["window"] = None if light else _window_view(state, chart, wins, by_key, now, end, horizon,
-                                                  scope_unknown=bool(unreadable))
+                                                  unknown=unknown)
     if len(keys) < 2:
         out["joint"] = {"available": False, "reason": "scope_unknown" if unreadable else "one_window" if keys else "no_window",
                         "note": "only one window governs this scope: the window's own graph is the "
@@ -608,47 +660,70 @@ def build(state: "qs.SummaryState", chart: Optional["qs.GroupCalc"], horizon: st
 
 def _window_view(state: "qs.SummaryState", chart: "qs.GroupCalc", wins: Sequence["qs.GroupCalc"],
                  by_key: Dict[str, "qs.GroupCalc"], now: float, end: float, horizon: str,
-                 scope_unknown: bool = False) -> Optional[Dict[str, Any]]:
+                 unknown: Sequence["qs.GroupCalc"] = ()) -> Optional[Dict[str, Any]]:
     """The selected window's own conditional futures. Each of its current
-    accounts is held to the family's other binding windows as well (and
-    calibrated with them), so the window is never drained while the account
-    could not run."""
+    accounts is held to the other binding windows it reports as well, so the
+    window is never drained while the account could not run.
+
+    Which windows hold an account is the account's own: the selected window
+    and every other binding window it is known to have (``slots``: a reading
+    in this answer, fresh or not, or one its kept history knows). A window
+    it has no reading of is not assumed to bind it — an absent reading says
+    the limit may not apply — so one account's stale window never holds the
+    others. An account is held at its own share, with no pace, when the
+    selected window does not govern the request, when the scope of the
+    selected window or of another window it has cannot be read, or when
+    another window it has is not known now (stale, unknown, history only).
+    A known exhausted window it has stops its work until that window's
+    reported reset, as before."""
     members = chart.measured
     if not members:
         return None
     # A selected per-window chart remains visible for inspection even when a
     # model/kind query does not bind it. Such work cannot consume that window.
     scope_applies = chart.key in by_key
+    own_unknown = any(g.key == chart.key for g in unknown)
+    # Accounts that have a window whose applicability cannot be read: that
+    # window may govern their request, so their future cannot be judged.
+    # An account with no reading of such a window is not held by it.
+    unknown_owners = {(m.harness, m.subject_id) for g in unknown for m in g.slots}
     keys = [chart.key] + [g.key for g in wins if g.key != chart.key]
     groups = dict(by_key)
     groups[chart.key] = chart
     unit_key = min(keys, key=lambda key: (groups[key].window or 0, key))
-    accounts = [a for a in _accounts(state, keys, groups, unit_key, now)
-                if (a.subject in {(m.harness, m.subject_id) for m in members})]
-    pairs: List[Tuple[_Account, List[qj.Win]]] = []
-    held = 0
+    current = {(m.harness, m.subject_id) for m in members}
+    accounts = [a for a in _accounts(state, keys, groups, unit_key, now) if a.subject in current]
+    rows: List[Tuple[List[qj.Win], str]] = []
+    holds: Counter = Counter()
     for acct in accounts:
-        w = acct.wins(keys, recent=True)
-        if scope_unknown or not scope_applies or any(x.remaining is None for x in w):
-            # Another binding window is not known now: the account's future
-            # cannot be judged against it, so it is held at its own share of
-            # this window (no pace, nothing drained).
+        bound = [key for key in keys if key == chart.key or acct.members.get(key) is not None]
+        w = acct.wins(bound, recent=True)
+        why = ("scope_unknown" if own_unknown
+               else "scope_not" if not scope_applies
+               else "scope_unknown" if acct.subject in unknown_owners
+               else "window_unknown" if any(x.remaining is None for x in w) else "")
+        if why:
+            # The account's future cannot be judged against that window: it
+            # is held at its own share of this window (no pace, nothing
+            # drained).
             own = w[0]
             w = [qj.Win(own.key, own.remaining, own.reset, None, own.k, own.unit)]
-            held += 1
-        pairs.append((acct, w))
+            holds[why] += 1
+        rows.append((w, _own_pace(acct.members.get(chart.key))))
     futures: Dict[str, Any] = {}
     for name, pace in (("no_new_use", False), ("recent_pace", True)):
-        trajs = [(qj.simulate(w, now, end, pace), w) for _a, w in pairs]
-        trajs = [(t, w) for t, w in trajs if t.segments]
+        trajs = [(qj.simulate(w, now, end, pace), w, own) for w, own in rows]
+        trajs = [(t, w, own) for t, w, own in trajs if t.segments]
         if not trajs:
             return None
-        sc = _scenario(trajs, 0, False, now, end, horizon)
-        futures[name] = sc
+        classes = [_pace_class(t, w, own) for t, w, own in trajs] if pace else None
+        futures[name] = _scenario([(t, w) for t, w, _own in trajs], 0, False, now, end, horizon, classes)
     return {"key": chart.key, "scenarios": futures, "table": future_table(futures, now),
-            "held_to_other_windows": held,
+            "held_to_other_windows": sum(holds.values()),
+            "holds": dict(sorted(holds.items())),
             "pace_basis": "trailing_hour", "pace_lookback_seconds": qs.RATE_WINDOW_SEC,
-            "scope_applies": None if scope_unknown else scope_applies,
-            "accounts": len(pairs),
+            "scope_applies": None if own_unknown else scope_applies,
+            "accounts": len(rows),
             "note": "the window's accounts at its own share; a pace future stops draining every window of "
-                    "an account while any of its binding windows is exhausted"}
+                    "an account while any of its binding windows is exhausted; a window an account has no "
+                    "reading of does not bind it"}
