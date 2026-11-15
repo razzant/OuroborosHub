@@ -1502,6 +1502,31 @@ def test_a_malformed_body_is_refused_off_the_loop_and_keeps_the_saved_choice(tmp
     assert any('not JSON' in message for _level, message in host.logs)
 
 
+def test_a_malformed_display_body_is_refused_off_the_loop_logged_and_keeps_the_saved_rows(tmp_path, monkeypatch):
+    # The display route is awaited on the host's event loop: a body that did not parse answers with the rows kept,
+    # read off the loop like every other read of the file, and the refusal is logged as the prefs route logs it.
+    host = _Host(tmp_path)
+    plugin.register(host)
+    route = host.routes['display']
+    saved = asyncio.run(route(_Body({'hidden': ['codex|primary|604800|-'], 'frame': 'f', 'seq': 1})))
+    assert saved['error'] == '' and saved['display'] == {'hidden': ['codex|primary|604800|-']}
+    before = (tmp_path / 'display.json').read_bytes()
+    read = plugin.read_display
+    threads = []
+
+    def traced_read(api):
+        threads.append(threading.get_ident())
+        return read(api)
+
+    monkeypatch.setattr(plugin, 'read_display', traced_read)
+    host.logs.clear()
+    answer = asyncio.run(route(_Body(broken=True)))
+    assert answer == {'display': saved['display'], 'error': 'request body was not JSON'}
+    assert threads and all(t != threading.get_ident() for t in threads), 'read off the event loop'
+    assert (tmp_path / 'display.json').read_bytes() == before
+    assert ('error', 'claudexor display write refused: request body was not JSON') in host.logs
+
+
 class RunsBackwards(concurrent.futures.ThreadPoolExecutor):
     """Holds every job, then runs them newest first on one thread: two saves
     reach the file in the opposite order to the one they arrived in."""

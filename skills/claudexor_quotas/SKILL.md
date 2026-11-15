@@ -1,7 +1,7 @@
 ---
 name: claudexor_quotas
 description: "Claudexor quota dashboard and read-only quota_summary: sorted account bars, per-window and calibrated joint timelines, reported resets, measured pace, dated account resources and reversible row visibility. The optional granted context snapshot supplies the same figures at eligible host context tails; no routing, account changes or automatic provider refresh."
-version: 0.13.0
+version: 0.13.1
 type: extension
 runtime: python3
 entry: plugin.py
@@ -33,7 +33,7 @@ ui_tab:
     start: auto
 ---
 
-# Claudexor Quotas (v0.13.0)
+# Claudexor Quotas (v0.13.1)
 
 The composer quota chip opens this widget. `GET chip` uses the same passive
 cached read as `quotas?reuse=1&chart=0`; it never requests provider refresh.
@@ -78,13 +78,95 @@ it (`api.get_state_dir()`):
   runs. Its OS lock serializes collector cycles across unload/reload; it holds
   no account or quota data. SQLite may also keep its standard WAL/SHM files.
 
+## What changed in 0.13.1
+
+- **Recent pace of one window.** An account's pace future is held only by the
+  binding windows that account reports: a reading in this answer, fresh or not,
+  or one its kept history knows. A window it has no reading of is not assumed to
+  bind it, as the coverage line says ("no reading, limit may not apply"). Before,
+  one account's stale 30-day window held every account of the family, and Recent
+  pace drew the No new use line beside measured paces. An account's own stale,
+  unknown or history-only window still holds it; its own exhausted window still
+  stops its work until that window's reported reset. A window whose scope cannot
+  be read holds the accounts that have it (all of them when it is the selected
+  window), not the whole family. Combined's figures are unchanged: it still
+  needs every binding window of the family on one account, in comparable units,
+  and its Details now show "—", like its headline, when no account is counted.
+- **Why a pace line is flat.** The pace future (per window and Combined) splits
+  the accounts it does not drain (`held`, as before; `at_pace` counts the
+  drained ones): `zero_growth` (a measured pace with no growth), `pace_held` (a
+  measured positive pace held by a limit or a scope) and `pace_unknown` (no
+  measured pace). The per-window view adds `holds` (`scope_not`,
+  `scope_unknown`, `window_unknown`). The legend says which applies: "no growth
+  measured", "pace measured but held" or "no measured pace yet", each "same as
+  no new use". The collector, history, pace estimator and its 15-minute
+  minimum and the tool are unchanged; so are the snapshot's figures (its size
+  bound is below).
+- **Widget text through the gateway only.** The `i18n` route (and
+  `quotas?text=1`) reads the language and its translation memory from the
+  gateway's own `GET /api/ui/i18n` and reports the phrases the memory lacks with
+  `POST /api/ui/i18n/missing`, both over loopback like the status read. 0.13.0
+  imported host modules instead: at every load it registered its table in the
+  host's translation generator (a host-global entry that disable and unload did
+  not remove, so the host could still queue the table for translation), and it
+  wrote the host's translation queue itself. Now the skill imports no host module
+  and registers nothing outside the PluginAPI. Translations are shown as the
+  memory holds them, owner and imported pins included; a generated entry made for
+  another English (its `source`) shows the English and is reported reworded
+  (`stale`), as the host's own interface treats a code. A missing phrase is
+  reported once; a batch the host did not take whole (no answer, an error, or
+  fewer accepted than sent) is offered once more after five minutes, then rests.
+  It is reported again only six hours later, or at once when the memory shows a
+  loss (fewer refusals than before, as Regenerate leaves, or an earlier revision);
+  never on every reading or every batch the translator writes. Limitation: a
+  host process that already loaded a build that registered the catalog (0.13.0)
+  keeps that entry until Ouroboros restarts; the PluginAPI offers no way to
+  remove it, and this release does not reach into the host to try.
+- **Bounded context snapshot.** The whole UTF-8 JSON envelope stays within the
+  host's 32,768-byte bound and the text within 12,000 characters. Whole
+  lower-priority lines are dropped with an omission notice. Each limit line names
+  its whole scope: models and family prefixes together, request kinds, the
+  unspecified-model flag, unreadable or history-digest scope, and list remainders. Header scope and
+  omitted-family names are bounded too. Control characters in provider fields
+  are quoted and escaped so one fact stays on one line. An oversized amount is
+  omitted whole, never shortened into another number; the tool retains its exact
+  string. Resource identities are matched exactly, without trimming or clipping.
+  At most 2,000 resource input rows are considered; the tool and snapshot disclose
+  any remainder. A previous oversized snapshot is replaced on a successful read.
+- **Holds on part of an account.** Only a readable, model-unscoped text limit
+  or the engine's own account cooldown sets the whole-account verdict. Image-only
+  and unreadable-scope cooldowns hold their matching scope. The default-text
+  verdict is separate: a text-only cooldown cannot hold an image window. Cooldowns and reported exhaustions retain model names,
+  family prefixes, request kinds and the unspecified-model flag. Their complete
+  scope key ties them to current and history-restored windows without changing
+  stored readable series keys. A window with an unreadable scope field is its own
+  limit, never grouped with a readable scope, so applicability does not depend on
+  snapshot order. A new scope retires only its own account's old series; other
+  accounts' still-valid kept readings are restored. Unknown historical scope stays unknown. Prefixes and request
+  kinds appear in reserve labels and details. A spent shared window holds another
+  only when its readable scope covers all of that window's request kinds.
+- **Expired reset grants.** A positive or usable grant's `expires_at` bounds its
+  offer's freshness and the context snapshot's validity, including grants beyond
+  the displayed list. Once it passes, the aggregate remains dated last-known
+  evidence until refreshed; no count is recomputed or credit spent. Mixed resource
+  facets date stale rows separately and say “usable when read”. Offer totals
+  disclose omitted display rows as uncounted; the card uses the canonical earliest
+  grant expiry, including grants omitted from its displayed list.
+- **Failed reads.** A kept screen retains dated past history and resources.
+  Both the window and Combined views withdraw current figures, conditional hours,
+  futures and reset schedules. Switching views cannot restore them. Last-known
+  reset offers say whether they were usable when read.
+- **Display saves.** A display save whose body is not JSON is logged and
+  answered with the saved rows read off the event loop, as the prefs route does.
+
 ## What changed in 0.13.0
 
 A new look and a few new drawings for the widget; the numbers behind them
 (`quota_summary`, the collector, history, snapshot and existing quota fields)
 are unchanged. `quotas?text=1` optionally adds the widget text table. The new
-`i18n` route reads that table and queues missing translations; catalog registration
-can wake the host’s translation generator. The release also changes one `chip` field.
+`i18n` route reads that table and queues missing translations (since 0.13.1 only
+through the gateway's routes, with no catalog registration; see above). The release
+also changes one `chip` field.
 
 - **The head.** One capsule per family in a fixed order (the order the answer
   lists them; a pick moves no tab): the vendor's mark, the name and the count of
@@ -161,12 +243,10 @@ can wake the host’s translation generator. The release also changes one `chip`
   `en` (that table) and, when the install's language is not English, `strings`:
   the translation of these keys from the host's translation memory (`code:quotas.ui.*`),
   with the language, the memory's revision and its plural map. A phrase the
-  translation lacks is said in English; keys not translated yet are queued with
-  the host (after acceptance, per process and language; rejected batches are retried). `register_catalog` hands the table
-  to the host's generator at load, so a language chosen later gets these rows in
-  its first batch; it is best effort and the widget does not depend on it. The host's
-  modules are used when present; without them the same memory is read through the
-  gateway's loopback `/api/ui/i18n` routes. If the route cannot be read at all, the
+  translation lacks is said in English; keys not translated yet are reported to
+  the host's queue through the gateway's loopback `/api/ui/i18n` routes (how often,
+  and why 0.13.1 dropped the catalog registration and the host modules 0.13.0 used,
+  is under What changed in 0.13.1). If the route cannot be read at all, the
   widget shows one card, "The widget text could not be loaded", with Retry, and
   asks again with the next reading; it draws no quota claim without its text.
   `strings_en.json` is part of the release, so a hub catalog must list it.
@@ -269,7 +349,8 @@ can wake the host’s translation generator. The release also changes one `chip`
   with its measured cohort, coverage, and resources (last-known ones dated); a family
   with resources but no quota window is still shown, never inferred available.
   Positive sub-hour conditional work is not rounded to zero. The default text
-  bound is 12,000 characters, not 2,400; any omitted lines name their families
+  bound is 12,000 characters, not 2,400, and since 0.13.1 the whole file also
+  stays within the host's 32,768 bytes; any omitted lines name their families
   and point to the complete `quota_summary` answer. The snapshot and the tool
   never add amounts across accounts, scopes or currencies (the widget's Cursor
   billing-cycle plate is the one place that sums, under the limits stated in
@@ -280,8 +361,9 @@ can wake the host’s translation generator. The release also changes one `chip`
   model/kind stays visible but does not burn at that request's pace
   (`chart.analytics.window.scope_applies`); its legend explains the hold rather
   than claiming no history. A per-window future uses the same trailing-hour
-  per-account estimator as the tool's `recent_pace`, held by all its binding
-  windows. Combined uses the separate common-period calibration/pace. Details'
+  per-account estimator as the tool's `recent_pace`, held by every binding
+  window that account reports (0.13.1). Combined uses the separate
+  common-period calibration/pace. Details'
   history and future samples belong to the view actually drawn, including
   Combined. The bounded history read shares its newest rows among requested
   pairs; truncation is disclosed, not mislabelled as absent history.
@@ -1117,9 +1199,15 @@ exhausted window is never reported as the default login's.
    look like fresh red exhaustion, nor like an amber share held back now. A still-live cooldown carried by stale
    evidence may still deny or rank a route, so the widget does not claim the
    engine ignores that evidence.
-4. **Per-model caps stay per-model.** A constraint with a non-empty
-   `applies_to_models` never marks the whole account exhausted; it becomes a
-   scoped note. A present `cooldown_until` in the future (or one that cannot be
+4. **Per-model caps stay per-model.** A constraint tied to models, by a
+   non-empty `applies_to_models` or by family prefixes alone
+   (`applies_to_model_prefixes`), never marks the whole account exhausted, and
+   neither does one of other request kinds only or one whose scope cannot be
+   read: only a window that speaks for the whole account (`account_wide`) does,
+   in the account view and in the widget's dot and state word alike. The others
+   become a scoped note ("per-model caps spent: …", "caps on other request kinds
+   or an unreadable scope spent: …") and an amber state ("a model at its limit",
+   "a limit on some requests reached"). A present `cooldown_until` in the future (or one that cannot be
    parsed) is a cooldown — the window or model is out for now, "cooling down"
    in amber, never "Limit reached", never the red of a spent share and never a
    reset. Red is only a measured share at its limit; a cooldown, a reported
@@ -1251,8 +1339,11 @@ The skill declares no secrets (`env_from_settings: []`). Its permissions are
 
 - `net` — the routes, the tool and the collector read the host's own endpoints
   over loopback with `urllib` (no external host and no proxy handler): passive
-  status GET with a 25-second bound (20 seconds for the tool), and the explicit
-  foreground quota POST with 180 seconds, only from the Refresh button;
+  status GET with a 25-second bound (20 seconds for the tool), the explicit
+  foreground quota POST with 180 seconds, only from the Refresh button, and the
+  widget text's `GET /api/ui/i18n` and `POST /api/ui/i18n/missing` with 5 seconds
+  each (the second only for a chosen language other than English, and only for
+  phrases its memory lacks);
 - `route` + `widget` — the widget and its quotas, refresh, display and legacy prefs
   routes, plus its tab;
 - `tool` — the read-only `quota_summary` tool;
@@ -1264,5 +1355,10 @@ No secret key grant is required. Everything the skill writes lives in its own
 state directory: legacy `prefs.json`, row-visibility `display.json`, the dated
 `context-snapshot.json`, and the bounded history. History contains no account name,
 address, credential or raw response; the snapshot carries the tool's bounded
-resource facts, not credentials.
+resource facts, not credentials. One write happens outside it, made by the host
+at the skill's request: a missing phrase reported to `POST /api/ui/i18n/missing`
+goes into the host's own translation queue (`state/i18n/<language>.pending.json`
+under the Ouroboros data directory), and the host's translator then translates it
+with the owner's light model, an accounted model call the owner pays for. With
+English or no language chosen nothing is reported.
 Enabling a reviewed skill remains the owner's action in Skills.

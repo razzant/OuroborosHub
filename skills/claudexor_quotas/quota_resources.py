@@ -44,11 +44,13 @@ REQUEST_KINDS = ("text", "image")
 
 
 def _text(value: Any, limit: int = MAX_TEXT) -> str:
-    return str(value if value is not None else "").strip()[:limit]
+    text = str(value if value is not None else "").strip()
+    return text if len(text) <= limit else text[:limit] + "… [text omitted]"
 
 
 def _instant(value: Any) -> Optional[str]:
-    return _text(value, 40) or None if isinstance(value, str) else None
+    # Never shorten an unreadable date into a different, parseable instant.
+    return value if isinstance(value, str) and value else None
 
 
 def _count(value: Any) -> Optional[int]:
@@ -135,12 +137,20 @@ def _offer(raw: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, dict):
         return None
     grants = raw.get("grants")
+    # The aggregate count includes grants beyond the display cap as well.
+    # Its first expiry must therefore be computed before bounding that list.
+    expirations = [(qs.parse_instant(g.get("expires_at")), g.get("expires_at"))
+                   for g in (grants if isinstance(grants, list) else []) if isinstance(g, dict)
+                   and ((_count(g.get("available_count")) or 0) > 0 or g.get("usable_now") is True)]
+    expirations = [(t, raw) for t, raw in expirations if t is not None]
     return {
         "id": _text(raw.get("id"), 120), "kind": _enum(raw.get("kind"), ("granted_reset", "session_refill")),
         "label": _text(raw.get("label")), "available_count": _count(raw.get("available_count")),
         "eligible": _flag(raw.get("eligible")), "usable_now": _flag(raw.get("usable_now")),
         "reason": _text(raw.get("reason"), MAX_NOTE) or None, "resets_at": _instant(raw.get("resets_at")),
         "weekly_limit_applies": _flag(raw.get("weekly_limit_applies")),
+        "grants_expire_at": min(expirations, key=lambda pair: pair[0])[1] if expirations else None,
+        "grants_omitted": max(0, len(grants) - MAX_ROWS) if isinstance(grants, list) else 0,
         "grants": None if not isinstance(grants, list) else [
             {"id": _text(g.get("id"), 120), "label": _text(g.get("label")),
              "available_count": _count(g.get("available_count")),
@@ -160,6 +170,23 @@ def _diagnostic(raw: Any) -> Optional[Dict[str, Any]]:
 _READERS = {"balances": _balance, "spending": _spending, "resets": _offer, "diagnostics": _diagnostic}
 
 
+def boundaries(row: Dict[str, Any]) -> List[str]:
+    """Every reported instant past which one resource row no longer says what
+    holds now: its reset, its period's end and, for a reset offer, the expiry
+    of each grant that gives something to use (a positive count, or reported
+    usable now). Once one passes, the row's figures — an offer's count and
+    whether it could be used — are what was read then, never what holds now;
+    nothing is subtracted or recomputed from them. A grant that reports 0 and
+    is not usable, or reports nothing, changes no figure when it expires.
+    The one list the facet's freshness and the snapshot's validity both read."""
+    out = [row.get("resets_at"), (row.get("period") or {}).get("ends_at"), row.get("grants_expire_at")]
+    for grant in row.get("grants") or []:
+        count = grant.get("available_count")
+        if (isinstance(count, int) and count > 0) or grant.get("usable_now") is True:
+            out.append(grant.get("expires_at"))
+    return [value for value in out if isinstance(value, str) and value]
+
+
 def facet_view(raw: Any, facet: str, kept: bool = False, now: Optional[float] = None) -> Dict[str, Any]:
     """One facet as the widget and the tool carry it.
 
@@ -167,7 +194,9 @@ def facet_view(raw: Any, facet: str, kept: bool = False, now: Optional[float] = 
     a value: dated, never current), ``not_reported`` (no value) — judged only
     on the engine's own freshness word; a facet kept from an earlier read
     (``kept``) is never fresh. A missing or malformed facet is
-    ``not_reported``, never an empty list read as "none"."""
+    ``not_reported``, never an empty list read as "none". In a current
+    facet, a row one of whose ``boundaries`` has passed is last known on
+    its own, its figures kept as read and dated by the facet's observation."""
     if not isinstance(raw, dict):
         return {"state": "not_reported", "freshness": "unknown", "observed_at": None, "source": None,
                 "rows": None, "omitted": 0, "last_error": None}
@@ -187,8 +216,7 @@ def facet_view(raw: Any, facet: str, kept: bool = False, now: Optional[float] = 
         state = "current" if freshness == "fresh" else "last_known"
     if state == "current" and now is not None and facet != "diagnostics":
         for row in rows or []:
-            bounds = (row.get("resets_at"), (row.get("period") or {}).get("ends_at"))
-            if any(t is not None and t <= now for t in (qs.parse_instant(v) for v in bounds)):
+            if any(t is not None and t <= now for t in (qs.parse_instant(v) for v in boundaries(row))):
                 row["state"] = "last_known"
                 row["note"] = ((row.get("note") or "") + "; last known: reported boundary passed").lstrip("; ")
         if rows and all(r.get("state") == "last_known" for r in rows):
@@ -218,11 +246,19 @@ def scope_echo(payload: Any) -> Dict[str, Any]:
 def _targets(payload: Any) -> Dict[Tuple[str, str], Dict[str, Any]]:
     out: Dict[Tuple[str, str], Dict[str, Any]] = {}
     rows = payload.get("resources") if isinstance(payload, dict) else None
-    for row in (rows if isinstance(rows, list) else []):
+    for row in (rows if isinstance(rows, list) else [])[:qs.MAX_SNAPSHOTS]:
         target = row.get("target") if isinstance(row, dict) else None
-        if isinstance(target, dict) and _text(target.get("harness"), 64) and _text(target.get("profile_id"), 200):
-            out[(_text(target["harness"], 64), _text(target["profile_id"], 200))] = row
+        if isinstance(target, dict) and all(isinstance(target.get(k), str) and target[k]
+                                           for k in ("harness", "profile_id")):
+            # Identity is exact: two long IDs or IDs with whitespace must
+            # never collapse onto a different account's resource rows.
+            out[(target["harness"], target["profile_id"])] = row
     return out
+
+
+def targets_omitted(payload: Any) -> int:
+    rows = payload.get("resources") if isinstance(payload, dict) else None
+    return max(0, len(rows) - qs.MAX_SNAPSHOTS) if isinstance(rows, list) else 0
 
 
 def account_resources(payload: Any, harness: str, subject_id: str, kept: bool = False,
@@ -254,6 +290,7 @@ def family_resets(payload: Any, harness: str, kept: bool = False, now: Optional[
             last_known += 1
             continue
         known += 1
+        uncounted += facet["omitted"]
         for offer in facet["rows"] or []:
             if offer.get("state") == "last_known":
                 uncounted += 1

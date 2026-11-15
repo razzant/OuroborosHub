@@ -32,7 +32,8 @@ def _at(**ago):
 
 CARD_WORDS = ["card.pick", "card.left", "card.no_reading", "card.resets_in", "card.back_in", "card.cycle_ends_in", "card.signed_out", "card.not_read",
               "card.no_reset", "card.plan", "card.read", "card.res_label", "card.bonus", "card.credits", "card.team", "card.none_zero",
-              "card.none_offered", "card.offer_usable", "card.offer_usable_then", "card.offer_not_usable", "card.offer_unknown",
+              "card.none_offered", "card.offer_usable", "card.offer_usable_then", "card.offer_not_usable",
+              "card.offer_not_usable_then", "card.offer_unknown",
               "card.reported_unknown", "card.offer_title", "card.expires_in", "card.last_known", "card.age_unknown", "card.unknown",
               "card.state_off", "card.state_unknown", "card.state_last", "card.state_limit", "card.state_held",
               "acc.clear_label", "acc.card_label", "acc.details", "acc.more", "acc.less"]
@@ -73,6 +74,10 @@ def _views(base):
         "zero": _with(base, resets=_facet([offer(available_count=0)])),
         "none_offered": _with(base, resets=_facet([])),
         "kept": _with(base, resets=_facet([offer(usable_now=True)], state="last_known", observed=_at(days=1))),
+        "kept_not_usable": _with(base, resets=_facet([offer(usable_now=False)], state="last_known", observed=_at(days=1))),
+        # one offer whose reported reset passed is last known on its own, in a facet read now (quota_resources)
+        "row_passed": _with(base, resets=_facet([offer(usable_now=True, state="last_known", resets_at=_at(hours=1),
+                                                       note="last known: reported boundary passed")])),
         "not_reported": _with(base, resets={"state": "not_reported", "rows": []}, balances={"state": "not_reported", "rows": []}),
         "legacy": _with(base, legacy={"state": "current", "count": 3, "observed_at": _at(seconds=0), "source": "fixture", "label": "", "reason": ""}),
         "both": dict(_with(base, resets=_facet([offer(usable_now=True)])), legacy_count=3),
@@ -189,6 +194,83 @@ const settle2 = async () => { for (let i = 0; i < 6; i++) await settle(); };
 """
 
 
+NODE_STALE_OFFERS = r"""
+const click = (env, key) => { const node = byFocus(env.root, key); assert.ok(node, 'missing control ' + key); node.listeners.click[0]({ stopPropagation() {} }); };
+const res = (env) => { const r = classes(env.root, 'q-res'); return r.length ? r[0].textContent : ''; };
+// The account's details, opened: the resources whole, as the details say them.
+const details = (env) => {
+  const button = byFocus(env.root, 'inspector-details');
+  if (button.getAttribute('aria-expanded') !== 'true') click(env, 'inspector-details');
+  return classes(env.root, 'account-resources')[0].textContent;
+};
+
+(async () => {
+  const views = JSON.parse(require('fs').readFileSync(process.env.CARD_VIEWS_FILE, 'utf8'));
+  // A last-known offer was usable when it was read: the card and the details say so, neither says "now".
+  let env = await boot(views.kept);
+  assert.match(res(env), /^Bonus resets: 2 usable when read · last known · (24 h|1 d) ago$/);
+  let whole = details(env);
+  assert.match(whole, /Reset offers · last known · observed .+, not current/);
+  assert.match(whole, /Granted reset: 2 usable when read/);
+  assert.doesNotMatch(whole, /usable now|not usable now/, whole);
+  env.disposeHooks[0]();
+  env = await boot(views.kept_not_usable);
+  assert.match(res(env), /^Bonus resets: 2 granted · not usable when read · last known · (24 h|1 d) ago$/);
+  whole = details(env);
+  assert.match(whole, /Granted reset: 2 granted · not usable when read/);
+  assert.doesNotMatch(whole, /usable now/, whole);
+  env.disposeHooks[0]();
+  // One offer whose reported reset passed is last known in a facet read now: said "when read" in both places.
+  env = await boot(views.row_passed);
+  assert.match(res(env), /^Bonus resets: 2 usable when read · last known · just now$/);
+  whole = details(env);
+  assert.match(whole, /Granted reset: 2 usable when read · last known: reported boundary passed/);
+  assert.doesNotMatch(whole, /usable now/, whole);
+  env.disposeHooks[0]();
+  // A reading that fails after a good one: the kept screen says nothing in it is current, and its resources too are
+  // last known — dated by their own observation, never "usable now", in the card and in the details.
+  let failed = false;
+  env = await boot(() => (failed ? null : views.usable));
+  assert.match(res(env), /^Bonus resets: 2 usable now · next expires in 3d \d+h · just now$/);
+  assert.match(details(env), /Granted reset: 2 usable now/);
+  failed = true;
+  env.interval()();
+  await settle(); await settle();
+  assert.match(env.root.textContent, /nothing in it is current/);
+  assert.match(res(env), /^Bonus resets: 2 usable when read · last known · just now$/, res(env));
+  whole = details(env);
+  assert.match(whole, /Reset offers · last known · observed .+, not current/);
+  assert.match(whole, /Granted reset: 2 usable when read/);
+  assert.doesNotMatch(whole + res(env), /usable now/);
+  // the money and the counts stay as read: a reported count and an unknown usability are kept, nothing invented
+  failed = false;
+  env.interval()();
+  await settle(); await settle();
+  assert.match(res(env), /^Bonus resets: 2 usable now · next expires in 3d \d+h · just now$/, 'a good reading is current again');
+  env.disposeHooks[0]();
+  env = await boot((url, calls) => (calls.length > 1 ? null : views.unknown_use));
+  env.interval()();
+  await settle(); await settle();
+  assert.match(res(env), /^Bonus resets: 2 granted · usability unknown · last known · just now$/);
+  assert.match(details(env), /Granted reset: 2 granted · usability unknown/);
+  env.disposeHooks[0]();
+})().catch((error) => { console.error(error && error.stack ? error.stack : error); process.exitCode = 1; });
+"""
+
+
+def test_node_a_last_known_offer_is_never_usable_now_in_the_card_or_the_details(base_view, tmp_path):
+    node = _node()
+    assert node is not None, "a Node runtime is required for widget tests"
+    harness = test_quotas.NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    fixture_file = tmp_path / "stale-offer-views.json"
+    fixture_file.write_text(json.dumps(_views(base_view)), encoding="utf-8")
+    widget = Path(os.environ.get("QUOTAS_REVIEW_WIDGET_PATH", WIDGET))
+    result = subprocess.run([str(node), "-e", harness + NODE_STALE_OFFERS], cwd=WIDGET.parent,
+                            env={**os.environ, "WIDGET_PATH": str(widget), "CARD_VIEWS_FILE": str(fixture_file)},
+                            capture_output=True, text=True, timeout=90, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_node_the_card_of_the_picked_account(base_view, tmp_path):
     # The views are built here, at the moment the card is drawn: an age the card says ("just now") is measured from this moment.
     node = _node()
@@ -279,3 +361,83 @@ def test_card_does_not_infer_hold_cause_from_unrelated_scope(tmp_path, scope):
                             env={**os.environ, 'WIDGET_PATH': os.environ.get('QUOTAS_REVIEW_WIDGET_PATH', str(WIDGET)),
                                  'TEST_VIEW': json.dumps(view)}, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _caps_and_offers_view():
+    """The real backend's account view (plugin.build_view) of four Antigravity accounts: a spent gemini-* limit scoped
+    by prefix alone, a spent cap of image requests only, a spent limit of every text request, and one with room; the
+    first reports a last-known reset offer, the last a current one."""
+    import time as _time
+    import plugin
+    from test_reserve import payload, profile
+    now = _time.time()
+    iso = plugin.qs.iso
+
+    def snap(sid, capped):
+        rows = [{"id": "shared", "label": "Shared", "used_ratio": 0.2, "window_seconds": 604800, "resets_at": iso(now + 86400)}]
+        if capped is not None:
+            rows.insert(0, dict({"id": "capped", "label": "Capped", "used_ratio": 1.0, "window_seconds": 18000,
+                                 "resets_at": iso(now + 3600)}, **capped))
+        return {"subject": {"harness": "agy", "subject_id": sid}, "constraints": rows,
+                "availability": {"state": "available"}, "observed_at": iso(now - 60), "freshness": "fresh", "source": "fixture"}
+
+    def facet(value, freshness, observed):
+        return {"value": value, "source": "fixture", "observed_at": iso(observed), "freshness": freshness,
+                "last_attempt_at": None, "last_error": None}
+
+    offer = {"id": "granted", "kind": "granted_reset", "label": "Granted reset", "available_count": 2, "eligible": True,
+             "usable_now": True, "reason": None, "resets_at": None, "weekly_limit_applies": None, "grants": None}
+    accounts = {"prefix": {"applies_to_model_prefixes": ["gemini-"]}, "image": {"applies_to_request_kinds": ["image"]},
+                "text": {"applies_to_request_kinds": ["text"]}, "plain": None}
+    data = payload([snap(sid, capped) for sid, capped in accounts.items()], [profile("agy", sid) for sid in accounts],
+                   harnesses=("agy",))
+    data["resources"] = [{"target": {"harness": "agy", "profile_id": sid},
+                          "balances": facet(None, "unknown", now), "spending": facet(None, "unknown", now),
+                          "resets": facet([offer], freshness, now - age), "diagnostics": facet([], "fresh", now)}
+                         for sid, freshness, age in (("prefix", "stale", 7200), ("plain", "fresh", 30))]
+    return plugin.build_view(data, "", now)
+
+
+CAPS_STUB = r"""
+(view) => {
+  window.__fail = false;
+  window.fetch = (url, options = {}) => {
+    const post = ((options && options.method) || 'GET') !== 'GET';
+    const body = post ? { ok: true, quota_updates: [] } : (window.__fail ? null : view);
+    return Promise.resolve({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+  };
+}
+"""
+
+
+def test_browser_caps_and_last_known_offers_read_true_in_real_engines(browser):
+    from test_reserve import with_i18n
+    view = _caps_and_offers_view()
+    page = browser.new_page(viewport={"width": 1120, "height": 1200})
+    try:
+        page.set_content('<!doctype html><html><head></head><body><div id="root"></div></body></html>')
+        page.evaluate(with_i18n(CAPS_STUB), view)
+        page.add_script_tag(content=WIDGET.read_text(encoding="utf-8"))
+        page.wait_for_selector('[data-focus="refresh"]:not([disabled])')
+        state = lambda sid: page.locator(f'[data-focus="acct:agy:{sid}"] .acc-state').inner_text().strip()
+        dot = lambda sid: page.locator(f'[data-focus="acct:agy:{sid}"] .state-dot').first.get_attribute("class")
+        assert state("prefix") == "a model at its limit" and "warn" in dot("prefix").split()
+        assert state("image") == "a limit on some requests reached" and "warn" in dot("image").split()
+        assert state("text") == "limit reached" and "bad" in dot("text").split()
+        assert state("plain") == "ready"
+        page.click('[data-focus="acct:agy:prefix"]')
+        inspector = page.locator(".inspector")
+        assert "20% used" in inspector.inner_text() and "Limit reached" not in inspector.inner_text()
+        resources = page.locator(".inspector .account-resources").inner_text()
+        assert "Granted reset: 2 usable when read" in resources and "usable now" not in resources, resources
+        page.click('[data-focus="acct:agy:plain"]')
+        assert "Granted reset: 2 usable now" in page.locator(".inspector .account-resources").inner_text()
+        # the next reading fails: the kept screen is nothing current, its resources too
+        page.evaluate("() => { window.__fail = true; }")
+        page.click('[data-focus="refresh"]')
+        page.wait_for_function("() => /nothing in it is current/.test(document.body.innerText)", timeout=10000)
+        kept = page.locator(".inspector .account-resources").inner_text()
+        assert "Granted reset: 2 usable when read" in kept and "usable now" not in kept, kept
+        assert "last known" in kept and "not current" in kept
+    finally:
+        page.close()
