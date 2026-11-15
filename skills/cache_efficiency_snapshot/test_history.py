@@ -711,8 +711,12 @@ def test_short_range_recovers_published_history_after_transient_error(tmp_path, 
         if timeframe == "CUSTOM":
             query.update({"from": (NOW-timedelta(hours=1)).isoformat(), "to": NOW.isoformat()})
         assert read_route(route, **query)["status"] == "degraded"
+        # That reading itself retried the failed pass; let that retry fail too before the fault is lifted.
+        finish_index(plugin._HISTORY)
+        failed = plugin._HISTORY._thread
         monkeypatch.setattr(Path, "open", original)
         read_route(route, **query)  # a failed pass is retried at once, not after the cadence
+        assert plugin._HISTORY._thread is not failed
         finish_index(plugin._HISTORY)
         result = read_route(route, **query)
         assert result["status"] == "ok"
@@ -802,7 +806,7 @@ def test_a_changed_archive_replaces_its_copy_only_when_it_reads_cleanly(tmp_path
     restarted.close()
 
 
-def test_a_cold_reading_after_reload_is_complete_without_reading_archives(tmp_path, monkeypatch):
+def test_a_cold_reading_after_reload_shows_stored_history_at_once_without_reading_archives(tmp_path, monkeypatch):
     for minute in range(30):
         write_rows(tmp_path / "archive" / f"events_{minute:03d}.jsonl",
                    event(ledger_attempt_ids=[str(minute)], ts=(NOW - timedelta(hours=2, minutes=minute)).isoformat()))
@@ -811,16 +815,30 @@ def test_a_cold_reading_after_reload_is_complete_without_reading_archives(tmp_pa
     read_route(route, timeframe="24H")
     finish_index(plugin._HISTORY)
     unload[0]()
-    # Reload: a new instance on the preserved index; the first 24h reading is whole and parses no archive.
+    # Reload: a new instance on the preserved index. Its stored history is offered once loaded, before the listing
+    # (held here): whole, parsing no archive, and `loading` until the listing ends, then `ok`.
     _, route, unload = api_for(tmp_path, monkeypatch)
-    parsed = []
-    original = plugin._HISTORY._read_lines
-    monkeypatch.setattr(plugin._HISTORY, "_read_lines", lambda path, identity, consume: parsed.append(path.name) or original(path, identity, consume))
+    index, parsed = plugin._HISTORY, []
+    original = index._read_lines
+    monkeypatch.setattr(index, "_read_lines", lambda path, identity, consume: parsed.append(path.name) or original(path, identity, consume))
+    entered, release = threading.Event(), threading.Event()
+    listing = index._pass
+    def held(directory):
+        entered.set()
+        assert release.wait(10)
+        return listing(directory)
+    monkeypatch.setattr(index, "_pass", held)
     try:
+        result = read_route(route, timeframe="24H")
+        assert entered.wait(10) and index._ready.is_set()  # released before the listing, not after two seconds
+        assert result["status"] == "loading" and result["summary"]["request_count"] == 31
+        release.set()
+        finish_index(index)
         result = read_route(route, timeframe="24H")
         assert result["status"] == "ok" and result["summary"]["request_count"] == 31
         assert parsed == [] and plugin._EVENTS.raw_stats["total_lines_read"] == 1
     finally:
+        release.set()
         unload[0]()
 
 

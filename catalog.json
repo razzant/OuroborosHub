@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/54d6ab5b60d9e5615d295f9e3b8bd0d3b83bc7f9",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
   "skills": [
     {
@@ -344,13 +344,13 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "2846e9ba521f81073b3e23a33f30adf334793013a52c6ec2786929c3f68e580a",
-          "size": 14863
+          "sha256": "46dc6c6bf4337934d080c6f2cf0a3baee931e0394897b328f622bf8586db949f",
+          "size": 15262
         },
         {
           "path": "history.py",
-          "sha256": "50c49f4ee4165f0ceb91f85ae00fcd30f8de940a621d1ac2463f2f5434ba9c41",
-          "size": 80086
+          "sha256": "e7ee6c09fc2da6f1d76498cb5cd60207b1ad599b5af8d79d2a298b4d286aa89f",
+          "size": 80805
         },
         {
           "path": "plugin.py",
@@ -369,13 +369,13 @@
         },
         {
           "path": "test_history.py",
-          "sha256": "ae2086b71b56d71f53e1b192a73e068f4c4f422f198d0d9cb577e8ff46cfd51b",
-          "size": 44786
+          "sha256": "fb43bf0b0c75a3c21b36c92fd99ac03546fbbea2113894487898f72f46e737fe",
+          "size": 45720
         },
         {
           "path": "test_history_regressions.py",
-          "sha256": "89b4a150d092c70f5973fd5faaed10cc2c75edbd20e5f54a6cdacb0874d81ca4",
-          "size": 20321
+          "sha256": "b1a89cf755dee8956a51e2de49a8a57f15c779bd296bb396a41a4dbee006f1dd",
+          "size": 27215
         },
         {
           "path": "test_widget.cjs",
@@ -397,7 +397,7 @@
       "slug": "cache_efficiency_snapshot",
       "title": "Cache Efficiency Snapshot",
       "type": "extension",
-      "version": "0.8.1"
+      "version": "0.8.2"
     },
     {
       "description": "Единый календарь владельца — локальные календари, CalDAV (включая Яндекс) и Google с личным OAuth-клиентом; события, повторения, доступ, связанные копии, свободные окна, напоминания и виджет День/Неделя.",

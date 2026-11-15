@@ -23,7 +23,7 @@ SUITES = {
                     'env': {'SMART_LISTS_REQUIRE_BROWSERS': '1'}},
     'gigasearch': {'skills': ['gigasearch'], 'tests': ['skills/gigasearch/test_gigasearch.py']},
     'cache-efficiency': {'skills': ['cache_efficiency_snapshot'],
-                         'tests': ['skills/cache_efficiency_snapshot/test_cache_efficiency.py', 'skills/cache_efficiency_snapshot/test_history.py', 'tests/test_cache_dashboard_browser.py'],
+                         'tests': ['skills/cache_efficiency_snapshot', 'tests/test_cache_dashboard_browser.py'],
                          'dependencies': ['playwright==1.62.0'],
                          'env': {'CACHE_DASHBOARD_REQUIRE_RUNTIME': '1'}},
     'widgets': {'skills': ['cache_efficiency_snapshot', 'claudexor_quotas', 'context-lens', 'memory-atlas',

@@ -431,3 +431,124 @@ def test_a_cold_load_with_unexaminable_new_archives_releases_readers_degraded(tm
         release.set()
         finish_index(index)
         unload[0]()
+
+
+def loaded_state(index):
+    """Everything a load puts in memory, in its order (dicts as item lists)."""
+    with index._db_lock:
+        index._load()
+    return {'commits': index._commits, 'groups': list(index._groups), 'group_ids': dict(index._group_ids),
+            'segments': list(index._segments.items()), 'facts': index._facts, 'kept': index._kept,
+            'days': [(day, [(cell, list(inner.items())) for cell, inner in cells.items()]) for day, cells in index._days.items()],
+            'span': (index._total, index._oldest, index._newest), 'sessions': list(index._sessions.items()),
+            'session_order': index._session_order, 'boots': list(index._boots.items()), 'boot_list': index._boot_list,
+            'boot_stamps': index._boot_stamps, 'fp_base': list(index._fp_base), 'fp_chunks': index._fp_chunks}
+
+
+def test_one_statement_per_table_loads_exactly_what_a_cursor_loads(tmp_path, monkeypatch):
+    archive = tmp_path / 'archive'
+    write_rows(archive / 'events_01.jsonl', event(), event(ledger_attempt_ids=['unknown'], prompt_tokens=None, cached_tokens=None),
+               event(ledger_attempt_ids=['ü'], model='модель/🧪 "q" \\ \t'), session_event(), boot('abc', 30))
+    write_rows(archive / 'events_02.jsonl', event(ledger_attempt_ids=['b'], ts=(NOW - timedelta(days=3)).isoformat()))
+    index = new_index(tmp_path / 'history')
+    index.update(archive)
+    history, big, small = plugin._history_module, 2 ** 63 - 1, -2 ** 63
+    stamp = plugin.to_us(NOW - timedelta(hours=5))
+    with index._db_lock:  # edge values written directly: NULLs, int64 extremes, Unicode and control text, orphans
+        db = index._db
+        db.execute('INSERT INTO groups(provider, model, kind) VALUES (?, ?, ?)', ('провайдер ', 'm\x01"\\', 'attempt'))
+        db.execute('INSERT INTO segments(name, kind, size, mtime_ns, low, high, stats, fps)'
+                   ' VALUES (?, ?, NULL, NULL, NULL, NULL, ?, NULL)', ('events_ü🧪.jsonl', 'restored', json.dumps({'lines': big, 'note': 'ß'})))
+        db.execute('INSERT INTO cells VALUES (?, ?, ?, ?, ?)', (stamp - stamp % history.CELL_US, 1,
+                   history._pack([big, small] + [0] * (plugin.VECTOR_SIZE - 2)), small, big))
+        for order, (p, c, w) in enumerate(((big, 0, None), (None, None, None), (small, small, small), (5, 3, 0))):
+            db.execute('INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                       (1 if order % 2 else 999, 100 + order, 'session:ид🧪' + str(order % 2), stamp + order,
+                        'claude', 'ü/model\n', p, c, w, order * 9))
+        db.execute('INSERT INTO boots VALUES (?, ?, ?, ?, ?)', ('boot:ü', stamp, 'дерево', 'ветка/🧪', 999))
+    bulk = loaded_state(index)
+    cursor = lambda connection, table, columns: connection.execute('SELECT ' + columns + ' FROM ' + table)  # noqa: E731
+    monkeypatch.setattr(history, '_table', cursor)
+    assert loaded_state(index) == bulk
+    assert len(bulk['sessions']) >= 3 and bulk['segments'][-1][1]['facts']['lines'] == big and bulk['fp_base']
+    index.close()
+
+
+class NoJson:
+    """A connection of an SQLite without JSON functions: its JSON aggregate fails as such an SQLite fails it."""
+
+    def __init__(self, db, seen):
+        self.db, self.seen = db, seen
+
+    def execute(self, sql, *args):
+        self.seen.append(sql)
+        if 'json_group_array' in sql:
+            raise sqlite3.OperationalError('no such function: json_group_array')
+        return self.db.execute(sql, *args)
+
+    def __getattr__(self, key):
+        return getattr(self.db, key)
+
+
+def test_an_sqlite_without_json_functions_degrades_and_never_reads_rows_another_way(tmp_path, monkeypatch):
+    archive = tmp_path / 'archive'
+    write_rows(archive / 'events_01.jsonl', event(), session_event(), boot('abc', 30))
+    seed = new_index(tmp_path / 'history')
+    seed.update(archive)
+    seed.close()
+    tables = ('segments', 'rows', 'sessions', 'boots', 'cells')
+    with sqlite3.connect(tmp_path / 'history' / 'history.sqlite3') as db:
+        saved = {t: db.execute('SELECT * FROM ' + t).fetchall() for t in tables}
+    real, seen = sqlite3.connect, []
+    monkeypatch.setattr(plugin._history_module.sqlite3, 'connect', lambda *a, **k: NoJson(real(*a, **k), seen))
+    index = new_index(tmp_path / 'history')
+    try:
+        index._run(archive)
+        meta = index.meta()
+        assert meta['state'] == 'degraded' and meta['read_error'] == 'history_index_error:OperationalError'
+        assert index.view() is None and index._ready.is_set() and not index._loaded
+        assert any('json_group_array' in sql for sql in seen)
+        assert not [sql for sql in seen if 'json_group_array' not in sql and ' FROM sessions' in sql]  # no other way
+        assert not list((tmp_path / 'history').glob('*.unreadable-*'))  # a missing capability never sets the file aside
+    finally:
+        index.close()
+    monkeypatch.undo()
+    with sqlite3.connect(tmp_path / 'history' / 'history.sqlite3') as db:
+        assert {t: db.execute('SELECT * FROM ' + t).fetchall() for t in tables} == saved
+
+
+def test_a_reload_offers_stored_history_before_new_archives_and_counts_each_new_row_once(tmp_path, monkeypatch):
+    archive = tmp_path / 'archive'
+    write_rows(archive / 'events_01.jsonl', event(ledger_attempt_ids=['one'], ts=(NOW - timedelta(hours=3)).isoformat()))
+    write_rows(tmp_path / 'logs/events.jsonl')
+    _, route, unload = api_for(tmp_path, monkeypatch)
+    read_route(route, timeframe='24H')
+    finish_index(plugin._HISTORY)
+    unload[0]()
+    two = event(ledger_attempt_ids=['two'], ts=(NOW - timedelta(hours=1)).isoformat())
+    write_rows(archive / 'events_02.jsonl', two)
+    write_rows(tmp_path / 'logs/events.jsonl', two)  # the same observation still live at the rotation boundary
+    _, route, unload = api_for(tmp_path, monkeypatch)
+    index = plugin._HISTORY
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    original = index._index_list
+    def held(*args):
+        entered.set()  # the barrier: the new archive is not indexed yet
+        assert release.wait(10)
+        return original(*args)
+    monkeypatch.setattr(index, '_index_list', held)
+    try:
+        index.request(archive)
+        assert entered.wait(10)
+        assert index._ready.is_set() and index.meta()['revision'] >= 1  # released with the first published view
+        reading = read_route(route, timeframe='24H')
+        assert reading['status'] == 'loading' and reading['summary']['request_count'] == 2  # stored one + live two
+        release.set()
+        finish_index(index)
+        reading = read_route(route, timeframe='24H')
+        assert reading['status'] == 'ok' and reading['summary']['request_count'] == 2  # two counted once
+        assert index.view().total_records() == 2
+    finally:
+        release.set()
+        unload[0]()
