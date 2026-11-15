@@ -1,6 +1,6 @@
 ---
 name: cache_efficiency_snapshot
-version: 0.8.0
+version: 0.8.1
 title: Cache Efficiency Snapshot
 description: Token and cache dashboard with exact intraday intervals, daily Week/Month/All bars, Custom dates, weighted cache hit rate, cache writes, measurement coverage and automatic local archive indexing.
 type: extension
@@ -36,8 +36,9 @@ harness session. The core also writes a `delegate_run_ledger_recorded` event for
 every session it records; a session met only there counts with its route and
 time and unknown tokens. `worker_boot` events show when new code started. It
 reports input tokens, cache reads and cache writes with explicit measurement coverage. It makes
-no model calls and changes no task-card accounting. Its only writes are its own
-normalized history index and recoverable copies of an unreadable index.
+no model calls and changes no task-card accounting. Its only writes are its own history
+index in the host-assigned skill state directory (`api.get_state_dir()`) and a kept copy
+of an unreadable index there.
 
 From Ouroboros 7.7.0 the usage ledger lives in the core's SQLite store
 (`state/usage.sqlite`). The store keeps ordinary readers off its attempts table,
@@ -45,8 +46,10 @@ and its journal holds writers back while a reader is inside a query, so the
 dashboard never opens it. Cores before it (7.6.0 and older) keep session tokens
 in `state/usage_attempts.jsonl` and write no session usage events; that file is
 read while it changes within the archive window, and its session rows replace the
-same run's tokenless sessions. The store's import leaves the file unchanged, so
-it stops being read once its last change leaves the window.
+same run's sessions by the evidence order below. Only identified
+`subscription_session` rows are sessions; other settled kinds (`external_unmetered`
+and the like) and rows without a run key are skipped and counted. The store's import
+leaves the file unchanged, so it stops being read once its last change leaves the window.
 
 ## Measurements
 
@@ -81,9 +84,10 @@ Known cache writes count every write a record reports and its input can hold,
 like known cache reads, so a write of a record whose reads or input total are
 unknown is among them but is not drawn (the bars hold the writes of measured
 records only); unknown cache writes count the records they do not cover. Records
-written by a core older than 7.7.0 may carry 0 for a count their provider did
-not report; such a 0 counts as reported, so that record's unread input is drawn
-as uncached input. Writes are shown in tokens only; the money is on the core's Costs page,
+without `record_contract_version: 2` (the host record contract's `LEGACY_RULE`) may
+carry 0 for a count their provider did not report, so such a zero is unknown, never a
+measured zero; the counts name these legacy zeros per counter. A normalized split names
+an unknown as null, so its zeros are reported. Writes are shown in tokens only; the money is on the core's Costs page,
 which counts single model calls by their start time (not harness sessions), so
 its token figures differ from these.
 
@@ -116,12 +120,16 @@ instant is exclusive. The widget's day detail uses exact ISO boundaries and
 `granularity=hour`, including 23/25-hour DST days. Without `daily=1`, 7D/All
 retain adaptive intraday bins for older API consumers.
 
-Intervals are half-open and have no artificial empty endpoint. Bins are
-labelled in the viewer's local time, and the chart names that time zone. The live
-event log is read incrementally: incomplete trailing lines wait for their
-newline, a rotated or truncated live file restarts at offset zero, and each
-rotated archive is read once. Records are keyed by call identity, so a request
-met in the live tail and again inside the archive it rotated into counts once.
+A Custom range that would need more than about ten years of daily (or 15,000 intraday)
+intervals starts at the first observation and says so; with nothing observed it is refused
+as `custom_range_too_long`. Intervals are half-open and have no artificial empty endpoint. Bins are
+labelled in the viewer's local time, and the chart names that time zone. A GET reads
+only the live event log, incrementally: incomplete trailing lines wait for their
+newline and a rotated or truncated live file restarts at offset zero. Rotated archives
+belong to the history index below, which reads each once. Records are keyed by call identity (a hash over every
+reported field: time, task, source, provider and key type, model, all counters, the
+normalized split, the contract stamp, call and attempt ids), so a request met in the live
+tail and again inside the archive it rotated into counts once.
 Sessions are keyed by run, so a run met as a usage event and as a ledger event
 counts once, with the usage event's tokens.
 A run may emit several session usage events (for example a failed review, then a
@@ -132,23 +140,47 @@ with strictly higher evidence; fields are never merged, summed or filled across
 events, and equal evidence keeps the first event. Two different normalized splits
 of one run are not reconciled: the first is kept and the other is counted as a
 skipped duplicate.
-The recent reader keeps seven days of archives plus the active log's observations
-(even if it has not rotated for longer), and a preceding worker start for version
-comparison. Month, All and older Custom ranges use
-`state/cache_efficiency_snapshot/history-index.json`. One owned background thread
-loads, incrementally parses and atomically saves normalized archive entries. GET
-reads a parsed timestamp-sorted snapshot, resolving the live overlay's session
-evidence before the range filter. Short ranges and selected-day detail use the
-same available historical winners and can recover that index after a transient
-read error on the existing background cadence. Unchanged polls do not decode and deduplicate
-all of history again. Changed archives still rebuild and persist the normalized
-index in the background; All aggregation remains proportional to its observations.
-Discovery checks for rotation every thirty seconds; raw
-archives are immutable under the core's rotation contract. Indexed measurements
-survive raw-source retirement, with absent-source counts disclosed. A damaged
-index is preserved beside its replacement and its recovery is shown.
+The live reader keeps what it read until the history index holds those records exactly
+after rotation, including while an archive write fails and retries. Every range reads the history index
+`history/history.sqlite3` in the skill state directory (in memory when the host gives
+none; WAL with durable FULL commits, as the core's own store). One owned thread parses
+each rotated archive once, newest first, several archives per transaction while it
+catches up: its normalized requests (the full identity digest with a 63-bit fingerprint for
+fast lookups, time, provider/model/kind, counts and legacy-zero bits), session candidates,
+code starts and content facts. A fingerprint match is only a candidate; the stored digest
+decides whether a request is a duplicate. Requests also add to 15-minute cells per
+provider, model and kind, which is all a long range reads; a cell an unaligned edge cuts
+between its records (5-minute, 30-minute and trailing-hour bins, explicit instants) is
+counted from its own rows. Cells, refined rows and live membership checks share one committed
+SQLite snapshot; a reading retries if its published view has become stale. Live requests join exactly, and
+sessions keep one global winner before any range filter. A new archive costs its own
+rows and the cells it touches; a GET never reads or decodes an archive. After a reload a
+reading waits at most two seconds for the index's first pass, so it shows the preserved
+history at once. Discovery checks for rotation at most every thirty seconds and examines new
+names only; raw archives are immutable under the core's rotation contract, and every indexed
+archive's identity is checked again at each load and every six hours. An archive whose bytes change replaces
+its indexed copy only when it reads cleanly: every nonempty line, usage or not, is a whole JSON object. Source rows, surviving request copies and cell totals
+change in one transaction; a failed write keeps the previous reading and retries. Code starts retain
+each source's copy. Existing SQLite indexes keep all stored observations and replay available
+archives' code starts once, resumably, before source replacement. A cut-short or damaged archive
+leaves the earlier copy counted and is disclosed.
 
-The index contains no raw prompts; request/session identities are hashes, with
+Until the first complete pass, a reading that reaches back past the newest archive not yet
+indexed is returned with status `loading` and its progress (the first migration of a large
+history takes minutes and is resumable); afterwards readings stay `ok` (or `degraded` on a
+read or save error, retried; an archive that cannot be examined leaves the indexed history shown as
+`degraded`) while `refreshing` reports a background check, and a rotation never turns a reading back
+into `loading`. A torn archive tail (its whole
+last record is indexed), malformed lines and code starts without a commit are disclosed
+facts, not errors. Indexed measurements survive raw-source retirement, with absent-source
+counts disclosed. The 0.8.x JSON index (`state/cache_efficiency_snapshot/history-index.json`
+under the data directory) is read once and never written: its entries whose archive is no
+longer on disk become restored sources (their unstamped zeros are unknown), and archives
+still on disk are parsed again. An unreadable index is kept beside its replacement and its
+recovery is shown, including that observations kept only in it are not part of the rebuild.
+Unreadable or skipped legacy sources remain disclosed beside the figures after reload.
+
+The index contains no raw prompts or task ids; request/session identities are hashes, with
 only times, source/model, counters and code-start facts retained. A saved index
 is a local projection, not a backup of the full logs. Backfill progress counts
 processed archives; observed extrema never prove continuous daily coverage.
@@ -169,7 +201,11 @@ model, task mix or provider change.
 ## Widget lifecycle
 
 The standalone module uses the owning extension fetch bridge, with no external
-CDN. Refresh is explicit and also runs every thirty seconds while mounted.
+CDN. Refresh is explicit and also runs every thirty seconds while mounted. A range
+press shows at once; a selection read before shows its last reading while the fresh one
+loads. A reading that arrives while history is indexed is drawn with its progress, and
+follow-up reads run on a bounded schedule (1, 2, 4, 8, then 15 seconds, ten in all) before
+the regular cadence takes over. A server refusal is shown in words.
 SVG token-volume and hit-rate views support pointer, touch and keyboard inspection;
 coverage, absolute known cache reads and unit explanations remain visible outside tooltips. Known input whose
 class is unknown (unknown cache reads, or unread input without a usable cache-write count) is hatched, not silently
@@ -179,7 +215,10 @@ Refreshing an open day invalidates and reloads its detail; current bucket totals
 remain visible meanwhile. Keyboard focus follows the exact chart/bin through
 asynchronous redraws. Usable partial measurements retain their own dates and an
 explicit warning, separately from the last successful snapshot. Transport failures
-keep the displayed reading. Retry and the existing thirty-second polling cadence
-both recover the failed selection. Native disclosure state survives refresh. Disposal stops polling, detaches
+keep the displayed reading. A twenty-second deadline covers both response headers and body;
+a stalled request clears pending and can recover. Retry and the existing thirty-second polling cadence
+both recover the failed selection. Native disclosure state survives refresh. The host
+measures the document and owns the frame's height and scrolling; the module adds no resize
+protocol and never suppresses document overflow. Disposal stops polling, detaches
 the width observer and theme listener; plugin unload stops its archive worker.
 The existing host/owner launch policy is unchanged.
