@@ -711,8 +711,12 @@ def test_short_range_recovers_published_history_after_transient_error(tmp_path, 
         if timeframe == "CUSTOM":
             query.update({"from": (NOW-timedelta(hours=1)).isoformat(), "to": NOW.isoformat()})
         assert read_route(route, **query)["status"] == "degraded"
+        # That reading itself retried the failed pass; let that retry fail too before the fault is lifted.
+        finish_index(plugin._HISTORY)
+        failed = plugin._HISTORY._thread
         monkeypatch.setattr(Path, "open", original)
         read_route(route, **query)  # a failed pass is retried at once, not after the cadence
+        assert plugin._HISTORY._thread is not failed
         finish_index(plugin._HISTORY)
         result = read_route(route, **query)
         assert result["status"] == "ok"

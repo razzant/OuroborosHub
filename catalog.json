@@ -369,8 +369,8 @@
         },
         {
           "path": "test_history.py",
-          "sha256": "58efe8cca5cd1ea41d6bae2ef1846ed0df0157ef776956d006a2c977b1c30732",
-          "size": 45481
+          "sha256": "fb43bf0b0c75a3c21b36c92fd99ac03546fbbea2113894487898f72f46e737fe",
+          "size": 45720
         },
         {
           "path": "test_history_regressions.py",
