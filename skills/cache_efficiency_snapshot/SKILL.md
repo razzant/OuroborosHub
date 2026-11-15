@@ -1,8 +1,8 @@
 ---
 name: cache_efficiency_snapshot
-version: 0.7.0
+version: 0.8.0
 title: Cache Efficiency Snapshot
-description: Token and cache dashboard with exact intraday intervals, daily Week/Month/All bars, Custom dates, weighted cache hit rate, measurement coverage and automatic local archive indexing.
+description: Token and cache dashboard with exact intraday intervals, daily Week/Month/All bars, Custom dates, weighted cache hit rate, cache writes, measurement coverage and automatic local archive indexing.
 type: extension
 runtime: python3
 entry: plugin.py
@@ -35,7 +35,7 @@ requests. An `llm_usage` event carrying a Claudexor run receipt is one whole
 harness session. The core also writes a `delegate_run_ledger_recorded` event for
 every session it records; a session met only there counts with its route and
 time and unknown tokens. `worker_boot` events show when new code started. It
-reports input tokens and cache reads with explicit measurement coverage. It makes
+reports input tokens, cache reads and cache writes with explicit measurement coverage. It makes
 no model calls and changes no task-card accounting. Its only writes are its own
 normalized history index and recoverable copies of an unreadable index.
 
@@ -66,6 +66,26 @@ counters. Other harnesses' session counters do not establish an inclusive total
 (Claude's input excludes cache reads and names no cache writes), so those
 sessions stay unknown, as does a session recorded without a usage event. There
 is no guess based on model names or on which count is larger.
+
+A measured record that reports a cache-write count splits the input it did
+not read from the cache into cache writes and uncached input (neither read from
+the cache nor written to it). Without such a count, or with a write that with
+the known reads exceeds the input total, that unread input is unclassified, like
+input whose reads are unknown: no write is guessed and nothing unknown is called
+uncached. The volume bars stack unclassified input, cache reads, cache writes
+and uncached input, so the parts add up to the input total. The headline shows
+"—" for cache writes when no record reports a usable write count and for
+uncached input when no measured record does; each of the two cards names how
+many of the window's records it covers when that is not all of them.
+Known cache writes count every write a record reports and its input can hold,
+like known cache reads, so a write of a record whose reads or input total are
+unknown is among them but is not drawn (the bars hold the writes of measured
+records only); unknown cache writes count the records they do not cover. Records
+written by a core older than 7.7.0 may carry 0 for a count their provider did
+not report; such a 0 counts as reported, so that record's unread input is drawn
+as uncached input. Writes are shown in tokens only; the money is on the core's Costs page,
+which counts single model calls by their start time (not harness sessions), so
+its token figures differ from these.
 
 Known-token totals exclude unknown records, whose counts remain visible. The
 coverage card counts records with both valid measurements, including measured
@@ -151,8 +171,9 @@ model, task mix or provider change.
 The standalone module uses the owning extension fetch bridge, with no external
 CDN. Refresh is explicit and also runs every thirty seconds while mounted.
 SVG token-volume and hit-rate views support pointer, touch and keyboard inspection;
-coverage, absolute known cache reads and unit explanations remain visible outside tooltips. Known input with
-unknown cache reads is hatched, not silently dropped. Selected intraday bins use
+coverage, absolute known cache reads and unit explanations remain visible outside tooltips. Known input whose
+class is unknown (unknown cache reads, or unread input without a usable cache-write count) is hatched, not silently
+dropped. Selected intraday bins use
 their own totals; a selected day requests its own hourly data, models and marks.
 Refreshing an open day invalidates and reloads its detail; current bucket totals
 remain visible meanwhile. Keyboard focus follows the exact chart/bin through

@@ -8,6 +8,7 @@ other hosted suite. A change under `skills/chrome_browser/` or `tests/chrome_bro
 ## Run
 
 ```sh
+python -m pip install pytest PyYAML
 npm install --ignore-scripts --no-audit --no-fund --prefix "$DIR" @playwright/mcp@<version in skills/chrome_browser/pins.json>
 OUROBOROS_CHROME_NODE_MODULES="$DIR/node_modules" python -B -m pytest -p no:cacheprovider -q tests/chrome_browser
 ```

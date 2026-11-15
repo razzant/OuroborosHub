@@ -9,7 +9,7 @@ The setup cases run `setup.mjs status` on a copy of the skill: the older-host im
 
 Node with --test-force-exit and --test-timeout must be on PATH (verified on 24, used in CI). The last three files need the npm files that
 skills/chrome_browser/pins.json records (OUROBOROS_CHROME_NODE_MODULES; the hosted workflow installs it). Without it they
-fail and say what to install. Nothing here skips.
+fail and say what to install. The Python setup cases also require PyYAML. Nothing here skips.
 """
 from __future__ import annotations
 

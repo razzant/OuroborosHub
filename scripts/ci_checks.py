@@ -15,8 +15,12 @@ from scripts.build_index import refresh_legacy_entries, run_git
 SUITES = {
     'perplexity': {'skills': ['perplexity'], 'tests': ['tests/test_perplexity.py'],
                    'dependencies': ['httpx', 'starlette']},
+    # The browser regressions mount the widget through the core's own module bridge in Chromium and WebKit:
+    # catalog-check.yml gives this suite the mail/calendar core pin, its runtime and both browsers.
+    # SMART_LISTS_REQUIRE_BROWSERS turns a skip for want of Playwright or Chromium into a failure.
     'smart-lists': {'skills': ['smart_lists'], 'tests': ['skills/smart_lists/tests', 'tests/test_smart_lists_browser.py'],
-                    'dependencies': ['starlette']},
+                    'dependencies': ['starlette'], 'core_env': 'OUROBOROS_THEME_CORE_ROOT',
+                    'env': {'SMART_LISTS_REQUIRE_BROWSERS': '1'}},
     'gigasearch': {'skills': ['gigasearch'], 'tests': ['skills/gigasearch/test_gigasearch.py']},
     'cache-efficiency': {'skills': ['cache_efficiency_snapshot'],
                          'tests': ['skills/cache_efficiency_snapshot/test_cache_efficiency.py', 'skills/cache_efficiency_snapshot/test_history.py', 'tests/test_cache_dashboard_browser.py'],
@@ -50,6 +54,8 @@ SUITES = {
     'email-presence': {'skills': ['email-presence'], 'tests': ['skills/email-presence/tests'],
                        'dependencies': ['httpx', 'starlette', 'requests', 'requests-ntlm', 'defusedxml'], 'cwd': 'skills/email-presence',
                        'core_env': 'OUROBOROS_SOURCE_DIR', 'env': {'OUROBOROS_RUN_MAIL_BROWSER': '1'}},
+    'freshdesk': {'skills': ['freshdesk'], 'tests': ['skills/freshdesk/tests', 'tests/test_freshdesk_core_consumer.py'],
+                  'dependencies': ['httpx', 'starlette', 'websockets'], 'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT'},
     'agentrq-bridge': {'skills': ['agentrq-bridge'], 'tests': ['skills/agentrq-bridge/tests'],
                       'dependencies': ['starlette']},
     'github': {'skills': ['github'], 'tests': ['skills/github/tests'],
