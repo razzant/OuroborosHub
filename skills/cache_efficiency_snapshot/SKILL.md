@@ -1,6 +1,6 @@
 ---
 name: cache_efficiency_snapshot
-version: 0.8.1
+version: 0.8.2
 title: Cache Efficiency Snapshot
 description: Token and cache dashboard with exact intraday intervals, daily Week/Month/All bars, Custom dates, weighted cache hit rate, cache writes, measurement coverage and automatic local archive indexing.
 type: extension
@@ -154,9 +154,13 @@ between its records (5-minute, 30-minute and trailing-hour bins, explicit instan
 counted from its own rows. Cells, refined rows and live membership checks share one committed
 SQLite snapshot; a reading retries if its published view has become stale. Live requests join exactly, and
 sessions keep one global winner before any range filter. A new archive costs its own
-rows and the cells it touches; a GET never reads or decodes an archive. After a reload a
-reading waits at most two seconds for the index's first pass, so it shows the preserved
-history at once. Discovery checks for rotation at most every thirty seconds and examines new
+rows and the cells it touches; a GET never reads or decodes an archive. A load reads the stored
+segments, cells, sessions and code starts with one SQLite JSON statement each, reducing per-row
+SQL/Python handoffs; group order and fingerprint reads are unchanged. SQLite without JSON leaves
+the index `degraded`. After a reload the stored history is shown as soon as it is loaded;
+readings that need the unverified archive interval stay `loading` until the first listing
+finds no new archives or finishes indexing them. An empty index lets a reading wait at most
+two seconds for its first pass. Discovery checks for rotation at most every thirty seconds and examines new
 names only; raw archives are immutable under the core's rotation contract, and every indexed
 archive's identity is checked again at each load and every six hours. An archive whose bytes change replaces
 its indexed copy only when it reads cleanly: every nonempty line, usage or not, is a whole JSON object. Source rows, surviving request copies and cell totals

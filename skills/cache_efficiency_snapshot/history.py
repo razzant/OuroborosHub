@@ -95,6 +95,13 @@ def _unpack(blob):
     return values
 
 
+def _table(db, table, columns):
+    """Every row of one of this module's own tables (fixed names, never input) from ONE SQLite step, as JSON. A cursor
+    gives up the GIL around each row; while other server threads run Python, each row then waits for it again. SQLite
+    without JSON functions fails here (OperationalError): the load degrades, nothing is read another way."""
+    return json.loads(db.execute("SELECT json_group_array(json_array(" + columns + ")) FROM " + table).fetchone()[0])
+
+
 def _in_sorted(values, item):
     index = bisect_left(values, item)
     return index < len(values) and values[index] == item
@@ -221,7 +228,7 @@ class HistoryIndex:
         self._db_lock = threading.RLock()
         self._readers, self._reader_lock = [], threading.Lock()  # idle read-only connections (WAL readings)
         self._commits = 0                  # the commit count the in-memory state (and so the next view) shows
-        self._ready = threading.Event()    # the first pass after loading ended (or failed): readings may wait for it
+        self._ready = threading.Event()    # a stored view is published, or the first pass ended/failed
         self._kept = {}                    # archive name -> changed identity whose bytes did not replace the indexed copy
         self._stop = threading.Event()
         self._thread = None
@@ -269,7 +276,7 @@ class HistoryIndex:
             self._close_db()
 
     def wait_ready(self, timeout):
-        """Block a reading up to ``timeout`` seconds for the first pass after loading (cold start); later passes never."""
+        """Wait for a stored view, or the empty index's first pass (cold start); later passes never block here."""
         return self._ready.wait(timeout)
 
     def wait_published(self, commits, timeout):
@@ -383,7 +390,10 @@ class HistoryIndex:
                 self._open()
                 self._migrate_legacy(archive_dir)
                 self._loaded = True
-                self._publish(force=True)
+                if self._publish(force=True) and self._segments:
+                    # Stored history is shown at once, as loading until the first listing (complete_after_us); only
+                    # an empty index lets a reading wait briefly for a small first backfill.
+                    self._release_readers()
             elif str((self._legacy or {}).get("status", "")).startswith("pending:"):
                 # Keep the good index; retry only on the normal background cadence, without reopening it.
                 self._migrate_legacy(archive_dir)
@@ -567,8 +577,7 @@ class HistoryIndex:
         for gid, provider, model, kind in db.execute("SELECT id, provider, model, kind FROM groups ORDER BY id"):
             self._remember_group(gid, (provider, model, kind))
         names = {}
-        for seg, name, kind, size, mtime_ns, stats in db.execute(
-                "SELECT id, name, kind, size, mtime_ns, stats FROM segments"):
+        for seg, name, kind, size, mtime_ns, stats in _table(db, "segments", "id, name, kind, size, mtime_ns, stats"):
             self._segments[name] = {"id": seg, "kind": kind, "size": size, "mtime_ns": mtime_ns,
                                     "facts": json.loads(stats)}
             names[seg] = name
@@ -578,19 +587,19 @@ class HistoryIndex:
             for key in _FACT_KEYS:
                 self._facts[key] += facts.get(key, 0)
         days = self._days
-        for cell, gid, vector, low, high in db.execute("SELECT cell, gid, vector, low, high FROM cells"):
-            vector = tuple(_unpack(vector))
+        for cell, gid, vector, low, high in _table(db, "cells", "cell, gid, hex(vector), low, high"):
+            vector = tuple(_unpack(bytes.fromhex(vector)))
             days.setdefault(cell // DAY_US, {}).setdefault(cell, {})[gid] = (vector, low, high)
             self._total += vector[0]
             self._oldest = low if self._oldest is None else min(self._oldest, low)
             self._newest = high if self._newest is None else max(self._newest, high)
         self._loading = True  # winners first, one sort after
-        for seg, order, identity, ts, provider, model, p, c, w, flags in db.execute(
-                "SELECT seg, ord, identity, ts, provider, model, p, c, w, flags FROM sessions"):
+        for seg, order, identity, ts, provider, model, p, c, w, flags in _table(
+                db, "sessions", "seg, ord, identity, ts, provider, model, p, c, w, flags"):
             self._offer_session((names.get(seg, ""), order), self._session_record(identity, ts, provider, model, p, c, w, flags))
         self._loading = False
         self._session_order = sorted((record["ts"], identity) for identity, (_, record) in self._sessions.items())
-        for identity, ts, sha, branch in db.execute("SELECT identity, ts, sha, branch FROM boots"):
+        for identity, ts, sha, branch in _table(db, "boots", "identity, ts, sha, branch"):
             # One code start per identity, whichever sources still hold a copy of it.
             self._boots[identity] = {"ts": _stamp(ts), "sha": sha, "branch": branch, "identity": identity}
         self._boot_list = sorted(self._boots.values(), key=lambda boot: boot["ts"])
