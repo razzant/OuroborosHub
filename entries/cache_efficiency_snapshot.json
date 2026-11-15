@@ -3,7 +3,7 @@
     "ouroboros"
   ],
   "description": "Token and cache dashboard with exact intraday intervals, daily Week/Month/All bars, Custom dates, weighted cache hit rate, cache writes, measurement coverage and automatic local archive indexing.",
-  "digest": "64ae98a1c21e9040cbeff67ff2807dd299d91db58a76883b2eaf9e7edc9b6ab4",
+  "digest": "919e1e093ba04a037f537d23eae2b1f290943bde223e4ab72a1fb7e49e796acc",
   "name": "cache_efficiency_snapshot",
   "owner": "razzant",
   "schema_version": 2,
@@ -11,6 +11,7 @@
     "kind": "hosted",
     "path": "skills/cache_efficiency_snapshot"
   },
+  "title": "Cache Efficiency Snapshot",
   "type": "extension",
   "version": "0.8.1",
   "withdrawn": null

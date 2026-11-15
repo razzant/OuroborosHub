@@ -137,6 +137,7 @@ class SelectionTests(unittest.TestCase):
 
     def test_selected_consumers_refuse_absent_or_old_core_before_running_an_all_skipped_suite(self):
         for name, key in [('email-presence', 'OUROBOROS_SOURCE_DIR'), ('calendar-skill', 'OUROBOROS_THEME_CORE_ROOT'),
+                          ('smart-lists', 'OUROBOROS_THEME_CORE_ROOT'),
                           ('slack-bridge', 'OUROBOROS_PRESENCE_CORE_ROOT'), ('telegram-bot', 'OUROBOROS_PRESENCE_CORE_ROOT'),
                           ('telegram-user-session', 'OUROBOROS_PRESENCE_CORE_ROOT'),
                           ('freshdesk', 'OUROBOROS_PRESENCE_CORE_ROOT')]:

@@ -53,7 +53,7 @@ jobs:
     name: ${{ matrix.suite }}
     # memory-atlas drives its card in a real host with Chromium and WebKit as macOS runs them, on the core's Python.
     runs-on: ${{ matrix.suite == 'memory-atlas' && 'macos-latest' || 'ubuntu-latest' }}
-    timeout-minutes: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence"]'), matrix.suite) && 30 || 15 }}
+    timeout-minutes: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence", "smart-lists"]'), matrix.suite) && 30 || 15 }}
     strategy:
       fail-fast: false
       matrix:
@@ -83,9 +83,10 @@ jobs:
           python -m playwright install chromium webkit
           echo "ATLAS_CORE=$GITHUB_WORKSPACE/atlas-core" >> "$GITHUB_ENV"
       # Mail and Calendar exercise the actual Host Service, child tool dispatcher, opaque widgets and sign-in return.
-      # This exact core contains their coordinated seam; provider edges remain offline fixtures.
+      # This exact core contains their coordinated seam; provider edges remain offline fixtures. Smart Lists mounts
+      # its widget through the same core's module bridge.
       - name: Check out the pinned core for mail and calendar
-        if: matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill'
+        if: matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill' || matrix.suite == 'smart-lists'
         uses: actions/checkout@v4
         with:
           repository: razzant/ouroboros
@@ -93,7 +94,7 @@ jobs:
           path: mail-calendar-core
           persist-credentials: false
       - name: Install the mail and calendar consumer runtime
-        if: matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill'
+        if: matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill' || matrix.suite == 'smart-lists'
         run: |
           python -m pip install -r mail-calendar-core/requirements.txt
           python -m playwright install --with-deps chromium webkit
