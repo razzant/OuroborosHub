@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "note": "Exact upstream identities this skill was written and tested against. The server refuses to start a browser session with anything else.",
+  "note": "Upstream identities this skill was written and tested against. The npm files listed with their sha256, the two package versions, the playwright-core version @playwright/mcp declares and the patch's pre- and postimage are checked when the server starts and loads Playwright; with anything else it starts no browser session. The extension section is a record of the builds examined and tested, not a check: the server never reads the installed extension. It sends relay protocol 2 in the approval link, and the extension's own connect page refuses a protocol version it does not support.",
   "npm": {
     "@playwright/mcp": {
       "version": "0.0.84",
@@ -54,10 +54,28 @@
     "name": "Playwright Extension",
     "id": "mmlmfjhmonkocbjadbfplnigmagldckm",
     "store_url": "https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm",
-    "tested_version": "0.4.0",
-    "source_commit": "018adb570c757898e7035f23e29ebb689d1d6ead",
+    "tested_version": "0.5.0",
     "relay_protocol_version": 2,
-    "background_mjs_sha256_of_build_examined": "1bdd5116275d6066dcb668f908ed0ea2daeeee4bd8e26905191f7967466c77ac",
-    "modified_by_this_skill": false
+    "modified_by_this_skill": false,
+    "tested_build": {
+      "version": "0.5.0",
+      "obtained": "Chrome Web Store CRX3 downloaded on 2026-11-12 (Last-Modified 2026-11-03) and loaded unpacked; the crx_id field of its signed header (signature not verified here) and the manifest key both give mmlmfjhmonkocbjadbfplnigmagldckm",
+      "crx_sha256": "598517ba87d9f2f3b3642483cb6662bc0ea061401c5d3c1eb188a19847c92b0b",
+      "files_sha256": {
+        "manifest.json": "67ea3f171475a03c4e691d04029a986b2ba85781506fdfe2ee868b4b0f504c46",
+        "lib/background.mjs": "01c053bd04fd3df94f77c35b249f4e8ebe9ed0fef0de9e3b931dbc99229b22b6",
+        "lib/ui/connect.js": "9381af43d16ca55e3ef4b0c82c526b03c9761ae66ddeb22e6c21c642c61133a5"
+      },
+      "relay_protocol": "lib/ui/connect.js: SUPPORTED_PROTOCOL_VERSION = 2",
+      "source_commit": null,
+      "source_commit_note": "Not established: this Web Store build was not matched to a microsoft/playwright commit."
+    },
+    "earlier_build_examined": {
+      "version": "0.4.0",
+      "note": "The build this skill's earlier releases recorded as tested; kept as it was recorded, not a record of the 0.5.0 build.",
+      "built_from": "packages/extension of https://github.com/microsoft/playwright",
+      "source_commit": "018adb570c757898e7035f23e29ebb689d1d6ead",
+      "background_mjs_sha256_of_build_examined": "1bdd5116275d6066dcb668f908ed0ea2daeeee4bd8e26905191f7967466c77ac"
+    }
   }
 }

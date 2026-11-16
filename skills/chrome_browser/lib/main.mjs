@@ -55,7 +55,8 @@ export async function main({ env = process.env, stdin = process.stdin, stdout = 
       { name: SERVER_NAME, version: `${PINS.npm['@playwright/mcp'].version}+chrome_browser` },
       { capabilities: { tools: { listChanged: false } }, instructions: SERVER_INSTRUCTIONS });
   server.setRequestHandler(utils.ListToolsRequestSchema, async () => await core.listTools());
-  server.setRequestHandler(utils.CallToolRequestSchema, async (request, extra) => await core.callTool(request.params.name, request.params.arguments || {}, extra?.signal));
+  // The request's id goes along: it is part of the JSON-RPC message whose length the transport bounds (fitToTransport).
+  server.setRequestHandler(utils.CallToolRequestSchema, async (request, extra) => await core.callTool(request.params.name, request.params.arguments || {}, extra?.signal, extra?.requestId));
 
   let shuttingDown = false;
   const shutdown = async (code = 0) => {
