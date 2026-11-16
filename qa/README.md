@@ -2,7 +2,7 @@
 
 Copy this directory and the companion `catalog-check.yml` only to a `qa/memory-transfer-*`
 branch of OuroborosHub. The existing workflow filename already supports manual dispatch.
-This is one disposable macOS Actions job, not a product workflow or publication gate.
+This is one disposable Linux Actions job, not a product workflow or publication gate.
 It uses no repository secrets; it reads published Git sources and synthetic test memory.
 
 `subjects.json` binds the frozen core, actual target and Hub product tree (all original
@@ -15,7 +15,8 @@ core; size against the actual target; out-of-process 2.1/2.5 compatibility; whol
 existing real-host capture scenarios; C1/C3/F3 negative witnesses; five datetime cases
 on 3.12.13. Every pytest selection is collected first and executed once. First red
 stops subsequent work; planned unrun stages remain `NOT_RUN`. No skip/xfail is accepted.
-No Linux or second browser matrix is added. The 3.12 comparison exercises the known
+macOS runner acquisition failed before any step; this job uses Linux with both browser engines.
+It does not claim native macOS qualification. The 3.12 comparison exercises the known
 `fromisoformat` difference for historical long ISO fields, not a replacement runtime.
 
 The core's setup action runs at the workspace root. Hub is moved to runner temporary

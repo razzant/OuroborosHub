@@ -10,7 +10,7 @@ defaults:
 jobs:
   qualify:
     if: startsWith(github.ref, 'refs/heads/qa/memory-transfer-')
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
       PYTHONDONTWRITEBYTECODE: '1'
@@ -50,7 +50,7 @@ jobs:
       - name: Install locked Chromium and WebKit
         id: browsers
         run: |
-          "$UV_PROJECT_ENVIRONMENT/bin/python" -m playwright install chromium webkit 2>&1 | tee "$RUNNER_TEMP/evidence/browser-install.log"
+          "$UV_PROJECT_ENVIRONMENT/bin/python" -m playwright install --with-deps chromium webkit 2>&1 | tee "$RUNNER_TEMP/evidence/browser-install.log"
       - name: Execute core, Atlas, compatibility and negative witnesses
         if: success()
         run: |
