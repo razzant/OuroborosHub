@@ -1,0 +1,11 @@
+--- a/ouroboros/memory_reader.py
++++ b/ouroboros/memory_reader.py
+@@ -327,7 +327,7 @@
+     if span is None:
+         return None
+     if stated:
+-        return _project(span, address, ["metadata", "stated_period"], budget)
++        return span
+     text = _field_text(span)[0]
+     available = max(0, min(PREVIEW_CHARS, budget[0] - 8))
+     budget[0] -= 8 + min(len(text), available)

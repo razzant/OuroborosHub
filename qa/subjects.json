@@ -1,0 +1,15 @@
+{
+  "core_commit": "42aab559faca79bac21bf7630a82ac9fb9667702",
+  "core_tree": "8202a12f58e603bc8fa0a3a812b818300bf6c1ad",
+  "base_commit": "8f778621ccbfb8398963084944b69a1818c23c74",
+  "target_commit": "fd02530ade27a60d319c1ffb65180115d0614053",
+  "target_tree": "ae89eb64695d6902f7aba921237e1b697127d0b0",
+  "hub_source_tree": "c96fde593ce667aacf4aaf6c851e6f21e344d325",
+  "hub_product_paths": 856,
+  "hub_product_manifest_sha256": "317cc344dd11f615a09b8af4472fe54092914c011cee1a195bd8b94e61587e8d",
+  "negative_patches": {
+    "c1": "6a70b32105911cac69d3affc521088383fbc6b2bb9c4733dd27308988820b0df",
+    "c3": "87071c430f523b25bad130480db5c41c02b8e0dbb332749ecd90ae52800d7bac",
+    "f3": "94e8dd25297215a53267b675e118a8dfb8e93500076fbf6fbc8be86000f1e07e"
+  }
+}

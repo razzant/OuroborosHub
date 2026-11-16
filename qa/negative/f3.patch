@@ -1,0 +1,11 @@
+--- a/ouroboros/memory_view_legacy.py
++++ b/ouroboros/memory_view_legacy.py
+@@ -88,7 +88,7 @@
+         dated = [e for e in entries if e.get(key)]
+         if dated:
+             incomplete = " (incomplete)" if any((e.get(source) or {}).get("incomplete") for e in dated) else ""
+-            merged.append(f"{min(e[key][0] for e in dated)} → {max(e[key][1] for e in dated)}{incomplete}{note}")
++            merged.append(f"{min(e[key][0] for e in dated)} → {max(e[key][1] for e in dated)}{note}")
+     period = "; ".join(merged + sorted({entry["period"] for entry in entries
+                                         if not entry.get("span") and not entry.get("stated_span")}))
+     chars, moved = sum(entry.get("chars") or 0 for entry in entries), bool(entries[0].get("transfer"))

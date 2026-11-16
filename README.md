@@ -298,13 +298,16 @@ Nothing there skips: without them, a run says what to install.
 
 Memory Atlas keeps its tests outside the payload, in `tests/memory_atlas`. Most of them start one
 isolated Ouroboros from the core checkout named by `ATLAS_CORE`, which must provide PluginAPI 2.1
-`read_memory` (`ouroboros/memory_reader.py`): they copy it into a new directory under `/tmp`, write
+`read_memory` (`ouroboros/memory_reader.py`) and the transfer contract (`source_author`, transfer metadata,
+`period_bases`); transfer tests fail preflight against an earlier core. They copy it into a new directory under `/tmp`, write
 synthetic memory there through Ouroboros's own producers, install the payload into that data root
 only and drive the card in Chromium and WebKit. The test runner's Python needs the core's runtime
-requirements, which include Playwright, and Playwright's Chromium and WebKit. Nothing in this suite
-is skipped: without `ATLAS_CORE`, a compatible core, Playwright or starlette, a run that selects
+requirements, which include Playwright, and Playwright's Chromium and WebKit. The pure formatter tests
+need Node 20 or newer on PATH (CI uses Node 24). Nothing in this suite
+is skipped: without `ATLAS_CORE`, a compatible core, Node, Playwright or starlette, a run that selects
 these tests stops before the first one and says what is missing. CI runs the whole suite on macOS
-against the `razzant/ouroboros` commit pinned in `.github/workflows/catalog-check.yml`. Locally:
+against the `razzant/ouroboros` commit pinned in `.github/workflows/catalog-check.yml`. Run the owning
+suite on a dedicated test machine or VM: it starts a real core host. On that test machine:
 
 ```bash
 ATLAS_CORE=/path/to/ouroboros PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs tests/memory_atlas

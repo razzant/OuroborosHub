@@ -1,0 +1,590 @@
+{
+  "stress": true,
+  "matrix": [
+    {
+      "label": "chromium-desktop-light",
+      "engine": "chromium",
+      "viewport": {
+        "width": 1360,
+        "height": 747
+      },
+      "theme": "light"
+    },
+    {
+      "label": "webkit-desktop-light",
+      "engine": "webkit",
+      "viewport": {
+        "width": 1360,
+        "height": 747
+      },
+      "theme": "light"
+    },
+    {
+      "label": "chromium-narrow-dark",
+      "engine": "chromium",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "theme": "dark"
+    },
+    {
+      "label": "webkit-narrow-dark",
+      "engine": "webkit",
+      "viewport": {
+        "width": 390,
+        "height": 844
+      },
+      "theme": "dark"
+    }
+  ],
+  "steps": [
+    {
+      "name": "tr-source",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-source",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [],
+      "rows_selector": ".doc > .byline, .doc .facts-grid dt, .doc .facts-grid dd, .doc .prose",
+      "expect_text": [
+        "Written by Synthetic Writer · model synthetic-model-a · signed in the source",
+        "Written 3 Mar 2026 (as its source states)"
+      ],
+      "forbid_text": [],
+      "scroll_rows_into_view": true,
+      "full_scroll": true
+    },
+    {
+      "name": "tr-importer",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-importer",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [],
+      "rows_selector": ".doc > .byline, .doc .facts-grid dt, .doc .facts-grid dd, .doc .prose",
+      "expect_text": [
+        "Written by Importer Stated Writer · model not stated · stated by the importer",
+        "Written 4 Mar 2026, 09:30 (as its source states)"
+      ],
+      "forbid_text": [],
+      "scroll_rows_into_view": true,
+      "full_scroll": true
+    },
+    {
+      "name": "tr-unknown-author",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-unknown-author",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [],
+      "rows_selector": ".doc > .byline, .doc .facts-grid dt, .doc .facts-grid dd, .doc .prose",
+      "expect_text": [
+        "Author not stated · model synthetic-model-b · stated by the importer",
+        "Written date not stated (as its source states)"
+      ],
+      "forbid_text": [],
+      "scroll_rows_into_view": true,
+      "full_scroll": true
+    },
+    {
+      "name": "tr-all-unknown",
+      "open": [
+        {
+          "v": "room",
+          "room": "legacy"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-all-unknown",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "legacy"
+          }
+        }
+      ],
+      "click": [],
+      "rows_selector": ".doc > .byline, .doc .facts-grid dt, .doc .facts-grid dd, .doc .prose",
+      "expect_text": [
+        "Author not stated · model not stated · attribution not stated"
+      ],
+      "forbid_text": [],
+      "scroll_rows_into_view": true,
+      "full_scroll": true
+    },
+    {
+      "name": "tr-moved-helper",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-moved-helper",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [],
+      "rows_selector": ".doc > .byline, .doc .facts-grid dt, .doc .facts-grid dd, .doc .prose",
+      "expect_text": [
+        "Retold by an earlier helper · recorded writer old_consolidator · retelling by Light, not lived"
+      ],
+      "forbid_text": [],
+      "scroll_rows_into_view": true,
+      "full_scroll": true
+    },
+    {
+      "name": "tr-special",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-special",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [],
+      "rows_selector": ".doc > .byline, .doc .facts-grid dt, .doc .facts-grid dd, .doc .prose",
+      "expect_text": [
+        "\\u{202E}",
+        "(excerpt)",
+        "signed in the source",
+        "<b>tag</b>"
+      ],
+      "forbid_text": [
+        "Author not stated",
+        "model not stated",
+        "operator not recorded",
+        "tool not recorded"
+      ],
+      "scroll_rows_into_view": true,
+      "full_scroll": true,
+      "metadata_cf_check": true
+    },
+    {
+      "name": "tr-special-stored-record",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-special",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [
+        {
+          "name": "Stored record"
+        }
+      ],
+      "rows_selector": ".doc .tree",
+      "expect_text": [
+        "<b>tag</b>"
+      ],
+      "forbid_text": [],
+      "scroll_rows_into_view": true,
+      "full_scroll": true
+    },
+    {
+      "name": "tr-mix-part",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-mix-part",
+          "label": "Part",
+          "hint": {
+            "kind": "part",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [],
+      "rows_selector": ".doc > .byline, .doc .facts-grid dt, .doc .facts-grid dd, .doc .prose",
+      "expect_text": [
+        "partly block period, partly stated by its source",
+        "Folds 3 records",
+        "2025"
+      ],
+      "forbid_text": [],
+      "scroll_rows_into_view": true,
+      "full_scroll": true
+    },
+    {
+      "name": "old-legacy-helper",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.old-block-synth",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [],
+      "rows_selector": ".doc > .byline, .doc .facts-grid dt, .doc .facts-grid dd, .doc .prose",
+      "expect_text": [
+        "Imported from the earlier dialogue file"
+      ],
+      "forbid_text": [
+        "Transferred"
+      ],
+      "scroll_rows_into_view": true,
+      "full_scroll": true
+    },
+    {
+      "name": "room-1-list",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        }
+      ],
+      "click": [],
+      "rows_selector": ".row .facts",
+      "expect_text": [
+        "Transferred · Written by Synthetic Writer"
+      ],
+      "forbid_text": [],
+      "scroll_rows_into_view": true,
+      "full_scroll": true
+    },
+    {
+      "name": "room-legacy-list",
+      "open": [
+        {
+          "v": "room",
+          "room": "legacy"
+        }
+      ],
+      "click": [],
+      "rows_selector": ".row .facts",
+      "expect_text": [
+        "Transferred · Author not stated · model not stated · attribution not stated"
+      ],
+      "forbid_text": [],
+      "scroll_rows_into_view": true,
+      "full_scroll": true
+    },
+    {
+      "name": "full-author-name",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-special",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [
+        {
+          "name": "Read full author name",
+          "exact": true
+        }
+      ],
+      "rows_selector": "[aria-label=\"Exact stored text\"]",
+      "exact_ids_path": [
+        "tr-special-author",
+        "label"
+      ],
+      "full_scroll": true
+    },
+    {
+      "name": "full-model",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-special",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [
+        {
+          "name": "Read full model",
+          "exact": true
+        }
+      ],
+      "rows_selector": "[aria-label=\"Exact stored text\"]",
+      "exact_ids_path": [
+        "tr-special-author",
+        "model"
+      ],
+      "full_scroll": true
+    },
+    {
+      "name": "full-operator",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-special",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [
+        {
+          "name": "Read full operator",
+          "exact": true
+        }
+      ],
+      "rows_selector": "[aria-label=\"Exact stored text\"]",
+      "exact_ids_path": [
+        "tr-special-transfer",
+        "operator"
+      ],
+      "full_scroll": true
+    },
+    {
+      "name": "full-tool",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-special",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [
+        {
+          "name": "Read full tool",
+          "exact": true
+        }
+      ],
+      "rows_selector": "[aria-label=\"Exact stored text\"]",
+      "exact_ids_path": [
+        "tr-special-transfer",
+        "tool"
+      ],
+      "full_scroll": true
+    },
+    {
+      "name": "full-task",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-special",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [
+        {
+          "name": "Read full task",
+          "exact": true
+        }
+      ],
+      "rows_selector": "[aria-label=\"Exact stored text\"]",
+      "exact_ids_path": [
+        "tr-special-transfer",
+        "task_id"
+      ],
+      "full_scroll": true
+    },
+    {
+      "name": "signature-source",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-special",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "click": [
+        {
+          "name": "Read signature source",
+          "exact": true
+        }
+      ],
+      "rows_selector": "[aria-label=\"Exact stored text\"]",
+      "signature_source": true,
+      "full_scroll": true
+    },
+    {
+      "name": "story-list",
+      "open": [
+        {
+          "v": "story"
+        }
+      ],
+      "rows_selector": ".row .facts",
+      "expect_text": [
+        "(excerpt)"
+      ],
+      "full_scroll": true
+    },
+    {
+      "name": "period-basic",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-period-basic",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "rows_selector": ".doc > .byline, .facts-grid, .doc .prose",
+      "expect_text": [
+        "20260701 → 20260731 (stated by its source)"
+      ],
+      "full_scroll": true
+    },
+    {
+      "name": "period-offset",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-period-offset",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "rows_selector": ".doc > .byline, .facts-grid, .doc .prose",
+      "expect_text": [
+        "2026-07-01 21:30 → 2026-08-01 02:30 (stated by its source)"
+      ],
+      "full_scroll": true
+    },
+    {
+      "name": "period-budget",
+      "open": [
+        {
+          "v": "room",
+          "room": "1"
+        },
+        {
+          "v": "record",
+          "id": "$ids.tr-period-budget",
+          "label": "Earlier dialogue",
+          "hint": {
+            "kind": "legacy",
+            "room": "1"
+          }
+        }
+      ],
+      "rows_selector": ".doc > .byline, .facts-grid, .doc .prose",
+      "expect_text": [
+        "stated by its source"
+      ],
+      "full_scroll": true
+    }
+  ]
+}

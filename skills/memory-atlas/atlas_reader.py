@@ -140,7 +140,7 @@ class CoreReader:
                          current_revision=answer.get("current_revision"),
                          preview=str(answer.get("text") or "")[:own if isinstance(own, int) else PREVIEW_CHARS])
             # A dated record's period stands at the document's top level, as its list entry carries it.
-            entry.update({key: answer[key] for key in ("period", "source_period", "period_basis") if key in answer})
+            entry.update({key: answer[key] for key in ("period", "source_period", "period_basis", "period_bases") if key in answer})
             out.append({"id": ident, "missing": False, "record": entry})
         return {"memory_contract": MEMORY_CONTRACT, "entries": out}
 

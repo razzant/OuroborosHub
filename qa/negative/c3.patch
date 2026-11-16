@@ -1,0 +1,11 @@
+--- a/ouroboros/chronicle_store.py
++++ b/ouroboros/chronicle_store.py
+@@ -941,8 +941,6 @@
+         problem = _author_problem(record.get("author"), kind)
+         if problem:
+             return _refuse("invalid", problem)
+-        if kind != "legacy" and _mapping(record.get("metadata")).get("transfer") is not None:
+-            return _refuse("invalid", "metadata.transfer is only valid on legacy records")
+         if kind in _TEXT_KINDS and not _nonblank(record.get("text")):
+             return _refuse("invalid", f"a {kind} needs text")
+         if kind in ("page", "part") and record["author"]["kind"] not in ("mind", "helper"):

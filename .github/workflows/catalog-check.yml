@@ -1,166 +1,84 @@
-name: Validate Catalog
-
+# Temporary qualification branch ONLY. Do not merge this replacement into main.
+name: Memory transfer qualification
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
-
 permissions:
   contents: read
-
+defaults:
+  run:
+    shell: bash
 jobs:
-  catalog:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
-      suites: ${{ steps.prepare.outputs.suites }}
+  qualify:
+    if: startsWith(github.ref, 'refs/heads/qa/memory-transfer-')
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/python310
+      UV_PYTHON_DOWNLOADS: never
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/browsers
     steps:
       - uses: actions/checkout@v4
         with:
+          path: qa-hub
           persist-credentials: false
+          fetch-depth: 1
+      - name: Keep Hub separate from the core checkout
+        run: |
+          mv "$GITHUB_WORKSPACE/qa-hub" "$RUNNER_TEMP/hub"
+          mkdir -p "$RUNNER_TEMP/evidence"
+      - uses: actions/checkout@v4
+        with:
+          repository: razzant/ouroboros
+          ref: 42aab559faca79bac21bf7630a82ac9fb9667702
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: actions/setup-node@v4
         with:
-          python-version: '3.11'
-      - run: python -m pip install PyYAML pytest
-      - name: Select affected suites and refresh legacy publishers' entries
-        id: prepare
-        run: python -B scripts/ci_checks.py
-      # Entries are canonical. Owner updates may omit the generated v1 file;
-      # Sync Joi Lab Mirror publishes it from merged main before mirroring.
-      - run: python scripts/build_index.py
-      - run: python scripts/build_index.py --check
-      - run: >-
-          python -B -m pytest -p no:cacheprovider -q
-          tests/test_catalog.py tests/test_index.py tests/test_owner_updates.py
-          tests/test_signals.py tests/test_workflows.py tests/test_ci_checks.py
-      - name: Record owner-update eligibility without secrets
-        if: github.event_name == 'pull_request'
-        run: python -B scripts/owner_updates.py verdict --output "$RUNNER_TEMP/owner-verdict/verdict.json"
+          node-version: '24'
+      - name: Bind sources and prepare a mechanical composition
+        id: sources
+        run: python3 -I -B "$RUNNER_TEMP/hub/qa/qualify.py" prepare
+      # This action runs from the core root, as its relative paths require.
+      - name: Core's shipped Python 3.10.22 and locked dependency-only environment
+        id: runtime
+        uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: shipped
+          install-project: 'false'
+      - name: Install locked Chromium and WebKit
+        id: browsers
+        run: |
+          "$UV_PROJECT_ENVIRONMENT/bin/python" -m playwright install chromium webkit 2>&1 | tee "$RUNNER_TEMP/evidence/browser-install.log"
+      - name: Execute core, Atlas, compatibility and negative witnesses
+        if: success()
+        run: |
+          "$UV_PROJECT_ENVIRONMENT/bin/python" -I -B "$RUNNER_TEMP/hub/qa/qualify.py" run
+      - uses: actions/setup-python@v5
+        id: comparison_python
+        with:
+          python-version: '3.12.13'
+      - name: Only the legacy datetime reader comparison
+        id: comparison
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/python312
+          COMPARISON_PYTHON: ${{ steps.comparison_python.outputs.python-path }}
+        run: |
+          uv sync --locked --python "$COMPARISON_PYTHON" --extra browser --group dev --no-install-project 2>&1 | tee "$RUNNER_TEMP/evidence/setup312.log"
+          "$UV_PROJECT_ENVIRONMENT/bin/python" -I -B "$RUNNER_TEMP/hub/qa/qualify.py" compare
+      - name: Preserve sources, synthetic state and outcomes on either result
+        if: always()
+        env:
+          PREPARE_OUTCOME: ${{ steps.sources.outcome }}
+          RUNTIME_OUTCOME: ${{ steps.runtime.outcome }}
+          BROWSER_OUTCOME: ${{ steps.browsers.outcome }}
+          COMPARISON_SETUP_OUTCOME: ${{ steps.comparison_python.outcome }}
+        run: python3 -I -B "$RUNNER_TEMP/hub/qa/qualify.py" export
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'pull_request'
+        if: always()
         with:
-          name: owner-update-verdict
-          overwrite: true
-          path: ${{ runner.temp }}/owner-verdict/verdict.json
+          name: memory-transfer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence
+          include-hidden-files: true
           if-no-files-found: error
-          retention-days: 3
-
-  hosted-skills:
-    needs: catalog
-    if: needs.catalog.outputs.suites != '[]'
-    name: ${{ matrix.suite }}
-    # memory-atlas drives its card in a real host with Chromium and WebKit as macOS runs them, on the core's Python.
-    runs-on: ${{ matrix.suite == 'memory-atlas' && 'macos-latest' || 'ubuntu-latest' }}
-    timeout-minutes: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence", "smart-lists"]'), matrix.suite) && 30 || 15 }}
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: ${{ fromJSON(needs.catalog.outputs.suites) }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence"]'), matrix.suite) && '3.10' || '3.11' }}
-      - run: python -m pip install PyYAML
-      # The core Memory Atlas reads memory through (PluginAPI 2.1 read_memory): razzant/ouroboros at the merge of its
-      # PR 2426. Its runtime lock brings Playwright. Without the core or a browser the suite fails; it never skips.
-      - name: Check out the pinned core for memory-atlas
-        if: matrix.suite == 'memory-atlas'
-        uses: actions/checkout@v4
-        with:
-          repository: razzant/ouroboros
-          ref: 4d55f05d2a67c4678de0cd0d82c685c2c33fe4d7
-          path: atlas-core
-          persist-credentials: false
-      - name: Install that core's runtime and the browsers, and name the core
-        if: matrix.suite == 'memory-atlas'
-        run: |
-          python -m pip install -r atlas-core/requirements.txt
-          python -m playwright install chromium webkit
-          echo "ATLAS_CORE=$GITHUB_WORKSPACE/atlas-core" >> "$GITHUB_ENV"
-      # Mail and Calendar exercise the actual Host Service, child tool dispatcher, opaque widgets and sign-in return.
-      # Email uses PR 3538's PluginAPI 2.5 core; Calendar and Smart Lists retain their qualified core.
-      # Provider edges remain offline fixtures. Smart Lists mounts its widget through the core's module bridge.
-      - name: Check out the pinned core for mail and calendar
-        if: matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill' || matrix.suite == 'smart-lists'
-        uses: actions/checkout@v4
-        with:
-          repository: razzant/ouroboros
-          ref: ${{ matrix.suite == 'email-presence' && '04b6453ad0e5d4b6bb157b76e67ccac60fb0eff6' || '9c4411457bdb752d9379f17a97cf171a22384402' }}
-          path: mail-calendar-core
-          persist-credentials: false
-      - name: Install the mail and calendar consumer runtime
-        if: matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill' || matrix.suite == 'smart-lists'
-        run: |
-          python -m pip install -r mail-calendar-core/requirements.txt
-          python -m playwright install --with-deps chromium webkit
-          echo "OUROBOROS_SOURCE_DIR=$GITHUB_WORKSPACE/mail-calendar-core" >> "$GITHUB_ENV"
-          echo "OUROBOROS_THEME_CORE_ROOT=$GITHUB_WORKSPACE/mail-calendar-core" >> "$GITHUB_ENV"
-      # The Presence consumers (tests/test_*_core_consumer.py) drive Slack and Telegram through this core's own Presence
-      # routes in child processes. They import nothing beyond each suite's dependencies, so the checkout is all they
-      # need. Without it the suite fails; they never skip.
-      - name: Check out the pinned core for the Presence consumers
-        if: contains(fromJSON('["freshdesk", "slack-bridge", "telegram-bot", "telegram-user-session"]'), matrix.suite)
-        uses: actions/checkout@v4
-        with:
-          repository: razzant/ouroboros
-          ref: 9f6fe2f5f7f4d8f3e5ea58f0d04fb352181416bc
-          path: presence-core
-          persist-credentials: false
-      - name: Name that core for the Presence consumers
-        if: contains(fromJSON('["freshdesk", "slack-bridge", "telegram-bot", "telegram-user-session"]'), matrix.suite)
-        run: echo "OUROBOROS_PRESENCE_CORE_ROOT=$GITHUB_WORKSPACE/presence-core" >> "$GITHUB_ENV"
-      # The Chrome adapter's tests are Node's own. They need Node and the exact npm closure skills/chrome_browser/pins.json
-      # records; the version is read from that file, and the tests verify every pinned file by hash. A different closure
-      # fails them; they never skip.
-      - uses: actions/setup-node@v4
-        if: matrix.suite == 'chrome-browser'
-        with:
-          node-version: '24'
-      - name: Install the npm closure that chrome_browser pins
-        if: matrix.suite == 'chrome-browser'
-        run: |
-          mkdir -p "$RUNNER_TEMP/chrome-browser-npm"
-          version=$(python -c "import json; print(json.load(open('skills/chrome_browser/pins.json'))['npm']['@playwright/mcp']['version'])")
-          npm install --ignore-scripts --no-audit --no-fund --prefix "$RUNNER_TEMP/chrome-browser-npm" "@playwright/mcp@$version"
-          echo "OUROBOROS_CHROME_NODE_MODULES=$RUNNER_TEMP/chrome-browser-npm/node_modules" >> "$GITHUB_ENV"
-      # The quota widget's Node harnesses and real-browser cases: Node and Playwright's Chromium and WebKit. Without them
-      # its tests fail (QUOTAS_REQUIRE_RUNTIME in scripts/ci_checks.py); they never skip.
-      - uses: actions/setup-node@v4
-        if: matrix.suite == 'claudexor-quotas' || matrix.suite == 'cache-efficiency'
-        with:
-          node-version: '24'
-      - name: Install Playwright and its browsers for claudexor-quotas
-        if: matrix.suite == 'claudexor-quotas'
-        run: |
-          python -m pip install 'playwright>=1.50,<2'
-          python -m playwright install --with-deps chromium webkit
-      - name: Install the token dashboard's real browser consumers
-        if: matrix.suite == 'cache-efficiency'
-        run: |
-          python -m pip install 'playwright==1.62.0'
-          python -m playwright install --with-deps chromium webkit
-      - name: Run the selected hosted suite with its runtime dependencies
-        env:
-          SUITE: ${{ matrix.suite }}
-        run: python -B scripts/ci_checks.py run "$SUITE"
-
-  checks:
-    needs: [catalog, hosted-skills]
-    if: ${{ always() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Require every selected suite to pass
-        env:
-          NEEDS: ${{ toJSON(needs) }}
-        run: |
-          python - <<'PY'
-          import json, os, sys
-          results = [job['result'] for job in json.loads(os.environ['NEEDS']).values()]
-          sys.exit(0 if all(result in {'success', 'skipped'} for result in results) else 1)
-          PY
+          retention-days: 14
