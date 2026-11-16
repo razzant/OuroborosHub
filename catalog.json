@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/f845c2a81065cc42457a4861634be52517512dbf",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/4bb28167e5537988e42456fdafc67f46b7c4f6b4",
   "schema_version": 1,
   "skills": [
     {
@@ -275,8 +275,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "c0ed4ac6432e8dd565c68f8b54a58729ce41dad645633b7dc085fd1b6c286f6d",
-          "size": 5838
+          "sha256": "bbad0fc036bd8235e43f4527713e9a06d5c978392b6ed022444a133964396750",
+          "size": 7563
         },
         {
           "path": "references/domains.md",
@@ -290,19 +290,19 @@
         },
         {
           "path": "references/examples.md",
-          "sha256": "d2b5e30049595bbe5cd3bea203514cf7ff69fb6f47f90bae94a7eb2b4cb9d150",
-          "size": 6027
+          "sha256": "1784fa624e715f0bd8179e8445274ae066fbe1e3437fe0e3aec2405b48a7c82b",
+          "size": 8924
         },
         {
           "path": "references/signals.md",
-          "sha256": "4793a1c17017077a65d5f9dc72133cc9f3bcebe8c371ee012770b449cf51a564",
-          "size": 4000
+          "sha256": "c4dc2f7893b804dba596fb70165ec3becdc4728bef7bc4a291a44a8b43ae71b7",
+          "size": 4482
         }
       ],
       "name": "anti-slop",
       "slug": "anti-slop",
       "type": "instruction",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "when_to_use": "Drafting or revising human-facing prose, including scientific or technical writing, documentation, posts, slides, speeches, and correspondence; or when asked to audit writing for slop."
     },
     {
