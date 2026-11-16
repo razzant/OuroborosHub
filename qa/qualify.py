@@ -4,6 +4,7 @@ prepare: bind the published source commits and materialize Git's clean merge tre
 run: unmodified home suites plus three known negative witnesses and UI capture.
 export: retain raw results and exact synthetic roots on success or failure.
 """
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -94,6 +95,8 @@ def prepare():
             and not r['path'].startswith('qa/')]
     assert len(rows) == PINS['hub_product_paths']
     assert digest(json.dumps(rows, sort_keys=True, separators=(',', ':')).encode()) == PINS['hub_product_manifest_sha256']
+    for key, expected in PINS['negative_patches'].items():
+        assert digest((QA / 'negative' / f'{key}.patch').read_bytes()) == expected
     snapshot(CORE, 'core-before')
     snapshot(HUB, 'hub-before')
     # No merge commit, ref movement or conflict resolution. A conflict remains a preparation failure.
@@ -245,6 +248,22 @@ def pytest(label, core, selection, cwd=None, env=None, negative=None):
             f'--junitxml={OUT / (label + ".xml")}', *selection], env, negative)
 
 
+@contextmanager
+def family(label):
+    """Keep a failed family's evidence and continue independent families; never credit it."""
+    try:
+        yield
+    except (AssertionError, RuntimeError, OSError, ValueError, ET.ParseError,
+            subprocess.SubprocessError) as exc:
+        result = RESULTS[PLANNED.index(label)]
+        # Preserve the test/custody classification already written by pytest/execute.
+        if result['status'] in ('NOT_RUN', 'STARTED'):
+            result['status'] = 'INCOMPLETE_OR_SETUP_ERROR'
+        result.update(qualification_status='FAIL', family_error=f'{type(exc).__name__}: {exc}')
+        (OUT / f'{label}-error.txt').write_text(traceback.format_exc())
+        save(OUT / 'results.json', RESULTS)
+
+
 def run():
     assert (OUT / 'subjects.json').is_file(), 'preparation did not complete'
     assert sys.version_info[:3] == (3, 10, 22), sys.version
@@ -260,22 +279,28 @@ def run():
          'packages': {d.metadata['Name']: d.version for d in importlib.metadata.distributions()}})
     assert command('browser-inventory', [sys.executable, '-m', 'playwright', 'install', '--list'], CORE) == 0
     for label, core in [('frozen', CORE), ('composed', COMPOSED)]:
-        pytest(f'{label}-transfer', core, ['tests/test_chronicle_transfer.py'])
-        pytest(f'{label}-owners', core, [f'tests/{name}.py' for name in OWNERS])
-    pytest('size', COMPOSED, ['-m', 'size_ratchet', 'tests/'],
-           env={'OURO_SIZE_RATCHET_BASE_REF': PINS['target_commit']})
+        with family(f'{label}-transfer'):
+            pytest(f'{label}-transfer', core, ['tests/test_chronicle_transfer.py'])
+        with family(f'{label}-owners'):
+            pytest(f'{label}-owners', core, [f'tests/{name}.py' for name in OWNERS])
+    with family('size'):
+        pytest('size', COMPOSED, ['-m', 'size_ratchet', 'tests/'],
+               env={'OURO_SIZE_RATCHET_BASE_REF': PINS['target_commit']})
     # Extra witness is a named QA overlay, kept out of source tree snapshots and size measurement.
     compat = COMPOSED / 'tests/test_transfer_qa_compat.py'
     assert not compat.exists()
     shutil.copyfile(QA / 'test_transfer_compat.py', compat)
     save(OUT / 'compat-overlay.json', {'path': str(compat), 'sha256': digest(compat.read_bytes())})
-    pytest('plugin-compat', COMPOSED, ['tests/test_transfer_qa_compat.py'])
+    with family('plugin-compat'):
+        pytest('plugin-compat', COMPOSED, ['tests/test_transfer_qa_compat.py'])
     atlas_env = {'ATLAS_CORE': str(COMPOSED), 'ATLAS_RUN_ROOT': '/tmp/mt-atlas-suite',
                  'ATLAS_SHOTS': str(OUT / 'atlas-shots'), 'PYTHONPATH': str(HUB)}
     (OUT / 'atlas-shots').mkdir(exist_ok=True)
-    pytest('atlas', COMPOSED, ['tests/memory_atlas'], cwd=HUB, env=atlas_env)
-    execute('frames', COMPOSED, HUB, [str(QA / 'capture_frames.py'), str(HUB), str(COMPOSED),
-                                    str(OUT / 'visual'), '/tmp/mt-atlas-frames'])
+    with family('atlas'):
+        pytest('atlas', COMPOSED, ['tests/memory_atlas'], cwd=HUB, env=atlas_env)
+    with family('frames'):
+        execute('frames', COMPOSED, HUB, [str(QA / 'capture_frames.py'), str(HUB), str(COMPOSED),
+                                        str(OUT / 'visual'), '/tmp/mt-atlas-frames'])
     # Each retained patch restores just one known defect; current tests/assertions remain byte-identical.
     for key, (nodes, marker) in NEGATIVE.items():
         mutant = TEMP / f'negative-{key}'
@@ -295,7 +320,8 @@ def run():
                 archive.add(mutant / name, arcname=name)
         save(OUT / f'negative-{key}-before.json', before)
         try:
-            pytest(f'negative-{key}', mutant, [f'tests/test_chronicle_transfer.py::{node}' for node in nodes], negative=(nodes, marker))
+            with family(f'negative-{key}'):
+                pytest(f'negative-{key}', mutant, [f'tests/test_chronicle_transfer.py::{node}' for node in nodes], negative=(nodes, marker))
         finally:
             after = {name: digest((mutant / name).read_bytes()) if (mutant / name).is_file() else None for name in before}
             save(OUT / f'negative-{key}-after.json', after)
@@ -304,10 +330,14 @@ def run():
                     if (mutant / name).exists():
                         archive.add(mutant / name, arcname=name)
             assert before == after, 'negative source changed during the witness'
+    # Reached only after run's source checks; a red product family may still compare.
+    with open(os.environ['GITHUB_OUTPUT'], 'a') as outputs:
+        outputs.write('comparison_ready=true\n')
     assert all(r.get('qualification_status') == 'PASS' for r in RESULTS if r['label'] != 'datetime312'), 'qualification is red; read results.json'
 
 
 def compare():
+    assert (OUT / 'subjects.json').is_file(), 'preparation did not complete'
     assert sys.version_info[:3] == (3, 12, 13), sys.version
     save(OUT / 'runtime312.json', {'python': sys.version, 'executable': sys.executable,
                                  'prefix': sys.prefix, 'base_prefix': sys.base_prefix})

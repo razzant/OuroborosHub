@@ -13,8 +13,11 @@ Preparation uses Git's mechanical merge tree, without a merge commit or conflict
 Order: exact shipped 3.10.22; whole transfer and owning suites on frozen and composed
 core; size against the actual target; out-of-process 2.1/2.5 compatibility; whole Atlas;
 existing real-host capture scenarios; C1/C3/F3 negative witnesses; five datetime cases
-on 3.12.13. Every pytest selection is collected first and executed once. First red
-stops subsequent work; planned unrun stages remain `NOT_RUN`. No skip/xfail is accepted.
+on 3.12.13. Every pytest selection is collected first and executed once. Each independent family records its own failure and the remaining families continue;
+the overall run still fails. Source preparation and mutation identity checks
+remain fatal: invalid subjects never authorize the comparison. Planned unrun stages
+remain `NOT_RUN`. The 3.12 comparison runs after product failures only when `run`
+reaches the end of its source checks; its aggregate verdict retains earlier reds. No skip/xfail is accepted.
 macOS runner acquisition failed before any step; this job uses Linux with both browser engines.
 It does not claim native macOS qualification. The 3.12 comparison exercises the known
 `fromisoformat` difference for historical long ISO fields, not a replacement runtime.
@@ -25,11 +28,18 @@ Dependencies use the core lock with no editable project install. Browser version
 from that lock; Node 24 resolves through setup-node. Actual versions are in runtime.json.
 Downloads can fail: there is no automatic Python fallback.
 
-The artifact contains raw command/stdout/stderr/return codes, collected nodeids, JUnit,
+The `memory-transfer-small-*` artifact uploads first: all top-level JSON, stdout,
+stderr, XML, text and setup logs, plus raw PNG/DOM and visual manifests/text. It excludes
+source/state tarballs. `memory-transfer-full-*` separately retains the entire evidence
+directory even if the small upload fails. Both uploads run after failed qualification.
+The full artifact contains raw command/stdout/stderr/return codes, collected nodeids, JUnit,
 results.json, source manifests and before/after archives, full retained synthetic
 state, and visual/frames raw PNG, DOM and text. A separate negative-source archive plus
 the core-before archive and retained patch reconstruct each mutant. Capture uses the
-existing RealHost/Card/transfer producers and unchanged B8 scenarios. It records all
+existing RealHost/Card/transfer producers and unchanged B8 scenarios. All 21 views
+reopen their own route in each of four cells; the manifest checks and retains the
+actual route before and after capture, including exact-field and stored-record views.
+A wrong route is a failed case, not visual evidence for its filename. It records all
 HTTP failures; the suite's own card contract judges widget-route failures (unrelated
 host maintenance probes may return 503). No DOM rewriting or mock widget replaces it.
 The hosted runner has network access; the synthetic host uses the core ModelStub.

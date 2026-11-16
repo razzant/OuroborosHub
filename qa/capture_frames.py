@@ -37,6 +37,27 @@ def subst(value, ids):
     return value
 
 
+def expected_route(step, ids):
+    opened = subst(step['open'], ids)[-1]
+    if step.get('exact_ids_path') or step.get('signature_source'):
+        field = ['author']
+        if step.get('exact_ids_path'):
+            source, name = step['exact_ids_path']
+            field = ['author', name] if source.endswith('-author') else ['metadata', 'transfer', name]
+        return {'v': 'field', 'address': {'kind': 'record', 'id': opened['id'], 'field': field}}
+    route = {key: opened[key] for key in ('v', 'id', 'room') if key in opened}
+    if step.get('click'):
+        assert step['click'] == [{'name': 'Stored record'}], step
+        route['source'] = True
+    return route
+
+
+def check_route(actual, expected):
+    assert all(actual.get(key) == value for key, value in expected.items()), (actual, expected)
+    if expected['v'] == 'record':
+        assert bool(actual.get('source')) == bool(expected.get('source')), (actual, expected)
+
+
 ROW_FACTS = """(sel) => {
   const els = Array.from(document.querySelectorAll(sel));
   const doc = document.documentElement;
@@ -84,6 +105,10 @@ try:
                             card.settle()      # the suite's own wait after a click
                         if step.get('wait_text'):
                             card.wait_text(step['wait_text'])
+                        row['expected_route'] = expected_route(step, host.ids)
+                        row['route'] = card.ev('() => window.__memoryAtlas.route()')
+                        row['title'] = card.title()
+                        check_route(row['route'], row['expected_route'])
                         sel = step.get('rows_selector')
                         base = f"{cell['label']}__{step['name']}"
                         if sel:
@@ -173,6 +198,8 @@ try:
                                 card.card.screenshot(path=str(tile))
                                 shots.append({'kind': 'scroll-tile', 'scroll_top': actual_top, 'path': tile.name, 'sha256': sha(tile)})
                         row['shots'] = shots
+                        row['route_after_capture'] = card.ev('() => window.__memoryAtlas.route()')
+                        check_route(row['route_after_capture'], row['expected_route'])
                     except Exception as error:
                         row['error'] = repr(error)
                         row['traceback'] = traceback.format_exc()
@@ -192,7 +219,11 @@ try:
                 manifest['failures'].append({'cell': cell['label'], 'error': repr(error)})
             finally:
                 if card is not None:
-                    card.close()
+                    try:
+                        card.close()
+                    except Exception as error:
+                        record['close_error'] = repr(error)
+                        manifest['failures'].append({'cell': cell['label'], 'close_error': repr(error)})
 except Exception as error:        # start / transfer refusal / anything before or between cells: kept in the manifest, exit 1
     manifest['setup_error'] = repr(error)
     manifest['setup_traceback'] = traceback.format_exc()

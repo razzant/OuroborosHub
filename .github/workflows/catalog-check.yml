@@ -52,14 +52,17 @@ jobs:
         run: |
           "$UV_PROJECT_ENVIRONMENT/bin/python" -m playwright install --with-deps chromium webkit 2>&1 | tee "$RUNNER_TEMP/evidence/browser-install.log"
       - name: Execute core, Atlas, compatibility and negative witnesses
+        id: qualification
         if: success()
         run: |
           "$UV_PROJECT_ENVIRONMENT/bin/python" -I -B "$RUNNER_TEMP/hub/qa/qualify.py" run
       - uses: actions/setup-python@v5
+        if: ${{ !cancelled() && steps.qualification.outputs.comparison_ready == 'true' }}
         id: comparison_python
         with:
           python-version: '3.12.13'
       - name: Only the legacy datetime reader comparison
+        if: ${{ !cancelled() && steps.qualification.outputs.comparison_ready == 'true' && steps.comparison_python.outcome == 'success' }}
         id: comparison
         env:
           UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/python312
@@ -75,10 +78,30 @@ jobs:
           BROWSER_OUTCOME: ${{ steps.browsers.outcome }}
           COMPARISON_SETUP_OUTCOME: ${{ steps.comparison_python.outcome }}
         run: python3 -I -B "$RUNNER_TEMP/hub/qa/qualify.py" export
-      - uses: actions/upload-artifact@v4
+      - name: Upload small outcomes, logs and visual evidence first
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: memory-transfer-${{ github.run_id }}-${{ github.run_attempt }}
+          name: memory-transfer-small-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/evidence/*.json
+            ${{ runner.temp }}/evidence/*.stdout
+            ${{ runner.temp }}/evidence/*.stderr
+            ${{ runner.temp }}/evidence/*.xml
+            ${{ runner.temp }}/evidence/*.txt
+            ${{ runner.temp }}/evidence/*.log
+            ${{ runner.temp }}/evidence/**/*.png
+            ${{ runner.temp }}/evidence/**/*.html
+            ${{ runner.temp }}/evidence/visual/**/*.json
+            ${{ runner.temp }}/evidence/visual/**/*.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload full retained archive separately
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: memory-transfer-full-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/evidence
           include-hidden-files: true
           if-no-files-found: error

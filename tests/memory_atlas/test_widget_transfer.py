@@ -196,7 +196,8 @@ def test_the_author_filter_lists_the_source_authors_and_leaves_the_old_kinds_apa
     found = get(real_host, "list", area="records", author_kind="source_author", limit=500)
     assert found["complete"] and all(e["author"]["kind"] == "source_author" and e["byline"] for e in found["entries"])
     assert {e["id"] for e in found["entries"]} == {ids[n] for n in (
-        "tr-mix-rows", "tr-mix-stated", "tr-source", "tr-importer", "tr-unknown-author", "tr-all-unknown", "tr-special", "tr-period-basic")}
+        "tr-mix-rows", "tr-mix-stated", "tr-source", "tr-importer", "tr-unknown-author", "tr-all-unknown", "tr-special",
+        "tr-period-basic", "tr-period-offset")}
     helpers = get(real_host, "list", area="records", author_kind="legacy_helper", limit=500)["entries"]
     with_transfer = {e["id"] for e in helpers if "transfer" in e}
     assert with_transfer == {ids["tr-moved-helper"], ids["tr-period-budget"]}
@@ -212,7 +213,8 @@ def test_ordinary_records_carry_no_transfer_fields(real_host, transfers):
     for kind in ("page", "part", "note", "legacy"):
         for entry in get(real_host, "list", area="records", room_id="1", kinds=[kind], limit=200)["entries"]:
             if entry["id"] in (ids["tr-source"], ids["tr-importer"], ids["tr-unknown-author"], ids["tr-moved-helper"],
-                               ids["tr-special"], ids["tr-mix-rows"], ids["tr-mix-stated"], ids["tr-period-budget"], ids["tr-period-basic"]):
+                               ids["tr-special"], ids["tr-mix-rows"], ids["tr-mix-stated"], ids["tr-period-budget"],
+                               ids["tr-period-basic"], ids["tr-period-offset"]):
                 continue
             for name in ("transfer", "written_at", "stated_period"):
                 assert name not in entry, (kind, entry["id"], name)
@@ -372,7 +374,8 @@ def test_rows_name_the_transfer_and_never_date_it_by_its_local_publication(card,
         else:
             assert "2026-07-01" in period and "2026-07-31" in period
         assert "incomplete" not in period and "unknown" not in period
-        assert c.ev(META, "record:" + ids[key]) == "Earlier dialogue · " + period
+        # My story spans rooms, so its rows name the room as well as the source-stated period.
+        assert c.ev(META, "record:" + ids[key]) == "Earlier dialogue · Main · " + period
     # Basic ISO must retain both dates in the document heading too, without a second ISO parser.
     open_record(c, ids["tr-period-basic"], "1")
     basic = doc(real_host, ids["tr-period-basic"])
