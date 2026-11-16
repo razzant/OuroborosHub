@@ -25,7 +25,6 @@ jobs:
         run: |
           mv "$GITHUB_WORKSPACE/qa-hub" "$RUNNER_TEMP/hub"
           mkdir -p "$RUNNER_TEMP/evidence"
-          echo "UV_PROJECT_ENVIRONMENT=$RUNNER_TEMP/python310" >> "$GITHUB_ENV"
           echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/browsers" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
@@ -46,6 +45,8 @@ jobs:
         with:
           interpreter: shipped
           install-project: 'false'
+      - name: Use the environment activated by the core action
+        run: echo "UV_PROJECT_ENVIRONMENT=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
       - name: Install locked Chromium and WebKit
         id: browsers
         run: |
