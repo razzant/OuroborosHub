@@ -66,14 +66,14 @@ jobs:
         with:
           python-version: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence"]'), matrix.suite) && '3.10' || '3.11' }}
       - run: python -m pip install PyYAML
-      # The core Memory Atlas reads memory through (PluginAPI 2.1 read_memory): razzant/ouroboros at the merge of its
-      # PR 2426. Its runtime lock brings Playwright. Without the core or a browser the suite fails; it never skips.
+      # Memory Atlas reads through PluginAPI 2.1 read_memory and PR 3573's transfer-attribution contract.
+      # The pinned core supplies Playwright. Without the core, Node or a browser the suite fails; it never skips.
       - name: Check out the pinned core for memory-atlas
         if: matrix.suite == 'memory-atlas'
         uses: actions/checkout@v4
         with:
           repository: razzant/ouroboros
-          ref: 4d55f05d2a67c4678de0cd0d82c685c2c33fe4d7
+          ref: 5c8e908d0858897ed829c921606f57477524753c
           path: atlas-core
           persist-credentials: false
       - name: Install that core's runtime and the browsers, and name the core
@@ -118,7 +118,7 @@ jobs:
       # records; the version is read from that file, and the tests verify every pinned file by hash. A different closure
       # fails them; they never skip.
       - uses: actions/setup-node@v4
-        if: matrix.suite == 'chrome-browser'
+        if: matrix.suite == 'chrome-browser' || matrix.suite == 'memory-atlas'
         with:
           node-version: '24'
       - name: Install the npm closure that chrome_browser pins

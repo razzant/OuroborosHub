@@ -25,7 +25,7 @@ RECORD_KINDS = ("page", "part", "note", "correction", "decision", "mark", "mark_
                 "account", "selection", "legacy", "gap")
 HISTORY_KINDS = ("correction", "decision", "selection", "mark_view", "mark_release")
 STATUSES = ("final", "draft", "candidate", "accepted", "rejected")
-AUTHOR_KINDS = ("mind", "helper", "host", "legacy_helper")
+AUTHOR_KINDS = ("mind", "helper", "host", "legacy_helper", "source_author")
 RELATIONS = ("members", "sources", "source_changes", "cited_by", "links")
 ADDRESS_KINDS = ("record", "note", "file", "journal", "entry")
 

@@ -2,7 +2,7 @@
 name: memory-atlas
 title: Memory Atlas
 description: Read Ouroboros's memory room by room, beside the record you open, with corrections, drafts and decisions, knowledge notes, marks and identity, and copy an exact address to paste into a chat. Long lists and texts continue where they stopped; Refresh shows what changed. Read-only, no model calls.
-version: 0.3.0
+version: 0.3.1
 type: extension
 runtime: python3
 entry: plugin.py
@@ -44,6 +44,12 @@ list is the first screen and a record opens after a choice.
   and its reason, the part it belongs to and the accounts that tell or cite it. "Stored
   record" shows the record as stored; a long stored value shows its first words and reads
   whole.
+  A chapter brought from elsewhere (a transfer) names the author of its words as its source or its importer
+  states it, with the model and what the attribution rests on, each either stated or "not stated"; it shows
+  apart the date its source says it was written and the date it was transferred here, and its period is the one
+  its source states, or says it is not stated. The words themselves are shown as stored. Earlier records keep
+  their usual signatures. Shortened metadata is labelled as an excerpt and opens through its existing field
+  address; invisible format controls are shown visibly in metadata, with original text preserved.
 - **An account**: what it selected into My story, and each source as it cited it
   (revision and sha256), with what changed in that source afterwards.
 - **Knowledge**: every shelf's notes with their authored summaries ("No summary" when

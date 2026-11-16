@@ -232,6 +232,7 @@ export function mountAtlas(root, { client, kit = true } = {}) {
       if (e.replaces && e.replaces.count) { facts.push('Tells ' + plural(e.replaces.count, 'record') + ' in their place'); }
       if (e.selection && typeof e.selection === 'object') { facts.push(e.selection.shown ? 'Selected into My story' : 'Withdrawn from My story'); }
     }
+    if (W.isTransfer(e)) { facts.push('Transferred · ' + W.byline(e.author, e.signer, e)); }
     if (e.told_by) { facts.push('Told in My story by an account'); }
     return rowButton('record:' + e.id, () => go(recordRoute(e)), [
       h('div', { class: 'top' }, top),
@@ -402,7 +403,10 @@ export function mountAtlas(root, { client, kit = true } = {}) {
     if (sw) { kicker.appendChild(word(sw)); }
     doc.appendChild(kicker);
     doc.appendChild(viewTitle(heading.name, { title: heading.full }));
-    doc.appendChild(h('p', { class: 'byline meta' }, W.byline(r.author, r.signer) + ' · ' + W.when(r.ts)));
+    if (W.isTransfer(r)) {   // words brought here from elsewhere: who wrote them, then the two dates apart (the words stay below)
+      doc.appendChild(h('p', { class: 'byline meta' }, W.byline(r.author, r.signer, r)));
+      doc.appendChild(h('p', { class: 'byline meta' }, W.transferDates(r)));
+    } else { doc.appendChild(h('p', { class: 'byline meta' }, W.byline(r.author, r.signer, r) + ' · ' + W.when(r.ts))); }
     doc.appendChild(segment('Show', [
       { label: 'Read', chosen: !src, on: () => replaceTop({ source: false }) },
       { label: 'Stored record', chosen: src, on: () => replaceTop({ source: true }) }]));
@@ -627,6 +631,24 @@ export function mountAtlas(root, { client, kit = true } = {}) {
     const facts = h('dl', { class: 'facts-grid' });
     const fact = (k, v) => { facts.appendChild(h('dt', null, k)); facts.appendChild(h('dd', null, v)); };
     if ('period' in doc0) { fact('Period', W.periodText(doc0)); }
+    if (W.isTransfer(r)) {
+      fact('Transferred', W.when(r.ts) + ', ' + W.transferWords(r));
+      const value = (v, label) => {
+        const at = W.metadataAddress(v);
+        return h('span', null, W.metadataValue(v), at ? ' · ' : null,
+          at ? link(v.derived_from ? 'Read signature source' : 'Read full ' + label.toLowerCase(),
+            () => go({ v: 'field', address: at, label }), 'small') : null);
+      };
+      if (W.metadataValue(r.byline)) { fact('Signed as', value(r.byline, 'Signature')); }
+      // Only shortened facts need extra controls. The core's existing field addresses read their exact bytes.
+      for (const [label, v] of [['Author', r.author], ['Author name', r.author && r.author.label],
+        ['Model', r.author && r.author.model], ['Attribution', r.author && r.author.basis],
+        ['Writer', r.author && r.author.writer], ['Operation', r.author && r.author.operation],
+        ['Attribution note', r.author && r.author.attribution], ['Transfer', r.transfer],
+        ['Operator', r.transfer.operator], ['Tool', r.transfer.tool], ['Task', r.transfer.task_id], ['Written date', r.written_at]]) {
+        if (W.metadataAddress(v)) { fact(label, value(v, label)); }
+      }
+    }
     if (typeof r.room_id === 'string') { fact('Room', link(W.roomName(doc0.room_label || roomLabel(r.room_id)).name, () => choose({ v: 'room', room: r.room_id }))); }   // '' is the host's room
     if (r.folded_into) { fact('Part of', recLink({ id: r.folded_into, kind: 'part', room_id: r.room_id }, 'The part that folds it')); }
     if (doc0.told_by) { fact('Told in My story by', recLink({ id: doc0.told_by, kind: 'account', room_id: r.room_id }, 'An account')); }
