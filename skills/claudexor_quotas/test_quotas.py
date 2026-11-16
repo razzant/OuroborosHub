@@ -310,6 +310,62 @@ class TestQuotaFor:
         assert "40% used" in res["label"]
         assert "per-model caps spent: Opus Cap" in res["note"]
 
+    @staticmethod
+    def _two(capped, shared_ratio=0.20, availability="available"):
+        """One fresh reading of a spent cap beside a shared window at 80% left, the engine's own word
+        for the account (an unspecified-model text request) being ``availability``."""
+        return [{
+            "subject": {"harness": "agy", "subject_id": "p1"},
+            "freshness": "fresh",
+            "observed_at": AUG_OBSERVED,
+            "availability": {"state": availability},
+            "constraints": [
+                dict({"label": "Capped", "used_ratio": 1.0, "resets_at": "2026-08-16T00:00:00Z"}, **capped),
+                {"label": "Shared", "used_ratio": shared_ratio, "resets_at": "2026-08-16T04:00:00Z"},
+            ],
+        }]
+
+    def test_a_spent_prefix_only_limit_is_a_model_cap_not_the_accounts_limit(self):
+        # The engine scopes Gemini by model-id prefix with no model list: an exhausted gemini-* limit holds those
+        # models, not the account, whose shared window has 80% left and whose engine word is "available".
+        res = quota_for(self._two({"applies_to_model_prefixes": ["gemini-"]}), "agy", "p1", READ_OK, now=AUG_NOW)
+        assert res["state"] == "ok" and res["label"] == "20% used" and res["resets_at"] == "2026-08-16T04:00:00Z"
+        assert res["note"] == "per-model caps spent: Capped" and res["availability"] == "available"
+        capped, shared = res["constraints"]
+        assert capped["account_wide"] is False and capped["at_limit"] is True and capped["scoped_prefixes"] == ["gemini-"]
+        assert shared["account_wide"] is True
+
+    @pytest.mark.parametrize("capped", [
+        {"applies_to_request_kinds": ["image"]},                          # another request kind only
+        {"applies_to_models": "gemini"},                                  # a scope that cannot be read
+        {"applies_to_request_kinds": ["image", "video"]},                 # a kind the engine's schema forbids
+    ])
+    def test_a_spent_cap_on_part_of_the_requests_is_not_the_accounts_limit(self, capped):
+        res = quota_for(self._two(capped), "agy", "p1", READ_OK, now=AUG_NOW)
+        assert res["state"] == "ok" and res["label"] == "20% used"
+        assert res["note"] == "caps on other request kinds or an unreadable scope spent: Capped"
+        assert [c["account_wide"] for c in res["constraints"]] == [False, True]
+
+    @pytest.mark.parametrize("capped", [
+        {"applies_to_request_kinds": ["text"]},                           # Codex's text bucket
+        {"applies_to_request_kinds": ["text", "image"]},
+        {"applies_to_models": [], "applies_to_model_prefixes": []},       # empty lists: vendor-wide
+        {"applies_to_unspecified_model": False},                          # the flag alone scopes nothing
+    ])
+    def test_a_spent_limit_of_every_text_request_is_still_the_accounts_limit(self, capped):
+        res = quota_for(self._two(capped, availability="exhausted"), "agy", "p1", READ_OK, now=AUG_NOW)
+        assert res["state"] == "exhausted" and res["label"] == "Limit reached"
+        assert res["resets_at"] == "2026-08-16T00:00:00Z" and res["note"] == ""
+        assert [c["account_wide"] for c in res["constraints"]] == [True, True]
+
+    def test_a_model_list_that_also_governs_unnamed_requests_stays_a_model_cap(self):
+        # Antigravity's gemini windows list models, carry gemini-* and govern a request naming no model; as
+        # before, a spent one is that scope's cap, as the reserve counts it (never a shared limit).
+        res = quota_for(self._two({"applies_to_models": ["gemini-3.1-pro-high"], "applies_to_model_prefixes": ["gemini-"],
+                                   "applies_to_unspecified_model": True}), "agy", "p1", READ_OK, now=AUG_NOW)
+        assert res["state"] == "ok" and res["note"] == "per-model caps spent: Capped"
+        assert res["constraints"][0]["account_wide"] is False
+
     def test_exact_subject_matching_isolation(self):
         snapshots = [
             {
@@ -1813,3 +1869,65 @@ class TestPrefs:
     def test_fold_that_is_not_a_map_leaves_every_reason_folded(self):
         for junk in (["failed"], "failed", 0, None, True):
             assert clean_prefs({"fold": junk})["fold"] == ALL_FOLDED
+
+
+NODE_ACCOUNT_CAPS = r"""
+(async () => {
+  const view = JSON.parse(process.env.CAPS_VIEW);
+  const click = (env, key) => { const node = byFocus(env.root, key); assert.ok(node, 'missing control ' + key); node.listeners.click[0]({ stopPropagation() {} }); };
+  const stateOf = (env, key) => classes(byFocus(env.root, 'acct:' + key), 'acc-state')[0].textContent;
+  const dotOf = (node) => String(classes(node, 'state-dot')[0].className);
+  const env = await boot(view);
+  // A spent gemini-* limit (a model family by prefix) beside a shared window with 80% left: a model's cap, amber,
+  // never the account's "limit reached"; a spent cap of image requests only is said as what it is; a spent limit of
+  // every text request is still the account's; an account with room left is ready.
+  assert.equal(stateOf(env, 'agy:prefix'), 'a model at its limit');
+  assert.equal(stateOf(env, 'agy:image'), 'a limit on some requests reached');
+  assert.equal(stateOf(env, 'agy:text'), 'limit reached');
+  assert.equal(stateOf(env, 'agy:plain'), 'ready');
+  assert.match(dotOf(byFocus(env.root, 'acct:agy:prefix')), /\bwarn\b/);
+  assert.match(dotOf(byFocus(env.root, 'acct:agy:text')), /\bbad\b/);
+  click(env, 'acct:agy:prefix');
+  const inspector = classes(env.root, 'inspector')[0];
+  assert.match(dotOf(inspector), /\bwarn\b/, 'the card of the account is not red for a model family cap');
+  assert.match(inspector.textContent, /20% used/, 'the one figure of the account is its shared window');
+  assert.doesNotMatch(inspector.textContent, /Limit reached/);
+  env.disposeHooks[0]();
+})().catch((error) => { console.error(error && error.stack ? error.stack : error); process.exitCode = 1; });
+"""
+
+
+def test_a_cap_on_part_of_the_requests_never_reads_as_the_accounts_limit_in_the_widget():
+    """The real backend's account view (build_view) drawn by the real widget: the verdict reads the backend's one
+    word (account_wide), so a spent gemini-* limit or an image-only cap is not the account's limit in either."""
+    import time as _time
+    from test_reserve import _node, payload, profile
+    now = _time.time()
+    iso = plugin.qs.iso
+
+    def snap(sid, capped):
+        constraints = [{"id": "shared", "label": "Shared", "used_ratio": 0.2, "window_seconds": 604800,
+                        "resets_at": iso(now + 86400)}]
+        if capped is not None:
+            constraints.insert(0, dict({"id": "capped", "label": "Capped", "used_ratio": 1.0, "window_seconds": 18000,
+                                        "resets_at": iso(now + 3600)}, **capped))
+        return {"subject": {"harness": "agy", "subject_id": sid}, "constraints": constraints,
+                "availability": {"state": "exhausted" if capped and "applies_to_request_kinds" in capped
+                                 and "text" in capped["applies_to_request_kinds"] else "available"},
+                "observed_at": iso(now - 60), "freshness": "fresh", "source": "fixture"}
+
+    accounts = {"prefix": {"applies_to_model_prefixes": ["gemini-"]}, "image": {"applies_to_request_kinds": ["image"]},
+                "text": {"applies_to_request_kinds": ["text"]}, "plain": None}
+    data = payload([snap(sid, capped) for sid, capped in accounts.items()], [profile("agy", sid) for sid in accounts],
+                   harnesses=("agy",))
+    view = plugin.build_view(data, "", now)
+    states = {a["subject_id"]: a["quota"]["state"] for a in view["groups"][0]["accounts"]}
+    assert states == {"prefix": "ok", "image": "ok", "text": "exhausted", "plain": "ok"}
+    node = _node()
+    assert node is not None, "a Node runtime is required for widget tests"
+    widget_path = Path(os.environ.get("QUOTAS_REVIEW_WIDGET_PATH", Path(__file__).with_name("widget.js"))).resolve()
+    harness = NODE_WIDGET_MATRIX.split("(async () => {")[0]
+    result = subprocess.run([str(node), "-e", harness + NODE_ACCOUNT_CAPS], cwd=Path(__file__).parent,
+                            env={**os.environ, "WIDGET_PATH": str(widget_path), "CAPS_VIEW": json.dumps(view)},
+                            text=True, capture_output=True, timeout=60, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr

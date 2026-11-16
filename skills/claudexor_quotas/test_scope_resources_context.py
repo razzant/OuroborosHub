@@ -197,8 +197,91 @@ def test_snapshot_text_is_deterministic_bounded_and_matches_the_tool_numbers(tmp
         assert f"{row['remaining_windows']:.2f} left" in text or "no current reading" in text
     # no relative age, no per-refresh clock, no shortened text
     assert not re.search(r"\b\d+\s*(min|h|s)\s+ago\b", text) and "[:" not in text
+    assert quota_context.envelope_bytes(text) <= quota_context.MAX_FILE_BYTES
     tiny = quota_context.snapshot_text(answer, bound=700)
     assert len(tiny) <= 700 and "left out" in tiny and tiny.startswith(quota_context.HEADER)
+    small = quota_context.snapshot_text(answer, byte_bound=1200)
+    assert quota_context.envelope_bytes(small) <= 1200 and "left out" in small and small.startswith(quota_context.HEADER)
+
+
+# The host's reader of the file (ouroboros/skill_context_snapshot.py _read_snapshot), as this skill must satisfy it:
+# at most MAX_SNAPSHOT_BYTES of the whole file (one byte more is "snapshot_oversized"), UTF-8 JSON, schema_version
+# the integer 1, a non-empty text, timezone-aware dates with observed_at not after valid_until.
+HOST_MAX_SNAPSHOT_BYTES = 32768
+
+
+def host_reads(path):
+    with open(path, "rb") as stream:
+        raw = stream.read(HOST_MAX_SNAPSHOT_BYTES + 1)
+    if len(raw) > HOST_MAX_SNAPSHOT_BYTES:
+        return "snapshot_oversized", None
+    value = json.loads(raw.decode("utf-8"))
+    observed, valid = (qs.parse_instant(value[k]) for k in ("observed_at", "valid_until"))
+    assert type(value["schema_version"]) is int and value["schema_version"] == 1
+    assert isinstance(value["text"], str) and value["text"].strip() and observed <= valid
+    value["text"].encode("utf-8")
+    return "fresh", value
+
+
+def wide_resources(accounts=12, rows=12):
+    """A resource-only family whose engine text is multi-byte and needs JSON escapes: every account reports
+    twelve diagnostics, each code 64 characters (the reader's cap) of four-byte, three-byte, quote, backslash and
+    control characters. Distinct per account, so no line folds into a counted cohort."""
+    data = payload([], [profile("cursor", f"c{a}") for a in range(accounts)], harnesses=("cursor",))
+    data["availability_scope"] = {"model": None, "requestKind": "text", "basis": "quota_block"}
+    data["resources"] = [{
+        "target": {"harness": "cursor", "profile_id": f"c{a}"},
+        "balances": facet(None, "unknown"), "spending": facet(None, "unknown"), "resets": facet(None, "unknown"),
+        "diagnostics": facet([{"code": (f"{a:02d}{r:02d}" + "\U0001F600" * 56 + "\u20ac\"\\\u0001")[:64]}
+                              for r in range(rows)]),
+    } for a in range(accounts)]
+    return data
+
+
+def test_multibyte_and_escaped_provider_text_is_published_within_the_hosts_byte_bound(tmp_path):
+    data = wide_resources()
+    latest = plugin.LatestRead()
+    latest.put(data, "", NOW)
+    effective, cached = latest.effective(data)
+    answer = plugin.answer_of(None, effective, cached, data, NOW, NOW)
+    whole = quota_context.snapshot_text(answer, bound=10 ** 9, byte_bound=10 ** 9)
+    # under the character bound, over the host's file bound: what 12,000 characters alone let through
+    assert len(whole) <= quota_context.MAX_CHARS and quota_context.envelope_bytes(whole) > HOST_MAX_SNAPSHOT_BYTES
+    text = quota_context.snapshot_text(answer)
+    assert quota_context.envelope_bytes(text) <= HOST_MAX_SNAPSHOT_BYTES and len(text) <= quota_context.MAX_CHARS
+    lines, kept = text.split("\n"), set(whole.split("\n"))
+    omission = [line for line in lines if "left out" in line]
+    assert len(omission) == 1 and omission[0] == lines[-1] and "cursor" in omission[0] and "quota_summary" in omission[0]
+    assert all(line in kept for line in lines[:-1]), "only whole lines of the full text, none cut"
+    assert text.startswith(quota_context.HEADER) and text != whole
+    # the producer's own file, read as the host reads it
+    assert plugin.publish_snapshot(_Api(tmp_path), None, data, "", NOW, latest) == "written"
+    path = tmp_path / quota_context.SNAPSHOT_FILE
+    state, value = host_reads(path)
+    assert state == "fresh" and value["text"] == text and path.stat().st_size <= HOST_MAX_SNAPSHOT_BYTES
+    raw = path.read_bytes()
+    assert b"\\u0001" in raw and "\U0001F600".encode("utf-8") in raw  # escaped control, raw UTF-8 emoji
+    assert len(raw) <= quota_context.envelope_bytes(text)
+
+
+def test_an_oversized_previous_file_is_no_snapshot_and_an_oversized_text_is_never_written(tmp_path):
+    answer, _store, latest, data = _answer(tmp_path)
+    api = _Api(tmp_path)
+    text = quota_context.snapshot_text(answer)
+    path = tmp_path / quota_context.SNAPSHOT_FILE
+    # A file the host reads as oversized, with this very text and a validity far ahead: never "unchanged".
+    big = {"schema_version": 1, "observed_at": qs.iso(NOW), "valid_until": qs.iso(NOW + 400), "text": text,
+           "pad": "x" * HOST_MAX_SNAPSHOT_BYTES}
+    path.write_text(json.dumps(big), encoding="utf-8")
+    assert host_reads(path)[0] == "snapshot_oversized"
+    assert quota_context.read_snapshot(path) is None
+    assert plugin.publish_snapshot(api, None, data, "", NOW + 10, latest) == "written"
+    assert host_reads(path)[0] == "fresh"
+    before = path.read_bytes()
+    # A text no line-dropping bounded: refused before anything is written; the last file stays to expire.
+    with pytest.raises(ValueError):
+        quota_context.publish(tmp_path, "\U0001F600" * 9000, NOW + 20, None, qs.iso_exact, qs.parse_instant)
+    assert path.read_bytes() == before and not list(tmp_path.glob("context-snapshot.json.*.tmp"))
 
 
 def test_snapshot_is_written_once_renewed_near_expiry_and_never_for_a_failed_sweep(tmp_path):

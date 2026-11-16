@@ -20,10 +20,13 @@ overview, the chart and the model tool are one calculation (quota_summary.py)
 over the same status projection and the same history view.
 
 The widget speaks the language chosen in Ouroboros (the install-wide language): its English
-phrases are one file, strings_en.json, which this module registers with the host's translation
-generator (register_catalog, as the Telegram bridge does) and serves to the widget on the
-``i18n`` route together with whatever the install's translation memory holds for them. The
-skill ships no dictionary; with no language chosen, or no translation yet, the English stands.
+phrases are one file, strings_en.json, which this module serves to the widget on the ``i18n``
+route together with whatever the install's translation memory holds for them, read from the
+gateway's own ``GET /api/ui/i18n`` over loopback. A phrase the memory lacks is reported through
+the gateway's ``POST /api/ui/i18n/missing``: the host queues it and its translator (the owner's
+light model) translates it. The skill imports no host module and registers nothing with the host
+outside the PluginAPI. It ships no dictionary; with no language chosen, or no translation yet,
+the English stands.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ import itertools
 import json
 import math
 import os
+import re
 import socket
 import tempfile
 import threading
@@ -424,23 +428,22 @@ def _used_text(ratio: Optional[float]) -> Optional[str]:
     return text
 
 
-def _constraint_view(constraint: Dict[str, Any], at_limit: bool = False,
-                     scope: Optional[str] = None) -> Dict[str, Any]:
+def _constraint_view(constraint: Dict[str, Any], at_limit: bool = False) -> Dict[str, Any]:
     """One window as the account view draws it. The ratio is read the way
     the reserve reads it (quota_summary.ratio_of): a value outside [0, 1], a
     string or NaN is refused and named in ``ratio_problem``, never clamped
     into a share nobody reported. ``used_pct`` is the unrounded percent (for
     bars and tones), ``used_text`` the words for it. ``at_limit`` is the
     caller's verdict on a current reading; a last-known or not-current
-    window never carries one. ``scope_key`` is the reserve's identity of the
-    window's own model list — taken from the constraint itself when the
-    caller has no reading of it (a bare cooldown, a credit counter)."""
+    window never carries one. ``scope_key`` is the one identity of the
+    window's whole scope that holds reported apart from it are tied by
+    (quota_scope.hold_key, the reserve's too): the model list's id for a
+    window tied to models (by name or family prefix), "-" for an unscoped
+    limit of both request kinds, the exact fields for an unreadable scope."""
     ratio, problem = qs.ratio_of(constraint.get("used_ratio"))
     models = constraint.get("applies_to_models")
     scoped = [str(m) for m in models if m] if isinstance(models, list) else []
     desc = quota_scope.scope_of(constraint)
-    if scope is None:
-        scope = desc.token
     return {
         "id": str(constraint.get("id") or ""),
         "label": str(constraint.get("label") or constraint.get("id") or "constraint"),
@@ -456,8 +459,13 @@ def _constraint_view(constraint: Dict[str, Any], at_limit: bool = False,
         # is model-scoped, never a shared limit.
         "scoped_prefixes": list(desc.prefixes),
         "scope_fields": desc.describe(),
+        # Whether this window speaks for the whole account in its verdict
+        # (quota_scope.account_wide): not one tied to models by name or
+        # prefix, not one of other request kinds only, not an unreadable
+        # scope. The widget's verdict reads this one word too.
+        "account_wide": quota_scope.account_wide(desc),
         # Display names can be shortened; the reserve's identity cannot.
-        "scope_key": scope,
+        "scope_key": quota_scope.hold_key(desc),
         "window_seconds": constraint.get("window_seconds"),
     }
 
@@ -472,20 +480,33 @@ def _spent(view: Dict[str, Any]) -> bool:
 
 def _cooldown_view(cooldown: qs.Cooldown, now: float) -> Dict[str, Any]:
     """One cooldown as the account view carries it, apart from every
-    window's share and reset: what it holds (the whole account, or some
-    models), until when — or why that is not known — and which reading
-    reported it."""
+    window's share and reset: what it holds — the whole account, some models
+    (by name or family prefix), or some requests (other request kinds only,
+    or a scope that cannot be read) — until when, or why that is not known,
+    and which reading reported it. ``scope_key`` (quota_scope.hold_key) ties
+    it to the windows of exactly its scope, as the reserve does."""
     if cooldown.until is not None:
         until, note = qs.iso(cooldown.until) or "", "" if cooldown.until > now else "passed"
     else:
         until, note = "", "unreadable" if cooldown.until_text else "not_reported"
+    desc = cooldown.desc if cooldown.desc is not None else quota_scope.Scope()
+    if cooldown.scope == "-":
+        scope = "account"
+    elif cooldown.models or cooldown.prefixes or desc.scoped:
+        scope = "models"
+    else:
+        scope = "requests"
     return {
-        # A cooldown tied only to family prefixes still holds models, not the
-        # whole account: its scope id says so where no name is listed.
-        "scope": "models" if cooldown.models or cooldown.scope != "-" else "account",
+        "scope": scope,
         "scope_key": cooldown.scope,
+        "account_wide": quota_scope.account_wide(desc),
         "models": list(cooldown.models),
         "models_omitted": cooldown.models_omitted,
+        "prefixes": list(cooldown.prefixes),
+        "prefixes_omitted": cooldown.prefixes_omitted,
+        # Every scope field as sent (absent, empty and false apart), the
+        # request kinds among them, as each window carries its own.
+        "scope_fields": desc.describe(),
         "label": cooldown.label,
         "until": "" if note else until,
         "until_note": note,
@@ -527,6 +548,11 @@ def _exhaustion_view(exhaustion: qs.Exhaustion) -> Dict[str, Any]:
         "scope_key": exhaustion.scope,
         "models": list(exhaustion.models),
         "models_omitted": exhaustion.models_omitted,
+        # A limit the engine scopes by family prefix names its models so.
+        "prefixes": list(exhaustion.prefixes),
+        "prefixes_omitted": exhaustion.prefixes_omitted,
+        "scope": "models" if exhaustion.desc is None or exhaustion.desc.scoped or exhaustion.scope == "-" else "requests",
+        "scope_fields": exhaustion.desc.describe() if exhaustion.desc is not None else None,
         "live": exhaustion.live,
         # The reported reset, read; "" when none was reported or it cannot
         # be read (``reset_note`` says which). A passed one stays as the fact.
@@ -645,10 +671,9 @@ def quota_for(
     reset_credits = qs.reset_credits_of(rows, harness_id, moment, projection=projection)
     cooldowns = _cooldowns(rows, harness_id, subject_id, moment, projection)
     exhaustions = _exhaustions(rows, harness_id, subject_id, moment)
-    # Held as a whole: "Cooling down" (unless a window is at its limit),
-    # whatever the numbers say and however fresh they are — the reserve
-    # counts the same cooldowns as its "cooling" restriction.
-    cooling = [c for c in cooldowns if c["scope"] == "account"]
+    # The account verdict is for default text requests. A text-only cooldown
+    # sets that verdict without holding image windows in the reserve.
+    cooling = [c for c in cooldowns if c["account_wide"]]
     cooling_until = ""
     if cooling and all(c["until"] for c in cooling):
         # Unavailable until the last of them ends, if every end is known.
@@ -770,14 +795,13 @@ def quota_for(
         member = qs.resolve_member(readings, moment)
         if member.status == "measured":
             views.append(_constraint_view(origin[id(member.reading)][1],
-                                          member.remaining <= qs.RATIO_EPS,
-                                          member.reading.scope))
+                                          member.remaining <= qs.RATIO_EPS))
             continue
         if all(reading.ratio_problem == "missing" for reading in readings):
             # Reported with no share at all: it claims nothing, and stays in
             # view as the window it is, with no bar.
             newest = max(readings, key=lambda r: r.observed_at if r.observed_at is not None else -math.inf)
-            views.append(_constraint_view(origin[id(newest)][1], scope=newest.scope))
+            views.append(_constraint_view(origin[id(newest)][1]))
             continue
         for reading in readings:
             row, constraint = origin[id(reading)]
@@ -789,18 +813,23 @@ def quota_for(
                 "why": why,
                 "constraints": [],
             })
-            entry["constraints"].append(_constraint_view(constraint, scope=reading.scope))
+            entry["constraints"].append(_constraint_view(constraint))
     not_current = list(set_aside.values())
 
     spent_windows: List[Dict[str, Any]] = []
     worst: Optional[Dict[str, Any]] = None
     scoped_spent: List[str] = []
+    part_spent: List[str] = []
     # A share counts only from a current window (at_limit). A cooldown is not
     # a share: it is read apart (``cooldowns``), whichever window is drawn.
+    # Only a window that speaks for the whole account (account_wide) decides
+    # its state and its one figure: a model's limit, by name or by family
+    # prefix, one of other request kinds or of an unreadable scope is a cap
+    # on part of its requests, said in the note.
     for view in views:
-        if view["scoped_models"]:
+        if not view["account_wide"]:
             if _spent(view):
-                scoped_spent.append(view["label"])
+                (scoped_spent if view["scoped_models"] or view["scoped_prefixes"] else part_spent).append(view["label"])
             continue
         if _spent(view):
             spent_windows.append(view)
@@ -809,8 +838,12 @@ def quota_for(
         if worst is None or view["used_pct"] > worst["used_pct"]:
             worst = view
 
-    note = ", ".join(sorted(set(scoped_spent)))
-    note = f"per-model caps spent: {note}" if note else ""
+    notes = []
+    if scoped_spent:
+        notes.append("per-model caps spent: " + ", ".join(sorted(set(scoped_spent))))
+    if part_spent:
+        notes.append("caps on other request kinds or an unreadable scope spent: " + ", ".join(sorted(set(part_spent))))
+    note = "; ".join(notes)
     if spent_windows:
         state, label = "exhausted", "Limit reached"
         # The spent window's own reported reset; never a cooldown's end.
@@ -1852,6 +1885,9 @@ def answer_of(store: Optional[quota_history.HistoryStore], effective: Optional[D
     answer["availability_scope"] = qr.scope_echo(effective)
     answer["resources"] = {hid: row for hid, row in qr.family_resources(effective, kept, moment).items()
                            if not wanted or hid == wanted}
+    omitted = qr.targets_omitted(effective)
+    if omitted:
+        answer["resource_rows_omitted"] = omitted
     resets = {hid: qr.family_resets(effective, hid, kept, moment)
               for hid in sorted({str(g["key"]).split("|")[0] for g in answer["groups"]}
                                 | set(answer["resources"]))
@@ -1923,14 +1959,34 @@ def tool_answer(
 STRINGS_FILE = "strings_en.json"
 # The translation memory keeps these as ``code:quotas.ui.<key>`` (the core's own tables have other prefixes).
 I18N_PREFIX = "quotas.ui"
+# Sent with each phrase the memory lacks, as the context its translator reads (the host passes it to the model).
 I18N_NOTE = (
     "Claudexor quota widget: limits, accounts, resets and cooldowns. Short labels (buttons, tabs, table headings, "
     "legend) and sentences. Cursor, Claude Code, Codex, Antigravity stay as they are."
 )
-I18N_FALLBACK_TIMEOUT_SEC = 5.0
+# The gateway's own interface-language routes (ouroboros/gateway/ui_i18n.py), read over loopback like the
+# status: the language and its memory, and the queue of strings a renderer could not translate.
+I18N_PATH = "/api/ui/i18n"
+I18N_MISSING_PATH = "/api/ui/i18n/missing"
+I18N_TIMEOUT_SEC = 5.0
+# The gateway takes at most this many strings per request (ui_i18n.MAX_MISSING_ITEMS).
+I18N_MISSING_BATCH = 200
+# A phrase the memory lacks (or holds for another English) is reported once. A batch the host did not take
+# whole (no answer, an error, or fewer accepted than sent: it answers counts, not which) is offered once more,
+# no sooner than MISS_RETRY_SEC after; then the phrase rests. It is reported again (once, with the same one
+# retry) only where the host may have let it go: MISS_AGAIN_SEC later, or at once when the memory shows a
+# loss (its refusal ledger shrank, as Regenerate empties it, or its revision went back). A phrase the memory
+# shows translated loses its record, so one the memory loses later is reported at the next reading. Never a
+# report on every reading, nor on every batch the host's translator writes.
+MISS_RETRY_SEC = 300.0
+MISS_SENDS = 2
+MISS_AGAIN_SEC = 6 * 3600.0
 _STRINGS_CACHE: Dict[str, Any] = {"stamp": None, "rows": {}}
-# Keys already reported as missing in this process, per language: reported once, not on every read.
-_REPORTED_MISSES: Dict[str, set] = {}
+# Per language: the memory's last revision and refusal count seen, and per key the English it was reported
+# for, the sends of its round and the earliest moment of the next one. Shared by every route thread of this load.
+_MISSES: Dict[str, Dict[str, Any]] = {}
+_MISSES_LOCK = threading.Lock()
+_KEY_SPACE = re.compile(r"[ \t\n\r\f\v]+")
 
 
 def clean_strings(raw: Any) -> Dict[str, Any]:
@@ -1951,7 +2007,7 @@ def clean_strings(raw: Any) -> Dict[str, Any]:
 
 def english_strings(path: Optional[Path] = None) -> Dict[str, Any]:
     """The widget's English phrases: strings_en.json beside this file, the one source of them (the widget
-    gets them from the i18n route, the host's translation generator from register_catalog). An unreadable
+    gets them from the i18n route, the host's translator with each phrase reported missing). An unreadable
     file is no phrases, never an exception."""
     target = Path(path) if path else Path(__file__).with_name(STRINGS_FILE)
     try:
@@ -1967,122 +2023,142 @@ def english_strings(path: Optional[Path] = None) -> Dict[str, Any]:
 
 
 def _english_text(value: Any) -> str:
+    """The English a phrase is translated from: a phrase that counts in its general form ({n} accounts); the
+    translator answers one form for each plural category of the language."""
     return value if isinstance(value, str) else str((value or {}).get("other") or "")
 
 
-def catalog_rows() -> Dict[str, str]:
-    """key -> English sentence, as the translation generator takes a table: a phrase that counts is given in
-    its general form ({n} accounts) and comes back as one form for each plural category of the language."""
-    return {key: _english_text(value) for key, value in english_strings().items()}
+def _key_text(text: Any) -> str:
+    """Text as the host compares it (i18n_memory.key_text, the browser's keyText): runs of ASCII whitespace are
+    one space, the ends trimmed."""
+    return _KEY_SPACE.sub(" ", str(text or "")).strip()
 
 
-def _host_i18n() -> Tuple[Any, Any, Any]:
-    """The host's translation memory, generator and English test — Nones outside the host (an older host, a test)."""
-    try:
-        from ouroboros import i18n_memory as memory
-        from ouroboros import ui_translation as translation
-        from ouroboros.ui_language import is_english
-        return memory, translation, is_english
-    except Exception:
-        return None, None, None
+def _from_entries(entries: Any, english: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, bool]]:
+    """Our keys out of a memory's entries, read the way the host's own interface reads a code
+    (web/modules/i18n.js ``tr``): ``found`` — a text, or the forms of a phrase that counts; ``wanted`` — the
+    keys to report, each with whether it is a reworded one (True) or simply absent (False). A generated entry
+    remembers the English it translated (``source``): when that is not our English now, the entry is not shown
+    (the English is) and is reported reworded. An owner's or an import's pin is shown whatever the English
+    says, as the host shows it."""
+    found: Dict[str, Any] = {}
+    wanted: Dict[str, bool] = {}
+    rows = entries if isinstance(entries, dict) else {}
+    prefix = f"code:{I18N_PREFIX}."
+    for key, value in english.items():
+        entry = rows.get(prefix + key)
+        shown: Any = None
+        if isinstance(entry, dict):
+            if isinstance(entry.get("text"), str):
+                shown = entry["text"]
+            elif isinstance(entry.get("forms"), dict):
+                forms = {str(cat): text for cat, text in entry["forms"].items() if isinstance(text, str)}
+                shown = {"forms": forms} if forms else None
+        if shown is None:
+            wanted[key] = False
+            continue
+        if entry.get("provenance") == "generated" and isinstance(entry.get("source"), str) \
+                and _key_text(entry["source"]) != _key_text(_english_text(value)):
+            wanted[key] = True
+            continue
+        found[key] = shown
+    return found, wanted
 
 
-def register_catalog() -> bool:
-    """Hand the English table to the host's generator, so a language chosen at any time gets these rows in its
-    first batch (a table registered after the choice is queued at once). Best effort: the widget does not need it."""
-    _memory, translation, _is_english = _host_i18n()
-    if translation is None:
+def _claim_misses(tag: str, revision: int, refused: Optional[int], english: Dict[str, Any],
+                  wanted: Dict[str, bool], now: float) -> List[Dict[str, Any]]:
+    """The items to send now, in the gateway's shape, each claimed under the lock so two readings at once
+    never send one key twice. A key's record lasts for one English; a key shown translated loses its record.
+    Every record of the language goes when the memory shows a loss: fewer refusals than before (the ledger
+    Regenerate empties: what it refused may be taken now) or an earlier revision (a memory replaced)."""
+    prefix = f"code:{I18N_PREFIX}."
+    items: List[Dict[str, Any]] = []
+    with _MISSES_LOCK:
+        book = _MISSES.get(tag)
+        lost = book is not None and (revision < book["revision"] or (
+            refused is not None and book["refused"] is not None and refused < book["refused"]))
+        if book is None or lost:
+            book = _MISSES[tag] = {"revision": revision, "refused": refused, "keys": {}}
+        book["revision"], book["refused"] = revision, refused
+        keys = book["keys"]
+        for key in [k for k in keys if k not in wanted]:
+            del keys[key]
+        for key, reworded in wanted.items():
+            source = _english_text(english[key])
+            record = keys.get(key)
+            if record is None or record["source"] != source:
+                record = keys[key] = {"source": source, "sends": 0, "not_before": 0.0}
+            if now < record["not_before"]:
+                continue
+            if record["sends"] >= MISS_SENDS:
+                record["sends"] = 0  # rested MISS_AGAIN_SEC: one more round
+            record["sends"] += 1
+            # the one retry of a round comes after MISS_RETRY_SEC; after its last send the phrase rests
+            record["not_before"] = now + (MISS_RETRY_SEC if record["sends"] < MISS_SENDS else MISS_AGAIN_SEC)
+            context: Dict[str, Any] = {"source": source, "table": I18N_PREFIX, "note": I18N_NOTE, "role": "quotas"}
+            if reworded:
+                context["stale"] = True  # the host's word: translate again although an entry exists
+            items.append({"key": prefix + key, "context": context})
+    return items
+
+
+def _settle_misses(tag: str, items: List[Dict[str, Any]], answer: Any, error: str, status: int,
+                   now: float) -> bool:
+    """After one POST: a batch the host took whole rests until MISS_AGAIN_SEC (the host queued every key of
+    it). Anything else keeps the send already counted, so the key is offered once more after MISS_RETRY_SEC
+    if that was the round's first (``_claim_misses``). Returns whether the batch was taken whole."""
+    accepted = answer.get("accepted") if isinstance(answer, dict) else None
+    whole = not error and 200 <= status < 300 and type(accepted) is int and accepted == len(items)
+    if not whole:
         return False
-    try:
-        translation.register_catalog(I18N_PREFIX, catalog_rows, I18N_NOTE)
-    except Exception:
-        return False
+    prefix = f"code:{I18N_PREFIX}."
+    with _MISSES_LOCK:
+        book = _MISSES.get(tag)
+        for item in (items if book is not None else []):
+            record = book["keys"].get(item["key"][len(prefix):])
+            if record is not None and record["source"] == item["context"]["source"]:
+                record["sends"] = MISS_SENDS
+                record["not_before"] = now + MISS_AGAIN_SEC
     return True
 
 
-def _from_entries(entries: Any, english: Dict[str, Any]) -> Dict[str, Any]:
-    """Our keys' translations out of a memory's entries: a text, or the forms of a phrase that counts."""
-    found: Dict[str, Any] = {}
-    if not isinstance(entries, dict):
-        return found
-    prefix = f"code:{I18N_PREFIX}."
-    for key in english:
-        entry = entries.get(prefix + key)
-        if not isinstance(entry, dict):
-            continue
-        if isinstance(entry.get("text"), str):
-            found[key] = entry["text"]
-        elif isinstance(entry.get("forms"), dict):
-            forms = {str(cat): text for cat, text in entry["forms"].items() if isinstance(text, str)}
-            if forms:
-                found[key] = {"forms": forms}
-    return found
-
-
-def _missing_items(tag: str, english: Dict[str, Any], have: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """The keys not translated yet and not yet reported in this process, as the host's miss queue takes them."""
-    seen = _REPORTED_MISSES.setdefault(tag, set())
-    fresh = [key for key in english if key not in have and key not in seen]
-    return [{"key": f"code:{I18N_PREFIX}.{key}",
-             "context": {"source": _english_text(english[key]), "table": I18N_PREFIX, "role": "quotas"}}
-            for key in fresh]
-
-
-def _accept_missing(tag: str, items: List[Dict[str, Any]], answer: Any) -> bool:
-    # The host returns a count, not accepted IDs. Only a fully accepted batch can
-    # be deduplicated safely; partial/rejected batches remain eligible for retry.
-    accepted = answer.get("accepted") if isinstance(answer, dict) else None
-    if type(accepted) is int and accepted == len(items):
-        prefix = f"code:{I18N_PREFIX}."
-        _REPORTED_MISSES.setdefault(tag, set()).update(item["key"][len(prefix):] for item in items)
-    return type(accepted) is int and accepted > 0
-
-
-def _view_from_memory(view: Dict[str, Any], english: Dict[str, Any], root: Path,
-                      memory: Any, translation: Any, is_english: Any) -> None:
-    tag = memory.current_language()
-    if not tag or is_english(tag):
-        return
-    doc = memory.cached_memory(root, tag) or {}
-    strings = _from_entries(doc.get("entries"), english)
-    view.update(language=tag, revision=int(doc.get("revision") or 0),
-                plural_select=doc.get("plural_select"), strings=strings)
-    items = _missing_items(tag, english, strings)
-    woke = False
-    for start in range(0, len(items), 200):
-        batch = items[start:start + 200]
-        woke = _accept_missing(tag, batch, memory.record_missing(root, tag, batch)) or woke
-    if woke:
-        translation.on_language_event("missing", root, tag)
-
-
-def _view_from_loopback(view: Dict[str, Any], english: Dict[str, Any], port: int) -> None:
-    """Without the host's modules: the same memory through the gateway's own routes (GET /api/ui/i18n,
-    POST /api/ui/i18n/missing). Loopback needs no password."""
-    payload, _error, _status = _request_json(port, "/api/ui/i18n", timeout_sec=I18N_FALLBACK_TIMEOUT_SEC)
+def _view_from_gateway(view: Dict[str, Any], english: Dict[str, Any], port: int,
+                       now: Optional[float] = None) -> None:
+    """The language and its memory through the gateway's own route (GET /api/ui/i18n, side-effect free), and
+    the phrases it lacks reported through the gateway's queue (POST /api/ui/i18n/missing): the host writes
+    its queue and wakes its translator; this skill writes nothing of the host's. Loopback needs no password."""
+    payload, _error, _status = _request_json(port, I18N_PATH, timeout_sec=I18N_TIMEOUT_SEC)
     if not payload:
         return
     tag = str(payload.get("language") or "")
     if not tag or payload.get("english") or tag.lower().split("-")[0] == "en":
         return
-    strings = _from_entries(payload.get("entries"), english)
-    view.update(language=tag, revision=int(payload.get("revision") or 0),
-                plural_select=payload.get("plural_select"), strings=strings)
-    items = _missing_items(tag, english, strings)
-    for start in range(0, len(items), 200):
-        batch = items[start:start + 200]
-        answer, error, status = _request_json(port, "/api/ui/i18n/missing", method="POST",
-                                              timeout_sec=I18N_FALLBACK_TIMEOUT_SEC,
+    try:
+        revision = int(payload.get("revision") or 0)
+    except (TypeError, ValueError):
+        revision = 0
+    strings, wanted = _from_entries(payload.get("entries"), english)
+    view.update(language=tag, revision=revision, plural_select=payload.get("plural_select"), strings=strings)
+    if payload.get("memory_error"):
+        return  # a memory the host could not read says nothing about what it lacks
+    stats = payload.get("stats") if isinstance(payload.get("stats"), dict) else {}
+    refused = stats.get("refused") if type(stats.get("refused")) is int else None
+    moment = time.monotonic() if now is None else now
+    items = _claim_misses(tag, revision, refused, english, wanted, moment)
+    for start in range(0, len(items), I18N_MISSING_BATCH):
+        batch = items[start:start + I18N_MISSING_BATCH]
+        answer, error, status = _request_json(port, I18N_MISSING_PATH, method="POST",
+                                              timeout_sec=I18N_TIMEOUT_SEC,
                                               payload={"language": tag, "items": batch})
-        if not error and 200 <= status < 300:
-            _accept_missing(tag, batch, answer)
+        _settle_misses(tag, batch, answer, error, status, moment)
 
 
 def i18n_view(api: Any) -> Dict[str, Any]:
     """The widget's text table: ``en`` — the English of every phrase (strings_en.json) — always, and, when the
     install has chosen a language other than English, ``strings`` — the translation memory's rendering of our
     keys (a text, or {forms} for a phrase that counts) — with the language, the memory's revision and its plural
-    map. A language with no translation yet has empty ``strings``: English, and the misses are queued."""
+    map, all as the gateway's own ``GET /api/ui/i18n`` gives them. A language with no translation yet has empty
+    ``strings``: English, and the misses are reported to the host's queue."""
     english = english_strings()
     view: Dict[str, Any] = {"language": "", "revision": 0, "plural_select": None, "en": english, "strings": {}}
     try:
@@ -2093,11 +2169,7 @@ def i18n_view(api: Any) -> Dict[str, Any]:
     if not data_dir:  # not the host's own runtime: nothing to read a language from
         return view
     try:
-        memory, translation, is_english = _host_i18n()
-        if memory is not None:
-            _view_from_memory(view, english, Path(data_dir), memory, translation, is_english)
-        else:
-            _view_from_loopback(view, english, _server_port(api))
+        _view_from_gateway(view, english, _server_port(api))
     except Exception as exc:
         api.log("error", f"claudexor i18n read failed: {type(exc).__name__}: {exc}")
         return {"language": "", "revision": 0, "plural_select": None, "en": english, "strings": {}}
@@ -2237,11 +2309,18 @@ def register(api: Any) -> None:
             return write_display(api, payload)
 
     async def display_route(request: Any) -> Dict[str, Any]:
+        unread = object()
         try:
             payload = await request.json()
         except Exception:
-            return {"display": read_display(api), "error": "request body was not JSON"}
+            payload = unread
         loop = asyncio.get_running_loop()
+        # As in prefs_route: a body that did not parse writes nothing, is logged, and the
+        # file is read off the event loop like every other read of it.
+        if payload is unread:
+            api.log("error", "claudexor display write refused: request body was not JSON")
+            return {"display": await loop.run_in_executor(None, read_display, api),
+                    "error": "request body was not JSON"}
         order = prefs_order(payload)
         if order is not None:
             frame, seq = order
@@ -2310,7 +2389,8 @@ def register(api: Any) -> None:
     def i18n_route(_request: Any) -> Dict[str, Any]:
         return i18n_view(api)
 
-    register_catalog()
+    # The text table is read and its misses reported through the gateway's routes only (i18n_view): nothing is
+    # registered with the host outside this API, so unload leaves nothing of the skill's behind.
     api.register_route("i18n", i18n_route, methods=("GET",))
     api.register_route("chip", chip_route, methods=("GET",))
     api.register_route("quotas", quotas_route, methods=("GET",))

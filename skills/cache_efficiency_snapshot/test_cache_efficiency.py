@@ -33,7 +33,7 @@ def row(**values: Any) -> Dict[str, Any]:
     result = {
         "state": "settled", "kind": "attempt", "provider": "openai",
         "model": "test-model", "ts": (NOW - timedelta(minutes=10)).isoformat(),
-        "prompt_tokens": 100, "cached_tokens": 80, "cache_write_tokens": 0,
+        "prompt_tokens": 100, "cached_tokens": 80, "cache_write_tokens": 0, "record_contract_version": 2,
     }
     result.update(values)
     return result
@@ -42,7 +42,7 @@ def row(**values: Any) -> Dict[str, Any]:
 def event(**values: Any) -> Dict[str, Any]:
     """One per-call ``llm_usage`` event as ``ouroboros/loop_llm_call.py`` emits it."""
     result = {
-        "type": "llm_usage", "ts": (NOW - timedelta(minutes=10)).isoformat(),
+        "type": "llm_usage", "ts": (NOW - timedelta(minutes=10)).isoformat(), "record_contract_version": 2,
         "task_id": "task-1", "model": "claudexor::codex=gpt-6-astra", "provider": "claudexor",
         "api_key_type": "claudexor", "source": "loop", "category": "task",
         "prompt_tokens": 100, "cached_tokens": 80, "cache_write_tokens": 0,
@@ -384,16 +384,15 @@ def test_usage_events_are_read_from_live_log_and_skip_other_rows(tmp_path: Path)
                event(model="first"), event(model="second", prompt_tokens=0, cached_tokens=0),
                {"type": "task_checkpoint", "ts": NOW.isoformat(), "note": "llm_usage mentioned in text"})
     cache = UsageEventsCache()
-    records, meta = cache.update(live, tmp_path / "archive", now=NOW)
+    records, meta = cache.update(live, now=NOW)
     assert [item["model"] for item in records] == ["first", "second"]
     assert meta["exists"] is True and meta["read_error"] is None
     assert meta["raw_stats"]["usage_events"] == 2
     assert meta["raw_stats"]["non_usage_lines"] == 2
-    assert meta["raw_stats"]["archives_read"] == 0
     summary = calculate_analytics(records, timeframe="1H", now=NOW)["summary"]
     assert summary["request_count"] == 2 and summary["session_count"] == 0
     assert summary["zero_volume_records"] == 1 and summary["cache_read_rate"] == 80.0
-    repeated, same = cache.update(live, tmp_path / "archive", now=NOW)
+    repeated, same = cache.update(live, now=NOW)
     assert repeated == records and same["raw_stats"] == meta["raw_stats"]
     cache.clear()
     assert cache.records == [] and cache.seen == set()
@@ -406,84 +405,95 @@ def test_usage_events_torn_line_waits_and_duplicates_count_once(tmp_path: Path) 
     with live.open("ab") as stream:
         stream.write(second[: len(second) // 2])
     cache = UsageEventsCache()
-    records, meta = cache.update(live, tmp_path / "archive", now=NOW)
+    records, meta = cache.update(live, now=NOW)
     assert [item["model"] for item in records] == ["first"]
     with live.open("ab") as stream:
         stream.write(second[len(second) // 2:] + b"\n{\"type\": \"llm_usage\", broken\nnot-json\n")
-    records, meta = cache.update(live, tmp_path / "archive", now=NOW)
+    records, meta = cache.update(live, now=NOW)
     assert [item["model"] for item in records] == ["first", "second"]
     assert meta["raw_stats"]["malformed_lines"] == 1  # a broken usage line
     assert meta["raw_stats"]["non_usage_lines"] == 1  # a line that is not a usage event at all
     append_rows(live, event(model="second", ledger_attempt_ids=["a2"]))  # a byte-identical replay
-    records, meta = cache.update(live, tmp_path / "archive", now=NOW)
+    records, meta = cache.update(live, now=NOW)
     assert [item["model"] for item in records] == ["first", "second"]
     assert meta["raw_stats"]["duplicate_events_skipped"] == 1
 
 
 def test_rotation_moves_the_live_tail_into_an_archive_without_gaps_or_doubles(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    stamp = lambda minutes: (now - timedelta(minutes=minutes)).isoformat()  # noqa: E731
     live = tmp_path / "logs" / "events.jsonl"
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
-    write_rows(live, event(model="one", ledger_attempt_ids=["a1"]))
-    cache = UsageEventsCache()
-    assert [r["model"] for r in cache.update(live, archive_dir, now=NOW)[0]] == ["one"]
-    # The core appends more, then rotates: rename live -> archive, start a new live file.
-    append_rows(live, event(model="two", ledger_attempt_ids=["a2"]))
-    live.rename(archive_dir / "events_20260911T115900.jsonl")
-    write_rows(live, event(model="three", ledger_attempt_ids=["a3"]))
-    records, meta = cache.update(live, archive_dir, now=NOW)
-    assert [r["model"] for r in records] == ["one", "two", "three"]
-    assert meta["raw_stats"]["archives_read"] == 1
-    assert meta["raw_stats"]["duplicate_events_skipped"] == 1  # "one" met again inside the archive
-    # Truncation of the live file restarts its offset and keeps what was read.
-    live.write_text("", encoding="utf-8")
-    append_rows(live, event(model="four", ledger_attempt_ids=["a4"]))
-    records, meta = cache.update(live, archive_dir, now=NOW)
-    assert [r["model"] for r in records] == ["one", "two", "three", "four"]
-    assert meta["raw_stats"]["archives_read"] == 1  # an unchanged archive is not re-read
+    write_rows(live, event(model="one", ledger_attempt_ids=["a1"], ts=stamp(30)))
+    api = MockAPI(tmp_path)
+    register(api)
+    try:
+        hour = lambda: api.routes["data"]({"query_params": {"timeframe": "1H"}})  # noqa: E731
+        assert hour()["summary"]["request_count"] == 1
+        # The core appends more, then rotates: rename live -> archive, start a new live file.
+        append_rows(live, event(model="two", ledger_attempt_ids=["a2"], ts=stamp(20)))
+        live.rename(archive_dir / "events_20260911T115900.jsonl")
+        write_rows(live, event(model="three", ledger_attempt_ids=["a3"], ts=stamp(10)))
+        # Before the index holds the rotated archive, the recent reader still has "one" (and "two" is new to it
+        # only through the archive): the reading never loses or doubles a request across the seam.
+        plugin._HISTORY._last_check = 0
+        response = hour()
+        plugin._HISTORY._thread.join(5)
+        response = hour()
+        assert response["summary"]["request_count"] == 3
+        assert sorted(m["model"] for m in response["models"]) == ["one", "three", "two"]
+        assert [r["model"] for r in plugin._EVENTS.records] == ["three"]  # the index holds the rotated ones exactly
+        # Truncation of the live file restarts its offset and keeps what was read.
+        live.write_text("", encoding="utf-8")
+        append_rows(live, event(model="four", ledger_attempt_ids=["a4"], ts=stamp(5)))
+        assert hour()["summary"]["request_count"] == 4
+    finally:
+        api.unload_fn()
 
 
-def test_archives_outside_the_window_are_ignored_and_old_records_pruned(tmp_path: Path) -> None:
+def test_the_recent_reader_holds_only_the_live_file_and_prunes_rotated_records(tmp_path: Path) -> None:
     live = tmp_path / "logs" / "events.jsonl"
-    archive_dir = tmp_path / "archive"
-    write_rows(live, event(model="live"))
-    old = archive_dir / "events_20260801T000000.jsonl"
-    write_rows(old, event(model="ancient", ts=(NOW - timedelta(days=40)).isoformat()))
-    stale = (NOW - timedelta(days=40)).timestamp()
-    os.utime(old, (stale, stale))
-    recent = archive_dir / "events_20260911T100000.jsonl"
-    write_rows(recent, event(model="recent", ts=(NOW - timedelta(days=2)).isoformat()),
-               event(model="expired", ts=(NOW - timedelta(days=9)).isoformat()))
+    write_rows(live, event(model="live"), event(model="old-live", ts=(NOW - timedelta(days=9)).isoformat(), ledger_attempt_ids=["o"]))
+    write_rows(tmp_path / "archive" / "events_20260801T000000.jsonl", event(model="archived", ts=(NOW - timedelta(days=40)).isoformat()))
     cache = UsageEventsCache()
-    records, meta = cache.update(live, archive_dir, now=NOW)
-    assert sorted(r["model"] for r in records) == ["live", "recent"]
-    assert meta["raw_stats"]["archives_read"] == 1
-    assert meta["archive_window_days"] == plugin.USAGE_ARCHIVE_WINDOW_DAYS
-    assert calculate_analytics(records, timeframe="7D", now=NOW)["summary"]["request_count"] == 2
+    records, meta = cache.update(live, now=NOW)
+    assert sorted(r["model"] for r in records) == ["live", "old-live"]  # unrotated records stay, whatever their age
+    assert "archives_read" not in meta["raw_stats"]  # archives are the history index's
+    live.rename(tmp_path / "archive" / "events_20260911T000000.jsonl")
+    write_rows(live, event(model="newer", ledger_attempt_ids=["n"]))
+    records, _ = cache.update(live, now=NOW)
+    assert sorted(r["model"] for r in records) == ["live", "newer"]  # the rotated old record left the window
 
 
 def test_missing_live_log_is_degraded_but_archives_still_count(tmp_path: Path) -> None:
-    archive_dir = tmp_path / "archive"
-    write_rows(archive_dir / "events_20260911T100000.jsonl", event(model="archived"))
-    records, meta = UsageEventsCache().update(tmp_path / "logs" / "events.jsonl", archive_dir, now=NOW)
-    assert [r["model"] for r in records] == ["archived"]
-    assert meta["exists"] is False and meta["read_error"] == "file_not_found"
+    now = datetime.now(timezone.utc)
+    write_rows(tmp_path / "archive" / "events_20260911T100000.jsonl", event(model="archived", ts=(now - timedelta(minutes=10)).isoformat()))
+    api = MockAPI(tmp_path)
+    register(api)
+    try:
+        response = api.routes["data"]({"query_params": {"timeframe": "1H"}})
+        assert [m["model"] for m in response["models"]] == ["archived"]
+        assert response["status"] == "degraded" and response["read_error"] == "file_not_found"
+    finally:
+        api.unload_fn()
 
 
 def test_history_index_backfills_immutable_archives_once_and_preserves_identity(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
     old = archive_dir / "events_20260801T000000.jsonl"
     write_rows(old, event(model="old", ts=(NOW - timedelta(days=20)).isoformat(), ledger_attempt_ids=["old"]))
-    index = HistoryIndex(tmp_path / "state" / "history-index.json")
-    records, boots, meta = index.update(archive_dir, NOW - timedelta(days=21), NOW)
-    assert [record["model"] for record in records] == ["old"]
-    assert boots == []
-    assert meta["archives_read_this_call"] == 1
-    assert (tmp_path / "state" / "history-index.json").is_file()
-
-    repeated, _, second = index.update(archive_dir, NOW - timedelta(days=21), NOW)
-    assert [record["identity"] for record in repeated] == [records[0]["identity"]]
-    assert second["archives_read_this_call"] == 0
+    index = plugin.make_history_index(tmp_path / "state" / "history")
+    view = index.update(archive_dir)
+    cells = list(view.cells(0, plugin.to_us(NOW)))
+    assert [view.groups[gid][1] for _, gid, _, _, _ in cells] == ["old"] and view.total_records() == 1
+    record = _normalize_usage_event(event(model="old", ts=(NOW - timedelta(days=20)).isoformat(), ledger_attempt_ids=["old"]))
+    assert view.contains(plugin.identity_fingerprint(record["identity"]))
+    assert index.meta()["archives_done"] == 1 and (tmp_path / "state" / "history" / "history.sqlite3").is_file()
+    index._last_check = 0
+    repeated = index.update(archive_dir)
+    assert repeated.total_records() == 1 and index.meta()["archives_read_last_pass"] == 0  # an unchanged archive is not read again
+    index.close()
 
 
 def test_custom_analytics_uses_half_open_bounds_and_regular_daily_bins() -> None:
@@ -554,7 +564,7 @@ def test_a_usage_event_supplies_the_tokens_of_a_recorded_session(tmp_path: Path,
     live = tmp_path / "logs" / "events.jsonl"
     rows = [session_event(run_id="run-1"), ledger_event(run_id="run-1", route="codex")]
     write_rows(live, *(rows if usage_first else rows[::-1]), ledger_event(run_id="run-2"))
-    records, meta = UsageEventsCache().update(live, tmp_path / "archive", now=NOW)
+    records, meta = UsageEventsCache().update(live, now=NOW)
     sessions = {r["identity"]: r for r in records}
     first, second = session_key("run-1"), session_key("run-2")
     assert set(sessions) == {first, second}
@@ -591,7 +601,7 @@ def _normalized(total: Any = 20488, read: Any = 12738, write: Any = 7746, **valu
 def _read_session(tmp_path: Path, *rows: Dict[str, Any]):
     live = tmp_path / "logs" / "events.jsonl"
     write_rows(live, *rows)
-    records, meta = UsageEventsCache().update(live, tmp_path / "archive", now=NOW)
+    records, meta = UsageEventsCache().update(live, now=NOW)
     sessions = [r for r in records if r["kind"] == "subscription_session"]
     return records, sessions, meta
 
@@ -667,19 +677,28 @@ def test_equal_rank_events_of_one_run_keep_the_first_as_before(tmp_path: Path) -
 
 
 def test_evidence_order_survives_ledger_events_archives_and_incremental_reads(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    at = lambda minutes: (now - timedelta(minutes=minutes)).isoformat()  # noqa: E731
     live, archive_dir = tmp_path / "logs" / "events.jsonl", tmp_path / "archive"
-    write_rows(archive_dir / "events_20260911T100000.jsonl", ledger_event(run_id=RUN, route="claude"),
-               _legacy_unknown(ts=(NOW - timedelta(minutes=9)).isoformat()))
-    cache = UsageEventsCache()
-    first, _ = cache.update(live, archive_dir, now=NOW)
-    assert [(r["prompt_tokens"], r["token_facts"]) for r in first] == [(None, True)]
-    write_rows(live, _normalized(ts=(NOW - timedelta(minutes=5)).isoformat()), ledger_event(run_id=RUN, route="claude"))
-    records, meta = cache.update(live, archive_dir, now=NOW)
-    assert len(records) == 1 and records[0]["prompt_tokens"] == 20488 and records[0]["cache_write_tokens"] == 7746
-    append_rows(live, _legacy_unknown(), _normalized(1, 0, 0, ts=(NOW - timedelta(minutes=4)).isoformat()))
-    records, meta = cache.update(live, archive_dir, now=NOW)  # later, lower or equal rank: nothing changes
-    assert len(records) == 1 and records[0]["prompt_tokens"] == 20488
-    assert calculate_analytics(records, timeframe="1H", now=NOW)["summary"]["session_count"] == 1
+    write_rows(archive_dir / "events_20260911T100000.jsonl", ledger_event(run_id=RUN, route="claude", ts=at(10)),
+               _legacy_unknown(ts=at(9)))
+    write_rows(live)
+    api = MockAPI(tmp_path)
+    register(api)
+    try:
+        hour = lambda: api.routes["data"]({"query_params": {"timeframe": "1H"}})  # noqa: E731
+        first = hour()
+        sessions = [m for m in first["models"] if m["kind"] == "subscription_session"]
+        assert first["summary"]["session_count"] == 1 and sessions[0]["prompt_tokens"] is None
+        append_rows(live, _normalized(ts=at(5)), ledger_event(run_id=RUN, route="claude", ts=at(5)))
+        second = hour()
+        assert second["summary"]["session_count"] == 1
+        assert (second["summary"]["prompt_tokens"], second["summary"]["cache_write_tokens"]) == (20488, 7746)
+        append_rows(live, _legacy_unknown(ts=at(4)), _normalized(1, 0, 0, ts=at(4)))
+        third = hour()  # later, lower or equal rank: nothing changes
+        assert third["summary"]["session_count"] == 1 and third["summary"]["prompt_tokens"] == 20488
+    finally:
+        api.unload_fn()
 
 
 def test_route_reports_the_recovered_session_once_with_normalized_tokens(tmp_path: Path) -> None:
@@ -706,7 +725,7 @@ def test_code_marks_are_first_boots_on_a_new_commit(tmp_path: Path) -> None:
     write_rows(live, boot("a" * 40, 200), boot("a" * 40, 50, pid=2), boot("b" * 40, 45),
                boot("b" * 40, 44, pid=3), boot("c" * 40, 10), boot("", 5))
     cache = UsageEventsCache()
-    records, meta = cache.update(live, tmp_path / "archive", now=NOW)
+    records, meta = cache.update(live, now=NOW)
     assert records == [] and meta["raw_stats"]["worker_boots"] == 5
     marks = calculate_analytics(records, timeframe="1H", now=NOW, boots=cache.boot_snapshot())["markers"]
     # The earliest boot has no predecessor; restarts on the same commit mark nothing.
@@ -737,14 +756,14 @@ def test_sessions_stay_while_unrotated_then_leave_with_the_archive_window(tmp_pa
     write_rows(live, session_event(ts=old, run_id="old"), ledger_event(ts=old, run_id="older"),
                {**boot("a" * 40, 0), "ts": old}, session_event(run_id="new"), boot("b" * 40, 5))
     cache = UsageEventsCache()
-    records, meta = cache.update(live, tmp_path / "archive", now=NOW)
+    records, meta = cache.update(live, now=NOW)
     assert [r["identity"] for r in records] == [session_key("old"), session_key("older"), session_key("new")]
     assert calculate_analytics(records, now=NOW)["summary"]["session_count"] == 1
     archive = tmp_path / "archive"
     archive.mkdir()
     live.rename(archive / "events_rotated.jsonl")
     write_rows(live, session_event(run_id="newer"))
-    records, meta = cache.update(live, archive, now=NOW)
+    records, meta = cache.update(live, now=NOW)
     assert [r["identity"] for r in records] == [session_key("new"), session_key("newer")]
     assert [b["sha"][:1] for b in cache.boot_snapshot()] == ["a", "b"]
     marks = calculate_analytics(records, now=NOW, boots=cache.boot_snapshot())["markers"]
@@ -752,28 +771,32 @@ def test_sessions_stay_while_unrotated_then_leave_with_the_archive_window(tmp_pa
     assert meta["raw_stats"]["worker_boots"] == 2
 
 
-# ---------------------------------------------------------------------------
-# The JSONL ledger: live before the usage store (7.6.0 and older), retired after
-# ---------------------------------------------------------------------------
-
 def test_ledger_keeps_sessions_and_skips_requests_baseline_and_unsettled(tmp_path: Path) -> None:
     path = tmp_path / "usage_attempts.jsonl"
     header = {"kind": "usage_baseline", "attempt_id": "baseline-1", "state": "settled", "seq": 1,
               "ts": (NOW - timedelta(minutes=5)).isoformat(), "compaction_epoch": 1,
               "folded_attempt_count": 3, "group_count": 1, "retained_row_count": 3}
     write_rows(path, header, row(kind="usage_baseline_group", state="settled", folded_attempt_count=3),
-               row(), row(kind="subscription_session", provider="claude", input_token_usage=measurement(0, 0)),
-               row(kind="subscription_session", provider="claude", input_token_usage=measurement(100, 90)),
+               row(), row(kind="subscription_session", provider="claude", input_token_usage=measurement(0, 0),
+                          session_id_sha256="1" * 64),
+               row(kind="subscription_session", provider="claude", input_token_usage=measurement(100, 90),
+                   session_id_sha256="2" * 64),
+               # A settled row of another kind (7.6.0 writes one per skill dispatch holding a provider key)
+               # and a session without its run key have no session to count: skipped and disclosed.
+               row(kind="external_unmetered", provider="openai"),
+               row(kind="subscription_session", provider="claude", input_token_usage=measurement(5, 1)),
                row(state="dispatched"))
     cache = LedgerCache()
     records, meta = cache.update(path)
     assert len(records) == 2
     assert {item["kind"] for item in records} == {"subscription_session"}
+    assert all(item["identity"].startswith("session:") for item in records)
     assert meta["raw_stats"]["non_settled_lines"] == 1
     assert meta["raw_stats"]["compacted_records_skipped"] == 2
     assert meta["raw_stats"]["request_rows_skipped"] == 1  # requests come from usage events
+    assert meta["raw_stats"]["unsupported_rows_skipped"] == 2
     assert meta["raw_stats"]["valid_records"] == 2
-    assert meta["raw_stats"]["total_lines_read"] == 6
+    assert meta["raw_stats"]["total_lines_read"] == 8
     summary = calculate_analytics(records, timeframe="1H", now=NOW)["summary"]
     assert summary["request_count"] == 0 and summary["session_count"] == 2
     repeated, same_meta = cache.update(path)
@@ -785,16 +808,17 @@ def test_ledger_keeps_sessions_and_skips_requests_baseline_and_unsettled(tmp_pat
 def test_ledger_rotation_and_truncation_replace_cached_records(tmp_path: Path) -> None:
     path = tmp_path / "usage_attempts.jsonl"
     session = dict(kind="subscription_session", provider="claude", input_token_usage=measurement(10, 5))
-    write_rows(path, row(model="first", **session), row(model="second", **session))
+    write_rows(path, row(model="first", session_id_sha256="1" * 64, **session),
+               row(model="second", session_id_sha256="2" * 64, **session))
     cache = LedgerCache()
     assert len(cache.update(path)[0]) == 2
     replacement = tmp_path / "new.jsonl"
-    write_rows(replacement, row(model="replacement", **session))
+    write_rows(replacement, row(model="replacement", session_id_sha256="3" * 64, **session))
     replacement.replace(path)
     records, meta = cache.update(path)
     assert [item["model"] for item in records] == ["replacement"]
     assert meta["raw_stats"]["total_lines_read"] == 1
-    write_rows(path, row(model="x", **session))
+    write_rows(path, row(model="x", session_id_sha256="4" * 64, **session))
     records, meta = cache.update(path)
     assert [item["model"] for item in records] == ["x"]
 
@@ -811,7 +835,20 @@ def test_a_live_ledger_supplies_the_tokens_of_its_sessions_and_a_retired_one_is_
     assert set(by_key) == {session_key("run-a"), session_key("run-b"), session_key("run-c")}
     assert by_key[session_key("run-a")]["prompt_tokens"] == 100  # the ledger row replaced the tokenless event
     assert by_key[session_key("run-b")]["token_facts"] is False
-    assert by_key[session_key("run-c")]["prompt_tokens"] == 2043012  # a measured event keeps its tokens
+    # Evidence rank decides between sources: the ledger's normalized split outranks legacy event counters,
+    assert by_key[session_key("run-c")]["prompt_tokens"] == 100
+    # and a normalized split's nulls are never filled by a ledger row's legacy counters.
+    nulls = _normalize_usage_event(session_event(run_id="run-d", input_token_usage=measurement(None, None)))
+    legacy = normalized(row(kind="subscription_session", provider="codex", subscription_route="codex",
+                            session_id_sha256=sha("run-d"), prompt_tokens=500, cached_tokens=400))
+    kept, = plugin._merge_ledger_sessions([nulls], legacy, horizon)
+    assert (kept["prompt_tokens"], kept["cached_tokens"], kept["normalized"]) == (None, None, True)
+    # Equal evidence keeps the event; identity-less or out-of-window rows never enter.
+    event_legacy = _normalize_usage_event(session_event(run_id="run-e"))
+    ledger_legacy = normalized(row(kind="subscription_session", provider="codex", subscription_route="codex",
+                                   session_id_sha256=sha("run-e"), prompt_tokens=7, cached_tokens=1))
+    kept, = plugin._merge_ledger_sessions([event_legacy], ledger_legacy, horizon)
+    assert kept["prompt_tokens"] == 2043012
     ledger = tmp_path / "usage_attempts.jsonl"
     write_rows(ledger, row())
     assert plugin._ledger_is_live(ledger, horizon=datetime.now(timezone.utc) - timedelta(days=7))
@@ -875,13 +912,14 @@ def test_plugin_route_reads_requests_sessions_and_marks_from_events_and_unload_c
         assert [m["code"] for m in response["markers"]] == ["bbbbbbbbb"]
         quality = response["quality"]
         assert quality["events_path"] == str(live) and quality["ledger_live"] is False
-        assert quality["raw_stats"]["archives_read"] == 1
+        assert quality["history_index"]["archives_indexed"] == 1
         assert quality["sessions_without_usage_event"] == 1
         assert "event log" in quality["coverage"]
         assert api.routes["data"]({"query_params": {"timeframe": "6H"}})["timeframe"] == "6H"
     finally:
         api.unload_fn()
     assert plugin._EVENTS.records == [] and plugin._EVENTS.sessions == {} and plugin._EVENTS.boots == []
+    assert plugin._HISTORY is None
     assert plugin._CACHE.records == []
 
 
@@ -907,3 +945,179 @@ def test_a_live_ledger_route_counts_each_session_once_with_its_tokens(tmp_path: 
         assert (everything["request_count"], everything["session_count"]) == (1, 1)
     finally:
         api.unload_fn()
+
+
+# ---------------------------------------------------------------------------
+# Repairs of the 0.8.1 review: legacy zeros, identity, ledger kinds, range bounds
+# ---------------------------------------------------------------------------
+
+def _reference_aggregate(records):
+    """The 0.8.1 arithmetic, verbatim, as the oracle for the additive vectors."""
+    totals = [r["prompt_tokens"] for r in records if r["prompt_tokens"] is not None]
+    reads = [r["cached_tokens"] for r in records if r["cached_tokens"] is not None]
+    writes = [r["cache_write_tokens"] for r in records if r.get("cache_write_tokens") is not None and (
+        r["prompt_tokens"] is None or r["cache_write_tokens"] + (r["cached_tokens"] or 0) <= r["prompt_tokens"])]
+    eligible = [r for r in records if r["eligible"]]
+    prompt = sum(r["prompt_tokens"] for r in eligible)
+    cached = sum(r["cached_tokens"] for r in eligible)
+    counted = [r for r in records if r["measured"] and r.get("cache_write_tokens") is not None
+               and r["cached_tokens"] + r["cache_write_tokens"] <= r["prompt_tokens"]]
+    written = sum(r["cache_write_tokens"] for r in counted)
+    unread = sum(r["prompt_tokens"] - r["cached_tokens"] for r in counted)
+    return {
+        "total_records": len(records), "request_count": sum(r["kind"] == "attempt" for r in records),
+        "session_count": sum(r["kind"] == "subscription_session" for r in records),
+        "other_count": sum(r["kind"] not in ("attempt", "subscription_session") for r in records),
+        "prompt_tokens": sum(totals) if totals else None, "cached_tokens": sum(reads) if reads else None,
+        "cache_write_tokens": sum(writes) if writes else None, "eligible_prompt_tokens": prompt,
+        "eligible_cached_tokens": cached, "uncached_tokens": prompt - cached,
+        "eligible_write_tokens": written if counted else None,
+        "uncached_input_tokens": unread - written if counted else None,
+        "unclassified_tokens": sum(totals) - cached - unread, "write_records": len(counted),
+        "unknown_write_records": len(records) - len(writes), "unknown_prompt_tokens": sum(totals) - prompt,
+        "cache_read_rate": round(cached / prompt * 100, 2) if prompt else None,
+        "measured_records": sum(r["measured"] for r in records), "rate_records": len(eligible),
+        "unknown_total_records": len(records) - len(totals), "unknown_read_records": len(records) - len(reads),
+        "zero_volume_records": sum(r["measured"] and r["prompt_tokens"] == 0 for r in records),
+    }
+
+
+def test_additive_vectors_reproduce_the_previous_arithmetic_exactly() -> None:
+    import random
+    generator = random.Random(7)
+    choices = [None, 0, 1, 5, 40, 100, 250, 1000]
+    for trial in range(300):
+        records = []
+        for index in range(generator.randint(0, 12)):
+            kind = generator.choice(["attempt", "attempt", "subscription_session", "other"])
+            source = row(kind=kind, provider=generator.choice(["codex", "claude"]),
+                         subscription_route=generator.choice(["codex", None]),
+                         prompt_tokens=generator.choice(choices), cached_tokens=generator.choice(choices),
+                         cache_write_tokens=generator.choice(choices))
+            if generator.random() < 0.3:
+                source["input_token_usage"] = measurement(*(generator.choice(choices) for _ in range(3)))
+            if generator.random() < 0.3:
+                del source["record_contract_version"]
+            records.append(_normalize_record(source))
+        expected = _reference_aggregate(records)
+        actual = plugin._aggregate(records)
+        assert {key: actual[key] for key in expected} == expected, trial
+
+
+def test_unstamped_zeros_are_unknown_and_disclosed_per_counter() -> None:
+    legacy = {k: v for k, v in event(prompt_tokens=100, cached_tokens=0, cache_write_tokens=0).items()
+              if k != "record_contract_version"}
+    record = _normalize_usage_event(legacy)
+    assert (record["prompt_tokens"], record["cached_tokens"], record["cache_write_tokens"]) == (100, None, None)
+    assert record["measured"] is False and record["legacy_zeros"] == plugin.LEGACY_READ | plugin.LEGACY_WRITE
+    version_one = _normalize_usage_event({**legacy, "record_contract_version": 1, "prompt_tokens": 0})
+    assert version_one["prompt_tokens"] is None and version_one["legacy_zeros"] == 7
+    stamped = _normalize_usage_event(event(prompt_tokens=100, cached_tokens=0, cache_write_tokens=0))
+    assert (stamped["cached_tokens"], stamped["cache_write_tokens"], stamped["measured"]) == (0, 0, True)
+    nonzero = _normalize_usage_event({**legacy, "cached_tokens": 30, "cache_write_tokens": 20})
+    assert (nonzero["cached_tokens"], nonzero["cache_write_tokens"], nonzero["legacy_zeros"]) == (30, 20, 0)
+    summary = calculate_analytics([record, version_one, stamped, nonzero], timeframe="1H", now=NOW)["summary"]
+    assert (summary["legacy_zero_total_records"], summary["legacy_zero_read_records"],
+            summary["legacy_zero_write_records"]) == (1, 2, 2)
+    assert summary["measured_records"] == 2 and summary["cache_read_rate"] == round(30 / 200 * 100, 2)
+    assert summary["unknown_read_records"] == 2 and summary["unknown_write_records"] == 2
+    # A normalized split names unknowns as null, so its zeros are reported zeros on any row.
+    split = _normalize_usage_event({**session_event(), "record_contract_version": None,
+                                    "input_token_usage": measurement(50, 0, 0)})
+    assert (split["prompt_tokens"], split["cached_tokens"], split["measured"], split["legacy_zeros"]) == (50, 0, True, 0)
+    # A ledger session row without a stamp follows the same rule.
+    ledger = _normalize_record({**row(kind="subscription_session", provider="codex", subscription_route="codex",
+                                      prompt_tokens=50, cached_tokens=0), "record_contract_version": None})
+    assert ledger["cached_tokens"] is None and ledger["legacy_zeros"] == plugin.LEGACY_READ | plugin.LEGACY_WRITE
+
+
+def test_request_identity_keeps_every_reported_fact(tmp_path: Path) -> None:
+    base = event(ledger_attempt_ids=["same"])
+    variants = [base, {**base, "provider": "openrouter"}, {**base, "api_key_type": "openrouter"},
+                {**base, "cache_write_tokens": 20}, {**base, "input_token_usage": measurement(100, 80, 0)}]
+    identities = {_normalize_usage_event(item)["identity"] for item in variants}
+    assert len(identities) == len(variants)
+    live = tmp_path / "logs" / "events.jsonl"
+    write_rows(live, *variants, base)  # the last line is a byte-identical replay
+    records, meta = UsageEventsCache().update(live, now=NOW)
+    assert len(records) == 5 and meta["raw_stats"]["duplicate_events_skipped"] == 1
+    assert sorted({r["provider"] for r in records}) == ["claudexor", "openrouter"]
+
+
+def test_code_start_without_a_commit_is_disclosed_not_malformed(tmp_path: Path) -> None:
+    live = tmp_path / "logs" / "events.jsonl"
+    write_rows(live, boot("a" * 40, 30), boot("", 20), boot("b" * 40, 10))
+    cache = UsageEventsCache()
+    _, meta = cache.update(live, now=NOW)
+    stats = meta["raw_stats"]
+    assert (stats["worker_boots"], stats["boots_without_code"], stats["unparsed_events"], stats["malformed_lines"]) == (2, 1, 0, 0)
+
+
+def test_unsupported_ledger_rows_never_break_any_range(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    stamp = (now - timedelta(minutes=10)).isoformat()
+    write_rows(tmp_path / "logs" / "events.jsonl", event(ts=stamp))
+    write_rows(tmp_path / "archive" / "events_20200101T000000.jsonl",
+               event(ts=(now - timedelta(days=20)).isoformat(), ledger_attempt_ids=["old"]))
+    write_rows(tmp_path / "state" / "usage_attempts.jsonl",
+               row(ts=stamp, kind="external_unmetered", provider="openai"),
+               row(ts=stamp, kind="subscription_session", provider="claude", input_token_usage=measurement(100, 90)))
+    api = MockAPI(tmp_path)
+    register(api)
+    try:
+        first = api.routes["data"]({"query_params": {"timeframe": "ALL", "daily": "1"}})
+        plugin._HISTORY._thread.join(5)
+        for query in ({"timeframe": "ALL", "daily": "1"}, {"timeframe": "MONTH", "daily": "1"},
+                      {"timeframe": "24H"}, {"timeframe": "7D", "daily": "1"}):
+            response = api.routes["data"]({"query_params": query})
+            assert response["status"] == "ok", (query, response.get("read_error"))
+            assert response["quality"]["ledger_raw_stats"]["unsupported_rows_skipped"] == 2
+            assert response["summary"]["session_count"] == 0
+        assert api.routes["data"]({"query_params": {"timeframe": "ALL", "daily": "1"}})["summary"]["request_count"] == 2
+        assert first["status"] in ("ok", "loading")
+    finally:
+        api.unload_fn()
+
+
+def test_custom_range_from_year_one_is_bounded_and_disclosed() -> None:
+    import time
+    records = normalized(row(ts=(NOW - timedelta(days=3)).isoformat()))
+    started = time.monotonic()
+    for daily in (True, False):
+        data = calculate_analytics(records, "CUSTOM", now=NOW, start_override=plugin._custom_bound("0001-01-01"),
+                                   end_override=NOW, calendar_daily=daily)
+        assert data["status"] == "ok" and data["summary"]["request_count"] == 1
+        assert data["quality"]["range_clamped_from"].startswith("0001-01-01")
+        assert len(data["buckets"]) <= max(plugin.MAX_BUCKETS_RETURNED, 5)
+    assert time.monotonic() - started < 2
+    # Nothing observed to start from: a typed refusal instead of millions of intervals.
+    refused = calculate_analytics([], "CUSTOM", now=NOW, start_override=plugin._custom_bound("0001-01-01"),
+                                  end_override=NOW, calendar_daily=True)
+    assert refused == {"status": "degraded", "read_error": "custom_range_too_long", "timeframe": "CUSTOM", "timezone": "UTC"}
+    # An ordinary long Custom range keeps every requested date.
+    year = calculate_analytics(records, "CUSTOM", now=NOW, start_override=NOW - timedelta(days=365),
+                               end_override=NOW, calendar_daily=True)
+    assert len(year["buckets"]) in (365, 366) and "range_clamped_from" not in year["quality"]
+
+
+def test_state_lives_only_in_the_host_state_directory(tmp_path: Path) -> None:
+    data, state = tmp_path / "data", tmp_path / "skill-state"
+    write_rows(data / "logs" / "events.jsonl", event(ts=(datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()))
+    api = MockAPI(data)
+    api.get_state_dir = lambda: str(state)
+    register(api)
+    try:
+        api.routes["data"]({"query_params": {"timeframe": "ALL", "daily": "1"}})
+        plugin._HISTORY._thread.join(5)
+    finally:
+        api.unload_fn()
+    assert sorted(p.relative_to(state).as_posix() for p in state.rglob("*")) == ["history", "history/history.sqlite3"]
+    assert not (data / "state").exists()
+    # Without a data directory the route says so instead of guessing a home path.
+    blind = MockAPI(data)
+    blind.get_runtime_info = lambda: {}
+    register(blind)
+    try:
+        assert blind.routes["data"]({"query_params": {"timeframe": "24H"}}) == {"status": "degraded", "read_error": "data_dir_unavailable"}
+    finally:
+        blind.unload_fn()

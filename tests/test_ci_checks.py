@@ -44,6 +44,12 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(discovered - scheduled, set(),
                          'Add uncovered test modules to the catalog job or a hosted suite tests list')
 
+    def test_cache_suite_includes_all_payload_regressions(self):
+        self.assertIn('skills/cache_efficiency_snapshot', ci.SUITES['cache-efficiency']['tests'])
+        for path in (ROOT / 'skills/cache_efficiency_snapshot').glob('test_*.py'):
+            with self.subTest(path=path.name):
+                self.assertIn('cache-efficiency', ci.selected_suites({path.relative_to(ROOT).as_posix()}))
+
     def test_metadata_prs_skip_hosted_suites_and_payload_prs_select_their_consumers(self):
         self.assertEqual(ci.selected_suites(set()), [])
         self.assertEqual(ci.selected_suites({'README.md', 'entries/calendar.json', 'official.json', 'catalog.json'}), [])
