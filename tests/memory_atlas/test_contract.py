@@ -590,3 +590,96 @@ def test_dated_records_carry_the_cores_period_and_nothing_else_does(real_host):
     told = ok(real_host, "entries", ids=json.dumps([ids["weekly"], ids["fix_weekly"]]))["entries"]
     assert {k: told[0]["record"][k] for k in PERIOD} == {k: weekly[k] for k in PERIOD}   # copied from the top level
     assert not set(PERIOD) & set(told[1]["record"])
+
+
+TRANSFER_BODY = "First <b>line</b> & \"quoted\"\n\n  indented\tTab   \U0001F4A1 end\n"
+
+
+def _transfer_record(**extra):
+    return {"id": "t-1", "kind": "legacy", "room_id": "legacy", "chars": len(TRANSFER_BODY), "ts": "2026-11-16T10:20:00+00:00",
+            "author": {"kind": "source_author", "label": {"ref": "text", "preview": "<img src=x onerror=alert(1)>" + "N" * 254, "chars": 500,
+                     "address": {"kind": "record", "id": "t-1", "field": ["author", "label"]}}, "model": "m\nodel", "basis": "source"},
+            "byline": "source_author (...)",
+            "transfer": {"operator": "<b>op</b>", "tool": "importer <script>1</script>", "task_id": None},
+            "written_at": "2026-03-03", "stated_period": {"start": "2026-03-01", "end": None, "incomplete": True}, **extra}
+
+
+def test_the_author_filter_knows_the_source_author_and_still_refuses_others(routes):
+    seen = []
+
+    class Reader:
+        mode, label = "core", "x"
+
+        def list(self, area, **params):
+            seen.append((area, params))
+            return {"entries": [], "complete": True}
+
+    for kind in ("mind", "helper", "host", "legacy_helper", "source_author"):
+        status, _ = call(routes, Reader(), "list", area="records", author_kind=kind)
+        assert status == 200, kind
+    assert [p["author_kind"] for _, p in seen] == ["mind", "helper", "host", "legacy_helper", "source_author"]
+    status, body = call(routes, Reader(), "list", area="records", author_kind="importer")
+    assert status == 400 and body["error"]["code"] == "invalid_parameter" and "source_author" in body["error"]["message"]
+
+
+def test_entries_pass_the_transfer_facts_and_the_period_bases_through_and_keep_the_body(routes, reader_mod):
+    """The reader adds nothing and drops nothing: a transferred record's byline, transfer, written_at, stated_period and
+    the document's period_bases arrive as the core gave them, and the preview is the stored words unchanged."""
+    asked = []
+
+    def read_memory(operation, params):
+        asked.append((operation, params))
+        return {"contract": "ouroboros.memory/1", "operation": "document", "record": _transfer_record(),
+                "text": TRANSFER_BODY + "signed correction block", "room_label": "Legacy", "told_by": None,
+                "current_revision": "r1", "period": "period not stated by its source", "source_period": None,
+                "period_basis": "stated", "period_bases": ["stated"]}
+
+    status, body = call(routes, reader_mod.CoreReader(read_memory), "entries", ids='["t-1"]')
+    assert status == 200
+    entry = body["entries"][0]["record"]
+    assert entry["preview"] == TRANSFER_BODY   # the stored words, byte for byte (the correction block is cut off)
+    assert entry["byline"] == "source_author (...)"
+    assert entry["transfer"] == {"operator": "<b>op</b>", "tool": "importer <script>1</script>", "task_id": None}
+    assert entry["written_at"] == "2026-03-03" and entry["stated_period"]["incomplete"] is True
+    assert entry["author"]["label"] == _transfer_record()["author"]["label"]   # core projection and address unchanged
+    assert (entry["period"], entry["source_period"], entry["period_basis"], entry["period_bases"]) == (
+        "period not stated by its source", None, "stated", ["stated"])
+    assert entry["ts"] == "2026-11-16T10:20:00+00:00"   # the local publication time, a separate fact
+    assert asked == [("document", {"address": {"kind": "record", "id": "t-1"}, "length": reader_mod.PREVIEW_CHARS})]
+
+
+@pytest.mark.parametrize("projected_field", ["start", "end", "incomplete"])
+def test_entries_keep_nested_period_references_and_core_fallback_text(routes, reader_mod, projected_field):
+    address = {"kind": "record", "id": "t-1", "field": ["metadata", "stated_period", projected_field]}
+    span = {"start": "2026-07-01", "end": "2026-07-31", "incomplete": False}
+    span[projected_field] = {"ref": "value", "address": address}
+    period = "2026-07-01 – 2026-07-31 (stated by its source)"
+
+    def read_memory(operation, params):
+        return {"contract": "ouroboros.memory/1", "operation": "document", "record": _transfer_record(),
+                "text": TRANSFER_BODY, "room_label": "Legacy", "current_revision": "r1", "period": period,
+                "source_period": span, "period_basis": "stated", "period_bases": ["stated"]}
+
+    status, body = call(routes, reader_mod.CoreReader(read_memory), "entries", ids='["t-1"]')
+    assert status == 200
+    entry = body["entries"][0]["record"]
+    assert entry["period"] == period and entry["source_period"] == span
+    assert entry["source_period"][projected_field]["address"] == address
+    assert entry["preview"] == TRANSFER_BODY
+
+
+def test_an_answer_without_the_new_fields_gives_an_entry_without_them(routes, reader_mod):
+    old = {"id": "h-1", "kind": "legacy", "room_id": "1", "chars": 5, "ts": "2026-06-01T08:00:00+00:00",
+           "author": {"kind": "legacy_helper"}}
+
+    def read_memory(operation, params):
+        return {"contract": "ouroboros.memory/1", "operation": "document", "record": dict(old), "text": "words",
+                "room_label": "Main", "current_revision": "r1", "period": "2026-05 (block period)",
+                "source_period": None, "period_basis": "block"}
+
+    status, body = call(routes, reader_mod.CoreReader(read_memory), "entries", ids='["h-1"]')
+    entry = body["entries"][0]["record"]
+    assert status == 200 and entry["preview"] == "words"
+    for name in ("byline", "transfer", "written_at", "stated_period", "period_bases"):
+        assert name not in entry, name
+    assert entry["author"] == {"kind": "legacy_helper"} and entry["period_basis"] == "block"

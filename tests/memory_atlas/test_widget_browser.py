@@ -76,8 +76,11 @@ class Card:
         self.page.wait_for_timeout(300)
 
     def stop(self):
-        self.power.click()
+        self.card.get_by_role("button", name="Widget options", exact=True).click()
+        # The host moves the open menu to document.body, outside the card.
+        self.page.get_by_role("menu", name="Widget options", exact=True).get_by_role("menuitem", name="Stop", exact=True).click()
         self.card.locator("iframe").wait_for(state="detached", timeout=30000)
+        self.power.wait_for(state="visible", timeout=30000)
 
     def ev(self, script, arg=None):
         return self.frame.evaluate(script, arg)
