@@ -14,9 +14,7 @@ jobs:
     timeout-minutes: 180
     env:
       PYTHONDONTWRITEBYTECODE: '1'
-      UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/python310
       UV_PYTHON_DOWNLOADS: never
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/browsers
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,6 +25,8 @@ jobs:
         run: |
           mv "$GITHUB_WORKSPACE/qa-hub" "$RUNNER_TEMP/hub"
           mkdir -p "$RUNNER_TEMP/evidence"
+          echo "UV_PROJECT_ENVIRONMENT=$RUNNER_TEMP/python310" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/browsers" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           repository: razzant/ouroboros
