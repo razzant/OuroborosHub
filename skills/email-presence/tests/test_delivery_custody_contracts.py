@@ -37,9 +37,19 @@ def decoded_raw(payload):
 @pytest.mark.parametrize('to', ['john@example.invalid', '"Doe, John" <john@example.invalid>'])
 def test_named_recipients_keep_groups_and_bcc_on_both_transports(tmp_path, to):
     account, service, store = service_and_store(tmp_path)
-    result = service.send(account_id=account['id'], to=to, cc=['"Lee, Sue" <sue@example.invalid>'],
-                          bcc=['blind@example.invalid', 'john@example.invalid'], body='Message', request_id='named')
+    first = dict(account_id=account['id'], to=to, cc=['"Lee, Sue" <sue@example.invalid>'],
+                 bcc=['blind@example.invalid', 'john@example.invalid'], body='Message', request_id='named')
+    prepared = service.send(**first)
+    # The Host sees each actual recipient once, as a bare address; the names travel beside them.
+    assert prepared['status'] == 'needs_arguments' and prepared['code'] == 'canonical_recipients_required'
+    retry = prepared['retry_arguments']
+    named_to = {'john@example.invalid': 'Doe, John'} if 'Doe' in to else {}
+    assert (retry['to'], retry['cc'], retry['bcc']) == ('john@example.invalid', ['sue@example.invalid'], ['blind@example.invalid'])
+    assert retry['display_names'] == {**named_to, 'sue@example.invalid': 'Lee, Sue'}
+    assert store.receipt('named') is None
+    result = service.send(**retry)
     assert result['state'] == 'pending'
+    assert service.send(**retry)['deduplicated'] and service.send(**first)['deduplicated']
     item = store.claim_outbox()
     assert set(item.envelope_recipients) == {'john@example.invalid', 'sue@example.invalid', 'blind@example.invalid'}
     assert item.bcc == ('blind@example.invalid',)
@@ -57,8 +67,11 @@ def test_named_recipients_keep_groups_and_bcc_on_both_transports(tmp_path, to):
     gmail.transmit(None, message, item.envelope_recipients, has_bcc=True)
     wire = decoded_raw(payloads[0])
     assert wire['To'].addresses[0].addr_spec == 'john@example.invalid'
+    assert wire['To'].addresses[0].display_name == named_to.get('john@example.invalid', '')
     assert wire['Cc'].addresses[0].display_name == 'Lee, Sue'
+    assert wire['Cc'].addresses[0].addr_spec == 'sue@example.invalid'
     assert wire['Bcc'].addresses[0].addr_spec == 'blind@example.invalid'
+    assert str(message['Cc']) == '"Lee, Sue" <sue@example.invalid>'
 
 
 @pytest.mark.parametrize('to', ['', '"unterminated', 'not-an-address'])

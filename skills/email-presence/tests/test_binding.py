@@ -165,6 +165,7 @@ def test_enqueue_holds_use_the_same_words_and_count_as_held(tmp_path, monkeypatc
     host = SimpleNamespace(capture_binding=lambda *_, **__: refused)
     runtime = EmailRuntime(store, SimpleNamespace(settings={}), host, account=account["id"])
     item = InboxItem(1, "lease", "INBOX", 4, "<incoming>", "", (), "reader@example.invalid", "Subject", "Text", (), "", 1)
+    runtime.remember_reply_targets(item)  # the event this transport submitted carried its reply_targets
     runtime._reply(item, ("answer",), "output")
 
     tool, automatic = store.receipt("tool"), store.receipt(f"presence:{item.provider_event_key}:output")

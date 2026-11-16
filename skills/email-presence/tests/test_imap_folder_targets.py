@@ -35,6 +35,9 @@ class RecordingBox:
         return key, [b"7" if key == "UIDVALIDITY" else b"5"]
 
     def uid(self, *args):
+        if args[0] == "FETCH":  # identity peek before a prepared write; never a write itself
+            return "OK", [(args[1].encode() + b" (BODY[HEADER.FIELDS (MESSAGE-ID)] {35}",
+                           b"Message-ID: <imap-fixture@example.invalid>\r\n\r\n"), b")"]
         self.writes.append(args)
         return "OK", [b"done"]
 
@@ -98,7 +101,9 @@ def test_imap_only_changed_folders_go_to_the_host(tmp_path, monkeypatch, referen
     if reference:
         assert used["message_ref"] == args["message_ref"]
     assert visible.get("folder_names", []) == ([] if action == "copy" else ["Legal"])
-    assert box.sessions == [("Legal", action == "copy")]
+    # The first call peeks the message's conversation in its folder and prepares; the canonical retry writes there.
+    assert box.sessions == [("Legal", action == "copy")] * 2
+    assert used["message_conversation_id"] == used["message_thread_id"] == "<imap-fixture@example.invalid>"
     expected = (action.upper(), "4", '"Archive"') if action in {"copy", "move"} else (
         "STORE", "4", "-FLAGS.SILENT", r"(\Deleted)") if action == "flags" else (
         "STORE", "4", "+FLAGS.SILENT", r"(\Seen)")
@@ -351,7 +356,8 @@ def test_copy_checks_destination_inbox_spelling_and_validity(tmp_path, monkeypat
     assert used["destination"] == "INBOX" and "Paused" in refusal and not box.writes
     with pytest.raises(ValueError, match="UIDVALIDITY"):
         run({"action": "copy", "folder": "Legal", "uid": 4, "uidvalidity": 6, "destination": "Archive"})
-    assert box.sessions == [("Legal", True)] and not box.writes
+    # One session prepared the first copy (its identity peek); the second refused the stale UIDVALIDITY before any read.
+    assert box.sessions == [("Legal", True), ("Legal", True)] and not box.writes
 
 
 @pytest.mark.parametrize("tool", ["email_folders", "email_mailbox"])

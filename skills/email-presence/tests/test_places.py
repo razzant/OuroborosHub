@@ -45,8 +45,9 @@ def test_unbound_host_negotiates_facts_and_queries_current_state(monkeypatch):
 def test_hold_keeps_message_id_bytes_and_retry_budget(rig, reason):
     clock, _, client, store, host, runtime = rig
     held = [True]
-    def check(account, conversation):
+    def check(account, conversation, *, thread_id=""):
         assert account == "bot@example.org" and conversation == "<root>"
+        assert thread_id == '<root>'
         return reason if held[0] else ""
     host.place_hold = check
     store.enqueue_outbox(request_id="stable", recipients=["a@example.org"], subject="subject", body="body", references=["<root>"])

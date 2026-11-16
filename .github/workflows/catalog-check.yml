@@ -83,14 +83,14 @@ jobs:
           python -m playwright install chromium webkit
           echo "ATLAS_CORE=$GITHUB_WORKSPACE/atlas-core" >> "$GITHUB_ENV"
       # Mail and Calendar exercise the actual Host Service, child tool dispatcher, opaque widgets and sign-in return.
-      # This exact core contains their coordinated seam; provider edges remain offline fixtures. Smart Lists mounts
-      # its widget through the same core's module bridge.
+      # Email uses PR 3538's PluginAPI 2.5 core; Calendar and Smart Lists retain their qualified core.
+      # Provider edges remain offline fixtures. Smart Lists mounts its widget through the core's module bridge.
       - name: Check out the pinned core for mail and calendar
         if: matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill' || matrix.suite == 'smart-lists'
         uses: actions/checkout@v4
         with:
           repository: razzant/ouroboros
-          ref: 9c4411457bdb752d9379f17a97cf171a22384402
+          ref: ${{ matrix.suite == 'email-presence' && '04b6453ad0e5d4b6bb157b76e67ccac60fb0eff6' || '9c4411457bdb752d9379f17a97cf171a22384402' }}
           path: mail-calendar-core
           persist-credentials: false
       - name: Install the mail and calendar consumer runtime

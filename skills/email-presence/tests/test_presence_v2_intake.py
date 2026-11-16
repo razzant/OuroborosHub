@@ -677,7 +677,8 @@ def test_stopped_author_speech_is_never_sent_and_the_mail_never_reposted(rig, st
 
 # ---- late child and anchors ------------------------------------------------------------------
 
-def test_late_child_replies_to_the_polled_mail_and_unknown_anchor_falls_back(rig):
+def test_late_child_replies_to_the_polled_mail_and_unknown_anchor_is_not_redirected(rig):
+    """A stray anchor names no captured mail: its output is not sent to another message (contract r5 section 5)."""
     async def run():
         root, client = rig
         host = V2Host()
@@ -708,7 +709,6 @@ def test_late_child_replies_to_the_polled_mail_and_unknown_anchor_falls_back(rig
             await bridge.close()
         assert [(mail["body"], mail["to"], mail["in_reply_to"]) for mail in bridge.mail()] == [
             ("To Bob", "bob@example.org", "<2>"),
-            ("Fallback", "alice@example.org", "<1>"),
             ("Child report", "alice@example.org", "<1>"),
         ]
         assert bridge.inbox()["<1>"] == "retry" and host.posts == [FIRST, SECOND]
@@ -753,7 +753,8 @@ def test_terminal_only_final_replies_to_the_mail_its_anchor_names(rig):
     ("completed", "other_thread"), ("completed", "forged_message")])
 def test_an_anchor_binds_only_the_exact_captured_mail_of_the_same_thread(rig, channel, anchored):
     """Carol's <3> is captured in another thread. An anchor naming it, or one whose message is
-    not the captured mail its source names, falls back to the polled mail (alice's <1>)."""
+    not the captured mail its source names, is unusable: nothing is queued and the polled mail's
+    inbox row fails with that note; the reply is never redirected to alice's <1>."""
     async def run():
         root, client = rig
         host = V2Host()
@@ -792,12 +793,14 @@ def test_an_anchor_binds_only_the_exact_captured_mail_of_the_same_thread(rig, ch
             await bridge.send()
         finally:
             await bridge.close()
+        if anchored != "same_thread":
+            assert bridge.inbox()["<1>"] == "failed" and set(bridge.inbox().values()) == {"completed", "failed"}
+            assert bridge.outbox() == [] and bridge.mail() == []
+            return
         assert set(bridge.inbox().values()) == {"completed"}
         assert bridge.outbox() == [f"presence:{FIRST}:output:out-1"]
-        expected = ("bob@example.org", "<2>", "<1> <2>") if anchored == "same_thread" \
-            else ("alice@example.org", "<1>", "<1>")
         assert [(mail["body"], mail["to"], mail["in_reply_to"], mail["references"]) for mail in bridge.mail()] == [
-            ("Answer", *expected)]
+            ("Answer", "bob@example.org", "<2>", "<1> <2>")]
 
     asyncio.run(run())
 

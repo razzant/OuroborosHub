@@ -16,9 +16,23 @@ def published_targets(name,args):
     source=os.environ.get('OUROBOROS_SOURCE_DIR')
     if not source:pytest.skip('Set OUROBOROS_SOURCE_DIR for the real Host target projection')
     if source not in sys.path:sys.path.insert(0,source)
-    from ouroboros.tool_effects import ToolEffect,target_values
-    row=DECLARATIONS[name]
-    return target_values(ToolEffect(row['effect'],tuple(row.get('target') or ()),row.get('conversation',''),row.get('thread',''),True),args)
+    from ouroboros.tool_effects import ToolEffect, effect_of, target_values, touched_addresses
+    from ouroboros.extension_registry_state import REVIEWED_DECLARATION
+    from ouroboros.extension_surface_names import extension_surface_name
+    # Project the shipped declaration, including independently addressed groups. This helper only returns
+    # argument values; host_guard and the joint loader tests exercise the actual policy decision.
+    descriptor = {'skill': 'email-presence', 'extension_generation': 'projection',
+                  REVIEWED_DECLARATION: {'extension_generation': 'projection', 'tool': DECLARATIONS[name],
+                                         'plugin_api': MANIFEST['plugin_api']}}
+    effect = effect_of(extension_surface_name('email-presence', name), ext_tool=descriptor, args=args)
+    assert not effect.problem, effect.problem
+    _, problem = touched_addresses(effect, args)
+    assert not problem, problem
+    values = target_values(effect, args)
+    for group in effect.touches:
+        values.update(target_values(ToolEffect(effect=group.effect, conversation=group.conversation,
+                                               thread=group.thread), args))
+    return values
 
 
 def harness(provider='gmail'):
@@ -29,6 +43,13 @@ def harness(provider='gmail'):
         def capture(method,path,**kwargs):
             if method=='GET' and path=='/labels':
                 return {'labels':[{'id':'Label_1','name':'Filed'}]}
+            if method == 'GET' and path.startswith('/messages/'):
+                native = path.rsplit('/', 1)[-1]
+                if kwargs.get('params', {}).get('format') == 'raw':
+                    from test_write_targets import raw_message
+                    return {'id':native, 'raw':raw_message({'Message-ID':f'<declared-{native}@example.invalid>'})}
+                return {'id': native, 'labelIds': [], 'payload': {'headers': [
+                    {'name': 'Message-ID', 'value': f'<declared-{native}@example.invalid>'}]}}
             requests.append({'method':method,'path':path,**kwargs})
             return {'id':'fixture-result'}
         client._request=capture
@@ -38,7 +59,10 @@ def harness(provider='gmail'):
             capabilities=(b'IMAP4rev1',b'MOVE')
             def list(self,reference,pattern):return 'OK',[b'(\\Noselect) "/" ""']
             def create(self,target):requests.append({'create':target});return 'OK',[b'created']
-            def uid(self,*args):requests.append({'uid':args});return 'OK',[b'done']
+            def uid(self,*args):
+                if args[0]=='FETCH':  # identity peek before the prepared write; not a provider effect
+                    return 'OK',[(args[1].encode()+b' (BODY[HEADER.FIELDS (MESSAGE-ID)] {35}',b'Message-ID: <imap-fixture@example.invalid>\r\n\r\n'),b')']
+                requests.append({'uid':args});return 'OK',[b'done']
         @contextmanager
         def imap(*args,**kwargs):yield Box()
         client.imap=imap
@@ -47,7 +71,8 @@ def harness(provider='gmail'):
     @contextmanager
     def target(account_id=''):
         assert account_id==account['id']
-        yield account,None,client
+        # This preparation-only fixture has no retained mail; real-store historical scopes have separate tests.
+        yield account,SimpleNamespace(historical_message_roots=lambda _: []),client
     service.target=target
     registered={}
     schemas={}
@@ -149,7 +174,10 @@ def test_existing_copy_move_targets_stay_one_call(provider,action):
     result,used,calls,targets=invoke(registered,requests,'email_mailbox',{
         'account_id':account['id'],'action':action,'folder':'INBOX','uid':4,
         'uidvalidity':1 if provider=='gmail' else 7,'destination':destination,
-        **({('remove_labels' if provider=='gmail' else 'folder_names'):['INBOX']} if action=='move' else {})},schemas)
+        **({('remove_labels' if provider=='gmail' else 'folder_names'):['INBOX']} if action=='move' else {}),
+        # A canonical call names the selected message's conversation, as a previous retry returned it.
+        **dict.fromkeys(('message_conversation_id','message_thread_id'),
+                        '<declared-4@example.invalid>' if provider=='gmail' else '<imap-fixture@example.invalid>')},schemas)
     assert calls==1 and targets['destination']==[destination]
     if provider=='gmail':
         assert requests[0]=={'method':'POST','path':'/messages/4/modify','body':{
@@ -179,7 +207,7 @@ def test_canonical_target_metadata_preserves_real_host_write_modes(tmp_path,monk
     from ouroboros.extension_surface_names import extension_surface_name
     from ouroboros.consciousness_authority import CONSCIOUSNESS_INITIATOR
     descriptor={'skill':'email-presence','extension_generation':'target-test'}
-    bundle=registry._ExtensionRegistrations(generation_digest='target-test',loaded_skill=SimpleNamespace(manifest=SimpleNamespace(raw_extra=MANIFEST)))
+    bundle=registry._ExtensionRegistrations(generation_digest='target-test',loaded_skill=SimpleNamespace(manifest=SimpleNamespace(raw_extra=MANIFEST, plugin_api={"version": MANIFEST["plugin_api"]})))
     full=extension_surface_name('email-presence',name)
     monkeypatch.setitem(registry._extensions,'email-presence',bundle)
     monkeypatch.setitem(registry._tools,full,descriptor)

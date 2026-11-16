@@ -4,12 +4,13 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
-from email.utils import getaddresses, parsedate_to_datetime
+from email.utils import parsedate_to_datetime
 
 from .client import MailClient
 from .ews_operations import EwsOperations
 from .ews_wire import EwsError, EwsWire, NS, ews_timestamp, m, t
-from .mime import _html_to_text, _message_ids, decode_header_value, parse_message, usable_message_id
+from .mime import (_html_to_text, address_names_of, conversation_root, decode_header_value, header_mailboxes,
+                   parse_message, thread_fields, usable_message_id)
 
 
 # These are EWS distinguished folder IDs, not localized mailbox display names.
@@ -248,12 +249,15 @@ class EwsClient(EwsOperations, MailClient):
         return self._resolved_folder(t('FolderId', Id=native), defaults)
 
     @staticmethod
-    def _prepare_folders(prepare, *, new_name='', **folders):
+    def _prepare_folders(prepare, *, new_name='', root=None, **folders):
         names = {new_name} if new_name else set()
         targets = {}
         for key, (_, handle, aliases) in folders.items():
             targets[key] = handle
             names.update((handle, *aliases))
+        if root is not None:
+            # The selected item's conversation, as a target and as the Host's separate thread argument.
+            targets['message_conversation_id'] = targets['message_thread_id'] = root
         return prepare({**targets, 'folder_names': sorted(names)})
 
     def _folder_info(self, value):
@@ -290,10 +294,11 @@ class EwsClient(EwsOperations, MailClient):
 
     def _metadata(self, item):
         facts = self._facts(item)
+        thread = {'references': item.findtext('t:References', '', NS), 'in_reply_to': item.findtext('t:InReplyTo', '', NS)}
         return {**facts, 'subject': item.findtext('t:Subject', '', NS), 'sender': item.findtext('t:From/t:Mailbox/t:EmailAddress', '', NS),
                 'sender_name': item.findtext('t:From/t:Mailbox/t:Name', '', NS),
                 'message_id': usable_message_id(item.findtext('t:InternetMessageId', '', NS)) or _fallback_id(facts['provider_id']),
-                'references': _message_ids(item.findtext('t:References', '', NS)), 'in_reply_to': item.findtext('t:InReplyTo', '', NS),
+                **thread_fields(thread['references'], thread['in_reply_to']), 'thread_headers': thread,
                 'date': item.findtext('t:DateTimeReceived', '', NS)}
 
     def _find(self, folder, limit, offset, *, restriction=None, query=''):
@@ -333,13 +338,14 @@ class EwsClient(EwsOperations, MailClient):
                               'message:ToRecipients', 'message:CcRecipients', 'message:ReplyTo')
         item = self._get_item(native, _shape('Item', fields, text_body=True))
         msg = self._metadata(item)
-        headers = {}
+        headers, raw_headers = {}, {}
         raw_mid = None
         for row in item.findall('t:InternetMessageHeaders/t:InternetMessageHeader', NS):
             name = (row.get('HeaderName') or '').casefold()
             if name == 'message-id' and raw_mid is None:
                 raw_mid = row.text
             if name:
+                raw_headers.setdefault(name, []).append(row.text or '')
                 headers.setdefault(name, []).append(decode_header_value(row.text or ''))
 
         def addresses(prop, header):
@@ -347,20 +353,25 @@ class EwsClient(EwsOperations, MailClient):
                       for box in item.findall('t:' + prop + '/t:Mailbox', NS)
                       if box.findtext('t:RoutingType', 'SMTP', NS).upper() == 'SMTP']
             # Native recipients can mix SMTP addresses and Exchange legacy DNs.
-            # Prefer a supplied RFC list just as the normal MIME reader does.
-            rfc = [(name, address) for name, address in getaddresses(headers.get(header, [])) if '@' in address]
+            # Prefer a supplied RFC list just as the normal MIME reader does, parsed from its raw syntax:
+            # the decoded text would split an encoded comma or "@" in a display name into another address.
+            rfc = [pair for value in raw_headers.get(header, []) for pair in header_mailboxes(header, value)]
             return rfc or [(name, address) for name, address in values if '@' in address]
 
         sender = addresses('From', 'from')
         msg.update(sender=sender[0][1] if sender else '', sender_name=(sender[0][0] if sender else '') or msg['sender_name'],
+                   address_names=address_names_of(lambda field: raw_headers.get(field.casefold(), [])),
                    recipients=[v for _, v in addresses('ToRecipients', 'to')], cc=[v for _, v in addresses('CcRecipients', 'cc')],
                    reply_to=[v for _, v in addresses('ReplyTo', 'reply-to')], headers=headers,
                    message_id=usable_message_id(item.findtext('t:InternetMessageId', '', NS))
                               or usable_message_id(raw_mid) or msg['message_id'],
-                   in_reply_to=msg['in_reply_to'] or next(iter(headers.get('in-reply-to', [])), ''),
                    # The sender's Date, as the MIME reader gives it; the receipt stays internal_date.
-                   date=next(iter(headers.get('date', [])), ''),
-                   references=msg['references'] or _message_ids(' '.join(headers.get('references', []))))
+                   date=next(iter(headers.get('date', [])), ''))
+        msg['raw_address_headers'] = {key: raw_headers[key] for key in ('from', 'to', 'cc', 'reply-to') if key in raw_headers}
+        # Threading comes from raw syntax, read as intake reads MIME; decoded header text could expose comment text.
+        msg['thread_headers'] = {'references': msg['thread_headers']['references'] or ' '.join(raw_headers.get('references', [])),
+                                 'in_reply_to': msg['thread_headers']['in_reply_to'] or next(iter(raw_headers.get('in-reply-to', [])), '')}
+        msg.update(thread_fields(msg['thread_headers']['references'], msg['thread_headers']['in_reply_to']))
         body = item.find('t:Body', NS)
         msg['body'] = (body.text or '') if body is not None else ''
         if body is not None and body.get('BodyType', '').lower() == 'html':
@@ -410,13 +421,24 @@ class EwsClient(EwsOperations, MailClient):
         return {**message, **facts}
 
     def find_message(self, message_id, *, folder='INBOX'):
-        restriction = t('IsEqualTo', t('FieldURI', FieldURI='message:InternetMessageId'),
-                        t('FieldURIOrConstant', t('Constant', Value=message_id)))
-        page = self._find(folder, 1, 0, restriction=restriction)
-        if not page['messages']:
-            return None
-        original = self._read_scoped(message_ref=page['messages'][0]['message_ref'])
-        return original if original.get('message_id') == message_id else None
+        from .mime import canonical_message_id, unique_reply_source
+        # InternetMessageId can retain comments. Match candidates by token, then verify full intake identities.
+        token = canonical_message_id(message_id)
+        restriction = t('Contains', t('FieldURI', FieldURI='message:InternetMessageId'),
+                        t('Constant', Value=token), ContainmentMode='Substring', ContainmentComparison='Exact')
+        matches, offset = [], 0
+        while True:
+            page = self._find(folder, 50, offset, restriction=restriction)
+            matches.extend(self._read_scoped(message_ref=row['message_ref']) for row in page['messages'])
+            if not page.get('next_page_token'):
+                return unique_reply_source(matches, token)
+            offset = int(page['next_page_token'])
+
+    def identity_root(self, native):
+        """Use intake's MIME parser, native ID override and structured conversion-failure fallback."""
+        full = self._read_scoped(message_ref='ews:' + native)
+        return conversation_root(references=full.get('references'), in_reply_to=full.get('in_reply_to'),
+                                 message_id=full.get('message_id'))
 
     def mark_read(self, *, message_ref='', prepare_targets=None, **_legacy):
         return self.mailbox(action='flags', message_ref=message_ref, flags=[r'\Seen'], prepare_targets=prepare_targets)
@@ -446,7 +468,8 @@ class EwsClient(EwsOperations, MailClient):
             item = self._checked_native('Item', native)
             if prepare_targets:
                 source = {} if action == 'copy' else {'folder': self._item_parent(item, defaults)}
-                if needed := self._prepare_folders(prepare_targets, destination=target, **source):
+                if needed := self._prepare_folders(prepare_targets, destination=target, root=self.identity_root(native),
+                                                   **source):
                     return needed
             op = 'CopyItem' if action == 'copy' else 'MoveItem'
             result = self._call(m(op, m('ToFolderId', target[0]), m('ItemIds', t('ItemId', Id=native))))
@@ -467,7 +490,8 @@ class EwsClient(EwsOperations, MailClient):
         current = _child(item, 't:ItemId')
         if current.get('Id') != native or not current.get('ChangeKey'):
             raise EwsError('MissingCurrentItemVersion')
-        if prepare_targets and (needed := self._prepare_folders(prepare_targets, folder=self._item_parent(item, {}))):
+        if prepare_targets and (needed := self._prepare_folders(prepare_targets, folder=self._item_parent(item, {}),
+                                                                 root=self.identity_root(native))):
             return needed
         self._call(m('UpdateItem', m('ItemChanges', t('ItemChange', current, t('Updates', *updates))),
                      ConflictResolution='NeverOverwrite', MessageDisposition='SaveOnly', SuppressReadReceipts='true'))

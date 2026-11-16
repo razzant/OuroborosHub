@@ -40,9 +40,11 @@ class EwsError(RuntimeError):
     def __init__(self, code, *, http_status=None, retry_after=None, proven=False):
         self.code, self.http_status = code, http_status
         self.retry_after, self.proven = retry_after, proven
+        # A rejected login latches this account's background client until the connection is saved again, so
+        # the persisted diagnostic (poll health, status route, widget) carries the remedy, not only str(exc).
         hint = '. Check your Exchange login and save the connection to retry background mail.' if http_status == 401 else ''
-        self.mail_diagnostic = f'Exchange: {code}' + (f' (HTTP {http_status})' if http_status else '')
-        super().__init__(self.mail_diagnostic + hint)
+        self.mail_diagnostic = f'Exchange: {code}' + (f' (HTTP {http_status})' if http_status else '') + hint
+        super().__init__(self.mail_diagnostic)
 
 
 def ews_timestamp(value):

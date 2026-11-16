@@ -8,7 +8,8 @@ import pytest
 
 from lib.client import MailClient
 from lib.delivery import email_report
-from lib.host_adapter import HostDelivery, HostOutput, HostTurnStatus, LoopbackPresenceHostAdapter, _ref
+from lib.host_adapter import (LEGACY_REPLY_HELD, HostDelivery, HostOutput, HostTurnStatus, LoopbackPresenceHostAdapter,
+                              _ref)
 from lib.mime import MailAddressError, mailbox_addresses
 from lib.runtime import EmailRuntime
 from lib.store import EmailStore, OutboxItem
@@ -99,7 +100,11 @@ def test_terminal_invalid_recipient_keeps_exact_paid_selection_without_resubmiss
             assert saved['state'] == 'failed' and 'invalid_recipient' in saved['last_error']
             assert store.status()['outbox'] == {}
         else:
-            assert saved['state'] == 'completed' and store.status()['outbox'] == {'pending': 1}
+            # Selected before this transport sent reply_targets: the paid words are kept, held, never sent.
+            assert saved['state'] == 'completed' and store.status()['outbox'] == {'retry': 1}
+            with store._connect() as db:
+                assert [tuple(row) for row in db.execute('SELECT body,last_error FROM outbox')] == [
+                    ('Retained selected answer', LEGACY_REPLY_HELD)]
     asyncio.run(exercise())
 
 
