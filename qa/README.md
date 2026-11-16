@@ -19,6 +19,11 @@ the existing unbounded floor path is exercised, while physical fit stays
 `UNVERIFIED` without a source-bound model window and complete request envelope.
 The normal `full` dispatch remains available with its original selections.
 
+`phase=core-fix` selects only the remaining core delta and the one mixed-part
+Atlas test (four cells), with no full Atlas/frames repeat. It is intentionally
+unbound until the parent supplies reviewed source pins and the retained N3
+journal. See [CORE_FIX.md](CORE_FIX.md) for the binding, groups and expected counts.
+
 The repeat adds one diagnostic request header through the existing bridge, observes
 the product's own body reads (no clone or extra drain), and records request identity,
 step boundaries, native EOF, bridge bytes/end, consumer JSON completion, abort stack,

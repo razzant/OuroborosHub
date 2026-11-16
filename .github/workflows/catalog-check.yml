@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       phase:
-        description: Full qualification or the addressed frames repeat plus N3 observation
+        description: Full qualification, frames repeat, or addressed core delta
         type: choice
         default: full
-        options: [full, frames-only]
+        options: [full, frames-only, core-fix]
 permissions:
   contents: read
 defaults:
@@ -33,10 +33,28 @@ jobs:
           mv "$GITHUB_WORKSPACE/qa-hub" "$RUNNER_TEMP/hub"
           mkdir -p "$RUNNER_TEMP/evidence"
           echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/browsers" >> "$GITHUB_ENV"
+      - name: Select the phase's explicit source binding
+        id: binding
+        run: |
+          python3 -I -B - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          qa = Path(os.environ['RUNNER_TEMP']) / 'hub/qa'
+          core_fix = os.environ['QA_PHASE'] == 'core-fix'
+          path = qa / ('core-fix-subjects.json' if core_fix else 'subjects.json')
+          assert path.is_file(), 'core-fix needs reviewed parent pins; no fallback to R4/R5'
+          pins = json.loads(path.read_text())
+          if core_fix:
+              assert pins.get('state') == 'ready', 'core-fix binding is not ready'
+          ref = pins['core_commit']
+          assert len(ref) == 40 and all(c in '0123456789abcdef' for c in ref)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('core_ref=' + ref + '\n')
+          PYTHON
       - uses: actions/checkout@v4
         with:
           repository: razzant/ouroboros
-          ref: 42aab559faca79bac21bf7630a82ac9fb9667702
+          ref: ${{ steps.binding.outputs.core_ref }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -68,6 +86,24 @@ jobs:
         if: ${{ success() && inputs.phase == 'frames-only' }}
         run: '"$UV_PROJECT_ENVIRONMENT/bin/python" -I -B "$RUNNER_TEMP/hub/qa/qualify.py" frames-only'
       - uses: actions/setup-python@v5
+        if: ${{ success() && inputs.phase == 'core-fix' }}
+        id: core_fix_writer_python
+        with:
+          python-version: '3.12.13'
+      - name: Prepare the real 3.12 writer before its 3.10 reader
+        id: core_fix_writer
+        if: ${{ success() && inputs.phase == 'core-fix' }}
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/python312
+          WRITER_PYTHON: ${{ steps.core_fix_writer_python.outputs.python-path }}
+        run: |
+          uv sync --locked --python "$WRITER_PYTHON" --extra browser --group dev --no-install-project 2>&1 | tee "$RUNNER_TEMP/evidence/setup312.log"
+          "$UV_PROJECT_ENVIRONMENT/bin/python" -I -B -c 'import sys; assert sys.version_info[:3] == (3, 12, 13); print(sys.executable)'
+      - name: Only the remaining core delta and before-control on shipped 3.10
+        id: core_fix
+        if: ${{ success() && inputs.phase == 'core-fix' }}
+        run: '"$UV_PROJECT_ENVIRONMENT/bin/python" -I -B "$RUNNER_TEMP/hub/qa/qualify.py" core-fix'
+      - uses: actions/setup-python@v5
         if: ${{ !cancelled() && (steps.qualification.outputs.comparison_ready == 'true' || (inputs.phase == 'frames-only' && steps.sources.outcome == 'success' && steps.runtime.outcome == 'success')) }}
         id: comparison_python
         with:
@@ -81,6 +117,10 @@ jobs:
         run: |
           uv sync --locked --python "$COMPARISON_PYTHON" --extra browser --group dev --no-install-project 2>&1 | tee "$RUNNER_TEMP/evidence/setup312.log"
           "$UV_PROJECT_ENVIRONMENT/bin/python" -I -B "$RUNNER_TEMP/hub/qa/qualify.py" compare
+      - name: Addressed core comparison and same historical N3 on 3.12
+        id: core_fix_comparison
+        if: ${{ !cancelled() && steps.core_fix.outputs.comparison_ready == 'true' && steps.core_fix_writer.outcome == 'success' }}
+        run: '"$RUNNER_TEMP/python312/bin/python" -I -B "$RUNNER_TEMP/hub/qa/qualify.py" core-fix-compare'
       - name: N3 historical C1 writer on 3.12 (independent of frames outcome)
         id: n3_writer
         if: ${{ !cancelled() && inputs.phase == 'frames-only' && steps.sources.outcome == 'success' && steps.runtime.outcome == 'success' && steps.comparison_python.outcome == 'success' }}
@@ -100,6 +140,7 @@ jobs:
           RUNTIME_OUTCOME: ${{ steps.runtime.outcome }}
           BROWSER_OUTCOME: ${{ steps.browsers.outcome }}
           COMPARISON_SETUP_OUTCOME: ${{ steps.comparison_python.outcome }}
+          CORE_FIX_WRITER_OUTCOME: ${{ steps.core_fix_writer.outcome }}
         run: python3 -I -B "$RUNNER_TEMP/hub/qa/qualify.py" export
       - name: Upload small outcomes, logs and visual evidence first
         uses: actions/upload-artifact@v4
@@ -122,6 +163,8 @@ jobs:
             ${{ runner.temp }}/evidence/n3/*.json
             ${{ runner.temp }}/evidence/n3/*.txt
             ${{ runner.temp }}/evidence/n3/*.py
+            ${{ runner.temp }}/evidence/n3/**/*.json
+            ${{ runner.temp }}/evidence/n3/**/*.txt
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14

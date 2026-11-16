@@ -417,7 +417,8 @@ def test_the_real_mixed_part_names_each_base_of_its_members(card, real_host, tra
     assert c.title() == "Main, 10 November 2025 – 30 April 2026 (partly block period, partly stated by its source)"
     assert c.ev(FACT, "Period") == part["period"]   # the core's own words, exactly
     c.wait_text("Folds 3 records")
-    assert c.ev(META, "record:" + ids["old-block-synth"]) == "Earlier dialogue · 1–30 Apr (block period)"
+    old_year = "" if c.ev("() => new Date().getFullYear()") == 2026 else " 2026"
+    assert c.ev(META, "record:" + ids["old-block-synth"]) == f"Earlier dialogue · 1–30 Apr{old_year} (block period)"
     assert c.ev(META, "record:" + ids["tr-mix-rows"]) == "Earlier dialogue · 1–2 Dec 2025 (stated by its source)"
     assert c.ev(META, "record:" + ids["tr-mix-stated"]) == "Earlier dialogue · 10–14 Nov 2025 (stated by its source)"
     assert "Transferred · " in c.ev(ROW_FACTS, "record:" + ids["tr-mix-rows"])

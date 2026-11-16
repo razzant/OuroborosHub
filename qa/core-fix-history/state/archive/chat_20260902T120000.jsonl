@@ -1,0 +1,5 @@
+{"chat_id": 1, "direction": "out", "ts": "2026-09-02T00:00:00+00:00", "text": "bound work", "task_id": "bound"}
+{torn
+{"chat_id": 1, "direction": "out", "ts": "2026-09-02T00:01:00+00:00", "text": "child of bound", "task_id": "kid", "parent_task_id": "bound", "root_task_id": "bound", "subagent_task_id": "kid", "delegation_role": "subagent"}
+{"chat_id": 72247503, "direction": "in", "ts": "2026-09-02T00:02:00+00:00", "text": "beta question", "client_message_id": "b0"}
+{"chat_id": 72247503, "direction": "out", "ts": "2026-09-02T00:03:00+00:00", "text": "beta answer", "task_id": "tb"}

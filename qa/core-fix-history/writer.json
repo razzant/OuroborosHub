@@ -1,0 +1,16 @@
+{
+  "python": "3.12.13 (main, Jun 16 2026, 22:05:08) [GCC 13.3.0]",
+  "source_sha256": "15f09c3979bfd54ef52407a442b176639eb253aac0585f5fe513b648997a44b4",
+  "fixture": "test_long_iso_period_is_bounded_in_every_api_reader_and_its_original_is_readable",
+  "selected_setup_sha256": "a3f827cd84794852d5b0e2aab33121b478dd1209ce2d2b746b888459193f127c",
+  "journal_sha256": "ecee6219e1303b2cccc33e34cd6121df8554f231eba01e2d6cd221c6fdc9d2f2",
+  "start": {
+    "chars": 100026,
+    "utf8_bytes": 100026,
+    "sha256": "bfa16e96034e406cb22048e783b3dc201d89d22985e2f04a35fa110bb339d9d2",
+    "json_chars": 100026,
+    "estimated_view_tokens": 25007
+  },
+  "parsed_start": "2026-07-01T00:00:00.111111+00:00",
+  "method": "C1 historical transaction, not fresh publication"
+}

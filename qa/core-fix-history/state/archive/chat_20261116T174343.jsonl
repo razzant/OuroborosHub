@@ -1,0 +1,10 @@
+{"chat_id": 1, "direction": "system", "ts": "2026-09-03T00:00:00+00:00", "text": "Room started", "type": "project_started"}
+{"chat_id": 1, "direction": "in", "ts": "2026-09-03T00:01:00+00:00", "text": "next please", "client_message_id": "m1"}
+{"chat_id": 1, "direction": "out", "ts": "2026-09-03T00:02:00+00:00", "text": "a long reply\n## with a heading", "task_id": "t2", "initiator": "consciousness"}
+{"chat_id": 248773269, "direction": "in", "ts": "2026-09-03T00:03:00+00:00", "text": "alpha again", "client_message_id": "a1"}
+{"chat_id": 72247503, "direction": "in", "ts": "2026-09-03T00:04:00+00:00", "text": "beta again", "client_message_id": "b1"}
+{"chat_id": 777, "direction": "out", "ts": "2026-09-03T00:05:00+00:00", "text": "to the transport", "task_id": "t3"}
+{"chat_id": 1, "direction": "system", "ts": "2026-09-03T00:06:00+00:00", "text": "", "type": "task_summary", "task_id": "t2", "status": "completed", "result_ref": {"reader": "get_task_result", "task_id": "t2"}}
+{"chat_id": 0, "direction": "out", "ts": "2026-09-03T00:07:00+00:00", "text": "hidden note"}
+{"chat_id": 1, "direction": "system", "ts": "2026-09-03T00:08:00+00:00", "text": "Could not start", "type": "task_not_started", "task_id": "bound"}
+{"chat_id": 1, "direction": "in", "ts": "2026-09-03T00:09:00+00:00", "text": "and more", "client_message_id": "m2"}

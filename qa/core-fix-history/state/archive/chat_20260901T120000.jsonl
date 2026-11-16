@@ -1,0 +1,8 @@
+{"chat_id": 1, "direction": "in", "ts": "2026-09-01T00:00:00+00:00", "text": "hello", "client_message_id": "m0"}
+{"chat_id": -5, "direction": "in", "ts": "2026-09-01T00:00:30+00:00", "text": "agent traffic"}
+
+{"chat_id": 1, "direction": "out", "ts": "2026-09-01T00:01:00+00:00", "text": "hello back", "task_id": "t1"}
+{"chat_id": 248773269, "direction": "in", "ts": "2026-09-01T00:02:00+00:00", "text": "alpha question", "client_message_id": "a0"}
+{"chat_id": 248773269, "direction": "out", "ts": "2026-09-01T00:03:00+00:00", "text": "alpha answer", "task_id": "ta"}
+{"chat_id": 777, "direction": "in", "ts": "2026-09-01T00:04:00+00:00", "text": "from the transport", "transport": {"provider": "telegram", "actor": {"display_name": "Ann"}}}
+{"chat_id": 1, "direction": "in", "ts": "2026-09-01T00:05:00+00:00", "text": "Start alpha with the inventory work", "client_message_id": "origin-a"}

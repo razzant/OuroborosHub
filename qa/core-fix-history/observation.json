@@ -1,0 +1,54 @@
+{
+  "python": "3.10.22 (main, Oct  9 2026, 15:21:30) [Clang 22.1.3 ]",
+  "replay_equal": true,
+  "full": {
+    "chars": 101708,
+    "utf8_bytes": 101764,
+    "sha256": "b617a3fbbf9e3ac86049c172168cfe8742ee549866f624a4b9ad91fe96ad8306",
+    "json_chars": 101743,
+    "estimated_view_tokens": 25437
+  },
+  "F3": {
+    "chars": 101509,
+    "utf8_bytes": 101547,
+    "sha256": "aae5918cd02f17c2c9fddda57158db9675cab0f72d867413c3b45e3b44723185",
+    "json_chars": 101528,
+    "estimated_view_tokens": 25383
+  },
+  "fit_status": "UNVERIFIED",
+  "fit_reason": "No source-bound model window, reply reserve or complete request envelope supplied. An unbounded floor walk cannot establish physical fit.",
+  "fit_path": "ouroboros.memory_floor.fit_memory_view",
+  "allowances": {
+    "margin": null,
+    "budget": null,
+    "physical": null
+  },
+  "unbounded_floor": {
+    "addressed": [],
+    "story": {
+      "chars": 101708,
+      "utf8_bytes": 101764,
+      "sha256": "b617a3fbbf9e3ac86049c172168cfe8742ee549866f624a4b9ad91fe96ad8306",
+      "json_chars": 101743,
+      "estimated_view_tokens": 25437
+    }
+  },
+  "F3_elements": [
+    {
+      "step": "F3",
+      "id": "1",
+      "full_chars": 100569,
+      "short_chars": 100370,
+      "full_json_chars": 100586,
+      "short_json_chars": 100371
+    },
+    {
+      "step": "F3",
+      "id": "248773269",
+      "full_chars": 232,
+      "short_chars": 158,
+      "full_json_chars": 235,
+      "short_json_chars": 158
+    }
+  ]
+}

@@ -22,15 +22,28 @@ CORE = Path(os.environ['GITHUB_WORKSPACE']).resolve()
 TEMP = Path(os.environ['RUNNER_TEMP']).resolve()
 OUT = TEMP / 'evidence'
 COMPOSED = TEMP / 'core-composed'
-PINS = json.loads((QA / 'subjects.json').read_text())
+SELECTION = os.environ.get('QA_PHASE', 'full')
+assert SELECTION in ('full', 'frames-only', 'core-fix'), SELECTION
+pin_file = QA / ('core-fix-subjects.json' if SELECTION == 'core-fix' else 'subjects.json')
+# An unbound core-fix can still export its failed preparation. Never fall back to old pins.
+PINS = json.loads(pin_file.read_text()) if pin_file.exists() else {}
 OUT.mkdir(parents=True, exist_ok=True)
 FULL_PLANNED = ['frozen-transfer', 'frozen-owners', 'composed-transfer', 'composed-owners',
            'size', 'plugin-compat', 'atlas', 'frames', 'negative-c1', 'negative-c3', 'negative-f3', 'datetime312']
-SELECTION = os.environ.get('QA_PHASE', 'full')
-assert SELECTION in ('full', 'frames-only'), SELECTION
-PLANNED = ['frames', 'n3-write', 'n3-read'] if SELECTION == 'frames-only' else FULL_PLANNED
+CORE_FIX_PLANNED = ['core-fix-iso', 'core-fix-capacity', 'core-fix-inventory',
+    'core-fix-transfer', 'core-fix-story', 'core-fix-fallback', 'core-fix-size',
+    'core-fix-atlas-mixed', 'core-fix-catalog', 'core-fix-before-n3',
+    'core-fix-observe-before', 'core-fix-observe-after', 'core-fix-iso312',
+    'core-fix-before312', 'core-fix-observe312', 'core-fix-pair']
+PLANNED = (CORE_FIX_PLANNED if SELECTION == 'core-fix' else
+           ['frames', 'n3-write', 'n3-read'] if SELECTION == 'frames-only' else FULL_PLANNED)
 EXPECTED_COUNTS = {'frozen-transfer': 80, 'composed-transfer': 80, 'size': 7,
                    'plugin-compat': 2, 'datetime312': 5}
+
+
+def core_fix(action):
+    import runpy
+    return runpy.run_path(str(QA / 'core_fix.py'))[action](sys.modules[__name__])
 
 
 def save(path, value):
@@ -94,6 +107,8 @@ def prepare():
     save(OUT / 'selection.json', {'phase': SELECTION, 'selected': PLANNED,
          'not_selected': [name for name in FULL_PLANNED if name not in PLANNED],
          'prior_results': 'R4 remains unchanged; omitted families are not rerun or credited here'})
+    if SELECTION == 'core-fix':
+        core_fix('validate')
     assert git(CORE, 'rev-parse', 'HEAD') == PINS['core_commit']
     assert git(CORE, 'rev-parse', 'HEAD^{tree}') == PINS['core_tree']
     assert git(CORE, 'rev-parse', PINS['target_commit'] + '^{tree}') == PINS['target_tree']
@@ -121,6 +136,8 @@ def prepare():
     snapshot(COMPOSED, 'composed-before')
     save(OUT / 'subjects.json', dict(PINS, hub_qa_commit=git(HUB, 'rev-parse', 'HEAD'),
                                     composed_tree=tree, composed_head_is_source_commit=True))
+    if SELECTION == 'core-fix':
+        core_fix('prepare')
 
 
 OWNERS = [
@@ -214,6 +231,13 @@ def execute(label, core, cwd, argv, env=None, negative=None, collect=False):
                 good = (rc == 1 and len(cases) == len(names) and len(failures) == len(names)
                         and not errors and not skips and {c.get('name') for c in cases} == set(names)
                         and all(marker in ''.join(c.find('failure').itertext()) for c in failures))
+                if label.startswith('core-fix-before'):
+                    # A marker elsewhere in --tb=long is not the failed assertion.
+                    good = good and all(
+                        'AssertionError' in ''.join(c.find('failure').itertext()) and
+                        any(line.lstrip().startswith('>') and marker in line
+                            for line in ''.join(c.find('failure').itertext()).splitlines())
+                        for c in failures)
                 result['status'] = 'EXPECTED_FAILURE' if good else 'INVALID_NEGATIVE'
             elif rc == 0 and cases and not failures and not errors and not skips:
                 result['status'] = 'PASS'
@@ -390,6 +414,8 @@ def compare():
 
 def export():
     # Only exact roots named by our launcher; never search processes or remove data.
+    if SELECTION == 'core-fix' and not (OUT / 'results.json').exists():
+        save(OUT / 'results.json', RESULTS)  # binding/setup failed before prepare
     retained = set()
     for stream in OUT.glob('*.stderr'):
         for line in stream.read_text(errors='replace').splitlines():
@@ -408,11 +434,22 @@ def export():
     for root, label in ((CORE, 'core'), (HUB, 'hub'), (COMPOSED, 'composed')):
         before = OUT / f'{label}-before.json'
         if before.exists():
-            after = snapshot(root, f'{label}-after')
-            audits[label] = after == json.loads(before.read_text())
+            try:
+                after = snapshot(root, f'{label}-after')
+                audits[label] = after == json.loads(before.read_text())
+            except (OSError, ValueError, AssertionError, subprocess.SubprocessError):
+                audits[label] = False
+                (OUT / f'{label}-source-audit-error.txt').write_text(traceback.format_exc())
     save(OUT / 'source-audit.json', audits)
+    if SELECTION == 'core-fix' and (OUT / 'core-fix-before-source.json').exists():
+        try:
+            audits['core-fix'] = core_fix('audit')
+        except (OSError, ValueError, KeyError, AssertionError, subprocess.SubprocessError):
+            audits['core-fix'] = False
+            (OUT / 'core-fix-source-audit-error.txt').write_text(traceback.format_exc())
+        save(OUT / 'source-audit.json', audits)
     save(OUT / 'preparation-outcomes.json', {k: os.environ.get(k, 'unknown') for k in
-         ('PREPARE_OUTCOME', 'RUNTIME_OUTCOME', 'BROWSER_OUTCOME', 'COMPARISON_SETUP_OUTCOME')})
+         ('PREPARE_OUTCOME', 'RUNTIME_OUTCOME', 'BROWSER_OUTCOME', 'COMPARISON_SETUP_OUTCOME', 'CORE_FIX_WRITER_OUTCOME')})
     save(OUT / 'SHA256SUMS.json', {str(p.relative_to(OUT)): file_digest(p)
          for p in sorted(OUT.rglob('*')) if p.is_file() and p.name != 'SHA256SUMS.json'})
     assert all(audits.values()), 'source changed during qualification; inspect before/after archives'
@@ -422,7 +459,9 @@ if __name__ == '__main__':
     phase = sys.argv[1]
     try:
         {'prepare': prepare, 'run': run, 'frames-only': frames_only, 'n3-write': n3_write,
-         'n3-read': n3_read, 'compare': compare, 'export': export}[phase]()
+         'n3-read': n3_read, 'compare': compare, 'export': export,
+         'core-fix': lambda: core_fix('run'),
+         'core-fix-compare': lambda: core_fix('compare')}[phase]()
     except BaseException:
         (OUT / f'{phase}-error.txt').write_text(traceback.format_exc())
         raise
