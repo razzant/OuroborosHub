@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/e1f14e0b66bda1586ed6929167dcd1b8c6d84e17",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/f845c2a81065cc42457a4861634be52517512dbf",
   "schema_version": 1,
   "skills": [
     {
@@ -2660,18 +2660,18 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "5a8694471ad47c016ca394c8836a73a9f8b5135b6dcebf1009d74116bd31636d",
-          "size": 3708
+          "sha256": "2bde6dfd2939df0cadfc8201258e7cea9a878a2c8a4e69268f750b81841d4f75",
+          "size": 4352
         },
         {
           "path": "app/atlas.css",
-          "sha256": "aea85784480d930855ef134541a4a980ff1971f6434719a335e05b85489d61fa",
-          "size": 17867
+          "sha256": "0985a2240a8206c1067c511195ef73e9ad1fb2d1ff495957060cd2f1ec2fa865",
+          "size": 17951
         },
         {
           "path": "app/atlas.js",
-          "sha256": "7b32e0c9937ead034a51155ff4d4856255c725d98611cd1d0a8f9da23b225165",
-          "size": 91283
+          "sha256": "45943c6f7cd7d48a5cf262d31423a5c0ed2b20a1ae8f880ad7e8f26b7844dcbf",
+          "size": 92912
         },
         {
           "path": "app/client.js",
@@ -2695,18 +2695,18 @@
         },
         {
           "path": "app/words.js",
-          "sha256": "1d488d4277356c9cf4e14810f7aedbbcfec980ba487e4750459fb81f86c22fa7",
-          "size": 8004
+          "sha256": "46f67cf463ec83b3d6af14ba9d2ffe77721b645e433e652b98cb51a7a803d965",
+          "size": 12809
         },
         {
           "path": "atlas_reader.py",
-          "sha256": "db77c5e4cd046ab9c4be24a09934aa77b8a012eaa331d30ec3e99fd5c54cfa32",
-          "size": 8523
+          "sha256": "80278e6adf551475fa5b36bf4ce6bcbc69586ba6742eb06630e43b01ea5a1281",
+          "size": 8539
         },
         {
           "path": "atlas_routes.py",
-          "sha256": "0d997311cebf680482d2134a6362e37444a2792f88809f5dd51c9cb55f54e738",
-          "size": 13186
+          "sha256": "e4766d1abf46f3e3886c26d01c3c33c2df1f4b4dbcc1c9d8bfb9f0c8f1a20851",
+          "size": 13203
         },
         {
           "path": "atlas_search.py",
@@ -2723,7 +2723,7 @@
       "slug": "memory-atlas",
       "title": "Memory Atlas",
       "type": "extension",
-      "version": "0.3.0"
+      "version": "0.3.1"
     },
     {
       "description": "Generate a music clip from a text prompt via OpenRouter's Google Lyria model and play it directly inside the widget. Files are persisted to the skill's private state directory and streamed through an extension route for both inline playback and download.",
