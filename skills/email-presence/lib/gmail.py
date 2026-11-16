@@ -6,9 +6,10 @@ import copy
 import re
 import time
 from contextlib import contextmanager
+from collections.abc import Mapping
 from functools import cache
 from email.policy import SMTP
-from email.utils import getaddresses
+from email.utils import getaddresses, parseaddr
 
 import httpx
 
@@ -16,10 +17,18 @@ from .accounts import AccountError
 from .google_auth import FULL_MAIL_SCOPE, SETTINGS_SCOPE
 from .client import MailClient
 from .delivery import DeliveryRejected
-from .mime import build_message, mailbox_addresses, parse_message
+from .mime import build_message, conversation_root, mailbox_addresses, parse_message
 
 BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 _SYSTEM_LABEL_IDS = frozenset({"INBOX", "SENT", "DRAFT", "SPAM", "TRASH", "STARRED", "UNREAD", "IMPORTANT"})
+# messages.list leaves Spam and Trash out unless asked (includeSpamTrash defaults to false).
+_SPAM_TRASH = frozenset({"SPAM", "TRASH"})
+
+
+def _draft_id(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise ValueError("Choose draft_id from email_search(folder='DRAFT')")
+    return value
 
 
 class GmailError(RuntimeError):
@@ -115,7 +124,10 @@ class GmailClient(MailClient):
         native = self.native_id(payload["id"])
         if headers_only:
             fields = (payload.get("payload") or {}).get("headers") or []
-            raw = ("\r\n".join(f"{item['name']}: {item['value']}" for item in fields) + "\r\n\r\n").encode("utf-8")
+            # Metadata is only a search projection. A provider value cannot inject a header boundary.
+            fields = [(str(item['name']), re.sub(r'[\r\n]+', ' ', str(item['value']))) for item in fields]
+            raw = ("\r\n".join(f"{name}: {value}" for name, value in fields
+                                  if re.fullmatch(r"[!-9;-~]+", name)) + "\r\n\r\n").encode("utf-8")
         else:
             encoded = payload.get("raw") or ""
             raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
@@ -141,6 +153,8 @@ class GmailClient(MailClient):
         label = self._label_id(folder) if folder and folder != "ALL" else ""
         if label and label != "DRAFT":
             params["labelIds"] = label
+        if label in _SPAM_TRASH:
+            params["includeSpamTrash"] = "true"  # On every page; otherwise this explicit folder lists nothing.
         if query:
             params["q"] = str(query)
         if page_token:
@@ -168,8 +182,17 @@ class GmailClient(MailClient):
                              include_attachment_data=include_attachment_data)
 
     def find_message(self, message_id, *, folder="ALL"):
-        found = self.search(folder=folder, query="rfc822msgid:" + str(message_id), limit=1)
-        return self.read(message_ref=found["messages"][0]["message_ref"]) if found["messages"] else None
+        """Read all search candidates; decoded metadata cannot establish a reply's identity."""
+        from .mime import canonical_message_id, unique_reply_source
+        token = canonical_message_id(message_id)
+        matches, page = [], ''
+        while True:
+            found = self.search(folder=folder, query="rfc822msgid:" + token, limit=50,
+                                **({'page_token': page} if page else {}))
+            matches.extend(self.read(message_ref=row['message_ref']) for row in found['messages'])
+            page = found.get('next_page_token')
+            if not page:
+                return unique_reply_source(matches, token)
 
     def _label_id(self, value, *, snapshot=None):
         if value in _SYSTEM_LABEL_IDS:
@@ -194,22 +217,93 @@ class GmailClient(MailClient):
             raise ValueError("Cannot verify the current Gmail label IDs and their names; refresh the message or label selection and retry")
         return {by_id[key] for key in custom if by_id[key] != key}
 
-    def mark_read(self, *, message_ref="", uid=None, uidvalidity=None, folder=None, prepare_targets=None):
+    def message_state(self, native, outcome):
+        """Read the selected message's current labels and RFC conversation before preparing a write."""
+        message = self._request("GET", "/messages/" + native,
+                                params={"format": "metadata", "fields": "id,labelIds,payload/headers"})
+        if not isinstance(message, dict) or message.get("id") != native:
+            raise ValueError(f"Gmail did not confirm the selected message; nothing was {outcome}")
+        return self._state(message, outcome)
+
+    def _state(self, message, outcome):
+        """The same authority facts for a messages.get or drafts.get message resource."""
+        labels = message.get("labelIds", [])
+        if not isinstance(labels, list) or any(not isinstance(value, str) or not value.strip() for value in labels):
+            raise ValueError(f"Gmail did not return the message's label IDs; nothing was {outcome}")
+        return sorted(set(labels)), self._identity(message, outcome)
+
+    def _identity(self, metadata, outcome):
+        """Use the raw source and intake parser; decoded metadata cannot preserve wire identity."""
+        native = self.native_id(metadata["id"])
+        payload = self._request("GET", "/messages/" + native, params={"format": "raw"})
+        if not isinstance(payload, dict) or payload.get("id") != metadata["id"] or not payload.get("raw"):
+            raise ValueError(f"Gmail did not return the selected message's source; nothing was {outcome}")
+        full = self._message(payload)
+        if check := getattr(self, 'retained_source_check', None):
+            check(full)
+        return conversation_root(references=full["references"], in_reply_to=full["in_reply_to"],
+                                 message_id=full["message_id"])
+
+    def draft_state(self, draft_id, outcome):
+        """An existing draft's current label IDs and RFC conversation, read now from its underlying message.
+
+        Replacing or deleting the draft removes that message from every label it bears and from its conversation.
+        The conversation is the RFC root intake uses: References, else In-Reply-To, else the draft's own
+        Message-ID. ``outcome`` names what did not happen on failure."""
+        draft = self._request("GET", "/drafts/" + _draft_id(draft_id), params={"format": "metadata"})
+        message = draft.get("message") if isinstance(draft, dict) else None
+        if (not isinstance(message, dict) or draft.get("id") != draft_id or not isinstance(message.get("id"), str)
+                or not re.fullmatch(r"[a-fA-F0-9]{1,16}", message["id"])):
+            raise ValueError(f"Gmail did not confirm the selected draft; nothing was {outcome}")
+        return self._state(message, outcome)
+
+    def draft_targets(self, draft_id):
+        """Label IDs and their current names (Drafts for DRAFT), and the RFC conversation, that replacing the draft
+        changes. They are Host targets only and never alter the saved draft."""
+        labels, root = self.draft_state(draft_id, "saved")
+        names = {*labels, "Drafts", *self._current_label_names(labels)} - {"DRAFT"}
+        return ["Drafts", *sorted(names - {"Drafts"})], root
+
+    def mark_read(self, *, message_ref="", uid=None, uidvalidity=None, folder=None, message_conversation_id="",
+                  message_thread_id="", label_names=None, prepare_targets=None):
         return self.mailbox(action="flags", message_ref=message_ref, uid=uid, uidvalidity=uidvalidity,
-                            flags=["\\Seen"], prepare_targets=prepare_targets)
+                            flags=["\\Seen"], label_names=label_names, message_conversation_id=message_conversation_id,
+                            message_thread_id=message_thread_id, prepare_targets=prepare_targets)
 
     def mailbox(self, *, action="list", folder="INBOX", uid=None, uidvalidity=None, message_ref="",
                 destination="", flags=None, remove_flags=False, add_labels=None, remove_labels=None,
-                label_id="", properties=None, draft_id="", label_names=None, prepare_targets=None):
+                label_id="", properties=None, draft_id="", label_names=None, draft_conversation_id="",
+                message_conversation_id="", message_thread_id="", prepare_targets=None):
         # One fresh snapshot per operation. Never cache a mutable display name
         # across calls or translate the provider's add/remove ID arrays as names.
         @cache
         def snapshot():
             return self._request("GET", "/labels").get("labels", [])
 
+        @cache
+        def state():
+            return self.message_state(native, "deleted" if action == "delete" else "changed")
+
         def write(method, path, body, targets, affected=(), fixed_names=()):
             if prepare_targets:
                 names = set(fixed_names)
+                if path.startswith("/messages/"):
+                    labels, root = state()
+                    # Every message mutation changes this conversation and the message visible in these folders.
+                    # These are authority facts only; never add them to the provider's mutation body.
+                    names.update(set(labels) - set(targets.get("add_labels", add_labels or ()))
+                                 - set(targets.get("remove_labels", remove_labels or ())))
+                    if "DRAFT" in labels:
+                        names.add("Drafts")
+                    affected = {*affected, *labels}
+                    # The conversation is a target; the same root as a separate thread argument lets the Host
+                    # find a Place stored with both (the manifest's thread selector), without hiding label targets.
+                    targets["message_conversation_id"] = targets["message_thread_id"] = root
+                elif "message_thread_id" not in targets:
+                    if message_conversation_id:
+                        targets["message_conversation_id"] = ""
+                    if message_thread_id:
+                        targets["message_thread_id"] = ""
                 names.update(self._current_label_names(affected, snapshot))
                 if names or label_names:
                     targets["label_names"] = sorted(names)
@@ -233,25 +327,45 @@ class GmailClient(MailClient):
             return write("PATCH" if action == "update_label" else "DELETE", "/labels/" + selected,
                          properties if action == "update_label" else None, targets, [selected])
         if action == "delete_draft":
-            if not isinstance(draft_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", draft_id):
-                raise ValueError("Choose draft_id from email_search(folder='DRAFT')")
-            return write("DELETE", "/drafts/" + draft_id, None, {"remove_labels": ["DRAFT"]}, fixed_names=["Drafts"])
+            _draft_id(draft_id)
+            targets, labels = {"remove_labels": ["DRAFT"]}, ["DRAFT"]
+            if prepare_targets:
+                # Deleting a draft permanently deletes its message, from every label it bears and from its RFC
+                # conversation. Both are read now and exposed; any other caller target is cleared, not trusted.
+                labels, root = self.draft_state(draft_id, "deleted")
+                targets = {"remove_labels": labels or ["DRAFT"]}
+                for key, value, empty in (("add_labels", add_labels, []), ("label_id", label_id, ""),
+                                          ("destination", destination, "")):
+                    if value:
+                        targets[key] = empty
+                targets["draft_conversation_id"] = targets["message_thread_id"] = root
+                if message_conversation_id:
+                    targets["message_conversation_id"] = ""
+            return write("DELETE", "/drafts/" + draft_id, None, targets, labels, fixed_names=["Drafts"])
         native = self.native_id(message_ref or (format(int(uid) % (2 ** 64), "x") if uid is not None and uidvalidity == 1 else ""))
         if action in {"trash", "untrash"}:
-            return write("POST", f"/messages/{native}/{action}", {}, {}, fixed_names=["TRASH"])
+            # Moving into or out of Trash changes where the message appears under every label it bears, so the
+            # Host sees its current labels as well as TRASH. Any other caller target is cleared, not trusted.
+            labels, _root = state()
+            kept = sorted(set(labels) - {"TRASH"})
+            if action == "trash":
+                targets = {"remove_labels": kept, "add_labels": ["TRASH"]}
+            else:
+                targets = {"remove_labels": ["TRASH"], "add_labels": kept}
+            targets = {key: value for key, value in targets.items()
+                       if value or (add_labels if key == "add_labels" else remove_labels)}
+            if label_id:
+                targets["label_id"] = ""
+            if destination:
+                targets["destination"] = ""
+            return write("POST", f"/messages/{native}/{action}", {}, targets, [*kept, "TRASH"],
+                         ["TRASH", *(["Drafts"] if "DRAFT" in labels else [])])
         if action == "delete":
             scopes = self.account.get("scopes")
             if scopes is not None and "https://mail.google.com/" not in scopes:
                 raise AccountError("Permanent deletion requires a new Google consent with the full mail scope; trash is available with gmail.modify")
             path = "/messages/" + native
-            message = self._request("GET", path, params={"format": "minimal", "fields": "id,labelIds"})
-            if not isinstance(message, dict) or message.get("id") != native:
-                raise ValueError("Gmail did not confirm the selected message; nothing was deleted")
-            # Empty repeated fields can be absent even in a requested minimal response.
-            labels = message.get("labelIds", [])
-            if not isinstance(labels, list) or any(not isinstance(value, str) or not value.strip() for value in labels):
-                raise ValueError("Gmail did not return the message's label IDs; nothing was deleted")
-            labels = sorted(set(labels))
+            labels, _root = state()
             targets = {"remove_labels": labels} if labels or remove_labels else {}
             if add_labels:
                 targets["add_labels"] = []
@@ -288,7 +402,8 @@ class GmailClient(MailClient):
             targets["add_labels"] = body["addLabelIds"]
         if set(remove) - set(remove_labels or []):
             targets["remove_labels"] = body["removeLabelIds"]
-        return write("POST", "/messages/" + native + "/modify", body, targets, [*add, *remove])
+        affected, fixed = [*add, *remove], []
+        return write("POST", "/messages/" + native + "/modify", body, targets, affected, fixed)
 
     def draft(self, *, to, subject, body="", folder="DRAFT", reply_to_message_id="", references=None,
               cc=(), bcc=(), html_body="", body_type="plain", attachments=(), sender="", draft_id="", thread_id=""):
@@ -323,6 +438,8 @@ class GmailClient(MailClient):
 
     def settings_write(self, *, resource, action="update", identifier="", values=None, forward_to="", prepare_targets=None):
         from urllib.parse import quote
+        if values is not None and not isinstance(values, Mapping):
+            raise ValueError("values must be an object")
         if resource in {"autoForwarding", "forwardingAddresses"}:
             return {"ok": False, "code": "website_required", "message": "Changing forwarding requires Workspace administrative delegation; use Gmail settings for a personal account."}
         paths = {"sendAs": "/settings/sendAs", "filters": "/settings/filters", "vacation": "/settings/vacation",
@@ -343,13 +460,30 @@ class GmailClient(MailClient):
                                "Gmail's website, or reconnect Google with that choice ticked if the administrator allows it."}
         body = None if action == "delete" else dict(values or {})
         targets = {}
+        if body:
+            # The manifest declares values.replyToAddress, so the Host reads the exact field Gmail receives.
+            # Gmail's JSON also accepts other spellings of that field; refuse them rather than hide the address.
+            if any(not isinstance(key, str) or (key != "replyToAddress"
+                                                and key.replace("_", "").casefold() == "replytoaddress") for key in body):
+                raise ValueError("Use values.replyToAddress for the Reply-To address; the Host checks that exact field")
+            reply_to = body.get("replyToAddress", "")
+            if not isinstance(reply_to, str):
+                raise ValueError("values.replyToAddress must be a string: one bare email address, or empty to remove Reply-To")
+            if reply_to.strip():
+                try:
+                    parsed = mailbox_addresses(reply_to)
+                except ValueError:
+                    parsed = []
+                if parsed != [reply_to.strip()] or parseaddr(parsed[0])[1] != parsed[0]:
+                    raise ValueError("values.replyToAddress must be one bare email address such as name@example.com, "
+                                     "or empty to remove Reply-To")
         if resource == "filters" and action == "create":
             if identifier:
                 raise ValueError("Creating a Gmail filter targets the filter collection; omit identifier")
             if any(key.lower() == "action" and key != "action" for key in body):
                 raise ValueError("Use the Gmail filter's documented action field")
             rule = body.get("action", {})
-            if not isinstance(rule, dict) or rule.keys() - {"forward", "addLabelIds", "removeLabelIds"}:
+            if not isinstance(rule, Mapping) or rule.keys() - {"forward", "addLabelIds", "removeLabelIds"}:
                 raise ValueError("Gmail filter action must be an object with forward, addLabelIds or removeLabelIds")
             if not isinstance(rule.get("forward", ""), str) or not isinstance(forward_to, str):
                 raise ValueError("Gmail filter forwarding destination must be a string")
@@ -427,8 +561,10 @@ class GmailClient(MailClient):
             # Pin the new history boundary before enumeration; later changes are
             # replayed from it, and store identity deduplicates any overlap.
             newest = str(self._request("GET", "/profile")["historyId"])
-            ids = [item["id"] for item in self._pages("/messages", "messages", params={
-                "q": "after:" + str(int(cursor["activated_at"])), "maxResults": 100})]
+            rescan = {"q": "after:" + str(int(cursor["activated_at"])), "maxResults": 100}
+            if folder in _SPAM_TRASH:  # An intake folder of Spam or Trash is rescanned there too.
+                rescan["includeSpamTrash"] = "true"
+            ids = [item["id"] for item in self._pages("/messages", "messages", params=rescan)]
         count = 0
         label = self._label_id(folder) if folder and folder != "ALL" else ""
         for native in dict.fromkeys(ids):

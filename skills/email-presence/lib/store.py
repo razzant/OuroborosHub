@@ -27,6 +27,23 @@ def _delivery_state(state, error):
     return "held" if state == "retry" and str(error).startswith("Held:") else state
 
 
+def _physical_source(message):
+    """The provider message a read came from: its Gmail/Exchange ref, else its IMAP folder, UIDVALIDITY and UID.
+    None when a stored read does not name one (e.g. one kept by an earlier version without those fields)."""
+    ref = message.get("message_ref")
+    if isinstance(ref, str) and ref:
+        return ["ref", ref]
+    where = ref if isinstance(ref, dict) else message
+    if where.get("uid") is not None and where.get("uidvalidity") is not None:
+        return ["imap", str(where.get("folder") or ""), str(where["uidvalidity"]), str(where["uid"])]
+    return ["provider", str(message["provider_id"])] if message.get("provider_id") else None
+
+
+def _read_source_key(message_id, source):
+    data = json.dumps([str(message_id or ""), source], separators=(",", ":"), ensure_ascii=True)
+    return "read_source:" + hashlib.sha256(data.encode("ascii")).hexdigest()
+
+
 class RequestIdConflict(ValueError):
     """A request id already names a different outgoing message."""
 
@@ -354,7 +371,8 @@ class EmailStore:
                 # bytes. An explicitly supplied b"" below is a real empty file.
                 descriptors.append(dict(item))
                 continue
-            if str(item.get("content_type") or item.get("mime_type") or "").lower() == "message/rfc822":
+            if str(item.get("content_type") or item.get("mime_type") or "").lower().startswith(("message/", "multipart/")):
+                # Containers (attached mail, delivery/read reports) have no single payload to stage.
                 descriptor = {key: value for key, value in dict(item).items() if key not in {"data", "path"}}
                 descriptor.update(content_available=False, stage_error="unsupported_mime_type", error="unsupported_mime_type")
                 descriptors.append(descriptor)
@@ -369,6 +387,9 @@ class EmailStore:
             staged.extend(copied)
             descriptor = {key: value for key, value in copied[0].items() if key != "path"}
             descriptor["content_available"] = True
+            for key in ("within", "container", "container_index", "depth", "mime_part"):
+                if key in item:  # the nearest container that carried it, and where the part sits in the raw MIME
+                    descriptor[key] = item[key]
             descriptors.append(descriptor)
         source = self._stage_raw_source(message.pop("_raw_source", None), identity=identity)
         if source:
@@ -435,7 +456,7 @@ class EmailStore:
                         for item in message["attachments"])):
             self.stage_inbound_attachments(message)
         context = {key: message[key] for key in (
-            "sender_name", "cc", "date", "reply_to", "headers", "attachments", "source_artifact", "attachment_stage_note",
+            "sender_name", "cc", "date", "reply_to", "headers", "address_names", "thread_headers", "raw_address_headers", "attachments", "source_artifact", "attachment_stage_note",
             "provider_id", "provider_thread_id", "provider_event_key", "message_ref", "labels", "source_format", "source_note"
         ) if key in message}
         staged = list(message.get("staged_files") or ())
@@ -690,24 +711,113 @@ class EmailStore:
             db.execute("UPDATE outbox SET accepted_json=?,refused_json=? WHERE id=? AND lease_token=?",
                        (json.dumps(list(accepted)), json.dumps(_refused_json(refused), ensure_ascii=False), row_id, token))
 
-    def message_by_id(self, message_id):
+    def reply_sources(self, message_id):
+        from .mime import canonical_message_id
+        token = canonical_message_id(message_id)
         with self._connect() as db:
-            row = db.execute("SELECT * FROM inbox WHERE message_id=? ORDER BY id DESC LIMIT 1", (str(message_id),)).fetchone()
-        if not row:
-            return self.get("read_message:" + str(message_id))
-        context = json.loads(row["context_json"] or "{}")
-        return {
-            "message_id": row["message_id"], "sender": row["sender"], "recipients": json.loads(row["recipients_json"] or "[]"),
-            "cc": json.loads(row["cc_json"] or "[]"), "reply_to": json.loads(row["reply_to_json"] or "[]"),
-            "in_reply_to": row["in_reply_to"], "references": json.loads(row["references_json"] or "[]"),
-            **context,
-        }
+            # Existing keys remain unchanged, including comment-bearing IDs and old read caches.
+            ids = [r[0] for r in db.execute('SELECT message_id FROM inbox')
+                   if canonical_message_id(r[0]) == token]
+            messages = []
+            for identity in dict.fromkeys(ids):
+                for row in db.execute('SELECT * FROM inbox WHERE message_id=? ORDER BY id DESC', (identity,)):
+                    context = json.loads(row['context_json'] or '{}')
+                    messages.append({**context, 'message_id': row['message_id'], 'sender': row['sender'],
+                        'folder': row['folder'], 'uid': row['uid'], 'uidvalidity': row['uidvalidity'],
+                        'recipients': json.loads(row['recipients_json'] or '[]'), 'cc': json.loads(row['cc_json'] or '[]'),
+                        'reply_to': json.loads(row['reply_to_json'] or '[]'), 'in_reply_to': row['in_reply_to'],
+                        'references': json.loads(row['references_json'] or '[]')})
+            messages.extend(json.loads(row[0]) for row in db.execute(
+                "SELECT value FROM runtime_state WHERE key LIKE 'read_message:%' OR key LIKE 'read_source:%'")
+                if canonical_message_id(json.loads(row[0]).get('message_id')) == token)
+        return messages
+
+    def message_by_id(self, message_id):
+        from .mime import unique_reply_source
+        return unique_reply_source(self.reply_sources(message_id), message_id)
+
+    def retained_outbox_hold(self, item):
+        """An accepted damaged envelope stays intact. A new parser is not consent to repair and send it."""
+        from .mime import reply_chain
+        from .retained import legacy_ews_source
+        # New rows were built from verified source syntax before acceptance. Only legacy accepted rows need
+        # retrospective source inspection; ordinary delivery/anchor lookup must not scan the whole inbox.
+        if not item.in_reply_to or item.reporting.get('reply_source_syntax') == 1:
+            return ''
+        for source in self.reply_sources(item.in_reply_to):
+            if legacy_ews_source(source):
+                return 'Held: Legacy Exchange reply source lost address syntax; accepted envelope needs reconciliation'
+            before = list(source.get('references') or ([source['in_reply_to']] if source.get('in_reply_to') else []))
+            after = reply_chain(source)
+            if before != after and list(item.references) == before:
+                return 'Held: Accepted reply used comment-derived ancestry; original headers and queue are preserved'
+        return ''
+
+    def historical_message_roots(self, selection):
+        """Stored scopes of this physical message whose old reference projection differs from raw syntax."""
+        from .mime import reply_chain
+        wanted = _physical_source(selection)
+        if wanted is None:
+            return []
+        with self._connect() as db:
+            rows = db.execute('SELECT * FROM inbox WHERE folder=? AND uidvalidity=? AND uid=?',
+                              (selection.get('folder', 'INBOX'), selection.get('uidvalidity'), selection.get('uid'))).fetchall()
+            if selection.get('message_ref'):
+                rows = db.execute("SELECT * FROM inbox WHERE json_extract(context_json,'$.message_ref')=?",
+                                  (selection['message_ref'],)).fetchall()
+            sources = [{**json.loads(row['context_json'] or '{}'), 'message_id': row['message_id'],
+                        'references': json.loads(row['references_json']), 'in_reply_to': row['in_reply_to']}
+                       for row in rows]
+            sources.extend(m for row in db.execute(
+                "SELECT value FROM runtime_state WHERE key LIKE 'read_message:%' OR key LIKE 'read_source:%'")
+                for m in [json.loads(row[0])] if _physical_source(m) == wanted)
+        from .retained import UndecidableThreadSyntax
+        roots = []
+        for source in sources:
+            old = conversation_root(references=source.get('references'), in_reply_to=source.get('in_reply_to'),
+                                    message_id=source.get('message_id'))
+            try:
+                actual = reply_chain(source)
+            except UndecidableThreadSyntax:
+                actual = None  # unknown ancestry: the stored scope keeps its own check
+            if old and actual != list(source.get('references') or
+                                      ([source['in_reply_to']] if source.get('in_reply_to') else [])):
+                roots.append(old)
+        return list(dict.fromkeys(roots))
 
     def remember_read(self, message):
-        """Keep reply headers for an explicitly read old mail without admitting it to Presence."""
-        keys = ("message_id", "sender", "recipients", "cc", "reply_to", "in_reply_to", "references", "provider_id",
-                "provider_thread_id", "message_ref", "folder", "uid", "uidvalidity", "source_artifact")
-        self.put("read_message:" + str(message["message_id"]), {key: message[key] for key in keys if key in message})
+        """Keep reply headers for an explicitly read old mail without admitting it to Presence.
+
+        ``read_message:<Message-ID>`` keeps the latest read, as before. When the read it replaces came from another
+        physical message (provider ref, or IMAP folder/UIDVALIDITY/UID) with a different reply authority, that read
+        is kept too, under ``read_source:<digest>``: message_by_id then still sees both and refuses the ambiguous ID
+        instead of silently answering whichever was read last. A later read of a kept source refreshes its entry."""
+        from .mime import reply_authority
+        keys = ("message_id", "sender", "sender_name", "headers", "address_names", "thread_headers", "raw_address_headers", "source_format", "recipients", "cc", "reply_to", "in_reply_to", "references",
+                "provider_id", "provider_thread_id", "message_ref", "folder", "uid", "uidvalidity", "source_artifact")
+        record = {key: message[key] for key in keys if key in message}
+        key = "read_message:" + str(message["message_id"])
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            previous, source = self._get(db, key), _physical_source(record)
+            if isinstance(previous, dict):
+                earlier = _physical_source(previous)
+                from .retained import legacy_ews_source
+                from .mime import conversation_root
+                root = lambda m: conversation_root(references=m.get('references'), in_reply_to=m.get('in_reply_to'),
+                                                   message_id=m.get('message_id'))
+                if earlier == source and (legacy_ews_source(previous) or root(previous) != root(record)
+                                          or previous.get('references') != record.get('references')):
+                    # Keep the old interpretation as evidence even after a fresh read of the same provider item.
+                    # Its independent key cannot be refreshed away by the next read_source update below.
+                    self._put(db, _read_source_key(previous.get('message_id'), ['historical', earlier,
+                        hashlib.sha256(json.dumps(previous, sort_keys=True).encode()).hexdigest()]), previous)
+                if source and earlier and earlier != source and reply_authority(previous) != reply_authority(record):
+                    self._put(db, _read_source_key(previous.get("message_id"), earlier), previous)
+            own = _read_source_key(record.get("message_id"), source) if source else ""
+            if own and self._get(db, own) is not None:
+                self._put(db, own, record)
+            self._put(db, key, record)
 
     def receipt(self, request_id):
         with self._connect() as db:

@@ -27,6 +27,8 @@ class SharedStores(Session):
         self.item_folder = 'projects'
         self.optional_error = None
         self.batch_error = None
+        self.item_headers = [('Message-ID', '&lt;transport@example.invalid&gt;')]
+        self.identity_reads = []
 
     def post(self, *args, **kwargs):
         op = ET.fromstring(kwargs['data']).find('s:Body', NS)[0]
@@ -63,6 +65,14 @@ class SharedStores(Session):
                     xml = folder_record(native, *self.labels[native])
             elif op.find('.//t:IncludeMimeContent', NS) is not None:
                 xml = response(verb, '<m:Items>' + item(native, mime=True) + '</m:Items>')
+            elif op.find('.//t:FieldURI[@FieldURI="item:InternetMessageHeaders"]', NS) is not None:
+                # A prepared message write reads the item's own identity: InternetMessageId and transport headers.
+                self.identity_reads.append(native)
+                rows = ''.join(f'<t:InternetMessageHeader HeaderName="{name}">{value}</t:InternetMessageHeader>'
+                               for name, value in self.item_headers)
+                xml = response(verb, f'<m:Items><t:Message><t:ItemId Id="{native}" ChangeKey="ck"/>'
+                                     f'<t:InternetMessageId>&lt;{native}@example.invalid&gt;</t:InternetMessageId>'
+                                     f'<t:InternetMessageHeaders>{rows}</t:InternetMessageHeaders></t:Message></m:Items>')
             else:
                 assert op.find('.//t:FieldURI[@FieldURI="' + kind.lower() + ':ParentFolderId"]', NS) is not None
                 assert op.find('.//t:ExtendedFieldURI[@PropertyTag="0x0FFA"]', NS) is not None
@@ -216,7 +226,7 @@ def test_relabelled_target_allowed_by_host_still_cannot_touch_paused_exchange(to
     manifest = yaml.safe_load((Path(__file__).resolve().parents[1] / 'SKILL.md').read_text(encoding='utf-8').split('---',2)[1])
     descriptor = {'skill':'email-presence', 'extension_generation':'synthetic'}
     bundle = registry._ExtensionRegistrations(generation_digest='synthetic',
-                        loaded_skill=SimpleNamespace(manifest=SimpleNamespace(raw_extra=manifest)))
+                        loaded_skill=SimpleNamespace(manifest=SimpleNamespace(raw_extra=manifest, plugin_api={"version": manifest["plugin_api"]})))
     full = extension_surface_name('email-presence','email_mark_read')
     monkeypatch.setitem(registry._extensions,'email-presence',bundle)
     monkeypatch.setitem(registry._tools,full,descriptor)

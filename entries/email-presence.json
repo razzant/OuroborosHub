@@ -5,8 +5,8 @@
   "connects": [
     "Email"
   ],
-  "description": "Multi-account Gmail, on-premises Exchange EWS and IMAP/SMTP mail with folders, drafts, durable delivery and optional Presence intake.",
-  "digest": "72620575d36b9ad90c8462dd6b9a427bbb6accf70f972c6a825f8aeaacff6e19",
+  "description": "Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.",
+  "digest": "23ee0c22ae983f0473be59ebb4b98c5e01facfad4efcf5e9ba1e92e1958eada5",
   "icon": "ui/icon.svg",
   "install_specs": [
     "httpx",
@@ -23,6 +23,7 @@
     "path": "skills/email-presence"
   },
   "type": "extension",
-  "version": "0.10.9",
+  "version": "0.10.11",
+  "when_to_use": "User wants to read, compose, organize or configure mailboxes, or receive and reply to incoming mail through a Place.",
   "withdrawn": null
 }

@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import imaplib
 import json
+import smtplib
 import time
 from pathlib import Path
 
+import httpx
 from starlette.responses import JSONResponse
 
 from .lib.accounts import AccountError, SETTING_KEYS
@@ -125,11 +128,20 @@ def register(api):
             result = await asyncio.to_thread(perform)
             return JSONResponse({"ok": True, "account": result})
         except (ValueError, TypeError, RuntimeError) as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+            # A connection test reports its redacted stage and remedy (MailConnectionError.diagnostic).
+            return JSONResponse({"ok": False, "error": str(exc), **dict(getattr(exc, "diagnostic", None) or {})},
+                                status_code=400)
+        except (OSError, imaplib.IMAP4.error, smtplib.SMTPException, httpx.HTTPError) as exc:
+            # Never a bare HTTP 500, and never the server's text, which can echo a login.
+            return JSONResponse({"ok": False, "code": "connection_failed", "error_type": type(exc).__name__,
+                                 "error": f"The mail service could not complete this request ({type(exc).__name__}). "
+                                          "Check the connection settings and retry."}, status_code=502)
 
     async def oauth_begin(request):
         try:
             body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("Expected a JSON object")
             origin = str(body.get("origin") or "").rstrip("/")
             if not origin:
                 info = api.get_runtime_info()
@@ -141,15 +153,23 @@ def register(api):
             return JSONResponse(result)
         except (ValueError, TypeError, KeyError, RuntimeError) as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except httpx.HTTPError as exc:  # google_auth names its own failures; never surface a bare HTTP 500
+            return JSONResponse({"ok": False, "error": f"Could not prepare Google sign-in ({type(exc).__name__}); try again"},
+                                status_code=502)
 
     async def oauth_complete(request):
         try:
             body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("Expected a JSON object")
             result = await asyncio.to_thread(google_auth.finish, service.accounts, state=str(body.get("state") or ""),
                                             code=str(body.get("code") or ""), error=str(body.get("error") or ""))
             return JSONResponse(result)
         except (ValueError, TypeError, RuntimeError) as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except httpx.HTTPError as exc:
+            return JSONResponse({"ok": False, "error": f"Could not reach Google ({type(exc).__name__})."
+                                                       + google_auth.RESTART}, status_code=502)
 
     async def save(request):
         """Legacy settings stay at the original route and state path."""

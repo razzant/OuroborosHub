@@ -1,6 +1,6 @@
 # Email Presence
 
-Version 0.10.9 connects Gmail, on-premises Exchange (EWS over HTTPS with NTLM),
+Version 0.10.11 connects Gmail, on-premises Exchange (EWS over HTTPS with NTLM),
 and IMAP/SMTP mailboxes, including Yandex and Proton Mail Bridge. Each account has its own credentials, inbox,
 outbox and receipts; sender addresses are separate from mailbox identity.
 Previously issued Exchange links still work. Mail asks Exchange whether an item
@@ -16,6 +16,14 @@ Existing EMAIL_* configurations keep their original identity and mail history.
 Known thread replies preserve RFC threading, and transient Host failures retry
 stored paid output without generating it again. Unknown provider acceptance is
 never automatically resent. Sender authentication remains explicitly unverified.
+
+Searches return pages: pass `next_page_token` back as `page_token` with the same
+account, folder and query or criteria until it comes back empty. IMAP criteria are
+raw search tokens, so quote an ASCII operand that contains spaces, for example
+`["SUBJECT", "\"New sign-in\""]`. An empty or failed search is not proof that a
+message never arrived; widen the criteria (FROM with SINCE/BEFORE), page through
+the results and compare non-ASCII subjects in their decoded form before concluding
+that mail is missing.
 
 See [SKILL.md](SKILL.md) for setup, scopes, TLS, credential storage, compatibility
 and residuals, and [CHANGELOG.md](CHANGELOG.md) for release changes. Google mail

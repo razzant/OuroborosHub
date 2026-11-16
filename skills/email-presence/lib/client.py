@@ -4,6 +4,7 @@ from __future__ import annotations
 import imaplib
 import base64
 import hashlib
+import json
 import os
 import re
 import smtplib
@@ -14,10 +15,54 @@ from email.policy import SMTP
 
 import httpx
 
-from .mime import build_message, mailbox_addresses, parse_message
+from .mime import build_message, conversation_root, mailbox_addresses, parse_message
 
 
 _LIST_HEADER = re.compile(rb'^\(([^)]*)\) (?:NIL|"(\\[\\"]|[^\\"])") ', re.I)
+_PAGE_PREFIX = "imap-page:"
+_PAGE_FIELDS = {"scope", "folder", "uidvalidity", "criteria", "top", "below"}
+_SEARCH_NOTE = ("Newest UID first: the order this folder stored the messages, not necessarily their date. "
+                "An empty result is not proof that a message never arrived: server-side search can miss matches.")
+
+
+_STAGE_REMEDIES = {
+    "connect": "Check the host, port and security mode, and that the server (or Proton Bridge) is running and reachable.",
+    "tls": "Check the security mode (SSL or STARTTLS) and the CA certificate or SHA-256 pin; for Proton Bridge use its certificate.",
+    "auth": "Check the username and the app or Bridge password (not the account's website password), then save the connection.",
+}
+
+
+@contextmanager
+def _stage(name):
+    """Tag the first failing connection step; the tag never carries server text or credentials."""
+    try:
+        yield
+    except Exception as exc:
+        if not hasattr(exc, "mail_stage"):
+            try:
+                exc.mail_stage = name
+            except AttributeError:
+                pass
+        raise
+
+
+class MailConnectionError(RuntimeError):
+    """A redacted connection diagnostic: protocol, stage, typed code and remedy only."""
+
+    def __init__(self, protocol, exc):
+        stage = getattr(exc, "mail_stage", "connect")
+        if isinstance(exc, (ssl.SSLError, ssl.CertificateError)):
+            stage = "tls"
+        code = type(exc).__name__
+        # IMAP and SMTP replies can echo the login; keep only a bracketed response code atom such as
+        # [AUTHENTICATIONFAILED], or the numeric SMTP reply code.
+        if isinstance(exc, imaplib.IMAP4.error) and (atom := re.search(r"\[([A-Z][A-Z0-9-]{1,40})\]", str(exc))):
+            code += ":" + atom[1]
+        if isinstance(exc, smtplib.SMTPResponseException):
+            code += f":{int(exc.smtp_code)}"
+        self.diagnostic = {"code": "connection_failed", "protocol": protocol, "stage": f"{protocol}_{stage}",
+                           "error_type": code, "remedy": _STAGE_REMEDIES.get(stage, _STAGE_REMEDIES["connect"])}
+        super().__init__(f"{protocol.upper()} {stage} failed ({code}). {self.diagnostic['remedy']}")
 
 
 class MailClient:
@@ -83,14 +128,18 @@ class MailClient:
         if security not in {"ssl", "starttls"}:
             raise ValueError("EMAIL_IMAP_SECURITY must be ssl or starttls")
         port = int(self._get("EMAIL_IMAP_PORT", 993 if security == "ssl" else 143))
-        context = self._tls_context()
-        box = (imaplib.IMAP4_SSL(host, port, ssl_context=context, timeout=30) if security == "ssl"
-               else imaplib.IMAP4(host, port, timeout=30))
+        with _stage("tls"):
+            context = self._tls_context()
+        with _stage("connect"):
+            box = (imaplib.IMAP4_SSL(host, port, ssl_context=context, timeout=30) if security == "ssl"
+                   else imaplib.IMAP4(host, port, timeout=30))
         try:
-            if security == "starttls":
-                self._ok(box.starttls(ssl_context=context), "starttls")
-            self._verify_tls(box)
-            self._auth(box)
+            with _stage("tls"):
+                if security == "starttls":
+                    self._ok(box.starttls(ssl_context=context), "starttls")
+                self._verify_tls(box)
+            with _stage("auth"):
+                self._auth(box)
             if folder is not None:
                 self._ok(box.select(self.folder_name(folder), readonly=readonly), "select")
             yield box
@@ -218,32 +267,116 @@ class MailClient:
             message.pop("_raw_source", None)
         return message
 
-    def search(self, *, folder="INBOX", criteria=None, limit=50):
+    @staticmethod
+    def _criteria_digest(criteria):
+        return hashlib.sha256(json.dumps(criteria).encode("ascii")).hexdigest()
+
+    def _page_position(self, token, *, scope, folder, digest):
+        """Check a continuation before any IMAP command; UIDVALIDITY is compared after SELECT."""
+        try:
+            text = str(token)
+            if not text.startswith(_PAGE_PREFIX):
+                raise ValueError
+            encoded = text[len(_PAGE_PREFIX):]
+            value = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+            if (set(value) != _PAGE_FIELDS or not all(isinstance(value[key], str) for key in ("scope", "folder", "criteria"))
+                    or not all(type(value[key]) is int for key in ("uidvalidity", "top", "below"))
+                    or value["uidvalidity"] < 1 or not 1 < value["below"] <= value["top"]):
+                raise ValueError
+        except (ValueError, TypeError):
+            raise ValueError("Use the next_page_token from the previous email_search page unchanged") from None
+        if value["scope"] != scope:
+            raise ValueError("This page_token belongs to another account; continue with that account_id or search again without page_token")
+        if value["folder"] != self._canonical_folder(str(folder)):
+            raise ValueError(f"This page_token continues folder {value['folder']!r}; repeat that folder and the same criteria, "
+                             "or search again without page_token")
+        if value["criteria"] != digest:
+            raise ValueError("This page_token belongs to different criteria; repeat the first page's exact criteria, "
+                             "or search again without page_token")
+        return value
+
+    def search(self, *, folder="INBOX", criteria=None, limit=50, page_token="", scope=""):
+        """One page of matching headers, newest UID first, and its continuation.
+
+        UID order is the order this folder stored the messages, not their date. A
+        continuation names the same scope (the service passes the account), folder,
+        criteria and UIDVALIDITY. It keeps the first page's highest matching UID, so
+        mail arriving between pages neither repeats nor shifts them; a new search sees it.
+        """
         criteria = criteria or ["ALL"]
         if not isinstance(criteria, list) or not all(isinstance(c, str) and not any(x in c for x in "\r\n\0") for c in criteria):
             raise ValueError("criteria must be an array of IMAP search tokens without line breaks")
+        count = max(1, min(200, int(limit)))
+        digest = self._criteria_digest(criteria)
+        position = self._page_position(page_token, scope=scope, folder=folder, digest=digest) if page_token else None
         with self.imap(folder) as box:
             validity, _ = self.metadata(box)
+            if position and position["uidvalidity"] != validity:
+                raise ValueError(f"Folder {folder!r} reports UIDVALIDITY {validity}, but this page_token was issued under "
+                                 f"{position['uidvalidity']}, so its UIDs no longer apply; search again without page_token")
             uids = self.uids(box, criteria)
-            chosen = uids[-max(1, min(200, int(limit))):]
+            top = position["top"] if position else (uids[-1] if uids else 0)
+            matches = [uid for uid in uids if uid <= top]
+            remaining = [uid for uid in matches if uid < position["below"]] if position else matches
+            chosen = remaining[-count:]
             messages = [self.fetch(box, folder, uid, validity, headers_only=True) for uid in reversed(chosen)]
         for message in messages:
             message.pop("body", None)
-        return {"folder": folder, "uidvalidity": validity, "total": len(uids), "messages": messages}
+        more = len(remaining) > len(chosen)
+        token = ""
+        if more:
+            fields = {"scope": scope, "folder": self._canonical_folder(str(folder)), "uidvalidity": validity,
+                      "criteria": digest, "top": top, "below": chosen[0]}
+            token = _PAGE_PREFIX + base64.urlsafe_b64encode(
+                json.dumps(fields, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).decode("ascii").rstrip("=")
+        return {"folder": folder, "uidvalidity": validity, "total": len(matches), "returned": len(messages),
+                "has_more": more, "next_page_token": token, "order": "uid_desc", "search_note": _SEARCH_NOTE,
+                "messages": messages}
 
     def find_message(self, message_id, *, folder="INBOX"):
-        found = self.search(folder=folder, criteria=["HEADER", "Message-ID", self.quote(message_id)], limit=1)
-        if not found["messages"]:
-            return None
-        row = found["messages"][0]
-        return self.read(uid=row["uid"], uidvalidity=row["uidvalidity"], folder=folder)
+        """Read all substring-search candidates; only the full intake identity establishes a match."""
+        from .mime import canonical_message_id, unique_reply_source
+        token = canonical_message_id(message_id)
+        matches, page = [], ''
+        while True:
+            found = self.search(folder=folder, criteria=["HEADER", "Message-ID", self.quote(token)], limit=50,
+                                **({'page_token': page} if page else {}))
+            for row in found['messages']:
+                matches.append(self.read(uid=row['uid'], uidvalidity=row['uidvalidity'], folder=folder))
+            page = found.get('next_page_token')
+            if not page:
+                return unique_reply_source(matches, token)
+
+    def identity_root(self, box, folder, uid):
+        """The selected message's RFC conversation exactly as intake derives it from the full source.
+
+        The whole header section is parsed first, preserving malformed lines and parser boundaries. Only
+        when they give no identity (absent or damaged Message-ID and no reply headers) is the full source read, as
+        intake hashes it."""
+        def peek(section):
+            data = self._ok(box.uid("FETCH", str(int(uid)), f"({section})"), "fetch")
+            part = next((p for p in data if isinstance(p, tuple) and isinstance(p[1], bytes)), None)
+            if part is None:
+                raise RuntimeError(f"IMAP UID {uid} disappeared before its conversation could be read")
+            return part[1]
+        headers = parse_message(peek("BODY.PEEK[HEADER]"),
+                                folder=folder, uid=uid, missing_id="")
+        root = conversation_root(references=headers["references"], in_reply_to=headers["in_reply_to"],
+                                 message_id=headers["message_id"])
+        if root:
+            return root
+        full = parse_message(peek("BODY.PEEK[]"), folder=folder, uid=uid)
+        return conversation_root(references=full["references"], in_reply_to=full["in_reply_to"],
+                                 message_id=full["message_id"])
 
     def read(self, *, uid, uidvalidity, folder="INBOX", include_attachment_data=False):
         """Peek only: a read-only session and BODY.PEEK leave every flag unchanged."""
         with self.imap(folder, readonly=True) as box:
             validity, _ = self.metadata(box)
             if validity != int(uidvalidity):
-                raise ValueError("Mailbox UIDVALIDITY changed; search again before addressing a message")
+                raise ValueError(f"Folder {folder!r} reports UIDVALIDITY {validity}, but this request names {int(uidvalidity)}; "
+                                 "nothing was read. Use the uid, uidvalidity and folder of one email_search result, "
+                                 "or its message_ref, and search this folder again if needed.")
             return self.fetch(box, folder, uid, validity, include_attachment_data=include_attachment_data)
 
     def mark_read(self, *, uid, uidvalidity, folder="INBOX", prepare_targets=None):
@@ -256,33 +389,54 @@ class MailClient:
         # INBOX is the only IMAP name with protocol-defined case insensitivity.
         return "INBOX" if name.isascii() and name.upper() == "INBOX" else name
 
-    def _listed_parent(self, box, parent, delimiter):
-        wildcard = "*" in parent or "%" in parent
-        matches = {}
+    @staticmethod
+    def _list_entries(rows, operation, *, strict=True):
+        """Parse imaplib LIST data: ``(match, raw name, line)`` per mailbox.
+
+        A literal name arrives as ``(header ending in {n}, name bytes)`` followed by a separate trailer item:
+        ``b""``, or extended LIST data starting with a space or ``)``. ``line`` is the entry rewritten with a
+        quoted name, the same form an ordinary quoted response line has.
+        """
         literal_tail = False
-        for row in self._ok(box.list('""', self.folder_name(parent)), "parent lookup"):
+        for row in rows or ():
             if row is None or (literal_tail and row == b""):  # imaplib: no matches, or a literal's empty trailer.
                 literal_tail = False
                 continue
             header = row[0] if isinstance(row, tuple) else row
+            if not isinstance(header, bytes):
+                raise RuntimeError(f"IMAP LIST returned malformed {operation} data")
             if literal_tail and header.startswith((b" ", b")")):  # Extended LIST data after a literal.
                 literal_tail = isinstance(row, tuple)
                 continue
             literal_tail = isinstance(row, tuple)
             match = _LIST_HEADER.match(header)
+            if not match and not strict:
+                yield None, b"", header  # Listing shows an unparsed line as before rather than failing.
+                continue
             if not match:
-                raise RuntimeError("IMAP LIST returned malformed parent metadata")
+                raise RuntimeError(f"IMAP LIST returned malformed {operation} metadata")
             token = header[match.end():]
             if token.startswith(b'"') and (value := re.match(rb'^"((?:\\[\\"]|[^"\\])*)"(?: |$)', token)):
                 raw = re.sub(rb'\\([\\"])', rb'\1', value[1])
-            elif literal_tail and token == b"{%d}" % len(row[1]):
+            elif literal_tail and isinstance(row[1], bytes) and token == b"{%d}" % len(row[1]):
                 raw = row[1]
             elif token and not token.startswith((b'"', b"{")):
                 raw = token.partition(b" ")[0]
             else:
                 raw = b""
             if not raw:
-                raise RuntimeError("IMAP LIST returned a missing or malformed parent name")
+                raise RuntimeError(f"IMAP LIST returned a missing or malformed {operation} name")
+            if literal_tail:
+                quoted = raw.replace(b"\\", b"\\\\").replace(b'"', b'\\"')
+                line = header[:match.end()] + b'"' + quoted + b'"'
+            else:
+                line = header
+            yield match, raw, line
+
+    def _listed_parent(self, box, parent, delimiter):
+        wildcard = "*" in parent or "%" in parent
+        matches = {}
+        for match, raw, _line in self._list_entries(self._ok(box.list('""', self.folder_name(parent)), "parent lookup"), "parent"):
             actual = self.decode_folder(raw.decode("ascii"))
             # LIST "" <literal without wildcards> names the mailbox as SELECT would.
             # Compare decoded names: * and % stay literal, and a case variant
@@ -348,21 +502,27 @@ class MailClient:
         if action not in {"list", "create"}:
             folder = self._canonical_folder(folder)
 
-        def prepare(names):
+        def prepare(names, root=None):
             targets = {"destination": destination} if addressed else {}
             additional = sorted(set(names) - {destination})
             if additional:
                 targets["folder_names"] = additional
+            if root is not None:
+                # The selected message's conversation, as a target and as the Host's separate thread argument.
+                targets["message_conversation_id"] = targets["message_thread_id"] = root
             return prepare_targets(targets)
 
-        if prepare_targets and action in {"copy", "move", "flags"}:
-            if needed := prepare([] if action == "copy" else [folder]):
-                return needed
         with self.imap(None if action in {"list", "create"} else folder,
                        readonly=action not in {"move", "flags"}) as box:
+            if prepare_targets and action in {"copy", "move", "flags"}:
+                validity, _ = self.metadata(box)
+                if validity != int(uidvalidity or 0) or not uid or int(uid) < 1:
+                    raise ValueError("A current UID and UIDVALIDITY from search/read are required")
+                if needed := prepare([] if action == "copy" else [folder], self.identity_root(box, folder, uid)):
+                    return needed
             if action == "list":
-                rows = [x.decode("ascii", errors="replace") for x in self._ok(box.list(), "list") if x]
-                return {"folders": [self.decode_folder(row) for row in rows]}
+                rows = self._list_entries(self._ok(box.list(), "list"), "folder", strict=False)
+                return {"folders": [self.decode_folder(line.decode("utf-8", errors="replace")) for _m, _r, line in rows]}
             if action == "create":
                 if prepare_targets and (needed := prepare(self._create_names(box, destination))):
                     return needed
@@ -410,15 +570,20 @@ class MailClient:
         security = self._get("EMAIL_SMTP_SECURITY", "ssl" if port == 465 else "starttls")
         if security not in {"ssl", "starttls"}:
             raise ValueError("EMAIL_SMTP_SECURITY must be ssl or starttls")
-        context = self._tls_context()
-        client = smtplib.SMTP_SSL(host, port, context=context, timeout=30) if security == "ssl" else smtplib.SMTP(host, port, timeout=30)
+        with _stage("tls"):
+            context = self._tls_context()
+        with _stage("connect"):
+            client = smtplib.SMTP_SSL(host, port, context=context, timeout=30) if security == "ssl" else smtplib.SMTP(host, port, timeout=30)
         try:
-            client.ehlo()
-            if security == "starttls":
-                client.starttls(context=context)
+            with _stage("connect"):
                 client.ehlo()
-            self._verify_tls(client)
-            self._auth(client, smtp=True)
+            with _stage("tls"):
+                if security == "starttls":
+                    client.starttls(context=context)
+                    client.ehlo()
+                self._verify_tls(client)
+            with _stage("auth"):
+                self._auth(client, smtp=True)
             yield client
         finally:
             # A failed QUIT after accepted DATA must not turn success into retry.
@@ -443,8 +608,10 @@ class MailClient:
         return refused, {}
 
     def test_connection(self):
-        with self.imap():
-            pass
-        with self.smtp():
-            pass
+        for protocol, connect in (("imap", self.imap), ("smtp", self.smtp)):
+            try:
+                with connect():
+                    pass
+            except (OSError, imaplib.IMAP4.error, smtplib.SMTPException, ValueError, RuntimeError, httpx.HTTPError) as exc:
+                raise MailConnectionError(protocol, exc) from None
         return {"ok": True, "imap": "authenticated", "smtp": "authenticated"}
