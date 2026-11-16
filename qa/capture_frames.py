@@ -21,6 +21,7 @@ from playwright.sync_api import sync_playwright  # noqa: E402
 from realhost import RealHost  # noqa: E402
 from test_widget_browser import Card  # noqa: E402
 from conftest import ensure_transfers  # noqa: E402
+from request_trace import Trace  # noqa: E402
 
 
 def sha(path):
@@ -87,13 +88,16 @@ try:
             record = {'cell': cell['label'], 'engine': cell['engine'], 'viewport': cell['viewport'], 'theme': cell['theme'], 'steps': []}
             manifest['cells'].append(record)
             card = None
+            trace = Trace(FR, cell['label'])
             try:
-                card = Card(pw, host, cell['engine'], cell['viewport'], cell['theme'])
+                card = Card(trace.playwright(pw), host, cell['engine'], cell['viewport'], cell['theme'])
                 record['http_errors'], record['request_errors'], record['dialogs'] = [], [], []
                 card.page.on('response', lambda r: record['http_errors'].append({'status': r.status, 'url': r.url}) if r.status >= 400 else None)
                 card.page.on('requestfailed', lambda r: record['request_errors'].append({'url': r.url, 'failure': r.failure}))
                 card.page.on('dialog', lambda d: (record['dialogs'].append(d.message), d.dismiss()))
                 for step in spec['steps']:
+                    trace.step = step['name']
+                    trace.event('step_begin')
                     row = {'step': step['name']}
                     record['steps'].append(row)
                     try:
@@ -204,13 +208,12 @@ try:
                         row['error'] = repr(error)
                         row['traceback'] = traceback.format_exc()
                         manifest['failures'].append({'cell': cell['label'], 'step': step['name'], 'error': repr(error)})
+                    finally:
+                        trace.event('step_end')
                 record['page_errors'] = list(card.errors)
                 record['route_answers'] = card.answers
                 if card.errors:
                     manifest['failures'].append({'cell': cell['label'], 'page_errors': card.errors})
-                for key in ('http_errors', 'request_errors'):
-                    if key == 'request_errors' and record[key]:
-                        manifest['failures'].append({'cell': cell['label'], key: record[key]})
                 if record['dialogs']:
                     manifest['failures'].append({'cell': cell['label'], 'dialogs': record['dialogs']})
             except Exception as error:
@@ -218,12 +221,40 @@ try:
                 record['traceback'] = traceback.format_exc()
                 manifest['failures'].append({'cell': cell['label'], 'error': repr(error)})
             finally:
+                trace.step = 'close'
+                trace.event('close_begin')
                 if card is not None:
                     try:
                         card.close()
                     except Exception as error:
                         record['close_error'] = repr(error)
                         manifest['failures'].append({'cell': cell['label'], 'close_error': repr(error)})
+                else:
+                    for browser in trace.browsers:
+                        try:
+                            browser.close()  # exact browsers created for this failed Card constructor
+                        except Exception as error:
+                            manifest['failures'].append({'cell': cell['label'], 'close_error': repr(error)})
+                trace.event('close_end')
+                try:
+                    record['request_classification'] = trace.finish()
+                except Exception as error:
+                    record['request_classification'] = []
+                    trace.stream.close()
+                    manifest['failures'].append({'cell': cell['label'], 'trace_error': repr(error)})
+                record['trace_coverage_errors'] = trace.coverage_errors
+                if trace.coverage_errors:
+                    manifest['failures'].append({'cell': cell['label'], 'trace_coverage_errors': trace.coverage_errors})
+                unresolved = [r for r in record['request_classification']
+                              if r['classification'] != 'PROVEN_ABORT_AFTER_CONSUMPTION']
+                if unresolved:
+                    manifest['failures'].append({'cell': cell['label'], 'request_errors': unresolved})
+                # Original Card assertions cover teardown too; earlier failures stay recorded.
+                if card is not None:
+                    record['page_errors_after_close'] = list(card.errors)
+                    if card.errors or record['dialogs']:
+                        manifest['failures'].append({'cell': cell['label'], 'teardown_errors': card.errors,
+                                                     'dialogs': record['dialogs']})
 except Exception as error:        # start / transfer refusal / anything before or between cells: kept in the manifest, exit 1
     manifest['setup_error'] = repr(error)
     manifest['setup_traceback'] = traceback.format_exc()

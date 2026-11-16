@@ -10,6 +10,26 @@ tracked paths except the replaced workflow). No downloaded QA archives are requi
 The source commit must be published by its integrating parent before dispatch.
 Preparation uses Git's mechanical merge tree, without a merge commit or conflict resolution.
 
+For the addressed R4 repeat select dispatch input `phase=frames-only`. This selects
+only the unchanged 21 views × 4 cells and one N3 observation (C1 historical journal
+written on 3.12.13, replayed/rendered on shipped 3.10.22). `selection.json` explicitly
+names omitted suites; it does not credit them again. N3 runs even when frames fail.
+Its full/F3 texts, snapshot, record, selected C1 setup and lengths are retained;
+the existing unbounded floor path is exercised, while physical fit stays
+`UNVERIFIED` without a source-bound model window and complete request envelope.
+The normal `full` dispatch remains available with its original selections.
+
+The repeat adds one diagnostic request header through the existing bridge, observes
+the product's own body reads (no clone or extra drain), and records request identity,
+step boundaries, native EOF, bridge bytes/end, consumer JSON completion, abort stack,
+port close, frame detach and browser close. Raw `*.requests.jsonl` survives failures.
+Only a unique request with 200, identical retained native/delivered bytes, EOF,
+bridge end and successful Atlas JSON consumption strictly before its own abort may
+be classified `PROVEN_ABORT_AFTER_CONSUMPTION`. Other failures stay red, including
+missing/ambiguous identity or chronology. Classification occurs after close;
+raw request errors are never removed. This instrumentation can affect timing and
+does not retroactively explain R4: its 12 aborts and frames FAIL remain unchanged.
+
 Order: exact shipped 3.10.22; whole transfer and owning suites on frozen and composed
 core; size against the actual target; out-of-process 2.1/2.5 compatibility; whole Atlas;
 existing real-host capture scenarios; C1/C3/F3 negative witnesses; five datetime cases

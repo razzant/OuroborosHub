@@ -24,8 +24,11 @@ OUT = TEMP / 'evidence'
 COMPOSED = TEMP / 'core-composed'
 PINS = json.loads((QA / 'subjects.json').read_text())
 OUT.mkdir(parents=True, exist_ok=True)
-PLANNED = ['frozen-transfer', 'frozen-owners', 'composed-transfer', 'composed-owners',
+FULL_PLANNED = ['frozen-transfer', 'frozen-owners', 'composed-transfer', 'composed-owners',
            'size', 'plugin-compat', 'atlas', 'frames', 'negative-c1', 'negative-c3', 'negative-f3', 'datetime312']
+SELECTION = os.environ.get('QA_PHASE', 'full')
+assert SELECTION in ('full', 'frames-only'), SELECTION
+PLANNED = ['frames', 'n3-write', 'n3-read'] if SELECTION == 'frames-only' else FULL_PLANNED
 EXPECTED_COUNTS = {'frozen-transfer': 80, 'composed-transfer': 80, 'size': 7,
                    'plugin-compat': 2, 'datetime312': 5}
 
@@ -88,6 +91,9 @@ def snapshot(root, label):
 
 def prepare():
     save(OUT / 'results.json', [{'label': name, 'status': 'NOT_RUN'} for name in PLANNED])
+    save(OUT / 'selection.json', {'phase': SELECTION, 'selected': PLANNED,
+         'not_selected': [name for name in FULL_PLANNED if name not in PLANNED],
+         'prior_results': 'R4 remains unchanged; omitted families are not rerun or credited here'})
     assert git(CORE, 'rev-parse', 'HEAD') == PINS['core_commit']
     assert git(CORE, 'rev-parse', 'HEAD^{tree}') == PINS['core_tree']
     assert git(CORE, 'rev-parse', PINS['target_commit'] + '^{tree}') == PINS['target_tree']
@@ -264,7 +270,7 @@ def family(label):
         save(OUT / 'results.json', RESULTS)
 
 
-def run():
+def runtime():
     assert (OUT / 'subjects.json').is_file(), 'preparation did not complete'
     assert sys.version_info[:3] == (3, 10, 22), sys.version
     import importlib.metadata
@@ -278,6 +284,39 @@ def run():
          'node': subprocess.check_output(['node', '--version']).decode().strip(),
          'packages': {d.metadata['Name']: d.version for d in importlib.metadata.distributions()}})
     assert command('browser-inventory', [sys.executable, '-m', 'playwright', 'install', '--list'], CORE) == 0
+
+
+def frames_only():
+    assert SELECTION == 'frames-only'
+    runtime()
+    with family('frames'):
+        execute('frames', COMPOSED, HUB, [str(QA / 'capture_frames.py'), str(HUB), str(COMPOSED),
+                                        str(OUT / 'visual'), '/tmp/mt-atlas-frames'])
+    assert RESULTS[0].get('qualification_status') == 'PASS', 'frames remains red; N3 is independent'
+
+
+def n3_write():
+    assert SELECTION == 'frames-only' and (OUT / 'subjects.json').is_file()
+    assert sys.version_info[:3] == (3, 12, 13), sys.version
+    execute('n3-write', COMPOSED, COMPOSED,
+            [str(QA / 'observe_n3.py'), 'write', str(COMPOSED), str(OUT / 'n3')])
+
+
+def n3_read():
+    assert SELECTION == 'frames-only' and sys.version_info[:3] == (3, 10, 22), sys.version
+    assert RESULTS[PLANNED.index('n3-write')].get('qualification_status') == 'PASS'
+    with family('n3-read'):
+        execute('n3-read', COMPOSED, COMPOSED,
+                [str(QA / 'observe_n3.py'), 'read', str(COMPOSED), str(OUT / 'n3')])
+        result = RESULTS[PLANNED.index('n3-read')]
+        result.update(status='OBSERVED', fit_status=json.loads((OUT / 'n3/observation.json').read_text())['fit_status'])
+        save(OUT / 'results.json', RESULTS)
+    assert RESULTS[PLANNED.index('n3-read')].get('qualification_status') == 'PASS'
+
+
+def run():
+    assert SELECTION == 'full'
+    runtime()
     for label, core in [('frozen', CORE), ('composed', COMPOSED)]:
         with family(f'{label}-transfer'):
             pytest(f'{label}-transfer', core, ['tests/test_chronicle_transfer.py'])
@@ -382,7 +421,8 @@ def export():
 if __name__ == '__main__':
     phase = sys.argv[1]
     try:
-        {'prepare': prepare, 'run': run, 'compare': compare, 'export': export}[phase]()
+        {'prepare': prepare, 'run': run, 'frames-only': frames_only, 'n3-write': n3_write,
+         'n3-read': n3_read, 'compare': compare, 'export': export}[phase]()
     except BaseException:
         (OUT / f'{phase}-error.txt').write_text(traceback.format_exc())
         raise

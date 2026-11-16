@@ -2,6 +2,12 @@
 name: Memory transfer qualification
 on:
   workflow_dispatch:
+    inputs:
+      phase:
+        description: Full qualification or the addressed frames repeat plus N3 observation
+        type: choice
+        default: full
+        options: [full, frames-only]
 permissions:
   contents: read
 defaults:
@@ -15,6 +21,7 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       UV_PYTHON_DOWNLOADS: never
+      QA_PHASE: ${{ inputs.phase }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,11 +60,15 @@ jobs:
           "$UV_PROJECT_ENVIRONMENT/bin/python" -m playwright install --with-deps chromium webkit 2>&1 | tee "$RUNNER_TEMP/evidence/browser-install.log"
       - name: Execute core, Atlas, compatibility and negative witnesses
         id: qualification
-        if: success()
+        if: ${{ success() && inputs.phase == 'full' }}
         run: |
           "$UV_PROJECT_ENVIRONMENT/bin/python" -I -B "$RUNNER_TEMP/hub/qa/qualify.py" run
+      - name: Only the complete four-cell frames matrix
+        id: frames
+        if: ${{ success() && inputs.phase == 'frames-only' }}
+        run: '"$UV_PROJECT_ENVIRONMENT/bin/python" -I -B "$RUNNER_TEMP/hub/qa/qualify.py" frames-only'
       - uses: actions/setup-python@v5
-        if: ${{ !cancelled() && steps.qualification.outputs.comparison_ready == 'true' }}
+        if: ${{ !cancelled() && (steps.qualification.outputs.comparison_ready == 'true' || (inputs.phase == 'frames-only' && steps.sources.outcome == 'success' && steps.runtime.outcome == 'success')) }}
         id: comparison_python
         with:
           python-version: '3.12.13'
@@ -70,6 +81,18 @@ jobs:
         run: |
           uv sync --locked --python "$COMPARISON_PYTHON" --extra browser --group dev --no-install-project 2>&1 | tee "$RUNNER_TEMP/evidence/setup312.log"
           "$UV_PROJECT_ENVIRONMENT/bin/python" -I -B "$RUNNER_TEMP/hub/qa/qualify.py" compare
+      - name: N3 historical C1 writer on 3.12 (independent of frames outcome)
+        id: n3_writer
+        if: ${{ !cancelled() && inputs.phase == 'frames-only' && steps.sources.outcome == 'success' && steps.runtime.outcome == 'success' && steps.comparison_python.outcome == 'success' }}
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/python312
+          COMPARISON_PYTHON: ${{ steps.comparison_python.outputs.python-path }}
+        run: |
+          uv sync --locked --python "$COMPARISON_PYTHON" --extra browser --group dev --no-install-project 2>&1 | tee "$RUNNER_TEMP/evidence/setup312.log"
+          "$UV_PROJECT_ENVIRONMENT/bin/python" -I -B "$RUNNER_TEMP/hub/qa/qualify.py" n3-write
+      - name: N3 cross-version replay and full/F3 observation on shipped 3.10
+        if: ${{ !cancelled() && inputs.phase == 'frames-only' && steps.n3_writer.outcome == 'success' }}
+        run: '"$GITHUB_WORKSPACE/.venv/bin/python" -I -B "$RUNNER_TEMP/hub/qa/qualify.py" n3-read'
       - name: Preserve sources, synthetic state and outcomes on either result
         if: always()
         env:
@@ -94,6 +117,11 @@ jobs:
             ${{ runner.temp }}/evidence/**/*.html
             ${{ runner.temp }}/evidence/visual/**/*.json
             ${{ runner.temp }}/evidence/visual/**/*.txt
+            ${{ runner.temp }}/evidence/visual/**/*.jsonl
+            ${{ runner.temp }}/evidence/visual/**/*.bin
+            ${{ runner.temp }}/evidence/n3/*.json
+            ${{ runner.temp }}/evidence/n3/*.txt
+            ${{ runner.temp }}/evidence/n3/*.py
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
