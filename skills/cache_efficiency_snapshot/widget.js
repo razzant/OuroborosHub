@@ -18,17 +18,22 @@
   };
   const icon = name => '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">'+icons[name]+'</svg>';
   const presets = [['1H','1h'],['6H','6h'],['24H','24h'],['7D','Week'],['MONTH','Month'],['ALL','All']];
+  const labels = {...Object.fromEntries(presets), CUSTOM:'Custom'};
   const state = {range:'24H', committed:null, pending:null, failed:null, snapshot:null, partial:null, selected:null,
     from:'', to:'', customOpen:false, models:false, coverage:false, status:'loading', message:'', page:0};
-  let detail = null, requestSeq = 0, detailSeq = 0, disposed = false, pendingTimer = 0;
-  let lastHeight = 0, lastWidth = 0, renderFrame = 0;
+  // The last successful reading of each selection: a switch shows it at once while its fresh read is in flight.
+  const readings = new Map();
+  // Follow-up reads while history is still being indexed: bounded, then the ordinary 30-second cadence resumes.
+  const FOLLOW_UP_MS = [1000, 2000, 4000, 8000, 15000, 15000, 15000, 15000, 15000, 15000];
+  let detail = null, requestSeq = 0, detailSeq = 0, disposed = false, followTimer = 0, followUps = 0;
+  let lastWidth = 0, renderFrame = 0;
   const style = document.createElement('style');
   style.textContent = `
 :root{color-scheme:dark;--ink:#ededf1;--meta:#aaa7b2;--surface:#202023;--tray:#2a2830;--capsule:rgba(255,255,255,.07);--line:rgba(228,228,231,.14);--rose:#e9687c;--blue:#60a5fa;--write:#bfdbfe;--mint:#40d9a2;--amber:#f4bd45;--focus:#ff9eaa;--shadow:0 1px 2px rgba(0,0,0,.3),0 8px 22px rgba(0,0,0,.15)}
 :root[data-theme=light]{color-scheme:light;--ink:#25262b;--meta:#61616c;--surface:#fff;--tray:#f3f2f6;--capsule:#f2f1f4;--line:rgba(38,38,43,.14);--rose:#bb2850;--blue:#2e68d0;--write:#172554;--mint:#178e70;--amber:#8a6100;--focus:#a3243b;--shadow:0 1px 2px rgba(28,33,51,.05),0 7px 18px rgba(28,33,51,.07)}
-*{box-sizing:border-box}html{overflow:hidden}html,body{margin:0;padding:0;min-height:0;background:transparent;color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+*{box-sizing:border-box}html,body{margin:0;padding:0;min-height:0;background:transparent;color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
 button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;background:var(--capsule);border-radius:999px;min-height:36px;padding:7px 12px;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap}button:hover{background:var(--tray)}button:focus-visible,input:focus-visible,summary:focus-visible,.hit:focus-visible{outline:2px solid var(--focus);outline-offset:2px}button:disabled{opacity:.5;cursor:default}button.icon{width:38px;padding:0}
-.dash{padding:12px 14px 8px}.top{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}.title{font-size:16px;font-weight:600}.controls{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.range{display:flex;gap:2px;flex-wrap:wrap}.range button{min-height:36px;padding:5px 10px}.range button[aria-pressed=true]{background:var(--rose);color:#fff}.custom{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.custom[hidden]{display:none}.custom label{display:grid;gap:4px;flex:1;min-width:120px}.custom input{width:100%;min-width:0;border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:7px 8px;min-height:38px;font-size:12px}.scope{margin:8px 0 12px}.meta{color:var(--meta);font-size:12px}.notice{background:var(--tray);border-radius:12px;padding:9px 12px;margin-bottom:12px;font-size:12px;display:flex;justify-content:space-between;gap:8px;align-items:center}.notice.error{color:var(--rose)}.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:0 0 12px}.kpi{background:var(--surface);border-radius:12px;padding:10px 11px;min-width:0;box-shadow:var(--shadow)}.kpi b{display:block;font-size:24px;line-height:1.3;font-variant-numeric:tabular-nums}.kpi span{display:block;margin-top:4px;color:var(--meta);font-size:12px;overflow-wrap:anywhere}
+.dash{padding:12px 14px 8px}.top{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}.title{font-size:16px;font-weight:600}.controls{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.range{display:flex;gap:2px;flex-wrap:wrap}.range button{min-height:36px;padding:5px 10px}.range button[aria-pressed=true]{background:var(--rose);color:#fff}.custom{display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-top:10px}.custom[hidden]{display:none}.custom label{display:grid;gap:4px;flex:1;min-width:120px}.custom input{width:100%;min-width:0;border:1px solid var(--line);background:var(--surface);border-radius:9px;padding:7px 8px;min-height:38px;font-size:12px}.scope{margin:8px 0 12px}.caveat{margin:-6px 0 12px;color:var(--amber);font-size:12px;overflow-wrap:anywhere}.meta{color:var(--meta);font-size:12px}.notice{background:var(--tray);border-radius:12px;padding:9px 12px;margin-bottom:12px;font-size:12px;display:flex;justify-content:space-between;gap:8px;align-items:center}.notice.error{color:var(--rose)}.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:0 0 12px}.kpi{background:var(--surface);border-radius:12px;padding:10px 11px;min-width:0;box-shadow:var(--shadow)}.kpi b{display:block;font-size:24px;line-height:1.3;font-variant-numeric:tabular-nums}.kpi span{display:block;margin-top:4px;color:var(--meta);font-size:12px;overflow-wrap:anywhere}
 .panels{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(220px,.85fr);gap:12px;align-items:start}.panel{background:var(--surface);border-radius:14px;padding:12px;min-width:0}.panel h2{font-size:14px;margin:0 0 8px;font-weight:600}.panel-head{display:flex;justify-content:space-between;gap:8px;align-items:center}.chart{width:100%;overflow:hidden}.chart svg{display:block;width:100%;height:auto}.axis{fill:var(--meta);font-size:12px}.grid{stroke:var(--line);stroke-dasharray:2 5}.bar-cache{fill:var(--blue)}.bar-write{fill:var(--write)}.bar-fresh{fill:var(--rose)}.bar-unknown{fill:url(#tokenUnknown)}.point{fill:var(--mint)}.code-mark{stroke:var(--meta);stroke-dasharray:3 4;stroke-width:1}.hit{cursor:pointer}.hit:hover .hitbox,.hit.sel .hitbox{fill:rgba(233,104,124,.13)}.legend{display:flex;flex-wrap:wrap;gap:5px 13px;color:var(--meta);font-size:12px;margin-top:7px}.legend i{display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--blue);margin-right:5px}.legend i.write{background:var(--write)}.legend i.fresh{background:var(--rose)}.legend i.unknown{background:repeating-linear-gradient(135deg,transparent,transparent 2px,var(--amber) 2px,var(--amber) 3px);border:1px solid var(--amber)}.rowline{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;padding:8px 0;border-top:1px solid var(--line)}.name{overflow-wrap:anywhere}.num{text-align:right;font-variant-numeric:tabular-nums}.sub{color:var(--meta);font-size:12px}.sub.right{text-align:right}.fold{margin-top:10px;border-top:1px solid var(--line);padding-top:6px}.fold summary{cursor:pointer;color:var(--meta);min-height:36px;padding:6px 0}.fold p{color:var(--meta);font-size:12px;margin:8px 0}.inspector{margin-top:10px;background:var(--tray);border-radius:12px;padding:12px}.inspector-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.inspector-head b{font-size:14px}.hourly{display:flex;gap:2px;height:60px;align-items:end;margin:12px 0 4px}.hourly i{display:block;flex:1;min-width:1px;background:var(--blue);border-radius:2px 2px 0 0}.mini-labels,.pager,.footer{display:flex;justify-content:space-between;gap:8px;align-items:center;flex-wrap:wrap}.mini-labels{color:var(--meta);font-size:12px}.pager{margin-top:8px}.pager button{min-height:32px}.footer{margin-top:12px}.footer button{background:none;box-shadow:none;padding:4px 0;color:var(--meta)}.empty{color:var(--meta);padding:22px 0;text-align:center}
 @media(max-width:520px){.panels{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:800px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.kpi:last-child{grid-column:1/-1}}
@@ -37,48 +42,96 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
   document.head.append(style);
   function theme(value) {document.documentElement.dataset.theme = value === 'light' ? 'light' : 'dark';}
   theme(window.TOKEN_DASH_THEME || 'dark');
+  // Known server reasons in words; an unknown reason is shown as sent.
+  const reasons = {
+    invalid_custom_range:'Choose a valid date range', invalid_timezone:'This time zone is not recognised',
+    custom_range_too_long:'This range has too many intervals to chart; choose fewer days',
+    data_dir_unavailable:'Ouroboros did not report its data folder', history_unavailable:'History index unavailable',
+  };
+  const describe = code => code ? reasons[code] || String(code) : '';
   function problem(data) {
     const q = data.quality || {}, h = q.history_index || {};
     return data.status === 'degraded' || q.read_error || q.ledger_read_error || h.state === 'degraded' || h.state === 'unavailable'
-      ? (data.read_error || q.read_error || q.ledger_read_error || h.read_error || 'Incomplete reading') : '';
+      ? describe(data.read_error || q.read_error || q.ledger_read_error || h.read_error || 'Incomplete reading') : '';
+  }
+  // History indexing is progress, not a failure: the reading it accompanies is usable and dated.
+  function progress(data) {
+    const h = data.quality?.history_index || {};
+    const total = h.archives_total || 0, done = Math.min(total, h.archives_done || 0);
+    return 'Indexing history' + (total ? ' · ' + nf.format(done) + ' / ' + nf.format(total) + ' archives' : '');
   }
   function reading() {return state.partial || state.snapshot;}
+  // Retained history that could not be recovered (an unreadable index or part of the earlier one) lowers older
+  // totals for good, so it stays in view beside the reading it qualifies; Coverage & counting repeats it.
+  function caveat(snap) {
+    const h = snap?.quality?.history_index;
+    return h?.recovery_incomplete ? `<p class="caveat" role="note">History incomplete: ${esc(h.recovery || 'some retained observations could not be recovered.')}</p>` : '';
+  }
+  const keyOf = selection => selection ? selection.range + (selection.range === 'CUSTOM' ? '|' + selection.from + '|' + selection.to : '') : '';
   function queryString(selection) {
     const q = new URLSearchParams({timeframe: selection.range, timezone: zone});
     if (['7D','MONTH','ALL','CUSTOM'].includes(selection.range)) q.set('daily','1');
     if (selection.range === 'CUSTOM') {q.set('from',selection.from);q.set('to',selection.to);}
     return q;
   }
+  // One deadline covers a reading's whole answer, headers and body: a stalled response fails like any other, so
+  // its pending state ends and Retry and the thirty-second cadence recover it. The bridge's own bound and the
+  // abort end the request itself; the race ends the wait even where neither reaches a body that never finishes.
+  const REQUEST_MS = 20000;
   async function getData(query) {
-    const response = await fetch('/api/extensions/cache_efficiency_snapshot/data?' + query);
-    if (!response.ok) throw new Error('HTTP ' + response.status);
-    const data = await response.json();
-    return data;
+    const controller = new AbortController();
+    let timer = 0;
+    const deadline = new Promise((_, reject) => {timer = setTimeout(() => {controller.abort(); reject(new Error('No answer within ' + REQUEST_MS / 1000 + ' seconds'));}, REQUEST_MS);});
+    const answer = (async () => {
+      const response = await fetch('/api/extensions/cache_efficiency_snapshot/data?' + query, {signal: controller.signal, timeoutMs: REQUEST_MS});
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.json();
+    })();
+    try {return await Promise.race([answer, deadline]);}
+    finally {clearTimeout(timer);}
   }
-  async function load(selection) {
+  function followUp(selection) {
+    clearTimeout(followTimer); followTimer = 0;
+    if (followUps >= FOLLOW_UP_MS.length) return false;
+    followTimer = setTimeout(() => {followTimer = 0; load(selection, {follow:true});}, FOLLOW_UP_MS[followUps++]);
+    return true;
+  }
+  async function load(selection, {follow = false, automatic = false} = {}) {
     if (disposed) return;
     const seq = ++requestSeq;
-    clearTimeout(pendingTimer);
+    clearTimeout(followTimer); followTimer = 0;
+    if (!follow && !automatic) followUps = 0;
+    // Commit the user's selection before the request returns, and show that
+    // selection's last reading at once when there is one; otherwise the
+    // previous reading stays, labelled, until the new one arrives.
+    const key = keyOf(selection), known = readings.get(key);
+    if (known && key !== keyOf(state.committed)) {state.snapshot = known; state.partial = null; state.committed = {...selection};}
+    state.range = selection.range;
     state.pending = selection; state.failed = null; state.status = 'loading'; state.message = ''; render();
     try {
       const data = await getData(queryString(selection));
       if (disposed || seq !== requestSeq) return;
-      if (data.status === 'loading') {
-        const h = data.quality?.history_index || {};
-        state.message = 'Loading available history · ' + nf.format(h.archives_done || 0) + ' / ' + nf.format(h.archives_total || 0) + ' archives';
-        render();
-        pendingTimer = setTimeout(() => load(selection), 1000);
-        return;
+      if (!data || !data.summary || !Array.isArray(data.buckets)) {
+        if (data?.status === 'loading') {
+          // Nothing usable yet: retry on a bounded schedule, then hand over to the regular cadence.
+          state.message = progress(data);
+          // Still running after the bounded follow-ups: a waiting state, not a failure; the regular cadence asks again.
+          if (!followUp(selection)) {state.pending = null; state.failed = selection; state.status = 'waiting'; state.message += ' · still running; the next regular update checks again';}
+          render();
+          return;
+        }
+        throw new Error(describe(data?.read_error) || 'Invalid reading');
       }
-      if (!data.summary || !Array.isArray(data.buckets)) throw new Error('Invalid reading');
-      const error = problem(data);
+      const error = problem(data), indexing = !error && data.status === 'loading';
       // Every usable reading updates the same selection/detail lifecycle. Partial
       // measurements keep their warning and never replace the successful snapshot.
       state.partial = error ? data : null;
-      if (!error) {state.snapshot = data; state.committed = {...selection};}
+      if (!error) {state.snapshot = data; state.committed = {...selection}; readings.delete(key); readings.set(key, data); if (readings.size > 8) readings.delete(readings.keys().next().value);}
       state.range = selection.range; state.pending = null;
       state.failed = error ? selection : null;
-      state.status = error ? 'failed' : 'ready'; state.message = error;
+      state.status = error ? 'failed' : indexing ? 'indexing' : 'ready'; state.message = error || (indexing ? progress(data) : '');
+      if (!indexing) {if (!error) followUps = 0;}
+      else if (!followUp(selection)) state.message += ' · the regular update will refresh it';
       if (selection.range === 'CUSTOM') state.customOpen = true;
       if (!state.from) state.from = dateKey(data.start);
       if (!state.to) state.to = dateKey(data.end);
@@ -110,9 +163,10 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
     try {
       const data = await getData(q);
       if (disposed || seq !== detailSeq || state.selected !== bucket.ts) return;
-      if (data.status === 'loading') throw new Error('History is still loading; select the interval again shortly');
-      if (!data.summary || !Array.isArray(data.buckets)) throw new Error('Invalid detail reading');
-      detail = {key:bucket.ts, data, error:problem(data), loading:false}; render();
+      if (!data || !data.summary || !Array.isArray(data.buckets)) {
+        throw new Error(data?.status === 'loading' ? progress(data) + '; this day reloads with the next update' : describe(data?.read_error) || 'Invalid detail reading');
+      }
+      detail = {key:bucket.ts, data, error:problem(data), loading:false, indexing:data.status === 'loading'}; render();
     } catch (error) {
       if (disposed || seq !== detailSeq) return;
       detail = {key:bucket.ts, data:null, error:error.message, loading:false}; render();
@@ -165,8 +219,13 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
         const mx=left+(i+(Date.parse(m.ts)-Date.parse(b.ts))/(Date.parse(b.end_ts)-Date.parse(b.ts)))*band;
         body+=`<line class="code-mark" x1="${mx}" x2="${mx}" y1="${height-31}" y2="${height-23}" pointer-events="none"/>`;
       }
-      // Label density changes; measurement intervals and selectable positions do not.
-      if (i===0 || i===buckets.length-1 || i % Math.ceil(buckets.length/5) === 0) body += `<text class="axis" x="${x+bw/2}" y="${height-8}" text-anchor="middle">${esc(label)}</text>`;
+      // Label density changes; measurement intervals and selectable positions do not. A periodic label too close
+      // to the last one is skipped, and the last one ends at the plot edge instead of running past it.
+      const every = Math.ceil(buckets.length/5), last = buckets.length-1;
+      if (i===0 || i===last || (i % every === 0 && (last-i)*band >= 52)) {
+        const atEdge = i===last && x+bw/2+24 > width-8;
+        body += `<text class="axis" x="${atEdge?width-8:x+bw/2}" y="${height-8}" text-anchor="${atEdge?'end':'middle'}">${esc(label)}</text>`;
+      }
       body += '</g>';
     });
     const defs = kind==='volume'?'<defs><pattern id="tokenUnknown" width="6" height="6" patternUnits="userSpaceOnUse"><path d="M0 6 6 0" stroke="var(--amber)" stroke-width="1.5"/></pattern></defs>':'';
@@ -175,7 +234,9 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
   // A card computed from part of the window's records says how many of them it covers.
   const cover = (s, n) => s && s.total_records && n < s.total_records ? ` · ${nf.format(n)} of ${nf.format(s.total_records)} records` : '';
   function counts(s) {
-    return `${fmt(s.cached_tokens)} known cache reads · ${fmt(s.cache_write_tokens)} known cache writes · ${nf.format(s.request_count)} requests · ${nf.format(s.session_count)} sessions · ${nf.format(s.unknown_total_records)} unknown totals · ${nf.format(s.unknown_read_records)} unknown cache reads · ${nf.format(s.unknown_write_records || 0)} unknown cache writes`;
+    // Zeros of records written before the record contract stamped them are unknown, and named as such.
+    const legacy = [['totals',s.legacy_zero_total_records],['cache reads',s.legacy_zero_read_records],['cache writes',s.legacy_zero_write_records]].filter(([,n])=>n);
+    return `${fmt(s.cached_tokens)} known cache reads · ${fmt(s.cache_write_tokens)} known cache writes · ${nf.format(s.request_count)} requests · ${nf.format(s.session_count)} sessions · ${nf.format(s.unknown_total_records)} unknown totals · ${nf.format(s.unknown_read_records)} unknown cache reads · ${nf.format(s.unknown_write_records || 0)} unknown cache writes${legacy.length?' (of these, unconfirmed legacy zeros: '+legacy.map(([k,n])=>nf.format(n)+' '+k).join(', ')+')':''}`;
   }
   function modelList(rows) {
     const names=rows.map(r=>r.display_name||r.model);
@@ -189,6 +250,7 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
     if (detail?.key===b.ts) {
       if (detail.loading) body += '<p class="meta">Loading hourly detail…</p>';
       else if (detail.error) body += `<p class="meta" role="alert">${detail.data?'Partial detail':'Detail unavailable'}: ${esc(detail.error)}</p>`;
+      else if (detail.indexing) body += `<p class="meta">${esc(progress(detail.data))}: hours of older archives may still be added.</p>`;
       if (!detail.loading && detail.data) {
         const hours = detail.data.buckets, max = Math.max(1,...hours.map(h=>h.prompt_tokens||0));
         body += '<div class="hourly">'+hours.map(h=>`<i data-ts="${esc(h.ts)}" data-tokens="${h.prompt_tokens==null?'':h.prompt_tokens}" title="${esc(intervalLabel(h,false)+' · '+fmt(h.prompt_tokens)+' input')}" style="height:${(h.prompt_tokens||0)/max*100}%;${h.total_records?'':'background:none;'}"></i>`).join('')+'</div>';
@@ -197,13 +259,21 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
       }
     }
     const marks = (detail?.key===b.ts && detail.data ? detail.data.markers : snap.markers || []).filter(m=>inInterval(m,b));
-    body += '<p class="meta">'+(marks.length?marks.map(m=>'Code start '+esc(m.code)+' at '+esc(clock(m.ts))).join(' · '):'No code change observed in this interval.')+'</p>';
+    body += '<p class="meta">'+(marks.length?marks.slice(0,12).map(m=>'Code start '+esc(m.code)+' at '+esc(clock(m.ts))).join(' · ')+(marks.length>12?' · and '+nf.format(marks.length-12)+' more code starts':''):'No code change observed in this interval.')+'</p>';
     return `<section class="inspector"><div class="inspector-head"><b>${esc(intervalLabel(b,snap.daily))}</b><button class="icon" data-act="clear" aria-label="Close details">${icon('close')}</button></div>${body}</section>`;
+  }
+  function history(h) {
+    if (!h) return '';
+    const facts = [[h.torn_tails,'archive tails without a final newline (their complete lines are indexed)'],[h.malformed_lines,'malformed usage lines'],
+      [h.unparsed_events,'usage events without a usable time'],[h.boots_without_code,'code starts without a commit (not marked)'],
+      [h.changed_sources_kept_count,'archives changed on disk after indexing without reading cleanly (their earlier indexed copy is kept)'],
+      [h.fingerprint_collisions,'requests told apart by their full identity after a fingerprint match']].filter(([n])=>n);
+    return `<p>History: ${esc(h.state)}${h.refreshing?' · checking new archives':''} · ${nf.format(h.archives_indexed || 0)} archives indexed${h.archives_total&&h.archives_done<h.archives_total?' · '+nf.format(h.archives_done||0)+' / '+nf.format(h.archives_total)+' in this pass':''}.<br>Observed span: ${h.indexed_oldest_ts?esc(timestamp(h.indexed_oldest_ts)):'no recorded usage'} – ${h.indexed_newest_ts?esc(timestamp(h.indexed_newest_ts)):''}.<br>${nf.format(h.retained_sources_absent || 0)} indexed sources no longer on disk; their saved observations are retained${h.restored_sources?', '+nf.format(h.restored_sources)+' of them restored from the previous index':''}.${facts.length?'<br>'+facts.map(([n,t])=>nf.format(n)+' '+t).join(' · ')+'.':''}${h.recovery?'<br>'+esc(h.recovery):''}</p>`;
   }
   function coverage(snap) {
     if (!snap) return '';
-    const q = snap.quality, h = q.history_index;
-    return `<p>${esc(q.coverage)}</p><p>${counts(snap.summary)}. ${nf.format(snap.summary.zero_volume_records)} measured zero-volume records.</p><p>${nf.format(q.models_omitted || 0)} model rows omitted · ${nf.format(q.buckets_omitted || 0)} time bins omitted · ${nf.format(q.markers_omitted || 0)} code marks omitted. Totals cover the full selected interval.</p>${h?`<p>History: ${esc(h.state)} · ${nf.format(h.archives_indexed || 0)} archives indexed.<br>Observed span: ${h.indexed_oldest_ts?esc(timestamp(h.indexed_oldest_ts)):'no recorded usage'} – ${h.indexed_newest_ts?esc(timestamp(h.indexed_newest_ts)):''}.<br>${nf.format(h.retained_sources_absent || 0)} indexed sources no longer on disk; their saved observations are retained.<br>${h.recovery?esc(h.recovery):''}</p>`:''}<p>Unclassified input has a known total but no known class: its cache reads are unknown, or it was not read from the cache and its record reports no cache-write count the input can hold. Cache writes are what a provider reports writing to its cache; uncached input was neither read from it nor written to it. A write reported by a record whose reads or input total are unknown counts among known cache writes but is not drawn: the bars hold the writes of measured records only. Records written by a core older than 7.7.0 may carry 0 for a count their provider did not report; such a 0 counts as reported, so that record's unread input is drawn as uncached input. Tokens only: money is on the core's Costs page, which counts single model calls by their start (not harness sessions), so its token figures differ from these. Empty bins are not proof of zero use. Code marks are observations, not causes. Output tokens are outside this view.</p>`;
+    const q = snap.quality;
+    return `<p>${esc(q.coverage)}</p><p>${counts(snap.summary)}. ${nf.format(snap.summary.zero_volume_records)} measured zero-volume records.</p><p>${nf.format(q.models_omitted || 0)} model rows omitted · ${nf.format(q.buckets_omitted || 0)} time bins omitted · ${nf.format(q.markers_omitted || 0)} code marks omitted. Totals cover the full selected interval.${q.range_clamped_from?' The requested range began '+esc(dateKey(q.range_clamped_from))+'; it starts at the first observation instead.':''}</p>${history(q.history_index)}<p>Unclassified input has a known total but no known class: its cache reads are unknown, or it was not read from the cache and its record reports no cache-write count the input can hold. Cache writes are what a provider reports writing to its cache; uncached input was neither read from it nor written to it. A write reported by a record whose reads or input total are unknown counts among known cache writes but is not drawn: the bars hold the writes of measured records only. A zero in a record written before Ouroboros stamped its usage records (record contract 2) may mean the count was not reported, so it is unknown, never a measured zero; observations kept from the previous index without their source archive carry no stamp and are read the same way. Tokens only: money is on the core's Costs page, which counts single model calls by their start (not harness sessions), so its token figures differ from these. Empty bins are not proof of zero use. Code marks are observations, not causes. Output tokens are outside this view.</p>`;
   }
   function render() {
     if (disposed) return;
@@ -217,14 +287,14 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
     const {all,buckets,n} = visibleBuckets();
     const label = snap ? `${timestamp(snap.start)} – ${timestamp(snap.end)} · ${zone}` : 'Waiting for the first reading';
     const loading = state.status==='loading';
-    root.innerHTML = `<article class="dash"><header class="top"><div class="title">Token usage & cache health</div><div class="controls"><div class="range" aria-label="Time range">${presets.map(([value,label])=>`<button data-range="${value}" aria-pressed="${state.range===value}">${label}</button>`).join('')}<button data-range="CUSTOM" aria-pressed="${state.range==='CUSTOM'}">Custom</button></div><button class="icon" data-act="refresh" aria-label="Refresh reading">${icon('refresh')}</button></div></header><div class="custom" ${state.customOpen?'':'hidden'}><label class="meta">From<input id="from" type="date" value="${esc(state.from)}"></label><label class="meta">To<input id="to" type="date" value="${esc(state.to)}"></label><button data-act="apply">Apply range</button></div><div class="scope meta">${esc(label)}</div>${loading?`<div class="notice" role="status">${esc(state.message || 'Updating '+(state.pending?.range||'')+'…')}${snap?' · previous reading retained':''}</div>`:state.status==='failed'?`<div class="notice error" role="alert"><span>${state.partial?'Partial reading':'Update failed'} · ${esc(state.message)}${snap&&!state.partial?' · showing the last reading':''}</span><button data-act="retry">Retry</button></div>`:''}<section class="kpis"><div class="kpi"><b>${fmt(s?.prompt_tokens)}</b><span>input tokens</span></div><div class="kpi"><b>${pct(s?.cache_read_rate)}</b><span>cache hit rate · weighted</span></div><div class="kpi"><b>${fmt(s?.cache_write_tokens)}</b><span>known cache writes${cover(s, s ? s.total_records - (s.unknown_write_records || 0) : 0)}</span></div><div class="kpi"><b>${fmt(s?.uncached_input_tokens)}</b><span>uncached input${cover(s, s?.write_records || 0)}</span></div><div class="kpi"><b>${s?nf.format(s.measured_records)+' / '+nf.format(s.total_records):'—'}</b><span>measured records</span></div></section><div class="panels"><section class="panel volume-panel"><div class="panel-head"><h2>Token volume</h2><span class="meta">${snap?.daily?'daily input':'input per interval'}</span></div><div class="chart" data-chart="volume"></div><div class="legend"><span><i></i>Cache reads</span><span><i class="write"></i>Cache writes</span><span><i class="fresh"></i>Uncached input</span><span><i class="unknown"></i>Unclassified</span></div>${all.length>n?`<div class="pager"><button data-act="earlier" ${state.page+n>=all.length?'disabled':''}>Earlier</button><span class="meta">${buckets.length} / ${all.length} intervals</span><button data-act="later" ${state.page===0?'disabled':''}>Later</button></div>`:''}${inspector()}</section><section class="panel side-panel"><div class="panel-head"><h2>Cache hit rate</h2><span class="meta">0–100%</span></div><div class="chart" data-chart="rate"></div><div class="fold"><details data-fold="models" ${state.models?'open':''}><summary>Models & sources</summary>${modelList(snap?.models || [])}</details></div><div class="fold"><details data-fold="coverage" ${state.coverage?'open':''}><summary>Coverage & counting</summary>${coverage(snap)}</details></div></section></div>${s?`<div class="scope meta">${counts(s)}</div>`:''}<footer class="footer"><button data-act="coverage">About the data</button><span class="meta">${snap?(state.partial?'Partial read ':'Last read ')+clock(snap.generated_at):'No successful reading yet'}</span></footer></article>`;
+    root.innerHTML = `<article class="dash"><header class="top"><div class="title">Token usage & cache health</div><div class="controls"><div class="range" aria-label="Time range">${presets.map(([value,label])=>`<button data-range="${value}" aria-pressed="${state.range===value}">${label}</button>`).join('')}<button data-range="CUSTOM" aria-pressed="${state.range==='CUSTOM'}">Custom</button></div><button class="icon" data-act="refresh" aria-label="Refresh reading">${icon('refresh')}</button></div></header><div class="custom" ${state.customOpen?'':'hidden'}><label class="meta">From<input id="from" type="date" value="${esc(state.from)}"></label><label class="meta">To<input id="to" type="date" value="${esc(state.to)}"></label><button data-act="apply">Apply range</button></div><div class="scope meta">${esc(label)}</div>${caveat(snap)}${loading?`<div class="notice" role="status">${esc(state.message || 'Updating '+(labels[state.pending?.range]||'')+'…')}${snap?(keyOf(state.pending)===keyOf(state.committed)?' · showing the reading from '+clock(snap.generated_at):' · previous reading retained'):''}</div>`:state.status==='indexing'?`<div class="notice" role="status">${esc(state.message)} · older days may still be added</div>`:state.status==='waiting'?`<div class="notice" role="status"><span>${esc(state.message)}${snap?' · showing the last reading':''}</span><button data-act="retry">Check now</button></div>`:state.status==='failed'?`<div class="notice error" role="alert"><span>${state.partial?'Partial reading':'Update failed'} · ${esc(state.message)}${snap&&!state.partial?' · showing the last reading':''}</span><button data-act="retry">Retry</button></div>`:''}<section class="kpis"><div class="kpi"><b>${fmt(s?.prompt_tokens)}</b><span>input tokens</span></div><div class="kpi"><b>${pct(s?.cache_read_rate)}</b><span>cache hit rate · weighted</span></div><div class="kpi"><b>${fmt(s?.cache_write_tokens)}</b><span>known cache writes${cover(s, s ? s.total_records - (s.unknown_write_records || 0) : 0)}</span></div><div class="kpi"><b>${fmt(s?.uncached_input_tokens)}</b><span>uncached input${cover(s, s?.write_records || 0)}</span></div><div class="kpi"><b>${s?nf.format(s.measured_records)+' / '+nf.format(s.total_records):'—'}</b><span>measured records</span></div></section><div class="panels"><section class="panel volume-panel"><div class="panel-head"><h2>Token volume</h2><span class="meta">${snap?.daily?'daily input':'input per interval'}</span></div><div class="chart" data-chart="volume"></div><div class="legend"><span><i></i>Cache reads</span><span><i class="write"></i>Cache writes</span><span><i class="fresh"></i>Uncached input</span><span><i class="unknown"></i>Unclassified</span></div>${all.length>n?`<div class="pager"><button data-act="earlier" ${state.page+n>=all.length?'disabled':''}>Earlier</button><span class="meta">${buckets.length} / ${all.length} intervals</span><button data-act="later" ${state.page===0?'disabled':''}>Later</button></div>`:''}${inspector()}</section><section class="panel side-panel"><div class="panel-head"><h2>Cache hit rate</h2><span class="meta">0–100%</span></div><div class="chart" data-chart="rate"></div><div class="fold"><details data-fold="models" ${state.models?'open':''}><summary>Models & sources</summary>${modelList(snap?.models || [])}</details></div><div class="fold"><details data-fold="coverage" ${state.coverage?'open':''}><summary>Coverage & counting</summary>${coverage(snap)}</details></div></section></div>${s?`<div class="scope meta">${counts(s)}</div>`:''}<footer class="footer"><button data-act="coverage">About the data</button><span class="meta">${snap?(state.partial?'Partial read ':'Last read ')+clock(snap.generated_at):'No successful reading yet'}</span></footer></article>`;
     root.querySelector('[data-chart="volume"]').innerHTML = chart(buckets,'volume',snap?.daily);
     root.querySelector('[data-chart="rate"]').innerHTML = chart(buckets,'rate',snap?.daily);
     root.querySelectorAll('[data-range]').forEach(b=>b.onclick=()=>{
       if (b.dataset.range==='CUSTOM') {state.customOpen=true;render();root.querySelector('#from').focus();return;}
       state.customOpen=false;state.selected=null;detail=null;++detailSeq;state.page=0;load({range:b.dataset.range});
     });
-    root.querySelectorAll('[data-fold]').forEach(el=>el.addEventListener('toggle',()=>{state[el.dataset.fold]=el.open;resize();}));
+    root.querySelectorAll('[data-fold]').forEach(el=>el.addEventListener('toggle',()=>{state[el.dataset.fold]=el.open;}));
     for (const id of ['from','to']) root.querySelector('#'+id).oninput=e=>{state[id]=e.target.value;};
     root.querySelectorAll('[data-pick]').forEach(el=>{
       el.onclick=()=>pick(el.dataset.pick);
@@ -241,29 +311,23 @@ button,select,input{font:inherit;color:inherit}button{border:0;cursor:pointer;ba
       if (act==='clear') {state.selected=null;detail=null;++detailSeq;render();}
       if (act==='coverage') {state.coverage=!state.coverage;render();}
       if (act==='earlier'||act==='later') {state.page=Math.max(0,state.page+(act==='earlier'?n:-n));render();}
-      if (act==='refresh'||act==='retry') load(state.failed||state.committed||{range:state.range});
+      if (act==='refresh'||act==='retry') load(state.pending||state.failed||state.committed||{range:state.range});
       if (act==='apply') {
         if (!state.from||!state.to||state.from>state.to) {state.status='failed';state.message='Choose a valid date range';render();return;}
         state.selected=null;detail=null;++detailSeq;state.page=0;load({range:'CUSTOM',from:state.from,to:state.to});
       }
     });
     if (focus) root.querySelector(focus)?.focus();
-    requestAnimationFrame(resize);
   }
-  function resize() {
-    if (disposed) return;
-    const h=Math.ceil(root.getBoundingClientRect().height+8);
-    if (h!==lastHeight) {lastHeight=h;window.OuroborosWidget?.resize?.(h);}
-  }
+  // The host measures #root and owns the frame's height and scrolling; the widget only redraws its charts for a new width.
   const offTheme=typeof window.OuroborosWidget?.onTheme==='function'?window.OuroborosWidget.onTheme(t=>theme(t?.theme||t)):null;
   const observer=new ResizeObserver(()=>{
     const w=root.clientWidth;
     if (w!==lastWidth) {lastWidth=w;cancelAnimationFrame(renderFrame);renderFrame=requestAnimationFrame(render);}
-    else resize();
   });
   observer.observe(root);
-  const timer=setInterval(()=>{if (!disposed&&!state.pending&&!document.hidden) load(state.failed||state.committed||{range:state.range});},30000);
-  function dispose(){disposed=true;++requestSeq;++detailSeq;clearInterval(timer);clearTimeout(pendingTimer);cancelAnimationFrame(renderFrame);observer.disconnect();if(typeof offTheme==='function')offTheme();}
+  const timer=setInterval(()=>{if (!disposed&&!state.pending&&!followTimer&&!document.hidden) load(state.failed||state.committed||{range:state.range}, {automatic:true});},30000);
+  function dispose(){disposed=true;++requestSeq;++detailSeq;clearInterval(timer);clearTimeout(followTimer);cancelAnimationFrame(renderFrame);observer.disconnect();if(typeof offTheme==='function')offTheme();}
   if (typeof window.__ouroWidgetOnDispose==='function') window.__ouroWidgetOnDispose(dispose);
   render();load({range:'24H'});
 })();

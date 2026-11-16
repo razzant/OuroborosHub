@@ -9,18 +9,26 @@ governed) and ``applies_to_request_kinds`` (absent = text and image).
 This module keeps what each field said, *including whether it was said at
 all*: an absent field, an explicit ``false`` and an empty list are three
 different facts for inspection, and none of them is rewritten into another.
-Three things are derived from it, each with one owner here:
+Five things are derived from it, each with one owner here:
 
 * ``models_hash`` — the scope id a cooldown or a reported model exhaustion is
   tied to a window by. With no prefixes it is byte-identical to the id the
   history has always stored (so no recorded series changes identity).
 * ``key_token`` — the last field of a limit's group key: the same id, plus a
   short digest only when the window is also scoped by the unspecified-model
-  flag being true or by request kinds. A window with none of the new fields
+  flag being true or by request kinds, or has a field that cannot be read. A window with none of the new fields
   keeps exactly its old key and its old history.
 * ``applies`` — whether the window governs a request ``(model, kind)``, by the
   engine's own projection rule (``quotaSnapshotAvailability``). ``model=None``
   is a request that names no model.
+* ``account_wide`` — whether the window speaks for its whole account in the
+  account view's verdict: not tied to models (names or prefixes) and governing
+  text requests, every scope field readable.
+* ``hold_key`` — the one identity a hold reported apart from a window's share
+  (a cooldown, a model limit the engine reports out) is tied to windows by,
+  in the reserve, the account view and the widget alike: ``-`` only for a
+  scope that governs every request kind, the legacy model key for a plain model scope, extended by request kinds
+  and the unspecified-model flag; unreadable scopes retain their own identity.
 
 What this module refuses to do: guess a scope from a label, treat a window
 whose scope fields it cannot read as vendor-wide, or invent a model list.
@@ -102,6 +110,16 @@ class Scope:
         return bool(self.models or self.prefixes)
 
     @property
+    def unreadable(self) -> bool:
+        return "unreadable" in (self.models_state, self.prefixes_state, self.kinds_state)
+
+    def exact(self) -> list:
+        """Every field state and value as read: the identity of a scope with
+        a field that cannot be read."""
+        return [list(self.models), list(self.prefixes), self.models_state, self.prefixes_state, self.unspecified,
+                None if self.kinds is None else list(self.kinds), self.kinds_state]
+
+    @property
     def token(self) -> str:
         return models_hash(self.models, self.prefixes)
 
@@ -109,12 +127,20 @@ class Scope:
         """The scope field of the group key. Legacy-identical unless the
         window also carries ``applies_to_unspecified_model: true`` or
         request kinds; those split the group, as the engine's own identity
-        splits them. ``false`` and absent are one identity there too."""
+        splits them. ``false`` and absent are one identity there too.
+
+        A field that cannot be read splits the group as well, by the scope's
+        exact identity: it is never one limit with a readable scope (an
+        absent model list, a readable request-kind list) whose descriptor
+        would then speak for it — or, depending on which snapshot came
+        first, a readable account for it. Every readable scope keeps its key."""
         extra: Dict[str, Any] = {}
         if self.unspecified is True:
             extra["u"] = True
         if self.kinds is not None:
             extra["k"] = list(self.kinds)
+        if self.unreadable:
+            extra["x"] = self.exact()
         if not extra:
             return self.token
         digest = hashlib.sha256(json.dumps(extra, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:6]
@@ -157,6 +183,39 @@ def scope_of(constraint: Any) -> Scope:
         unspecified=raw_flag if isinstance(raw_flag, bool) else None,
         kinds=kinds, kinds_state=kinds_state,
     )
+
+
+def account_wide(scope: Scope, kind: str = "text") -> bool:
+    """Whether a window speaks for its whole account in the account's own
+    verdict (its "Limit reached", its one figure): tied to no model, by name
+    or by family prefix (as the reserve's shared limits are, never a
+    model-scoped one), governing requests of ``kind`` (the engine judges an
+    account's availability for a text request that names no model), and with
+    every scope field readable. Any other window is a cap on part of the
+    account's requests: shown and counted where it applies, never the
+    account's state."""
+    return not scope.scoped and applies(scope, None, kind) is True
+
+
+def hold_key(scope: Scope) -> str:
+    """The identity a hold reported apart from a window's share — a cooldown,
+    a model limit the engine reports out — is tied to windows by (the account
+    view's and the widget's ``scope_key``, the reserve's restriction):
+
+    * ``-`` — a readable model-unscoped limit governing text AND image;
+    * any other readable scope — its key_token, including request kinds and
+      the unspecified-model flag; legacy model-only keys stay unchanged;
+    * an unreadable scope — its exact field states, never a universal hold.
+
+    These are transient restriction keys, not a change to persisted series
+    identity. Readable partial scopes use key_token so history can match a
+    current hold without reconstructing the scope fields from its digest."""
+    if all(account_wide(scope, kind) for kind in REQUEST_KINDS):
+        return "-"
+    if not scope.unreadable:
+        return scope.key_token()
+    exact = json.dumps(scope.exact(), separators=(",", ":"))
+    return "~" + hashlib.sha256(exact.encode("utf-8")).hexdigest()[:10]
 
 
 def applies(scope: Scope, model: Optional[str], kind: str = "text") -> Optional[bool]:
