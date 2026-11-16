@@ -19,6 +19,8 @@ import httpx
 from .accounts import public_message_ref
 from .store import InboxItem
 from .facts import email_facts, mailbox_identity
+from .mime import MailAddressError, _mailbox_key
+from .retained import automatic_reply_bare
 
 log = logging.getLogger("email_presence")
 
@@ -63,7 +65,7 @@ class HostOutput:
     identity: str
     text: str
     turn_ref: str
-    anchor: Mapping[str, Any] = field(default_factory=dict)
+    anchor: Any = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class HostTurnStatus:
@@ -103,6 +105,164 @@ def place_refusal_hold(facts: Mapping[str, Any]) -> str:
         return _PLACE_DISCONNECTED.format(label=label)
     return f"Held: {label} is {state}"
 
+# Match modes of the r6 bind/check wire. ``scope`` is the existing matcher (also when the parameter is absent);
+# ``exact_casefold`` finds only Places naming this conversation, compared after casefold; account and thread exact.
+MATCH_SCOPE, MATCH_EXACT_CASEFOLD = "scope", "exact_casefold"
+_MATCHES = frozenset({MATCH_SCOPE, "exact", MATCH_EXACT_CASEFOLD})
+# New queue rows keep each binding's mode beside it, by reporting key; check sends the same mode.
+PLACE_MATCH = "place_match"
+RECIPIENT_PLACES = "recipient_places"
+_BOUND_KEYS = ("place_binding", "emitted_place_binding")
+# A recognised new-format row whose bindings and modes do not agree: never defaulted, never sent.
+_BINDINGS_CORRUPT = "Held: Its retained place bindings are incomplete; it will not go out."
+# The envelope no longer equals the recipients whose Places were checked when this email was accepted.
+_RECIPIENTS_CHANGED = "Held: Its recipients differ from the ones checked when it was queued; it will not go out."
+# An automatic reply's actual envelope must equal the reply_targets the Host saw before Safety.
+_TARGETS_DIFFER = ("Held: This automatic reply's recipients differ from the ones Ouroboros checked before writing it; "
+                   "it will not go out.")
+# An automatic reply prepared before its recipients' places reached Safety (no reply_targets): words kept, not sent.
+LEGACY_REPLY_HELD = ("Held: This automatic reply was prepared before its recipients' places were checked; "
+                     "it will not go out automatically. Send it again with email_send if it is still needed.")
+
+
+def recipient_key(address) -> str:
+    """The policy key of one envelope address: its bare address, stripped and casefolded (``_mailbox_key``).
+
+    Only the key is folded; the envelope keeps its wire spelling. A Place naming the address in any letter case
+    applies (match ``exact_casefold``); no plus/dot/provider aliases are inferred."""
+    return _mailbox_key(address)
+
+
+def reply_target_rows(envelope) -> list[dict[str, str]]:
+    """``event.message.reply_targets`` for an automatic reply delivered to ``envelope``: one write target per address."""
+    return [{"conversation": key, "effect": "write", "match": MATCH_EXACT_CASEFOLD}
+            for key in dict.fromkeys(recipient_key(address) for address in envelope)]
+
+
+def valid_reply_targets(value) -> bool:
+    """The ingress shape of ``reply_targets`` (contract r5 section 5): a list of exact objects."""
+    if not isinstance(value, list):
+        return False
+    for row in value:
+        if (not isinstance(row, Mapping) or not set(row) <= {"conversation", "effect", "match", "thread"}
+                or not {"conversation", "effect", "match"} <= set(row) or not isinstance(row["conversation"], str)
+                or not row["conversation"] or row["effect"] != "write"
+                or not isinstance(row["match"], str) or row["match"] not in _MATCHES
+                or not isinstance(row.get("thread", ""), str)):
+            return False
+    return True
+
+
+def capture_recipients(host, account_id: str, envelope) -> tuple[str, dict | None]:
+    """At enqueue: each actual envelope address's own Place, bound with ``exact_casefold`` and retained with its
+    mode. ``(hold, record)``; ``record`` is None when the Host keeps no bindings. A bind failure raises: nothing is
+    queued. An address no Place names gets the Host's unbound snapshot, which delivery checks again, so a Place
+    connected later still applies."""
+    capture = getattr(host, "capture_binding", None)
+    if capture is None:
+        return "", None
+    hold, rows = "", []
+    for address in envelope:
+        key = recipient_key(address)
+        facts = capture(account_id, key, thread_id="", match=MATCH_EXACT_CASEFOLD)
+        if not facts.get("supported"):
+            return "", None  # No bindings on this Host: nothing retained, delivery reads the current Places.
+        binding = facts.get("binding")
+        if binding is not None and not isinstance(binding, Mapping) or binding is None and facts.get("allowed") is True:
+            raise HostContractError("Host omitted a recipient's Place binding")
+        # A refusal without a snapshot is retained as null: delivery never sends it (binding_hold(None)).
+        rows.append({"address": str(address), "key": key, "binding": dict(binding) if binding is not None else None})
+        if facts.get("allowed") is not True:
+            hold = hold or place_refusal_hold(facts)
+    return hold, {"match": MATCH_EXACT_CASEFOLD, "rows": rows}
+
+
+def match_arguments(modes, key) -> dict[str, str]:
+    """The ``match`` argument for checking one retained binding: none for a legacy row or a ``scope`` binding (the
+    wire's absent value, exactly as it was bound), else its retained mode."""
+    mode = (modes or {}).get(key, MATCH_SCOPE)
+    return {} if mode == MATCH_SCOPE else {"match": mode}
+
+
+def binding_modes(reporting: Mapping[str, Any]) -> dict[str, str] | None:
+    """The retained mode of each binding of a new-format row; None for a legacy row (no modes kept).
+
+    Raises ValueError for a recognised new-format row whose bindings and modes disagree (corrupt, never defaulted)."""
+    if PLACE_MATCH not in reporting:
+        if RECIPIENT_PLACES in reporting or "recipient_place_bindings" in reporting:
+            raise ValueError("recipient bindings without their modes")
+        return None
+    modes = reporting[PLACE_MATCH]
+    if not isinstance(modes, Mapping) or any(not isinstance(v, str) or v not in _MATCHES for v in modes.values()):
+        raise ValueError("unreadable binding modes")
+    present = {key for key in (*_BOUND_KEYS, RECIPIENT_PLACES) if key in reporting}
+    if set(modes) != present:
+        raise ValueError("bindings and modes differ")
+    record = reporting.get(RECIPIENT_PLACES)
+    if RECIPIENT_PLACES in reporting:
+        if not isinstance(record, Mapping):
+            raise ValueError("unreadable recipient bindings")
+        rows = record.get("rows")
+        if (record.get("match") != modes[RECIPIENT_PLACES] or not isinstance(rows, list)
+                or any(not isinstance(row, Mapping) or not isinstance(row.get("binding"), (Mapping, type(None)))
+                       or "binding" not in row
+                       or not isinstance(row.get("key"), str) or not isinstance(row.get("address"), str)
+                       for row in rows)):
+            raise ValueError("unreadable recipient bindings")
+    return dict(modes)
+
+
+def recipient_delivery_hold(host, account_id: str, envelope, reporting: Mapping[str, Any], modes) -> str:
+    """At delivery: every actual envelope address is checked now. A new row's retained bindings are checked with
+    their retained mode; an old row's addresses get a fresh ``exact_casefold`` lookup that is never retained. An
+    accepted row is neither rewritten nor given an invented binding."""
+    record = reporting.get(RECIPIENT_PLACES) if modes is not None else None
+    if record is None:
+        capture = getattr(host, "capture_binding", None)
+        if capture is None:
+            return ""
+        for address in envelope:
+            hold = capture_hold(capture, account_id, recipient_key(address), thread_id="", match=MATCH_EXACT_CASEFOLD)
+            if hold is None:
+                return ""  # This Host keeps no Place bindings.
+            if hold:
+                return hold
+        return ""
+    rows = record["rows"]
+    if [(row["address"], row["key"]) for row in rows] != [(str(a), recipient_key(a)) for a in envelope]:
+        return _RECIPIENTS_CHANGED
+    check = getattr(host, "binding_hold", None)
+    if check is None:
+        return PLACE_POLICY_UNREAD
+    for row in rows:
+        binding = dict(row["binding"]) if row["binding"] is not None else None
+        if hold := check(binding, account_id, row["key"], thread_id="",
+                         **match_arguments({"rows": record["match"]}, "rows")):
+            return hold
+    return ""
+
+
+def capture_hold(capture, account_id: str, conversation_id: str, *, thread_id=None, match=None) -> str | None:
+    """A queued send's fresh bind check of one scope, as a hold reason like binding_hold's: "" when allowed, the
+    Place's state when refused, and PLACE_POLICY_UNREAD (held; the same row retries without spending an attempt)
+    when the Host cannot answer now. None when the Host keeps no Place bindings."""
+    try:
+        facts = capture(account_id, conversation_id, thread_id=conversation_id if thread_id is None else thread_id,
+                        **({"match": match} if match else {}))
+    except httpx.HTTPStatusError as exc:
+        try:
+            if exc.response.status_code == 403 and exc.response.json().get("code") == "presence_auth_blocked":
+                return SKILL_ACCESS_REFUSED
+        except (ValueError, AttributeError):
+            pass
+        return PLACE_POLICY_UNREAD
+    except (HostContractError, httpx.HTTPError, ValueError, AttributeError):
+        return PLACE_POLICY_UNREAD
+    if not facts.get("supported"):
+        return None
+    return "" if facts.get("allowed") else place_refusal_hold(facts)
+
+
 def _sent_at(date_header: Any) -> str:
     """The Date header (the sender's origination time) as ``message.sent_at``, in the sender's offset; ``-0000`` is
     UTC from an unnamed zone (RFC 5322 3.3). "" when absent, unreadable or without a zone, never a receipt time."""
@@ -114,6 +274,16 @@ def _sent_at(date_header: Any) -> str:
     if sent.utcoffset() is None and re.search(r"\s-0000(?:\s|\(|$)", text):
         sent = sent.replace(tzinfo=timezone.utc)
     return sent.isoformat() if sent.utcoffset() is not None else ""
+
+def automatic_reply_targets(item: InboxItem) -> list[dict[str, str]]:
+    """``event.message.reply_targets`` of this captured mail: the actual automatic-reply envelope (Reply-To, else
+    From), so the Host reads those recipients' Places before Safety. ``[]`` when no reply can be addressed (the
+    reply itself then fails before anything is queued)."""
+    try:
+        return reply_target_rows(automatic_reply_bare(item))
+    except MailAddressError:
+        return []
+
 
 def email_presence_event(item: InboxItem, *, account_id: str, places: bool = False,
                          identity: bool = False, words=(), address="", senders=(), sender="") -> dict[str, Any]:
@@ -136,7 +306,8 @@ def email_presence_event(item: InboxItem, *, account_id: str, places: bool = Fal
                     **item.context,
                     **({"sent_at": sent_at} if sent_at else {}),
                     **({"message_ref": public_message_ref(account_id, item.context["message_ref"])}
-                       if item.context.get("message_ref") else {})},
+                       if item.context.get("message_ref") else {}),
+                    "reply_targets": automatic_reply_targets(item)},
         "text": f"Subject: {item.subject}\n\n{item.body}",
         **({"facts": email_facts(item, address or account_id, words, senders)} if places else {}),
         **({"identity": mailbox_identity(address or account_id, senders=senders, sender=sender)} if identity else {}),
@@ -175,19 +346,19 @@ def _retry_after(payload: Mapping[str, Any]):
         return None
     return float(value)
 
-def _anchor(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """The whole ``reply_anchor`` (``source_event_id`` and its ``message``), or ``{}``."""
-    anchor = payload.get("reply_anchor")
-    if not isinstance(anchor, Mapping) or not str(anchor.get("source_event_id") or "").strip():
-        return {}
-    message = anchor.get("message")
-    return {"source_event_id": str(anchor["source_event_id"]).strip(),
-            "message": dict(message) if isinstance(message, Mapping) else {}}
+def _anchor(payload: Mapping[str, Any]) -> Any:
+    """Keep the literal selected anchor, including malformed values, for the consumer to hold.
 
-def _receipt_anchor(receipt: Mapping[str, Any]) -> dict[str, Any]:
-    """The anchor a persisted receipt kept (older receipts kept none)."""
-    anchor = receipt.get("anchor")
-    return dict(anchor) if isinstance(anchor, Mapping) else {}
+    Only absent/null or an empty object means no anchor. Never erase an explicit unusable selection and thereby
+    redirect its words to the wake event. The retained receipt keeps the same value across retries.
+    """
+    anchor = payload.get("reply_anchor")
+    return dict(anchor) if isinstance(anchor, Mapping) else ({} if anchor is None else anchor)
+
+
+def _receipt_anchor(receipt: Mapping[str, Any]) -> Any:
+    """The same literal anchor in a persisted receipt (older receipts kept none)."""
+    return _anchor({"reply_anchor": receipt.get("anchor")})
 
 def _output_identity(output_ref: str, fallback: str) -> str:
     return f"output:{output_ref}" if output_ref else fallback
@@ -263,7 +434,7 @@ class LoopbackPresenceHostAdapter:
         listed = payload.get("presence_continuation_versions")
         self.continuation_version = 2 if isinstance(listed, list) and any(type(v) is int and v == 2 for v in listed) else 0
 
-    def place_hold(self, account_id, conversation_id, *, draft=False):
+    def place_hold(self, account_id, conversation_id, *, draft=False, thread_id=""):
         """Read current Place state for a queued send or a synchronous draft folder."""
         unread = _DRAFT_POLICY_UNREAD if draft else PLACE_POLICY_UNREAD
         try:
@@ -277,7 +448,7 @@ class LoopbackPresenceHostAdapter:
                 return ""
             response = self._place_http.get(f"{self.host_service_url}/presence/place", headers=self._headers(),
                                             params={"provider": "email", "account_id": account_id,
-                                                    "conversation_id": conversation_id})
+                                                    "conversation_id": conversation_id, "thread_id": thread_id})
             if response.status_code == 403 and response.json().get("code") == "presence_auth_blocked":
                 return _DRAFT_ACCESS_REFUSED if draft else SKILL_ACCESS_REFUSED
             if response.status_code == 404:
@@ -301,7 +472,10 @@ class LoopbackPresenceHostAdapter:
             self._place_http = httpx.Client(timeout=10, trust_env=False)
         return self._place_http
 
-    def capture_binding(self, account_id, conversation_id, *, thread_id="", require_place=False):
+    def capture_binding(self, account_id, conversation_id, *, thread_id="", require_place=False, match=None):
+        """``operation=bind``. ``match`` (r6) is sent only when given; absent is the Host's ``scope``."""
+        if match is not None and match not in _MATCHES:
+            raise HostContractError(f"Unknown Place match mode: {match}")
         if self.delivery_reporting_status in {"unknown", "unavailable"}:
             identity = self._place_client().get(f"{self.host_service_url}/identity", headers=self._headers())
             identity.raise_for_status()
@@ -311,17 +485,20 @@ class LoopbackPresenceHostAdapter:
         response = self._place_client().get(f"{self.host_service_url}/presence/place", headers=self._headers(), params={
             "operation": "bind", "provider": "email", "account_id": account_id,
             "conversation_id": conversation_id, "thread_id": thread_id,
-            "require_place": "true" if require_place else "false"})
+            "require_place": "true" if require_place else "false", **({"match": match} if match else {})})
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict) or type(payload.get("allowed")) is not bool or "binding" not in payload:
             raise HostContractError("Host omitted the mail operation's binding facts")
         return {**payload, "supported": True}
 
-    def draft_folder_hold(self, account_id, folder):
-        """Check the folder separately from the RFC Place. Drafts are never queued for retry."""
+    def draft_folder_hold(self, account_id, folder, *, thread_id=""):
+        """Check the folder separately from the RFC Place. Drafts are never queued for retry.
+
+        ``thread_id`` accompanies an RFC conversation target (a replaced draft's old root), so a Place stored with
+        both its conversation and thread is found; a folder or label is checked without one."""
         try:
-            decision = self.capture_binding(account_id, folder)
+            decision = self.capture_binding(account_id, folder, thread_id=thread_id)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 403:
                 try:
@@ -341,16 +518,19 @@ class LoopbackPresenceHostAdapter:
             return _DRAFT_POLICY_UNREAD
         # A folder outside an Active RFC scope can still be a valid unbound
         # target. Only explicit not-connected (or no Places support) clears it.
-        return self.place_hold(account_id, folder, draft=True)
+        return self.place_hold(account_id, folder, draft=True, thread_id=thread_id)
 
-    def binding_hold(self, binding, account_id, conversation_id, *, thread_id=""):
+    def binding_hold(self, binding, account_id, conversation_id, *, thread_id="", match=None):
+        """``operation=check`` of a retained binding with the mode it was bound with (absent for legacy rows)."""
         if not isinstance(binding, dict):
             return _NO_PLACE_WHEN_QUEUED
+        if match is not None and match not in _MATCHES:
+            return PLACE_POLICY_UNREAD
         try:
             response = self._place_client().get(f"{self.host_service_url}/presence/place", headers=self._headers(), params={
                 "operation": "check", "provider": "email", "account_id": account_id,
                 "conversation_id": conversation_id, "thread_id": thread_id,
-                "binding": json.dumps(binding, separators=(",", ":"))})
+                "binding": json.dumps(binding, separators=(",", ":")), **({"match": match} if match else {})})
             payload = response.json()
             if response.status_code == 403 and payload.get("code") == "presence_auth_blocked":
                 return SKILL_ACCESS_REFUSED
@@ -501,7 +681,7 @@ class LoopbackPresenceHostAdapter:
                                                           *[str(v).strip() for v in receipt.get("work_refs", [])]]) if value and value != ref]]
         known, settled, notes, ended, outputs = list(refs), {}, [], [], {}
         def add(identity, text, turn_ref, anchor=None):
-            if text.strip() and identity not in outputs: outputs[identity] = HostOutput(identity, text, turn_ref, anchor or {})
+            if text.strip() and identity not in outputs: outputs[identity] = HostOutput(identity, text, turn_ref, {} if anchor is None else anchor)
         if receipt.get("outcome") in _SPEECH:
             add(_output_identity(str(receipt.get("output_ref") or ""), f"initial:{ref}"), str(receipt.get("text") or ""), ref,
                 _receipt_anchor(receipt))

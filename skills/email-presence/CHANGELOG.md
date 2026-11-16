@@ -1,5 +1,161 @@
 # Changelog
 
+## 0.10.11
+
+- Requires PluginAPI 2.5. Tool rows declare `touches` groups instead of flat targets
+  mixed with one conversation/thread. email_send keeps its source conversation and
+  thread as the primary destination; To, Cc and Bcc are its audience plus separate
+  write groups matched `exact_casefold`; an emitted RFC root is its own message group
+  with its own thread. email_draft keeps To/Cc/Bcc as audience only (a draft delivers
+  nothing); its folder, folder names, replaced draft and emitted root are write groups
+  matched `exact`, beside the unchanged folder lookup that treats an unconnected
+  folder as writable. email_mailbox and email_mark_read pair the message's RFC root
+  with its own thread instead of applying that thread to every folder and label.
+  email_send still declares no words argument: Safety and the owner card judge the
+  whole call.
+- A Silent or Paused Place naming a bare email address now holds every delivery to
+  that address: email_send To, Cc and Bcc, Reply All, and the automatic Presence reply,
+  whose envelope is Reply-To (or From). Each envelope address is bound with
+  `match=exact_casefold` under its policy key (the bare address, casefolded; the wire
+  keeps its spelling) and the mode is stored beside every new binding and sent again at
+  check. A Place stored in another letter case applies; equally ranked spellings hold
+  when any is Silent/Paused; an address Place without an account applies to every
+  mailbox and one with an account only to that mailbox. No aliases are inferred. A
+  paused RFC conversation still holds only that conversation. An address no Place
+  names keeps the Host's unbound snapshot, so a Place connected later still applies.
+  Rows accepted earlier are checked at delivery without being rewritten; a new-format
+  row with missing modes or malformed recipient bindings, including null, is held as
+  corrupt, never read as legacy.
+- Each Presence event carries `message.reply_targets`, the automatic reply's actual
+  envelope, so the Host reads those recipients' Places before Safety. The queued reply
+  keeps the targets of the anchor it answers (or of the submitted wake event) and is
+  held when they are absent, malformed or differ from its envelope. Automatic replies
+  prepared before this version keep their words and stay held; nothing is resent. An
+  explicit unusable anchor queues nothing. Only an absent, null or empty-object anchor
+  falls back to the polled mail; malformed selections stay in the retained receipt.
+- References use RFC tokens: angle brackets inside comments are not message IDs.
+  Old captures keep their Place keys; new replies derive ancestry from retained raw
+  headers and check both historical and emitted scopes. A fresh read cannot erase
+  an old scope's hold. Already accepted comment-derived envelopes stay unchanged and
+  held. The advertised legacy Place lookup also carries the conversation's thread.
+- Intake, Exchange reads and retained raw headers read References/In-Reply-To with
+  one rule: an encoded word outside comments decodes as intake always decoded it, so
+  replies keep that ancestry; one inside a comment or quoted string stays comment
+  text. Old Exchange text that survives only decoded is not guessed where decoding
+  could have moved a comment boundary: a new reply needs a fresh read, an accepted
+  envelope stays held, and the stored scope is still checked.
+- Old Exchange structured captures that lost raw address syntax cannot choose new
+  reply recipients. Read the original again for a new request; previously accepted
+  envelopes remain held, with their identities and content preserved. New captures
+  retain raw address/thread headers; no mass migration or uncertain resend occurs.
+- Message and draft mutations on Gmail, IMAP and Exchange (delete, trash/untrash, flags,
+  labels, archive, copy, move, mark-read, delete_draft) read the item's RFC conversation
+  with the same parser and fallback chain as intake. IMAP peeks at the whole header
+  section, then the full source when needed; Gmail reads raw MIME and Exchange uses
+  its MIME/native structured fallback. Lossy metadata never supplies mutation authority.
+  IMAP and Exchange accepted no conversation target before. The root reaches the Host as
+  `message_conversation_id` (`draft_conversation_id` for delete_draft) and as the new
+  `message_thread_id`, paired in one touches group on email_mailbox and email_mark_read, so
+  Places stored with conversation and thread hold these writes; folder and label Places
+  still apply. A Gmail draft_id update checks the replaced draft's conversation with its
+  thread. Provider methods, paths and bodies are unchanged; a canonical call that omits
+  the new targets returns them once in retry_arguments.
+- Gmail send-as `values.replyToAddress` is a declared Host destination: one bare
+  address or empty. Settings values and filter actions must be objects before any
+  coercion; pair arrays and alternative Reply-To field spellings are refused.
+- Replies: `reply_to_message_id` must be one Message-ID (another spelling returns
+  retry_arguments) and its source is looked up in this mailbox for every provider. On IMAP
+  and Exchange, caller references used to skip that lookup and decide the conversation.
+  References and the conversation now come from the verified source; different supplied
+  references return `conversation_identity_mismatch`, and references without a reply
+  source are refused. Store and provider lookups compare canonical tokens while retaining
+  comment-bearing source IDs and refuse conflicting matches across pages. The written
+  reply headers are parsed back before queueing or saving. A legacy multi-ID In-Reply-To
+  keeps its key; an independently emitted root is exposed as emitted_conversation_id and
+  checked through existing Place bindings/holds, including automatic replies and delivery.
+  Accepted queue rows replay unchanged; old rows gain no rewritten binding or headers.
+- `email_send` declares no words argument, as in 0.10.7: Safety and owner approval cover
+  the whole call, including subject, names, HTML and files. A Safety hold therefore follows
+  the exact call (another request_id is read again) and the turn's send record carries no
+  mail text. With `body_type: html` and both fields, the explicit body is now the plain
+  alternative instead of being replaced by text rendered from html_body.
+- Search documentation names the observed miss of a Cyrillic SUBJECT search and the
+  procedure: FROM with SINCE/BEFORE, every page, then the decoded subjects compared locally.
+  Only synthetic wire captures verify the UTF-8 literal; the live Proton mismatch cause
+  remains unknown. Gmail search metadata cannot inject header separators.
+- Gmail search of Spam or Trash sends `includeSpamTrash` on every page.
+- Exchange's structured fallback (no MIME) decoded each whole address header before
+  splitting it, so an encoded display name with a comma or `@` became an extra
+  recipient of automatic replies and Reply All. Address headers are now parsed from raw
+  syntax with the MIME reader's model, names included; native SMTP mailboxes remain the
+  fallback for an absent or damaged header.
+- A second `email_read` of another message with the same Message-ID but different reply
+  authority no longer replaces the first in the reply cache: the replaced read is kept
+  (`read_source:` beside the unchanged `read_message:` key), so the ID stays ambiguous
+  and is refused instead of answering whichever was read last. `reply_folder` selects
+  the provider's verified source in that folder. Repeat reads of one message, identical
+  copies and older cache entries behave as before.
+- An old queue row whose emitted scope is bound at delivery is held, without spending
+  attempts, when the Host cannot answer (it used to fail after five tries, unsent).
+- Replies write the source's canonical Message-ID token in In-Reply-To/References: a
+  comment spelling another ID is no longer read as the conversation root. Stored sources,
+  queue rows and Place keys keep their spelling; both scopes are still checked.
+- Recipients reach the Host as bare addresses, each once across To, Cc and Bcc; named,
+  comma-separated or repeated input returns `canonical_recipients_required` with the
+  bare lists. 0.10.10 then dropped the display names from the sent headers. The names now
+  travel in the new optional `display_names` argument (bare address → name), filled from
+  named input and, for Reply All, from the source's From/To/Cc. Sent and saved To/Cc keep
+  them, quoted commas included. `display_names` can only name a listed recipient. Bare
+  calls still queue in one call; queued request_ids, including rows queued before this
+  version, replay unchanged. Before anything is prepared, queued or saved, the named
+  To/Cc/Bcc headers are written and parsed again; they must read back each name and
+  deliver to exactly the bare addresses. A name that would not, such as literal RFC 2047
+  encoded-word text that decodes into an address, or a line separator that cannot be
+  written, is refused, and one taken from a source header is left out. A name the header
+  model cannot carry is an error, never a silent bare address. The 256-character limit is
+  gone; long names are folded. Draft Bcc keeps its names.
+- MIME: a non-root part with a filename or attachment disposition, and every attached
+  message or report, belongs to the attachment list, never to `body`, `body_html` or the
+  `signal.words` text. Delivery, read-receipt and message/global reports were staged as
+  empty files marked available; they now report `unsupported_mime_type`, and the retained
+  raw source holds them. Files inside an attached message (message/rfc822,
+  message/global) or an attachment-marked multipart are still listed and staged, as in
+  0.10.7, with full parent metadata stored once as `container` on its descriptor. Children
+  link by `container_index`, with `depth` and `mime_part` locating them; long headers
+  are not repeated across nesting or fanout. Older rows keep `within`. The attached
+  mail's text never becomes the outer body. A named inline plain/HTML part is the body only
+  when the message has no readable un-named text of its own; a blank or markup-only first
+  part no longer hides it.
+- Reply All keeps RFC 2047 names that contain a comma, such as "Doe, John": the source's
+  To/Cc/From/Reply-To names are stored as parsed `address_names`. Reads stored by earlier
+  versions keep the old decoded-header lookup.
+- IMAP folder listing failed when the server sent a folder name as a literal. Listing and
+  the CREATE parent lookup now share one parser for literals and their trailers.
+- Delivery re-reads the account after opening the provider connection. Sending turned off
+  or a disconnect during that time holds the same queued item before anything is sent.
+- Account test in the widget: a rejected IMAP/SMTP login or a TLS/connection failure
+  answers JSON with its stage and remedy instead of HTTP 500; server reply text and
+  credentials are not repeated. The OAuth routes answer a non-object JSON body with a
+  structured 400, and a Google transport failure with a redacted 502.
+- Exchange HTTP 401 diagnostics name the remedy (edit and save the connection).
+
+## 0.10.10
+
+- IMAP search continues past its first page. `email_search` returned only the `limit`
+  newest matching UIDs (at most 200) and a `total`, with no way to reach older matches.
+  An IMAP page now also reports `returned`, `has_more` and `next_page_token`; passing that
+  token back as `page_token` with the same account, folder and criteria returns the next
+  older UIDs. Pages run newest UID first (`order: uid_desc`), the folder's storage order,
+  which can differ from message dates. The token keeps the first page's highest UID, so
+  mail that arrives meanwhile is neither repeated nor shifted. A token from another
+  account, folder, criteria or UIDVALIDITY is refused. Nothing is stored between pages.
+- Reading with a UIDVALIDITY that does not match the folder now names the folder and both
+  numbers. It used to say that the mailbox UIDVALIDITY changed, also when the UID came
+  from a search of another folder. The refusal still comes before anything is fetched.
+- The tool schema, SKILL.md and README say that criteria are raw IMAP tokens: an ASCII
+  operand containing spaces needs quotes, as in `["SUBJECT", "\"New sign-in\""]`. They
+  also say that an empty or failed search is not proof that a message never arrived.
+
 ## 0.10.9
 
 - Connecting Google mail can leave out the permission to manage Gmail settings (filters,

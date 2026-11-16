@@ -10,7 +10,7 @@ from lib.gmail import GmailClient, GmailError
 from lib.service import MailService, register_tools
 from test_accounts import gmail_account
 from test_gmail import payload
-from test_write_targets import host_guard, published_targets
+from test_write_targets import host_guard, published_targets, raw_message
 
 
 @pytest.fixture
@@ -20,7 +20,8 @@ def mailbox(tmp_path, monkeypatch):
     account = gmail_account(accounts)
     account["scopes"].append("https://mail.google.com/")
     accounts.save(account)
-    data = SimpleNamespace(message={"id": "7b", "labelIds": ["DRAFT"]}, label_name="Receipts",
+    data = SimpleNamespace(message={"id": "7b", "labelIds": ["DRAFT"], "payload": {"headers": [
+                               {"name": "Message-ID", "value": "<delete-fixture@example.invalid>"}]}}, label_name="Receipts",
                            status=200, requests=[], writes=[])
     def exchange(request):
         assert request.url.host == "gmail.googleapis.com"
@@ -36,9 +37,11 @@ def mailbox(tmp_path, monkeypatch):
         if path == "/labels":
             return httpx.Response(200, json={"labels": [{"id": "Label_1", "name": data.label_name}]})
         assert path == "/messages/7b"
-        if request.url.params.get("format") == "metadata":  # registered draft search
+        if request.url.params.get("format") == "metadata" and not request.url.params.get("fields"):  # registered draft search
             return httpx.Response(200, json=payload("7b", labels=["DRAFT"]))
-        assert dict(request.url.params) == {"format": "minimal", "fields": "id,labelIds"}
+        if dict(request.url.params) == {"format": "raw"}:  # a message without a usable identity header
+            return httpx.Response(data.status, json={**data.message, "raw": raw_message({h["name"]:h["value"] for h in data.message.get("payload", {}).get("headers", [])})})
+        assert dict(request.url.params) == {"format": "metadata", "fields": "id,labelIds,payload/headers"}
         return httpx.Response(data.status, json=data.message)
     with httpx.Client(transport=httpx.MockTransport(exchange)) as http:
         monkeypatch.setattr("lib.service.account_client", lambda store, row, **_: GmailClient(store, row["id"], http=http))
@@ -84,7 +87,9 @@ def test_actual_message_labels_replace_decoys_before_permanent_delete(mailbox, h
     retry = d.delete(args)["retry_arguments"]
     assert not d.writes and retry["message_ref"] == d.args["message_ref"]
     assert published_targets("email_mailbox", retry) == {"account_id": [d.account["id"]],
-           "remove_labels": ["INBOX", "Label_1"], "label_names": ["Receipts"]}
+           "remove_labels": ["INBOX", "Label_1"], "label_names": ["Receipts"],
+           "message_conversation_id": ["<delete-fixture@example.invalid>"],
+           "message_thread_id": ["<delete-fixture@example.invalid>"]}
     if held:
         assert "Paused" in guard(retry) and not d.writes
     else:
@@ -116,8 +121,14 @@ def test_unlabelled_mail_can_still_be_deleted_with_unknown_scope_metadata(mailbo
     d.message = metadata
     guard = d.guard([("", "active"), ("DRAFT", "paused")])
     assert not guard(d.args)
-    d.delete(d.args)
-    assert d.requests == [("GET", "/messages/7b"), ("DELETE", "/messages/7b")]
+    # Without an identity header the raw source is read for its intake identity (the source's SHA-256 ID, as poll and
+    # email_read derive it); the retry names that conversation and the requested DELETE follows unchanged.
+    retry = d.delete(d.args)["retry_arguments"]
+    assert retry["message_conversation_id"] == retry["message_thread_id"]
+    assert retry["message_conversation_id"].startswith("<sha256-") and not d.writes
+    assert not guard(retry)
+    d.delete(retry)
+    assert d.requests == [("GET", "/messages/7b"), ("GET", "/messages/7b")] * 2 + [("DELETE", "/messages/7b")]
 
 
 @pytest.mark.parametrize("metadata", [{}, {"id": "7c", "labelIds": []}, {"id": "7b", "labelIds": "DRAFT"},

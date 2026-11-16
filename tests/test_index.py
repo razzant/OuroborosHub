@@ -683,6 +683,29 @@ def registered_routes(directory):
             if function and node.args and isinstance(node.args[0], ast.Constant)}
 
 
+def assert_target_selectors(target):
+    # Core tool_effects._argument_names accepts nonblank strings; argument_value
+    # traverses dotted mapping keys without restricting their case or spelling.
+    assert isinstance(target, (str, list))
+    for argument in ([target] if isinstance(target, str) else target):
+        assert isinstance(argument, str) and argument.strip()
+
+
+@pytest.mark.parametrize("target", [
+    "account_id", "replyToAddress", "values.replyToAddress", "body.X-Header",
+    "items.0.id", ["account_id", "values.replyToAddress"],
+])
+def test_target_selectors_accept_core_argument_names(target):
+    assert_target_selectors(target)
+
+
+@pytest.mark.parametrize("target", [None, 7, {}, "", " \t\n", ["account_id", ""],
+                                   ["account_id", " "], ["account_id", None], [["to"]]])
+def test_target_selectors_reject_invalid_argument_names(target):
+    with pytest.raises(AssertionError):
+        assert_target_selectors(target)
+
+
 @pytest.mark.parametrize("name", CONNECTORS)
 def test_every_exported_tool_has_an_effect_and_destination(name):
     directory = ROOT / "skills" / name
@@ -694,10 +717,7 @@ def test_every_exported_tool_has_an_effect_and_destination(name):
         assert row["effect"] in {"read", "message", "gesture", "write"}
         # A gesture acts on one message: the core fills that argument from the waking event.
         assert (row["effect"] == "gesture") == bool(row.get("message")), row["name"]
-        target = row["target"]
-        assert isinstance(target, (str, list))
-        for argument in ([target] if isinstance(target, str) else target):
-            assert re.fullmatch(r"[a-z][a-z0-9_]*", argument)
+        assert_target_selectors(row["target"])
 
 
 @pytest.mark.parametrize("name", CONNECTORS)

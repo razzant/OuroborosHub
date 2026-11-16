@@ -194,6 +194,7 @@ def test_sending_off_holds_automatic_and_queued_mail_then_resumes(rig):
     path = store.state_dir / "settings.json"
     store.enqueue_outbox(request_id="queued", to=[ACCOUNT], body="Queued")
     item = captured(store.state_dir / "incoming")
+    runtime.remember_reply_targets(item)  # submitted with its reply_targets, as process_inbox does
     runtime._reply(item, ["Automatic"], "final")
     path.write_text(json.dumps({"sending": "off"}))
     assert runtime.process_outbox() and runtime.process_outbox()
@@ -224,6 +225,18 @@ def test_request_id_reuse_checks_payload_and_returns_original_receipt(tmp_path, 
     assert EmailStore(tmp_path).receipt("stable") == first["receipt"]
     assert sum(EmailStore(tmp_path).status()["outbox"].values()) == 1
     requested = {**original, **change, "request_id": "new"}
+    if 'references' in change:
+        # References continue a conversation only with a reply source verified in this mailbox; a new send naming
+        # a bare chain is refused before anything is queued (it could otherwise claim another conversation's Place).
+        with pytest.raises(ValueError, match='references continue a conversation'):
+            tools["email_send"](**requested)
+        assert EmailStore(tmp_path).receipt('new') is None
+        # Naming a source does not let the caller choose its chain: the verified source <other> starts its own
+        # conversation, so the supplied ["<other>"] is answered with the source's actual (empty) chain.
+        mismatch = json.loads(tools["email_send"](**{**requested, 'reply_to_message_id': '<other>'}))
+        assert mismatch['code'] == 'conversation_identity_mismatch' and mismatch['retry_arguments']['references'] == []
+        assert EmailStore(tmp_path).receipt('new') is None
+        requested = {**requested, 'reply_to_message_id': '<other>', 'references': []}
     next_result = json.loads(tools["email_send"](**requested))
     if 'reply_to_message_id' in change or 'references' in change:
         assert next_result['status'] == 'needs_arguments'
@@ -250,7 +263,7 @@ def test_outgoing_body_is_authored_without_connector_marks(body):
 
 def test_manifest_offers_facts_without_default_wakes():
     manifest = yaml.safe_load((Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1])
-    assert manifest["version"] == "0.10.9"
+    assert manifest["version"] == "0.10.11"
     place = manifest["contributes"][0]
     assert place["wakes"] == []
     assert place["settings"] == "email_presence"

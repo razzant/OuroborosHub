@@ -269,7 +269,8 @@ run its `run.sh` with an evidence directory. It checks the existing Places picke
 against synthetic Bot API updates and an upgrade from 0.8, without live credentials.
 
 The selected `calendar-skill`, `email-presence` and `smart-lists` CI jobs check out
-the exact core pinned in `catalog-check.yml`, install its Python runtime requirements
+their exact cores pinned in `catalog-check.yml` (email uses PluginAPI 2.5; Calendar
+and Smart Lists retain their prior pin), install each core's Python runtime requirements
 and Chromium/WebKit. Calendar and mail exercise the real Host Service and widget
 bridge with fake providers. Smart Lists mounts its widget through that core's real
 module bridge (`widget_module.js`), served by a test HTTP server over the skill's
@@ -283,8 +284,8 @@ python -m pip install icalendar python-dateutil cryptography pytest
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q skills/calendar/tests --ignore=skills/calendar/tests/test_widget_browser.py
 ```
 
-For the complete selected consumers, use Python 3.10 with the pinned core's
-requirements and browsers installed, set `OUROBOROS_SOURCE_DIR` and
+For each complete consumer suite, use Python 3.10 with the requirements and browsers
+from that suite's pinned core. Set `OUROBOROS_SOURCE_DIR` and
 `OUROBOROS_THEME_CORE_ROOT` to that checkout, then run
 `python -B scripts/ci_checks.py run email-presence` and
 `python -B scripts/ci_checks.py run calendar-skill` separately. The mail runner

@@ -26,7 +26,7 @@ def host_guard(tmp_path, monkeypatch, tool, account, scopes, *, drive=None):
     name = extension_surface_name('email-presence', tool)
     ext = {'skill': 'email-presence', 'extension_generation': 'mail-effect'}
     bundle = registry._ExtensionRegistrations(generation_digest='mail-effect',
-        loaded_skill=SimpleNamespace(manifest=SimpleNamespace(raw_extra=MANIFEST)))
+        loaded_skill=SimpleNamespace(manifest=SimpleNamespace(raw_extra=MANIFEST, plugin_api={"version": MANIFEST["plugin_api"]})))
     monkeypatch.setitem(registry._extensions, 'email-presence', bundle)
     monkeypatch.setitem(registry._tools, name, ext)
     for conversation, state in scopes:
@@ -34,6 +34,13 @@ def host_guard(tmp_path, monkeypatch, tool, account, scopes, *, drive=None):
                              conversation_id=conversation, state=state)
     ctx = SimpleNamespace(drive_root=drive, task_id='fixture', task_metadata={})
     return lambda args: place_guard.dispatch_refusal(ctx, name, args, ext_tool=ext)
+
+
+def capture_source(tmp_path, message_id, references=(), *, uid=1):
+    """Capture a reply source in the store tools_for opens, as intake does; a reply must name a verified source."""
+    EmailStore(tmp_path / 'email').ingest({'folder': 'INBOX', 'uidvalidity': 1, 'uid': uid, 'message_id': message_id,
+                                           'references': list(references), 'sender': 'reader@example.invalid',
+                                           'subject': 'Source', 'body': 'source'})
 
 
 def tools_for(tmp_path, provider, client, *, account_id=None):
@@ -50,11 +57,52 @@ def tools_for(tmp_path, provider, client, *, account_id=None):
     return account['id'], lambda tool, args: json.loads(handlers[tool](**args))
 
 
-def gmail_for(tmp_path, *, label_rows=None, reads=None):
+FIXTURE_ID = '<fixture-7b@example.invalid>'
+DRAFT_ID = '<draft-one@example.invalid>'
+
+
+def raw_message(headers, body='fixture body'):
+    """The base64url raw source Gmail returns for format=raw, built from these header lines."""
+    import base64
+    text = ''.join(f'{key}: {value}\r\n' for key, value in headers.items()) + '\r\n' + body + '\r\n'
+    return base64.urlsafe_b64encode(text.encode('utf-8')).decode('ascii').rstrip('=')
+
+
+def gmail_for(tmp_path, *, label_rows=None, reads=None, message_labels=None, drafts=None, message_headers=None):
+    """``message_labels`` is the selected message 7b's current labelIds, read by Trash/Spam changes. ``drafts`` maps
+    a draft id to its message's current ``(labelIds, headers)``; draft-one bears only DRAFT and replies to nothing.
+    Message 7b has its own Message-ID unless ``message_headers`` says otherwise; a message without a usable identity
+    is read again as format=raw, exactly as Gmail serves it."""
     client = GmailClient.__new__(GmailClient)
     client.account = {'id': 'gmail:fixture', 'provider': 'gmail'}  # a real client carries its account; scopes unknown
     writes = []
+    drafts = drafts if drafts is not None else {'draft-one': (['DRAFT'], {'Message-ID': DRAFT_ID})}
+    headers_7b = message_headers if message_headers is not None else {'Message-ID': FIXTURE_ID}
+    selected_draft = [next(iter(drafts.values()))] if drafts else []
     def request(method, path, **options):
+        if method == 'GET' and path in ('/messages/7b', '/messages/d1') and options.get('params') == {'format': 'raw'}:
+            if reads is not None:
+                reads.append(path + '?raw')
+            if path == '/messages/7b':
+                return {'id': '7b', 'labelIds': list(message_labels if message_labels is not None else ['INBOX']),
+                        'raw': raw_message(headers_7b)}
+            labels, headers = selected_draft[0]
+            return {'id': 'd1', 'labelIds': list(labels), 'raw': raw_message(headers)}
+        if method == 'GET' and path == '/messages/7b':
+            assert options.get('params') == {'format': 'metadata', 'fields': 'id,labelIds,payload/headers'}
+            if reads is not None:
+                reads.append(path)
+            return {'id': '7b', 'labelIds': list(message_labels if message_labels is not None else ['INBOX']),
+                    'payload': {'headers': [{'name': k, 'value': v} for k, v in headers_7b.items()]}}
+        if method == 'GET' and path.startswith('/drafts/'):
+            assert options.get('params') == {'format': 'metadata'}
+            if reads is not None:
+                reads.append(path)
+            labels, headers = drafts[path[len('/drafts/'):]]
+            selected_draft[:] = [(labels, headers)]
+            return {'id': path[len('/drafts/'):], 'message': {
+                'id': 'd1', 'threadId': 't1', 'labelIds': list(labels),
+                'payload': {'headers': [{'name': key, 'value': value} for key, value in headers.items()]}}}
         if method == 'GET':
             assert path == '/labels'
             if reads is not None:
@@ -62,6 +110,8 @@ def gmail_for(tmp_path, *, label_rows=None, reads=None):
             return {'labels': label_rows if label_rows is not None else [
                 {'id':'Label_1', 'name':'Public'}, {'id':'Label_2', 'name':'Archive Team'}]}
         writes.append((method, path, options.get('body')))
+        if method in ('PUT', 'POST') and path.startswith('/drafts'):  # a saved draft resource, as Gmail answers
+            return {'id': path[len('/drafts/'):] or 'draft-new', 'message': {'id': 'd2'}}
         return {}
     client._request = request
     return (*tools_for(tmp_path, 'gmail', client), writes)
@@ -161,11 +211,13 @@ def test_draft_uses_the_real_host_for_both_rfc_and_folder(tmp_path, monkeypatch,
     if scene=='global_folder':
         places.connect_place(drive,connector='email-presence',provider='email',account_id='',conversation_id='SharedArchive',state='silent')
     guard = host_guard(tmp_path, monkeypatch, 'email_draft', account, [], drive=drive)
+    capture_source(tmp_path, '<source@example.invalid>', ['<root>'])
     args={'account_id':account,'folder':'SharedArchive','subject':'Reply','to':'reader@example.invalid',
+          'reply_to_message_id':'<source@example.invalid>',
           'references':['<root>'],'conversation_id':'<root>','thread_id':'<root>'}
     refusal=guard(args)
     if refusal:
-        assert held and scene in ('account_paused','rfc_silent') and not writes
+        assert held and scene in ('account_paused','rfc_silent','folder_paused','global_folder') and not writes
     else:
         result=call('email_draft',args)
         assert result['ok'] is not held and writes == ([] if held else ['SharedArchive'])
@@ -235,7 +287,9 @@ def test_exchange_save_uses_same_resolved_folder_and_cannot_hide_its_other_name(
     if restricted:
         places.connect_place(drive,connector='email-presence',provider='email',account_id=account,
                              conversation_id=stable if restricted=='id' else restricted,state='silent')
+    capture_source(tmp_path, '<source@example.invalid>', ['<root>'])
     args={'account_id':account,'folder':stable if selected=='id' else selected,'to':'reader@example.invalid','subject':'Draft',
+          'reply_to_message_id':'<source@example.invalid>',
           'references':['<root>'],'conversation_id':'<root>','thread_id':'<root>'}
     prepared=call('email_draft',args)
     assert prepared['status']=='needs_arguments' and 'CreateItem' not in names(session)
@@ -287,17 +341,17 @@ def test_move_keeps_stable_ids_on_name_change_and_lists_labels_once_per_dispatch
     args={'account_id':account,'action':'move','folder':'From','destination':'To','uid':123,'uidvalidity':1,
           'remove_labels':['Label_3'], 'label_names':['invented']}
     first=call('email_mailbox',args)
-    assert reads==['/labels'] and not writes
+    assert reads.count('/labels') == reads.count('/messages/7b') == 1 and not writes
     retry=first['retry_arguments']
     assert retry['folder']=='Label_1' and set(retry['remove_labels'])=={'Label_1','Label_3'}
     rows[0]['name']='Renamed'
     rows.append({'id':'Label_4','name':'From'})
     second=call('email_mailbox',retry)
-    assert len(reads)==2 and not writes
+    assert reads.count('/labels') == reads.count('/messages/7b') == 2 and not writes
     final=second['retry_arguments']
     assert 'Renamed' in final['label_names'] and final['folder']=='Label_1'
     call('email_mailbox',final)
-    assert len(reads)==3
+    assert reads.count('/labels') == reads.count('/messages/7b') == 3
     assert writes==[('POST','/messages/7b/modify',{'addLabelIds':['Label_2'],'removeLabelIds':['Label_3','Label_1']})]
     with pytest.raises(ValueError,match='current Gmail label IDs'):
         call('email_mailbox',{**args,'action':'labels','add_labels':['Renamed']})
@@ -336,7 +390,9 @@ def test_omitted_gmail_draft_folder_keeps_both_supported_spellings(tmp_path,monk
     places.connect_place(drive,connector='email-presence',provider='email',account_id=account,state='active')
     places.connect_place(drive,connector='email-presence',provider='email',account_id=account,
                          conversation_id='Drafts',state='silent' if restricted else 'active')
-    args={'account_id':account,'subject':'Draft','to':'reader@example.invalid','references':['<r>'],'conversation_id':'<r>','thread_id':'<r>'}
+    capture_source(tmp_path, '<source@example.invalid>', ['<r>'])
+    args={'account_id':account,'subject':'Draft','to':'reader@example.invalid','reply_to_message_id':'<source@example.invalid>',
+          'references':['<r>'],'conversation_id':'<r>','thread_id':'<r>'}
     prepared=call('email_draft',args)
     assert prepared['status']=='needs_arguments' and not writes
     retry=prepared['retry_arguments']
@@ -346,14 +402,18 @@ def test_omitted_gmail_draft_folder_keeps_both_supported_spellings(tmp_path,monk
 
 
 def test_imap_mailbox_reports_the_folder_in_its_authentic_reference_before_store(tmp_path):
-    writes=[]
+    writes,opened=[],[]
     imap=MailClient({'EMAIL_USER':'owner@example.invalid'})
     class Box:
         def response(self,key): return key,[b'7' if key=='UIDVALIDITY' else b'8']
-        def uid(self,*command): writes.append(command);return 'OK',[b'done']
+        def uid(self,*command):
+            if command[0]=='FETCH':  # the peek of the selected message's identity headers
+                assert command[1]=='3' and 'BODY.PEEK[HEADER]' in command[2]
+                return 'OK',[(b'3 (BODY[HEADER.FIELDS (MESSAGE-ID)] {32}',b'Message-ID: <private@example.invalid>\r\n\r\n'),b')']
+            writes.append(command);return 'OK',[b'done']
     @contextmanager
     def open_box(folder,*,readonly=False):
-        writes.append((folder,readonly));yield Box()
+        opened.append((folder,readonly));yield Box()
     imap.imap=open_box
     account,call=tools_for(tmp_path,'imap',imap)
     ref=MailService.wrap_ref({'id':account},{'uid':3,'uidvalidity':7,'folder':'Private'})
@@ -363,8 +423,10 @@ def test_imap_mailbox_reports_the_folder_in_its_authentic_reference_before_store
     assert result['status']=='needs_arguments' and not writes
     retry=result['retry_arguments']
     assert retry['message_ref']==ref and published_targets('email_mailbox',retry)['folder_names']==['Private']
+    assert retry['message_conversation_id']==retry['message_thread_id']=='<private@example.invalid>'
     assert call('email_mailbox',retry)['ok']
-    assert writes==[('Private',False),('STORE','3','+FLAGS.SILENT',r'(\Seen)')]
+    assert opened==[('Private',False),('Private',False)]
+    assert writes==[('STORE','3','+FLAGS.SILENT',r'(\Seen)')]
 
 
 @pytest.fixture
@@ -383,9 +445,21 @@ def sole_gmail(tmp_path,monkeypatch):
         assert request.url.host == 'gmail.googleapis.com'
         path = request.url.path.removeprefix('/gmail/v1/users/me')
         if request.method == 'GET':
-            if path == '/messages/b':
-                assert dict(request.url.params) == {'format':'minimal','fields':'id,labelIds'}
-                return httpx.Response(200,json={'id':'b','labelIds':['Label_1']})
+            if path == '/messages/d1' and dict(request.url.params) == {'format':'raw'}:
+                return httpx.Response(200,json={'id':'d1','labelIds':['DRAFT'],'raw':raw_message({'Subject':'draft'})})
+            if path.startswith('/messages/') and dict(request.url.params) == {'format':'raw'}:
+                native = path.rsplit('/', 1)[-1]
+                return httpx.Response(200,json={'id':native,'labelIds':['Label_1'],
+                    'raw':raw_message({'Message-ID':f'<sole-{native}@example.invalid>'})})
+            if path.startswith('/messages/'):
+                assert dict(request.url.params) == {'format':'metadata','fields':'id,labelIds,payload/headers'}
+                native = path.rsplit('/', 1)[-1]
+                return httpx.Response(200,json={'id':native,'labelIds':['Label_1'],'payload':{'headers':[
+                    {'name':'Message-ID','value':f'<sole-{native}@example.invalid>'}]}})
+            if path == '/drafts/draft-one':
+                assert dict(request.url.params) == {'format':'metadata'}
+                return httpx.Response(200,json={'id':'draft-one','message':{'id':'d1','labelIds':['DRAFT'],
+                                                                            'payload':{'headers':[]}}})
             assert path == '/labels'
             return httpx.Response(200,json={'labels':[{'id':'Label_1','name':'Filed'}]})
         writes.append((request.method,path,json.loads(request.content) if request.content else None))

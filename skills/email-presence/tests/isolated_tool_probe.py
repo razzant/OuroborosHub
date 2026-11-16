@@ -30,7 +30,7 @@ def main():
     queue.init(drive)
     skills = temp_root / "skills"
     skill = skills / "email-presence"
-    shutil.copytree(source_skill, skill, ignore=shutil.ignore_patterns("__pycache__", ".ouroboros_env"))
+    shutil.copytree(source_skill, skill, ignore=shutil.ignore_patterns("__pycache__", ".ouroboros_env", ".review-evidence", ".git"))
     shutil.move(skill / "plugin.py", skill / "original_plugin.py")
     # Replace only network-facing client methods. Registration, store, MIME source
     # staging, context injection, JSON return and subprocess transport remain real.
@@ -58,6 +58,10 @@ class OfflineMailClient(original_plugin.MailClient):
             def response(self, name):
                 return "OK", [b"7"]
             def uid(self, *args):
+                if args[0] == "FETCH":
+                    assert args[1] == "4" and "BODY.PEEK[HEADER]" in args[2]
+                    return "OK", [(b"4 (BODY[HEADER.FIELDS (MESSAGE-ID)] {35}",
+                                   b"Message-ID: <imap-fixture@example.invalid>\\r\\n\\r\\n"), b")"]
                 assert args == ("STORE", "4", "+FLAGS.SILENT", "(" + chr(92) + "Seen)")
                 return "OK", [b""]
         yield Box()
@@ -132,6 +136,8 @@ def register(api):
         prepared_mark = invoke("email_mark_read", uid=4, uidvalidity=7)
         assert prepared_mark["status"] == "needs_arguments"
         assert prepared_mark["retry_arguments"]["folder_names"] == ["INBOX"]
+        assert (prepared_mark["retry_arguments"]["message_conversation_id"]
+                == prepared_mark["retry_arguments"]["message_thread_id"] == "<imap-fixture@example.invalid>")
         assert invoke("email_mark_read", **prepared_mark["retry_arguments"]) == {"ok": True, "uid": 4, "uidvalidity": 7, "account_id": "mail@example.invalid"}
         assert invoke("email_mailbox", action="list") == {"folders": [
             {"name": "INBOX", "selectable": True}, {"name": "Архив", "optional": None}], "account_id": "mail@example.invalid"}

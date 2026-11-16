@@ -245,7 +245,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(checkout['if'], condition)
         self.assertEqual(install['if'], condition)
         self.assertEqual(checkout['with']['repository'], 'razzant/ouroboros')
-        self.assertRegex(checkout['with']['ref'], r'^[a-f0-9]{40}$')
+        self.assertEqual(checkout['with']['ref'],
+                         "${{ matrix.suite == 'email-presence' && '04b6453ad0e5d4b6bb157b76e67ccac60fb0eff6' "
+                         "|| '9c4411457bdb752d9379f17a97cf171a22384402' }}")
         self.assertEqual(checkout['with']['persist-credentials'], 'false')
         python = next(step for step in hosted['steps'] if step.get('uses') == 'actions/setup-python@v5')
         self.assertEqual(python['with']['python-version'],
