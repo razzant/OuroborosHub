@@ -1,11 +1,11 @@
-# Signals are questions, not bans
+# Signals in context
 
-These are editorial diagnostics, not statistically validated classifiers. Sources and their evidence types are in [evidence.md](evidence.md), particularly S02, S04, S05, S08–S10. Frequency and context matter; no numerical threshold is prescribed.
+For text you write, the first two rows apply the house defaults in SKILL.md, which are a chosen style. In someone else's text, a dash, contrast or rhythm the author chose deliberately stays. The sources in [evidence.md](evidence.md), particularly S02, S04, S05 and S08–S10, inform the diagnostic questions and do not establish the defaults; S04 and S08 even document legitimate dashes and contrasts. No signal classifies authorship. Frequency and context matter; no numerical threshold is prescribed.
 
 | Signal | Inspect the actual defect | Keep when |
 |---|---|---|
-| 'Not just X, but Y'; 'No A. No B. Just C.' | Is X a real misconception or merely a straw premise invented to make Y dramatic? | The distinction is true, relevant and worth emphasizing. |
-| Dashes in nearly every sentence | Is the aside useful, or does punctuation conceal an unclear relation? | The interruption adds precision, rhythm or the author's voice. |
+| 'Not just X, but Y'; 'X, not Y'; 'No A. No B. Just C.' | Is the excluded alternative a real boundary or misconception, or a straw premise invented for drama? | The excluded alternative is information the reader needs, such as a real boundary or a misconception they actually hold; state it in one connected sentence. |
+| Long em dashes between clauses | Is the relation clear? Use a comma, colon, parentheses or a new sentence only where it keeps the same relation. | The output language's punctuation requires it, or a quotation, code or a format the user or brief requests contains it. |
 | Bold labels, headings, tables and bullets everywhere | Is structure replacing explanation or breaking a continuous thought? | Scanning, navigation, comparison or procedural order needs it. |
 | Uniform short fragments | Were 'because', 'although', 'if' or 'therefore' lost with the logical relation? | Urgency, dialogue, a punchline or projected slides calls for that rhythm. |
 | Triads and parallel phrases | Does each member add something distinct? | There really are three distinct points, or deliberate repetition helps listeners. |
@@ -23,6 +23,6 @@ These are editorial diagnostics, not statistically validated classifiers. Source
 
 ## Overcorrection to avoid
 
-Replacing 'delve' with 'explore' repairs no missing argument. Turning every sentence into a fragment loses logical relations. Adding invented measurements or personal memories creates false substance. Removing uncertainty can turn correlation into causation. Varying the name of one API component creates ambiguity. Stripping every dash or heading makes an anti-slop house style rather than better writing.
+Replacing 'delve' with 'explore' repairs no missing argument. Turning every sentence into a fragment loses logical relations. Adding invented measurements or personal memories creates false substance. Removing uncertainty can turn correlation into causation. Varying the name of one API component creates ambiguity. Replacing a dash with a semicolon fixes nothing if the relation between the thoughts remains unclear.
 
 When specificity is missing, use what is known, ask for the missing fact, or mark a placeholder. Do not fill it with a plausible number. A plain falsehood is still a falsehood.
