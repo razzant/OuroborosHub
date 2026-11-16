@@ -304,7 +304,8 @@ class WorkflowTests(unittest.TestCase):
         hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']
         node = next(step for step in hosted['steps'] if step.get('uses') == 'actions/setup-node@v4')
         install = next(step for step in hosted['steps'] if step.get('name') == 'Install the npm closure that chrome_browser pins')
-        self.assertEqual((node['if'], install['if']), ("matrix.suite == 'chrome-browser'",) * 2)
+        self.assertEqual(node['if'], "matrix.suite == 'chrome-browser' || matrix.suite == 'memory-atlas'")
+        self.assertEqual(install['if'], "matrix.suite == 'chrome-browser'")
         self.assertEqual(node['with'], {'node-version': '24'})
         self.assertEqual(ci_checks.SUITES['chrome-browser'], {'skills': ['chrome_browser'], 'tests': ['tests/chrome_browser']})
         steps = hosted['steps']
