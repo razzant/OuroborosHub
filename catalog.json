@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/59d843f749bd3c8cfdf79ba2e0f4e1040a7198a1",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/28d09893d3dec06fd7859a42951a10168cb4a79c",
   "schema_version": 1,
   "skills": [
     {
@@ -843,8 +843,8 @@
         },
         {
           "path": "SKILL.md",
-          "sha256": "1f9d874f59432be179353d28783301e25d6e1a2d98477c8da6dd4c927051c600",
-          "size": 25649
+          "sha256": "25eb05d042051377172c591d8fb4e0e02f9475010ef2993be2bf5d5224119759",
+          "size": 27570
         },
         {
           "path": "lib/connection.mjs",
@@ -873,8 +873,8 @@
         },
         {
           "path": "lib/pinned.mjs",
-          "sha256": "c1ab1b99d206265c488e824f2f5e352f954eb84814bd7ddaca64da3ac2666513",
-          "size": 8049
+          "sha256": "8b79814d919be3c58573b3b29a621101f86c494702ed302591631fd7fa5c6e46",
+          "size": 8125
         },
         {
           "path": "lib/server.mjs",
@@ -903,13 +903,13 @@
         },
         {
           "path": "scripts/server.mjs",
-          "sha256": "6d4ec72a82f59d5e5ee1caaba94aefc5cc9be39ff577e56e417c3ee17866d35c",
-          "size": 380
+          "sha256": "52852ebaca4eda17c2c1da57b857b241236b82aec5627b0b2b64729e21f7af3f",
+          "size": 430
         },
         {
           "path": "scripts/setup.mjs",
-          "sha256": "cc6ca1b56c929848b741dbcb2da06e6de5f4dc41c1b73c7794cfa15f11eb88b1",
-          "size": 3469
+          "sha256": "1abcf405479a31569e795c3b6836e02d9b3a87ef3a5adb6156750747e88b282e",
+          "size": 7591
         }
       ],
       "install_specs": [
@@ -922,7 +922,7 @@
       "slug": "chrome_browser",
       "title": "Chrome (shared tab)",
       "type": "script",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "when_to_use": "The owner wants work done in their own signed-in Chrome - in a tab they share and in background tabs for the same work - while they keep using the browser, and takes the page over by saying so when a login, a code or a decision is theirs."
     },
     {
