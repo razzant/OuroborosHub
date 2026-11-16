@@ -20,15 +20,23 @@ SETTINGS_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic"
 SCOPES = MAIL_SCOPES + (SETTINGS_SCOPE,)
 FULL_MAIL_SCOPE = "https://mail.google.com/"
 RETURN_PAGE = "/onboarding/static/provider-return.html"
+RESTART = " This sign-in attempt has ended; start Google sign-in again from Email accounts."
 
 
 def _request(method, url, *, http=None, **kwargs):
     request = http.request if http is not None else httpx.request
-    response = request(method, url, timeout=30, **kwargs)
+    try:
+        response = request(method, url, timeout=30, **kwargs)
+    except httpx.HTTPError as exc:
+        # Only the failure class: a transport message can carry addresses or request details.
+        raise AccountError(f"Could not reach Google ({type(exc).__name__}); check this computer's network or proxy") from None
     if response.status_code >= 400:
         # Provider bodies may echo credentials or private input. Do not expose them.
         raise AccountError(f"Google connection failed (HTTP {response.status_code}); check the client and granted permissions")
-    return response.json()
+    try:
+        return response.json()
+    except ValueError:
+        raise AccountError(f"Google returned an unreadable response (HTTP {response.status_code})") from None
 
 
 def begin(store, settings, *, origin, login_hint="", permanent_delete=False, manage_settings=True, http=None,
@@ -46,8 +54,12 @@ def begin(store, settings, *, origin, login_hint="", permanent_delete=False, man
             local = ipaddress.ip_address(parsed.hostname).is_loopback
         except ValueError:
             local = parsed.hostname == 'localhost'
-        probe = (http.request("HEAD", redirect, timeout=15) if http is not None else
-                 httpx.request("HEAD", redirect, timeout=15, trust_env=not local))
+        try:
+            probe = (http.request("HEAD", redirect, timeout=15) if http is not None else
+                     httpx.request("HEAD", redirect, timeout=15, trust_env=not local))
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
+            raise AccountError(f"Could not reach the Ouroboros address for the return ({type(exc).__name__}); "
+                               "correct that address and prepare the sign-in again") from None
         if probe.status_code not in {200, 401}:
             raise AccountError("This Ouroboros address does not serve the sign-in return page; update the host or correct its public address")
     verifier = secrets.token_urlsafe(48)
@@ -71,8 +83,18 @@ def finish(store, *, state, code="", error="", http=None):
     pending = store.consume_oauth(str(state))
     if error:
         return {"ok": False, "code": "authorization_declined", "error": "Google authorization was not granted; no account was connected."}
+    # The one-time state is spent: retrying this completion cannot succeed, whatever failed next.
+    try:
+        return _connect(store, pending, code, http)
+    except AccountError as exc:
+        raise AccountError(f"{exc}.{RESTART}" if not str(exc).endswith(".") else f"{exc}{RESTART}") from None
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise AccountError(f"Google returned an unexpected sign-in response ({type(exc).__name__}).{RESTART}") from None
+
+
+def _connect(store, pending, code, http):
     if not code:
-        raise AccountError("Google did not return an authorization code; start connection again")
+        raise AccountError("Google did not return an authorization code")
     body = {"client_id": pending["client_id"], "code": str(code), "code_verifier": pending["verifier"],
             "grant_type": "authorization_code", "redirect_uri": pending["redirect_uri"]}
     if pending["client_secret"]:

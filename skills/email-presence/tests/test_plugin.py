@@ -142,6 +142,9 @@ def test_read_tool_only_peeks_and_mark_read_is_its_own_write(tmp_path, monkeypat
                 def response(self, name):
                     return 'OK', [b'7']
                 def uid(self, *args):
+                    if args[0] == 'FETCH':  # the identity peek is a read, not part of the write under test
+                        return 'OK', [(b'4 (BODY[HEADER.FIELDS (MESSAGE-ID)] {35}',
+                                       b'Message-ID: <imap-fixture@example.invalid>\r\n\r\n'), b')']
                     calls.append(('uid', folder, args))
                     return 'OK', [b'']
             yield Box()
@@ -170,7 +173,8 @@ def test_read_tool_only_peeks_and_mark_read_is_its_own_write(tmp_path, monkeypat
     read, read_schema = api.tools["email_read"]
     mark, mark_schema = api.tools["email_mark_read"]
     assert set(read_schema["properties"]) == {"account_id", "message_ref", "uid", "uidvalidity", "folder"}
-    assert set(mark_schema["properties"]) == {*read_schema["properties"], "remove_labels", "folder_names"}
+    assert set(mark_schema["properties"]) == {*read_schema["properties"], "remove_labels", "folder_names", "label_names", "message_conversation_id",
+                                         "message_thread_id"}
     assert read_schema["required"] == mark_schema["required"] == []
     assert json.loads(read(uid=4, uidvalidity=7))["uid"] == 4
     assert calls == [("read", {"uid": 4, "uidvalidity": 7, "folder": "Work", "include_attachment_data": True})]

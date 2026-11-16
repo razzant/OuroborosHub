@@ -83,8 +83,8 @@ def test_registered_retry_projects_actual_recipients_and_preserves_rfc_policy(tm
                          state='paused' if kind == 'send' else 'active')
     rfc = places.connect_place(drive, connector='email-presence', provider='email', account_id=aid,
                                conversation_id=ROOT, state='active')
-    places.connect_place(drive, connector='email-presence', provider='email', account_id=aid,
-                         conversation_id=PAUSED, state='paused')
+    recipient = places.connect_place(drive, connector='email-presence', provider='email', account_id=aid,
+                                     conversation_id=PAUSED, state='paused')
     guard = host_guard(tmp_path, monkeypatch, tool, aid, [], drive=drive)
     # Even a fully identified account/thread/folder cannot bypass expansion. An explicit
     # self copy survives automatic self-exclusion; source Bcc must never be reconstructed.
@@ -92,6 +92,10 @@ def test_registered_retry_projects_actual_recipients_and_preserves_rfc_policy(tm
                 reply_all=True, reply_to_message_id=SOURCE, cc=[OWNER], bcc=[PAUSED, BLIND])
     if kind == 'draft':
         args['folder'] = 'Drafts'
+    else:
+        # The explicit Bcc already names a paused address, even before Reply All expands the source.
+        assert 'Paused' in guard(args) and not saved and store.status()['outbox'] == {}
+        places.edit_place(drive, recipient.place_id, 'set_state', author='owner', state='active')
     assert not guard(args)
     offer = call(args)
     assert offer['status'] == 'needs_arguments' and not saved and store.status()['outbox'] == {}
@@ -104,7 +108,12 @@ def test_registered_retry_projects_actual_recipients_and_preserves_rfc_policy(tm
     assert 'Paused' in guard(retry)
     assert not saved and store.status()['outbox'] == {}
     places.edit_place(drive, rfc.place_id, 'set_state', author='owner', state='active')
-    assert not guard(retry)  # A paused address-named Place is not a contact ban in this RFC.
+    if kind == 'send':
+        # Expanded Cc is an independent exact-address write group at dispatch.
+        places.edit_place(drive, recipient.place_id, 'set_state', author='owner', state='paused')
+        assert 'Paused' in guard(retry) and not saved and store.status()['outbox'] == {}
+        places.edit_place(drive, recipient.place_id, 'set_state', author='owner', state='active')
+    assert not guard(retry)
     assert call(retry)['ok']
     if kind == 'draft':
         assert len(saved) == 1 and not transmitted and store.status()['outbox'] == {}
@@ -115,6 +124,18 @@ def test_registered_retry_projects_actual_recipients_and_preserves_rfc_policy(tm
         assert (queued.to, queued.cc, queued.bcc) == ((PEER,), (PAUSED, OWNER), (BLIND,))
         wire = WireDelivery({'EMAIL_USER': OWNER})
         runtime = EmailRuntime(store, wire, adapter, account=aid, account_loader=lambda: account)
+        places.edit_place(drive, recipient.place_id, 'set_state', author='owner', state='paused')
+        # Owner decision 15 Nov: a Paused bare-address Place holds any delivery to it, Reply All included,
+        # while the paused mailbox does not hold this explicitly Active RFC conversation's other recipients.
+        with store._connect() as db:
+            db.execute("UPDATE outbox SET available_at=0 WHERE state='retry'")
+        runtime.process_outbox()
+        assert not transmitted and store.receipt(retry['request_id'])['state'] == 'held'
+        assert store.receipt(retry['request_id'])['last_error'].endswith('is paused')
+        paused = next(p for p in places.load_places(drive) if p.conversation_id == PAUSED)
+        places.edit_place(drive, paused.place_id, 'set_state', author='owner', state='active')
+        with store._connect() as db:
+            db.execute("UPDATE outbox SET available_at=0 WHERE state='retry'")
         assert runtime.process_outbox() and len(transmitted) == 1
         assert wire.sent[0][1] == [PEER, PAUSED, OWNER, BLIND]
         message = transmitted[0]
@@ -199,7 +220,9 @@ def test_reply_to_self_keeps_a_blank_draft_and_never_promotes_bcc_into_to(tmp_pa
 
 @pytest.mark.parametrize('stamp', [None, 'not-a-fingerprint'])
 def test_mail_without_reply_all_provenance_replays_explicitly_without_disclosing_old_recipients(tmp_path, stamp):
-    account, service, store, calls = context(tmp_path, None)
+    # A new reply verifies its source in this mailbox; replays of the accepted request never read it again.
+    source = {'message_id': SOURCE, 'references': [ROOT], 'sender': PEER}
+    account, service, store, calls = context(tmp_path, None if stamp is None else source)
     call = registered(service, 'email_send')
     explicit = dict(account_id=account['id'], request_id='old', reply_to_message_id=SOURCE,
                     references=[ROOT], thread_id=ROOT, conversation_id=ROOT, subject='Answer', body='Body',
@@ -211,6 +234,7 @@ def test_mail_without_reply_all_provenance_replays_explicitly_without_disclosing
         # Replay metadata never selects the audience or blocks a new explicit send.
         assert call({**explicit, 'reply_all_fingerprint': stamp})['ok']
     assert 'reply_all_fingerprint' not in store.queued_message('old').reporting
+    calls.clear()
     implicit = call({**explicit, 'reply_all': True, 'to': '', 'cc': [], 'bcc': []})
     assert not implicit['ok'] and implicit['code'] == 'reply_all_replay_unverifiable'
     assert all(addr not in json.dumps(implicit) for addr in (PEER, PAUSED, BLIND))

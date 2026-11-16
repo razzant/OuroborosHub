@@ -98,7 +98,7 @@ def test_prepared_reply_reaches_real_author_guard_without_reference_cartesian_pr
     manifest = yaml.safe_load(Path(__file__).resolve().parents[1].joinpath('SKILL.md').read_text(encoding='utf-8').split('---', 2)[1])
     name = extension_surface_name('email-presence', 'email_send')
     descriptor = {'skill': 'email-presence', 'extension_generation': 'mail-test'}
-    bundle = registry._ExtensionRegistrations(generation_digest='mail-test', loaded_skill=SimpleNamespace(manifest=SimpleNamespace(raw_extra=manifest)))
+    bundle = registry._ExtensionRegistrations(generation_digest='mail-test', loaded_skill=SimpleNamespace(manifest=SimpleNamespace(raw_extra=manifest, plugin_api={"version": manifest["plugin_api"]})))
     monkeypatch.setitem(registry._extensions, 'email-presence', bundle)
     monkeypatch.setitem(registry._tools, name, descriptor)
     drive = tmp_path / 'host'
@@ -152,7 +152,8 @@ def test_omitted_sole_account_prepares_before_staging_or_effect_even_with_thread
     monkeypatch.setattr(EmailStore, 'stage_outbound_attachments', stage)
     response = getattr(service, operation)(**args)
     assert response['status'] == 'needs_arguments' and response['code'] == 'canonical_account_required'
-    assert staged == [] and calls == [] and store.status()['outbox'] == {}
+    # A threaded reply verifies its source in this mailbox first (a provider read, never an effect).
+    assert staged == [] and calls == ([('read', '<incoming>')] if threaded else []) and store.status()['outbox'] == {}
     retry = response['retry_arguments']
     assert retry['account_id'] == account['id']
     for key, value in args.items():

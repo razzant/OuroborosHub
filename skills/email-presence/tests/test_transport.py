@@ -177,7 +177,7 @@ def test_uidvalidity_reset_deduplicates_and_keeps_new_arrivals(rig):
     box.add(3, "<later>", arrived=clock[0] + 5)
     assert runtime.poll() == 1
     assert store.status()["inbox"] == {"pending": 2}
-    with pytest.raises(ValueError, match="UIDVALIDITY changed"):
+    with pytest.raises(ValueError, match="Folder 'INBOX' reports UIDVALIDITY 8, but this request names 7"):
         client.read(uid=1, uidvalidity=box.validity - 1)
 
 
