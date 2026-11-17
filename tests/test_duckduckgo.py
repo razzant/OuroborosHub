@@ -66,8 +66,8 @@ class DuckDuckGoRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"], "invalid JSON body")
         self.assertEqual(self.searched, [])
 
-    async def test_non_finite_max_results_is_400_before_search(self):
-        for literal in ("1e400", "-1e400", "Infinity", "-Infinity", "NaN"):
+    async def test_non_integer_max_results_is_400_before_search(self):
+        for literal in ("1e400", "-1e400", "Infinity", "-Infinity", "NaN", "true", "false", "3.9", "[]", "{}"):
             with self.subTest(literal=literal):
                 response = await self.client.post("/search", content='{"query": "x", "max_results": %s}' % literal,
                                                   headers={"Content-Type": "application/json"})
@@ -92,7 +92,11 @@ class DuckDuckGoRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["results"][0]["title"], "Fixture")
         response = await self.client.post("/search", json={"query": "x" * 400})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.searched, [("ouroboros", 3), ("x" * 400, 5)])
+        for fields in ({"max_results": 7.0}, {"max_results": " 12 "}, {"max_results": ""}, {"max_results": None}):
+            with self.subTest(fields=fields):
+                response = await self.client.post("/search", json={"query": "q", **fields})
+                self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.searched, [("ouroboros", 3), ("x" * 400, 5), ("q", 7), ("q", 12), ("q", 5), ("q", 5)])
 
 
 if __name__ == "__main__":

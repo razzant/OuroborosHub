@@ -86,12 +86,16 @@ async def _route_search(request: Request) -> JSONResponse:
         return JSONResponse({"error": "query too long (max 400 chars)"}, status_code=400)
 
     raw_max_results = body.get("max_results")
-    if raw_max_results is None or str(raw_max_results).strip() == "":
+    if isinstance(raw_max_results, float) and raw_max_results.is_integer():
+        raw_max_results = int(raw_max_results)
+    if raw_max_results is None or (isinstance(raw_max_results, str) and not raw_max_results.strip()):
         max_results = _DEFAULT_RESULTS
+    elif isinstance(raw_max_results, bool) or not isinstance(raw_max_results, (str, int)):
+        return JSONResponse({"error": "max_results must be an integer"}, status_code=400)
     else:
         try:
             max_results = int(raw_max_results)
-        except (TypeError, ValueError, OverflowError):
+        except ValueError:
             return JSONResponse({"error": "max_results must be an integer"}, status_code=400)
 
     payload = await asyncio.to_thread(_search, query, max_results)
