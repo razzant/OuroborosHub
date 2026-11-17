@@ -243,8 +243,11 @@ def test_stale_leases_from_a_stopped_runtime_are_released_at_once(tmp_path):
     assert again_work.event_id == work.event_id and again_work.attempts == work.attempts + 1
     assert again_outbox.delivery_id == "send-1" and again_outbox.attempts == outbox.attempts + 1
     # The payload survives the release untouched; send checkpoints, reports
-    # and receipts are pinned by the next test.
-    assert again_outbox.payload == outbox.payload and again_work.event == work.event
+    # and receipts are pinned by the next test. Each claim of a send row moves
+    # only the attempt count this version accounts for (0.12.1).
+    assert {**again_outbox.payload, "_attempts_marked": outbox.payload["_attempts_marked"]} == outbox.payload
+    assert again_outbox.payload["_attempts_marked"] == again_outbox.attempts
+    assert again_work.event == work.event
     # Rows that were not leased keep their state and their backoff.
     assert store.claim_outbox() is None
     snapshot = store.status_snapshot()

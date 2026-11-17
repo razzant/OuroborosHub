@@ -1534,14 +1534,22 @@ def test_hold_gives_its_attempt_back_and_the_stamp_follows_the_count(tmp_path):
         value.submitter.hold = ""
         assert await value.process_one_outbox()
         assert value.store.delivery_receipt(delivery)["state"] == "delivered" and len(provider_reactions(provider)) == 1
-        # Rows without a stamp keep their payload byte for byte through a hold.
-        value.store.enqueue_outbox("telegram-send:x", {"kind": "message", "chat_id": "56", "text": "x"})
+        # Rows without a stamp, such as moderation, keep their payload byte for byte through a hold.
+        value.store.enqueue_outbox("telegram-moderate:x", {"kind": "moderation", "chat_id": "56", "action": "delete_message",
+                                                           "parameters": {"chat_id": "56", "message_id": 7}})
         lease = value.store.claim_outbox(lease_sec=120)
         with sqlite3.connect(value.store.path) as db:
             before = db.execute("SELECT payload_json FROM outbox WHERE delivery_id=?", (lease.delivery_id,)).fetchone()
             value.store.hold_outbox(lease.delivery_id, HELD)
             after = db.execute("SELECT payload_json, attempts FROM outbox WHERE delivery_id=?", (lease.delivery_id,)).fetchone()
-        assert after == (before[0], 0)
+        assert after == (before[0], 0) and "_attempts_marked" not in before[0]
+        # A send row's stamp follows its count through a hold, as a reaction's does (0.12.1).
+        value.store.enqueue_outbox("telegram-send:x", {"kind": "message", "chat_id": "57", "text": "x"})
+        lease = value.store.claim_outbox(lease_sec=120)
+        assert lease.payload["_attempts_marked"] == lease.attempts == 1
+        value.store.hold_outbox(lease.delivery_id, HELD)
+        assert value.store.outbox_payload(lease.delivery_id)["_attempts_marked"] == 0
+        assert value.store.delivery_receipt(lease.delivery_id)["attempts"] == 0
     asyncio.run(run())
 
 

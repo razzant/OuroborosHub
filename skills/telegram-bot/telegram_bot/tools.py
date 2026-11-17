@@ -6,6 +6,7 @@ import pathlib
 import re
 from typing import Any
 
+from . import outbox_files
 from .api import CLOUD_PHOTO_UPLOAD_LIMIT, CLOUD_UPLOAD_LIMIT, MEDIA_METHODS
 from .custody import CustodyStore
 from .delivery import tool_origin
@@ -31,12 +32,16 @@ class SendRefused(ValueError):
         return {"ok": False, "code": self.code, "error": str(self), **self.facts}
 
 
+def _upload_limit(kind: str) -> int:
+    return CLOUD_PHOTO_UPLOAD_LIMIT if kind == "photo" else CLOUD_UPLOAD_LIMIT
+
+
 def upload_path(kind: str, file_path: Any) -> str:
     """An existing file within the cloud Bot API's upload limit for ``kind``; refused, never cut."""
     path = pathlib.Path(str(file_path or "")).expanduser()
     if not path.is_file():
         raise SendRefused("file_missing", "file_path must name an existing file")
-    size, limit = path.stat().st_size, CLOUD_PHOTO_UPLOAD_LIMIT if kind == "photo" else CLOUD_UPLOAD_LIMIT
+    size, limit = path.stat().st_size, _upload_limit(kind)
     if size > limit:
         raise SendRefused("file_too_large", f"{path.name} is {size:,} bytes; the Bot API accepts a {kind} of at most "
                           f"{limit // (1024 * 1024)} MB from a bot. Not queued.", size_bytes=size, limit_bytes=limit)
@@ -46,6 +51,49 @@ def upload_path(kind: str, file_path: Any) -> str:
     return str(path.resolve())
 
 
+def queue_file(kind: str, source: str, state_dir: Any) -> dict[str, Any]:
+    """Keep a copy of the bytes of ``source`` now: the row sends that copy, never this path.
+
+    ``source`` is what ``upload_path`` returned for ``kind``: the name the caller gave was checked there, once, and
+    this is the file it resolves to. The copy holds the upload limit on the bytes it reads. Returns the row's
+    ``_frozen`` record ({path, sha256, size, source}); ``path`` keeps the resolved file's name, which Telegram shows
+    for a document, as 0.12.0 sent it. Refused, with nothing kept, when the file cannot be copied.
+    """
+    limit = _upload_limit(kind)
+    try:
+        return outbox_files.keep(pathlib.Path(source), state_dir, limit)
+    except outbox_files.CopyTooLarge as exc:
+        raise SendRefused("file_too_large", f"{exc}; the Bot API accepts a {kind} of at most "
+                          f"{limit // (1024 * 1024)} MB from a bot. Not queued.", limit_bytes=limit) from exc
+    except OSError as exc:
+        raise SendRefused("file_copy_failed", f"{pathlib.Path(source).name} could not be copied for sending "
+                          f"({type(exc).__name__}: {exc.strerror or exc}). Not queued.") from exc
+
+
+def discard_files(records: list[dict[str, Any]], state_dir: Any) -> None:
+    """Remove the copies this call kept when it queued nothing (refused, or its request_id was already queued)."""
+    outbox_files.discard(records, state_dir)
+
+
+def discard_unqueued(records: list[dict[str, Any]], state_dir: Any, store: Any, delivery_id: str) -> None:
+    """After an enqueue that raised, remove this call's copies only if the row cannot name them.
+
+    SQLite may have committed the row before the error reached this call, and then the copy is that row's only bytes.
+    So they are removed only when no store was opened, or the store, read back, has no row ``delivery_id`` naming
+    them; they stay when the row names them or the store cannot be read to say.
+    """
+    if not records:
+        return
+    if store is not None:
+        try:
+            named = {str(record["path"]) for record in outbox_files.records(store.outbox_payload(delivery_id))}
+        except Exception:
+            return  # whether the row was queued is unknown: its only copy stays
+        if any(str(record.get("path")) in named for record in records):
+            return
+    outbox_files.discard(records, state_dir)
+
+
 def frozen_caption(caption: str, markdown: bool) -> dict[str, str]:
     try:
         return prepare_caption(caption, markdown=markdown)
@@ -53,8 +101,13 @@ def frozen_caption(caption: str, markdown: bool) -> dict[str, str]:
         raise SendRefused("caption_too_long", str(exc)) from exc
 
 
-def album_items(items: Any, caption: str, markdown: bool) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The album as queued and as it will be sent, after Telegram's composition rules (sendMediaGroup)."""
+def album_items(items: Any, caption: str, markdown: bool,
+                state_dir: Any = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """The album as queued, as it will be sent, after Telegram's composition rules (sendMediaGroup), and the copies.
+
+    With ``state_dir`` each file is copied once every check has passed, and both lists name the copies; without it
+    the files are only checked and no copy is kept.
+    """
     if not isinstance(items, list) or not 2 <= len(items) <= 10:
         raise SendRefused("album_size", "an album has 2 to 10 items. Not queued.")
     if any(not isinstance(item, dict) for item in items):
@@ -71,9 +124,19 @@ def album_items(items: Any, caption: str, markdown: bool) -> tuple[list[dict[str
     if caption and any(captions):
         raise SendRefused("album_caption", "give the album one caption, or captions on its items, not both. Not queued.")
     captions[0] = captions[0] or caption
-    queued = [{"kind": kind, "file_path": upload_path(kind, item.get("file_path")), "caption": text}
-              for kind, item, text in zip(kinds, items, captions)]
-    return queued, [{**item, "caption": frozen_caption(item["caption"], markdown)} for item in queued]
+    paths = [upload_path(kind, item.get("file_path")) for kind, item in zip(kinds, items)]
+    rendered = [frozen_caption(text, markdown) for text in captions]
+    kept: list[dict[str, Any]] = []
+    if state_dir is not None:
+        try:
+            for kind, path in zip(kinds, paths):
+                kept.append(queue_file(kind, path, state_dir))
+        except BaseException:
+            discard_files(kept, state_dir)
+            raise
+        paths = [record["path"] for record in kept]
+    queued = [{"kind": kind, "file_path": path, "caption": text} for kind, path, text in zip(kinds, paths, captions)]
+    return queued, [{**item, "caption": frozen} for item, frozen in zip(queued, rendered)], kept
 
 
 TELEGRAM_TYPING_SCHEMA = {
