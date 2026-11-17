@@ -37,8 +37,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "441086ebc944df4d1c1ccda2521fe06ec7cef2302505649187b9fb47d08e2e0a",
-          "size": 5826
+          "sha256": "fa6e1aabfe8349823e69e3ad3f0d1725265b6e62f9d7562ec0f6a9cff3b72819",
+          "size": 6053
         },
         {
           "path": "lib/client.py",
@@ -52,7 +52,7 @@
         },
         {
           "path": "scripts/a2a_daemon.py",
-          "sha256": "ba104be2d5838da37b6cf5ac9fe17718f8157bf7f57c2e862781e8b3a955bbfc",
+          "sha256": "f5894b400281796829f0ee7321f520adb77d6a97864a039edc4fa5c17cf80832",
           "size": 66465
         },
         {
@@ -115,7 +115,7 @@
       "name": "a2a",
       "slug": "a2a",
       "type": "extension",
-      "version": "1.5.2",
+      "version": "1.5.3",
       "when_to_use": "User asks to communicate with another A2A-compatible agent, discover an agent card, send an A2A message, check A2A task status, or expose this Ouroboros instance as an A2A peer."
     },
     {
