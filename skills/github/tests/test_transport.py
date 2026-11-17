@@ -107,7 +107,7 @@ class FakeProvider:
         assert expected == WRITER["id"]
         return WRITER
 
-    def actor(self, raw):
+    def actor(self, raw, strict=False):
         user = raw.get("user") or {}
         return {"platform": "github", "platform_actor_id": str(user["id"]), "is_bot": user.get("type") == "Bot"} if "id" in user else {"platform": "github", "attribution": "unknown"}
 

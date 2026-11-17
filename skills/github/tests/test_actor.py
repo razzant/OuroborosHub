@@ -55,7 +55,9 @@ class ActorTests(unittest.TestCase):
                 actor = self.actor("Bot")
                 self.assertEqual(actor.get("attribution"), "unknown")
                 self.assertNotIn("platform_actor_id", actor)
-                self.assertNotIn("is_bot", actor)
+                # GraphQL still says Bot: an unresolved number never turns a bot into a person (0.2.0).
+                self.assertIs(actor.get("is_bot"), True)
+                self.assertEqual(actor["username"], "fixture-app[bot]")
                 self.assertFalse(self.provider.users)
                 self.responses["/users/fixture-app[bot]"] = (200, self.bot, {})
                 self.assertEqual(self.actor("Bot")["platform_actor_id"], "901")
@@ -66,6 +68,15 @@ class ActorTests(unittest.TestCase):
         self.assertEqual(self.provider.actor({"author": {"login": "fixture-app"}})["platform_actor_id"], "903")
         self.assertEqual(self.actor("User")["platform_actor_id"], "903")
         self.assertNotIn("/users/fixture-app%5Bbot%5D%5Bbot%5D", [r[1] for r in self.server.requests])
+
+    def test_GraphQL_databaseId_names_the_account_without_a_login_lookup(self):
+        for kind, ident, name in (("User", 903, "fixture-app"), ("Bot", 901, "fixture-app[bot]")):
+            actor = self.provider.actor({"author": {"login": "fixture-app", "__typename": kind, "databaseId": ident}})
+            self.assertEqual((actor["platform_actor_id"], actor["username"], actor["is_bot"]), (str(ident), name, kind == "Bot"))
+        self.assertEqual(self.server.requests, [])
+        # An account with no login and no number stays unknown, and is no bot unless GitHub says Bot.
+        self.assertNotIn("is_bot", self.provider.actor({"author": {"login": "", "__typename": "User"}}))
+        self.assertEqual(self.provider.actor({}), {"platform": "github", "attribution": "unknown"})
 
     def test_REST_numeric_actors_and_PAT_identity_are_preserved_without_actor_lookup(self):
         for user in (self.human, self.bot):

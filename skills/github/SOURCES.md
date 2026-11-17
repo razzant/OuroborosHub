@@ -78,6 +78,47 @@ server-to-Main session, model followup or browser rendering.
 support, not an assertion that a writable PAT is intrinsically read-only. The
 manifest declaration is retained; the second notifications client is GET-only.
 
+## Attention repair sources (2026-11-17)
+
+- [Public GraphQL schema](https://docs.github.com/public/fpt/schema.docs.graphql)
+  (SHA-256 `d928ebbb2d08cba348c0c5713ab3c8756a39e838324089ff66fcddf1bab2c496`): `databaseId` lives on `User`, `Bot`,
+  `Mannequin` and `Organization`, not on `Actor`; `UserContentEdit` has `editedAt`,
+  `editor` and `deletedAt`; `Comment.userContentEdits(first:)` and `lastEditedAt`;
+  `timelineItems(since:, last:, before:, itemTypes:)` with `PageInfo.startCursor`, whose
+  Issue item types lack review and merge events; every timeline event has `id: ID!`
+  (its identity; `Actor` has none); `Discussion` and `DiscussionComment` have
+  `lastEditedAt`; `ReviewRequestedEvent.requestedReviewer` includes `Team`,
+  `AssignedEvent.assignee` does not. Every document the connector builds was captured
+  from its own call path and validated against that schema (graphql-core 3.2.6, 13
+  documents on 2026-11-17, again after the edit window became `first: 50`); six
+  mutated negative controls were refused.
+- [REST OpenAPI description](https://github.com/github/rest-api-description)
+  (`api.github.com.json`, SHA-256 `f7a3de68869181d34b232d88840d31f8157ade45cad1746eaab90cd3c801b31c`): an issue row for a pull
+  request carries `draft` and `pull_request.merged_at`, so the Issues feed alone
+  observes a pull request's state; reviews have `submitted_at` and no `updated_at`.
+- Three public reads on 2026-11-17 (no mutation; one object each, not a
+  qualification of every installation): `userContentEdits` lists edits newest
+  first (`first: 2` returned the two newest with `hasNextPage`, `last: 2` the two
+  oldest with `hasPreviousPage`), so the connector asks `first: 50` and treats
+  `hasNextPage` as older edits outside its window; a REST issue row of a merged
+  pull request has `state`, `closed_at` and nested `pull_request.merged_at` and no
+  top-level `closed`, `merged` or `merged_at` (`closed` is GraphQL `Discussion`'s);
+  one Bot's GraphQL `databaseId` equalled its REST `[bot]` user id. App-mode
+  delivery through that id is still not live-qualified. A fourth read the same
+  day: `timelineItems` lists events oldest first (`last: 2` returned the two
+  newest with `hasPreviousPage`), so `last: 100` is the newest window there.
+- The same public schema on a Discussion's words: `lastEditedAt` ("The moment the
+  editor made the last edit"), `editor` ("The actor who edited the comment") and
+  `userContentEdits` ("A list of edits to this content") are its `Comment` fields
+  and describe its text; `title` has no edit field and a Discussion no timeline
+  (`RenamedTitleSubject` is `Issue | PullRequest`);
+  `updatedAt` is "the date and time when the object was last updated". Nothing
+  there says a title change sets `lastEditedAt`, so the connector takes a
+  Discussion's whole words for its author's only while `updatedAt` equals
+  `createdAt`. Not read live: whether GitHub ever stamps a new Discussion's
+  `updatedAt` later than its `createdAt`; if it does, that Discussion arrives with
+  an unknown origin (attention unchanged), never as wrongly proven.
+
 ## Authentication and lock sources (2026-10-23)
 
 - [App JWT claims](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app):

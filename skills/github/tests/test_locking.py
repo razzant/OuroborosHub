@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -147,6 +148,8 @@ class LockTests(unittest.TestCase):
             store = Store(self.tmp.name, readonly=True)
             try:
                 ready = store.meta("runtime", {}).get("state") == "disabled"
+            except sqlite3.OperationalError:
+                ready = False  # the file exists before the companion commits its schema
             finally:
                 store.close()
             if ready:

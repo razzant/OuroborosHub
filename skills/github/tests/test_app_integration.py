@@ -214,7 +214,7 @@ class IntegrationTests(unittest.TestCase):
         unknown = self.provider.actor(self.parent)
         self.assertEqual(unknown["attribution"], "unknown")
         self.assertNotIn("platform_actor_id", unknown)
-        self.assertNotIn("is_bot", unknown)
+        self.assertIs(unknown["is_bot"], True)  # its type is known even though its number is not
 
     def test_bare_Bot_discussion_lookup_failure_recovers_without_repost(self):
         self.prepare_discussion()

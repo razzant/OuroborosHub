@@ -150,18 +150,23 @@ before any Active trial. The payload never changes a place to Active.
    change, and an older host's Connect creates Active. For public Notifications
    outside the selected repositories, also connect **Account-wide notifications**
    (a **blank** conversation ID: the host resolves that blank scope to `*`; do not
-   enter a literal `*` as the stored conversation ID), keep it **Silent** and add
-   `any_message` ("every message") to its wakes, the only fact notifications carry.
+   enter a literal `*` as the stored conversation ID) and keep it **Silent**. On a
+   host advertising `presence_change_context`, choose `mention`, `assigned` and
+   `review_requested`: each proven message or action arrives once as its own event;
+   a notification update itself is background evidence. An older host receives
+   `any_message` alone, which wakes on every notification.
    The connector never creates or edits
    a place. An absent binding retains a visible admission gap; a notification
    never selects a repository for external writes. No place mode is stored here.
 4. Choose wakes, notes and model in Places. The connector suggests `new_issue`,
    `new_pull_request`, `mention`, `my_thread`, `review_requested` and `assigned`;
-   these facts are never disguised as mentions. `any_message` is an explicit choice
-   that adds unaddressed conversations and new Discussions. A merge, close, reopen
-   or edit carries `any_message` plus only a newly added mention, assignee or
-   reviewer, so without `any_message` it waits for the next own wake. Bots still
-   require `from_bot` explicitly. A blank model inherits the
+   these facts are never disguised as mentions. "New discussion"
+   (`signal.new_discussion`) is an opt-in choice. `any_message` is an explicit choice
+   that adds every other conversation and change, except that a host advertising
+   `presence_change_context` keeps a change whose actor GitHub's records do not
+   establish in the background. A merge, close, reopen or edit carries only a newly
+   added mention, assignee or reviewer (older hosts also `any_message`); without such a fact it
+   waits for the next own wake. Bots still require `from_bot` explicitly. A blank model inherits the
    consciousness model slot; verify that inheritance if the desired model is Main.
 5. Enable collection in the configuration. Inspect baseline progress, per-stream
    completions/gaps, waiting work and receipts. Use a short Silent trial and a
@@ -194,10 +199,15 @@ Settings are strict: a damaged file is an error, not an empty configuration.
 Only the host-provided `state_dir` contains `settings.json`, `transport.sqlite3`
 and the companion lock. The payload directory remains immutable. Configuration
 changes are noticed by the companion; outstanding reads finish with sending
-stopped before reconstruction. Secret rotation requires a controlled companion
-restart because its existing environment is not refreshed. No restart is performed
-by this payload. If the second reader fails identity verification, repository
-collection remains available and a visible gap requires credential repair/restart.
+stopped before reconstruction. When Settings remove a Notifications reader, its
+notification observation still waiting for a read goes out at its next retry without
+a read, as if its retries had run out: `notification_recipient_removed` lists any
+reads still open, each also an explicit gap. Secret rotation requires a
+controlled companion restart because its existing environment is not refreshed. No restart is performed
+by this payload. If the second reader's credential is missing or fails identity
+verification, repository collection and its waiting notifications go on, its own feed
+and discovery wait (`notification_reader_unavailable` when missing), and a visible
+gap requires credential repair/restart.
 
 ## Collection guarantees and limits
 
@@ -208,8 +218,8 @@ Same-origin repository renames resolve through numeric identity checks; an issue
 or Discussion transferred into another repository fails the pre-send target check.
 
 Each Issues/PR, general comment, inline comment and Discussion stream has its own
-persisted work queue. PR work includes details, submitted reviews and requested
-users/teams. REST `Link` and independent GraphQL `pageInfo` traversal have no
+persisted work queue. A pull request is one object observed through the Issues feed;
+its work adds submitted reviews and requested users/teams. REST `Link` and independent GraphQL `pageInfo` traversal have no
 content cap. Every Discussion parent is revisited, including old ones. Page
 observations and the next checkpoint commit together. Equal timestamps are not
 used as a stopping rule. Actual content A→B→A creates three observation revisions;
@@ -251,9 +261,13 @@ Notifications preserve the exact recipient, reason and source. Selected
 repositories get prompt feed rescans. For outside-selected **public** subjects,
 a separate durable job verifies repository identity/visibility and current
 Issue/PR/Discussion context, then submits a real notification observation through
-the ordinary place intake. It uses `any_message`: sticky reasons are never fresh
-mentions/review requests/assignments. Both identities remain separately
-attributed. The discovery event is read-only even if a place is mistakenly
+the ordinary place intake. A sticky reason is never a fresh mention, review request
+or assignment. On a capable host, inside the window since that reader's previous
+observation, new words naming a watched account, words an edit added (attributed to
+that edit) and its own timeline events prove one, each one event keyed by GitHub's
+node id whichever reader saw it; older hosts get `any_message`. Both readers'
+notifications stay as separate evidence. A proof reads at most five timeline pages
+and one edit record per mentioning comment whose own fields show a change. The discovery event is read-only even if a place is mistakenly
 Active; neither final output nor the explicit tools can send from it. Main
 reports/questions use the shared host tools under the owner-created Silent
 place. Missing places, unsupported subject types and private/unproven visibility
@@ -271,11 +285,42 @@ reference links and indented code can differ. `my_thread` uses actually read
 history with timestamps/numeric users, including browser posts; explicit parent
 links prove `reply_to_me`. Missing history remains a gap, not proof of absence.
 Review teams are retained but do not prove a watched member was addressed.
-Edits retain the original author separately; an unidentified editor is unknown.
+Edits retain the original author separately. On a host with `presence_change_context`
+one GraphQL read per changed object attributes the change to the account GitHub's
+edit and timeline records name for every observed change since the previous
+snapshot; several accounts, a missing record or an unknown number stay unknown.
+Words their first author edits are that account's own only while the object's
+complete edit record (its newest 50 edits) names no other editor and no earlier
+observed change of that text was another account's or unestablished; otherwise the
+text is marked as not theirs alone. An issue or pull request retained before its
+title was ever judged (older than the first scan, or kept by an earlier release)
+has every rename since it was opened read once, with its author's first revision.
+Older hosts receive every revision with an unknown actor (0.1.6). A read that
+decides attention or whose words they are and fails transiently is retried before
+the event is first offered (`enriching` in status; at most six attempts or 30 minutes, three for a
+record GitHub has not yet returned); later new words are not held. An outside comment
+that says it changed while its edit record shows nothing is never its author's words
+alone. In a selected repository a REST comment's later update time with a record that
+says "never edited" is read again, then GitHub's record stands; an object that itself
+reports an edit its record never shows stays unproven.
 `User` accounts with agent-like names do not become `Bot` facts.
 
 Snapshot polling cannot recover content created and deleted between polls, every
-intermediate edit, unobserved assignment changes or historical actor attribution.
+intermediate edit or unobserved assignment changes; a change GitHub keeps no
+record for has no attributed actor (a closed Discussion; a reviewer who leaves the
+requested list by submitting their review, reported as the list and not reread).
+Words first observed after they were written are their author's own when nobody
+else can have changed them (no later update time; a GraphQL comment never edited; an
+inline comment last touched when its review was published) or when GitHub's edit
+record, one read per such object, names that author alone. Otherwise they arrive
+as new words under their author with an unknown origin. A Discussion is its
+author's own only while its update time is its creation time: nothing records who
+set its title, and "never edited" speaks for its text alone, so any later one
+arrives with that unknown origin (`title_record_unavailable`), as does its
+author's first revision of one retained before this was judged; the mark stays
+with that Discussion. Not knowable:
+edits older than a record's newest 50. A Bot, or
+an author GitHub gives no number, is not read: no person's words are at stake.
 Deletion is not inferred from 404; the diagnostic is `no_longer_visible`.
 
 ## Delivery and recovery
@@ -335,6 +380,28 @@ Routine status is read-only and paginated (100 rows
 per list); use `status_offset`/`next_offsets` to see every retained obligation.
 Exact event/delivery lookup returns the complete retained evidence. State/receipt backups must be taken as a consistent
 SQLite backup by the eventual operator; deleting the database destroys custody.
+
+## Returning to an earlier release
+
+0.1.6 reads neither an `enriching` event nor an `enrich` job: left as they are, a
+waiting event is never offered and its job fails every minute. Before installing
+it over this state:
+
+1. Stop the companion (disable the skill in the host); collection state stays.
+2. Run, with the host's state directory for this skill:
+   `OUROBOROS_SKILL_STATE_DIR=<state_dir> python3 scripts/companion.py --release-waiting`.
+   It takes the companion lock (and refuses while a companion runs), reads nothing
+   from GitHub, and completes every waiting event once: what its retries already
+   read stays, each read still open becomes an explicit gap beside
+   `released_before_retries_finished`. It prints the released event ids.
+3. Continue only when it exits 0 with `still_enriching: 0` and
+   `enrich_jobs_pending: 0`.
+
+`undelivered_change_observations` counts events in the 0.2.0 change form that 0.1.6
+would offer to any host, without checking `presence_change_context`: let a capable
+host take them first. 0.1.6 also resumes its separate pull-request details stream,
+so each pull request first seen under 0.2.0 yields one details observation there.
+Per-message outside snapshots and retained thread openings are ignored by 0.1.6.
 
 ## Cutover from an existing watch
 
