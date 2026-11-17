@@ -166,6 +166,7 @@ def test_telegram_send_queues_text_and_deduplicates(tmp_path):
         "markdown": True,
         "_rendered_chunks": [{"text": "Hello", "parse_mode": "HTML"}],
         "_reporting": {"version": -1, "origin": {"kind": "tool"}},
+        "_attempts_marked": 1,  # the claim's own attempt, which this version accounts for (0.12.1)
     }
     api.unload()
 

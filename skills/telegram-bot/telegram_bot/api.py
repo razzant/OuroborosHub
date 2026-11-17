@@ -9,6 +9,7 @@ import mimetypes
 import pathlib
 import re
 import secrets
+import socket
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
@@ -34,6 +35,9 @@ _FILE_ID_UNREADABLE = re.compile(r"invalid file[ _]?id|wrong remote file identif
 # No whole answer arrived: no network, a timeout, a refused or reset connection, or an HTTP exchange that broke off.
 # A body cut short raises http.client.IncompleteRead, which is no OSError.
 _NO_ANSWER = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
+# The reasons urllib can give only before any connection exists, so before any byte of the request left: the server's
+# name did not resolve, or it refused the connection. Every other reason may come while the request is written.
+_NO_CONNECTION = (socket.gaierror, ConnectionRefusedError)
 
 
 class TelegramApiError(RuntimeError):
@@ -54,6 +58,16 @@ class TelegramFileTooLarge(TelegramApiError):
 
 class TelegramFileUnavailable(TelegramApiError):
     """Telegram cannot read this file_id at all; no later attempt can change that answer."""
+
+
+class TelegramRequestNotSent(TelegramApiError):
+    """No byte of the request left this machine, so Telegram cannot have acted on it.
+
+    Only two stages prove it: the upload could not be built (its file was unreadable or over the limit), or there was
+    no connection at all (the name did not resolve, or the connection was refused). Any failure once a connection
+    exists, while the request is written or its answer awaited, is a plain ``TelegramApiError``: Telegram may have
+    acted.
+    """
 
 
 def _file_refusal(exc: TelegramApiError) -> Optional[TelegramApiError]:
@@ -148,7 +162,10 @@ class UrllibTelegramTransport:
         url: str, fields: Dict[str, str], files: Sequence[Tuple[str, pathlib.Path]], timeout_sec: float,
     ) -> Dict[str, Any]:
         boundary = f"----ouroboros-{secrets.token_hex(12)}"
-        body = _multipart_files_body(boundary, fields, files)
+        try:
+            body = _multipart_files_body(boundary, fields, files)
+        except OSError as exc:
+            raise TelegramRequestNotSent("upload", type(exc).__name__) from exc  # unread file: nothing was sent
         request = urllib.request.Request(
             url,
             data=body,
@@ -459,7 +476,8 @@ class TelegramClient:
             fields.pop("parse_mode", None)
             fields["caption"] = _telegram_html_to_plain(caption)
             result = await post()
-        return {**result, "_delivery": {"text": fields.get("caption", ""), "format": "html" if fields.get("parse_mode") == "HTML" else "plain"}}
+        # As for text: an answer that is not a Message object names no message (the outbox ends such a send uncertain).
+        return {**result, "_delivery": {"text": fields.get("caption", ""), "format": "html" if fields.get("parse_mode") == "HTML" else "plain"}} if isinstance(result, dict) else {}
 
     async def send_media_group(
         self,
@@ -471,7 +489,9 @@ class TelegramClient:
     ) -> List[Dict[str, Any]]:
         """One album: each item ``{kind, file_path, caption: {text, parse_mode}}`` attached as ``attach://fileN``.
 
-        Telegram answers with one Message per item, in order; each carries the caption it was sent with.
+        Telegram answers with one Message per item, in order; each carries the caption it was sent with. Every entry of
+        the answer keeps its place: one that is not an object comes back as ``{}``, which names no message, so the
+        outbox sees the answer's own length and which item each message is for.
         """
         media: List[Dict[str, Any]] = []
         files: List[Tuple[str, pathlib.Path]] = []
@@ -508,9 +528,11 @@ class TelegramClient:
                       **({"caption": _telegram_html_to_plain(entry["caption"])} if "caption" in entry else {})}
                      for entry in media]
             result = await post(media)
-        messages = [item for item in result if isinstance(item, dict)] if isinstance(result, list) else []
         observed = []
-        for index, message in enumerate(messages):
+        for index, message in enumerate(result if isinstance(result, list) else []):
+            if not isinstance(message, dict):
+                observed.append({})
+                continue
             entry = media[index] if index < len(media) else {"caption": message.get("caption", "")}
             observed.append({**message, "_delivery": {"text": entry.get("caption", ""),
                              "format": "html" if entry.get("parse_mode") == "HTML" else "plain"}})
@@ -580,6 +602,12 @@ def _open_json(request: urllib.request.Request, timeout_sec: float) -> Dict[str,
         except Exception:
             payload = {"ok": False, "error_code": exc.code, "description": "HTTP error"}
         return payload
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, _NO_CONNECTION):
+            raise TelegramRequestNotSent("request", f"URLError ({type(exc.reason).__name__})") from exc
+        # urllib also wraps a failure while it writes the request in URLError, and a write can break after the bytes
+        # have left this machine: that says nothing about the effect.
+        raise TelegramApiError("request", type(exc).__name__) from exc
     except _NO_ANSWER as exc:
         raise TelegramApiError("request", type(exc).__name__) from exc
     if len(data) > 2 * 1024 * 1024:
@@ -634,7 +662,7 @@ def _multipart_files_body(
     for file_field, file_path in files:
         path = pathlib.Path(file_path)
         if path.stat().st_size > _MAX_UPLOAD_BYTES:
-            raise TelegramApiError("upload", "file exceeds Telegram Bot API upload limit")
+            raise TelegramRequestNotSent("upload", "file exceeds Telegram Bot API upload limit")
         mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         header_name = (
             path.name.replace("\\", "_")

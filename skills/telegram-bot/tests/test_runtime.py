@@ -411,7 +411,8 @@ def test_untyped_blocked_and_retry_refusals_keep_the_event_first(tmp_path, statu
 class FailingDeliveryClient(RuntimeClient):
     async def send_message(self, chat_id, text, **kwargs):
         if text == "never delivers":
-            raise RuntimeError("provider rejected delivery")
+            # Telegram's own refusal: it did nothing, so the bounded retry may ask again (0.12.1).
+            raise TelegramApiError("sendMessage", "Bad Request: chat not found", 400)
         return await super().send_message(chat_id, text, **kwargs)
 
 
@@ -561,7 +562,8 @@ def test_long_text_retry_keeps_confirmed_chunks_after_restart(tmp_path):
             async def send_message(self, chat_id, text, **kwargs):
                 if text == "b" * 100 and not self.failed:
                     self.failed = True
-                    raise RuntimeError("second chunk temporary failure")
+                    # A flood wait: Telegram did not send the chunk, so it may be asked again (0.12.1).
+                    raise TelegramApiError("sendMessage", "Too Many Requests: retry after 1", 429)
                 return await super().send_message(chat_id, text, **kwargs)
 
         client = FlakyClient("token")

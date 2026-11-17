@@ -1,4 +1,4 @@
-# Telegram Bot 0.12.0
+# Telegram Bot 0.12.1
 
 A public Telegram bot connector for private-chat, group and channel places,
 separate from the built-in owner-control Telegram bridge. It keeps incoming
@@ -31,6 +31,10 @@ Files up to Telegram's 20 MiB bot limit arrive staged, unchanged and never
 transcribed; others say why, and stickers, polls or places arrive described. The
 bot also sends video, audio, voice, GIFs and albums, and shows "typing…". See
 [Incoming content](SKILL.md#incoming-content-0120).
+
+A send whose outcome is unknown, such as a lost answer or a restart during the
+call, ends `uncertain` and is never made again. A file is copied when queued and
+goes out as those bytes. See [Sending once](SKILL.md#sending-once-0121).
 
 See [SKILL.md](SKILL.md#connector-settings-and-facts-063) for the fact rules,
 setup, provider visibility and delivery behavior, and [CHANGELOG.md](CHANGELOG.md)

@@ -179,16 +179,16 @@ def test_poll_persists_words_before_submission_and_negotiates_the_host(plugin, t
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("text,wakes,is_bot,decision", [
-    ("Joseph", [], False, "silent"),
-    ("Joseph", ["signal.words"], False, "focus"),
-    ("Josephine", ["signal.words"], False, "silent"),
-    ("Someone else", ["signal.words"], False, "silent"),
-    ("Joseph", ["signal.words"], True, "silent"),
-    ("Joseph", ["signal.words", "from_bot"], True, "focus"),
-    ("Someone else", ["signal.words", "from_bot"], True, "focus"),
+@pytest.mark.parametrize("text,wakes,is_bot,decision,matched", [
+    ("Joseph", [], False, "silent", []),
+    ("Joseph", ["signal.words"], False, "focus", ["signal.words"]),
+    ("Josephine", ["signal.words"], False, "silent", []),
+    ("Someone else", ["signal.words"], False, "silent", []),
+    ("Joseph", ["signal.words"], True, "silent", []),
+    ("Joseph", ["signal.words", "from_bot"], True, "focus", ["signal.words", "from_bot"]),
+    ("Someone else", ["signal.words", "from_bot"], True, "focus", ["from_bot"]),
 ])
-def test_word_fact_through_silent_place_intake(tmp_path, monkeypatch, text, wakes, is_bot, decision):
+def test_word_fact_through_silent_place_intake(tmp_path, monkeypatch, text, wakes, is_bot, decision, matched):
     places = pytest.importorskip("ouroboros.places")
     from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
     from ouroboros.extension_contributions import project_contributions
@@ -215,5 +215,12 @@ def test_word_fact_through_silent_place_intake(tmp_path, monkeypatch, text, wake
     capture_presence_event(admission, event, drive_root=tmp_path)
     assert decide_attention(tmp_path, admission, event)[0] == decision
     focus = focus_metadata(admission, event, "fixture", 1)["focus"]
-    assert not focus["addressed"] and not focus["actor"]["owner_confirmed"]
+    # A literal word is a signal, never an address: the event carries none of the facts the core once summarized as
+    # focus.addressed (removed in core 59fa5f5b; read the same way by older cores), and only the word or the bot fact
+    # woke the place.
+    facts = set(event.facts) if event.facts is not None else {"legacy_addressed"}
+    assert not facts & {"direct_message", "group_dm", "mention", "reply_to_me", "review_requested", "assigned",
+                        "legacy_addressed"}
+    assert sorted(focus["matched_wakes"]) == sorted(matched)
+    assert not focus["actor"]["owner_confirmed"]
     assert places.get_place(tmp_path, place.place_id).state == "silent"
