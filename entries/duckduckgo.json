@@ -3,7 +3,7 @@
     "search"
   ],
   "description": "Web search via DuckDuckGo — free, no API key required. Returns titles, URLs, and snippets.",
-  "digest": "42ff1948032ebc1d64dcbdb13f4e6b57a9ca99cc9074c4d0360c8b450c45a641",
+  "digest": "4883a8a54de8ba1ec901c9ce2b19facf14f82e83965c455d524eaba73f9b2673",
   "install_specs": [
     "ddgs"
   ],

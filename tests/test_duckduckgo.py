@@ -66,11 +66,33 @@ class DuckDuckGoRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["error"], "invalid JSON body")
         self.assertEqual(self.searched, [])
 
+    async def test_non_finite_max_results_is_400_before_search(self):
+        for literal in ("1e400", "-1e400", "Infinity", "-Infinity", "NaN"):
+            with self.subTest(literal=literal):
+                response = await self.client.post("/search", content='{"query": "x", "max_results": %s}' % literal,
+                                                  headers={"Content-Type": "application/json"})
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["error"], "max_results must be an integer")
+        self.assertEqual(self.searched, [])
+
+    async def test_missing_blank_non_string_or_long_query_is_400_before_search(self):
+        for body in ({}, {"query": None}, {"query": "   "}, {"query": 42}, {"query": ["x"]}):
+            with self.subTest(body=body):
+                response = await self.client.post("/search", json=body)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["error"], "query is required")
+        response = await self.client.post("/search", json={"query": "x" * 401})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("too long", response.json()["error"])
+        self.assertEqual(self.searched, [])
+
     async def test_object_body_reaches_search(self):
         response = await self.client.post("/search", json={"query": " ouroboros ", "max_results": "3"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["results"][0]["title"], "Fixture")
-        self.assertEqual(self.searched, [("ouroboros", 3)])
+        response = await self.client.post("/search", json={"query": "x" * 400})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.searched, [("ouroboros", 3), ("x" * 400, 5)])
 
 
 if __name__ == "__main__":
