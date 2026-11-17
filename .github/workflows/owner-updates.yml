@@ -4,17 +4,26 @@ on:
   workflow_run:
     workflows: [Validate Catalog]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to hold from automatic merging
+        required: true
+        type: string
 
 permissions: {}
 
+# Merges and holds share one queue: a hold is confirmed only while no merge job runs.
 concurrency:
   group: owner-updates
   cancel-in-progress: false
+  queue: max
 
 jobs:
   merge:
     if: >-
       github.repository == 'razzant/OuroborosHub' &&
+      github.event_name == 'workflow_run' &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
@@ -24,11 +33,12 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      # Only trusted default-branch helpers are executed. No PR checkout,
-      # dependency install, cache restore, or execution of artifact contents.
+      # Only trusted default-branch helpers are executed. PR objects are fetched and read,
+      # never checked out; no dependency install, cache restore or artifact execution.
       - uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -37,3 +47,28 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python -I scripts/owner_updates.py merge
+
+  hold:
+    if: >-
+      github.repository == 'razzant/OuroborosHub' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Confirm a maintainer hold on one pull request
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr }}
+        run: python -I scripts/owner_updates.py hold --pr "$PR_NUMBER"

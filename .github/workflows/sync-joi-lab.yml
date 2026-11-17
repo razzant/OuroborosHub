@@ -17,9 +17,9 @@ concurrency:
 
 jobs:
   sync:
-    if: >-
-      github.repository == 'razzant/OuroborosHub' &&
-      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    # Any finished Owner Updates run may have merged (a failed post-merge check or an unknown outcome
+    # still can); publication reads current main, so an unchanged main publishes nothing.
+    if: github.repository == 'razzant/OuroborosHub'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
