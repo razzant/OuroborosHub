@@ -20,7 +20,7 @@ from urllib.request import Request
 
 import yaml
 
-from scripts import ci_checks, sync_mirror
+from scripts import ci_checks, owner_updates, sync_mirror
 from scripts.github_api import APIError, GitHub, SafeRedirect
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -193,22 +193,43 @@ class WorkflowTests(unittest.TestCase):
 
     def test_validation_is_read_only_and_keeps_every_existing_suite(self):
         workflow = self.workflow('catalog-check.yml')
-        self.assertIn('pull_request', workflow['on'])
+        # Draft then Ready starts a fresh validation of a new tested merge; a rerun repeats the old one.
+        self.assertEqual(workflow['on']['pull_request'],
+                         {'types': ['opened', 'synchronize', 'reopened', 'ready_for_review']})
         self.assertNotIn('pull_request_target', workflow['on'])
         self.assertEqual(workflow['permissions'], {'contents': 'read'})
-        self.assertEqual(set(workflow['jobs']), {'catalog', 'hosted-skills', 'checks'})
+        self.assertEqual(set(workflow['jobs']), {'catalog', 'hosted-skills', 'checks', 'receipt'})
+        # Owner Updates expects these fixed job names plus one hosted job named by each selected suite.
+        self.assertEqual(set(workflow['jobs']) - {'hosted-skills'}, owner_updates.REQUIRED_JOBS)
+        self.assertEqual(workflow['jobs']['hosted-skills']['name'], '${{ matrix.suite }}')
         catalog = workflow['jobs']['catalog']['steps']
         commands = '\n'.join(s.get('run', '') for s in catalog)
         self.assertLess(commands.index('scripts/ci_checks.py'), commands.index('scripts/build_index.py'))
         for marker in ('scripts/build_index.py --check', 'tests/test_catalog.py', 'tests/test_index.py',
-                       'tests/test_ci_checks.py', 'owner_updates.py verdict'):
+                       'tests/test_ci_checks.py', 'tests/test_owner_updates.py'):
             self.assertIn(marker, commands)
         self.assertNotIn('unittest discover', commands)
         self.assertNotIn('skills/', commands)
-        self.assertTrue(any(s.get('uses') == 'actions/upload-artifact@v4' for s in catalog))
-        artifact = next(s for s in catalog if s.get('uses') == 'actions/upload-artifact@v4')
-        self.assertEqual(artifact['with']['overwrite'], 'true')  # Full reruns replace the prior attempt's verdict.
+        # Eligibility is decided only by the trusted job: validation never runs the helper itself.
+        self.assertNotIn('scripts/owner_updates.py', commands)
+        self.assertNotIn('owner_updates.py verdict', commands)
+        # Every checkout of this repository is the one commit the run tests; extra core checkouts are pinned SHAs.
         hosted = workflow['jobs']['hosted-skills']
+        for steps in (catalog, hosted['steps']):
+            own = [s for s in steps if s.get('uses') == 'actions/checkout@v4' and 'repository' not in s.get('with', {})]
+            self.assertEqual([s['with']['ref'] for s in own], ['${{ github.sha }}'])
+        receipt = workflow['jobs']['receipt']
+        self.assertEqual(receipt['needs'], 'checks')
+        self.assertEqual(receipt['if'], "${{ !cancelled() && github.event_name == 'pull_request' && "
+                                        "needs.checks.result == 'success' }}")
+        self.assertFalse(any(s.get('uses', '').startswith(('actions/checkout', 'actions/setup')) for s in receipt['steps']))
+        self.assertEqual(receipt['steps'][0]['env']['TESTED_SHA'], '${{ github.sha }}')
+        self.assertNotIn('${{', receipt['steps'][0]['run'])  # Contexts reach the script only through env.
+        upload = receipt['steps'][1]
+        self.assertEqual((upload['uses'], upload['with']['name'], upload['with']['overwrite']),
+                         ('actions/upload-artifact@v4', 'owner-update-receipt-${{ github.run_id }}-${{ github.run_attempt }}',
+                          'false'))
+        self.assertEqual(len(receipt['steps']), 2)
         self.assertEqual(hosted['needs'], 'catalog')
         self.assertEqual(hosted['if'], "needs.catalog.outputs.suites != '[]'")
         self.assertEqual(hosted['strategy'], {'fail-fast': 'false', 'matrix': {
@@ -329,14 +350,28 @@ class WorkflowTests(unittest.TestCase):
 
     def test_owner_write_job_uses_only_main_helpers_and_data_artifacts(self):
         workflow = self.workflow('owner-updates.yml')
-        self.assertEqual(workflow['on'], {'workflow_run': {'workflows': ['Validate Catalog'], 'types': ['completed']}})
+        self.assertEqual(workflow['on']['workflow_run'], {'workflows': ['Validate Catalog'], 'types': ['completed']})
+        self.assertEqual(workflow['on']['workflow_dispatch'], {'inputs': {'pr': {
+            'description': 'Pull request number to hold from automatic merging', 'required': 'true', 'type': 'string'}}})
+        # Merges and holds are serialized in one existing group; nothing pending is cancelled or dropped.
+        self.assertEqual(workflow['concurrency'], {'group': 'owner-updates', 'cancel-in-progress': 'false', 'queue': 'max'})
+        self.assertEqual(set(workflow['jobs']), {'merge', 'hold'})
         job = workflow['jobs']['merge']
+        self.assertIn("github.event_name == 'workflow_run'", job['if'])
         self.assertEqual(job['permissions'], {'actions': 'read', 'contents': 'write', 'pull-requests': 'write'})
-        self.assertEqual(job['steps'][0]['with'], {'ref': 'main', 'persist-credentials': 'false'})
+        self.assertEqual(job['steps'][0]['with'], {'ref': 'main', 'fetch-depth': '0', 'persist-credentials': 'false'})
         commands = '\n'.join(s.get('run', '') for s in job['steps'])
         self.assertEqual(commands.strip(), 'python -I scripts/owner_updates.py merge')
         self.assertNotIn('head_sha', commands)
         self.assertNotIn('pip install', commands)
+        hold = workflow['jobs']['hold']
+        self.assertIn("github.event_name == 'workflow_dispatch'", hold['if'])
+        self.assertIn("github.ref == 'refs/heads/main'", hold['if'])
+        self.assertEqual(hold['permissions'], {'contents': 'read', 'issues': 'write', 'pull-requests': 'write'})
+        self.assertEqual(hold['steps'][0]['with'], {'ref': 'main', 'persist-credentials': 'false'})
+        step = hold['steps'][-1]
+        self.assertEqual(step['run'], 'python -I scripts/owner_updates.py hold --pr "$PR_NUMBER"')
+        self.assertEqual(step['env']['PR_NUMBER'], '${{ inputs.pr }}')  # Never interpolated into the shell.
 
     def test_daily_signals_and_explicit_catalog_mirror_sequence(self):
         signals = self.workflow('signals.yml')
@@ -348,6 +383,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(signals['concurrency']['cancel-in-progress'], 'false')
         mirror = self.workflow('sync-joi-lab.yml')
         self.assertEqual(mirror['on']['workflow_run']['workflows'], ['Owner Updates'])
+        # A failed post-merge check or an unknown outcome may still have merged: publish current main anyway.
+        self.assertEqual(mirror['jobs']['sync']['if'], "github.repository == 'razzant/OuroborosHub'")
         self.assertEqual(mirror['on']['push']['branches'], ['main'])
         self.assertEqual(mirror['jobs']['sync']['steps'][0]['with']['ref'], 'main')
         self.assertEqual(mirror['jobs']['sync']['steps'][-1]['run'], 'python -B scripts/sync_mirror.py')
