@@ -1,0 +1,19 @@
+{
+  "category": [
+    "computer"
+  ],
+  "description": "Work directly in an authorized remote POSIX workspace over OpenSSH with bounded reads, search, conflict-checked edits, safe creation, and explicit command outcomes.",
+  "digest": "c8f915b25abbf9dd484b96ca201e5174fb60d00873d7b70af577022ffe1c00c6",
+  "name": "ssh_workspace",
+  "owner": "MatthewMih",
+  "schema_version": 2,
+  "source": {
+    "commit": "cd918c577c440793aaa10883b47dda2819cc99c9",
+    "kind": "git",
+    "path": "",
+    "repo": "https://github.com/MatthewMih/ouroboros-ssh-workspace"
+  },
+  "title": "SSH Workspace",
+  "version": "0.2.1",
+  "withdrawn": null
+}

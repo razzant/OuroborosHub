@@ -569,7 +569,8 @@ print(json.dumps([payload_digest(Path(c['path']), manifest_entry=c['front'].get(
                          set('duckduckgo pdf_tools word_tools anti-slop memory-atlas chrome_browser '
                              'keenable office_reader table_tools'.split()))
         generated = builder.build_catalog(ROOT)
-        self.assertEqual({r['slug'] for r in generated['skills']}, set(entries))
+        self.assertEqual({r['slug'] for r in generated['skills']},
+                         {name for name, entry in entries.items() if entry['source']['kind'] == 'hosted'})
         for entry in entries.values():
             with builder.source_directory(ROOT, entry) as directory:
                 self.assertEqual(declaration_json(entry.get('install_specs')),
