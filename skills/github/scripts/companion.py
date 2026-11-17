@@ -60,16 +60,40 @@ def build(store, config, environment):
                            unverified_notifications=[config["notifications_user_id"]]), Sender(store, writer, host, config)
 
 
+def release(state):
+    """``--release-waiting`` (SETUP.md, "Returning to an earlier release"): with the companion stopped, complete
+    every event still waiting for a retried read, without a network read, and print what was done. Exit 0 only when
+    nothing is left in a form an earlier release does not read."""
+    store = Store(state)
+    try:
+        released = Collector(store, None, read_config(state)).release_waiting()
+        left = store.one("SELECT COUNT(*) n FROM inbox WHERE state='enriching'")["n"]
+        jobs = store.one("SELECT COUNT(*) n FROM jobs WHERE json_extract(spec,'$.kind')='enrich' AND state!='done'")["n"]
+        # Change observations an earlier release would offer to any host, capable of reading them or not.
+        changes = store.one("SELECT COUNT(*) n FROM inbox i WHERE state IN ('ready','blocked','submitting') AND NOT EXISTS ("
+                            "SELECT 1 FROM json_each(i.event,'$.facts') f WHERE f.value='any_message')")["n"]
+        print(dump({"released": released, "still_enriching": left, "enrich_jobs_pending": jobs,
+                    "undelivered_change_observations": changes, "at": now()}))
+        return 0 if not left and not jobs else 1
+    finally:
+        store.close()
+
+
 def main():
     state = os.environ.get("OUROBOROS_SKILL_STATE_DIR")
     if not state:
         raise SystemExit("OUROBOROS_SKILL_STATE_DIR is required")
+    if sys.argv[1:] not in ([], ["--release-waiting"]):
+        raise SystemExit("usage: companion.py [--release-waiting]")
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: stop.set())
     Path(state).mkdir(parents=True, exist_ok=True)
     try:
+        # The same lock: the release step never runs beside a live companion.
         with CompanionLock(Path(state) / "companion.lock"):
+            if sys.argv[1:]:
+                raise SystemExit(release(state))
             run(state, stop)
     except CompanionAlreadyRunning as exc:
         raise SystemExit(str(exc)) from None

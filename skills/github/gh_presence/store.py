@@ -24,6 +24,15 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def later(one, other):
+    """Whether time ``one`` is after ``other``; a time that cannot be read proves nothing."""
+    try:
+        return (datetime.fromisoformat(str(one).replace("Z", "+00:00"))
+                > datetime.fromisoformat(str(other).replace("Z", "+00:00")))
+    except (TypeError, ValueError):
+        return False
+
+
 class Store:
     def __init__(self, state_dir, *, readonly=False):
         self.root = Path(state_dir)
@@ -179,24 +188,43 @@ class Store:
             raise ValueError("unknown_source_event_id")
         return json.loads(row["event"])
 
-    def observe(self, db, key, snapshot, event_factory, baseline=False):
-        """Call within the same transaction as the consumed page checkpoint."""
+    def observe(self, db, key, snapshot, event_factory, baseline=False, state=None, observed=None, changed=False):
+        """Call within the same transaction as the consumed page checkpoint.
+
+        ``state="enriching"`` keeps a new event out of dispatch until its retried read completes it once.
+        ``observed``: when the snapshot was really read, if earlier than this write; one read before what is
+        retained neither replaces it nor makes a revision. ``changed``: the caller observed a change the
+        comparison does not carry; a new revision under the same fingerprint."""
         row = db.execute("SELECT * FROM snapshots WHERE key=?", (key,)).fetchone()
         fingerprint = digest(snapshot.get("comparison", snapshot))
-        if row and row["fingerprint"] == fingerprint:
-            db.execute("UPDATE snapshots SET observed=? WHERE key=?", (now(), key))
+        earlier = bool(row) and observed is not None and later(row["observed"], observed)
+        if earlier or (row and row["fingerprint"] == fingerprint and not changed):
+            if not earlier:
+                db.execute("UPDATE snapshots SET observed=? WHERE key=?", (observed or now(), key))
             return None
         revision = row["revision"] + 1 if row else 1
         event_id = "ghobs:" + digest(key) + ":" + str(revision)
         old = json.loads(row["value"]) if row else None
         db.execute("INSERT OR REPLACE INTO snapshots VALUES(?,?,?,?,?)",
-                   (key, revision, fingerprint, dump(snapshot), now()))
+                   (key, revision, fingerprint, dump(snapshot), observed or now()))
         event = event_factory(event_id, revision, old)
         if event is not None:
-            state = (baseline if isinstance(baseline, str) else "baseline") if baseline and row is None else "ready"
+            state = (baseline if isinstance(baseline, str) else "baseline") if baseline and row is None else state or "ready"
             db.execute("INSERT INTO inbox(id,event,state,created) VALUES(?,?,?,?)",
                        (event_id, dump(event), state, now()))
         return event_id
+
+    def reobserve(self, db, key, snapshot, observed=None):
+        """Keep what was last observed of an already retained object without a new revision or event: its revision
+        still names the last event sent for it, while the next observation is compared with these words. What is
+        retained only moves forward: an observation made before it changes nothing. Whether it was kept."""
+        observed = observed or now()
+        row = db.execute("SELECT observed FROM snapshots WHERE key=?", (key,)).fetchone()
+        if not row or later(row["observed"], observed):
+            return False
+        db.execute("UPDATE snapshots SET fingerprint=?,value=?,observed=? WHERE key=?",
+                   (digest(snapshot.get("comparison", snapshot)), dump(snapshot), observed, key))
+        return True
 
     def job(self, db, stream, spec):
         db.execute("INSERT OR IGNORE INTO jobs(stream,spec) VALUES(?,?)", (stream, dump(spec)))
@@ -226,9 +254,9 @@ class Store:
             return rows[:limit]
         result["gaps"] = page("gaps", "SELECT * FROM gaps WHERE resolved IS NULL ORDER BY opened,scope")
         result["oldest_waiting"] = self.one(
-            "SELECT MIN(created) oldest FROM inbox WHERE state IN ('ready','blocked','submitting')")
+            "SELECT MIN(created) oldest FROM inbox WHERE state IN ('ready','blocked','submitting','enriching')")
         result["database_bytes"] = sum(p.stat().st_size for p in self.root.glob("transport.sqlite3*"))
-        result["waiting_events"] = page("waiting_events", "SELECT id,state,due,created FROM inbox WHERE state IN ('ready','blocked','submitting','rejected') ORDER BY seq")
+        result["waiting_events"] = page("waiting_events", "SELECT id,state,due,created FROM inbox WHERE state IN ('ready','blocked','submitting','rejected','enriching') ORDER BY seq")
         result["work_refs"] = page("work_refs", "SELECT ref,event_id,kind,state,due FROM refs WHERE state!='terminal' ORDER BY ref")
         result["deliveries"] = [{"id": r["id"], "source_event_id": r["event_id"], "state": r["state"],
                                  "due": r["due"], "code": json.loads(r["detail"]).get("code")}
