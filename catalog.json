@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/4bb28167e5537988e42456fdafc67f46b7c4f6b4",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
   "skills": [
     {
@@ -1312,28 +1312,33 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "0950c2c12faa8bb0124aa8bd087e41d60dc51b295423522f1cc1316b030476ac",
-          "size": 19496
+          "sha256": "1432dab0fa86284df67415093ea1633690707c6807f85c007ea690f11a0bc1e9",
+          "size": 25491
         },
         {
           "path": "lens_core.py",
-          "sha256": "5faa96a2018a328a81d34a272aa32fa637e78327b23941d4c5201a74dfc719f2",
-          "size": 57660
+          "sha256": "f5cd13cd5846e81b94f65fa581c4aba05e3996c32e36ce85604e53b0bfda7c7b",
+          "size": 57891
         },
         {
           "path": "lens_store.py",
-          "sha256": "e324b11d55abae4b5e6847c84505aa6ebc8c38d7f66395386e157e937d7b4274",
-          "size": 24376
+          "sha256": "94a393634212e179fef59cf7ce3cb9c6b15dac2d2bd39c58e182a213bee4d3b1",
+          "size": 30780
         },
         {
           "path": "plugin.py",
-          "sha256": "3910ccdc0adcf95f0cf55839da75478d6d9eaaf0e136f6b51f30570d692f00cf",
-          "size": 12358
+          "sha256": "92245b08dfad82c585f56802fb864c24d3fe74c043a7c7419be54364b6910b2a",
+          "size": 13046
+        },
+        {
+          "path": "tests/core_store_standin.py",
+          "sha256": "28b0085521c0fe7c5dfb4191e121969273f35e9308201ed6fb1ebb4e7a20b345",
+          "size": 5257
         },
         {
           "path": "tests/store_fixture.py",
-          "sha256": "0fe78cfd1c368f0afdcd2198c3823c9f3fa7b2001eeb35ed022db73dba200899",
-          "size": 10526
+          "sha256": "e4a975b627de6a97b2a2cade56f940dd52514b3bb4315dfb6e99c535ed8a071f",
+          "size": 11222
         },
         {
           "path": "tests/test_lens_core.py",
@@ -1342,13 +1347,13 @@
         },
         {
           "path": "tests/test_lens_store.py",
-          "sha256": "d3671fa3b1710c7ba57da237f20b78c83b35a89e302fa99be6e742e036d43030",
-          "size": 33107
+          "sha256": "5dce86a5011bd8748506db349750c94cc83afe6281fbb4b46c75429db70e5a69",
+          "size": 56942
         },
         {
           "path": "tests/test_plugin_routes.py",
-          "sha256": "f7c6ad69316107d9875ec0f6c5e33c84829e20ce1e2aa8ded70ab94e98164d45",
-          "size": 29993
+          "sha256": "eb72fe64597ec4b0bbfbe68d93ef86938b983e5588d956fd080e69098fb7ba1b",
+          "size": 37961
         },
         {
           "path": "tests/test_widget_contract.py",
@@ -1369,7 +1374,7 @@
       "name": "context-lens",
       "slug": "context-lens",
       "type": "extension",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "when_to_use": "The owner wants to understand reported input sizes, their spread and which requests belong to one task."
     },
     {
