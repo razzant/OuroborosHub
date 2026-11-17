@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from telegram_bot.api import TelegramApiError
+from telegram_bot.api import TelegramRequestNotSent
 from telegram_bot.runtime import TelegramTransportRuntime
 
 from fake_bot_api import Clock, FakeBotApi, use_clock
@@ -218,13 +218,15 @@ def test_an_album_telegram_did_not_accept_is_still_retried(tmp_path, monkeypatch
     items = [{"kind": "photo", "file_path": _file(tmp_path, "a.jpg")}, {"kind": "photo", "file_path": _file(tmp_path, "b.jpg")}]
     assert tools["telegram_send"](chat_id=CHAT, kind="album", items=items, request_id="retry")["ok"]
     telegram = FakeBotApi()
-    telegram.answers["sendMediaGroup"] = [{"ok": False, "error_code": 502, "description": "Bad Gateway"},
-                                          TelegramApiError("sendMediaGroup", "ConnectionResetError")]
+    # Telegram's flood wait, and a connection refused before anything was sent: neither can have sent the album.
+    # A lost answer or a 5xx ends the row uncertain instead (test_unknown_outcomes.py).
+    telegram.answers["sendMediaGroup"] = [{"ok": False, "error_code": 429, "description": "Too Many Requests"},
+                                          TelegramRequestNotSent("request", "URLError (ConnectionRefusedError)")]
     runtime = _runtime(tmp_path, telegram)
     for _ in range(3):
         asyncio.run(runtime.process_one_outbox())
         clock.advance(600)
-    assert len(telegram.methods("sendMediaGroup")) == 3  # a refusal and a lost answer retry as before; the third passed
+    assert len(telegram.methods("sendMediaGroup")) == 3  # both retry as before; the third passed
     assert runtime.store.delivery_receipt("telegram-send:retry")["state"] == "delivered"
 
 

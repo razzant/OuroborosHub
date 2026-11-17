@@ -1,7 +1,7 @@
 ---
 name: anime_studio
 description: AI-powered 2D anime generator with VLM-verified assets, video analysis via Gemini, sequential keyframes, scene continuity chain, multi-model image/video generation, LLM-powered error recovery, and parallel asset+music pipeline
-version: 3.2.0
+version: 3.3.1
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -117,7 +117,7 @@ ui_tab:
             condition_key: has_warnings
 ---
 
-# Anime Studio v3.2.0
+# Anime Studio v3.3.1
 
 A professional-grade 2D anime cartoon generator with **VLM-verified assets**,
 **video analysis via Gemini 3.1 Pro**, **sequential keyframes for continuity**,
@@ -455,8 +455,9 @@ every reference it attached. It deliberately carries **no** base64 payload and
 `VIDEO_MAX_INPUT_REFERENCES` was 4. With characters ordered first, a three-character
 scene consumed the whole budget and the cap silently discarded the cross-scene
 continuity frame — the exact anchor that keeps identity stable between shots. It
-is now 9, the vendor-documented Seedance maximum. A model accepting fewer replies
-4xx and the existing reference-rejection path trims and retries the same model.
+is now 9, the vendor-documented Seedance maximum. A video model accepting fewer
+replies 4xx, and that refusal goes to the failure advisor like any other; only
+the image path trims references and retries the same model.
 
 ### minimax/hailuo-3 added
 
@@ -490,6 +491,12 @@ About 2× cheaper.
    per second plus per reference image, which this estimator does not model, so
    its estimate for MiniMax is too HIGH. That errs toward stopping early rather
    than overspending, but it is an estimate mismatch and not a measurement.
+   Kept on purpose in 3.3.1: every budget figure here is an approximate unit
+   estimate, not a bill. For H3 the generic `$2.65` clip unit is deliberately
+   conservative (about `$2.31` on catalog prices even at 15 s with 9
+   references). It is no ceiling for other providers: a measured Seedance
+   720p/10 s candidate cost near `$3.3`. A per-second price would have to
+   follow the model, length and reference count of each actual dispatch.
 
 It is **not** made the default for scenes with characters: Seedance's
 reference-following is the behaviour actually measured here.
@@ -530,11 +537,13 @@ reference image ≈ `$1.46`) is cheaper at a higher resolution. Anyone comparing
 the two headline `$/second` figures alone would reach the opposite conclusion,
 which is exactly why this is written down.
 
-**Minimum duration is 5s, not 4s.** `_clamp_duration` falls back to the global
-4–15s range only when the capability snapshot is empty; with H3 selected and an
-empty snapshot a 4-second scene would be sent to a model whose documented floor
-is 5. The snapshot normally supplies `durations` and clamps correctly, so this is
-a narrow unknown-capability window, disclosed rather than fixed.
+**Minimum duration is 5s, not 4s.** When the capability snapshot has nothing for
+a model (catalog unreachable, or the model absent from it), `_clamp_duration`
+uses the global 4–15s range raised to that model's documented minimum from
+`_MODEL_MIN_DURATION_SEC` (hailuo-3: 5). The map holds only minimums, so it can
+move a value up toward a valid one and never invents a duration. The old
+per-model allowed list had clamped `google/veo-3.1` to an invalid 5, and a global
+floor of 5 would break Veo's real set `[4, 6, 8]`.
 
 ### Correction: `medium` runs ONE judge, not a panel of two
 
@@ -579,12 +588,102 @@ instead of looking like a generation failure. An unknown model keeps the owner's
 intent, because a permissive flag can at worst be ignored by the provider, while
 a restrictive one would mute a model that does support native speech.
 
-### Known, not fixed in v3.1
+### v3.3.1: changes over 3.2.0
 
-- `LEASE_TTL_SEC` (900s) is still shorter than `TIMEOUT_VIDEO` (1320s): a single
-  long video call can outlive its lease and be requeued, paying twice. Low risk
-  at short durations; real at long ones.
+**One response ceiling, 65536 tokens.** `DEFAULT_MAX_TOKENS` in `api_client.py`
+is the `max_tokens` of every model call in this payload: chat, VLM verification,
+the judge panel, comparison, condense, simplify and the advisor. A tight ceiling
+on a call that must return structured output fails quietly: a reasoning model
+spends the allowance on hidden reasoning before the JSON begins. With
+`max_tokens=2048` the identity judge was reported to return `attributes: {}` on
+every scene of a live job. 65536 is the largest value every text model called
+here accepts in the public OpenRouter catalog read on 2026-11-16 (Gemini 3.x:
+65,536; Claude Sonnet 4.6: 128,000); recheck it before raising the constant.
+Only emitted tokens are billed, but OpenRouter can refuse a request whose
+ceiling the remaining credit cannot cover (HTTP 402), and chat calls do not
+retry that. When a structured reply comes back empty or cut off, check
+`finish_reason` and whether `completion_tokens` sits at the ceiling first.
+
+**Paid clips are kept, and an unknown outcome is never paid twice.** Every
+network step of a video dispatch has a total deadline (httpx timeouts bound only
+the gaps between bytes): the POST `VIDEO_POST_DEADLINE`, each status GET
+`VIDEO_POLL_REQUEST_DEADLINE`, each download attempt `VIDEO_DOWNLOAD_TIMEOUT`,
+all attempts together `VIDEO_DOWNLOAD_BUDGET`. Their sum is
+`VIDEO_CALL_DEADLINE`, and the pipeline's outer `TIMEOUT_VIDEO` is derived from
+it. Polls tolerate up to `VIDEO_POLL_MAX_TRANSIENT` consecutive transient
+failures, a malformed status answer included; an empty 200 body is a failed
+download attempt. Only an answer in `VideoDispatchRejected.KNOWN_REFUSAL_STATUS`
+(400, 401, 402, 403, 404, 413, 422, 429) counts as a refusal that created no
+job; such a refusal, a prompt refused before sending and a provider-reported
+generation failure are the only dispatch outcomes that may go on to the failure
+advisor. Every other outcome raises `VideoJobUnretrieved`: with the provider job
+id once the acceptance was seen, and with no id (stage `dispatch`) when the POST
+got no usable answer, whether a transport error, the deadline, a dropped or
+malformed answer, an answer without an id or an ambiguous status such as 408 or
+5xx. The pipeline records it in
+`verification_stats["unretrieved_accepted_jobs"]` (id or `null`, `accepted`
+`yes` or `unknown`, stage, raw reason), adds `accepted_clip_unretrieved:<scene>`
+or `dispatch_outcome_unknown:<scene>` to `partial_reasons`, keeps the charge and
+starts no further paid clip for that scene: neither the advisor nor the next
+candidate, nor a later continuity or identity-panel regeneration, which is
+skipped (`regeneration_skipped_unretrieved`) while the scene keeps its current
+clip. When no scene has a clip, the final error lists these dispatches.
+
+**Liveness while waiting.** The worker refreshes its job lease only from the
+progress callback, and `LEASE_TTL_SEC` (900 s) is shorter than one video wait.
+`Pipeline.run` sets `client.poll_heartbeat`; the client calls it at most every
+`POLL_HEARTBEAT_INTERVAL` (60 s) while polling and before each download attempt,
+and assembly emits progress before each clip it re-encodes.
+
+**Refunds only for proven non-generation.** `BudgetLedger.charge` returns a
+receipt and `refund(receipt)` credits that exact charge once: only when the
+provider refused the request before starting a job (HTTP 400/422 at the POST,
+`VideoDispatchRejected` with the provider's message) or when the prompt fit
+refused before anything was sent. 429, 5xx, timeouts and every accepted-job
+failure stay charged. A refused charge never becomes an uncharged dispatch.
+
+**Prompts fit the model and keep their bindings.** `VIDEO_MODEL_PROMPT_LIMIT` in
+`api_client.py` is the only limit table (Kling 2500; `minimax/hailuo-3` 6800,
+under its 7000-character ceiling). An LLM-condensed candidate is accepted only
+if every line naming an `@ImageN` token survives verbatim; a candidate that
+swaps two characters' descriptions or keeps bare markers falls back to the
+mechanical fit. Continuity regeneration is condensed like the other paths.
+Right before the POST an over-long prompt keeps every `@ImageN` line and the
+spoken-dialogue block; the lessons and fix notes after the dialogue are cut
+first when the whole tail does not fit. When the reference lines alone cannot
+fit, nothing is sent (`VideoPromptFitError`). Hailuo's "text too long" refusal
+counts as a prompt-limit refusal.
+
+**Recovery paths that can succeed.** `minimax/hailuo-3` is in the advisor's model
+list. Without capability data for it, `_clamp_duration` applies its documented
+5 s floor. An advisor model switch reconciles the resolution for the new model
+without changing the job's settings (`_resolution_for_model`).
+
+**Honest results.** A multidimensional score with a missing, non-numeric or
+out-of-range (outside 0–10) dimension is `indeterminate`. Missing scenes add
+`missing_scenes` to `partial_reasons`. Clips that disagree on size or audio
+layout are re-encoded to one shape before the stream-copy concat, and the result
+is checked again: a failed re-encode keeps the paid original and adds
+`concat_layout_unverified`. The video stream of the final file is fully decoded
+(`final_decode_failed` otherwise). The music mix ends at the picture even when a
+clip's own audio is shorter. Failing to save prompt lessons no longer turns a
+delivered video into ERROR. A stored job whose phase or status this version does
+not know (or that lacks one) reads as terminal ERROR with the original values in
+`verification_stats["unsupported_stored_state"]`; the worker neither claims nor
+requeues it and never rewrites it.
+
+### Known, not fixed (3.3.1)
+
+- `LEASE_TTL_SEC` is a hardcoded constant shorter than `TIMEOUT_VIDEO`; the
+  heartbeat covers the wait from the other side.
+- A scene whose dispatch outcome is unknown is not retried, even when nothing
+  may have been sent (a connection error is not taken as proof of that).
 - Budget is charged at the logical unit, not the physical POST; `api_client` can
   issue up to three POSTs per charge, and condense/simplify/advisor calls do not
   charge at all.
+- The LLM condenser does not have to keep the dialogue verbatim; the mechanical
+  fit does.
 - MiniMax has not been run live from this skill.
+- `handle_jobs` lists only directory-shaped job records, so a legacy flat
+  `jobs/<id>.json` stays reachable through `status` but is absent from the
+  listing.

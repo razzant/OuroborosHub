@@ -1,7 +1,7 @@
 ---
 name: a2a
 description: Agent-to-Agent protocol bridge for Ouroboros. Provides a local A2A-compatible server plus client tools for discovering and messaging other A2A agents.
-version: 1.5.2
+version: 1.5.3
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -54,6 +54,11 @@ frontmatter under `companion_processes` (name `a2a_server`, argv
 loader resolves the descriptor from the frontmatter; review-prompt
 manifest summaries may omit the `companion_processes` field, so consult
 the frontmatter above for the authoritative declaration.
+
+The `widget` permission is for the Settings section that `plugin.py`
+registers with `api.register_settings_section(...)`: the host requires
+`widget` for Settings sections as well as for UI tabs. The skill registers
+no UI tab.
 
 This skill moves Ouroboros's Agent-to-Agent protocol support out of the
 core runtime. It exposes a small local A2A-compatible JSON-RPC server and

@@ -1,7 +1,7 @@
 ---
 name: github
 description: Observe connected GitHub issues, pull requests and Discussions, and deliver authorized replies or explained issue closures with durable receipts.
-version: 0.1.6
+version: 0.2.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -39,6 +39,17 @@ contributes:
     destination: vendor:GitHub
     scope: account
     icon: ui/icon.svg
+    facts:
+      - new_issue
+      - new_pull_request
+      - mention
+      - my_thread
+      - reply_to_me
+      - review_requested
+      - assigned
+      - any_message
+      - from_bot
+      - {id: signal.new_discussion, label: "New discussion"}
     wakes: [new_issue, new_pull_request, mention, my_thread, review_requested, assigned]
     source: {route: status, refresh_s: 15}
     settings: github
@@ -64,9 +75,15 @@ within its words and scope. Transport capability supplies no additional permissi
 
 Read the source and current thread before promising or sending. Event context
 contains observation dates, exact attribution, immutable source IDs and gaps.
-`message.sent_at` is when GitHub says the object was written, and an edit of its words
-adds `message.edited_at` (GitHub's last change); a state change adds none, and a review
-request has neither.
+`message.sent_at` is when GitHub says the object was written. On a host with
+`presence_change_context`, a change (edit, close, merge, assignment, review request)
+carries no new words of its own: `message.non_text` describes it, `actor` is the
+account GitHub records as making it (unknown when it cannot be established), revised
+words keep `edited_at` from that record and name their original author. Older hosts
+receive the 0.1.6 form: repeated words, an unknown actor and `edited_at` as GitHub's
+last change. New words with `message.forward_origin` were edited (a Discussion:
+touched in any way) before they were first observed and are not proven their
+author's alone: other hands may be in them.
 Use the ordinary reader when it can reach the source; disclose unavailable context.
 Use `send_user_message(destination='main', request_id=...)` for owner reports
 and `escalate(..., request_id=...)` for questions. The host supplies the origin

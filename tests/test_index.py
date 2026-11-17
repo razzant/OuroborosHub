@@ -274,8 +274,14 @@ class IndexTests(unittest.TestCase):
                 builder.validate_entry({**self.entry, 'source': {**source, **changes}}, {'search'})
         self.write('entries/demo.json', self.entry)
         # A pointer still checks fetched bytes; its old raw payload remains a v1 row.
-        with patch.object(builder, 'source_directory', return_value=contextlib.nullcontext(self.root / 'skills/demo')):
+        local = self.root / 'skills/demo'
+        with patch.object(builder, 'source_directory', return_value=contextlib.nullcontext(local)):
             self.assertEqual(builder.build_catalog(self.root)['skills'][0]['slug'], 'demo')
+        # With the same pinned release and no local payload, only v2 lists the skill.
+        checkout = local.rename(self.root / 'checkout')
+        with patch.object(builder, 'source_directory', return_value=contextlib.nullcontext(checkout)):
+            self.assertIn('demo', builder.load_hub(self.root)[1])
+            self.assertEqual(builder.build_catalog(self.root)['skills'], [])
             self.entry['digest'] = '0' * 64
             self.write('entries/demo.json', self.entry)
             with self.assertRaisesRegex(ValueError, 'digest mismatch'):
@@ -569,8 +575,9 @@ print(json.dumps([payload_digest(Path(c['path']), manifest_entry=c['front'].get(
                          set('duckduckgo pdf_tools word_tools anti-slop memory-atlas chrome_browser '
                              'keenable office_reader table_tools'.split()))
         generated = builder.build_catalog(ROOT)
-        self.assertEqual({r['slug'] for r in generated['skills']},
-                         {name for name, entry in entries.items() if entry['source']['kind'] == 'hosted'})
+        # V1 lists locally deliverable payloads, including copies retained after a v2 change.
+        local_slugs = {p.parent.name for p in (ROOT / 'skills').glob('*/SKILL.md') if p.is_file()}
+        self.assertEqual({r['slug'] for r in generated['skills']}, local_slugs)
         for entry in entries.values():
             with builder.source_directory(ROOT, entry) as directory:
                 self.assertEqual(declaration_json(entry.get('install_specs')),

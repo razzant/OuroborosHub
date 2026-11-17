@@ -1,7 +1,7 @@
 ---
 name: telegram-user-session
 description: Ouroboros as an independent Telegram participant through its own dedicated user account and shared Places memory.
-version: 0.4.3
+version: 0.4.4
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -148,6 +148,24 @@ Version 0.2 requires an explicit outgoing opt-in in both participant and retaine
 Retained legacy intake follows the current Host's Presence answers. A retained turn is observed through its original reference and never submitted again; a separately admitted child is observed until its own end, whatever its parent's outcome; each output the Host selected is sent once under its output identity, including the selected output of failed or cancelled work; their text without an output identity is never sent. Failed or cancelled work with nothing further to observe keeps its source held, as before. Replies without a Host output identity keep the earlier limit of one interim and one final reply per event. A reply queued before 0.3 stands, by its exact stored bytes, for the first selected output that matches it and for no other; its event records that match, and a further selection saying the same is still sent under its own identity. With a Host that lists continuation version 2, legacy intake asks for it too: an event the Host takes custody of (it answers `continuing`, keeps a retained turn, or ends naming a child) no longer holds its chat. The chat's next event is offered, and the held event's references are read apart, a child beside its parent, each until its own end; replies follow `reply_anchor` inside the chat and topic, as in participant mode. A busy answer keeps the event at its chat's head, without counting as an ingress failure, until the Host's `retry_after`. Each chat's next event is offered by a task of its own, up to three chats side by side and one chat's events in capture order, and events in Host custody are read in a pass of their own at the companion's three-second cadence: a slow work read, many held references or one chat's author that is still starting never hold another event, and replies, actions and receipts never wait for a Host answer. Without that list legacy keeps the version 0 request, which waits for the author's terminal, observes one reference at a time and keeps a chat's later incoming behind an admitted event it is still observing, so a long-running child delays them.
 
 Legacy custody observation cycles through bounded batches of at most 100 events. Each cycle fixes its newest event before reading, so both older pending work and later replies receive attention even when new events keep arriving; this is fairness, not a throughput guarantee. After restart the cycle begins oldest-first. When version 2 becomes available, previously admitted version-0 work moves into this custody path after its existing binding validation, without submitting that event again or changing queued replies.
+
+## Preflight targets and diagnostics (0.4.4)
+
+Reply targets and existing-message actions check the exact message ID and resolved
+peer before topic inference. A missing target, another message or another peer is
+refused before dispatch. This keeps 0.4.2's conversation policy: ordinary reply
+chains stay in the chat's conversation; only forums supply a Host topic.
+
+Preflight receipts identify `initial_authorization`, `account_verification`,
+`operation_preparation` or `final_authorization`. Definite refusals expose only
+fixed safe reason codes; transient failures retain their exception class, never
+its text, and keep their existing queue/retry behavior. Silent/Paused work keeps
+its existing held state. No old failed or unknown intent is replayed.
+
+Offline `tests/test_preflight_targets.py` covers exact targets, ordinary replies,
+safe diagnostics and unchanged transient outcomes. Run the full hosted suite with
+`python -m unittest discover -s skills/telegram-user-session/tests -v` from the Hub
+root. These tests use a recording client and synthetic state, not live Telegram.
 
 ## Declarations for the Host (0.4.3)
 

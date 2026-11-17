@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from test_transport import Case, CONFIG, Host, Outbox, Response, Store, event
+from gh_presence.host import wire_event
 
 
 class HeldContextTests(Case):
@@ -34,7 +35,11 @@ class HeldContextTests(Case):
         original = self.store.rows("SELECT id,event FROM inbox ORDER BY seq")
         sent, = self.dispatch()
         queue = sent["event"]["conversation"].pop("transport_queue")
-        self.assertEqual(sent["event"], next_event)
+        # The host gets the documented thread snapshot; every raw provider row stays in connector custody.
+        self.assertEqual(sent["event"], wire_event(next_event))
+        self.assertEqual(sent["event"]["conversation"]["history"]["retained_rows"], len(next_event["conversation"]["history"]["rows"]))
+        self.assertNotIn("rows", sent["event"]["conversation"]["history"])
+        self.assertEqual(sent["event"]["conversation"]["thread_history"], next_event["conversation"]["thread_history"])
         self.assertEqual(queue["after_source_event_id"], "next-provider-event")
         held, = queue["held_intents"]
         self.assertEqual((held["delivery_id"], held["source_event_id"]), ("tool:request-1", "event-1"))
@@ -92,7 +97,7 @@ class HeldContextTests(Case):
             db.execute("UPDATE inbox SET response='{}' WHERE id='legacy-retry'")
         legacy, = self.dispatch()
         self.assertEqual(legacy["staged_files"], [])
-        self.assertEqual(legacy["event"], original)
+        self.assertEqual(legacy["event"], wire_event(original))
 
     def test_context_publication_closes_temporary_handle_before_replace(self):
         import os

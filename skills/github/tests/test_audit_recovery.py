@@ -255,6 +255,34 @@ class NotificationsRecoveryTests(Case):
         self.assertFalse(any(r == 22 and p.startswith("/notifications") for r, p in self.calls))
         self.assertIsNotNone(self.store.meta("notification:11:N11"))
 
+    def test_a_missing_notifications_credential_leaves_its_reader_named_and_waiting(self):
+        """Settings name reader 22 but the host passes no Notifications secret: the companion builds no reader for
+        it and asks for credential repair; its discovery waits under its own code, never as a removed reader's."""
+        module, calls = companion_module(), []
+
+        def request(method, path, data=None, headers=None):
+            calls.append(path)
+            users = {"/user": WRITER, "/users/service-writer": WRITER, "/users/contributor": HUMAN}
+            return Response(200, users[path], {})
+        with patch.object(module, "writer_http", return_value=SimpleNamespace(request=request, cache_identity="11")), \
+                patch.object(module, "HTTP", return_value=SimpleNamespace(request=lambda *a: Response(200, HOST_IDENTITY, {}))):
+            host, collector, _ = module.build(self.store, CONFIG, {"GITHUB_PRESENCE_WRITER_TOKEN": "11"})
+        self.addCleanup(host.close)
+        self.assertEqual((sorted(collector.notifications), collector.config["notifications_user_id"]), ([], 22))
+        self.assertEqual(self.store.one("SELECT code FROM gaps WHERE scope='notifications_identity' AND resolved IS NULL")["code"],
+                         "notifications_credential_missing")
+        with self.store.transaction() as db:
+            self.store.job(db, "notifications:22:children", {"kind": "notification_discovery", "recipient": 22, "notification": {
+                "id": "N22", "reason": "mention", "updated_at": "2026-10-23T00:00:00Z", "repository": {**REPO, "private": False},
+                "subject": {"type": "Issue", "url": "https://api.github.com/repos/example/project/issues/1"}}})
+        read = len(calls)
+        self.assertFalse(collector.tick())
+        self.assertEqual(len(calls), read)  # nothing is read for it
+        job = self.store.one("SELECT id,state FROM jobs WHERE stream='notifications:22:children'")
+        self.assertEqual(job["state"], "removed")
+        self.assertEqual(self.store.one("SELECT code FROM gaps WHERE scope=?", ("page:" + str(job["id"]),))["code"],
+                         "notification_reader_unavailable")
+
 
 class ContinuationRecoveryTests(RecoveryCase):
     def transport(self, status="continuing", fail_ack=False):

@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/4bb28167e5537988e42456fdafc67f46b7c4f6b4",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/31dbab273a5c147fb1c2b19c54b54689fcf0be2a",
   "schema_version": 1,
   "skills": [
     {
@@ -37,8 +37,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "441086ebc944df4d1c1ccda2521fe06ec7cef2302505649187b9fb47d08e2e0a",
-          "size": 5826
+          "sha256": "fa6e1aabfe8349823e69e3ad3f0d1725265b6e62f9d7562ec0f6a9cff3b72819",
+          "size": 6053
         },
         {
           "path": "lib/client.py",
@@ -52,7 +52,7 @@
         },
         {
           "path": "scripts/a2a_daemon.py",
-          "sha256": "ba104be2d5838da37b6cf5ac9fe17718f8157bf7f57c2e862781e8b3a955bbfc",
+          "sha256": "f5894b400281796829f0ee7321f520adb77d6a97864a039edc4fa5c17cf80832",
           "size": 66465
         },
         {
@@ -115,7 +115,7 @@
       "name": "a2a",
       "slug": "a2a",
       "type": "extension",
-      "version": "1.5.2",
+      "version": "1.5.3",
       "when_to_use": "User asks to communicate with another A2A-compatible agent, discover an agent card, send an A2A message, check A2A task status, or expose this Ouroboros instance as an A2A peer."
     },
     {
@@ -187,8 +187,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "3ac40cf8c96f0eb720104c8c7869adffda23cd4faabb92f14b2937378d2df176",
-          "size": 32033
+          "sha256": "85887ecc8f72b3e7a761650632408b96b788b5b8b6efcea93a95d2cff2c43e23",
+          "size": 38680
         },
         {
           "path": "__init__.py",
@@ -197,13 +197,13 @@
         },
         {
           "path": "api_client.py",
-          "sha256": "7f9c3b9239f811db979f7399afbc9843017d6a2f2e377c36e64d31b126e114b3",
-          "size": 44178
+          "sha256": "a1260b086287e492bcf9b940ce27a630de177363719abc9f011b2878874d91a5",
+          "size": 69121
         },
         {
           "path": "budget.py",
-          "sha256": "252d8e3560f56dde9049b778d1eabf1a52298dad760536c3b2f08d3df052e0fd",
-          "size": 8087
+          "sha256": "d0ebebf17e6e004d3f49262c6d865fe93cf4cdf39bd58805b5947bd521102c46",
+          "size": 10337
         },
         {
           "path": "ffmpeg_bootstrap.py",
@@ -222,8 +222,8 @@
         },
         {
           "path": "models.py",
-          "sha256": "17a25a6510b4e5924e6fc4a5691a0203de0b69d829bc454e9d51a26c99e21990",
-          "size": 7517
+          "sha256": "6d66af05a6198667559b949cf8180c01650b3e837f5af2a79b8b6d02e68ad4c2",
+          "size": 10614
         },
         {
           "path": "modes.py",
@@ -232,8 +232,8 @@
         },
         {
           "path": "pipeline.py",
-          "sha256": "e63dbca11197257ebfa04416b2984b0d8ef9a8a08f116339ebd06a049557ea47",
-          "size": 146684
+          "sha256": "0b4639725f406b9bbd4584dc399639660a9134ea965310369774869316e00752",
+          "size": 179901
         },
         {
           "path": "pipeline_test.txt",
@@ -252,13 +252,63 @@
         },
         {
           "path": "scripts/anime_worker.py",
-          "sha256": "b2ac92acaf769a82f8353bea19689738031131b24a971c2c48acdc16a864e1ef",
-          "size": 18358
+          "sha256": "f5a4443730c3881427d3fbe170ad059a0997150694cf04e1d2632747da12f89f",
+          "size": 19753
+        },
+        {
+          "path": "tests/conftest.py",
+          "sha256": "dbf45eb4eea7408e580a5e033f9116623354717064cc7fc7c3213f65f52d8e48",
+          "size": 2379
         },
         {
           "path": "tests/test_api_client_vlm_helpers.py",
           "sha256": "6fed5827bb42cad919a301789785ae0a831daf67029555358004a6841d78fb25",
           "size": 1616
+        },
+        {
+          "path": "tests/test_assembly.py",
+          "sha256": "9c4bf4c4332c4d947f159c9e21dc471d8d65d8a5658be840b3d309249102560c",
+          "size": 12570
+        },
+        {
+          "path": "tests/test_budget_refunds.py",
+          "sha256": "2d89019d769b205f180a02f16b1033923d16c27edb5b170510848f2e9300acbf",
+          "size": 11775
+        },
+        {
+          "path": "tests/test_dispatch_deadlines.py",
+          "sha256": "9d4ff74c2bdd3ba2b3aa1227d891ee400ef938494f3fda81f640669aebe06fbc",
+          "size": 18694
+        },
+        {
+          "path": "tests/test_job_records.py",
+          "sha256": "dffd6336b2e469bb6ee673af26c3b6c2a8aeff4d568ed605d0b47951028fb6b8",
+          "size": 7487
+        },
+        {
+          "path": "tests/test_manifest_and_token_ceiling.py",
+          "sha256": "364bafba7a848aab7dbd1f037aafb0960b36a93fbad40d52b32956b4e00e0287",
+          "size": 3465
+        },
+        {
+          "path": "tests/test_prompt_fit.py",
+          "sha256": "1f30cda26ff579bdf2d21a8d830086c8f5d15df88948d8121758cdc231b077c6",
+          "size": 12375
+        },
+        {
+          "path": "tests/test_regeneration_after_unknown.py",
+          "sha256": "6c4e61d8bd5b1444205e5a8f09ccd23dedf5a16a273b4f7029657508a1730436",
+          "size": 10635
+        },
+        {
+          "path": "tests/test_verification_and_recovery.py",
+          "sha256": "34cbec1252e2449c8d5f605eaeaab0ef53a38032ba34d410615ceb5d1a24f0c8",
+          "size": 6165
+        },
+        {
+          "path": "tests/test_video_transport.py",
+          "sha256": "0b9ecf78b0ecc66e7c61639afa439c311eefd2b7d3436f84456fbffdd41a0132",
+          "size": 10763
         }
       ],
       "install_specs": [
@@ -267,7 +317,7 @@
       "name": "anime_studio",
       "slug": "anime_studio",
       "type": "extension",
-      "version": "3.2.0",
+      "version": "3.3.1",
       "when_to_use": "User wants to generate a short animated 2D anime cartoon, music video, or animated scene with consistent characters, VLM verification, and narrative continuity."
     },
     {
@@ -1312,28 +1362,33 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "0950c2c12faa8bb0124aa8bd087e41d60dc51b295423522f1cc1316b030476ac",
-          "size": 19496
+          "sha256": "1432dab0fa86284df67415093ea1633690707c6807f85c007ea690f11a0bc1e9",
+          "size": 25491
         },
         {
           "path": "lens_core.py",
-          "sha256": "5faa96a2018a328a81d34a272aa32fa637e78327b23941d4c5201a74dfc719f2",
-          "size": 57660
+          "sha256": "f5cd13cd5846e81b94f65fa581c4aba05e3996c32e36ce85604e53b0bfda7c7b",
+          "size": 57891
         },
         {
           "path": "lens_store.py",
-          "sha256": "e324b11d55abae4b5e6847c84505aa6ebc8c38d7f66395386e157e937d7b4274",
-          "size": 24376
+          "sha256": "94a393634212e179fef59cf7ce3cb9c6b15dac2d2bd39c58e182a213bee4d3b1",
+          "size": 30780
         },
         {
           "path": "plugin.py",
-          "sha256": "3910ccdc0adcf95f0cf55839da75478d6d9eaaf0e136f6b51f30570d692f00cf",
-          "size": 12358
+          "sha256": "92245b08dfad82c585f56802fb864c24d3fe74c043a7c7419be54364b6910b2a",
+          "size": 13046
+        },
+        {
+          "path": "tests/core_store_standin.py",
+          "sha256": "28b0085521c0fe7c5dfb4191e121969273f35e9308201ed6fb1ebb4e7a20b345",
+          "size": 5257
         },
         {
           "path": "tests/store_fixture.py",
-          "sha256": "0fe78cfd1c368f0afdcd2198c3823c9f3fa7b2001eeb35ed022db73dba200899",
-          "size": 10526
+          "sha256": "e4a975b627de6a97b2a2cade56f940dd52514b3bb4315dfb6e99c535ed8a071f",
+          "size": 11222
         },
         {
           "path": "tests/test_lens_core.py",
@@ -1342,13 +1397,13 @@
         },
         {
           "path": "tests/test_lens_store.py",
-          "sha256": "d3671fa3b1710c7ba57da237f20b78c83b35a89e302fa99be6e742e036d43030",
-          "size": 33107
+          "sha256": "5dce86a5011bd8748506db349750c94cc83afe6281fbb4b46c75429db70e5a69",
+          "size": 56942
         },
         {
           "path": "tests/test_plugin_routes.py",
-          "sha256": "f7c6ad69316107d9875ec0f6c5e33c84829e20ce1e2aa8ded70ab94e98164d45",
-          "size": 29993
+          "sha256": "eb72fe64597ec4b0bbfbe68d93ef86938b983e5588d956fd080e69098fb7ba1b",
+          "size": 37961
         },
         {
           "path": "tests/test_widget_contract.py",
@@ -1369,7 +1424,7 @@
       "name": "context-lens",
       "slug": "context-lens",
       "type": "extension",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "when_to_use": "The owner wants to understand reported input sizes, their spread and which requests belong to one task."
     },
     {
@@ -1396,13 +1451,13 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "027b309de85882eec195df66da676533489a87fe3db86a36efc370fb0a626666",
+          "sha256": "e0bfe27d4e1f8ca3aa968a875f46a9952eac4bdb94065df9782986c3d04f2b09",
           "size": 1751
         },
         {
           "path": "plugin.py",
-          "sha256": "8e6658c3069d9a399bf1dbdb3d1c3b732d019e276d06588eae9a3f33a9ff0d8e",
-          "size": 5697
+          "sha256": "3b7e8d0d174cf8213f9e20bced308fd14111d14a65527a59de1a831a1fd9e581",
+          "size": 6417
         }
       ],
       "install_specs": [
@@ -1411,7 +1466,7 @@
       "name": "duckduckgo",
       "slug": "duckduckgo",
       "type": "extension",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "when_to_use": "User asks to search the web, find information, look up facts, or research a topic — and no OpenAI key is available for web_search."
     },
     {
@@ -2167,23 +2222,23 @@
       "files": [
         {
           "path": "HOST_CONTRACT.md",
-          "sha256": "a50d3ce4c1c9334e50865621fe40a8241cc6a5d1a6f6361b3db02b3f278d80e2",
-          "size": 8973
+          "sha256": "2350bdcbca035d154f417b2404aad96c18e2ccfc8fde52398149db3404d27a75",
+          "size": 14210
         },
         {
           "path": "SETUP.md",
-          "sha256": "2d3f6545cf7a3619e71a779003086520e2e0903491e3c738e2a3a9d75638c5b7",
-          "size": 22680
+          "sha256": "d0c25b025907d97bb1cc59d21160f62ca438c00f416fdc40c7b9505bc0d5d8f6",
+          "size": 27631
         },
         {
           "path": "SKILL.md",
-          "sha256": "713d96a9ce8b9be61e043aad44a99cbbfa6ffdeb8d8007a5ba48a21172d7157b",
-          "size": 6593
+          "sha256": "c7546e848738146aca55a592428cc071f225b23e40e44bb94572afa4752faef5",
+          "size": 7343
         },
         {
           "path": "SOURCES.md",
-          "sha256": "8389ac84474f3f390d8b8597a7242c50974c1d4fdde0ada31a553865b473e011",
-          "size": 8485
+          "sha256": "d35438347634b21d2338a4061a5e87ccb57aad205b2cfc7ed022d8205b316c49",
+          "size": 11580
         },
         {
           "path": "gh_presence/__init__.py",
@@ -2197,8 +2252,8 @@
         },
         {
           "path": "gh_presence/collector.py",
-          "sha256": "a7eb1b9dc650990694a2c24be8ac953f88b1ab10ef4d8be8a9fa5441f1478bd3",
-          "size": 25286
+          "sha256": "835b9854456e6ab5e676d08913b523b7129c8ed91dc35a92b35e468433fc3ccd",
+          "size": 101048
         },
         {
           "path": "gh_presence/config.py",
@@ -2207,23 +2262,23 @@
         },
         {
           "path": "gh_presence/discovery.py",
-          "sha256": "cac60eefb4c957e6aacbff1d93535adb74038d5ac8b9a634c6816d70b441885d",
-          "size": 4466
+          "sha256": "bb62b7e50c92540d4f6e234d9d7d3d8f2b00693276adfc0f883a789f6c9c98c3",
+          "size": 10825
         },
         {
           "path": "gh_presence/events.py",
-          "sha256": "e3aa3b84e42e49ec8885480fbef5756a12f96eaffe46c155245ec942e8eca04b",
-          "size": 10797
+          "sha256": "c6d61eda20103146fdcec921dbcc4460c5c9e2f98aec54069cf4648cf60c8974",
+          "size": 43419
         },
         {
           "path": "gh_presence/host.py",
-          "sha256": "7cb7613143ce0c1bff41a411e41804baab0cbe47604f1ca3fe92e8b7092e2ee1",
-          "size": 21926
+          "sha256": "9c2b5aca9a12105722be3e46779d94c34a6c77aa8346c4a20ad1775736ce9d31",
+          "size": 24938
         },
         {
           "path": "gh_presence/http.py",
-          "sha256": "57b61b1e5b867740d2913b0f961f322358427262c03586e361e5fc914582cbbf",
-          "size": 7822
+          "sha256": "d0f86b5c4ad7c0a8e9fdee2563b124b4486efac6720103bc594d6b977e7fdca1",
+          "size": 8426
         },
         {
           "path": "gh_presence/identity.py",
@@ -2242,28 +2297,28 @@
         },
         {
           "path": "gh_presence/provider.py",
-          "sha256": "0f5713413c70739643a386d23cdce93bcedadccea9db79fa639317a5734cf63d",
-          "size": 18803
+          "sha256": "1ef8285b7c49e3394b523098f99941c3bbd8cc40f5731b289f8c518f0f4d1eb1",
+          "size": 25668
         },
         {
           "path": "gh_presence/store.py",
-          "sha256": "8c7e14836cf4169af0311d89118b6e390e155f60804444b4309617322a71240d",
-          "size": 14121
+          "sha256": "3c0ac2ff3a7b6b178c09b636ee22c915620ce5cae80f083ade9892dfb1077215",
+          "size": 15914
         },
         {
           "path": "plugin.py",
-          "sha256": "d90ba390b4e6048b5afd7c253781493ba91de8eea03ad1631bf1260d1b0a09b4",
-          "size": 11323
+          "sha256": "3900cbbc15e4334e2aa2b95e1c77d7c8dd40207c1f5c7885dba292b6f603d177",
+          "size": 11416
         },
         {
           "path": "scripts/companion.py",
-          "sha256": "4d6fec6e5224d8318e0d40eff2622bf515caf76a80fd202720c3e92ba14c46e0",
-          "size": 6494
+          "sha256": "bb04997c6b9b6eb9e2f6b703be6828e241fef9c619f57067b49a09679feeaae2",
+          "size": 8015
         },
         {
           "path": "tests/check_host_consumers.py",
-          "sha256": "d154d1b55701c9ece108c4965f36a16b5ed15298c1b4609ac69de181f4e9ccbd",
-          "size": 32175
+          "sha256": "10f0718109384c3747b0284ce74c427fcd8b3c45f68273b6be1138b7c3f6be3d",
+          "size": 85835
         },
         {
           "path": "tests/check_host_contract.py",
@@ -2277,18 +2332,23 @@
         },
         {
           "path": "tests/test_actor.py",
-          "sha256": "f3e2f03e88cc001d177e47e89ff2a30f4fd04787642155ab650e19885adb62a8",
-          "size": 4643
+          "sha256": "7ba50939ae7890133a5b9e1697ce1280c76d3dc88f4e773fcec0e822b3e4bd74",
+          "size": 5613
         },
         {
           "path": "tests/test_app_integration.py",
-          "sha256": "e99d6bec04e7e3ac905b5ab11065037209ab6892f5d8b3b97a5be83b010d0786",
-          "size": 20614
+          "sha256": "8811789957be2b67f522a5c876571100f586716365797250986bfc68b17ecdb6",
+          "size": 20668
+        },
+        {
+          "path": "tests/test_attention_repair.py",
+          "sha256": "c7017c09a37486bdaa66e3fece51f17be6a0353c411a30237499933437ae97a8",
+          "size": 58902
         },
         {
           "path": "tests/test_audit_recovery.py",
-          "sha256": "e33bf585c66644a14b08e0f564eb4c6909c13de0a04b187c5772466868c5ab72",
-          "size": 22850
+          "sha256": "126d6c7ea07819c5d239aef13040402ccb16303323947a1df8c67dd52d3bef79",
+          "size": 25039
         },
         {
           "path": "tests/test_auth.py",
@@ -2297,8 +2357,8 @@
         },
         {
           "path": "tests/test_held_context.py",
-          "sha256": "43849b3b2e2b63379e490232c974d9ae0756131505f3bae2a8956e75199f2557",
-          "size": 6865
+          "sha256": "c940b8d22f1b45449883d8f1985ea3e9781aa18e675c1a5466fb0f4f534cd703",
+          "size": 7367
         },
         {
           "path": "tests/test_identity.py",
@@ -2307,8 +2367,8 @@
         },
         {
           "path": "tests/test_locking.py",
-          "sha256": "f94ac66031c67d1bc909320b48f7999bd5bc3e6c4a9156e8e39c0875161efe6c",
-          "size": 7597
+          "sha256": "338473d88acc7651c7d67460293d7b46f057268629b5178939be0f2573701445",
+          "size": 7746
         },
         {
           "path": "tests/test_owner_identity.py",
@@ -2317,8 +2377,23 @@
         },
         {
           "path": "tests/test_repairs.py",
-          "sha256": "1620fc9185a9d8f762b84c8dd46d3012cf3ad47e1d18b96dad1447017c4a779c",
-          "size": 22348
+          "sha256": "58597543705148b7cd98889247ba0c7f2fd52cf356345902f53cc9cd58c95dd6",
+          "size": 22376
+        },
+        {
+          "path": "tests/test_rollback.py",
+          "sha256": "93fb12385386ed2dc4cd426656ffa420df26e46080a9c8955b86c6a4246dadad",
+          "size": 11043
+        },
+        {
+          "path": "tests/test_semantic_identity.py",
+          "sha256": "9fb0bbb503f9b42b77f50927d74fffbcddf3ebf4a6916766aea7ef7479fe21df",
+          "size": 133460
+        },
+        {
+          "path": "tests/test_stale_reads.py",
+          "sha256": "14b2879f0bcbf1667ff4f11bd0fe152450d9dbd584e8b70dc08df70309c6376b",
+          "size": 47031
         },
         {
           "path": "tests/test_status_route.py",
@@ -2326,9 +2401,14 @@
           "size": 4028
         },
         {
+          "path": "tests/test_thread_order_and_rereads.py",
+          "sha256": "ec6e2791cc0aa2714a40f0935d945b1ec13d6861e3b6208c6b4b53e6a73d2760",
+          "size": 20650
+        },
+        {
           "path": "tests/test_transport.py",
-          "sha256": "ec7c493c4e3f97356ade5075331bef99cd04a7adb7fe3e3e6bf7da3b895e09ae",
-          "size": 46711
+          "sha256": "550b136fc9b43925317ebc6050e6925074cf9a25bdd8febf1d9cffa7b1ba2b6a",
+          "size": 46725
         },
         {
           "path": "ui/icon.svg",
@@ -2343,7 +2423,7 @@
       "name": "github",
       "slug": "github",
       "type": "extension",
-      "version": "0.1.6"
+      "version": "0.2.0"
     },
     {
       "description": "Universal Google Workspace integration for Google Sheets, Docs, Drive, Slides and Calendar via explicit OAuth or Service Account authentication.",
@@ -3568,8 +3648,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "bcace3436ea8a3702054aec77af575e1b742114e51f308e393165c467207b65c",
-          "size": 15354
+          "sha256": "449c24e9366bd0e56811ca009f06634297af605629eb81ad486fee78dab6c41f",
+          "size": 18217
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -3583,18 +3663,18 @@
         },
         {
           "path": "README.md",
-          "sha256": "2c07795168e61967bf18fc3d2f308cb714c9078b709d834f6f166e588f2941c3",
-          "size": 2323
+          "sha256": "90a5ab4e4a45700743a3e4a7df907ac67a8651f7340c9a1505a456af6ddeb54f",
+          "size": 2557
         },
         {
           "path": "SKILL.md",
-          "sha256": "1c98ccce03634e2972c1f2e4d0c5880ea48c767683f412b5bed4fa6d10dc047b",
-          "size": 46397
+          "sha256": "81e3e0bfcb531bab6d0fd4c85204ecd5e685d3918bdccbe4eadca87390f98847",
+          "size": 52133
         },
         {
           "path": "plugin.py",
-          "sha256": "4f98c79ace30e3c8bd6f493a373b2f3eb4dd395441b928ad54fab2de381af0b9",
-          "size": 23447
+          "sha256": "ca1b879205c85c5c0c69cd31af44e2d664913e1e616e3e8a4fe6376a84c49293",
+          "size": 24427
         },
         {
           "path": "telegram_bot/__init__.py",
@@ -3603,18 +3683,18 @@
         },
         {
           "path": "telegram_bot/api.py",
-          "sha256": "b75ab4bed28e89fcb0a3e05a1b4754585edac72beec11450881b40215d4550d0",
-          "size": 28212
+          "sha256": "7e6dc5ffd2b5ea05021d2bcbd7ce1d32d0c8074f2490554acc62f93a8660daa6",
+          "size": 30039
         },
         {
           "path": "telegram_bot/custody.py",
-          "sha256": "978ef79bd36c46bf5eb583c306a7104592dbb8253495f8c8e5b1d2daabd467fb",
-          "size": 67003
+          "sha256": "59a03a2d63dc8f943054b1948dff5db7c86988955042e48c48f174456d23a16a",
+          "size": 73396
         },
         {
           "path": "telegram_bot/delivery.py",
-          "sha256": "5bf96820d12f35408ead0836d36524f63976208aa1e7fbc99d84175021b826e6",
-          "size": 6179
+          "sha256": "fb1d4ab3bb8c83312dc9d7068c7b2e544fb3815f8277ea9c0a5c877c72d0120a",
+          "size": 7173
         },
         {
           "path": "telegram_bot/discovery.py",
@@ -3637,9 +3717,14 @@
           "size": 21124
         },
         {
+          "path": "telegram_bot/outbox_files.py",
+          "sha256": "a41c785d77c66a4005b1772506ebb8dfbb1ad8ad788ca375e03cd73dcfe53958",
+          "size": 4458
+        },
+        {
           "path": "telegram_bot/runtime.py",
-          "sha256": "bb2f2f716fa5b9d01db7d6e079a70d40340da3f3bf1043eeff2752373b9b906b",
-          "size": 53662
+          "sha256": "c1e90dd89d6542c378b59c8d2903a226ca1c752be84726ee90a6022d9fe1757e",
+          "size": 67463
         },
         {
           "path": "telegram_bot/settings.py",
@@ -3648,8 +3733,8 @@
         },
         {
           "path": "telegram_bot/tools.py",
-          "sha256": "80f2ef7d24ed4f0edca574f31742eacb2ab683b7540c842f0e2c74141095d0a4",
-          "size": 23183
+          "sha256": "09a5d543188c0d742e018ee58b628e47d5f4af3799ba3d0473b962e8b9160bfa",
+          "size": 26376
         },
         {
           "path": "tests/conftest.py",
@@ -3673,8 +3758,8 @@
         },
         {
           "path": "tests/test_custody.py",
-          "sha256": "4375004cfe44d2d55ed2af4bb1f4c51b9cb76801a18ab3ca71b97305fdfd9e69",
-          "size": 15395
+          "sha256": "db24d5aed8d030a24eb1d80defafa785729b99d6d5c686b726d5c2a9af3537cf",
+          "size": 15635
         },
         {
           "path": "tests/test_delivery_reports.py",
@@ -3733,8 +3818,8 @@
         },
         {
           "path": "tests/test_outbound_media.py",
-          "sha256": "45abd7290db364c5d07ed8086f8bc0a1670cfddc47cd98e572c9f024d587d534",
-          "size": 19178
+          "sha256": "0e5b68b9c2b46fb93a69383d3161a153c290b72857c4ff56e7adce1666ed9f27",
+          "size": 19380
         },
         {
           "path": "tests/test_places.py",
@@ -3743,18 +3828,18 @@
         },
         {
           "path": "tests/test_plugin.py",
-          "sha256": "1dd4b3ed2bebe20705e60f25b2ea29fdfc0c165512e454e48f9a322a2db01b5a",
-          "size": 10185
+          "sha256": "ec51ef85e6f293ad3387ac871bea97ef98faa45587f9e82d555dfa754aeb2479",
+          "size": 10285
         },
         {
           "path": "tests/test_presence_continuation.py",
-          "sha256": "baf92a6a165ef64022b21ca27edec6c316f64630f89a8cdc23d1ef2b453c0efd",
-          "size": 53545
+          "sha256": "5d8b0de714a3eb432768478c279f83ff6f7e5115f81bee746e00ef1e369b3c12",
+          "size": 56430
         },
         {
           "path": "tests/test_reactions.py",
-          "sha256": "1a36d7640c1420d971df245f752cdb51a168a7a75d73860cea206c3c566ed146",
-          "size": 109725
+          "sha256": "ae2d64fb8bbfc57c78dedf004b7f1e2ad354ccef2502dc89e621a8b8d61a12b1",
+          "size": 110467
         },
         {
           "path": "tests/test_retained_custody.py",
@@ -3763,13 +3848,18 @@
         },
         {
           "path": "tests/test_runtime.py",
-          "sha256": "225868ee9a2d3289f60a38254f944d40bfa68841034a6faae4e762981be0bca3",
-          "size": 23428
+          "sha256": "7944478054e85fd0bf17d0536b98bfded5fa4ed39a9400f96713c2cae5509a00",
+          "size": 23682
         },
         {
           "path": "tests/test_typing.py",
           "sha256": "ab2e5c44598a4026a9de98d2c3ab13da24224d7edc77e1e054556b0de642d10e",
           "size": 13833
+        },
+        {
+          "path": "tests/test_unknown_outcomes.py",
+          "sha256": "59f3a6495d9d88ec8ee044884af5d128116efc4b7e930e20c1f6f0da552468b2",
+          "size": 81632
         },
         {
           "path": "tests/test_voice_audio.py",
@@ -3778,8 +3868,8 @@
         },
         {
           "path": "tests/test_words.py",
-          "sha256": "f561446e91946c4d17b7edb1a39db926ed47ae4e0a58af3c79e6bf7a262b3e2e",
-          "size": 11431
+          "sha256": "99bcc075ad365cf0297cfb07bb749d8c6785d81cb9485499da1cef621097b0c7",
+          "size": 12054
         },
         {
           "path": "tests/test_worker_identity.py",
@@ -3796,7 +3886,7 @@
       "name": "telegram-bot",
       "slug": "telegram-bot",
       "type": "extension",
-      "version": "0.12.0"
+      "version": "0.12.1"
     },
     {
       "connects": [
@@ -3806,8 +3896,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "ce9b1dc8088792a3b8ee9cedadcfcf026f7f5543d501eeadcf583caf1c3aad57",
-          "size": 42589
+          "sha256": "6548e62fed82d0ebe01370da124688f74528ee5ddc68fc2b18748917e16be495",
+          "size": 43673
         },
         {
           "path": "plugin.py",
@@ -3863,6 +3953,11 @@
           "path": "tests/test_participant_routes.py",
           "sha256": "de9fdf92d32c2a12bd1425e54694faafeeb44d61792195e0e4f91f01ddb9c5ca",
           "size": 24858
+        },
+        {
+          "path": "tests/test_preflight_targets.py",
+          "sha256": "35679c6f8f03c9bb46fc940b89564d3d00a70f3bc6ccd6f8a6bd517ffb9484cd",
+          "size": 7397
         },
         {
           "path": "tests/test_presence_v2_legacy.py",
@@ -3921,13 +4016,13 @@
         },
         {
           "path": "userbot/participant.py",
-          "sha256": "8e5507e70d75a05f2795f2f3964984393d6f5de62c5cef361698ff90c8c9c670",
-          "size": 50227
+          "sha256": "a8686165b50844129784357734c60d0ecef180dd9ba501d39f8b4edbd504565c",
+          "size": 50867
         },
         {
           "path": "userbot/participant_ops.py",
-          "sha256": "bb14b0ee81a0766abf71cb0c59dc8cf2ad5d290bf288794e31f95b881bd7181f",
-          "size": 26696
+          "sha256": "b1ccd25e0f7598a52fc11840e90b4eabf1c3ba23ed3a5bd6e33e780a438e7a9e",
+          "size": 27074
         },
         {
           "path": "userbot/participant_plugin.py",
@@ -3989,7 +4084,7 @@
       "name": "telegram-user-session",
       "slug": "telegram-user-session",
       "type": "extension",
-      "version": "0.4.3"
+      "version": "0.4.4"
     },
     {
       "description": "Token Observatory — Liquid Glass dashboard for recorded Ouroboros token usage, tasks and models.",

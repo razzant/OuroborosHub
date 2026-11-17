@@ -4,8 +4,10 @@ This module is the data-source boundary and nothing else: it opens one fixed
 SQLite file read-only, proves it is the store this version understands, reads
 one bounded selection inside one short read transaction, releases the
 transaction, and hands back plain column values. It sanitizes nothing and
-decides nothing about meaning — ``lens_core`` does that. No Ouroboros import,
-no host import, no network, no write of any kind.
+decides nothing about meaning — ``lens_core`` does that. No network, and no
+write of the store's content: no row, schema, pragma assignment, journal-mode
+change or checkpoint. The one Ouroboros import is core's shared SQLite protocol
+(``ouroboros.store``), resolved when a read starts (see below).
 
 Store facts this relies on (core ``ouroboros/usage_store.py``, schema 1;
 ``docs/USAGE_STORE.md``)
@@ -31,24 +33,51 @@ Store facts this relies on (core ``ouroboros/usage_store.py``, schema 1;
   filesystem without kernel locks where EVERY access must run inside the core's
   name-protocol money lock; taking that lock means creating a file, so this
   reader refuses that tier rather than read around the protocol.
+* The journal is the lifecycle owner's choice (``ouroboros/store_journal.py``):
+  WAL where ``store._journal_mode(path, tier)`` says this runtime may share it
+  (a SQLite carrying the WAL-reset fix, the enforced tier, a proven local
+  filesystem), else the rollback journal (PERSIST). Ordinary opens keep that
+  choice and refuse a WAL file this runtime must not share.
 
 How the file is touched
 -----------------------
 Never with ``open()``. A process that closes ANY descriptor on a SQLite file
-drops every POSIX lock it holds on that file, and this skill may run inside the
-same process as the core's own store connections. So the path is checked with
-``lstat`` only (no symlink at ``state`` or at the file, a regular file), and the
-file itself is only ever opened by SQLite: ``mode=ro`` URI, ``query_only``, a
-short busy timeout, one deferred read transaction. ``immutable`` and ``nolock``
-are never used on this live file. After the transaction the path's identity is
-checked again, so a store replaced while it was read is reported, not mixed in.
+drops every POSIX lock it holds on that file, and this skill normally runs
+inside the server process, beside the core's own store connections and its raw
+readers. So the path is checked with ``lstat`` only (no symlink at ``state`` or
+at the file, a regular file), and the file itself is only ever opened by
+SQLite: ``mode=ro`` URI, ``query_only``, a short busy timeout, one deferred read
+transaction. ``immutable`` and ``nolock`` are never used on this live file.
+After the transaction the path's identity is checked again, so a store replaced
+while it was read is reported, not mixed in.
+
+The connection is opened through core's ``store.counted_connect``: counted on
+the file's inode like every core store connection, so a core raw read of the
+same file (``store._borrow``) keeps its descriptor open while this read holds
+its locks. Without that helper (no core in this process, or a core older than
+the inode registry) a rollback-journal store is read with a plain connection,
+as 1.2.0 did, and a WAL store is refused.
+
+A WAL store is opened only where core's own eligibility (``_journal_mode``)
+says this runtime may share it, and only together with ``counted_connect``.
+Otherwise it is refused BEFORE SQLite opens the file, from the ``-wal`` sibling
+or core's header read (``store.wal_file``), because opening a WAL file already
+takes part in it. Inside the transaction ``PRAGMA journal_mode`` is checked
+again. A read-only connection to a WAL store still uses SQLite's coordination
+files: it updates the shared-memory index (``-shm``: read marks, and the index
+rebuild after a crash), and when no connection had the store open it creates an
+empty ``-wal`` and a ``-shm`` that stay after it closes. It cannot checkpoint,
+so it never moves or deletes a committed frame. Those two files lie outside the
+skill's own state directory; the manifest declares them as ``fs``.
 """
 
 from __future__ import annotations
 
 import heapq
+import importlib
 import json
 import os
+import pathlib
 import sqlite3
 import stat as _stat
 import time
@@ -60,6 +89,19 @@ LOCK_TIER_ENFORCED = "enforced"
 APPLICATION_ID_ENFORCED = 0x4F555345   # "OUSE" — core _APPLICATION_ID["enforced"]
 APPLICATION_ID_NAME = 0x4F55534E       # "OUSN" — core _APPLICATION_ID["name"]
 CATEGORY_INDEX = "attempts_category_time"
+
+# Core's shared SQLite protocol. Three names are used, each as core itself uses
+# them: ``counted_connect`` (chronicle_store's read-only index connection),
+# ``_journal_mode`` (store_journal's WAL eligibility) and ``wal_file`` (the
+# header read through the inode registry).
+CORE_STORE_MODULE = "ouroboros.store"
+# Whether this runtime may share a WAL store, as core's eligibility answers it.
+WAL_SHARED, WAL_INCOMPATIBLE, WAL_UNVERIFIED = "shared", "incompatible", "unverified"
+_WAL_REFUSAL = {WAL_INCOMPATIBLE: "store_wal_incompatible", WAL_UNVERIFIED: "store_wal_unverified"}
+# Tests replace the core resolution with a stand-in or ``None``; production
+# leaves this unset and imports the host's own module.
+_CORE_UNSET = object()
+_core_override: Any = _CORE_UNSET
 
 # Fixed bounds (documented in SKILL.md; no route may raise them).
 MAX_ROWS = 4000                        # rows of any kind in one selection
@@ -218,26 +260,97 @@ def store_path(data_dir: str) -> Tuple[str, Tuple[int, int]]:
         raise StoreMissing() from None
     except OSError:
         raise StoreUnavailable("store_unreadable") from None
-    # The store runs a rollback journal. A live `-wal` beside it means a WAL
-    # file, and SQLite creates WAL side files for any connection that opens
-    # one — so that store is refused here, before anything opens it.
-    if os.path.lexists(path + "-wal"):
-        raise StoreUnavailable("store_unsupported")
     return path, identity
 
 
-def connect(path: str) -> sqlite3.Connection:
+def core_store() -> Any:
+    """Core's ``ouroboros.store`` when this process has it, else ``None``.
+
+    In the server it is already imported, so this is a module lookup. Nothing
+    here guesses at the protocol when the module is absent: a rollback store is
+    then read with a plain connection and a WAL store is refused.
+    """
+    if _core_override is not _CORE_UNSET:
+        return _core_override
+    try:
+        return importlib.import_module(CORE_STORE_MODULE)
+    except Exception:  # an absent or broken core only means "no protocol to borrow"
+        return None
+
+
+def _counted_connector(core: Any) -> Any:
+    connector = getattr(core, "counted_connect", None) if core is not None else None
+    return connector if callable(connector) else None
+
+
+def wal_sharing(core: Any, path: str) -> str:
+    """May this runtime share a WAL store at ``path``? Core's own answer, never a local copy of it.
+
+    ``shared`` needs both core's eligibility (``_journal_mode(path, "enforced")
+    == "WAL"``: the call ``store_journal`` makes, asked for the enforced tier,
+    the only tier this reader accepts) and ``counted_connect``.
+    ``incompatible`` is core saying no; ``unverified`` is anything that leaves
+    the answer unknown (no core, a missing name, the check itself failing).
+    """
+    policy = getattr(core, "_journal_mode", None) if core is not None else None
+    if not callable(policy) or _counted_connector(core) is None:
+        return WAL_UNVERIFIED
+    try:
+        chosen = policy(pathlib.Path(path), getattr(core, "TIER_ENFORCED", LOCK_TIER_ENFORCED))
+    except Exception:
+        return WAL_UNVERIFIED
+    return WAL_SHARED if chosen == "WAL" else WAL_INCOMPATIBLE
+
+
+def _wal_header(core: Any, path: str) -> bool:
+    """Does the header say WAL? Only through core's registry read (``store.wal_file``).
+
+    Without it the header cannot be read here without ``open()``, so the answer
+    is "not known to be WAL" and the in-transaction check stays the backstop.
+    """
+    reader = getattr(core, "wal_file", None) if core is not None else None
+    if not callable(reader):
+        return False
+    try:
+        return bool(reader(pathlib.Path(path)))
+    except OSError:
+        raise StoreUnavailable("store_unreadable") from None
+
+
+def refuse_unshared_wal(core: Any, path: str, sharing: str) -> None:
+    """Before SQLite opens the file: a WAL store this runtime does not share is refused.
+
+    Opening a WAL file is already taking part in it (SQLite maps its ``-shm``,
+    may rebuild that index and creates missing side files), so the refusal must
+    come first. A ``-wal`` beside the store is refused whatever its header says,
+    as 1.2.0 did: SQLite opens a non-empty log even under a rollback header.
+    """
+    if sharing == WAL_SHARED:
+        return
+    if os.path.lexists(path + "-wal") or _wal_header(core, path):
+        raise StoreUnavailable(_WAL_REFUSAL[sharing])
+
+
+def connect(path: str, core: Any = None) -> sqlite3.Connection:
     """A strictly read-only connection to the live store.
 
-    ``mode=ro`` (never creates, never writes), no ``immutable`` and no
+    ``mode=ro`` (no database content is ever written), no ``immutable`` and no
     ``nolock`` (the store is live and its file locks are the protocol), a short
-    busy wait, and ``query_only`` as a second refusal of any write.
+    busy wait, and ``query_only`` as a second refusal of any write. With core's
+    ``counted_connect`` the connection is counted on the file's inode for its
+    whole life; ``close()`` uncounts it.
     """
     uri = "file:%s?mode=ro" % _uri_path(path)
+    connector = _counted_connector(core)
     try:
-        conn = sqlite3.connect(uri, uri=True, timeout=BUSY_TIMEOUT_SEC, isolation_level=None)
+        if connector is not None:
+            conn = connector(uri, path, uri=True, timeout=BUSY_TIMEOUT_SEC, isolation_level=None)
+        else:
+            conn = sqlite3.connect(uri, uri=True, timeout=BUSY_TIMEOUT_SEC, isolation_level=None)
     except sqlite3.Error as exc:
         raise _typed(exc) from None
+    except OSError:  # counted_connect states the path after opening: it went away meanwhile
+        raise StoreUnavailable("store_unreadable") from None
     try:
         conn.execute("PRAGMA query_only = ON")
     except sqlite3.Error as exc:
@@ -270,24 +383,24 @@ def _meta_json(rows: Dict[str, Any], key: str) -> Any:
         return None
 
 
-def _validate(conn: sqlite3.Connection) -> Dict[str, Any]:
+def _validate(conn: sqlite3.Connection, sharing: str = WAL_UNVERIFIED) -> Dict[str, Any]:
     """Prove this is the store version and lock tier this reader understands.
 
-    Runs inside the read transaction; the first statement takes the shared lock.
-    The application id is checked FIRST, so on a name-tier store nothing but the
-    header is ever read.
+    Runs inside the read transaction; the first statement takes the shared lock
+    (under WAL, the read mark of this snapshot). The application id is checked
+    FIRST, so on a name-tier store nothing but the header is ever read.
     """
     application_id = conn.execute("PRAGMA application_id").fetchone()[0]
     if application_id == APPLICATION_ID_NAME:
         raise StoreUnavailable("store_name_tier")
     if application_id != APPLICATION_ID_ENFORCED:
         raise StoreUnavailable("store_unsupported")
+    # A query, never an assignment: the journal is the lifecycle owner's choice.
     mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0] or "").lower()
-    if mode == "wal":
-        # Core's store runs a rollback journal (docs/USAGE_STORE.md). A WAL file
-        # is refused; note that SQLite may already have created its side files
-        # when it opened this one — see store_path() for the pre-open check.
-        raise StoreUnavailable("store_unsupported")
+    if mode == "wal" and sharing != WAL_SHARED:
+        # The pre-open check missed it (no core header read, or a conversion
+        # meanwhile). SQLite has opened the log by now; nothing is read from it.
+        raise StoreUnavailable(_WAL_REFUSAL.get(sharing, "store_wal_unverified"))
     tables = {row[0] for row in conn.execute(
         "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')")}
     if not {"attempts", "summaries", "meta", CATEGORY_INDEX} <= tables:
@@ -308,6 +421,7 @@ def _validate(conn: sqlite3.Connection) -> Dict[str, Any]:
     if indexed != ["category", "ts_last_epoch"]:
         raise StoreUnavailable("store_unsupported")
     return {"schema_version": SCHEMA_VERSION, "lock_tier": LOCK_TIER_ENFORCED,
+            "journal": "wal" if mode == "wal" else "rollback",
             "metadata_read": "sqlite_json" if _json_functions(conn) else "python_text"}
 
 
@@ -359,9 +473,13 @@ def read_store(
     closed before this returns, so nothing downstream holds the store's lock.
     """
     path, before = store_path(data_dir)
+    core = core_store()
+    sharing = wal_sharing(core, path)
+    refuse_unshared_wal(core, path, sharing)
     budget = _Budget(hard_budget_sec)
     started = time.monotonic()
-    conn = connect(path)
+    conn = connect(path, core)
+    counted = _counted_connector(core) is not None
     rows: List[Dict[str, Any]] = []
     partial: List[str] = []
     began = ended = None
@@ -370,7 +488,7 @@ def read_store(
         try:
             conn.execute("BEGIN")
             began = time.monotonic()
-            facts = _validate(conn)
+            facts = _validate(conn, sharing)
             categories, category_capped = _categories(conn, max_categories)
             if category_capped:
                 partial.append("category_cap")
@@ -436,9 +554,13 @@ def read_store(
         "unknown_timestamp_capped": untimed_capped,
         "categories_read": len(categories),
         "read_ms": int(round((time.monotonic() - started) * 1000)),
-        # How long this read held the store's shared lock (writers' COMMIT waits on it).
+        # How long this read held its snapshot: under the rollback journal a
+        # writer's COMMIT waits on that shared lock; under WAL it is a read mark
+        # that only keeps a checkpoint from resetting the log meanwhile.
         "transaction_ms": int(round(((ended or started) - (began or started)) * 1000)),
         "sql_steps": budget.steps,
+        # "counted": opened through core's counted_connect; "plain": no core helper.
+        "connection": "counted" if counted else "plain",
     })
     return {"rows": rows, "facts": facts}
 

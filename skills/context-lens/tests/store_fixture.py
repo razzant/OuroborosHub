@@ -91,6 +91,9 @@ class Store:
                  schema_version: Any = 1, lock_tier: Any = "enforced",
                  import_status: Any = "completed", journal_mode: str = "delete") -> None:
         self.root = root
+        # Core's writers set connection-local PERSIST on a rollback store, which
+        # keeps the journal file between commits; this fixture's writers do too.
+        self.journal_mode = journal_mode
         state = os.path.join(root, "state")
         os.makedirs(state, exist_ok=True)
         self.path = os.path.join(state, "usage.sqlite")
@@ -113,8 +116,21 @@ class Store:
             conn.close()
         self.seq = 0
 
+    @classmethod
+    def existing(cls, root: str, *, seq: int = 100000) -> "Store":
+        """An already built store, for a writer in another process (no schema is run)."""
+        self = cls.__new__(cls)
+        self.root = root
+        self.journal_mode = None
+        self.path = os.path.join(root, "state", "usage.sqlite")
+        self.seq = seq
+        return self
+
     def connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path, isolation_level=None)
+        conn = sqlite3.connect(self.path, isolation_level=None)
+        if self.journal_mode == "persist":
+            conn.execute("PRAGMA journal_mode = persist")
+        return conn
 
     def add(
         self,
