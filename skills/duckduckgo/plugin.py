@@ -34,7 +34,7 @@ def _search(query: str, max_results: int = _DEFAULT_RESULTS) -> Dict[str, Any]:
 
     try:
         max_results_int = int(max_results)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         max_results_int = _DEFAULT_RESULTS
 
     max_results = min(max(1, max_results_int), _MAX_RESULTS_CAP)

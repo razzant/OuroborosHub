@@ -2,6 +2,8 @@
 import importlib.util
 import json
 from pathlib import Path
+import sys
+import types
 import unittest
 from unittest.mock import patch
 
@@ -92,11 +94,36 @@ class DuckDuckGoRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["results"][0]["title"], "Fixture")
         response = await self.client.post("/search", json={"query": "x" * 400})
         self.assertEqual(response.status_code, 200)
-        for fields in ({"max_results": 7.0}, {"max_results": " 12 "}, {"max_results": ""}, {"max_results": None}):
+        for fields in ({"max_results": 4}, {"max_results": 7.0}, {"max_results": " 12 "}, {"max_results": ""},
+                       {"max_results": None}):
             with self.subTest(fields=fields):
                 response = await self.client.post("/search", json={"query": "q", **fields})
                 self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.searched, [("ouroboros", 3), ("x" * 400, 5), ("q", 7), ("q", 12), ("q", 5), ("q", 5)])
+        self.assertEqual(self.searched, [("ouroboros", 3), ("x" * 400, 5), ("q", 4), ("q", 7), ("q", 12), ("q", 5),
+                                         ("q", 5)])
+
+
+class DuckDuckGoToolTests(unittest.TestCase):
+    def test_tool_path_reads_a_non_finite_max_results_as_the_default(self):
+        seen = []
+
+        class FakeDDGS:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def text(self, query, max_results):
+                seen.append((query, max_results))
+                return [{"title": "Fixture", "href": "https://example.invalid/", "body": "fixture"}]
+
+        with patch.dict(sys.modules, {"ddgs": types.SimpleNamespace(DDGS=FakeDDGS)}):
+            for value, expected in ((float("inf"), 5), (float("-inf"), 5), (3, 3), (99, 20)):
+                with self.subTest(value=value):
+                    payload = json.loads(plugin._tool_search(query="x", max_results=value))
+                    self.assertEqual(payload["count"], 1)
+                    self.assertEqual(seen[-1], ("x", expected))
 
 
 if __name__ == "__main__":
