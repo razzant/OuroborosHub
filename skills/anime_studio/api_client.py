@@ -27,6 +27,295 @@ VLM_RETRIES = 2
 VLM_RETRY_STATUS = {400, 408, 409, 425, 429, 500, 502, 503, 504}
 CHAT_RETRIES = 2
 
+# THE response-token ceiling for EVERY model call this payload makes — chat,
+# VLM verification, judge panel, comparisons, condense/simplify/advisor.
+#
+# WHY ONE CONSTANT AND WHY THIS BIG (owner decision, 2026-08-04). A tight
+# max_tokens on a call that must return STRUCTURED output is an anti-pattern,
+# not an economy: a reasoning model spends its completion allowance on HIDDEN
+# reasoning BEFORE the first character of useful output, so the ceiling runs out
+# before the JSON begins. The failure then reads as "the model did not answer"
+# rather than "the budget ran out": `max_tokens=2048` on the identity judge was
+# reported to return `attributes: {}` on every scene of a live job and an
+# unterminated JSON string on the cross-scene check, making the hard identity
+# gate STRUCTURALLY unreachable.
+#
+# The ceiling caps the RESPONSE: only emitted tokens are billed. OpenRouter can
+# still refuse a request whose ceiling the remaining credit cannot cover (HTTP
+# 402), and chat calls do not retry that. Economy comes from a SHORT prompt and
+# a strict response format, never from clipping the answer.
+#
+# WHY 65536. It is the largest value every text model called here accepts: the
+# public OpenRouter catalog (read 2026-11-16) lists max_completion_tokens 65536
+# for google/gemini-3.1-pro-preview and google/gemini-3.5-flash and 128000 for
+# anthropic/claude-sonnet-4.6. A value above the smallest of them could turn
+# every call to that model into a refusal; recheck the catalog before raising it.
+#
+# It is a single constant on purpose — a number written at each call site
+# drifts apart again. Do not re-inline it, and do not lower it because it
+# "looks large": that is the defect, not tuning.
+DEFAULT_MAX_TOKENS = 65536
+
+# Minimum seconds between liveness heartbeats emitted from inside the video poll
+# loop (see generate_video). Well under the worker's lease TTL, well above the
+# 5s poll cadence: the point is to prove the worker is alive during a silent
+# 20-minute wait, not to write a job file every poll.
+POLL_HEARTBEAT_INTERVAL = 60.0
+# Transient tolerance around an ALREADY-PAID provider video job. These bound
+# recovery, not generation: the provider job id and its content URL stay valid,
+# so a retry costs nothing, while raising discards a finished clip and lets the
+# caller pay for a second one.
+VIDEO_RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
+VIDEO_POLL_MAX_TRANSIENT = 5  # consecutive, reset by any successful poll
+VIDEO_DOWNLOAD_ATTEMPTS = 3
+
+# THE duration contract of one generate_video call. httpx timeouts bound each
+# connect/read/write step, not a whole request (a slow trickle can outlive
+# them), so every network step also runs under asyncio.wait_for with its own
+# total deadline. The sum is the longest the call can run before it raises by
+# itself; the pipeline's outer wrapper (TIMEOUT_VIDEO) is derived from it and
+# stays above it, so the outer cut can never be what ends an accepted job.
+VIDEO_POST_DEADLINE = 120.0          # the dispatch POST, total
+VIDEO_POLL_REQUEST_DEADLINE = 60.0   # one status GET, total
+VIDEO_DOWNLOAD_TIMEOUT = 300.0       # one download attempt, total (a 2K clip can need minutes)
+VIDEO_DOWNLOAD_BUDGET = 600.0        # every download attempt and pause together
+VIDEO_DOWNLOAD_RETRY_PAUSE = 2.0     # pause before retry n is n times this, inside the budget
+VIDEO_CALL_DEADLINE = (
+    VIDEO_POST_DEADLINE
+    + VIDEO_MAX_WAIT
+    + VIDEO_POLL_INTERVAL
+    + VIDEO_POLL_REQUEST_DEADLINE
+    + VIDEO_DOWNLOAD_BUDGET
+)
+
+
+# ─── Prompt length: ONE owner for every model's hard limit ──────────
+#
+# WHY HERE. This module owns the only physical POST to /videos, so a limit
+# enforced anywhere else is advice, not a guarantee. A live run reported the
+# cost of not having this: minimax/hailuo-3 rejects a request whose prompt
+# exceeds 7000 characters ("invalid params, content[0].text too long:
+# 8640 > 7000 characters") and the model was absent from the pipeline's own
+# limit map entirely, so NO clamp existed for it — every scene that carried a
+# continuity anchor was refused with HTTP 400 while the ledger still charged
+# for it.
+#
+# 6800 for hailuo-3: the provider's hard ceiling is 7000, and the single
+# prompt reported to succeed live measured 6800, so this is the largest value
+# known to pass, with margin for the marker this fitter appends.
+VIDEO_MODEL_PROMPT_LIMIT: dict[str, int] = {
+    "kwaivgi/kling-v3.0-pro": 2500,
+    "kwaivgi/kling-v3.0-std": 2500,
+    "kwaivgi/kling-video-o1": 2500,
+    "minimax/hailuo-3": 6800,
+}
+
+PROMPT_TRUNCATION_MARKER = (
+    "\n[…prompt shortened to fit this model's character limit…]\n"
+)
+
+
+class VideoPromptFitError(RuntimeError):
+    """The prompt cannot be fitted without dropping a REQUIRED reference token.
+
+    Raised BEFORE any POST. Sending a prompt that no longer names the images it
+    attached is the exact defect the owner reported ("the second scene looks
+    generated from the text"), so an unfittable prompt is refused rather than
+    silently unbound.
+    """
+
+
+class VideoDispatchRejected(RuntimeError):
+    """The provider ANSWERED the dispatch with a refusal of the request itself.
+
+    Raised only for KNOWN_REFUSAL_STATUS: answers that refuse the request before
+    any job exists (validation, credentials, credits, moderation, missing
+    model, size, rate limit). Every other answer status, 408, 409 and 5xx in
+    particular, can sit on top of an accepted job and is VideoJobUnretrieved.
+
+    `refundable` is derived from the status code in ONE place, never by keyword
+    matching at each call site: only a 400/422 structural validation refusal
+    is credited back. The other known refusals keep their charge; the ledger
+    is an approximate estimate and may over-count, never the reverse.
+    """
+
+    REFUNDABLE_STATUS = frozenset({400, 422})
+    KNOWN_REFUSAL_STATUS = frozenset({400, 401, 402, 403, 404, 413, 422, 429})
+
+    def __init__(self, status_code: int, body: str, model: str = ""):
+        self.status_code = int(status_code)
+        self.body = body
+        self.model = model
+        self.refundable = self.status_code in self.REFUNDABLE_STATUS
+        super().__init__(
+            f"video dispatch rejected by {model or 'provider'}: "
+            f"HTTP {self.status_code}: {body}"
+        )
+
+
+class VideoGenerationFailed(RuntimeError):
+    """The provider reported the accepted job itself as failed (a definite outcome)."""
+
+
+class VideoJobUnretrieved(RuntimeError):
+    """A paid dispatch the provider accepted, or may have accepted, whose clip
+    did not reach disk here.
+
+    `job_id` is the provider's id when its acceptance was seen. It is None at
+    the "dispatch" stage, when the POST got no usable answer (transport error,
+    deadline, dropped or malformed answer, ambiguous server status): sent bytes
+    may have created a job all the same, and no id is ever invented for it.
+    Either way the job may exist and be billed, so this is never refundable and
+    the caller must not answer it with a fresh paid generation for the scene.
+    """
+
+    def __init__(self, job_id: Optional[str], model: str, stage: str, detail: str):
+        self.job_id = str(job_id) if job_id not in (None, "") else None
+        self.model = model
+        self.stage = stage
+        self.detail = detail
+        if self.job_id is None:
+            text = (
+                f"video dispatch to {model or 'provider'} has an unknown outcome at the "
+                f"{stage} stage (no job id came back; it may have been accepted): {detail}"
+            )
+        else:
+            text = (
+                f"provider accepted video job {self.job_id} ({model or 'provider'}) "
+                f"but the clip was not retrieved at the {stage} stage: {detail}"
+            )
+        super().__init__(text)
+
+
+def _answer_snippet(resp, limit: int = 300) -> str:
+    try:
+        return resp.text[:limit]
+    except Exception:
+        return "<response body unavailable>"
+
+
+async def _close_quietly(client, job_id) -> None:
+    """Close an httpx client without letting teardown discard a known outcome."""
+    try:
+        await client.aclose()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "video client close failed for job %s: %s: %s", job_id, type(exc).__name__, exc,
+        )
+
+
+DIALOGUE_HEADER = "\n\nSPOKEN DIALOGUE"
+# Blocks the pipeline appends AFTER the dialogue. They are advice for the
+# model, not speech, so they never ride inside the protected dialogue block.
+_AFTER_DIALOGUE_HEADERS = (
+    "\n\nLEARNED FROM PREVIOUS GENERATIONS",
+    "\n\nCRITICAL FIXES REQUIRED",
+    "\n\nADDITIONAL NEGATIVE CONSTRAINTS",
+)
+
+
+def split_protected_dialogue(text: str, room: int) -> tuple[str, str]:
+    """Split *text* into (cuttable body, protected tail) for a prompt fitter.
+
+    The tail is everything from the SPOKEN DIALOGUE header to the end when that
+    fits in *room*. Otherwise it is the dialogue block alone, and the lessons
+    and fix notes that followed it go back into the cuttable body, so a long
+    lessons block can no longer drag the dialogue out of the prompt with it.
+    When even the dialogue block does not fit, nothing is protected.
+    """
+    idx = text.find(DIALOGUE_HEADER)
+    if idx == -1 or room <= 0:
+        return text, ""
+    remainder = text[idx:]
+    if len(remainder) < room:
+        return text[:idx], remainder
+    ends = [remainder.find(h, len(DIALOGUE_HEADER)) for h in _AFTER_DIALOGUE_HEADERS]
+    end = min([e for e in ends if e != -1], default=len(remainder))
+    dialogue = remainder[:end]
+    if len(dialogue) < room:
+        return text[:idx] + remainder[end:], dialogue
+    return text, ""
+
+
+def video_prompt_limit(model: str) -> Optional[int]:
+    """The hard prompt character limit for *model*, or None when unknown."""
+    return VIDEO_MODEL_PROMPT_LIMIT.get(model)
+
+
+def expected_reference_tokens(reference_count: int) -> tuple[str, ...]:
+    """The @ImageN tokens a prompt MUST name for *reference_count* references.
+
+    Derived from the same count `_describe_video_request` audits, so the fitter
+    protects exactly the tokens the audit checks for.
+    """
+    return tuple(f"@Image{n}" for n in range(1, max(0, int(reference_count)) + 1))
+
+
+def fit_prompt_to_limit(
+    prompt: str, limit: int, required_tokens: tuple[str, ...] = ()
+) -> str:
+    """Fit *prompt* to *limit* characters, disclosing the loss inside the text.
+
+    Two kinds of content are protected rather than tail-cut, because a bare
+    `prompt[:limit]` silently deletes whatever was appended LAST:
+
+      * every line naming a required @ImageN token — the reference binding;
+      * the SPOKEN DIALOGUE block, when it still leaves room for the scene
+        (see split_protected_dialogue: the lessons after it are not speech).
+
+    Fails CLOSED (`VideoPromptFitError`) when the protected reference lines plus
+    the disclosure marker cannot themselves fit: an unbound prompt must never be
+    dispatched.
+    """
+    if len(prompt) <= limit:
+        return prompt
+
+    lines = prompt.split("\n")
+    protected_idx = {
+        i for i, line in enumerate(lines)
+        if any(tok in line for tok in required_tokens)
+    }
+    required_block = "\n".join(lines[i] for i in sorted(protected_idx))
+    marker = PROMPT_TRUNCATION_MARKER
+
+    reserved = len(marker) + len(required_block)
+    if reserved >= limit:
+        raise VideoPromptFitError(
+            f"reference binding needs {reserved} chars but the model limit is "
+            f"{limit}; refusing to dispatch a prompt that would drop "
+            f"{len(required_tokens)} reference token(s)"
+        )
+
+    body = "\n".join(lines[i] for i in range(len(lines)) if i not in protected_idx)
+
+    # Keep the dialogue only while the head still gets meaningful room:
+    # protecting a tail that eats the whole remaining budget would silently
+    # delete the scene it is supposed to be spoken in.
+    had_dialogue = DIALOGUE_HEADER in body
+    body, tail = split_protected_dialogue(body, (limit - reserved) // 2)
+
+    head_room = limit - reserved - len(tail)
+    if head_room <= 0:
+        head_room = 0
+    fitted = body[:head_room] + marker + required_block + tail
+
+    missing = [tok for tok in required_tokens if tok not in fitted]
+    if missing:
+        raise VideoPromptFitError(
+            f"prompt fit lost reference token(s) {missing}; refusing dispatch"
+        )
+    if len(fitted) > limit:
+        raise VideoPromptFitError(
+            f"prompt fit produced {len(fitted)} chars over the {limit} limit"
+        )
+    logger.warning(
+        "Prompt fitted: %d -> %d chars (limit %d); %d reference line(s) kept, "
+        "dialogue block: %s",
+        len(prompt), len(fitted), limit, len(protected_idx),
+        "kept" if tail else ("dropped" if had_dialogue else "none in prompt"),
+    )
+    return fitted
+
 
 def _describe_media_entry(entry) -> dict:
     """Redacted description of ONE input_references / frame_images entry.
@@ -125,11 +414,41 @@ async def run_with_timeout(coro, timeout_sec: float, description: str = "operati
 class OpenRouterClient:
     """Async client for all OpenRouter API interactions."""
 
+    # Optional zero-argument liveness hook, set by the caller that owns the job
+    # (Pipeline.run). Declared here rather than left implicit so the contract is
+    # visible: it is called while a video job is being polled and downloaded,
+    # throttled to POLL_HEARTBEAT_INTERVAL, and its exceptions are swallowed.
+    # Default None = no heartbeat, which is exactly the pre-existing behaviour.
+    poll_heartbeat = None
+    _last_poll_heartbeat = 0.0
+
     def __init__(self, api_key: str, state_dir: Path):
         self.api_key = api_key
         self.state_dir = state_dir
         self.assets_dir = state_dir / "assets"
         self.assets_dir.mkdir(parents=True, exist_ok=True)
+
+    def _poll_heartbeat_tick(self) -> None:
+        """Throttled liveness signal during the silent part of a video job.
+
+        The worker refreshes its job lease only from the progress callback, and
+        its lease TTL (900s) is shorter than one video wait (VIDEO_MAX_WAIT) and
+        than the download budget. Without a signal from inside these waits a
+        live worker's lease could expire, another worker generation would
+        requeue the job and pay for it again. A heartbeat must never abort a
+        paid generation, so its failures are logged and swallowed.
+        """
+        heartbeat = getattr(self, "poll_heartbeat", None)
+        if heartbeat is None:
+            return
+        now = time.time()
+        if now - self._last_poll_heartbeat < POLL_HEARTBEAT_INTERVAL:
+            return
+        self._last_poll_heartbeat = now
+        try:
+            heartbeat()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"poll heartbeat failed: {type(e).__name__}: {e}")
 
     def _headers(self) -> dict:
         auth_value = f"Bearer {self.api_key}"
@@ -214,7 +533,7 @@ class OpenRouterClient:
         model: str,
         content_parts: list[dict],
         default: dict,
-        max_tokens: int = 1536,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> dict:
         """Post a VLM request and parse JSON robustly; return default on failure."""
         payload = {
@@ -282,7 +601,7 @@ class OpenRouterClient:
         self,
         messages: list[dict],
         model: str = "anthropic/claude-sonnet-4.6",
-        max_toks: int = 4096,
+        max_toks: int = DEFAULT_MAX_TOKENS,
         temperature: float = 0.7,
         json_mode: bool = False,
     ) -> str:
@@ -491,7 +810,7 @@ class OpenRouterClient:
             label="image verification",
             model="anthropic/claude-sonnet-4.6",
             content_parts=content_parts,
-            max_tokens=1536,
+            max_tokens=DEFAULT_MAX_TOKENS,
             default={"passed": False, "issues": [], "suggestion": "", "vlm_error": True},
         )
 
@@ -517,7 +836,7 @@ class OpenRouterClient:
                 {"type": "text", "text": "Image 2:"},
                 images[1],
             ],
-            max_tokens=768,
+            max_tokens=DEFAULT_MAX_TOKENS,
             default={"winner": 1, "reason": "comparison failed, defaulting to first"},
         )
 
@@ -560,7 +879,7 @@ class OpenRouterClient:
             label="multi-image analysis",
             model=model,
             content_parts=content_parts,
-            max_tokens=2048,
+            max_tokens=DEFAULT_MAX_TOKENS,
             default=failed,
         )
 
@@ -604,6 +923,22 @@ class OpenRouterClient:
                 regeneration cannot overwrite each other's record.
         """
         filename = _safe_filename(filename)
+
+        # LAST-CHANCE prompt fit, applied to the FINAL text immediately before
+        # the body is built. Callers may fit earlier (the pipeline condenses via
+        # an LLM), but only this point sees what is actually sent: a caller that
+        # clamps and THEN appends a continuity anchor was reported to send an
+        # 8461-character prompt against a 7000-character ceiling and lose the
+        # whole scene to an HTTP 400. The reference tokens are protected, so a fit can shorten the
+        # description but can never unbind the images.
+        _limit = video_prompt_limit(model)
+        _prompt_chars_before = len(prompt)
+        _required_tokens = expected_reference_tokens(len(input_references or []))
+        _fit_applied = False
+        if _limit and _prompt_chars_before > _limit:
+            prompt = fit_prompt_to_limit(prompt, _limit, _required_tokens)
+            _fit_applied = True
+
         payload: dict = {
             "model": model,
             "prompt": prompt,
@@ -618,6 +953,9 @@ class OpenRouterClient:
             payload["input_references"] = input_references
 
         request_audit = _describe_video_request(payload)
+        request_audit["prompt_limit"] = _limit
+        request_audit["prompt_chars_before_fit"] = _prompt_chars_before
+        request_audit["prompt_fit_applied"] = _fit_applied
         logger.info("VIDEO_REQUEST_BODY %s", json.dumps(request_audit, sort_keys=True))
         if audit_sink is not None:
             try:
@@ -625,46 +963,229 @@ class OpenRouterClient:
             except Exception as e:  # never let auditing break a paid generation
                 logger.warning(f"video request audit sink failed: {type(e).__name__}: {e}")
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{OPENROUTER_BASE}/videos",
-                headers=self._headers(),
-                json=payload,
+        # Building the client sends nothing; from the first byte of the POST on,
+        # a failure says nothing about the provider side.
+        client = httpx.AsyncClient(timeout=30)
+        resp = None
+        try:
+            async with client:
+                resp = await asyncio.wait_for(
+                    client.post(
+                        f"{OPENROUTER_BASE}/videos",
+                        headers=self._headers(),
+                        json=payload,
+                    ),
+                    timeout=VIDEO_POST_DEADLINE,
+                )
+        except Exception as exc:  # noqa: BLE001
+            if resp is None:
+                # Transport error, dropped answer or deadline: the request may
+                # have been received and a job created. Unknown outcome, no id,
+                # no refund, and nothing here sends it again. A connection error
+                # is not taken as proof that no bytes left.
+                reason = (
+                    f"no answer within {VIDEO_POST_DEADLINE:.0f}s"
+                    if isinstance(exc, asyncio.TimeoutError)
+                    else f"{type(exc).__name__}: {exc}"
+                )
+                raise VideoJobUnretrieved(None, model, "dispatch", reason) from exc
+            logger.warning(
+                "video dispatch client teardown failed after the answer: %s: %s",
+                type(exc).__name__, exc,
             )
-            resp.raise_for_status()
-            job_data = resp.json()
-            job_id = job_data.get("id") or job_data.get("jobId")
-            if not job_id:
-                raise RuntimeError(f"No job ID in video response: {job_data}")
+        if resp.status_code >= 400:
+            # The BODY is the only place the provider says WHY. Discarding it
+            # left a bare HTTPStatusError in the job, and the real cause
+            # ("content[0].text too long: 8640 > 7000 characters") had to be
+            # recovered later by an external probe. Bounded and secret-free:
+            # this is the provider's own validation text, not our request.
+            body = _answer_snippet(resp, 1500)
+            if resp.status_code in VideoDispatchRejected.KNOWN_REFUSAL_STATUS:
+                raise VideoDispatchRejected(resp.status_code, body, model)
+            raise VideoJobUnretrieved(
+                None, model, "dispatch", f"provider answered HTTP {resp.status_code}: {body}",
+            )
+        try:
+            job_data = resp.json() if 200 <= resp.status_code < 300 else None
+        except ValueError:
+            job_data = None
+        job_id = (job_data.get("id") or job_data.get("jobId")) if isinstance(job_data, dict) else None
+        if isinstance(job_id, bool) or not isinstance(job_id, (str, int)) or not str(job_id).strip():
+            # An answer without a usable id (not JSON, not an object, no id,
+            # an unexpected status) may still stand for an accepted job.
+            raise VideoJobUnretrieved(
+                None, model, "dispatch",
+                f"HTTP {resp.status_code} answer carried no usable job id: {_answer_snippet(resp)}",
+            )
+        job_id = str(job_id)
 
-        # Poll until complete
+        # From here on the provider has ACCEPTED the job. Every failure below,
+        # except a provider-reported generation failure, is VideoJobUnretrieved
+        # with this id: the clip may exist and be billed.
         filepath = self.assets_dir / filename
+        try:
+            return await self._await_accepted_job(job_id, model, filepath)
+        except (VideoJobUnretrieved, VideoGenerationFailed):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Client setup, an unexpected answer shape, anything unforeseen:
+            # the id must survive instead of reaching the advisor as an
+            # ordinary failure that invites a second paid clip.
+            raise VideoJobUnretrieved(
+                job_id, model, "poll", f"{type(exc).__name__}: {exc}",
+            ) from exc
+
+    async def _await_accepted_job(self, job_id: str, model: str, filepath: Path) -> str:
+        """Poll an accepted job until it completes, then fetch its clip."""
         start = time.time()
-        async with httpx.AsyncClient(timeout=30) as client:
+        transient_failures = 0
+        client = httpx.AsyncClient(timeout=30)
+        try:
             while time.time() - start < VIDEO_MAX_WAIT:
                 await asyncio.sleep(VIDEO_POLL_INTERVAL)
-                resp = await client.get(
-                    f"{OPENROUTER_BASE}/videos/{job_id}",
-                    headers=self._headers(),
-                )
-                resp.raise_for_status()
-                status_data = resp.json()
+                # A POLL is not the generation. The clip is ALREADY being made and
+                # billed by the provider; `job_id` stays valid, so re-polling after
+                # a transient failure costs nothing. A non-transient status (auth,
+                # 404, malformed request) ends the wait at once because re-polling
+                # it would only burn the window.
+                try:
+                    resp = await asyncio.wait_for(
+                        client.get(
+                            f"{OPENROUTER_BASE}/videos/{job_id}",
+                            headers=self._headers(),
+                        ),
+                        timeout=VIDEO_POLL_REQUEST_DEADLINE,
+                    )
+                    resp.raise_for_status()
+                    status_data = resp.json()
+                    if not isinstance(status_data, dict):
+                        raise ValueError(
+                            f"status answer is not a JSON object: {str(status_data)[:200]}"
+                        )
+                except (
+                    httpx.HTTPStatusError, httpx.RequestError, ValueError, asyncio.TimeoutError,
+                ) as exc:
+                    status_code = (
+                        exc.response.status_code
+                        if isinstance(exc, httpx.HTTPStatusError)
+                        else None
+                    )
+                    if status_code is not None and status_code not in VIDEO_RETRY_STATUS:
+                        raise VideoJobUnretrieved(
+                            job_id, model, "poll", f"status poll answered HTTP {status_code}",
+                        ) from exc
+                    transient_failures += 1
+                    if transient_failures > VIDEO_POLL_MAX_TRANSIENT:
+                        raise VideoJobUnretrieved(
+                            job_id, model, "poll",
+                            f"{transient_failures} consecutive failed status polls; "
+                            f"last: {type(exc).__name__}: {exc}",
+                        ) from exc
+                    logger.warning(
+                        "video poll transient failure %d/%d for job %s: %s: %s",
+                        transient_failures,
+                        VIDEO_POLL_MAX_TRANSIENT,
+                        job_id,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    continue
+                transient_failures = 0
                 status = status_data.get("status", "")
 
+                # Liveness during the one operation that is silent for up to 20
+                # minutes; see _poll_heartbeat_tick for why the lease needs it.
+                self._poll_heartbeat_tick()
+
                 if status == "completed":
-                    dl_resp = await client.get(
-                        f"{OPENROUTER_BASE}/videos/{job_id}/content?index=0",
-                        headers=self._headers(),
-                    )
-                    dl_resp.raise_for_status()
-                    filepath.write_bytes(dl_resp.content)
-                    logger.info(f"Generated video: {filepath}")
-                    return str(filepath)
+                    try:
+                        return await self._download_accepted_clip(job_id, model, filepath)
+                    except VideoJobUnretrieved:
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        raise VideoJobUnretrieved(
+                            job_id, model, "download", f"{type(exc).__name__}: {exc}",
+                        ) from exc
                 elif status in ("failed", "error"):
                     error = status_data.get("error", "Unknown error")
-                    raise RuntimeError(f"Video generation failed: {error}")
+                    raise VideoGenerationFailed(f"Video generation failed: {error}")
 
-        raise TimeoutError(f"Video generation timed out after {VIDEO_MAX_WAIT}s")
+            raise VideoJobUnretrieved(
+                job_id, model, "wait", f"still not completed after {VIDEO_MAX_WAIT}s",
+            )
+        finally:
+            await _close_quietly(client, job_id)
+
+    async def _download_accepted_clip(self, job_id: str, model: str, filepath: Path) -> str:
+        """Fetch a COMPLETED clip within VIDEO_DOWNLOAD_BUDGET; never a new generation.
+
+        The clip exists and is paid for, and its content URL stays valid, so a
+        retry costs nothing while giving up costs a whole regenerated scene. Each
+        attempt runs under its own total deadline (an httpx timeout bounds only
+        the gaps between bytes), and attempts plus pauses share one budget.
+        """
+        content_url = f"{OPENROUTER_BASE}/videos/{job_id}/content?index=0"
+        deadline = time.monotonic() + VIDEO_DOWNLOAD_BUDGET
+        last = "no attempt fitted in the download budget"
+        dl = httpx.AsyncClient(timeout=VIDEO_DOWNLOAD_TIMEOUT)
+        try:
+            for attempt in range(1, VIDEO_DOWNLOAD_ATTEMPTS + 1):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                # The retries can outlast the lease on their own.
+                self._poll_heartbeat_tick()
+                try:
+                    dl_resp = await asyncio.wait_for(
+                        dl.get(content_url, headers=self._headers()),
+                        timeout=min(VIDEO_DOWNLOAD_TIMEOUT, remaining),
+                    )
+                    dl_resp.raise_for_status()
+                    content = dl_resp.content
+                    if not content:
+                        raise RuntimeError("empty video content body")
+                except (
+                    httpx.HTTPStatusError, httpx.RequestError, RuntimeError, asyncio.TimeoutError,
+                ) as exc:
+                    code = (
+                        exc.response.status_code
+                        if isinstance(exc, httpx.HTTPStatusError)
+                        else None
+                    )
+                    if code is not None and code not in VIDEO_RETRY_STATUS:
+                        raise VideoJobUnretrieved(
+                            job_id, model, "download", f"content answered HTTP {code}",
+                        ) from exc
+                    last = f"{type(exc).__name__}: {exc}"
+                    logger.warning(
+                        "video download attempt %d/%d failed for job %s: %s",
+                        attempt, VIDEO_DOWNLOAD_ATTEMPTS, job_id, last,
+                    )
+                    if attempt < VIDEO_DOWNLOAD_ATTEMPTS:
+                        pause = min(
+                            VIDEO_DOWNLOAD_RETRY_PAUSE * attempt,
+                            max(0.0, deadline - time.monotonic()),
+                        )
+                        await asyncio.sleep(pause)
+                    continue
+                try:
+                    filepath.write_bytes(content)
+                except OSError as exc:
+                    raise VideoJobUnretrieved(
+                        job_id, model, "write", f"{type(exc).__name__}: {exc}",
+                    ) from exc
+                logger.info(
+                    f"Generated video: {filepath} ({len(content)} bytes, attempt {attempt})"
+                )
+                return str(filepath)
+        finally:
+            # A teardown error after the clip was written must not discard it.
+            await _close_quietly(dl, job_id)
+        raise VideoJobUnretrieved(
+            job_id, model, "download",
+            f"{VIDEO_DOWNLOAD_ATTEMPTS} attempts or the {VIDEO_DOWNLOAD_BUDGET:.0f}s "
+            f"budget exhausted; last: {last}",
+        )
 
     # ─── Music Generation (SSE Streaming via Lyria 3 Pro) ───────────
 

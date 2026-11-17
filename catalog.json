@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/5bf3dda1eefe2c780ce4a21a4a87dfb72e9622b0",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
   "skills": [
     {
@@ -187,8 +187,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "3ac40cf8c96f0eb720104c8c7869adffda23cd4faabb92f14b2937378d2df176",
-          "size": 32033
+          "sha256": "85887ecc8f72b3e7a761650632408b96b788b5b8b6efcea93a95d2cff2c43e23",
+          "size": 38680
         },
         {
           "path": "__init__.py",
@@ -197,13 +197,13 @@
         },
         {
           "path": "api_client.py",
-          "sha256": "7f9c3b9239f811db979f7399afbc9843017d6a2f2e377c36e64d31b126e114b3",
-          "size": 44178
+          "sha256": "a1260b086287e492bcf9b940ce27a630de177363719abc9f011b2878874d91a5",
+          "size": 69121
         },
         {
           "path": "budget.py",
-          "sha256": "252d8e3560f56dde9049b778d1eabf1a52298dad760536c3b2f08d3df052e0fd",
-          "size": 8087
+          "sha256": "d0ebebf17e6e004d3f49262c6d865fe93cf4cdf39bd58805b5947bd521102c46",
+          "size": 10337
         },
         {
           "path": "ffmpeg_bootstrap.py",
@@ -222,8 +222,8 @@
         },
         {
           "path": "models.py",
-          "sha256": "17a25a6510b4e5924e6fc4a5691a0203de0b69d829bc454e9d51a26c99e21990",
-          "size": 7517
+          "sha256": "6d66af05a6198667559b949cf8180c01650b3e837f5af2a79b8b6d02e68ad4c2",
+          "size": 10614
         },
         {
           "path": "modes.py",
@@ -232,8 +232,8 @@
         },
         {
           "path": "pipeline.py",
-          "sha256": "e63dbca11197257ebfa04416b2984b0d8ef9a8a08f116339ebd06a049557ea47",
-          "size": 146684
+          "sha256": "0b4639725f406b9bbd4584dc399639660a9134ea965310369774869316e00752",
+          "size": 179901
         },
         {
           "path": "pipeline_test.txt",
@@ -252,13 +252,63 @@
         },
         {
           "path": "scripts/anime_worker.py",
-          "sha256": "b2ac92acaf769a82f8353bea19689738031131b24a971c2c48acdc16a864e1ef",
-          "size": 18358
+          "sha256": "f5a4443730c3881427d3fbe170ad059a0997150694cf04e1d2632747da12f89f",
+          "size": 19753
+        },
+        {
+          "path": "tests/conftest.py",
+          "sha256": "dbf45eb4eea7408e580a5e033f9116623354717064cc7fc7c3213f65f52d8e48",
+          "size": 2379
         },
         {
           "path": "tests/test_api_client_vlm_helpers.py",
           "sha256": "6fed5827bb42cad919a301789785ae0a831daf67029555358004a6841d78fb25",
           "size": 1616
+        },
+        {
+          "path": "tests/test_assembly.py",
+          "sha256": "9c4bf4c4332c4d947f159c9e21dc471d8d65d8a5658be840b3d309249102560c",
+          "size": 12570
+        },
+        {
+          "path": "tests/test_budget_refunds.py",
+          "sha256": "2d89019d769b205f180a02f16b1033923d16c27edb5b170510848f2e9300acbf",
+          "size": 11775
+        },
+        {
+          "path": "tests/test_dispatch_deadlines.py",
+          "sha256": "9d4ff74c2bdd3ba2b3aa1227d891ee400ef938494f3fda81f640669aebe06fbc",
+          "size": 18694
+        },
+        {
+          "path": "tests/test_job_records.py",
+          "sha256": "dffd6336b2e469bb6ee673af26c3b6c2a8aeff4d568ed605d0b47951028fb6b8",
+          "size": 7487
+        },
+        {
+          "path": "tests/test_manifest_and_token_ceiling.py",
+          "sha256": "364bafba7a848aab7dbd1f037aafb0960b36a93fbad40d52b32956b4e00e0287",
+          "size": 3465
+        },
+        {
+          "path": "tests/test_prompt_fit.py",
+          "sha256": "1f30cda26ff579bdf2d21a8d830086c8f5d15df88948d8121758cdc231b077c6",
+          "size": 12375
+        },
+        {
+          "path": "tests/test_regeneration_after_unknown.py",
+          "sha256": "6c4e61d8bd5b1444205e5a8f09ccd23dedf5a16a273b4f7029657508a1730436",
+          "size": 10635
+        },
+        {
+          "path": "tests/test_verification_and_recovery.py",
+          "sha256": "34cbec1252e2449c8d5f605eaeaab0ef53a38032ba34d410615ceb5d1a24f0c8",
+          "size": 6165
+        },
+        {
+          "path": "tests/test_video_transport.py",
+          "sha256": "0b9ecf78b0ecc66e7c61639afa439c311eefd2b7d3436f84456fbffdd41a0132",
+          "size": 10763
         }
       ],
       "install_specs": [
@@ -267,7 +317,7 @@
       "name": "anime_studio",
       "slug": "anime_studio",
       "type": "extension",
-      "version": "3.2.0",
+      "version": "3.3.1",
       "when_to_use": "User wants to generate a short animated 2D anime cartoon, music video, or animated scene with consistent characters, VLM verification, and narrative continuity."
     },
     {
