@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from telegram_bot.api import TelegramClient
+from telegram_bot.api import TelegramClient, TelegramRequestNotSent
 from telegram_bot.events import parse_telegram_update
 from telegram_bot.host import PresenceHostClient, PresenceHostError, PresenceHostHTTPError
 from telegram_bot.runtime import TelegramTransportRuntime
@@ -290,7 +290,7 @@ class Telegram:
 
     def __init__(self):
         self.requests, self.accepted, self.updates = [], [], []
-        self.lose_before_accept = {}  # text -> sendMessage attempts that fail before Telegram accepts
+        self.lose_before_accept = {}  # text -> sendMessage attempts whose connection is refused before any byte left
         self._message_ids = itertools.count(9001)
 
     def client(self, token):
@@ -310,7 +310,8 @@ class Telegram:
         assert method == "sendMessage", method
         if self.lose_before_accept.get(payload["text"], 0):
             self.lose_before_accept[payload["text"]] -= 1
-            raise ConnectionResetError("connection reset before Telegram answered")
+            # As the urllib transport reports a refused connection: nothing reached Telegram.
+            raise TelegramRequestNotSent("request", "URLError (ConnectionRefusedError)")
         self.accepted.append(copy.deepcopy(payload))
         return {"ok": True, "result": {"message_id": next(self._message_ids), "date": 1_700_001_000,
                                        "chat": {"id": int(payload["chat_id"])}, "text": payload["text"]}}
@@ -850,13 +851,14 @@ def test_send_and_report_unknowns_keep_custody_without_a_second_speech(tmp_path,
         assert await bridge.poll() == 1
         telegram.lose_before_accept = {"Done.": 1}
         sent = []
-        # The long output's earlier chunks are accepted; its last chunk's connection resets once.
+        # The long output's earlier chunks are accepted; its last chunk's connection is refused once, before any
+        # byte left. A lost answer after Telegram accepted is the next test's case.
         original = telegram.post_json
 
         async def lose_last_chunk(url, payload, timeout_sec):
             if url.endswith("/sendMessage") and payload["text"].endswith("Part two.") and not sent:
                 sent.append(payload["text"])
-                raise ConnectionResetError("connection reset before Telegram answered")
+                raise TelegramRequestNotSent("request", "URLError (ConnectionRefusedError)")
             return await original(url, payload, timeout_sec)
 
         telegram.post_json = lose_last_chunk
@@ -879,6 +881,59 @@ def test_send_and_report_unknowns_keep_custody_without_a_second_speech(tmp_path,
                    for report in host.reports)
         assert bridge.store.status_snapshot()["delivery_reports_pending"] == 0
         assert {row["state"] for row in bridge.rows("SELECT state FROM outbox")} == {"delivered"}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("loss", ["answer_lost", "process_died"])
+def test_a_chunk_telegram_took_whose_answer_was_lost_is_never_spoken_again(tmp_path, host, telegram, loss):
+    """0.12.1: Telegram accepted the last chunk and its answer never arrived, or the process died waiting for it.
+
+    The row ends uncertain with both earlier chunks confirmed and reported; restarts send nothing again, and the
+    conversation's next output is delivered once.
+    """
+    class Died(BaseException):
+        """The process ends here: nothing in the runtime catches it."""
+
+    async def run():
+        bridge = Bridge(tmp_path, host, telegram)
+        bridge.receive(message(1, "summarize", mention=True))
+        assert await bridge.inbox() == 1
+        ref = host.ref_of(source(1))
+        host.release(ref, "Part one. " * 450 + "\n\nPart two.")
+        host.finish(ref, "Done.")
+        assert await bridge.poll() == 1
+        original, lost = telegram.post_json, []
+
+        async def accept_then_lose(url, payload, timeout_sec):
+            answer = await original(url, payload, timeout_sec)  # Telegram has accepted it by now
+            if url.endswith("/sendMessage") and payload["text"].endswith("Part two.") and not lost:
+                lost.append(payload["text"])
+                if loss == "process_died":
+                    raise Died()
+                raise ConnectionResetError("connection reset after Telegram accepted")
+            return answer
+
+        telegram.post_json = accept_then_lose
+        if loss == "process_died":
+            with pytest.raises(Died):
+                await bridge.send()
+        else:
+            await bridge.send()
+        for _ in range(3):
+            bridge.restart()
+            await bridge.send()
+        texts = [item[1] for item in telegram.replies()]
+        assert len(texts) == 4 and texts.count("Done.") == 1 and texts[2].endswith("Part two.")
+        long_id, done_id = (delivery_id for delivery_id, _payload in bridge.outbox())
+        receipt = bridge.store.delivery_receipt(long_id)
+        assert receipt["state"] == "uncertain" and len(receipt["confirmed_messages"]) == 2
+        assert bridge.store.delivery_receipt(done_id)["state"] == "delivered"
+        assert sorted((r["delivery_id"], r["part_id"], r["state"]) for r in host.reports) == sorted([
+            (long_id, "0", "delivered"), (long_id, "1", "delivered"), (long_id, "status", "uncertain"),
+            (done_id, "0", "delivered")])
+        status = next(r for r in host.reports if r["part_id"] == "status")
+        assert status["message"]["confirmed_parts"] == 2 and status["text"] == ""
 
     asyncio.run(run())
 

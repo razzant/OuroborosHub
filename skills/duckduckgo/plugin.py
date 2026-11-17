@@ -34,7 +34,7 @@ def _search(query: str, max_results: int = _DEFAULT_RESULTS) -> Dict[str, Any]:
 
     try:
         max_results_int = int(max_results)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         max_results_int = _DEFAULT_RESULTS
 
     max_results = min(max(1, max_results_int), _MAX_RESULTS_CAP)
@@ -75,16 +75,27 @@ async def _route_search(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
 
-    query = str(body.get("query", "")).strip()
-    
+    raw_query = body.get("query")
+    query = raw_query.strip() if isinstance(raw_query, str) else ""
+    if not query:
+        return JSONResponse({"error": "query is required"}, status_code=400)
+    if len(query) > 400:
+        return JSONResponse({"error": "query too long (max 400 chars)"}, status_code=400)
+
     raw_max_results = body.get("max_results")
-    if raw_max_results is None or str(raw_max_results).strip() == "":
+    if isinstance(raw_max_results, float) and raw_max_results.is_integer():
+        raw_max_results = int(raw_max_results)
+    if raw_max_results is None or (isinstance(raw_max_results, str) and not raw_max_results.strip()):
         max_results = _DEFAULT_RESULTS
+    elif isinstance(raw_max_results, bool) or not isinstance(raw_max_results, (str, int)):
+        return JSONResponse({"error": "max_results must be an integer"}, status_code=400)
     else:
         try:
             max_results = int(raw_max_results)
-        except (TypeError, ValueError):
+        except ValueError:
             return JSONResponse({"error": "max_results must be an integer"}, status_code=400)
 
     payload = await asyncio.to_thread(_search, query, max_results)

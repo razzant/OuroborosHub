@@ -127,6 +127,11 @@ PREFLIGHT_REASONS = {'outgoing actions paused locally':'outgoing_paused',
     'peer outside the selected receiving scope':'peer_not_selected',
     'target user blocked by current configuration':'user_excluded',
     'unknown topic':'unknown_topic',
+    'peer must be a forum supergroup, not a monoforum':'not_a_forum',
+    'reply target unavailable or wrong peer':'reply_target_unavailable',
+    'reply belongs to another topic':'reply_topic_mismatch',
+    'message target belongs to another conversation or is unavailable':'message_target_unavailable',
+    'message target belongs to another topic':'message_topic_mismatch',
     'selected document is not a Telegram sticker; select its canonical sticker-pack document':'not_a_sticker'}
 # A closed place or local switch holds unattempted work; it is not a refusal of the work.
 HOLD_REASONS = frozenset({'outgoing_paused', 'destination_inactive'})
@@ -168,11 +173,15 @@ class Participant:
         args = json.loads(row['args'])
         effect = validate(row['op'], args)
         write = effect != 'read'
+        phase = 'initial_authorization'
         try:
             await self.authorize(args.get('peer',''), args.get('topic_id',''), write)
+            phase = 'account_verification'
             if await self.adapter.get_me() != int(self.account):
                 raise ValueError('authenticated account changed')
+            phase = 'operation_preparation'
             prepared = await asyncio.wait_for(self.ops.prepare(row['op'], args), 60)
+            phase = 'final_authorization'
             # Resolve aliases BEFORE the final destination check; a @name must
             # not evade a numeric muted/blocked place. Source reads are checked too.
             if prepared.get('source_peer') is not None:
@@ -182,19 +191,20 @@ class Participant:
             await self.authorize(prepared.get('resolved_peer',''), prepared.get('topic_id',''), write)
             self.current(prepared.get('resolved_peer',''), write)
         except errors.FloodWaitError as exc:
-            self.journal.set(row['seq'], 'queued', {'code':'flood_wait','reason':type(exc).__name__,'retry_after_seconds':exc.seconds}, max(1, exc.seconds))
+            self.journal.set(row['seq'], 'queued', {'code':'flood_wait','phase':phase,'reason':type(exc).__name__,'retry_after_seconds':exc.seconds}, max(1, exc.seconds))
             self.journal.flood(self.account, exc.seconds, type(exc).__name__)
             return True
-        except (TimeoutError, asyncio.TimeoutError, OSError, RuntimeError):
+        except (TimeoutError, asyncio.TimeoutError, OSError, RuntimeError) as exc:
             # Python 3.10's wait_for raises asyncio.TimeoutError, not the builtin.
-            self.journal.set(row['seq'], 'queued', {'code':'preflight_unavailable'}, 30)
+            self.journal.set(row['seq'], 'queued', {'code':'preflight_unavailable',
+                'phase':phase, 'type':type(exc).__name__}, 30)
             return True
         except Exception as exc:
             reason = PREFLIGHT_REASONS.get(str(exc)) if type(exc) is ValueError else None
             if reason in HOLD_REASONS:
                 self.journal.hold(row, reason)
                 return True
-            self.journal.set(row['seq'], 'failed', {'code':'preflight_refused', 'type':type(exc).__name__, 'reason':reason})
+            self.journal.set(row['seq'], 'failed', {'code':'preflight_refused', 'phase':phase, 'type':type(exc).__name__, 'reason':reason})
             return True
         remaining = self.journal.flood_remaining(self.account)
         if remaining:

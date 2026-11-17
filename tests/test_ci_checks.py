@@ -32,6 +32,23 @@ def consumer_core():
             yield core
 
 
+# Two rows in the layout `ffmpeg -hide_banner -encoders` prints.
+LIBX264 = ' V....D libx264              libx264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (codec h264)\n'
+AAC = ' A....D aac                  AAC (Advanced Audio Coding)\n'
+
+
+@contextmanager
+def synthetic_ffmpeg(table=LIBX264 + AAC, tools=('ffmpeg', 'ffprobe')):
+    """PATH names only these stand-ins; each prints `table` and encodes nothing."""
+    with tempfile.TemporaryDirectory(prefix='hub-ffmpeg-') as tmp:
+        for tool in tools:
+            path = Path(tmp) / tool
+            path.write_text(f'#!/bin/sh\nprintf %s {shlex.quote(table)}\n', encoding='utf-8')
+            path.chmod(0o755)
+        with patch.dict(os.environ, {'PATH': tmp}):
+            yield
+
+
 class SelectionTests(unittest.TestCase):
     def test_every_top_level_test_module_runs_in_ci(self):
         workflow = yaml.safe_load((ROOT / '.github/workflows/catalog-check.yml').read_text(encoding='utf-8'))
@@ -57,7 +74,7 @@ class SelectionTests(unittest.TestCase):
             'smart_lists': {'smart-lists', 'widgets'}, 'gigasearch': {'gigasearch'},
             'cache_efficiency_snapshot': {'cache-efficiency', 'widgets'}, 'calendar': {'calendar-skill', 'widgets'},
             'slack-bridge': {'slack-bridge'}, 'telegram-bot': {'telegram-bot'}, 'keenable': {'keenable'},
-            'perplexity': {'perplexity'}, '2gis': {'2gis'}, 'whoop-health': {'whoop-health'}, 'claudexor_quotas': {'widgets', 'claudexor-quotas'},
+            'perplexity': {'perplexity'}, 'duckduckgo': {'duckduckgo'}, '2gis': {'2gis'}, 'whoop-health': {'whoop-health'}, 'claudexor_quotas': {'widgets', 'claudexor-quotas'},
             'context-lens': {'widgets'}, 'memory-atlas': {'memory-atlas', 'widgets'}, 'token-usage': {'widgets'},
             'office_reader': {'office-reader'}, 'science_search': {'science-search'},
             'science_digest': {'science-digest'},
@@ -65,6 +82,7 @@ class SelectionTests(unittest.TestCase):
             'telegram-user-session': {'telegram-user-session'},
             'email-presence': {'email-presence'}, 'agentrq-bridge': {'agentrq-bridge'},
             'chrome_browser': {'chrome-browser'}, 'freshdesk': {'freshdesk'},
+            'anime_studio': {'anime-studio'},
         }
         for skill, expected in consumers.items():
             with self.subTest(skill=skill):
@@ -122,10 +140,14 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(json.loads(output.read_text(encoding='utf-8').removeprefix('suites=')), ['keenable'])
 
     def test_selected_suites_install_dependencies_and_run_in_separate_interpreters(self):
+        listed = subprocess.CompletedProcess([], 0, LIBX264 + AAC)
         for name, suite in ci.SUITES.items():
-            with self.subTest(suite=name), consumer_core() as core, patch.object(ci.subprocess, 'run') as run:
+            with self.subTest(suite=name), consumer_core() as core, synthetic_ffmpeg(), \
+                    patch.object(ci.subprocess, 'run', return_value=listed) as run:
                 ci.run_suite(name)
-                install, test = run.call_args_list
+                *probes, install, test = run.call_args_list
+                self.assertEqual([probe.args[0][1:] for probe in probes],
+                                 [['-hide_banner', '-encoders']] if 'ffmpeg_encoders' in suite else [])
                 self.assertEqual(install.args[0][1:6], ['-B', '-m', 'pip', 'install', 'PyYAML'])
                 self.assertTrue(set(suite.get('dependencies', [])) <= set(install.args[0]))
                 self.assertEqual(test.args[0][1:8], ['-B', '-m', 'pytest', '-p', 'no:cacheprovider', '-q', '-rs'])
@@ -155,6 +177,54 @@ class SelectionTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'must run, not skip'):
                     ci.run_suite(name)
                 run.assert_not_called()
+
+    def test_anime_studio_runs_its_whole_payload_suite_only_with_the_ffmpeg_its_assembly_cases_need(self):
+        self.assertEqual(ci.SUITES['anime-studio']['tests'], ['skills/anime_studio/tests'])
+        for path in (ROOT / 'skills/anime_studio/tests').glob('test_*.py'):
+            with self.subTest(path=path.name):
+                self.assertEqual(ci.selected_suites({path.relative_to(ROOT).as_posix()}), ['anime-studio'])
+        real_run, calls = subprocess.run, []
+
+        def run(command, **kwargs):
+            calls.append(command)
+            if command[1:] == ['-hide_banner', '-encoders']:
+                return real_run(command, **kwargs)  # the stand-in really runs and prints its table
+            return subprocess.CompletedProcess(command, 0)  # pip and pytest are only recorded
+
+        for table, tools, gap in [(LIBX264 + AAC, ('ffprobe',), 'ffmpeg on PATH'),
+                                  (LIBX264 + AAC, ('ffmpeg',), 'ffprobe on PATH'),
+                                  (AAC, ('ffmpeg', 'ffprobe'), 'the libx264 encoder'),
+                                  (LIBX264, ('ffmpeg', 'ffprobe'), 'the aac encoder')]:
+            calls.clear()
+            with self.subTest(gap=gap), synthetic_ffmpeg(table, tools), \
+                    patch.object(ci.subprocess, 'run', side_effect=run), \
+                    self.assertRaisesRegex(RuntimeError, f'requires {gap}; its real ffmpeg cases must run, not skip'):
+                ci.run_suite('anime-studio')
+            self.assertEqual([command for command in calls if command[1:2] == ['-B']], [],
+                             'neither pip nor pytest may start')
+        calls.clear()
+        with synthetic_ffmpeg(), patch.object(ci.subprocess, 'run', side_effect=run):
+            ci.run_suite('anime-studio')
+        probe, install, test = calls
+        self.assertEqual(Path(probe[0]).name, 'ffmpeg')
+        self.assertEqual(install[1:5], ['-B', '-m', 'pip', 'install'])
+        self.assertEqual(test[8:], ['skills/anime_studio/tests'])
+
+    def test_workflow_installs_ffmpeg_for_exactly_the_suites_that_require_it(self):
+        self.assertEqual([name for name, suite in ci.SUITES.items() if 'ffmpeg_encoders' in suite], ['anime-studio'])
+        workflow = yaml.safe_load((ROOT / '.github/workflows/catalog-check.yml').read_text(encoding='utf-8'))
+        steps = workflow['jobs']['hosted-skills']['steps']
+        install = next(step for step in steps if step.get('name') == "Install ffmpeg for anime-studio's assembly cases")
+        self.assertEqual(install['if'], "matrix.suite == 'anime-studio'")
+        self.assertLess(steps.index(install), len(steps) - 1)  # it precedes the suite run
+        with tempfile.TemporaryDirectory(prefix='hub-ffmpeg-workflow-') as tmp:
+            probes = Path(tmp) / 'probes'
+            # Execute the actual shell step; substitute only sudo, which would reach the package manager.
+            prelude = 'sudo() { printf "%s\\n" "$*" >> "$PROBES"; }\n'
+            subprocess.run(['/bin/sh', '-c', prelude + install['run']], check=True, capture_output=True, text=True,
+                           env={**os.environ, 'PROBES': str(probes)})
+            self.assertEqual(probes.read_text(encoding='utf-8').splitlines(),
+                             ['apt-get update', 'apt-get install --yes --no-install-recommends ffmpeg'])
 
     def test_payload_imports_work_in_the_actual_suite_subprocess(self):
         real_run = subprocess.run

@@ -5,6 +5,27 @@ from pathlib import Path
 from .events import _reaction_values
 
 
+def names_message(answer):
+    """Telegram's answer to a send names the message it created: a positive integer ``message_id``.
+
+    The one test of a confirmed message, for the outbox's decisions, its receipts and its reports; nothing else in the
+    answer is checked. An answer that fails it stays in the row as stored, and confirms nothing.
+    """
+    message_id = answer.get("message_id") if isinstance(answer, dict) else None
+    return type(message_id) is int and message_id > 0
+
+
+def stored_answers(payload):
+    """The answers a send row stored (text chunks in ``_sent_messages``, a file's or an album's in ``_sent_media``),
+    as (confirmed messages, other answers kept as stored); ``None`` when the row stored no answer."""
+    for key in ("_sent_messages", "_sent_media"):
+        if key in payload:
+            stored = payload[key] if isinstance(payload[key], list) else [payload[key]]
+            return ([answer for answer in stored if names_message(answer)],
+                    [answer for answer in stored if not names_message(answer)])
+    return None
+
+
 def tool_origin(ctx):
     origin = {"kind": "tool"}
     if getattr(ctx, "task_id", None):
@@ -108,9 +129,8 @@ def delivery_report(delivery_id, payload, *, part_id, state, receipt=None, text=
         if payload.get("original_delivery_id"):
             message["original_delivery_id"] = str(payload["original_delivery_id"])
     if error:
-        # Confirmed text chunks are _sent_messages; an album's messages Telegram returned are _sent_media.
-        confirmed = payload.get("_sent_messages") or payload.get("_sent_media")
-        message.update(error=error, confirmed_parts=len(confirmed) if isinstance(confirmed, list) else 0)
+        # Only stored answers that name their message count; an earlier version's empty answer stays in the row.
+        message.update(error=error, confirmed_parts=len((stored_answers(payload) or ([], []))[0]))
     return {
         "schema_version": 1, "delivery_id": delivery_id, "part_id": str(part_id),
         "state": state, "provider": "telegram", "account_id": str(reporting.get("account_id") or ""),

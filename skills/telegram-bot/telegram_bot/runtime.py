@@ -7,14 +7,16 @@ import pathlib
 import re
 import time
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
+from . import outbox_files
 from .api import (MEDIA_METHODS, TelegramClient, TelegramApiError, TelegramFileTooLarge, TelegramFileUnavailable,
-                  _split_text)
+                  TelegramRequestNotSent, _split_text)
 from .delivery import (REACTION_HISTORY_UNAVAILABLE, REACTION_REPORT_UNREADABLE, delivery_report,
-                       is_reaction_report, reaction_receipt, typed_reaction_report)
+                       is_reaction_report, names_message, reaction_receipt, typed_reaction_report)
 from .formatting import prepare_text, prepare_caption
-from .custody import REACTION_WITHHELD, CustodyStore, InboxLease, OutboxLease, _chat_forum
+from .custody import (CALL_STARTED, REACTION_WITHHELD, CustodyStore, InboxLease, OutboxLease, _chat_forum,
+                      recorded_calls)
 from .discovery import group_sightings
 from .events import parse_telegram_update, too_large_marks, too_large_note
 from .host import PresenceHostHTTPError, PresenceSubmission, PresenceWorkResult
@@ -47,6 +49,10 @@ _POLL_EVIDENCE_SECONDS = 120.0
 # "typing…": renewed this often (Telegram shows it about 5 s), for at most this long after the model asked.
 _TYPING_RENEW_SECONDS = 4.5
 _TYPING_CAP_SECONDS = 120.0
+# Telegram's answers that it did not perform a send call: the request was wrong or not allowed (400, 403), the token
+# names no bot (401, 404), or a flood wait (429). With a request proved never to have left (api.TelegramRequestNotSent),
+# only these let the same call be made again; any other outcome of a send call ends its row uncertain.
+_NOT_PERFORMED = frozenset({400, 401, 403, 404, 429})
 
 
 class PlaceHeld(RuntimeError):
@@ -54,7 +60,26 @@ class PlaceHeld(RuntimeError):
 
 
 class AlbumIncomplete(TelegramApiError):
-    """Telegram accepted an album (ok) but returned fewer messages than its items, or no list: never sent again."""
+    """Telegram accepted an album (ok) but its answer does not name one message per item: never sent again."""
+
+
+class UnconfirmedSend(RuntimeError):
+    """Telegram answered ok to a send call but named no message it created (no positive integer message_id), or the
+    row's stored answer does not: the call's effect is unknown, so the row ends uncertain and the call is not made
+    again."""
+
+    def __init__(self, method: str):
+        super().__init__(f"Telegram {method} answered ok without the message it created (no message_id)")
+
+
+class LeaseLost(RuntimeError):
+    """This attempt no longer holds its outbox row: another claim took it (a reload's runtime, or a claim after this
+    lease expired). The row is the other attempt's to change. ``message_ids`` names the messages Telegram confirmed to
+    this attempt's call that it could not record there, its yes having come after that claim; the outbox logs them."""
+
+    def __init__(self, message: str, message_ids: Sequence[int] = ()):
+        super().__init__(message)
+        self.message_ids = list(message_ids)
 
 
 class PresenceSubmitter(Protocol):
@@ -579,54 +604,131 @@ class TelegramTransportRuntime:
         if _is_reaction(lease.payload):
             await self._process_reaction(lease)
             return True
+        if recorded_calls(lease.payload) and self._settled_by_record(lease):
+            return True
+        calls = _ProviderCalls(self.store, lease)
+        # A send row's writes name this attempt (calls.fence), so after another claim of the row they change nothing.
         try:
             client = await self._ready_client()
             if client is None:
                 raise RuntimeError("telegram token is unavailable")
             lease = replace(lease, payload={**lease.payload, "_reporting": await self._resolved_reporting(lease.payload)})
-            self.store.checkpoint_outbox(lease.delivery_id, lease.payload)
+            calls.checkpoint(lease.payload)
             async def before_send():
                 # The row's own forum topic, as on the reaction path: a topic's place may hold what its chat allows.
                 await self._check_place(lease.payload, thread_id=str(lease.payload.get("topic_id") or ""))
+                if outbox_files.records(lease.payload):
+                    # Only the bytes queued are ever sent: a kept copy that changed fails before the call. Checked
+                    # after the place, so a held row reads nothing.
+                    await asyncio.to_thread(outbox_files.verify, lease.payload)
 
             receipt = await _deliver(client, lease, self.store, before_send=before_send, account_id=self._bot_id,
-                                     delivered=self._note_delivered)
-            self.store.mark_delivered(lease.delivery_id, provider_receipt=receipt)
+                                     delivered=self._note_delivered, calls=calls)
+            self.store.mark_delivered(lease.delivery_id, provider_receipt=receipt, attempts=calls.fence)
             return True
         except PlaceHeld as exc:
-            self.store.hold_outbox(lease.delivery_id, str(exc))
+            self.store.hold_outbox(lease.delivery_id, str(exc), attempts=calls.fence)
             return True
         except asyncio.CancelledError:
+            # A send call already stored as started keeps its marker, so the next claim ends the row uncertain. An
+            # attempt cancelled after another claim took its row leaves that claim's lease as it is.
             self.store.release_outbox(
-                lease.delivery_id, reason="worker_cancelled", retry_after_sec=0
+                lease.delivery_id, reason="worker_cancelled", retry_after_sec=0, attempts=calls.fence
             )
             raise
+        except LeaseLost as exc:
+            # Another claim holds the row now, with its own lease and record: this attempt changes nothing in it.
+            self._last_error = _error(exc)
+            if exc.message_ids:
+                # Telegram's yes to this attempt's call came after that claim: kept only in this log line.
+                self._log("warning", f"telegram-bot: {lease.delivery_id} attempt {lease.attempts}: Telegram "
+                                     f"confirmed message_id {exc.message_ids} in chat {lease.payload.get('chat_id')} "
+                                     "after another claim took the row; not recorded there")
+            return True
         except Exception as exc:
-            if isinstance(exc, AlbumIncomplete) or (lease.payload.get("kind") == "operation"
-                                                    and isinstance(exc, TelegramApiError) and exc.error_code == 0):
-                # The provider may have accepted this mutation before the
-                # response was lost, and Telegram did accept this album. Do not
-                # execute a second physical call merely because this lease can be reclaimed.
-                payload = self.store.outbox_payload(lease.delivery_id)
-                report = delivery_report(lease.delivery_id, payload, part_id="status",
-                                         state="uncertain", error=_error(exc))
-                self.store.mark_outbox_failed(lease.delivery_id, reason=_error(exc),
-                                              report=report, state="uncertain")
-                self._last_error = _error(exc)
+            if isinstance(exc, AlbumIncomplete) or calls.open is not None or (
+                    lease.payload.get("kind") == "operation" and isinstance(exc, TelegramApiError)
+                    and exc.error_code == 0):
+                # Telegram may have performed the open send call or this mutation before the answer was lost, and
+                # it did accept this album. Do not make a second physical call merely because this lease can be
+                # reclaimed.
+                self._end_uncertain(lease.delivery_id, _error(exc), attempts=calls.fence)
+                return True
+            if calls.recorded and self._settled_by_stored_record(lease, exc):
                 return True
             if lease.attempts >= _MAX_OUTBOX_ATTEMPTS:
                 payload = self.store.outbox_payload(lease.delivery_id)
-                state = "failed" if isinstance(exc, TelegramApiError) and exc.error_code else "uncertain"
+                # A send row gets here only through failures before a call and Telegram's answers that it did
+                # nothing; the other kinds keep their earlier rule.
+                state = ("failed" if recorded_calls(payload) or (isinstance(exc, TelegramApiError) and exc.error_code)
+                         else "uncertain")
                 report = delivery_report(lease.delivery_id, payload, part_id="status", state=state, error=_error(exc))
-                self.store.mark_outbox_failed(lease.delivery_id, reason=_error(exc), report=report)
+                self.store.mark_outbox_failed(lease.delivery_id, reason=_error(exc), report=report,
+                                              attempts=calls.fence)
             else:
                 self.store.release_outbox(
                     lease.delivery_id,
                     reason=_error(exc),
                     retry_after_sec=_retry_delay(lease.attempts),
+                    attempts=calls.fence,
                 )
             self._last_error = _error(exc)
             return True
+
+    def _settled_by_stored_record(self, lease: OutboxLease, exc: Exception) -> bool:
+        """After a send attempt failed with no call open, before its retry and attempt limit: the row as stored now may
+        already be decided, as when Telegram confirmed every part, the record keeps each and only marking the row
+        delivered failed. Then it ends from that record now (``_settled_by_record``, this attempt's identity), or, if
+        the store cannot take that, at the claim after this lease: never failed for a confirmed send, never sent again.
+        When the store cannot even be read, nothing more is written now and the claim after this lease decides.
+        ``False`` leaves the ordinary retry and limit."""
+        try:
+            stored = self.store.outbox_payload(lease.delivery_id)
+        except Exception as read_error:
+            self._last_error = _error(read_error)
+            return True
+        if not self._settled_by_record(replace(lease, payload=stored, unrecorded_attempt=False)):
+            return False
+        self._last_error = _error(exc)
+        return True
+
+    def _settled_by_record(self, lease: OutboxLease) -> bool:
+        """End a send row that its own record already decides, before any token, getMe, Host or place read, so the
+        conversation's next row is not held behind it; ``False`` leaves the row to the call it still has to make.
+
+        Every part's accepted message is stored: ``delivered`` from those receipts, with the reporting and account
+        the row was recorded with. A stored answer names no message, or an album's does not name one per item:
+        ``uncertain``. A call stored as started without its full answer after it, whatever ended that attempt (a
+        crash, a restart, a cancel or a stale lease), or an earlier version's attempt that left no proof that it did
+        nothing and no full answer: it may have reached Telegram, so ``uncertain``, and nothing is sent.
+        """
+        payload = lease.payload
+        end, value = _recorded_end(payload)
+        # An open call outweighs a record that looks complete: an album answer with an extra entry without a
+        # message_id keeps the call open beside the messages it named.
+        if (CALL_STARTED in payload and end != "uncertain") or (not end and lease.unrecorded_attempt):
+            marker = payload.get(CALL_STARTED)
+            method = str(marker.get("method") or "") if isinstance(marker, dict) else _send_method(payload)
+            end, value = "uncertain", _error(TelegramApiError(method or "send", "send_result_unrecorded"))
+        if not end:
+            return False
+        try:
+            if end == "delivered":
+                self.store.mark_delivered(lease.delivery_id, provider_receipt=value, attempts=lease.attempts)
+            else:
+                self._end_uncertain(lease.delivery_id, value, attempts=lease.attempts)
+        except Exception as exc:
+            # The row stays leased as it is; the claim after its lease decides the same way.
+            self._last_error = _error(exc)
+        return True
+
+    def _end_uncertain(self, delivery_id: str, error: str, *, attempts: Optional[int] = None) -> None:
+        """End a row whose call may have reached Telegram: confirmed parts and kept file copies stay, nothing is
+        sent again. ``attempts`` keeps a send attempt's end to the row it still holds."""
+        payload = self.store.outbox_payload(delivery_id)
+        report = delivery_report(delivery_id, payload, part_id="status", state="uncertain", error=error)
+        self.store.mark_outbox_failed(delivery_id, reason=error, report=report, state="uncertain", attempts=attempts)
+        self._last_error = error
 
     def _note_delivered(self, chat_id: str, topic_id: Any) -> None:
         """A message of this bot reached that conversation: a "typing…" asked for before it has ended."""
@@ -856,6 +958,107 @@ def _is_reaction(payload: Dict[str, Any]) -> bool:
     return payload.get("kind") == "operation" and payload.get("method") == REACTION_METHOD
 
 
+def _not_performed(exc: BaseException) -> bool:
+    """Telegram's own answer that the call did nothing, or a request proved never to have left this machine."""
+    return isinstance(exc, TelegramRequestNotSent) or (
+        isinstance(exc, TelegramApiError) and exc.error_code in _NOT_PERFORMED)
+
+
+class _ProviderCalls:
+    """The provider calls of one send attempt (a text chunk, a file or an album), each stored as started first.
+
+    ``open`` names the call stored as started whose accepted message is not stored yet. While it is set, any failure,
+    a lost answer, an answer that names no message or a store's failure after Telegram's answer included, leaves the
+    call's outcome unknown: the row ends uncertain and that call is never made again. Telegram's answer that it did
+    nothing (or a request proved never to have left) removes the marker, so a retry may make the call. An earlier
+    version's unrecorded attempt never gets here (TelegramTransportRuntime._settled_by_record). Edits and moderation
+    make their calls unrecorded, as before.
+
+    ``fence`` is the attempt's identity, its claim's attempts count, for a send row (``None`` for edits and
+    moderation, whose writes stay as before). Every write of a send row names it, as start_outbox_call always did, so
+    once another claim holds the row this attempt stores nothing there and ends with ``LeaseLost``.
+    """
+
+    def __init__(self, store: CustodyStore, lease: OutboxLease):
+        self.store, self.lease = store, lease
+        self.recorded = recorded_calls(lease.payload)
+        self.fence: Optional[int] = lease.attempts if self.recorded else None
+        self.open: Optional[Dict[str, Any]] = None
+
+    def checkpoint(self, payload: Dict[str, Any], *, report=None, sent=None, confirmed: Sequence[int] = ()) -> None:
+        """Store the row's record (with its reports and own messages) as this attempt has it; ``confirmed`` names the
+        messages Telegram just confirmed, carried by ``LeaseLost`` if the record cannot be stored."""
+        stored = self.store.checkpoint_outbox(self.lease.delivery_id, payload, report=report, sent=sent,
+                                              attempts=self.fence)
+        if not stored and self.fence is not None:
+            raise LeaseLost("this attempt no longer holds the outbox row; its record was not stored", confirmed)
+
+    async def make(self, payload: Dict[str, Any], part: int, method: str, call: Callable[[], Awaitable[Any]]) -> Any:
+        """Make one call; ``payload`` is the row's record as it stands just before it."""
+        if not self.recorded:
+            return await call()
+        marker = {"part": part, "method": method}
+        if not self.store.start_outbox_call(self.lease.delivery_id, self.lease.attempts,
+                                            {**payload, CALL_STARTED: marker}):
+            raise LeaseLost("this attempt no longer holds the outbox row; nothing was sent")
+        self.open = marker
+        try:
+            return await call()
+        except Exception as exc:
+            if _not_performed(exc):
+                self.checkpoint(payload)  # Telegram did nothing: the marker goes, while this attempt holds the row
+                self.open = None
+            raise
+
+    def answered(self) -> None:
+        """The open call's answer is stored, in the commit that also removed its marker."""
+        self.open = None
+
+
+def _send_method(payload: Dict[str, Any]) -> str:
+    kind = str(payload.get("kind") or "message")
+    return "sendMessage" if kind == "message" else "sendMediaGroup" if kind == "album" else MEDIA_METHODS.get(kind, "")
+
+
+def _album_incomplete(returned: int, named: int, items: int) -> AlbumIncomplete:
+    unnamed = f" and {returned - named} entries without a message_id" if returned > named else ""
+    return AlbumIncomplete("sendMediaGroup", f"Telegram accepted the album and returned {named} messages{unnamed} for "
+                           f"{items} items; completeness is unknown, and it is not sent again")
+
+
+def _recorded_end(payload: Dict[str, Any]) -> Tuple[str, Any]:
+    """What a send row's stored answers already decide, with no call.
+
+    ``("delivered", provider receipt)`` when every part's accepted message is stored; ``("uncertain", error)`` when a
+    stored answer names no message, or an album's does not name one message per item (fewer, more, or entries without
+    a message_id); ``("", None)`` while a part is still to be sent.
+    """
+    kind = str(payload.get("kind") or "message")
+    if kind == "message":
+        messages = payload.get("_sent_messages")
+        if messages is None:
+            return "", None
+        if not isinstance(messages, list) or not all(names_message(message) for message in messages):
+            return "uncertain", _error(UnconfirmedSend("sendMessage"))
+        chunks = payload.get("_rendered_chunks")
+        # A row from before formatting keeps the split it was sent with (_deliver).
+        count = len(chunks) if isinstance(chunks, list) else len(_split_text(str(payload.get("text") or ""), 4000))
+        return ("delivered", {"kind": kind, "messages": messages}) if messages and len(messages) >= count else ("", None)
+    if "_sent_media" not in payload:
+        return "", None
+    stored = payload["_sent_media"]
+    if kind == "album":
+        items = payload.get("_rendered_items") or payload.get("items") or []
+        returned = stored if isinstance(stored, list) else []
+        named = [message for message in returned if names_message(message)]
+        if len(returned) == len(named) == len(items):
+            return "delivered", {"kind": kind, "messages": named}
+        return "uncertain", _error(_album_incomplete(len(returned), len(named), len(items)))
+    if names_message(stored):
+        return "delivered", {"kind": kind, "message": stored}
+    return "uncertain", _error(UnconfirmedSend(_send_method(payload) or "send"))
+
+
 def _own_message(account_id: str, chat_id: str, topic_id: Any, result: Dict[str, Any], words: str) -> Optional[Tuple]:
     """A confirmed send's retained row; without its exact provider id there is nothing to remember."""
     message_id = result.get("message_id")
@@ -869,8 +1072,9 @@ def _own_message(account_id: str, chat_id: str, topic_id: Any, result: Dict[str,
 
 async def _deliver(
     client: TelegramClient, lease: OutboxLease, store: CustodyStore, *, before_send=None, account_id: str = "",
-    delivered: Callable[[str, Any], None] = lambda _chat, _topic: None,
+    delivered: Callable[[str, Any], None] = lambda _chat, _topic: None, calls: Optional[_ProviderCalls] = None,
 ) -> Dict[str, Any]:
+    calls = calls or _ProviderCalls(store, lease)
     payload = lease.payload
     kind = str(payload.get("kind") or "message")
     chat_id = str(payload.get("chat_id") or "").strip()
@@ -896,25 +1100,31 @@ async def _deliver(
                 )
             )
             payload = {**payload, "_rendered_chunks": chunks}
-            store.checkpoint_outbox(lease.delivery_id, payload)
+            calls.checkpoint(payload)
         for index in range(len(messages), len(chunks)):
             chunk = chunks[index]
             if before_send:
                 await before_send()
-            result = await client.send_text_chunk(
+            # The record with every chunk confirmed so far: the marker is stored with it, never in place of it.
+            current = {**payload, "_sent_messages": messages} if messages or "_sent_messages" in payload else payload
+            result = await calls.make(current, index, "sendMessage", lambda: client.send_text_chunk(
                 chat_id,
                 chunk["text"],
                 parse_mode=chunk["parse_mode"],
                 topic_id=topic_id,
                 reply_to_message_id=reply_id if index == 0 else None,
-            )
+            ))
+            if not names_message(result):
+                raise UnconfirmedSend("sendMessage")  # its marker stays: the row ends uncertain
             report = delivery_report(lease.delivery_id, payload, part_id=index, state="delivered", receipt=result,
                                      text=chunk["text"], fmt="html" if chunk["parse_mode"] == "HTML" else "plain")
             messages.append({key: value for key, value in result.items() if key != "_delivery"})
-            store.checkpoint_outbox(
-                lease.delivery_id, {**payload, "_sent_messages": messages}, report=report,
+            calls.checkpoint(
+                {**payload, "_sent_messages": messages}, report=report,
                 sent=_own_message(account_id, chat_id, topic_id, result, chunk["text"]),
+                confirmed=[result["message_id"]],
             )
+            calls.answered()
             delivered(chat_id, topic_id)
         return {"kind": kind, "messages": messages}
     if kind == "moderation":
@@ -946,49 +1156,54 @@ async def _deliver(
         return {"kind": kind, "method": method, "result": result}
     if kind == "album":
         return await _deliver_album(client, lease, store, before_send=before_send, account_id=account_id,
-                                    delivered=delivered)
+                                    delivered=delivered, calls=calls)
     if kind not in MEDIA_METHODS:
         raise ValueError(f"unsupported Telegram outbox kind: {kind}")
-    if payload.get("_sent_media"):
-        return {"kind": kind, "message": payload["_sent_media"]}
+    # A stored answer (_sent_media) was decided before any call (TelegramTransportRuntime._settled_by_record).
     caption = payload.get("_rendered_caption")
     if caption is None:
         caption = prepare_caption(
             str(payload.get("caption") or ""), markdown=payload.get("markdown", False)
         )
-        store.checkpoint_outbox(
-            lease.delivery_id, {**payload, "_rendered_caption": caption}
-        )
+        payload = {**payload, "_rendered_caption": caption}
+        calls.checkpoint(payload)
     if before_send:
         await before_send()
-    result = await client.send_media(
+    # The row's file: a copy kept when it was queued, or, for a row queued before 0.12.1, the path it named.
+    result = await calls.make(payload, 0, MEDIA_METHODS[kind], lambda: client.send_media(
         kind,
         chat_id,
         pathlib.Path(str(payload.get("file_path") or "")),
         prepared_caption=caption,
         topic_id=topic_id,
         reply_to_message_id=reply_id,
-    )
+    ))
+    if not names_message(result):
+        raise UnconfirmedSend(MEDIA_METHODS[kind])  # its marker stays: the row ends uncertain
     report = delivery_report(lease.delivery_id, payload, part_id=0, state="delivered", receipt=result,
                              text=caption["text"], fmt="html" if caption["parse_mode"] == "HTML" else "plain")
     result = {key: value for key, value in result.items() if key != "_delivery"}
-    store.checkpoint_outbox(lease.delivery_id, {**payload, "_sent_media": result}, report=report,
-                            sent=_own_message(account_id, chat_id, topic_id, result, caption["text"]))
+    calls.checkpoint({**payload, "_sent_media": result}, report=report,
+                     sent=_own_message(account_id, chat_id, topic_id, result, caption["text"]),
+                     confirmed=[result["message_id"]])
+    calls.answered()
     delivered(chat_id, topic_id)
     return {"kind": kind, "message": result}
 
 
 async def _deliver_album(
     client: TelegramClient, lease: OutboxLease, store: CustodyStore, *, before_send=None, account_id: str = "",
-    delivered: Callable[[str, Any], None] = lambda _chat, _topic: None,
+    delivered: Callable[[str, Any], None] = lambda _chat, _topic: None, calls: Optional[_ProviderCalls] = None,
 ) -> Dict[str, Any]:
     """One sendMediaGroup call; each message Telegram returns gets its own receipt part and delivery report.
 
-    Telegram's ok is kept as ``_sent_media`` before anything else, so an accepted album is never sent again.
+    Telegram's ok is kept as ``_sent_media`` before anything else, so an accepted album is never sent again (a stored
+    one is decided before any call: TelegramTransportRuntime._settled_by_record). Only entries that name a message
+    are kept. Unless the answer names one message per item, the call stays open in the record and the row ends
+    uncertain.
     """
+    calls = calls or _ProviderCalls(store, lease)
     payload = lease.payload
-    if "_sent_media" in payload:
-        return _album_receipt(payload["_sent_media"], payload.get("_rendered_items") or payload.get("items") or [])
     chat_id = str(payload.get("chat_id") or "").strip()
     topic_id = _optional_int(payload.get("topic_id"))
     items = payload.get("_rendered_items")
@@ -997,13 +1212,15 @@ async def _deliver_album(
                   "caption": prepare_caption(str(item.get("caption") or ""), markdown=payload.get("markdown", False))}
                  for item in payload.get("items") or []]
         payload = {**payload, "_rendered_items": items}
-        store.checkpoint_outbox(lease.delivery_id, payload)
+        calls.checkpoint(payload)
     if before_send:
         await before_send()
-    results = await client.send_media_group(chat_id, items, topic_id=topic_id,
-                                            reply_to_message_id=_optional_int(payload.get("reply_to_message_id")))
+    results = await calls.make(payload, 0, "sendMediaGroup", lambda: client.send_media_group(
+        chat_id, items, topic_id=topic_id, reply_to_message_id=_optional_int(payload.get("reply_to_message_id"))))
     messages, reports, rows = [], [], []
     for index, result in enumerate(results):
+        if not names_message(result):
+            continue  # confirms no message, so the album is not complete
         # Keep extra provider messages too; there is no input file to attribute to them.
         item = items[index] if index < len(items) else {
             "kind": next((kind for kind in MEDIA_METHODS if kind in result), "unknown"), "file_path": ""}
@@ -1014,16 +1231,14 @@ async def _deliver_album(
         message = {key: value for key, value in result.items() if key != "_delivery"}
         messages.append(message)
         rows.append(_own_message(account_id, chat_id, topic_id, message, wire.get("text", "")))
-    store.checkpoint_outbox(lease.delivery_id, {**payload, "_sent_media": messages}, report=reports, sent=rows)
+    complete = len(results) == len(messages) == len(items)
+    # Its confirmed messages are kept either way. An incomplete answer keeps the call open in the record.
+    calls.checkpoint({**payload, "_sent_media": messages, **({} if complete else {CALL_STARTED: calls.open})},
+                     report=reports, sent=rows, confirmed=[message["message_id"] for message in messages])
     delivered(chat_id, topic_id)
-    return _album_receipt(messages, items)
-
-
-def _album_receipt(messages: List[Dict[str, Any]], items: Sequence[Any]) -> Dict[str, Any]:
-    """Any count mismatch keeps every returned message and ends ``AlbumIncomplete`` without a resend."""
-    if len(messages) != len(items):
-        raise AlbumIncomplete("sendMediaGroup", f"Telegram accepted the album and returned {len(messages)} messages "
-                              f"for {len(items)} items; completeness is unknown, and it is not sent again")
+    if not complete:
+        raise _album_incomplete(len(results), len(messages), len(items))
+    calls.answered()
     return {"kind": "album", "messages": messages}
 
 

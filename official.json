@@ -1,7 +1,7 @@
 {
   "endorsements": [
     {
-      "digest": "147ff878ebd6c3bbde89e05278d66348405d6c55bf2c611c77e86d00e314d2b9",
+      "digest": "aed146b7eda8d5e4e0686ae348ed750da4f4fd00879ed8dd398739fa29f2493b",
       "name": "a2a",
       "recommended": false
     },
@@ -46,7 +46,7 @@
       "recommended": false
     },
     {
-      "digest": "4f8613be4dc4bab36b9effba01748f367419f1f536a19aec5c88f9a22c2dd90e",
+      "digest": "66e6de2764530f656f20214a17585a07acd5806b0a8c2de3f7b32d5678f6046a",
       "name": "duckduckgo",
       "recommended": true
     },
@@ -61,7 +61,7 @@
       "recommended": false
     },
     {
-      "digest": "415da55d9d94e79be70885c5dbf3aed2d56fb69b97856cafef1044d179d5a2b7",
+      "digest": "e7bdfddbcd9967548f2cfcc8d7fcc06234be69f2aa63f9237bf144b4e8fa551c",
       "name": "github",
       "recommended": false
     },
@@ -106,7 +106,7 @@
       "recommended": true
     },
     {
-      "digest": "f12cb13367b96a425895cb35998d91a5b10de29d35e52db8bc18452d52574414",
+      "digest": "d71fec0e1923b545afbf8b868418f56c20bac56c7e36dc50d7ceb972ed6b9f5b",
       "name": "telegram-bot",
       "recommended": false
     },

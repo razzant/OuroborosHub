@@ -80,6 +80,7 @@ _pipeline_mod = importlib.import_module(f"{_PKG}.pipeline")
 Job = _models.Job
 JobStatus = _models.JobStatus
 JobPhase = _models.JobPhase
+unsupported_stored_state = _models.unsupported_stored_state
 OpenRouterClient = _api_client.OpenRouterClient
 Pipeline = _pipeline_mod.Pipeline
 
@@ -275,6 +276,30 @@ def _on_progress(job) -> None:
     })
 
 
+# Job ids already logged as unsupported, so a 2-second scan does not repeat it.
+_unsupported_logged: set[str] = set()
+
+
+def _is_unsupported(job_id: str, data: dict) -> bool:
+    """True for a record this payload version must neither claim nor requeue.
+
+    The record is left exactly as written (by a newer version, or without a
+    phase/status): rewriting it would destroy the only copy of its real state,
+    and running it would re-pay for work this version cannot reason about.
+    """
+    raw = unsupported_stored_state(data.get("progress") or {})
+    if raw is None:
+        return False
+    if job_id not in _unsupported_logged:
+        _unsupported_logged.add(job_id)
+        log.warning(
+            "Job %s has a stored state this payload version does not support "
+            "(phase=%r, status=%r); leaving it untouched",
+            job_id, raw.get("phase"), raw.get("status"),
+        )
+    return True
+
+
 def _recover_stale_running(job_dir: Path, data: dict) -> None:
     """Requeue a RUNNING job whose worker died (lease missing/expired), once.
 
@@ -282,6 +307,8 @@ def _recover_stale_running(job_dir: Path, data: dict) -> None:
     same crash keeps recurring); mark it ERROR instead of requeueing forever.
     """
     job_id = job_dir.name
+    if _is_unsupported(job_id, data):
+        return
     lease = _read_lease(job_id)
     if lease is not None and not _lease_expired(lease):
         return  # a live worker owns it
@@ -290,6 +317,8 @@ def _recover_stale_running(job_dir: Path, data: dict) -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("Cannot deserialize stale RUNNING job %s: %s: %s", job_id, type(exc).__name__, exc)
         return
+    if job.progress.status is not JobStatus.RUNNING:
+        return  # only the normalized state decides; never requeue anything else
     dead_pid = (lease or {}).get("pid", "unknown")
     expired_at = (lease or {}).get("expires_at", "no lease file")
     stats = job.progress.verification_stats
@@ -342,6 +371,8 @@ def _claim_next_job():
             continue
         if status != JobStatus.QUEUED.value:
             continue
+        if _is_unsupported(job_dir.name, data):
+            continue
         candidates.append((data.get("created_at") or "", job_dir, data))
     candidates.sort(key=lambda item: item[0])
     for _, job_dir, data in candidates:
@@ -355,6 +386,9 @@ def _claim_next_job():
                 job_dir, type(exc).__name__, exc,
             )
             _remove_lease(job_dir.name)
+            continue
+        if job.progress.status is not JobStatus.QUEUED:
+            _remove_lease(job_dir.name)  # the normalized state is the authority
             continue
         # Claim before running so a restart/second poll does not double-process it.
         job.progress.status = JobStatus.RUNNING
