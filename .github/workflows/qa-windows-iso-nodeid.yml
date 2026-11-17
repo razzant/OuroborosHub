@@ -1,0 +1,213 @@
+# QA recipe (not part of the patch): ONE real Windows run, before 6dee626 vs after <pinned commit>.
+#
+# Use: put this file at .github/workflows/qa-windows-iso-nodeid.yml on a throwaway branch named
+# qa/windows-iso-nodeid-<anything> in OuroborosHub; checkout below selects the exact core AFTER_SHA.
+# Push once. Its only test job checks that public core commit; it does not run Hub code. Read-only token.
+#
+# Environment = the post-merge Windows leg: windows-latest, .github/actions/setup-python-env with
+# interpreter setup-python (Python 3.10, uv.lock), dependencies only (install-project false), TEMP on
+# the work disk. One pytest process per side, no xdist (the PYTEST_CURRENT_TEST write is the same in an
+# xdist worker: _pytest/runner.py runs in the worker). Selection by FILE paths only; the 100k-char node
+# ids never go through argv. Full logs, JUnit XML and a JSON verdict are uploaded as one artifact.
+
+name: QA - Windows long parametrize id (before/after)
+
+on:
+  push:
+    branches:
+      - 'qa/windows-iso-nodeid-**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-windows-iso-nodeid
+  cancel-in-progress: false
+
+env:
+  BEFORE_SHA: 6dee626eee271ab2f969e1c02d9e66f5978e9b8e
+  BEFORE_TEST_SHA256: b26e27798faca85ee1b70655fecee16ff1a467d9cd16b2bed4e0c59abeaf1201
+  # Fill with the commit that carries the patched test file (its sha256 below), e.g. 6dee + this patch.
+  AFTER_SHA: 2c417cc3c511a89810f2149704980c54cd1a46cb
+  AFTER_TEST_SHA256: fb7a784a8e4cbdf30551b9ac5cacf7e8643ab7e1b1f1c84d304244c7165fc4dd
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: razzant/ouroboros
+          ref: ${{ env.AFTER_SHA }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Put Windows test temp on the work disk
+        run: |
+          echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "TMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          echo "OUT=$RUNNER_TEMP/qa-iso-nodeid" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/setup-python-env
+        with:
+          interpreter: setup-python
+          install-project: 'false'
+      - name: Pin the before and after trees
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT"
+          [[ "$AFTER_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::AFTER_SHA is not filled"; exit 2; }
+          git cat-file -e "$BEFORE_SHA^{commit}"
+          git cat-file -e "$AFTER_SHA^{commit}"
+          # The environment is synced from this checkout: both sides must share its lock.
+          git diff --quiet HEAD "$BEFORE_SHA" -- uv.lock pyproject.toml
+          git diff --quiet HEAD "$AFTER_SHA" -- uv.lock pyproject.toml
+          git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" > "$OUT/before-after-changed-files.txt"
+          if [[ "$(cat "$OUT/before-after-changed-files.txt")" != "tests/test_memory_view_iso_period.py" ]]; then
+            echo "::error::after must differ only in the test file"; exit 2
+          fi
+          git worktree add --detach "$RUNNER_TEMP/before" "$BEFORE_SHA"
+          git worktree add --detach "$RUNNER_TEMP/after" "$AFTER_SHA"
+          for side in before after; do
+            want=$([[ $side == before ]] && echo "$BEFORE_TEST_SHA256" || echo "$AFTER_TEST_SHA256")
+            got=$(python -I -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" \
+                  "$RUNNER_TEMP/$side/tests/test_memory_view_iso_period.py")
+            echo "$side test file sha256 $got" | tee -a "$OUT/trees.txt"
+            [[ "$got" == "$want" ]] || { echo "::error::$side test file is not the pinned bytes"; exit 2; }
+          done
+          echo "before $(git -C "$RUNNER_TEMP/before" rev-parse HEAD)" >> "$OUT/trees.txt"
+          echo "after  $(git -C "$RUNNER_TEMP/after" rev-parse HEAD)" >> "$OUT/trees.txt"
+      - name: Record the environment
+        run: |
+          set -euo pipefail
+          python -I -c "import platform,sqlite3,sys;print('python',sys.version);print('platform',platform.platform());print('sqlite',sqlite3.sqlite_version);print('executable',sys.executable)" | tee "$OUT/environment.txt"
+          python -m pytest --version 2>&1 | tee -a "$OUT/environment.txt"
+      - name: Probe CPython's Windows environment-string limit (no pytest)
+        run: |
+          python -I - "$OUT/env-limit-probe.json" <<'EOF'
+          import json, os, sys
+          name, out = "OURO_QA_ENV_LIMIT_PROBE", {}
+          # name=value wide characters: just at the limit, one over, and the size of the longest failed id + " (teardown)".
+          for total in (32767, 32768, 100187):
+              try:
+                  os.environ[name] = "x" * (total - len(name) - 1)
+                  out[str(total)] = "accepted"
+              except (ValueError, OSError) as error:
+                  out[str(total)] = f"{type(error).__name__}: {error}"
+              os.environ.pop(name, None)
+          out["python"] = sys.version
+          json.dump(out, open(sys.argv[1], "w"), indent=1)
+          print(json.dumps(out, indent=1))
+          EOF
+      - name: Run the owning set on before and after
+        run: |
+          set -uo pipefail
+          set +e  # GitHub's explicit bash starts with -e; the before failure is expected.
+          for side in before after; do
+            (cd "$RUNNER_TEMP/$side" && python -m pytest -p no:cacheprovider -o addopts="" -q --tb=long -rfEs \
+              --junitxml="$OUT/$side.junit.xml" \
+              tests/test_memory_view_iso_period.py \
+              tests/test_chronicle_transfer.py \
+              tests/test_memory_fallback_sources.py \
+              tests/test_memory_forms_capacity.py \
+              tests/test_generated_inventories.py::test_facade_inventory_is_byte_identical \
+              tests/test_generated_inventories.py::test_data_layout_inventory_is_byte_identical \
+              > "$OUT/$side.log" 2>&1)
+            echo $? > "$OUT/$side.exit"
+            echo "$side pytest exit $(cat "$OUT/$side.exit")"
+            tail -c 2000 "$OUT/$side.log" | cut -c1-300
+          done
+      - name: Read the JUnit files into a verdict
+        id: verdict
+        run: |
+          python -I - "$OUT" <<'EOF'
+          import collections, hashlib, json, os, pathlib, sys
+          import xml.etree.ElementTree as ET
+          out = pathlib.Path(sys.argv[1])
+          ISO = "tests/test_memory_view_iso_period.py::"
+          LONG_FN = "test_unrecognized_or_incomplete_dates_are_not_invented_or_clipped"
+          CI_SHA = {  # nodeid sha256 of the six failing cases, run 43974576532 (long-nodeids.json)
+              "cd753179bb71babff2a64ad1da4aaf36d2845b4d5e7642ebacc9f4533e4903b3",
+              "30bda371a0476e5a58d9ff756f63d34b153c992fba2318328718d07bd414a1e9",
+              "37b1a207496f070582f9732410660b0be78335b10bf419661dfc511cd120c3db",
+              "54af5fc5ccb8582ed3b0ace16f0c693d5d8ce15dd4c595a647cdb8b98e31dc07",
+              "fafc2cc32295e8f35fb98511961542bd2b3f1c65e137b424b342fe8bd4204b48",
+              "8abb6686b70d2dd0fd82df60c217a62fe9861d8927e68b8dd1a5f053a3ff207d"}
+          AFTER_IDS = {f"{ISO}{LONG_FN}[2026-07-01T00:00:00.1x100013{s}]" for s in
+                       ("garbage", "+00:00:30.5garbage", "+00:00:30.5.6", "+00:0030.5", "+0000:30.5", "+25:00:30.5")}
+          NOT_RUN_ON_310 = {f"{ISO}test_port_matches_native_312_on_a_generated_corpus",
+                            f"{ISO}test_real_312_publication_replays_with_short_full_and_f3_periods"}
+          MESSAGE = "the environment variable is longer than 32767 characters"
+
+          def read(side):
+              cases = collections.OrderedDict()
+              for case in ET.parse(out / f"{side}.junit.xml").getroot().iter("testcase"):
+                  nodeid = case.get("classname").replace(".", "/") + ".py::" + case.get("name")
+                  row = cases.setdefault(nodeid, {"kinds": [], "messages": []})
+                  for child in case:
+                      if child.tag in ("failure", "error", "skipped"):
+                          row["kinds"].append(child.tag)
+                          row["messages"].append((child.get("message") or "")[:400])
+              for row in cases.values():
+                  row["outcome"] = ("error" if "error" in row["kinds"] else "failure" if "failure" in row["kinds"]
+                                    else "skipped" if "skipped" in row["kinds"] else "passed")
+              return cases
+
+          def short(nodeid):
+              return nodeid if len(nodeid) < 400 else f"{nodeid[:160]}...<{len(nodeid)} chars, sha256 {hashlib.sha256(nodeid.encode()).hexdigest()}>"
+
+          report, ok = {}, True
+          for side in ("before", "after"):
+              cases = read(side)
+              by = collections.Counter(row["outcome"] for row in cases.values())
+              report[side] = {"exit": (out / f"{side}.exit").read_text().strip(), "counts": dict(by),
+                              "iso_counts": dict(collections.Counter(r["outcome"] for n, r in cases.items() if n.startswith(ISO))),
+                              "not_passed": {short(n): {"outcome": r["outcome"], "messages": r["messages"]}
+                                             for n, r in cases.items() if r["outcome"] != "passed"}}
+              report[side]["_cases"] = cases
+          before, after = report["before"].pop("_cases"), report["after"].pop("_cases")
+          bad_before = {n: r for n, r in before.items() if r["outcome"] in ("error", "failure")}
+          checks = {
+              "before: pytest exited1": report["before"]["exit"] == "1",
+              "after: pytest exited0": report["after"]["exit"] == "0",
+              "before: exactly the six CI node ids are red": {hashlib.sha256(n.encode()).hexdigest() for n in bad_before} == CI_SHA,
+              "before: each of the six has a setup and a teardown error naming the limit":
+                  all(r["kinds"].count("error") == 2 and all(MESSAGE in m for m in r["messages"]) for r in bad_before.values()),
+              "after: no failure or error anywhere": not any(r["outcome"] in ("error", "failure") for r in after.values()),
+              "after: the six cases ran and passed under their short ids": all(after.get(n, {}).get("outcome") == "passed" for n in AFTER_IDS),
+              "after: ISO file has 227 cases": sum(n.startswith(ISO) for n in after) == 227,
+              "after: only the two cross-version cases are skipped in the ISO file (NOT RUN, not PASS)":
+                  {n for n, r in after.items() if n.startswith(ISO) and r["outcome"] == "skipped"} == NOT_RUN_ON_310,
+              "after: the 6 capacity cases passed": sum(n.startswith("tests/test_memory_forms_capacity.py::") and r["outcome"] == "passed" for n, r in after.items()) == 6,
+              "after: the facade inventory case passed":
+                  after.get("tests/test_generated_inventories.py::test_facade_inventory_is_byte_identical", {}).get("outcome") == "passed",
+          }
+          homes = {"tests/test_chronicle_transfer.py::": 80, "tests/test_memory_fallback_sources.py::": 4,
+                   "tests/test_memory_forms_capacity.py::": 6, "tests/test_generated_inventories.py::": 2}
+          for prefix, count in homes.items():
+              rows = [r for n, r in after.items() if n.startswith(prefix)]
+              checks[f"after: {prefix} all {count} selected cases passed"] = len(rows) == count and all(r["outcome"] == "passed" for r in rows)
+          checks["after: data-layout inventory passed"] = after.get("tests/test_generated_inventories.py::test_data_layout_inventory_is_byte_identical", {}).get("outcome") == "passed"
+          report["checks"], report["not_run_on_3_10"] = checks, sorted(NOT_RUN_ON_310)
+          report["env_limit_probe"] = json.loads((out / "env-limit-probe.json").read_text())
+          ok = all(checks.values())
+          report["verdict"] = "PASS" if ok else "FAIL"
+          (out / "verdict.json").write_text(json.dumps(report, indent=1))
+          lines = [f"## Windows long parametrize id: {report['verdict']}", ""] + [f"- {'OK' if v else 'NO'} {k}" for k, v in checks.items()]
+          lines += ["", f"before counts {report['before']['counts']}, after counts {report['after']['counts']}",
+                    f"not run on 3.10 (skipped, not PASS): {', '.join(sorted(NOT_RUN_ON_310))}"]
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines) + "\n")
+          sys.exit(0 if ok else 1)
+          EOF
+      - name: Upload the full output (logs with whole exceptions, JUnit, verdict)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: qa-windows-iso-nodeid-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qa-iso-nodeid/
+          retention-days: 14
+          if-no-files-found: error
