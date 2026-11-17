@@ -1,7 +1,9 @@
 """Context Lens — read-only HTTP surface over this install's usage record.
 
 Two GET routes under this skill's own namespace, one module widget, nothing
-else. No tools, no WebSocket, no network, no subprocess, no writes anywhere.
+else. No tools, no WebSocket, no network, no subprocess, and no write of the
+store's content (SQLite's own WAL coordination files, declared as ``fs``: see
+``lens_store``).
 
     GET /api/extensions/context-lens/data        ?horizon=&limit=&refresh=
     GET /api/extensions/context-lens/trajectory  ?task=&snapshot=&horizon=
@@ -57,6 +59,10 @@ _REASONS = {
     "store_unsupported": "The usage store has a format this version of Context Lens does not read.",
     "store_not_ready": "The usage store exists but its one-time import has not completed, so nothing is shown.",
     "store_name_tier": "This install keeps its usage store on a filesystem without kernel file locks. Reading it safely needs the host's money lock, which this read-only widget cannot take, so nothing is read.",
+    # Both WAL refusals can come from inside the read, after SQLite has opened the
+    # store (lens_store._validate), so neither sentence says it was not opened.
+    "store_wal_incompatible": "The usage store uses SQLite's write-ahead log, and the host's own compatibility check says this install's SQLite or filesystem must not share it, so this widget stopped without reading any usage data.",
+    "store_wal_unverified": "The usage store uses SQLite's write-ahead log, and this widget could not reach the host's check for sharing it safely, so it stopped without reading any usage data.",
     "store_not_confined": "This reader requires a real data directory, state directory and store file; a checked path is symlinked or invalid, so it was not read.",
     "store_not_regular": "The usage store path is not a regular file in this install, so it was not read.",
     "store_replaced": "The usage store was replaced while it was being read, so that read was discarded. Try again.",

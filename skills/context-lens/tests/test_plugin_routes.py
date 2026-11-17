@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import importlib.util
 import datetime as _dt
+import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import sys
 import tempfile
@@ -28,6 +30,7 @@ _ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+import core_store_standin as cs  # noqa: E402
 import store_fixture as sf  # noqa: E402
 
 
@@ -45,6 +48,14 @@ lens_core = plugin.lens_core
 lens_store = plugin.lens_store
 
 
+def _manifest_permissions() -> set:
+    """The ``permissions`` list of SKILL.md's front matter."""
+    front = (_ROOT / "SKILL.md").read_text(encoding="utf-8").split("\n---\n", 1)[0]
+    found = re.search(r"^permissions:\s*\[([^\]]*)\]\s*$", front, re.M)
+    assert found is not None, "SKILL.md front matter declares no permissions list"
+    return {item.strip() for item in found.group(1).split(",") if item.strip()}
+
+
 # ---------------------------------------------------------------------------
 # Doubles
 # ---------------------------------------------------------------------------
@@ -58,7 +69,9 @@ class FakeRequest:
 class FakePluginAPI:
     """Records registrations and enforces the permissions this skill declares."""
 
-    DECLARED_PERMISSIONS = {"route", "widget"}
+    # The manifest's list (a test pins the two equal). `fs` declares SQLite's WAL
+    # coordination files beside the store; no PluginAPI call checks it.
+    DECLARED_PERMISSIONS = {"route", "widget", "fs"}
 
     def __init__(self, data_dir: str) -> None:
         self.data_dir = data_dir
@@ -68,6 +81,7 @@ class FakePluginAPI:
         self.ws_handlers = []
         self.unload = []
         self.logs = []
+        self.required = []
 
     def log(self, level, message, *args, **kwargs):
         # The host log needs no declared permission, so this records rather than
@@ -80,6 +94,7 @@ class FakePluginAPI:
                 "execution_mode": "in_process", "capabilities": []}
 
     def _require(self, permission: str) -> None:
+        self.required.append(permission)
         if permission not in self.DECLARED_PERMISSIONS:
             raise AssertionError("skill used undeclared permission %r" % permission)
 
@@ -138,6 +153,10 @@ class RouteTestCase(unittest.TestCase):
         self.root = tempfile.mkdtemp(prefix="context-lens-routes-")
         self.addCleanup(shutil.rmtree, self.root, True)
         self.api = FakePluginAPI(self.root)
+        # Never an imported Ouroboros: no core by default, the synthetic
+        # stand-in where a test says so (core_store_standin).
+        lens_store._core_override = None
+        self.addCleanup(setattr, lens_store, "_core_override", lens_store._CORE_UNSET)
 
     def register(self) -> FakePluginAPI:
         plugin.register(self.api)
@@ -187,9 +206,25 @@ class TestRegistration(RouteTestCase):
         self.assertIn("start: auto", front)
         self.assertNotIn("height:", front)
 
+    def test_the_double_enforces_exactly_the_manifest_permissions(self) -> None:
+        """`fs` declares the WAL coordination files SQLite writes beside the store; no PluginAPI call needs it."""
+        self.assertEqual(_manifest_permissions(), {"route", "widget", "fs"})
+        self.assertEqual(set(FakePluginAPI.DECLARED_PERMISSIONS), _manifest_permissions())
+        api = self.register()
+        self.assertEqual(sorted(set(api.required)), ["route", "widget"])
+
     def test_manifest_version_matches_the_documented_release(self) -> None:
         text = (_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("version: 1.2.0", text)
+        self.assertIn("version: 1.2.1", text)
+        self.assertIn("### 1.2.1 changes from 1.2.0", text)
+
+    def test_every_typed_store_refusal_has_an_owner_sentence(self) -> None:
+        source = (_ROOT / "lens_store.py").read_text(encoding="utf-8")
+        codes = set(re.findall(r'StoreUnavailable\("(store_[a-z_]+)"\)', source))
+        codes |= set(lens_store._WAL_REFUSAL.values())
+        self.assertTrue({"store_busy", "store_name_tier", "store_wal_incompatible",
+                         "store_wal_unverified"} <= codes, codes)
+        self.assertEqual(sorted(codes - set(plugin._REASONS)), [])
 
     def test_unload_callback_releases_the_reader_and_the_snapshots(self) -> None:
         api = self.register()
@@ -521,6 +556,11 @@ class TestTrajectoryRoute(RouteTestCase):
 class TestStoreRoutes(RouteTestCase):
     """The usage store is the source whenever a store file exists."""
 
+    def setUp(self) -> None:
+        super().setUp()
+        self.core = cs.make_core()          # the stand-in: WAL may be shared, connections counted
+        lens_store._core_override = self.core
+
     def _store(self, **kwargs) -> "sf.Store":
         store = sf.Store(self.root, **kwargs)
         now = lens_core.now_ms() / 1000.0
@@ -581,6 +621,107 @@ class TestStoreRoutes(RouteTestCase):
             self.assertNotIn("123456", blob)
             self.assertNotIn(self.root, blob)
             self.assertNotIn("usage.sqlite", blob)
+
+    def test_a_wal_store_answers_through_core_custody(self) -> None:
+        self.register()
+        self._store(journal_mode="wal")
+        payload = plugin.route_data(FakeRequest(horizon="1h"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual((payload["source"]["journal"], payload["source"]["connection"]), ("wal", "counted"))
+        self.assertEqual([p["prompt_tokens"] for p in payload["points"]], [42000, 0, 7000])
+        self.assertEqual(self.core.registry.total_open(), 0)
+
+    def test_a_wal_store_without_core_is_a_typed_refusal_never_the_journal(self) -> None:
+        lens_store._core_override = None
+        self.register()
+        write_ledger(self.root, chain("journal-only", prompt_tokens=123456))
+        self._store(journal_mode="wal")
+        payload = plugin.route_data(FakeRequest())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["reason"], "store_wal_unverified")
+        self.assertIn("write-ahead log", payload["message"])
+        blob = json.dumps(payload)
+        self.assertNotIn("123456", blob)
+        self.assertNotIn(self.root, blob)
+
+    def test_a_wal_read_gains_only_the_coordination_files_fs_declares(self) -> None:
+        """SQLite's -wal and -shm beside the store lie outside this skill's state directory."""
+        self.assertIn("fs", _manifest_permissions())
+        self.register()
+        store = self._store(journal_mode="wal")
+
+        def tree():
+            found = {}
+            for folder, folders, names in os.walk(self.root):
+                for name in folders:
+                    found[os.path.relpath(os.path.join(folder, name), self.root) + os.sep] = None
+                for name in names:
+                    path = os.path.join(folder, name)
+                    found[os.path.relpath(path, self.root)] = os.path.getsize(path)
+            return found
+
+        def content():
+            with open(store.path, "rb") as handle:     # no connection of this process is open here
+                return hashlib.sha256(handle.read()).hexdigest()
+
+        state = "state" + os.sep
+        self.assertEqual(sorted(tree()), [state, state + "usage.sqlite"])
+        before = content()
+        payload = plugin.route_data(FakeRequest(horizon="1h"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["source"]["journal"], "wal")
+        self.assertEqual(self.core.registry.total_open(), 0)
+        after = tree()
+        self.assertEqual(sorted(after), [state, state + "usage.sqlite", state + "usage.sqlite-shm",
+                                         state + "usage.sqlite-wal"])
+        self.assertEqual(after[state + "usage.sqlite-wal"], 0, "an empty log: no frame written")
+        self.assertEqual(content(), before)
+
+    def test_a_wal_refusal_sentence_stays_true_once_sqlite_has_opened_the_store(self) -> None:
+        """Without core's header read the refusal comes from inside the read, after SQLite opened the file."""
+        state = os.path.join(self.root, "state")
+        for code, core in (("store_wal_unverified", None),
+                           ("store_wal_incompatible", cs.make_core(eligible=False, header=False))):
+            with self.subTest(code=code):
+                shutil.rmtree(state, True)
+                lens_store._core_override = core
+                self.register()
+                self._store(journal_mode="wal")
+                self.assertEqual(sorted(os.listdir(state)), ["usage.sqlite"])
+                late = plugin.route_data(FakeRequest())
+                self.assertEqual(late["reason"], code)
+                self.assertEqual(sorted(os.listdir(state)),
+                                 ["usage.sqlite", "usage.sqlite-shm", "usage.sqlite-wal"],
+                                 "SQLite opened the store before this refusal")
+                self.assertEqual(late["message"], plugin._REASONS[code])
+                self.assertNotRegex(late["message"], r"(?i)\b(?:did not|didn't|never|not) open")
+                self.assertIn("without reading any usage data", late["message"])
+                # With the log beside it the next read is refused before anything opens the
+                # store; the one sentence per code is true on both paths.
+                early = plugin.route_data(FakeRequest())
+                self.assertEqual((early["reason"], early["message"]), (code, late["message"]))
+                if core is not None:
+                    self.assertEqual((core.registry.opened, core.registry.total_open()), (1, 0))
+
+    def test_a_held_snapshot_is_unchanged_by_later_wal_commits(self) -> None:
+        self.register()
+        store = self._store(journal_mode="wal")
+        writer = store.connect()
+        self.addCleanup(writer.close)
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        overview = plugin.route_data(FakeRequest(horizon="24h"))
+        now = lens_core.now_ms() / 1000.0
+        store.add("raw-attempt-four", epoch=now - 10, prompt_tokens=9000, task_id="raw-root-task",
+                  root_task_id="raw-root-task", conn=writer)
+        task = lens_core._opaque("raw-root-task", "t-")
+        held = plugin.route_trajectory(FakeRequest(task=task, snapshot=overview["snapshot"]["id"]))
+        self.assertTrue(held["ok"])
+        self.assertEqual(sorted(p["prompt_tokens"] for g in held["groups"] for p in g["points"]), [0, 42000])
+        fresh = plugin.route_data(FakeRequest(horizon="24h"))
+        self.assertEqual(fresh["source"]["journal"], "wal")
+        self.assertEqual([p["prompt_tokens"] for p in fresh["points"]], [42000, 0, 7000, 9000])
+        again = plugin.route_trajectory(FakeRequest(task=task, snapshot=overview["snapshot"]["id"]))
+        self.assertEqual(again["groups"], held["groups"], "a held snapshot never takes newer rows")
 
     def test_a_busy_store_is_a_typed_visible_answer(self) -> None:
         self.register()
