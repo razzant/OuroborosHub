@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -86,6 +87,11 @@ SUITES = {
     # the exact npm closure skills/chrome_browser/pins.json records (OUROBOROS_CHROME_NODE_MODULES). Without them the
     # files that need them fail and say what is missing; they never skip.
     'chrome-browser': {'skills': ['chrome_browser'], 'tests': ['tests/chrome_browser']},
+    # The whole Anime Studio payload suite, offline: provider traffic is an in-memory transport and sockets are refused.
+    # Its assembly cases encode synthetic clips with the real ffmpeg. catalog-check.yml installs it; without ffmpeg,
+    # ffprobe and these encoders the suite stops with an error, so those cases run and never skip.
+    'anime-studio': {'skills': ['anime_studio'], 'tests': ['skills/anime_studio/tests'],
+                     'dependencies': ['httpx', 'Pillow', 'starlette'], 'ffmpeg_encoders': ['libx264', 'aac']},
 }
 SHARED = {'.github/workflows/catalog-check.yml', 'scripts/ci_checks.py', 'tests/test_ci_checks.py',
           'scripts/build_index.py', 'scripts/release_digest.py',
@@ -115,6 +121,16 @@ def prepare(root, event_name, event):
     return selected_suites(paths)
 
 
+def ffmpeg_gaps(encoders):
+    """What the payload's own skip conditions check: ffmpeg and ffprobe on PATH, then each encoder ffmpeg lists."""
+    tools = {tool: shutil.which(tool) for tool in ('ffmpeg', 'ffprobe')}
+    if missing := [f'{tool} on PATH' for tool, path in tools.items() if not path]:
+        return missing
+    listed = subprocess.run([tools['ffmpeg'], '-hide_banner', '-encoders'], capture_output=True, text=True,
+                            timeout=60).stdout
+    return [f'the {encoder} encoder' for encoder in encoders if f' {encoder} ' not in listed]
+
+
 def run_suite(name):
     suite = SUITES[name]
     env = {**os.environ, **suite.get('env', {}), 'PYTHONDONTWRITEBYTECODE': '1'}
@@ -126,6 +142,8 @@ def run_suite(name):
             raise RuntimeError(f'{name} requires {core_env} to name the coordinated core checkout; '
                                'its real-core consumers must run, not skip')
         env[core_env] = str(core)
+    if 'ffmpeg_encoders' in suite and (gaps := ffmpeg_gaps(suite['ffmpeg_encoders'])):
+        raise RuntimeError(f'{name} requires {", ".join(gaps)}; its real ffmpeg cases must run, not skip')
     subprocess.run([sys.executable, '-B', '-m', 'pip', 'install', 'PyYAML', 'pytest',
                     *suite.get('dependencies', [])], check=True)
     # Selection paths stay repository-relative; some suites import from their own payload.
