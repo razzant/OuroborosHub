@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/c891378de6004132d81a6208d8492d43ad8da1e5",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main",
   "schema_version": 1,
   "skills": [
     {
@@ -1451,13 +1451,13 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "027b309de85882eec195df66da676533489a87fe3db86a36efc370fb0a626666",
+          "sha256": "e0bfe27d4e1f8ca3aa968a875f46a9952eac4bdb94065df9782986c3d04f2b09",
           "size": 1751
         },
         {
           "path": "plugin.py",
-          "sha256": "8e6658c3069d9a399bf1dbdb3d1c3b732d019e276d06588eae9a3f33a9ff0d8e",
-          "size": 5697
+          "sha256": "ba3e89d5c40991837ad545131ffe58a2300a1559d48414c03698ae4f08542d9e",
+          "size": 5818
         }
       ],
       "install_specs": [
@@ -1466,7 +1466,7 @@
       "name": "duckduckgo",
       "slug": "duckduckgo",
       "type": "extension",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "when_to_use": "User asks to search the web, find information, look up facts, or research a topic — and no OpenAI key is available for web_search."
     },
     {
