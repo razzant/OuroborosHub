@@ -731,12 +731,22 @@ class UnaffectedWordsTests(FeedCase):
                                  ("observed", WITH, ["mention"]))
                 self.assertEqual(item["conversation"]["history"]["observed_at"], newest)
                 self.assertNotIn("forward_origin", item["message"])  # its author's own new words
-                # The thread as that read kept it does not number this author; the item's own author is read since.
+                # A successful retry numbers this same row/login in the adopted history, preserving its words/time.
+                history = item["conversation"]["thread_history"]
+                self.assertEqual(history["observed_at"], newest)
+                message, = [m for m in history["data"]["messages"] if m["message_id"] == "IC_981"]
+                expected = {"message_id": "IC_981", "kind": "issue_comment", "username": "lookup-user",
+                            "text": WITH, "sent_at": row["created_at"].replace("Z", "+00:00")}
                 copied = {"scope": "history", "code": "history_actor_unavailable"}
                 if how == "account found":
-                    self.assertEqual((item["actor"]["platform_actor_id"], self.gaps(item["source_event_id"])), ("77", [copied]))
+                    self.assertEqual((item["actor"]["platform_actor_id"], item["actor"]["username"]), ("77", "lookup-user"))
+                    self.assertEqual(message, {**expected, "platform_actor_id": "77"})
+                    self.assertIn({"id": "77", "name": "lookup-user", "is_self": False}, history["authors"])
+                    self.assertEqual(self.gaps(item["source_event_id"]), [])
                 else:
+                    self.assertEqual(message, expected)  # no borrowed number when the author's lookup never succeeded
                     self.assertEqual(item["actor"]["attribution"], "unknown")
+                    self.assertIn(copied, self.gaps(item["source_event_id"]))
                     self.assertEqual([gap.get("need") for gap in self.gaps(item["source_event_id"]) if gap != copied],
                                      ["author:IC_981"])
                 for reader in (22, 11):
