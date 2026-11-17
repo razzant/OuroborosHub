@@ -16,6 +16,8 @@ from scripts.build_index import refresh_legacy_entries, run_git
 SUITES = {
     'perplexity': {'skills': ['perplexity'], 'tests': ['tests/test_perplexity.py'],
                    'dependencies': ['httpx', 'starlette']},
+    'duckduckgo': {'skills': ['duckduckgo'], 'tests': ['tests/test_duckduckgo.py'],
+                   'dependencies': ['httpx', 'starlette']},
     # The browser regressions mount the widget through the core's own module bridge in Chromium and WebKit:
     # catalog-check.yml gives this suite the mail/calendar core pin, its runtime and both browsers.
     # SMART_LISTS_REQUIRE_BROWSERS turns a skip for want of Playwright or Chromium into a failure.

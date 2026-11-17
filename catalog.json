@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/c891378de6004132d81a6208d8492d43ad8da1e5",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/1b84693be8abc8313b990e694aa366e3564a584d",
   "schema_version": 1,
   "skills": [
     {
@@ -37,8 +37,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "441086ebc944df4d1c1ccda2521fe06ec7cef2302505649187b9fb47d08e2e0a",
-          "size": 5826
+          "sha256": "fa6e1aabfe8349823e69e3ad3f0d1725265b6e62f9d7562ec0f6a9cff3b72819",
+          "size": 6053
         },
         {
           "path": "lib/client.py",
@@ -52,7 +52,7 @@
         },
         {
           "path": "scripts/a2a_daemon.py",
-          "sha256": "ba104be2d5838da37b6cf5ac9fe17718f8157bf7f57c2e862781e8b3a955bbfc",
+          "sha256": "f5894b400281796829f0ee7321f520adb77d6a97864a039edc4fa5c17cf80832",
           "size": 66465
         },
         {
@@ -115,7 +115,7 @@
       "name": "a2a",
       "slug": "a2a",
       "type": "extension",
-      "version": "1.5.2",
+      "version": "1.5.3",
       "when_to_use": "User asks to communicate with another A2A-compatible agent, discover an agent card, send an A2A message, check A2A task status, or expose this Ouroboros instance as an A2A peer."
     },
     {
@@ -1451,13 +1451,13 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "027b309de85882eec195df66da676533489a87fe3db86a36efc370fb0a626666",
+          "sha256": "e0bfe27d4e1f8ca3aa968a875f46a9952eac4bdb94065df9782986c3d04f2b09",
           "size": 1751
         },
         {
           "path": "plugin.py",
-          "sha256": "8e6658c3069d9a399bf1dbdb3d1c3b732d019e276d06588eae9a3f33a9ff0d8e",
-          "size": 5697
+          "sha256": "3b7e8d0d174cf8213f9e20bced308fd14111d14a65527a59de1a831a1fd9e581",
+          "size": 6417
         }
       ],
       "install_specs": [
@@ -1466,7 +1466,7 @@
       "name": "duckduckgo",
       "slug": "duckduckgo",
       "type": "extension",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "when_to_use": "User asks to search the web, find information, look up facts, or research a topic — and no OpenAI key is available for web_search."
     },
     {
