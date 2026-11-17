@@ -11,7 +11,18 @@ import sys
 
 if __package__ in {None, ''}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.build_index import refresh_legacy_entries, run_git
+
+
+# Owner Updates imports selected_suites with the standard library only; build_index needs PyYAML.
+def run_git(args, directory):
+    from scripts.build_index import run_git as run
+    return run(args, directory)
+
+
+def refresh_legacy_entries(root, changed_paths=None):
+    from scripts.build_index import refresh_legacy_entries as refresh
+    return refresh(root, changed_paths)
+
 
 SUITES = {
     'perplexity': {'skills': ['perplexity'], 'tests': ['tests/test_perplexity.py'],

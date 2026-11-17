@@ -134,22 +134,64 @@ use it to discover updates. Run `--refresh NAME`, regenerate the catalog locally
 and run validation and the relevant skill tests. Commit the entry and payload;
 leave the generated catalog to publication if you want owner automerge.
 
-A PR is automatically merged only when it changes one existing entry (plus that
-skill's hosted files), its author is the owner recorded on main, the owner stays
-unchanged, the name has no Official endorsement, and the aggregate `checks` job
-passes. It requires catalog validation and every selected hosted suite to pass;
-unaffected suites may be skipped. The merge uses the exact validated head SHA. New names, ownership transfers,
-Official changes, workflow changes and changes outside that skill need maintainer
-review.
+**Automatic Community publication.** A PR is merged automatically only when, between
+its head and its merge base with main, it modifies one existing entry and changes
+nothing outside that entry and `skills/<name>/` (regular files only); its author is
+the owner recorded on main, the owner stays unchanged, the name has no Official
+endorsement on main, and the aggregate `checks` job passes. Independent maintainer
+review is not required on that path, and merging does not grant Official
+endorsement. New names, ownership transfers, Official changes, workflow changes and
+changes outside that skill need maintainer review. The merge is an ordinary merge
+commit at the exact validated head, so the contribution's commits, including
+intermediate ones, enter history; the checks inspect the final trees, not every
+historical commit.
 
-Validation runs on `pull_request` with read permissions and writes a small verdict
-artifact. The privileged `workflow_run` job executes helpers from main only. It
-reads the artifact as JSON, rechecks the PR, files, owner and endorsements through
-the API, and merges by SHA. It never checks out or executes PR code with its write
-token.
+Validation runs on `pull_request` with read permissions and checks out one tested
+commit, GitHub's merge of the head into main. After `checks` passes, a `receipt` job
+on a fresh runner records that run attempt's tested commit from GitHub's contexts as
+`owner-update-receipt-<run>-<attempt>`. The privileged **Owner Updates** job runs
+helpers from main only. It fetches main, `refs/pull/<n>/head` and the tested commit
+as Git objects and never checks out or executes PR files. It requires the tested
+commit to merge exactly this head into main, with the same skill files as the head
+and the same files outside `entries/`, `skills/` and `catalog.json` as current main.
+The selected entry and payload must be unchanged on main since the branch point;
+otherwise update the branch. Other skills may change on main meanwhile. That one
+attempt's own job list must show `catalog`, `checks`, `receipt` and every hosted
+suite `scripts/ci_checks.py` selects for the change as run and passed; a partial
+rerun, a superseded attempt, a moved head or a moved main refuses. Rerunning all
+jobs repeats the same tested merge. It helps after a moved main only while main
+kept the CI control files and this skill; otherwise push, use Update branch, or
+convert to Draft and back to Ready, which tests a new merge.
 
-If validation needs to be retried, rerun all jobs so the verdict and green checks
-belong to the same run attempt.
+Before merging, each merge attempt writes its own `github-actions[bot]` comment on
+the PR with this notice and an `attempting` marker naming the head and both runs,
+then rereads the PR, main and the validation run attempt and merges. Later it updates
+only that comment, so a delayed write cannot erase another attempt's record. It never
+resubmits a merge whose outcome is unknown. After merging it reads the merge commit's parents and says the
+contribution's commits were kept only once that readback succeeds; if main had
+moved, it rechecks this skill and its policy on the actual parent. Any mismatch or
+failed readback reports `merged; post-merge verification failed`, without reverting.
+
+**Hold.** Adding the `owner-update-hold` label (and converting to Draft) is an
+immediate stop request, not yet a confirmation. Run **Owner Updates** from main
+with `workflow_dispatch` and the PR number: queued with merges, it sets the label if
+needed, reads the PR open and unmerged, and records the hold in a new bot comment
+with its run. A merge job checks the label on entry and before merging; marking the
+PR Ready does not clear it. To release, remove the label, then validate again as
+above.
+
+**Unknown outcome.** While any attempt's comment shows `attempting`, or an
+owner-update bot comment is unreadable, no later merge proceeds and no hold is
+confirmed. Read back the named Owner Updates run and the PR. A Hold run dispatched
+for a merged PR records the merge as observed; nothing else is guaranteed to. If
+that merge landed after **Sync Joi Lab Mirror** had read main, run Sync from main
+with `workflow_dispatch`. To authorize a new attempt anyway, edit that attempt's
+comment: keep its text, change only `"phase":"attempting"` to
+`"phase":"acknowledged_unknown"` in the control line, and add a line
+`Maintainer acknowledgement (YYYY-MM-DD): <reason>`. This accepts the risk for a new
+merge attempt only. It does not prove the earlier request had no effect: the comment
+stays, and Hold stays unconfirmed (the label still stops new merges) until a merge
+is observed.
 
 To withdraw the entire entry from new installs, set `withdrawn` to a reason and date:
 
@@ -195,7 +237,7 @@ keeps old catalogs usable while new metadata is being published. Uncommitted
 local previews or exported trees without git history use `main`; publication
 always uses a clean checkout with full history.
 
-After a main push or an owner automerge, **Sync Joi Lab Mirror** refreshes legacy
+After a main push or any finished Owner Updates run, **Sync Joi Lab Mirror** refreshes legacy
 hosted entries, validates and regenerates the v1 catalog, publishes the generated
 commit to main, then mirrors it to `joi-lab/OuroborosHub`. It does not depend on a
 `GITHUB_TOKEN` push starting another workflow. When `CATALOG_DEPLOY_KEY` is set,
