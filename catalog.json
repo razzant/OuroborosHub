@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/3ab51c60d5e040c5c0fe0e3bc630ab985cf19056",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/c891378de6004132d81a6208d8492d43ad8da1e5",
   "schema_version": 1,
   "skills": [
     {
@@ -3871,8 +3871,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "ce9b1dc8088792a3b8ee9cedadcfcf026f7f5543d501eeadcf583caf1c3aad57",
-          "size": 42589
+          "sha256": "6548e62fed82d0ebe01370da124688f74528ee5ddc68fc2b18748917e16be495",
+          "size": 43673
         },
         {
           "path": "plugin.py",
@@ -3928,6 +3928,11 @@
           "path": "tests/test_participant_routes.py",
           "sha256": "de9fdf92d32c2a12bd1425e54694faafeeb44d61792195e0e4f91f01ddb9c5ca",
           "size": 24858
+        },
+        {
+          "path": "tests/test_preflight_targets.py",
+          "sha256": "35679c6f8f03c9bb46fc940b89564d3d00a70f3bc6ccd6f8a6bd517ffb9484cd",
+          "size": 7397
         },
         {
           "path": "tests/test_presence_v2_legacy.py",
@@ -3986,13 +3991,13 @@
         },
         {
           "path": "userbot/participant.py",
-          "sha256": "8e5507e70d75a05f2795f2f3964984393d6f5de62c5cef361698ff90c8c9c670",
-          "size": 50227
+          "sha256": "a8686165b50844129784357734c60d0ecef180dd9ba501d39f8b4edbd504565c",
+          "size": 50867
         },
         {
           "path": "userbot/participant_ops.py",
-          "sha256": "bb14b0ee81a0766abf71cb0c59dc8cf2ad5d290bf288794e31f95b881bd7181f",
-          "size": 26696
+          "sha256": "b1ccd25e0f7598a52fc11840e90b4eabf1c3ba23ed3a5bd6e33e780a438e7a9e",
+          "size": 27074
         },
         {
           "path": "userbot/participant_plugin.py",
@@ -4054,7 +4059,7 @@
       "name": "telegram-user-session",
       "slug": "telegram-user-session",
       "type": "extension",
-      "version": "0.4.3"
+      "version": "0.4.4"
     },
     {
       "description": "Token Observatory — Liquid Glass dashboard for recorded Ouroboros token usage, tasks and models.",
