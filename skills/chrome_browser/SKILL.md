@@ -2,7 +2,7 @@
 name: chrome_browser
 title: Chrome (shared tab)
 description: Work in the owner's own Chrome through Microsoft's official Playwright Extension - the tab they share plus background tabs for the same work, trusted input in background tabs, and handback by plain conversation.
-version: 0.4.0
+version: 0.5.0
 type: script
 runtime: node
 mcp_servers: [{"id":"chrome_browser","title":"Chrome (shared tab)","runtime":"node","entry":"scripts/server.mjs","task_session":true,"browser_policy":true}]
@@ -151,6 +151,8 @@ this does not imply that the host rejects every other YAML spelling.
    `browser_click` with `captureDownload: true` (see "Downloads"). For other
    pages of the same work, open background tabs with `browser_tabs` action `new` (optionally
    with a `url`); `select` changes which tab the agent acts in, not which tab the owner sees.
+   To look at one of those tabs without selecting it, give `browser_take_screenshot` its
+   `tabHandle` from a `browser_tabs` result (see "Request guard").
 4. **Handback.** When the owner says they will do something themselves - a login, a
    code, a payment, a decision - stop sending actions. When they say they are done,
    call `browser_snapshot` before anything else: their typing, login and unsaved text
@@ -203,14 +205,16 @@ owner's shared tab and tabs a page opened stay open.
 | `BROWSER_INPUT_NOT_READY` | Chrome produced no frame for the tab; no input was sent. | Retry once later or report. |
 | `BROWSER_INPUT_UNCONFIRMED` | Chrome accepted a click but the page saw no trusted event at the target. It was not sent again. | `browser_snapshot`, then decide. |
 | `BROWSER_INPUT_NOT_VERIFIED` | A click went out once, but its delivery could not be checked (the page refused the check, or the document changed, for example because the click navigated). It was not sent again. | `browser_snapshot` to see its effect. |
-| `BROWSER_TAB_CHANGED` | The tab this call was checked for closed, or stopped being current, while the host was being asked. Nothing was done, in it or in the tab current now. | `browser_snapshot` to see which tab is current, then decide. |
+| `BROWSER_TAB_CHANGED` | The tab this call was checked for closed, or stopped being current, while the host was being asked. Nothing was done, in it or in the tab current now. For a screenshot with `tabHandle`: a navigation committed in the named tab while the host was being asked, and no capture was attempted. | `browser_snapshot` to see which tab is current, then decide. A screenshot with `tabHandle` can be called again. |
+| `BROWSER_TAB_HANDLE_UNKNOWN` | `browser_take_screenshot` got a `tabHandle` that names no open tab of this connection: its tab closed or was detached (also while the host was being asked), or the value is from before the last `browser_connect` or is not a handle. No capture was attempted, and no other tab was captured in its place. | `browser_tabs` `list` for the tabs and handles there are now. |
+| `BROWSER_TAB_CAPTURE_WITHHELD` | A screenshot with `tabHandle` was attempted, and nothing it returned is passed on: before the result could be returned, a navigation committed in that tab (even back to the same address), the tab closed or was detached, the connection ended or changed, or the server could not remove upstream's copy of the capture. No image, and no other tab was captured in its place. | `browser_tabs` `list`, then capture again if the tab is still there. |
 | `BROWSER_RECORD_ORIGIN_UNKNOWN` | A page made more redirects than are kept for checking (512 addresses per document), so its console entries cannot be judged and are withheld. | Read the page itself; a new document starts fresh. |
 | `BROWSER_FILE_INTAKE_INVALID` / `_MISMATCH` / `_NAME_UNSUPPORTED` | An empty string in `paths`, or a NUL in a path or root (`_INVALID`, not sent to the host; more than 16 files or an empty `files[].path` are refused earlier by the tool's schema, and naming no file is upstream's own cancel or data-only drop); or the host's retained copy is not the size or sha256 it stated, or cannot be read (`_MISMATCH`); or a file's own name has a backslash or a control character, which this server does not give a page (`_NAME_UNSUPPORTED`; the file and its name are not changed). The host's own refusal of a file is shown verbatim. The page got nothing, and an open file chooser stays open. | Name readable files, at most 16 and 20 MiB together; report a mismatch; for an unsupported name, ask the owner how to rename or replace the file. |
 | `BROWSER_GUARD_PROTOCOL` | The host's file-intake response is malformed. No file bytes reached the page. | Report the protocol mismatch; do not bypass admission. |
 | `BROWSER_FILE_CHOOSER_GONE` | The file chooser closed while the host was reading the files. The page got nothing. | `browser_snapshot`, then open the chooser again if needed. |
 | `BROWSER_DOWNLOAD_CAPTURE_UNSUPPORTED` | `captureDownload` on a host that did not answer `capabilities.embedded_resources: true` when the guard was armed (an older Ouroboros, or a session no task owns). Nothing was clicked or changed. | Click without `captureDownload`; say that whether Chrome saved a file is unknown until the owner checks their Chrome downloads. |
 | `BROWSER_DOWNLOAD_CAPTURE_BUSY` / `_UNAVAILABLE` | `captureDownload` while another capturing click runs on this connection (`_BUSY`); or the tab could not be matched to the extension's tab, or Chrome refused the response-stage interception, whose answer is quoted (`_UNAVAILABLE`). Nothing was clicked. | Wait for the other call, or click without `captureDownload` as above. |
-| `BROWSER_ARGUMENT_REFUSED` | `filename` (results come inline), `isolatedContext` (owner's profile only) or `_meta` (upstream's output options `cwd`, `raw` and `json`; results always come in the advertised form). | Drop the argument. |
+| `BROWSER_ARGUMENT_REFUSED` | `filename` (results come inline), `isolatedContext` (owner's profile only) or `_meta` (upstream's output options `cwd`, `raw` and `json`; results always come in the advertised form); `tabHandle` on a tool other than `browser_take_screenshot` (the tool is not run in the current tab in its place), or together with an element `target` or `element` (refs come from the current tab's snapshot). | Drop the argument. To act in another tab, select it with `browser_tabs`. |
 | `CHROME_BROWSER_NOT_INSTALLED` / `_PIN_MISMATCH` / `_PATCH_FAILED` | The dependency is missing or not exactly the pinned files. | Re-enable the skill; check `setup.mjs status`. |
 
 A refusal from the host's guard is shown verbatim (for example
@@ -368,6 +372,29 @@ it returned. A close before a call makes that call's check and action apply to t
 The check cannot hold a page still: a document that commits between the check and the action
 gets the action, and the result is then judged by that document.
 
+A screenshot can name its tab instead of taking the current one. Every `browser_tabs` result
+gives, under its list, a handle for each listed tab by that tab's index (`- 1: tabHandle
+tab-9f1c2ab47d3e418ba9806234ab0dc58f`): the identity Playwright gives that tab's page, so it stays
+with the tab while indexes shift and names nothing in a later connection.
+`browser_take_screenshot` with `tabHandle` runs upstream's own screenshot on that tab's page
+(the viewport, or the whole page with `fullPage`); nothing is selected or brought to front, and
+no copy is kept in the server's folder. The capture is bound to what the tab showed when the
+host was asked about it. Its page is judged before the capture as the current tab's is (which
+is judged too, since the result can name it) and asked about afresh after it, so a host answer
+that changed meanwhile counts. The image is returned only if, at a last look after the host's
+last answer, the connection is the same, the tab is still open and attached,
+and no navigation has committed in it since that first check: a new document in any of its
+frames or a change of address, also one that came back to the same address. Otherwise there is
+no image and no other tab is captured: `BROWSER_TAB_HANDLE_UNKNOWN` or `BROWSER_TAB_CHANGED`
+when no capture was attempted, `BROWSER_TAB_CAPTURE_WITHHELD` when one was, and the host's own
+refusal says which ("Nothing was done" or "The call ran, but its output is withheld"). A
+reload, or a frame that loads meanwhile, also withholds an image the task could have read: call
+again. This rests on Chrome reporting a commit before the capture that shows it, which the
+tests' stand-in states and no real browser has shown here. Every other tool refuses `tabHandle`
+instead of running in the current tab; it is not taken with an element `target` or `element`,
+or with `filename`. Without `tabHandle` a screenshot is the current tab's, as before, including
+the neighbour after a close.
+
 Playwright keeps a tab's console entries, page errors and network requests across its
 documents and returns them on request. They are judged by where they came from, not by the
 page shown now: a console entry or page error by the document that made it (its address and
@@ -419,7 +446,9 @@ the route are not judged; the agent cannot act in that moment.
   from Microsoft's source. Hidden trusted input, inactive agent-created tabs, image delivery
   and same-page handback were observed. Headless checks also exercised redirect commitment
   and historical-record refusals. Tab-closure races were checked through Playwright's pinned
-  consumers with a stand-in for Chrome. Those checks did not use stable Chrome, the pinned 157
+  consumers with a stand-in for Chrome, as was a screenshot of a tab named by its handle
+  (whether Chrome hands over a frame of a tab that is not visible on that path was not shown: a
+  capture it does not answer ends in Playwright's 5 s timeout, with no image). Those checks did not use stable Chrome, the pinned 157
   browser or the Web Store extension build; the download checks above used the Web Store build
   0.5.0. Windows/Linux desktops, hardware input and real signed-in sites were not tested. The
   headed evidence includes corrected interpretation of saved focus records, not a clean pass
@@ -453,7 +482,7 @@ the route are not judged; the agent cannot act in that moment.
 - **Files:** a private session folder in the system temp directory, removed when the
   server exits normally (its input ends, or SIGTERM, SIGINT or SIGHUP). A killed or crashed
   server leaves the folder behind, and nothing removes it later. Upstream keeps a copy of each
-  screenshot there, a log of the pages' console messages, and each binary response body
+  screenshot there (not of one taken with `tabHandle`), a log of the pages' console messages, and each binary response body
   read with `browser_network_request`. Results do not point at these files: they say the
   screenshot or image is attached, that a binary body is attached as a resource or is not
   returned, or that new console
