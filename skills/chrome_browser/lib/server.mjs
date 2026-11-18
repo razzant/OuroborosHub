@@ -42,6 +42,18 @@ export const FILE_TOOLS = new Set(['browser_file_upload', 'browser_drop']);
 // Tools that can capture the HTTP download they start, when asked to (see withDownloadCapture).
 export const DOWNLOAD_TOOLS = new Set(['browser_click']);
 
+// What a screenshot that names its tab ("tabHandle", see withTabTarget) is told when it is not that tab's image. The
+// first two say no capture was attempted; the third, that one was and nothing of it is passed on. None is followed by
+// work in another tab: neither the current tab nor a closed tab's neighbour is captured in its place.
+const TAB_HANDLE_UNKNOWN = 'BROWSER_TAB_HANDLE_UNKNOWN: "tabHandle" names no open tab of this connection: its tab closed or was detached, or the value is from before the last browser_connect or is not a handle. No capture was attempted, in any tab. Call browser_tabs action "list" for the handles there are now.';
+const TAB_CHANGED_WHILE_ASKED = 'BROWSER_TAB_CHANGED: a navigation committed in the tab this "tabHandle" names while the host was being asked about it, so the page there is not the one that was checked. No capture was attempted, in it or in any other tab. Call again: the page is checked as it is then.';
+const captureWithheld = (why) => `BROWSER_TAB_CAPTURE_WITHHELD: ${why}. A capture was attempted in the tab this "tabHandle" names, and nothing it returned is passed on: no image, and no other tab was captured in its place. Call browser_tabs action "list", then capture again if the tab is still there.`;
+
+// A tab's handle: the full guid suffix Playwright itself gives the tab's page (pinned coreBundle.js, SdkObject: "page@"
+// and 16 random bytes, new for every page of every connection). It stays with its tab while tab indexes shift, an earlier
+// connection's names nothing in a later one, and nothing is kept here to resolve it (namedTab).
+const handleOf = (page) => `tab-${page._guid.slice('page@'.length)}`;
+
 // How long Playwright waits for a navigation. Upstream's 60 s plus its 5 s wait for "load" (pinned
 // coreBundle.js, Tab.navigate) outlasts the host's default 60 s MCP_TOOL_TIMEOUT_SEC, whose expiry ends
 // the task's session and with it the owner's approval. 45 s plus that 5 s leaves 10 s under the default
@@ -138,6 +150,14 @@ export function argumentRefusal(name, args) {
       if (args[param] !== undefined && !(param === 'isolatedContext' && args[param] === 'default'))
         return `BROWSER_ARGUMENT_REFUSED: ${why}`;
     }
+  }
+  // A tab named by its handle is never dropped in silence: upstream's schemas ignore a parameter they do not know, and
+  // the tool would then work in the current tab as if that were the tab named.
+  if (args.tabHandle !== undefined) {
+    if (name !== 'browser_take_screenshot')
+      return 'BROWSER_ARGUMENT_REFUSED: "tabHandle" is taken only by browser_take_screenshot. This tool works in the current tab; it was not run there in place of the tab named. Nothing was done.';
+    if (args.target !== undefined || args.element !== undefined)
+      return 'BROWSER_ARGUMENT_REFUSED: with "tabHandle" a screenshot is of that tab\'s viewport or full page. An element reference ("target", "element") comes from a snapshot of the current tab and is not accepted with it. No capture was attempted.';
   }
   return '';
 }
@@ -531,7 +551,8 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
     const loaded = loadRuntime();
     const { tools } = loaded.bundle;
     const config = await upstreamConfig(tools);
-    const toolList = upstreamToolList(tools, config).map(withRecordChecks).map((tool) => withFileIntake(tool, loaded.utils.z)).map((tool) => withDownloadCapture(tool, loaded.utils.z));
+    const toolList = upstreamToolList(tools, config).map(withRecordChecks).map((tool) => withFileIntake(tool, loaded.utils.z)).map((tool) => withDownloadCapture(tool, loaded.utils.z))
+        .map((tool) => withTabTarget(tool, loaded.utils.z)).map(withTabHandles);
     const pointerHooks = createPointerHooks();
     tools.setPointerActionHooks(pointerHooks);
     const listed = [CONNECT_TOOL, DISCONNECT_TOOL, ...toolList.map((tool) => toMcpTool(loaded.utils.z, tool))];
@@ -544,6 +565,8 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
   const callDecisions = new AsyncLocalStorage();
   // One call's embedded resources, returned after its output checks (none if its output is withheld).
   const callResources = new AsyncLocalStorage();
+  // The tab one call named by its handle, once callTool resolved it and the guard was asked about its page (withTabTarget).
+  const callTarget = new AsyncLocalStorage();
   // Labels of the response copies captureDownload returns, unique for this server's life.
   let downloadCount = 0;
   const newDecisions = () => {
@@ -901,6 +924,107 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
     };
   }
 
+  // The one open tab of this connection with that handle, or null. `context` is upstream's own: a tab the owner
+  // closed, or the extension detached (dragged out of the group), has left its list, and a later connection has
+  // another context with other pages.
+  function namedTab(context, handle) {
+    const tabs = typeof handle === 'string' ? context.tabs().filter((tab) => handleOf(tab.page) === handle) : [];
+    return tabs.length === 1 ? tabs[0] : null;
+  }
+
+  // Why what a screenshot got from the tab it named is not passed on, or ''. The capture is bound to what that tab
+  // showed when the host was asked about it before (callTool reads the tab's version in one step with those
+  // addresses): the connection is still the one the call began on, the tab is still one of its open tabs, and no
+  // navigation has committed in the tab since. Then every document it showed in between is one the host was asked
+  // about, before and after. A tab that left and came back to the same address does not pass; neither does a reload.
+  function targetLoss(backend, attempt, target) {
+    if (connection.state !== 'ready' || connection.diagnostic !== attempt || attempt?.terminal)
+      return 'the connection ended or changed during the call';
+    if (namedTab(backend._context, target.handle) !== target.tab)
+      return 'the tab closed or was detached from this connection during the call';
+    if (connection.documentVersion(target.tab.page) !== target.version)
+      return 'a navigation committed in the tab between the check before the capture and the check after it, so the image may show a page that was not checked, even if the tab is back at the same address';
+    return '';
+  }
+
+  // browser_take_screenshot captures whichever tab is current when it starts, and closing a tab hands "current" to a
+  // neighbour. With "tabHandle" (handleOf; browser_tabs lists them) the call names its tab instead. Upstream's own
+  // handler runs unchanged and is handed that tab where it asks for the current one (defineTabTool calls
+  // context.ensureTab), so the capture is that tab's own Page.screenshot: nothing is selected or brought to front.
+  // callTool resolved the handle, read the tab's version and asked the guard about its page before this runs. Asking
+  // takes time, so the tab is looked at once more as upstream asks for it: closed, detached or navigated meanwhile, it
+  // is not captured. What becomes of the result is callTool's last look (targetLoss). Without "tabHandle" the call is
+  // upstream's, untouched.
+  function withTabTarget(tool, z) {
+    if (tool.schema.name !== 'browser_take_screenshot')
+      return tool;
+    const inputSchema = tool.schema.inputSchema.extend({
+      tabHandle: z.string().optional().describe('Capture the tab with this handle instead of the current tab, without selecting it or bringing it to front. Every browser_tabs result lists the handles ("- 1: tabHandle tab-..."); unlike an index, a handle keeps naming the same tab when other tabs close. A handle whose tab closed or was detached, or one from an earlier connection, is an error with no image, and so is a navigation in that tab during the call: no other tab is captured in its place. Viewport or "fullPage" only, not with "target" or "element".'),
+    });
+    return {
+      ...tool,
+      schema: { ...tool.schema, inputSchema },
+      handle: async (context, params, response, signal) => {
+        const { tabHandle, ...upstreamParams } = params;
+        if (tabHandle === undefined)
+          return await tool.handle(context, params, response, signal);
+        // Only callTool hands a tab over, after its checks: a call that reached this handler another way has none.
+        const target = callTarget.getStore();
+        const named = Object.create(context, { ensureTab: { value: async () => {
+          const problem = !target || namedTab(context, tabHandle) !== target.tab ? TAB_HANDLE_UNKNOWN
+            : connection.documentVersion(target.tab.page) !== target.version ? TAB_CHANGED_WHILE_ASKED : '';
+          if (problem)
+            throw Object.assign(new Error(problem), { toString: () => problem });
+          // defineTabTool's own modal-state rule comes next, with nothing awaited in between: without a dialog or a
+          // file chooser, upstream's capture starts.
+          target.attempted = !target.tab.modalStates().length;
+          return target.tab;
+        } } });
+        // The copy upstream writes to the private folder as it captures (callTool removes it).
+        const resolveFile = response.resolveClientOutputFile;
+        response.resolveClientOutputFile = async function(...args) {
+          const file = await resolveFile.apply(this, args);
+          target.file = file.fileName;
+          return file;
+        };
+        try {
+          await tool.handle(named, upstreamParams, response, signal);
+        } finally {
+          response.resolveClientOutputFile = resolveFile;
+        }
+        if (target.attempted)
+          response.addTextResult(`- Tab captured: tabHandle ${tabHandle}, not selected or brought to front. A "Page" or "Open tabs" section here describes the current tab and the tab list, not this capture.`);
+        else
+          response.addError('No capture was attempted: the tab this "tabHandle" names has an open dialog or file chooser.');
+      },
+    };
+  }
+
+  // browser_tabs names tabs by index, a position in a list that a closing tab shortens. Its result also gives the
+  // handle of each tab it lists, by that index. Upstream reads the list once, last, whatever the action (pinned
+  // coreBundle.js, browserTabs.handle); the handles are written for that same read, so a tab that closes during the
+  // title reads after it moves no handle to another tab's line. Everything else upstream asks of its context goes to
+  // the real one. The handles come back with the list or not at all: the result is judged by every tab it lists.
+  function withTabHandles(tool) {
+    if (tool.schema.name !== 'browser_tabs')
+      return tool;
+    return {
+      ...tool,
+      handle: async (context, params, response, signal) => {
+        let listed = [];
+        const listing = new Proxy(context, { get: (real, key) => {
+          if (key === 'tabs')
+            return () => (listed = [...real.tabs()]);
+          const value = real[key];
+          return typeof value === 'function' ? value.bind(real) : value;
+        } });
+        await tool.handle(listing, params, response, signal);
+        if (listed.length)
+          response.addTextResult(['Tab handles for browser_take_screenshot "tabHandle", by the indexes above:', ...listed.map((tab, index) => `- ${index}: tabHandle ${handleOf(tab.page)}`)].join('\n'));
+      },
+    };
+  }
+
   async function reportCapture(report, failed, window) {
     const decide = callDecisions.getStore() ?? newDecisions();
     const resources = callResources.getStore();
@@ -1052,9 +1176,18 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
     const backend = connection.backend();
     const attempt = connection.diagnostic;
     connection.closedPages.length = 0;
+    // A screenshot that names its tab is for that tab alone. A handle that names no open tab of this connection ends
+    // the call here, before anything is asked or done: it does not become a call for the current tab.
+    let target = null;
+    if (params.tabHandle !== undefined) {
+      const tab = namedTab(backend._context, params.tabHandle);
+      if (!tab)
+        return errorResult(TAB_HANDLE_UNKNOWN);
+      target = { handle: params.tabHandle, tab, version: undefined, attempted: false, file: '' };
+    }
     // No page tool runs unless the host acknowledged the guard for the very context it acts in.
     const tabForGuard = await currentTab(backend);
-    if (!guard.isArmed(connection.context()) || (tabForGuard && !guard.isArmed(tabForGuard.page.context())))
+    if (!guard.isArmed(connection.context()) || (tabForGuard && !guard.isArmed(tabForGuard.page.context())) || (target && !guard.isArmed(target.tab.page.context())))
       return errorResult('BROWSER_GUARD_NOT_ARMED: the request guard is not armed for this browser context, so nothing was done. Call browser_disconnect, then browser_connect.');
     // An address is opened only if the host would let this task open it (the built-in browser's
     // check before browse_page). Non-network addresses (javascript:, data:, about:, ...) send no
@@ -1068,7 +1201,14 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
         return errorResult(`${block}\n${name === 'browser_tabs' ? 'No tab was opened.' : 'The address was not opened; the tab was left as it was.'}`);
     }
     if (!NAVIGATION_TOOLS.has(name)) {
-      const before = await pageRefusal(tabForGuard?.page, decide);
+      let before = await pageRefusal(tabForGuard?.page, decide);
+      // A tab named by its handle is judged as the current tab is, and as well as it: the result can still say where
+      // the current tab is (upstream's "Page" section). Its version is read in one step with the addresses the host
+      // is asked about (pageRefusal reads them before it first waits), and the capture is bound to it from here on.
+      if (!before && target) {
+        target.version = connection.documentVersion(target.tab.page);
+        before = await pageRefusal(target.tab.page, decide);
+      }
       if (before)
         return withheldResult(before, false);
     }
@@ -1114,7 +1254,7 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
     const resources = Object.assign([], { mark: crypto.randomBytes(16).toString('hex') });
     let result;
     try {
-      result = await callDecisions.run(decide, () => callResources.run(resources, () => backend.callTool(name, params, signal)));
+      result = await callDecisions.run(decide, () => callResources.run(resources, () => callTarget.run(target, () => backend.callTool(name, params, signal))));
     } catch (error) {
       result = errorResult(String(error));
     } finally {
@@ -1123,13 +1263,29 @@ export function createServerCore({ loadRuntime, guardEnvironment, clientName = '
     // Upstream can return observed data even after loss during settling, including
     // a Result alongside an Error. Keep both through the ordinary output checks.
     result = describePrivateFiles(result, outputDir);
+    // Upstream writes a copy of each screenshot to the private folder as it is taken, before any check of the result.
+    // A named tab's capture keeps none: its image is in this result or nowhere.
+    if (target?.file) {
+      try {
+        fs.rmSync(target.file, { force: true });
+      } catch {
+        return errorResult(captureWithheld('this server could not remove the copy of the capture that upstream wrote to its private folder'));
+      }
+    }
     // What the call returns is judged by the page it left the agent on, by the page a page tool worked in (it can
-    // have closed under the call, with another current by now), and by any tab title it lists.
+    // have closed under the call, with another current by now), and by any tab title it lists. A tab named by its
+    // handle is asked about afresh, not from this call's earlier answers: the host's answer now is the one that counts.
     const after = await pageRefusal((await currentTab(backend))?.page, decide)
       ?? (name === 'browser_tabs' ? null : await pageRefusal(tabForGuard?.page, decide))
+      ?? (target ? await pageRefusal(target.tab.page, newDecisions()) : null)
       ?? await listedTabRefusal(outputPages, textOf(result), decide);
+    // The last look at a tab named by its handle comes after the host's last answer: nothing is awaited from here to
+    // the return. A capture that was never attempted keeps its own refusal.
+    const loss = target && !after ? targetLoss(backend, attempt, target) : '';
     if (after)
-      result = withheldResult(after, true);
+      result = withheldResult(after, !target || target.attempted);
+    else if (loss && target.attempted)
+      result = errorResult(captureWithheld(loss));
     result = withDeliveryNotes(name, result, rt.pointerHooks.deliveriesSince(deliveryMark));
     const blocked = guardBlocksSince(guard, mark);
     if (blocked.length) {

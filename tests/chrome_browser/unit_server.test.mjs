@@ -1107,6 +1107,263 @@ test('a navigation result is judged by its destination even when that tab closes
   assert.match(textOf(result), /The call ran, but its output is withheld: this task may not read https:\/\/forbidden\.example\/bounce/);
 });
 
+// A screenshot of a tab named by its handle. What Chrome answers is the test's statement: each tab's capture is its own
+// bytes (a PNG signature, then the tab's id four times), after the viewport size and layout Playwright asks for.
+const shotOf = (tabId) => Buffer.concat([PNG.subarray(0, 8), Buffer.alloc(4, tabId)]).toString('base64');
+const VIEWPORT = { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0, scale: 1 };
+const screenshots = (method, params, tabId) => {
+  if (method === 'Page.captureScreenshot')
+    return { data: shotOf(tabId) };
+  if (method === 'Page.getLayoutMetrics')
+    return { cssVisualViewport: VIEWPORT, cssLayoutViewport: VIEWPORT, cssContentSize: { x: 0, y: 0, width: 800, height: 600 }, visualViewport: VIEWPORT, layoutViewport: VIEWPORT, contentSize: { x: 0, y: 0, width: 800, height: 600 } };
+  if (method === 'Runtime.callFunctionOn' && JSON.stringify(params.arguments ?? []).includes('(h) => h.result'))
+    return { result: { type: 'string', value: JSON.stringify({ width: 800, height: 600 }) } };
+  return undefined;
+};
+const CAPTURE = 'Page.captureScreenshot';
+const imagesOf = (result) => (result.content || []).filter((part) => part.type === 'image').map((part) => part.data);
+// The handle lines of a tab list, as [index, handle].
+const handleLines = (result) => [...textOf(result).matchAll(/^- (\d+): tabHandle (tab-[0-9a-f]{32})$/gm)].map((match) => [Number(match[1]), match[2]]);
+// The copies of screenshots upstream keeps in the server's private folder.
+const copies = ({ core }) => fs.readdirSync(core.connection.outputDir()).filter((name) => name.endsWith('.png'));
+// An answer that is no image: `said` tells a capture that was not attempted from one that was and is withheld.
+const noImage = (result, said, what) => {
+  assert.equal(result.isError, true, what);
+  assert.match(textOf(result), said, what);
+  assert.deepEqual(imagesOf(result), [], what);
+};
+const UNKNOWN = /^### Error\nBROWSER_TAB_HANDLE_UNKNOWN: .*No capture was attempted/;
+const withheldFor = (why) => new RegExp(`^### Error\\nBROWSER_TAB_CAPTURE_WITHHELD: ${why}.*A capture was attempted .* no image`);
+
+// Two tabs the task may read with the handles a tab list gives them, and a screenshot of the second by its handle.
+async function withHandles(options = {}) {
+  const world = await withNeighbour(`${ALLOWED}/neighbour`, { answer: screenshots, ...options });
+  const [[, shared], [, neighbour]] = handleLines(await world.call('browser_tabs', { action: 'list' }));
+  return { ...world, shared, neighbour, shoot: () => world.call('browser_take_screenshot', { tabHandle: neighbour }) };
+}
+
+test('a screenshot names its tab by a handle from the tab list: that tab alone is captured, where it is; without a handle the call is upstream\'s own', async () => {
+  const world = await withHandles();
+  const { chrome, call, core, shared, neighbour } = world;
+  // One handle for each listed tab, on that tab's index, the same in every list.
+  const listed = await call('browser_tabs', { action: 'list' });
+  assert.ok(sectionOf(listed, 'Result').startsWith(`- 0: (current) [Start](${ALLOWED}/start)\n- 1: [NEIGHBOUR](${ALLOWED}/neighbour)\n`), textOf(listed));
+  assert.deepEqual(handleLines(listed), [[0, shared], [1, neighbour]]);
+  assert.notEqual(shared, neighbour);
+
+  // Without a handle: the current tab, with upstream's result and upstream's private copy.
+  let mark = chrome.commands.length;
+  const implicit = await call('browser_take_screenshot');
+  assert.deepEqual(imagesOf(implicit), [shotOf(TAB)]);
+  assert.deepEqual(reachedSince(world, mark, CAPTURE), [TAB]);
+  assert.doesNotMatch(textOf(implicit), /tabHandle|Tab captured/);
+  assert.equal(copies(world).length, 1);
+
+  // With the neighbour's handle: that tab's own page is captured and nothing else happens to any tab.
+  mark = chrome.commands.length;
+  const named = await world.shoot();
+  assert.equal(named.isError, undefined, textOf(named));
+  assert.deepEqual(imagesOf(named), [shotOf(8)]);
+  assert.deepEqual(reachedSince(world, mark, CAPTURE), [8]);
+  assert.ok(sectionOf(named, 'Result').startsWith(`- Screenshot of viewport: the image is attached to this result\n- Tab captured: tabHandle ${neighbour},`), textOf(named));
+  assert.equal(core.connection.backend()._context.currentTab().page.url(), `${ALLOWED}/start`, 'the current tab is the one it was');
+  assert.deepEqual(chrome.commands.slice(mark).filter((command) => command.method !== 'chrome.debugger.sendCommand' || ['Page.bringToFront', 'Target.activateTarget'].includes(command.params[1])), [],
+      'no tab was created, removed, selected or brought to front');
+  assert.equal(copies(world).length, 1, 'a named capture keeps no copy in the private folder');
+
+  // The first tab closes: the neighbour's index shifts and upstream makes it current. Its handle still names it, the closed
+  // tab's handle names nothing, and only a call without a handle follows "current".
+  await closeTab(world, TAB);
+  assert.deepEqual(handleLines(await call('browser_tabs', { action: 'list' })), [[0, neighbour]]);
+  mark = chrome.commands.length;
+  noImage(await call('browser_take_screenshot', { tabHandle: shared }), UNKNOWN, 'the closed tab\'s handle');
+  assert.deepEqual(reachedSince(world, mark, CAPTURE), [], 'its neighbour was not captured in its place');
+  assert.deepEqual(imagesOf(await world.shoot()), [shotOf(8)]);
+  assert.deepEqual(imagesOf(await call('browser_take_screenshot')), [shotOf(8)], 'without a handle the call follows "current", as before');
+
+  // A tab that closes while upstream reads the titles of the tabs it listed moves no handle to another tab's line.
+  const shifting = await withHandles();
+  const [first] = shifting.core.connection.backend()._context.tabs();
+  const headerOf = first.headerSnapshot.bind(first);
+  first.headerSnapshot = async () => {
+    const header = await headerOf();
+    await closeTab(shifting, TAB);
+    return header;
+  };
+  assert.deepEqual(handleLines(await shifting.call('browser_tabs', { action: 'list' })), [[0, shifting.shared], [1, shifting.neighbour]]);
+});
+
+test('a handle that names no open tab of this connection captures nothing, and only a screenshot returned in its result takes one', async () => {
+  const world = await withHandles();
+  const { chrome, call, shared, neighbour } = world;
+  // Not a handle: no capture is attempted, and the host is not even asked.
+  let mark = chrome.commands.length;
+  const asked = world.questions().length;
+  for (const value of ['tab-000000000000', 1, 'NEIGHBOUR', neighbour.toUpperCase()])
+    noImage(await call('browser_take_screenshot', { tabHandle: value }), UNKNOWN, JSON.stringify(value));
+  assert.equal(world.questions().length, asked);
+  // Another tool is not run in the current tab in the named tab's place; an element reference belongs to the current tab's
+  // snapshot; and a file the caller names is written before any check of the result, so it is refused as everywhere.
+  for (const [name, args] of [
+    ['browser_snapshot', { tabHandle: neighbour }], ['browser_press_key', { key: 'a', tabHandle: neighbour }],
+    ['browser_take_screenshot', { tabHandle: neighbour, target: 'e1' }], ['browser_take_screenshot', { tabHandle: neighbour, filename: 'x.png' }],
+  ])
+    noImage(await call(name, args), /^### Error\nBROWSER_ARGUMENT_REFUSED: /, name);
+  assert.deepEqual(reachedSince(world, mark, KEY, CAPTURE, ...SCRIPT), [], 'nothing ran, in any tab');
+  // A handle is the start of its page's own identity. One that two open tabs would share names neither.
+  const [first, second] = world.core.connection.backend()._context.tabs();
+  const own = first.page._guid;
+  first.page._guid = second.page._guid;
+  const ambiguous = await world.shoot();
+  first.page._guid = own;
+  noImage(ambiguous, UNKNOWN, 'a handle of two tabs');
+  // Detached by the extension (the tab dragged out of its group): upstream hears of it as of a close.
+  chrome.detach(8, 'canceled_by_user');
+  await waitFor(() => world.core.connection.backend()._context.tabs().length === 1, 'the detached tab to leave upstream\'s list');
+  noImage(await world.shoot(), UNKNOWN, 'a detached tab');
+  assert.deepEqual(reachedSince(world, mark, CAPTURE), []);
+
+  // An earlier connection's handles name nothing in the next one, though the owner shares the same two tabs again.
+  await loseConnection(world);
+  const link = textOf(await call('browser_connect')).split('\n').find((line) => line.startsWith('chrome-extension://'));
+  const again = await connectFakeChrome(runtime.utils.ws, new URL(link).searchParams.get('mcpRelayUrl'), { answer: screenshots, tabs: [
+    { id: TAB, url: `${ALLOWED}/start`, title: 'Start', windowId: 1, index: 0, active: true }, { id: 8, url: `${ALLOWED}/neighbour`, title: 'NEIGHBOUR', windowId: 1, index: 1 },
+  ] });
+  cleanups.push(async () => again.close());
+  const routed = (id) => again.commands.some((command) => command.params?.[1] === 'Fetch.enable' && command.params?.[0]?.tabId === id);
+  await waitFor(() => world.core.connection.state === 'ready' && world.core.connection.backend()._context.tabs().length === 2 && routed(TAB) && routed(8), 'the new approval, both tabs');
+  for (const old of [shared, neighbour])
+    noImage(await call('browser_take_screenshot', { tabHandle: old }), UNKNOWN, 'a handle of the earlier connection');
+  assert.deepEqual(reachedSince({ chrome: again }, 0, CAPTURE), []);
+  const [, [, fresh]] = handleLines(await call('browser_tabs', { action: 'list' }));
+  assert.ok(![shared, neighbour].includes(fresh), 'the new connection\'s pages have handles of their own');
+  assert.deepEqual(imagesOf(await call('browser_take_screenshot', { tabHandle: fresh })), [shotOf(8)]);
+});
+
+test('a tab named by its handle is judged by the host as the current tab is, before the capture and after it', async () => {
+  // A list with a tab the task may not read is withheld, and its handles with it.
+  const hidden = await withNeighbour(`${FORBIDDEN}/private`, { answer: screenshots });
+  assert.doesNotMatch(textOf(await hidden.call('browser_tabs', { action: 'list' })), /tabHandle|tab-[0-9a-f]{32}/);
+
+  // Before: after its handle was given, the tab went through a redirect the task may not read. No capture is attempted there,
+  // nor while the current tab is on such a page: the result can say where the current tab is.
+  const moved = await withHandles();
+  moved.chrome.navigation(8, [`${ALLOWED}/from`, `${FORBIDDEN}/bounce`, `${ALLOWED}/landing`]);
+  await moved.settle();
+  let mark = moved.chrome.commands.length;
+  noImage(await moved.shoot(), /Nothing was done: this task may not read https:\/\/forbidden\.example\/bounce/, 'a refused hop');
+  moved.chrome.navigation(8, [`${ALLOWED}/clean`]);
+  moved.chrome.navigation(TAB, [`${FORBIDDEN}/owner`]);
+  await moved.settle();
+  noImage(await moved.shoot(), /Nothing was done: this task may not read https:\/\/forbidden\.example\/owner/, 'a refused current tab');
+  assert.deepEqual(reachedSince(moved, mark, CAPTURE), []);
+
+  // After: as Chrome receives the capture, the tab comes back to the address, title and status it had through a redirect the
+  // task may not read, so nothing in the result names the tab and only its own check stands. The capture ran, in that tab
+  // only; the answer is the host's reason, and no copy of the image is left.
+  const under = await withHandles({ onCommand: ({ chrome }, method, params) => {
+    if (method === 'chrome.debugger.sendCommand' && params[1] === CAPTURE)
+      chrome.navigation(8, [`${FORBIDDEN}/bounce`, `${ALLOWED}/neighbour`]);
+  } });
+  under.chrome.navigation(8, [`${ALLOWED}/neighbour`]);
+  await under.settle();
+  await under.call('browser_tabs', { action: 'list' });
+  mark = under.chrome.commands.length;
+  noImage(await under.shoot(), /^### Error\nREFUSED_BY_HOST.*\nThe call ran, but its output is withheld: this task may not read https:\/\/forbidden\.example\/bounce/, 'a refused hop under the capture');
+  assert.deepEqual(reachedSince(under, mark, CAPTURE), [8]);
+  assert.deepEqual(copies(under), []);
+
+  // The host is asked about the named tab again after the capture: an answer that changed meanwhile is the one that counts.
+  let ended = false;
+  const ending = await withHandles({
+    decide: (message) => (ended && message.url === `${ALLOWED}/neighbour` ? { block: 'REFUSED_BY_HOST: no longer this task\'s' } : refuseForbidden(message)),
+    onCommand: (world, method, params) => {
+      if (method === 'chrome.debugger.sendCommand' && params[1] === CAPTURE)
+        ended = true;
+    },
+  });
+  noImage(await ending.shoot(), /^### Error\nREFUSED_BY_HOST: no longer this task's\nThe call ran, but its output is withheld/, 'an answer that changed during the call');
+
+  // A dialog open in the named tab: upstream's own rule for a tab tool, applied to that tab.
+  const modal = await withHandles();
+  modal.core.connection.backend()._context.tabs()[1].setModalState({ type: 'dialog', description: 'a dialog', dialog: {} });
+  mark = modal.chrome.commands.length;
+  noImage(await modal.shoot(), /does not handle the modal state\.\nNo capture was attempted: /, 'an open dialog');
+  assert.deepEqual(reachedSince(modal, mark, CAPTURE), []);
+});
+
+test('a named capture is bound to what its tab showed when the host was asked: a navigation there, a close or a new connection before the result returns leaves no image', async (t) => {
+  // What Chrome reports in the named tab's place as it receives the first capture of that tab.
+  const underCapture = (during) => {
+    let pending = true;
+    return { onCommand: ({ chrome }, method, params) => {
+      if (pending && method === 'chrome.debugger.sendCommand' && params[1] === CAPTURE && params[0].tabId === 8) {
+        pending = false;
+        during(chrome);
+      }
+    } };
+  };
+  // The control: what another tab does meanwhile is not the named tab's version.
+  const calm = await withHandles(underCapture((chrome) => chrome.navigation(TAB, [`${ALLOWED}/elsewhere`])));
+  assert.deepEqual(imagesOf(await calm.shoot()), [shotOf(8)]);
+
+  // A navigation commits in the tab under the capture. The host allows every address involved and the tab ends on the
+  // address it had, so the checks of its addresses pass before and after: only the tab's version tells.
+  for (const [what, during] of [
+    ['another document and back', (chrome) => { chrome.navigation(8, [`${ALLOWED}/other`]); chrome.navigation(8, [`${ALLOWED}/neighbour`]); }],
+    ['a new document in a subframe', (chrome) => { chrome.attachFrame(8, 'FRAME-1'); chrome.navigation(8, [`${ALLOWED}/frame`], { frameId: 'FRAME-1', parentId: 'TARGET-8' }); }],
+    ['an address changed within the document and back', (chrome) => { chrome.navigatedWithinDocument(8, `${ALLOWED}/neighbour#a`); chrome.navigatedWithinDocument(8, `${ALLOWED}/neighbour`); }],
+  ]) {
+    const world = await withHandles(underCapture(during));
+    const mark = world.chrome.commands.length;
+    noImage(await world.shoot(), withheldFor('a navigation committed in the tab'), what);
+    assert.deepEqual(reachedSince(world, mark, CAPTURE), [8], what);
+    assert.deepEqual(copies(world), [], what);
+    assert.equal(world.core.connection.backend()._context.tabs()[1].page.url(), `${ALLOWED}/neighbour`, what);
+    assert.deepEqual(imagesOf(await world.shoot()), [shotOf(8)], `${what}: the next call is checked afresh`);
+  }
+
+  // The same while the host is being asked about the tab, or a close then: no capture is attempted.
+  const isNeighbour = (url) => url === `${ALLOWED}/neighbour`;
+  const reloaded = await withHandles();
+  whileAsked(reloaded.core.guard, 'decideTarget', isNeighbour, async () => {
+    reloaded.chrome.navigation(8, [`${ALLOWED}/neighbour`]);
+    await reloaded.settle();
+  });
+  let mark = reloaded.chrome.commands.length;
+  noImage(await reloaded.shoot(), /^### Error\nBROWSER_TAB_CHANGED: .*No capture was attempted/, 'a reload while the host answers');
+  const closing = await withHandles();
+  whileAsked(closing.core.guard, 'decideTarget', isNeighbour, () => closeTab(closing, 8));
+  noImage(await closing.shoot(), UNKNOWN, 'a close while the host answers');
+  assert.deepEqual([reachedSince(reloaded, mark, CAPTURE), reachedSince(closing, 0, CAPTURE)], [[], []]);
+
+  // After the capture, as upstream reads the tab's title for the result: the tab closes, or the connection is lost and another
+  // is approved. The image that was captured is not returned.
+  for (const [why, then] of [
+    ['the tab closed or was detached', (world) => closeTab(world, 8)],
+    ['the connection ended or changed', async (world) => { await loseConnection(world); await reapprove(world); }],
+  ]) {
+    const world = await withHandles();
+    const tab = world.core.connection.backend()._context.tabs()[1];
+    const headerOf = tab.headerSnapshot.bind(tab);
+    tab.headerSnapshot = async () => {
+      const header = await headerOf();
+      await then(world);
+      return header;
+    };
+    mark = world.chrome.commands.length;
+    noImage(await world.shoot(), withheldFor(why), why);
+    assert.deepEqual(reachedSince(world, mark, CAPTURE), [8], why);
+  }
+
+  // A copy upstream wrote that cannot be removed: the image is not returned either.
+  const kept = await withHandles();
+  const remove = t.mock.method(fs, 'rmSync', () => { throw new Error('EPERM'); });
+  const stuck = await kept.shoot();
+  remove.mock.restore();
+  noImage(stuck, withheldFor('this server could not remove the copy'), 'a copy that stays');
+});
+
 // What the connection keeps of a page's documents. A scripted history is what Chrome reports, in its order: each
 // document commits, then makes its records, named for it ("d7#2" is the second record of the document at /d7).
 // `via` puts a refused address among a document's redirect hops.
@@ -2880,6 +3137,11 @@ test('the tools stay offered, and arguments the server does not take are refused
     assert.match(properties.paths.description, /The host reads each file with its own file admission and keeps a copy; the page gets only that copy's bytes and the file's original name\. At most 16 files and 20971520 bytes in one call\./, name);
   }
   assert.match(tools.find((tool) => tool.name === 'browser_drop').description, /At least one of "paths", "files" or "data" must be provided\./);
+  // Only the screenshot takes a tab handle, optional, next to upstream's own "target", which stays the element reference it was.
+  assert.deepEqual(tools.filter((tool) => tool.inputSchema.properties?.tabHandle).map((tool) => tool.name), ['browser_take_screenshot']);
+  const shot = tools.find((tool) => tool.name === 'browser_take_screenshot').inputSchema;
+  assert.deepEqual([shot.properties.tabHandle.type, shot.required.includes('tabHandle')], ['string', false]);
+  assert.equal(shot.properties.target.description, 'Exact target element reference from the page snapshot, or a unique element selector');
   // Refusing an argument never takes an advertised one.
   for (const tool of tools) {
     for (const property of Object.keys(tool.inputSchema.properties ?? {}))

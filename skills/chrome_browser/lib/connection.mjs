@@ -357,13 +357,14 @@ export class BrowserConnection {
   //   firstOwn   the first document's own addresses, which outlast it (requestTargets);
   //   frames     frame -> redirect chain of the document it now shows, for a document that had hops;
   //   pending    frame -> its latest navigation request (only for the commit that names no request);
+  //   navigations  how many navigations have committed in its frames (documentVersion);
   //   console, errors  how many console messages and page errors this connection has seen.
   _provenance(page) {
     let state = this._pages.get(page);
     if (state)
       return state;
     const document = { own: unique([page.url()]), addresses: new Set(unique([page.url()])), truncated: false, console: 0, errors: 0 };
-    state = { document, documents: [document], firstOwn: document.own, frames: new Map(), pending: new Map(), console: 0, errors: 0 };
+    state = { document, documents: [document], firstOwn: document.own, frames: new Map(), pending: new Map(), navigations: 0, console: 0, errors: 0 };
     this._pages.set(page, state);
     const watch = (frame) => frame._eventEmitter.on('navigated', (event) => this._onNavigated(page, state, frame, event));
     page.frames().forEach(watch);
@@ -392,7 +393,10 @@ export class BrowserConnection {
   // before it, or the document never used the network): the frame's latest navigation request counts
   // if it is for the address that committed.
   _onNavigated(page, state, frame, event) {
-    if (event.error || !event.newDocument)
+    if (event.error)
+      return;
+    state.navigations += 1;
+    if (!event.newDocument)
       return;
     const pending = state.pending.get(frame);
     state.pending.delete(frame);
@@ -464,6 +468,13 @@ export class BrowserConnection {
     const state = this._provenance(page);
     const counted = state[kind] - 1 - fromNewest;
     return state.documents.findLast((document) => document[kind] <= counted) ?? state.documents[0];
+  }
+
+  // The version of what a page shows: how many navigations this connection has seen commit in its frames, a new
+  // document and a same-document change of address alike. Two readings are equal only if none committed in between,
+  // so a page that left its document and came back to the same address does not read the same.
+  documentVersion(page) {
+    return this._provenance(page).navigations;
   }
 
   _expire(generation) {
