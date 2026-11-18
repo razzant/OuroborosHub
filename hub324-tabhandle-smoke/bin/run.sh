@@ -109,7 +109,9 @@ done
 DISPLAY="$display" XAUTHORITY="$xauth_file" xdpyinfo > "$diag/xdpyinfo.txt" 2>&1 || unverified "the run's own X display does not answer with its cookie"
 cookie_required="yes"
 mkdir -p "$work/no-cookie-home"
-if env -i PATH="$PATH" HOME="$work/no-cookie-home" DISPLAY="$display" xdpyinfo > /dev/null 2>&1; then cookie_required="no"; fi
+if env -i PATH="$PATH" HOME="$work/no-cookie-home" DISPLAY="$display" xdpyinfo > /dev/null 2>&1; then
+  unverified "the test display accepts a client without its cookie; Chrome was not started"
+fi
 DISPLAY="$display" XAUTHORITY="$xauth_file" openbox > "$diag/openbox.log" 2>&1 &
 wm_pid=$!
 sleep 1

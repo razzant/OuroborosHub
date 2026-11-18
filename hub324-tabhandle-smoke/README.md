@@ -35,7 +35,7 @@ lets the browser read only that fixture.
 | S12 | A's old handle: `BROWSER_TAB_HANDLE_UNKNOWN`, no image, while A is listed again under a new handle |
 | S13 | the closed B's old handle: `BROWSER_TAB_HANDLE_UNKNOWN`, no image, and B is not listed |
 | S14, S15, S16 | A's new handle captures A; a screenshot without a handle is A; A was never reloaded and kept its draft |
-| I1 | informational: B's own page reported itself hidden during both captures |
+| I1 | required: B's page reported no switch to visible during either capture |
 
 A refusal is judged only by its error flag, its code and its number of image blocks; an unexpected image is counted,
 never stored. Verdict: **PASS** when every required check passes; **FAIL** when a scenario check fails or the skill

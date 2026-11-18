@@ -71,7 +71,7 @@ const CHECKS = [
   ['S14', 'scenario', true, "A's new handle captures A with A's current value"],
   ['S15', 'scenario', true, 'A screenshot without a handle after reapproval is tab A'],
   ['S16', 'scenario', true, 'Tab A was never reloaded and its draft survived the reconnection'],
-  ['I1', 'scenario', false, "B's own page reported itself hidden throughout both captures (informational)"],
+  ['I1', 'scenario', true, "B's own page did not report a switch to visible during either capture"],
 ];
 
 function parseArgs(argv) {
@@ -798,7 +798,8 @@ async function main() {
         const targetGone = !!(await poll(async () => !(await chrome.targetsNow()).some((target) => target.targetId === bTarget.targetId), 15_000));
         const unlisted = await poll(async () => {
           const list = await call('browser_tabs', { action: 'list' }, 'tabs-list-after-close');
-          return !list.failed && !tabsWithHandles(list.raw).some((tab) => tab.url === fixture.urlB) ? list : null;
+          const parsed = tabsWithHandles(list.raw);
+          return !list.failed && parsed.some((tab) => tab.url === fixture.urlA && tab.handle === handles.A1) && !parsed.some((tab) => tab.url === fixture.urlB) ? list : null;
         }, 20_000);
         if (!(pageGone && targetGone && unlisted)) {
           setCheck('S10', 'UNVERIFIED', 'the close of B was not confirmed, so its handle was not asked about', { page_gone: pageGone, target_gone: targetGone, unlisted: !!unlisted });
