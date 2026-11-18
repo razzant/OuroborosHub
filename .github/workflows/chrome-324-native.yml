@@ -1,0 +1,49 @@
+# The hub324 tabHandle smoke test on one GitHub-hosted runner, as that runner is isolated by GitHub: nothing on the
+# system is reconfigured, Chrome's own sandbox runs as shipped. Place the hub324-tabhandle-smoke/ folder at the
+# repository root and this file at .github/workflows/hub324-tabhandle-smoke.yml on the branch qa/chrome-324-native;
+# a push to that branch runs it. It needs no secret, writes nothing back, and keeps only a whitelisted result artifact.
+name: hub324 tabHandle smoke
+
+on:
+  push:
+    branches: ['qa/chrome-324-native']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hub324-tabhandle-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the smoke test
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: System packages from the Ubuntu archive
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends xvfb xauth openbox xdotool x11-utils
+
+      - name: Inputs from their official sources, verified
+        run: bash hub324-tabhandle-smoke/bin/acquire.sh --dest "$RUNNER_TEMP/acq"
+
+      - name: Smoke run (own Xvfb, Chrome for Testing, official extension, the skill's MCP stdio server)
+        run: bash hub324-tabhandle-smoke/bin/run.sh --acq "$RUNNER_TEMP/acq" --out "$RUNNER_TEMP/out" --work "$RUNNER_TEMP/work"
+
+      - name: Keep the whitelisted results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub324-tabhandle-smoke-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/out/summary.json
+            ${{ runner.temp }}/out/report.md
+            ${{ runner.temp }}/out/images/*.png
+          if-no-files-found: warn
+          retention-days: 14

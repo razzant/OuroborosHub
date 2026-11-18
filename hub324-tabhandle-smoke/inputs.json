@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "about": "What the smoke test runs, where each input officially comes from and what it is checked against. acquire.sh reads this file; the extension and npm pins it checks are the ones the tested skill itself carries in skills/chrome_browser/pins.json.",
+  "hub": {
+    "repository": "https://github.com/razzant/OuroborosHub.git",
+    "pull_request": 324,
+    "commit": "688d392e6df8953b9c266af2dfab7b1cedbcf1ad",
+    "commit_subject": "Let a Chrome screenshot name its tab without selecting it",
+    "skill_dir": "skills/chrome_browser",
+    "skill_tree": "2b53cec606e91c978dab5144a746463f2ada0c83",
+    "skill_version": "0.5.0",
+    "check": "git fetches the commit by its full SHA; the git tree of skills/chrome_browser must equal skill_tree (otherwise acquire.sh stops before fetching anything else); SKILL.md must say skill_version"
+  },
+  "node": {
+    "version": "24.16.0",
+    "source": "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-x64.tar.xz",
+    "check": "sha256 against https://nodejs.org/dist/v24.16.0/SHASUMS256.txt"
+  },
+  "chrome_for_testing": {
+    "version": "157.0.8103.50",
+    "platform": "linux64",
+    "source": "https://storage.googleapis.com/chrome-for-testing-public/157.0.8103.50/linux64/chrome-linux64.zip",
+    "listing": "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json",
+    "metadata": "https://storage.googleapis.com/storage/v1/b/chrome-for-testing-public/o/157.0.8103.50%2Flinux64%2Fchrome-linux64.zip",
+    "check": "the official listing names this archive for this version and platform; size and md5 equal Google's storage metadata (Google publishes no sha256: it is computed and recorded)"
+  },
+  "extension": {
+    "name": "Playwright Extension",
+    "id": "mmlmfjhmonkocbjadbfplnigmagldckm",
+    "version": "0.5.0",
+    "store_page": "https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm",
+    "source": "https://clients2.google.com/service/update2/crx?response=redirect&os=linux&arch=x64&os_arch=x86_64&prod=chromecrx&prodchannel=&prodversion=157.0.8103.50&lang=en-US&acceptformat=crx3&x=id%3Dmmlmfjhmonkocbjadbfplnigmagldckm%26installsource%3Dondemand%26uc",
+    "crx_sha256": "598517ba87d9f2f3b3642483cb6662bc0ea061401c5d3c1eb188a19847c92b0b",
+    "check": "sha256 equals pins.json extension.tested_build.crx_sha256 of the tested skill; the signed crx_id and the manifest key both give the id; manifest.json, lib/background.mjs and lib/ui/connect.js equal the pinned hashes; the CRX3 signatures are checked with openssl and recorded. The Web Store serves only its newest build: if it is not the pinned one, acquire.sh stops (exit 3). The unpacked copy leaves out _metadata/, which Chrome refuses in an unpacked extension."
+  },
+  "npm": {
+    "packages": [
+      "@playwright/mcp@0.0.84",
+      "playwright-core@1.65.0-alpha-2026-10-30",
+      "playwright@1.65.0-alpha-2026-10-30"
+    ],
+    "source": "the registry tarball URLs in pins.json of the tested skill",
+    "check": "sha512 integrity and sha1 shasum equal pins.json; files are unpacked without npm and without install scripts; the pinned file hashes are checked here and again by the skill when it starts"
+  },
+  "runner": {
+    "kind": "GitHub-hosted ubuntu-22.04 (acquire.sh and run.sh refuse elsewhere: GITHUB_ACTIONS=true, RUNNER_ENVIRONMENT=github-hosted)",
+    "packages": [
+      "xvfb",
+      "xauth",
+      "openbox",
+      "xdotool",
+      "x11-utils"
+    ],
+    "packages_source": "the Ubuntu archive, installed by the workflow with apt-get",
+    "prerequisites": "unprivileged user namespaces for Chrome's own sandbox, Chrome's system libraries; where one is missing the run ends UNVERIFIED and nothing on the system is changed"
+  }
+}
