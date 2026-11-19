@@ -96,6 +96,11 @@
       "recommended": false
     },
     {
+      "digest": "cfc5fb1f686a3b92b20739e51d44a2ff98b4c1e2098a0444c3c4584e2354c6c1",
+      "name": "provider_keys",
+      "recommended": false
+    },
+    {
       "digest": "88ae42a8980b3ed4b28b7dde9484e14c54d8cb4aa0a7c4b08916dad56dbfc938",
       "name": "slack-bridge",
       "recommended": false
