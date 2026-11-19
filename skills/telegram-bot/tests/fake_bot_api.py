@@ -21,6 +21,7 @@ class FakeBotApi:
         self.get_file_answers: Dict[str, list] = {}  # file_id -> scripted getFile answers, used up in order
         self.always: Dict[str, dict] = {}     # file_id -> a getFile answer given every time
         self.answers: Dict[str, list] = {}    # method -> scripted answers, used up in order
+        self.chats: Dict[str, dict] = {}
         self.next_message_id = 500
 
     # The scripted world --------------------------------------------------------------------
@@ -47,6 +48,9 @@ class FakeBotApi:
             return scripted
         if method == "getMe":
             return {"ok": True, "result": self.bot}
+        if method == "getChat":
+            chat = self.chats.get(str(payload["chat_id"]))
+            return {"ok": True, "result": chat} if chat else {"ok": False, "error_code": 400, "description": "unknown chat"}
         if method in {"deleteWebhook", "sendChatAction", "setMessageReaction"}:
             return {"ok": True, "result": True}
         if method == "getUpdates":

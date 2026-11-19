@@ -52,7 +52,7 @@ class RuntimeClient(TelegramClient):
         return True
 
     async def get_me(self):
-        return {"id": 9, "username": "presence_bot"}
+        return {"id": 9, "is_bot": True, "username": "presence_bot"}
 
     async def download_file(self, file_id, destination):
         destination = pathlib.Path(destination)
@@ -65,14 +65,17 @@ class RuntimeClient(TelegramClient):
         self.sent.append(("message", chat_id, text, kwargs))
         return [{"message_id": 1}]
 
-    async def send_text_chunk(self, chat_id, text, **kwargs):
-        return (await self.send_message(chat_id, text, **kwargs))[0]
+    async def send_text_chunk(self, chat_id, text, *, perform_post=None, **kwargs):
+        async def request():
+            return (await self.send_message(chat_id, text, **kwargs))[0]
+        return await perform_post(request) if perform_post else await request()
 
-    async def send_media(self, kind, chat_id, file_path, *, prepared_caption, **kwargs):
+    async def send_media(self, kind, chat_id, file_path, *, prepared_caption, perform_post=None, **kwargs):
         method = self.send_photo if kind == "photo" else self.send_document
-        return await method(
-            chat_id, file_path, caption=prepared_caption["text"], **kwargs
-        )
+
+        async def request():
+            return await method(chat_id, file_path, caption=prepared_caption["text"], **kwargs)
+        return await perform_post(request) if perform_post else await request()
 
     async def send_photo(self, chat_id, file_path, **kwargs):
         self.sent.append(("photo", chat_id, str(file_path), kwargs))

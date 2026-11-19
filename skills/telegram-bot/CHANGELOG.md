@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.2
+
+- A private-chat event carries its reply recipient from Telegram's chat ID. A host supporting direct
+  recipients can pin the bot required for a proactive send, even before the first getMe.
+  Only pinned proactive sends use getChat to verify the private user dialog. The outbox keeps the bot and
+  user chat together across retries, topic replies and multipart sends. A token for the same bot can
+  deliver them. A different bot holds them with any prior receipts.
+- An older private automatic reply that recorded its receiving bot also waits for that bot. Earlier
+  events gain no owner confirmation. Owner-confirmed sends carry their original confirmation in a distinct
+  outbox kind. Revocation or disconnection of the original outbound Place ends that send with its confirmed parts and frees the queue for the next
+  message. Temporary check failures hold it. The host releases conditional replies only to a connector that
+  can enforce them, including after a deferred turn.
+- Rolling back to 0.12.1 parks unfinished address-conditioned sends while ordinary rows continue. Returning to
+  0.12.2 keeps the same queued bytes, attempts and receipts, rechecks the address, and does not repeat any send
+  whose outcome is unknown.
+
 ## 0.12.1
 
 - A send whose outcome is unknown is never made again. Before each text chunk, file or album call the outbox stores

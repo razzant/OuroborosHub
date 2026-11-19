@@ -10,12 +10,14 @@ import re
 import sqlite3
 import threading
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from starlette.responses import JSONResponse
 
 from .telegram_bot.custody import CustodyStore
-from .telegram_bot.delivery import tool_origin
+from .telegram_bot.delivery import (OWNER_SEND_TOOL, delivery_kind, direct_send_fields, owner_condition_key, retained_sender,
+                                     telegram_topic, tool_origin)
+from .telegram_bot.events import is_user_id
 from .telegram_bot.formatting import prepare_text
 from .telegram_bot.host import PresenceHostClient
 from .telegram_bot.runtime import TelegramTransportRuntime
@@ -53,6 +55,7 @@ _BOT_DIFFERENCES = (
 _RUNTIME: Optional[TelegramTransportRuntime] = None
 _STATE_DIR: Optional[pathlib.Path] = None
 _SETTINGS_SAVE = threading.Lock()
+_UNPINNED = object()
 
 
 def _widget_render() -> Dict[str, Any]:
@@ -228,11 +231,36 @@ def _load_local_settings() -> Dict[str, Any]:
     return load_settings(_STATE_DIR) if _STATE_DIR is not None else {}
 
 
-def _make_telegram_send(api: Any):
+def _same_send_address(first, requested, current_account):
+    """The first queued bytes win. A repeat must still name their exact route and delivery purpose."""
+    fields = ("kind", "send_kind", "chat_id", "topic_id", "reply_to_message_id",
+              "direct_account_id", "direct_reply_user_id")
+    if not isinstance(first, dict) or any(first.get(key) != requested.get(key) for key in fields):
+        return False
+    reporting = first.get("_reporting", {})
+    origin = reporting.get("origin", {}) if isinstance(reporting, dict) else None
+    # Older tool rows may lack reporting; the telegram-send namespace is itself the tool's.
+    if not isinstance(origin, dict) or origin.get("kind", "tool") != "tool":
+        return False
+    account = requested.get("direct_account_id")
+    saved_condition, new_condition = first.get("owner_confirmation"), requested.get("owner_confirmation")
+    if saved_condition is not None or new_condition is not None:
+        address = (account, requested["chat_id"], requested.get("topic_id", ""))
+        saved_key = owner_condition_key(saved_condition, *address, tool=OWNER_SEND_TOOL)
+        if saved_key is None or saved_key != owner_condition_key(new_condition, *address, tool=OWNER_SEND_TOOL):
+            return False
+    # Reporting can name a bot before any POST. Use the same retained sender evidence as the outbox.
+    sender = retained_sender(first)
+    return sender is not None and (not sender or sender == (account or current_account()))
+
+
+def _make_telegram_send(api: Any, current_account: Callable[[], str] = lambda: ""):
     def telegram_send(
         ctx=None,
         *,
         chat_id: str = "",
+        direct_account_id: Any = _UNPINNED,
+        owner_confirmation: Optional[Dict[str, Any]] = None,
         text: str = "",
         kind: str = "message",
         file_path: str = "",
@@ -245,7 +273,7 @@ def _make_telegram_send(api: Any):
     ) -> Dict[str, Any]:
         target = str(chat_id or "").strip()
         selected_kind = str(kind or "message").strip()
-        if re.fullmatch(r"-?[0-9]+", target) is None:
+        if re.fullmatch(r"-?[0-9]+", target) is None or (target.isdecimal() and not is_user_id(chat_id)):
             return {
                 "ok": False,
                 "error": "chat_id must be an exact numeric Telegram id",
@@ -254,14 +282,27 @@ def _make_telegram_send(api: Any):
             return {"ok": False, "error": "kind must be " + ", ".join(SEND_KINDS)}
         if not isinstance(markdown, bool):
             return {"ok": False, "error": "markdown must be a boolean"}
+        thread = telegram_topic(topic_id)
+        if thread is None:
+            return {"ok": False, "error": "topic_id must be one exact positive decimal Telegram topic ID"}
         payload: Dict[str, Any] = {
             "kind": selected_kind,
             "chat_id": target,
             "markdown": markdown,
             "_reporting": {"version": -1, "origin": tool_origin(ctx)},
         }
-        if topic_id not in (None, ""):
-            payload["topic_id"] = str(topic_id).strip()
+        if owner_confirmation is not None and (direct_account_id is _UNPINNED or owner_condition_key(
+                owner_confirmation, direct_account_id, target, thread, tool=OWNER_SEND_TOOL) is None):
+            return {"ok": False, "error": "The host's owner confirmation must match this tool and its exact bot, chat and topic."}
+        if direct_account_id is not _UNPINNED:
+            if not is_user_id(chat_id):
+                return {"ok": False, "error": "A direct send requires one exact Telegram user chat_id."}
+            observed = current_account()
+            if not is_user_id(direct_account_id) or (observed and observed != direct_account_id):
+                return {"ok": False, "error": "The configured Telegram bot does not confirm direct_account_id."}
+            payload.update(direct_send_fields(selected_kind, direct_account_id, target, owner_confirmation))
+        if thread:
+            payload["topic_id"] = thread
         if reply_to_message_id not in (None, ""):
             payload["reply_to_message_id"] = str(reply_to_message_id).strip()
         state_dir = pathlib.Path(api.get_state_dir())
@@ -292,15 +333,19 @@ def _make_telegram_send(api: Any):
             # The row may be committed already: a copy goes only when no row is known to name it.
             discard_unqueued(payload.get("_frozen") or [], state_dir, store, delivery_id)
             raise
+        saved = payload
         if not inserted:
             # This request_id is already queued with the bytes it had then; this call's copy is not needed.
             discard_files(payload.get("_frozen") or [], state_dir)
+            saved = store.outbox_payload(delivery_id)
+            if not _same_send_address(saved, payload, current_account):
+                return {"ok": False, "error": "This request_id does not match the saved send address, kind or condition."}
         return {
             "ok": True,
             "state": "queued" if inserted else "already_queued",
             "request_id": receipt,
-            "chat_id": target,
-            "kind": selected_kind,
+            "chat_id": saved["chat_id"],
+            "kind": delivery_kind(saved),
         }
 
     return telegram_send
@@ -426,9 +471,17 @@ def register(api: Any) -> None:
         restart_policy="on_failure",
         max_restarts=10,
     )
+
+    def current_account() -> str:
+        try:
+            account = runtime.recorded_bot()
+        except (OSError, sqlite3.Error):
+            return ""
+        return account if is_user_id(account) else ""
+
     api.register_tool(
         "telegram_send",
-        _make_telegram_send(api),
+        _make_telegram_send(api, current_account),
         description=(
             "Durably queue a proactive Telegram send for an exact numeric chat, with optional topic and reply ids: "
             "text, or a file as photo, document, video, audio, voice (OGG/Opus, MP3 or M4A), animation (GIF or "
@@ -451,6 +504,7 @@ def register(api: Any) -> None:
             "type": "object",
             "properties": {
                 "chat_id": {"type": "string"},
+                "direct_account_id": {"type": "string", "description": "Required sending bot when the host pins a private chat."},
                 "text": {
                     "type": "string",
                     "description": "Displayed message content only; standard Markdown unless markdown=false.",
@@ -482,7 +536,7 @@ def register(api: Any) -> None:
                     "default": True,
                     "description": "Render standard Markdown; false preserves literal punctuation and XML.",
                 },
-                "topic_id": {"type": "string"},
+                "topic_id": {"type": "string", "description": "Exact positive decimal Telegram topic ID; omit outside a topic."},
                 "reply_to_message_id": {"type": "string"},
                 "request_id": {
                     "type": "string",

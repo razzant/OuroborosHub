@@ -12,6 +12,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Protocol, Sequence
 
+from .events import direct_reply_account
+
 
 _OUTCOMES = {"message", "silent", "tool_delivered", "deferred"}
 _TERMINAL_WORK_STATES = {"completed", "failed", "cancelled"}
@@ -40,6 +42,10 @@ _EVENT_KEYS = {
 
 class PresenceHostError(RuntimeError):
     """The local Host rejected a presence request or returned an invalid response."""
+
+
+class ConditionalDeliveryEnded(PresenceHostError):
+    """The original owner-confirmed delivery cannot resume on its bound route."""
 
 
 class PresenceHostHTTPError(PresenceHostError):
@@ -98,6 +104,7 @@ class PresenceSubmission:
     continuation_ref: str = ""
     output_ref: str = ""
     reply_anchor: Optional[Dict[str, Any]] = None
+    owner_confirmation: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +120,7 @@ class PresenceWorkResult:
     outputs: tuple[Dict[str, Any], ...] = ()
     output_ref: str = ""
     reply_anchor: Optional[Dict[str, Any]] = None
+    owner_confirmation: Optional[Dict[str, Any]] = None
 
     @property
     def terminal(self) -> bool:
@@ -208,6 +216,7 @@ class PresenceHostClient:
         self.delivery_reporting_status = "unknown"
         self.delivery_reporting_version = 0
         self.places_version = 0
+        self.legacy_place_api = False
         self.presence_wake_signals = 0
         self.presence_identity = 0
         self.connector_identity = {}
@@ -216,17 +225,20 @@ class PresenceHostClient:
         # 2 only when ``/identity`` lists it; otherwise each turn waits for its terminal (0).
         self.continuation_version = 0
 
-    async def discover_delivery_support(self) -> int:
-        if self.delivery_reporting_status in {"supported", "unsupported"}:
+    async def discover_delivery_support(self, *, refresh: bool = False) -> int:
+        if not refresh and self.delivery_reporting_status in {"supported", "unsupported"}:
             return self.delivery_reporting_version
         try:
             response = await self.transport.request_json(
                 "GET", f"{self.host_base}/identity", headers=self._headers(),
                 payload=None, timeout_sec=10.0,
             )
+            if not isinstance(response, dict) or response.get("ok", True) is not True:
+                raise PresenceHostError("presence Host did not confirm its identity")
             self.delivery_reporting_version = int(response.get("presence_delivery_version") == 1)
             version = response.get("places_version")
             self.places_version = int(type(version) is int and version >= 1)
+            self.legacy_place_api = response.get("ok") is True and "places_version" not in response
             self.presence_wake_signals = int(response.get("presence_wake_signals") == 1)
             self.presence_identity = int(response.get("presence_identity") == 1)
             # A JSON true is not the capability; bool compares equal to 1 in Python.
@@ -242,35 +254,57 @@ class PresenceHostClient:
         except (PresenceHostError, OSError, TimeoutError, asyncio.TimeoutError):
             self.delivery_reporting_status = "unavailable"
             self.delivery_reporting_version = 0
+            self.places_version = 0
+            self.legacy_place_api = False
             self.continuation_version = 0
             self.presence_reaction_context = 0
             self.presence_explicit_completion = 0
         return self.delivery_reporting_version
 
-    async def place_hold(self, account_id: str, conversation_id: str, thread_id: str = "") -> str:
-        await self.discover_delivery_support()
+    async def place_hold(self, account_id: str, conversation_id: str, thread_id: str = "", *, owner_confirmation=None) -> str:
+        outbound = expected = None
+        if owner_confirmation is not None:
+            outbound = owner_confirmation.get("delivery_place") if isinstance(owner_confirmation, dict) else None
+            if (not isinstance(outbound, dict) or not isinstance(outbound.get("place_id"), str)
+                    or not outbound["place_id"] or type(owner_confirmation.get("observed_revision")) is not int):
+                return PLACE_POLICY_UNREAD
+            expected = json.dumps(owner_confirmation, sort_keys=True)
+        # Re-observe before relying on legacy support. A failed or invalid identity read is not a legacy Host.
+        refresh = not self.places_version and self.delivery_reporting_status in {"supported", "unsupported"}
+        await self.discover_delivery_support(refresh=refresh)
         if not self.places_version:
-            return PLACE_POLICY_UNREAD if self.delivery_reporting_status == "unavailable" else ""
+            return "" if expected is None and self.legacy_place_api else PLACE_POLICY_UNREAD
         try:
             # Host excludes a thread's own place from a lookup that names no thread; one without asks as before.
             query = urllib.parse.urlencode({"provider": "telegram", "account_id": account_id,
                                             "conversation_id": conversation_id,
+                                            **({"owner_confirmation": expected} if expected is not None else {}),
                                             **({"thread_id": thread_id} if thread_id else {})})
             place = await self.transport.request_json(
                 "GET", f"{self.host_base}/presence/place?{query}", headers=self._headers(),
                 payload=None, timeout_sec=10.0,
             )
         except PresenceHostHTTPError as exc:
-            # "Not connected" and a refused skill are the Host's answers, not an unread policy:
-            # the first says what to do in its own words; the second waits for the owner, not for a retry.
-            if exc.payload.get("code") == "presence_auth_blocked":
+            code = exc.payload.get("code")
+            if owner_confirmation is not None and exc.status_code == 409:
+                if code == "place_owner_confirmation_changed" and exc.disposition == "rejected":
+                    raise ConditionalDeliveryEnded("The owner confirmation changed. Remaining parts were not sent.") from exc
+                if code == "place_disconnected" and exc.disposition == "blocked":
+                    raise ConditionalDeliveryEnded("The original outbound Place was disconnected. Remaining parts were not sent.") from exc
+            if code == "presence_auth_blocked":
                 return SKILL_ACCESS_REFUSED
-            words = exc.payload.get("error") if exc.payload.get("code") == "place_not_connected" else ""
+            held = {"place_not_connected", "place_owner_confirmation_changed", "presence_recipient_capability_required"}
+            words = exc.payload.get("error") if code in held else ""
             return f"Held: {words}" if words else PLACE_POLICY_UNREAD
         except (PresenceHostError, OSError, TimeoutError):
             return PLACE_POLICY_UNREAD
+        if not isinstance(place, dict) or place.get("ok", True) is not True:
+            return PLACE_POLICY_UNREAD
+        if outbound is not None and (place.get("place_id") != outbound["place_id"]
+                or json.dumps(place.get("owner_confirmation"), sort_keys=True) != expected):
+            return PLACE_POLICY_UNREAD
         state = place.get("state")
-        if not state:
+        if state not in ("active", "silent", "paused"):
             return PLACE_POLICY_UNREAD
         return "" if state == "active" else f"Held: {place.get('label') or 'Telegram'} is {state}"
 
@@ -296,8 +330,18 @@ class PresenceHostClient:
             event.pop("facts", None)
         elif not self.presence_wake_signals and "facts" in event:
             event["facts"] = [fact for fact in event["facts"] if fact != "signal.words"]
-        if self.presence_identity and self.connector_identity:
-            event["identity"] = self.connector_identity
+        identity = self.connector_identity
+        conversation = event.get("conversation")
+        if isinstance(conversation, dict) and "direct_reply_user_id" in conversation:
+            # This event may have waited while another token was confirmed. Use its captured bot.
+            account = direct_reply_account(event)
+            if not account:
+                identity = {}
+                event["conversation"] = {key: value for key, value in conversation.items() if key != "direct_reply_user_id"}
+            elif (identity.get("sends_as") or {}).get("id") != account:
+                identity = {"sends_as": {"id": account, "label": account, "kind": "bot"}}
+        if self.presence_identity and identity:
+            event["identity"] = identity
         early = self.continuation_version == _EARLY_CONTINUATION
         try:
             response = await self.transport.request_json(
@@ -344,6 +388,7 @@ class PresenceHostClient:
             continuation_ref=continuation_ref,
             output_ref=str(response.get("output_ref") or "").strip(),
             reply_anchor=_reply_anchor(response.get("reply_anchor")),
+            owner_confirmation=_owner_confirmation(response),
         )
 
     async def poll(self, work_ref: str, binding_id: str) -> PresenceWorkResult:
@@ -382,6 +427,7 @@ class PresenceHostClient:
             delivery_reporting_version=int(response.get("delivery_reporting_version") == 1),
             child_work_ref=child, outputs=outputs, output_ref=str(response.get("output_ref") or ""),
             reply_anchor=_reply_anchor(response.get("reply_anchor")),
+            owner_confirmation=_owner_confirmation(response),
         )
 
     def _headers(self) -> Dict[str, str]:
@@ -406,16 +452,24 @@ def load_binding_id(state_dir: pathlib.Path) -> str:
     return binding_id.strip()
 
 
+def _owner_confirmation(response):
+    if "owner_confirmation" in response and not isinstance(response["owner_confirmation"], dict):
+        raise PresenceHostError("invalid owner confirmation on a private reply")
+    return response.get("owner_confirmation")
+
+
 def _selected_outputs(response: Dict[str, Any]) -> tuple[Dict[str, Any], ...]:
     """Already selected speech keeps its identity even while the author is unresolved."""
     outputs = list(response.get("outputs") or [])
     if response.get("output_ref") and response.get("text"):
-        outputs.append({key: response.get(key) for key in ("output_ref", "outcome", "text", "reply_anchor")})
+        outputs.append({key: response[key] for key in ("output_ref", "outcome", "text", "reply_anchor", "owner_confirmation")
+                        if key in response})
     selected = []
     for output in outputs:
         if not isinstance(output, dict) or not output.get("output_ref") or output.get("outcome") not in _OUTCOMES:
             raise PresenceHostError("invalid released presence output")
         if output["outcome"] in {"message", "deferred"} and str(output.get("text") or "").strip():
+            _owner_confirmation(output)
             selected.append({**output, "reply_anchor": _reply_anchor(output.get("reply_anchor"))})
     return tuple(selected)
 
