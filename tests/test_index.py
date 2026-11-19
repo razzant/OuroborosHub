@@ -592,10 +592,13 @@ def place_contributions(manifest):
 CONNECTORS = sorted(directory.name for directory in (ROOT / "skills").iterdir()
                     if (directory / "SKILL.md").is_file() and place_contributions(builder.read_manifest(directory)))
 # Mirrors of the core contract, compared with a core checkout by the opt-in parity test below:
-# ouroboros/places.py WAKE_FACTS, ouroboros/extension_ui_validation.py _validate_contribution (common and
-# place keys) and ouroboros/icon_geometry.py (geometry and paint). The hub also refuses g and ellipse.
-CORE_WAKE_FACTS = ("direct_message", "group_dm", "mention", "reply_to_me", "my_thread", "signal.new_root", "new_issue",
+# ouroboros/places.py WAKE_FACTS and is_wake_signal, ouroboros/extension_ui_validation.py _validate_contribution
+# (common and place keys) and _place_contribution (facts and wakes), and ouroboros/icon_geometry.py (geometry and
+# paint). The hub also refuses g and ellipse.
+CORE_WAKE_FACTS = ("direct_message", "group_dm", "mention", "reply_to_me", "my_thread", "new_issue",
                    "new_pull_request", "review_requested", "assigned", "any_message", "from_bot")
+# A connector's own kind is no core fact: its place declares it, labelled, as signal.<slug> in facts.
+CORE_SIGNAL = re.compile(r"signal\.[a-z0-9_-]{1,40}")
 CORE_PLACE_KEYS = {"id", "label", "title", "icon", "order", "render",
                    "provides", "destination", "scope", "wakes", "source", "settings", "read_only", "facts"}
 ICON_GEOMETRY = {"svg": {"viewBox", "width", "height"}, "path": {"d"}, "circle": {"cx", "cy", "r"},
@@ -728,6 +731,26 @@ def test_every_exported_tool_has_an_effect_and_destination(name):
         assert_target_selectors(row["target"])
 
 
+def declared_wake_kinds(place):
+    """The kinds core _place_contribution lets this place wake on: the core facts when ``facts`` is absent, else its
+    declared ids, each a core fact name or a labelled core fact or signal.<slug>, none twice."""
+    if "facts" not in place:
+        return set(CORE_WAKE_FACTS)
+    assert isinstance(place["facts"], list)
+    declared = []
+    for fact in place["facts"]:
+        if isinstance(fact, dict):
+            assert set(fact) == {"id", "label"} and isinstance(fact["id"], str), fact
+            assert fact["id"] in CORE_WAKE_FACTS or CORE_SIGNAL.fullmatch(fact["id"]), fact
+            assert isinstance(fact["label"], str) and fact["label"].strip() and len(fact["label"]) <= 120, fact
+            declared.append(fact["id"])
+        else:
+            assert isinstance(fact, str) and fact in CORE_WAKE_FACTS, fact
+            declared.append(fact)
+    assert len(declared) == len(set(declared)), declared
+    return set(declared)
+
+
 @pytest.mark.parametrize("name", CONNECTORS)
 def test_place_contribution_meets_the_core_contract(name):
     directory = ROOT / "skills" / name
@@ -740,7 +763,8 @@ def test_place_contribution_meets_the_core_contract(name):
     assert place["destination"].startswith("vendor:") and service.strip() and place["label"] == service
     assert place["scope"] == "account"
     wakes = place["wakes"]
-    assert isinstance(wakes, list) and len(wakes) == len(set(wakes)) and set(wakes) <= set(CORE_WAKE_FACTS)
+    assert isinstance(wakes, list) and len(wakes) == len(set(wakes))
+    assert set(wakes) <= declared_wake_kinds(place)
     assert manifest["type"] == "extension"
     assert "presence" in manifest["permissions"] and "inject_chat" not in manifest["permissions"]
     if "source" in place:
@@ -792,9 +816,11 @@ from pathlib import Path
 from ouroboros.contracts.skill_manifest import parse_skill_manifest_text
 from ouroboros.extension_ui_validation import validate_contributions
 from ouroboros.icon_geometry import sanitize_svg, validate_icon
-from ouroboros.places import WAKE_FACTS
-report = {"wake_facts": list(WAKE_FACTS), "skills": {}}
-for path in json.load(sys.stdin):
+from ouroboros.places import WAKE_FACTS, is_wake_signal
+request = json.load(sys.stdin)
+report = {"wake_facts": list(WAKE_FACTS), "signals": {probe: is_wake_signal(probe) for probe in request["probes"]},
+          "skills": {}}
+for path in request["skills"]:
     root = Path(path)
     manifest = parse_skill_manifest_text((root / "SKILL.md").read_text(encoding="utf-8"))
     entries, problems = validate_contributions(manifest, skill_dir=root)
@@ -802,16 +828,24 @@ for path in json.load(sys.stdin):
     report["skills"][root.name] = {"provides": [e.get("provides") for e in entries], "problems": problems}
 print(json.dumps(report))
 """
+    # The core's own grammar on every declared kind and on its boundaries.
+    declared = sorted({fact["id"] for name in CONNECTORS for fact in place_contributions(
+        builder.read_manifest(ROOT / "skills" / name))[0].get("facts", []) if isinstance(fact, dict)})
+    probes = [*declared, "signal.a", "signal." + "a" * 40, "signal." + "a" * 41, "signal.", "signal.New",
+              "signal.new root", "signal.new.root", "new_root", "Signal.words", "signal.words\n"]
     with tempfile.TemporaryDirectory(prefix="hub-core-connectors-") as tmp:
         env = {"PATH": os.environ.get("PATH", ""), "HOME": tmp, "PYTHONPATH": str(Path(configured).resolve()),
                "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
                "OUROBOROS_APP_ROOT": tmp, "OUROBOROS_DATA_DIR": tmp + "/data",
                "OUROBOROS_REPO_DIR": tmp + "/repo", "OUROBOROS_SETTINGS_PATH": tmp + "/settings.json"}
-        run = subprocess.run([sys.executable, "-B", "-c", code], input=json.dumps([str(ROOT / "skills" / n) for n in CONNECTORS]),
+        request = {"skills": [str(ROOT / "skills" / n) for n in CONNECTORS], "probes": probes}
+        run = subprocess.run([sys.executable, "-B", "-c", code], input=json.dumps(request),
                              text=True, encoding="utf-8", capture_output=True, cwd=tmp, env=env, timeout=90)
     assert run.returncode == 0, run.stderr
     report = json.loads(run.stdout.strip().splitlines()[-1])
     assert tuple(report["wake_facts"]) == CORE_WAKE_FACTS
+    assert report["signals"] == {probe: CORE_SIGNAL.fullmatch(probe) is not None for probe in probes}
+    assert all(report["signals"][fact] for fact in declared if fact not in CORE_WAKE_FACTS)
     assert report["skills"] == {name: {"provides": ["place"], "problems": []} for name in CONNECTORS}
 
 

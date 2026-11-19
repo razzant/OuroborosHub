@@ -2,7 +2,68 @@
 
 from pathlib import Path
 
-from .events import _reaction_values
+from .events import _reaction_values, is_user_id
+
+
+DIRECT_SEND = "direct_send"
+OWNER_SEND = "owner_dm_send"
+DIRECT_KINDS = (DIRECT_SEND, OWNER_SEND)
+# The canonical Host producer name in owner confirmations, not a caller-supplied field.
+OWNER_SEND_TOOL = "ext_14_r_telegram-bot_telegram_send"
+
+
+def telegram_topic(value):
+    """The exact outbound topic, empty when absent; None means invalid."""
+    if value is None or value == "":
+        return ""
+    return value if is_user_id(value) else None
+
+
+def matches_owner_destination(confirmation, account_id, chat_id, thread_id):
+    return (isinstance(confirmation, dict) and confirmation.get("provider") == "telegram"
+            and confirmation.get("account_id") == account_id
+            and confirmation.get("conversation_id") == chat_id
+            and confirmation.get("thread_id") == thread_id)
+
+
+def owner_condition_key(condition, account_id, chat_id, thread_id, *, tool):
+    """Identify the saved proof and delivery Place; a newer observation alone is not a new destination."""
+    if (not matches_owner_destination(condition, account_id, chat_id, thread_id)
+            or tool not in (OWNER_SEND_TOOL, "place_reply") or condition.get("tool") != tool):
+        return None
+    outbound = condition.get("delivery_place")
+    floor = condition.get("observed_revision")
+    confirmed_at = condition.get("confirmed_at")
+    if (not matches_owner_destination(outbound, account_id, chat_id, thread_id)
+            or type(outbound.get("version")) is not int or outbound["version"] != 1
+            or type(floor) is not int or not isinstance(confirmed_at, str) or not confirmed_at):
+        return None
+    for place in (condition, outbound):
+        place_id, revision = place.get("place_id"), place.get("connected_revision")
+        if (place.get("connector") != "telegram-bot" or not isinstance(place_id, str) or not place_id
+                or type(revision) is not int or not 0 <= revision <= floor):
+            return None
+    # Comparison only. The original opaque condition, including its floor, goes back to the Host at delivery.
+    return {key: value for key, value in condition.items() if key != "observed_revision"}
+
+
+def direct_send_fields(kind, account_id, user_id, owner_confirmation=None):
+    # This kind retains the pin; the outbox's live states keep it out of older claimers.
+    fields = {"kind": DIRECT_SEND, "send_kind": kind, "direct_account_id": account_id, "direct_reply_user_id": user_id}
+    if owner_confirmation is not None:
+        fields.update(kind=OWNER_SEND, owner_confirmation=owner_confirmation)
+    return fields
+
+
+def matches_direct_recipient(payload, account_id, user_id):
+    return (payload.get("kind") in DIRECT_KINDS and is_user_id(account_id) and is_user_id(user_id)
+            and payload.get("direct_account_id") == account_id
+            and payload.get("chat_id") == user_id == payload.get("direct_reply_user_id"))
+
+
+def delivery_kind(payload):
+    kind = payload.get("kind") or "message"
+    return payload.get("send_kind") if kind in DIRECT_KINDS else kind
 
 
 def names_message(answer):
@@ -24,6 +85,28 @@ def stored_answers(payload):
             return ([answer for answer in stored if names_message(answer)],
                     [answer for answer in stored if not names_message(answer)])
     return None
+
+
+def retained_sender(payload):
+    """The sender of a partly sent row, or None if its confirmed parts do not establish one."""
+    if "_sending_account_id" in payload:
+        account = payload["_sending_account_id"]
+        return account if is_user_id(account) else None
+    if payload.get("kind") in DIRECT_KINDS:
+        return ""  # the independently retained direct_account_id is checked on every attempt
+    confirmed, _ = stored_answers(payload) or ([], [])
+    if not confirmed:
+        return ""
+    accounts = set()
+    for message in confirmed:
+        sender = message.get("from")
+        if not isinstance(sender, dict) or sender.get("is_bot") is not True or type(sender.get("id")) is not int:
+            return None
+        account = str(sender["id"])
+        if not is_user_id(account):
+            return None
+        accounts.add(account)
+    return next(iter(accounts)) if len(accounts) == 1 else None
 
 
 def tool_origin(ctx):
@@ -109,7 +192,7 @@ def delivery_report(delivery_id, payload, *, part_id, state, receipt=None, text=
         return None
     receipt = receipt or {}
     wire = receipt.get("_delivery") or {}
-    message = {"kind": payload.get("kind", "message")}
+    message = {"kind": delivery_kind(payload)}
     for key in ("message_id", "date", "entities", "caption_entities", "photo", "document", "video", "audio", "voice",
                 "animation", "media_group_id"):
         if key in receipt:

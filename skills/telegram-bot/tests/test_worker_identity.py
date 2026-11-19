@@ -331,16 +331,20 @@ def test_a_getme_failure_that_does_not_refuse_the_token_keeps_its_last_answer(tm
     asyncio.run(run())
 
 
-def test_an_answer_without_a_usable_id_confirms_nothing(tmp_path):
+@pytest.mark.parametrize("identity", [
+    {"is_bot": True}, {"id": "9", "is_bot": True}, {"id": True, "is_bot": True},
+    {"id": 9}, {"id": 9, "is_bot": False}, {"id": 9, "is_bot": 1},
+])
+def test_an_answer_without_a_typed_bot_identity_confirms_nothing(tmp_path, identity):
     async def run():
         settings = {"token": "token-a"}
         bots = bots_with_history()
         async with Server(tmp_path, settings, bots) as server:
             await confirmed(server)
         worker = instance(tmp_path, settings)
-        bots.bots["token-a"] = {"is_bot": True, "username": "no_id_bot"}
+        bots.bots["token-a"] = {**identity, "username": "fixture"}
         async with Server(tmp_path, settings, bots) as restarted:
-            await until(lambda: restarted.runtime.status_snapshot()["runtime_state"] == "polling")
+            await until(lambda: restarted.runtime.status_snapshot()["runtime_state"] == "provider_error")
             assert restarted.runtime.confirmed_bot()[0] == "" and worker.runtime.recorded_bot() == ""
             assert_unconfirmed(worker.operate, tmp_path)
     asyncio.run(run())

@@ -65,8 +65,9 @@ def test_each_media_kind_is_queued_sent_once_and_reported(tmp_path, kind, name, 
     queued = tools["telegram_send"](chat_id=CHAT, kind=kind, file_path=_file(tmp_path, name), caption="**look**",
                                     reply_to_message_id="41", request_id=f"r-{kind}")
     assert queued == {"ok": True, "state": "queued", "request_id": f"r-{kind}", "chat_id": CHAT, "kind": kind}
-    again = tools["telegram_send"](chat_id=CHAT, kind=kind, file_path=_file(tmp_path, name), request_id=f"r-{kind}")
-    assert again["state"] == "already_queued"  # request_id deduplicates the same logical send
+    again = tools["telegram_send"](chat_id=CHAT, kind=kind, file_path=_file(tmp_path, name),
+                                    reply_to_message_id="41", request_id=f"r-{kind}")
+    assert again["state"] == "already_queued"  # same address and kind; the first caption and bytes remain queued
     telegram = FakeBotApi()
     runtime = _runtime(tmp_path, telegram)
     assert asyncio.run(runtime.process_one_outbox())

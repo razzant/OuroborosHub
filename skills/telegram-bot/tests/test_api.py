@@ -1,7 +1,13 @@
 import asyncio
+import io
+import json
 import pathlib
+import urllib.error
+import urllib.request
 
-from telegram_bot.api import TelegramClient
+import pytest
+
+from telegram_bot.api import TelegramApiError, TelegramClient
 
 
 class FakeTransport:
@@ -25,6 +31,32 @@ class FakeTransport:
     async def get_bytes(self, url, timeout_sec, max_bytes):
         self.download_calls.append((url, timeout_sec, max_bytes))
         return b"data"
+
+
+@pytest.mark.parametrize("method,args,result", [
+    ("get_me", (), {"id": 9, "is_bot": True}),
+    ("get_chat", ("55",), {"id": 55, "type": "private"}),
+])
+@pytest.mark.parametrize("case", ["complete", "wrong_ok_type", "incomplete_body", "http_error"])
+def test_identity_lookup_needs_a_complete_affirmative_http_answer(monkeypatch, method, args, result, case):
+    data = json.dumps({"ok": 1 if case == "wrong_ok_type" else True, "result": result}).encode()
+    headers = {"Content-Length": str(len(data) + (1 if case == "incomplete_body" else 0))}
+
+    def response(request, timeout):
+        body = io.BytesIO(data)
+        if case == "http_error":
+            raise urllib.error.HTTPError(request.full_url, 502, "Bad Gateway", headers, body)
+        body.headers = headers
+        return body
+
+    monkeypatch.setattr(urllib.request, "urlopen", response)
+    call = getattr(TelegramClient("fixture", api_server="https://telegram.invalid"), method)
+    if case == "complete":
+        assert asyncio.run(call(*args)) == result
+    else:
+        with pytest.raises(TelegramApiError) as error:
+            asyncio.run(call(*args))
+        assert error.value.error_code == 0
 
 
 def test_get_file_download_and_text_topic_reply(tmp_path):

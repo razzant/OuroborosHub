@@ -771,6 +771,20 @@ def test_an_upload_that_could_not_be_built_proves_nothing_was_sent(tmp_path, mon
             "http://telegram.invalid/bottoken/sendDocument", {"chat_id": CHAT}, [("document", big)], 1.0)
 
 
+@pytest.mark.parametrize("kind", ["message", "document", "album"])
+def test_unreadable_http_refusal_keeps_the_send_uncertain(tmp_path, wire, kind):
+    delivery = _queue(_tools(tmp_path), tmp_path, kind, "once", **(
+        {"text": "**fixture**", "markdown": True} if kind == "message" else {"caption": "**fixture**"}))
+    method = METHOD[kind]
+    wire.answer(method, urllib.error.HTTPError("http://telegram.invalid", 400, "Bad Request", {},
+                                             io.BytesIO(b"unavailable")))
+    runtime = _runtime(tmp_path)
+    _drain(runtime)
+    _drain(_restart(tmp_path))
+    assert runtime.store.delivery_receipt(delivery)["state"] == "uncertain"
+    assert len(wire.sent(method)) == 1
+
+
 def test_a_call_is_stored_as_started_only_while_this_attempt_holds_the_row(tmp_path):
     from telegram_bot.custody import CALL_STARTED, CustodyStore
     store = CustodyStore(tmp_path / "custody.sqlite3")

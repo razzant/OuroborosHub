@@ -7,24 +7,25 @@ import pathlib
 import re
 import time
 from dataclasses import replace
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional, Protocol, Sequence, Tuple
 
 from . import outbox_files
 from .api import (MEDIA_METHODS, TelegramClient, TelegramApiError, TelegramFileTooLarge, TelegramFileUnavailable,
                   TelegramRequestNotSent, _split_text)
-from .delivery import (REACTION_HISTORY_UNAVAILABLE, REACTION_REPORT_UNREADABLE, delivery_report,
-                       is_reaction_report, names_message, reaction_receipt, typed_reaction_report)
+from .delivery import (DIRECT_KINDS, OWNER_SEND, OWNER_SEND_TOOL, REACTION_HISTORY_UNAVAILABLE,
+                       REACTION_REPORT_UNREADABLE, delivery_kind, delivery_report, is_reaction_report,
+                       matches_direct_recipient, matches_owner_destination, names_message, owner_condition_key,
+                       reaction_receipt, retained_sender, stored_answers, telegram_topic, typed_reaction_report)
 from .formatting import prepare_text, prepare_caption
 from .custody import (CALL_STARTED, REACTION_WITHHELD, CustodyStore, InboxLease, OutboxLease, _chat_forum,
                       recorded_calls)
 from .discovery import group_sightings
-from .events import parse_telegram_update, too_large_marks, too_large_note
-from .host import PresenceHostHTTPError, PresenceSubmission, PresenceWorkResult
+from .events import is_user_id, parse_telegram_update, private_user_id, too_large_marks, too_large_note
+from .host import ConditionalDeliveryEnded, PresenceHostHTTPError, PresenceSubmission, PresenceWorkResult
 from .settings import load_settings
 
 
 _MAX_OUTBOX_ATTEMPTS = 5
-_BOT_ID = re.compile(r"[1-9][0-9]*")
 _REACTION_KINDS = frozenset({"message_reaction", "message_reaction_count"})
 REACTION_METHOD = "setMessageReaction"
 # Telegram's "the request is wrong" and "you may not" (https://core.telegram.org/api/errors; the
@@ -57,6 +58,16 @@ _NOT_PERFORMED = frozenset({400, 401, 403, 404, 429})
 
 class PlaceHeld(RuntimeError):
     """Unsent custody waits for the current place policy, without a provider failure."""
+
+
+class SendAddressInvalid(RuntimeError):
+    """A definitive local refusal of the unsent remainder; recorded parts are unchanged."""
+
+
+class _BotClient(NamedTuple):
+    client: TelegramClient
+    account_id: str
+    username: str
 
 
 class AlbumIncomplete(TelegramApiError):
@@ -187,7 +198,7 @@ class TelegramTransportRuntime:
         token = str(self.token_provider() or "").strip()
         if not token:
             return "", "Bot token missing"
-        if token != self._client_token or not _BOT_ID.fullmatch(self._bot_id):
+        if token != self._client_token or not is_user_id(self._bot_id):
             return "", "Bot identity is unconfirmed; check the transport status"
         return self._bot_id, ""
 
@@ -223,12 +234,12 @@ class TelegramTransportRuntime:
         backoff = 2.0
         while not self._stopping:
             try:
-                client = await self._ready_client()
-                if client is None:
+                bot = await self._ready_client()
+                if bot is None:
                     await self._pause(5.0)
                     continue
                 # The bot this client answers for, even if another worker confirms a new token meanwhile.
-                account, username = self._bot_id, self._bot_username
+                client, account, username = bot
                 self._runtime_state = "polling"
                 discover = getattr(self.submitter, "discover_delivery_support", None)
                 if discover:
@@ -265,7 +276,7 @@ class TelegramTransportRuntime:
                 await self._pause(backoff)
                 backoff = min(60.0, backoff * 1.7)
 
-    async def _ready_client(self) -> Optional[TelegramClient]:
+    async def _ready_client(self) -> Optional[_BotClient]:
         if self._client_lock is None:
             self._client_lock = asyncio.Lock()
         async with self._client_lock:
@@ -277,7 +288,7 @@ class TelegramTransportRuntime:
                 self._client_token = ""
                 return None
             if self._client is not None and token == self._client_token:
-                return self._client
+                return _BotClient(self._client, self._bot_id, self._bot_username)
             client = self.client_factory(token)
             try:
                 await client.delete_webhook()
@@ -286,12 +297,13 @@ class TelegramTransportRuntime:
                 if exc.error_code in _TOKEN_REFUSED:
                     self.store.forget_confirmed_bot(token)
                 raise
-            bot_id = str(identity.get("id") or "unknown")
-            # Before anything in memory changes: if the store refuses, the next call asks getMe again.
-            if _BOT_ID.fullmatch(bot_id):
-                self.store.record_confirmed_bot(token, bot_id)
-            else:
+            provider_id = identity.get("id") if isinstance(identity, dict) and identity.get("is_bot") is True else None
+            bot_id = str(provider_id) if type(provider_id) is int else ""
+            if not is_user_id(bot_id):
                 self.store.forget_confirmed_bot(token)
+                raise PlaceHeld("Held: Telegram has not confirmed the sending bot's identity.")
+            # Before anything in memory changes: if the store refuses, the next call asks getMe again.
+            self.store.record_confirmed_bot(token, bot_id)
             self._bot_id = bot_id
             username = str(identity.get("username") or "").strip()
             self._bot_username = username
@@ -301,7 +313,7 @@ class TelegramTransportRuntime:
             self._client = client
             self._client_token = token
             self._last_error = ""
-            return client
+            return _BotClient(client, bot_id, username)
 
     async def _inbox_worker(self) -> None:
         while not self._stopping:
@@ -348,6 +360,7 @@ class TelegramTransportRuntime:
                     continuation_ref=result.continuation_ref,
                     output_ref=result.output_ref,
                     reply_anchor=result.reply_anchor,
+                    owner_confirmation=result.owner_confirmation,
                 )
             self._remove_staged_files(staged)
             return True
@@ -422,9 +435,10 @@ class TelegramTransportRuntime:
         attachments = message.get("attachments") or []
         if not attachments:
             return []
-        client = await self._ready_client()
-        if client is None:
+        bot = await self._ready_client()
+        if bot is None:
             raise RuntimeError("telegram token is unavailable")
+        client = bot.client
         limit = client.download_limit
         event_dir = self.state_dir / "staging" / _safe_component(lease.event_id)
         staged, settled, waiting = [], False, None
@@ -523,6 +537,7 @@ class TelegramTransportRuntime:
                     text=result.text if result.outcome in {"message", "deferred"} and not result.output_ref else "",
                     child_ref=result.child_work_ref,
                     reply_anchor=result.reply_anchor,
+                    owner_confirmation=result.owner_confirmation,
                 )
             elif result.status == "unresolved":
                 # An older Host without a canonical answer yet: keep observing at the
@@ -607,27 +622,72 @@ class TelegramTransportRuntime:
         if recorded_calls(lease.payload) and self._settled_by_record(lease):
             return True
         calls = _ProviderCalls(self.store, lease)
+        chat_read_wait: Optional[float] = None
         # A send row's writes name this attempt (calls.fence), so after another claim of the row they change nothing.
         try:
-            client = await self._ready_client()
-            if client is None:
+            kind = lease.payload.get("kind")
+            topic = lease.payload.get("topic_id")
+            if calls.recorded and kind not in DIRECT_KINDS and type(topic) is int:
+                topic = str(topic)  # old ordinary custody can name the same exact topic as an integer
+            thread_id = telegram_topic(topic) if calls.recorded else str(topic or "")
+            if thread_id is None:
+                raise SendAddressInvalid("The queued message does not name an exact Telegram topic.")
+            if calls.sender is None:
+                raise SendAddressInvalid("The sender of the confirmed parts is not recorded. Remaining parts were not sent.")
+            bot = await self._ready_client()
+            if bot is None:
                 raise RuntimeError("telegram token is unavailable")
-            lease = replace(lease, payload={**lease.payload, "_reporting": await self._resolved_reporting(lease.payload)})
+            if calls.recorded and not is_user_id(bot.account_id):
+                raise PlaceHeld("Held: Telegram has not confirmed the sending bot's identity.")
+            _check_send_recipient(lease.payload, bot.account_id)
+            if calls.sender and calls.sender != bot.account_id:
+                raise PlaceHeld("Held: The confirmed parts belong to another Telegram bot.")
+            confirmation = lease.payload.get("owner_confirmation") if kind == OWNER_SEND else None
+            if confirmation is not None:
+                chat_id = lease.payload.get("chat_id")
+                if not matches_owner_destination(confirmation, bot.account_id, chat_id, thread_id):
+                    raise SendAddressInvalid("The queued owner confirmation does not match the send address.")
+                origin = ((lease.payload.get("_reporting") or {}).get("origin") or {}).get("kind")
+                tool = {"tool": OWNER_SEND_TOOL, "automatic": "place_reply"}.get(origin)
+                if owner_condition_key(confirmation, bot.account_id, chat_id, thread_id, tool=tool) is None:
+                    raise PlaceHeld("Held: The queued owner confirmation does not establish this send's producer and Place.")
+            # The policy check and every provider call use this same client and address.
+            reporting = await self._resolved_reporting(lease.payload, bot.account_id)
+            lease = replace(lease, payload={**lease.payload, "_reporting": reporting})
             calls.checkpoint(lease.payload)
+            check_chat = kind in DIRECT_KINDS and (reporting.get("origin") or {}).get("kind") != "automatic"
+            frozen_files = outbox_files.records(lease.payload)
+
+            async def check_place():
+                await self._check_place(lease.payload, bot.account_id, thread_id=thread_id, owner_confirmation=confirmation)
+
+            # Let a definitive withdrawal settle before getChat or local file checks. The actual POST checks again.
+            if confirmation is not None and (check_chat or frozen_files):
+                await check_place()
+
             async def before_send():
-                # The row's own forum topic, as on the reaction path: a topic's place may hold what its chat allows.
-                await self._check_place(lease.payload, thread_id=str(lease.payload.get("topic_id") or ""))
-                if outbox_files.records(lease.payload):
-                    # Only the bytes queued are ever sent: a kept copy that changed fails before the call. Checked
-                    # after the place, so a held row reads nothing.
+                nonlocal chat_read_wait
+                if not calls.recorded or (confirmation is None and (check_chat or frozen_files)):
+                    await check_place()  # preserve the earlier check before other provider work or file reads
+                if check_chat:
+                    # Automatic replies already carry the typed private chat from the update. A tool caller has only an ID.
+                    try:
+                        chat = await bot.client.get_chat(lease.payload["chat_id"])
+                    except TelegramApiError as exc:
+                        # A failed read says nothing about this chat. A definitive 4xx remains a bounded failure.
+                        code = exc.error_code or exc.http_status or 0
+                        if code in (0, 408, 429) or 500 <= code < 600:
+                            wait = exc.retry_after if exc.error_code == 429 else None
+                            chat_read_wait = wait if wait is not None and 0 <= wait < float("inf") else 0.0
+                        raise
+                    if private_user_id(chat) != lease.payload["direct_reply_user_id"]:
+                        raise PlaceHeld("Held: Telegram did not identify this chat as the pinned user's private dialog.")
+                if frozen_files:
                     await asyncio.to_thread(outbox_files.verify, lease.payload)
 
-            receipt = await _deliver(client, lease, self.store, before_send=before_send, account_id=self._bot_id,
-                                     delivered=self._note_delivered, calls=calls)
+            receipt = await _deliver(bot.client, lease, self.store, before_send=before_send, account_id=bot.account_id,
+                                     check_place=check_place, delivered=self._note_delivered, calls=calls)
             self.store.mark_delivered(lease.delivery_id, provider_receipt=receipt, attempts=calls.fence)
-            return True
-        except PlaceHeld as exc:
-            self.store.hold_outbox(lease.delivery_id, str(exc), attempts=calls.fence)
             return True
         except asyncio.CancelledError:
             # A send call already stored as started keeps its marker, so the next claim ends the row uncertain. An
@@ -654,9 +714,18 @@ class TelegramTransportRuntime:
                 # reclaimed.
                 self._end_uncertain(lease.delivery_id, _error(exc), attempts=calls.fence)
                 return True
+            if isinstance(exc, PlaceHeld):
+                self.store.hold_outbox(lease.delivery_id, str(exc), attempts=calls.fence)
+                return True
             if calls.recorded and self._settled_by_stored_record(lease, exc):
                 return True
-            if lease.attempts >= _MAX_OUTBOX_ATTEMPTS:
+            if chat_read_wait is not None:
+                # No send call started for this part. Keep its retry budget and any earlier confirmed parts.
+                self.store.hold_outbox(
+                    lease.delivery_id, _error(exc), attempts=calls.fence,
+                    min_delay_sec=max(_retry_delay(lease.attempts), chat_read_wait),
+                )
+            elif isinstance(exc, (ConditionalDeliveryEnded, SendAddressInvalid)) or lease.attempts >= _MAX_OUTBOX_ATTEMPTS:
                 payload = self.store.outbox_payload(lease.delivery_id)
                 # A send row gets here only through failures before a call and Telegram's answers that it did
                 # nothing; the other kinds keep their earlier rule.
@@ -778,11 +847,11 @@ class TelegramTransportRuntime:
             if last is not None and now - last < _TYPING_RENEW_SECONDS:
                 continue
             try:
-                client = await self._ready_client()
-                if client is None:
+                bot = await self._ready_client()
+                if bot is None:
                     raise RuntimeError("telegram token is unavailable")
                 # Every showing: Silent, Paused or another current place policy stops it.
-                await self._check_place({"chat_id": key[0]}, thread_id=key[1])
+                await self._check_place({"chat_id": key[0]}, bot.account_id, thread_id=key[1])
                 # A reply delivered, the turn's end or the cap met during those awaits ends a request unsent.
                 at = time.time()
                 stale = [row for row in rows if over(row, key, at)]
@@ -792,7 +861,7 @@ class TelegramTransportRuntime:
                     if not rows:
                         continue
                 # Only a forum topic is a thread; a turn's topic_id is never a reply chain (events.py).
-                await client.send_chat_action(key[0], "typing", topic_id=int(key[1]) if key[1] else None)
+                await bot.client.send_chat_action(key[0], "typing", topic_id=int(key[1]) if key[1] else None)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -807,24 +876,28 @@ class TelegramTransportRuntime:
                 self._typing_sent_at.pop(key, None)
         return sent
 
-    async def _resolved_reporting(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _resolved_reporting(self, payload: Dict[str, Any], account_id: str) -> Dict[str, Any]:
         reporting = dict(payload.get("_reporting") or {"version": 0})
         discover = getattr(self.submitter, "discover_delivery_support", None)
         if reporting.get("version") == -1:
             reporting["version"] = await discover() if discover else 0
             reporting["status"] = getattr(self.submitter, "delivery_reporting_status", "unsupported")
-        if reporting.get("version") == 1 and not reporting.get("account_id"):
-            reporting["account_id"] = self._bot_id
+        tool_send = recorded_calls(payload) and (reporting.get("origin") or {}).get("kind") == "tool"
+        if reporting.get("version") == 1 and (tool_send or payload.get("kind") in DIRECT_KINDS or not reporting.get("account_id")):
+            reporting["account_id"] = account_id
         if reporting.get("version") == 1:
             if _is_reaction(payload) and discover:
                 await discover()
             reporting["explicit_completion"] = getattr(self.submitter, "presence_explicit_completion", 0)
         return reporting
 
-    async def _check_place(self, payload: Dict[str, Any], *, thread_id: str = "") -> None:
+    async def _check_place(self, payload: Dict[str, Any], account_id: str, *, thread_id: str = "", owner_confirmation=None) -> None:
         check = getattr(self.submitter, "place_hold", None)
+        if owner_confirmation is not None and not check:
+            raise PlaceHeld("Held: Ouroboros cannot check the queued owner confirmation.")
         if check:
-            reason = await check(self._bot_id, str(payload.get("chat_id") or ""),
+            reason = await check(account_id, str(payload.get("chat_id") or ""),
+                                 **({"owner_confirmation": owner_confirmation} if owner_confirmation is not None else {}),
                                  **({"thread_id": thread_id} if thread_id else {}))
             if reason:
                 raise PlaceHeld(reason)
@@ -847,19 +920,19 @@ class TelegramTransportRuntime:
             await self._settle_unanswered_reaction(lease, known)
             return
         try:
-            client = await self._ready_client()
-            if client is None:
+            bot = await self._ready_client()
+            if bot is None:
                 raise RuntimeError("telegram token is unavailable")
-            known["_reporting"] = await self._resolved_reporting(known)
+            known["_reporting"] = await self._resolved_reporting(known, bot.account_id)
             self.store.checkpoint_outbox(lease.delivery_id, known)
             parameters = known.get("parameters")
             if not str(known.get("chat_id") or "").strip() or not isinstance(parameters, dict):
                 raise ValueError("Telegram reaction chat_id and parameters are required")
             # The topic the tool's guard checked, so a topic paused after queueing holds this row too.
-            await self._check_place(known, thread_id=str(known.get("topic_id") or ""))
+            await self._check_place(known, bot.account_id, thread_id=str(known.get("topic_id") or ""))
             self.store.checkpoint_outbox(lease.delivery_id, {**known, _REACTION_MARKER: True})
             known[_REACTION_MARKER] = True
-            result = await client.operation(REACTION_METHOD, dict(parameters))
+            result = await bot.client.operation(REACTION_METHOD, dict(parameters))
             if result.get("ok") is False:
                 raise TelegramApiError(REACTION_METHOD, "Telegram did not confirm the reaction")
             known["_operation_result"] = result
@@ -897,8 +970,9 @@ class TelegramTransportRuntime:
 
     async def _settle_unanswered_reaction(self, lease: OutboxLease, known: Dict[str, Any]) -> None:
         try:
-            if await self._ready_client() is not None:
-                known["_reporting"] = await self._resolved_reporting(known)
+            bot = await self._ready_client()
+            if bot is not None:
+                known["_reporting"] = await self._resolved_reporting(known, bot.account_id)
         except Exception as exc:
             # Neither changes what is known. Without them this outcome stays in the local receipt.
             self._last_error = _error(exc)
@@ -954,6 +1028,23 @@ class TelegramTransportRuntime:
             callback(level, message)
 
 
+def _check_send_recipient(payload: Dict[str, Any], account_id: str) -> None:
+    chat = payload.get("chat_id")
+    if payload.get("kind") == OWNER_SEND and not isinstance(payload.get("owner_confirmation"), dict):
+        raise PlaceHeld("Held: The queued private destination lacks its owner confirmation.")
+    if payload.get("kind") in DIRECT_KINDS:
+        if not recorded_calls(payload) or not matches_direct_recipient(payload, account_id, chat):
+            raise PlaceHeld("Held: The direct recipient and sending bot must match the queued address.")
+        return
+    # A previous version's automatic reply can still name the bot that received its private turn.
+    # Keep that address during an upgrade, including a continuation of an older turn.
+    reporting = payload.get("_reporting") or {}
+    source_account = reporting.get("account_id")
+    if (is_user_id(chat) and (reporting.get("origin") or {}).get("kind") == "automatic"
+            and is_user_id(source_account) and source_account != account_id):
+        raise PlaceHeld("Held: This private reply belongs to another Telegram bot.")
+
+
 def _is_reaction(payload: Dict[str, Any]) -> bool:
     return payload.get("kind") == "operation" and payload.get("method") == REACTION_METHOD
 
@@ -982,31 +1073,45 @@ class _ProviderCalls:
     def __init__(self, store: CustodyStore, lease: OutboxLease):
         self.store, self.lease = store, lease
         self.recorded = recorded_calls(lease.payload)
+        self.sender = retained_sender(lease.payload) if self.recorded else ""
         self.fence: Optional[int] = lease.attempts if self.recorded else None
         self.open: Optional[Dict[str, Any]] = None
 
     def checkpoint(self, payload: Dict[str, Any], *, report=None, sent=None, confirmed: Sequence[int] = ()) -> None:
         """Store the row's record (with its reports and own messages) as this attempt has it; ``confirmed`` names the
         messages Telegram just confirmed, carried by ``LeaseLost`` if the record cannot be stored."""
+        if self.sender:
+            payload = {**payload, "_sending_account_id": self.sender}
         stored = self.store.checkpoint_outbox(self.lease.delivery_id, payload, report=report, sent=sent,
                                               attempts=self.fence)
         if not stored and self.fence is not None:
             raise LeaseLost("this attempt no longer holds the outbox row; its record was not stored", confirmed)
 
-    async def make(self, payload: Dict[str, Any], part: int, method: str, call: Callable[[], Awaitable[Any]]) -> Any:
+    def poster(self, payload, part, method, account_id, check_place):
+        async def post(request):
+            if check_place is not None:
+                await check_place()
+            return await self.make(payload, part, method, account_id, request)
+        return post
+
+    async def make(self, payload: Dict[str, Any], part: int, method: str, account_id: str,
+                   call: Callable[[], Awaitable[Any]]) -> Any:
         """Make one call; ``payload`` is the row's record as it stands just before it."""
+        _check_send_recipient(payload, account_id)
         if not self.recorded:
             return await call()
         marker = {"part": part, "method": method}
         if not self.store.start_outbox_call(self.lease.delivery_id, self.lease.attempts,
-                                            {**payload, CALL_STARTED: marker}):
+                                            {**payload, "_sending_account_id": account_id, CALL_STARTED: marker}):
             raise LeaseLost("this attempt no longer holds the outbox row; nothing was sent")
-        self.open = marker
+        previous_sender = self.sender
+        self.sender, self.open = account_id, marker
         try:
             return await call()
         except Exception as exc:
             if _not_performed(exc):
-                self.checkpoint(payload)  # Telegram did nothing: the marker goes, while this attempt holds the row
+                self.sender = previous_sender
+                self.checkpoint(payload)  # proved no effect: clear only this physical attempt's marker
                 self.open = None
             raise
 
@@ -1016,7 +1121,7 @@ class _ProviderCalls:
 
 
 def _send_method(payload: Dict[str, Any]) -> str:
-    kind = str(payload.get("kind") or "message")
+    kind = str(delivery_kind(payload))
     return "sendMessage" if kind == "message" else "sendMediaGroup" if kind == "album" else MEDIA_METHODS.get(kind, "")
 
 
@@ -1033,7 +1138,7 @@ def _recorded_end(payload: Dict[str, Any]) -> Tuple[str, Any]:
     stored answer names no message, or an album's does not name one message per item (fewer, more, or entries without
     a message_id); ``("", None)`` while a part is still to be sent.
     """
-    kind = str(payload.get("kind") or "message")
+    kind = str(delivery_kind(payload))
     if kind == "message":
         messages = payload.get("_sent_messages")
         if messages is None:
@@ -1071,13 +1176,13 @@ def _own_message(account_id: str, chat_id: str, topic_id: Any, result: Dict[str,
 
 
 async def _deliver(
-    client: TelegramClient, lease: OutboxLease, store: CustodyStore, *, before_send=None, account_id: str = "",
+    client: TelegramClient, lease: OutboxLease, store: CustodyStore, *, before_send=None, check_place=None, account_id: str = "",
     delivered: Callable[[str, Any], None] = lambda _chat, _topic: None, calls: Optional[_ProviderCalls] = None,
 ) -> Dict[str, Any]:
     calls = calls or _ProviderCalls(store, lease)
     payload = lease.payload
-    kind = str(payload.get("kind") or "message")
-    chat_id = str(payload.get("chat_id") or "").strip()
+    kind = str(delivery_kind(payload))
+    chat_id = str(payload.get("chat_id") or "")
     if not chat_id:
         raise ValueError("outbox chat_id is required")
     topic_id = _optional_int(payload.get("topic_id"))
@@ -1107,13 +1212,14 @@ async def _deliver(
                 await before_send()
             # The record with every chunk confirmed so far: the marker is stored with it, never in place of it.
             current = {**payload, "_sent_messages": messages} if messages or "_sent_messages" in payload else payload
-            result = await calls.make(current, index, "sendMessage", lambda: client.send_text_chunk(
+            result = await client.send_text_chunk(
                 chat_id,
                 chunk["text"],
                 parse_mode=chunk["parse_mode"],
                 topic_id=topic_id,
                 reply_to_message_id=reply_id if index == 0 else None,
-            ))
+                perform_post=calls.poster(current, index, "sendMessage", account_id, check_place),
+            )
             if not names_message(result):
                 raise UnconfirmedSend("sendMessage")  # its marker stays: the row ends uncertain
             report = delivery_report(lease.delivery_id, payload, part_id=index, state="delivered", receipt=result,
@@ -1156,7 +1262,7 @@ async def _deliver(
         return {"kind": kind, "method": method, "result": result}
     if kind == "album":
         return await _deliver_album(client, lease, store, before_send=before_send, account_id=account_id,
-                                    delivered=delivered, calls=calls)
+                                    delivered=delivered, calls=calls, check_place=check_place)
     if kind not in MEDIA_METHODS:
         raise ValueError(f"unsupported Telegram outbox kind: {kind}")
     # A stored answer (_sent_media) was decided before any call (TelegramTransportRuntime._settled_by_record).
@@ -1170,14 +1276,15 @@ async def _deliver(
     if before_send:
         await before_send()
     # The row's file: a copy kept when it was queued, or, for a row queued before 0.12.1, the path it named.
-    result = await calls.make(payload, 0, MEDIA_METHODS[kind], lambda: client.send_media(
+    result = await client.send_media(
         kind,
         chat_id,
         pathlib.Path(str(payload.get("file_path") or "")),
         prepared_caption=caption,
+        perform_post=calls.poster(payload, 0, MEDIA_METHODS[kind], account_id, check_place),
         topic_id=topic_id,
         reply_to_message_id=reply_id,
-    ))
+    )
     if not names_message(result):
         raise UnconfirmedSend(MEDIA_METHODS[kind])  # its marker stays: the row ends uncertain
     report = delivery_report(lease.delivery_id, payload, part_id=0, state="delivered", receipt=result,
@@ -1192,7 +1299,7 @@ async def _deliver(
 
 
 async def _deliver_album(
-    client: TelegramClient, lease: OutboxLease, store: CustodyStore, *, before_send=None, account_id: str = "",
+    client: TelegramClient, lease: OutboxLease, store: CustodyStore, *, before_send=None, check_place=None, account_id: str = "",
     delivered: Callable[[str, Any], None] = lambda _chat, _topic: None, calls: Optional[_ProviderCalls] = None,
 ) -> Dict[str, Any]:
     """One sendMediaGroup call; each message Telegram returns gets its own receipt part and delivery report.
@@ -1204,7 +1311,7 @@ async def _deliver_album(
     """
     calls = calls or _ProviderCalls(store, lease)
     payload = lease.payload
-    chat_id = str(payload.get("chat_id") or "").strip()
+    chat_id = str(payload.get("chat_id") or "")
     topic_id = _optional_int(payload.get("topic_id"))
     items = payload.get("_rendered_items")
     if items is None:
@@ -1215,8 +1322,9 @@ async def _deliver_album(
         calls.checkpoint(payload)
     if before_send:
         await before_send()
-    results = await calls.make(payload, 0, "sendMediaGroup", lambda: client.send_media_group(
-        chat_id, items, topic_id=topic_id, reply_to_message_id=_optional_int(payload.get("reply_to_message_id"))))
+    results = await client.send_media_group(
+        chat_id, items, topic_id=topic_id, reply_to_message_id=_optional_int(payload.get("reply_to_message_id")),
+        perform_post=calls.poster(payload, 0, "sendMediaGroup", account_id, check_place))
     messages, reports, rows = [], [], []
     for index, result in enumerate(results):
         if not names_message(result):

@@ -60,12 +60,13 @@ def runtime(state_dir, provider):
     )
     instance._client = TelegramClient("fake-token", transport=provider)
     instance._client_token = "fake-token"
+    instance._bot_id = "9"
     return instance
 
 
 def ready_again(store):
     with sqlite3.connect(store.path) as db:
-        db.execute("UPDATE outbox SET available_at=0 WHERE state='pending'")
+        db.execute("UPDATE outbox SET available_at=0 WHERE state IN ('pending','direct_pending')")
 
 
 @pytest.mark.parametrize("kind", ["message", "photo", "document"])
@@ -254,28 +255,42 @@ def test_rendered_chunks_and_confirmed_receipts_survive_retry_and_restart(
     asyncio.run(run())
 
 
-def test_partially_delivered_legacy_row_keeps_original_raw_boundaries(tmp_path):
+@pytest.mark.parametrize("sender_known", [True, False])
+def test_partially_delivered_legacy_row_keeps_confirmed_parts_and_its_sender(tmp_path, sender_known):
     async def run():
-        provider = Provider()
-        worker = runtime(tmp_path, provider)
+        other, original = Provider(), Provider()
+        worker = runtime(tmp_path, other)
+        worker._bot_id = "77"
+        first = {"message_id": 99}
+        if sender_known:
+            first["from"] = {"is_bot": True, "id": 9}
         worker.store.enqueue_outbox(
             "legacy",
             {
                 "kind": "message",
                 "chat_id": "1",
                 "text": "x" * 4000 + "**literal tail**",
-                "_sent_messages": [{"message_id": 99}],
+                "_sent_messages": [first],
                 "reply_to_message_id": 5,
             },
         )
         assert await worker.process_one_outbox()
-        assert provider.calls == [
-            ("sendMessage", {"chat_id": "1", "text": "**literal tail**"})
-        ]
-        messages = worker.store.delivery_receipt("legacy")["provider_receipt"][
-            "messages"
-        ]
-        assert messages == [{"message_id": 99}, {"message_id": 1}]
+        assert not other.calls
+        receipt = worker.store.delivery_receipt("legacy")
+        assert receipt["confirmed_messages"] == [first]
+        if not sender_known:
+            assert receipt["state"] == "failed"
+            assert not await worker.process_one_outbox()
+            return
+        assert receipt["state"] == "held"
+        ready_again(worker.store)
+        resumed = runtime(tmp_path, original)
+        assert await resumed.process_one_outbox()
+        assert original.calls == [("sendMessage", {"chat_id": "1", "text": "**literal tail**"})]
+        receipt = resumed.store.delivery_receipt("legacy")
+        assert receipt["state"] == "delivered"
+        assert receipt["provider_receipt"]["messages"] == [first, {"message_id": 1}]
+        assert resumed.store.outbox_payload("legacy")["_sending_account_id"] == "9"
 
     asyncio.run(run())
 

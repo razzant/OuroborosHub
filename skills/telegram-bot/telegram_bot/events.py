@@ -13,12 +13,45 @@ from .api import CLOUD_DOWNLOAD_LIMIT
 
 # Chats a bot can be part of. A private chat is one person who started the bot.
 _PLACE_CHAT_TYPES = frozenset({"private", "group", "supergroup", "channel"})
+# Telegram's Bot API user dialog IDs are 1 through 2**40 - 1 (core.telegram.org/api/bots/ids).
+_MAX_USER_ID = (1 << 40) - 1
 # getFile serves at most this much; a larger file can never be downloaded by a bot (api.CLOUD_DOWNLOAD_LIMIT).
 BOT_API_DOWNLOAD_LIMIT = CLOUD_DOWNLOAD_LIMIT
 # The core contract's optional event.message key: [{"kind": word, "description": plain text}] for what a message
 # holds that neither event.text nor an attachments record carries. The one place this name is spelled.
 NON_TEXT_KEY = "non_text"
 _NON_TEXT_CHARS = 4000
+
+
+def is_user_id(value: Any) -> bool:
+    """A canonical decimal user dialog ID, as used in connector arguments and stored events."""
+    return (isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,12}", value) is not None
+            and int(value) <= _MAX_USER_ID)
+
+
+def private_user_id(chat: Any) -> str:
+    """The user dialog in Telegram's typed Chat, from an update or getChat."""
+    if not isinstance(chat, dict) or chat.get("type") != "private" or chat.get("is_direct_messages", False) is not False:
+        return ""
+    chat_id = chat.get("id")
+    return str(chat_id) if type(chat_id) is int and 0 < chat_id <= _MAX_USER_ID else ""
+
+
+def _direct_reply_recipient(chat: Dict[str, Any], account_id: str) -> Dict[str, str]:
+    user = private_user_id(chat)
+    return {"direct_reply_user_id": user} if user and is_user_id(account_id) else {}
+
+
+def direct_reply_account(event: Dict[str, Any]) -> str:
+    """The sending account for a captured private reply whose conversation and recipient agree."""
+    conversation = event.get("conversation") or {}
+    account = event.get("account_id")
+    user_id = conversation.get("direct_reply_user_id")
+    if (event.get("provider") == conversation.get("platform") == "telegram" and conversation.get("chat_type") == "private"
+            and is_user_id(account) and conversation.get("bot_account_id") == account
+            and is_user_id(user_id) and user_id == conversation.get("chat_id") == event.get("conversation_id")):
+        return account
+    return ""
 
 
 def _megabytes(size: int) -> str:
@@ -175,6 +208,7 @@ def parse_telegram_update(
         "title": str(chat.get("title") or ""),
         "username": str(chat.get("username") or ""),
         "topic_id": topic_id,
+        **_direct_reply_recipient(chat, bot_id),
         **({"is_forum": True} if chat.get("is_forum") is True else {}),
     }
     if str(chat_id) == str(management_group_id).strip() and chat.get("type") in {
@@ -187,6 +221,7 @@ def parse_telegram_update(
     message_fact = {
         "event_kind": event_kind,
         "message_id": message_id,
+        **({"reply_targets": []} if "direct_reply_user_id" in conversation_fact else {}),
         "sent_at_epoch": _integer(message.get("date")),
         **_time_facts(_integer(message.get("date")), _integer(message.get("edit_date"))),
         "reply_to_message_id": _reply_message_id(message),
@@ -308,6 +343,7 @@ def _parse_reaction_update(
         "title": str(chat.get("title") or ""),
         "username": str(chat.get("username") or ""),
         "topic_id": None,
+        **_direct_reply_recipient(chat, bot_id),
         **({"is_forum": True} if chat.get("is_forum") is True else {}),
     }
     if str(chat_id) == str(management_group_id).strip() and chat.get("type") in {"group", "supergroup"}:
@@ -327,6 +363,7 @@ def _parse_reaction_update(
         message={
             "event_kind": "message_reaction_count" if counted else "message_reaction",
             "message_id": message_id,
+            **({"reply_targets": []} if "direct_reply_user_id" in conversation else {}),
             "sent_at_epoch": sent_at_epoch,
             **_time_facts(sent_at_epoch),
             **raw,
