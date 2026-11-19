@@ -3,8 +3,8 @@ import asyncio
 import pytest
 
 from telegram_bot.events import parse_telegram_update
-from telegram_bot.host import (PLACE_POLICY_UNREAD, SKILL_ACCESS_REFUSED, PresenceHostClient, PresenceHostError,
-                               PresenceHostHTTPError)
+from telegram_bot.host import (PLACE_POLICY_UNREAD, SKILL_ACCESS_REFUSED, OwnerConfirmationChanged,
+                               PresenceHostClient, PresenceHostError, PresenceHostHTTPError)
 from telegram_bot.runtime import TelegramTransportRuntime
 from test_host import _event
 from test_runtime import AcceptingSubmitter, Logger, RuntimeClient
@@ -38,14 +38,70 @@ def test_unread_place_policy_is_held_in_words_that_ask_nothing(tmp_path, place):
     assert asyncio.run(_place_host(tmp_path, place).place_hold("9", "-1")) == PLACE_POLICY_UNREAD
 
 
+def _owner_condition():
+    address = {"provider": "telegram", "account_id": "9", "conversation_id": "55", "thread_id": "4"}
+    return {**address, "connector": "telegram-bot", "tool": "place_reply", "place_id": "confirming-place",
+            "confirmed_at": "2025-01-01T00:00:00Z", "connected_revision": 1, "observed_revision": 3,
+            "delivery_place": {**address, "connector": "telegram-bot", "version": 1,
+                               "place_id": "outbound-place", "connected_revision": 2}}
+
+
+@pytest.mark.parametrize("status,code,disposition,ok", [
+    (409, "place_owner_confirmation_changed", "blocked", False),  # earlier Host
+    (409, "place_owner_confirmation_changed", "retry", False),
+    (503, "place_owner_confirmation_changed", "rejected", False),
+    (409, "place_owner_confirmation_changed", "rejected", True),
+    (409, "presence_recipient_capability_required", "blocked", False),
+    (409, "other", "rejected", False),
+])
+def test_inconclusive_owner_check_keeps_the_row_held(tmp_path, status, code, disposition, ok):
+    refusal = {"ok": ok, "code": code, "disposition": disposition, "error": "The owner confirmation changed."}
+    host = _place_host(tmp_path, PresenceHostHTTPError(status, "fixture", refusal))
+    assert asyncio.run(host.place_hold("9", "55", thread_id="4", owner_confirmation=_owner_condition())).startswith("Held:")
+
+
+def test_conditional_send_uses_the_original_outbound_place_and_exact_echo(tmp_path):
+    async def run():
+        condition = _owner_condition()
+        active = {"state": "active", "place_id": "outbound-place", "owner_confirmation": condition}
+        for answer, expected in [(active, ""), ({**active, "place_id": "confirming-place"}, PLACE_POLICY_UNREAD),
+                                 ({**active, "owner_confirmation": {**condition, "observed_revision": 4}}, PLACE_POLICY_UNREAD)]:
+            host = _place_host(tmp_path, answer)
+            assert await host.place_hold("9", "55", "4", owner_confirmation=condition) == expected
+        refusal = {"ok": False, "code": "place_owner_confirmation_changed", "disposition": "rejected"}
+        host = _place_host(tmp_path, PresenceHostHTTPError(409, "fixture", refusal))
+        with pytest.raises(OwnerConfirmationChanged):
+            await host.place_hold("9", "55", "4", owner_confirmation=condition)
+    asyncio.run(run())
+
+
 def test_host_that_cannot_answer_identity_holds_in_the_same_words_and_older_hosts_do_not_hold(tmp_path):
     assert asyncio.run(_place_host(tmp_path, {}, identity=OSError("refused")).place_hold("9", "-1")) == PLACE_POLICY_UNREAD
+    assert asyncio.run(_place_host(tmp_path, {}, identity={"ok": True, "places_version": False}).place_hold("9", "-1")) == PLACE_POLICY_UNREAD
     assert asyncio.run(_place_host(tmp_path, {}, identity={"ok": True}).place_hold("9", "-1")) == ""
+
+
+def test_legacy_policy_exception_is_refreshed_before_the_next_send(tmp_path):
+    async def run():
+        class Transport:
+            identities = iter([{"ok": True}, {"ok": True, "places_version": 1}])
+
+            async def request_json(self, method, url, **kwargs):
+                if url.endswith("/identity"):
+                    return next(self.identities)
+                return {"state": "paused"}
+
+        host = PresenceHostClient(state_dir=tmp_path, token_provider=lambda: "fixture",
+                                  host_base="http://host.invalid", transport=Transport())
+        assert await host.place_hold("9", "-1") == ""
+        assert await host.place_hold("9", "-1") == "Held: Telegram is paused"
+    asyncio.run(run())
 
 
 def test_place_state_reads_as_before_and_not_connected_keeps_the_hosts_words(tmp_path):
     def hold(place):
-        return asyncio.run(_place_host(tmp_path, place).place_hold("9", "-1"))
+        identity = {"ok": True, "places_version": 1, "presence_place_binding_version": 1}
+        return asyncio.run(_place_host(tmp_path, place, identity=identity).place_hold("9", "-1"))
     assert hold({"state": "silent", "label": "Team chat"}) == "Held: Team chat is silent"
     assert hold({"state": "paused"}) == "Held: Telegram is paused"
     assert hold({"state": "active"}) == ""

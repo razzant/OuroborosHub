@@ -1,4 +1,4 @@
-# Telegram Bot 0.12.1
+# Telegram Bot 0.12.2
 
 A public Telegram bot connector for private-chat, group and channel places,
 separate from the built-in owner-control Telegram bridge. It keeps incoming
@@ -35,6 +35,10 @@ bot also sends video, audio, voice, GIFs and albums, and shows "typing…". See
 A send whose outcome is unknown, such as a lost answer or a restart during the
 call, ends `uncertain` and is never made again. A file is copied when queued and
 goes out as those bytes. See [Sending once](SKILL.md#sending-once-0121).
+
+A supporting host can verify which bot will send a direct message or automatic reply
+and which user chat will receive it. Switching bots holds queued messages bound to
+the previous bot. See [Direct recipients](SKILL.md#direct-recipients).
 
 See [SKILL.md](SKILL.md#connector-settings-and-facts-063) for the fact rules,
 setup, provider visibility and delivery behavior, and [CHANGELOG.md](CHANGELOG.md)

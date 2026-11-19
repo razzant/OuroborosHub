@@ -27,6 +27,8 @@ _MAX_UPLOAD_BYTES = CLOUD_UPLOAD_LIMIT
 # Message kinds a file is sent as, by Bot API method; the multipart file field is the kind itself.
 MEDIA_METHODS = {"photo": "sendPhoto", "document": "sendDocument", "video": "sendVideo", "audio": "sendAudio",
                  "voice": "sendVoice", "animation": "sendAnimation"}
+_SEND_METHODS = frozenset({"sendMessage", "sendMediaGroup", *MEDIA_METHODS.values()})
+_IDENTITY_METHODS = frozenset({"getMe", "getChat"})
 # getFile's words that this file can never be served: above the server's limit, or a file_id that cannot be
 # read at all. Decided by Telegram's description, never by its status code: getFile also answers a generic 400
 # "wrong file_id or the file is temporarily unavailable", which usually passes and stays a retry.
@@ -41,7 +43,8 @@ _NO_CONNECTION = (socket.gaierror, ConnectionRefusedError)
 
 
 class TelegramApiError(RuntimeError):
-    def __init__(self, endpoint: str, description: str, error_code: int = 0, retry_after: Optional[float] = None):
+    def __init__(self, endpoint: str, description: str, error_code: int = 0, retry_after: Optional[float] = None,
+                 *, http_status: Optional[int] = None):
         super().__init__(
             f"Telegram {endpoint} failed ({error_code or 'transport'}): {description}"
         )
@@ -50,6 +53,8 @@ class TelegramApiError(RuntimeError):
         self.error_code = int(error_code or 0)
         # Telegram's ResponseParameters.retry_after with a 429: the flood wait it names, in seconds.
         self.retry_after = retry_after
+        # HTTP status observed on a chat lookup, not a Bot API refusal or proof about a send.
+        self.http_status = http_status
 
 
 class TelegramFileTooLarge(TelegramApiError):
@@ -223,6 +228,9 @@ class TelegramClient:
     async def get_me(self) -> Dict[str, Any]:
         return await self._call("getMe", {})
 
+    async def get_chat(self, chat_id: str) -> Dict[str, Any]:
+        return await self._call("getChat", {"chat_id": chat_id})
+
     async def delete_webhook(self) -> bool:
         return bool(await self._call("deleteWebhook", {"drop_pending_updates": False}))
 
@@ -315,6 +323,7 @@ class TelegramClient:
         text: str,
         *,
         parse_mode: str = "",
+        perform_post=None,
         topic_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -326,8 +335,14 @@ class TelegramClient:
             payload["reply_parameters"] = {"message_id": int(reply_to_message_id)}
         if parse_mode:
             payload["parse_mode"] = parse_mode
+
+        async def post():
+            async def request():
+                return await self._call("sendMessage", payload)
+            return await perform_post(request) if perform_post else await request()
+
         try:
-            result = await self._call("sendMessage", payload)
+            result = await post()
         except TelegramApiError as exc:
             # A definitive negative 400 response permits a plain retry. A timeout
             # or unknown response never triggers a second physical send here.
@@ -335,7 +350,7 @@ class TelegramClient:
                 raise
             payload.pop("parse_mode", None)
             payload["text"] = _telegram_html_to_plain(text)
-            result = await self._call("sendMessage", payload)
+            result = await post()
         return {**result, "_delivery": {"text": payload["text"], "format": "html" if payload.get("parse_mode") == "HTML" else "plain"}} if isinstance(result, dict) else {}
 
     async def send_photo(
@@ -437,6 +452,7 @@ class TelegramClient:
         file_path: pathlib.Path,
         *,
         prepared_caption: Dict[str, str],
+        perform_post=None,
         topic_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -459,14 +475,13 @@ class TelegramClient:
             )
 
         async def post() -> Dict[str, Any]:
-            response = await self._transport.post_multipart(
-                self._endpoint(endpoint),
-                fields,
-                kind,
-                pathlib.Path(file_path),
-                60.0,
-            )
-            return self._result(endpoint, response)
+            url, path = self._endpoint(endpoint), pathlib.Path(file_path)
+
+            async def request():
+                response = await self._transport.post_multipart(url, fields, kind, path, 60.0)
+                return self._result(endpoint, response)
+
+            return await perform_post(request) if perform_post else await request()
 
         try:
             result = await post()
@@ -484,6 +499,7 @@ class TelegramClient:
         chat_id: str,
         items: Sequence[Dict[str, Any]],
         *,
+        perform_post=None,
         topic_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
@@ -511,12 +527,15 @@ class TelegramClient:
             fields["reply_parameters"] = json.dumps({"message_id": int(reply_to_message_id)})
 
         async def post(entries: List[Dict[str, Any]]) -> Any:
-            if not self._token:
-                raise TelegramApiError("sendMediaGroup", "TELEGRAM_PUBLIC_BOT_TOKEN is not configured")
-            response = await self._transport.post_multipart_files(
-                self._endpoint("sendMediaGroup"), {**fields, "media": json.dumps(entries, ensure_ascii=False)},
-                files, 120.0)
-            return self._result("sendMediaGroup", response)
+            endpoint = "sendMediaGroup"
+            url = self._endpoint(endpoint)
+            data = {**fields, "media": json.dumps(entries, ensure_ascii=False)}
+
+            async def request():
+                response = await self._transport.post_multipart_files(url, data, files, 120.0)
+                return self._result(endpoint, response)
+
+            return await perform_post(request) if perform_post else await request()
 
         try:
             result = await post(media)
@@ -575,32 +594,58 @@ class TelegramClient:
 
     @staticmethod
     def _result(endpoint: str, response: Dict[str, Any]) -> Any:
-        if not isinstance(response, dict) or not response.get("ok"):
-            payload = response if isinstance(response, dict) else {}
-            try:
-                code = int(payload.get("error_code") or 0)
-            except (TypeError, ValueError, OverflowError):
-                code = 0  # An unreadable code says nothing, so it is no code.
-            parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
-            wait = parameters.get("retry_after")
-            raise TelegramApiError(
-                endpoint,
-                str(payload.get("description") or "invalid provider response"),
-                code,
-                retry_after=float(wait) if type(wait) in (int, float) and wait >= 0 else None,
-            )
-        return response.get("result")
+        payload = response if isinstance(response, dict) else {}
+        strict = endpoint in _SEND_METHODS or endpoint in _IDENTITY_METHODS
+        ok = payload.get("ok")
+        success = (ok is True and not payload.get("_unreadable_http_error")) if strict else bool(ok)
+        if success:
+            return payload.get("result")
+        raise _api_refusal(endpoint, payload, strict=strict)
+
+
+def _api_refusal(endpoint: str, payload: Dict[str, Any], *, strict: bool,
+                 http_status: Optional[int] = None) -> TelegramApiError:
+    if strict:
+        # A proxy's HTTP status or a truthy/falsy value cannot prove the outcome of a Bot API call.
+        raw_code = payload.get("error_code")
+        readable = not payload.get("_unreadable_http_error")
+        code = raw_code if payload.get("ok") is False and type(raw_code) is int and readable else 0
+    else:
+        try:
+            code = int(payload.get("error_code") or 0)
+        except (TypeError, ValueError, OverflowError):
+            code = 0
+    parameters = payload.get("parameters") if isinstance(payload.get("parameters"), dict) else {}
+    wait = parameters.get("retry_after")
+    return TelegramApiError(
+        endpoint, str(payload.get("description") or "invalid provider response"), code,
+        retry_after=float(wait) if type(wait) in (int, float) and wait >= 0 else None,
+        http_status=http_status,
+    )
 
 
 def _open_json(request: urllib.request.Request, timeout_sec: float) -> Dict[str, Any]:
+    endpoint = request.full_url.rsplit("/", 1)[-1]
+    identity_read = endpoint in _IDENTITY_METHODS
     try:
         with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            declared = _declared_length(response) if identity_read else None
             data = response.read(2 * 1024 * 1024 + 1)
     except urllib.error.HTTPError as exc:
         try:
-            payload = json.loads(exc.read(64 * 1024).decode("utf-8", errors="replace"))
+            limit = 64 * 1024
+            body = exc.read(limit + 1)
+            payload = json.loads(body.decode("utf-8"))
+            declared = _declared_length(exc)
+            if isinstance(payload, dict) and (len(body) > limit or (declared is not None and len(body) != declared)
+                                              or (identity_read and payload.get("ok") is not False)):
+                # A failed HTTP exchange cannot confirm an identity, even if its body parses as JSON.
+                payload["_unreadable_http_error"] = True
         except Exception:
-            payload = {"ok": False, "error_code": exc.code, "description": "HTTP error"}
+            payload = {"ok": False, "error_code": exc.code, "description": "HTTP error", "_unreadable_http_error": True}
+        if endpoint == "getChat":
+            # Keep the transport status of a failed lookup solely for scheduling another read.
+            raise _api_refusal(endpoint, payload if isinstance(payload, dict) else {}, strict=True, http_status=exc.code) from exc
         return payload
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, _NO_CONNECTION):
@@ -612,6 +657,9 @@ def _open_json(request: urllib.request.Request, timeout_sec: float) -> Dict[str,
         raise TelegramApiError("request", type(exc).__name__) from exc
     if len(data) > 2 * 1024 * 1024:
         raise TelegramApiError("request", "response exceeds 2 MiB")
+    if declared is not None and len(data) != declared:
+        # urllib's bounded read can end early without raising, even on a JSON boundary.
+        raise TelegramApiError(endpoint, "incomplete identity response")
     try:
         payload = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:

@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.12.1
+version: 0.12.2
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -118,12 +118,15 @@ ui_tab:
       - label: Reactions in Host context
         path: reaction_context
       target: status
+place_reply:
+  direct_recipient: {provider: telegram, confirmation: owner_confirmation}
 tools:
 - name: telegram_send
   effect: message
   target: chat_id
   conversation: chat_id
   thread: topic_id
+  direct_recipient: {provider: telegram, account: direct_account_id, confirmation: owner_confirmation}
   description: Queue a proactive Telegram text, photo, document, video, audio, voice, animation or album for durable delivery.
 - name: telegram_moderate
   effect: write
@@ -222,6 +225,36 @@ echoes are ignored. Owner identity is the numeric Telegram ID the owner confirms
 in the Places sheet; a private chat with this bot grants no owner authority by
 itself. The owner-control chat remains the built-in Telegram bridge with its own
 bot token.
+
+### Direct recipients
+
+For a new private-chat message or reaction, `conversation.direct_reply_user_id` is Telegram's `chat.id`
+and `message.reply_targets: []` states that the reply has no further addresses. The host checks its current owner association.
+For a proactive `telegram_send`, an explicit `direct_account_id` selects the bot. A focus sending
+to its own private chat uses that event's bot. Elsewhere the host can infer a sole confirmed bot or Place account.
+Ordinary sends without a pin use the normal Bot API send path. Registration requires no observed bot.
+A known mismatch refuses the call. Before the first `getMe` or after token rotation a request can queue,
+but each delivery attempt needs Telegram's complete affirmative answer naming a bot. For proactive pinned
+content the same client asks `getChat` for the exact private user dialog. A temporary lookup outage leaves the message
+pending without spending a send attempt; a Bot API flood wait is respected. Private automatic replies carry
+Telegram's typed chat from the captured update. A typed recipient mismatch holds remaining parts. A repeated
+`request_id` must match the saved kind, destination, topic, reply and condition. When a sending bot is already
+established it must agree too. A later observation of the same condition never replaces the saved one.
+For a confirmed owner DM, the host retains both the owner confirmation and the selected outbound Place.
+Before marking each Bot API request started, including a plain formatting retry, the connector checks the exact
+bot, chat and topic. On a Places-capable host, missing, Silent or Paused places still hold ordinary sends.
+A definitive withdrawal ends the unsent remainder and keeps confirmed parts. An unavailable check holds the row;
+a request with an unknown provider outcome is never repeated. A partially sent row continues only with the same bot.
+A separately pinned bot has its own queue order.
+Telegram defines the numeric ranges for user and group chats in [Bot API dialog IDs](https://core.telegram.org/api/bots/ids).
+
+On rollback from 0.12.2 to 0.12.1 using the same state directory, the older worker leaves queued and leased
+address-conditioned sends parked. Ordinary rows can still go out; the older version does not count parked rows
+in its queue totals and may show their internal state in a receipt. It can still report already confirmed parts.
+After returning to 0.12.2, delivery uses the original bot and chat checks and resumes only the unsent parts;
+a provider call with no confirmed outcome is never repeated. Ordering applies to rows the current worker
+can serve, not across a period on the older version. This does not add address checks to messages that 0.12.1
+itself queues.
 
 The Bot API has no method for reading earlier chat history. This connector
 receives only updates delivered while it runs (Telegram keeps undelivered

@@ -17,8 +17,8 @@ from types import SimpleNamespace
 from typing import Sequence, Any, Dict, Iterator, List, Optional
 
 from . import discovery, outbox_files
-from .delivery import stored_answers
-from .events import ALBUM_POSITION_KEY, TelegramEvent
+from .delivery import DIRECT_KINDS, delivery_kind, direct_send_fields, stored_answers
+from .events import ALBUM_POSITION_KEY, TelegramEvent, direct_reply_account
 from .formatting import prepare_text
 
 
@@ -72,6 +72,29 @@ CREATE TABLE IF NOT EXISTS {name}(
     completed_at REAL,
     last_error TEXT NOT NULL DEFAULT '',
     FOREIGN KEY(event_id) REFERENCES inbox(event_id)
+)"""
+
+
+# A worker that cannot enforce an address pin must not claim or recover these rows.
+# Keep them in the same outbox for delivery identity, ordering and retained reports.
+_OUTBOX_PENDING = "('pending','direct_pending')"
+_OUTBOX_LEASED = "('leased','direct_leased')"
+_OUTBOX_REQUEUE = "CASE state WHEN 'direct_leased' THEN 'direct_pending' ELSE 'pending' END"
+_OUTBOX_TABLE = """
+CREATE TABLE {name}(
+    delivery_id TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('pending','leased','direct_pending','direct_leased','delivered','failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    available_at REAL NOT NULL,
+    lease_until REAL NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    delivered_at REAL,
+    failed_at REAL,
+    provider_receipt_json TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    reports_json TEXT NOT NULL DEFAULT '[]',
+    report_due_at REAL NOT NULL DEFAULT 0
 )"""
 
 
@@ -199,7 +222,7 @@ def recorded_calls(payload: Dict[str, Any]) -> bool:
 
     A row without ``kind`` is a text message. Edits, reactions and moderation keep their own handling unchanged.
     """
-    return str(payload.get("kind") or "message") in _SEND_KINDS
+    return str(delivery_kind(payload)) in _SEND_KINDS
 
 
 def _held_by(attempts: Optional[int]) -> tuple:
@@ -322,17 +345,21 @@ WHERE (state='pending' AND available_at<=?)
 ORDER BY available_at ASC, created_at ASC
 LIMIT 1
 """
-_CLAIMABLE_OUTBOX = """
+# Two exact bot pins name independent queues. An unknown bot still shares its chat/topic's ordering.
+_CLAIMABLE_OUTBOX = f"""
 SELECT candidate.delivery_id, candidate.payload_json, candidate.attempts,
        candidate.state, candidate.last_error
 FROM outbox AS candidate
-WHERE ((candidate.state='pending' AND candidate.available_at<=?)
-   OR (candidate.state='leased' AND candidate.lease_until<=?))
+WHERE ((candidate.state IN {_OUTBOX_PENDING} AND candidate.available_at<=?)
+   OR (candidate.state IN {_OUTBOX_LEASED} AND candidate.lease_until<=?))
 AND NOT EXISTS (
     SELECT 1 FROM outbox AS earlier
     WHERE earlier.rowid < candidate.rowid
-      AND earlier.state IN ('pending','leased')
+      AND (earlier.state IN {_OUTBOX_PENDING} OR earlier.state IN {_OUTBOX_LEASED})
       AND json_extract(earlier.payload_json, '$.chat_id') = json_extract(candidate.payload_json, '$.chat_id')
+      AND (COALESCE(json_extract(earlier.payload_json, '$.direct_account_id'), '') = ''
+           OR COALESCE(json_extract(candidate.payload_json, '$.direct_account_id'), '') = ''
+           OR json_extract(earlier.payload_json, '$.direct_account_id') = json_extract(candidate.payload_json, '$.direct_account_id'))
       AND COALESCE(json_extract(earlier.payload_json, '$.topic_id'), '') = COALESCE(json_extract(candidate.payload_json, '$.topic_id'), '')
 )
 ORDER BY candidate.created_at ASC, candidate.rowid ASC
@@ -537,9 +564,9 @@ class CustodyStore:
         a single owner: only one runtime's workers claim rows for this state
         dir, so a lease that exists before they start belongs to a runtime
         that is no longer running.  Waiting for its expiry would hold the
-        conversation's FIFO for up to the full Host-turn lease.  Only ``leased``
-        rows move to ``pending``; attempts, send checkpoints, receipts, and
-        report state are left unchanged, and the next claim counts the retry.
+        conversation's FIFO for up to the full Host-turn lease. Only leased
+        rows move to their corresponding pending state; attempts, send checkpoints,
+        receipts and reports are unchanged, and the next claim counts the retry.
 
         Residual: if an extension reload starts the new runtime before the old
         one has stopped, this can release a live lease -- the same outcome as a
@@ -552,9 +579,10 @@ class CustodyStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             for table in ("inbox", "outbox", "presence_work"):
+                pending, leased = (_OUTBOX_REQUEUE, _OUTBOX_LEASED) if table == "outbox" else ("'pending'", "('leased')")
                 cursor = conn.execute(
-                    f"UPDATE {table} SET state='pending', available_at=?, lease_until=0, "
-                    "last_error='released_at_runtime_start' WHERE state='leased'",
+                    f"UPDATE {table} SET state={pending}, available_at=?, lease_until=0, "
+                    f"last_error='released_at_runtime_start' WHERE state IN {leased}",
                     (now,),
                 )
                 released[table] = cursor.rowcount
@@ -736,6 +764,7 @@ class CustodyStore:
         continuation_ref: str = "",
         output_ref: str = "",
         reply_anchor: Optional[Dict[str, Any]] = None,
+        owner_confirmation: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Atomically retain Host custody, immediate text, and deferred work.
 
@@ -763,12 +792,13 @@ class CustodyStore:
             if text and outcome in {"message", "deferred"}:
                 if output_ref:
                     self._enqueue_output(conn, event_id, turn_ref, event, {
-                        "output_ref": output_ref, "text": text, "reply_anchor": reply_anchor}, now)
+                        "output_ref": output_ref, "text": text, "reply_anchor": reply_anchor,
+                        "owner_confirmation": owner_confirmation}, now)
                 else:
                     self._enqueue_outbox(
                         conn,
                         f"presence:{event_id}:turn",
-                        _reply_payload(event, text, _anchor_message_id(conn, event, reply_anchor)),
+                        _reply_payload(event, text, _anchor_message_id(conn, event, reply_anchor), owner_confirmation),
                         now,
                     )
             observed = continuation_ref or (work_ref if outcome == "deferred" else "")
@@ -818,9 +848,9 @@ class CustodyStore:
             """
             INSERT OR IGNORE INTO outbox(
                 delivery_id, payload_json, state, attempts, available_at, created_at
-            ) VALUES (?, ?, 'pending', 0, ?, ?)
+            ) VALUES (?, ?, ?, 0, ?, ?)
             """,
-            (delivery_id, _json(payload), now, now),
+            (delivery_id, _json(payload), "direct_pending" if payload.get("kind") in DIRECT_KINDS else "pending", now, now),
         )
 
     def claim_work(self, *, lease_sec: float = 90.0) -> Optional[WorkLease]:
@@ -917,10 +947,10 @@ class CustodyStore:
             return
         reply_to = _anchor_message_id(conn, event, output.get("reply_anchor"))
         self._enqueue_outbox(conn, f"{prefix}{work_ref}:{output_ref}",
-                             _reply_payload(event, str(output["text"]), reply_to), now)
+                             _reply_payload(event, str(output["text"]), reply_to, output.get("owner_confirmation")), now)
 
     def complete_work(self, work_ref: str, *, status: str, text: str, child_ref: str = "",
-                      reply_anchor: Optional[Dict[str, Any]] = None) -> None:
+                      reply_anchor: Optional[Dict[str, Any]] = None, owner_confirmation=None) -> None:
         """Settle a reference; retain a child its terminal view names in the same commit."""
         if status not in {"completed", "failed", "cancelled"}:
             raise ValueError("work status is not terminal")
@@ -958,7 +988,7 @@ class CustodyStore:
                                else f"presence:{event_id}:{role}:{work_ref}")
                 event = json.loads(row["event_json"])
                 self._enqueue_outbox(conn, delivery_id, _reply_payload(
-                    event, text, _anchor_message_id(conn, event, reply_anchor)), now)
+                    event, text, _anchor_message_id(conn, event, reply_anchor), owner_confirmation), now)
             conn.commit()
 
     def claim_outbox(self, *, lease_sec: float = 90.0) -> Optional[OutboxLease]:
@@ -968,7 +998,8 @@ class CustodyStore:
             if row is None:
                 return None
             payload = json.loads(row["payload_json"])
-            unanswered = row["state"] == "leased" or row["last_error"] in _UNANSWERED_ATTEMPT
+            state = row["state"]
+            unanswered = state in ("leased", "direct_leased") or row["last_error"] in _UNANSWERED_ATTEMPT
             unrecorded = False
             marked = None
             if _unmarked_reaction(payload):
@@ -988,14 +1019,12 @@ class CustodyStore:
             updated = conn.execute(
                 """
                 UPDATE outbox
-                SET state='leased', lease_until=?, attempts=attempts+1, last_error='',
+                SET state=?, lease_until=?, attempts=attempts+1, last_error='',
                     payload_json=COALESCE(?, payload_json)
-                WHERE delivery_id=? AND (
-                    (state='pending' AND available_at<=?)
-                    OR (state='leased' AND lease_until<=?)
-                )
+                WHERE delivery_id=? AND state=?
                 """,
-                (now + max(1.0, lease_sec), marked, row["delivery_id"], now, now),
+                ("direct_leased" if state in ("direct_pending", "direct_leased") else "leased",
+                 now + max(1.0, lease_sec), marked, row["delivery_id"], state),
             )
             conn.commit()
             if updated.rowcount != 1:
@@ -1015,10 +1044,10 @@ class CustodyStore:
         held, args = _held_by(attempts)
         with self._connect() as conn:
             updated = conn.execute(
-                """
+                f"""
                 UPDATE outbox
-                SET state='pending', available_at=?, lease_until=0, last_error=?
-                WHERE delivery_id=? AND state='leased'
+                SET state={_OUTBOX_REQUEUE}, available_at=?, lease_until=0, last_error=?
+                WHERE delivery_id=? AND state IN {_OUTBOX_LEASED}
                 """ + held,
                 (
                     time.time() + max(0.0, retry_after_sec),
@@ -1029,16 +1058,17 @@ class CustodyStore:
             )
             return updated.rowcount == 1
 
-    def hold_outbox(self, delivery_id: str, reason: str, *, attempts: Optional[int] = None) -> bool:
-        # A hold returns its attempt to the count; a reaction's stamp of that count moves with it.
+    def hold_outbox(self, delivery_id: str, reason: str, *, attempts: Optional[int] = None,
+                    min_delay_sec: float = 0.0) -> bool:
+        """Defer without charging this attempt; move the stamp with its count."""
         held, args = _held_by(attempts)
         with self._connect() as conn:
             updated = conn.execute(
-                "UPDATE outbox SET state='pending',available_at=?,lease_until=0,"
+                f"UPDATE outbox SET state={_OUTBOX_REQUEUE},available_at=?,lease_until=0,"
                 "last_error=?,attempts=MAX(0,attempts-1),payload_json=CASE WHEN "
                 "json_extract(payload_json,?)=attempts THEN json_set(payload_json,?,MAX(0,attempts-1)) "
-                "ELSE payload_json END WHERE delivery_id=? AND state='leased'" + held,
-                (time.time() + 5, reason, _STAMP_PATH, _STAMP_PATH, delivery_id, *args))
+                f"ELSE payload_json END WHERE delivery_id=? AND state IN {_OUTBOX_LEASED}" + held,
+                (time.time() + max(5.0, min_delay_sec), reason, _STAMP_PATH, _STAMP_PATH, delivery_id, *args))
             return updated.rowcount == 1
 
     def mark_outbox_failed(self, delivery_id: str, *, reason: str, report=None,
@@ -1048,17 +1078,17 @@ class CustodyStore:
         held, args = _held_by(attempts)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT payload_json FROM outbox WHERE delivery_id=? AND state='leased'" + held,
+            row = conn.execute(f"SELECT payload_json FROM outbox WHERE delivery_id=? AND state IN {_OUTBOX_LEASED}" + held,
                                (delivery_id, *args)).fetchone() if state == "uncertain" else None
             payload = json.loads(row[0]) if row is not None else None
             if payload is not None:
                 payload["_terminal_outcome"] = "uncertain"
             updated = conn.execute(
-                """
+                f"""
                 UPDATE outbox
                 SET state='failed', lease_until=0, failed_at=?, last_error=?,
                     payload_json=COALESCE(?,payload_json)
-                WHERE delivery_id=? AND state='leased'
+                WHERE delivery_id=? AND state IN {_OUTBOX_LEASED}
                 """ + held,
                 (time.time(), str(reason)[:500], _json(payload) if payload is not None else None,
                  delivery_id, *args),
@@ -1075,7 +1105,7 @@ class CustodyStore:
         stored, when this attempt no longer holds the lease (the row was released or claimed again)."""
         with self._connect() as conn:
             updated = conn.execute(
-                "UPDATE outbox SET payload_json=? WHERE delivery_id=? AND state='leased' AND attempts=?",
+                f"UPDATE outbox SET payload_json=? WHERE delivery_id=? AND state IN {_OUTBOX_LEASED} AND attempts=?",
                 (_json(payload), delivery_id, int(attempts)),
             )
             return updated.rowcount == 1
@@ -1095,7 +1125,7 @@ class CustodyStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             updated = conn.execute(
-                "UPDATE outbox SET payload_json=? WHERE delivery_id=? AND state='leased'" + held,
+                f"UPDATE outbox SET payload_json=? WHERE delivery_id=? AND state IN {_OUTBOX_LEASED}" + held,
                 (_json(payload), delivery_id, *args),
             )
             if attempts is not None and updated.rowcount != 1:
@@ -1115,11 +1145,11 @@ class CustodyStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             updated = conn.execute(
-                """
+                f"""
                 UPDATE outbox
                 SET state='delivered', lease_until=0, delivered_at=?,
                     provider_receipt_json=?, last_error=''
-                WHERE delivery_id=? AND state='leased'
+                WHERE delivery_id=? AND state IN {_OUTBOX_LEASED}
                 """ + held,
                 (time.time(), _json(provider_receipt), delivery_id, *args),
             )
@@ -1195,6 +1225,7 @@ class CustodyStore:
             ).fetchone()
         if row is None:
             return {"state": "not_found"}
+        state = {"direct_pending": "pending", "direct_leased": "leased"}.get(row["state"], row["state"])
         payload = json.loads(row["payload_json"])
         reaction = payload.get("kind") == "operation" and payload.get("method") == "setMessageReaction"
         reporting = payload.get("_reporting") or {}
@@ -1209,15 +1240,16 @@ class CustodyStore:
         return {
             # -1: the outbox has not yet asked this Host.
             **({"history_limitation": "Host history for reactions is unavailable: this receipt stays local."}
-               if reaction and (reporting.get("version") != -1 or row["state"] != "pending")
+               if reaction and (reporting.get("version") != -1 or state != "pending")
                and reporting.get("explicit_completion") != 1
                and not any(entry["acked"] for entry in json.loads(row["reports_json"])) else {}),
-            "state": "held" if row["state"] == "pending" and str(row["last_error"]).startswith("Held:") else "uncertain" if payload.get("_terminal_outcome") == "uncertain" else str(row["state"]),
+            "state": ("held" if state == "pending" and str(row["last_error"]).startswith("Held:")
+                      else "uncertain" if payload.get("_terminal_outcome") == "uncertain" else state),
             "attempts": int(row["attempts"]),
             "delivered_at": _timestamp(row["delivered_at"]),
             "provider_receipt": json.loads(row["provider_receipt_json"] or "{}"),
             **({"confirmed_messages": answers[0], **({"answers_without_message_id": answers[1]} if answers[1] else {})}
-               if answers is not None and row["state"] != "delivered" else {}),
+               if answers is not None and state != "delivered" else {}),
             **({"files": files} if files else {}),
             "error": str(row["last_error"]),
             "delivery_reporting": payload.get("_reporting", {"version": 0, "status": "legacy_unconfirmed"}),
@@ -1269,9 +1301,11 @@ class CustodyStore:
                     "SELECT COUNT(*) FROM inbox WHERE state='failed' AND last_error=?", (REACTION_WITHHELD,)
                 ).fetchone()[0]),
                 "reactions_withheld": withheld,
-                "outbox_waiting": outbox.get("pending", 0),
-                "outbox_held": conn.execute("SELECT COUNT(*) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%'").fetchone()[0],
-                "outbox_leased": outbox.get("leased", 0),
+                "outbox_waiting": outbox.get("pending", 0) + outbox.get("direct_pending", 0),
+                "outbox_held": conn.execute(
+                    f"SELECT COUNT(*) FROM outbox WHERE state IN {_OUTBOX_PENDING} AND last_error LIKE 'Held:%'"
+                ).fetchone()[0],
+                "outbox_leased": outbox.get("leased", 0) + outbox.get("direct_leased", 0),
                 "outbox_delivered": outbox.get("delivered", 0),
                 "outbox_failed": outbox.get("failed", 0) - conn.execute(
                     "SELECT COUNT(*) FROM outbox WHERE state='failed' AND json_extract(payload_json,'$._terminal_outcome')='uncertain'"
@@ -1321,21 +1355,6 @@ class CustodyStore:
                 + """;
                 CREATE INDEX IF NOT EXISTS presence_work_ready_idx
                     ON presence_work(state, available_at, lease_until, created_at);
-                CREATE TABLE IF NOT EXISTS outbox(
-                    delivery_id TEXT PRIMARY KEY,
-                    payload_json TEXT NOT NULL,
-                    state TEXT NOT NULL CHECK(state IN ('pending','leased','delivered','failed')),
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    available_at REAL NOT NULL,
-                    lease_until REAL NOT NULL DEFAULT 0,
-                    created_at REAL NOT NULL,
-                    delivered_at REAL,
-                    failed_at REAL,
-                    provider_receipt_json TEXT NOT NULL DEFAULT '',
-                    last_error TEXT NOT NULL DEFAULT ''
-                );
-                CREATE INDEX IF NOT EXISTS outbox_ready_idx
-                    ON outbox(state, available_at, lease_until, created_at);
                 """
                 + discovery.GROUPS_TABLE
                 + ";"
@@ -1350,11 +1369,7 @@ class CustodyStore:
                 + _TYPING_TABLE
             )
             conn.execute("BEGIN IMMEDIATE")
-            columns = {r[1] for r in conn.execute("PRAGMA table_info(outbox)")}
-            if "reports_json" not in columns:
-                conn.execute("ALTER TABLE outbox ADD COLUMN reports_json TEXT NOT NULL DEFAULT '[]'")
-                conn.execute("ALTER TABLE outbox ADD COLUMN report_due_at REAL NOT NULL DEFAULT 0")
-            conn.execute("CREATE INDEX IF NOT EXISTS outbox_reports_due ON outbox(report_due_at)")
+            self._ensure_outbox_schema(conn)
             if "host_receipt_json" not in {r[1] for r in conn.execute("PRAGMA table_info(inbox)")}:
                 conn.execute("ALTER TABLE inbox ADD COLUMN host_receipt_json TEXT NOT NULL DEFAULT ''")
             if "role" not in {r[1] for r in conn.execute("PRAGMA table_info(presence_work)")}:
@@ -1362,6 +1377,38 @@ class CustodyStore:
             conn.commit()
             self._import_legacy_offset(conn)
         discovery.backfill_legacy(self._connect)
+
+    @staticmethod
+    def _ensure_outbox_schema(conn: sqlite3.Connection) -> None:
+        """Widen the state CHECK in the caller's write transaction; keep rowid for FIFO."""
+        table = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='outbox'").fetchone()
+        if table is None:
+            conn.execute(_OUTBOX_TABLE.format(name="outbox"))
+        elif "'direct_pending'" not in table[0]:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(outbox)")}
+            reports = "reports_json, report_due_at" if "reports_json" in columns else "'[]', 0"
+            conn.execute(_OUTBOX_TABLE.format(name="outbox_with_direct_states"))
+            # Also park any nonterminal address-conditioned rows written by a prerelease build.
+            conn.execute(
+                f"""
+                INSERT INTO outbox_with_direct_states(
+                    rowid, delivery_id, payload_json, state, attempts, available_at, lease_until, created_at,
+                    delivered_at, failed_at, provider_receipt_json, last_error, reports_json, report_due_at
+                )
+                SELECT rowid, delivery_id, payload_json,
+                       CASE WHEN (CASE WHEN state IN ('pending','leased') AND json_valid(payload_json)
+                                       THEN json_extract(payload_json, '$.kind') END) IN (?, ?)
+                            THEN 'direct_' || state ELSE state END,
+                       attempts, available_at, lease_until, created_at,
+                       delivered_at, failed_at, provider_receipt_json, last_error, {reports}
+                FROM outbox
+                """,
+                DIRECT_KINDS,
+            )
+            conn.execute("DROP TABLE outbox")
+            conn.execute("ALTER TABLE outbox_with_direct_states RENAME TO outbox")
+        conn.execute("CREATE INDEX IF NOT EXISTS outbox_ready_idx ON outbox(state, available_at, lease_until, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS outbox_reports_due ON outbox(report_due_at)")
 
     @staticmethod
     def _key_work_by_reference(conn: sqlite3.Connection) -> None:
@@ -1486,7 +1533,7 @@ def _anchor_message_id(
     return captured if str(captured) == str(message_id) else None
 
 
-def _reply_payload(event: Dict[str, Any], text: str, reply_to: Any = None) -> Dict[str, Any]:
+def _reply_payload(event: Dict[str, Any], text: str, reply_to: Any = None, owner_confirmation=None) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "kind": "message",
         "chat_id": str(event.get("conversation_id") or ""),
@@ -1495,8 +1542,16 @@ def _reply_payload(event: Dict[str, Any], text: str, reply_to: Any = None) -> Di
         "_rendered_chunks": prepare_text(str(text)),
         "_reporting": event.get("_reporting", {"version": 0}),
     }
-    thread_id = str(event.get("thread_id") or "").strip()
-    if thread_id:
+    conversation = event.get("conversation")
+    if owner_confirmation is not None or (isinstance(conversation, dict) and "direct_reply_user_id" in conversation):
+        # Carry the observed recipient independently of chat_id. A disagreement holds the reply at dispatch.
+        user = conversation.get("direct_reply_user_id") if isinstance(conversation, dict) else None
+        payload.update(direct_send_fields("message", direct_reply_account(event), user, owner_confirmation))
+    thread_id = event.get("thread_id")
+    if payload["kind"] not in DIRECT_KINDS:
+        thread_id = str(thread_id or "").strip()
+    # Preserve the exact address of a pinned reply, even when it must be refused at dispatch.
+    if thread_id not in (None, ""):
         payload["topic_id"] = thread_id
     message = event.get("message") if isinstance(event.get("message"), dict) else {}
     reply_id = message.get("message_id") if reply_to in (None, "") else reply_to

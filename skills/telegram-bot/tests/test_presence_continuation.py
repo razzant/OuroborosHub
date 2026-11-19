@@ -352,7 +352,8 @@ class Bridge:
     def due(self, *tables):
         with sqlite3.connect(self.store.path) as conn:
             for table in tables or ("inbox", "presence_work", "outbox"):
-                conn.execute(f"UPDATE {table} SET available_at=0 WHERE state='pending'")
+                pending = "('pending','direct_pending')" if table == "outbox" else "('pending')"
+                conn.execute(f"UPDATE {table} SET available_at=0 WHERE state IN {pending}")
 
     async def inbox(self):
         """Every inbox row that is due now, once each, in the runtime's claim order."""
