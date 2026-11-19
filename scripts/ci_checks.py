@@ -105,6 +105,9 @@ SUITES = {
     # ffprobe and these encoders the suite stops with an error, so those cases run and never skip.
     'anime-studio': {'skills': ['anime_studio'], 'tests': ['skills/anime_studio/tests'],
                      'dependencies': ['httpx', 'Pillow', 'starlette'], 'ffmpeg_encoders': ['libx264', 'aac']},
+    # The provider keys widget's issuer-binding regressions: purely synthetic settings and an
+    # intercepted HTTP boundary keep the suite offline; it needs nothing beyond the interpreter.
+    'provider-keys': {'skills': ['provider_keys'], 'tests': ['tests/test_provider_keys.py']},
 }
 SHARED = {'.github/workflows/catalog-check.yml', 'scripts/ci_checks.py', 'tests/test_ci_checks.py',
           'scripts/build_index.py', 'scripts/release_digest.py',
