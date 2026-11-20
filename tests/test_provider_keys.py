@@ -41,13 +41,16 @@ BODIES = {
 
 
 class Settings:
-    """A fictional host: every absent requested key is simply missing, never denied."""
+    """A fictional host: a value is served only for a requested key, and every
+    absent requested key is simply missing, never denied. An inventory asking
+    for too little thus loses exactly what the real host would withhold."""
 
     def __init__(self, values):
         self.values = values
 
     def get_settings_state(self, keys):
-        return {"status": "ok", "values": self.values,
+        return {"status": "ok",
+                "values": {key: value for key, value in self.values.items() if key in keys},
                 "missing": [key for key in keys if key not in self.values]}
 
 
@@ -103,6 +106,14 @@ def test_dedicated_openrouter_base_without_its_own_key_stays_keyless(sent):
     assert {url for url, _ in sent} == OPENAI_URLS
     assert {auth for _, auth in sent} == {"Bearer " + OPENAI_KEY}
     assert len(sent) == 2
+    # Positive evidence that the dedicated row was seen and deliberately not
+    # read, rather than dropped: it surfaces in the snapshot as a keyless
+    # OpenRouter row attributed to OPENAI_COMPATIBLE_API_KEY alone.
+    keyless = [row for row in response["snapshot"]["rows"]
+               if row["status"]["code"] == "keyless"]
+    assert len(keyless) == 1
+    assert keyless[0]["kind"] == "openrouter"
+    assert [use["setting"] for use in keyless[0]["uses"]] == ["OPENAI_COMPATIBLE_API_KEY"]
 
 
 def test_dedicated_openrouter_base_with_its_own_key_pairs_each_sentinel(sent):
@@ -133,6 +144,30 @@ def test_foreign_legacy_base_never_sends_the_openai_key(sent):
     assert len(rows) == 1
     assert rows[0]["status"]["code"] == "no_metadata_endpoint"
     assert [use["setting"] for use in rows[0]["uses"]] == ["OPENAI_API_KEY"]
+
+
+def test_foreign_legacy_base_with_dedicated_router_pair_reads_only_the_router(sent):
+    response = refresh({"OPENAI_API_KEY": OPENAI_KEY,
+                        "OPENAI_BASE_URL": PROXY_BASE,
+                        "OPENAI_COMPATIBLE_BASE_URL": OPENROUTER_BASE,
+                        "OPENAI_COMPATIBLE_API_KEY": COMPAT_KEY})
+    assert response["outcome"]["reason"] == "finished"
+    # The dedicated pair supersedes the legacy compatible use, not its issuer
+    # evidence: the only reads are the two OpenRouter endpoints carrying the
+    # pair's own sentinel. The foreign legacy base is contacted by nothing and
+    # the OpenAI sentinel goes nowhere.
+    assert {url for url, _ in sent} == OPENROUTER_URLS
+    assert {auth for _, auth in sent} == {"Bearer " + COMPAT_KEY}
+    assert len(sent) == 2
+    # The flat key behind the foreign legacy base still surfaces, and the
+    # foreign base itself spawns no row: exactly one unverified_issuer OpenAI
+    # row attributed to OPENAI_API_KEY, whose key is never bound to a read.
+    assert len(response["snapshot"]["rows"]) == 2
+    legacy = [row for row in response["snapshot"]["rows"]
+              if row["status"]["code"] == "unverified_issuer"]
+    assert len(legacy) == 1
+    assert legacy[0]["kind"] == "openai"
+    assert [use["setting"] for use in legacy[0]["uses"]] == ["OPENAI_API_KEY"]
 
 
 def test_legacy_openrouter_base_routes_the_key_to_openrouter_only(sent):
