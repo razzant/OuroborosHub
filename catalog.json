@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/11a03a81eb13240282479fbb6ec335133f06c5d7",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/e912ad4ac0695aede6901b291b222d19dcbb82a4",
   "schema_version": 1,
   "skills": [
     {
@@ -454,7 +454,7 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "d3d34ac7c73a61ed73d9195123707213294f341a3354b58667e6e1a04c04d3f8",
+          "sha256": "50ba9250d2f98dd42c392cfdf33becf2bb52812671a2d083d29fc6f370a2a9ac",
           "size": 55659
         },
         {
@@ -594,8 +594,8 @@
         },
         {
           "path": "tests/test_calendar_lifecycle_custody.py",
-          "sha256": "aa5f52baccb5eea87affb459f99c9a433cd4373048ba287f192b0bb099b25c0d",
-          "size": 19716
+          "sha256": "5ff634dfc77618c90174b3b8126be99cbd35527686c1949ec406b784eafd84cc",
+          "size": 20128
         },
         {
           "path": "tests/test_calendar_lifecycle_invariants.py",
@@ -689,8 +689,8 @@
         },
         {
           "path": "tests/test_calendar_temporal_roundtrip.py",
-          "sha256": "cdbedb7aff65f5492b535bef13b682688903e963947dde1630ed844fba4684df",
-          "size": 20473
+          "sha256": "ea97b2fa270d806723c3598eb9fc48cb6c0a786294864b4e46eec42e2d3539e4",
+          "size": 20693
         },
         {
           "path": "tests/test_cancellation_replay.py",
@@ -699,13 +699,13 @@
         },
         {
           "path": "tests/test_civil_recurrence_contract.py",
-          "sha256": "cea686cf76f291817ebac35525d62bf429b491968800de39427989ab20e35764",
-          "size": 7188
+          "sha256": "acc0c7f4d252ba94ced776fefb98f5ebbb8dd360002b329d0335bc295899923f",
+          "size": 7408
         },
         {
           "path": "tests/test_clock_consumer_consistency.py",
-          "sha256": "817faf1be58d40f804155ff277f8b57b5402916da98c0cf434b92ab26c824371",
-          "size": 10786
+          "sha256": "b6e3625aa8cb582fb7aa89cc93bdd6d706185f6df65eab89dd5f04ba6d2db44d",
+          "size": 11013
         },
         {
           "path": "tests/test_conflict_resolution.py",
@@ -714,8 +714,8 @@
         },
         {
           "path": "tests/test_effective_event_clock.py",
-          "sha256": "5d525d58f41641f49794d9dae595d2a352e1bd5063bef685ac430e4929255f90",
-          "size": 13878
+          "sha256": "650f28a650a34c2ab4e404502f90241dfc9022ebd7ef5b4bec83e96c5e5d777e",
+          "size": 14289
         },
         {
           "path": "tests/test_google_vault.py",
@@ -831,7 +831,7 @@
       "name": "calendar",
       "slug": "calendar",
       "type": "extension",
-      "version": "2.0.5",
+      "version": "2.0.6",
       "when_to_use": "Владелец говорит «что у меня сегодня / завтра / на неделе», «поставь / создай / забей встречу, обед, тренировку на 16», «найди окно на час», «перенеси … на 17», «отмени …», «напомни о …», «покажи мою занятость в рабочем календаре», «обычно я завтракаю в 6:30» (служебное событие-распорядок), «подключи Яндекс / Google»."
     },
     {
