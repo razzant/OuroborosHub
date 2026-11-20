@@ -2,6 +2,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -60,8 +61,10 @@ def test_date_override_uses_its_own_time_kind_for_reads_availability_and_reminde
     reminders.plan(ctx.store, ctx.occurrences, now=begin - timedelta(minutes=1))
     sent = []
     channel = SimpleNamespace(send=lambda key, text: (sent.append(text) or ('sent', 'fixture')))
-    delivered = reminders.deliver_due(ctx.store, channel, ctx.tz, now=begin)
-    assert delivered['sent'] == 1 and 'Timed exception' in sent[0]
+    # deliver_due re-reads each due reminder at max(now, wall clock): pin the wall clock to this fixture's instant
+    with patch.object(reminders, 'now_utc', return_value=begin):
+        delivered = reminders.deliver_due(ctx.store, channel, ctx.tz, now=begin)
+        assert delivered['sent'] == 1 and 'Timed exception' in sent[0]
 
 
 def test_floating_scope_all_moves_wall_coordinates_and_date_sets_through_dst(tmp_path):
