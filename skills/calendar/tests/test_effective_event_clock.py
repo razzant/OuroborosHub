@@ -3,6 +3,7 @@ import asyncio
 import json
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import icalendar
 import pytest
@@ -69,9 +70,11 @@ def test_effective_override_clock_agrees_in_list_detail_busy_and_delivery(tmp_pa
     reminders.plan(ctx.store, ctx.occurrences, now=begin-timedelta(minutes=1))
     sent = []
     channel = SimpleNamespace(send=lambda key, text: (sent.append((key, text)) or ('sent', 'fixture')))
-    delivered = reminders.deliver_due(ctx.store, channel, ctx.tz, now=begin)
-    assert delivered['sent'] == 1 and 'Override' in sent[0][1]
-    assert reminders.deliver_due(ctx.store, channel, ctx.tz, now=begin+timedelta(seconds=5))['sent'] == 0
+    # deliver_due re-reads each due reminder at max(now, wall clock): pin the wall clock to this fixture's instant
+    with patch.object(reminders, 'now_utc', return_value=begin):
+        delivered = reminders.deliver_due(ctx.store, channel, ctx.tz, now=begin)
+        assert delivered['sent'] == 1 and 'Override' in sent[0][1]
+        assert reminders.deliver_due(ctx.store, channel, ctx.tz, now=begin+timedelta(seconds=5))['sent'] == 0
     saved = ctx.store.get_event(child['id'])
     assert {key: saved[key] for key in ('id', 'uid', 'master_id', 'recurrence_id', 'start_utc', 'end_utc')} == {
         key: child[key] for key in ('id', 'uid', 'master_id', 'recurrence_id', 'start_utc', 'end_utc')}
@@ -202,7 +205,9 @@ def test_calendar_move_readdresses_slots_and_preserves_notice_custody(tmp_path, 
     reminders.plan(ctx.store, ctx.occurrences, now=expected-timedelta(minutes=1))
     sent = []
     channel = SimpleNamespace(send=lambda key, text: (sent.append((key, text)) or ('sent', 'fixture')))
-    delivery = reminders.deliver_due(ctx.store, channel, ctx.tz, now=expected)
+    # deliver_due re-reads each due reminder at max(now, wall clock): pin the wall clock to this fixture's instant
+    with patch.object(reminders, 'now_utc', return_value=expected):
+        delivery = reminders.deliver_due(ctx.store, channel, ctx.tz, now=expected)
     assert delivery['sent'] == (1 if scope == 'all' else 0), (delivery, sent)
     with ctx.store._conn() as connection:
         assert connection.execute('SELECT state FROM reminders WHERE notice_id=?', (notice,)).fetchone()[0] == terminal

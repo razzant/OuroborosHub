@@ -5,6 +5,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -212,8 +213,10 @@ def test_all_day_window_availability_and_notice_share_the_date(tmp_path, zone, r
     reminders.plan(ctx.store, ctx.occurrences, now=begin)
     sent = []
     channel = SimpleNamespace(send=lambda key, text: (sent.append(text) or ('sent', 'offline recorder')))
-    result = reminders.deliver_due(ctx.store, channel, ctx.tz, now=begin)
-    assert result['sent'] == 1 and len(sent) == 1 and '10.12' in sent[0]
+    # deliver_due re-reads each due reminder at max(now, wall clock): pin the wall clock to this fixture's instant
+    with patch.object(reminders, 'now_utc', return_value=begin):
+        result = reminders.deliver_due(ctx.store, channel, ctx.tz, now=begin)
+        assert result['sent'] == 1 and len(sent) == 1 and '10.12' in sent[0]
 
 
 def test_stored_override_keeps_identity_and_pending_history_after_rule_change(tmp_path):
