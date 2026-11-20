@@ -4,7 +4,7 @@
       "stars": 0
     }
   },
-  "generated_at": "2026-11-19T13:28:20.685864Z",
+  "generated_at": "2026-11-20T13:05:57.964720Z",
   "schema_version": 1,
   "skills": {
     "2gis": {
@@ -190,6 +190,11 @@
     "pomerado": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/244",
+      "votes": 0
+    },
+    "provider_keys": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/329",
       "votes": 0
     },
     "rea-reverse-engineering": {
