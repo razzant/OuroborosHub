@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/e912ad4ac0695aede6901b291b222d19dcbb82a4",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/5e1151c5676fef9d015bf7325048a8ec16f338d7",
   "schema_version": 1,
   "skills": [
     {
@@ -2958,6 +2958,47 @@
       "type": "instruction",
       "version": "0.1.0",
       "when_to_use": "A person wants current public website information, such as flight fares, product prices, listings or availability, and Pomerado is connected or the owner wants help connecting it. Not for private data, website changes, account login or building tools."
+    },
+    {
+      "description": "Account credit, key limits and provider-reported usage for configured provider keys.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "a25cd9b7ce0715dea5ea80c12938d1d5755c88922eaf79cb0254dcf3282ce270",
+          "size": 3843
+        },
+        {
+          "path": "keys_adapters.py",
+          "sha256": "fb2212a5d3e749bfb04d58f340bd17d247dfd93f5ff97af93bf6a364384691bf",
+          "size": 21322
+        },
+        {
+          "path": "keys_settings.py",
+          "sha256": "cac7bc345cb7b9d6e9131395ee0e112000c13fd2a13539ff242061dcaec1a103",
+          "size": 8871
+        },
+        {
+          "path": "keys_snapshot.py",
+          "sha256": "6b9578d1856cceaeadbd83d317fcd4127968e70213cda95dd6d98a96f2ab1697",
+          "size": 12644
+        },
+        {
+          "path": "plugin.py",
+          "sha256": "132d7a933373bde213681e1c52cc036c5bd9740df5ee6c9f14db8bddad2f528e",
+          "size": 10889
+        },
+        {
+          "path": "widget.js",
+          "sha256": "f4469ab4cf5b07aa6ce30ee44a5d194bd6beb083100b46bc69a078bf6497d044",
+          "size": 54015
+        }
+      ],
+      "name": "provider_keys",
+      "slug": "provider_keys",
+      "title": "Provider keys",
+      "type": "extension",
+      "version": "1.0.3",
+      "when_to_use": "Open Widgets to compare balances and spending limits for configured API connections."
     },
     {
       "description": "Use morluto/rea for evidence-grounded analysis of shipped binaries, packages, browser runtimes, captures, and reconstruction tasks without copying its large runtime into Ouroboros.",
