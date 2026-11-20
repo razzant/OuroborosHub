@@ -82,7 +82,7 @@ class SelectionTests(unittest.TestCase):
             'telegram-user-session': {'telegram-user-session'},
             'email-presence': {'email-presence'}, 'agentrq-bridge': {'agentrq-bridge'},
             'chrome_browser': {'chrome-browser'}, 'freshdesk': {'freshdesk'},
-            'anime_studio': {'anime-studio'},
+            'anime_studio': {'anime-studio'}, 'provider_keys': {'provider-keys'},
         }
         for skill, expected in consumers.items():
             with self.subTest(skill=skill):
