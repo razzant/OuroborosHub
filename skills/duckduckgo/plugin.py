@@ -46,12 +46,12 @@ def _search(query: str, max_results: int = _DEFAULT_RESULTS) -> Dict[str, Any]:
 
     try:
         with DDGS() as ddgs:
-            raw = ddgs.text(cleaned, max_results=max_results)
+            raw = list(ddgs.text(cleaned, max_results=max_results) or [])
     except Exception as exc:
         return {"error": f"DuckDuckGo search failed: {type(exc).__name__}: {exc}"}
 
     results: List[Dict[str, str]] = []
-    for item in (raw or []):
+    for item in raw:
         results.append({
             "title": str(item.get("title", "")),
             "url": str(item.get("href", "")),
