@@ -125,6 +125,49 @@ class DuckDuckGoToolTests(unittest.TestCase):
                     self.assertEqual(payload["count"], 1)
                     self.assertEqual(seen[-1], ("x", expected))
 
+    def test_results_are_read_while_the_session_is_open(self):
+        """An older ddgs returned a generator that dies with its session; the list must be built inside the block."""
+
+        class FakeDDGS:
+            closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                type(self).closed = True
+                return False
+
+            def text(self, query, max_results):
+                def rows():
+                    for n in range(2):
+                        if FakeDDGS.closed:
+                            raise RuntimeError("session closed before the results were read")
+                        yield {"title": "T%d" % n, "href": "https://example.invalid/%d" % n, "body": "b%d" % n}
+
+                return rows()
+
+        with patch.dict(sys.modules, {"ddgs": types.SimpleNamespace(DDGS=FakeDDGS)}):
+            payload = json.loads(plugin._tool_search(query="x"))
+        self.assertNotIn("error", payload)
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(payload["results"][1]["url"], "https://example.invalid/1")
+
+    def test_a_none_result_is_an_empty_list(self):
+        class FakeDDGS:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def text(self, query, max_results):
+                return None
+
+        with patch.dict(sys.modules, {"ddgs": types.SimpleNamespace(DDGS=FakeDDGS)}):
+            payload = json.loads(plugin._tool_search(query="x"))
+        self.assertEqual(payload, {"query": "x", "results": [], "count": 0})
+
 
 if __name__ == "__main__":
     unittest.main()
