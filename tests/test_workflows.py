@@ -329,7 +329,16 @@ class WorkflowTests(unittest.TestCase):
                 self.assertNotEqual(core_pin_violations(changed), [])
 
     def test_every_suite_that_needs_a_core_runs_on_the_one_checkout(self):
-        hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']
+        workflow = self.workflow('catalog-check.yml')
+        # The catalog job compares every hosted release and connector with that core (tests/test_index.py).
+        catalog = workflow['jobs']['catalog']['steps']
+        [core] = [step for step in catalog if step.get('with', {}).get('repository') == CORE_REPOSITORY]
+        self.assertEqual(core['with'], {'repository': CORE_REPOSITORY, 'ref': CORE_REF, 'path': 'core',
+                                        'persist-credentials': 'false'})
+        tests = next(step for step in catalog if 'tests/test_index.py' in step.get('run', ''))
+        self.assertLess(catalog.index(core), catalog.index(tests))
+        self.assertEqual(tests['env'], {'OUROBOROS_IDENTITY_CORE_ROOT': '${{ github.workspace }}/core'})
+        hosted = workflow['jobs']['hosted-skills']
         steps = hosted['steps']
         needs_core = sorted(name for name, spec in ci_checks.SUITES.items() if spec.get('core_env'))
 
@@ -340,11 +349,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(checkout['with'], {'repository': CORE_REPOSITORY, 'ref': CORE_REF, 'path': 'core',
                                             'persist-credentials': 'false'})
         install = next(step for step in steps if step.get('name') == "Install the core's runtime and the browsers, and name the core")
-        presence = next(step for step in steps if step.get('name') == 'Name the core for the Presence consumers')
+        source = next(step for step in steps if step.get('name') == 'Name the core for the suites that need only its source')
         runtime = ['calendar-skill', 'email-presence', 'memory-atlas', 'smart-lists']
+        readers = [name for name in needs_core if name not in runtime]
+        self.assertEqual((install['if'], source['if']), (selecting(runtime), selecting(readers)))
         consumer_suites = [name for name in needs_core if ci_checks.SUITES[name]['core_env'] == 'OUROBOROS_PRESENCE_CORE_ROOT']
-        self.assertEqual((install['if'], presence['if']), (selecting(runtime), selecting(consumer_suites)))
-        self.assertEqual(sorted(runtime + consumer_suites), needs_core)
+        self.assertEqual(sorted(consumer_suites + ['github']), readers)
         # The Presence consumers (tests/test_*_core_consumer.py): every suite that lists one requires the core.
         consumers = {path.relative_to(ROOT).as_posix() for path in (ROOT / 'tests').glob('test_*_core_consumer.py')
                      if 'CORE_ENV = "OUROBOROS_PRESENCE_CORE_ROOT"' in path.read_text(encoding='utf-8')}
@@ -362,7 +372,7 @@ class WorkflowTests(unittest.TestCase):
         # checkout, and every suite is given the variable its tests read (core_env) by the step that runs for it.
         named = {}
         for step, expected in [(install, ['-m pip install -r core/requirements.txt', '-m playwright install {}chromium webkit']),
-                               (presence, [])]:
+                               (source, [])]:
             for runner in ('Linux', 'macOS'):
                 with self.subTest(step=step['name'], runner=runner), tempfile.TemporaryDirectory(prefix='hub core workflow ') as tmp:
                     root = Path(tmp)
@@ -376,12 +386,14 @@ class WorkflowTests(unittest.TestCase):
                     probes = (root / 'probes').read_text(encoding='utf-8').splitlines() if expected else []
                     deps = '--with-deps ' if runner == 'Linux' else ''  # Linux runners also need the browsers' libraries
                     self.assertEqual(probes, [line.format(deps) for line in expected])
-        self.assertEqual(named[install['name']], {'ATLAS_CORE', 'OUROBOROS_SOURCE_DIR', 'OUROBOROS_THEME_CORE_ROOT'})
-        self.assertEqual(named[presence['name']], {'OUROBOROS_PRESENCE_CORE_ROOT'})
+        # Each runtime suite also gets the opt-in names its tests read (smart-lists' core validator: OUROBOROS_CORE_ROOT).
+        self.assertEqual(named[install['name']], {'ATLAS_CORE', 'OUROBOROS_SOURCE_DIR', 'OUROBOROS_THEME_CORE_ROOT',
+                                                  'OUROBOROS_CORE_ROOT'})
+        self.assertEqual(named[source['name']], {'OUROBOROS_PRESENCE_CORE_ROOT', 'OUROBOROS_IDENTITY_CORE_ROOT'})
         for suite in needs_core:
-            given = named[install['name'] if suite in runtime else presence['name']]
+            given = named[install['name'] if suite in runtime else source['name']]
             self.assertIn(ci_checks.SUITES[suite]['core_env'], given, suite)
-        for step in (install, presence):
+        for step in (install, source):
             self.assertLess(steps.index(checkout), steps.index(step))
             self.assertLess(steps.index(step), len(steps) - 1)  # it precedes the suite run
 

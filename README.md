@@ -296,10 +296,11 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/sla
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/telegram-bot/tests
 ```
 
-Every suite whose tests drive a real core (`core_env` in `scripts/ci_checks.py`: Memory Atlas,
-mail, Calendar, Smart Lists and the Presence consumers of Freshdesk, Slack and Telegram) runs
-against one `razzant/ouroboros` commit, `OUROBOROS_CORE_SHA` at the top of
-`.github/workflows/catalog-check.yml`, checked out once per job. With one pin every seam between a
+Every suite whose tests use a real core (`core_env` in `scripts/ci_checks.py`: Memory Atlas,
+mail, Calendar, Smart Lists, GitHub and the Presence consumers of Freshdesk, Slack and Telegram)
+runs against one `razzant/ouroboros` commit, `OUROBOROS_CORE_SHA` at the top of
+`.github/workflows/catalog-check.yml`, checked out once per job; the catalog job checks every
+hosted release and connector against the same commit. With one pin every seam between a
 hosted skill and the core is tested on the same reproducible core, and no suite stays behind on an
 older one; `tests/test_workflows.py` fails on a second pin. To move it, open a PR that changes only
 that value. The workflow is shared, so that PR runs every suite on the new core, and it merges when
@@ -370,9 +371,10 @@ Memory Atlas.
 
 The hub tests include mocked GitHub APIs for owner authorization, signals and
 catalog-to-mirror sequencing. The release-identity test compares all hosted skills
-with the core checkout selected by `OUROBOROS_IDENTITY_CORE_ROOT`, using the test
-runner's Python with core requirements installed. Without that variable the
-cross-repository check is reported as skipped. Every hosted skill that contributes
+with the core checkout selected by `OUROBOROS_IDENTITY_CORE_ROOT`; it imports only
+core modules, which need nothing beyond PyYAML. CI's catalog job sets it to the
+pinned core. Without that variable the cross-repository check is reported as
+skipped. Every hosted skill that contributes
 a place is checked as a connector: declared tool effects, the place contract,
 wake facts, its status route and a bounded monochrome `ui/icon.svg`. The hub keeps
 a mirror of the core rules for this; the same checkout also runs every connector

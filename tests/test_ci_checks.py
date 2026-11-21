@@ -28,7 +28,8 @@ def consumer_core():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('fixture', encoding='utf-8')
         with patch.dict(os.environ, {'OUROBOROS_SOURCE_DIR': str(core), 'OUROBOROS_THEME_CORE_ROOT': str(core),
-                                     'OUROBOROS_PRESENCE_CORE_ROOT': str(core), 'ATLAS_CORE': str(core)}):
+                                     'OUROBOROS_PRESENCE_CORE_ROOT': str(core), 'ATLAS_CORE': str(core),
+                                     'OUROBOROS_IDENTITY_CORE_ROOT': str(core)}):
             yield core
 
 
@@ -168,7 +169,7 @@ class SelectionTests(unittest.TestCase):
                           ('smart-lists', 'OUROBOROS_THEME_CORE_ROOT'), ('memory-atlas', 'ATLAS_CORE'),
                           ('slack-bridge', 'OUROBOROS_PRESENCE_CORE_ROOT'), ('telegram-bot', 'OUROBOROS_PRESENCE_CORE_ROOT'),
                           ('telegram-user-session', 'OUROBOROS_PRESENCE_CORE_ROOT'),
-                          ('freshdesk', 'OUROBOROS_PRESENCE_CORE_ROOT')]:
+                          ('freshdesk', 'OUROBOROS_PRESENCE_CORE_ROOT'), ('github', 'OUROBOROS_IDENTITY_CORE_ROOT')]:
             with self.subTest(suite=name), consumer_core() as core, patch.object(ci.subprocess, 'run') as run:
                 for value in ('', str(core / 'missing')):
                     with patch.dict(os.environ, {key: value}), self.assertRaisesRegex(RuntimeError, key):

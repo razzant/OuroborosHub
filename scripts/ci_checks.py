@@ -73,8 +73,10 @@ SUITES = {
                   'dependencies': ['httpx', 'starlette', 'websockets'], 'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT'},
     'agentrq-bridge': {'skills': ['agentrq-bridge'], 'tests': ['skills/agentrq-bridge/tests'],
                       'dependencies': ['starlette']},
+    # Its owner-account contract runs through the pinned core's places module (OUROBOROS_IDENTITY_CORE_ROOT).
     'github': {'skills': ['github'], 'tests': ['skills/github/tests'],
-               'dependencies': ['PyJWT[crypto]>=2.13,<3', 'httpx', 'starlette']},
+               'dependencies': ['PyJWT[crypto]>=2.13,<3', 'httpx', 'starlette'],
+               'core_env': 'OUROBOROS_IDENTITY_CORE_ROOT'},
     'telegram-bot': {'skills': ['telegram-bot'], 'tests': ['skills/telegram-bot/tests', 'tests/test_reaction_core_consumer.py',
                                                            'tests/test_gesture_core_consumer.py',
                                                            'tests/test_voice_attachment_core_consumer.py',
