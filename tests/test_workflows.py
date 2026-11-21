@@ -8,6 +8,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import stat
 import subprocess
@@ -186,6 +187,48 @@ class GitHubAPITests(unittest.TestCase):
         self.assertTrue(same.has_header('Authorization'))
 
 
+CORE_REPOSITORY = 'razzant/ouroboros'
+CORE_REF = '${{ env.OUROBOROS_CORE_SHA }}'
+COMMIT = re.compile(r'(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])')
+
+
+def _scalars(node, key=''):
+    """Every scalar of a workflow except action references (`uses:` may pin an action by its commit)."""
+    if isinstance(node, dict):
+        for name, value in node.items():
+            yield from _scalars(value, name)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _scalars(value, key)
+    elif key != 'uses':
+        yield node
+
+
+def core_pin_violations(workflows):
+    """Every way these workflows (file name -> BaseLoader document) test against a core other than the one pin:
+    catalog-check.yml declares OUROBOROS_CORE_SHA once, every checkout of the core reads it, and no other commit
+    literal appears in any workflow."""
+    pin = workflows['catalog-check.yml'].get('env', {}).get('OUROBOROS_CORE_SHA', '')
+    found = [] if re.fullmatch('[0-9a-f]{40}', pin) else [f'OUROBOROS_CORE_SHA is not one full commit: {pin!r}']
+    for file, workflow in workflows.items():
+        scopes = [] if file == 'catalog-check.yml' else [(f'{file}', workflow.get('env', {}))]
+        for job_name, job in workflow.get('jobs', {}).items():
+            scopes.append((f'{file} job {job_name}', job.get('env', {})))
+            for number, step in enumerate(job.get('steps', []), 1):
+                where = f'{file} job {job_name} step {number}'
+                scopes.append((where, step.get('env', {})))
+                options = step.get('with', {})
+                if (step.get('uses', '').startswith('actions/checkout@')
+                        and options.get('repository', '').lower() == CORE_REPOSITORY and options.get('ref') != CORE_REF):
+                    found.append(f'{where} checks out the core at {options.get("ref")!r}, not {CORE_REF}')
+        found += [f'{where} declares OUROBOROS_CORE_SHA again' for where, env in scopes if 'OUROBOROS_CORE_SHA' in env]
+        commits = [commit for text in _scalars(workflow) for commit in COMMIT.findall(text)]
+        expected = [pin] if file == 'catalog-check.yml' else []
+        if commits != expected:
+            found.append(f'{file} names commits {commits}, expected only {expected}')
+    return found
+
+
 class WorkflowTests(unittest.TestCase):
     def workflow(self, name):
         # BaseLoader keeps YAML's `on` key as text (YAML 1.1 SafeLoader treats it as a boolean).
@@ -213,7 +256,8 @@ class WorkflowTests(unittest.TestCase):
         # Eligibility is decided only by the trusted job: validation never runs the helper itself.
         self.assertNotIn('scripts/owner_updates.py', commands)
         self.assertNotIn('owner_updates.py verdict', commands)
-        # Every checkout of this repository is the one commit the run tests; extra core checkouts are pinned SHAs.
+        # Every checkout of this repository is the one commit the run tests; the core is checked out only at its one
+        # pin (test_the_core_is_checked_out_only_at_the_one_pin).
         hosted = workflow['jobs']['hosted-skills']
         for steps in (catalog, hosted['steps']):
             own = [s for s in steps if s.get('uses') == 'actions/checkout@v4' and 'repository' not in s.get('with', {})]
@@ -258,41 +302,50 @@ class WorkflowTests(unittest.TestCase):
                                      env={**os.environ, 'NEEDS': json.dumps(needs)}, capture_output=True)
                 self.assertEqual(run.returncode, 0 if all(r in {'success', 'skipped'} for r in results) else 1)
 
-    def test_mail_calendar_workflow_connects_the_pinned_core_to_real_consumers(self):
-        hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']
-        checkout = next(step for step in hosted['steps'] if step.get('with', {}).get('path') == 'mail-calendar-core')
-        install = next(step for step in hosted['steps'] if step.get('name') == 'Install the mail and calendar consumer runtime')
-        condition = "matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill' || matrix.suite == 'smart-lists'"
-        self.assertEqual(checkout['if'], condition)
-        self.assertEqual(install['if'], condition)
-        self.assertEqual(checkout['with']['repository'], 'razzant/ouroboros')
-        self.assertEqual(checkout['with']['ref'],
-                         "${{ matrix.suite == 'email-presence' && '04b6453ad0e5d4b6bb157b76e67ccac60fb0eff6' "
-                         "|| '9c4411457bdb752d9379f17a97cf171a22384402' }}")
-        self.assertEqual(checkout['with']['persist-credentials'], 'false')
-        python = next(step for step in hosted['steps'] if step.get('uses') == 'actions/setup-python@v5')
-        self.assertEqual(python['with']['python-version'],
-                         '${{ contains(fromJSON(\'["memory-atlas", "calendar-skill", "email-presence"]\'), matrix.suite) && \'3.10\' || \'3.11\' }}')
-        with tempfile.TemporaryDirectory(prefix='hub consumer workflow ') as tmp:
-            root = Path(tmp)
-            output = root / 'environment'
-            # Execute the actual shell step; substitute only downloads, not its variable expansion.
-            prelude = 'python() { printf "%s\\n" "$*" >> "$PROBES"; }\n'
-            result = subprocess.run(['/bin/sh', '-c', prelude + install['run']], check=True,
-                                    env={**os.environ, 'GITHUB_WORKSPACE': str(root), 'GITHUB_ENV': str(output),
-                                         'PROBES': str(root / 'probes')}, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0)
-            env = dict(line.split('=', 1) for line in output.read_text(encoding='utf-8').splitlines())
-            self.assertEqual(env, {key: str(root / 'mail-calendar-core')
-                                  for key in ('OUROBOROS_SOURCE_DIR', 'OUROBOROS_THEME_CORE_ROOT')})
-            self.assertEqual((root / 'probes').read_text(encoding='utf-8').splitlines(),
-                             ['-m pip install -r mail-calendar-core/requirements.txt',
-                              '-m playwright install --with-deps chromium webkit'])
+    def test_the_core_is_checked_out_only_at_the_one_pin(self):
+        workflows = {path.name: self.workflow(path.name) for path in sorted((ROOT / '.github/workflows').glob('*.yml'))}
+        self.assertEqual(core_pin_violations(workflows), [])
+        pin = workflows['catalog-check.yml']['env']['OUROBOROS_CORE_SHA']
+        old = '9f6fe2f5f7f4d8f3e5ea58f0d04fb352181416bc'
+        steps = lambda documents: documents['catalog-check.yml']['jobs']['hosted-skills']['steps']
+        [checkout] = [step for step in steps(workflows) if step.get('with', {}).get('repository') == CORE_REPOSITORY]
+        at = steps(workflows).index(checkout)
+        second = {**checkout, 'with': {**checkout['with'], 'ref': old, 'path': 'presence-core'}}
+        # A second pin, however it is spelled, fails; each change is applied to a fresh copy of the real workflows.
+        for label, change in [
+                ('a second checkout at an older commit', lambda w: steps(w).insert(at + 1, second)),
+                ('the checkout at a literal copy of the pin', lambda w: steps(w)[at]['with'].update(ref=pin)),
+                ('a ref that depends on the suite', lambda w: steps(w)[at]['with'].update(
+                    ref=f"${{{{ matrix.suite == 'email-presence' && '{old}' || env.OUROBOROS_CORE_SHA }}}}")),
+                ('a job that declares the pin again', lambda w: w['catalog-check.yml']['jobs']['hosted-skills'].update(
+                    env={'OUROBOROS_CORE_SHA': old})),
+                ('a checkout of the core in another workflow', lambda w: w['signals.yml']['jobs']['snapshot']['steps'].append(second)),
+                ('a commit a script fetches', lambda w: steps(w).insert(at + 1, {'run': f'git -C core checkout {old}'})),
+                ('a pin that is not a full commit', lambda w: w['catalog-check.yml']['env'].update(OUROBOROS_CORE_SHA=pin[:12])),
+        ]:
+            with self.subTest(label):
+                changed = json.loads(json.dumps(workflows))  # BaseLoader yields only dicts, lists and strings
+                change(changed)
+                self.assertNotEqual(core_pin_violations(changed), [])
 
-    def test_presence_consumers_run_against_the_pinned_core_in_every_suite_that_lists_them(self):
+    def test_every_suite_that_needs_a_core_runs_on_the_one_checkout(self):
         hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']
-        checkout = next(step for step in hosted['steps'] if step.get('with', {}).get('path') == 'presence-core')
-        name = next(step for step in hosted['steps'] if step.get('name') == 'Name that core for the Presence consumers')
+        steps = hosted['steps']
+        needs_core = sorted(name for name, spec in ci_checks.SUITES.items() if spec.get('core_env'))
+
+        def selecting(suites):
+            return f"contains(fromJSON('{json.dumps(sorted(suites))}'), matrix.suite)"
+        [checkout] = [step for step in steps if step.get('with', {}).get('repository') == CORE_REPOSITORY]
+        self.assertEqual(checkout['if'], selecting(needs_core))
+        self.assertEqual(checkout['with'], {'repository': CORE_REPOSITORY, 'ref': CORE_REF, 'path': 'core',
+                                            'persist-credentials': 'false'})
+        install = next(step for step in steps if step.get('name') == "Install the core's runtime and the browsers, and name the core")
+        presence = next(step for step in steps if step.get('name') == 'Name the core for the Presence consumers')
+        runtime = ['calendar-skill', 'email-presence', 'memory-atlas', 'smart-lists']
+        consumer_suites = [name for name in needs_core if ci_checks.SUITES[name]['core_env'] == 'OUROBOROS_PRESENCE_CORE_ROOT']
+        self.assertEqual((install['if'], presence['if']), (selecting(runtime), selecting(consumer_suites)))
+        self.assertEqual(sorted(runtime + consumer_suites), needs_core)
+        # The Presence consumers (tests/test_*_core_consumer.py): every suite that lists one requires the core.
         consumers = {path.relative_to(ROOT).as_posix() for path in (ROOT / 'tests').glob('test_*_core_consumer.py')
                      if 'CORE_ENV = "OUROBOROS_PRESENCE_CORE_ROOT"' in path.read_text(encoding='utf-8')}
         self.assertEqual(consumers, {'tests/test_slack_conversation_core_consumer.py', 'tests/test_reaction_core_consumer.py',
@@ -300,26 +353,37 @@ class WorkflowTests(unittest.TestCase):
                                      'tests/test_telegram_bot_media_core_consumer.py',
                                      'tests/test_telegram_bot_typing_core_consumer.py',
                                      'tests/test_freshdesk_core_consumer.py'})
-        # Every suite that runs one of them requires the core, and no other suite does.
-        listing = [suite for suite, spec in ci_checks.SUITES.items() if consumers & set(spec['tests'])]
-        required = [suite for suite, spec in ci_checks.SUITES.items()
-                    if spec.get('core_env') == 'OUROBOROS_PRESENCE_CORE_ROOT']
-        self.assertEqual(listing, required)
-        condition = f"contains(fromJSON('{json.dumps(sorted(required))}'), matrix.suite)"
-        self.assertEqual((checkout['if'], name['if']), (condition, condition))
-        self.assertEqual(checkout['with']['repository'], 'razzant/ouroboros')
-        self.assertRegex(checkout['with']['ref'], r'^[a-f0-9]{40}$')
-        self.assertEqual(checkout['with']['persist-credentials'], 'false')
-        steps = hosted['steps']
-        self.assertLess(steps.index(checkout), steps.index(name))
-        self.assertLess(steps.index(name), len(steps) - 1)  # both precede the suite run
-        with tempfile.TemporaryDirectory(prefix='hub presence workflow ') as tmp:
-            root = Path(tmp)
-            output = root / 'environment'
-            # Execute the actual shell step.
-            subprocess.run(['/bin/sh', '-c', name['run']], check=True, capture_output=True, text=True,
-                           env={**os.environ, 'GITHUB_WORKSPACE': str(root), 'GITHUB_ENV': str(output)})
-            self.assertEqual(output.read_text(encoding='utf-8'), f'OUROBOROS_PRESENCE_CORE_ROOT={root / "presence-core"}\n')
+        self.assertEqual([suite for suite, spec in ci_checks.SUITES.items() if consumers & set(spec['tests'])],
+                         [suite for suite in ci_checks.SUITES if suite in consumer_suites])
+        python = next(step for step in steps if step.get('uses') == 'actions/setup-python@v5')
+        self.assertEqual(python['with']['python-version'],
+                         '${{ contains(fromJSON(\'["memory-atlas", "calendar-skill", "email-presence"]\'), matrix.suite) && \'3.10\' || \'3.11\' }}')
+        # Execute both shell steps as written on either runner; substitute only the downloads. Each names the one
+        # checkout, and every suite is given the variable its tests read (core_env) by the step that runs for it.
+        named = {}
+        for step, expected in [(install, ['-m pip install -r core/requirements.txt', '-m playwright install {}chromium webkit']),
+                               (presence, [])]:
+            for runner in ('Linux', 'macOS'):
+                with self.subTest(step=step['name'], runner=runner), tempfile.TemporaryDirectory(prefix='hub core workflow ') as tmp:
+                    root = Path(tmp)
+                    prelude = 'python() { printf "%s\\n" "$*" >> "$PROBES"; }\n'
+                    subprocess.run(['/bin/sh', '-c', prelude + step['run']], check=True, capture_output=True, text=True,
+                                   env={**os.environ, 'RUNNER_OS': runner, 'GITHUB_WORKSPACE': str(root),
+                                        'GITHUB_ENV': str(root / 'environment'), 'PROBES': str(root / 'probes')})
+                    env = dict(line.split('=', 1) for line in (root / 'environment').read_text(encoding='utf-8').splitlines())
+                    self.assertEqual(set(env.values()), {str(root / 'core')})
+                    named[step['name']] = set(env)
+                    probes = (root / 'probes').read_text(encoding='utf-8').splitlines() if expected else []
+                    deps = '--with-deps ' if runner == 'Linux' else ''  # Linux runners also need the browsers' libraries
+                    self.assertEqual(probes, [line.format(deps) for line in expected])
+        self.assertEqual(named[install['name']], {'ATLAS_CORE', 'OUROBOROS_SOURCE_DIR', 'OUROBOROS_THEME_CORE_ROOT'})
+        self.assertEqual(named[presence['name']], {'OUROBOROS_PRESENCE_CORE_ROOT'})
+        for suite in needs_core:
+            given = named[install['name'] if suite in runtime else presence['name']]
+            self.assertIn(ci_checks.SUITES[suite]['core_env'], given, suite)
+        for step in (install, presence):
+            self.assertLess(steps.index(checkout), steps.index(step))
+            self.assertLess(steps.index(step), len(steps) - 1)  # it precedes the suite run
 
     def test_chrome_browser_workflow_installs_node_and_the_npm_closure_its_pins_record(self):
         hosted = self.workflow('catalog-check.yml')['jobs']['hosted-skills']

@@ -296,6 +296,16 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/sla
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/telegram-bot/tests
 ```
 
+Every suite whose tests drive a real core (`core_env` in `scripts/ci_checks.py`: Memory Atlas,
+mail, Calendar, Smart Lists and the Presence consumers of Freshdesk, Slack and Telegram) runs
+against one `razzant/ouroboros` commit, `OUROBOROS_CORE_SHA` at the top of
+`.github/workflows/catalog-check.yml`, checked out once per job. With one pin every seam between a
+hosted skill and the core is tested on the same reproducible core, and no suite stays behind on an
+older one; `tests/test_workflows.py` fails on a second pin. To move it, open a PR that changes only
+that value. The workflow is shared, so that PR runs every suite on the new core, and it merges when
+all of them pass. A suite that fails there is fixed in the hub when the skill or its test is wrong
+against the core's documented contract, and reported to the core when the core broke it.
+
 The `claudexor-quotas` suite needs Node 24, pytest, Playwright and its Chromium
 and WebKit builds. `OUROBOROSHUB_NODE` selects an existing Node executable;
 `PLAYWRIGHT_BROWSERS_PATH` selects the browser cache. Run with
@@ -310,11 +320,10 @@ Set `TG_DISCOVERY_CORE`, `TG_DISCOVERY_VENV` and `PLAYWRIGHT_BROWSERS_PATH`, the
 run its `run.sh` with an evidence directory. It checks the existing Places picker
 against synthetic Bot API updates and an upgrade from 0.8, without live credentials.
 
-The selected `calendar-skill`, `email-presence` and `smart-lists` CI jobs check out
-their exact cores pinned in `catalog-check.yml` (email uses PluginAPI 2.5; Calendar
-and Smart Lists retain their prior pin), install each core's Python runtime requirements
-and Chromium/WebKit. Calendar and mail exercise the real Host Service and widget
-bridge with fake providers. Smart Lists mounts its widget through that core's real
+The selected `calendar-skill`, `email-presence` and `smart-lists` CI jobs install the
+pinned core's Python runtime requirements and Chromium/WebKit. Calendar and mail
+exercise the real Host Service and widget bridge with fake providers. Smart Lists
+mounts its widget through that core's real
 module bridge (`widget_module.js`), served by a test HTTP server over the skill's
 routes registered on `FakePluginAPI`, without the Host Service. A missing core fails
 those jobs; so do missing Playwright or browsers (Smart Lists: `SMART_LISTS_REQUIRE_BROWSERS`,
@@ -327,7 +336,7 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q skills/calenda
 ```
 
 For each complete consumer suite, use Python 3.10 with the requirements and browsers
-from that suite's pinned core. Set `OUROBOROS_SOURCE_DIR` and
+from the pinned core. Set `OUROBOROS_SOURCE_DIR` and
 `OUROBOROS_THEME_CORE_ROOT` to that checkout, then run
 `python -B scripts/ci_checks.py run email-presence` and
 `python -B scripts/ci_checks.py run calendar-skill` separately. The mail runner

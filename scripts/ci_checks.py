@@ -30,7 +30,7 @@ SUITES = {
     'duckduckgo': {'skills': ['duckduckgo'], 'tests': ['tests/test_duckduckgo.py'],
                    'dependencies': ['httpx', 'starlette']},
     # The browser regressions mount the widget through the core's own module bridge in Chromium and WebKit:
-    # catalog-check.yml gives this suite the mail/calendar core pin, its runtime and both browsers.
+    # catalog-check.yml gives this suite the pinned core, its runtime and both browsers.
     # SMART_LISTS_REQUIRE_BROWSERS turns a skip for want of Playwright or Chromium into a failure.
     'smart-lists': {'skills': ['smart_lists'], 'tests': ['skills/smart_lists/tests', 'tests/test_smart_lists_browser.py'],
                     'dependencies': ['starlette'], 'core_env': 'OUROBOROS_THEME_CORE_ROOT',
@@ -51,7 +51,8 @@ SUITES = {
                          'env': {'QUOTAS_REQUIRE_RUNTIME': '1'}},
     # The whole suite, real host and browsers included: catalog-check.yml gives this suite the pinned core (ATLAS_CORE),
     # its runtime and Playwright's browsers. Without them the suite stops with an error; it never skips.
-    'memory-atlas': {'skills': ['memory-atlas'], 'tests': ['tests/memory_atlas'], 'dependencies': ['starlette']},
+    'memory-atlas': {'skills': ['memory-atlas'], 'tests': ['tests/memory_atlas'], 'dependencies': ['starlette'],
+                     'core_env': 'ATLAS_CORE'},
     'calendar-skill': {'skills': ['calendar'],
                        'tests': ['skills/calendar/tests', 'tests/test_calendar_skill.py',
                                  'tests/test_calendar_host_browser.py'],

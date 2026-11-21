@@ -28,7 +28,7 @@ def consumer_core():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('fixture', encoding='utf-8')
         with patch.dict(os.environ, {'OUROBOROS_SOURCE_DIR': str(core), 'OUROBOROS_THEME_CORE_ROOT': str(core),
-                                     'OUROBOROS_PRESENCE_CORE_ROOT': str(core)}):
+                                     'OUROBOROS_PRESENCE_CORE_ROOT': str(core), 'ATLAS_CORE': str(core)}):
             yield core
 
 
@@ -165,7 +165,7 @@ class SelectionTests(unittest.TestCase):
 
     def test_selected_consumers_refuse_absent_or_old_core_before_running_an_all_skipped_suite(self):
         for name, key in [('email-presence', 'OUROBOROS_SOURCE_DIR'), ('calendar-skill', 'OUROBOROS_THEME_CORE_ROOT'),
-                          ('smart-lists', 'OUROBOROS_THEME_CORE_ROOT'),
+                          ('smart-lists', 'OUROBOROS_THEME_CORE_ROOT'), ('memory-atlas', 'ATLAS_CORE'),
                           ('slack-bridge', 'OUROBOROS_PRESENCE_CORE_ROOT'), ('telegram-bot', 'OUROBOROS_PRESENCE_CORE_ROOT'),
                           ('telegram-user-session', 'OUROBOROS_PRESENCE_CORE_ROOT'),
                           ('freshdesk', 'OUROBOROS_PRESENCE_CORE_ROOT')]:
