@@ -98,18 +98,20 @@ class Engine:
         except Exception as exc:
             directory = None
             reason = str(exc)
-        with self.lock:
-            return {
-                "ready": directory is not None and not reason and not self.installing,
-                "resident": self.model is not None,
-                "model": str(directory or settings["model_path"]),
-                "always_resident": settings["always_resident"],
-                "idle_expiry_sec": 0 if settings["always_resident"] else IDLE_SECONDS,
-                "installing": self.installing,
-                "install_error": self.install_error,
-                "install_notice": self.install_notice,
-                "reason": reason or ("Model download in progress" if self.installing else ""),
-            }
+        # A snapshot of plain attributes: status never waits for the model lock, which a recognition holds
+        # for its whole run; `busy` tells the caller why Whisper cannot take another recording right now.
+        return {
+            "busy": self.transcription.locked(),
+            "ready": directory is not None and not reason and not self.installing,
+            "resident": self.model is not None,
+            "model": str(directory or settings["model_path"]),
+            "always_resident": settings["always_resident"],
+            "idle_expiry_sec": 0 if settings["always_resident"] else IDLE_SECONDS,
+            "installing": self.installing,
+            "install_error": self.install_error,
+            "install_notice": self.install_notice,
+            "reason": reason or ("Model download in progress" if self.installing else ""),
+        }
 
     def configure(self, settings: dict) -> dict:
         path = str(model_directory(settings["model_path"]).resolve())
@@ -166,6 +168,7 @@ class Engine:
         if count < 1600:
             raise ValueError("audio shorter than 0.1 seconds")
         audio = np.concatenate(parts).astype("float32", copy=False)
+        parts.clear()  # the per-frame copies are not needed beside the waveform during recognition
         decoded = time.perf_counter()
         with self.lock:
             acquired = time.perf_counter()
@@ -254,6 +257,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _discard(self, raw_length: str) -> None:
+        remaining = int(raw_length) if raw_length.isdecimal() else 0
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+
     def log_message(self, *_args) -> None:
         pass  # Audio and the owner's transcript never enter companion logs.
 
@@ -270,6 +281,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             raw_length = self.headers.get("Content-Length", "")
             source = self.headers.get(SOURCE_HEADER, "dictation")
+            if ENGINE.transcription.locked() and (self.path == "/transcribe" or self.path in ("/settings", "/models/install")):
+                # Busy is answered before the body is buffered; a long note is drained, never held in memory.
+                self._discard(raw_length)
+                self._reply(503, error("voice_busy", "A local transcription is already running; try again after it finishes"))
+                return
             if not raw_length.isdecimal() or int(raw_length) > limits_for(source if self.path == "/transcribe" else "dictation")[0]:
                 self._reply(413, error("too_large", "Request too large"))
                 return

@@ -9,7 +9,7 @@ from starlette.responses import JSONResponse
 
 from .whisper_runtime import (
     DICTATION_MAX_BYTES, DICTATION_MAX_SECONDS, ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_SECONDS, MAX_REPLY_BYTES,
-    SOURCE_HEADER, TOOL_TIMEOUT_SECONDS, WORKER_TIMEOUT_SECONDS, audio_format, error, read_settings,
+    SOURCE_HEADER, TOOL_TIMEOUT_SECONDS, audio_format, error, read_settings, wait_for,
 )
 
 
@@ -28,7 +28,7 @@ def _worker(state_dir: Path, method: str, path: str, body: bytes = b"", mime: st
         token = endpoint.get("token")
         if type(port) is not int or not 1 <= port <= 65535 or not isinstance(token, str) or len(token) < 30:
             raise ValueError("worker endpoint malformed")
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=WORKER_TIMEOUT_SECONDS)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=wait_for(path, source))
         try:
             conn.request(method, path, body=body, headers={
                 "X-Voice-Token": token,
@@ -47,7 +47,8 @@ def _worker(state_dir: Path, method: str, path: str, body: bytes = b"", mime: st
         finally:
             conn.close()
     except (OSError, ValueError, TimeoutError, json.JSONDecodeError) as exc:
-        return JSONResponse(error("worker_unavailable", f"Voice worker unavailable: {type(exc).__name__}"), status_code=503)
+        waited = f" after {wait_for(path, source)} s" if isinstance(exc, TimeoutError) else ""
+        return JSONResponse(error("worker_unavailable", f"Voice worker unavailable: {type(exc).__name__}{waited}"), status_code=503)
 
 
 def _settings_response(response: JSONResponse) -> JSONResponse:
