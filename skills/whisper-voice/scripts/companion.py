@@ -117,7 +117,9 @@ class Engine:
     def _control_lock(self):
         """The model lock for a settings change, never waited for: a recognition holds it for its whole run, and a
         save that waited could apply after the caller was told 503."""
-        if not self.lock.acquire(blocking=False):
+        # A recognition owns the single slot from admission; it takes the model lock only after decoding, so the
+        # lock alone would let a save through during the decode. Both are checked, neither is waited for.
+        if self.transcription.locked() or not self.lock.acquire(blocking=False):
             raise VoiceBusy("A local transcription is already running; try again after it finishes")
 
     def configure(self, settings: dict) -> dict:

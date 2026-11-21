@@ -168,31 +168,29 @@ def test_download_stays_in_skill_state_and_later_owner_selection_wins(tmp_path, 
         assert cache_dir == str(tmp_path / "models")
         assert "model.bin" in allow_patterns
         entered.set()
-        assert release.wait(timeout=3)
+        assert release.wait(timeout=60)  # an upper bound for a starved runner, not a delay
         return str(downloaded)
 
     monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(snapshot_download=fake_download))
     engine = companion.Engine()
     engine.install("small")
-    assert entered.wait(timeout=3)
+    assert entered.wait(timeout=60)
     chosen = tmp_path / "newer-choice"
     chosen.mkdir()
     for name in ("model.bin", "config.json", "tokenizer.json"):
         (chosen / name).write_bytes(b"valid")
     engine.configure(validate_choice(str(chosen), False))
     release.set()
-    for _ in range(100):
-        if not engine.installing:
-            break
+    deadline = time.monotonic() + 60
+    while engine.installing and time.monotonic() < deadline:
         time.sleep(.01)
     assert not engine.installing and not engine.install_error
     assert "newer selection was kept" in engine.install_notice
     assert read_settings(tmp_path)["model_path"] == str(chosen)
 
     engine.install("small")
-    for _ in range(100):
-        if not engine.installing:
-            break
+    deadline = time.monotonic() + 60
+    while engine.installing and time.monotonic() < deadline:
         time.sleep(.01)
     assert not engine.installing and not engine.install_error
     assert read_settings(tmp_path)["model_path"] == str(downloaded)
