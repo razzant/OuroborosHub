@@ -299,7 +299,7 @@ def test_real_plugin_route_forwards_raw_audio_over_private_loopback(tmp_path, mi
         async def receive():
             return {'type': 'http.request', 'body': audio, 'more_body': False}
         request_obj = Request({'type': 'http', 'method': 'POST', 'path': '/transcribe',
-                               'headers': [(b'content-type', mime),
+                               'headers': [(b'content-type', mime), (b'x-voice-source', b'attachment'),
                                            (b'content-length', str(len(audio)).encode())]}, receive)
         _status, transcribe, _settings, _install = plugin._routes(tmp_path)
         response = asyncio.run(transcribe(request_obj))
@@ -593,17 +593,20 @@ def test_real_plugin_route_refuses_over_the_dictation_ceiling_and_takes_exactly_
 
     plugin = load_plugin()
     seen = []
-    plugin._worker = lambda *args, **kwargs: seen.append(len(args[3])) or plugin.JSONResponse({"text": "ok"})
+    sources = []
+    plugin._worker = lambda *args, **kwargs: (seen.append(len(args[3])), sources.append(kwargs.get("source", "dictation"))) and plugin.JSONResponse({"text": "ok"})
     audio = b"OggS" + b"\0" * (DICTATION_MAX_BYTES - 4)
 
     def call(body, length):
         async def receive():
             return {"type": "http.request", "body": body, "more_body": False}
         scope = {"type": "http", "method": "POST", "path": "/transcribe",
-                 "headers": [(b"content-type", b"audio/ogg"), (b"content-length", str(length).encode())]}
+                 # A browser caller claiming the attachment path: the skill ignores it, the route sets its own source.
+                 "headers": [(b"content-type", b"audio/ogg"), (b"x-voice-source", b"attachment"),
+                             (b"content-length", str(length).encode())]}
         return asyncio.run(plugin._routes(tmp_path)[1](Request(scope, receive)))
 
     assert call(audio, len(audio)).status_code == 200 and seen == [DICTATION_MAX_BYTES]
     refused = call(audio + b"\0", len(audio) + 1)
     assert refused.status_code == 413 and "524288" in json.loads(refused.body)["error"]["message"]
-    assert seen == [DICTATION_MAX_BYTES]  # the refused one never reached the worker
+    assert seen == [DICTATION_MAX_BYTES] and sources == ["dictation"]  # refused one never reached the worker

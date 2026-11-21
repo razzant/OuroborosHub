@@ -35,6 +35,10 @@ SUITES = {
     'smart-lists': {'skills': ['smart_lists'], 'tests': ['skills/smart_lists/tests', 'tests/test_smart_lists_browser.py'],
                     'dependencies': ['starlette'], 'core_env': 'OUROBOROS_THEME_CORE_ROOT',
                     'env': {'SMART_LISTS_REQUIRE_BROWSERS': '1'}},
+    # Offline: the suite fakes the model (no weights, no faster-whisper); PyAV and numpy decode real silent MP4 for
+    # the length limits, and starlette serves the plugin route. The core consumer runs in the Telegram suites.
+    'whisper-voice': {'skills': ['whisper-voice'], 'tests': ['skills/whisper-voice/tests'],
+                      'dependencies': ['starlette', 'numpy', 'av>=17.1.0,<19']},
     'gigasearch': {'skills': ['gigasearch'], 'tests': ['skills/gigasearch/test_gigasearch.py']},
     'cache-efficiency': {'skills': ['cache_efficiency_snapshot'],
                          'tests': ['skills/cache_efficiency_snapshot', 'tests/test_cache_dashboard_browser.py'],
