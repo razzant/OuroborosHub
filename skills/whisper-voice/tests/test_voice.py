@@ -23,6 +23,7 @@ from whisper_runtime import (  # noqa: E402
     ATTACHMENT_MAX_SECONDS,
     DICTATION_MAX_BYTES,
     DICTATION_MAX_SECONDS,
+    DURATION_GRACE_SECONDS,
     ModelUnavailable,
     audio_format,
     model_directory,
@@ -451,18 +452,22 @@ def _runtime(name):
 
 
 def _mp4(seconds, rate=16000, bit_rate=None, noise=False):
-    """A real AAC/MP4 clip at the given sample rate; silent unless noise (big enough to cross a byte cap)."""
+    """A real AAC/MP4 clip at the given sample rate (seconds may be fractional); silent unless noise (big enough to
+    cross a byte cap)."""
     import io
 
     av, np = _runtime("av"), _runtime("numpy")
     rng = np.random.default_rng(7)
     output = io.BytesIO()
+    remaining = int(seconds * rate)
     with av.open(output, "w", format="mp4") as container:
         stream = container.add_stream("aac", rate=rate)
         if bit_rate:
             stream.bit_rate = bit_rate
-        for _ in range(seconds):
-            data = (rng.uniform(-.3, .3, (1, rate)) if noise else np.zeros((1, rate))).astype(np.float32)
+        while remaining > 0:
+            count = min(rate, remaining)
+            remaining -= count
+            data = (rng.uniform(-.3, .3, (1, count)) if noise else np.zeros((1, count))).astype(np.float32)
             frame = av.AudioFrame.from_ndarray(data, format="fltp", layout="mono")
             frame.sample_rate = rate
             for packet in stream.encode(frame):
@@ -495,16 +500,22 @@ def _fake_whisper(monkeypatch, words="long words", seen=None):
 
 
 @pytest.mark.parametrize("rate", [16000, 44100, 48000])
-@pytest.mark.parametrize("source,under,over", [("dictation", 119, 121), ("attachment", 599, 601)])
-def test_decoded_length_limit_holds_in_both_directions_per_source(tmp_path, monkeypatch, source, under, over, rate):
-    """Native 16 kHz and 44.1/48 kHz clips (which pass through the resampler) at each path's length boundary."""
+@pytest.mark.parametrize("source,accepted,over", [("dictation", (119, 120.3), 130), ("attachment", (599, 601), 610)])
+def test_decoded_length_limit_holds_in_both_directions_per_source(tmp_path, monkeypatch, source, accepted, over, rate):
+    """Native 16 kHz and 44.1/48 kHz clips (which pass through the resampler) around each path's length limit. The
+    nominal limits are 120 and 600 s; the worker tolerates DURATION_GRACE_SECONDS more (a recorder that stops 300 ms
+    late, codec padding), so a 120.3 s dictation is taken and one well over is refused."""
     companion = _companion_module(tmp_path, monkeypatch, "voice_length_test")
     seen = []
     _fake_whisper(monkeypatch, seen=seen)
     engine = companion.Engine()
-    limit = {"dictation": DICTATION_MAX_SECONDS, "attachment": ATTACHMENT_MAX_SECONDS}[source]
-    assert engine.transcribe(_mp4(under, rate), "audio/mp4", None, source) == "long words"
-    assert seen and abs(seen[0] - under * 16000) < 16000 // 2
+    nominal = {"dictation": DICTATION_MAX_SECONDS, "attachment": ATTACHMENT_MAX_SECONDS}[source]
+    limit = nominal + DURATION_GRACE_SECONDS
+    assert limit == {"dictation": 125, "attachment": 605}[source]
+    for seconds in accepted:
+        seen.clear()
+        assert engine.transcribe(_mp4(seconds, rate), "audio/mp4", None, source) == "long words"
+        assert seen and abs(seen[0] - seconds * 16000) < 16000 // 2
     seen.clear()
     with pytest.raises(ValueError, match=f"audio longer than {limit} seconds"):
         engine.transcribe(_mp4(over, rate), "audio/mp4", None, source)
@@ -512,7 +523,7 @@ def test_decoded_length_limit_holds_in_both_directions_per_source(tmp_path, monk
     if source == "dictation":
         # A recording that the attachment path takes is still too long for dictation; unknown means dictation.
         assert engine.transcribe(_mp4(over, rate), "audio/mp4", None, "attachment") == "long words"
-        with pytest.raises(ValueError, match="audio longer than 120 seconds"):
+        with pytest.raises(ValueError, match="audio longer than 125 seconds"):
             engine.transcribe(_mp4(over, rate), "audio/mp4", None, "unknown")
 
 
@@ -522,7 +533,7 @@ def test_length_limit_also_holds_for_what_the_resampler_drains_at_the_end(tmp_pa
     np = _runtime("numpy")
     companion = _companion_module(tmp_path, monkeypatch, "voice_drain_test")
     _fake_whisper(monkeypatch)
-    limit = DICTATION_MAX_SECONDS * 16000
+    limit = (DICTATION_MAX_SECONDS + DURATION_GRACE_SECONDS) * 16000
 
     class Converted:
         def __init__(self, count):
@@ -557,7 +568,7 @@ def test_length_limit_also_holds_for_what_the_resampler_drains_at_the_end(tmp_pa
     if accepted:
         assert engine.transcribe(b"OggS", "audio/ogg", None, "dictation") == "long words"
     else:
-        with pytest.raises(ValueError, match="audio longer than 120 seconds"):
+        with pytest.raises(ValueError, match="audio longer than 125 seconds"):
             engine.transcribe(b"OggS", "audio/ogg", None, "dictation")
 
 
@@ -581,14 +592,17 @@ def test_transcript_cap_is_exact_in_both_directions(tmp_path, monkeypatch, char)
     assert len(longest.encode("utf-8")) <= whisper_runtime.MAX_REPLY_BYTES
 
 
-@pytest.mark.parametrize("extra,accepted", [(0, True), (1, False)])
-def test_plugin_reply_reader_takes_exactly_its_bound_and_refuses_one_byte_more(tmp_path, extra, accepted):
+@pytest.mark.parametrize("trailing,accepted", [(b"", True), (b"\n", False)])
+def test_plugin_reply_reader_takes_a_complete_reply_of_exactly_its_bound_and_refuses_anything_after_it(tmp_path, trailing, accepted):
+    """A complete JSON reply of exactly MAX_REPLY_BYTES parses; one trailing byte (whitespace keeps the JSON
+    valid, so only the reader's own guard can refuse it) does not."""
     import whisper_runtime
 
     plugin = load_plugin()
     frame = len(json.dumps({"text": ""}).encode())
-    body = json.dumps({"text": "x" * (whisper_runtime.MAX_REPLY_BYTES - frame + extra)}).encode()
-    assert len(body) == whisper_runtime.MAX_REPLY_BYTES + extra
+    body = json.dumps({"text": "x" * (whisper_runtime.MAX_REPLY_BYTES - frame)}).encode()
+    assert len(body) == whisper_runtime.MAX_REPLY_BYTES
+    body += trailing
 
     class Receiver(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -624,32 +638,43 @@ def test_waits_are_per_route_and_the_tool_outlasts_its_worker_wait():
 
 
 class _Child:
-    """A real companion process with a fake faster_whisper (no weights) and the real av/numpy decoder."""
+    """A real companion process with a fake faster_whisper (no weights) and the real av/numpy decoder. Every spawned
+    process is recorded in `spawned`, and a constructor that fails for any reason terminates its own child first."""
+
+    spawned: list = []
+    INIT_DEADLINE_SECONDS = 30
 
     def __init__(self, tmp_path, chars=5, char="я", extra_env=None):
-        fake = tmp_path / "fake_site"
-        fake.mkdir(exist_ok=True)
-        (fake / "faster_whisper.py").write_text(
-            "import os, types\nclass WhisperModel:\n    def __init__(self, path, **kw):\n        pass\n"
-            "    def transcribe(self, audio, **kw):\n        import time\n"
-            "        time.sleep(float(os.environ.get('FAKE_SECONDS', '0')))\n"
-            "        return [types.SimpleNamespace(text=os.environ['FAKE_CHAR'] * int(os.environ['FAKE_CHARS']))], None\n",
-            encoding="utf-8")
-        env = {**os.environ, "OUROBOROS_SKILL_STATE_DIR": str(tmp_path), "FAKE_CHARS": str(chars), "FAKE_CHAR": char,
-               "PYTHONPATH": os.pathsep.join([str(fake), os.environ.get("PYTHONPATH", "")]), **(extra_env or {})}
-        self.proc = subprocess.Popen([sys.executable, str(ROOT / "scripts" / "companion.py")], env=env,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        endpoint = tmp_path / "voice_endpoint.json"
-        for _ in range(400):  # a cold PyAV/NumPy import on a loaded runner can take seconds
-            if endpoint.exists():
-                break
-            if self.proc.poll() is not None:
-                raise AssertionError(self.proc.stderr.read().decode("utf-8", "replace"))
-            time.sleep(0.05)
-        data = json.loads(endpoint.read_text(encoding="utf-8"))
-        self.port, self.token = data["port"], data["token"]
-        request(self.port, self.token, "POST", "/settings", json.dumps({
-            "model_path": str(make_model(tmp_path)), "always_resident": False}).encode())
+        self.proc = None
+        try:
+            fake = tmp_path / "fake_site"
+            fake.mkdir(exist_ok=True)
+            (fake / "faster_whisper.py").write_text(
+                "import os, types\nclass WhisperModel:\n    def __init__(self, path, **kw):\n        pass\n"
+                "    def transcribe(self, audio, **kw):\n        import time\n"
+                "        time.sleep(float(os.environ.get('FAKE_SECONDS', '0')))\n"
+                "        return [types.SimpleNamespace(text=os.environ['FAKE_CHAR'] * int(os.environ['FAKE_CHARS']))], None\n",
+                encoding="utf-8")
+            env = {**os.environ, "OUROBOROS_SKILL_STATE_DIR": str(tmp_path), "FAKE_CHARS": str(chars), "FAKE_CHAR": char,
+                   "PYTHONPATH": os.pathsep.join([str(fake), os.environ.get("PYTHONPATH", "")]), **(extra_env or {})}
+            self.proc = subprocess.Popen([sys.executable, str(ROOT / "scripts" / "companion.py")], env=env,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            _Child.spawned.append(self.proc)
+            endpoint = tmp_path / "voice_endpoint.json"
+            deadline = time.monotonic() + self.INIT_DEADLINE_SECONDS
+            while not endpoint.exists():
+                if self.proc.poll() is not None:
+                    raise AssertionError(self.proc.stderr.read().decode("utf-8", "replace"))
+                if time.monotonic() > deadline:
+                    raise AssertionError("companion did not publish its endpoint in time")
+                time.sleep(0.05)
+            data = json.loads(endpoint.read_text(encoding="utf-8"))
+            self.port, self.token = data["port"], data["token"]
+            request(self.port, self.token, "POST", "/settings", json.dumps({
+                "model_path": str(make_model(tmp_path)), "always_resident": False}).encode())
+        except BaseException:
+            self.close()
+            raise
 
     def post(self, body, mime="audio/mp4", source=None, path="/transcribe", timeout=60):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
@@ -663,16 +688,50 @@ class _Child:
         finally:
             conn.close()
 
+    def open_upload(self, size, source="attachment", mime="audio/ogg", send=0):
+        """Start an upload of `size` bytes and send only `send` of them; returns the live connection."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        conn.putrequest("POST", "/transcribe")
+        for name, value in {"X-Voice-Token": self.token, "Content-Type": mime, "X-Voice-Source": source,
+                            "Content-Length": str(size)}.items():
+            conn.putheader(name, value)
+        conn.endheaders()
+        if send:
+            conn.send(b"OggS" + bytes(send - 4))
+        return conn
+
     def close(self):
-        self.proc.terminate()
-        self.proc.wait(timeout=5)
-        self.proc.stderr.close()
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()  # this exact child only
+            proc.wait(timeout=5)
+        finally:
+            if proc.stderr:
+                proc.stderr.close()
+
+
+def test_a_failed_fixture_constructor_leaves_no_companion_alive(tmp_path, monkeypatch):
+    spawned_before = len(_Child.spawned)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("forced constructor failure")
+
+    monkeypatch.setattr(sys.modules[__name__], "request", boom)
+    with pytest.raises(RuntimeError, match="forced constructor failure"):
+        _Child(tmp_path)
+    mine = _Child.spawned[spawned_before:]
+    assert len(mine) == 1 and mine[0].poll() is not None  # the child it spawned is gone
 
 
 def test_source_reaches_the_real_decoder_through_the_plugin_and_the_companion_over_http(tmp_path):
-    """One 121 s, ~1.9 MB clip crosses BOTH dictation limits: only the attachment source may carry it, and the
+    """One 130 s, ~2 MB clip crosses BOTH dictation limits: only the attachment source may carry it, and the
     source set by the skill's own caller is what the companion's decoder applies."""
-    clip = _mp4(121, rate=44100, bit_rate=128000, noise=True)
+    clip = _mp4(130, rate=44100, bit_rate=128000, noise=True)
     assert len(clip) > DICTATION_MAX_BYTES and len(clip) < ATTACHMENT_MAX_BYTES
     plugin = load_plugin()
     child = _Child(tmp_path)
@@ -680,11 +739,11 @@ def test_source_reaches_the_real_decoder_through_the_plugin_and_the_companion_ov
         # Attachment: the same bytes pass both limits and reach the model.
         taken = plugin._worker(tmp_path, "POST", "/transcribe", clip, "audio/mp4", source="attachment")
         assert taken.status_code == 200 and json.loads(taken.body)["text"] == "яяяяя"
-        # A 121 s clip that fits 512 KiB is refused on length as dictation and taken as attachment.
-        short = _mp4(121, rate=44100)
+        # A 130 s clip that fits 512 KiB is refused on length as dictation and taken as attachment.
+        short = _mp4(130, rate=44100)
         assert len(short) < DICTATION_MAX_BYTES
         over = plugin._worker(tmp_path, "POST", "/transcribe", short, "audio/mp4")
-        assert over.status_code == 400 and "audio longer than 120 seconds" in json.loads(over.body)["error"]["message"]
+        assert over.status_code == 400 and "audio longer than 125 seconds" in json.loads(over.body)["error"]["message"]
         assert plugin._worker(tmp_path, "POST", "/transcribe", short, "audio/mp4", source="attachment").status_code == 200
     finally:
         child.close()
@@ -709,36 +768,118 @@ def test_boundary_sized_transcript_crosses_the_real_companion_and_plugin(tmp_pat
         child.close()
 
 
-def test_status_and_controls_answer_during_a_long_recognition_and_busy_comes_before_the_body(tmp_path):
+def _running(child, tmp_path, seconds=6):
+    """Start one attached note whose (fake) recognition takes `seconds`; returns its thread and result list."""
+    results = []
+    thread = threading.Thread(target=lambda: results.append(child.post(_mp4(3), source="attachment")))
+    thread.start()
+    for _ in range(200):
+        if request(child.port, child.token, "GET", "/status")[1]["busy"]:
+            return thread, results
+        time.sleep(0.05)
+    raise AssertionError("recognition never started")
+
+
+def test_status_answers_at_once_and_a_settings_save_during_recognition_is_refused_with_nothing_changed(tmp_path):
     plugin = load_plugin()
     child = _Child(tmp_path, extra_env={"FAKE_SECONDS": "6"})
-    clip = _mp4(3)
-    results = []
-    worker = threading.Thread(target=lambda: results.append(child.post(clip, source="attachment")))
-    worker.start()
+    old = json.loads((tmp_path / "voice_settings.json").read_text(encoding="utf-8"))["model_path"]
+    other = tmp_path / "other-model"
+    other.mkdir()
+    for name in ("model.bin", "config.json", "tokenizer.json"):
+        (other / name).write_bytes(b"valid")
+    thread, results = _running(child, tmp_path)
     try:
-        for _ in range(100):
-            if request(child.port, child.token, "GET", "/status")[1]["busy"]:
-                break
-            time.sleep(0.05)
         began = time.monotonic()
         status, snapshot = request(child.port, child.token, "GET", "/status")
         assert status == 200 and snapshot["busy"] is True and time.monotonic() - began < 2
-        # Settings and download start answer busy at once instead of queuing behind the model lock.
-        assert request(child.port, child.token, "POST", "/settings", b"{}")[0] == 503
-        assert request(child.port, child.token, "POST", "/models/install", b'{"model":"small"}')[1]["error"]["code"] == "voice_busy"
-        # A second note is answered busy while its whole 8 MiB body is read off the socket, never held.
-        big = b"OggS" + bytes(8 * 1024 * 1024)
-        status, body = child.post(big, mime="audio/ogg", source="attachment")
-        assert status == 503 and body["error"]["code"] == "voice_busy"
-        # The plugin's own status call also answers within its short wait.
-        began = time.monotonic()
         assert json.loads(plugin._worker(tmp_path, "GET", "/status").body)["busy"] is True
-        assert time.monotonic() - began < 2
+        # A save returns 503 AT ONCE (never waits on the model lock) and changes nothing, now or later.
+        began = time.monotonic()
+        status, body = request(child.port, child.token, "POST", "/settings", json.dumps(
+            {"model_path": str(other), "always_resident": True}).encode())
+        assert status == 503 and body["error"]["code"] == "voice_busy" and time.monotonic() - began < 2
+        assert request(child.port, child.token, "POST", "/models/install", b'{"model":"small"}')[1]["error"]["code"] == "voice_busy"
+        shown = plugin._settings_response(plugin._worker(tmp_path, "GET", "/status"))
+        assert "a transcription is running" in json.loads(shown.body)["voice"]["message"]
     finally:
-        worker.join(30)
-        child.close()
+        thread.join(30)
     assert results and results[0][0] == 200
+    try:
+        # The recognition has ended: the refused save did NOT take effect afterwards, and the old model is selected.
+        status, now = request(child.port, child.token, "GET", "/status")
+        assert now["busy"] is False and now["model"] == old and now["always_resident"] is False
+        assert json.loads((tmp_path / "voice_settings.json").read_text(encoding="utf-8"))["model_path"] == old
+        # Idle: the same save applies and answers success.
+        status, saved = request(child.port, child.token, "POST", "/settings", json.dumps(
+            {"model_path": str(other), "always_resident": True}).encode())
+        assert status == 200 and saved["model"] == str(other) and saved["always_resident"] is True
+    finally:
+        child.close()
+
+
+def test_the_slot_is_reserved_before_the_body_and_a_second_or_oversized_upload_is_answered_unread(tmp_path):
+    child = _Child(tmp_path)
+    first = child.open_upload(64 * 1024, send=1024)          # admitted: its body is still arriving
+    try:
+        time.sleep(0.5)
+        assert request(child.port, child.token, "GET", "/status")[1]["busy"] is True
+        second = child.open_upload(64 * 1024)                 # nothing of its body is ever sent
+        response = second.getresponse()
+        assert response.status == 503 and json.loads(response.read())["error"]["code"] == "voice_busy"
+        second.close()
+        # An over-limit Content-Length is refused 413 from its header alone, admitted or not.
+        over = child.open_upload(DICTATION_MAX_BYTES + 1, source="dictation")
+        response = over.getresponse()
+        assert response.status == 413
+        over.close()
+        # The plugin's client turns an upload the worker refuses early into voice_busy as well.
+        plugin = load_plugin()
+        busy = plugin._worker(tmp_path, "POST", "/transcribe", b"OggS" + bytes(8 * 1024 * 1024), "audio/ogg", source="attachment")
+        assert busy.status_code == 503 and json.loads(busy.body)["error"]["code"] == "voice_busy"
+    finally:
+        first.close()  # the sender gives up: the handler ends and frees the slot
+    try:
+        for _ in range(100):
+            if not request(child.port, child.token, "GET", "/status")[1]["busy"]:
+                break
+            time.sleep(0.05)
+        assert request(child.port, child.token, "GET", "/status")[1]["busy"] is False
+        assert child.post(_mp4(2), source="attachment")[0] == 200
+    finally:
+        child.close()
+
+
+def test_a_stalled_sender_loses_the_slot_after_the_upload_idle_deadline(tmp_path, monkeypatch):
+    companion = _companion_module(tmp_path, monkeypatch, "voice_stall_test")
+    monkeypatch.setattr(companion.Handler, "timeout", 1)  # the production value is UPLOAD_IDLE_SECONDS (30)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), companion.Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
+        conn.putrequest("POST", "/transcribe")
+        for name, value in {"X-Voice-Token": companion.TOKEN, "Content-Type": "audio/ogg",
+                            "X-Voice-Source": "attachment", "Content-Length": "100000"}.items():
+            conn.putheader(name, value)
+        conn.endheaders()
+        conn.send(b"OggS")
+        for _ in range(50):
+            if companion.ENGINE.transcription.locked():
+                break
+            time.sleep(0.02)
+        assert companion.ENGINE.transcription.locked()          # admitted, then stalls
+        for _ in range(150):                                     # the idle deadline ends it and frees the slot
+            if not companion.ENGINE.transcription.locked():
+                break
+            time.sleep(0.05)
+        assert not companion.ENGINE.transcription.locked()
+        conn.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
 
 
 def test_companion_checks_each_sources_byte_limit_before_reading(tmp_path):

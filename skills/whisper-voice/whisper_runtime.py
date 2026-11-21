@@ -34,8 +34,15 @@ DICTATION_MAX_SECONDS = 120
 ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
 ATTACHMENT_MAX_SECONDS = 600
 SOURCE_HEADER = "X-Voice-Source"
-LIMITS = {"dictation": (DICTATION_MAX_BYTES, DICTATION_MAX_SECONDS),
-          "attachment": (ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_SECONDS)}
+# The worker measures decoded audio, which is never exactly what the recorder's timer intended: the recorder's stop
+# callback lands a little after its 120 s timer (300 ms measured in headless Chromium), and a codec's padding adds
+# samples (12 and 58 at 44.1 kHz AAC for 120.000 and 600.000 s). So the worker accepts the nominal length plus a
+# few seconds of tolerance; the dictation's byte cap (512 KiB, about 126 s at the recorder's rate) still binds.
+DURATION_GRACE_SECONDS = 5
+LIMITS = {"dictation": (DICTATION_MAX_BYTES, DICTATION_MAX_SECONDS + DURATION_GRACE_SECONDS),
+          "attachment": (ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_SECONDS + DURATION_GRACE_SECONDS)}
+# A sender that stalls mid-upload releases the single transcription slot after this many idle seconds.
+UPLOAD_IDLE_SECONDS = 30
 # Transcript text a 10-minute recording can hold (about 15 characters a second, doubled), and the worker reply read
 # bound that fits it at 4 bytes a character plus JSON framing.
 MAX_TRANSCRIPT_CHARS = 20000

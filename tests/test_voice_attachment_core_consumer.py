@@ -159,7 +159,7 @@ def test_user_session_voice_and_m4a_reach_whisper_as_their_original_bytes(tmp_pa
 WORKER_REPLIES = (
     (200, {"text": "fake local words", "timings": {"model_loaded": False}}),
     (503, {"error": {"code": "worker_unavailable", "message": "Voice worker unavailable: ConnectionRefusedError"}}),
-    (400, {"error": {"code": "voice_unavailable", "message": "audio longer than 600 seconds"}}),
+    (400, {"error": {"code": "voice_unavailable", "message": "audio longer than 605 seconds"}}),
     (200, {"text": "", "timings": {}, "status": "no_speech"}),
 )
 

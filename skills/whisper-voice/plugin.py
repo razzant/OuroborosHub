@@ -30,13 +30,21 @@ def _worker(state_dir: Path, method: str, path: str, body: bytes = b"", mime: st
             raise ValueError("worker endpoint malformed")
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=wait_for(path, source))
         try:
-            conn.request(method, path, body=body, headers={
-                "X-Voice-Token": token,
-                "Content-Type": mime if method == "POST" else "application/json",
-                "Content-Length": str(len(body)),
-                SOURCE_HEADER: source,
-            })
-            response = conn.getresponse()
+            try:
+                conn.request(method, path, body=body, headers={
+                    "X-Voice-Token": token,
+                    "Content-Type": mime if method == "POST" else "application/json",
+                    "Content-Length": str(len(body)),
+                    SOURCE_HEADER: source,
+                })
+                response = conn.getresponse()
+            except (BrokenPipeError, ConnectionResetError):
+                # The companion answers a second recording (or an over-limit one) before it reads the upload and
+                # closes the connection: an early close while sending means it refused, in practice because busy.
+                try:
+                    response = conn.getresponse()
+                except OSError:
+                    return JSONResponse(error("voice_busy", "The local worker closed the upload; another transcription is running"), status_code=503)
             result = response.read(MAX_REPLY_BYTES)
             if response.read(1):
                 raise ValueError("oversized worker reply")
@@ -61,10 +69,12 @@ def _settings_response(response: JSONResponse) -> JSONResponse:
             data["error"] = issue.get("message", "Voice unavailable")
     else:
         state = "downloading" if data.get("installing") else "ready" if data.get("ready") else "unavailable"
+        ready = "Model is ready for local speech" + ("; a transcription is running, so settings cannot change until it finishes"
+                                                     if data.get("busy") else "")
         data["voice"] = {
             "state": state,
             "message": data.get("install_error") or data.get("reason") or data.get("install_notice") or
-                       ("Model is ready for local speech" if state == "ready" else "Voice unavailable"),
+                       (ready if state == "ready" else "Voice unavailable"),
         }
     return JSONResponse(data, status_code=response.status_code)
 
