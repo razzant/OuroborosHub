@@ -219,8 +219,11 @@ def core_pin_violations(workflows):
                 scopes.append((where, step.get('env', {})))
                 options = step.get('with', {})
                 if (step.get('uses', '').startswith('actions/checkout@')
-                        and options.get('repository', '').lower() == CORE_REPOSITORY and options.get('ref') != CORE_REF):
-                    found.append(f'{where} checks out the core at {options.get("ref")!r}, not {CORE_REF}')
+                        and options.get('repository', '').lower() == CORE_REPOSITORY):
+                    if file != 'catalog-check.yml':  # where the pin is undefined: the checkout would follow a branch
+                        found.append(f'{where} checks out the core outside catalog-check.yml, which holds its pin')
+                    elif options.get('ref') != CORE_REF:
+                        found.append(f'{where} checks out the core at {options.get("ref")!r}, not {CORE_REF}')
         found += [f'{where} declares OUROBOROS_CORE_SHA again' for where, env in scopes if 'OUROBOROS_CORE_SHA' in env]
         commits = [commit for text in _scalars(workflow) for commit in COMMIT.findall(text)]
         expected = [pin] if file == 'catalog-check.yml' else []
@@ -320,6 +323,8 @@ class WorkflowTests(unittest.TestCase):
                 ('a job that declares the pin again', lambda w: w['catalog-check.yml']['jobs']['hosted-skills'].update(
                     env={'OUROBOROS_CORE_SHA': old})),
                 ('a checkout of the core in another workflow', lambda w: w['signals.yml']['jobs']['snapshot']['steps'].append(second)),
+                ('another workflow reading a pin it cannot see', lambda w: w['signals.yml']['jobs']['snapshot']['steps'].append(
+                    checkout)),
                 ('a commit a script fetches', lambda w: steps(w).insert(at + 1, {'run': f'git -C core checkout {old}'})),
                 ('a pin that is not a full commit', lambda w: w['catalog-check.yml']['env'].update(OUROBOROS_CORE_SHA=pin[:12])),
         ]:
