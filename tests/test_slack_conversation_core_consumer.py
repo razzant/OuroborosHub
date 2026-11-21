@@ -62,11 +62,13 @@ def test_a_top_level_answer_joins_the_dm_room_of_the_proactive_message_it_answer
                                                  ["out", room, "Answered Ev-1"]]
     [turn] = facts["turns"]
     assert turn["source"] == "Ev-1" and turn["chat_id"] == room
-    # The answering turn's own room view holds Ouroboros's earlier words verbatim, as its own, in lane 1.
+    # The answering turn's own room view holds Ouroboros's earlier words verbatim, as its own, in lane 1, under the
+    # work that sent them (the origin slack_send recorded) and beside their delivery provenance.
     room_facts, lane = _open_conversation(turn["room"])
     assert "people 1, mine 1, task facts 0" in room_facts
     assert lane.index(PROACTIVE) < lane.index(FIRST)
-    assert "Ouroboros [" in next(line for line in lane.splitlines() if PROACTIVE in line)
+    mine = next(line for line in lane.splitlines() if PROACTIVE in line)
+    assert "; Ouroboros (task project-1) [provider=slack;" in mine
     assert facts["posts"] == [["D1", "", PROACTIVE], ["D1", "", "Answered Ev-1"]]
     assert facts["statuses"] == {"Ev-1": 200} and facts["inbox"] == {"Ev-1": "delivered"}
 
