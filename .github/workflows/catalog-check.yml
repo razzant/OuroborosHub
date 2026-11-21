@@ -119,7 +119,7 @@ jobs:
           echo "OUROBOROS_IDENTITY_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
       # The Chrome adapter's tests are Node's own. They need Node and the exact npm closure skills/chrome_browser/pins.json
       # records; the version is read from that file, and the tests verify every pinned file by hash. A different closure
-      # fails them; they never skip.
+      # fails them; they never skip. memory-atlas's formatter tests (test_transfer_words.py) need Node 20 or newer too.
       - uses: actions/setup-node@v4
         if: matrix.suite == 'chrome-browser' || matrix.suite == 'memory-atlas'
         with:
