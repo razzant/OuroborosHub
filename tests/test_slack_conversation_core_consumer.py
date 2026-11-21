@@ -47,9 +47,11 @@ def _run(tmp_path, scenario):
 
 
 def _open_conversation(room):
-    """A rendered room's header and its verbatim lane (people and my replies), before any task facts."""
-    header, _, lane = room.partition("### Open conversation")
-    return header, lane.split("\n### ", 1)[0]
+    """A rendered room's standing facts and its verbatim lane (people and my replies, up to the next section). The
+    core renders the facts last, under ``### This room now``, so the room's earlier text stays a reusable prefix."""
+    _rest, closing, facts = room.rpartition("\n### This room now\n")
+    assert closing, room
+    return facts, room.partition("### Open conversation")[2].split("\n### ", 1)[0]
 
 
 def test_a_top_level_answer_joins_the_dm_room_of_the_proactive_message_it_answers(tmp_path):
@@ -61,8 +63,8 @@ def test_a_top_level_answer_joins_the_dm_room_of_the_proactive_message_it_answer
     [turn] = facts["turns"]
     assert turn["source"] == "Ev-1" and turn["chat_id"] == room
     # The answering turn's own room view holds Ouroboros's earlier words verbatim, as its own, in lane 1.
-    header, lane = _open_conversation(turn["room"])
-    assert "people 1, mine 1, task facts 0" in header
+    room_facts, lane = _open_conversation(turn["room"])
+    assert "people 1, mine 1, task facts 0" in room_facts
     assert lane.index(PROACTIVE) < lane.index(FIRST)
     assert "Ouroboros [" in next(line for line in lane.splitlines() if PROACTIVE in line)
     assert facts["posts"] == [["D1", "", PROACTIVE], ["D1", "", "Answered Ev-1"]]
@@ -80,7 +82,7 @@ def test_a_second_top_level_dm_message_reaches_the_live_author_of_the_first(tmp_
     assert turn["source"] == "Ev-1" and turn["heard"] == ["Ev-2"]
     attention = {key: facts["attention"]["Ev-2"].get(key) for key in ("decision", "reason", "recipient")}
     assert attention == {"decision": "heard", "reason": "current_author", "recipient": turn["task_id"]}
-    _header, lane = _open_conversation(turn["room"])
+    _room_facts, lane = _open_conversation(turn["room"])
     assert lane.index(FIRST) < lane.index(SECOND)
     assert [row[:3] for row in facts["rows"]] == [["in", room, FIRST], ["in", room, SECOND],
                                                  ["out", room, "Answered Ev-1"]]
@@ -97,8 +99,8 @@ def test_a_reply_under_ouroboros_s_channel_post_joins_the_room_the_post_was_reco
                                                  ["in", thread, FIRST], ["out", thread, "Answered Ev-1"]]
     [turn] = facts["turns"]
     assert turn["source"] == "Ev-1" and turn["chat_id"] == thread
-    header, lane = _open_conversation(turn["room"])
-    assert "people 1, mine 1, task facts 0" in header and lane.index(POST) < lane.index(FIRST)
+    room_facts, lane = _open_conversation(turn["room"])
+    assert "people 1, mine 1, task facts 0" in room_facts and lane.index(POST) < lane.index(FIRST)
     # Nothing a person sees changes: the post stays at the channel's top level and the answer goes to its thread.
     assert facts["posts"] == [["C1", "", POST], ["C1", "9.1", "Answered Ev-1"]]
     assert facts["inbox"] == {"Ev-0": "delivered", "Ev-1": "delivered"}
