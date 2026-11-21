@@ -7,25 +7,37 @@ from pathlib import Path
 
 from starlette.responses import JSONResponse
 
-from .whisper_runtime import MAX_AUDIO_BYTES, audio_format, error, read_settings
+from .whisper_runtime import (
+    DICTATION_MAX_BYTES, DICTATION_MAX_SECONDS, ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_SECONDS, MAX_REPLY_BYTES,
+    SOURCE_HEADER, TOOL_TIMEOUT_SECONDS, WORKER_TIMEOUT_SECONDS, audio_format, error, read_settings,
+)
 
 
-def _worker(state_dir: Path, method: str, path: str, body: bytes = b"", mime: str = "") -> JSONResponse:
+def _size(count: int) -> str:
+    return f"{count // 1048576} MiB" if count % 1048576 == 0 else f"{count // 1024} KiB"
+
+
+def _length(seconds: int) -> str:
+    return f"{seconds // 60} minutes"
+
+
+def _worker(state_dir: Path, method: str, path: str, body: bytes = b"", mime: str = "", source: str = "dictation") -> JSONResponse:
     try:
         endpoint = json.loads((state_dir / "voice_endpoint.json").read_text(encoding="utf-8"))
         port = endpoint.get("port")
         token = endpoint.get("token")
         if type(port) is not int or not 1 <= port <= 65535 or not isinstance(token, str) or len(token) < 30:
             raise ValueError("worker endpoint malformed")
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=120)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=WORKER_TIMEOUT_SECONDS)
         try:
             conn.request(method, path, body=body, headers={
                 "X-Voice-Token": token,
                 "Content-Type": mime if method == "POST" else "application/json",
                 "Content-Length": str(len(body)),
+                SOURCE_HEADER: source,
             })
             response = conn.getresponse()
-            result = response.read(65536)
+            result = response.read(MAX_REPLY_BYTES)
             if response.read(1):
                 raise ValueError("oversized worker reply")
             value = json.loads(result)
@@ -63,14 +75,14 @@ def _routes(state_dir: Path):
 
     async def transcribe(request):
         length = request.headers.get("content-length", "")
-        if length and (not length.isdecimal() or int(length) > MAX_AUDIO_BYTES):
-            return JSONResponse(error("too_large", "Voice recording exceeds 393216 bytes"), status_code=413)
-        # Host ingress has its own 512 KiB cap; a skill-specific cap ensures
+        if length and (not length.isdecimal() or int(length) > DICTATION_MAX_BYTES):
+            return JSONResponse(error("too_large", f"Voice recording exceeds {DICTATION_MAX_BYTES} bytes"), status_code=413)
+        # Host ingress has its own 512 KiB cap (the dictation ceiling); this check makes
         # in-process and isolated extension paths share the same bound.
         data = await request.body()
         mime = request.headers.get("content-type", "")
         try:
-            audio_format(mime, data)
+            audio_format(mime, data, DICTATION_MAX_BYTES)
         except ValueError as exc:
             return JSONResponse(error("invalid_audio", str(exc)), status_code=400)
         return _worker(state_dir, "POST", "/transcribe", data, mime)
@@ -111,10 +123,10 @@ def register(api):
 
     api.register_tool(
         "transcribe_attachment", handler=attachment,
-        description="Transcribe a host-staged audio attachment locally by its manifest ordinal (not a file path). Reuses Whisper's resident companion; no cloud audio transfer. Returns text and non-content worker timings. Does not Send a message or change settings. Max 384 KiB / 60 seconds. Use directly for attached voice recordings, without HTTP scripts or port discovery.",
+        description="Transcribe a host-staged audio attachment locally by its manifest ordinal (not a file path). Reuses Whisper's resident companion; no cloud audio transfer. Returns text and non-content worker timings. Does not Send a message or change settings. Max " + _size(ATTACHMENT_MAX_BYTES) + " / " + _length(ATTACHMENT_MAX_SECONDS) + " (composer dictation is limited to " + _size(DICTATION_MAX_BYTES) + " / " + _length(DICTATION_MAX_SECONDS) + "). Use directly for attached voice recordings, without HTTP scripts or port discovery.",
         schema={"type": "object", "properties": {"ordinal": {"type": "integer", "minimum": 0}},
                 "required": ["ordinal"], "additionalProperties": False},
-        timeout_sec=150,
+        timeout_sec=TOOL_TIMEOUT_SECONDS,
     )
     status, transcribe, settings, install = _routes(state_dir)
     # Settings actions submit POST even when their descriptor says GET;
@@ -124,7 +136,7 @@ def register(api):
     api.register_route("settings/save", settings, methods=("GET", "POST"))
     api.register_route("models/install", install, methods=("POST",))
     api.register_settings_section("voice", title="Local voice input", schema={"components": [
-        {"type": "markdown", "text": "Optional local speech to editable draft. No audio is sent to an external speech service. On this host the installed Hélène model may be used read-only; new models are downloaded only after an explicit click into this skill's state directory. Recording is limited to 60 seconds and 384 KiB."},
+        {"type": "markdown", "text": ("Optional local speech to editable draft. No audio is sent to an external speech service. On this host the installed Hélène model may be used read-only; new models are downloaded only after an explicit click into this skill's state directory. Recording is limited to " + _length(DICTATION_MAX_SECONDS) + " and " + _size(DICTATION_MAX_BYTES) + "; an attached voice note, transcribed by the assistant, may be up to " + _length(ATTACHMENT_MAX_SECONDS) + " and " + _size(ATTACHMENT_MAX_BYTES) + ".")},
         {"type": "form", "route": "settings/save", "method": "POST", "fields": [
             {"name": "model_path", "label": "Local model snapshot or installed.json receipt", "type": "text", "help": "Absolute read-only path; the selected snapshot must contain model.bin, config.json and tokenizer.json."},
             {"name": "always_resident_choice", "label": "After recording", "type": "select", "options": [

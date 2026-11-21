@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from .whisper_runtime import MAX_AUDIO_BYTES, audio_format, error
+from .whisper_runtime import ATTACHMENT_MAX_BYTES, audio_format, error
 
 
 def transcribe_attachment(ctx, ordinal, *, state_dir, worker):
@@ -29,18 +29,18 @@ def transcribe_attachment(ctx, ordinal, *, state_dir, worker):
         from ouroboros.tool_access import build_resolved_resource_binding
         from ouroboros.tools.media import _resolve_local_file
         binding = build_resolved_resource_binding(ctx, root="artifact_store", path=path, operation="read")
-        admitted, reason = _resolve_local_file(ctx, str(binding.target_path), max_bytes=MAX_AUDIO_BYTES)
+        admitted, reason = _resolve_local_file(ctx, str(binding.target_path), max_bytes=ATTACHMENT_MAX_BYTES)
         if admitted is None:
             return json.dumps({"ok": False, **error("attachment_blocked", reason)}, ensure_ascii=False)
         with admitted.open("rb") as stream:
-            data = stream.read(MAX_AUDIO_BYTES + 1)
-        if len(data) > MAX_AUDIO_BYTES:
-            raise ValueError("attachment exceeds 393216 bytes")
+            data = stream.read(ATTACHMENT_MAX_BYTES + 1)
+        if len(data) > ATTACHMENT_MAX_BYTES:
+            raise ValueError(f"attachment exceeds {ATTACHMENT_MAX_BYTES} bytes")
         if entry.get("sha256") != hashlib.sha256(data).hexdigest():
             raise ValueError("attachment bytes no longer match host manifest")
         mime = entry.get("mime", "")
-        audio_format(mime, data)
-        response = worker(state_dir, "POST", "/transcribe", data, mime)
+        audio_format(mime, data, ATTACHMENT_MAX_BYTES)
+        response = worker(state_dir, "POST", "/transcribe", data, mime, source="attachment")
         value = json.loads(response.body)
         return json.dumps({"ok": response.status_code < 400, **value}, ensure_ascii=False)
     except Exception as exc:

@@ -11,8 +11,31 @@ import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
-MAX_AUDIO_BYTES = 393216
-MAX_AUDIO_SECONDS = 60
+# One constant per limit; the manifest row, tool text, widget text, route and companion all read these.
+# Dictation (the composer's POST route) is bounded by core's ceilings for a `provides: stt` row:
+# ouroboros/extension_ui_validation.py clamps max_bytes to 524288 and max_seconds to 600, the gateway's
+# child-dispatch body cap is 512 KiB (gateway/extensions.py), and the composer recorder clamps to both
+# (web/modules/voice_recorder.js, speech_providers.js). SKILL.md's contributes row repeats these two numbers.
+DICTATION_MAX_BYTES = 524288
+DICTATION_MAX_SECONDS = 600
+# An attached recording (transcribe_attachment, e.g. a Telegram voice note) never crosses that ingress: the tool
+# reads the host-staged file and posts it to the loopback companion; core's staging puts no size cap of its own
+# on it, so the ceiling is what a connector can hand over: 20 MiB is the Bot API download limit of the Hub's
+# telegram-bot (CLOUD_DOWNLOAD_LIMIT), while core's built-in skills/telegram stops at 10 MiB
+# (_MAX_TELEGRAM_DOWNLOAD_BYTES). The length cap is the skill's own working bound for memory (decoded
+# 16 kHz float32, 115 MB at the cap) and for the tool deadline below.
+ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
+ATTACHMENT_MAX_SECONDS = 1800
+SOURCE_HEADER = "X-Voice-Source"
+LIMITS = {"dictation": (DICTATION_MAX_BYTES, DICTATION_MAX_SECONDS),
+          "attachment": (ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_SECONDS)}
+# Transcript text a 30-minute recording can hold (about 15 characters a second), and the worker reply read
+# bound that fits it in UTF-8 (2 bytes per Cyrillic character) plus JSON framing.
+MAX_TRANSCRIPT_CHARS = 60000
+MAX_REPLY_BYTES = 262144
+# Recognition runs on CPU; the HTTP wait on the worker and the tool deadline outlast the longest accepted recording.
+WORKER_TIMEOUT_SECONDS = 1500
+TOOL_TIMEOUT_SECONDS = 1560
 IDLE_SECONDS = 3600
 DEFAULT_RECEIPT = r"C:\Program Files\Helene\data\models\whisper\installed.json"
 REQUIRED_MODEL_FILES = ("model.bin", "config.json", "tokenizer.json")
@@ -106,12 +129,17 @@ def model_directory(path: str) -> Path:
     return selected
 
 
-def audio_format(mime: str, data: bytes) -> None:
+def limits_for(source: str) -> tuple[int, int]:
+    """(max_bytes, max_seconds) of a request source; anything unnamed is dictation, the stricter one."""
+    return LIMITS.get(source, LIMITS["dictation"])
+
+
+def audio_format(mime: str, data: bytes, max_bytes: int = DICTATION_MAX_BYTES) -> None:
     mime = mime.split(";", 1)[0].strip().lower()
     if mime not in ("audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg"):
         raise ValueError("unsupported audio type; use WebM, Ogg, MP4 or MP3")
-    if not data or len(data) > MAX_AUDIO_BYTES:
-        raise ValueError("audio must contain 1..393216 bytes")
+    if not data or len(data) > max_bytes:
+        raise ValueError(f"audio must contain 1..{max_bytes} bytes")
     valid = (data.startswith(b"\x1a\x45\xdf\xa3") if mime == "audio/webm" else
              data.startswith(b"OggS") if mime == "audio/ogg" else
              data[4:8] == b"ftyp" if mime == "audio/mp4" else

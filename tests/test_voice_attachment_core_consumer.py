@@ -37,7 +37,7 @@ MP3 = b"\xff\xfb\x90\x64" + bytes(60) + b"mpeg-frames"
 FLAC = b"fLaC\x00\x00\x00\x22" + bytes(40)
 # An M4A as iOS and many recorders write it: generic ``isom`` major brand, no ``M4A `` brand.
 M4A = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2mp41" + bytes(32) + b"aac-frames"
-LONG_OGG = b"OggS\x00\x02" + bytes(400 * KIB)  # larger than Whisper's 384 KiB, far below Telegram's limits
+LONG_OGG = b"OggS\x00\x02" + bytes(20 * 1024 * KIB - 6)  # exactly Whisper's attachment cap (20 MiB), the Bot API limit
 
 
 def _run(tmp_path, mode):
@@ -96,12 +96,13 @@ def test_bot_voice_and_audio_reach_whisper_as_their_original_bytes(tmp_path):
     assert mp3["tool"][0]["ok"] is True and mp3["worker_calls"][0][2:] == [_sha(MP3), "audio/mpeg"]
     assert facts["unsuffixed_mp3_mime"] == "application/octet-stream"  # what 0.10.0's name would have meant
 
-    # Larger than Whisper takes: staged whole (never cut), refused by the tool, no words.
+    # The largest file the Bot API connector can stage (20 MiB, Whisper's attachment cap): staged whole and
+    # handed to the worker byte for byte. One byte more is refused in tests/test_attachment.py.
     long = facts["turns"][f"telegram:{BOT}:3"]
     [row] = long["manifest"]
     assert (row["mime"], row["size"], row["sha256"]) == ("audio/ogg", len(LONG_OGG), _sha(LONG_OGG))
-    assert long["tool"][0]["ok"] is False and long["tool"][0]["error"]["code"] == "attachment_blocked"
-    assert "FILE_TOO_LARGE" in long["tool"][0]["error"]["message"] and long["worker_calls"] == []
+    assert long["tool"][0] == {"ok": True, "text": "fake local words", "timings": {"model_loaded": False}}
+    assert long["worker_calls"] == [["POST", "/transcribe", _sha(LONG_OGG), "audio/ogg"]]
 
     # A format Whisper does not take stays a file.
     flac = facts["turns"][f"telegram:{BOT}:4"]
@@ -158,7 +159,7 @@ def test_user_session_voice_and_m4a_reach_whisper_as_their_original_bytes(tmp_pa
 WORKER_REPLIES = (
     (200, {"text": "fake local words", "timings": {"model_loaded": False}}),
     (503, {"error": {"code": "worker_unavailable", "message": "Voice worker unavailable: ConnectionRefusedError"}}),
-    (400, {"error": {"code": "voice_unavailable", "message": "audio longer than 60 seconds"}}),
+    (400, {"error": {"code": "voice_unavailable", "message": "audio longer than 1800 seconds"}}),
     (200, {"text": "", "timings": {}, "status": "no_speech"}),
 )
 
@@ -231,7 +232,8 @@ def _core(root, connector, account):
             calls, tool = [], []
 
             def worker_for(reply):
-                def worker(_state, method, path, body, mime):
+                def worker(_state, method, path, body, mime, source=None):
+                    assert source == "attachment"
                     calls.append([method, path, hashlib.sha256(body).hexdigest(), mime])
                     return JSONResponse(reply[1], status_code=reply[0])
                 return worker

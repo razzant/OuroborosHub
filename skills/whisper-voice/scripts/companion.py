@@ -20,10 +20,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from whisper_runtime import (  # noqa: E402
     IDLE_SECONDS,
-    MAX_AUDIO_BYTES,
-    MAX_AUDIO_SECONDS,
+    MAX_TRANSCRIPT_CHARS,
+    SOURCE_HEADER,
     audio_format,
     error,
+    limits_for,
     model_directory,
     read_settings,
     validate_choice,
@@ -122,18 +123,19 @@ class Engine:
             self.install_notice = ""
         return self.status()
 
-    def transcribe(self, data: bytes, mime: str, timings: dict | None = None) -> str:
+    def transcribe(self, data: bytes, mime: str, timings: dict | None = None, source: str = "dictation") -> str:
         # Refuse excess work before imports/decode; never queue stale recordings.
         if not self.transcription.acquire(blocking=False):
             raise VoiceBusy("A local transcription is already running; try again after it finishes")
         try:
-            return self._transcribe(data, mime, timings)
+            return self._transcribe(data, mime, timings, source)
         finally:
             self.transcription.release()
 
-    def _transcribe(self, data: bytes, mime: str, timings: dict | None = None) -> str:
+    def _transcribe(self, data: bytes, mime: str, timings: dict | None = None, source: str = "dictation") -> str:
         started = time.perf_counter()
-        audio_format(mime, data)
+        max_bytes, max_seconds = limits_for(source)
+        audio_format(mime, data, max_bytes)
         # Decode BEFORE loading 1.6 GB of weights; cap decoded samples too.
         import av
         import numpy as np
@@ -152,14 +154,14 @@ class Engine:
                 for converted in resampler.resample(frame):
                     samples = converted.to_ndarray().reshape(-1)
                     count += len(samples)
-                    if count > MAX_AUDIO_SECONDS * 16000:
-                        raise ValueError("audio longer than 60 seconds")
+                    if count > max_seconds * 16000:
+                        raise ValueError(f"audio longer than {max_seconds} seconds")
                     parts.append(samples.copy())
             for converted in resampler.resample(None):
                 samples = converted.to_ndarray().reshape(-1)
                 count += len(samples)
-                if count > MAX_AUDIO_SECONDS * 16000:
-                    raise ValueError("audio longer than 60 seconds")
+                if count > max_seconds * 16000:
+                    raise ValueError(f"audio longer than {max_seconds} seconds")
                 parts.append(samples.copy())
         if count < 1600:
             raise ValueError("audio shorter than 0.1 seconds")
@@ -193,7 +195,7 @@ class Engine:
                 "worker_total_ms": round((inferred - started) * 1000, 3),
                 "model_loaded": model_loaded,
             })
-        if len(words) > 8000:
+        if len(words) > MAX_TRANSCRIPT_CHARS:
             raise ValueError("transcript too long")
         return words
 
@@ -267,7 +269,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._reply(404, error("not_found", "Unknown voice route"))
                 return
             raw_length = self.headers.get("Content-Length", "")
-            if not raw_length.isdecimal() or int(raw_length) > MAX_AUDIO_BYTES:
+            source = self.headers.get(SOURCE_HEADER, "dictation")
+            if not raw_length.isdecimal() or int(raw_length) > limits_for(source if self.path == "/transcribe" else "dictation")[0]:
                 self._reply(413, error("too_large", "Request too large"))
                 return
             data = self.rfile.read(int(raw_length))
@@ -275,7 +278,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("incomplete request body")
             if self.path == "/transcribe":
                 timings = {}
-                text = ENGINE.transcribe(data, self.headers.get("Content-Type", ""), timings)
+                text = ENGINE.transcribe(data, self.headers.get("Content-Type", ""), timings, source)
                 self._reply(200, {"text": text, "timings": timings,
                                   **({"status": "no_speech"} if not text else {})})
             else:

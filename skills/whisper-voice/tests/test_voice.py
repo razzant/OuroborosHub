@@ -19,7 +19,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from whisper_runtime import (  # noqa: E402
-    MAX_AUDIO_BYTES,
+    ATTACHMENT_MAX_BYTES,
+    ATTACHMENT_MAX_SECONDS,
+    DICTATION_MAX_BYTES,
+    DICTATION_MAX_SECONDS,
     ModelUnavailable,
     audio_format,
     model_directory,
@@ -91,8 +94,21 @@ def test_settings_and_audio_fail_closed(tmp_path):
         audio_format("audio/ogg", b"\x1a\x45\xdf\xa3foo")
     with pytest.raises(ValueError, match="signature"):
         audio_format("audio/mpeg", b"OggSwrong-container")
-    with pytest.raises(ValueError, match="393216"):
-        audio_format("audio/webm", b"\x1a\x45\xdf\xa3" + b"x" * MAX_AUDIO_BYTES)
+
+
+def test_byte_limits_hold_in_both_directions_for_each_path():
+    """The dictation ceiling is core's 512 KiB; the attachment ceiling is a connector's 20 MiB."""
+    assert (DICTATION_MAX_BYTES, DICTATION_MAX_SECONDS) == (524288, 600)
+    assert (ATTACHMENT_MAX_BYTES, ATTACHMENT_MAX_SECONDS) == (20 * 1024 * 1024, 1800)
+    head = b"\x1a\x45\xdf\xa3"
+    audio_format("audio/webm", head + b"x" * (DICTATION_MAX_BYTES - 4))
+    with pytest.raises(ValueError, match="1..524288 bytes"):
+        audio_format("audio/webm", head + b"x" * (DICTATION_MAX_BYTES - 3))
+    # What dictation refuses, an attached recording may be, up to its own cap.
+    audio_format("audio/webm", head + b"x" * (DICTATION_MAX_BYTES - 3), ATTACHMENT_MAX_BYTES)
+    audio_format("audio/webm", head + b"x" * (ATTACHMENT_MAX_BYTES - 4), ATTACHMENT_MAX_BYTES)
+    with pytest.raises(ValueError, match="1..20971520 bytes"):
+        audio_format("audio/webm", head + b"x" * (ATTACHMENT_MAX_BYTES - 3), ATTACHMENT_MAX_BYTES)
 
 
 def test_parallel_settings_writes_have_distinct_atomic_temp_files(tmp_path, monkeypatch):
@@ -264,6 +280,7 @@ def test_real_plugin_route_forwards_raw_audio_over_private_loopback(tmp_path, mi
         def do_POST(self):
             count = int(self.headers['Content-Length'])
             self.server.observed = (self.headers.get('X-Voice-Token'), self.rfile.read(count))
+            self.server.source = self.headers.get('X-Voice-Source')
             body = json.dumps({'text': 'recognized locally'}).encode()
             self.send_response(200)
             self.send_header('Content-Length', str(len(body)))
@@ -288,7 +305,7 @@ def test_real_plugin_route_forwards_raw_audio_over_private_loopback(tmp_path, mi
         response = asyncio.run(transcribe(request_obj))
         assert response.status_code == 200
         assert json.loads(response.body) == {'text': 'recognized locally'}
-        assert server.observed == ('x' * 32, audio)
+        assert server.observed == ('x' * 32, audio) and server.source == 'dictation'
         server.shutdown()
         thread.join(timeout=2)
 
@@ -423,3 +440,170 @@ def test_busy_rejected_before_decode_and_exception_releases_admission(tmp_path, 
         engine.transcribe(b'OggS', 'audio/ogg')
     monkeypatch.setattr(engine, '_transcribe', lambda *args: 'next request')
     assert engine.transcribe(b'OggS', 'audio/ogg') == 'next request'
+
+
+def _silent_mp4(av, np, seconds):
+    import io
+
+    output = io.BytesIO()
+    with av.open(output, "w", format="mp4") as container:
+        stream = container.add_stream("aac", rate=16000)
+        chunk = np.zeros((1, 16000), dtype=np.float32)
+        for _ in range(seconds):
+            frame = av.AudioFrame.from_ndarray(chunk, format="fltp", layout="mono")
+            frame.sample_rate = 16000
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+    return output.getvalue()
+
+
+@pytest.mark.parametrize("source,under,over", [("dictation", 599, 601), ("attachment", 1799, 1801)])
+def test_decoded_length_limit_holds_in_both_directions_per_source(tmp_path, monkeypatch, source, under, over):
+    av = pytest.importorskip("av")
+    np = pytest.importorskip("numpy")
+    monkeypatch.setenv("OUROBOROS_SKILL_STATE_DIR", str(tmp_path))
+    spec = importlib.util.spec_from_file_location("voice_length_test", ROOT / "scripts" / "companion.py")
+    companion = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(companion)
+    write_settings(tmp_path, validate_choice(str(make_model(tmp_path)), False))
+    seen = []
+
+    class Model:
+        def __init__(self, path, **kwargs):
+            pass
+
+        def transcribe(self, audio, **kwargs):
+            seen.append(len(audio))
+            return [types.SimpleNamespace(text=" long words ")], None
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=Model))
+    engine = companion.Engine()
+    limit = {"dictation": DICTATION_MAX_SECONDS, "attachment": ATTACHMENT_MAX_SECONDS}[source]
+    assert engine.transcribe(_silent_mp4(av, np, under), "audio/mp4", None, source) == "long words"
+    assert seen and seen[0] > (under - 1) * 16000
+    seen.clear()
+    with pytest.raises(ValueError, match=f"audio longer than {limit} seconds"):
+        engine.transcribe(_silent_mp4(av, np, over), "audio/mp4", None, source)
+    assert seen == []  # refused while decoding, before the model loads or runs
+    if source == "dictation":
+        # A recording that the attachment path takes is still too long for dictation.
+        assert engine.transcribe(_silent_mp4(av, np, over), "audio/mp4", None, "attachment") == "long words"
+        # An unnamed or unknown source gets the stricter dictation limit.
+        with pytest.raises(ValueError, match="audio longer than 600 seconds"):
+            engine.transcribe(_silent_mp4(av, np, over), "audio/mp4", None, "unknown")
+
+
+def test_transcript_cap_is_one_constant_that_fits_the_longest_recording(tmp_path, monkeypatch):
+    import whisper_runtime
+
+    assert whisper_runtime.MAX_TRANSCRIPT_CHARS >= ATTACHMENT_MAX_SECONDS * 15
+    # Cyrillic is two bytes a character in the worker's UTF-8 reply; the plugin's read bound must fit it whole.
+    assert whisper_runtime.MAX_REPLY_BYTES > whisper_runtime.MAX_TRANSCRIPT_CHARS * 2 + 4096
+    assert whisper_runtime.WORKER_TIMEOUT_SECONDS > ATTACHMENT_MAX_SECONDS * 0.8
+    assert whisper_runtime.TOOL_TIMEOUT_SECONDS > whisper_runtime.WORKER_TIMEOUT_SECONDS
+
+
+def test_companion_checks_each_sources_byte_limit_before_reading(tmp_path):
+    model = make_model(tmp_path)
+    env = {**os.environ, "OUROBOROS_SKILL_STATE_DIR": str(tmp_path)}
+    executable = getattr(sys, "_base_executable", sys.executable) if os.name == "nt" else sys.executable
+    child = subprocess.Popen([executable, str(ROOT / "scripts" / "companion.py")],
+                             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        endpoint = tmp_path / "voice_endpoint.json"
+        for _ in range(60):
+            if endpoint.exists():
+                break
+            time.sleep(0.05)
+        data = json.loads(endpoint.read_text(encoding="utf-8"))
+        port, token = data["port"], data["token"]
+        request(port, token, "POST", "/settings", json.dumps({"model_path": str(model), "always_resident": False}).encode())
+
+        def limit_of(source):
+            return ATTACHMENT_MAX_BYTES if source == "attachment" else DICTATION_MAX_BYTES
+
+        def post(size, source=None):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            headers = {"X-Voice-Token": token, "Content-Type": "audio/ogg"}
+            if source:
+                headers["X-Voice-Source"] = source
+            try:
+                # Announce the length, then send the body only when the cap should let it through: a refusal
+                # is answered from the header, before the companion reads a byte.
+                conn.putrequest("POST", "/transcribe")
+                for name, value in {**headers, "Content-Length": str(size)}.items():
+                    conn.putheader(name, value)
+                conn.endheaders()
+                if size <= limit_of(source):
+                    conn.send(b"OggS" + b"\0" * (size - 4))
+                response = conn.getresponse()
+                return response.status, json.loads(response.read())
+            finally:
+                conn.close()
+
+        assert post(DICTATION_MAX_BYTES + 1)[0] == 413          # dictation (the default) stops at 512 KiB
+        assert post(DICTATION_MAX_BYTES + 1, "dictation")[0] == 413
+        assert post(ATTACHMENT_MAX_BYTES + 1, "attachment")[0] == 413
+        status, body = post(DICTATION_MAX_BYTES + 1, "attachment")   # an attachment may be larger than dictation
+        assert status != 413 and body["error"]["code"] in ("voice_unavailable", "inference_failed")
+        status, body = post(DICTATION_MAX_BYTES)                      # at the dictation cap the limit check passes
+        assert status != 413
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+        child.stderr.close()
+
+
+def test_plugin_texts_and_manifest_state_the_same_limits(tmp_path):
+    import yaml
+
+    plugin = load_plugin()
+    tools, widgets = {}, []
+
+    class Api:
+        def get_state_dir(self):
+            return str(tmp_path)
+
+        def register_companion_process(self, name):
+            pass
+
+        def register_tool(self, name, **kwargs):
+            tools[name] = kwargs
+
+        def register_route(self, *args, **kwargs):
+            pass
+
+        def register_settings_section(self, name, **kwargs):
+            widgets.append(kwargs["schema"]["components"][0]["text"])
+
+    plugin.register(Api())
+    row = yaml.safe_load((ROOT / "SKILL.md").read_text(encoding="utf-8").split("---", 2)[1])["contributes"][0]
+    assert (row["max_bytes"], row["max_seconds"]) == (DICTATION_MAX_BYTES, DICTATION_MAX_SECONDS)
+    description = tools["transcribe_attachment"]["description"]
+    assert "Max 20 MiB / 30 minutes" in description and "512 KiB / 10 minutes" in description
+    assert "384" not in description and "60 seconds" not in description
+    assert "10 minutes and 512 KiB" in widgets[0] and "30 minutes and 20 MiB" in widgets[0]
+    assert tools["transcribe_attachment"]["timeout_sec"] > ATTACHMENT_MAX_SECONDS * 0.8
+
+
+def test_real_plugin_route_refuses_over_the_dictation_ceiling_and_takes_exactly_it(tmp_path):
+    from starlette.requests import Request
+
+    plugin = load_plugin()
+    seen = []
+    plugin._worker = lambda *args, **kwargs: seen.append(len(args[3])) or plugin.JSONResponse({"text": "ok"})
+    audio = b"OggS" + b"\0" * (DICTATION_MAX_BYTES - 4)
+
+    def call(body, length):
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+        scope = {"type": "http", "method": "POST", "path": "/transcribe",
+                 "headers": [(b"content-type", b"audio/ogg"), (b"content-length", str(length).encode())]}
+        return asyncio.run(plugin._routes(tmp_path)[1](Request(scope, receive)))
+
+    assert call(audio, len(audio)).status_code == 200 and seen == [DICTATION_MAX_BYTES]
+    refused = call(audio + b"\0", len(audio) + 1)
+    assert refused.status_code == 413 and "524288" in json.loads(refused.body)["error"]["message"]
+    assert seen == [DICTATION_MAX_BYTES]  # the refused one never reached the worker
