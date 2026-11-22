@@ -297,16 +297,21 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/tel
 ```
 
 Every suite whose tests use a real core (`core_env` in `scripts/ci_checks.py`: Memory Atlas,
-mail, Calendar, Smart Lists, GitHub and the Presence consumers of Freshdesk, Slack and Telegram)
-runs against one `razzant/ouroboros` commit, `OUROBOROS_CORE_SHA` at the top of
-`.github/workflows/catalog-check.yml`, checked out once per job; the catalog job checks every
-hosted release and connector against the same commit. With one pin every seam between a
-hosted skill and the core is tested on the same reproducible core, and no suite stays behind on an
-older one; `tests/test_workflows.py` fails on a second pin in any `.yml` or `.yaml` workflow, whether
-a checkout or a run step's git command takes it. To move it, open a PR that changes only
-that value. The workflow is shared, so that PR runs every suite on the new core, and it merges when
-all of them pass. A suite that fails there is fixed in the hub when the skill or its test is wrong
-against the core's documented contract, and reported to the core when the core broke it.
+mail, Calendar, Smart Lists, the dashboard widgets, GitHub and the Presence consumers of
+Freshdesk, Slack and Telegram) runs against one `razzant/ouroboros` commit, `OUROBOROS_CORE_SHA`
+at the top of `.github/workflows/catalog-check.yml`, checked out once per job; the catalog job
+checks every hosted release and connector against the same commit. With one pin every seam
+between a hosted skill and the core is tested on the same reproducible core, and no suite stays
+behind on an older one; `tests/test_workflows.py` fails on a second pin in any `.yml` or `.yaml`
+workflow, whether a checkout or a run step's git command takes it. To move it, open a PR that
+changes only that value. The workflow is shared, so that PR runs every suite on the new core, and it
+merges when all of them pass. A suite that fails there is fixed in the hub when the skill or its test
+is wrong against the core's documented contract, and reported to the core when the core broke it.
+
+`scripts/ci_checks.py run <suite>` refuses a suite whose core is not named, and puts that core last
+on its tests' import path, so the skill tests that check their wire bodies with the core's own
+validators run them. The Slack and Telegram bridge suites also list the core functions those tests
+import (`core_imports`): a core without one stops the suite instead of letting the check skip.
 
 The `claudexor-quotas` suite needs Node 24, pytest, Playwright and its Chromium
 and WebKit builds. `OUROBOROSHUB_NODE` selects an existing Node executable;
@@ -366,6 +371,9 @@ suite on a dedicated test machine or VM: it starts a real core host. On that tes
 ATLAS_CORE=/path/to/ouroboros PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs tests/memory_atlas
 ```
 
+`python -B scripts/ci_checks.py run memory-atlas` takes either `ATLAS_CORE` or `ATLAS_HOST_ROOT`
+(a host already started by `realhost.py`, whose copy of its core is `repo/`).
+
 `python tests/memory_atlas/dev/realhost.py --core /path/to/ouroboros --root /tmp/<new directory>`
 starts the same host to look at and prints `READY <url>`; open `<url>/#widgets` and press Start on
 Memory Atlas.
@@ -385,10 +393,12 @@ Module widgets can declare `render.appearance: host` and feature-detect
 `OuroborosWidget.onTheme`. Preserve state while applying Light/Dark, unsubscribe
 on disposal, and retain a usable palette on older hosts. The real-bridge
 browser suites require a local core checkout with git history, Playwright,
-Chromium and WebKit:
+Chromium and WebKit. CI gives the `widgets`, `calendar-skill`, `smart-lists` and
+`telegram-user-session` jobs the pinned core, its runtime and both browsers; only
+the dashboard suite (`widgets`) reads the core's history:
 
 ```bash
-OUROBOROS_THEME_CORE_ROOT=/path/to/ouroboros python -m pytest -p no:cacheprovider -q tests/test_dashboard_theme_browser.py tests/test_calendar_host_browser.py tests/test_smart_lists_browser.py
+OUROBOROS_THEME_CORE_ROOT=/path/to/ouroboros python -m pytest -p no:cacheprovider -q tests/test_dashboard_theme_browser.py tests/test_calendar_host_browser.py tests/test_smart_lists_browser.py tests/test_telegram_participant_widget_browser.py
 ```
 
 These standalone invocations are local opt-ins; the selected Calendar and Smart Lists

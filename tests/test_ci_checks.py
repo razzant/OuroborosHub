@@ -19,17 +19,21 @@ from scripts.build_index import run_git
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def fake_core(root):
+    for name in ci.CORE_FILES:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('fixture', encoding='utf-8')
+    return root
+
+
 @contextmanager
 def consumer_core():
     with tempfile.TemporaryDirectory(prefix='hub-consumer-core-') as tmp:
-        core = Path(tmp)
-        for name in ('ouroboros/gateway/host_service.py', 'web/provider-return.html'):
-            path = core / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('fixture', encoding='utf-8')
-        with patch.dict(os.environ, {'OUROBOROS_SOURCE_DIR': str(core), 'OUROBOROS_THEME_CORE_ROOT': str(core),
-                                     'OUROBOROS_PRESENCE_CORE_ROOT': str(core), 'ATLAS_CORE': str(core),
-                                     'OUROBOROS_IDENTITY_CORE_ROOT': str(core)}):
+        core = fake_core(Path(tmp))
+        names = {name for suite in ci.SUITES.values() for name in ci.core_envs(suite)}
+        with patch.dict(os.environ, {name: str(core) for name in names}):
+            os.environ.pop('ATLAS_HOST_ROOT', None)
             yield core
 
 
@@ -144,7 +148,8 @@ class SelectionTests(unittest.TestCase):
         listed = subprocess.CompletedProcess([], 0, LIBX264 + AAC)
         for name, suite in ci.SUITES.items():
             with self.subTest(suite=name), consumer_core() as core, synthetic_ffmpeg(), \
-                    patch.object(ci.subprocess, 'run', return_value=listed) as run:
+                    patch.object(ci.subprocess, 'run', return_value=listed) as run, \
+                    patch.object(ci, 'core_import_gaps', return_value={}) as imports:
                 ci.run_suite(name)
                 *probes, install, test = run.call_args_list
                 self.assertEqual([probe.args[0][1:] for probe in probes],
@@ -159,18 +164,32 @@ class SelectionTests(unittest.TestCase):
                 self.assertTrue(install.kwargs['check'])
                 self.assertTrue(test.kwargs['check'])
                 self.assertEqual(test.kwargs['env']['PYTHONDONTWRITEBYTECODE'], '1')
-                if suite.get('core_env'):
-                    self.assertEqual(test.kwargs['env'][suite['core_env']], str(core.resolve()))
+                for key in ci.core_envs(suite):
+                    self.assertEqual(test.kwargs['env'][key], str(core.resolve()))
+                # The tests that import the core themselves get that core, last on their path; others keep theirs.
+                path = test.kwargs['env'].get('PYTHONPATH')
+                if ci.core_envs(suite):
+                    self.assertEqual(path.split(os.pathsep)[-1], str(core.resolve()))
+                else:
+                    self.assertEqual(path, os.environ.get('PYTHONPATH'))
+                if suite.get('core_imports'):
+                    imports.assert_called_once_with(suite['core_imports'], test.kwargs['env'])
+                else:
+                    imports.assert_not_called()
                 for key, value in suite.get('env', {}).items():
                     self.assertEqual(test.kwargs['env'][key], value)
 
     def test_selected_consumers_refuse_absent_or_old_core_before_running_an_all_skipped_suite(self):
-        for name, key in [('email-presence', 'OUROBOROS_SOURCE_DIR'), ('calendar-skill', 'OUROBOROS_THEME_CORE_ROOT'),
-                          ('smart-lists', 'OUROBOROS_THEME_CORE_ROOT'), ('memory-atlas', 'ATLAS_CORE'),
-                          ('slack-bridge', 'OUROBOROS_PRESENCE_CORE_ROOT'), ('telegram-bot', 'OUROBOROS_PRESENCE_CORE_ROOT'),
-                          ('telegram-user-session', 'OUROBOROS_PRESENCE_CORE_ROOT'),
-                          ('freshdesk', 'OUROBOROS_PRESENCE_CORE_ROOT'), ('github', 'OUROBOROS_IDENTITY_CORE_ROOT')]:
-            with self.subTest(suite=name), consumer_core() as core, patch.object(ci.subprocess, 'run') as run:
+        pairs = [(name, key) for name, suite in ci.SUITES.items() for key in ci.core_envs(suite)]
+        self.assertEqual(pairs, [('smart-lists', 'OUROBOROS_THEME_CORE_ROOT'), ('widgets', 'OUROBOROS_THEME_CORE_ROOT'),
+                                 ('memory-atlas', 'ATLAS_CORE'), ('calendar-skill', 'OUROBOROS_THEME_CORE_ROOT'),
+                                 ('slack-bridge', 'OUROBOROS_PRESENCE_CORE_ROOT'), ('email-presence', 'OUROBOROS_SOURCE_DIR'),
+                                 ('freshdesk', 'OUROBOROS_PRESENCE_CORE_ROOT'), ('github', 'OUROBOROS_IDENTITY_CORE_ROOT'),
+                                 ('telegram-bot', 'OUROBOROS_PRESENCE_CORE_ROOT'),
+                                 ('telegram-user-session', 'OUROBOROS_PRESENCE_CORE_ROOT'),
+                                 ('telegram-user-session', 'OUROBOROS_THEME_CORE_ROOT')])
+        for name, key in pairs:
+            with self.subTest(suite=name, key=key), consumer_core() as core, patch.object(ci.subprocess, 'run') as run:
                 for value in ('', str(core / 'missing')):
                     with patch.dict(os.environ, {key: value}), self.assertRaisesRegex(RuntimeError, key):
                         ci.run_suite(name)
@@ -178,6 +197,50 @@ class SelectionTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'must run, not skip'):
                     ci.run_suite(name)
                 run.assert_not_called()
+
+    def test_memory_atlas_may_attach_to_a_started_host_instead_of_naming_a_core(self):
+        # The local mode tests/memory_atlas/conftest.py documents: a host started from a core, whose copy is repo/.
+        with consumer_core(), tempfile.TemporaryDirectory(prefix='hub-atlas-host-') as tmp, \
+                patch.object(ci.subprocess, 'run') as run:
+            host = Path(tmp)
+            repo = fake_core(host / 'repo')
+            with patch.dict(os.environ, {'ATLAS_HOST_ROOT': str(host)}):
+                os.environ.pop('ATLAS_CORE')
+                ci.run_suite('memory-atlas')
+                env = run.call_args_list[-1].kwargs['env']
+                self.assertNotIn('ATLAS_CORE', env)
+                self.assertEqual(env['ATLAS_HOST_ROOT'], str(host))
+                self.assertEqual(env['PYTHONPATH'].split(os.pathsep)[-1], str(repo.resolve()))
+                # A host without its core copy is refused, naming the variable that pointed at it.
+                run.reset_mock()
+                (repo / 'web/provider-return.html').unlink()
+                with self.assertRaisesRegex(RuntimeError, 'ATLAS_HOST_ROOT'):
+                    ci.run_suite('memory-atlas')
+                run.assert_not_called()
+
+    def test_in_process_core_checks_fail_when_the_named_core_lacks_what_they_import(self):
+        self.assertEqual({name for name, suite in ci.SUITES.items() if suite.get('core_imports')},
+                         {'slack-bridge', 'telegram-bot'})
+        with tempfile.TemporaryDirectory(prefix='hub-core-imports-') as tmp:
+            core = Path(tmp)
+            (core / 'ouroboros').mkdir()
+            (core / 'ouroboros/__init__.py').write_text('', encoding='utf-8')
+            (core / 'ouroboros/place_intake.py').write_text('def reaction_refusal(event, files):\n    return ""\n',
+                                                             encoding='utf-8')
+            env = {**os.environ, 'PYTHONPATH': str(core), 'PYTHONDONTWRITEBYTECODE': '1'}
+            self.assertEqual(ci.core_import_gaps(['ouroboros.place_intake:reaction_refusal'], env), {})
+            gaps = ci.core_import_gaps(['ouroboros.place_intake:reaction_refusal', 'ouroboros.place_intake:decide_attention',
+                                        'ouroboros.presence_delivery:validate_delivery'], env)
+            self.assertEqual(gaps['ouroboros.place_intake:decide_attention'], 'absent')
+            self.assertTrue(gaps['ouroboros.presence_delivery:validate_delivery'].startswith('ModuleNotFoundError'))
+            self.assertEqual(len(gaps), 2)
+        # A gap stops the suite after its dependencies and before pytest, naming what is missing.
+        for name in ('slack-bridge', 'telegram-bot'):
+            with self.subTest(suite=name), consumer_core(), patch.object(ci.subprocess, 'run') as run, \
+                    patch.object(ci, 'core_import_gaps', return_value={'ouroboros.place_intake:reaction_refusal': 'absent'}), \
+                    self.assertRaisesRegex(RuntimeError, r'reaction_refusal \(absent\); its in-process core checks must run'):
+                ci.run_suite(name)
+            self.assertEqual([call.args[0][1:4] for call in run.call_args_list], [['-B', '-m', 'pip']])
 
     def test_anime_studio_runs_its_whole_payload_suite_only_with_the_ffmpeg_its_assembly_cases_need(self):
         self.assertEqual(ci.SUITES['anime-studio']['tests'], ['skills/anime_studio/tests'])

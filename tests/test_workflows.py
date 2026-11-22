@@ -396,21 +396,29 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(tests['env'], {'OUROBOROS_IDENTITY_CORE_ROOT': '${{ github.workspace }}/core'})
         hosted = workflow['jobs']['hosted-skills']
         steps = hosted['steps']
-        needs_core = sorted(name for name, spec in ci_checks.SUITES.items() if spec.get('core_env'))
+        needs_core = sorted(name for name, spec in ci_checks.SUITES.items() if ci_checks.core_envs(spec))
 
         def selecting(suites):
             return f"contains(fromJSON('{json.dumps(sorted(suites))}'), matrix.suite)"
         [checkout] = [step for step in steps if step.get('with', {}).get('repository') == CORE_REPOSITORY]
         self.assertEqual(checkout['if'], selecting(needs_core))
+        # The dashboard suite reads the core's historical bridge (tests/test_dashboard_theme_browser.py LEGACY_REF).
         self.assertEqual(checkout['with'], {'repository': CORE_REPOSITORY, 'ref': CORE_REF, 'path': 'core',
-                                            'persist-credentials': 'false'})
+                                            'persist-credentials': 'false',
+                                            'fetch-depth': "${{ matrix.suite == 'widgets' && '0' || '1' }}"})
+        self.assertIn('LEGACY_REF = "', (ROOT / 'tests/test_dashboard_theme_browser.py').read_text(encoding='utf-8'))
         install = next(step for step in steps if step.get('name') == "Install the core's runtime and the browsers, and name the core")
-        source = next(step for step in steps if step.get('name') == 'Name the core for the suites that need only its source')
-        runtime = ['calendar-skill', 'email-presence', 'memory-atlas', 'smart-lists']
-        readers = [name for name in needs_core if name not in runtime]
+        source = next(step for step in steps if step.get('name') == 'Name the core for the Presence consumers and GitHub')
+        # The suites whose tests drive browsers through the core install its runtime and both browsers, and get 30
+        # minutes; the Presence consumers and GitHub read its source.
+        runtime = ['calendar-skill', 'email-presence', 'memory-atlas', 'smart-lists', 'telegram-user-session', 'widgets']
+        consumer_suites = [name for name in needs_core if 'OUROBOROS_PRESENCE_CORE_ROOT' in ci_checks.core_envs(ci_checks.SUITES[name])]
+        readers = sorted(consumer_suites + ['github'])
         self.assertEqual((install['if'], source['if']), (selecting(runtime), selecting(readers)))
-        consumer_suites = [name for name in needs_core if ci_checks.SUITES[name]['core_env'] == 'OUROBOROS_PRESENCE_CORE_ROOT']
-        self.assertEqual(sorted(consumer_suites + ['github']), readers)
+        self.assertEqual(sorted(set(runtime) | set(readers)), needs_core)
+        longer = re.fullmatch(r"\$\{\{ contains\(fromJSON\('(\[.*\])'\), matrix\.suite\) && 30 \|\| 15 \}\}",
+                              hosted['timeout-minutes'])
+        self.assertEqual(sorted(json.loads(longer.group(1))), runtime)
         # The Presence consumers (tests/test_*_core_consumer.py): every suite that lists one requires the core.
         consumers = {path.relative_to(ROOT).as_posix() for path in (ROOT / 'tests').glob('test_*_core_consumer.py')
                      if 'CORE_ENV = "OUROBOROS_PRESENCE_CORE_ROOT"' in path.read_text(encoding='utf-8')}
@@ -447,8 +455,9 @@ class WorkflowTests(unittest.TestCase):
                                                   'OUROBOROS_CORE_ROOT'})
         self.assertEqual(named[source['name']], {'OUROBOROS_PRESENCE_CORE_ROOT', 'OUROBOROS_IDENTITY_CORE_ROOT'})
         for suite in needs_core:
-            given = named[install['name'] if suite in runtime else source['name']]
-            self.assertIn(ci_checks.SUITES[suite]['core_env'], given, suite)
+            given = set().union(*(named[step['name']] for step, chosen in ((install, runtime), (source, readers))
+                                  if suite in chosen))
+            self.assertLessEqual(set(ci_checks.core_envs(ci_checks.SUITES[suite])), given, suite)
         for step in (install, source):
             self.assertLess(steps.index(checkout), steps.index(step))
             self.assertLess(steps.index(step), len(steps) - 1)  # it precedes the suite run

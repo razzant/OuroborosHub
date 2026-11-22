@@ -64,8 +64,8 @@ jobs:
     name: ${{ matrix.suite }}
     # memory-atlas drives its card in a real host with Chromium and WebKit as macOS runs them.
     runs-on: ${{ matrix.suite == 'memory-atlas' && 'macos-latest' || 'ubuntu-latest' }}
-    # The four suites that install the core's runtime and drive browsers get 30 minutes.
-    timeout-minutes: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence", "smart-lists"]'), matrix.suite) && 30 || 15 }}
+    # The suites that install the core's runtime and drive browsers get 30 minutes.
+    timeout-minutes: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence", "smart-lists", "telegram-user-session", "widgets"]'), matrix.suite) && 30 || 15 }}
     strategy:
       fail-fast: false
       matrix:
@@ -82,22 +82,25 @@ jobs:
           python-version: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence"]'), matrix.suite) && '3.10' || '3.11' }}
       - run: python -m pip install PyYAML
       # Every suite whose tests use a real core (core_env in scripts/ci_checks.py) checks out that one commit,
-      # OUROBOROS_CORE_SHA above. Without it those suites fail; their real-core tests never skip.
+      # OUROBOROS_CORE_SHA above. Without it those suites fail; their real-core tests never skip. The widgets suite
+      # also reads the core's historical theme bridge with git show, so its checkout carries the history (about 130 MB).
       - name: Check out the pinned core
-        if: contains(fromJSON('["calendar-skill", "email-presence", "freshdesk", "github", "memory-atlas", "slack-bridge", "smart-lists", "telegram-bot", "telegram-user-session"]'), matrix.suite)
+        if: contains(fromJSON('["calendar-skill", "email-presence", "freshdesk", "github", "memory-atlas", "slack-bridge", "smart-lists", "telegram-bot", "telegram-user-session", "widgets"]'), matrix.suite)
         uses: actions/checkout@v4
         with:
           repository: razzant/ouroboros
           ref: ${{ env.OUROBOROS_CORE_SHA }}
           path: core
           persist-credentials: false
+          fetch-depth: ${{ matrix.suite == 'widgets' && '0' || '1' }}
       # Memory Atlas starts that core's server and reads through PluginAPI 2.1 read_memory and its transfer contract.
       # Mail and Calendar exercise its Host Service, child tool dispatcher, opaque widgets and sign-in return; provider
-      # edges remain offline fixtures. Smart Lists mounts its widget through the core's module bridge and checks its
-      # widget declarations with the core's validator (OUROBOROS_CORE_ROOT). They need the core's runtime (it supplies
-      # Playwright) and Chromium and WebKit; Linux runners also need the browsers' libraries.
+      # edges remain offline fixtures. Smart Lists, the Telegram participant widget and the dashboard cards (widgets)
+      # mount through the core's module bridge; Smart Lists also checks its widget declarations with the core's
+      # validator (OUROBOROS_CORE_ROOT). They need the core's runtime (it supplies Playwright) and Chromium and WebKit;
+      # Linux runners also need the browsers' libraries.
       - name: Install the core's runtime and the browsers, and name the core
-        if: contains(fromJSON('["calendar-skill", "email-presence", "memory-atlas", "smart-lists"]'), matrix.suite)
+        if: contains(fromJSON('["calendar-skill", "email-presence", "memory-atlas", "smart-lists", "telegram-user-session", "widgets"]'), matrix.suite)
         run: |
           python -m pip install -r core/requirements.txt
           if [ "$RUNNER_OS" = Linux ]; then
@@ -111,8 +114,9 @@ jobs:
           echo "OUROBOROS_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
       # The Presence consumers (tests/test_*_core_consumer.py) drive Slack and Telegram through the core's own Presence
       # routes in child processes, and GitHub's owner-account contract runs through its places module. They import
-      # nothing beyond each suite's dependencies, so the checkout is all they need.
-      - name: Name the core for the suites that need only its source
+      # nothing beyond each suite's dependencies, so the checkout is all they need; scripts/ci_checks.py puts it last
+      # on the tests' import path and stops a bridge suite whose core lacks a check its tests import (core_imports).
+      - name: Name the core for the Presence consumers and GitHub
         if: contains(fromJSON('["freshdesk", "github", "slack-bridge", "telegram-bot", "telegram-user-session"]'), matrix.suite)
         run: |
           echo "OUROBOROS_PRESENCE_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
