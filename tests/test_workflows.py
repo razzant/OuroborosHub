@@ -189,46 +189,65 @@ class GitHubAPITests(unittest.TestCase):
 
 CORE_REPOSITORY = 'razzant/ouroboros'
 CORE_REF = '${{ env.OUROBOROS_CORE_SHA }}'
-COMMIT = re.compile(r'(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])')
+# razzant/ouroboros as a whole name inside a command or URL (never razzant/OuroborosHub).
+CORE_NAMED = re.compile(r'(?<![\w.-])razzant/ouroboros(?:\.git)?(?![\w.-])', re.IGNORECASE)
+# The git commands that move or fill a checkout.
+GIT_MOVES = {'checkout', 'switch', 'reset', 'restore', 'fetch', 'pull', 'clone', 'worktree', 'submodule'}
 
 
-def _scalars(node, key=''):
-    """Every scalar of a workflow except action references (`uses:` may pin an action by its commit)."""
-    if isinstance(node, dict):
-        for name, value in node.items():
-            yield from _scalars(value, name)
-    elif isinstance(node, list):
-        for value in node:
-            yield from _scalars(value, key)
-    elif key != 'uses':
-        yield node
+def workflow_documents(directory):
+    """Every workflow GitHub loads from the directory (`.yml` and `.yaml`), by file name, as BaseLoader documents."""
+    return {path.name: yaml.load(path.read_text(encoding='utf-8'), Loader=yaml.BaseLoader)
+            for path in sorted(directory.iterdir()) if path.suffix in {'.yml', '.yaml'} and path.is_file()}
+
+
+def is_core_repository(value):
+    """razzant/ouroboros as a checkout names it: any case, an owner/name, a GitHub URL, a .git suffix."""
+    text = re.sub(r'^(?:https?://|git@)?(?:www\.)?github\.com[/:]', '', str(value).strip().lower()).rstrip('/')
+    return text.removesuffix('.git') == CORE_REPOSITORY
+
+
+def core_git_commands(script):
+    """The git commands of a run step that fetch or move a core: one naming razzant/ouroboros, or one run in core/."""
+    found = []
+    for command in re.split(r'\n|;|&&|\|\|', script):
+        try:
+            words = shlex.split(command)
+        except ValueError:
+            words = command.split()
+        at = next((index for index, word in enumerate(words) if word.rsplit('/', 1)[-1] == 'git'), None)
+        if at is None or not GIT_MOVES & set(words):
+            continue
+        args = words[at + 1:]
+        in_core = any(flag == '-C' and target.rstrip('/').rsplit('/', 1)[-1] == 'core'
+                      for flag, target in zip(args, args[1:]))
+        if in_core or CORE_NAMED.search(command):
+            found.append(command.strip())
+    return found
 
 
 def core_pin_violations(workflows):
     """Every way these workflows (file name -> BaseLoader document) test against a core other than the one pin:
-    catalog-check.yml declares OUROBOROS_CORE_SHA once, every checkout of the core reads it, and no other commit
-    literal appears in any workflow."""
+    catalog-check.yml declares OUROBOROS_CORE_SHA once, every checkout of the core reads it, and no run step fetches
+    or moves a core with git. Other repositories, and actions, may be pinned however they like."""
     pin = workflows['catalog-check.yml'].get('env', {}).get('OUROBOROS_CORE_SHA', '')
     found = [] if re.fullmatch('[0-9a-f]{40}', pin) else [f'OUROBOROS_CORE_SHA is not one full commit: {pin!r}']
     for file, workflow in workflows.items():
-        scopes = [] if file == 'catalog-check.yml' else [(f'{file}', workflow.get('env', {}))]
+        scopes = [] if file == 'catalog-check.yml' else [(file, workflow.get('env', {}))]
         for job_name, job in workflow.get('jobs', {}).items():
             scopes.append((f'{file} job {job_name}', job.get('env', {})))
             for number, step in enumerate(job.get('steps', []), 1):
                 where = f'{file} job {job_name} step {number}'
                 scopes.append((where, step.get('env', {})))
                 options = step.get('with', {})
-                if (step.get('uses', '').startswith('actions/checkout@')
-                        and options.get('repository', '').lower() == CORE_REPOSITORY):
+                if step.get('uses', '').startswith('actions/checkout@') and is_core_repository(options.get('repository', '')):
                     if file != 'catalog-check.yml':  # where the pin is undefined: the checkout would follow a branch
                         found.append(f'{where} checks out the core outside catalog-check.yml, which holds its pin')
-                    elif options.get('ref') != CORE_REF:
-                        found.append(f'{where} checks out the core at {options.get("ref")!r}, not {CORE_REF}')
+                    elif options.get('ref') != CORE_REF or options.get('repository') != CORE_REPOSITORY:
+                        found.append(f'{where} checks out {options.get("repository")!r} at {options.get("ref")!r}, '
+                                     f'not {CORE_REPOSITORY} at {CORE_REF}')
+                found += [f'{where} fetches or moves a core: {command}' for command in core_git_commands(step.get('run', ''))]
         found += [f'{where} declares OUROBOROS_CORE_SHA again' for where, env in scopes if 'OUROBOROS_CORE_SHA' in env]
-        commits = [commit for text in _scalars(workflow) for commit in COMMIT.findall(text)]
-        expected = [pin] if file == 'catalog-check.yml' else []
-        if commits != expected:
-            found.append(f'{file} names commits {commits}, expected only {expected}')
     return found
 
 
@@ -306,7 +325,9 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(run.returncode, 0 if all(r in {'success', 'skipped'} for r in results) else 1)
 
     def test_the_core_is_checked_out_only_at_the_one_pin(self):
-        workflows = {path.name: self.workflow(path.name) for path in sorted((ROOT / '.github/workflows').glob('*.yml'))}
+        directory = ROOT / '.github/workflows'
+        workflows = workflow_documents(directory)
+        self.assertEqual(set(workflows), {path.name for path in directory.glob('*.y*ml')})
         self.assertEqual(core_pin_violations(workflows), [])
         pin = workflows['catalog-check.yml']['env']['OUROBOROS_CORE_SHA']
         old = '9f6fe2f5f7f4d8f3e5ea58f0d04fb352181416bc'
@@ -314,24 +335,54 @@ class WorkflowTests(unittest.TestCase):
         [checkout] = [step for step in steps(workflows) if step.get('with', {}).get('repository') == CORE_REPOSITORY]
         at = steps(workflows).index(checkout)
         second = {**checkout, 'with': {**checkout['with'], 'ref': old, 'path': 'presence-core'}}
+        elsewhere = {'uses': 'actions/checkout@v4', 'with': {'repository': 'razzant/OuroborosHub-fixtures', 'ref': old}}
+        # Repositories other than the core may be pinned by commit, in a checkout or a script: nothing to report.
+        for label, change in [
+                ('another repository at a full commit', lambda w: steps(w).insert(at + 1, elsewhere)),
+                ('a script moving another checkout', lambda w: steps(w).insert(at + 1, {'run': f'git -C fixtures checkout {old}'})),
+                ('a script reading the core', lambda w: steps(w).insert(at + 1, {'run': 'git -C core log -1 --format=%H'})),
+        ]:
+            with self.subTest(label):
+                changed = json.loads(json.dumps(workflows))  # BaseLoader yields only dicts, lists and strings
+                change(changed)
+                self.assertEqual(core_pin_violations(changed), [])
         # A second pin, however it is spelled, fails; each change is applied to a fresh copy of the real workflows.
         for label, change in [
                 ('a second checkout at an older commit', lambda w: steps(w).insert(at + 1, second)),
                 ('the checkout at a literal copy of the pin', lambda w: steps(w)[at]['with'].update(ref=pin)),
                 ('a ref that depends on the suite', lambda w: steps(w)[at]['with'].update(
                     ref=f"${{{{ matrix.suite == 'email-presence' && '{old}' || env.OUROBOROS_CORE_SHA }}}}")),
+                ('the core spelled as a URL at a branch', lambda w: steps(w).insert(at + 1, {**second, 'with': {
+                    **second['with'], 'repository': 'https://github.com/Razzant/Ouroboros.git', 'ref': 'ouroboros'}})),
                 ('a job that declares the pin again', lambda w: w['catalog-check.yml']['jobs']['hosted-skills'].update(
                     env={'OUROBOROS_CORE_SHA': old})),
                 ('a checkout of the core in another workflow', lambda w: w['signals.yml']['jobs']['snapshot']['steps'].append(second)),
                 ('another workflow reading a pin it cannot see', lambda w: w['signals.yml']['jobs']['snapshot']['steps'].append(
                     checkout)),
-                ('a commit a script fetches', lambda w: steps(w).insert(at + 1, {'run': f'git -C core checkout {old}'})),
+                ('a script moving the pinned checkout', lambda w: steps(w).insert(at + 1, {'run': f'git -C core checkout {old}'})),
+                ('a script fetching a branch into it', lambda w: steps(w).insert(at + 1, {
+                    'run': 'cd "$GITHUB_WORKSPACE"\ngit -C "$GITHUB_WORKSPACE/core" fetch origin ouroboros'})),
+                ('a script cloning the core', lambda w: steps(w).insert(at + 1, {
+                    'run': 'git clone --depth 1 https://github.com/razzant/ouroboros.git core2'})),
                 ('a pin that is not a full commit', lambda w: w['catalog-check.yml']['env'].update(OUROBOROS_CORE_SHA=pin[:12])),
         ]:
             with self.subTest(label):
-                changed = json.loads(json.dumps(workflows))  # BaseLoader yields only dicts, lists and strings
+                changed = json.loads(json.dumps(workflows))
                 change(changed)
                 self.assertNotEqual(core_pin_violations(changed), [])
+        # GitHub loads `.yaml` workflows too: discovery finds one, and its own core checkout fails the check.
+        with tempfile.TemporaryDirectory(prefix='hub-workflows-') as tmp:
+            copy = Path(tmp)
+            for path in directory.iterdir():
+                (copy / path.name).write_bytes(path.read_bytes())
+            consumer = {'on': {'push': ''}, 'jobs': {'consumer': {'runs-on': 'ubuntu-latest', 'steps': [second]}}}
+            (copy / 'consumer.yaml').write_text(yaml.safe_dump(consumer), encoding='utf-8')
+            found = workflow_documents(copy)
+            self.assertIn('consumer.yaml', found)
+            self.assertTrue(any(line.startswith('consumer.yaml job consumer step 1') for line in core_pin_violations(found)))
+            (copy / 'consumer.yaml').write_text(yaml.safe_dump({**consumer, 'jobs': {'consumer': {
+                'runs-on': 'ubuntu-latest', 'steps': [elsewhere]}}}), encoding='utf-8')
+            self.assertEqual(core_pin_violations(workflow_documents(copy)), [])
 
     def test_every_suite_that_needs_a_core_runs_on_the_one_checkout(self):
         workflow = self.workflow('catalog-check.yml')

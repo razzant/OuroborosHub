@@ -302,7 +302,8 @@ runs against one `razzant/ouroboros` commit, `OUROBOROS_CORE_SHA` at the top of
 `.github/workflows/catalog-check.yml`, checked out once per job; the catalog job checks every
 hosted release and connector against the same commit. With one pin every seam between a
 hosted skill and the core is tested on the same reproducible core, and no suite stays behind on an
-older one; `tests/test_workflows.py` fails on a second pin. To move it, open a PR that changes only
+older one; `tests/test_workflows.py` fails on a second pin in any `.yml` or `.yaml` workflow, whether
+a checkout or a run step's git command takes it. To move it, open a PR that changes only
 that value. The workflow is shared, so that PR runs every suite on the new core, and it merges when
 all of them pass. A suite that fails there is fixed in the hub when the skill or its test is wrong
 against the core's documented contract, and reported to the core when the core broke it.
