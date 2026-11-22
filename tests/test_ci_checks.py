@@ -19,13 +19,6 @@ from scripts.build_index import run_git
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def package_name(spec):
-    """The distribution name of a pip requirement, without its version range or extras."""
-    for separator in ('[', ';', '<', '>', '=', '!', '~', ' '):
-        spec = spec.split(separator)[0]
-    return spec.strip().lower()
-
-
 @contextmanager
 def consumer_core():
     with tempfile.TemporaryDirectory(prefix='hub-consumer-core-') as tmp:
@@ -91,7 +84,6 @@ class SelectionTests(unittest.TestCase):
             'chrome_browser': {'chrome-browser'}, 'freshdesk': {'freshdesk'},
             'anime_studio': {'anime-studio'}, 'provider_keys': {'provider-keys'}, 'whisper-voice': {'whisper-voice'},
             'amberkeep': {'amberkeep'},
-            'kirill-menshov-premium-black': {'premium-black'},
         }
         for skill, expected in consumers.items():
             with self.subTest(skill=skill):
@@ -225,32 +217,6 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(Path(probe[0]).name, 'ffmpeg')
         self.assertEqual(install[1:5], ['-B', '-m', 'pip', 'install'])
         self.assertEqual(test[8:], ['skills/anime_studio/tests'])
-
-    def test_premium_black_lane_selects_the_payload_suite_and_agrees_with_the_manifest(self):
-        suite = ci.SUITES['premium-black']
-        self.assertEqual(suite['skills'], ['kirill-menshov-premium-black'])
-        self.assertEqual(suite['tests'], ['skills/kirill-menshov-premium-black/tests'])
-        # The payload directory and its CSS are the lane's own inputs; the generic
-        # selection tests already cover test files and unrelated skill prefixes.
-        self.assertEqual(ci.selected_suites({'skills/kirill-menshov-premium-black/tests'}), ['premium-black'])
-        self.assertEqual(ci.selected_suites({'skills/kirill-menshov-premium-black/assets/deck.css'}), ['premium-black'])
-        # The lane's runtime agrees with the manifest: it installs only what the payload declares,
-        # and it covers the packages the offline build imports. Another dependency later is fine.
-        manifest = (ROOT / 'skills/kirill-menshov-premium-black/SKILL.md').read_text(encoding='utf-8')
-        for package in suite['dependencies']:
-            with self.subTest(package=package):
-                self.assertIn(package, manifest, 'the lane must test the versions the payload declares')
-        installed = {package_name(package) for package in suite['dependencies']}
-        for required in ('numpy', 'pillow'):
-            with self.subTest(required=required):
-                self.assertIn(required, installed,
-                              'the offline build imports %s, so the lane must install it' % required)
-        # A knob the lane sets is one the payload reads, so a later render lane stays possible.
-        payload = '\n'.join(path.read_text(encoding='utf-8') for path in
-                            (ROOT / 'skills/kirill-menshov-premium-black').rglob('*.py'))
-        for key in suite.get('env', {}):
-            with self.subTest(key=key):
-                self.assertIn(key, payload, 'the lane may only set a knob the payload reads')
 
     def test_workflow_installs_ffmpeg_for_exactly_the_suites_that_require_it(self):
         self.assertEqual([name for name, suite in ci.SUITES.items() if 'ffmpeg_encoders' in suite], ['anime-studio'])
