@@ -25,9 +25,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / 'skills' / 'telegram-user-session'
 ACCOUNT = 8667525238
-# The parent's route lease for a classic entry (the core's docs/WIDGET_HOST_PROTOCOL.md): a fixture answer only; the
-# real module still builds the frame, relays fetches and revokes the lease when the card is disposed.
-LEASE = {'token': 'lease', 'base_url': '/api/widget-resources/lease/', 'expires_in': 120, 'renew_after': 40}
+# The card's publication as a host lists it, and the parent's route lease for its classic entry (the core's
+# docs/WIDGET_HOST_PROTOCOL.md, "Route leases"; ouroboros/gateway/widget_assets.py answers the same requests): a fixture
+# answer only, while the real module still builds the frame, relays fetches and revokes the lease on disposal.
+TAB = {'skill': 'telegram-user-session', 'tab_id': 'participant', 'generation': 'fixture-generation'}
+LEASE_TOKEN = 'fixture-lease-' + '0' * 29  # the core's token shape: 43 URL-safe characters
+LEASE = {'token': LEASE_TOKEN, 'base_url': f'/api/widget-resources/{LEASE_TOKEN}/', 'expires_in': 120, 'renew_after': 40}
 HOST = '''<!doctype html><html><head><script src="/static/theme.js"></script>
 <style>body{margin:0;background:#0f0f11}.widgets-frame{width:100%;height:var(--widget-frame-height,320px);border:0;display:block}</style></head>
 <body><section><div class="widgets-card-status"></div><div id="mount"></div></section>
@@ -35,10 +38,47 @@ HOST = '''<!doctype html><html><head><script src="/static/theme.js"></script>
 import {mountModuleWidget} from '/static/modules/widget_module.js';
 ouroTheme.set('dark');
 window.disposeWidget=await mountModuleWidget(document.getElementById('mount'),
- {skill:'telegram-user-session',ws_prefix:'ext:telegram-user-session:'},
+ {skill:'telegram-user-session',ws_prefix:'ext:telegram-user-session:',tab_id:'participant',generation:'fixture-generation'},
  {entry:'widget.js',appearance:'host'},null,new Set());
 window.ready=true;
 </script></body></html>'''
+
+
+def lease_answer(method, path, payload):
+    """The core's answer to this card's lease controls, or None for a request it refuses: POST only; an open of the
+    card's route lease (once more with its token, to re-establish it), or a renewal or revocation of that token."""
+    try:
+        body = json.loads(payload or b'null')
+    except ValueError:
+        return None
+    operation = {'/api/widgets/asset-leases': 'open', '/api/widgets/asset-leases/renew': 'renew',
+                 '/api/widgets/asset-leases/revoke': 'revoke'}.get(path)
+    if method != 'POST' or not isinstance(body, dict) or operation is None:
+        return None
+    if operation == 'open' and body in ({**TAB, 'scope': 'routes'}, {**TAB, 'scope': 'routes', 'token': LEASE_TOKEN}):
+        return LEASE
+    if body == {'token': LEASE_TOKEN}:
+        return LEASE if operation == 'renew' else {'ok': True} if operation == 'revoke' else None
+    return None
+
+
+def test_the_fixture_host_answers_only_the_lease_requests_the_core_accepts():
+    route_lease = json.dumps({**TAB, 'scope': 'routes'}).encode()
+    token = json.dumps({'token': LEASE_TOKEN}).encode()
+    assert lease_answer('POST', '/api/widgets/asset-leases', route_lease) == LEASE
+    assert lease_answer('POST', '/api/widgets/asset-leases', json.dumps(
+        {**TAB, 'scope': 'routes', 'token': LEASE_TOKEN}).encode()) == LEASE
+    assert lease_answer('POST', '/api/widgets/asset-leases/renew', token) == LEASE
+    assert lease_answer('POST', '/api/widgets/asset-leases/revoke', token) == {'ok': True}
+    refused = [('GET', '/api/widgets/asset-leases', route_lease),                        # the controls are POST only
+               ('POST', '/api/widgets/asset-leases', json.dumps(TAB).encode()),          # a file lease: not this entry
+               ('POST', '/api/widgets/asset-leases', json.dumps(                         # no tab id or generation
+                   {'skill': TAB['skill'], 'scope': 'routes'}).encode()),
+               ('POST', '/api/widgets/asset-leases', json.dumps({**TAB, 'skill': 'other', 'scope': 'routes'}).encode()),
+               ('POST', '/api/widgets/asset-leases/renew', json.dumps({'token': 'lease'}).encode()),
+               ('POST', '/api/widgets/asset-leases/extend', token),                     # no such operation
+               ('POST', '/api/widgets/asset-leases/revoke', b'not json')]
+    assert [lease_answer(*request) for request in refused] == [None] * len(refused)
 
 
 class Request:
@@ -146,7 +186,10 @@ def widget_server():
             if url.path == '/':
                 return self.send(HOST, 'text/html')
             if url.path.startswith('/api/widgets/asset-leases'):
-                return self.send({'ok': True} if url.path.endswith('/revoke') else LEASE)
+                if (answer := lease_answer(self.command, url.path, payload)) is None:
+                    state['errors'].append(f'lease request the core refuses: {self.command} {url.path} {payload!r}')
+                    return self.send({'error': 'invalid lease fields'}, status=400)
+                return self.send(answer)
             if url.path == '/api/widgets/fault':
                 state['faults'].append(payload.decode('utf-8', 'replace'))
                 return self.send({'ok': True})
