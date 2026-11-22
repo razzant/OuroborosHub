@@ -1,6 +1,6 @@
 """A send whose outcome is unknown is never made again, and a queued file goes out as the bytes it had (0.12.1).
 
-Telegram's side is urllib's own ``urlopen``, replaced in-process: the real ``TelegramClient``, its urllib transport
+Telegram's side is urllib's opener, replaced in-process: the real ``TelegramClient``, its urllib transport
 with its error classification, the custody store and the runtime run unchanged. Every request that reached the fake
 is recorded with its exact body. Data is synthetic, the API server is ``telegram.invalid``, and nothing leaves the
 process. The behavioural tests use only what 0.12.0 already had, so the same file is a negative control on it.
@@ -65,9 +65,12 @@ def _parts(request):
     kind = request.get_header("Content-type") or ""
     if not kind.startswith("multipart/form-data"):
         return json.loads(request.data), {}
+    # A file request streams its body as http.client writes it; read here whole, as Telegram receives it.
+    data = request.data if isinstance(request.data, bytes) else b"".join(request.data)
+    assert int(request.get_header("Content-length")) == len(data)
     boundary = kind.split("boundary=", 1)[1].encode()
     fields, files = {}, {}
-    for part in request.data.split(b"--" + boundary):
+    for part in data.split(b"--" + boundary):
         head, found, body = part.partition(b"\r\n\r\n")
         if not found:
             continue
@@ -82,7 +85,7 @@ def _parts(request):
 
 
 class Wire:
-    """Telegram's HTTP side at ``urllib.request.urlopen``: records what reached it and answers as scripted.
+    """Telegram's HTTP side at the opener: records what reached it and answers as scripted.
 
     Outcomes per method, used up in order (default ``ok``): ``no_dns`` and ``refused`` fail before any connection
     (Telegram received nothing); ``write_broke`` and ``write_timeout`` fail while urllib writes the request, and
@@ -193,7 +196,8 @@ class Notes:
 @pytest.fixture
 def wire(monkeypatch):
     value = Wire()
-    monkeypatch.setattr(urllib.request, "urlopen", value)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open",
+                        lambda _opener, request, data=None, timeout=None: value(request, timeout))
     yield value
     value.gate.set()
 
@@ -600,8 +604,8 @@ def _old_row(store, delivery_id, kind):
     (1, "pending", "TelegramApiError: Telegram sendMessage failed (502): Bad Gateway", "uncertain"),
     (1, "pending", "Held: Telegram is paused", "uncertain"),  # the hold replaced the counted attempt's error
     (2, "pending", "TelegramApiError: Telegram sendMessage failed (429): Too Many Requests: retry after 1", "uncertain"),
-    (1, "pending", "TelegramApiError: Telegram {method} failed (429): Too Many Requests: retry after 1", "delivered"),
-    (1, "pending", "TelegramApiError: Telegram {method} failed (400): Bad Request: chat not found", "delivered"),
+    (1, "pending", "TelegramApiError: Telegram {method} failed (429): Too Many Requests: retry after 1", "text_only"),
+    (1, "pending", "TelegramApiError: Telegram {method} failed (400): Bad Request: chat not found", "text_only"),
     (1, "pending", "RuntimeError: telegram token is unavailable", "delivered"),
     (1, "pending", "TelegramApiError: Telegram getMe failed (401): Unauthorized", "delivered"),
 ])
@@ -614,7 +618,12 @@ def test_a_send_an_earlier_version_attempted_is_judged_by_what_its_record_proves
         db.execute("UPDATE outbox SET attempts=?, state=?, last_error=?, lease_until=?, available_at=0 "
                    "WHERE delivery_id='telegram-send:old'",
                    (attempts, state, last_error.format(method=METHOD[kind]), 1 if state == "leased" else 0))
+        if attempts:  # an old file attempt could call only after persisting resolved reporting
+            db.execute("UPDATE outbox SET payload_json=json_set(payload_json,'$._reporting.version',0) "
+                       "WHERE delivery_id='telegram-send:old'")
     _drain(runtime)
+    if expected == "text_only":  # the old error string did not identify the response to the original upload
+        expected = "delivered" if kind == "message" else "uncertain"
     receipt = runtime.store.delivery_receipt("telegram-send:old")
     assert receipt["state"] == expected
     assert len(wire.sent(METHOD[kind])) == (expected == "delivered") + (kind == "message")
@@ -672,7 +681,8 @@ def test_an_earlier_versions_file_that_vanished_is_never_sent_and_ends_failed(tm
     payload = _old_row(runtime.store, "telegram-send:old", "photo")
     pathlib.Path(payload["file_path"]).unlink()
     with sqlite3.connect(runtime.store.path) as db:
-        db.execute("UPDATE outbox SET attempts=1, last_error=? WHERE delivery_id='telegram-send:old'",
+        db.execute("UPDATE outbox SET attempts=1,last_error=?,payload_json=json_set(payload_json, "
+                   "'$._reporting.version',0) WHERE delivery_id='telegram-send:old'",
                    (f"FileNotFoundError: [Errno 2] No such file or directory: '{payload['file_path']}'",))
     _drain(runtime)
     receipt = runtime.store.delivery_receipt("telegram-send:old")
@@ -759,7 +769,8 @@ def test_an_answer_lost_after_the_request_was_written_is_not_proof(monkeypatch):
 
 def test_an_upload_that_could_not_be_built_proves_nothing_was_sent(tmp_path, monkeypatch):
     from telegram_bot import api
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: pytest.fail("nothing may be sent"))
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open",
+                        lambda *_args, **_kwargs: pytest.fail("nothing may be sent"))
     with pytest.raises(api.TelegramRequestNotSent):
         api.UrllibTelegramTransport._post_multipart_files(
             "http://telegram.invalid/bottoken/sendPhoto", {"chat_id": CHAT}, [("photo", tmp_path / "gone.jpg")], 1.0)
@@ -836,7 +847,8 @@ def test_an_earlier_versions_unproven_attempt_ends_uncertain_on_its_first_claim_
     runtime = _before_any_call_fails(tmp_path, wire, failure)
     _old_row(runtime.store, "telegram-send:old", kind)
     with sqlite3.connect(runtime.store.path) as db:
-        db.execute("UPDATE outbox SET attempts=1, last_error=? WHERE delivery_id='telegram-send:old'", (OLD_LOST,))
+        db.execute("UPDATE outbox SET attempts=1,last_error=?,payload_json=json_set(payload_json, "
+                   "'$._reporting.version',0) WHERE delivery_id='telegram-send:old'", (OLD_LOST,))
     _due(runtime.store)
     assert asyncio.run(runtime.process_one_outbox())  # its first claim
     receipt = runtime.store.delivery_receipt("telegram-send:old")

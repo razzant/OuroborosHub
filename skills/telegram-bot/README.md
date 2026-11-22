@@ -1,4 +1,4 @@
-# Telegram Bot 0.12.1
+# Telegram Bot 0.13.0
 
 A public Telegram bot connector for private-chat, group and channel places,
 separate from the built-in owner-control Telegram bridge. It keeps incoming
@@ -34,7 +34,10 @@ bot also sends video, audio, voice, GIFs and albums, and shows "typing…". See
 
 A send whose outcome is unknown, such as a lost answer or a restart during the
 call, ends `uncertain` and is never made again. A file is copied when queued and
-goes out as those bytes. See [Sending once](SKILL.md#sending-once-0121).
+goes out as those bytes, streamed in pieces with the receipt showing the last
+saved lower bound of local bytes written, not proof of delivery. See
+[Sending once](SKILL.md#sending-once-0121) and
+[File sends and transfer observations](SKILL.md#file-sends-and-transfer-observations-0130).
 
 See [SKILL.md](SKILL.md#connector-settings-and-facts-063) for the fact rules,
 setup, provider visibility and delivery behavior, and [CHANGELOG.md](CHANGELOG.md)

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import http.client
+import inspect
 import json
 import mimetypes
+import os
 import pathlib
 import re
 import secrets
 import socket
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Protocol, Sequence, Tuple
 
 from .formatting import prepare_text, prepare_caption, _telegram_html_to_plain
 
@@ -38,6 +41,9 @@ _NO_ANSWER = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPExce
 # The reasons urllib can give only before any connection exists, so before any byte of the request left: the server's
 # name did not resolve, or it refused the connection. Every other reason may come while the request is written.
 _NO_CONNECTION = (socket.gaierror, ConnectionRefusedError)
+# A file is written to the connection in pieces of this size. The request's socket timeout bounds each piece, so a
+# slow upload that keeps moving is never cut by a deadline for the whole body (one write of it all made it one).
+_UPLOAD_CHUNK = 64 * 1024
 
 
 class TelegramApiError(RuntimeError):
@@ -80,7 +86,31 @@ def _file_refusal(exc: TelegramApiError) -> Optional[TelegramApiError]:
     return None
 
 
+class UploadProgress(Protocol):
+    """What one multipart request reports while it runs, called from the transport's worker thread.
+
+    ``begin`` once its files are open, before any connection. ``check_active`` raises if the attempt was stopped,
+    without recording a write. ``wrote`` with 0 once the request line and headers are written, then after each
+    nonfinal body write returns, with the file bytes so far (not form fields or framing). ``sent`` once the write
+    of the closing boundary returns: the whole request is with the network.
+    ``ended`` with ``"ok"``, ``"refused"`` and Telegram's ``error_code``, or ``"none"`` when no Bot API answer was
+    read. ``begin`` and ``wrote`` may raise to stop the request where it stands; ``ended`` must not raise.
+    """
+
+    def begin(self, file_bytes_total: int) -> None: ...
+
+    def check_active(self) -> None: ...
+
+    def wrote(self, file_bytes_written: int) -> None: ...
+
+    def sent(self) -> None: ...
+
+    def ended(self, answer: str, error_code: int = 0) -> None: ...
+
+
 class TelegramTransport(Protocol):
+    """A transport may opt into observing multipart sends by accepting a ``progress`` keyword."""
+
     async def post_json(
         self, url: str, payload: Dict[str, Any], timeout_sec: float
     ) -> Dict[str, Any]: ...
@@ -116,6 +146,7 @@ class UrllibTelegramTransport:
         file_field: str,
         file_path: pathlib.Path,
         timeout_sec: float,
+        progress: Optional[UploadProgress] = None,
     ) -> Dict[str, Any]:
         return await asyncio.to_thread(
             self._post_multipart,
@@ -124,6 +155,7 @@ class UrllibTelegramTransport:
             file_field,
             file_path,
             timeout_sec,
+            progress,
         )
 
     async def get_bytes(self, url: str, timeout_sec: float, max_bytes: int) -> bytes:
@@ -131,8 +163,9 @@ class UrllibTelegramTransport:
 
     async def post_multipart_files(
         self, url: str, fields: Dict[str, str], files: Sequence[Tuple[str, pathlib.Path]], timeout_sec: float,
+        progress: Optional[UploadProgress] = None,
     ) -> Dict[str, Any]:
-        return await asyncio.to_thread(self._post_multipart_files, url, fields, files, timeout_sec)
+        return await asyncio.to_thread(self._post_multipart_files, url, fields, files, timeout_sec, progress)
 
     @staticmethod
     def _post_json(
@@ -154,29 +187,49 @@ class UrllibTelegramTransport:
         file_field: str,
         file_path: pathlib.Path,
         timeout_sec: float,
+        progress: Optional[UploadProgress] = None,
     ) -> Dict[str, Any]:
-        return UrllibTelegramTransport._post_multipart_files(url, fields, [(file_field, file_path)], timeout_sec)
+        return UrllibTelegramTransport._post_multipart_files(
+            url, fields, [(file_field, file_path)], timeout_sec, progress)
 
     @staticmethod
     def _post_multipart_files(
         url: str, fields: Dict[str, str], files: Sequence[Tuple[str, pathlib.Path]], timeout_sec: float,
+        progress: Optional[UploadProgress] = None,
     ) -> Dict[str, Any]:
+        """One multipart request, its files streamed from disk under a fixed Content-Length.
+
+        Each file is open and within the limit before any connection, so an unreadable or oversized one sends nothing.
+        Each body write has its own socket timeout of ``timeout_sec``. Reading the answer uses the same value as an
+        inactivity timeout, not a deadline for receiving the whole reply.
+        """
         boundary = f"----ouroboros-{secrets.token_hex(12)}"
-        try:
-            body = _multipart_files_body(boundary, fields, files)
-        except OSError as exc:
-            raise TelegramRequestNotSent("upload", type(exc).__name__) from exc  # unread file: nothing was sent
-        request = urllib.request.Request(
-            url,
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": f"multipart/form-data; boundary={boundary}",
-                "Content-Length": str(len(body)),
-                "Accept": "application/json",
-            },
-        )
-        return _open_json(request, timeout_sec)
+        with contextlib.ExitStack() as opened:
+            try:
+                parts = _multipart_parts(boundary, fields, files, opened)
+            except OSError as exc:
+                raise TelegramRequestNotSent("upload", type(exc).__name__) from exc  # unread file: nothing was sent
+            file_bytes = sum(part[1] for part in parts if not isinstance(part, bytes))
+            if progress is not None:
+                progress.begin(file_bytes)  # it may stop the request here, before any connection
+            request = urllib.request.Request(
+                url,
+                data=_multipart_stream(parts, progress),
+                method="POST",
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "Content-Length": str(file_bytes + sum(len(part) for part in parts if isinstance(part, bytes))),
+                    "Accept": "application/json",
+                },
+            )
+            answer, code = "none", 0
+            try:
+                payload = _open_json(request, timeout_sec, strict=True)
+                answer, code = ("ok", 0) if payload.get("ok") is True else ("refused", payload["error_code"])
+                return payload
+            finally:
+                if progress is not None:
+                    progress.ended(answer, code)
 
     @staticmethod
     def _get_bytes(url: str, timeout_sec: float, max_bytes: int) -> bytes:
@@ -439,8 +492,12 @@ class TelegramClient:
         prepared_caption: Dict[str, str],
         topic_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
+        progress: Optional[UploadProgress] = None,
     ) -> Dict[str, Any]:
-        """Send one file of a ``MEDIA_METHODS`` kind with a frozen caption and exact reply provenance."""
+        """Send one file of a ``MEDIA_METHODS`` kind with a frozen caption and exact reply provenance.
+
+        ``progress`` observes each request: the first, and the plain-caption one after Telegram refused HTML.
+        """
         endpoint = MEDIA_METHODS.get(kind)
         if endpoint is None:
             raise ValueError(f"unsupported Telegram media kind: {kind}")
@@ -458,13 +515,18 @@ class TelegramClient:
                 {"message_id": int(reply_to_message_id)}
             )
 
+        url = self._endpoint(endpoint)
+        transport_post = self._transport.post_multipart
+        observed = _observed(transport_post, progress)
+
         async def post() -> Dict[str, Any]:
-            response = await self._transport.post_multipart(
-                self._endpoint(endpoint),
+            response = await transport_post(
+                url,
                 fields,
                 kind,
                 pathlib.Path(file_path),
                 60.0,
+                **observed,
             )
             return self._result(endpoint, response)
 
@@ -486,6 +548,7 @@ class TelegramClient:
         *,
         topic_id: Optional[int] = None,
         reply_to_message_id: Optional[int] = None,
+        progress: Optional[UploadProgress] = None,
     ) -> List[Dict[str, Any]]:
         """One album: each item ``{kind, file_path, caption: {text, parse_mode}}`` attached as ``attach://fileN``.
 
@@ -510,12 +573,14 @@ class TelegramClient:
         if reply_to_message_id is not None:
             fields["reply_parameters"] = json.dumps({"message_id": int(reply_to_message_id)})
 
+        url = self._endpoint("sendMediaGroup")
+        transport_post = self._transport.post_multipart_files
+        observed = _observed(transport_post, progress)
+
         async def post(entries: List[Dict[str, Any]]) -> Any:
-            if not self._token:
-                raise TelegramApiError("sendMediaGroup", "TELEGRAM_PUBLIC_BOT_TOKEN is not configured")
-            response = await self._transport.post_multipart_files(
-                self._endpoint("sendMediaGroup"), {**fields, "media": json.dumps(entries, ensure_ascii=False)},
-                files, 120.0)
+            response = await transport_post(
+                url, {**fields, "media": json.dumps(entries, ensure_ascii=False)},
+                files, 120.0, **observed)
             return self._result("sendMediaGroup", response)
 
         try:
@@ -592,35 +657,88 @@ class TelegramClient:
         return response.get("result")
 
 
-def _open_json(request: urllib.request.Request, timeout_sec: float) -> Dict[str, Any]:
+class _NoUploadRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # a later request (even a GET) cannot supply the POST's answer
+
+
+def _open_multipart(request: urllib.request.Request, *, timeout: float) -> Any:
+    # Replace only redirect handling; keep urllib's default HTTPS verification and proxy discovery.
+    return urllib.request.build_opener(_NoUploadRedirect()).open(request, timeout=timeout)
+
+
+def _open_json(request: urllib.request.Request, timeout_sec: float, *, strict: bool = False) -> Dict[str, Any]:
+    """Telegram's JSON answer to ``request``.
+
+    ``strict`` (file sends) only reads the original POST's answer: ``ok`` true to a success status, or Telegram's own
+    error to an error status, ``ok`` false with a ``description`` and an integer ``error_code`` equal to that status.
+    Anything else, such as a gateway's HTML error page, a cut body or an answer contradicting its status, says
+    nothing about what Telegram did, so it is an error without a code: never a refusal that permits another request.
+    """
+    open_request = _open_multipart if strict else urllib.request.urlopen
     try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-            data = response.read(2 * 1024 * 1024 + 1)
+        with open_request(request, timeout=timeout_sec) as response:
+            data = _read_answer(response, 2 * 1024 * 1024, require_whole=strict)
     except urllib.error.HTTPError as exc:
         try:
-            payload = json.loads(exc.read(64 * 1024).decode("utf-8", errors="replace"))
-        except Exception:
+            with exc:
+                data = (_read_answer(exc, 64 * 1024, require_whole=True) if strict else exc.read(64 * 1024))
+            payload = json.loads(data.decode("utf-8", errors="strict" if strict else "replace"))
+        except _NO_ANSWER + (ValueError, TelegramApiError):
+            if strict:
+                raise TelegramApiError("request", f"HTTP {exc.code} without a Bot API answer") from exc
             payload = {"ok": False, "error_code": exc.code, "description": "HTTP error"}
+        if strict and not _bot_api_refusal(payload, exc.code):
+            raise TelegramApiError("request", f"HTTP {exc.code} without a Bot API answer") from exc
         return payload
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, _NO_CONNECTION):
             raise TelegramRequestNotSent("request", f"URLError ({type(exc.reason).__name__})") from exc
         # urllib also wraps a failure while it writes the request in URLError, and a write can break after the bytes
         # have left this machine: that says nothing about the effect.
-        raise TelegramApiError("request", type(exc).__name__) from exc
+        raise TelegramApiError("request", f"URLError ({type(exc.reason).__name__})") from exc
     except _NO_ANSWER as exc:
         raise TelegramApiError("request", type(exc).__name__) from exc
-    if len(data) > 2 * 1024 * 1024:
-        raise TelegramApiError("request", "response exceeds 2 MiB")
     try:
         payload = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise TelegramApiError("request", "provider returned invalid JSON") from exc
+    if strict and not (isinstance(payload, dict) and payload.get("ok") is True):
+        raise TelegramApiError("request", "success status without an ok Bot API answer")
     return (
         payload
         if isinstance(payload, dict)
         else {"ok": False, "description": "invalid response"}
     )
+
+
+def _read_answer(response: Any, limit: int, *, require_whole: bool) -> bytes:
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise TelegramApiError("request", f"response exceeds {limit} bytes")
+    declared = _declared_length(response) if require_whole else None
+    if declared is not None and len(data) != declared:
+        raise TelegramApiError("request", f"answer has {len(data)} of {declared} declared bytes")
+    return data
+
+
+def _bot_api_refusal(payload: Any, status: int) -> bool:
+    """Telegram's own error answer to an HTTP error ``status``; any other body there is no answer from it."""
+    return (400 <= status < 600 and isinstance(payload, dict) and payload.get("ok") is False
+            and type(payload.get("error_code")) is int
+            and payload["error_code"] == status and isinstance(payload.get("description"), str))
+
+
+def _observed(post: Any, progress: Optional[UploadProgress]) -> Dict[str, Any]:
+    """Bind the optional keyword before sending; never retry a POST after a ``TypeError`` from the transport."""
+    if progress is not None:
+        try:
+            inspect.signature(post).bind_partial(progress=progress)
+        except (TypeError, ValueError):
+            pass  # legacy transport (or an unreadable signature): the ordinary call still works, without progress
+        else:
+            return {"progress": progress}
+    return {}
 
 
 def _declared_length(response: Any) -> Optional[int]:
@@ -635,33 +753,28 @@ def _declared_length(response: Any) -> Optional[int]:
     return length if length >= 0 else None
 
 
-def _multipart_body(
-    boundary: str,
-    fields: Dict[str, str],
-    file_field: str,
-    file_path: pathlib.Path,
-) -> bytes:
-    return _multipart_files_body(boundary, fields, [(file_field, file_path)])
-
-
-def _multipart_files_body(
+def _multipart_parts(
     boundary: str,
     fields: Dict[str, str],
     files: Sequence[Tuple[str, pathlib.Path]],
-) -> bytes:
-    chunks: List[bytes] = []
-    for name, value in fields.items():
-        chunks.extend(
-            [
-                f"--{boundary}\r\n".encode(),
-                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
-                str(value).encode("utf-8"),
-                b"\r\n",
-            ]
-        )
+    opened: contextlib.ExitStack,
+) -> List[Any]:
+    """The multipart body, byte for byte as 0.12.1 joined it: framing as ``bytes``, each file as (open handle, size).
+
+    The size is the open file's own, so the Content-Length and the bytes read agree. Each file is opened here, before
+    any connection: ``OSError`` or the upload limit means nothing was sent.
+    """
+    framing = b"".join(
+        f"--{boundary}\r\n".encode() + f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+        + str(value).encode("utf-8") + b"\r\n"
+        for name, value in fields.items()
+    )
+    parts: List[Any] = []
     for file_field, file_path in files:
         path = pathlib.Path(file_path)
-        if path.stat().st_size > _MAX_UPLOAD_BYTES:
+        handle = opened.enter_context(open(path, "rb"))
+        size = os.fstat(handle.fileno()).st_size
+        if size > _MAX_UPLOAD_BYTES:
             raise TelegramRequestNotSent("upload", "file exceeds Telegram Bot API upload limit")
         mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         header_name = (
@@ -670,20 +783,49 @@ def _multipart_files_body(
             .replace("\r", "_")
             .replace("\n", "_")
         )
-        chunks.extend(
-            [
-                f"--{boundary}\r\n".encode(),
-                (
-                    f'Content-Disposition: form-data; name="{file_field}"; '
-                    f'filename="{header_name}"\r\n'
-                ).encode("utf-8"),
-                f"Content-Type: {mime}\r\n\r\n".encode(),
-                path.read_bytes(),
-                b"\r\n",
-            ]
+        framing += (
+            f"--{boundary}\r\n".encode()
+            + f'Content-Disposition: form-data; name="{file_field}"; filename="{header_name}"\r\n'.encode("utf-8")
+            + f"Content-Type: {mime}\r\n\r\n".encode()
         )
-    chunks.append(f"--{boundary}--\r\n".encode())
-    return b"".join(chunks)
+        parts += [framing, (handle, size)]
+        framing = b"\r\n"
+    parts.append(framing + f"--{boundary}--\r\n".encode())
+    return parts
+
+
+def _multipart_stream(parts: Sequence[Any], progress: Optional[UploadProgress]) -> Iterator[bytes]:
+    """The body as http.client writes it: each item yielded is one ``sendall``.
+
+    The code after a ``yield`` runs when http.client asks for the next item, once the write of this one returned. So
+    a file piece is counted only after its write, and ``sent`` comes only after the closing boundary's write. A file
+    that ends before its size stops the request mid-body, which says nothing about what Telegram did.
+    """
+    written, last = 0, len(parts) - 1
+    if progress is not None:
+        progress.wrote(0)  # the request line and headers are written
+    for index, part in enumerate(parts):
+        if isinstance(part, bytes):
+            if progress is not None:
+                progress.check_active()
+            yield part
+            if progress is not None and index < last:  # after the closing boundary the request is whole
+                progress.wrote(written)
+            continue
+        handle, left = part
+        while left:
+            piece = handle.read(min(_UPLOAD_CHUNK, left))
+            if progress is not None:
+                progress.check_active()  # the sender may have stopped while the disk read blocked
+            if not piece:
+                raise OSError(f"{pathlib.Path(handle.name).name} ended {left} bytes early while it was sent")
+            yield piece
+            left -= len(piece)
+            written += len(piece)
+            if progress is not None:
+                progress.wrote(written)
+    if progress is not None:
+        progress.sent()
 
 
 def _split_text(text: str, limit: int) -> List[str]:
