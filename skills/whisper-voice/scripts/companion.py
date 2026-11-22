@@ -329,7 +329,13 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("incomplete request body")
             if self.path == "/transcribe":
                 timings = {}
-                text = ENGINE.transcribe(data, self.headers.get("Content-Type", ""), timings, source, admitted=True)
+                try:
+                    text = ENGINE.transcribe(data, self.headers.get("Content-Type", ""), timings, source, admitted=True)
+                finally:
+                    # Free the slot BEFORE the answer is written: a client that sends its next recording the
+                    # moment it reads this reply must not meet a false busy. The outer finally is the backstop.
+                    ENGINE.transcription.release()
+                    held = False
                 self._reply(200, {"text": text, "timings": timings,
                                   **({"status": "no_speech"} if not text else {})})
             else:
@@ -349,6 +355,7 @@ class Handler(BaseHTTPRequestHandler):
         except VoiceBusy as exc:
             self._reply(503, error("voice_busy", str(exc)))
         except (ValueError, OSError, ImportError) as exc:
+            self.close_connection = True  # after a stalled or broken body there is no clean next request
             self._reply(400, error("voice_unavailable", str(exc)))
         except Exception as exc:
             self._reply(502, error("inference_failed", f"{type(exc).__name__}: {exc}"))

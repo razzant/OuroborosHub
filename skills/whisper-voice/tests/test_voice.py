@@ -1070,6 +1070,7 @@ def test_worker_that_disconnects_is_one_typed_503_and_never_a_second_getresponse
     def serve():
         listener.settimeout(10)
         conn, _ = listener.accept()
+        conn.settimeout(10)  # bounded from the first read, in both branches
         if dies_after_request:
             conn.settimeout(10)
             data = b""
@@ -1086,6 +1087,7 @@ def test_worker_that_disconnects_is_one_typed_503_and_never_a_second_getresponse
                     break
                 have += len(chunk)
         else:
+            conn.settimeout(10)
             conn.recv(1024)
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")  # RST
         conn.close()
@@ -1101,3 +1103,68 @@ def test_worker_that_disconnects_is_one_typed_503_and_never_a_second_getresponse
     finally:
         thread.join(10)
         listener.close()
+
+
+@pytest.mark.parametrize("route", ["status", "settings", "transcribe"])
+def test_a_refused_connection_during_a_worker_restart_is_a_typed_503_on_every_route(tmp_path, route):
+    import socket
+
+    plugin = load_plugin()
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()  # nothing listens here any more: connect is refused
+    (tmp_path / "voice_endpoint.json").write_text(json.dumps({"port": port, "token": "x" * 32, "pid": 1}), encoding="utf-8")
+    status, transcribe, settings, _install = plugin._routes(tmp_path)
+    from starlette.requests import Request
+
+    async def receive():
+        return {"type": "http.request", "body": b"OggS" + bytes(100), "more_body": False}
+    scope = {"type": "http", "method": "POST", "path": "/x", "headers": [(b"content-type", b"audio/ogg")]}
+    if route == "status":
+        response = asyncio.run(status(Request(scope, receive)))
+    elif route == "transcribe":
+        response = asyncio.run(transcribe(Request(scope, receive)))
+    else:
+        async def receive_json():
+            return {"type": "http.request", "body": b'{"always_resident_choice":"no","model_path":"/x"}', "more_body": False}
+        response = asyncio.run(settings(Request({**scope, "headers": [(b"content-type", b"application/json")]}, receive_json)))
+    assert response.status_code == 503
+    body = json.loads(response.body)
+    assert body.get("error_code", (body.get("error") or {}).get("code") if isinstance(body.get("error"), dict) else body.get("error_code")) == "worker_unavailable"
+
+
+def test_sequential_recordings_never_meet_a_false_busy(tmp_path):
+    child = _Child(tmp_path)
+    clip = _mp4(2)
+    for _ in range(5):  # each next request is sent the instant the previous reply is read
+        status, body = child.post(clip, source="attachment")
+        assert status == 200, body
+
+
+def test_a_save_that_outlives_the_callers_deadline_is_refused_through_the_real_handler(tmp_path, monkeypatch):
+    companion = _companion_module(tmp_path, monkeypatch, "voice_handler_deadline_test")
+    monkeypatch.setattr(companion, "CONTROL_WAIT_SECONDS", 5.2)  # the handler's deadline is then 0.2 s
+    real = companion.model_directory
+    other = tmp_path / "other"
+    other.mkdir()
+    for name in ("model.bin", "config.json", "tokenizer.json"):
+        (other / name).write_bytes(b"valid")
+    monkeypatch.setattr(companion, "model_directory", lambda p: (time.sleep(0.6), real(p))[1])
+    old = read_settings(tmp_path)["model_path"]
+    server = ThreadingHTTPServer(("127.0.0.1", 0), companion.Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=20)
+        conn.request("POST", "/settings", json.dumps({"model_path": str(other), "always_resident": False}),
+                     {"X-Voice-Token": companion.TOKEN, "Content-Type": "application/json"})
+        response = conn.getresponse()
+        assert response.status == 400 and "nothing was changed" in response.read().decode()
+        conn.close()
+        assert read_settings(tmp_path)["model_path"] == old
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)

@@ -39,6 +39,8 @@ def _worker(state_dir: Path, method: str, path: str, body: bytes = b"", mime: st
                     SOURCE_HEADER: source,
                 })
             except ConnectionError:  # reset, abort or broken pipe, whatever the platform calls it
+                if conn.sock is None:
+                    raise  # never connected (refused: the worker is restarting): worker_unavailable below
                 # The companion answers a second recording (or an over-limit one) before it reads the upload and
                 # closes the connection: the send failed, but its early answer may be waiting to be read.
                 sent = False
