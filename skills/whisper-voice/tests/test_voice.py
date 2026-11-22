@@ -957,13 +957,14 @@ def test_plugin_texts_and_manifest_state_the_same_limits(tmp_path):
     assert tools["transcribe_attachment"]["timeout_sec"] == whisper_runtime.TOOL_TIMEOUT_SECONDS > ATTACHMENT_MAX_SECONDS * 2
 
 
-def test_real_plugin_route_refuses_over_the_dictation_ceiling_and_takes_exactly_it(tmp_path):
+def test_real_plugin_route_refuses_over_the_dictation_ceiling_and_takes_exactly_it(tmp_path, monkeypatch):
     from starlette.requests import Request
 
     plugin = load_plugin()
     seen = []
     sources = []
-    plugin._worker = lambda *args, **kwargs: (seen.append(len(args[3])), sources.append(kwargs.get("source", "dictation"))) and plugin.JSONResponse({"text": "ok"})
+    # monkeypatch, not assignment: load_plugin() returns one cached module shared by every test.
+    monkeypatch.setattr(plugin, "_worker", lambda *args, **kwargs: (seen.append(len(args[3])), sources.append(kwargs.get("source", "dictation"))) and plugin.JSONResponse({"text": "ok"}))
     audio = b"OggS" + b"\0" * (DICTATION_MAX_BYTES - 4)
 
     def call(body, length):
