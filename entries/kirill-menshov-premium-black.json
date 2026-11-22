@@ -5,7 +5,7 @@
     "business"
   ],
   "description": "Russian-language board presentations in Kirill Menshov's Premium Black design system: dark 1920x1080 scenes, a toned dune and stone photo library, cards and eight diagram layouts with a living light line. Builds a JSON spec into a self-contained HTML, PNG slides, a PDF and an editable PPTX with its fonts.",
-  "digest": "f1934799af5faec0e446abd672dbe97ffb8dbc265cbf97e91fe024baec854e89",
+  "digest": "62630d386532b17cee03a072ce47419bf9f97b7ec97be89b942efcd31669ed01",
   "install_specs": [
     {
       "kind": "pip",

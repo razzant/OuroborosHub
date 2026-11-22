@@ -113,6 +113,8 @@ def main():
                 continue
         else:
             raise pc.Refused("слишком много снимков с таким именем, выбери другое")
+        # the key for the spec, derived from the real file name (see choose_photo_alias for covered collisions)
+        photo_name = pc.choose_photo_alias(os.path.splitext(os.path.basename(target))[0])
     except pc.Refused as exc:
         pc.emit({"status": "error", "error": str(exc)})
         return pc.EXIT_REFUSED
@@ -122,7 +124,6 @@ def main():
     except (OSError, ValueError) as exc:
         pc.emit({"status": "error", "error": f"снимок не читается: {exc}"})
         return pc.EXIT_REFUSED
-    photo_name = pc.choose_photo_alias(os.path.splitext(os.path.basename(target))[0])
     photo_operand = f"{photo_name}={target}"
     photo_arg = f"--photo {shlex.quote(photo_operand)}"
     pc.emit({"status": "ok", "file": str(target), "size": [out.size[0], out.size[1]],

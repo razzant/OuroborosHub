@@ -308,7 +308,15 @@ def L_matrix(sl):
         px = gx + float(p["x"]) / 100 * gw; py = gy + (1 - float(p["y"]) / 100) * gh
         body.append(f'<div style="position:absolute;left:{px - 7:.0f}px;top:{py - 7:.0f}px;width:14px;height:14px;border-radius:50%;background:{COPPER};box-shadow:0 0 18px {COPPER};z-index:6"></div>')
         if p.get("label"):
-            body.append(f'<div style="position:absolute;left:{px + 16:.0f}px;top:{py - 11:.0f}px;font-size:15px;font-weight:500;color:var(--ivory);z-index:6;white-space:nowrap">{B["T"](p["label"])}</div>')
+            # the label sits right of the point; near the right edge (x close to 100) it moves to the left
+            # side, right-aligned, so it never leaves the matrix or the slide
+            lw = B["text_width"](str(p["label"]), "Inter", 15) * 1.08
+            pos = f"left:{px + 16:.0f}px"
+            room_right, room_left = gx + gw - 12 - (px + 16), px - 16 - (gx + 12)
+            if lw > room_right and room_left > room_right:
+                lw = min(lw, room_left)
+                pos = f"left:{px - 16 - lw:.0f}px;width:{lw:.0f}px;text-align:right"
+            body.append(f'<div style="position:absolute;{pos};top:{py - 11:.0f}px;font-size:15px;font-weight:500;color:var(--ivory);z-index:6;white-space:nowrap">{B["T"](p["label"])}</div>')
     xa, ya = sl.get("x_axis") or {}, sl.get("y_axis") or {}
     # x axis labels
     body.append(f'<div style="position:absolute;left:{gx}px;top:{gy + gh + 18}px;width:{gw}px;display:flex;justify-content:space-between;z-index:5">'

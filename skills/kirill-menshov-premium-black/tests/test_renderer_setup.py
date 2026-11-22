@@ -11,6 +11,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import shutil
 import time
 import unittest
 import zipfile
@@ -136,16 +137,22 @@ class OfflineInstallerTests(unittest.TestCase):
               ThreadPoolExecutor(max_workers=2) as pool):
             futures = [pool.submit(renderer.install, self.state, "google") for _ in range(2)]
             results = [future.result(timeout=12) for future in futures]
+            downloads = renderer.urllib.request.urlopen.call_count
         self.assertTrue(all(r["status"] == "ok" for r in results), results)
-        reports = [r["attempts"][0] for r in results]
-        winner, = [r for r in reports if "note" not in r]
-        loser, = [r for r in reports if "note" in r]
-        self.assertIn("сохранена", loser["note"])
-        self.assertTrue(loser["reused"])
-        expected = b"first candidate" if winner["md5"] == first_md5 else b"second candidate"
-        self.assertEqual((self.dest / self.exe_path).read_bytes(), expected)
-        self.assertTrue(self.marker.is_file())
+        # Both outcomes are normal for the second installer: it either saw the ready revision
+        # before starting (no attempts) or after taking the lock (a reused attempt). Either way
+        # there is exactly one download and one publication, and the bytes are that download's.
+        self.assertEqual(downloads, 1)
         publication.assert_called_once()
+        attempts = [a for r in results for a in r.get("attempts", [])]
+        published = [a for a in attempts if a.get("md5")]
+        self.assertEqual(len(published), 1, attempts)
+        self.assertEqual(published[0]["md5"], first_md5)
+        for other in attempts:
+            if other is not published[0]:
+                self.assertTrue(other.get("reused"), other)
+        self.assertEqual((self.dest / self.exe_path).read_bytes(), b"first candidate")
+        self.assertTrue(self.marker.is_file())
         self.assertEqual(set(self.root.iterdir()), {self.dest, self.root / ".install.lock"})
 
     def test_install_lock_waits_with_timeout_and_leaves_other_lock_alone(self):
@@ -187,8 +194,9 @@ class OfflineInstallerTests(unittest.TestCase):
         native.assert_not_called()
 
     def test_native_installer_uses_same_publication_lock(self):
-        def native(root, timeout):
+        def native(root, revision, timeout):
             self.assertEqual(root, self.root)
+            self.assertEqual(revision, self.rev)
             self.assertGreater(timeout, 0)
             self.assertTrue((root / ".install.lock").is_file())
             self.dest.mkdir()
@@ -200,6 +208,58 @@ class OfflineInstallerTests(unittest.TestCase):
             result = renderer.install(self.state, "playwright")
         self.assertEqual(result["status"], "ok", result)
         self.assertEqual(set(self.root.iterdir()), {self.dest, self.root / ".install.lock"})
+
+
+    def fake_installer(self, outcome):
+        """A stand-in for `python -m playwright install`: records the browsers path it was given."""
+        seen = {}
+
+        def run(cmd, env, **kwargs):
+            seen["path"] = pathlib.Path(env["PLAYWRIGHT_BROWSERS_PATH"])
+            if outcome == "timeout":
+                raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+            folder = seen["path"] / self.dest.name / pathlib.Path(self.exe_path).parent
+            folder.mkdir(parents=True)
+            (folder / pathlib.Path(self.exe_path).name).write_bytes(b"playwright build")
+            (seen["path"] / self.dest.name / "INSTALLATION_COMPLETE").touch()
+            (seen["path"] / ".links").mkdir()
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return run, seen
+
+    def test_playwright_installer_publishes_from_its_own_staging_folder(self):
+        run, seen = self.fake_installer("ok")
+        with (patch.object(renderer, "resolves", return_value=True),
+              patch.object(renderer.subprocess, "run", side_effect=run),
+              patch.object(renderer.urllib.request, "urlopen", side_effect=AssertionError("unexpected network"))):
+            result = renderer.install(self.state, "auto")
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(seen["path"].parent, self.root)
+        self.assertNotEqual(seen["path"], self.root)
+        self.assertEqual((self.dest / self.exe_path).read_bytes(), b"playwright build")
+        self.assertEqual(set(self.root.iterdir()), {self.dest, self.root / ".install.lock"})
+
+    def test_playwright_timeout_tail_cannot_touch_the_google_revision(self):
+        run, seen = self.fake_installer("timeout")
+        response, _ = self.response(b"google build")
+        with (patch.object(renderer, "resolves", return_value=True),
+              patch.object(renderer.subprocess, "run", side_effect=run),
+              patch.object(renderer.urllib.request, "urlopen", return_value=response)):
+            result = renderer.install(self.state, "auto")
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual([a["source"] for a in result["attempts"]], ["playwright", "google"])
+        self.assertEqual(result["attempts"][0]["staging"], str(seen["path"]))
+        published = (self.dest / self.exe_path).read_bytes()
+        self.assertEqual(published, b"google build")
+        # the orphaned Node driver keeps working in the only path it was given: remove the
+        # revision folder there, re-extract, run its cache clean-up
+        tail = seen["path"] / self.dest.name
+        shutil.rmtree(tail, ignore_errors=True)
+        (tail / "partial").mkdir(parents=True)
+        (tail / "partial" / "chrome-headless-shell").write_bytes(b"late tail")
+        shutil.rmtree(seen["path"] / ".links", ignore_errors=True)
+        self.assertEqual((self.dest / self.exe_path).read_bytes(), b"google build")
+        self.assertTrue(self.marker.is_file())
+        self.assertEqual(renderer.status(self.state)["installed"], True)
 
 
 class LocalInputOutputTests(unittest.TestCase):
@@ -298,25 +358,40 @@ class LocalInputOutputTests(unittest.TestCase):
             src = root / "R&D source.png"
             Image.new("RGB", (12, 8), "brown").save(src)
 
-            report = tone(src, "R&D.jpg")
-            target = pathlib.Path(report["file"])
-            self.assertEqual(target.name, "R&D.jpg")
-            self.assertEqual(report["spec_value"], "R-D")
-            self.assertEqual(report["build_args"], ["--photo", f"R-D={target}"])
-            self.assertTrue(target.is_absolute())
-            self.assertIn("--photo 'R-D=", report["note"])
-
-            report = tone(src, "dunes-mist.jpg")
-            target = pathlib.Path(report["file"])
-            self.assertEqual(target.name, "dunes-mist.jpg")
-            self.assertEqual(report["spec_value"], "own-dunes-mist")
-            self.assertEqual(report["build_args"], ["--photo", f"own-dunes-mist={target}"])
-
-            report = tone(src, "My Photo.jpg")
-            target = pathlib.Path(report["file"])
-            self.assertEqual(target.name, "My Photo.jpg")
-            self.assertEqual(report["spec_value"], "My Photo")
-            self.assertEqual(report["build_args"], ["--photo", f"My Photo={target}"])
+            reports = {dst: tone(src, dst) for dst in
+                       ("R&D.jpg", "R=D.jpg", "R-D.jpg", "dunes-mist.jpg", "own-dunes-mist.jpg",
+                        "DUNES-MIST.jpg", "My Photo.jpg")}
+            for dst, report in reports.items():
+                target = pathlib.Path(report["file"])
+                self.assertTrue(target.is_absolute())
+                self.assertEqual(target.parent, root / "state" / "photos")
+                self.assertTrue(pc.photo_name_is_valid(report["spec_value"]), report)
+                self.assertFalse(pc.photo_name_is_library(report["spec_value"]), report)
+                self.assertEqual(report["build_args"], ["--photo", f"{report['spec_value']}={target}"])
+            names = {dst: pathlib.Path(r["file"]).name for dst, r in reports.items()}
+            keys = {dst: r["spec_value"] for dst, r in reports.items()}
+            files = [pathlib.Path(r["file"]) for r in reports.values()]
+            for i, first in enumerate(files):                                              # every result is its own file
+                for second in files[i + 1:]:
+                    self.assertFalse(first.samefile(second), (first, second))
+            self.assertEqual(names["dunes-mist.jpg"], "dunes-mist.jpg")
+            self.assertEqual(names["own-dunes-mist.jpg"], "own-dunes-mist.jpg")
+            self.assertEqual(len(set(keys.values())), len(keys), keys)                    # separate results, separate keys
+            self.assertEqual(keys["dunes-mist.jpg"], "own-dunes-mist")
+            self.assertEqual(keys["own-dunes-mist.jpg"], "own-own-dunes-mist")
+            self.assertEqual(keys["R-D.jpg"], "R-D")
+            self.assertEqual(keys["My Photo.jpg"], "My Photo")
+            self.assertRegex(keys["R&D.jpg"], r"^own-R-D-[0-9a-f]{8}$")
+            self.assertRegex(keys["R=D.jpg"], r"^own-R-D-[0-9a-f]{8}$")
+            self.assertIn("--photo 'own-R-D-", reports["R&D.jpg"]["note"])
+            # Both case outcomes are valid: a case-sensitive file system keeps DUNES-MIST.jpg next to
+            # dunes-mist.jpg; a case-insensitive one finds the name taken and writes DUNES-MIST-2.jpg.
+            # Either way the key follows the real file name and differs from own-dunes-mist.
+            self.assertIn(names["DUNES-MIST.jpg"], ("DUNES-MIST.jpg", "DUNES-MIST-2.jpg"))
+            self.assertEqual(keys["DUNES-MIST.jpg"], names["DUNES-MIST.jpg"][:-4])
+            for stem in ("DUNES-MIST", "DUNES-MIST-2"):                                     # both outcomes, without the FS
+                self.assertEqual(pc.choose_photo_alias(stem), stem)
+                self.assertNotEqual(pc.choose_photo_alias(stem), pc.choose_photo_alias("dunes-mist"))
 
     def test_tone_photo_result_builds_a_real_deck_with_the_returned_alias_and_path(self):
         import tone_photo

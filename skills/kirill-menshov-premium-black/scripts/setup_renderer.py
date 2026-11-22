@@ -110,15 +110,52 @@ def resolves(host: str) -> bool:
         return False
 
 
-def via_playwright(root: pathlib.Path, timeout: float) -> dict:
-    env = dict(os.environ, PLAYWRIGHT_BROWSERS_PATH=str(root))
+def _publish(candidate: pathlib.Path, dest: pathlib.Path) -> str | None:
+    """Move a complete revision folder into place (caller holds the install lock).
+    A revision that is already complete is kept as it is."""
+    if (dest / "INSTALLATION_COMPLETE").is_file():
+        return "готовая ревизия сохранена"
+    if os.path.lexists(dest):
+        dest.rename(dest.parent / f".stale-{dest.name}-{secrets.token_hex(16)}")
+    os.replace(candidate, dest)
+    return None
+
+
+def via_playwright(root: pathlib.Path, revision: str, timeout: float) -> dict:
+    """Playwright's own installer, confined to a fresh staging folder of this attempt.
+
+    `python -m playwright install` starts a Node driver as its own child; a timeout stops only
+    our direct child, and the driver may keep downloading, deleting and extracting in its
+    PLAYWRIGHT_BROWSERS_PATH. That path is therefore never the published root: the attempt
+    writes into <root>/.playwright-<random>/, and only a completed revision from a cleanly
+    finished installer is moved to its final place. A late tail can touch nothing but its own
+    staging folder, which is left alone after a timeout (its outcome is unknown).
+    """
+    staging = pathlib.Path(tempfile.mkdtemp(prefix=".playwright-", dir=root))
+    env = dict(os.environ, PLAYWRIGHT_BROWSERS_PATH=str(staging))
     try:
         run = subprocess.run([sys.executable, "-m", "playwright", "install", BROWSER], env=env,
                              capture_output=True, text=True, timeout=max(30, timeout))
     except subprocess.TimeoutExpired:
-        return {"source": "playwright", "ok": False, "error": "установщик Playwright не уложился во время"}
+        return {"source": "playwright", "ok": False, "staging": str(staging),
+                "error": "установщик Playwright не уложился во время; его незавершённые файлы остаются "
+                         "в отдельной папке попытки, опубликованная ревизия не затрагивается"}
     tail = (run.stdout + run.stderr).strip().splitlines()[-4:]
-    return {"source": "playwright", "ok": run.returncode == 0, "installer_exit": run.returncode, "installer_tail": tail}
+    result = {"source": "playwright", "ok": False, "installer_exit": run.returncode, "installer_tail": tail}
+    try:
+        candidate = staging / f"chromium_headless_shell-{revision}"
+        if run.returncode == 0 and (candidate / "INSTALLATION_COMPLETE").is_file():
+            note = _publish(candidate, root / candidate.name)
+            result["ok"] = True
+            if note:
+                result["note"] = note
+        elif run.returncode == 0:
+            result["error"] = "установщик завершился без готовой ревизии"
+    except OSError as exc:
+        result["error"] = str(exc)[:400]
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)   # the installer has exited: the folder is only ours
+    return result
 
 
 def _safe_extract(archive: pathlib.Path, target: pathlib.Path) -> None:
@@ -272,12 +309,9 @@ def via_google(root: pathlib.Path, revision: str, version: str, deadline: float)
                       "md5_computed": actual_md5, "md5_header": header_md5,
                       "md5_header_verified": header_md5 is not None,
                       "md5_note": "MD5 — контрольная сумма, не подпись"}
-            if (dest / "INSTALLATION_COMPLETE").is_file():
-                result["note"] = "готовая ревизия сохранена"
-            else:
-                if os.path.lexists(dest):
-                    dest.rename(root / f".stale-{dest.name}-{secrets.token_hex(16)}")
-                os.replace(staging, dest)
+            note = _publish(staging, dest)
+            if note:
+                result["note"] = note
             return result
     except Exception as exc:  # noqa: BLE001 - reported to the caller
         return {"source": "google", "ok": False, "url": url, "error": str(exc)[:400]}
@@ -301,13 +335,14 @@ def install(state: pathlib.Path, source: str = "auto") -> dict:
         if source == "auto" and not resolves(PLAYWRIGHT_CDN):
             attempts.append({"source": "playwright", "ok": False, "error": f"{PLAYWRIGHT_CDN} не разрешается в DNS"})
         else:
-            # Playwright writes the same revision folder directly: keep it out of Google's publication step.
+            # The installer works in its own staging folder; publication happens under the lock.
             try:
                 with _install_lock(root, deadline):
                     current = status(state)
                     if current["installed"]:
                         return {**current, "status": "ok", "note": "уже установлен"}
-                    attempts.append(via_playwright(root, (deadline - time.monotonic()) * (0.6 if source == "auto" else 1)))
+                    attempts.append(via_playwright(root, before["revision"],
+                                                   (deadline - time.monotonic()) * (0.6 if source == "auto" else 1)))
             except OSError as exc:
                 attempts.append({"source": "playwright", "ok": False, "error": str(exc)[:400]})
     if source in ("auto", "google") and not status(state)["installed"]:

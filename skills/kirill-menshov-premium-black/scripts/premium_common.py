@@ -114,24 +114,39 @@ def output_name(raw: str | None, default_stem: str, suffix: str) -> str:
     return name
 
 
-def library_photo_keys() -> set[str]:
-    """Keys of the bundled photo library.
+def library_photos() -> dict[str, pathlib.Path]:
+    """The bundled photo library as one exact table: key -> file.
 
-    This is the single spelling of the library-name predicate.  The builder and the
-    photo toner must agree on it: a generated photo may not silently take the key of
-    a bundled photograph.
+    Built from the folder listing with exact (case-sensitive) names, so the answer does
+    not depend on whether the file system ignores case: "DUNES-MIST" is not a library key
+    on macOS or Windows either. The builder's collision check and its reader both use
+    this table; nothing opens a library path built from a spec string.
     """
     try:
-        return {path.stem for path in PHOTO_LIBRARY.glob("*.jpg")}
+        return {path.name[:-4]: path for path in PHOTO_LIBRARY.iterdir()
+                if path.name.endswith(".jpg") and path.is_file()}
     except OSError:
-        return set()
+        return {}
 
 
-def photo_name_is_library(name: str, library: set[str] | None = None) -> bool:
-    """Whether ``name`` would collide with a bundled photo key."""
-    keys = library if library is not None else library_photo_keys()
+def library_photo_keys() -> set[str]:
+    return set(library_photos())
+
+
+def library_photo_key(name: str, library=None) -> str | None:
+    """The library key a spec value names ("dunes-mist" or "dunes-mist.jpg"), exact spelling only."""
+    keys = library if library is not None else library_photos()
     text = str(name or "")
-    return text in keys or (text.lower().endswith(".jpg") and text[:-4] in keys)
+    if text in keys:
+        return text
+    if text.endswith(".jpg") and text[:-4] in keys:
+        return text[:-4]
+    return None
+
+
+def photo_name_is_library(name: str, library=None) -> bool:
+    """Whether ``name`` would collide with a bundled photo key (same exact table as the reader)."""
+    return library_photo_key(name, library) is not None
 
 
 def photo_name_is_valid(name: str) -> bool:
@@ -139,21 +154,34 @@ def photo_name_is_valid(name: str) -> bool:
     return bool(PHOTO_NAME.fullmatch(str(name or "")))
 
 
-def choose_photo_alias(stem: str, library: set[str] | None = None) -> str:
-    """Choose an own-photo key without changing the photo file itself.
+OWN_PREFIX = "own-"
 
-    The first choice is the requested stem.  If it is already a library key, a
-    deterministic ``own-`` variant is used.  The returned value is the exact key
-    for the spec's ``photo`` field and for ``--photo NAME=PATH``.
+
+def choose_photo_alias(stem: str, library=None) -> str:
+    """The own-photo key for a toned file, without renaming the file.
+
+    Keeps the keys of separate tone_photo results apart in the cases it covers:
+    - a stem that is a valid key, not a library key and does not start with ``own-``
+      is used as is;
+    - any other stem gets the ``own-`` prefix ("dunes-mist" -> "own-dunes-mist",
+      "own-dunes-mist" -> "own-own-dunes-mist"): as-is keys never start with ``own-``;
+    - when characters had to be replaced ("R&D" and "R=D" both read "R-D") or the key
+      had to be shortened, a short hash of the exact stem is appended; an 8-hex hash makes a
+      clash unlikely, not impossible, and a clash in one build is refused as a duplicate name.
     """
-    keys = library if library is not None else library_photo_keys()
-    base = re.sub(r"[&=]", "-", str(stem or "").strip()) or "photo"
-    candidates = (base, f"own-{base}", f"{base}-own", f"own-{base}-photo")
-    for candidate in candidates:
-        candidate = candidate[:120].rstrip(" .")
-        if photo_name_is_valid(candidate) and not photo_name_is_library(candidate, keys):
-            return candidate
-    raise Refused("не удалось выбрать свободное имя фотографии")
+    import hashlib
+    keys = library if library is not None else library_photos()
+    text = str(stem or "").strip() or "photo"
+    if (photo_name_is_valid(text) and not photo_name_is_library(text, keys)
+            and not text.startswith(OWN_PREFIX)):
+        return text
+    readable = OWN_PREFIX + re.sub(r"[&=]", "-", text)
+    if readable != OWN_PREFIX + text or len(readable) > 120:
+        tag = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+        readable = f"{readable[:111].rstrip(' .')}-{tag}"
+    if not photo_name_is_valid(readable) or photo_name_is_library(readable, keys):
+        raise Refused("не удалось выбрать свободное имя фотографии")
+    return readable
 
 
 def slug(text: str) -> str:

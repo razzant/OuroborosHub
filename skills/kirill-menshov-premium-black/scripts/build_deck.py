@@ -199,14 +199,23 @@ def parse_photos(items):
 def _operator_photo(path, key):
     """A photo the operator passed with --photo, decoded and re-encoded without any metadata
     (no EXIF, ICC, XMP or JPEG comment): only pixels reach the deck."""
+    import warnings
     from PIL import Image, ImageOps
     if not path.is_file() or path.stat().st_size > USER_PHOTO_MAX_BYTES:
         raise pc.Refused(f"фото «{key}»: нужен обычный файл до 30 МБ")
+    too_big = f"фото «{key}»: снимок больше {USER_PHOTO_MAX_PIXELS} пикселей; уменьши его или пропусти через tone_photo.py"
+    previous_limit = Image.MAX_IMAGE_PIXELS
     Image.MAX_IMAGE_PIXELS = USER_PHOTO_MAX_PIXELS
     try:
-        with Image.open(path) as im:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            opened = Image.open(path)                # reads the header only
+        with opened as im:
             if im.format not in ("JPEG", "PNG", "WEBP"):
                 raise pc.Refused(f"фото «{key}»: поддерживаются JPEG, PNG и WebP, а не {im.format}")
+            width, height = im.size
+            if width * height > USER_PHOTO_MAX_PIXELS:   # checked BEFORE any pixel is decoded
+                raise pc.Refused(too_big)
             im.info.pop("comment", None)   # Pillow copies the JPEG comment through convert()
             im = ImageOps.exif_transpose(im).convert("RGB")
             im.info.pop("comment", None)   # and writes it back as a COM marker on save
@@ -215,8 +224,12 @@ def _operator_photo(path, key):
             im.save(buf, format="JPEG", quality=92)
     except pc.Refused:
         raise
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
+        raise pc.Refused(too_big) from None
     except Exception as exc:  # noqa: BLE001 - any decoder failure is a refused input
         raise pc.Refused(f"фото «{key}» не читается как изображение: {exc}") from None
+    finally:
+        Image.MAX_IMAGE_PIXELS = previous_limit
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 def photo_src(key):
@@ -236,12 +249,13 @@ def photo_src(key):
     if norm in declared:
         uri = _operator_photo(declared[norm], key)
     elif "/" not in norm and "\\" not in norm:
-        p = os.path.join(PHOTOS, norm if "." in norm else norm + ".jpg")
-        if os.path.dirname(os.path.abspath(p)) != os.path.abspath(PHOTOS) or not os.path.isfile(p):
-            raise pc.Refused(f"Фотография не найдена: {key}. Доступные из библиотеки: "
-                             f"{', '.join(sorted(pc.library_photo_keys()))}. "
+        library = pc.library_photos()             # the same exact table as the --photo collision check
+        lib_key = pc.library_photo_key(norm, library)
+        if lib_key is None:
+            raise pc.Refused(f"Фотография не найдена: {key}. Доступные из библиотеки (точное написание): "
+                             f"{', '.join(sorted(library))}. "
                              f"Свой снимок передай в эту сборку: --photo {norm}=<полный путь к выбранному файлу>")
-        with open(p, "rb") as f:
+        with open(library[lib_key], "rb") as f:
             uri = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode("ascii")
     else:
         raise pc.Refused(f"фото «{key}»: путь в спецификации - не разрешение на чтение файла. Передай снимок "
@@ -750,7 +764,15 @@ def L_market(sl):
     if len(lv) > 1:
         body.append(f'<div class="card glass" style="left:1000px;top:180px;width:720px;height:410px"><div class="inner" style="padding:40px 44px"><div class="meta">{T(lv[1].get("meta"))}</div><div class="num bronze" style="{num_style(lv[1]["num"], 64, 632)}margin-top:14px">{T(lv[1]["num"])}</div><div class="label">{T(lv[1].get("label"))}</div></div>')
         if len(lv) > 2:
-            body.append(f'<div class="card caramel" style="left:300px;top:200px;width:380px;height:170px;border-radius:22px"><div class="inner" style="padding:28px 32px"><div class="meta" style="color:#5A4636">{T(lv[2].get("meta"))}</div><div class="num" style="{num_style(lv[2]["num"], 48, 316)}margin-top:auto;color:var(--espresso)">{T(lv[2]["num"])}</div></div></div>')
+            som_label = lv[2].get("label")
+            som_h, som_text = 170, ""
+            if som_label:
+                # the SOM card grows 24px downwards (still inside the SAM card) for one or two label lines
+                one_line = text_width(som_label, "Inter", 17) * SAFETY <= 316
+                som_h = 194 if one_line else 212
+                som_text = (f'<div class="label" style="font-size:{17 if one_line else 15}px;line-height:1.25;margin-top:6px;'
+                            f'color:#3A2A1E;opacity:0.9">{T(som_label)}</div>')
+            body.append(f'<div class="card caramel" style="left:300px;top:{200 if som_h <= 194 else 182}px;width:380px;height:{som_h}px;border-radius:22px"><div class="inner" style="padding:28px 32px"><div class="meta" style="color:#5A4636">{T(lv[2].get("meta"))}</div><div class="num" style="{num_style(lv[2]["num"], 48, 316)}margin-top:auto;color:var(--espresso)">{T(lv[2]["num"])}</div>{som_text}</div></div>')
         body.append("</div>")
     body.append("</div>")
     return "".join(body)
@@ -909,6 +931,16 @@ def check_schema(spec):
     errors += check_nested(spec)
     return errors
 
+def _list(v):
+    """A list field as the checks may walk it: a scalar or object in its place is reported
+    by check_nested as "должно быть списком" and never iterated character by character."""
+    return v if isinstance(v, list) else []
+
+# Cards that draw a photo surface: kind=photo (explicit, or the default of the 4th stairs step)
+# needs its photo, otherwise the card renders as an empty frame.
+PHOTO_CARD_DEFAULTS = {"cards": lambda j: "ink", "stairs": lambda j: ("ink", "glass", "caramel", "photo")[j % 4],
+                       "kpi": lambda j: "glass"}
+
 def check_nested(spec):
     """Element types and required nested fields: a missing num or a string where an object
     belongs becomes a schema error naming the slide, the field and what is expected."""
@@ -962,8 +994,14 @@ def check_nested(spec):
             if (not isinstance(rows, list) or not rows
                     or not all(isinstance(r, list) and all(isinstance(c, str) for c in r) for r in rows)):
                 errors.append(f"slide {n} (table): rows - список строк таблицы (список списков строк)")
+        if t in PHOTO_CARD_DEFAULTS:
+            for j, it in enumerate(_list(sl.get("items"))):
+                if (isinstance(it, dict) and it.get("kind", PHOTO_CARD_DEFAULTS[t](j)) == "photo"
+                        and not (isinstance(it.get("photo"), str) and it["photo"].strip())):
+                    errors.append(f"slide {n} ({t}): items[{j}] - карточка kind=photo требует поле photo "
+                                  "(ключ библиотеки или имя из --photo) или другой kind: ink, glass, caramel")
         if t == "forecast":
-            for j, it in enumerate(sl.get("items") or []):
+            for j, it in enumerate(_list(sl.get("items"))):
                 if not isinstance(it, dict):
                     continue
                 ms = it.get("metrics")
@@ -982,7 +1020,7 @@ def check_nested(spec):
                     if not (isinstance(m.get("num"), str) and m["num"]):
                         errors.append(f"slide {n} (forecast): items[{j}].metrics[{m2}] нет обязательного поля «num»")
         if t == "layers":
-            for j2, node in enumerate(sl.get("layers") or []):
+            for j2, node in enumerate(_list(sl.get("layers"))):
                 if not isinstance(node, dict):
                     continue
                 its = node.get("items")
@@ -990,7 +1028,7 @@ def check_nested(spec):
                                         or not all(isinstance(x2, str) and x2.strip() for x2 in its)):
                     errors.append(f"slide {n} (layers): layers[{j2}].items - список строк")
         if t == "tree":
-            for j2, node in enumerate(sl.get("children") or []):
+            for j2, node in enumerate(_list(sl.get("children"))):
                 if not isinstance(node, dict):
                     continue
                 its = node.get("items")
@@ -1038,7 +1076,7 @@ def check_values(spec):
                         errors.append(f"{where}: delta - строка или объект с обязательным полем text")
                 elif k == "number" and v is not None and not (_is_number(v) or (isinstance(v, str) and len(v) <= 6)):
                     errors.append(f"{where}: number - номер раздела, число или до 6 знаков")
-                elif k in ("photo", "card_title", "title", "text", "num") and v is not None and not isinstance(v, str):
+                elif k in ("photo", "card_title", "title", "text", "num", "meta") and v is not None and not isinstance(v, str):
                     errors.append(f"{where}: нужна строка")
                 visit(v, where)
         elif isinstance(obj, list):
@@ -1052,8 +1090,8 @@ def check_values(spec):
             continue
         visit(sl, f"slide {i+1}")
         if isinstance(sl.get("type"), str) and sl.get("type") in schemes.LAYOUTS:
-            for node in [*(sl.get("items") or []), *(sl.get("layers") or []), *(sl.get("quadrants") or []),
-                         *(sl.get("children") or [])]:
+            for node in [*_list(sl.get("items")), *_list(sl.get("layers")), *_list(sl.get("quadrants")),
+                         *_list(sl.get("children"))]:
                 if isinstance(node, dict) and node.get("kind") == "photo":
                     errors.append(f"slide {i+1}: узлы схем бывают ink, glass или caramel, не photo")
     for key in ("brand", "doc_title", "meta"):

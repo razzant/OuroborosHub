@@ -424,6 +424,95 @@ class OfflineBuildTests(unittest.TestCase):
                 self.assertEqual(code, 3, out)
                 self.assertEqual(report["error"], "schema")
 
+    def test_scalar_in_place_of_a_list_and_card_photos_are_schema_errors_before_a_job(self):
+        node = {"title": "а", "text": "б"}
+        bad = [
+            {"type": "forecast", "title": "Т", "items": 5},
+            {"type": "flow", "title": "Т", "items": 5},
+            {"type": "flow", "title": "Т", "items": {"title": "а"}},
+            {"type": "tree", "title": "Т", "root": {"title": "к"}, "children": 5},
+            {"type": "layers", "title": "Т", "layers": 7},
+            {"type": "kpi", "title": "Т", "items": [{"num": "1", "label": "м", "meta": 2027}]},
+            {"type": "kpi", "title": "Т", "items": [{"num": "1", "label": "м", "meta": ["2027"]}]},
+            {"type": "stairs", "title": "Т", "items": [dict(node), dict(node), dict(node), dict(node)]},
+            {"type": "cards", "title": "Т", "items": [{**node, "kind": "photo"}, dict(node)]},
+            {"type": "kpi", "title": "Т", "items": [{"num": "1", "label": "м", "kind": "photo"}]},
+        ]
+        for slide in bad:
+            with self.subTest(slide=slide):
+                self.box.spec([slide])
+                code, out, report = self.build("deck.json")
+                self.assertEqual(code, 3, out)
+                self.assertEqual(report["error"], "schema")
+                self.assertNotIn("Traceback", out)
+                self.assertEqual(self.box.jobs(), [])
+        # a stairs photo step with its photo builds
+        self.box.spec([{"type": "stairs", "title": "Т",
+                        "items": [dict(node), dict(node), dict(node), {**node, "photo": "dunes-mist"}]}])
+        code, out, report = self.build("deck.json")
+        self.assertEqual(code, 0, out)
+
+    def test_library_names_are_one_exact_table(self):
+        """DUNES-MIST is not the library's dunes-mist on any file system: undeclared it is refused,
+        declared with --photo it is the operator's own file."""
+        jpeg_with_markers(self.box.task / "own.jpg")
+        library = (SKILL / "assets" / "photos" / "dunes-mist.jpg").read_bytes()
+        self.box.spec([{**TITLE, "photo": "DUNES-MIST"}])
+        code, out, report = self.build("deck.json")
+        self.assertEqual(code, 5, out)
+        self.assertIn("Фотография не найдена", out)
+        code, out, report = self.build("deck.json", "--photo", f"DUNES-MIST={self.box.task / 'own.jpg'}")
+        self.assertEqual(code, 0, out)
+        images = re.findall(r"data:image/jpeg;base64,([A-Za-z0-9+/=]+)", self.html_of(report))
+        self.assertEqual(len(images), 1)
+        self.assertNotEqual(base64.b64decode(images[0]), library)
+        for spelling in ("dunes-mist", "dunes-mist.jpg"):
+            with self.subTest(spelling=spelling):
+                self.box.spec([{**TITLE, "photo": spelling}])
+                code, out, report = self.build("deck.json")
+                self.assertEqual(code, 0, out)
+                images = re.findall(r"data:image/jpeg;base64,([A-Za-z0-9+/=]+)", self.html_of(report))
+                self.assertEqual(base64.b64decode(images[0]), library)
+                code, out, _ = self.build("deck.json", "--photo", f"{spelling}={self.box.task / 'own.jpg'}")
+                self.assertEqual(code, 5, out)        # a library key cannot be declared as an own photo
+
+    def test_direct_photo_pixel_limit_is_checked_before_decoding(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import build_deck
+        from unittest.mock import patch
+        from PIL import Image, ImageOps
+        path = self.box.task / "small.png"
+        Image.new("RGB", (20, 20), "brown").save(path)
+        before = Image.MAX_IMAGE_PIXELS
+        with (patch.object(build_deck, "USER_PHOTO_MAX_PIXELS", 300),
+              patch.object(ImageOps, "exif_transpose", side_effect=AssertionError("decoded too early")),
+              patch.object(Image.Image, "load", side_effect=AssertionError("decoded too early"))):
+            with self.assertRaisesRegex(build_deck.pc.Refused, "больше 300 пикселей"):
+                build_deck._operator_photo(path, "small")
+        self.assertEqual(Image.MAX_IMAGE_PIXELS, before)
+        with patch.object(build_deck, "USER_PHOTO_MAX_PIXELS", 400):          # exactly at the limit: accepted
+            self.assertTrue(build_deck._operator_photo(path, "small").startswith("data:image/jpeg;base64,"))
+
+    def test_market_som_label_and_matrix_edge_labels_stay_on_the_slide(self):
+        quadrant = {"title": "К", "text": "т"}
+        self.box.spec([
+            {"type": "market", "title": "Рынок", "photo": "dune-night",
+             "levels": [{"meta": "TAM", "num": "12 млрд", "label": "Весь рынок"},
+                        {"meta": "SAM", "num": "3 млрд", "label": "Доступный сегмент"},
+                        {"meta": "SOM", "num": "240 млн", "label": "Наша доля за три года"}]},
+            {"type": "matrix", "title": "Матрица", "quadrants": [quadrant] * 4,
+             "points": [{"x": 100, "y": 50, "label": "Длинная подпись точки у правого края"},
+                        {"x": 20, "y": 50, "label": "Слева"}]},
+        ])
+        code, out, report = self.build("deck.json")
+        self.assertEqual(code, 0, out)
+        html = self.html_of(report)
+        self.assertIn("Наша доля за три года", html)
+        right = re.search(r'left:(\d+)px;width:(\d+)px;text-align:right;[^"]*">Длинная подпись', html)
+        self.assertIsNotNone(right)
+        self.assertLessEqual(int(right.group(1)) + int(right.group(2)), 1848)
+        self.assertRegex(html, r'left:\d+px;top:\d+px;[^"]*">Слева')
+
     def test_html_carries_both_font_licences(self):
         self.box.spec([TITLE])
         code, out, report = self.build("deck.json")
@@ -655,6 +744,32 @@ class RenderTests(unittest.TestCase):
         delta = next(b for b in blocks if any("за год" in r["text"] for r in b["runs"]))
         label = next(b for b in blocks if any(r["text"].strip() == "метка" for r in b["runs"]))
         self.assertGreaterEqual(delta["x"] - label["x"], 24, (delta, label))
+
+    def test_market_som_label_and_matrix_edge_label_render_inside_as_editable_text(self):
+        quadrant = {"title": "К", "text": "т"}
+        label = "Длинная подпись точки у правого края"
+        self.box.spec([
+            {"type": "market", "title": "Рынок", "photo": "dune-night",
+             "levels": [{"meta": "TAM", "num": "12 млрд", "label": "Весь рынок"},
+                        {"meta": "SAM", "num": "3 млрд", "label": "Доступный сегмент"},
+                        {"meta": "SOM", "num": "240 млн", "label": "Наша доля за три года"}]},
+            {"type": "matrix", "title": "Матрица", "quadrants": [quadrant] * 4,
+             "points": [{"x": 100, "y": 50, "label": label}]},
+        ])
+        code, out, report = self.box.run("build_deck.py", "deck.json", "--pptx", "Edge v1.pptx")
+        self.assertEqual(code, 0, out)
+        from pptx import Presentation
+        from pptx.util import Emu
+        prs = Presentation(str(pathlib.Path(report["files"]["pptx"])))
+        width = prs.slide_width
+        found = {}
+        for i, slide in enumerate(prs.slides):
+            for sh in slide.shapes:
+                if sh.has_text_frame and sh.text_frame.text.strip() in ("Наша доля за три года", label):
+                    found[sh.text_frame.text.strip()] = (i, sh.left, sh.width)
+        self.assertEqual(set(found), {"Наша доля за три года", label})
+        _, left, w = found[label]
+        self.assertLessEqual(left + w, Emu(width) * 1848 // 1920 + Emu(12700))   # inside the matrix (1 pt slack)
 
     def test_chart_and_ring_captions_stay_editable_text(self):
         """The SVG captions of curve (axis labels) and ring-bars (share and label) must be
