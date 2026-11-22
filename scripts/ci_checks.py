@@ -35,6 +35,12 @@ SUITES = {
     'smart-lists': {'skills': ['smart_lists'], 'tests': ['skills/smart_lists/tests', 'tests/test_smart_lists_browser.py'],
                     'dependencies': ['starlette'], 'core_env': 'OUROBOROS_THEME_CORE_ROOT',
                     'env': {'SMART_LISTS_REQUIRE_BROWSERS': '1'}},
+    # Offline: the suite fakes the model (no weights, no faster-whisper); PyAV and numpy decode real silent MP4 for
+    # the length limits, and starlette serves the plugin route. The core consumer runs in the Telegram suites.
+    'whisper-voice': {'skills': ['whisper-voice'], 'tests': ['skills/whisper-voice/tests'],
+                      'dependencies': ['starlette', 'numpy', 'av>=17.1.0,<19'],
+                      # WHISPER_REQUIRE_RUNTIME turns a skip for want of PyAV or NumPy into a failure.
+                      'env': {'WHISPER_REQUIRE_RUNTIME': '1'}},
     'gigasearch': {'skills': ['gigasearch'], 'tests': ['skills/gigasearch/test_gigasearch.py']},
     'cache-efficiency': {'skills': ['cache_efficiency_snapshot'],
                          'tests': ['skills/cache_efficiency_snapshot', 'tests/test_cache_dashboard_browser.py'],
@@ -97,6 +103,8 @@ SUITES = {
                                                            'tests/test_telegram_bot_media_core_consumer.py',
                                                            'tests/test_telegram_bot_typing_core_consumer.py'],
                      'dependencies': ['httpx', 'starlette', 'websockets', 'telethon>=1.45,<2', 'PySocks>=1.7.1'],
+                     # The real-core voice consumer drives whisper-voice's attachment adapter.
+                     'shared': ['skills/whisper-voice/attachment_tool.py'],
                      'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT',
                      'core_imports': ['ouroboros.places:connect_place', 'ouroboros.places:edit_place',
                                       'ouroboros.places:get_place', 'ouroboros.place_intake:decide_attention',
@@ -114,7 +122,7 @@ SUITES = {
     'telegram-user-session': {'skills': ['telegram-user-session'],
                               'tests': ['skills/telegram-user-session/tests', 'tests/test_telegram_participant_widget_browser.py',
                                         'tests/test_voice_attachment_core_consumer.py'],
-                              'shared': ['tests/widget_lease_gateway.py'],
+                              'shared': ['tests/widget_lease_gateway.py', 'skills/whisper-voice/attachment_tool.py'],
                               'dependencies': ['telethon>=1.45,<2', 'PySocks>=1.7.1', 'httpx', 'starlette'],
                               'core_env': ('OUROBOROS_PRESENCE_CORE_ROOT', 'OUROBOROS_THEME_CORE_ROOT')},
     '2gis': {'skills': ['2gis'], 'tests': ['tests/test_2gis.py']},
