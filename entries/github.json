@@ -11,9 +11,9 @@
   "install_specs": [
     "PyJWT[crypto]>=2.13,<3"
   ],
-  "mark": "GitHub token",
+  "mark": "GitHub access",
   "name": "github",
-  "needs": "needs a GitHub token",
+  "needs": "needs a GitHub token or GitHub App installation",
   "owner": "ouroboros-agent",
   "pitch": "Answer issues and pull requests",
   "schema_version": 2,

@@ -33,8 +33,8 @@ seeded from the manifest and may be reworded for people; the canonical name stay
 its identity. Optional `pitch` is a one-line description of what the skill does,
 `needs` says in a few words what it needs (empty when nothing) and `mark` is that
 need in two or three words (`Gemini key`); the setup wizard's Skills step in
-Ouroboros shows them and reads them only when present. A connector needs none:
-its place `label` already names the service.
+Ouroboros shows them when present. A connector needs no separate manifest title:
+its place `label` names the service. Its catalog entry can still supply setup wording.
 Connector marks are monochrome `currentColor` geometry: the Slack and GitHub
 marks use Lucide geometry (ISC License) and the Telegram mark uses Tabler Icons
 geometry (MIT License); product names and marks remain the property of their
@@ -125,7 +125,9 @@ identity along with code and instructions.
    included in an entry PR.
 
 `--refresh` updates only the named entry's version, raw dependency declaration,
-release digest, and manifest-derived `icon`/`connects`/`title` fields. `--digest NAME`
+release digest, and manifest-derived `icon` and `connects`. It keeps existing
+`title`, `pitch`, `needs` and `mark`, seeding `title` from the manifest only
+if absent. The v1 catalog still uses the manifest title. `--digest NAME`
 prints the digest without changing files. Neither command renews Official
 endorsements. `scripts/build_catalog.py` remains a
 compatible alias for the generator and its `--check` mode.

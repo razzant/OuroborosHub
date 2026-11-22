@@ -9,11 +9,11 @@
     "python-dateutil",
     "cryptography"
   ],
-  "mark": "calendar login",
+  "mark": "",
   "name": "calendar",
-  "needs": "needs a Google or Yandex calendar account",
+  "needs": "",
   "owner": "kazzand",
-  "pitch": "Your day, events and free time",
+  "pitch": "Plan your day locally; optional Google or CalDAV sync",
   "schema_version": 2,
   "source": {
     "kind": "hosted",

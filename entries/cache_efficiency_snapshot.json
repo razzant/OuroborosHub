@@ -14,7 +14,7 @@
     "kind": "hosted",
     "path": "skills/cache_efficiency_snapshot"
   },
-  "title": "Token usage",
+  "title": "Tokens & cache",
   "type": "extension",
   "version": "0.8.2",
   "withdrawn": null

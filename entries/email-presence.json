@@ -19,7 +19,7 @@
   "name": "email-presence",
   "needs": "needs mailbox access",
   "owner": "razzant",
-  "pitch": "Ouroboros gets its own mailbox",
+  "pitch": "Connect an existing mailbox to read and reply",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
