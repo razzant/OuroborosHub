@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/4c4d0bc07c9fc39c75e2af68a831f9f69cb32135",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/cc7e34143ec58ebb9f449ccc648a59437401a684",
   "schema_version": 1,
   "skills": [
     {
@@ -181,6 +181,43 @@
       "type": "extension",
       "version": "0.3.1",
       "when_to_use": "User wants to interact with an AgentRQ workspace: pull tasks, create tasks for human review, reply to task threads, update task status, or request human permission for sensitive actions."
+    },
+    {
+      "author": "Ouroboros (@ouroboros-agent), Эмиль Фролов (@emilfrolov), Inna Vosko (@innavosko)",
+      "description": "Carry chosen memory, user context, and unfinished work into Ouroboros project rooms or pack confirmed selections for handoff: start from a pasted summary or explicit export/package, orient with grounded prompts and an open task, reconcile with revision checks, and verify before applying.",
+      "files": [
+        {
+          "path": "ATTRIBUTION.md",
+          "sha256": "978c97c1e5d60955464946f323329ee3a59a579ee2942e07048d9c71d4c0e07c",
+          "size": 2725
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "835b1b6737e4298b100686804802a9847b25945fcf152af7e496e3879fa96ee0",
+          "size": 16829
+        },
+        {
+          "path": "scripts/amberkeep.py",
+          "sha256": "fe4f48f36a0df85afed0d34471298220f47975513127d7bcae72c79363d243b8",
+          "size": 94656
+        },
+        {
+          "path": "scripts/portable.py",
+          "sha256": "18541450d2e7fcd7535a04fcdbb9b9635134be0c5c294ba2fb4daf6b1c8c18c6",
+          "size": 35308
+        },
+        {
+          "path": "scripts/readers.py",
+          "sha256": "dc1507a7eec5c137c155bd4130c81ff7be6c9f5a2b40643de2834b19173f76a2",
+          "size": 39504
+        }
+      ],
+      "name": "amberkeep",
+      "slug": "amberkeep",
+      "title": "Amberkeep",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "The user wants to introduce themselves or carry over memory, decisions, instructions, projects, or unfinished work from another AI assistant (ChatGPT, Claude, Claude Code, Codex, Hermes, Dots, Duet), pastes a summary from a previous assistant, or shares an export file or Portable Memory package to continue work in an Ouroboros room."
     },
     {
       "description": "AI-powered 2D anime generator with VLM-verified assets, video analysis via Gemini, sequential keyframes, scene continuity chain, multi-model image/video generation, LLM-powered error recovery, and parallel asset+music pipeline",
@@ -2654,6 +2691,346 @@
       "when_to_use": "Focused fact checks, finding primary sources, documentation lookup, reading a known URL, site/date-filtered retrieval, or supplying sources for Ouroboros's own research. Use live fetch for current pages and a focused extraction question for a section beyond the excerpt. Choose a broader research workflow when the task needs many searches and a synthesized report."
     },
     {
+      "author": "Kirill Menshov (Кирилл Меньшов)",
+      "description": "Russian-language board presentations in Kirill Menshov's Premium Black design system: dark 1920x1080 scenes, a toned dune and stone photo library, cards and eight diagram layouts with a living light line. Builds a JSON spec into a self-contained HTML, PNG slides, a PDF and an editable PPTX with its fonts.",
+      "files": [
+        {
+          "path": "CHANGELOG.md",
+          "sha256": "44945f70e8e8040327d9fe4296c3bb896b072f229654defeb3a55deaafa2b684",
+          "size": 17774
+        },
+        {
+          "path": "NOTICE.md",
+          "sha256": "29844b90506de6f56921eeaa859f973a3a1b910e2d731f8957fd444a8e97f600",
+          "size": 4184
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "ba0fe85cfde258f603b7eaa5949dd393901d1df3f9c6b4316bc52461abc1d3a8",
+          "size": 31766
+        },
+        {
+          "path": "assets/deck.css",
+          "sha256": "fe170d6cd22d1fe4bddae9781b558a1773c00560f56acdd3d06da49d36c9c0b7",
+          "size": 10008
+        },
+        {
+          "path": "assets/example_schemes_spec.json",
+          "sha256": "54630c3d10f297c0f31379c36019cd44b669e9a53fa84e0f95843733a0743272",
+          "size": 8831
+        },
+        {
+          "path": "assets/example_spec.json",
+          "sha256": "d7b45f51320dd373c969fed785bdc1ac4def2616dfd155b5ce5d24255392f366",
+          "size": 18131
+        },
+        {
+          "path": "assets/font_metrics.json",
+          "sha256": "ce1918dc1d38180d011eaeb4ac0dd337dd2cd4ad2fbf5cc6975d2cd6a1feb3e4",
+          "size": 30279
+        },
+        {
+          "path": "assets/fonts/Inter-cyrillic-ext.woff2",
+          "sha256": "ca157063339ac4ad418f214f3abfed119b0798ab4d377386ce5c9e5a7a435ebd",
+          "size": 25960
+        },
+        {
+          "path": "assets/fonts/Inter-cyrillic.woff2",
+          "sha256": "71d5ee93cc1e9f1d520a3a8b66456de18c7879d8df09d57fcd2eaff75fef0075",
+          "size": 18748
+        },
+        {
+          "path": "assets/fonts/Inter-latin-ext.woff2",
+          "sha256": "34b9c504cab7a73e37b746343a449132e56cf7b5481af2cb81dc74dcff25c956",
+          "size": 85068
+        },
+        {
+          "path": "assets/fonts/Inter-latin.woff2",
+          "sha256": "3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62",
+          "size": 48256
+        },
+        {
+          "path": "assets/fonts/LICENSE-Inter.txt",
+          "sha256": "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a",
+          "size": 4380
+        },
+        {
+          "path": "assets/fonts/LICENSE-Unbounded.txt",
+          "sha256": "31e5d4e83955e7103c34570dd49b0570ef490800bd65b42923c0dd02445263b3",
+          "size": 4392
+        },
+        {
+          "path": "assets/fonts/Unbounded-cyrillic-ext.woff2",
+          "sha256": "f25c38d28da3d57b68419590e7165c382e99bab3548baf4a498af93f87d3e518",
+          "size": 1840
+        },
+        {
+          "path": "assets/fonts/Unbounded-cyrillic.woff2",
+          "sha256": "e30bf6a6063b6a47232bbd657e24c7cf4fdaf76fc2c50d92d9ee63e2ad2087cf",
+          "size": 31424
+        },
+        {
+          "path": "assets/fonts/Unbounded-latin-ext.woff2",
+          "sha256": "845e1c9fe2e9a7bfbedfeb447fbeba4bc1b5ecd6246277910ccdaad35a7a532c",
+          "size": 118348
+        },
+        {
+          "path": "assets/fonts/Unbounded-latin.woff2",
+          "sha256": "22f9b928aa3928a896340422b54d690fbb5875c30eae4c106f029c61f2289fd6",
+          "size": 50904
+        },
+        {
+          "path": "assets/fonts/ttf/Inter-Light.ttf",
+          "sha256": "f3c76142089c681ea25b3960694a8a464d6e509fb56847dc0d0833f66ebaef64",
+          "size": 165576
+        },
+        {
+          "path": "assets/fonts/ttf/Inter-Medium.ttf",
+          "sha256": "4028dcc5c4bd411ada6ae9e37c41924b44b66ff07cb7bbd120a13cdc24a1f87f",
+          "size": 165084
+        },
+        {
+          "path": "assets/fonts/ttf/Inter-Regular.ttf",
+          "sha256": "d6eed7bd4a958d2514e0acc38b532453741a6ec90c0155662a3faf26f0313465",
+          "size": 164968
+        },
+        {
+          "path": "assets/fonts/ttf/Inter-SemiBold.ttf",
+          "sha256": "58ae60a963aeb5f579f35d164726899659d27bd7867ab8e1fe0380e8d529f12d",
+          "size": 165592
+        },
+        {
+          "path": "assets/fonts/ttf/README.md",
+          "sha256": "b08fd4dbd85b17dbfafbc0c00e9c8d0b18def672c12751c6923b69c4898b722b",
+          "size": 2094
+        },
+        {
+          "path": "assets/fonts/ttf/Unbounded-Medium.ttf",
+          "sha256": "a17d72d20ebb668e6dd6edacfd1a16e329937573ba37a0882f43b89539afe018",
+          "size": 192344
+        },
+        {
+          "path": "assets/fonts/ttf/Unbounded-SemiBold.ttf",
+          "sha256": "29b5a65429cba90f926df9c5ee94a4dd7d0d3eedb9e0ae57c272695a64df911e",
+          "size": 192376
+        },
+        {
+          "path": "assets/fonts.css",
+          "sha256": "39df52f58111ba576432a0c64749d1152c845d7c42036e23cab0050ac35e12a7",
+          "size": 2379
+        },
+        {
+          "path": "assets/photos/canyon-light.jpg",
+          "sha256": "f24f4be42f4e75fd091ea8d2ee12b8491669a9467d3c420d4a36a9bcc9738564",
+          "size": 478474
+        },
+        {
+          "path": "assets/photos/canyon-slot.jpg",
+          "sha256": "1c8273fb6725b8bc225336c854160f29d1d486c7067ffe50e05e0d471630edfe",
+          "size": 353213
+        },
+        {
+          "path": "assets/photos/dune-aerial.jpg",
+          "sha256": "ac743f3495686064aca18c59f5af88ab8ecf8e6a740344e237d2364c1684f28d",
+          "size": 109876
+        },
+        {
+          "path": "assets/photos/dune-night.jpg",
+          "sha256": "f50cbffc757dc54cd075ebf7d5468d6e16344d7d54cd1d89241bd52f4c0fe219",
+          "size": 366868
+        },
+        {
+          "path": "assets/photos/dune-ridge.jpg",
+          "sha256": "b125a798bf3e67cf2447319bd06c981bc3a241706c80184725d3792c9ce05f34",
+          "size": 161013
+        },
+        {
+          "path": "assets/photos/dunes-dusk.jpg",
+          "sha256": "e29eb37b388efe06aa343242bd9a21fd67956b91ab98a3981b4520725b2628db",
+          "size": 204726
+        },
+        {
+          "path": "assets/photos/dunes-evening.jpg",
+          "sha256": "3b73061a51d21b1ff1fee1a84195f699bb00a4c18ce7548339fa6f9e5e24cd38",
+          "size": 349159
+        },
+        {
+          "path": "assets/photos/dunes-haze.jpg",
+          "sha256": "0114983592f84538ff769c66dd79de11dd20e25de9d9d6686bb9bba4f2bdd378",
+          "size": 244229
+        },
+        {
+          "path": "assets/photos/dunes-horizon.jpg",
+          "sha256": "ebaff46645cdfa64bf89cc40a0529665540e99684660c8a2651d596e4a7e5652",
+          "size": 156156
+        },
+        {
+          "path": "assets/photos/dunes-mauve.jpg",
+          "sha256": "47fc8a624684c100555ede50a9c5497cb9c5b06098c0a8c7a3baddfd07ab3022",
+          "size": 155953
+        },
+        {
+          "path": "assets/photos/dunes-mist.jpg",
+          "sha256": "72a7ebe0f3496f1902eee8745bb883b97f0aa0b4a42be3d36c235dc7ce22daa0",
+          "size": 115264
+        },
+        {
+          "path": "assets/photos/dunes-sky.jpg",
+          "sha256": "471b768d21e0c7963d7f6e07a8fd74639873527907f7e13df4e151dbb624c1a6",
+          "size": 141865
+        },
+        {
+          "path": "assets/photos/dunes-soft.jpg",
+          "sha256": "9bcec7dd6bdb3c416c00dd7360c001cc8f78bc825a04ae5d97a284aa68a7602e",
+          "size": 465418
+        },
+        {
+          "path": "assets/photos/dunes-wide.jpg",
+          "sha256": "1552c382f232908ab2439e3281b63eec226122d6d0d0486add1394cca4907898",
+          "size": 267029
+        },
+        {
+          "path": "assets/photos/sand-curve.jpg",
+          "sha256": "fe94f07a9f15a9242269b84f64e5a8ae49be4e1b57cceb4c5f93e5ec97e62d73",
+          "size": 138607
+        },
+        {
+          "path": "assets/photos/sand-flow.jpg",
+          "sha256": "1d5812af4b0ee36817b5eed26421cbe2b42e72566c016c15b47fae2276f18fc9",
+          "size": 161378
+        },
+        {
+          "path": "assets/photos/sand-light.jpg",
+          "sha256": "3f44c9a5fdd39232d3e39100eccf96c6181c3eb74b37d78fa7cce534c1e8b374",
+          "size": 139673
+        },
+        {
+          "path": "assets/photos/sand-pale.jpg",
+          "sha256": "d03163612d58ee4a17f5b84370084edf2e995e4dddabc59a6cb94491f01565f0",
+          "size": 104497
+        },
+        {
+          "path": "assets/photos/sand-ripples.jpg",
+          "sha256": "d046edf733b9cc53bbe016d9db1b062ab618a001eecae14f804943a8c647077e",
+          "size": 99435
+        },
+        {
+          "path": "assets/photos/sand-silk.jpg",
+          "sha256": "db43289aa9a0b5828681f643ce119e05fd49788a25010b7426e9639ec83971b2",
+          "size": 188127
+        },
+        {
+          "path": "assets/photos/sand-veins.jpg",
+          "sha256": "d046edf733b9cc53bbe016d9db1b062ab618a001eecae14f804943a8c647077e",
+          "size": 99435
+        },
+        {
+          "path": "assets/photos/stone-layers.jpg",
+          "sha256": "fb9c84c7884bfabbaaf571c06df347ca568558de7def1cf01cc1e040b7599bc5",
+          "size": 978135
+        },
+        {
+          "path": "assets/photos/stone-stack.jpg",
+          "sha256": "fedb7af97772e6965787f98885ae0e5d13921f2d040b7579eaf4a15f878f79b1",
+          "size": 648691
+        },
+        {
+          "path": "references/design-tokens.md",
+          "sha256": "a71cfbbc3fe4c9254d81ce95904195fd9a7fd1c503b48823fd41036c99b5a230",
+          "size": 11637
+        },
+        {
+          "path": "references/images.md",
+          "sha256": "51c136cbf72427aa910b8540c68c406cc0df6909a37ab22a140761f74c0dd4ca",
+          "size": 8016
+        },
+        {
+          "path": "references/layouts.md",
+          "sha256": "5191fbb638aeacb4bf4f33e8bbbae64ec68aa8c1248f2db8760181ce80d141dd",
+          "size": 16231
+        },
+        {
+          "path": "references/text-standard.md",
+          "sha256": "2093c36576ad48239d528a2e03f93f84a84e83a8b3f4b80741d388608e2e7f02",
+          "size": 6450
+        },
+        {
+          "path": "scripts/build_deck.py",
+          "sha256": "aa18fd61edabece9b09f8afa6f6db1e3a3a7196cbc36ba0513bd05ba6f4166d6",
+          "size": 87654
+        },
+        {
+          "path": "scripts/build_pptx.py",
+          "sha256": "7a83ef19f441f204e748c9b0184404613ff7ff55178154b65fabfa2651f03487",
+          "size": 9216
+        },
+        {
+          "path": "scripts/particle_path.py",
+          "sha256": "9eedad8c63faec7b03911b59bc922e55ddd0af16c2daffd39aab16aa9ba7c5bc",
+          "size": 9851
+        },
+        {
+          "path": "scripts/premium_common.py",
+          "sha256": "779fdcbf3e33f1548cad28ccef19f88c33afe00b377accbd301347f590873320",
+          "size": 9822
+        },
+        {
+          "path": "scripts/render_deck.py",
+          "sha256": "951588b08a0002c806ad0a11accb7abc03f3cdfb70556c63f8856fce2c2b5362",
+          "size": 13506
+        },
+        {
+          "path": "scripts/schemes.py",
+          "sha256": "704c518ea0c5fc247fa1ed5aaef3c5f527e9ad8718ece3748644741b1418c115",
+          "size": 29669
+        },
+        {
+          "path": "scripts/setup_renderer.py",
+          "sha256": "5f68b95f130ac3b03c9858946a66b97843043867488edb19678dfc71c0f76f88",
+          "size": 18194
+        },
+        {
+          "path": "scripts/tone_photo.py",
+          "sha256": "31665a6f9ec61b97ad4c594e390cae61d186d6be79c7bf32002e4fc8f1bf8b92",
+          "size": 7016
+        },
+        {
+          "path": "tests/test_premium_black.py",
+          "sha256": "69ac690603aabe00cc753a27cedc1eb73d010a90e123b02b975e8107d0068268",
+          "size": 46527
+        },
+        {
+          "path": "tests/test_renderer_setup.py",
+          "sha256": "82680e17791d315dab77dde1a4ce6d1c5b9152cdf50a4ceefacd7b4f09905d88",
+          "size": 25084
+        }
+      ],
+      "install_specs": [
+        {
+          "kind": "pip",
+          "package": "numpy>=1.26,<3"
+        },
+        {
+          "kind": "pip",
+          "package": "Pillow>=10,<13"
+        },
+        {
+          "kind": "pip",
+          "package": "python-pptx==1.0.2"
+        },
+        {
+          "kind": "pip",
+          "package": "playwright==1.65.2"
+        }
+      ],
+      "name": "kirill-menshov-premium-black",
+      "slug": "kirill-menshov-premium-black",
+      "title": "Kirill Menshov Premium Black",
+      "type": "script",
+      "version": "2.3.2-hub.1",
+      "when_to_use": "The user asks for a presentation, slides, a deck, a pitch or a board or investor report in the Premium Black style, or to turn a document, notes or a table into such slides, delivered as HTML, PDF or editable PowerPoint."
+    },
+    {
       "description": "Структурирует OCR-текст лабораторных анализов и объясняет отклонения; не заменяет врача или экстренную помощь.",
       "files": [
         {
@@ -3058,6 +3435,22 @@
       "slug": "roadmap_analyst",
       "type": "extension",
       "version": "2.2.0"
+    },
+    {
+      "description": "Инструкция по публичному MCP-серверу Самоката: подключение в одном из пяти поддерживаемых клиентов, минимальные права, работа с общей корзиной и оформление заказа только после явного подтверждения.",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "sha256": "2b6fe41b39b58875f7aa5fa6075c7bd3beb9687890c696e173b7454b9f26d3b6",
+          "size": 28156
+        }
+      ],
+      "name": "samokat-mcp-guide",
+      "slug": "samokat-mcp-guide",
+      "title": "Самокат MCP: подключение и безопасная работа",
+      "type": "instruction",
+      "version": "0.3.1",
+      "when_to_use": "Человек хочет подключить официальный MCP-сервер Самоката в поддерживаемом клиенте (ГигаАгент, Claude Code, ChatGPT в браузере, Codex или Opencode) или безопасно найти товары, изменить общую корзину и оформить заказ. Не для встроенной интеграции с Самокатом в Ouroboros: сервис пока не называет Ouroboros поддерживаемым клиентом."
     },
     {
       "description": "Generate 3D scenes from satellite imagery using Sat3DGen (ICLR 2026). Sends a satellite image to the HuggingFace Space API and returns a textured 3D mesh (.obj) plus an interactive Three.js viewer.",
