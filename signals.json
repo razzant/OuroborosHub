@@ -4,7 +4,7 @@
       "stars": 0
     }
   },
-  "generated_at": "2026-11-21T12:51:19.710138Z",
+  "generated_at": "2026-11-22T14:19:44.964223Z",
   "schema_version": 1,
   "skills": {
     "2gis": {
@@ -25,6 +25,11 @@
     "agentrq-bridge": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/152",
+      "votes": 0
+    },
+    "amberkeep": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/340",
       "votes": 0
     },
     "anime_studio": {
@@ -147,6 +152,11 @@
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/173",
       "votes": 0
     },
+    "kirill-menshov-premium-black": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/341",
+      "votes": 0
+    },
     "medical-lab-analyzer": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/174",
@@ -210,6 +220,11 @@
     "roadmap_analyst": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/182",
+      "votes": 0
+    },
+    "samokat-mcp-guide": {
+      "comments": 0,
+      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/342",
       "votes": 0
     },
     "sat3dgen": {
