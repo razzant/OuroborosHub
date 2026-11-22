@@ -89,7 +89,7 @@ class SelectionTests(unittest.TestCase):
             'telegram-user-session': {'telegram-user-session'},
             'email-presence': {'email-presence'}, 'agentrq-bridge': {'agentrq-bridge'},
             'chrome_browser': {'chrome-browser'}, 'freshdesk': {'freshdesk'},
-            'anime_studio': {'anime-studio'}, 'provider_keys': {'provider-keys'},
+            'anime_studio': {'anime-studio'}, 'provider_keys': {'provider-keys'}, 'whisper-voice': {'whisper-voice'},
             'amberkeep': {'amberkeep'},
             'kirill-menshov-premium-black': {'premium-black'},
         }
@@ -104,6 +104,13 @@ class SelectionTests(unittest.TestCase):
                 path = dependency if dependency.endswith('.py') or dependency.endswith('.json') else dependency.rstrip('/') + '/test_example.py'
                 with self.subTest(suite=name, path=path):
                     self.assertIn(name, ci.selected_suites({path}))
+        # The adapter is also what the real-core voice consumers in the Telegram suites drive; the rest of the
+        # skill's payload is not.
+        self.assertEqual(set(ci.selected_suites({'skills/whisper-voice/attachment_tool.py'})),
+                         {'whisper-voice', 'telegram-bot', 'telegram-user-session'})
+        self.assertEqual(ci.selected_suites({'skills/whisper-voice/whisper_runtime.py'}), ['whisper-voice'])
+        # PyAV and NumPy are required in hosted CI: their absence fails the suite instead of skipping it.
+        self.assertEqual(ci.SUITES['whisper-voice']['env'], {'WHISPER_REQUIRE_RUNTIME': '1'})
         self.assertEqual(ci.selected_suites({'tests/fixtures/keenable/new.json'}), ['keenable'])
         self.assertEqual(ci.selected_suites({'tests/fixtures/dashboard_theme_responses.json'}), ['widgets'])
         for path in ('.github/workflows/catalog-check.yml', 'scripts/ci_checks.py', 'scripts/build_index.py',

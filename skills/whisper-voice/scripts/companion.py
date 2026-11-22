@@ -20,10 +20,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from whisper_runtime import (  # noqa: E402
     IDLE_SECONDS,
-    MAX_AUDIO_BYTES,
-    MAX_AUDIO_SECONDS,
+    CONTROL_WAIT_SECONDS,
+    MAX_TRANSCRIPT_CHARS,
+    SOURCE_HEADER,
+    UPLOAD_IDLE_SECONDS,
     audio_format,
     error,
+    limits_for,
     model_directory,
     read_settings,
     validate_choice,
@@ -97,22 +100,54 @@ class Engine:
         except Exception as exc:
             directory = None
             reason = str(exc)
-        with self.lock:
-            return {
-                "ready": directory is not None and not reason and not self.installing,
-                "resident": self.model is not None,
-                "model": str(directory or settings["model_path"]),
-                "always_resident": settings["always_resident"],
-                "idle_expiry_sec": 0 if settings["always_resident"] else IDLE_SECONDS,
-                "installing": self.installing,
-                "install_error": self.install_error,
-                "install_notice": self.install_notice,
-                "reason": reason or ("Model download in progress" if self.installing else ""),
-            }
+        # A snapshot of plain attributes: status never waits for the model lock, which a recognition holds
+        # for its whole run; `busy` tells the caller why Whisper cannot take another recording right now.
+        return {
+            "busy": self.transcription.locked(),
+            "ready": directory is not None and not reason and not self.installing,
+            "resident": self.model is not None,
+            "model": str(directory or settings["model_path"]),
+            "always_resident": settings["always_resident"],
+            "idle_expiry_sec": 0 if settings["always_resident"] else IDLE_SECONDS,
+            "installing": self.installing,
+            "install_error": self.install_error,
+            "install_notice": self.install_notice,
+            "reason": reason or ("Model download in progress" if self.installing else ""),
+        }
 
-    def configure(self, settings: dict) -> dict:
+    def _control(self):
+        """Context manager: the recognition slot AND the model lock, both taken without waiting, released together."""
+        engine = self
+
+        class Held:
+            def __enter__(self):
+                engine._control_lock()
+
+            def __exit__(self, *exc):
+                engine.lock.release()
+                engine.transcription.release()
+                return False
+        return Held()
+
+    def _control_lock(self):
+        """The model lock for a settings change, never waited for: a recognition holds it for its whole run, and a
+        save that waited could apply after the caller was told 503."""
+        # A recognition owns the single slot from admission; it takes the model lock only after decoding, so the
+        # lock alone would let a save through during the decode. Both are checked, neither is waited for.
+        if not self.transcription.acquire(blocking=False):
+            raise VoiceBusy("A local transcription is already running; try again after it finishes")
+        if not self.lock.acquire(blocking=False):
+            self.transcription.release()
+            raise VoiceBusy("A local transcription is already running; try again after it finishes")
+
+    def configure(self, settings: dict, deadline: float | None = None) -> dict:
+        # The proposed directory is read and validated holding nothing: a stalled mounted path blocks only this
+        # call, never a recognition. Only the commit takes the slot and the model lock, both without waiting.
         path = str(model_directory(settings["model_path"]).resolve())
-        with self.lock:
+        with self._control():
+            if deadline is not None and time.monotonic() > deadline:
+                # The caller's wait has expired by our own clock: it was told "unavailable", so no late save.
+                raise ValueError("the model directory was too slow to read; nothing was changed")
             write_settings(STATE, settings)
             # Residency is a retention policy, not a new model selection.
             if self.loaded_path != path:
@@ -122,18 +157,22 @@ class Engine:
             self.install_notice = ""
         return self.status()
 
-    def transcribe(self, data: bytes, mime: str, timings: dict | None = None) -> str:
-        # Refuse excess work before imports/decode; never queue stale recordings.
-        if not self.transcription.acquire(blocking=False):
+    def transcribe(self, data: bytes, mime: str, timings: dict | None = None, source: str = "dictation",
+                   admitted: bool = False) -> str:
+        # Refuse excess work before imports/decode; never queue stale recordings. The HTTP handler reserves the
+        # slot before it reads the body and passes admitted=True (it releases the slot itself).
+        if not admitted and not self.transcription.acquire(blocking=False):
             raise VoiceBusy("A local transcription is already running; try again after it finishes")
         try:
-            return self._transcribe(data, mime, timings)
+            return self._transcribe(data, mime, timings, source)
         finally:
-            self.transcription.release()
+            if not admitted:
+                self.transcription.release()
 
-    def _transcribe(self, data: bytes, mime: str, timings: dict | None = None) -> str:
+    def _transcribe(self, data: bytes, mime: str, timings: dict | None = None, source: str = "dictation") -> str:
         started = time.perf_counter()
-        audio_format(mime, data)
+        max_bytes, max_seconds = limits_for(source)
+        audio_format(mime, data, max_bytes)
         # Decode BEFORE loading 1.6 GB of weights; cap decoded samples too.
         import av
         import numpy as np
@@ -152,18 +191,19 @@ class Engine:
                 for converted in resampler.resample(frame):
                     samples = converted.to_ndarray().reshape(-1)
                     count += len(samples)
-                    if count > MAX_AUDIO_SECONDS * 16000:
-                        raise ValueError("audio longer than 60 seconds")
+                    if count > max_seconds * 16000:
+                        raise ValueError(f"audio longer than {max_seconds} seconds")
                     parts.append(samples.copy())
             for converted in resampler.resample(None):
                 samples = converted.to_ndarray().reshape(-1)
                 count += len(samples)
-                if count > MAX_AUDIO_SECONDS * 16000:
-                    raise ValueError("audio longer than 60 seconds")
+                if count > max_seconds * 16000:
+                    raise ValueError(f"audio longer than {max_seconds} seconds")
                 parts.append(samples.copy())
         if count < 1600:
             raise ValueError("audio shorter than 0.1 seconds")
         audio = np.concatenate(parts).astype("float32", copy=False)
+        parts.clear()  # the per-frame copies are not needed beside the waveform during recognition
         decoded = time.perf_counter()
         with self.lock:
             acquired = time.perf_counter()
@@ -193,14 +233,14 @@ class Engine:
                 "worker_total_ms": round((inferred - started) * 1000, 3),
                 "model_loaded": model_loaded,
             })
-        if len(words) > 8000:
+        if len(words) > MAX_TRANSCRIPT_CHARS:
             raise ValueError("transcript too long")
         return words
 
     def install(self, name: str) -> None:
         if name not in MODEL_REPOS:
             raise ValueError("choose small or large-v3-turbo")
-        with self.lock:
+        with self._control():
             if self.installing:
                 raise ValueError("a model download is already in progress")
             selected_at_start = read_settings(STATE)["model_path"]
@@ -243,6 +283,7 @@ ENGINE = Engine()
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    timeout = UPLOAD_IDLE_SECONDS  # an idle socket (a stalled upload) ends the request and frees the slot
 
     def _reply(self, status: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -256,9 +297,11 @@ class Handler(BaseHTTPRequestHandler):
         pass  # Audio and the owner's transcript never enter companion logs.
 
     def _handle(self) -> None:
+        deadline = time.monotonic() + CONTROL_WAIT_SECONDS - 5  # the control caller waits CONTROL_WAIT_SECONDS
         if not secrets.compare_digest(self.headers.get("X-Voice-Token", ""), TOKEN):
             self._reply(403, error("forbidden", "Worker authorization failed"))
             return
+        held = False
         try:
             if self.command == "GET" and self.path == "/status":
                 self._reply(200, ENGINE.status())
@@ -267,15 +310,32 @@ class Handler(BaseHTTPRequestHandler):
                 self._reply(404, error("not_found", "Unknown voice route"))
                 return
             raw_length = self.headers.get("Content-Length", "")
-            if not raw_length.isdecimal() or int(raw_length) > MAX_AUDIO_BYTES:
+            source = self.headers.get(SOURCE_HEADER, "dictation")
+            if not raw_length.isdecimal() or int(raw_length) > limits_for(source if self.path == "/transcribe" else "dictation")[0]:
+                self.close_connection = True
                 self._reply(413, error("too_large", "Request too large"))
                 return
+            if self.path == "/transcribe":
+                # The single recognition slot is reserved before the body is read: a second note is answered busy
+                # with its body unread (the connection closes), and a sender that stalls frees the slot by the
+                # idle timeout. The slot is released in the finally below.
+                if not ENGINE.transcription.acquire(blocking=False):
+                    self.close_connection = True
+                    self._reply(503, error("voice_busy", "A local transcription is already running; try again after it finishes"))
+                    return
+                held = True
             data = self.rfile.read(int(raw_length))
             if len(data) != int(raw_length):
                 raise ValueError("incomplete request body")
             if self.path == "/transcribe":
                 timings = {}
-                text = ENGINE.transcribe(data, self.headers.get("Content-Type", ""), timings)
+                try:
+                    text = ENGINE.transcribe(data, self.headers.get("Content-Type", ""), timings, source, admitted=True)
+                finally:
+                    # Free the slot BEFORE the answer is written: a client that sends its next recording the
+                    # moment it reads this reply must not meet a false busy. The outer finally is the backstop.
+                    ENGINE.transcription.release()
+                    held = False
                 self._reply(200, {"text": text, "timings": timings,
                                   **({"status": "no_speech"} if not text else {})})
             else:
@@ -288,16 +348,20 @@ class Handler(BaseHTTPRequestHandler):
                     settings = validate_choice(value["model_path"], value["always_resident"])
                     # Enforce local, readable snapshot before saving; a failed
                     # choice never replaces the last usable configuration.
-                    self._reply(200, ENGINE.configure(settings))
+                    self._reply(200, ENGINE.configure(settings, deadline))
                 else:
                     ENGINE.install(value.get("model"))
                     self._reply(202, ENGINE.status())
         except VoiceBusy as exc:
             self._reply(503, error("voice_busy", str(exc)))
         except (ValueError, OSError, ImportError) as exc:
+            self.close_connection = True  # after a stalled or broken body there is no clean next request
             self._reply(400, error("voice_unavailable", str(exc)))
         except Exception as exc:
             self._reply(502, error("inference_failed", f"{type(exc).__name__}: {exc}"))
+        finally:
+            if held:
+                ENGINE.transcription.release()
 
     do_GET = _handle
     do_POST = _handle
