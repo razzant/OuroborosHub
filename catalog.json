@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/5cdccf70a9438fa82844dbc76276b9e245a01ac3",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/cc7e34143ec58ebb9f449ccc648a59437401a684",
   "schema_version": 1,
   "skills": [
     {
@@ -181,6 +181,43 @@
       "type": "extension",
       "version": "0.3.1",
       "when_to_use": "User wants to interact with an AgentRQ workspace: pull tasks, create tasks for human review, reply to task threads, update task status, or request human permission for sensitive actions."
+    },
+    {
+      "author": "Ouroboros (@ouroboros-agent), Эмиль Фролов (@emilfrolov), Inna Vosko (@innavosko)",
+      "description": "Carry chosen memory, user context, and unfinished work into Ouroboros project rooms or pack confirmed selections for handoff: start from a pasted summary or explicit export/package, orient with grounded prompts and an open task, reconcile with revision checks, and verify before applying.",
+      "files": [
+        {
+          "path": "ATTRIBUTION.md",
+          "sha256": "978c97c1e5d60955464946f323329ee3a59a579ee2942e07048d9c71d4c0e07c",
+          "size": 2725
+        },
+        {
+          "path": "SKILL.md",
+          "sha256": "835b1b6737e4298b100686804802a9847b25945fcf152af7e496e3879fa96ee0",
+          "size": 16829
+        },
+        {
+          "path": "scripts/amberkeep.py",
+          "sha256": "fe4f48f36a0df85afed0d34471298220f47975513127d7bcae72c79363d243b8",
+          "size": 94656
+        },
+        {
+          "path": "scripts/portable.py",
+          "sha256": "18541450d2e7fcd7535a04fcdbb9b9635134be0c5c294ba2fb4daf6b1c8c18c6",
+          "size": 35308
+        },
+        {
+          "path": "scripts/readers.py",
+          "sha256": "dc1507a7eec5c137c155bd4130c81ff7be6c9f5a2b40643de2834b19173f76a2",
+          "size": 39504
+        }
+      ],
+      "name": "amberkeep",
+      "slug": "amberkeep",
+      "title": "Amberkeep",
+      "type": "instruction",
+      "version": "0.1.0",
+      "when_to_use": "The user wants to introduce themselves or carry over memory, decisions, instructions, projects, or unfinished work from another AI assistant (ChatGPT, Claude, Claude Code, Codex, Hermes, Dots, Duet), pastes a summary from a previous assistant, or shares an export file or Portable Memory package to continue work in an Ouroboros room."
     },
     {
       "description": "AI-powered 2D anime generator with VLM-verified assets, video analysis via Gemini, sequential keyframes, scene continuity chain, multi-model image/video generation, LLM-powered error recovery, and parallel asset+music pipeline",
