@@ -2,9 +2,10 @@
 
     OUROBOROS_PRESENCE_CORE_ROOT=/path/to/ouroboros python -m pytest -q -rs tests/test_reaction_core_consumer.py
 
-Without that variable, or with a core lacking the reaction fact, this is reported as skipped,
-never as passed. The connectors run unchanged (parser, store, workers, provider client, Host
-client); providers are scripted and core's own app answers over ASGI. Only skill-token
+Without that variable this is reported as skipped, never as passed. A named core that lacks the
+reaction fact, or does not advertise explicit completion itself, fails: hosted CI names the pinned
+core, and a capability it lost must show. The connectors run unchanged (parser, store, workers,
+provider client, Host client); providers are scripted and core's own app answers over ASGI. Only skill-token
 authentication and inference are stubbed. The connectors read ``/identity`` as one of three Hosts,
 whatever a core advertises today. ``OLD_HOST`` strips both capabilities. ``EXPLICIT_ONLY_HOST``
 strips the reaction context and leaves core's own answer on explicit completion, so its positive
@@ -39,7 +40,7 @@ def _run(tmp_path, mode):
     if not core:
         pytest.skip(f"{CORE_ENV} is not set; the core Presence routes were not exercised")
     if not (Path(core) / "ouroboros" / "place_intake.py").read_text(encoding="utf-8").count("reaction_refusal"):
-        pytest.skip("this core has no reaction fact; the routes were not exercised")
+        pytest.fail(f"the core {CORE_ENV} names has no reaction fact (ouroboros/place_intake.py reaction_refusal)")
     env = {
         "PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path / "home"),
         "OUROBOROS_APP_ROOT": str(tmp_path / "app"), "OUROBOROS_DATA_DIR": str(tmp_path / "data"),
@@ -107,8 +108,8 @@ def test_old_core_receives_no_reaction_from_either_connector(tmp_path):
 
 def test_explicit_completion_only_core_records_own_reactions_and_still_receives_none(tmp_path):
     facts = _run(tmp_path, "explicit-host")
-    if facts["core_identity"].get("presence_explicit_completion") != 1:
-        pytest.skip("this core does not advertise explicit completion; that Host was not exercised")
+    assert facts["core_identity"].get("presence_explicit_completion") == 1, \
+        "the named core does not advertise explicit completion"
     assert facts["identity"].get("presence_explicit_completion") == 1 and "presence_reaction_context" not in facts["identity"]
     # Nothing incoming: without the reaction context each stays in custody, as on an old Host.
     assert facts["slack_turns"] == ["Ev-m", "Ev-reply"] and facts["telegram_turns"] == ["telegram:9:1"]
@@ -146,8 +147,8 @@ def test_frozen_list_report_is_not_posted_to_a_core_that_does_not_advertise_it(t
 
 def test_frozen_list_report_is_recorded_by_a_core_advertising_only_explicit_completion(tmp_path):
     facts = _run(tmp_path, "frozen-explicit")
-    if facts["core_identity"].get("presence_explicit_completion") != 1:
-        pytest.skip("this core does not advertise explicit completion; that Host was not exercised")
+    assert facts["core_identity"].get("presence_explicit_completion") == 1, \
+        "the named core does not advertise explicit completion"
     assert facts["identity"].get("presence_explicit_completion") == 1 and "presence_reaction_context" not in facts["identity"]
     assert facts["status"] == 200 and facts["posts"] == 1 and facts["recorded"] == 1 and facts["acked"] is True
     assert facts["stored_shape"] == "list" and facts["provider_calls"] == 0
