@@ -2,14 +2,15 @@
   "about": "Офлайн-репетиция черновика sberpay-agent-guide для scripts/rehearse.py. Магазины, счета, суммы и ответы вымышлены: ни одно значение не получено от банка, магазина или клиента SberPay, реального платежа не было. Суммы в копейках.",
   "legend": {
     "auth_status": "записанный заранее ответ auth status --json; поля из публичной инструкции @sberpay-cli/cli 0.4.0-dev.27",
-    "merchants_check": "записанный заранее ответ merchants check --json; поля из той же инструкции. merchant — запись магазина в реестре, её поля репетиции не нужны; без merchant домена в реестре нет, даже при supported: true",
-    "bank_result": "итог платёжного вызова: код выхода и ответ с полями той же инструкции; null — ответа не было",
+    "merchants_check": "записанный заранее ответ merchants check --json; поля из той же инструкции. merchant — запись магазина в реестре, её поля репетиции не нужны; null или отсутствие поля — записи нет, и домена в реестре нет, даже при supported: true; status PAUSED — приём приостановлен, тоже даже при supported: true",
+    "bank_result": "итог платёжного вызова: код выхода и ответ с полями той же инструкции; null — ответа не было. Чистые итоги только два: SUCCESS с кодом 0 и DECLINED с кодом 1 (код — целое число, false и true не годятся). Всё остальное, в том числе bank_result или response не объектом, — исход неизвестен; передача при этом уже учтена",
     "request": "просьба покупателя; условная форма черновика",
-    "invoice": "счёт, который передал официальный адаптер; условная форма черновика, не формат клиента или магазина",
+    "invoice": "счёт, который передал официальный адаптер; условная форма черновика, не формат клиента или магазина. id — непустой текст; qty — целое от 1; price и amount — целые числа копеек (true, false и 129000.0 не годятся). Счёт без номера или с неверным полем останавливает ход до передачи",
+    "items": "состав — набор строк (name, qty, price): порядок строк не важен, повторы считаются, так что [A, A, B] и [A, B, A] равны, а [A, A, B] и [A, B, B] нет. Так сравниваются и счёт с просьбой, и согласие со счётом",
     "consent": "ответ владельца на показанный счёт: согласие — только approved: true на тот же счёт, а не любые слова; условная форма черновика",
-    "after": "что стало известно после передачи: просьба повторить, строка выписки в банковском приложении (invoice — номер счёта, если он в ней виден), отметка магазина; условная форма черновика",
-    "change": "что случай меняет в base; объекты сливаются, списки и значения заменяются",
-    "expect": "ожидаемое решение и число передач платежа"
+    "after": "что стало известно после передачи: просьба повторить; строка выписки в банковском приложении (invoice — номер счёта, если он в ней виден); отметка магазина; new_invoice — квитанция магазина с другим номером счёта на ту же покупку; условная форма черновика",
+    "change": "что случай меняет в base; объекты сливаются, списки и значения заменяются, null заменяет значение",
+    "expect": "ожидаемое решение и число передач, которые должна сделать имитация: 0 — стоп до шага 4, 1 — передача была. Это счёт самого скрипта, а не проверка клиента или банка. Необязательный says — фразы, которые должны быть в тексте покупателю"
   },
   "base": {
     "request": {
@@ -47,6 +48,40 @@
       "expect": {"decision": "paid", "handoffs": 1}
     },
     {
+      "id": "basket-reordered",
+      "title": "Те же три строки в другом порядке, две из них одинаковые: счёт и «да» принимаются",
+      "change": {
+        "request": {
+          "words": "Купи на chai.example два зелёных чая и один чёрный по 645 ₽, отдельными строками.",
+          "items": [
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Чёрный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500}
+          ]
+        },
+        "invoice": {
+          "id": "INV-DEMO-0003",
+          "items": [
+            {"name": "Чёрный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500}
+          ],
+          "amount": 193500
+        },
+        "consent": {
+          "id": "INV-DEMO-0003",
+          "items": [
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Чёрный чай, 100 г", "qty": 1, "price": 64500}
+          ],
+          "amount": 193500
+        },
+        "after": [{"kind": "store_order", "invoice": "INV-DEMO-0003", "amount": 193500, "paid": true}]
+      },
+      "expect": {"decision": "paid", "handoffs": 1}
+    },
+    {
       "id": "not-ready",
       "title": "Токен сохранён (STORED), но готовность не подтверждена",
       "change": {"auth_status": {"canPay": false}},
@@ -54,8 +89,20 @@
     },
     {
       "id": "store-paused",
-      "title": "Магазин в реестре на паузе",
-      "change": {"merchants_check": {"supported": false, "merchant": {"status": "PAUSED"}}},
+      "title": "supported: true, но запись магазина в реестре на паузе (PAUSED)",
+      "change": {"merchants_check": {"supported": true, "merchant": {"status": "PAUSED"}}},
+      "expect": {"decision": "stop_store", "handoffs": 0}
+    },
+    {
+      "id": "merchant-missing",
+      "title": "supported: true, но записи merchant нет: домена в реестре нет",
+      "change": {"merchants_check": {"supported": true, "merchant": null}},
+      "expect": {"decision": "stop_store", "handoffs": 0}
+    },
+    {
+      "id": "store-not-supported",
+      "title": "Запись merchant есть и не на паузе, но supported: false",
+      "change": {"merchants_check": {"supported": false, "merchant": {}}},
       "expect": {"decision": "stop_store", "handoffs": 0}
     },
     {
@@ -68,6 +115,30 @@
       "id": "item-substituted",
       "title": "В счёте другой чай по той же цене",
       "change": {"invoice": {"items": [{"name": "Чёрный чай, 100 г", "qty": 2, "price": 64500}]}},
+      "expect": {"decision": "stop_mismatch", "handoffs": 0}
+    },
+    {
+      "id": "duplicates-differ",
+      "title": "Повторы считаются: в счёте чёрного чая две строки вместо одной, зелёного одна; набор названий и итог те же",
+      "change": {
+        "request": {
+          "words": "Купи на chai.example два зелёных чая и один чёрный по 645 ₽, отдельными строками.",
+          "items": [
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Чёрный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500}
+          ]
+        },
+        "invoice": {
+          "id": "INV-DEMO-0003",
+          "items": [
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Чёрный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Чёрный чай, 100 г", "qty": 1, "price": 64500}
+          ],
+          "amount": 193500
+        }
+      },
       "expect": {"decision": "stop_mismatch", "handoffs": 0}
     },
     {
@@ -93,6 +164,27 @@
       "expect": {"decision": "stop_mismatch", "handoffs": 0}
     },
     {
+      "id": "quantity-boolean",
+      "title": "Количество записано как true, а не числом: true не равно 1, просьба не разобрана даже при совпавшем «да»",
+      "change": {
+        "request": {"items": [{"name": "Зелёный чай, 100 г", "qty": true, "price": 64500}]},
+        "invoice": {"items": [{"name": "Зелёный чай, 100 г", "qty": true, "price": 64500}], "amount": 64500},
+        "consent": {"items": [{"name": "Зелёный чай, 100 г", "qty": true, "price": 64500}], "amount": 64500}
+      },
+      "expect": {"decision": "stop_mismatch", "handoffs": 0}
+    },
+    {
+      "id": "empty-invoice-number",
+      "title": "У счёта пустой номер: стоп до передачи; строка выписки с пустым номером его не подтвердила бы",
+      "change": {
+        "invoice": {"id": ""},
+        "consent": {"id": ""},
+        "bank_result": {"exit_code": null, "response": null},
+        "after": [{"kind": "bank_app", "invoice": "", "store": "chai.example", "amount": 129000, "charge_seen": true}]
+      },
+      "expect": {"decision": "stop_mismatch", "handoffs": 0}
+    },
+    {
       "id": "changed-after-consent",
       "title": "После «да» покупатель добавил пачку: прежнее согласие не действует",
       "change": {
@@ -105,6 +197,39 @@
       "id": "not-approved",
       "title": "На показанный счёт владелец ответил не согласием",
       "change": {"consent": {"words": "Посмотри сначала, что ещё есть в корзине.", "approved": false}},
+      "expect": {"decision": "ask_consent", "handoffs": 0}
+    },
+    {
+      "id": "consent-duplicates-differ",
+      "title": "Повторы считаются и в согласии: «да» дано на другое число одинаковых строк, итог и набор названий те же",
+      "change": {
+        "request": {
+          "words": "Купи на chai.example два зелёных чая и один чёрный по 645 ₽, отдельными строками.",
+          "items": [
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Чёрный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500}
+          ]
+        },
+        "invoice": {
+          "id": "INV-DEMO-0003",
+          "items": [
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Чёрный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500}
+          ],
+          "amount": 193500
+        },
+        "consent": {
+          "id": "INV-DEMO-0003",
+          "items": [
+            {"name": "Зелёный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Чёрный чай, 100 г", "qty": 1, "price": 64500},
+            {"name": "Чёрный чай, 100 г", "qty": 1, "price": 64500}
+          ],
+          "amount": 193500
+        }
+      },
       "expect": {"decision": "ask_consent", "handoffs": 0}
     },
     {
@@ -140,6 +265,39 @@
       "expect": {"decision": "conflict", "handoffs": 1}
     },
     {
+      "id": "exit-code-boolean",
+      "title": "Код выхода false вместо числа 0, хотя в ответе SUCCESS: исход неизвестен, магазин молчит",
+      "change": {
+        "bank_result": {"exit_code": false, "response": {"status": "SUCCESS"}},
+        "after": []
+      },
+      "expect": {"decision": "unconfirmed", "handoffs": 1}
+    },
+    {
+      "id": "exit-code-true",
+      "title": "Код выхода true вместо числа 1 при DECLINED: это не отказ, а неизвестный исход; не «оплата не прошла»",
+      "change": {
+        "bank_result": {"exit_code": true, "response": {"status": "DECLINED", "reasonCode": "LIMIT_PER_DAY"}},
+        "after": []
+      },
+      "expect": {"decision": "unconfirmed", "handoffs": 1}
+    },
+    {
+      "id": "bank-unreadable-store-paid",
+      "title": "bank_result пришёл строкой, а не объектом: исход банка неизвестен, передача одна; оплату отметил магазин",
+      "change": {"bank_result": "<html>502 Bad Gateway</html>"},
+      "expect": {"decision": "paid", "handoffs": 1}
+    },
+    {
+      "id": "response-unreadable",
+      "title": "Код выхода 0, но response — строка, а не объект: исход неизвестен, магазин молчит",
+      "change": {
+        "bank_result": {"exit_code": 0, "response": "SUCCESS"},
+        "after": []
+      },
+      "expect": {"decision": "unconfirmed", "handoffs": 1}
+    },
+    {
       "id": "timeout-retry",
       "title": "Ответа нет, покупатель просит повторить, подтверждений пока нет",
       "change": {
@@ -172,15 +330,32 @@
     },
     {
       "id": "timeout-other-order",
-      "title": "Ответа нет: похожее списание без номера счёта, у магазина оплачен только прошлый заказ",
+      "title": "Ответа нет: только похожие записи — списание без номера счёта, с другой суммой или другим магазином, оплата другого заказа или на другую сумму",
       "change": {
         "bank_result": {"exit_code": null, "response": null},
         "after": [
-          {"kind": "store_order", "invoice": "INV-DEMO-0000", "amount": 64500, "paid": true},
-          {"kind": "bank_app", "store": "chai.example", "amount": 129000, "charge_seen": true}
+          {"kind": "store_order", "invoice": "INV-DEMO-0000", "amount": 129000, "paid": true},
+          {"kind": "store_order", "invoice": "INV-DEMO-0001", "amount": 64500, "paid": true},
+          {"kind": "bank_app", "store": "chai.example", "amount": 129000, "charge_seen": true},
+          {"kind": "bank_app", "invoice": "INV-DEMO-0001", "store": "chai.example", "amount": 64500, "charge_seen": true},
+          {"kind": "bank_app", "invoice": "INV-DEMO-0001", "store": "drugoy.example", "amount": 129000, "charge_seen": true}
         ]
       },
       "expect": {"decision": "unconfirmed", "handoffs": 1}
+    },
+    {
+      "id": "timeout-new-invoice",
+      "title": "Ответа нет, исход не выяснен, а магазин прислал новую квитанцию с другим номером счёта: новой передачи нет, даже если просят",
+      "change": {
+        "bank_result": {"exit_code": null, "response": null},
+        "after": [
+          {"kind": "new_invoice", "invoice": "INV-DEMO-0002", "amount": 129000, "seen": "квитанция магазина на ту же корзину: номер другой, оплаты не видно"},
+          {"kind": "retry_request", "from": "покупатель", "words": "Оплати новый счёт, старый, похоже, не прошёл."},
+          {"kind": "bank_app", "store": "chai.example", "amount": 129000, "charge_seen": false},
+          {"kind": "store_order", "invoice": "INV-DEMO-0001", "amount": 129000, "paid": false, "seen": "заказ по первому счёту без отметки об оплате"}
+        ]
+      },
+      "expect": {"decision": "unconfirmed", "handoffs": 1, "says": ["Новый счёт INV-DEMO-0002 не оплачиваю", "исход счёта INV-DEMO-0001"]}
     }
   ]
 }
