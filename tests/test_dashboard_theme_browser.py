@@ -30,7 +30,8 @@ LEGACY_REF = "3e71431e4fa790d7bea6169a83ad572bf7eb6f20"
 READY = {
     "cache_efficiency_snapshot": ".kpi:nth-child(2) b",
     "claudexor_quotas": ".q-plate",
-    "context-lens": ".row",
+    # Context Lens 1.2.0 lists its requests under a disclosure that starts closed; the summary comes with the data.
+    "context-lens": '[data-focus="requests"]',
     "token-usage": ".to-total",
 }
 FOCUS = {
@@ -211,8 +212,11 @@ def _exercise_selection(frame, skill):
         }""")
     elif skill == "context-lens":
         frame.locator('[data-focus="filter-model"]').select_option("vendor/model-a")
+        # Open Requests and select its newest request: the selection panel describes it, and its row stays marked.
+        frame.locator('[data-focus="requests"]').click()
         frame.locator(".row").first.click()
-        frame.wait_for_function('() => document.querySelectorAll("canvas").length === 2')
+        frame.wait_for_selector('[data-focus="clear-selection"]')
+        frame.wait_for_selector('.row[aria-current="true"]', state="attached")
     elif skill == "token-usage":
         frame.locator('select[data-pref="model"]').select_option("native-test")
         frame.wait_for_function('() => !document.querySelector(".to-content").matches("[aria-busy=true]")')
