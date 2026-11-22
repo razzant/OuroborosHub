@@ -140,14 +140,13 @@ class Engine:
             self.transcription.release()
             raise VoiceBusy("A local transcription is already running; try again after it finishes")
 
-    def configure(self, settings: dict) -> dict:
-        # Busy is answered first, with nothing read: the slot and the lock are held before the model directory is
-        # touched, so a missing or slow path cannot change the answer to a refused save.
-        began = time.monotonic()
+    def configure(self, settings: dict, deadline: float | None = None) -> dict:
+        # The proposed directory is read and validated holding nothing: a stalled mounted path blocks only this
+        # call, never a recognition. Only the commit takes the slot and the model lock, both without waiting.
+        path = str(model_directory(settings["model_path"]).resolve())
         with self._control():
-            path = str(model_directory(settings["model_path"]).resolve())
-            if time.monotonic() - began > CONTROL_WAIT_SECONDS - 5:
-                # The caller's own wait is nearly over: it has been (or is about to be) told "unavailable".
+            if deadline is not None and time.monotonic() > deadline:
+                # The caller's wait has expired by our own clock: it was told "unavailable", so no late save.
                 raise ValueError("the model directory was too slow to read; nothing was changed")
             write_settings(STATE, settings)
             # Residency is a retention policy, not a new model selection.
@@ -298,6 +297,7 @@ class Handler(BaseHTTPRequestHandler):
         pass  # Audio and the owner's transcript never enter companion logs.
 
     def _handle(self) -> None:
+        deadline = time.monotonic() + CONTROL_WAIT_SECONDS - 5  # the control caller waits CONTROL_WAIT_SECONDS
         if not secrets.compare_digest(self.headers.get("X-Voice-Token", ""), TOKEN):
             self._reply(403, error("forbidden", "Worker authorization failed"))
             return
@@ -342,7 +342,7 @@ class Handler(BaseHTTPRequestHandler):
                     settings = validate_choice(value["model_path"], value["always_resident"])
                     # Enforce local, readable snapshot before saving; a failed
                     # choice never replaces the last usable configuration.
-                    self._reply(200, ENGINE.configure(settings))
+                    self._reply(200, ENGINE.configure(settings, deadline))
                 else:
                     ENGINE.install(value.get("model"))
                     self._reply(202, ENGINE.status())

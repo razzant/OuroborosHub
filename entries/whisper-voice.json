@@ -3,7 +3,7 @@
     "media"
   ],
   "description": "Optional local Whisper voice input for an editable Ouroboros composer draft.",
-  "digest": "df2500737252dc9e16f410a04fac3c59ea58402454b499cbc70145cf0aa3a1d2",
+  "digest": "ea02551d44e7b9523e2ece0ec1fe4ab174752a98607a5af97623a2285078f8e4",
   "install_specs": [
     {
       "kind": "pip",

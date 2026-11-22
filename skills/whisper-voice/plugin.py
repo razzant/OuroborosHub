@@ -38,7 +38,7 @@ def _worker(state_dir: Path, method: str, path: str, body: bytes = b"", mime: st
                     "Content-Length": str(len(body)),
                     SOURCE_HEADER: source,
                 })
-            except (BrokenPipeError, ConnectionResetError):
+            except ConnectionError:  # reset, abort or broken pipe, whatever the platform calls it
                 # The companion answers a second recording (or an over-limit one) before it reads the upload and
                 # closes the connection: the send failed, but its early answer may be waiting to be read.
                 sent = False
@@ -47,7 +47,8 @@ def _worker(state_dir: Path, method: str, path: str, body: bytes = b"", mime: st
             except (OSError, http.client.HTTPException):
                 if sent:
                     raise  # the worker died after taking the request: worker_unavailable below
-                return JSONResponse(error("voice_busy", "The local worker closed the upload; another transcription is running"), status_code=503)
+                # No answer at all: the upload was interrupted. A worker that really is busy answers voice_busy itself.
+                return JSONResponse(error("upload_interrupted", "The upload to the local worker was interrupted before it answered"), status_code=503)
             result = response.read(MAX_REPLY_BYTES)
             if response.read(1):
                 raise ValueError("oversized worker reply")

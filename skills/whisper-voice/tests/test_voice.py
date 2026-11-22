@@ -635,11 +635,21 @@ def test_waits_are_per_route_and_the_tool_outlasts_its_worker_wait():
     assert rt.TOOL_TIMEOUT_SECONDS > rt.ATTACHMENT_WAIT_SECONDS
 
 
+@pytest.fixture(autouse=True)
+def _close_every_companion_child():
+    """Whatever a test constructed is closed at teardown, even when an assertion fails before its own close()."""
+    yield
+    for child in list(_Child.instances):
+        child.close()
+    _Child.instances.clear()
+
+
 class _Child:
     """A real companion process with a fake faster_whisper (no weights) and the real av/numpy decoder. Every spawned
     process is recorded in `spawned`, and a constructor that fails for any reason terminates its own child first."""
 
     spawned: list = []
+    instances: list = []
     INIT_DEADLINE_SECONDS = 30
 
     def __init__(self, tmp_path, chars=5, char="я", extra_env=None):
@@ -672,6 +682,7 @@ class _Child:
             request(self.port, self.token, "POST", "/settings", json.dumps({
                 "model_path": str(make_model(tmp_path)), "always_resident": False}).encode(),
                 timeout=max(1.0, deadline - time.monotonic()))
+            _Child.instances.append(self)  # registered the moment construction succeeds
         except BaseException:
             self.close()
             raise
@@ -859,6 +870,8 @@ def _slot_reservation_case(child, tmp_path):
 
 def test_a_stalled_sender_loses_the_slot_after_the_upload_idle_deadline(tmp_path, monkeypatch):
     companion = _companion_module(tmp_path, monkeypatch, "voice_stall_test")
+    import whisper_runtime
+    assert companion.Handler.timeout == whisper_runtime.UPLOAD_IDLE_SECONDS  # the production value, pinned
     monkeypatch.setattr(companion.Handler, "timeout", 1)  # the production value is UPLOAD_IDLE_SECONDS (30)
     server = ThreadingHTTPServer(("127.0.0.1", 0), companion.Handler)
     server.daemon_threads = True
@@ -982,22 +995,63 @@ def test_real_plugin_route_refuses_over_the_dictation_ceiling_and_takes_exactly_
     assert seen == [DICTATION_MAX_BYTES] and sources == ["dictation"]  # refused one never reached the worker
 
 
-def test_a_busy_save_answers_busy_before_the_model_directory_is_read(tmp_path):
+def test_a_busy_save_of_a_valid_directory_answers_busy_and_a_missing_one_is_reported_without_the_slot(tmp_path):
     child = _Child(tmp_path, extra_env={"FAKE_SECONDS": "4"})
     thread, results = _running(child, tmp_path)
     try:
-        missing = tmp_path / "no-such-snapshot"          # would be a 400 if it were read first
+        other = tmp_path / "other"
+        other.mkdir()
+        for name in ("model.bin", "config.json", "tokenizer.json"):
+            (other / name).write_bytes(b"valid")
         status, body = request(child.port, child.token, "POST", "/settings", json.dumps(
-            {"model_path": str(missing), "always_resident": False}).encode())
+            {"model_path": str(other), "always_resident": False}).encode())
         assert status == 503 and body["error"]["code"] == "voice_busy"
+        # Validation holds nothing, so a missing directory is reported as such even while a recognition runs.
+        status, body = request(child.port, child.token, "POST", "/settings", json.dumps(
+            {"model_path": str(tmp_path / "no-such"), "always_resident": False}).encode())
+        assert status == 400
     finally:
         thread.join(30)
+
+
+def test_a_stalled_model_directory_check_holds_neither_the_slot_nor_the_lock_and_never_saves_late(tmp_path, monkeypatch):
+    companion = _companion_module(tmp_path, monkeypatch, "voice_stalled_dir_test")
+    engine = companion.Engine()
+    entered, release = threading.Event(), threading.Event()
+    real = companion.model_directory
+    other = tmp_path / "other"
+    other.mkdir()
+    for name in ("model.bin", "config.json", "tokenizer.json"):
+        (other / name).write_bytes(b"valid")
+
+    def stalled(path):
+        entered.set()
+        assert release.wait(60)
+        return real(path)
+
+    monkeypatch.setattr(companion, "model_directory", stalled)
+    old = read_settings(tmp_path)["model_path"]
+    outcome = []
+
+    def save():
+        try:
+            outcome.append(engine.configure({"model_path": str(other), "always_resident": False},
+                                            deadline=time.monotonic() + 0.2))
+        except ValueError as exc:
+            outcome.append(exc)
+
+    thread = threading.Thread(target=save)
+    thread.start()
     try:
-        status, body = request(child.port, child.token, "POST", "/settings", json.dumps(
-            {"model_path": str(missing), "always_resident": False}).encode())
-        assert status == 400  # idle: the missing snapshot is now reported, and nothing was changed either way
+        assert entered.wait(30)
+        assert not engine.transcription.locked() and engine.lock.acquire(blocking=False)  # transcription is free
+        engine.lock.release()
+        time.sleep(0.4)  # the caller's deadline passes while the path stalls
     finally:
-        child.close()
+        release.set()
+        thread.join(30)
+    assert isinstance(outcome[0], ValueError) and "nothing was changed" in str(outcome[0])
+    assert read_settings(tmp_path)["model_path"] == old  # no late save
 
 
 @pytest.mark.parametrize("dies_after_request", [True, False])
@@ -1014,15 +1068,23 @@ def test_worker_that_disconnects_is_one_typed_503_and_never_a_second_getresponse
         "port": listener.getsockname()[1], "token": "x" * 32, "pid": os.getpid()}), encoding="utf-8")
 
     def serve():
+        listener.settimeout(10)
         conn, _ = listener.accept()
         if dies_after_request:
+            conn.settimeout(10)
             data = b""
             while b"\r\n\r\n" not in data:
-                data += conn.recv(65536)
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break  # EOF: the sender is gone
+                data += chunk
             body_len = int(next(l for l in data.split(b"\r\n") if l.lower().startswith(b"content-length")).split(b":")[1])
             have = len(data.split(b"\r\n\r\n", 1)[1])
             while have < body_len:
-                have += len(conn.recv(65536))
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                have += len(chunk)
         else:
             conn.recv(1024)
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")  # RST
@@ -1035,7 +1097,7 @@ def test_worker_that_disconnects_is_one_typed_503_and_never_a_second_getresponse
         response = plugin._worker(tmp_path, "POST", "/transcribe", body, "audio/ogg", source="attachment")
         value = json.loads(response.body)
         assert response.status_code == 503
-        assert value["error"]["code"] == ("worker_unavailable" if dies_after_request else "voice_busy")
+        assert value["error"]["code"] == ("worker_unavailable" if dies_after_request else "upload_interrupted")
     finally:
         thread.join(10)
         listener.close()
