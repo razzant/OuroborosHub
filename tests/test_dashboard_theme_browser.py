@@ -3,7 +3,8 @@
 Opt in with OUROBOROS_THEME_CORE_ROOT pointing to a core checkout containing the
 merged theme bridge and the historical ref below, then run this file explicitly.
 The host uses the real mount, document CSP, fetch relay and disposal handshake.
-Only skill API responses are synthetic. No installed runtime is read or changed.
+Only skill API responses and the host's lease answers (lease_answer) are
+synthetic. No installed runtime is read or changed.
 OUROBOROS_THEME_EVIDENCE_DIR optionally retains screenshots.
 This harness mounts classic widget.js entries. memory-atlas is an ES module entry
 that only PluginAPI 2.1 hosts load; tests/memory_atlas checks its theme in a real host.
@@ -48,7 +49,7 @@ import {mountModuleWidget} from '/static/modules/widget_module.js';
 const p=new URLSearchParams(location.search); ouroTheme.set(p.get('theme'));
 window.handlers=new Set();
 window.disposeWidget=await mountModuleWidget(document.getElementById('mount'),
-  {skill:p.get('skill'),ws_prefix:'ext:'+p.get('skill')+':'},
+  {skill:p.get('skill'),ws_prefix:'ext:'+p.get('skill')+':',tab_id:'dashboard',generation:'fixture-generation'},
   {entry:'widget.js',height:850,appearance:'host'},null,window.handlers);
 window.ready=true;
 </script></body></html>"""
@@ -64,6 +65,55 @@ LISTENERS = """(()=>{
    return remove.call(this,type,fn,options);
  };
 })();"""
+
+
+# Each card's publication as a host lists it, and the parent's route lease for its classic entry (the core's
+# docs/WIDGET_HOST_PROTOCOL.md, "Route leases"; ouroboros/gateway/widget_assets.py answers the same requests): a fixture
+# answer only, while the real module still builds the frame, relays fetches and revokes the lease on disposal.
+TAB = {"tab_id": "dashboard", "generation": "fixture-generation"}
+LEASE_TOKEN = "fixture-lease-" + "0" * 29  # the core's token shape: 43 URL-safe characters
+LEASE = {"token": LEASE_TOKEN, "base_url": f"/api/widget-resources/{LEASE_TOKEN}/", "expires_in": 120, "renew_after": 40}
+
+
+def lease_answer(method, path, payload):
+    """The core's answer to a card's lease controls, or None for a request it refuses: POST only; an open of a mounted
+    card's route lease (once more with its token, to re-establish it), or a renewal or revocation of that token."""
+    try:
+        body = json.loads(payload or b"null")
+    except ValueError:
+        return None
+    operation = {"/api/widgets/asset-leases": "open", "/api/widgets/asset-leases/renew": "renew",
+                 "/api/widgets/asset-leases/revoke": "revoke"}.get(path)
+    if method != "POST" or not isinstance(body, dict) or operation is None:
+        return None
+    if operation == "open":
+        card = {"skill": body.get("skill"), **TAB, "scope": "routes"}
+        mounted = isinstance(card["skill"], str) and card["skill"] in READY
+        return LEASE if mounted and body in (card, {**card, "token": LEASE_TOKEN}) else None
+    if body == {"token": LEASE_TOKEN}:
+        return LEASE if operation == "renew" else {"ok": True}
+    return None
+
+
+def test_the_fixture_host_answers_only_the_lease_requests_the_core_accepts():
+    route_lease = json.dumps({"skill": "context-lens", **TAB, "scope": "routes"}).encode()
+    token = json.dumps({"token": LEASE_TOKEN}).encode()
+    assert lease_answer("POST", "/api/widgets/asset-leases", route_lease) == LEASE
+    assert lease_answer("POST", "/api/widgets/asset-leases", json.dumps(
+        {"skill": "token-usage", **TAB, "scope": "routes", "token": LEASE_TOKEN}).encode()) == LEASE
+    assert lease_answer("POST", "/api/widgets/asset-leases/renew", token) == LEASE
+    assert lease_answer("POST", "/api/widgets/asset-leases/revoke", token) == {"ok": True}
+    refused = [("GET", "/api/widgets/asset-leases", route_lease),                       # the controls are POST only
+               ("POST", "/api/widgets/asset-leases", json.dumps(                         # a file lease: not a classic entry
+                   {"skill": "context-lens", **TAB}).encode()),
+               ("POST", "/api/widgets/asset-leases", json.dumps(                         # no tab id or generation
+                   {"skill": "context-lens", "scope": "routes"}).encode()),
+               ("POST", "/api/widgets/asset-leases", json.dumps(                         # a card this host never mounts
+                   {"skill": "memory-atlas", **TAB, "scope": "routes"}).encode()),
+               ("POST", "/api/widgets/asset-leases/renew", json.dumps({"token": "theme-fixture"}).encode()),
+               ("POST", "/api/widgets/asset-leases/extend", token),                     # no such operation
+               ("POST", "/api/widgets/asset-leases/revoke", b"")]                        # no token
+    assert [lease_answer(*request) for request in refused] == [None] * len(refused)
 
 
 def _load(name, path):
@@ -163,18 +213,19 @@ def theme_server():
 
         def do_POST(self):
             # Current classic mounts request a route lease before constructing
-            # the opaque frame. This fixture supplies the host response only;
-            # the real module still owns fetch relay, CSP and lease disposal.
+            # the opaque frame. This fixture answers only the lease requests the
+            # core accepts (lease_answer); the real module still owns fetch
+            # relay, CSP and lease disposal. A refused one fails the test.
             path = urlsplit(self.path).path
             if path.startswith("/api/widgets/asset-leases"):
-                payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
-                if path == "/api/widgets/asset-leases":
-                    assert payload.get("skill") in READY and payload.get("scope") == "routes"
-                    return self.send({"token": "theme-fixture", "base_url": "/api/widget-resources/theme-fixture/",
-                                      "renew_after": 3600, "expires_in": 7200})
-                if path == "/api/widgets/asset-leases/revoke":
-                    assert payload.get("token") == "theme-fixture"
-                    return self.send({"ok": True})
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = self.rfile.read(length)
+                if len(payload) < length:
+                    return  # the page closed while sending it (a keepalive revoke during teardown): no one to answer
+                if (answer := lease_answer(self.command, path, payload)) is None:
+                    unmatched.append((path, {"refused lease request": payload.decode("utf-8", "replace")}))
+                    return self.send({"error": "invalid lease fields"}, status=400)
+                return self.send(answer)
             return self.do_GET()
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
