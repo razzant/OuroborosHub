@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/cc7e34143ec58ebb9f449ccc648a59437401a684",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/3926700e1af07cbde4f461b7640791fe5d261cf9",
   "schema_version": 1,
   "skills": [
     {
@@ -4330,8 +4330,8 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "6548e62fed82d0ebe01370da124688f74528ee5ddc68fc2b18748917e16be495",
-          "size": 43673
+          "sha256": "b0daaa2956d74c5ba7e1ce324c3625287b0a24a94454aa09bc1fdae77a1a0002",
+          "size": 43737
         },
         {
           "path": "plugin.py",
@@ -4518,7 +4518,7 @@
       "name": "telegram-user-session",
       "slug": "telegram-user-session",
       "type": "extension",
-      "version": "0.4.4"
+      "version": "0.4.5"
     },
     {
       "description": "Token Observatory — Liquid Glass dashboard for recorded Ouroboros token usage, tasks and models.",
@@ -4736,38 +4736,38 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "cf6a39c4894271d62b42335cb7cb861adfef2d5208cb647fd3d8e708eb1c3a89",
-          "size": 6233
+          "sha256": "1cedcb65eee564550444e70fbcb9ea0c9b5a0771bc9e34d92b95db849bffeefa",
+          "size": 11081
         },
         {
           "path": "attachment_tool.py",
-          "sha256": "bf0267c6fcec238d811a8e6a2f8f87a9272ff2a42ea2d9cace2786174d3a6c53",
-          "size": 2624
+          "sha256": "3741c418d1b4426d0e910e565777597a5fb07e51a8719bf54fd69ffd98310111",
+          "size": 2704
         },
         {
           "path": "plugin.py",
-          "sha256": "898dafc7b398bef14f30dc0ef3311678d0412bd499428c904f2399247bc2be28",
-          "size": 8248
+          "sha256": "4d547496d1bd996ccb5b601309146bda03c6fb8f56dc013ba19d66070efd22ac",
+          "size": 10487
         },
         {
           "path": "scripts/companion.py",
-          "sha256": "3093ec4f0c73d05a62905111cd8b9feeca1b6cac595ab9ba7da04d55104cbf77",
-          "size": 14128
+          "sha256": "5b9e03b9613fc58471399d6d6f524f3352048e3b73913ce8ad79eabd9e88a42b",
+          "size": 18255
         },
         {
           "path": "tests/test_attachment.py",
-          "sha256": "fbfd201f597560271f22cbad9ddeefab7efa081d83a2e0c7cb58151808bf6445",
-          "size": 3560
+          "sha256": "61559de42011a5644be59ca3ddeda1f3cf6affdee6b39d19426bff03feb8da8d",
+          "size": 4661
         },
         {
           "path": "tests/test_voice.py",
-          "sha256": "318b8f83f77b6b4a0966b4b378f14c74f177b6368415ab1bd4eb705e37a6fe32",
-          "size": 19284
+          "sha256": "515afc603c35a5e483fc126f35d3bbbc836427e933500e2fde51dabf415eb778",
+          "size": 55756
         },
         {
           "path": "whisper_runtime.py",
-          "sha256": "d55ee18ffe57174fd3d9eacf237f88ac489ec4f86bde9a7397f840475629bb57",
-          "size": 5402
+          "sha256": "b03198140c13f290f3d2118a735922b1b2a5bd582fc83ebe06f83d2186f7eb3d",
+          "size": 9775
         }
       ],
       "install_specs": [
@@ -4783,7 +4783,7 @@
       "name": "whisper-voice",
       "slug": "whisper-voice",
       "type": "extension",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "when_to_use": "The owner explicitly enables optional local voice input in the composer."
     },
     {
