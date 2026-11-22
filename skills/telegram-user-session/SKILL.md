@@ -1,7 +1,7 @@
 ---
 name: telegram-user-session
 description: Ouroboros as an independent Telegram participant through its own dedicated user account and shared Places memory.
-version: 0.4.4
+version: 0.4.5
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -173,7 +173,7 @@ root. These tests use a recording client and synthetic state, not live Telegram.
 
 ## Voice and audio (0.4.1)
 
-In participant mode a voice message or audio file is staged like any other media: its original bytes, unchanged and uncut, go to the Host as an ordinary attachment up to the 32 MiB capture bound (above it `media.status` is `too_large` and only the message reference goes on). Its text stays the descriptor `[Telegram voice message]` or `[Telegram audio: <title>]`, never words from the recording, and its wake facts are those of any message without text. The staged copy's suffix now follows Telegram's declared type (`.ogg`, `.mp3`, `.m4a`, …) rather than the host computer's MIME table, because the Host classifies a staged file by its bytes and recognizes some audio only with its usual suffix. This connector makes no speech-to-text claim. With the optional local `whisper-voice` skill enabled the answering model may call its `transcribe_attachment` tool with the manifest ordinal; on this path that tool currently takes Ogg, MP3 and MP4/M4A audio of at most 384 KiB and 60 seconds. Whisper also lists WebM, but the Host classifies staged WebM bytes as `video/webm` whatever the file name and the tool refuses that, so WebM from Telegram stays only a file (Telegram voice messages are Ogg). Telegram delivers far longer and larger recordings than the recognizer accepts; such a recording, like WAV, FLAC or AAC, is still staged whole, never cut, and stays only a file. Retained legacy mode still captures no media.
+In participant mode a voice message or audio file is staged like any other media: its original bytes, unchanged and uncut, go to the Host as an ordinary attachment up to the 32 MiB capture bound (above it `media.status` is `too_large` and only the message reference goes on). Its text stays the descriptor `[Telegram voice message]` or `[Telegram audio: <title>]`, never words from the recording, and its wake facts are those of any message without text. The staged copy's suffix now follows Telegram's declared type (`.ogg`, `.mp3`, `.m4a`, …) rather than the host computer's MIME table, because the Host classifies a staged file by its bytes and recognizes some audio only with its usual suffix. This connector makes no speech-to-text claim. With the optional local `whisper-voice` skill enabled the answering model may call its `transcribe_attachment` tool with the manifest ordinal; on this path that tool currently takes Ogg, MP3 and MP4/M4A audio of at most 20 MiB and 10 minutes (its tool description states the current limits). Whisper also lists WebM, but the Host classifies staged WebM bytes as `video/webm` whatever the file name and the tool refuses that, so WebM from Telegram stays only a file (Telegram voice messages are Ogg). A recording above those limits (this connector stages up to 32 MiB), like WAV, FLAC or AAC, is still staged whole, never cut; the tool refuses it with a specific error and it stays only a file. Retained legacy mode still captures no media.
 
 ## Upgrading to 0.4.2
 
