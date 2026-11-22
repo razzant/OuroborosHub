@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from whisper_runtime import (  # noqa: E402
     IDLE_SECONDS,
+    CONTROL_WAIT_SECONDS,
     MAX_TRANSCRIPT_CHARS,
     SOURCE_HEADER,
     UPLOAD_IDLE_SECONDS,
@@ -114,18 +115,40 @@ class Engine:
             "reason": reason or ("Model download in progress" if self.installing else ""),
         }
 
+    def _control(self):
+        """Context manager: the recognition slot AND the model lock, both taken without waiting, released together."""
+        engine = self
+
+        class Held:
+            def __enter__(self):
+                engine._control_lock()
+
+            def __exit__(self, *exc):
+                engine.lock.release()
+                engine.transcription.release()
+                return False
+        return Held()
+
     def _control_lock(self):
         """The model lock for a settings change, never waited for: a recognition holds it for its whole run, and a
         save that waited could apply after the caller was told 503."""
         # A recognition owns the single slot from admission; it takes the model lock only after decoding, so the
         # lock alone would let a save through during the decode. Both are checked, neither is waited for.
-        if self.transcription.locked() or not self.lock.acquire(blocking=False):
+        if not self.transcription.acquire(blocking=False):
+            raise VoiceBusy("A local transcription is already running; try again after it finishes")
+        if not self.lock.acquire(blocking=False):
+            self.transcription.release()
             raise VoiceBusy("A local transcription is already running; try again after it finishes")
 
     def configure(self, settings: dict) -> dict:
-        path = str(model_directory(settings["model_path"]).resolve())
-        self._control_lock()
-        try:
+        # Busy is answered first, with nothing read: the slot and the lock are held before the model directory is
+        # touched, so a missing or slow path cannot change the answer to a refused save.
+        began = time.monotonic()
+        with self._control():
+            path = str(model_directory(settings["model_path"]).resolve())
+            if time.monotonic() - began > CONTROL_WAIT_SECONDS - 5:
+                # The caller's own wait is nearly over: it has been (or is about to be) told "unavailable".
+                raise ValueError("the model directory was too slow to read; nothing was changed")
             write_settings(STATE, settings)
             # Residency is a retention policy, not a new model selection.
             if self.loaded_path != path:
@@ -133,8 +156,6 @@ class Engine:
                 self.loaded_path = ""
             self.install_error = ""
             self.install_notice = ""
-        finally:
-            self.lock.release()
         return self.status()
 
     def transcribe(self, data: bytes, mime: str, timings: dict | None = None, source: str = "dictation",
@@ -220,16 +241,13 @@ class Engine:
     def install(self, name: str) -> None:
         if name not in MODEL_REPOS:
             raise ValueError("choose small or large-v3-turbo")
-        self._control_lock()
-        try:
+        with self._control():
             if self.installing:
                 raise ValueError("a model download is already in progress")
             selected_at_start = read_settings(STATE)["model_path"]
             self.installing = name
             self.install_error = ""
             self.install_notice = ""
-        finally:
-            self.lock.release()
 
         def download() -> None:
             try:

@@ -30,6 +30,7 @@ def _worker(state_dir: Path, method: str, path: str, body: bytes = b"", mime: st
             raise ValueError("worker endpoint malformed")
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=wait_for(path, source))
         try:
+            sent = True
             try:
                 conn.request(method, path, body=body, headers={
                     "X-Voice-Token": token,
@@ -37,14 +38,16 @@ def _worker(state_dir: Path, method: str, path: str, body: bytes = b"", mime: st
                     "Content-Length": str(len(body)),
                     SOURCE_HEADER: source,
                 })
-                response = conn.getresponse()
             except (BrokenPipeError, ConnectionResetError):
                 # The companion answers a second recording (or an over-limit one) before it reads the upload and
-                # closes the connection: an early close while sending means it refused, in practice because busy.
-                try:
-                    response = conn.getresponse()
-                except OSError:
-                    return JSONResponse(error("voice_busy", "The local worker closed the upload; another transcription is running"), status_code=503)
+                # closes the connection: the send failed, but its early answer may be waiting to be read.
+                sent = False
+            try:
+                response = conn.getresponse()  # exactly once
+            except (OSError, http.client.HTTPException):
+                if sent:
+                    raise  # the worker died after taking the request: worker_unavailable below
+                return JSONResponse(error("voice_busy", "The local worker closed the upload; another transcription is running"), status_code=503)
             result = response.read(MAX_REPLY_BYTES)
             if response.read(1):
                 raise ValueError("oversized worker reply")
@@ -54,7 +57,7 @@ def _worker(state_dir: Path, method: str, path: str, body: bytes = b"", mime: st
             return JSONResponse(value, status_code=response.status)
         finally:
             conn.close()
-    except (OSError, ValueError, TimeoutError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, TimeoutError, json.JSONDecodeError, http.client.HTTPException) as exc:
         waited = f" after {wait_for(path, source)} s" if isinstance(exc, TimeoutError) else ""
         return JSONResponse(error("worker_unavailable", f"Voice worker unavailable: {type(exc).__name__}{waited}"), status_code=503)
 

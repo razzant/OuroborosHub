@@ -196,8 +196,8 @@ def test_download_stays_in_skill_state_and_later_owner_selection_wins(tmp_path, 
     assert read_settings(tmp_path)["model_path"] == str(downloaded)
 
 
-def request(port, token, method, path, payload=b"", mime="application/json"):
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+def request(port, token, method, path, payload=b"", mime="application/json", timeout=3):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
         conn.request(method, path, payload, {"X-Voice-Token": token, "Content-Type": mime})
         response = conn.getresponse()
@@ -668,8 +668,10 @@ class _Child:
                 time.sleep(0.05)
             data = json.loads(endpoint.read_text(encoding="utf-8"))
             self.port, self.token = data["port"], data["token"]
+            # Initialisation has one deadline end to end: the settings call gets what is left of it.
             request(self.port, self.token, "POST", "/settings", json.dumps({
-                "model_path": str(make_model(tmp_path)), "always_resident": False}).encode())
+                "model_path": str(make_model(tmp_path)), "always_resident": False}).encode(),
+                timeout=max(1.0, deadline - time.monotonic()))
         except BaseException:
             self.close()
             raise
@@ -802,8 +804,8 @@ def test_status_answers_at_once_and_a_settings_save_during_recognition_is_refuse
         assert "a transcription is running" in json.loads(shown.body)["voice"]["message"]
     finally:
         thread.join(30)
-    assert results and results[0][0] == 200
     try:
+        assert results and results[0][0] == 200
         # The recognition has ended: the refused save did NOT take effect afterwards, and the old model is selected.
         status, now = request(child.port, child.token, "GET", "/status")
         assert now["busy"] is False and now["model"] == old and now["always_resident"] is False
@@ -818,6 +820,13 @@ def test_status_answers_at_once_and_a_settings_save_during_recognition_is_refuse
 
 def test_the_slot_is_reserved_before_the_body_and_a_second_or_oversized_upload_is_answered_unread(tmp_path):
     child = _Child(tmp_path)
+    try:
+        _slot_reservation_case(child, tmp_path)
+    finally:
+        child.close()
+
+
+def _slot_reservation_case(child, tmp_path):
     first = child.open_upload(64 * 1024, send=1024)          # admitted: its body is still arriving
     try:
         time.sleep(0.5)
@@ -845,7 +854,7 @@ def test_the_slot_is_reserved_before_the_body_and_a_second_or_oversized_upload_i
         assert request(child.port, child.token, "GET", "/status")[1]["busy"] is False
         assert child.post(_mp4(2), source="attachment")[0] == 200
     finally:
-        child.close()
+        pass
 
 
 def test_a_stalled_sender_loses_the_slot_after_the_upload_idle_deadline(tmp_path, monkeypatch):
@@ -970,3 +979,62 @@ def test_real_plugin_route_refuses_over_the_dictation_ceiling_and_takes_exactly_
     refused = call(audio + b"\0", len(audio) + 1)
     assert refused.status_code == 413 and "524288" in json.loads(refused.body)["error"]["message"]
     assert seen == [DICTATION_MAX_BYTES] and sources == ["dictation"]  # refused one never reached the worker
+
+
+def test_a_busy_save_answers_busy_before_the_model_directory_is_read(tmp_path):
+    child = _Child(tmp_path, extra_env={"FAKE_SECONDS": "4"})
+    thread, results = _running(child, tmp_path)
+    try:
+        missing = tmp_path / "no-such-snapshot"          # would be a 400 if it were read first
+        status, body = request(child.port, child.token, "POST", "/settings", json.dumps(
+            {"model_path": str(missing), "always_resident": False}).encode())
+        assert status == 503 and body["error"]["code"] == "voice_busy"
+    finally:
+        thread.join(30)
+    try:
+        status, body = request(child.port, child.token, "POST", "/settings", json.dumps(
+            {"model_path": str(missing), "always_resident": False}).encode())
+        assert status == 400  # idle: the missing snapshot is now reported, and nothing was changed either way
+    finally:
+        child.close()
+
+
+@pytest.mark.parametrize("dies_after_request", [True, False])
+def test_worker_that_disconnects_is_one_typed_503_and_never_a_second_getresponse(tmp_path, dies_after_request):
+    """A socket-level worker that accepts the request and closes without replying (a restart) gives 503
+    worker_unavailable; one that closes while the body is still being sent gives voice_busy."""
+    import socket
+
+    plugin = load_plugin()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    (tmp_path / "voice_endpoint.json").write_text(json.dumps({
+        "port": listener.getsockname()[1], "token": "x" * 32, "pid": os.getpid()}), encoding="utf-8")
+
+    def serve():
+        conn, _ = listener.accept()
+        if dies_after_request:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                data += conn.recv(65536)
+            body_len = int(next(l for l in data.split(b"\r\n") if l.lower().startswith(b"content-length")).split(b":")[1])
+            have = len(data.split(b"\r\n\r\n", 1)[1])
+            while have < body_len:
+                have += len(conn.recv(65536))
+        else:
+            conn.recv(1024)
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")  # RST
+        conn.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        body = b"OggS" + bytes(16 * 1024 * 1024) if not dies_after_request else b"OggS" + bytes(1000)
+        response = plugin._worker(tmp_path, "POST", "/transcribe", body, "audio/ogg", source="attachment")
+        value = json.loads(response.body)
+        assert response.status_code == 503
+        assert value["error"]["code"] == ("worker_unavailable" if dies_after_request else "voice_busy")
+    finally:
+        thread.join(10)
+        listener.close()
