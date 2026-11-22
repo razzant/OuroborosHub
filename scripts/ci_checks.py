@@ -108,6 +108,13 @@ SUITES = {
     # The provider keys widget's issuer-binding regressions: purely synthetic settings and an
     # intercepted HTTP boundary keep the suite offline; it needs nothing beyond the interpreter.
     'provider-keys': {'skills': ['provider_keys'], 'tests': ['tests/test_provider_keys.py']},
+    # The Amberkeep regressions: invented Portable Memory packages built in the test,
+    # so the suite is offline and needs nothing beyond the interpreter. The reader's
+    # own test, the CLI's flow test and the offline export readers' test travel
+    # together, so every Amberkeep test runs in CI.
+    'amberkeep': {'skills': ['amberkeep'],
+                  'tests': ['tests/test_amberkeep_portable.py', 'tests/test_amberkeep_flow.py',
+                            'tests/test_amberkeep_readers.py']},
     # The Premium Black presentation skill's own suite: the offline build, path, value and package cases.
     # The payload imports numpy and Pillow in every build, so those are the lane's runtime today.
     # The render cases (PNG, PDF, PPTX) need the pinned Chromium headless shell the skill keeps in its
