@@ -1,0 +1,186 @@
+{
+  "about": "Офлайн-репетиция черновика sberpay-agent-guide для scripts/rehearse.py. Магазины, счета, суммы и ответы вымышлены: ни одно значение не получено от банка, магазина или клиента SberPay, реального платежа не было. Суммы в копейках.",
+  "legend": {
+    "auth_status": "записанный заранее ответ auth status --json; поля из публичной инструкции @sberpay-cli/cli 0.4.0-dev.27",
+    "merchants_check": "записанный заранее ответ merchants check --json; поля из той же инструкции. merchant — запись магазина в реестре, её поля репетиции не нужны; без merchant домена в реестре нет, даже при supported: true",
+    "bank_result": "итог платёжного вызова: код выхода и ответ с полями той же инструкции; null — ответа не было",
+    "request": "просьба покупателя; условная форма черновика",
+    "invoice": "счёт, который передал официальный адаптер; условная форма черновика, не формат клиента или магазина",
+    "consent": "ответ владельца на показанный счёт: согласие — только approved: true на тот же счёт, а не любые слова; условная форма черновика",
+    "after": "что стало известно после передачи: просьба повторить, строка выписки в банковском приложении (invoice — номер счёта, если он в ней виден), отметка магазина; условная форма черновика",
+    "change": "что случай меняет в base; объекты сливаются, списки и значения заменяются",
+    "expect": "ожидаемое решение и число передач платежа"
+  },
+  "base": {
+    "request": {
+      "words": "Купи на chai.example две пачки зелёного чая по 645 ₽.",
+      "store": "chai.example",
+      "items": [{"name": "Зелёный чай, 100 г", "qty": 2, "price": 64500}],
+      "currency": "RUB"
+    },
+    "auth_status": {"canPay": true, "binding": {"phase": "STORED"}, "token": {"dailyAvailable": 250000}},
+    "merchants_check": {"supported": true, "merchant": {}},
+    "invoice": {
+      "id": "INV-DEMO-0001",
+      "store": "chai.example",
+      "items": [{"name": "Зелёный чай, 100 г", "qty": 2, "price": 64500}],
+      "amount": 129000,
+      "currency": "RUB"
+    },
+    "consent": {
+      "words": "Да, оплачивай.",
+      "approved": true,
+      "id": "INV-DEMO-0001",
+      "store": "chai.example",
+      "items": [{"name": "Зелёный чай, 100 г", "qty": 2, "price": 64500}],
+      "amount": 129000,
+      "currency": "RUB"
+    },
+    "bank_result": {"exit_code": 0, "response": {"status": "SUCCESS"}},
+    "after": [{"kind": "store_order", "invoice": "INV-DEMO-0001", "amount": 129000, "paid": true}]
+  },
+  "cases": [
+    {
+      "id": "happy-path",
+      "title": "Пример из SKILL.md: банк и магазин подтвердили оплату",
+      "change": {},
+      "expect": {"decision": "paid", "handoffs": 1}
+    },
+    {
+      "id": "not-ready",
+      "title": "Токен сохранён (STORED), но готовность не подтверждена",
+      "change": {"auth_status": {"canPay": false}},
+      "expect": {"decision": "stop_not_ready", "handoffs": 0}
+    },
+    {
+      "id": "store-paused",
+      "title": "Магазин в реестре на паузе",
+      "change": {"merchants_check": {"supported": false, "merchant": {"status": "PAUSED"}}},
+      "expect": {"decision": "stop_store", "handoffs": 0}
+    },
+    {
+      "id": "amount-mismatch",
+      "title": "Итог счёта больше, чем стоят заказанные позиции",
+      "change": {"invoice": {"amount": 139000}},
+      "expect": {"decision": "stop_mismatch", "handoffs": 0}
+    },
+    {
+      "id": "item-substituted",
+      "title": "В счёте другой чай по той же цене",
+      "change": {"invoice": {"items": [{"name": "Чёрный чай, 100 г", "qty": 2, "price": 64500}]}},
+      "expect": {"decision": "stop_mismatch", "handoffs": 0}
+    },
+    {
+      "id": "other-store",
+      "title": "Счёт выставил другой магазин",
+      "change": {"invoice": {"store": "drugoy.example"}},
+      "expect": {"decision": "stop_mismatch", "handoffs": 0}
+    },
+    {
+      "id": "currency-mismatch",
+      "title": "Просьба, счёт и согласие в долларах: черновик платит только в рублях",
+      "change": {
+        "request": {"words": "Купи на chai.example две пачки зелёного чая, счёт в долларах.", "currency": "USD"},
+        "invoice": {"currency": "USD"},
+        "consent": {"currency": "USD"}
+      },
+      "expect": {"decision": "stop_mismatch", "handoffs": 0}
+    },
+    {
+      "id": "amount-not-integer",
+      "title": "Сумма пришла не целым числом копеек",
+      "change": {"invoice": {"amount": 129000.0}},
+      "expect": {"decision": "stop_mismatch", "handoffs": 0}
+    },
+    {
+      "id": "changed-after-consent",
+      "title": "После «да» покупатель добавил пачку: прежнее согласие не действует",
+      "change": {
+        "request": {"words": "Добавь ещё одну пачку.", "items": [{"name": "Зелёный чай, 100 г", "qty": 3, "price": 64500}]},
+        "invoice": {"id": "INV-DEMO-0002", "items": [{"name": "Зелёный чай, 100 г", "qty": 3, "price": 64500}], "amount": 193500}
+      },
+      "expect": {"decision": "ask_consent", "handoffs": 0}
+    },
+    {
+      "id": "not-approved",
+      "title": "На показанный счёт владелец ответил не согласием",
+      "change": {"consent": {"words": "Посмотри сначала, что ещё есть в корзине.", "approved": false}},
+      "expect": {"decision": "ask_consent", "handoffs": 0}
+    },
+    {
+      "id": "success-store-silent",
+      "title": "Банк ответил SUCCESS, магазин ещё не отметил заказ",
+      "change": {"after": []},
+      "expect": {"decision": "bank_ok_store_pending", "handoffs": 1}
+    },
+    {
+      "id": "declined-day-limit",
+      "title": "Отказ банка: исчерпан дневной лимит",
+      "change": {
+        "bank_result": {"exit_code": 1, "response": {"status": "DECLINED", "reasonCode": "LIMIT_PER_DAY", "userMessage": "Дневной лимит исчерпан."}},
+        "after": []
+      },
+      "expect": {"decision": "declined", "handoffs": 1}
+    },
+    {
+      "id": "already-paid",
+      "title": "Счёт уже оплачен раньше",
+      "change": {
+        "bank_result": {"exit_code": 1, "response": {"status": "DECLINED", "reasonCode": "ALREADY_PAID", "userMessage": "Счёт уже оплачен."}},
+        "after": []
+      },
+      "expect": {"decision": "already_paid", "handoffs": 1}
+    },
+    {
+      "id": "declined-store-paid",
+      "title": "Банк отказал, а магазин отметил этот счёт оплаченным",
+      "change": {
+        "bank_result": {"exit_code": 1, "response": {"status": "DECLINED", "reasonCode": "ACQUIRING_DECLINED", "userMessage": "Банк отклонил списание."}}
+      },
+      "expect": {"decision": "conflict", "handoffs": 1}
+    },
+    {
+      "id": "timeout-retry",
+      "title": "Ответа нет, покупатель просит повторить, подтверждений пока нет",
+      "change": {
+        "bank_result": {"exit_code": null, "response": null},
+        "after": [
+          {"kind": "retry_request", "from": "покупатель", "words": "Попробуй ещё раз."},
+          {"kind": "bank_app", "store": "chai.example", "amount": 129000, "charge_seen": false},
+          {"kind": "store_order", "invoice": "INV-DEMO-0001", "amount": 129000, "paid": false, "seen": "страница «Спасибо за заказ» без отметки об оплате"}
+        ]
+      },
+      "expect": {"decision": "unconfirmed", "handoffs": 1}
+    },
+    {
+      "id": "timeout-store-paid",
+      "title": "Ответа нет, магазин отметил оплату этого счёта",
+      "change": {
+        "bank_result": {"exit_code": null, "response": null},
+        "after": [{"kind": "store_order", "invoice": "INV-DEMO-0001", "amount": 129000, "paid": true}]
+      },
+      "expect": {"decision": "paid", "handoffs": 1}
+    },
+    {
+      "id": "timeout-bank-charge",
+      "title": "Ответа нет, в выписке списание с номером этого счёта, магазин молчит",
+      "change": {
+        "bank_result": {"exit_code": null, "response": null},
+        "after": [{"kind": "bank_app", "invoice": "INV-DEMO-0001", "store": "chai.example", "amount": 129000, "charge_seen": true}]
+      },
+      "expect": {"decision": "bank_ok_store_pending", "handoffs": 1}
+    },
+    {
+      "id": "timeout-other-order",
+      "title": "Ответа нет: похожее списание без номера счёта, у магазина оплачен только прошлый заказ",
+      "change": {
+        "bank_result": {"exit_code": null, "response": null},
+        "after": [
+          {"kind": "store_order", "invoice": "INV-DEMO-0000", "amount": 64500, "paid": true},
+          {"kind": "bank_app", "store": "chai.example", "amount": 129000, "charge_seen": true}
+        ]
+      },
+      "expect": {"decision": "unconfirmed", "handoffs": 1}
+    }
+  ]
+}
