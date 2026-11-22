@@ -1,0 +1,39 @@
+{
+  "author": "Kirill Menshov (Кирилл Меньшов)",
+  "category": [
+    "documents",
+    "business"
+  ],
+  "description": "Russian-language board presentations in Kirill Menshov's Premium Black design system: dark 1920x1080 scenes, a toned dune and stone photo library, cards and eight diagram layouts with a living light line. Builds a JSON spec into a self-contained HTML, PNG slides, a PDF and an editable PPTX with its fonts.",
+  "digest": "f1934799af5faec0e446abd672dbe97ffb8dbc265cbf97e91fe024baec854e89",
+  "install_specs": [
+    {
+      "kind": "pip",
+      "package": "numpy>=1.26,<3"
+    },
+    {
+      "kind": "pip",
+      "package": "Pillow>=10,<13"
+    },
+    {
+      "kind": "pip",
+      "package": "python-pptx==1.0.2"
+    },
+    {
+      "kind": "pip",
+      "package": "playwright==1.65.2"
+    }
+  ],
+  "name": "kirill-menshov-premium-black",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/kirill-menshov-premium-black"
+  },
+  "title": "Kirill Menshov Premium Black",
+  "type": "script",
+  "version": "2.3.2-hub.1",
+  "when_to_use": "The user asks for a presentation, slides, a deck, a pitch or a board or investor report in the Premium Black style, or to turn a document, notes or a table into such slides, delivered as HTML, PDF or editable PowerPoint.",
+  "withdrawn": null
+}
