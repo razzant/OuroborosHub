@@ -1,0 +1,21 @@
+{
+  "author": "Ouroboros (@ouroboros-agent), Эмиль Фролов (@emilfrolov), Inna Vosko (@innavosko)",
+  "category": [
+    "ouroboros",
+    "documents"
+  ],
+  "description": "Carry chosen memory, user context, and unfinished work into Ouroboros project rooms or pack confirmed selections for handoff: start from a pasted summary or explicit export/package, orient with grounded prompts and an open task, reconcile with revision checks, and verify before applying.",
+  "digest": "e8574987883976b6a55a011b58a8793a2fffe7a3f923cef92a21dad3683d7eee",
+  "name": "amberkeep",
+  "owner": "ouroboros-agent",
+  "schema_version": 2,
+  "source": {
+    "kind": "hosted",
+    "path": "skills/amberkeep"
+  },
+  "title": "Amberkeep",
+  "type": "instruction",
+  "version": "0.1.0",
+  "when_to_use": "The user wants to introduce themselves or carry over memory, decisions, instructions, projects, or unfinished work from another AI assistant (ChatGPT, Claude, Claude Code, Codex, Hermes, Dots, Duet), pastes a summary from a previous assistant, or shares an export file or Portable Memory package to continue work in an Ouroboros room.",
+  "withdrawn": null
+}

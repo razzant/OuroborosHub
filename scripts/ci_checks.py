@@ -108,6 +108,13 @@ SUITES = {
     # The provider keys widget's issuer-binding regressions: purely synthetic settings and an
     # intercepted HTTP boundary keep the suite offline; it needs nothing beyond the interpreter.
     'provider-keys': {'skills': ['provider_keys'], 'tests': ['tests/test_provider_keys.py']},
+    # The Amberkeep regressions: invented Portable Memory packages built in the test,
+    # so the suite is offline and needs nothing beyond the interpreter. The reader's
+    # own test, the CLI's flow test and the offline export readers' test travel
+    # together, so every Amberkeep test runs in CI.
+    'amberkeep': {'skills': ['amberkeep'],
+                  'tests': ['tests/test_amberkeep_portable.py', 'tests/test_amberkeep_flow.py',
+                            'tests/test_amberkeep_readers.py']},
 }
 SHARED = {'.github/workflows/catalog-check.yml', 'scripts/ci_checks.py', 'tests/test_ci_checks.py',
           'scripts/build_index.py', 'scripts/release_digest.py',
