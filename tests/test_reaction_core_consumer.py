@@ -3,18 +3,17 @@
     OUROBOROS_PRESENCE_CORE_ROOT=/path/to/ouroboros python -m pytest -q -rs tests/test_reaction_core_consumer.py
 
 Without that variable this is reported as skipped, never as passed. A named core that lacks the
-reaction fact, or does not advertise explicit completion itself, fails: hosted CI names the pinned
-core, and a capability it lost must show. The connectors run unchanged (parser, store, workers,
-provider client, Host client); providers are scripted and core's own app answers over ASGI. Only skill-token
-authentication and inference are stubbed. The connectors read ``/identity`` as one of three Hosts,
-whatever a core advertises today. ``OLD_HOST`` strips both capabilities. ``EXPLICIT_ONLY_HOST``
-strips the reaction context and leaves core's own answer on explicit completion, so its positive
-case is real. ``CAPABLE_HOST`` adds both as a labelled stand-in: it proves the schema and route
-seam, not that a core is ready to advertise them, and not the sleeping-author or final-selection
-paths. The worker tests load the skill through core's real loader in separate processes and call it
-through the real dispatch; only the LLM safety check and what ``urllib`` would reach (Telegram, and
-the Host answering the polling process) are stubbed. Every run is a subprocess whose HOME, data and
-settings are temporary.
+reaction fact, or does not itself advertise the reaction context and explicit completion, fails:
+hosted CI names the pinned core, and a capability it lost must show. The connectors run unchanged
+(parser, store, workers, provider client, Host client); providers are scripted and core's own app
+answers over ASGI. Only skill-token authentication and inference are stubbed. The connectors read ``/identity`` as one of three Hosts.
+``CURRENT_HOST`` is the named core's own answer, unchanged, for every positive case, so a core that
+stops advertising the reaction context or explicit completion fails them. ``OLD_HOST`` strips both
+capabilities. ``EXPLICIT_ONLY_HOST`` strips the reaction context and leaves core's own answer on
+explicit completion. The worker tests load the skill through core's real loader in separate
+processes and call it through the real dispatch; only the LLM safety check and what ``urllib``
+would reach (Telegram, and the Host answering the polling process) are stubbed. Every run is a
+subprocess whose HOME, data and settings are temporary.
 """
 from __future__ import annotations
 
@@ -32,7 +31,7 @@ TOKEN = "fixture-skill-token"
 # What each Host's /identity says about reactions, over core's own answer.
 OLD_HOST = {"drop": ("presence_reaction_context", "presence_explicit_completion"), "add": {}}
 EXPLICIT_ONLY_HOST = {"drop": ("presence_reaction_context",), "add": {}}
-CAPABLE_HOST = {"drop": (), "add": {"presence_reaction_context": 1, "presence_explicit_completion": 1}}  # a stand-in, not proof
+CURRENT_HOST = {"drop": (), "add": {}}  # the named core's own advertisement, nothing overlaid
 
 
 def _run(tmp_path, mode):
@@ -57,8 +56,16 @@ def _run(tmp_path, mode):
     return json.loads(run.stdout.strip().splitlines()[-1])
 
 
+def _assert_current_host(facts):
+    # The connectors read the named core's /identity as it is: incoming reactions need its own advertisement.
+    assert facts["identity"] == facts["core_identity"]
+    assert facts["core_identity"].get("presence_reaction_context") == 1, \
+        "the named core does not advertise the reaction context"
+
+
 def test_slack_reactions_through_the_real_routes(tmp_path):
     facts = _run(tmp_path, "slack")
+    _assert_current_host(facts)
     assert facts["refusals"] == {}
     assert facts["statuses"] == {"Ev-m": 200, "Ev-reply": 200, "Ev-r": 200, "Ev-on-reply": 200, "Ev-miss": 200, "Ev-removed": 200}
     # Only the ordinary message woke anybody, under a wake list that matches everything.
@@ -82,6 +89,7 @@ def test_slack_reactions_through_the_real_routes(tmp_path):
 
 def test_telegram_reactions_through_the_real_routes(tmp_path):
     facts = _run(tmp_path, "telegram")
+    _assert_current_host(facts)
     assert facts["woken"] == ["telegram:9:1"]
     assert facts["reasons"] == {"telegram:9:2": "reaction_context_only", "telegram:9:3": "reaction_context_only",
                                 "telegram:9:4": "reaction_context_only", "telegram:9:5": "reaction_context_only"}
@@ -349,7 +357,7 @@ def test_slack_rows_from_before_the_update_keep_each_message_in_order_and_hold_b
 
 # ---- subprocess -----------------------------------------------------------------------------
 
-def _core(root, connector, provider, account, conversation, *, host=CAPABLE_HOST):
+def _core(root, connector, provider, account, conversation, *, host=CURRENT_HOST):
     from types import SimpleNamespace
 
     import httpx
@@ -456,7 +464,7 @@ def _readback(world):
     return rows, reasons, actions, account_candidates
 
 
-def _slack(root, *, host=CAPABLE_HOST):
+def _slack(root, *, host=CURRENT_HOST):
     import asyncio
     import sqlite3
 
@@ -520,7 +528,7 @@ def _slack(root, *, host=CAPABLE_HOST):
     return world, store, inbox
 
 
-def _telegram(root, *, host=CAPABLE_HOST):
+def _telegram(root, *, host=CURRENT_HOST):
     import asyncio
     import json as _json
 
@@ -659,7 +667,7 @@ def _reads(root):
     return {**facts, "requests": requests}
 
 
-def _frozen(root, *, host=CAPABLE_HOST):
+def _frozen(root, *, host=CURRENT_HOST):
     import asyncio
 
     import httpx
@@ -1507,13 +1515,14 @@ def _drive(root: Path, mode: str) -> dict:
         receipts = {key: store.delivery_receipt(key)["parts"][0]["state"] for key in ("react-ok", "react-noop", "react-gone")}
         return {"statuses": world.statuses, "refusals": world.refusals, "woken": world.woken, "rows": rows, "reasons": reasons, "actions": actions,
                 "inbox": inbox, "receipts": receipts, "recorded": world.recorded,
+                "core_identity": world.core_identity, "identity": world.identity,
                 "candidates": sorted(row["platform_actor_id"] for row in candidates(world.data, _place(world.data, "slack")))}
     if mode == "telegram":
         world, runtime = _telegram(root)
         rows, reasons, actions, candidates = _readback(world)
         receipts = {key: runtime.store.delivery_receipt(f"telegram-operation:{key}")["state"] for key in ("set", "refused")}
         return {"woken": world.woken, "rows": rows, "reasons": reasons, "actions": actions, "receipts": receipts,
-                "recorded": world.recorded,
+                "recorded": world.recorded, "core_identity": world.core_identity, "identity": world.identity,
                 "candidates": sorted(row["platform_actor_id"] for row in candidates(world.data, _place(world.data, "telegram")))}
     host = OLD_HOST if mode == "old-host" else EXPLICIT_ONLY_HOST
     slack_world, slack_store, _ = _slack(root / "s" if (root / "s").mkdir() is None else root, host=host)

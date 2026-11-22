@@ -42,11 +42,14 @@ SUITES = {
                          'env': {'CACHE_DASHBOARD_REQUIRE_RUNTIME': '1'}},
     # The dashboard cards through the core's own module bridge and theme in Chromium and WebKit, and once through its
     # historical pre-onTheme bridge (read with git show): catalog-check.yml gives this suite the pinned core with its
-    # history, its runtime and both browsers.
+    # history, its runtime and both browsers. The browser harnesses' lease host (tests/widget_lease_gateway.py) is
+    # checked against the core's lease controls here.
     'widgets': {'skills': ['cache_efficiency_snapshot', 'claudexor_quotas', 'context-lens', 'memory-atlas',
                            'token-usage', 'smart_lists', 'calendar'],
-                'tests': ['tests/test_widget_theme_contracts.py', 'tests/test_dashboard_theme_browser.py'],
-                'shared': ['tests/fixtures/dashboard_theme_responses.json'], 'core_env': 'OUROBOROS_THEME_CORE_ROOT'},
+                'tests': ['tests/test_widget_theme_contracts.py', 'tests/test_dashboard_theme_browser.py',
+                          'tests/test_widget_lease_gateway.py'],
+                'shared': ['tests/fixtures/dashboard_theme_responses.json', 'tests/widget_lease_gateway.py'],
+                'core_env': 'OUROBOROS_THEME_CORE_ROOT'},
     # The quota widget's whole payload suite: its Node harnesses and its real Chromium and WebKit cases. catalog-check.yml
     # gives it Node and Playwright's browsers; QUOTAS_REQUIRE_RUNTIME turns a skip for want of them into a failure.
     'claudexor-quotas': {'skills': ['claudexor_quotas'], 'tests': ['skills/claudexor_quotas'],
@@ -65,8 +68,9 @@ SUITES = {
     # Suites that list a Presence consumer (tests/test_*_core_consumer.py): catalog-check.yml gives them the pinned
     # core (OUROBOROS_PRESENCE_CORE_ROOT), and the consumers drive the connectors through its Presence routes.
     # Without that core the suite stops with an error; its consumers never skip. The bridges' own tests also check
-    # what they send and hear with the core's validators in-process (core_imports): with the core on their import path
-    # those checks run, and a core that lacks one stops the suite instead of letting the check skip or return.
+    # what they send and hear with the core's validators in-process (core_imports): with the core first on their
+    # PYTHONPATH those checks run, and a named core that does not itself provide one stops the suite instead of letting
+    # the check skip or return.
     'slack-bridge': {'skills': ['slack-bridge'],
                      'tests': ['skills/slack-bridge/tests', 'tests/test_slack_conversation_core_consumer.py',
                                'tests/test_reaction_core_consumer.py', 'tests/test_gesture_core_consumer.py'],
@@ -110,6 +114,7 @@ SUITES = {
     'telegram-user-session': {'skills': ['telegram-user-session'],
                               'tests': ['skills/telegram-user-session/tests', 'tests/test_telegram_participant_widget_browser.py',
                                         'tests/test_voice_attachment_core_consumer.py'],
+                              'shared': ['tests/widget_lease_gateway.py'],
                               'dependencies': ['telethon>=1.45,<2', 'PySocks>=1.7.1', 'httpx', 'starlette'],
                               'core_env': ('OUROBOROS_PRESENCE_CORE_ROOT', 'OUROBOROS_THEME_CORE_ROOT')},
     '2gis': {'skills': ['2gis'], 'tests': ['tests/test_2gis.py']},
@@ -190,15 +195,27 @@ def ffmpeg_gaps(encoders):
 
 
 CORE_FILES = ('ouroboros/gateway/host_service.py', 'web/provider-return.html')
-# Prints, as JSON, each `module:name` argument the interpreter's import path cannot provide, with the reason.
-CORE_IMPORT_PROBE = '''import importlib, json, sys
+# Prints, as JSON, each `module:name` argument (after the JSON list of named core roots) that the interpreter's import
+# path cannot provide from one of those roots, with the reason: a module or name found in another tree is a gap too.
+CORE_IMPORT_PROBE = '''import importlib, json, pathlib, sys
+roots = [pathlib.Path(root).resolve() for root in json.loads(sys.argv[1])]
+def outside(module):
+    path = getattr(module, "__file__", None)
+    path = pathlib.Path(path).resolve() if path else None
+    return None if path and any(path.is_relative_to(root) for root in roots) else str(path)
 missing = {}
-for spec in sys.argv[1:]:
+for spec in sys.argv[2:]:
     module, _, name = spec.partition(":")
     try:
         loaded = importlib.import_module(module)
-        if name and not hasattr(loaded, name):
+        found = getattr(loaded, name, None) if name else None
+        owner = sys.modules.get(getattr(found, "__module__", None) or "") or loaded
+        if outside(loaded) is not None:
+            missing[spec] = "imported from " + outside(loaded) + ", outside the named core"
+        elif name and not hasattr(loaded, name):
             missing[spec] = "absent"
+        elif outside(owner) is not None:
+            missing[spec] = "defined in " + outside(owner) + ", outside the named core"
     except Exception as exc:
         missing[spec] = type(exc).__name__ + ": " + str(exc)
 print(json.dumps(missing))
@@ -225,10 +242,11 @@ def core_checkout(name, suite, core_env, env):
     return core, named == attach
 
 
-def core_import_gaps(imports, env):
-    """{`module:name`: why} for what the suite's tests import from the core in-process and this environment lacks."""
-    probe = subprocess.run([sys.executable, '-B', '-c', CORE_IMPORT_PROBE, *imports], env=env, capture_output=True,
-                           text=True, timeout=300)
+def core_import_gaps(imports, env, cores):
+    """{`module:name`: why} for what the suite's tests import from the core in-process and this environment does not
+    provide from the named core checkouts `cores`."""
+    probe = subprocess.run([sys.executable, '-B', '-c', CORE_IMPORT_PROBE, json.dumps(cores), *imports], env=env,
+                           capture_output=True, text=True, timeout=300)
     try:
         gaps = json.loads(probe.stdout.strip().splitlines()[-1]) if probe.returncode == 0 else None
     except (IndexError, ValueError):
@@ -247,14 +265,15 @@ def run_suite(name):
             env[core_env] = str(core)
         cores.append(str(core))
     if cores:
-        # The skill tests that import the core themselves get the same core, last on their import path.
-        env['PYTHONPATH'] = os.pathsep.join(dict.fromkeys(filter(None, [*env.get('PYTHONPATH', '').split(os.pathsep),
-                                                                         *cores])))
+        # The skill tests that import the core themselves get the same core, ahead of any inherited PYTHONPATH entry
+        # (their own directories still come first: the working directory and the paths pytest and the tests insert).
+        env['PYTHONPATH'] = os.pathsep.join(dict.fromkeys(filter(None, [*cores,
+                                                                         *env.get('PYTHONPATH', '').split(os.pathsep)])))
     if 'ffmpeg_encoders' in suite and (gaps := ffmpeg_gaps(suite['ffmpeg_encoders'])):
         raise RuntimeError(f'{name} requires {", ".join(gaps)}; its real ffmpeg cases must run, not skip')
     subprocess.run([sys.executable, '-B', '-m', 'pip', 'install', 'PyYAML', 'pytest',
                     *suite.get('dependencies', [])], check=True)
-    if suite.get('core_imports') and (gaps := core_import_gaps(suite['core_imports'], env)):
+    if suite.get('core_imports') and (gaps := core_import_gaps(suite['core_imports'], env, cores)):
         raise RuntimeError(f'{name} requires the named core to provide '
                            f'{", ".join(f"{spec} ({why})" for spec, why in gaps.items())}; '
                            'its in-process core checks must run, not skip')

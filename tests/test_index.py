@@ -722,7 +722,10 @@ def place_wake_facts(place):
 
 def assert_place_wakes(place):
     wakes = place["wakes"]
-    assert isinstance(wakes, list) and len(wakes) == len(set(wakes)) and set(wakes) <= place_wake_facts(place), place
+    assert isinstance(wakes, list) and set(wakes) <= place_wake_facts(place), place
+    # The hub's publication convention, not the core's: the core keeps one of a repeated wake, a published place says
+    # each once.
+    assert len(wakes) == len(set(wakes)), place
 
 
 @pytest.mark.parametrize("place", [
@@ -744,11 +747,17 @@ def test_place_wakes_accept_core_facts_or_the_place_s_own_declared_facts(place):
     {"facts": ["signal.new_root"], "wakes": []},                                 # a bare name is a core fact only
     {"facts": ["mention", {"id": "mention", "label": "again"}], "wakes": []},    # ids are unique
     {"facts": "mention", "wakes": []},
-    {"wakes": ["mention", "mention"]},                                           # each wake suggested once
 ])
 def test_place_wakes_reject_what_the_core_refuses(place):
     with pytest.raises(AssertionError):
         assert_place_wakes(place)
+
+
+def test_a_published_place_suggests_each_wake_once():
+    # The core would accept the repetition and keep one; the hub refuses it in what it publishes.
+    with pytest.raises(AssertionError):
+        assert_place_wakes({"wakes": ["mention", "mention"]})
+    assert_place_wakes({"wakes": ["mention"]})
 
 
 @pytest.mark.parametrize("target", [

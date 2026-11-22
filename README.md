@@ -303,15 +303,21 @@ at the top of `.github/workflows/catalog-check.yml`, checked out once per job; t
 checks every hosted release and connector against the same commit. With one pin every seam
 between a hosted skill and the core is tested on the same reproducible core, and no suite stays
 behind on an older one; `tests/test_workflows.py` fails on a second pin in any `.yml` or `.yaml`
-workflow, whether a checkout or a run step's git command takes it. To move it, open a PR that
+workflow, whether a checkout or a run step's git command takes it. That check is a lint against an
+accidental second pin, not a boundary: a step that moves the checked-out core with a git command run
+from `working-directory: core` or after a shell `cd` is not seen by it. To move the pin, open a PR that
 changes only that value. The workflow is shared, so that PR runs every suite on the new core, and it
 merges when all of them pass. A suite that fails there is fixed in the hub when the skill or its test
 is wrong against the core's documented contract, and reported to the core when the core broke it.
 
-`scripts/ci_checks.py run <suite>` refuses a suite whose core is not named, and puts that core last
-on its tests' import path, so the skill tests that check their wire bodies with the core's own
-validators run them. The Slack and Telegram bridge suites also list the core functions those tests
-import (`core_imports`): a core without one stops the suite instead of letting the check skip.
+`scripts/ci_checks.py run <suite>` refuses a suite whose core is not named, and puts that core first
+on its tests' `PYTHONPATH`, ahead of anything inherited, so the skill tests that check their wire
+bodies with the core's own validators run them. The Slack and Telegram bridge suites also list the
+core functions those tests import (`core_imports`): a named core without one, or an import that
+resolves outside the named checkout, stops the suite instead of letting the check skip. Locally each
+variable a suite names is checked on its own, so two of them (Telegram User Session's Presence and
+theme roots, or Memory Atlas's `ATLAS_CORE` beside `ATLAS_HOST_ROOT`) can name different checkouts;
+CI names one checkout per job.
 
 The `claudexor-quotas` suite needs Node 24, pytest, Playwright and its Chromium
 and WebKit builds. `OUROBOROSHUB_NODE` selects an existing Node executable;

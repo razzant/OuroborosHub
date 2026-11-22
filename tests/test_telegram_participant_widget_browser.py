@@ -22,15 +22,15 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from widget_lease_gateway import LeaseGateway, controls
+
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / 'skills' / 'telegram-user-session'
 ACCOUNT = 8667525238
-# The card's publication as a host lists it, and the parent's route lease for its classic entry (the core's
-# docs/WIDGET_HOST_PROTOCOL.md, "Route leases"; ouroboros/gateway/widget_assets.py answers the same requests): a fixture
-# answer only, while the real module still builds the frame, relays fetches and revokes the lease on disposal.
-TAB = {'skill': 'telegram-user-session', 'tab_id': 'participant', 'generation': 'fixture-generation'}
-LEASE_TOKEN = 'fixture-lease-' + '0' * 29  # the core's token shape: 43 URL-safe characters
-LEASE = {'token': LEASE_TOKEN, 'base_url': f'/api/widget-resources/{LEASE_TOKEN}/', 'expires_in': 120, 'renew_after': 40}
+# The card's live publication as a host lists it (HOST mounts the same tab id and generation). Its route lease is
+# answered as the core's controls answer it (tests/widget_lease_gateway.py), while the real module still builds the
+# frame, relays fetches and revokes the lease on disposal.
+CARDS = {'telegram-user-session': ('participant', 'fixture-generation')}
 HOST = '''<!doctype html><html><head><script src="/static/theme.js"></script>
 <style>body{margin:0;background:#0f0f11}.widgets-frame{width:100%;height:var(--widget-frame-height,320px);border:0;display:block}</style></head>
 <body><section><div class="widgets-card-status"></div><div id="mount"></div></section>
@@ -42,43 +42,6 @@ window.disposeWidget=await mountModuleWidget(document.getElementById('mount'),
  {entry:'widget.js',appearance:'host'},null,new Set());
 window.ready=true;
 </script></body></html>'''
-
-
-def lease_answer(method, path, payload):
-    """The core's answer to this card's lease controls, or None for a request it refuses: POST only; an open of the
-    card's route lease (once more with its token, to re-establish it), or a renewal or revocation of that token."""
-    try:
-        body = json.loads(payload or b'null')
-    except ValueError:
-        return None
-    operation = {'/api/widgets/asset-leases': 'open', '/api/widgets/asset-leases/renew': 'renew',
-                 '/api/widgets/asset-leases/revoke': 'revoke'}.get(path)
-    if method != 'POST' or not isinstance(body, dict) or operation is None:
-        return None
-    if operation == 'open' and body in ({**TAB, 'scope': 'routes'}, {**TAB, 'scope': 'routes', 'token': LEASE_TOKEN}):
-        return LEASE
-    if body == {'token': LEASE_TOKEN}:
-        return LEASE if operation == 'renew' else {'ok': True} if operation == 'revoke' else None
-    return None
-
-
-def test_the_fixture_host_answers_only_the_lease_requests_the_core_accepts():
-    route_lease = json.dumps({**TAB, 'scope': 'routes'}).encode()
-    token = json.dumps({'token': LEASE_TOKEN}).encode()
-    assert lease_answer('POST', '/api/widgets/asset-leases', route_lease) == LEASE
-    assert lease_answer('POST', '/api/widgets/asset-leases', json.dumps(
-        {**TAB, 'scope': 'routes', 'token': LEASE_TOKEN}).encode()) == LEASE
-    assert lease_answer('POST', '/api/widgets/asset-leases/renew', token) == LEASE
-    assert lease_answer('POST', '/api/widgets/asset-leases/revoke', token) == {'ok': True}
-    refused = [('GET', '/api/widgets/asset-leases', route_lease),                        # the controls are POST only
-               ('POST', '/api/widgets/asset-leases', json.dumps(TAB).encode()),          # a file lease: not this entry
-               ('POST', '/api/widgets/asset-leases', json.dumps(                         # no tab id or generation
-                   {'skill': TAB['skill'], 'scope': 'routes'}).encode()),
-               ('POST', '/api/widgets/asset-leases', json.dumps({**TAB, 'skill': 'other', 'scope': 'routes'}).encode()),
-               ('POST', '/api/widgets/asset-leases/renew', json.dumps({'token': 'lease'}).encode()),
-               ('POST', '/api/widgets/asset-leases/extend', token),                     # no such operation
-               ('POST', '/api/widgets/asset-leases/revoke', b'not json')]
-    assert [lease_answer(*request) for request in refused] == [None] * len(refused)
 
 
 class Request:
@@ -160,6 +123,7 @@ def widget_server():
     api = API(root)
     load_plugin(api)
     state = {'posts': [], 'errors': [], 'faults': [], 'disconnects': []}
+    leases = LeaseGateway(CARDS)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -182,14 +146,18 @@ def widget_server():
 
         def dispatch(self):
             url = urlsplit(self.path)
-            payload = self.rfile.read(int(self.headers.get('Content-Length', 0) or 0))
+            length = int(self.headers.get('Content-Length', 0) or 0)
+            payload = self.rfile.read(length)
+            if len(payload) < length:
+                # The page closed while sending it (a keepalive revoke as its test ends): no one is left to answer.
+                state['disconnects'].append(f'{self.command} {self.path}')
+                return
             if url.path == '/':
                 return self.send(HOST, 'text/html')
-            if url.path.startswith('/api/widgets/asset-leases'):
-                if (answer := lease_answer(self.command, url.path, payload)) is None:
-                    state['errors'].append(f'lease request the core refuses: {self.command} {url.path} {payload!r}')
-                    return self.send({'error': 'invalid lease fields'}, status=400)
-                return self.send(answer)
+            if controls(url.path):
+                # A refused one is recorded by the gateway and fails the teardown below.
+                status, answer = leases.answer(self.command, url.path, self.headers, payload)
+                return self.send(answer, status=status)
             if url.path == '/api/widgets/fault':
                 state['faults'].append(payload.decode('utf-8', 'replace'))
                 return self.send({'ok': True})
@@ -228,6 +196,7 @@ def widget_server():
         shutil.rmtree(root)
         assert not thread.is_alive()
         assert not state['errors'], state['errors']
+        assert not leases.refused, leases.refused
 
 
 def settle(page, frame):

@@ -114,8 +114,9 @@ jobs:
           echo "OUROBOROS_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
       # The Presence consumers (tests/test_*_core_consumer.py) drive Slack and Telegram through the core's own Presence
       # routes in child processes, and GitHub's owner-account contract runs through its places module. They import
-      # nothing beyond each suite's dependencies, so the checkout is all they need; scripts/ci_checks.py puts it last
-      # on the tests' import path and stops a bridge suite whose core lacks a check its tests import (core_imports).
+      # nothing beyond each suite's dependencies, so the checkout is all they need; scripts/ci_checks.py puts it first
+      # on the tests' PYTHONPATH and stops a bridge suite whose core does not itself provide a check its tests import
+      # (core_imports).
       - name: Name the core for the Presence consumers and GitHub
         if: contains(fromJSON('["freshdesk", "github", "slack-bridge", "telegram-bot", "telegram-user-session"]'), matrix.suite)
         run: |
