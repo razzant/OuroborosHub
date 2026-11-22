@@ -15,13 +15,17 @@
     "requests-ntlm",
     "defusedxml"
   ],
+  "mark": "mailbox login",
   "name": "email-presence",
+  "needs": "needs mailbox access",
   "owner": "razzant",
+  "pitch": "Ouroboros gets its own mailbox",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/email-presence"
   },
+  "title": "Email inbox",
   "type": "extension",
   "version": "0.10.11",
   "when_to_use": "User wants to read, compose, organize or configure mailboxes, or receive and reply to incoming mail through a Place.",

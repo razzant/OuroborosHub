@@ -172,7 +172,8 @@ def relative_path(value, *, allow_root=False):
 
 def validate_entry(entry, categories):
     object_fields(entry, ('schema_version', 'name', 'description', 'category', 'owner', 'version', 'source', 'digest', 'withdrawn'),
-                  ('install_specs', 'when_to_use', 'author', 'type', 'withdrawn_releases', 'icon', 'connects', 'title'),
+                  ('install_specs', 'when_to_use', 'author', 'type', 'withdrawn_releases', 'icon', 'connects', 'title',
+                   'pitch', 'needs', 'mark'),
                   label='entry')
     schema(entry, 2, 'entry')
     for field in ('name', 'description', 'version'):
@@ -194,6 +195,12 @@ def validate_entry(entry, categories):
         text_field(entry['title'], 'title')
         if entry['title'] != entry['title'].strip() or any(ch in entry['title'] for ch in '\r\n'):
             raise ValueError('title must be one line without surrounding spaces')
+    for field in ('pitch', 'needs', 'mark'):
+        if field in entry:
+            value = entry[field]
+            if (not isinstance(value, str) or value != value.strip() or any(ch in value for ch in '\r\n')
+                    or (not value and field == 'pitch')):
+                raise ValueError(f'{field} must be one line without surrounding spaces')
     if 'type' in entry and entry['type'] not in ('instruction', 'script', 'extension'):
         raise ValueError(f'{name}: invalid type')
     if 'icon' in entry:
@@ -377,9 +384,12 @@ def refresh_entry(root, entry):
             entry['install_specs'] = json.loads(declaration_json(declaration))
         entry['version'] = str(front.get('version', '0.1.0'))
         entry['digest'] = release_digest(directory, entry)
+        catalog_title = entry.get('title')
         for key in DISCOVERY_FACTS:
             entry.pop(key, None)
         entry.update(discovery_facts(front))
+        if catalog_title:
+            entry['title'] = catalog_title
     return entry
 
 
@@ -457,7 +467,8 @@ def build_catalog(root: Path) -> dict:
             facts = discovery_facts(read_manifest(directory))
             # Optional for older schema-2 publishers; supplied facts must be truthful.
             for key in DISCOVERY_FACTS:
-                if key in entry and entry[key] != facts.get(key):
+                # `title` in an entry is the catalog's own wording for people and may differ from the manifest's.
+                if key != 'title' and key in entry and entry[key] != facts.get(key):
                     raise ValueError(f"{entry['name']}: {key} must derive from SKILL.md; use --refresh")
     # Retained hosted copies remain deliverable to old clients if a v2 entry is
     # later withdrawn, converted to a git pointer or removed from discovery.

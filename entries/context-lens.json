@@ -4,13 +4,17 @@
   ],
   "description": "Read-only chart of model-request input sizes from the local usage store, with honest freshness and coverage.",
   "digest": "c070e9dc9d7c1c7f543bb21d400425c659815a6c9256d4d222d175c8b1835136",
+  "mark": "",
   "name": "context-lens",
+  "needs": "",
   "owner": "razzant",
+  "pitch": "How large each model request was",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/context-lens"
   },
+  "title": "Request sizes",
   "type": "extension",
   "version": "1.2.1",
   "when_to_use": "The owner wants to understand reported input sizes, their spread and which requests belong to one task.",

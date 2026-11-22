@@ -4,14 +4,17 @@
   ],
   "description": "Read Ouroboros's memory room by room, beside the record you open, with corrections, drafts and decisions, knowledge notes, marks and identity, and copy an exact address to paste into a chat. Long lists and texts continue where they stopped; Refresh shows what changed. Read-only, no model calls.",
   "digest": "246f2c31ccbe37d30c947d082e3a3c8872ff41e495ed011594ec8f88bded7c68",
+  "mark": "",
   "name": "memory-atlas",
+  "needs": "",
   "owner": "razzant",
+  "pitch": "Browse what Ouroboros remembers",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/memory-atlas"
   },
-  "title": "Memory Atlas",
+  "title": "Memory browser",
   "type": "extension",
   "version": "0.3.1",
   "withdrawn": null

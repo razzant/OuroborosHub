@@ -114,6 +114,7 @@ class IndexTests(unittest.TestCase):
             {'source': {'kind': 'hosted', 'path': 'skills/another'}},
             {'source': {'kind': 'hosted', 'path': '../demo'}}, {'source': {}},
             {'title': ''}, {'title': 7}, {'title': 'Two\nlines'}, {'title': ' Padded'},
+            {'pitch': ''}, {'pitch': 7}, {'pitch': 'Two\nlines'}, {'needs': ' Padded'}, {'mark': 3},
         ]
         for changes in mutations:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -175,9 +176,14 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(entry['title'], 'Demo tools')
         builder.validate_entry(entry, {'search'})
         self.assertEqual(builder.build_catalog(self.root)['skills'][0]['title'], 'Demo tools')
-        self.write('entries/demo.json', {**entry, 'title': 'Something else'})
-        with self.assertRaisesRegex(ValueError, 'title must derive'):
-            builder.build_catalog(self.root)
+        # The entry's title is the catalog's own wording: it may differ, and a refresh keeps it.
+        worded = {**entry, 'title': 'Something else', 'pitch': 'Does a thing', 'needs': '', 'mark': ''}
+        self.write('entries/demo.json', worded)
+        builder.validate_entry(worded, {'search'})
+        self.assertEqual(builder.build_catalog(self.root)['skills'][0]['title'], 'Demo tools')
+        self.assertEqual(builder.main(['--refresh', 'demo'], root=self.root), 0)
+        self.assertEqual(builder.read_json(self.root / 'entries/demo.json')['title'], 'Something else')
+        self.assertEqual(builder.read_json(self.root / 'entries/demo.json')['pitch'], 'Does a thing')
         # An entry may omit the field; the manifest still names the v1 row.
         self.write('entries/demo.json', {k: v for k, v in entry.items() if k != 'title'})
         self.assertEqual(builder.build_catalog(self.root)['skills'][0]['title'], 'Demo tools')

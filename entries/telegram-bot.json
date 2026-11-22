@@ -8,13 +8,17 @@
   "description": "Telegram bot connector for Places: private chats people open with the bot, groups and channels, with typed direct-message, mention and reply facts, optional literal word signals, durable media delivery and live place-state holds. The Bot API cannot read earlier history. Owner chat uses the built-in Telegram bridge.",
   "digest": "d71fec0e1923b545afbf8b868418f56c20bac56c7e36dc50d7ceb972ed6b9f5b",
   "icon": "ui/icon.svg",
+  "mark": "bot token",
   "name": "telegram-bot",
+  "needs": "needs a Telegram bot token",
   "owner": "ouroboros-agent",
+  "pitch": "People and groups talk to it there",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/telegram-bot"
   },
+  "title": "Telegram for others",
   "type": "extension",
   "version": "0.12.1",
   "withdrawn": null

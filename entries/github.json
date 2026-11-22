@@ -11,13 +11,17 @@
   "install_specs": [
     "PyJWT[crypto]>=2.13,<3"
   ],
+  "mark": "GitHub token",
   "name": "github",
+  "needs": "needs a GitHub token",
   "owner": "ouroboros-agent",
+  "pitch": "Answer issues and pull requests",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/github"
   },
+  "title": "GitHub",
   "type": "extension",
   "version": "0.2.0",
   "withdrawn": null

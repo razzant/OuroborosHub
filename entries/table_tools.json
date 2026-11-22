@@ -10,13 +10,17 @@
       "package": "openpyxl"
     }
   ],
+  "mark": "",
   "name": "table_tools",
+  "needs": "",
   "owner": "kazzand",
+  "pitch": "Filter, sort and total CSV and Excel",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/table_tools"
   },
+  "title": "Spreadsheets",
   "type": "script",
   "version": "0.1.0",
   "when_to_use": "The user attached a CSV or XLSX file and asks to inspect, summarize, filter, compare, group, sort, or calculate from its data.",

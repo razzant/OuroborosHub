@@ -28,8 +28,12 @@ a source, a release digest and a withdrawal status. Optional `withdrawn_releases
 records withdrawn versions by digest. Optional `icon` names a host icon or a
 local `ui/*.svg` geometry asset. `connects` is derived from `provides: place`
 contributions in the reviewed manifest; older consumers can ignore both fields.
-Optional `title` is the human name the manifest gives a skill (for example
-`Email tools`); the canonical name stays its identity. A connector needs none:
+Optional `title` is the human name of a skill (for example `Email tools`); it is
+seeded from the manifest and may be reworded for people; the canonical name stays
+its identity. Optional `pitch` is a one-line description of what the skill does,
+`needs` says in a few words what it needs (empty when nothing) and `mark` is that
+need in two or three words (`Gemini key`); the setup wizard's Skills step in
+Ouroboros shows them and reads them only when present. A connector needs none:
 its place `label` already names the service.
 Connector marks are monochrome `currentColor` geometry: the Slack and GitHub
 marks use Lucide geometry (ISC License) and the Telegram mark uses Tabler Icons
