@@ -115,15 +115,6 @@ SUITES = {
     'amberkeep': {'skills': ['amberkeep'],
                   'tests': ['tests/test_amberkeep_portable.py', 'tests/test_amberkeep_flow.py',
                             'tests/test_amberkeep_readers.py']},
-    # The Premium Black presentation skill's own suite: the offline build, path, value and package cases.
-    # The payload imports numpy and Pillow in every build, so those are the lane's runtime today.
-    # The render cases (PNG, PDF, PPTX) need the pinned Chromium headless shell the skill keeps in its
-    # own state folder; that lane is verified separately, so this suite demands no render. The payload's
-    # own guard skips those cases with a visible reason instead of passing them off as covered, and a
-    # later render lane only has to give this suite the payload's own browser knob.
-    'premium-black': {'skills': ['kirill-menshov-premium-black'],
-                      'tests': ['skills/kirill-menshov-premium-black/tests'],
-                      'dependencies': ['numpy>=1.26,<3', 'Pillow>=10,<13']},
 }
 SHARED = {'.github/workflows/catalog-check.yml', 'scripts/ci_checks.py', 'tests/test_ci_checks.py',
           'scripts/build_index.py', 'scripts/release_digest.py',
