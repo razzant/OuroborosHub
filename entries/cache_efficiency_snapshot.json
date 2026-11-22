@@ -8,7 +8,7 @@
   "name": "cache_efficiency_snapshot",
   "needs": "",
   "owner": "razzant",
-  "pitch": "Charts of token use and cache savings",
+  "pitch": "Token usage and cache hit rate",
   "schema_version": 2,
   "source": {
     "kind": "hosted",

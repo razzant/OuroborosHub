@@ -81,6 +81,8 @@ def validate_catalog(root: Path, catalog: object) -> None:
             raise ValueError(f'{slug}: version must be a non-empty string')
         if 'name' in entry and not isinstance(entry['name'], str):
             raise ValueError(f'{slug}: name must be a string')
+        if 'title' in entry:
+            _validate_title(entry['title'], f'{slug}: v1 title')
         if 'type' in entry and (not isinstance(entry['type'], str) or entry['type'] not in {'instruction', 'script', 'extension'}):
             raise ValueError(f'{slug}: unsupported skill type')
         files = entry.get('files')
@@ -143,6 +145,12 @@ def text_field(value, label):
         raise ValueError(f'{label}: must be a non-empty string')
 
 
+def _validate_title(value, label):
+    text_field(value, label)
+    if value != value.strip() or any(ch in value for ch in '\r\n'):
+        raise ValueError(f'{label} must be one line without surrounding spaces')
+
+
 def schema(value, version, label):
     if type(value.get('schema_version')) is not int or value['schema_version'] != version:
         raise ValueError(f'{label}.schema_version must be {version}')
@@ -192,9 +200,7 @@ def validate_entry(entry, categories):
         if field in entry:
             text_field(entry[field], field)
     if 'title' in entry:
-        text_field(entry['title'], 'title')
-        if entry['title'] != entry['title'].strip() or any(ch in entry['title'] for ch in '\r\n'):
-            raise ValueError('title must be one line without surrounding spaces')
+        _validate_title(entry['title'], 'title')
     for field in ('pitch', 'needs', 'mark'):
         if field in entry:
             value = entry[field]

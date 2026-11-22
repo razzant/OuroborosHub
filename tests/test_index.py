@@ -192,6 +192,13 @@ class IndexTests(unittest.TestCase):
         self.assertNotIn('title', builder.read_json(self.root / 'entries/demo.json'))
         self.assertNotIn('title', builder.build_catalog(self.root)['skills'][0])
 
+        # A valid editorial title does not make a numeric manifest title valid for v1.
+        manifest.write_text('---\nversion: v3\ntitle: 2026\n---\nBody\n', encoding='utf-8')
+        self.write('entries/demo.json', {**worded, 'version': 'v3', 'digest': payload_digest(manifest.parent)})
+        self.assertEqual(builder.load_hub(self.root)[1]['demo']['title'], 'Something else')
+        with self.assertRaisesRegex(ValueError, 'demo: v1 title: must be a non-empty string'):
+            builder.build_catalog(self.root)
+
     def test_endorsements_bind_exact_release_and_recommendations_are_boolean(self):
         endorsement = {'name': 'demo', 'digest': self.entry['digest'], 'recommended': True}
         def write(rows, maintainer='razzant'):

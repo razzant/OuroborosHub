@@ -9,7 +9,7 @@
   ],
   "mark": "Confluence key",
   "name": "confluence",
-  "needs": "needs a Confluence site and API token",
+  "needs": "needs a Confluence Cloud site and an API token",
   "owner": "razzant",
   "pitch": "Search, read and edit pages",
   "schema_version": 2,
