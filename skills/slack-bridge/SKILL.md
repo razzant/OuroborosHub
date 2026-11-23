@@ -1021,9 +1021,15 @@ history callback. The existing outbound workers submit that report through
 the existing provider receipt in the same outbox. Each existing outbound worker
 keeps at most one tracked report task in flight while continuing provider sends;
 stopping the worker cancels and awaits that task. A slow or failed report never
-requeues the provider send or holds later sends waiting for a report ACK. A restart
-or lost ACK retries exactly the same report; the Host owns idempotent history
-acceptance. The status route exposes pending/acknowledged report counts and
+requeues the provider send or holds later sends waiting for a report ACK. Reports
+leave cleaned of credentials: their identity and routing (delivery, part, account,
+conversation and thread IDs, state) are never changed, and their `text` stays exact
+only for delivered or accepted parts, the ones the Host matches against the turn's
+reply. A restart or lost ACK retries the same cleaned report, and the Host owns
+idempotent history acceptance. A report queued by 1.12.x is dispatched again as a
+cleaned copy; a 409 `presence_receipt_conflict` for that copy means the Host already
+holds a receipt for the same part and state, so it counts as recorded. Any other
+409 stays pending. The status route exposes pending/acknowledged report counts and
 the last report error separately from provider delivery state.
 
 Reports identify tool versus automatic origin explicitly. Successful chunks

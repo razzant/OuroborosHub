@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, closing
+from contextlib import closing
 from datetime import datetime, timezone
 import importlib.util
 import json
@@ -176,6 +176,8 @@ def test_fresh_install_edge_reports_not_configured_zero_recent_and_null_last_err
             "failed_messages_in_parts": 0,
             "uncertain_messages_in_parts": 0,
             "uncertain_messages_with_refused_part": 0,
+            "failed_messages_still_queued_partly_delivered": 0,
+            "uncertain_messages_still_queued_partly_delivered": 0,
             "last_failed_at": None,
             "last_uncertain_at": None,
             "last_error": None,
@@ -351,6 +353,38 @@ def test_daemon_error_exit_clears_its_own_pid_and_keeps_the_error(tmp_path, monk
                                "since": None, "error": "disk full"}
     assert payload["text"] == "Connection error · the bridge stopped after an error"
     assert payload["attention"][0]["auth"] is False
+
+
+def test_an_exiting_daemon_writes_its_error_only_while_it_owns_the_pid(tmp_path, monkeypatch) -> None:
+    """R9-8: a successor wrote its PID and its live state first; the old process's error and PID clear leave both."""
+    daemon = _load_daemon()
+    successor = os.getpid() + 1
+
+    class _FailingAfterSuccessor:
+        def __init__(self, *, store, **_kwargs):
+            self.store = store
+
+        async def run(self):
+            self.store.set_runtime(companion_pid=successor, socket_state="connected", last_socket_error="")
+            raise OSError("disk full")
+
+        async def close(self):
+            pass
+
+    monkeypatch.setenv("OUROBOROS_SKILL_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(daemon, "SlackClient", _SignedInSlack)
+    monkeypatch.setattr(daemon, "BridgeRuntime", _FailingAfterSuccessor)
+    monkeypatch.setattr(daemon, "create_host_adapter", lambda *_a, **_k: object())
+    with pytest.raises(OSError):
+        _run_daemon(daemon, monkeypatch)
+    with closing(BridgeStore(tmp_path)) as store:
+        assert store.runtime_value("companion_pid") == successor
+        assert (store.runtime_value("socket_state"), store.runtime_value("last_socket_error")) == ("connected", "")
+        # The same call by the owner writes and clears in one transaction; a non-owner changes nothing.
+        assert store.finish_companion(successor + 1, socket_state="error", last_socket_error="x") is False
+        assert store.runtime_value("socket_state") == "connected"
+        assert store.finish_companion(successor, socket_state="error", last_socket_error="disk full") is True
+        assert (store.runtime_value("companion_pid"), store.runtime_value("socket_state")) == (None, "error")
 
 
 @pytest.mark.parametrize("code", ["invalid_auth", "missing_scope"])
@@ -562,6 +596,8 @@ def test_recent_problems_and_old_failure_outside_window_edge(tmp_path) -> None:
             "failed_messages_in_parts": 0,
             "uncertain_messages_in_parts": 0,
             "uncertain_messages_with_refused_part": 0,
+            "failed_messages_still_queued_partly_delivered": 0,
+            "uncertain_messages_still_queued_partly_delivered": 0,
             "last_failed_at": _iso_z(old_ts),
             "last_uncertain_at": None,
             "last_error": {"at": _iso_z(old_ts), "state": "failed", "text": "channel_not_found"},
@@ -1195,227 +1231,7 @@ def test_a_later_request_that_confirms_the_host_binding_reaches_the_status(tmp_p
     assert payload["text"] == "Connected · nothing needs attention"
 
 
-# ---------- round 7: credentials in error text, refused messages by their other parts, each item's own error ----------
-
-_ILLEGAL = {"newline": "\n", "carriage_return": "\r"}
-
-
-def _synthetic_token(illegal: str) -> str:
-    # Split so secret scanners never read this synthetic value as a real Slack token.
-    return "xox" + f"b-9182736450-5647382910-QwErTyUiOpAsDf{illegal}ZxCvBnMmLkJhGf"
-
-
-def _fragments(token: str) -> set[str]:
-    """Every run of 6 characters of the token that does not cross its illegal character."""
-    runs = [run for run in token.replace("\n", "\0").replace("\r", "\0").split("\0") if run]
-    return {run[i:i + 6] for run in runs for i in range(len(run) - 5)}
-
-
-@asynccontextmanager
-async def _local_header_client():
-    """Real httpx/h11 against a local listener, shared by the store and log regressions."""
-    import httpx
-    from lib.slack_api import SlackClient
-
-    class _Local(httpx.AsyncHTTPTransport):
-        # The real transport, pointed at a local listener: h11 refuses the header before anything is sent.
-        async def handle_async_request(self, request):
-            request.url = request.url.copy_with(scheme="http", host="127.0.0.1", port=_Local.port)
-            return await super().handle_async_request(request)
-
-    class _RealClient(SlackClient):
-        def __init__(self, bot, app):
-            super().__init__(bot, app, http_client=httpx.AsyncClient(transport=_Local(), trust_env=False))
-
-    server = await asyncio.start_server(lambda _r, w: w.close(), "127.0.0.1", 0)
-    _Local.port = server.sockets[0].getsockname()[1]
-    try:
-        yield _RealClient
-    finally:
-        server.close()
-        await server.wait_closed()
-
-
-@pytest.mark.parametrize("illegal", sorted(_ILLEGAL))
-def test_a_token_in_a_real_http_error_never_reaches_the_store_or_the_status(tmp_path, monkeypatch, illegal) -> None:
-    """The real SlackClient's request fails in httpx on the token's illegal character; the daemon stores the error."""
-    import httpx
-
-    token = _synthetic_token(_ILLEGAL[illegal])
-    daemon = _load_daemon()
-
-    async def run() -> None:
-        async with _local_header_client() as client:
-            monkeypatch.setattr(daemon, "SlackClient", client)
-            monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler", lambda *_a: None)
-            await daemon._run()
-
-    monkeypatch.setenv("OUROBOROS_SKILL_STATE_DIR", str(tmp_path))
-    monkeypatch.setenv("SLACK_BOT_TOKEN", token)
-    monkeypatch.setenv("SLACK_APP_TOKEN", "xapp" + "-1-A09SYNTH-0000000000-abcdefabcdef")
-    with pytest.raises(httpx.LocalProtocolError) as raised:
-        asyncio.run(run())
-    assert any(piece in str(raised.value) for piece in _fragments(token))  # the library did print the token
-    store = BridgeStore(tmp_path)
-    try:
-        stored = store.runtime_value("last_socket_error")
-    finally:
-        store.close()
-    payload = _read_status_route(_TokensApi(tmp_path, bot_token=token))
-    for text in (stored, json.dumps(payload, ensure_ascii=False), json.dumps(payload)):
-        leaked = sorted(piece for piece in _fragments(token) if piece in text)
-        assert leaked == [], (leaked, text)
-    assert stored.startswith("Illegal header value b'Bearer [redacted]")
-    assert payload["link"]["error"] == stored and payload["attention"][0]["error"] == {"text": stored}
-
-
-@pytest.mark.parametrize("illegal", sorted(_ILLEGAL))
-def test_real_http_error_is_clean_in_all_bridge_logs_and_exception_text(monkeypatch, caplog, illegal) -> None:
-    import logging
-    import httpx
-
-    token = _synthetic_token(_ILLEGAL[illegal])
-    monkeypatch.setenv("SLACK_BOT_TOKEN", token)
-    # A non-shaped configured value proves logs use the same configured-secrets source too.
-    app = "fixture-configured-app\rOtherFixtureSecret"
-    monkeypatch.setenv("SLACK_APP_TOKEN", app)
-    caplog.set_level(logging.DEBUG)
-    daemon = _load_daemon()
-
-    async def run():
-        async with _local_header_client() as client:
-            slack = client(token, "xapp" + "-fixture")
-            try:
-                await slack.auth_test()
-            except httpx.LocalProtocolError as exc:
-                assert any(piece in str(exc) for piece in _fragments(token))
-                for name in ("lib.runtime", "lib.socket_mode", "slack_bridge"):
-                    logger = logging.getLogger(name)
-                    logger.warning("Request failed: %s; app=%r", exc, app)
-                    logger.debug("Request traceback", exc_info=True)
-                    logger.exception("Request failed with traceback: %s", exc)
-                logging.getLogger("lib.socket_mode").warning("channel_not_found")
-            finally:
-                await slack._http.aclose()
-
-    monkeypatch.setattr(daemon, "_run", run)
-    # Use the actual daemon entry point: its configured handlers also serve httpcore DEBUG records.
-    filters_before = {h: list(h.filters) for h in logging.getLogger().handlers}
-    try:
-        daemon.main()
-        output = caplog.text
-        assert "LocalProtocolError" in output and "Traceback" in output
-        assert "channel_not_found" in output
-        assert {"lib.runtime", "lib.socket_mode", "slack_bridge"} <= {r.name for r in caplog.records}
-        for secret in (token, app):
-            assert not sorted(piece for piece in _fragments(secret) if piece in output)
-        for record in caplog.records:
-            rendered = logging.Formatter("%(message)s").format(record)
-            assert not any(piece in rendered for piece in _fragments(token) | _fragments(app))
-    finally:
-        for handler, filters in filters_before.items():
-            handler.filters[:] = filters
-
-
-@pytest.mark.parametrize("kind", ("delivery", "reaction"))
-def test_report_error_is_clean_when_stored_and_handed_to_host(tmp_path, monkeypatch, kind) -> None:
-    import dataclasses
-
-    token = _synthetic_token("\n")
-    monkeypatch.setenv("SLACK_BOT_TOKEN", token)
-    app = "fixture-configured-app\rOtherFixtureSecret"
-    monkeypatch.setenv("SLACK_APP_TOKEN", app)
-
-    class Host:
-        explicit_completion = 1
-
-        def __init__(self):
-            self.payloads = []
-
-        async def report_delivery(self, payload):
-            self.payloads.append(payload)
-
-    async def run():
-        host = Host()
-        with closing(BridgeStore(tmp_path)) as store:
-            for index, error in enumerate((f"Illegal header value {f'Bearer {token}'.encode()!r}; {app!r}",
-                                           "channel_not_found")):
-                if kind == "delivery":
-                    store.enqueue_outbox(request_id=f"r{index}", target="C09SYNTH01", thread_ts="",
-                                         chunks=("Synthetic reply",), delivery_reporting_version=1)
-                else:
-                    store.enqueue_mutation(request_id=f"r{index}", operation="reaction_add",
-                                           payload={"channel": "C09SYNTH01", "ts": "1.0", "name": "eyes"},
-                                           delivery_reporting_version=1)
-                item = dataclasses.replace(store.claim_outbox(), provider_account_id="T09SYNTH01")
-                report = (item.delivery_report if kind == "delivery" else item.reaction_report)("failed", error=error)
-                store.fail_outbox(item.row_id, item.lease_token, error, report_payload=report)
-                with sqlite3.connect(tmp_path / "slack_bridge.sqlite3") as conn:
-                    saved = json.loads(conn.execute("SELECT report_payload_json FROM outbox WHERE id=?",
-                                                    (item.row_id,)).fetchone()[0])
-                await OutboundWorker(store, _Slack(), host)._report(store.claim_report())
-                assert saved == host.payloads[-1] == report
-                for payload in (saved, host.payloads[-1]):
-                    for text in (json.dumps(payload), json.dumps(payload, ensure_ascii=False)):
-                        assert not any(piece in text for piece in _fragments(token) | _fragments(app))
-                assert saved["message"]["error"] == ("channel_not_found" if index else
-                                                       "Illegal header value b'Bearer [redacted]'; '[redacted]'")
-
-    asyncio.run(run())
-
-
-def test_records_of_an_older_version_holding_a_token_come_out_clean(tmp_path) -> None:
-    token = _synthetic_token("\n")
-    printed = repr(f"Bearer {token}".encode())  # how a header refusal prints it, with "\\n"
-    store = BridgeStore(tmp_path)
-    try:
-        store.set_runtime(socket_state="connected", host_adapter_state="active", companion_pid=os.getpid(),
-                          reaction_context_state="available", history_reporting_state="supported")
-        raw = _envelope(1)
-        store.ingest_envelope(raw, parse_socket_envelope(raw, bot_user_id="U_BOT"))
-        event = store.claim_inbox()
-        store.fail_inbox(event.row_id, event.lease_token, "placeholder")
-        store.enqueue_outbox(request_id="old", target="C09A", thread_ts="", chunks=("one",))
-        part = store.claim_outbox()
-        store.fail_outbox(part.row_id, part.lease_token, "placeholder", state="failed")
-        store.enqueue_outbox(request_id="held", target="C09B", thread_ts="", chunks=("two",))
-        store.hold_outbox(store.claim_outbox(), "Held: placeholder")
-    finally:
-        store.close()
-    # What 1.12.x wrote before any redaction existed, put straight into the file.
-    with sqlite3.connect(tmp_path / "slack_bridge.sqlite3") as conn:
-        conn.execute("UPDATE runtime_state SET value_json=? WHERE key='socket_state'", (json.dumps("error"),))
-        conn.execute("INSERT OR REPLACE INTO runtime_state(key, value_json, updated_at) VALUES('last_socket_error', ?, 1)",
-                     (json.dumps(f"Illegal header value {printed}"),))
-        conn.execute("UPDATE inbox SET last_error=?", (f"Authorization: Bearer {token}",))
-        conn.execute("UPDATE outbox SET last_error=? WHERE state='failed'", (f"headers={{'Authorization': 'Bearer {token}'}}",))
-        conn.execute("UPDATE outbox SET last_error=? WHERE state='pending'", (f"Held: token {token} refused",))
-    payload = _read_status_route(_TokensApi(tmp_path, bot_token=token))
-    text = json.dumps(payload, ensure_ascii=False)
-    assert sorted(piece for piece in _fragments(token) if piece in text) == []
-    assert "[redacted]" in payload["last_socket_error"] and "[redacted]" in payload["last_delivery_error"]
-    assert payload["recent_problems"]["inbound"]["last_failed_error"]["text"] == "Authorization: Bearer [redacted]"
-    assert payload["held_reasons"][0]["reason"] == "token [redacted] refused"
-
-
-@pytest.mark.parametrize("text", ["channel_not_found", "Slack API error: invalid_auth", "ReadTimeout",
-                                  "not_in_channel: #ops-room", "Presence Host returned HTTP 503",
-                                  "missing Authorization header"])
-def test_ordinary_error_text_is_left_as_it_is(tmp_path, text) -> None:
-    from lib.redaction import redact
-    for words in (text, "Held: Ops room is paused", "Bearer token expected"):
-        assert redact(words, ("xoxb-synthetic-bot-token", "xapp-synthetic-app-token")) == words
-    store = BridgeStore(tmp_path)
-    try:
-        store.set_runtime(socket_state="error", last_socket_error=text, companion_pid=os.getpid())
-        store.enqueue_outbox(request_id="m", target="C09A", thread_ts="", chunks=("one",))
-        part = store.claim_outbox()
-        store.fail_outbox(part.row_id, part.lease_token, text, state="failed")
-    finally:
-        store.close()
-    payload = _read_status_route(_TokensApi(tmp_path))
-    assert payload["last_socket_error"] == text and payload["link"]["error"] == text
-    assert payload["recent_problems"]["outbound_text"]["last_failed_error"]["text"] == text
+# ---------- round 7: refused messages by their other parts, each item's own error ----------
 
 
 def _deliver(store: BridgeStore) -> None:
@@ -1501,57 +1317,3 @@ def test_a_held_message_with_an_old_problem_part_is_not_said_to_be_listed_above(
     items = attention_items({**status, **_quiet_route_payload()})
     assert [item["kind"] for item in items] == ["held"]  # no refused item is shown for it
     assert (items[0]["with_problem_parts"], items[0]["with_recent_problem_parts"]) == (1, 0)
-
-
-@pytest.mark.parametrize("first", ["200", "503"])
-def test_overlapping_host_checks_leave_the_published_capabilities_equal_to_the_adapters(tmp_path, first) -> None:
-    """Two discoveries in flight at once, one answered 200 and one 503, finishing in either order."""
-    import httpx
-    from lib.host_adapter import LoopbackPresenceHostAdapter
-    from lib.runtime import BridgeRuntime, _reactions_live
-
-    gates = {"200": asyncio.Event(), "503": asyncio.Event()}
-    started: list[str] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        answer = "200" if len(started) == 1 else "503"  # the first call is the start check (503 below)
-        if len(started) == 0:
-            started.append("start")
-            return httpx.Response(503, json={"ok": False})
-        started.append(answer)
-        await gates[answer].wait()
-        if answer == "503":
-            return httpx.Response(503, json={"ok": False})
-        # A Host bound by binding_id (no Places): the 503 then returns the adapter exactly to its state before.
-        return httpx.Response(200, json={"ok": True, "presence_delivery_version": 1,
-                                         "presence_reaction_context": 1, "presence_explicit_completion": 1})
-
-    async def run() -> dict:
-        http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        adapter = LoopbackPresenceHostAdapter(binding_id="9f4c2a7e1b8053d6c4e2a9187b06f5d3",
-                                              host_service_url="http://127.0.0.1:8767",
-                                              skill_token="skill-token", http_client=http)
-        store = BridgeStore(tmp_path)
-        try:
-            BridgeRuntime(store=store, slack=_Slack(), host=adapter, bot_user_id="U09OUROBOT1")
-            await adapter.discover_delivery_support()  # the start check: 503
-            ok = asyncio.create_task(adapter.discover_delivery_support())
-            await asyncio.sleep(0)
-            failed = asyncio.create_task(adapter.discover_delivery_support())
-            await asyncio.sleep(0)
-            assert started == ["start", "200", "503"]
-            second = "503" if first == "200" else "200"
-            gates[first].set()
-            await (ok if first == "200" else failed)
-            gates[second].set()
-            await asyncio.gather(ok, failed)
-            status = store.status()
-            return {"store": (status["reaction_context_state"], status["history_reporting_state"]),
-                    "adapter": ("available" if _reactions_live(adapter) else "update_required",
-                                adapter.delivery_reporting_status)}
-        finally:
-            store.close()
-            await http.aclose()
-
-    seen = asyncio.run(run())
-    assert seen["store"] == seen["adapter"], seen

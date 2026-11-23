@@ -8,7 +8,7 @@ split so secret scanners do not read them as real tokens; every value here is sy
 from __future__ import annotations
 
 import asyncio
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 import io
 import json
 import logging
@@ -22,10 +22,11 @@ import threading
 
 import pytest
 
+from lib.events import parse_socket_envelope
 from lib.redaction import MARK, install_log_redaction, redact
 from lib.runtime import OutboundWorker
 from lib.store import BridgeStore
-from test_status_contract import _read_status_route, _TokensApi
+from test_status_contract import _envelope, _load_daemon, _read_status_route, _TokensApi
 from test_workers_plugin import _Slack
 
 SKILL = Path(__file__).resolve().parents[1]
@@ -435,19 +436,435 @@ def test_a_receipt_conflict_ends_only_a_cleaned_older_report(tmp_path, monkeypat
         assert state == "pending" and "different receipt" in error  # a new report's conflict stays visible
 
 
-# ---------- plugin.py (runs in the Host process): the settings form's answers ----------
+# ---------- plugin.py (runs in the Host process): the settings form's answers (R9-3) ----------
 
-def test_a_token_pasted_into_the_settings_form_is_not_echoed_back(tmp_path) -> None:
+# Tokens joined to what precedes them, and not in this process's environment.
+UNDERSCORE_JOINED = "C09SYNTH01_" + BOT + "9182736450-5647382910-JoinedByUnderscore"
+DIRECTLY_APPENDED = "C09SYNTH01" + BOT + "9182736450-5647382910-AppendedDirectly"
+
+
+def _save_settings(tmp_path, body: dict) -> tuple[int, dict]:
     from test_workers_plugin import _http_request, _settings_route
-
-    pasted = BOT + "9182736450-5647382910-PastedIntoTheChannelField"
 
     async def run() -> tuple[int, dict]:
         handler, _methods, _fields = _settings_route(tmp_path)
-        body = json.dumps({"SLACK_NEW_ROOT_CHANNELS": pasted}).encode()
-        response = await handler(_http_request("POST", body))
+        response = await handler(_http_request("POST", json.dumps(body).encode()))
         return response.status_code, json.loads(response.body)
 
-    status, answer = asyncio.run(run())
-    assert status == 400 and "is not a Slack channel ID" in answer["error"], answer
-    assert "PastedIntoTheChannelField" not in answer["error"] and MARK in answer["error"]
+    return asyncio.run(run())
+
+
+@pytest.mark.parametrize("entry,position", [(BOT + "9182736450-5647382910-PastedIntoTheChannelField", 1),
+                                            ("C09SYNTH02 " + UNDERSCORE_JOINED, 2),
+                                            ("C09SYNTH02, C09SYNTH03 " + DIRECTLY_APPENDED, 3)])
+def test_a_rejected_channel_entry_is_named_by_position_never_echoed(tmp_path, monkeypatch, entry, position) -> None:
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+    status, answer = _save_settings(tmp_path, {"SLACK_NEW_ROOT_CHANNELS": entry})
+    assert status == 400 and answer["error"].startswith(f"SLACK_NEW_ROOT_CHANNELS: entry {position} is not a Slack channel ID")
+    for piece in ("9182736450", "Pasted", "Joined", "Appended", BOT):
+        assert piece not in answer["error"], answer
+
+
+def test_every_settings_save_error_is_value_free(tmp_path) -> None:
+    secret = "secret-" + "9182736450"
+    for body in ({"binding_id": "not-hex-" + secret}, {"SLACK_INBOUND_WORKERS": secret}):
+        status, answer = _save_settings(tmp_path, body)
+        assert status == 400 and secret not in answer["error"] and "9182736450" not in answer["error"], answer
+
+
+def test_valid_channel_ids_and_ordinary_labels_pass_unchanged(tmp_path, monkeypatch) -> None:
+    """Controls: a valid list saves as typed; ordinary labels, also with underscores or "app-", stay as they are."""
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    status, answer = _save_settings(tmp_path, {"SLACK_NEW_ROOT_CHANNELS": "C09SYNTH01, C09SYNTH02"})
+    assert status == 200 and answer["ok"] is True
+    for label in ("Northstar_Labs", "ops_room-2", "flexapp-team", "whatsapp-bridge", "xoxo-gossip", "C09SYNTH01"):
+        assert redact(label) == label
+
+
+@pytest.mark.parametrize("workspace,label", [("Northstar_" + BOT + "9182736450-5647382910-WorkspaceTail", "ouroboros-bot"),
+                                             ("Northstar Labs", "ops" + BOT + "9182736450-5647382910-LabelTail")])
+def test_a_token_joined_to_a_label_is_redacted_on_the_status_route(tmp_path, monkeypatch, workspace, label) -> None:
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
+    with closing(BridgeStore(tmp_path)) as store:
+        store.set_runtime(socket_state="connected", host_adapter_state="active", companion_pid=os.getpid(),
+                          reaction_context_state="available", history_reporting_state="supported",
+                          workspace_name=workspace, presence_identity=1,
+                          connector_identity={"sends_as": {"id": "U09OUROBOT1", "label": label, "kind": "bot"}})
+    payload = _read_status_route(_TokensApi(tmp_path))
+    text = json.dumps(payload)
+    for tail in ("WorkspaceTail", "LabelTail", "9182736450"):
+        assert tail not in text
+    assert payload["workspace_name"] in ("Northstar_" + MARK, "Northstar Labs")
+    assert payload["identity"]["sends_as"]["label"] in ("ops" + MARK, "ouroboros-bot")
+
+
+# ---------- Host report identity and text (R9-1, R9-2) ----------
+
+def _report_for(tmp_path, request_id: str, text: str, state: str, error: str = "") -> dict:
+    with closing(BridgeStore(tmp_path)) as store:
+        item = _failed_part(store, request_id, text)
+        return item.delivery_report(state, result={"ts": "1700000000.000100", "channel": "C09SYNTH01"}
+                                    if state == "delivered" else None, error=error)
+
+
+def test_report_identity_passes_byte_identical(tmp_path, monkeypatch) -> None:
+    from lib.redaction import redact_report
+
+    monkeypatch.setenv("SLACK_BOT_TOKEN", TOKENS["newline"])
+    first = _report_for(tmp_path / "a", "synthetic-req?ticket=101", "one", "failed", error="channel_not_found")
+    second = _report_for(tmp_path / "b", "synthetic-req?ticket=102", "two", "failed", error="channel_not_found")
+    assert (first["delivery_id"], second["delivery_id"]) == ("synthetic-req?ticket=101", "synthetic-req?ticket=102")
+    shaped = {"schema_version": 1, "delivery_id": "d?token=abc123def456", "part_id": "0", "state": "failed",
+              "provider": "slack", "account_id": "T09SYNTH01?sig=abcdef012345", "conversation_id": "C09?ticket=777777",
+              "thread_id": "1700000000.000100", "text": "", "format": "mrkdwn",
+              "message": {"provider_message_id": "1700000000.000200", "requested_target": "C09?ticket=888888",
+                          "error": "Bearer abcdef0123456789"},
+              "origin": {"kind": "tool", "task_id": "task?ticket=999999", "source_event_id": "Ev?token=123456"}}
+    clean = redact_report(shaped)
+    assert clean["message"]["error"] == "Bearer " + MARK
+    assert {**clean, "message": {**clean["message"], "error": shaped["message"]["error"]}} == shaped
+
+
+class _CoreReceiver:
+    """A fake /presence/delivery keyed like the core (presence_delivery._key: skill, account_id, delivery_id, part_id,
+    state), with the core's digest of the whole payload: the same key with other facts is a 409 conflict."""
+
+    def __init__(self):
+        self.index, self.conflicts = {}, []
+
+    def handler(self, request):
+        import hashlib
+        import httpx
+        payload = json.loads(request.content)
+        key = ("slack-bridge", *(payload[name] for name in ("account_id", "delivery_id", "part_id", "state")))
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if key in self.index and self.index[key] != digest:
+            self.conflicts.append(key)
+            return httpx.Response(409, json={"ok": False, "error": "presence delivery identity already has different facts",
+                                             "code": "presence_receipt_conflict", "disposition": "rejected"})
+        self.index[key] = digest
+        return httpx.Response(200, json={"ok": True, "recorded": True})
+
+
+def _dispatch_all(tmp_path, reports: list[dict], receiver) -> list[tuple]:
+    import httpx
+    from lib.host_adapter import LoopbackPresenceHostAdapter
+
+    async def run() -> list[tuple]:
+        http = httpx.AsyncClient(transport=httpx.MockTransport(receiver))
+        host = LoopbackPresenceHostAdapter(binding_id="9f4c2a7e1b8053d6c4e2a9187b06f5d3",
+                                           host_service_url="http://127.0.0.1:8767", skill_token="skill-token",
+                                           http_client=http)
+        try:
+            with closing(BridgeStore(tmp_path)) as store:
+                for index, report in enumerate(reports):
+                    item = _failed_part(store, report["delivery_id"], report["text"])
+                    store.fail_outbox(item.row_id, item.lease_token, "placeholder", report_payload=report)
+                while (claimed := store.claim_report()) is not None:
+                    await OutboundWorker(store, _Slack(), host)._report(claimed)
+                with sqlite3.connect(store.path) as conn:
+                    return conn.execute("SELECT request_id, report_state, report_error FROM outbox ORDER BY id").fetchall()
+        finally:
+            await http.aclose()
+
+    return asyncio.run(run())
+
+
+def _legacy(request_id: str, text: str, error: str, state: str = "failed") -> dict:
+    """The exact payload 1.12.2 built and queued, credential included."""
+    return {"schema_version": 1, "delivery_id": request_id, "part_id": "0", "state": state, "provider": "slack",
+            "account_id": "T09SYNTH01", "conversation_id": "C09SYNTH01", "thread_id": "", "text": text,
+            "format": "mrkdwn", "message": {"provider_message_id": "", "requested_target": "C09SYNTH01",
+                                            "target_resolved": False, "chunk_count": 1, "error": error},
+            "origin": {"kind": "automatic", "source_event_id": "EvSYNTH1"}}
+
+
+def test_an_upgrade_replay_records_each_report_under_its_own_key(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("SLACK_BOT_TOKEN", TOKENS["newline"])
+    error = "Authorization: " + TOKENS["newline"]
+    receiver = _CoreReceiver()
+    rows = _dispatch_all(tmp_path, [_legacy("synthetic-req?ticket=101", "one", error),
+                                    _legacy("synthetic-req?ticket=102", "two", error)], receiver.handler)
+    assert sorted(key[2] for key in receiver.index) == ["synthetic-req?ticket=101", "synthetic-req?ticket=102"]
+    assert receiver.conflicts == [] and [row[1] for row in rows] == ["acked", "acked"]
+
+
+def test_a_conflict_on_the_same_key_counts_as_recorded_only_for_a_cleaned_copy(tmp_path, monkeypatch) -> None:
+    """The Host recorded 101's original before its answer was lost; the cleaned copy then conflicts on the same key."""
+    import hashlib
+    monkeypatch.setenv("SLACK_BOT_TOKEN", TOKENS["newline"])
+    error = "Authorization: " + TOKENS["newline"]
+    receiver = _CoreReceiver()
+    original = _legacy("synthetic-req?ticket=101", "one", error)
+    receiver.index[("slack-bridge", "T09SYNTH01", "synthetic-req?ticket=101", "0", "failed")] = hashlib.sha256(
+        json.dumps(original, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    rows = _dispatch_all(tmp_path, [original, _legacy("synthetic-req?ticket=102", "two", error)], receiver.handler)
+    assert [key[2] for key in receiver.conflicts] == ["synthetic-req?ticket=101"]
+    assert [row[1] for row in rows] == ["acked", "acked"]
+    assert ("slack-bridge", "T09SYNTH01", "synthetic-req?ticket=102", "0", "failed") in receiver.index
+
+
+def test_any_other_409_stays_pending(tmp_path, monkeypatch) -> None:
+    """Control: a 409 that is not presence_receipt_conflict leaves even a cleaned report pending."""
+    import httpx
+    monkeypatch.setenv("SLACK_BOT_TOKEN", TOKENS["newline"])
+    rows = _dispatch_all(tmp_path, [_legacy("synthetic-req?ticket=101", "one", "Authorization: " + TOKENS["newline"])],
+                         lambda _request: httpx.Response(409, json={"ok": False, "code": "presence_origin_mismatch",
+                                                                    "disposition": "rejected"}))
+    assert rows[0][1] == "pending" and "HTTP 409" in rows[0][2]
+
+
+PASTED = "notes: Bearer " + "abcdef" + "0123456789 then " + BOT + "9182736450-5647382910-InTheText"
+
+
+@pytest.mark.parametrize("state,exact", [("delivered", True), ("accepted", True), ("failed", False), ("uncertain", False)])
+def test_report_text_stays_exact_only_where_the_core_compares_it(tmp_path, monkeypatch, state, exact) -> None:
+    from lib.redaction import redact_report
+
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    built = (_report_for(tmp_path, "synthetic-text", PASTED, state) if state != "accepted"
+             else redact_report(_legacy("synthetic-text", PASTED, "", state="accepted")))
+    assert (built["text"] == PASTED) is exact
+    if not exact:
+        assert built["text"] == "notes: Bearer " + MARK + " then " + MARK
+    assert redact_report(built) == built  # dispatch cleans again and changes nothing
+
+
+@pytest.mark.parametrize("state,exact", [("delivered", True), ("failed", False), ("uncertain", False)])
+def test_a_reopened_legacy_report_is_cleaned_by_its_outcome(tmp_path, monkeypatch, state, exact) -> None:
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    received = []
+
+    def receiver(request):
+        import httpx
+        received.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "recorded": True})
+
+    _dispatch_all(tmp_path, [_legacy("synthetic-legacy", PASTED, "", state=state)], receiver)
+    assert (received[0]["text"] == PASTED) is exact
+    assert ("InTheText" in received[0]["text"]) is exact
+
+
+# ---------- moved from test_status_contract.py (rounds 7 and 7b): error text, logs and reports ----------
+
+_ILLEGAL = {"newline": "\n", "carriage_return": "\r"}
+
+
+def _synthetic_token(illegal: str) -> str:
+    # Split so secret scanners never read this synthetic value as a real Slack token.
+    return "xox" + f"b-9182736450-5647382910-QwErTyUiOpAsDf{illegal}ZxCvBnMmLkJhGf"
+
+
+def _fragments(token: str) -> set[str]:
+    """Every run of 6 characters of the token that does not cross its illegal character."""
+    runs = [run for run in token.replace("\n", "\0").replace("\r", "\0").split("\0") if run]
+    return {run[i:i + 6] for run in runs for i in range(len(run) - 5)}
+
+
+@asynccontextmanager
+async def _local_header_client():
+    """Real httpx/h11 against a local listener, shared by the store and log regressions."""
+    import httpx
+    from lib.slack_api import SlackClient
+
+    class _Local(httpx.AsyncHTTPTransport):
+        # The real transport, pointed at a local listener: h11 refuses the header before anything is sent.
+        async def handle_async_request(self, request):
+            request.url = request.url.copy_with(scheme="http", host="127.0.0.1", port=_Local.port)
+            return await super().handle_async_request(request)
+
+    class _RealClient(SlackClient):
+        def __init__(self, bot, app):
+            super().__init__(bot, app, http_client=httpx.AsyncClient(transport=_Local(), trust_env=False))
+
+    server = await asyncio.start_server(lambda _r, w: w.close(), "127.0.0.1", 0)
+    _Local.port = server.sockets[0].getsockname()[1]
+    try:
+        yield _RealClient
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize("illegal", sorted(_ILLEGAL))
+def test_a_token_in_a_real_http_error_never_reaches_the_store_or_the_status(tmp_path, monkeypatch, illegal) -> None:
+    """The real SlackClient's request fails in httpx on the token's illegal character; the daemon stores the error."""
+    import httpx
+
+    token = _synthetic_token(_ILLEGAL[illegal])
+    daemon = _load_daemon()
+
+    async def run() -> None:
+        async with _local_header_client() as client:
+            monkeypatch.setattr(daemon, "SlackClient", client)
+            monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler", lambda *_a: None)
+            await daemon._run()
+
+    monkeypatch.setenv("OUROBOROS_SKILL_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("SLACK_BOT_TOKEN", token)
+    monkeypatch.setenv("SLACK_APP_TOKEN", "xapp" + "-1-A09SYNTH-0000000000-abcdefabcdef")
+    with pytest.raises(httpx.LocalProtocolError) as raised:
+        asyncio.run(run())
+    assert any(piece in str(raised.value) for piece in _fragments(token))  # the library did print the token
+    store = BridgeStore(tmp_path)
+    try:
+        stored = store.runtime_value("last_socket_error")
+    finally:
+        store.close()
+    payload = _read_status_route(_TokensApi(tmp_path, bot_token=token))
+    for text in (stored, json.dumps(payload, ensure_ascii=False), json.dumps(payload)):
+        leaked = sorted(piece for piece in _fragments(token) if piece in text)
+        assert leaked == [], (leaked, text)
+    assert stored.startswith("Illegal header value b'Bearer [redacted]")
+    assert payload["link"]["error"] == stored and payload["attention"][0]["error"] == {"text": stored}
+
+
+@pytest.mark.parametrize("illegal", sorted(_ILLEGAL))
+def test_real_http_error_is_clean_in_all_bridge_logs_and_exception_text(monkeypatch, caplog, illegal) -> None:
+    import logging
+    import httpx
+
+    token = _synthetic_token(_ILLEGAL[illegal])
+    monkeypatch.setenv("SLACK_BOT_TOKEN", token)
+    # A non-shaped configured value proves logs use the same configured-secrets source too.
+    app = "fixture-configured-app\rOtherFixtureSecret"
+    monkeypatch.setenv("SLACK_APP_TOKEN", app)
+    caplog.set_level(logging.DEBUG)
+    daemon = _load_daemon()
+
+    async def run():
+        async with _local_header_client() as client:
+            slack = client(token, "xapp" + "-fixture")
+            try:
+                await slack.auth_test()
+            except httpx.LocalProtocolError as exc:
+                assert any(piece in str(exc) for piece in _fragments(token))
+                for name in ("lib.runtime", "lib.socket_mode", "slack_bridge"):
+                    logger = logging.getLogger(name)
+                    logger.warning("Request failed: %s; app=%r", exc, app)
+                    logger.debug("Request traceback", exc_info=True)
+                    logger.exception("Request failed with traceback: %s", exc)
+                logging.getLogger("lib.socket_mode").warning("channel_not_found")
+            finally:
+                await slack._http.aclose()
+
+    monkeypatch.setattr(daemon, "_run", run)
+    # Use the actual daemon entry point: its configured handlers also serve httpcore DEBUG records.
+    filters_before = {h: list(h.filters) for h in logging.getLogger().handlers}
+    try:
+        daemon.main()
+        output = caplog.text
+        assert "LocalProtocolError" in output and "Traceback" in output
+        assert "channel_not_found" in output
+        assert {"lib.runtime", "lib.socket_mode", "slack_bridge"} <= {r.name for r in caplog.records}
+        for secret in (token, app):
+            assert not sorted(piece for piece in _fragments(secret) if piece in output)
+        for record in caplog.records:
+            rendered = logging.Formatter("%(message)s").format(record)
+            assert not any(piece in rendered for piece in _fragments(token) | _fragments(app))
+    finally:
+        for handler, filters in filters_before.items():
+            handler.filters[:] = filters
+
+
+@pytest.mark.parametrize("kind", ("delivery", "reaction"))
+def test_report_error_is_clean_when_stored_and_handed_to_host(tmp_path, monkeypatch, kind) -> None:
+    import dataclasses
+
+    token = _synthetic_token("\n")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", token)
+    app = "fixture-configured-app\rOtherFixtureSecret"
+    monkeypatch.setenv("SLACK_APP_TOKEN", app)
+
+    class Host:
+        explicit_completion = 1
+
+        def __init__(self):
+            self.payloads = []
+
+        async def report_delivery(self, payload):
+            self.payloads.append(payload)
+
+    async def run():
+        host = Host()
+        with closing(BridgeStore(tmp_path)) as store:
+            for index, error in enumerate((f"Illegal header value {f'Bearer {token}'.encode()!r}; {app!r}",
+                                           "channel_not_found")):
+                if kind == "delivery":
+                    store.enqueue_outbox(request_id=f"r{index}", target="C09SYNTH01", thread_ts="",
+                                         chunks=("Synthetic reply",), delivery_reporting_version=1)
+                else:
+                    store.enqueue_mutation(request_id=f"r{index}", operation="reaction_add",
+                                           payload={"channel": "C09SYNTH01", "ts": "1.0", "name": "eyes"},
+                                           delivery_reporting_version=1)
+                item = dataclasses.replace(store.claim_outbox(), provider_account_id="T09SYNTH01")
+                report = (item.delivery_report if kind == "delivery" else item.reaction_report)("failed", error=error)
+                store.fail_outbox(item.row_id, item.lease_token, error, report_payload=report)
+                with sqlite3.connect(tmp_path / "slack_bridge.sqlite3") as conn:
+                    saved = json.loads(conn.execute("SELECT report_payload_json FROM outbox WHERE id=?",
+                                                    (item.row_id,)).fetchone()[0])
+                await OutboundWorker(store, _Slack(), host)._report(store.claim_report())
+                assert saved == host.payloads[-1] == report
+                for payload in (saved, host.payloads[-1]):
+                    for text in (json.dumps(payload), json.dumps(payload, ensure_ascii=False)):
+                        assert not any(piece in text for piece in _fragments(token) | _fragments(app))
+                assert saved["message"]["error"] == ("channel_not_found" if index else
+                                                       "Illegal header value b'Bearer [redacted]'; '[redacted]'")
+
+    asyncio.run(run())
+
+
+def test_records_of_an_older_version_holding_a_token_come_out_clean(tmp_path) -> None:
+    token = _synthetic_token("\n")
+    printed = repr(f"Bearer {token}".encode())  # how a header refusal prints it, with "\\n"
+    store = BridgeStore(tmp_path)
+    try:
+        store.set_runtime(socket_state="connected", host_adapter_state="active", companion_pid=os.getpid(),
+                          reaction_context_state="available", history_reporting_state="supported")
+        raw = _envelope(1)
+        store.ingest_envelope(raw, parse_socket_envelope(raw, bot_user_id="U_BOT"))
+        event = store.claim_inbox()
+        store.fail_inbox(event.row_id, event.lease_token, "placeholder")
+        store.enqueue_outbox(request_id="old", target="C09A", thread_ts="", chunks=("one",))
+        part = store.claim_outbox()
+        store.fail_outbox(part.row_id, part.lease_token, "placeholder", state="failed")
+        store.enqueue_outbox(request_id="held", target="C09B", thread_ts="", chunks=("two",))
+        store.hold_outbox(store.claim_outbox(), "Held: placeholder")
+    finally:
+        store.close()
+    # What 1.12.x wrote before any redaction existed, put straight into the file.
+    with sqlite3.connect(tmp_path / "slack_bridge.sqlite3") as conn:
+        conn.execute("UPDATE runtime_state SET value_json=? WHERE key='socket_state'", (json.dumps("error"),))
+        conn.execute("INSERT OR REPLACE INTO runtime_state(key, value_json, updated_at) VALUES('last_socket_error', ?, 1)",
+                     (json.dumps(f"Illegal header value {printed}"),))
+        conn.execute("UPDATE inbox SET last_error=?", (f"Authorization: Bearer {token}",))
+        conn.execute("UPDATE outbox SET last_error=? WHERE state='failed'", (f"headers={{'Authorization': 'Bearer {token}'}}",))
+        conn.execute("UPDATE outbox SET last_error=? WHERE state='pending'", (f"Held: token {token} refused",))
+    payload = _read_status_route(_TokensApi(tmp_path, bot_token=token))
+    text = json.dumps(payload, ensure_ascii=False)
+    assert sorted(piece for piece in _fragments(token) if piece in text) == []
+    assert "[redacted]" in payload["last_socket_error"] and "[redacted]" in payload["last_delivery_error"]
+    assert payload["recent_problems"]["inbound"]["last_failed_error"]["text"] == "Authorization: Bearer [redacted]"
+    assert payload["held_reasons"][0]["reason"] == "token [redacted] refused"
+
+
+@pytest.mark.parametrize("text", ["channel_not_found", "Slack API error: invalid_auth", "ReadTimeout",
+                                  "not_in_channel: #ops-room", "Presence Host returned HTTP 503",
+                                  "missing Authorization header"])
+def test_ordinary_error_text_is_left_as_it_is(tmp_path, text) -> None:
+    from lib.redaction import redact
+    for words in (text, "Held: Ops room is paused", "Bearer token expected"):
+        assert redact(words, (BOT + "synthetic-bot-token", APP + "synthetic-app-token")) == words
+    store = BridgeStore(tmp_path)
+    try:
+        store.set_runtime(socket_state="error", last_socket_error=text, companion_pid=os.getpid())
+        store.enqueue_outbox(request_id="m", target="C09A", thread_ts="", chunks=("one",))
+        part = store.claim_outbox()
+        store.fail_outbox(part.row_id, part.lease_token, text, state="failed")
+    finally:
+        store.close()
+    payload = _read_status_route(_TokensApi(tmp_path))
+    assert payload["last_socket_error"] == text and payload["link"]["error"] == text
+    assert payload["recent_problems"]["outbound_text"]["last_failed_error"]["text"] == text

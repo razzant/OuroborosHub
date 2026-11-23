@@ -1562,6 +1562,30 @@ class BridgeStore:
                 )
             db.commit()
 
+    def finish_companion(self, pid: int, **values: Any) -> bool:
+        """An exiting companion's last write: ``values`` (its final socket state and error) and clearing its PID, in
+        one transaction and only while the stored PID is still its own (one keyed lookup). A successor that already
+        wrote its PID keeps its state; nothing is written then."""
+        values = {key: redact(value) if key in _REDACTED_RUNTIME_KEYS and isinstance(value, str) else value
+                  for key, value in values.items()}
+        now = time.time()
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT value_json FROM runtime_state WHERE key='companion_pid'").fetchone()
+            if row is None or row[0] != json.dumps(pid, ensure_ascii=False):
+                db.commit()
+                return False
+            for key, value in {**values, "companion_pid": None}.items():
+                db.execute(
+                    """
+                    INSERT INTO runtime_state(key, value_json, updated_at) VALUES(?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at
+                    """,
+                    (str(key), json.dumps(value, ensure_ascii=False), now),
+                )
+            db.commit()
+        return True
+
     def clear_runtime_if_equal(self, key: str, expected: Any) -> bool:
         """Clear ``key`` only while it still holds ``expected``; an exiting daemon never erases a newer one's PID."""
         with self._connect() as db:
@@ -1634,6 +1658,15 @@ class BridgeStore:
                         AND failed_n > 0 THEN 1 ELSE 0 END), 0) AS msg_failed,
                     COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n = 0 AND uncertain_n = 0
                         AND failed_n = 0 THEN 1 ELSE 0 END), 0) AS msg_delivered,
+                    -- The newest outcome time among the messages each class above counts (not of any part).
+                    MAX(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n = 0 AND uncertain_n > 0
+                        THEN last_uncertain_at ELSE NULL END) AS msg_uncertain_last_at,
+                    MAX(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n = 0 AND uncertain_n = 0 AND failed_n > 0
+                        THEN last_failed_at ELSE NULL END) AS msg_failed_last_at,
+                    COALESCE(SUM(CASE WHEN recent_f = 1 AND queued_n > 0 AND delivered_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_failed_queued_partly,
+                    COALESCE(SUM(CASE WHEN recent_u = 1 AND queued_n > 0 AND delivered_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_uncertain_queued_partly,
                     COALESCE(SUM(CASE WHEN leased_n > 0 AND problem_n > 0 THEN 1 ELSE 0 END), 0) AS msg_leased_problem,
                     COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n > 0 AND problem_n > 0 THEN 1 ELSE 0 END), 0)
                         AS msg_held_problem,
@@ -1944,6 +1977,9 @@ class BridgeStore:
                     "failed_messages_in_parts": int(text_row["recent_failed_in_parts"]),
                     "uncertain_messages_in_parts": int(text_row["recent_uncertain_in_parts"]),
                     "uncertain_messages_with_refused_part": int(text_row["recent_uncertain_with_failed"]),
+                    # Of the still-queued ones, those that also already have a part in the conversation.
+                    "failed_messages_still_queued_partly_delivered": int(text_row["recent_failed_queued_partly"]),
+                    "uncertain_messages_still_queued_partly_delivered": int(text_row["recent_uncertain_queued_partly"]),
                     "last_failed_at": outbox_prob.get(("text", "failed"), (0, None))[1],
                     "last_uncertain_at": outbox_prob.get(("text", "uncertain"), (0, None))[1],
                     **errors["outbound_text"],
@@ -1971,6 +2007,12 @@ class BridgeStore:
                 "delivered": int(text_row["msg_delivered"]),
                 "failed": int(text_row["msg_failed"]),
                 "uncertain": int(text_row["msg_uncertain"]),
+            },
+            # When the newest message of each final class got its outcome: the totals' "last" belongs to the class.
+            "outbound_messages_last_at": {
+                "failed": _iso_z(float(text_row["msg_failed_last_at"])) if text_row["msg_failed_last_at"] else None,
+                "uncertain": (_iso_z(float(text_row["msg_uncertain_last_at"]))
+                              if text_row["msg_uncertain_last_at"] else None),
             },
             # Of the waiting, held and sending messages above, those that already have a part not delivered or with
             # an unknown outcome: one message, some parts final, others still queued.

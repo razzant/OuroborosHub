@@ -399,3 +399,22 @@ def test_a_host_check_that_failed_for_now_is_not_a_missing_place():
     assert (unanswered["kind"], unanswered.get("host_unanswered")) == ("link", True)
     answered = attention_items(_quiet(link=inactive, history_reporting_state="unsupported"))[0]
     assert "host_unanswered" not in answered  # Ouroboros answered and confirmed no place: the setup advice stays
+
+
+def test_the_newest_error_is_chosen_by_instant_not_by_string():
+    """R9-9: the store writes "10:00:00Z" for a whole second and "10:00:00.500Z" otherwise; as strings the first sorts
+    after the second, as instants it is earlier."""
+    from lib.status_summary import _latest, _newest_error, attention_items
+
+    whole, later = "2026-11-23T10:00:00Z", "2026-11-23T10:00:00.500Z"
+    assert _latest(whole, later) == later and _latest(later, whole) == later
+    assert _newest_error({"at": whole, "text": "earlier"}, {"at": later, "text": "later"})["text"] == "later"
+    recent = {"outbound_text": {"failed_messages": 1, "failed": 1, "last_failed_at": whole,
+                                "last_failed_error": {"at": whole, "state": "failed", "text": "channel_not_found"}},
+              "mutations": {"failed": 1, "last_failed_at": later,
+                            "last_failed_error": {"at": later, "state": "failed", "text": "message_not_found",
+                                                  "operation": "update_message"}},
+              "inbound": {}}
+    item = next(item for item in attention_items({"recent_problems": recent, "link": {"state": "connected",
+                "detail": "ok", "companion_alive": True}}) if item["kind"] == "not_delivered")
+    assert item["at"] == later and item["error"]["text"] == "message_not_found"

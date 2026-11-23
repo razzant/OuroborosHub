@@ -789,13 +789,20 @@ var TransportKit = (function () {
         var single = messages - parted + actions;
         var total = messages + actions;
         var alone = [queued, settled, wholeParted, single].filter(function (n) { return n > 0; }).length === 1;
-        function partOf(n, rest) {
-            if (alone) return (total === 1 ? 'Part of it was refused and is not retried; its' : 'Part of each was refused and is not retried; their')
-                + ' other parts ' + rest;
-            return someOf(n) + ' had a part refused, which is not retried; ' + (n === 1 ? 'its' : 'their') + ' other parts ' + rest;
+        function partOf(n, rest, some) {
+            var whose = alone ? (total === 1 ? 'its' : 'their') : (n === 1 ? 'its' : 'their');
+            return (alone ? (total === 1 ? 'Part of it was refused and is not retried; ' : 'Part of each was refused and is not retried; ')
+                : someOf(n) + ' had a part refused, which is not retried; ') + (some ? 'some of ' : '') + whose + ' other parts ' + rest;
         }
         var lines = [];
-        if (queued) lines.push(partOf(queued, 'are still queued and go out by themselves.'));
+        // Of the still-queued ones, those that also have a part in the conversation (absent in an older payload).
+        var partly = Math.min(queued, count(item.queued_partly_delivered));
+        if (queued && partly === queued) {
+            lines.push(partOf(queued, 'are already in the conversation, and the rest are still queued or held and go out by themselves.', true));
+        } else if (queued) {
+            lines.push(partOf(queued, 'are still queued and go out by themselves.'));
+            if (partly) lines.push((partly === 1 ? '1 of these also has' : num(partly) + ' of these also have') + ' parts already in the conversation.');
+        }
         if (settled) lines.push(partOf(settled, 'were delivered or have an unknown outcome.'));
         if (wholeParted) lines.push((alone ? (total === 1 ? 'It was' : 'They were') : someOf(wholeParted) + (wholeParted === 1 ? ' was' : ' were'))
             + ' sent in several parts, and every part was refused; none is retried.');
@@ -806,6 +813,14 @@ var TransportKit = (function () {
             lines.push({ strong: parted ? 'For the others, fix the cause,' : 'Fix the cause,', text: 'then ask Ouroboros to send again if needed.' });
         }
         return lines;
+    }
+
+    /* The time beside a count of messages belongs to the messages counted (outbound_messages_last_at). An older
+       payload has only the newest part of any message, so it is labelled as that. */
+    function classTime(data, state, partAt, now) {
+        var last = data.outbound_messages_last_at;
+        if (last && typeof last === 'object') return last[state] ? ', last ' + K.clock(last[state], now) : '';
+        return partAt ? ', last part outcome ' + K.clock(partAt, now) : '';
     }
 
     /* Messages work as usual only while the link is up and the bridge passes events on. */
@@ -900,9 +915,9 @@ var TransportKit = (function () {
                 // One message can be queued and already have a refused or unknown part (its own item says which).
                 { text: mixedQueued ? num(mixedQueued) + ' of the queued ones with a part not delivered or unknown' : '', dim: true },
                 { text: count(messages.failed) ? num(count(messages.failed)) + ' not delivered'
-                    + (text.last_failed_at ? ', last ' + K.clock(text.last_failed_at, now) : '') : '', dim: true },
+                    + classTime(data, 'failed', text.last_failed_at, now) : '', dim: true },
                 { text: count(messages.uncertain) ? num(count(messages.uncertain)) + ' outcome unknown'
-                    + (text.last_uncertain_at ? ', last ' + K.clock(text.last_uncertain_at, now) : '') : '', dim: true }
+                    + classTime(data, 'uncertain', text.last_uncertain_at, now) : '', dim: true }
             ])]);
             var actions = count(data.mutations_delivered) + count(data.mutations_pending) + count(data.mutations_leased)
                 + count(data.mutations_failed) + count(data.mutations_uncertain);

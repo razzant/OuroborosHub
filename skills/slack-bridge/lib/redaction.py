@@ -30,8 +30,11 @@ _TOKEN_KEYS = ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN")
 # One character of a printed credential: an escape sequence, a real control character (a token with an illegal
 # newline printed raw), or a printable non-separator. A credential continues through all of them.
 _CHAR = r"\\x[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}|\\[^\s'\"]|[\x00-\x1f\x7f]"
-# A Slack token and whatever escaped or control characters follow it inside one printed value.
-_TOKEN_SHAPE = re.compile(r"\b(?:xox[a-z]|xapp)-(?:" + _CHAR + r"|[A-Za-z0-9._~+/=-])+")
+# A Slack token and whatever escaped or control characters follow it inside one printed value. It is found anywhere,
+# also right after an underscore or a channel ID ("C09A_xoxb-…", "C09Axoxb-…"); only the real prefixes count
+# (bot, user, app, refresh, config, client and cookie tokens), and an app token needs its digit, so words such as
+# "flexapp-team" stay.
+_TOKEN_SHAPE = re.compile(r"(?:xox[a-eprs]-|xapp-\d)(?:" + _CHAR + r"|[A-Za-z0-9._~+/=-])*")
 # A credential-like value after a prefix: everything up to a quote, separator or space, including escaped and
 # control characters and an earlier ``[redacted]``, so no tail of a cut credential stays. Six or more characters
 # (the fragment size that matters); "Bearer token" stays a phrase.
@@ -186,20 +189,54 @@ def redact_status(payload: MutableMapping[str, Any], secrets: Iterable[str] = ()
     _redact_tree(payload, configured_secrets(secrets))
 
 
-def redact_report(payload: Any) -> Any:
-    """A Host report with every free text cleaned (the error, notes, provider labels) except ``text``; IDs, part
-    IDs, states and ordinary text unchanged.
+# Identity and routing fields of a Host report pass byte-identical. The Host keys a receipt by (skill, account_id,
+# delivery_id, part_id, state) (core presence_delivery._key); changing one would merge two receipts or split one.
+# These values came from the Host or from Slack's own answers, so returning them exposes nothing new.
+_REPORT_IDENTITY = frozenset({
+    "schema_version", "delivery_id", "part_id", "request_id", "state", "provider", "account_id", "conversation_id",
+    "channel", "thread_id", "thread_ts", "ts", "format", "origin", "requested_target", "target_resolved", "chunk_count",
+    "output_ref", "kind", "method", "operation", "resolution", "effect", "type",
+})
+# The Host compares a report's text with the turn's reply only for parts that arrived (core presence_runner
+# ``_turn_sends``: states "delivered" and "accepted"); there it must stay exact.
+_TEXT_MATCHED = frozenset({"delivered", "accepted"})
 
-    ``text`` is the copy of what was posted to Slack, which is never changed: the Host matches it against the
-    turn's own reply to tell a delivered reply from a partly confirmed one, so a cleaned copy would read as a send
-    without a receipt. Applied when a report is built and again when a stored one is dispatched, so a report
-    queued by an older version leaves clean too. Returns a copy; the stored row is not rewritten.
+
+def _identity(key: Any) -> bool:
+    key = str(key)
+    return key in _REPORT_IDENTITY or key.endswith(("_id", "_ts"))
+
+
+def _clean_report_tree(value: Any, secrets: tuple[str, ...]) -> Any:
+    if isinstance(value, str):
+        return redact(value, secrets)
+    if isinstance(value, MutableMapping):
+        for key in list(value):
+            if not _identity(key):
+                value[key] = _clean_report_tree(value[key], secrets)
+        return value
+    if isinstance(value, list):
+        value[:] = [_clean_report_tree(item, secrets) for item in value]
+    return value
+
+
+def redact_report(payload: Any) -> Any:
+    """A Host report with its free text cleaned (the error, notes, labels); identity and routing unchanged.
+
+    ``text`` stays exact for a delivered or accepted part, where the Host matches it against the turn's reply; for a
+    failed or uncertain part (nothing or nothing confirmed reached Slack) it is cleaned like any free text. Applied
+    when a report is built and again when a stored one is dispatched, so a report queued by an older version leaves
+    clean too. Returns a copy; the stored row is not rewritten. Cleaning twice changes nothing.
     """
     if not isinstance(payload, Mapping):
         return payload
     secrets = configured_secrets()
     clean = copy.deepcopy(dict(payload))
+    matched = clean.get("state") in _TEXT_MATCHED
     for key in clean:
-        if key != "text":
-            clean[key] = _redact_tree(clean[key], secrets)
+        if key == "text":
+            if not matched and isinstance(clean[key], str):
+                clean[key] = redact(clean[key], secrets)
+        elif not _identity(key):
+            clean[key] = _clean_report_tree(clean[key], secrets)
     return clean

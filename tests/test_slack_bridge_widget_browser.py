@@ -192,6 +192,29 @@ def seed(scenario, root):
             second = store.claim_outbox()
             store.fail_outbox(second.row_id, second.lease_token, 'ReadTimeout', state='uncertain')
             store.hold_outbox(store.claim_outbox(), 'Held: Ops room is paused')
+        if scenario == 'underscore_label':  # a token joined by an underscore, not in this process's environment
+            store.set_runtime(workspace_name='Northstar_' + 'xox' + 'b-9182736450-5647382910-WorkspaceTail',
+                              workspace_id='T09SYNTH01')
+        if scenario == 'delivered_refused_held':  # one message in three parts: delivered, refused now, held
+            store.enqueue_outbox(request_id='synthetic-three-refused', target='C09SYNTH01', thread_ts='',
+                                 chunks=('one', 'two', 'three'))
+            first = store.claim_outbox()
+            store.complete_outbox(first.row_id, first.lease_token, provider_message_ts='1700000000.000100')
+            second = store.claim_outbox()
+            store.fail_outbox(second.row_id, second.lease_token, 'msg_blocked', state='failed')
+            store.hold_outbox(store.claim_outbox(), 'Held: Ops room is paused')
+        if scenario == 'totals_date':  # refused a week ago; another refused and unknown today (counted as unknown)
+            import sqlite3
+            import time as _time
+            store.enqueue_outbox(request_id='synthetic-last-week', target='C09SYNTH01', thread_ts='', chunks=('one',))
+            old = store.claim_outbox()
+            store.fail_outbox(old.row_id, old.lease_token, 'channel_not_found', state='failed')
+            with sqlite3.connect(store.path) as conn:
+                conn.execute('UPDATE outbox SET updated_at=? WHERE id=?', (_time.time() - 7 * 86400, old.row_id))
+            store.enqueue_outbox(request_id='synthetic-today', target='C09SYNTH02', thread_ts='', chunks=('one', 'two'))
+            for state in ('failed', 'uncertain'):
+                part = store.claim_outbox()
+                store.fail_outbox(part.row_id, part.lease_token, 'ReadTimeout', state=state)
         if scenario == 'reactions_unbound':  # Ouroboros answered: no place confirmed, reactions need an update
             store.set_runtime(host_adapter_state='missing_binding_id', history_reporting_state='unsupported',
                               reaction_context_state='update_required')
@@ -512,6 +535,16 @@ DEGRADED = [
       'Part by part: wait until the queued or held parts are sent',
       'check parts with an unknown outcome in Slack itself', '(listed above)'],
      ['repeat it', 'send again if needed', 'send only the missing parts']),
+    ('delivered_refused_held', 'Connected · 1 message not delivered · 1 more needs attention',
+     ['some of its other parts are already in the conversation, and the rest are still queued or held',
+      'Fix the cause, then part by part: wait until the queued or held parts are sent'],
+     ['its other parts are still queued and go out by themselves', 'send again if needed']),
+    ('totals_date', 'Connected · outcome unknown for 1 message',
+     ['1 not delivered, last ', 'Another of its parts was refused.'],
+     ['last part outcome']),
+    ('underscore_label', 'Connected · nothing needs attention',
+     ['Northstar_[redacted] (T09SYNTH01)'],
+     ['WorkspaceTail', '9182736450']),
     ('host_key_missing', 'Connected · Slack events are not passed to Ouroboros · 1 more needs attention',
      ['the bridge has no Ouroboros service key (HOST_SERVICE_TOKEN)',
       'In Extensions, turn Slack Bridge off and on; Ouroboros gives the bridge its key when it starts it.',
@@ -568,4 +601,39 @@ def test_each_state_says_only_what_the_store_recorded(served, line, shown, absen
         finally:
             browser.close()
     assert not messages, messages
+    assert not state['faults'], state['faults']
+
+
+@pytest.mark.parametrize('engine', ['webkit', 'chromium'])
+def test_a_failed_refresh_keeps_the_last_status_and_offers_a_retry(served, engine):
+    """The status route stops answering after a good read: the card keeps what it showed, says so, and retries."""
+    from playwright.sync_api import sync_playwright, expect
+    state, url = served
+    line = route_status(state, url)['text']
+    good = state['api'].routes['status']
+
+    class Outage:
+        status_code, body = 503, b'{"error": "synthetic outage"}'
+
+    async def failing(_request=None):
+        return Outage()
+
+    messages = []
+    with sync_playwright() as pw:
+        browser, page = open_card(pw, engine, url, 'dark', 335, messages)
+        try:
+            frame = page.frame_locator('iframe')
+            expect(frame.locator('.tc-status .tc-st-text')).to_have_text(line, timeout=15000)
+            state['api'].routes['status'] = failing
+            frame.locator('.tc-fresh button').click()
+            expect(frame.locator('.tc-fresh')).to_contain_text('Couldn’t refresh · showing', timeout=15000)
+            expect(frame.locator('.tc-fresh button')).to_have_text('Try again')
+            expect(frame.locator('.tc-status .tc-st-text')).to_have_text(line)  # the last data stays
+            state['api'].routes['status'] = good
+            frame.locator('.tc-fresh button').click()
+            expect(frame.locator('.tc-fresh')).to_contain_text('Updated', timeout=15000)
+            expect(frame.locator('.tc-fresh button')).to_have_text('Refresh')
+            page.evaluate('async () => { await disposeWidget(); }')
+        finally:
+            browser.close()
     assert not state['faults'], state['faults']

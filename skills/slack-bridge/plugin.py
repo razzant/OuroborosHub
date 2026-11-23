@@ -475,9 +475,11 @@ def _make_settings_save(api: Any):
                 if binding_id:
                     try:
                         binding_id = normalize_binding_id(binding_id)
-                    except HostContractError as exc:
+                    except HostContractError:
+                        # Value-free: the field and its rule, never what was typed.
                         return JSONResponse(
-                            {"ok": False, "error": redact(exc)}, status_code=400
+                            {"ok": False, "error": "binding_id must be 32 lowercase hexadecimal characters"},
+                            status_code=400,
                         )
                 current["binding_id"] = binding_id
             for key, default, minimum, maximum in _WORKER_SETTINGS:
@@ -495,6 +497,7 @@ def _make_settings_save(api: Any):
                 try:
                     current[NEW_ROOT_CHANNELS] = normalize_channel_ids(body[NEW_ROOT_CHANNELS])
                 except ValueError as exc:
+                    # normalize_channel_ids names the field and the entry's position, never the entry.
                     return JSONResponse({"ok": False, "error": redact(exc)}, status_code=400)
 
             _save_local_settings(api, current)

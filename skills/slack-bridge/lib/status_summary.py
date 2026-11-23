@@ -11,6 +11,7 @@ Problems older than the store's recent window are history, shown by the card's t
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Mapping
 
 TONE_RANK = {"muted": 0, "ok": 0, "warn": 1, "error": 2}
@@ -108,14 +109,23 @@ def _units(messages: int, actions: int, events: int = 0) -> str:
     return " and ".join(parts) if len(parts) < 3 else f"{parts[0]}, {parts[1]} and {parts[2]}"
 
 
+def _instant(stamp: Any) -> float:
+    """An ISO time as an instant: the store writes fractions with varying precision ("10:00:00Z" and
+    "10:00:00.500Z"), so the strings do not sort by time. An unreadable stamp sorts first."""
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return float("-inf")
+
+
 def _latest(*stamps: Any) -> str | None:
     known = [stamp for stamp in stamps if isinstance(stamp, str) and stamp]
-    return max(known) if known else None
+    return max(known, key=_instant) if known else None
 
 
 def _newest_error(*errors: Any) -> dict[str, Any] | None:
     known = [error for error in errors if isinstance(error, Mapping) and error.get("at")]
-    return dict(max(known, key=lambda error: str(error["at"]))) if known else None
+    return dict(max(known, key=lambda error: _instant(error["at"]))) if known else None
 
 
 def _problem(recent: Mapping[str, Any], key: str) -> Mapping[str, Any]:
@@ -192,7 +202,8 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             # Partly delivered with nothing left queued: only those may have their missing parts sent now.
             "partly_delivered_none_queued": _int(text.get("uncertain_messages_partly_delivered_none_queued")),
             # Sent in several parts: per-part advice only. Absent in an older payload (the card then assumes parts).
-            **_present(text, in_parts="uncertain_messages_in_parts", with_refused_part="uncertain_messages_with_refused_part"),
+            **_present(text, in_parts="uncertain_messages_in_parts", with_refused_part="uncertain_messages_with_refused_part",
+                       queued_partly_delivered="uncertain_messages_still_queued_partly_delivered"),
             "events": _int(inbound.get("uncertain")),
             "at": _latest(_item_time(text, "uncertain", _int(text.get("uncertain_messages"))),
                           _item_time(mutations, "uncertain", _int(mutations.get("uncertain"))),
@@ -215,7 +226,8 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             **({"others_settled": _int(text.get("failed_messages_others_delivered_or_unknown")),
                 "every_part_refused": _int(text.get("failed_messages_every_part_refused"))}
                if "failed_messages_every_part_refused" in text else {}),
-            **_present(text, in_parts="failed_messages_in_parts"),
+            **_present(text, in_parts="failed_messages_in_parts",
+                       queued_partly_delivered="failed_messages_still_queued_partly_delivered"),
             "at": _latest(_item_time(text, "failed", _int(text.get("failed_messages"))),
                           _item_time(mutations, "failed", _int(mutations.get("failed")))),
             "error": _newest_error(_state_error(text, "failed", _int(text.get("failed_messages"))),

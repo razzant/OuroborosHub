@@ -12,7 +12,7 @@ import sqlite3
 
 import pytest
 
-from card_text import card_items
+from card_text import card_items, card_models
 from lib.status_summary import attention_items
 from lib.store import BridgeStore
 from test_status_contract import _quiet_route_payload
@@ -27,9 +27,9 @@ WHOLE = ("repeat it", "repeat them", "send again if needed", "send only the refu
          "Before sending that part again")
 
 
-def _seed(store: BridgeStore, request_id: str, parts: tuple[str, ...]) -> None:
+def _seed(store: BridgeStore, request_id: str, parts: tuple[str, ...], target: str = "C09SYNTH01") -> None:
     order = sorted(parts, key=lambda state: (state not in _SETTLED, state == "waiting"))
-    store.enqueue_outbox(request_id=request_id, target="C09SYNTH01", thread_ts="",
+    store.enqueue_outbox(request_id=request_id, target=target, thread_ts="",
                          chunks=tuple(f"part {index}" for index in range(len(order))))
     for state in order:
         if state == "waiting":
@@ -143,3 +143,96 @@ def test_last_failed_error_comes_from_the_messages_the_item_counts(tmp_path) -> 
     text = status["recent_problems"]["outbound_text"]
     assert (text["failed"], text["failed_messages"], text["uncertain_messages"]) == (1, 0, 1)
     assert text["last_failed_error"] is None and text["uncertain_messages_with_refused_part"] == 1
+
+
+# ---------- round 9 ----------
+
+@pytest.mark.parametrize("problem,shown", [
+    # R9-5: one part delivered, one refused, one held: both facts, then the per-part advice as before.
+    ("failed", "Part of it was refused and is not retried; some of its other parts are already in the conversation, "
+               "and the rest are still queued or held and go out by themselves."),
+    # Control (already said both before round 9): the same with an unknown outcome instead of the refusal.
+    ("uncertain", "Some of its parts are already in the conversation.\nSome of its parts are still waiting, held or being sent"),
+])
+def test_a_message_with_delivered_problem_and_held_parts_says_both(tmp_path, problem, shown) -> None:
+    _attention, items = _card(tmp_path, ("delivered", problem, "held"))
+    text = "\n".join(line for item in items for line in item["lines"])
+    assert shown in text, text
+    assert "its other parts are still queued and go out" not in text
+    assert text.lower().count("part by part:") == 1 and "wait until the queued or held parts are sent" in text
+
+
+def test_only_some_queued_messages_with_delivered_parts_are_said_so(tmp_path) -> None:
+    store = BridgeStore(tmp_path)
+    try:
+        _seed(store, "with-delivered", ("delivered", "failed", "held"))
+        _seed(store, "without", ("failed", "waiting"), target="C09SYNTH02")
+        status = store.status(now=NOW, pid_alive=lambda _pid: True)
+    finally:
+        store.close()
+    assert status["recent_problems"]["outbound_text"]["failed_messages_still_queued_partly_delivered"] == 1
+    payload = {**status, **_quiet_route_payload()}
+    payload["attention"] = attention_items(payload)
+    text = "\n".join(card_items([payload])[0][0]["lines"])
+    assert "Part of each was refused and is not retried; their other parts are still queued" in text
+    assert "1 of these also has parts already in the conversation." in text
+
+
+def _totals_case(tmp_path):
+    """R9-7: one message refused a week ago; another refused and with an unknown part today (counted as unknown)."""
+    import time as _time
+    now = _time.time()
+    store = BridgeStore(tmp_path)
+    try:
+        store.enqueue_outbox(request_id="last-week", target="C09SYNTH01", thread_ts="", chunks=("one",))
+        part = store.claim_outbox()
+        store.fail_outbox(part.row_id, part.lease_token, "channel_not_found", state="failed")
+        with sqlite3.connect(store.path) as conn:
+            conn.execute("UPDATE outbox SET updated_at=? WHERE id=?", (now - 7 * 86400, part.row_id))
+        store.enqueue_outbox(request_id="today", target="C09SYNTH02", thread_ts="", chunks=("one", "two"))
+        for state in ("failed", "uncertain"):
+            part = store.claim_outbox()
+            store.fail_outbox(part.row_id, part.lease_token, "ReadTimeout", state=state)
+        return now, store.status(now=now, pid_alive=lambda _pid: True)
+    finally:
+        store.close()
+
+
+def test_the_totals_date_belongs_to_the_counted_messages(tmp_path) -> None:
+    import re
+    from lib.status_summary import _instant
+    now, status = _totals_case(tmp_path)
+    assert (status["outbound_messages"]["failed"], status["outbound_messages"]["uncertain"]) == (1, 1)
+    last = status["outbound_messages_last_at"]
+    assert now - 7 * 86400 - 1 <= _instant(last["failed"]) <= now - 7 * 86400 + 1   # the week-old message
+    assert now - 60 <= _instant(status["recent_problems"]["outbound_text"]["last_failed_at"])  # any part: today
+    assert now - 60 <= _instant(last["uncertain"])
+    payload = {**status, **_quiet_route_payload()}
+    payload["attention"] = attention_items(payload)
+    older = {key: value for key, value in payload.items() if key != "outbound_messages_last_at"}
+    new, old = (dict(model["facts"])["Messages"] for model in card_models([payload, older]))
+    # A week-old time shows its date; today's shows the time only.
+    assert re.search(r"1 not delivered, last \d{1,2} \w{3}", new), new
+    assert re.search(r"1 outcome unknown, last \d{2}:\d{2}", new), new
+    assert re.search(r"1 not delivered, last part outcome \d{2}:\d{2}", old), old
+
+
+# ---------- R9-10: node for these tests ----------
+
+def test_the_card_tests_fall_back_to_playwrights_node_and_fail_when_required(monkeypatch) -> None:
+    import sys
+    import card_text
+    monkeypatch.setattr(card_text.shutil, "which", lambda _name: None)
+    monkeypatch.delenv("OUROBOROS_PLAYWRIGHT_NODE_SELECTED", raising=False)
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        pytest.skip("Playwright is not installed here")
+    assert card_text._node().endswith(("driver/node", "driver\\node.exe"))
+    monkeypatch.setitem(sys.modules, "playwright", None)  # no Playwright either
+    monkeypatch.setenv("TRANSPORT_WIDGET_REQUIRE_BROWSERS", "1")
+    with pytest.raises(pytest.fail.Exception):
+        card_text._node()
+    monkeypatch.delenv("TRANSPORT_WIDGET_REQUIRE_BROWSERS")
+    with pytest.raises(pytest.skip.Exception):
+        card_text._node()

@@ -52,13 +52,17 @@ async def _run() -> None:
     state_dir = pathlib.Path(os.environ.get("OUROBOROS_SKILL_STATE_DIR") or ".")
     with closing(BridgeStore(state_dir)) as store:
         store.set_runtime(socket_state="starting", companion_pid=os.getpid())
+        # The daemon owns the final state: cleanup writes "disconnected", so a run that ended with an error records
+        # that error after cleanup (a clean stop stays "disconnected"). The write happens only while this process
+        # still owns the PID, in the same transaction that clears it, so an overlapping successor's state stays.
+        fatal: str | None = None
         try:
             try:
                 settings = load_local_settings(state_dir)
             except LocalSettingsError as exc:
                 # Same contract as the extension child: unreadable settings are an
                 # explicit failure, never a silently empty configuration.
-                store.set_runtime(socket_state="error", last_socket_error=error_text(exc))
+                fatal = error_text(exc)
                 raise
             new_root_channels, channels_error = _new_root_channels(settings)
             # What this companion actually uses, for the status route.
@@ -70,13 +74,10 @@ async def _run() -> None:
                     os.environ.get("SLACK_APP_TOKEN", ""),
                 )
             except Exception as exc:
-                store.set_runtime(socket_state="error", last_socket_error=error_text(exc))
+                fatal = error_text(exc)
                 raise
 
             runtime: BridgeRuntime | None = None
-            # The daemon owns the final state: cleanup writes "disconnected", so a run that ended with an error
-            # records that error again after cleanup (a clean stop stays "disconnected").
-            fatal: str | None = None
             try:
                 auth = await slack.auth_test()
                 bot_user_id = str(auth.get("user_id") or "")
@@ -129,20 +130,16 @@ async def _run() -> None:
                     await runtime_task
             except Exception as exc:
                 fatal = error_text(exc)
-                store.set_runtime(socket_state="error", last_socket_error=fatal)
                 raise
             finally:
-                try:
-                    if runtime is not None:
-                        await runtime.close()
-                    else:
-                        await slack.aclose()
-                finally:
-                    if fatal is not None:
-                        store.set_runtime(socket_state="error", last_socket_error=fatal)
+                if runtime is not None:
+                    await runtime.close()
+                else:
+                    await slack.aclose()
         finally:
             try:
-                store.clear_runtime_if_equal("companion_pid", os.getpid())
+                store.finish_companion(os.getpid(), **(
+                    {"socket_state": "error", "last_socket_error": fatal} if fatal is not None else {}))
             except Exception:
                 pass
 

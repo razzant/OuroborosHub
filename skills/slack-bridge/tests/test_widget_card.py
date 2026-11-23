@@ -4,8 +4,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
-import shutil
-import subprocess
 
 import pytest
 
@@ -36,14 +34,6 @@ def test_skill_manifest_and_runtime_register_the_same_single_module_card(tmp_pat
     assert api.tabs["slack_presence"][1]["render"] == RENDER
 
 
-NODE = shutil.which("node") or os.environ.get("OUROBOROS_PLAYWRIGHT_NODE_SELECTED") or ""
-
-
-@pytest.mark.skipif(not NODE or not Path(NODE).exists(), reason="node is not installed")
-def test_widget_parses():
-    subprocess.run([NODE, "--check", str(WIDGET)], check=True)
-
-
 def test_widget_follows_the_module_contract():
     source = WIDGET.read_text(encoding="utf-8")
     # Requests go only through the bridge to this skill's own routes.
@@ -55,8 +45,8 @@ def test_widget_follows_the_module_contract():
     # tests/test_widget_theme_contracts.py's, where slack-bridge is a DASHBOARDS row).
     assert "typeof bridge.onTheme === 'function'" in source
     assert "html,body{margin:0;background:transparent}" in source
-    # Refresh never dies silently: no tick limit, a failed read is said in words with a way to retry.
-    assert "max_ticks" not in source and "refresh · showing" in source and "Try again" in source
+    # Refresh never dies silently (no tick limit); the failed read's words are tests/test_slack_bridge_widget_browser.py's.
+    assert "max_ticks" not in source
     # No resize protocol of its own: the host measures #root.
     assert "ouro-widget-resize" not in source and "ResizeObserver" not in source
 
