@@ -98,7 +98,7 @@ class SelectionTests(unittest.TestCase):
         consumers = {
             'smart_lists': {'smart-lists', 'widgets'}, 'gigasearch': {'gigasearch'},
             'cache_efficiency_snapshot': {'cache-efficiency', 'widgets'}, 'calendar': {'calendar-skill', 'widgets'},
-            'slack-bridge': {'slack-bridge'}, 'telegram-bot': {'telegram-bot'}, 'keenable': {'keenable'},
+            'slack-bridge': {'slack-bridge'}, 'telegram-bot': {'telegram-bot', 'widgets'}, 'keenable': {'keenable'},
             'perplexity': {'perplexity'}, 'duckduckgo': {'duckduckgo'}, '2gis': {'2gis'}, 'whoop-health': {'whoop-health'}, 'claudexor_quotas': {'widgets', 'claudexor-quotas'},
             'context-lens': {'widgets'}, 'memory-atlas': {'memory-atlas', 'widgets'}, 'token-usage': {'widgets'},
             'office_reader': {'office-reader'}, 'science_search': {'science-search'},
@@ -162,7 +162,7 @@ class SelectionTests(unittest.TestCase):
             git('commit', '-qm', 'move')
             paths = ci.changed_paths(root, {'pull_request': {'base': {'sha': base}, 'head': {'sha': git('rev-parse', 'HEAD')}}})
             self.assertEqual(paths, {'skills/slack-bridge/file.py', 'skills/telegram-bot/file.py'})
-            self.assertEqual(set(ci.selected_suites(paths)), {'slack-bridge', 'telegram-bot'})
+            self.assertEqual(set(ci.selected_suites(paths)), {'slack-bridge', 'telegram-bot', 'widgets'})
 
     def test_prepare_writes_matrix_output_for_the_workflow(self):
         with tempfile.TemporaryDirectory(prefix='hub-ci-output-') as tmp:

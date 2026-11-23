@@ -51,7 +51,7 @@ SUITES = {
     # history, its runtime and both browsers. The browser harnesses' lease host (tests/widget_lease_gateway.py) is
     # checked against the core's lease controls here.
     'widgets': {'skills': ['cache_efficiency_snapshot', 'claudexor_quotas', 'context-lens', 'memory-atlas',
-                           'token-usage', 'smart_lists', 'calendar'],
+                           'token-usage', 'smart_lists', 'calendar', 'telegram-bot'],
                 'tests': ['tests/test_widget_theme_contracts.py', 'tests/test_dashboard_theme_browser.py',
                           'tests/test_widget_lease_gateway.py'],
                 'shared': ['tests/fixtures/dashboard_theme_responses.json', 'tests/widget_lease_gateway.py'],
@@ -101,8 +101,12 @@ SUITES = {
                                                            'tests/test_gesture_core_consumer.py',
                                                            'tests/test_voice_attachment_core_consumer.py',
                                                            'tests/test_telegram_bot_media_core_consumer.py',
-                                                           'tests/test_telegram_bot_typing_core_consumer.py'],
-                     'dependencies': ['httpx', 'starlette', 'websockets', 'telethon>=1.45,<2', 'PySocks>=1.7.1'],
+                                                           'tests/test_telegram_bot_typing_core_consumer.py',
+                                                           # The card mounts through that core's real module bridge.
+                                                           'tests/test_telegram_bot_widget_browser.py'],
+                     'dependencies': ['httpx', 'starlette', 'websockets', 'telethon>=1.45,<2', 'PySocks>=1.7.1',
+                                      'playwright==1.62.0'],
+                     'env': {'TRANSPORT_WIDGET_REQUIRE_BROWSERS': '1'},
                      # The real-core voice consumer drives whisper-voice's attachment adapter.
                      'shared': ['skills/whisper-voice/attachment_tool.py'],
                      'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT',

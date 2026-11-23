@@ -1,0 +1,537 @@
+"""Additive status facts for the Widgets card, and the one rule the Places line and the card's first line share."""
+import asyncio
+import importlib.util
+import json
+import pathlib
+import sqlite3
+import sys
+import time
+
+import pytest
+
+from types import SimpleNamespace
+
+from telegram_bot import runtime as runtime_mod
+from telegram_bot.api import TelegramApiError
+from telegram_bot.custody import CustodyStore, RECENT_PROBLEM_WINDOW_S
+from telegram_bot.events import parse_telegram_update
+from telegram_bot.host import PLACE_POLICY_UNREAD, SKILL_ACCESS_REFUSED
+from telegram_bot.status_summary import TONE_RANK, attention_items, summarize
+from test_plugin import FakeApi
+
+
+def _event(update_id):
+    return parse_telegram_update(
+        {"update_id": update_id, "message": {"message_id": update_id, "text": "hello",
+                                             "from": {"id": 3, "is_bot": False}, "chat": {"id": 4, "type": "private"}}},
+        bot_account_id="9",
+    )
+
+
+def _quiet(**overrides):
+    payload = {
+        "runtime_state": "polling", "poll_result": "ok", "host_checked": True, "places_version": 1, "binding_state": "missing",
+        "reaction_context": "available", "outbox_held": 0, "held_reasons": [], "inbox_waiting": 0,
+        "recent_problems": {"window_seconds": 86400,
+                            "outbound": {"failed": 0, "uncertain": 0, "last_failed_at": "", "last_uncertain_at": "",
+                                         "last_error": None},
+                            "inbound": {"failed": 0, "last_failed_at": "", "last_error": None}},
+    }
+    payload.update(overrides)
+    return payload
+
+
+# ---------- the rule ----------
+
+def test_healthy_polling_is_green_and_says_so():
+    assert summarize(_quiet()) == {"text": "Connected · nothing needs attention", "tone": "ok", "attention": []}
+
+
+@pytest.mark.parametrize(("state", "text", "tone"), [
+    ("not_started", "Starting…", "muted"),
+    ("waiting_for_token", "Not set up · the bot token is missing", "warn"),
+    ("provider_error", "Connection error · new messages are not being received", "error"),
+    ("stopped", "Stopped · the bot is not running", "error"),
+])
+def test_every_runtime_state_has_words_and_a_tone(state, text, tone):
+    summary = summarize(_quiet(runtime_state=state))
+    assert (summary["text"], summary["tone"]) == (text, tone)
+
+
+def test_delivery_failures_are_no_longer_a_muted_polling_line():
+    # The root's fixture 05: two sends refused (403) while polling; the old route said "polling", muted.
+    payload = _quiet()
+    payload["recent_problems"]["outbound"].update(failed=2, last_failed_at="2026-11-22T17:58:40Z", last_error={
+        "at": "2026-11-22T17:58:40Z", "state": "failed", "text": "Forbidden: bot was blocked by the user"})
+    summary = summarize(payload)
+    # The outbox also holds reactions, moderation and operations: "outgoing items", not "messages".
+    assert (summary["text"], summary["tone"]) == ("Connected · 2 outgoing items not delivered", "error")
+    assert summary["attention"][0]["error"]["text"] == "Forbidden: bot was blocked by the user"
+
+
+def test_order_and_worst_tone():
+    payload = _quiet(runtime_state="provider_error", poll_result="failed", poll_error="TelegramApiError: x",
+                     poll_failure="network", provider_ok_at="2026-11-22T10:00:00Z",
+                     outbox_held=2, held_reasons=[{"reason": "Example is paused", "note": "Held: Example is paused", "count": 2}],
+                     places_version=0, reaction_context="update_required")
+    payload["recent_problems"]["outbound"].update(failed=1, uncertain=1)
+    payload["recent_problems"]["inbound"].update(failed=3)
+    kinds = [item["kind"] for item in attention_items(payload)]
+    # Worst tone first (error), then warn, then muted; the order of consequence within each tone.
+    assert kinds == ["link", "not_delivered", "not_handed", "outcome_unknown", "binding", "reactions", "held"]
+    link = attention_items(payload)[0]
+    assert link["at"] == "2026-11-22T10:00:00Z" and link["error"]["text"] == "TelegramApiError: x"
+    assert summarize(payload)["tone"] == "error"
+    assert summarize(payload)["text"].endswith("· 6 more need attention")
+
+
+def test_outcome_unknown_is_amber_and_never_called_failed():
+    payload = _quiet()
+    payload["recent_problems"]["outbound"].update(uncertain=1)
+    summary = summarize(payload)
+    assert summary["tone"] == "warn" and "fail" not in summary["text"].lower()
+
+
+def test_held_is_amber_only_for_the_skills_own_refusal():
+    paused = _quiet(outbox_held=1, held_reasons=[{"reason": "Example is paused", "note": "Held: Example is paused", "count": 1}])
+    assert summarize(paused)["tone"] == "muted"
+    retries = _quiet(outbox_held=1, held_reasons=[{"reason": "It retries by itself.", "note": PLACE_POLICY_UNREAD, "count": 1}])
+    assert summarize(retries)["tone"] == "muted"
+    refused = _quiet(outbox_held=1, held_reasons=[{"reason": "x", "note": SKILL_ACCESS_REFUSED, "count": 1}])
+    assert summarize(refused)["tone"] == "warn"
+
+
+def test_capabilities_are_not_blamed_before_ouroboros_answered():
+    unknown = _quiet(host_checked=False, places_version=0, reaction_context="update_required", inbox_waiting=2)
+    # Nothing is blamed, and nothing reads as all clear either: the state is partly known (muted).
+    assert attention_items(unknown) == [{"kind": "partial", "tone": "muted", "headline": "State partly known",
+                                         "gaps": ["capabilities_unchecked"]}]
+    unreachable = summarize(_quiet(host_checked=False, delivery_reporting="unavailable"))
+    assert (unreachable["text"], unreachable["tone"]) == ("Connected · state partly known", "muted")
+    assert unreachable["attention"][0]["gaps"] == ["host_unanswered"]
+    legacy = _quiet()
+    del legacy["recent_problems"]
+    assert summarize(legacy)["attention"][0]["gaps"] == ["no_recent_window"]
+    old_host = _quiet(places_version=0, inbox_waiting=2)
+    assert attention_items(old_host)[0] | {} == {"kind": "binding", "tone": "warn", "count": 2,
+                                                 "headline": "Incoming messages wait for a place binding"}
+    assert attention_items(_quiet(places_version=0, binding_state="configured")) == []
+
+
+def test_an_unavailable_connect_list_while_polling_stays_visible():
+    payload = _quiet(connect=None, connect_unavailable="Observed chats could not be read")
+    summary = summarize(payload)
+    assert (summary["text"], summary["tone"]) == ("Connected · observed chats could not be read", "warn")
+    # Outside polling the runtime's own item already says why; no second item.
+    stopped = summarize(_quiet(runtime_state="stopped", connect=None, connect_unavailable="Telegram bot not running"))
+    assert [item["kind"] for item in stopped["attention"]] == ["link"]
+
+
+def test_the_first_line_names_the_item_that_sets_its_tone():
+    # Root's fixture 10: an unknown outcome (warn) beside refusals (error); the red line names the refusals.
+    payload = _quiet()
+    payload["recent_problems"]["outbound"].update(failed=4127, uncertain=318)
+    summary = summarize(payload)
+    assert summary["tone"] == "error"
+    assert summary["text"] == "Connected · 4,127 outgoing items not delivered · 1 more needs attention"
+    assert summary["attention"][1]["kind"] == "outcome_unknown" and summary["attention"][1]["tone"] == "warn"
+
+
+def test_each_outbound_item_carries_its_own_newest_error():
+    payload = _quiet()
+    payload["recent_problems"]["outbound"].update(
+        failed=1, uncertain=1,
+        last_error={"at": "2026-11-22T18:06:02Z", "state": "uncertain", "text": "TimeoutError"},
+        last_failed_error={"at": "2026-11-22T17:58:40Z", "state": "failed", "text": "Forbidden"},
+        last_uncertain_error={"at": "2026-11-22T18:06:02Z", "state": "uncertain", "text": "TimeoutError"})
+    errors = {item["kind"]: item["error"]["text"] for item in attention_items(payload)}
+    assert errors == {"not_delivered": "Forbidden", "outcome_unknown": "TimeoutError"}
+
+
+def _retrying(count, error="PresenceHostHTTPError: 409"):
+    return {"count": count, "since": "2026-11-22T18:00:00Z", "next_attempt_at": "2026-11-22T18:20:00Z",
+            "last_error": error if count else ""}
+
+
+def test_updates_waiting_for_ouroboros_are_said_but_never_amber():
+    payload = _quiet(inbox_waiting=6, handoff_retrying=_retrying(6))
+    summary = summarize(payload)
+    assert (summary["text"], summary["tone"]) == ("Connected · 6 Telegram updates wait to be passed to Ouroboros", "muted")
+    item = summary["attention"][0]
+    assert item["error"]["text"] == "PresenceHostHTTPError: 409" and item["at"] == "2026-11-22T18:00:00Z"
+    # One update: the singular verb.
+    one = summarize(_quiet(inbox_waiting=1, handoff_retrying=_retrying(1)))
+    assert one["text"] == "Connected · 1 Telegram update waits to be passed to Ouroboros"
+    # On a pre-Places Host the binding item explains the wait; no second item.
+    old = attention_items(_quiet(places_version=0, inbox_waiting=6, handoff_retrying=_retrying(6)))
+    assert [item["kind"] for item in old] == ["binding"]
+
+
+def test_handoff_waiting_follows_custody_rows_never_the_runtimes_newest_error():
+    # Inbox rows back off while an outbound blip overwrote the process-wide error source: still listed.
+    blip = _quiet(inbox_waiting=2, handoff_retrying=_retrying(2), last_error_source="outbound", last_error="TimeoutError")
+    assert [item["kind"] for item in attention_items(blip)] == ["handoff_waiting"]
+    # After recovery the rows are gone; a sticky inbound error of the runtime no longer makes a problem.
+    recovered = _quiet(inbox_waiting=0, handoff_retrying=_retrying(0), last_error_source="inbound", last_error="old")
+    assert summarize(recovered) == {"text": "Connected · nothing needs attention", "tone": "ok", "attention": []}
+    # A busy Host's deferral (nothing tried and failed) is normal flow: green.
+    deferred = _quiet(inbox_waiting=3, handoff_retrying=_retrying(0))
+    assert summarize(deferred)["tone"] == "ok"
+
+
+def test_every_hold_reason_counts_toward_the_owners_move():
+    reasons = [{"reason": f"Place {index} is paused", "note": f"Held: Place {index} is paused", "count": 9 - index}
+               for index in range(6)] + [{"reason": "x", "note": SKILL_ACCESS_REFUSED, "count": 1}]
+    held = attention_items(_quiet(outbox_held=40, held_reasons=reasons))[0]
+    assert held["tone"] == "warn" and len(held["reasons"]) == 7
+    # The reason that makes it amber leads, though it is the rarest: the card shows the first four.
+    assert held["reasons"][0] == {"reason": "x", "count": 1, "action": True}
+    assert [reason["reason"] for reason in held["reasons"][1:3]] == ["Place 0 is paused", "Place 1 is paused"]
+    assert not any(reason.get("action") for reason in held["reasons"][1:])
+
+
+# ---------- the link: green only after an answer for the token set now ----------
+
+def test_a_request_still_out_never_reads_connected():
+    connecting = summarize(_quiet(poll_result=""))
+    assert (connecting["text"], connecting["tone"]) == ("Connecting…", "muted")
+    # The last completed attempt failed and the next one is out: still the error, never green.
+    retry = summarize(_quiet(poll_result="failed", poll_error="TelegramApiError: Telegram getUpdates failed "
+                             "(transport): TimeoutError", poll_failure="network", poll_at="2026-11-22T18:00:00Z"))
+    assert (retry["text"], retry["tone"]) == ("Connection error · new messages are not being received", "error")
+    assert retry["attention"][0]["failure"] == "network"
+
+
+def test_confirmed_bot_reasons_set_the_tone():
+    from telegram_bot.runtime import BOT_TOKEN_MISSING, BOT_UNCONFIRMED
+    # A new token getMe has not confirmed yet, while the old request is out: waiting, neutral.
+    waiting = summarize(_quiet(poll_result="", connect=None, connect_unavailable=BOT_UNCONFIRMED))
+    assert (waiting["text"], waiting["tone"]) == ("Connecting…", "muted")
+    # The token was removed while a request was out: the owner's move, as before any token.
+    missing = summarize(_quiet(connect=None, connect_unavailable=BOT_TOKEN_MISSING))
+    assert (missing["text"], missing["tone"]) == ("Not set up · the bot token is missing", "warn")
+    assert [item["kind"] for item in missing["attention"]] == ["link"]
+
+
+def test_the_link_item_carries_this_attempts_error_not_another_loops():
+    payload = _quiet(runtime_state="provider_error", poll_result="failed", poll_error="sqlite3.OperationalError: locked",
+                     poll_failure="local", last_error="Forbidden from a send", last_error_source="outbound")
+    link = attention_items(payload)[0]
+    assert link["failure"] == "local" and link["error"]["text"] == "sqlite3.OperationalError: locked"
+    # Without this attempt's facts, another loop's error is not shown as the link's.
+    other = attention_items(_quiet(runtime_state="provider_error", poll_result="", last_error="Forbidden",
+                                   last_error_source="outbound"))[0]
+    assert "error" not in other
+
+
+class _Client:
+    """getUpdates: first a request without an answer, then one held until ``gate`` opens."""
+    download_limit = 20 * 1024 * 1024
+
+    def __init__(self, gate, updates=()):
+        self.gate, self.calls, self.updates = gate, 0, list(updates)
+
+    async def delete_webhook(self):
+        return True
+
+    async def get_me(self):
+        return {"id": 9, "username": "card_bot"}
+
+    async def get_updates(self, offset, timeout_sec):
+        self.calls += 1
+        if self.calls == 1:
+            raise TelegramApiError("getUpdates", "TimeoutError")
+        await self.gate.wait()
+        await asyncio.sleep(0.01)  # a real long poll yields; an open gate alone would spin the loop
+        return self.updates
+
+
+def _link_facts(runtime):
+    """The runtime's link facts over a quiet card (this fake Host is never asked about capabilities)."""
+    snapshot = runtime.status_snapshot({})
+    return {key: snapshot[key] for key in ("runtime_state", "poll_result", "poll_at", "poll_error", "poll_failure",
+                                           "provider_ok_at")}
+
+
+async def _until(predicate):
+    for _ in range(2000):
+        if predicate():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("condition not reached")
+
+
+def test_after_a_timeout_the_next_attempt_is_not_a_false_all_clear(tmp_path):
+    async def run():
+        gate = asyncio.Event()
+        client = _Client(gate)
+        runtime = runtime_mod.TelegramTransportRuntime(state_dir=tmp_path, token_provider=lambda: "token-a",
+                                                       logger=None, submitter=SimpleNamespace(),
+                                                       client_factory=lambda token: client)
+
+        async def brief(_seconds):
+            await asyncio.sleep(0.01)
+        runtime._pause = brief
+        loop = asyncio.create_task(runtime._poll_loop())
+        try:
+            await _until(lambda: client.calls == 2)
+            snapshot = runtime.status_snapshot({})
+            # runtime_state says "polling" (set before the request), but nothing answered it yet.
+            assert snapshot["runtime_state"] == "polling" and snapshot["poll_result"] == "failed"
+            assert snapshot["poll_failure"] == "network"
+            assert summarize(_quiet(**_link_facts(runtime)))["tone"] == "error"
+            gate.set()
+            await _until(lambda: runtime.status_snapshot({})["poll_result"] == "ok")
+            assert summarize(_quiet(**_link_facts(runtime)))["text"] == "Connected · nothing needs attention"
+        finally:
+            runtime._stopping = True
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+            runtime.store.close()
+
+    asyncio.run(run())
+
+
+def test_a_local_failure_after_telegrams_answer_is_named_local(tmp_path):
+    async def run():
+        gate = asyncio.Event()
+        gate.set()
+        client = _Client(gate, [{"update_id": 1, "message": {"message_id": 1, "text": "hi", "date": 1,
+                                                             "from": {"id": 3, "is_bot": False},
+                                                             "chat": {"id": 4, "type": "private"}}}])
+        client.calls = 1  # skip the first, failing request
+        runtime = runtime_mod.TelegramTransportRuntime(state_dir=tmp_path, token_provider=lambda: "token-a",
+                                                       logger=None, submitter=SimpleNamespace(),
+                                                       client_factory=lambda token: client)
+
+        def broken(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+        runtime.store.commit_update = broken
+
+        async def brief(_seconds):
+            await asyncio.sleep(0.01)
+        runtime._pause = brief
+        loop = asyncio.create_task(runtime._poll_loop())
+        try:
+            await _until(lambda: runtime.status_snapshot({})["poll_result"] == "failed")
+            snapshot = runtime.status_snapshot({})
+            assert snapshot["poll_failure"] == "local" and "database is locked" in snapshot["poll_error"]
+            assert snapshot["provider_ok_at"].endswith("Z")  # Telegram did answer
+        finally:
+            runtime._stopping = True
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+            runtime.store.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("exc", "side"), [
+    (TelegramApiError("getUpdates", "Unauthorized", 401), "token"),
+    (TelegramApiError("getUpdates", "Conflict", 409), "telegram"),
+    (TelegramApiError("getUpdates", "TimeoutError"), "network"),
+    (ValueError("x"), ""),
+])
+def test_poll_failure_sides(exc, side):
+    assert runtime_mod._poll_failure(exc, answered=False) == side
+    assert runtime_mod._poll_failure(exc, answered=True) == "local"
+
+
+def test_a_poll_result_counts_only_for_the_token_set_now(tmp_path):
+    token = {"value": "token-a"}
+    runtime = runtime_mod.TelegramTransportRuntime(state_dir=tmp_path, token_provider=lambda: token["value"],
+                                                   logger=None, submitter=object())
+    runtime._poll_done("token-a", "ok")
+    assert runtime.status_snapshot({})["poll_result"] == "ok"
+    token["value"] = "token-b"
+    assert runtime.status_snapshot({})["poll_result"] == ""
+    runtime.store.close()
+
+
+def test_tones_are_the_place_sheet_vocabulary():
+    assert set(TONE_RANK) == {"muted", "ok", "warn", "error"}
+
+
+# ---------- custody: recent problems and hold reasons ----------
+
+def test_card_snapshot_counts_recent_terminal_rows_with_times_and_hold_reasons(tmp_path):
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+    for update_id in (21, 22, 23):
+        store.commit_update(update_id, _event(update_id))
+    inbox = store.claim_inbox()
+    store.mark_inbox_failed(inbox.event_id, reason="Host refused")
+    withheld = store.claim_inbox()
+    store.mark_inbox_failed(withheld.event_id, reason="reaction_host_context_unavailable")
+    # The outbox is FIFO per chat; one chat per row keeps every row claimable here.
+    for index, name in enumerate(("refused", "lost", "old", "held-a", "held-b", "held-c")):
+        store.enqueue_outbox(name, {"kind": "message", "chat_id": str(100 + index)})
+    store.mark_outbox_failed(store.claim_outbox().delivery_id, reason="Forbidden: bot was blocked by the user")
+    store.mark_outbox_failed(store.claim_outbox().delivery_id, reason="TimeoutError", state="uncertain")
+    old = store.claim_outbox().delivery_id
+    store.mark_outbox_failed(old, reason="an old refusal")
+    with sqlite3.connect(tmp_path / "custody.sqlite3") as conn:
+        conn.execute("UPDATE outbox SET failed_at=? WHERE delivery_id=?", (time.time() - RECENT_PROBLEM_WINDOW_S - 60, old))
+    store.hold_outbox(store.claim_outbox().delivery_id, "Held: Example is paused")
+    store.hold_outbox(store.claim_outbox().delivery_id, "Held: Example is paused")
+    store.hold_outbox(store.claim_outbox().delivery_id, SKILL_ACCESS_REFUSED)
+
+    card = store.card_snapshot()
+    recent = card["recent_problems"]
+    assert recent["window_seconds"] == RECENT_PROBLEM_WINDOW_S
+    assert recent["outbound"]["failed"] == 1 and recent["outbound"]["uncertain"] == 1
+    assert recent["outbound"]["last_failed_at"].endswith("Z") and recent["outbound"]["last_uncertain_at"].endswith("Z")
+    assert recent["outbound"]["last_error"]["state"] in {"failed", "uncertain"}
+    assert recent["inbound"]["failed"] == 1  # the withheld reaction is not an inbound failure
+    assert recent["inbound"]["last_error"]["text"] == "Host refused"
+    assert card["held_reasons"] == [
+        {"reason": "Example is paused", "note": "Held: Example is paused", "count": 2},
+        {"reason": "Check this skill's access in Skills.", "note": SKILL_ACCESS_REFUSED, "count": 1},
+    ]
+    # Lifetime totals keep their meaning beside the recent window.
+    snapshot = store.status_snapshot()
+    assert snapshot["outbox_failed"] == 2 and snapshot["outbox_uncertain"] == 1 and snapshot["outbox_held"] == 3
+
+
+def test_card_snapshot_returns_every_hold_reason(tmp_path):
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+    for index in range(7):
+        store.enqueue_outbox(f"held-{index}", {"kind": "message", "chat_id": str(200 + index)})
+        note = SKILL_ACCESS_REFUSED if index == 6 else f"Held: Place {index} is paused"
+        store.hold_outbox(store.claim_outbox().delivery_id, note)
+    reasons = store.card_snapshot()["held_reasons"]
+    assert len(reasons) == 7 and sum(reason["count"] for reason in reasons) == store.status_snapshot()["outbox_held"]
+    assert any(reason["note"] == SKILL_ACCESS_REFUSED for reason in reasons)
+
+
+def test_card_snapshot_of_an_empty_store(tmp_path):
+    card = CustodyStore(tmp_path / "custody.sqlite3").card_snapshot()
+    assert card["held_reasons"] == []
+    assert card["recent_problems"]["outbound"] == {"failed": 0, "uncertain": 0, "last_failed_at": "",
+                                                   "last_uncertain_at": "", "last_error": None,
+                                                   "last_failed_error": None, "last_uncertain_error": None}
+    assert card["recent_problems"]["inbound"] == {"failed": 0, "last_failed_at": "", "last_error": None}
+    assert card["handoff_retrying"] == {"count": 0, "since": "", "next_attempt_at": "", "last_error": ""}
+
+
+def test_handoff_retrying_counts_only_failed_handoff_attempts(tmp_path):
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+    for update_id in (31, 32, 33, 34):
+        store.commit_update(update_id, parse_telegram_update(
+            {"update_id": update_id, "message": {"message_id": update_id, "text": "hi", "date": 1,
+                                                 "from": {"id": 3, "is_bot": False},
+                                                 "chat": {"id": 40 + update_id, "type": "private"}}},
+            bot_account_id="9"))
+    assert store.card_snapshot()["handoff_retrying"] == {"count": 0, "since": "", "next_attempt_at": "", "last_error": ""}
+    # A busy Host (presence capacity full) gives the attempt back: not a failed handoff.
+    busy = store.claim_inbox()
+    store.defer_inbox(busy.event_id, reason="PresenceHostHTTPError: presence_capacity_full", retry_after_sec=60)
+    # A lease released at runtime start is not a handoff answer either.
+    store.claim_inbox()
+    store.release_own_leases()
+    assert store.card_snapshot()["handoff_retrying"]["count"] == 0
+    # A handoff that was tried and failed is retried by itself, and counted.
+    failed = store.claim_inbox()
+    store.release_inbox(failed.event_id, reason="PresenceHostError: 500", retry_after_sec=30)
+    retrying = store.card_snapshot()["handoff_retrying"]
+    assert retrying["count"] == 1 and retrying["last_error"] == "PresenceHostError: 500"
+    assert retrying["since"].endswith("Z") and retrying["next_attempt_at"].endswith("Z")
+    assert summarize(_quiet(handoff_retrying=retrying))["text"] == (
+        "Connected · 1 Telegram update waits to be passed to Ouroboros")
+    # Recovery: once Ouroboros takes it, nothing is listed (whatever the runtime's sticky error says).
+    with sqlite3.connect(tmp_path / "custody.sqlite3") as conn:
+        conn.execute("UPDATE inbox SET available_at=0 WHERE event_id=?", (failed.event_id,))
+    again = store.claim_inbox()
+    while again is not None and again.event_id != failed.event_id:
+        store.release_inbox(again.event_id, reason="", retry_after_sec=3600)
+        again = store.claim_inbox()
+    store.record_submission(failed.event_id, binding_id="", turn_ref="turn-1", outcome="silent", text="", work_ref="")
+    assert store.card_snapshot()["handoff_retrying"]["count"] == 0
+    store.close()
+
+
+def test_status_totals_and_card_facts_come_from_one_read_transaction(tmp_path, monkeypatch):
+    store = CustodyStore(tmp_path / "custody.sqlite3")
+    store.enqueue_outbox("sending", {"kind": "message", "chat_id": "100"})
+    lease = store.claim_outbox()
+    original = CustodyStore._card_facts
+
+    def card_after_a_send_finished(conn, now, window_s):
+        # Another connection settles the send between the two groups of queries.
+        with sqlite3.connect(tmp_path / "custody.sqlite3") as other:
+            other.execute("UPDATE outbox SET state='failed', failed_at=?, last_error='Forbidden' WHERE delivery_id=?",
+                          (time.time(), lease.delivery_id))
+        return original(conn, now, window_s)
+
+    monkeypatch.setattr(CustodyStore, "_card_facts", staticmethod(card_after_a_send_finished))
+    counts, card = store.read_status()
+    # One moment: still sending in both, never "sending" beside a recent failure of the same row.
+    assert counts["outbox_leased"] == 1 and counts["outbox_failed"] == 0
+    assert card["recent_problems"]["outbound"]["failed"] == 0
+    monkeypatch.undo()
+    counts, card = store.read_status()
+    assert counts["outbox_leased"] == 0 and card["recent_problems"]["outbound"]["failed"] == 1
+    store.close()
+
+
+# ---------- runtime: when and where the newest error was recorded ----------
+
+def test_last_error_records_its_time_and_the_loop_that_wrote_it(tmp_path):
+    runtime = runtime_mod.TelegramTransportRuntime(state_dir=tmp_path, token_provider=lambda: "", logger=None,
+                                                   submitter=object())
+    assert runtime.status_snapshot({})["last_error_at"] == "" and runtime._last_error == ""
+
+    async def in_task(name):
+        async def write():
+            runtime._last_error = f"from {name}"
+        await asyncio.create_task(write(), name=name)
+        return runtime.status_snapshot({})
+
+    for name, source in (("telegram-presence-outbox", "outbound"), ("telegram-presence-inbox-1", "inbound"),
+                         ("telegram-presence-work", "inbound"), ("Task-7", "polling")):
+        snapshot = asyncio.run(in_task(name))
+        assert snapshot["last_error"] == f"from {name}"
+        assert snapshot["last_error_source"] == source and snapshot["last_error_at"].endswith("Z")
+    runtime._last_error = ""
+    assert runtime.status_snapshot({})["last_error_at"] == "" and runtime.status_snapshot({})["last_error_source"] == ""
+    runtime.store.close()
+
+
+def test_the_error_sources_name_tasks_this_runtime_creates():
+    source = (pathlib.Path(runtime_mod.__file__)).read_text(encoding="utf-8")
+    for prefix, _ in runtime_mod._ERROR_SOURCES:
+        assert f'name="{prefix}' in source or f'name=f"{prefix}' in source
+
+
+# ---------- the route ----------
+
+def _load(tmp_path):
+    skill_dir = pathlib.Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("telegram_bot_card_route_test", skill_dir / "plugin.py",
+                                                  submodule_search_locations=[str(skill_dir)])
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    api = FakeApi(tmp_path)
+    module.register(api)
+    return module, api
+
+
+def test_route_adds_card_fields_and_keeps_every_existing_key(tmp_path):
+    module, api = _load(tmp_path)
+    try:
+        payload = json.loads(asyncio.run(module._status_route(None)).body)
+    finally:
+        api.unload()
+    for key in ("runtime_state", "bot_label", "last_event_at", "last_delivery_at", "last_error", "delivery_reporting",
+                "presence_continuation_version", "reaction_context", "reaction_history", "has_presence_binding",
+                "management_group_id", "binding_state", "connect", "telegram_offset", "inbox_waiting", "inbox_leased",
+                "inbox_submitted", "inbox_failed", "outbox_waiting", "outbox_held", "outbox_delivered", "outbox_failed",
+                "outbox_uncertain", "text", "tone", "title"):
+        assert key in payload
+    assert payload["observed_at"].endswith("Z")
+    assert payload["host_checked"] is False and payload["places_version"] == 0
+    assert payload["last_error_at"] == "" and payload["provider_ok_at"] == ""
+    assert (payload["poll_result"], payload["poll_error"], payload["poll_failure"]) == ("", "", "")
+    assert payload["handoff_retrying"]["count"] == 0
+    assert payload["recent_problems"]["outbound"]["failed"] == 0 and payload["held_reasons"] == []
+    assert (payload["text"], payload["tone"], payload["title"]) == ("Starting…", "muted", "Telegram transport")

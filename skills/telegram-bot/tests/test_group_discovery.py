@@ -206,7 +206,11 @@ def test_groups_reach_connect_through_the_poll_loop_and_membership_updates_stay_
             await until(lambda: api.waiting == 1)
             requests, turns = len(api.requests), list(connector.host.turns)
             status = await connector.status()
-            assert await connector.status() == status
+            again = await connector.status()
+            # Two reads agree on every fact; only when the body was read may differ (a second boundary).
+            assert again["observed_at"].endswith("Z") and status["observed_at"].endswith("Z")
+            assert {k: v for k, v in again.items() if k != "observed_at"} == {
+                k: v for k, v in status.items() if k != "observed_at"}
             # The status read is local: no Bot API call, no Host call.
             assert len(api.requests) == requests and connector.host.turns == turns
 
@@ -216,7 +220,12 @@ def test_groups_reach_connect_through_the_poll_loop_and_membership_updates_stay_
                 {"account_id": "9", "conversation_id": "-102", "label": 'R&D <team> "core" notes (-102)'},
                 {"account_id": "9", "conversation_id": "-105", "label": "Renamed (-105)"},
             ]
-            assert (status["text"], status["tone"]) == ("polling", "muted")
+            # The route line is the card's first line (telegram_bot/status_summary.py).
+            assert status["runtime_state"] == "polling"
+            # This Host refuses every turn and keeps it (place not connected): the line says the updates wait, in
+            # neutral ink, and that the Host's capabilities are not confirmed yet.
+            assert status["text"].startswith("Connected · ") and status["tone"] == "muted"
+            assert [item["kind"] for item in status["attention"]] == ["handoff_waiting", "partial"]
             # The Host's readers treat error/ok:false as a failed read; the bot identity
             # came from getMe although this Host does not advertise presence_identity.
             assert {"error", "ok", "identity", "connect_unavailable"}.isdisjoint(status)
@@ -237,13 +246,14 @@ def test_groups_reach_connect_through_the_poll_loop_and_membership_updates_stay_
                 conn.execute("ALTER TABLE telegram_groups RENAME TO unreadable_groups")
             broken = await connector.status()
             assert broken["connect"] is None and broken["telegram_offset"] == 12
-            assert (broken["text"], broken["tone"]) == ("Observed chats could not be read", "warn")
+            assert broken["text"].startswith("Connected · observed chats could not be read") and broken["tone"] == "warn"
             with sqlite3.connect(connector.runtime.store.path) as conn:
                 conn.execute("ALTER TABLE unreadable_groups RENAME TO telegram_groups")
             assert (await connector.status())["connect"] == status["connect"]
             api.open.set()
         stopped = await connector.status()
-        assert stopped["connect"] is None and stopped["text"] == "Telegram bot not running"
+        assert stopped["connect"] is None and stopped["connect_unavailable"] == "Telegram bot not running"
+        assert (stopped["text"], stopped["tone"]) == ("Stopped · the bot is not running", "error")
 
     asyncio.run(run())
 
@@ -255,7 +265,7 @@ def test_only_the_bot_getme_confirmed_for_the_current_token_offers_its_groups(tm
         api.updates["token-b"] = [member(5, chat(-200, "Theirs"), "member", bot=OTHER_BOT)]
         connector = Connector(tmp_path, api)
         idle = await connector.status()
-        assert idle["connect"] is None and idle["text"] == "Telegram bot not running"
+        assert idle["connect"] is None and idle["connect_unavailable"] == "Telegram bot not running"
         async with connector:
             await connector.settled(2)
             assert labels(await connector.status()) == ["Ours (-100)"]
@@ -267,16 +277,24 @@ def test_only_the_bot_getme_confirmed_for_the_current_token_offers_its_groups(tm
             connector.token = ""
             missing = await connector.status()
             assert missing["connect"] is None
-            assert (missing["text"], missing["tone"]) == ("Bot token missing", "warn")
+            # The earlier bot's request is still out, but no token is set: the owner's move, never "Connected".
+            assert (missing["text"], missing["tone"]) == ("Not set up · the bot token is missing", "warn")
             connector.token = "token-b"  # Telegram refuses getMe for it
-            assert (await connector.status())["text"] == "Bot identity is unconfirmed; check the transport status"
-            assert (await connector.status())["connect"] is None
+            unconfirmed = await connector.status()
+            assert unconfirmed["connect_unavailable"] == "Bot identity is unconfirmed; check the transport status"
+            assert unconfirmed["connect"] is None
+            # No attempt has completed for this token yet: waiting in neutral ink, neither green nor amber.
+            assert (unconfirmed["text"], unconfirmed["tone"]) == ("Connecting…", "muted")
             api.open.set()
             await until(lambda: any(token == "token-b" for token, *_ in api.calls("getMe")))
             await until(lambda: connector.runtime.status_snapshot()["runtime_state"] == "provider_error")
             refused = await connector.status()
-            assert refused["connect"] is None and refused["text"] == "Bot identity is unconfirmed; check the transport status"
+            assert refused["connect"] is None and refused["connect_unavailable"] == "Bot identity is unconfirmed; check the transport status"
+            assert (refused["text"], refused["tone"]) == ("Connection error · new messages are not being received", "error")
             assert refused["last_error"] and refused["runtime_state"] == "provider_error"
+            # The link item names this attempt's own side: Telegram refused the token (401).
+            link = refused["attention"][0]
+            assert link["failure"] == "token" and "(401)" in link["error"]["text"]
 
             api.bots["token-b"] = {"id": OTHER_BOT, "is_bot": True, "username": "other_bot"}
             await connector.settled(6)
@@ -321,7 +339,7 @@ def test_a_confirmed_bot_without_groups_is_known_empty_and_the_list_is_never_cap
         async with Connector(tmp_path, api) as connector:
             await until(lambda: connector.runtime.confirmed_bot()[0] == "9")
             empty = await connector.status()
-            assert empty["connect"] == [] and empty["text"] == "polling"
+            assert empty["connect"] == [] and empty["runtime_state"] == "polling"
             # More groups than one getUpdates page, every one of them offered.
             api.updates["token-a"] = [member(1 + index, chat(-1000 - index, f"Group {index:03d}"), "member")
                                       for index in range(150)]

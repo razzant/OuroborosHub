@@ -84,9 +84,8 @@ def test_package_style_plugin_registration_and_status_route(tmp_path):
     assert api.routes[1][2] == ("GET", "POST")
     assert api.tabs[0][0] == "transport"
     assert api.tools[0][0] == "telegram_send"
-    form = next(c for c in api.tabs[0][2]["render"]["components"] if c["type"] == "form")
-    assert form["type"] == "form" and form["route"] == "settings/save"
-    assert all(field["name"] != "binding_id" for field in form["fields"])
+    assert api.tabs[0][2]["render"] == {
+        "kind": "module", "entry": "widget.js", "appearance": "host", "start": "auto", "span": 1}
     assert callable(api.unload)
 
     # Check the model-visible catalog, not only direct Python handler calls.
@@ -112,15 +111,8 @@ def test_package_style_plugin_registration_and_status_route(tmp_path):
     assert payload["telegram_offset"] == 0
     assert payload["inbox_failed"] == 0
     assert payload["outbox_failed"] == 0
-    metric_paths = {
-        component["path"]
-        for component in next(
-            component
-            for component in api.tabs[0][2]["render"]["components"]
-            if component.get("title") == "Provider custody"
-        )["components"]
-    }
-    assert {"inbox_failed", "outbox_failed", "outbox_uncertain"} <= metric_paths
+    assert payload["outbox_uncertain"] == 0
+    assert payload["text"] == "Starting…" and payload["tone"] == "muted" and payload["attention"] == []
     api.unload()
 
 
@@ -261,7 +253,8 @@ def test_manifest_widget_declaration_matches_registered_tab(tmp_path):
     module.register(api)
     registered = api.tabs[0][2]["render"]
     assert registered == front["ui_tab"]["render"]
-    note = registered["components"][0]
-    assert note["type"] == "markdown"
-    assert "cannot read earlier chat history" in note["text"]
+    assert registered["span"] == 1
+    # One card only, under the manifest's own tab id and its title.
+    assert [(tab[0], tab[1]) for tab in api.tabs] == [(front["ui_tab"]["tab_id"], "Telegram Transport")]
+    # The bot-versus-account explanation moved into the card's Details (test_widget_card.py).
     assert front["contributes"][0]["wakes"] == ["direct_message", "mention", "reply_to_me"]

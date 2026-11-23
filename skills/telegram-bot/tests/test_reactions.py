@@ -2055,10 +2055,13 @@ def test_status_route_reads_the_store_once(tmp_path, monkeypatch):
     spec.loader.exec_module(module)
     api = FakeApi(tmp_path)
     module.register(api)
-    real, reads = module._RUNTIME.store.status_snapshot, []
-    monkeypatch.setattr(module._RUNTIME.store, "status_snapshot", lambda: reads.append(1) or real())
+    store, reads = module._RUNTIME.store, []
+    real_read, real_counts = store.read_status, store.status_snapshot
+    monkeypatch.setattr(store, "read_status", lambda *args: reads.append("read_status") or real_read(*args))
+    monkeypatch.setattr(store, "status_snapshot", lambda: reads.append("status_snapshot") or real_counts())
     module._status_payload()
-    assert len(reads) == 1
+    # One read transaction gives the totals and the card's facts; the runtime reuses those totals.
+    assert reads == ["read_status"]
     api.unload()
 
 

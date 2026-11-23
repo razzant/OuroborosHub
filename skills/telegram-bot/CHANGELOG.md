@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.13.1
+
+- The Telegram Transport card on the Widgets page is rebuilt. Its first line answers whether the link works and
+  whether anything needs attention: "Connected · nothing needs attention", "Starting…", "Connecting…", "Not set up ·
+  the bot token is missing", "Connection error · new messages are not being received" with the time of Telegram's
+  last answer and the side the last attempt failed on (token, network, Telegram, or this computer), or "Stopped · the
+  bot is not running". It is green only after Telegram answered the last completed request for the token set now;
+  a request still out, or a token not confirmed yet, reads "Connecting…". The Places line for this connector uses
+  the same words and colour.
+- Below it, only what needs the owner now, each item saying what it means and what to do: sends that failed or
+  whose outcome is unknown, Telegram updates not passed to Ouroboros or still being retried, messages waiting for a
+  place binding, held messages with their hold reason (a reason that needs the owner first), chats Places cannot
+  offer, and reactions that need an Ouroboros update. Failed sends, unknown outcomes and updates Ouroboros refused
+  are listed while they ended within the last day; older ones stay in the totals with the date of the last one.
+  Holds, retried updates and the link are listed while they last. The latest error opens inside its item. For a
+  failed or unknown send the card points to the parts Telegram confirmed, so only what is missing is sent again.
+- Quiet totals follow: the bot, the last update and delivery, incoming and outgoing counts since install, and the
+  current queue (waiting, sending, held). Counts not listed are zero.
+- The management group ID and the details are folded. The field, its hint and Save are unchanged; the card checks
+  the value by the server's rule and says "Saved." or "Not saved:" with the reason. Details keep every earlier fact:
+  the bot-account explanation word for word, the exact queue counts, the Telegram offset, the last error with when
+  and in which loop, and what Ouroboros reported.
+- The card says when the status was read and refreshes every 10 seconds while the page is visible, with no limit on
+  refreshes; Refresh works at any moment. The previous card stopped silently after 100 refreshes. A failed read
+  keeps the last data, says so and offers "Try again". The status and attention repaint while the group ID field is
+  being edited, keeping its text, selection and open folds. When the status cannot be read at all, the group ID
+  field (with its saved value, read once from `settings/save`) and the bot explanation stay available.
+- `GET status` gains fields and changes none: `observed_at`, `last_error_at`, `last_error_source`,
+  `provider_ok_at`, `poll_result`, `poll_at`, `poll_error`, `poll_failure`, `host_checked`, `places_version`,
+  `recent_problems` (null when the custody store was not read), `handoff_retrying`, `held_reasons` and `attention`.
+  Its `text` and `tone` now follow the card's first line. The custody store gains read-only `card_snapshot()` and
+  `read_status()`, which reads the totals and the card's facts in one SQLite read transaction; nothing it writes
+  changes.
+- File uploads, sending, receipts and the outbox are unchanged from 0.13.0. Rolling back to 0.13.0 restores the
+  previous card; it reads none of the new fields.
+
 ## 0.13.0
 
 - A file or album send streams its multipart body from disk instead of reading it whole into memory. Framing and

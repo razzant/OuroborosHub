@@ -14,7 +14,7 @@ import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import Sequence, Any, Dict, Iterator, List, Optional
+from typing import Sequence, Any, Dict, Iterator, List, Optional, Tuple
 
 from . import discovery, outbox_files
 from .delivery import stored_answers
@@ -176,6 +176,12 @@ _FILE_SEND_KINDS = frozenset({"photo", "document", "video", "audio", "voice", "a
 _SEND_KINDS = _FILE_SEND_KINDS | {"message"}
 # An inbox row kept on a Host that cannot hold it as context-only; it is never submitted later.
 REACTION_WITHHELD = "reaction_host_context_unavailable"
+# The Widgets card lists terminal problems of the last day as attention; older ones are history in the totals.
+RECENT_PROBLEM_WINDOW_S = 86400
+# A waiting inbox row whose handoff to Ouroboros was tried and failed. Not: a busy deferral (defer_inbox gives the
+# attempt back), a lease released at runtime start or by a cancelled worker (no handoff answer at all).
+_HANDOFF_RETRYING = ("state='pending' AND attempts>0 "
+                     "AND last_error NOT IN ('', 'released_at_runtime_start', 'worker_cancelled')")
 # The bot getMe last confirmed, for tools in processes whose runtime does not poll: "<token digest>:<bot id>".
 # The digest ties it to that one token. The token itself is not stored, and this row is read only by confirmed_account.
 _CONFIRMED_BOT = "confirmed_bot"
@@ -1293,67 +1299,158 @@ class CustodyStore:
         with self._connect() as conn:
             return discovery.offered_groups(conn, account_id)
 
+    def card_snapshot(self, now: Optional[float] = None, window_s: float = RECENT_PROBLEM_WINDOW_S) -> Dict[str, Any]:
+        """Additive status facts for the Widgets card: recent terminal problems with their time, and every hold reason.
+
+        Lifetime totals stay in status_snapshot(); these count only rows that ended within ``window_s``. An
+        uncertain send is a failed row whose payload marks ``_terminal_outcome`` uncertain (as status_snapshot
+        counts it); a withheld reaction is not an inbound failure. ``handoff_retrying`` counts waiting updates whose
+        handoff to Ouroboros was tried and failed (see _card_facts).
+        """
+        with self._connect() as conn:
+            return self._card_facts(conn, time.time() if now is None else float(now), window_s)
+
     def status_snapshot(self) -> Dict[str, Any]:
         with self._connect() as conn:
-            inbox = {
-                str(row["state"]): int(row["count"])
-                for row in conn.execute(
-                    "SELECT state, COUNT(*) AS count FROM inbox GROUP BY state"
-                )
-            }
-            outbox = {
-                str(row["state"]): int(row["count"])
-                for row in conn.execute(
-                    "SELECT state, COUNT(*) AS count FROM outbox GROUP BY state"
-                )
-            }
-            work = {
-                str(row["state"]): int(row["count"])
-                for row in conn.execute(
-                    "SELECT state, COUNT(*) AS count FROM presence_work GROUP BY state"
-                )
-            }
-            last_event = conn.execute(
-                "SELECT MAX(received_at) AS ts FROM inbox"
-            ).fetchone()["ts"]
-            last_delivery = conn.execute(
-                "SELECT MAX(delivered_at) AS ts FROM outbox"
-            ).fetchone()["ts"]
-            return {
-                "telegram_offset": self._metadata_int(conn, "telegram_offset"),
-                "inbox_waiting": inbox.get("pending", 0),
-                "inbox_leased": inbox.get("leased", 0),
-                "inbox_submitted": inbox.get("submitted", 0),
-                # Retained events whose original attempt or child is still observed.
-                "inbox_retained": conn.execute(
-                    "SELECT COUNT(DISTINCT event_id) FROM presence_work "
-                    "WHERE role IN ('turn','child') AND state IN ('pending','leased')"
-                ).fetchone()[0],
-                "inbox_failed": inbox.get("failed", 0) - (withheld := conn.execute(
-                    "SELECT COUNT(*) FROM inbox WHERE state='failed' AND last_error=?", (REACTION_WITHHELD,)
-                ).fetchone()[0]),
-                "reactions_withheld": withheld,
-                "outbox_waiting": outbox.get("pending", 0),
-                "outbox_held": conn.execute("SELECT COUNT(*) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%'").fetchone()[0],
-                "outbox_leased": outbox.get("leased", 0),
-                "outbox_delivered": outbox.get("delivered", 0),
-                "outbox_failed": outbox.get("failed", 0) - conn.execute(
-                    "SELECT COUNT(*) FROM outbox WHERE state='failed' AND json_extract(payload_json,'$._terminal_outcome')='uncertain'"
-                ).fetchone()[0],
-                "outbox_uncertain": conn.execute(
-                    "SELECT COUNT(*) FROM outbox WHERE state='failed' AND json_extract(payload_json,'$._terminal_outcome')='uncertain'"
-                ).fetchone()[0],
-                "work_waiting": work.get("pending", 0),
-                "work_leased": work.get("leased", 0),
-                "work_terminal": sum(
-                    work.get(state, 0) for state in ("completed", "failed", "cancelled")
-                ),
-                "delivery_reports_pending": conn.execute("SELECT COUNT(*) FROM outbox WHERE report_due_at>0").fetchone()[0],
-                "delivery_reports_held": conn.execute(_HELD_REPORTS).fetchone()[0],
-                "group_backfill_unreadable": discovery.backfill_unreadable(conn),
-                "last_event_at": _timestamp(last_event),
-                "last_delivery_at": _timestamp(last_delivery),
-            }
+            return self._status_counts(conn)
+
+    def read_status(self, now: Optional[float] = None,
+                    window_s: float = RECENT_PROBLEM_WINDOW_S) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """``(status_snapshot(), card_snapshot())`` read in ONE SQLite read transaction: one consistent moment.
+
+        Read separately, a send finishing between the two reads could be counted as sending in one and as failed
+        in the other.
+        """
+        now = time.time() if now is None else float(now)
+        with self._connect() as conn:
+            conn.execute("BEGIN")  # deferred: the first SELECT fixes the snapshot every later SELECT reads
+            try:
+                return self._status_counts(conn), self._card_facts(conn, now, window_s)
+            finally:
+                conn.rollback()  # nothing was written
+
+    @staticmethod
+    def _card_facts(conn: sqlite3.Connection, now: float, window_s: float) -> Dict[str, Any]:
+        since = now - float(window_s)
+        # IFNULL: a row without _terminal_outcome is a plain failure, never NULL in NOT(...).
+        uncertain = "IFNULL(json_extract(payload_json,'$._terminal_outcome'),'')='uncertain'"
+
+        def one(sql: str, params: tuple = ()) -> Any:
+            return conn.execute(sql, params).fetchone()
+
+        # One pass over the failed sends counts both kinds in the window; each kind's newest row gives its last time.
+        sent = one(f"SELECT SUM(u=0 AND failed_at>=?), SUM(u=1 AND failed_at>=?) FROM "
+                   f"(SELECT failed_at, ({uncertain}) AS u FROM outbox WHERE state='failed')", (since, since))
+        newest_failed = one(f"SELECT failed_at, last_error, rowid FROM outbox WHERE state='failed' AND NOT ({uncertain}) "
+                            "ORDER BY failed_at DESC, rowid DESC LIMIT 1")
+        newest_uncertain = one(f"SELECT failed_at, last_error, rowid FROM outbox WHERE state='failed' AND {uncertain} "
+                               "ORDER BY failed_at DESC, rowid DESC LIMIT 1")
+        # The newest failed send of either kind, by the same order the two queries use.
+        newest_send = max((row for row in (newest_failed, newest_uncertain) if row is not None),
+                          key=lambda row: (row["failed_at"] or 0, row["rowid"]), default=None)
+        in_failed = one("SELECT COUNT(*) FROM inbox WHERE state='failed' AND last_error<>? AND failed_at>=?",
+                        (REACTION_WITHHELD, since))[0]
+        newest_in = one("SELECT failed_at, last_error FROM inbox WHERE state='failed' AND last_error<>? "
+                        "ORDER BY failed_at DESC, update_id DESC LIMIT 1", (REACTION_WITHHELD,))
+        # Waiting updates whose handoff was tried and failed: a capacity deferral gives its attempt back (attempts 0)
+        # and a released lease names no handoff error, so neither counts. The newest such update carries the error.
+        handoff = one(
+            f"SELECT COUNT(*), MIN(received_at), MIN(available_at), (SELECT last_error FROM inbox WHERE {_HANDOFF_RETRYING} "
+            f"ORDER BY update_id DESC LIMIT 1) FROM inbox WHERE {_HANDOFF_RETRYING}")
+        held = conn.execute(
+            "SELECT last_error, COUNT(*) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%' "
+            "GROUP BY last_error ORDER BY COUNT(*) DESC, last_error").fetchall()
+        return {
+            "recent_problems": {
+                "window_seconds": int(window_s),
+                "outbound": {
+                    "failed": int(sent[0] or 0), "uncertain": int(sent[1] or 0),
+                    "last_failed_at": _timestamp(newest_failed["failed_at"] if newest_failed else None),
+                    "last_uncertain_at": _timestamp(newest_uncertain["failed_at"] if newest_uncertain else None),
+                    "last_error": ({"at": _timestamp(newest_send["failed_at"]),
+                                    "state": "uncertain" if newest_send is newest_uncertain else "failed",
+                                    "text": str(newest_send["last_error"] or "")} if newest_send else None),
+                    # Each kind's own newest error, so a newer unknown outcome never hides the last refusal.
+                    "last_failed_error": _card_error(newest_failed, "failed"),
+                    "last_uncertain_error": _card_error(newest_uncertain, "uncertain"),
+                },
+                "inbound": {
+                    "failed": int(in_failed),
+                    "last_failed_at": _timestamp(newest_in["failed_at"] if newest_in else None),
+                    "last_error": ({"at": _timestamp(newest_in["failed_at"]), "state": "failed",
+                                    "text": str(newest_in["last_error"] or "")} if newest_in else None),
+                },
+            },
+            "handoff_retrying": {
+                "count": int(handoff[0]),
+                "since": _timestamp(handoff[1]) if handoff[0] else "",
+                "next_attempt_at": _timestamp(handoff[2]) if handoff[0] else "",
+                "last_error": str(handoff[3] or "") if handoff[0] else "",
+            },
+            "held_reasons": [{"reason": str(row[0])[len("Held:"):].strip(), "note": str(row[0]), "count": int(row[1])}
+                             for row in held],
+        }
+
+    def _status_counts(self, conn: sqlite3.Connection) -> Dict[str, Any]:
+        inbox = {
+            str(row["state"]): int(row["count"])
+            for row in conn.execute(
+                "SELECT state, COUNT(*) AS count FROM inbox GROUP BY state"
+            )
+        }
+        outbox = {
+            str(row["state"]): int(row["count"])
+            for row in conn.execute(
+                "SELECT state, COUNT(*) AS count FROM outbox GROUP BY state"
+            )
+        }
+        work = {
+            str(row["state"]): int(row["count"])
+            for row in conn.execute(
+                "SELECT state, COUNT(*) AS count FROM presence_work GROUP BY state"
+            )
+        }
+        last_event = conn.execute(
+            "SELECT MAX(received_at) AS ts FROM inbox"
+        ).fetchone()["ts"]
+        last_delivery = conn.execute(
+            "SELECT MAX(delivered_at) AS ts FROM outbox"
+        ).fetchone()["ts"]
+        return {
+            "telegram_offset": self._metadata_int(conn, "telegram_offset"),
+            "inbox_waiting": inbox.get("pending", 0),
+            "inbox_leased": inbox.get("leased", 0),
+            "inbox_submitted": inbox.get("submitted", 0),
+            # Retained events whose original attempt or child is still observed.
+            "inbox_retained": conn.execute(
+                "SELECT COUNT(DISTINCT event_id) FROM presence_work "
+                "WHERE role IN ('turn','child') AND state IN ('pending','leased')"
+            ).fetchone()[0],
+            "inbox_failed": inbox.get("failed", 0) - (withheld := conn.execute(
+                "SELECT COUNT(*) FROM inbox WHERE state='failed' AND last_error=?", (REACTION_WITHHELD,)
+            ).fetchone()[0]),
+            "reactions_withheld": withheld,
+            "outbox_waiting": outbox.get("pending", 0),
+            "outbox_held": conn.execute("SELECT COUNT(*) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%'").fetchone()[0],
+            "outbox_leased": outbox.get("leased", 0),
+            "outbox_delivered": outbox.get("delivered", 0),
+            "outbox_failed": outbox.get("failed", 0) - conn.execute(
+                "SELECT COUNT(*) FROM outbox WHERE state='failed' AND json_extract(payload_json,'$._terminal_outcome')='uncertain'"
+            ).fetchone()[0],
+            "outbox_uncertain": conn.execute(
+                "SELECT COUNT(*) FROM outbox WHERE state='failed' AND json_extract(payload_json,'$._terminal_outcome')='uncertain'"
+            ).fetchone()[0],
+            "work_waiting": work.get("pending", 0),
+            "work_leased": work.get("leased", 0),
+            "work_terminal": sum(
+                work.get(state, 0) for state in ("completed", "failed", "cancelled")
+            ),
+            "delivery_reports_pending": conn.execute("SELECT COUNT(*) FROM outbox WHERE report_due_at>0").fetchone()[0],
+            "delivery_reports_held": conn.execute(_HELD_REPORTS).fetchone()[0],
+            "group_backfill_unreadable": discovery.backfill_unreadable(conn),
+            "last_event_at": _timestamp(last_event),
+            "last_delivery_at": _timestamp(last_delivery),
+        }
 
     def _initialize(self) -> None:
         with self._connect() as conn:
@@ -1521,6 +1618,10 @@ class CustodyStore:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _card_error(row: Any, state: str) -> Optional[Dict[str, Any]]:
+    return {"at": _timestamp(row["failed_at"]), "state": state, "text": str(row["last_error"] or "")} if row else None
 
 
 def _timestamp(value: Any) -> str:

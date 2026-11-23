@@ -9,6 +9,7 @@ import pathlib
 import re
 import sqlite3
 import threading
+import time
 import uuid
 from typing import Any, Dict, Optional
 
@@ -18,8 +19,9 @@ from .telegram_bot.custody import CustodyStore
 from .telegram_bot.delivery import tool_origin
 from .telegram_bot.formatting import prepare_text
 from .telegram_bot.host import PresenceHostClient
-from .telegram_bot.runtime import TelegramTransportRuntime
+from .telegram_bot.runtime import BOT_NOT_RUNNING, TelegramTransportRuntime
 from .telegram_bot.settings import load_settings, normalize_words
+from .telegram_bot.status_summary import summarize as summarize_status
 from .telegram_bot.tools import (
     album_items,
     discard_files,
@@ -42,149 +44,31 @@ from .telegram_bot.tools import (
 )
 
 
-_BOT_DIFFERENCES = (
-    "**Telegram bot.** Telegram labels this account as a bot. People reach it in a private "
-    "chat they opened themselves and in groups or channels it was added to; group coverage depends "
-    "on privacy mode and admin rights. A bot cannot start a private chat with someone who never "
-    "opened one. The Bot API cannot read earlier chat history: only messages that arrive while it "
-    "runs are received. A dedicated ordinary account is the separate Telegram participant connector."
-)
-
 _RUNTIME: Optional[TelegramTransportRuntime] = None
 _STATE_DIR: Optional[pathlib.Path] = None
 _SETTINGS_SAVE = threading.Lock()
 
 
-def _widget_render() -> Dict[str, Any]:
-    return {
-        "kind": "declarative",
-        "schema_version": 1,
-        "components": [
-            {"type": "markdown", "text": _BOT_DIFFERENCES},
-            {
-                "type": "form",
-                "route": "settings/save",
-                "method": "POST",
-                "submit_label": "Save transport settings",
-                "fields": [
-                    {
-                        "name": "management_group_id",
-                        "label": "Management group ID",
-                        "type": "text",
-                        "placeholder": "Optional numeric Telegram group ID",
-                        "help": "Marks this room in event facts. Work instructions stay "
-                        "in the place notes; no owner permissions are "
-                        "granted.",
-                    },
-                ],
-            },
-            {
-                "type": "poll",
-                "route": "status",
-                "method": "GET",
-                "target": "status",
-                "interval_ms": 5000,
-                "auto_start": True,
-                "max_ticks": 100,
-                "label": "Refresh transport status",
-            },
-            {
-                "type": "callout",
-                "path": "runtime_state",
-                "tone": "info",
-                "target": "status",
-            },
-            {
-                "type": "group",
-                "title": "Provider custody",
-                "layout": "grid",
-                "columns": 4,
-                "components": [
-                    {
-                        "type": "metric",
-                        "label": "Inbox waiting",
-                        "path": "inbox_waiting",
-                        "target": "status",
-                    },
-                    {
-                        "type": "metric",
-                        "label": "Inbox leased",
-                        "path": "inbox_leased",
-                        "target": "status",
-                    },
-                    {
-                        "type": "metric",
-                        "label": "Submitted",
-                        "path": "inbox_submitted",
-                        "target": "status",
-                    },
-                    {
-                        "type": "metric",
-                        "label": "Inbox failed",
-                        "path": "inbox_failed",
-                        "target": "status",
-                    },
-                    {
-                        "type": "metric",
-                        "label": "Outbox waiting",
-                        "path": "outbox_waiting",
-                        "target": "status",
-                    },
-                        {"type": "metric", "label": "Outbox held", "path": "outbox_held", "target": "status"},
-                    {
-                        "type": "metric",
-                        "label": "Delivered",
-                        "path": "outbox_delivered",
-                        "target": "status",
-                    },
-                    {
-                        "type": "metric",
-                        "label": "Outbox failed",
-                        "path": "outbox_failed",
-                        "target": "status",
-                    },
-                    {
-                        "type": "metric",
-                        "label": "Outbox uncertain",
-                        "path": "outbox_uncertain",
-                        "target": "status",
-                    },
-                    {
-                        "type": "metric",
-                        "label": "Telegram offset",
-                        "path": "telegram_offset",
-                        "target": "status",
-                    },
-                ],
-                "target": "status",
-            },
-            {
-                "type": "kv",
-                "fields": [
-                    {"label": "Bot", "path": "bot_label"},
-                    {"label": "Last provider event", "path": "last_event_at"},
-                    {"label": "Last delivery", "path": "last_delivery_at"},
-                    {"label": "Last error", "path": "last_error"},
-                    {"label": "Reactions in Host context", "path": "reaction_context"},
-                ],
-                "target": "status",
-            },
-        ],
-    }
+# The Widgets card is a module (widget.js): it shows when the status was read, keeps refreshing without a tick
+# limit, colours by the current facts, explains the bot's reach and saves the management group ID on one surface.
+_WIDGET_RENDER: Dict[str, Any] = {
+    "kind": "module", "entry": "widget.js", "appearance": "host", "start": "auto", "span": 1,
+}
 
 
 def _status_payload() -> Dict[str, Any]:
-    if _RUNTIME is not None:
-        counts = _RUNTIME.store.status_snapshot()
-    elif _STATE_DIR is None:
-        counts: Dict[str, Any] = {}
-    else:
-        counts = CustodyStore.shared(_STATE_DIR / "custody.sqlite3").status_snapshot()
+    observed = time.time()
+    counts: Dict[str, Any] = {}
+    card: Dict[str, Any] = {}
+    if _RUNTIME is not None or _STATE_DIR is not None:
+        store = _RUNTIME.store if _RUNTIME is not None else CustodyStore.shared(_STATE_DIR / "custody.sqlite3")
+        # Totals and the card's facts from one read transaction: never a send counted twice or not at all.
+        counts, card = store.read_status(observed)
     runtime = _RUNTIME.status_snapshot(counts) if _RUNTIME is not None else {}
     binding_id = str(_load_local_settings().get("binding_id") or "").strip()
     # Connect offers only the observed chats of the bot getMe confirmed for the current token.
     # null, never [], while that bot or its chats cannot be read.
-    account, unavailable = _RUNTIME.confirmed_bot() if _RUNTIME is not None else ("", "Telegram bot not running")
+    account, unavailable = _RUNTIME.confirmed_bot() if _RUNTIME is not None else ("", BOT_NOT_RUNNING)
     groups = None
     if account:
         try:
@@ -210,17 +94,33 @@ def _status_payload() -> Dict[str, Any]:
         "connect": groups,
         **({"connect_unavailable": unavailable} if groups is None else {}),
         **counts,
+        # Additive card facts (each tested in tests/test_status_card.py). observed_at: when this body was read.
+        "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(observed)),
+        "last_error_at": runtime.get("last_error_at", ""),
+        "last_error_source": runtime.get("last_error_source", ""),
+        "provider_ok_at": runtime.get("provider_ok_at", ""),
+        # The last completed getUpdates attempt for the token configured now ("" none yet): green needs "ok".
+        "poll_result": runtime.get("poll_result", ""),
+        "poll_at": runtime.get("poll_at", ""),
+        "poll_error": runtime.get("poll_error", ""),
+        "poll_failure": runtime.get("poll_failure", ""),
+        "host_checked": bool(runtime.get("host_checked", False)),
+        "places_version": runtime.get("places_version", 0),
+        # null when the custody store was not read: unknown, never zero.
+        "recent_problems": card.get("recent_problems"),
+        "held_reasons": card.get("held_reasons") or [],
+        # Waiting updates whose handoff to Ouroboros failed and is retried; null when the store was not read.
+        "handoff_retrying": card.get("handoff_retrying"),
     }
 
 
 async def _status_route(_request: Any) -> JSONResponse:
     # Custody counts, the token and local settings are file reads: they run beside the Host's HTTP loop.
     payload = await asyncio.to_thread(_status_payload)
-    held = payload.get("outbox_held", 0)
-    text, tone = ((f"{held} held", "warn") if held else
-                  (payload["connect_unavailable"], "warn") if payload["connect"] is None else
-                  (payload["runtime_state"], "muted"))
-    payload.update(text=text, tone=tone, title="Telegram transport")
+    # One rule for the Places line and the card's first line: the same words, the worst current tone.
+    summary = summarize_status(payload)
+    payload.update(text=summary["text"], tone=summary["tone"], attention=summary["attention"],
+                   title="Telegram transport")
     return JSONResponse(payload)
 
 
@@ -572,7 +472,7 @@ def register(api: Any) -> None:
         "transport",
         "Telegram Transport",
         icon="message",
-        render=_widget_render(),
+        render=dict(_WIDGET_RENDER),
     )
     api.on_unload(unload)
     api.log("info", "telegram-bot: durable provider transport registered")
