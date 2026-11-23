@@ -3,7 +3,8 @@
 Every file here is invented and built in the test: no real memory, no real
 person, no real export. The persona is a fictional gardening cooperative
 «Огонёк» and its fictional member Марта. The test drives the CLI the way its
-consumer calls it (from the installed payload) and checks the contract:
+consumer calls it (the installed script, run in the task's own folder — here
+the test's tmp_path) and checks the contract:
 
 * honest selection — exactly the picked records travel, built straight from
   the source named in the same call and bound to the inspect that read it
@@ -28,6 +29,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -61,9 +63,20 @@ def _load(path: Path, alias: str):
 portable = _load(SKILL / "scripts" / "portable.py", "amberkeep_portable_under_test")
 
 
+@pytest.fixture(autouse=True)
+def _in_task_folder(tmp_path):
+    """The CLI creates files only in the folder it runs in: every test runs in
+    its own tmp_path, as the host runs the CLI in the task's own folder. Kept
+    apart from ``monkeypatch``, whose undo() some tests call midway."""
+    previous = os.getcwd()
+    os.chdir(tmp_path)
+    yield
+    os.chdir(previous)
+
+
 def run_cli(argv: list[str]):
-    """Run the CLI as its consumer does, from the installed payload."""
-    return subprocess.run([sys.executable, str(HELPER), *argv],
+    """Run the installed CLI as its consumer does, in the task's own folder."""
+    return subprocess.run([sys.executable, "-B", str(HELPER), *argv],
                           capture_output=True, text=True, timeout=120)
 
 
@@ -107,10 +120,12 @@ def genuine_profile(records: list, memory: dict) -> dict:
 
 
 def build_package(path: Path, records: list, coverage: dict | None = None,
-                  with_coverage: bool = True) -> Path:
+                  with_coverage: bool = True, fixed: bool = False) -> Path:
     """Any invented Portable Memory v0.7 package: digests, the producer's
     review and an exact manifest, on the wire format. ``with_coverage=False``
-    leaves the coverage block out, as an older producer may."""
+    leaves the coverage block out, as an older producer may; ``fixed=True``
+    stores the members with one fixed time and system, so the same records
+    give the same bytes on every run."""
     for record in records:
         # On the wire the digest covers the record minus review, and lives
         # inside review: pop review, digest the body, then set it back.
@@ -136,9 +151,15 @@ def build_package(path: Path, records: list, coverage: dict | None = None,
         manifest["coverage"] = coverage
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
-        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
-        for name, blob in members.items():
-            archive.writestr(name, blob)
+        for name, blob in (("manifest.json", json.dumps(manifest, ensure_ascii=False).encode()),
+                           *members.items()):
+            if not fixed:
+                archive.writestr(name, blob)
+                continue
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            info.compress_type, info.create_system = zipfile.ZIP_STORED, 3
+            info.external_attr = 0o600 << 16
+            archive.writestr(info, blob)
     path.write_bytes(buffer.getvalue())
     return path
 
@@ -432,11 +453,6 @@ def test_select_ids_are_stable_across_picks_and_bytes_are_deterministic(rows_doc
                       "--record", "memory.json#rec-alpha",
                       "--receipt", receipt_of(source)]))
     assert one.read_bytes() == again.read_bytes()
-    # Create-only: an existing file is never overwritten, even identically.
-    taken = run_cli(["select", str(again), "--original", str(source),
-                     "--record", "memory.json#rec-alpha",
-                     "--receipt", receipt_of(source)])
-    assert "never overwrites" in refused(taken)["refused"]
 
 
 def test_select_refuses_bad_input_and_missing_locators(rows_doc, tmp_path):
@@ -790,12 +806,18 @@ def test_links_travel_only_when_confirmed_inside_the_pick(tmp_path):
     ])
     sha = receipt_of(source)
     both = tmp_path / "both.zip"
-    doc = out_json(run_cli(["select", str(both), "--original", str(source),
-                            "--record", "memory.json#keep", "--record", "memory.json#mate",
-                            "--receipt", sha]))
-    # Unpicked, pending and excluded targets stay on the owner's side.
-    assert doc["coverage"]["dropped_links"] == sorted(
-        ["secret-plot", "memory.json#draft", "memory.json#left-out", "chat-5", "s1"])
+    select_result = run_cli(["select", str(both), "--original", str(source),
+                             "--record", "memory.json#keep", "--record", "memory.json#mate",
+                             "--receipt", sha])
+    doc = out_json(select_result)
+    # Unpicked and shared targets stay on the owner's side, by name; a link
+    # into a pending or excluded record never reaches the pick: the reader
+    # left it out and only counted it, so its name is printed nowhere.
+    assert doc["coverage"]["dropped_links"] == sorted(["memory.json#left-out", "chat-5", "s1"])
+    assert any("2 link(s) into records this package withholds" in line
+               for line in doc["coverage"]["source_gap_lines"])
+    for hidden in ("secret-plot", "тайная грядка", "draft", "черновик"):
+        assert hidden not in select_result.stdout, hidden
     _manifest, selection = selection_of(both)
     text = json.dumps(selection, ensure_ascii=False)
     for leaked in ("secret-plot", "тайная грядка", "draft", "черновик",
@@ -983,10 +1005,13 @@ def test_quote_reads_under_the_chain_label_and_checks_role_and_date(tmp_path):
     assert check["verified"] is True
     assert check["label_from_chain"] == "огород-2026"
 
-    for field, value, flag in (("date", "2026-01-01T00:00:00Z", "date_match"),
-                               ("role", "user", "role_match")):
+    # A role travels only with a provenance it agrees with, so the role is
+    # edited together with its provenance.
+    for field, change, flag in (("date", {"date": "2026-01-01T00:00:00Z"}, "date_match"),
+                                ("role", {"role": "user", "provenance": "user_statement"},
+                                 "role_match")):
         changed = rewrite_selection(out, tmp_path / f"changed-{field}.zip",
-                                    lambda record: record.update({field: value}))
+                                    lambda record: record.update(change))
         report = out_json(run_cli(["quote", str(changed), "--record", record_id,
                                    "--original", str(note)]))
         assert report["verification"][flag] is False
@@ -1043,10 +1068,10 @@ def test_the_cli_never_writes_what_it_could_not_read_back(tmp_path, monkeypatch,
     assert code == 1 and "limit for a rows document" in doc["refused"]
     monkeypatch.undo()
 
-    # Create-only needs its parent; nothing half-written is left behind.
+    # A new file only in the folder the command runs in; nothing is created on the way.
     code, doc = run(["select", str(tmp_path / "no-dir" / "x.zip"), "--original", str(source),
                      "--all", "--receipt", receipt_of(source)])
-    assert code == 1 and "parent directory does not exist" in doc["refused"]
+    assert code == 1 and "folder this command runs in" in doc["refused"]
     assert not (tmp_path / "no-dir").exists()
 
 
@@ -1196,19 +1221,19 @@ def test_a_recarry_keeps_ids_and_versions_and_a_revised_source_shows(tmp_path):
     assert direct["memory.json#rec-gamma"] == gamma_version
 
     # A later export of the same item: same text and locator, so the same id;
-    # any change of status, currency, role or cited source is a new version.
+    # any change of status, currency, role, date or cited source is a new version.
     def later(name: str, **changes) -> dict:
         record = fact("rec-gamma", changes.pop("value", "Старая заметка про покраску забора."),
                       decision=changes.pop("decision", "historical"), title="Забор",
                       scope="дом", provenance=changes.pop("provenance", "source"),
-                      date="2026-11-01T08:00:00Z", **changes)
+                      date=changes.pop("date", "2026-11-01T08:00:00Z"), **changes)
         path = build_package(tmp_path / name, [record])
         # The same file name as the first export, in its own folder.
         folder = tmp_path / name.removesuffix(".zip")
         folder.mkdir()
         renamed = folder / "src.zip"
         path.rename(renamed)
-        doc = out_json(run_cli(["select", str(folder / "out.zip"), "--original", str(renamed),
+        doc = out_json(run_cli(["select", f"{folder.name}-out.zip", "--original", str(renamed),
                                 "--all", "--receipt", receipt_of(renamed)]))
         return doc["records"][0]
 
@@ -1216,6 +1241,7 @@ def test_a_recarry_keeps_ids_and_versions_and_a_revised_source_shows(tmp_path):
         gamma_version, gamma_id)
     for number, changes in enumerate(({"decision": "active"}, {"currency": "historical"},
                                       {"provenance": "model_inference"},
+                                      {"date": "2026-11-09T08:00:00Z"},
                                       {"sources": [{"id": "s1", "locator": "chat-12",
                                                     "observed_at": None}]})):
         revised = later(f"rev-{number}.zip", **dict(changes))
@@ -1381,12 +1407,12 @@ def test_empty_values_null_text_and_scope_travel_as_the_source_states_them(tmp_p
         # A record that stated no scope carries none: never an empty string,
         # and never the package's file name posing as its area.
         assert "scope" not in by_title["bare"], "a missing scope stays missing"
+    # A group shows the scope as stated: "" when stated empty, null when the
+    # records state none — never the package's file name posing as an area.
     groups = {g["scope"] for g in out_json(run_cli(["portrait", str(out)]))["groups"]}
-    assert "(no scope)" in groups, "the empty scope is shown, not stored, as a fallback"
-    # The file name is the display's own grouping for a package row that
-    # states no area; it is never the area carried with the record.
+    assert {"", None, "огород"} <= groups and out.name not in groups
     source_groups = {g["scope"] for g in out_json(run_cli(["portrait", str(source)]))["groups"]}
-    assert source.name in source_groups
+    assert None in source_groups and source.name not in source_groups
     for title, kind in (("obj", "projection"), ("arr", "projection"), ("nul", "projection"),
                         ("txt", "verbatim")):
         quote = out_json(run_cli(["quote", str(out), "--record", by_title[title]["id"],
@@ -1431,12 +1457,14 @@ def test_owner_side_output_is_bounded_with_totals_and_a_route(tmp_path):
         {"target": f"memory.json#r{n:03d}", "relation": "near", "basis": "рядом"}
         for n in range(45)]))
     records += [fact(f"wait{n}{long_tail}", "Ждёт.", decision="pending") for n in range(3)]
+    # Long names of records the read returns: a gap line naming them is bounded.
+    records += [fact(f"cur{n}{long_tail}", "Сезонная.", currency="seasonal") for n in range(3)]
     source = build_package(tmp_path / "big.zip", records)
     receipt = receipt_of(source)
     doc = out_json(run_cli(["select", str(tmp_path / "hub.zip"), "--original", str(source),
                             "--record", "memory.json#hub", "--receipt", receipt]))
     coverage = doc["coverage"]
-    assert coverage["excluded_count"] == 520 and coverage["excluded_truncated"] is True
+    assert coverage["excluded_count"] == 523 and coverage["excluded_truncated"] is True
     assert len(coverage["excluded_locators"]) == 500
     assert coverage["dropped_link_count"] == 45 and coverage["dropped_links_truncated"] is True
     assert len(coverage["dropped_links"]) == 40
@@ -1445,17 +1473,658 @@ def test_owner_side_output_is_bounded_with_totals_and_a_route(tmp_path):
 
     one = out_json(run_cli(["inspect", str(source), "--record", "memory.json#hub"]))
     assert isinstance(one["gaps"], list) and one["gaps_total"] >= 1
-    pending_line = next(line for line in one["gaps"] if "pending" in line)
-    assert len(pending_line) < 450 and "in full: inspect SOURCE --rows" in pending_line
+    currency_line = next(line for line in one["gaps"] if "currency" in line)
+    assert len(currency_line) < 450 and "in full: inspect SOURCE --rows" in currency_line
     assert one["row"]["text"] == "Узел.", "the one requested row stays full"
 
     report = out_json(run_cli(["verify", str(source)]))
-    assert report["record_count"] == 521
+    assert report["record_count"] == 524
     assert len(report["records"]) == 500 and report["records_truncated"] is True
     assert all(len(line) < 450 for line in report["gaps"]) and report["full"] == "read PKG.zip"
     full = out_json(run_cli(["read", str(source)]))
-    assert len(full["rows"]) == 521
+    assert len(full["rows"]) == 524
     assert any(long_tail in line for line in full["gaps"]), "read stays full"
+    # The pending records are counted, never named, in any of these outputs.
+    for shown in (doc, one, report, full):
+        assert not any(f"wait{n}" in json.dumps(shown, ensure_ascii=False) for n in range(3))
     missing = refused(run_cli(["select", str(tmp_path / "x.zip"), "--original", str(source),
                                "--record", "memory.json#nope", "--receipt", receipt]))["refused"]
     assert "no such locators" in missing
+
+
+# ------------------------- 0.1.1: one cleaned record, both formats, and 0.1.0
+
+def canonical_bytes(document) -> bytes:
+    """How Amberkeep writes a package member: compact, sorted keys, UTF-8."""
+    return json.dumps(document, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def first_locator_of(row: dict) -> str:
+    """Where a row was first read: its earliest chain hop, or its own locator."""
+    hops = [hop for hop in row.get("sources") or [] if "source_sha256" in hop]
+    return hops[0]["locator"] if hops else row["locator"]
+
+
+def test_every_view_of_both_formats_is_built_from_one_cleaned_record(tmp_path):
+    """read, inspect (page, record, raw, rows), quote, portrait and the next
+    select see one cleaned record in both formats: citations and links in
+    their shape, each speaker beside its own provenance, the date, the types."""
+    source = build_package(tmp_path / "garden.zip", [
+        fact("said", "Марта просит поливать огурцы по средам.",
+             sources=[{"id": "s1", "locator": "chat-21", "observed_at": "2026-11-02T08:00:00Z",
+                       "label": "Беседа о поливе", "access_token": "invented-1"}],
+             links=[{"target": "memory.json#guess", "relation": "same_bed", "basis": "рядом",
+                     "note": "лишнее поле"}]),
+        fact("guess", {"навес": True, "вёдер": 3, "доля": 0.5, "заметка": None,
+                       "api_token": "invented-2"},
+             provenance="model_inference", date="2026-11-03T09:30:00+03:00"),
+        {"id": "plan", "kind": "fact", "title": "plan", "provenance": "source",
+         "value": "Схема грядок висит в сарае.",
+         "sources": [{"id": "s1", "locator": "chat-4", "observed_at": "2026-10-30T18:00:00Z"}],
+         "review": {"decision": "historical"}},
+    ])
+    pairs = {"said": ("document", "user_statement"), "guess": ("assistant", "model_inference"),
+             "plan": ("document", "source")}
+    dates = {"said": "2026-11-02T08:00:00Z", "guess": "2026-11-03T09:30:00+03:00",
+             "plan": "2026-10-30T18:00:00Z"}
+    printed: list[str] = []
+
+    def run(argv: list[str]) -> dict:
+        result = run_cli(argv)
+        printed.append(result.stdout)
+        return out_json(result)
+
+    def one_record(rows: list) -> None:
+        by = {first_locator_of(row).removeprefix("memory.json#"): row for row in rows}
+        assert set(by) == set(pairs)
+        for name, row in by.items():
+            assert (row["speaker"], row["origin"]["provenance"]) == pairs[name], name
+            assert row["date"] == dates[name], name
+            for entry in row.get("sources") or []:
+                assert set(entry) <= {"id", "locator", "observed_at", "source_label",
+                                      "source_sha256", "read_via"}, entry
+            for link in row.get("links") or []:
+                assert set(link) <= {"target", "relation", "basis"}, link
+        value = by["guess"]["value"]
+        assert value == {"навес": True, "вёдер": 3, "доля": 0.5, "заметка": None}
+        assert value["навес"] is True and type(value["вёдер"]) is int
+        assert type(value["доля"]) is float and value["заметка"] is None
+        assert by["guess"]["text"] == canonical_bytes(value).decode("utf-8")
+        assert by["guess"]["origin"]["dropped_fields"] == ["api_token"]
+        assert by["said"]["origin"]["dropped_fields"] == ["access_token"]
+        assert by["said"]["text"] == "Марта просит поливать огурцы по средам."
+        assert "scope" not in by["plan"]["origin"]
+        assert by["plan"]["origin"]["decision"] == "historical"
+
+    # The Portable package, every view.
+    page = run(["inspect", str(source)])
+    assert {row["scope"] for row in page["page"]["rows"]} == {"огород", None}
+    table = tmp_path / "rows.json"
+    one = run(["inspect", str(source), "--record", "memory.json#said", "--rows", str(table)])
+    assert one["row"]["sources"] == [{"id": "s1", "locator": "chat-21",
+                                      "observed_at": "2026-11-02T08:00:00Z"}]
+    assert one["row"]["links"] == [{"target": "memory.json#guess", "relation": "same_bed",
+                                    "basis": "рядом"}]
+    one_record(run(["inspect", str(source), "--raw"])["rows"])
+    one_record(json.loads(table.read_text(encoding="utf-8"))["rows"])
+    read_source = run(["read", str(source)])
+    one_record(read_source["rows"])
+    versions = {item["first_locator"]: item["version_sha256"] for item in read_source["items"]}
+    quoted = run(["quote", str(source), "--record", "guess"])
+    assert (quoted["speaker"], quoted["provenance"], quoted["date"]) == (
+        "assistant", "model_inference", dates["guess"])
+    assert quoted["version_sha256"] == versions["memory.json#guess"]
+    assert run(["quote", str(source), "--record", "plan"])["scope"] is None
+    checks = run(["verify", str(source)])
+    assert "Portable Memory 0.7 beyond the contract portable.py itself states" in checks[
+        "not_checked"]
+    portrait = run(["portrait", str(source)])
+    assert (portrait["first_date"], portrait["last_date"], portrait["date_order"]) == (
+        dates["plan"], dates["guess"], "time")
+    assert {group["scope"] for group in portrait["groups"]} == {"огород", None}
+
+    # The selection built from it, every view, and the next select from it.
+    carried = tmp_path / "garden-carried.zip"
+    picked = run(["select", str(carried), "--original", str(source), "--rows", str(table)])
+    assert {r["first_locator"]: r["version_sha256"] for r in picked["records"]} == versions
+    assert {r["first_locator"]: (r["role"], r["provenance"], r["date"], r["scope"])
+            for r in picked["records"]} == {
+        f"memory.json#{name}": (*pairs[name], dates[name], None if name == "plan" else "огород")
+        for name in pairs}
+    ids = {r["first_locator"]: r["id"] for r in picked["records"]}
+    _manifest, selection = selection_of(carried)
+    said = next(r for r in selection["records"] if r["id"] == ids["memory.json#said"])
+    assert said["links"] == [{"target": ids["memory.json#guess"], "relation": "same_bed",
+                              "basis": "рядом"}]
+    read_carried = run(["read", str(carried)])
+    one_record(read_carried["rows"])
+    assert {i["first_locator"]: i["version_sha256"] for i in read_carried["items"]} == versions
+    checked = run(["quote", str(carried), "--record", ids["memory.json#guess"],
+                   "--original", str(source)])
+    assert checked["verification"]["verified"] is True
+    assert checked["verification"]["value_match"] is True
+    assert checked["version_sha256"] == versions["memory.json#guess"]
+    # The check compares provenance beside the role: a retold user statement
+    # and a model's inference each match only themselves.
+    for name, check in (("guess", checked["verification"]),
+                        ("said", run(["quote", str(carried), "--record", ids["memory.json#said"],
+                                      "--original", str(source)])["verification"])):
+        assert (check["provenance"], check["provenance_in_original"], check["provenance_match"],
+                check["verified"]) == (pairs[name][1], pairs[name][1], True, True), name
+    assert {g["scope"] for g in run(["portrait", str(carried)])["groups"]} == {"огород", None}
+    table2 = tmp_path / "rows-carried.json"
+    run(["inspect", str(carried), "--rows", str(table2)])
+    one_record(json.loads(table2.read_text(encoding="utf-8"))["rows"])
+    following = tmp_path / "garden-next.zip"
+    again = run(["select", str(following), "--original", str(carried), "--rows", str(table2)])
+    assert {r["first_locator"]: (r["id"], r["version_sha256"]) for r in again["records"]} == {
+        locator: (ids[locator], version) for locator, version in versions.items()}
+    one_record(run(["read", str(following)])["rows"])
+
+    shown = "\n".join(printed) + table.read_text(encoding="utf-8") + table2.read_text(
+        encoding="utf-8") + "".join(blob.decode("utf-8") for package in (carried, following)
+                                    for blob in package_members(package).values())
+    for hidden in ("invented-1", "invented-2", "Беседа о поливе", "лишнее поле"):
+        assert hidden not in shown, hidden
+
+
+def test_a_selection_counts_its_withheld_records_and_never_names_them(tmp_path):
+    """A selection may hold a pending or excluded record: it is counted,
+    never named, and a link into it is left out with its basis."""
+    source = build_package(tmp_path / "beds.zip", [
+        fact("bed-a", "Грядка у забора.",
+             links=[{"target": "memory.json#bed-b", "relation": "near", "basis": "рядом"}]),
+        fact("bed-b", "Грядка у колодца.")])
+    out = tmp_path / "beds-sel.zip"
+    doc = out_json(run_cli(["select", str(out), "--original", str(source), "--all",
+                            "--receipt", receipt_of(source)]))
+    ids = {record["first_locator"]: record["id"] for record in doc["records"]}
+    held_id = ids["memory.json#bed-b"]
+    held = rewrite_selection(out, tmp_path / "beds-held.zip", lambda record: record.update(
+        decision="pending") if record["id"] == held_id else None)
+    result = run_cli(["read", str(held)])
+    read = out_json(result)
+    assert [row["locator"] for row in read["rows"]] == [
+        f"selection.json#{ids['memory.json#bed-a']}"]
+    assert "links" not in read["rows"][0]
+    assert any("1 pending record(s)" in gap for gap in read["gaps"])
+    assert any("1 link(s) into records this selection withholds" in gap for gap in read["gaps"])
+    for hidden in (held_id, "bed-b", "Грядка у колодца.", "рядом"):
+        assert hidden not in result.stdout, hidden
+
+
+def compat_records() -> list:
+    """The neutral original the published 0.1.0 read for the compatibility case."""
+    return [
+        {"id": "rec-water", "kind": "fact", "title": "Полив", "scope": "огород",
+         "provenance": "user_statement", "value": "Огурцы поливаем по средам утром.",
+         "date": "2026-10-07T07:30:00Z",
+         "sources": [{"id": "s1", "locator": "chat-12", "observed_at": "2026-10-07T07:30:00Z"}],
+         "links": [{"target": "memory.json#rec-shade", "relation": "same_bed",
+                    "basis": "одна грядка"}],
+         "review": {"decision": "active"}},
+        {"id": "rec-shade", "kind": "inference", "title": "Навес", "scope": "огород",
+         "provenance": "model_inference",
+         "value": {"нужен": True, "вёдер": 3, "доля": 0.5, "заметка": None},
+         "date": "2026-10-08T09:00:00+03:00", "review": {"decision": "active"}},
+        {"id": "rec-fence", "kind": "fact", "title": "Забор", "scope": "дом",
+         "provenance": "source", "value": "Забор красили в мае.",
+         "sources": [{"id": "s1", "locator": "chat-3", "observed_at": "2026-05-20T12:00:00Z"}],
+         "review": {"decision": "historical"}},
+        {"id": "rec-note", "kind": "fact", "title": "Заметка", "provenance": "source",
+         "value": "Семена хранятся в синей коробке.", "date": "2026-10-09T18:15:00Z",
+         "review": {"decision": "active"}},
+    ]
+
+
+COMPAT_ORIGINAL_SHA256 = "be464d8dc142341bf950dc11a061fbea7d6e274eca6a65278db979554d2cd017"
+# The two members the published Amberkeep 0.1.0 wrote from that original
+# (inspect, then select --all --decided-by Марта), as it wrote them.
+COMPAT_0_1_0 = json.loads(r"""
+{
+ "manifest.json": {
+  "coverage": {
+   "read": [
+    "garden-0.1.0-original.zip"
+   ],
+   "source_gaps": false
+  },
+  "decided_by": "Марта",
+  "dropped_fields": [],
+  "files": {
+   "selection.json": {
+    "bytes": 2760,
+    "sha256": "08942981503a840c7572a19c7bf1866af028011a01900b9996759505e9cddec3"
+   }
+  },
+  "format": "amberkeep-selection",
+  "note": "an Amberkeep selection: exactly the records the owner picked from one named source; unselected records do not travel, and decided_by is not the receiver's consent",
+  "record_count": 4,
+  "schema_version": 1
+ },
+ "selection.json": {
+  "format": "amberkeep-selection",
+  "records": [
+   {
+    "content_sha256": "8a2ab7bd039bc979520ae698ef3442faa122855f551b3dde0dc1bbb66847f5e1",
+    "date": "2026-10-07T07:30:00Z",
+    "decision": "active",
+    "id": "kd3a7fd7ae904d9d0",
+    "kind": "fact",
+    "links": [
+     {
+      "basis": "одна грядка",
+      "relation": "same_bed",
+      "target": "ka36028db8a833d90"
+     }
+    ],
+    "provenance": "user_statement",
+    "quote": "Огурцы поливаем по средам утром.",
+    "role": "document",
+    "scope": "огород",
+    "sources": [
+     {
+      "id": "s1",
+      "locator": "chat-12",
+      "observed_at": "2026-10-07T07:30:00Z"
+     },
+     {
+      "id": "s2",
+      "locator": "memory.json#rec-water",
+      "observed_at": "2026-10-07T07:30:00Z",
+      "read_via": "portable.read_portable",
+      "source_label": "garden-0.1.0-original.zip",
+      "source_sha256": "be464d8dc142341bf950dc11a061fbea7d6e274eca6a65278db979554d2cd017"
+     }
+    ],
+    "title": "Полив"
+   },
+   {
+    "content_sha256": "fe6717fe2f182df6b0b95654784c45a4be1f3541cea8a2a8f2c0d3d5d5c89d82",
+    "date": "2026-10-08T09:00:00+03:00",
+    "decision": "active",
+    "id": "ka36028db8a833d90",
+    "kind": "inference",
+    "links": [],
+    "provenance": "model_inference",
+    "quote": "{\"вёдер\":3,\"доля\":0.5,\"заметка\":null,\"нужен\":true}",
+    "role": "assistant",
+    "scope": "огород",
+    "sources": [
+     {
+      "id": "s1",
+      "locator": "memory.json#rec-shade",
+      "observed_at": "2026-10-08T09:00:00+03:00",
+      "read_via": "portable.read_portable",
+      "source_label": "garden-0.1.0-original.zip",
+      "source_sha256": "be464d8dc142341bf950dc11a061fbea7d6e274eca6a65278db979554d2cd017"
+     }
+    ],
+    "title": "Навес",
+    "value": {
+     "вёдер": 3,
+     "доля": 0.5,
+     "заметка": null,
+     "нужен": true
+    }
+   },
+   {
+    "content_sha256": "97b598762b022728a43cc8556ce15227d65a33563a833188ebe5ea34e55483d7",
+    "date": "2026-05-20T12:00:00Z",
+    "decision": "historical",
+    "id": "k8954a225dc520dd3",
+    "kind": "fact",
+    "links": [],
+    "provenance": "source",
+    "quote": "Забор красили в мае.",
+    "role": "document",
+    "scope": "дом",
+    "sources": [
+     {
+      "id": "s1",
+      "locator": "chat-3",
+      "observed_at": "2026-05-20T12:00:00Z"
+     },
+     {
+      "id": "s2",
+      "locator": "memory.json#rec-fence",
+      "observed_at": "2026-05-20T12:00:00Z",
+      "read_via": "portable.read_portable",
+      "source_label": "garden-0.1.0-original.zip",
+      "source_sha256": "be464d8dc142341bf950dc11a061fbea7d6e274eca6a65278db979554d2cd017"
+     }
+    ],
+    "title": "Забор"
+   },
+   {
+    "content_sha256": "637d3a187fede1d515e2253a6a19ca488f0d0ca518a55b0d0e796f3bbdf2601b",
+    "date": "2026-10-09T18:15:00Z",
+    "decision": "active",
+    "id": "k1df0eb77b0759061",
+    "kind": "fact",
+    "links": [],
+    "provenance": "source",
+    "quote": "Семена хранятся в синей коробке.",
+    "role": "document",
+    "sources": [
+     {
+      "id": "s1",
+      "locator": "memory.json#rec-note",
+      "observed_at": "2026-10-09T18:15:00Z",
+      "read_via": "portable.read_portable",
+      "source_label": "garden-0.1.0-original.zip",
+      "source_sha256": "be464d8dc142341bf950dc11a061fbea7d6e274eca6a65278db979554d2cd017"
+     }
+    ],
+    "title": "Заметка"
+   }
+  ],
+  "schema_version": 1
+ }
+}
+""")
+# The versions 0.1.0 reported for two of those records: no scheme, no date.
+COMPAT_0_1_0_VERSIONS = {
+    "kd3a7fd7ae904d9d0": "7313fb449655ff4d94c2c301102ecc574a8c01d99dd192492fd0da6d18237150",
+    "ka36028db8a833d90": "cdef889e1fa43313fd345b3d8a7e5987672eff51718c7762e70bf90f6f7411ae",
+}
+
+
+def test_a_selection_written_by_published_0_1_0_reads_with_this_version(tmp_path):
+    """An ordinary package of the published 0.1.0, read by this version: the
+    same ids, roles beside their provenance, dates, decisions and typed
+    values; its chain still binds the original; the next transfer keeps it
+    all; and reading changes no byte of it."""
+    original = build_package(tmp_path / "garden-0.1.0-original.zip", compat_records(),
+                             {"read": ["chat-12", "chat-3"], "unavailable": [], "excluded": []},
+                             fixed=True)
+    assert sha_of(original) == COMPAT_ORIGINAL_SHA256, "the original is reproduced byte for byte"
+    members = {name: canonical_bytes(document) for name, document in COMPAT_0_1_0.items()}
+    listed = COMPAT_0_1_0["manifest.json"]["files"]["selection.json"]
+    # The member bytes are exactly the ones 0.1.0 listed in its manifest.
+    assert (hashlib.sha256(members["selection.json"]).hexdigest(),
+            len(members["selection.json"])) == (listed["sha256"], listed["bytes"])
+    legacy = tmp_path / "garden-0.1.0.zip"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, blob in members.items():
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, blob)
+    legacy.write_bytes(buffer.getvalue())
+    before = sha_of(legacy)
+
+    report = out_json(run_cli(["verify", str(legacy)]))
+    assert (report["ok"], report["format"], report["record_count"]) == (
+        True, "amberkeep-selection", 4)
+    expected = COMPAT_0_1_0["selection.json"]["records"]
+    read = out_json(run_cli(["read", str(legacy)]))
+    rows = {row["locator"].removeprefix("selection.json#"): row for row in read["rows"]}
+    assert list(rows) == [record["id"] for record in expected]
+    for record in expected:
+        row = rows[record["id"]]
+        assert (row["speaker"], row["origin"]["provenance"]) == (record["role"],
+                                                                 record["provenance"])
+        assert (row["date"], row["origin"]["decision"]) == (record["date"], record["decision"])
+        assert row["origin"].get("scope", "<none>") == record.get("scope", "<none>")
+        assert row["text"] == record["quote"]
+    shade = rows["ka36028db8a833d90"]["value"]
+    assert shade["нужен"] is True and type(shade["вёдер"]) is int
+    assert type(shade["доля"]) is float and shade["заметка"] is None
+    items = {item["record"]: item for item in read["items"]}
+    for record in expected:
+        # The text's own digest is the one 0.1.0's quote has.
+        assert items[record["id"]]["quote_sha256"] == hashlib.sha256(
+            record["quote"].encode("utf-8")).hexdigest()
+
+    # A version 0.1.0 reported (no scheme, no date) is a doubtful binding: the
+    # same item, by id and first locator, so it is updated in place, never
+    # duplicated, under a version of this scheme, once the chosen original
+    # confirms it again.
+    for record_id, old_version in COMPAT_0_1_0_VERSIONS.items():
+        item = items[record_id]
+        assert item["version_scheme"] == "amberkeep-version/2"
+        assert item["version_sha256"] != old_version
+        check = out_json(run_cli(["quote", str(legacy), "--record", record_id,
+                                  "--original", str(original)]))
+        assert (check["first_locator"], check["version_sha256"]) == (
+            item["first_locator"], item["version_sha256"])
+        assert check["verification"]["verified"] is True, record_id
+        assert check["verification"]["provenance_match"] is True, record_id
+    assert check["text_kind"] == "projection" and check["verification"]["value_match"] is True
+
+    portrait = out_json(run_cli(["portrait", str(legacy)]))
+    assert (portrait["first_date"], portrait["last_date"], portrait["date_order"],
+            portrait["undated"]) == ("2026-05-20T12:00:00Z", "2026-10-09T18:15:00Z", "time", 0)
+    assert {group["scope"] for group in portrait["groups"]} == {"огород", "дом", None}
+
+    # The next transfer, through inspect --rows, keeps ids, roles, dates,
+    # decisions, versions and the internal link.
+    table = tmp_path / "legacy-rows.json"
+    out_json(run_cli(["inspect", str(legacy), "--rows", str(table)]))
+    following = tmp_path / "garden-0.1.1.zip"
+    carried = out_json(run_cli(["select", str(following), "--original", str(legacy),
+                                "--rows", str(table)]))
+    assert [(r["id"], r["role"], r["provenance"], r["date"], r["decision"])
+            for r in carried["records"]] == [
+        (r["id"], r["role"], r["provenance"], r["date"], r["decision"]) for r in expected]
+    assert {i["record"]: i["version_sha256"]
+            for i in out_json(run_cli(["read", str(following)]))["items"]} == {
+        record_id: item["version_sha256"] for record_id, item in items.items()}
+    water = next(r for r in selection_of(following)[1]["records"]
+                 if r["id"] == "kd3a7fd7ae904d9d0")
+    assert water["links"] == [{"basis": "одна грядка", "relation": "same_bed",
+                               "target": "ka36028db8a833d90"}]
+    assert sha_of(legacy) == before, "reading never rewrites a package"
+
+
+@pytest.mark.skipif(not READERS.is_file(), reason="readers.py is not in this payload yet")
+def test_quote_original_compares_the_provenance_select_carried(tmp_path):
+    """An export states no provenance: quote --original derives it from the
+    role exactly as select did, and compares it beside the role."""
+    note = tmp_path / "note.txt"
+    note.write_text("Марта сажает чеснок в октябре.", encoding="utf-8")
+    out = tmp_path / "note.zip"
+    doc = out_json(run_cli(["select", str(out), "--original", str(note), "--kind", "text", "--all",
+                            "--receipt", receipt_of(note, "--kind", "text")]))
+    carried = doc["records"][0]
+    assert (carried["role"], carried["provenance"]) == ("document", "source")
+    check = out_json(run_cli(["quote", str(out), "--record", carried["id"],
+                              "--original", str(note)]))["verification"]
+    assert (check["provenance"], check["provenance_in_original"], check["provenance_match"],
+            check["verified"]) == ("source", "source", True, True)
+
+
+def test_an_inspect_records_its_reading_rules_and_its_table_selects(tmp_path):
+    """The rows table an inspect writes names the reading rules it read by,
+    and that same table, with the same source, selects as before."""
+    note = tmp_path / "note.txt"
+    note.write_text("Марта сажает чеснок в октябре.", encoding="utf-8")
+    table = tmp_path / "rows.json"
+    shown = out_json(run_cli(["inspect", str(note), "--kind", "text", "--rows", str(table)]))
+    doc = json.loads(table.read_text(encoding="utf-8"))
+    assert doc["sources"][0]["reading_scheme"] == "amberkeep-reading/5"
+    assert doc["sources"][0]["receipt"] == shown["receipt"]
+    picked = out_json(run_cli(["select", str(tmp_path / "ok.zip"), "--original", str(note),
+                               "--kind", "text", "--rows", str(table)]))
+    assert picked["receipt"] == shown["receipt"] and picked["record_count"] == 1
+    by_receipt = out_json(run_cli(["select", str(tmp_path / "ok2.zip"), "--original", str(note),
+                                   "--kind", "text", "--all", "--receipt", shown["receipt"]]))
+    assert by_receipt["record_count"] == 1
+
+
+def test_a_codex_journal_that_later_adds_the_other_form_keeps_the_record_it_gave(tmp_path):
+    """The same Codex journal read again after the other record form of a reply was appended:
+    a selection of everything it reads names the same record — id, first address, date and
+    version — because the event that came first stays the row, though the item that follows
+    holds a harness block beside the words the event already carried (two visible parts)."""
+    env = "<environment_context>\n  <cwd>/work/ogorod</cwd>\n</environment_context>"
+    first, second = "Марта поливает огурцы по утрам среды.", "Кабачки пересадим в июне."
+    head = [
+        {"type": "session_meta", "payload": {"id": "cx-ogonek"}},
+        {"type": "event_msg", "timestamp": "2026-11-02T08:00:00Z",
+         "payload": {"type": "user_message", "message": f"{first}\n{second}"}},
+    ]
+    item = {"type": "response_item", "timestamp": "2026-11-02T08:00:03Z", "payload": {
+        "type": "message", "role": "user", "id": "u-1",
+        "content": [{"type": "input_text", "text": text} for text in (env, first, second)]}}
+    journal = tmp_path / "rollout.jsonl"
+    picked = []
+    for name, records in (("head", head), ("grown", head + [item])):
+        journal.write_text("".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records),
+                           encoding="utf-8")
+        shown = out_json(run_cli(["inspect", str(journal), "--kind", "codex"]))
+        picked.append(out_json(run_cli(["select", str(tmp_path / f"{name}.zip"), "--original", str(journal),
+                                        "--kind", "codex", "--all", "--receipt", shown["receipt"]])))
+    before, after = picked
+    assert before["record_count"] == after["record_count"] == 1
+    assert after["records"] == before["records"]
+    (record,) = after["records"]
+    assert record["first_locator"] == "codex:cx-ogonek:L2/p0" and record["date"] == "2026-11-02T08:00:00Z"
+    cli = _load(HELPER, "amberkeep_cli_codex_growth_under_test")
+    assert record["id"] == cli._stable_id("codex:cx-ogonek:L2/p0", f"{first}\n{second}")
+
+
+def test_a_link_left_behind_takes_its_field_names_and_the_chain_hop_stays_whole(tmp_path):
+    """After the pick, nothing names a field of a link that stayed behind —
+    not the select output's source gap lines (they count such fields), the
+    manifest, read, quote or the next select; the chain hop the pick wrote
+    keeps its whole binding."""
+    source = build_package(tmp_path / "beds.zip", [
+        fact("keep", "Огурцы у теплицы.",
+             links=[{"target": "memory.json#mate", "relation": "same_bed", "basis": "рядом",
+                     "mate_label": "invented-1", "api_key": "invented-2"}]),
+        fact("mate", "Укроп рядом с огурцами."),
+    ])
+    out = tmp_path / "keep.zip"
+    doc = out_json(run_cli(["select", str(out), "--original", str(source),
+                            "--record", "memory.json#keep", "--receipt", receipt_of(source)]))
+    assert doc["dropped_fields"] == [] and "dropped_fields" not in doc["records"][0]
+    assert any(line.startswith("2 field(s) outside the shape")
+               for line in doc["coverage"]["source_gap_lines"])
+    record_id = doc["records"][0]["id"]
+    read = out_json(run_cli(["read", str(out)]))
+    hop = read["rows"][0]["sources"][-1]
+    assert (hop["locator"], hop["source_label"], hop["read_via"]) == (
+        "memory.json#keep", source.name, "portable.read_portable")
+    quote = out_json(run_cli(["quote", str(out), "--record", record_id,
+                              "--original", str(source)]))
+    assert quote["verification"]["verified"] is True
+    again = tmp_path / "again.zip"
+    out_json(run_cli(["select", str(again), "--original", str(out), "--all",
+                      "--receipt", receipt_of(out)]))
+    shown = json.dumps([doc, read, quote], ensure_ascii=False)
+    shown += "".join(blob.decode("utf-8") for package in (out, again)
+                     for blob in package_members(package).values())
+    for hidden in ("mate_label", "api_key", "invented"):
+        assert hidden not in shown, hidden
+    # The selection's own cleaning counts such fields the same way: a pure count, no names.
+    cli = _load(HELPER, "amberkeep_cli_shape_under_test")
+    parts = cli._clean_parts("Огурцы у теплицы.",
+                             [{"id": "s1", "locator": "chat-7", "source_label": "beds.zip"}],
+                             [{"target": "r2", "relation": "near", "mate_label": "рядом"}])
+    assert (parts["sources"], parts["links"], parts["unshaped_count"]) == (
+        [{"id": "s1", "locator": "chat-7"}], [{"target": "r2", "relation": "near"}], 2)
+    assert "unshaped_fields" not in parts
+
+
+def test_a_stated_empty_collection_travels_and_its_projection_verifies(tmp_path):
+    """A collection the source stated empty is a value: it travels beside the
+    removed credential field's name, and its quote verifies against the
+    unchanged original."""
+    source = build_package(tmp_path / "keys.zip", [
+        fact("box", {"creds": {}}), fact("shelves", {"полки": {}, "token": "invented"})])
+    out = tmp_path / "carried.zip"
+    doc = out_json(run_cli(["select", str(out), "--original", str(source), "--all",
+                            "--receipt", receipt_of(source)]))
+    ids = {r["first_locator"]: r["id"] for r in doc["records"]}
+    _manifest, selection = selection_of(out)
+    shelves = next(r for r in selection["records"] if r["id"] == ids["memory.json#shelves"])
+    assert (shelves["value"], shelves["dropped_fields"]) == ({"полки": {}}, ["token"])
+    for name in ("box", "shelves"):
+        check = out_json(run_cli(["quote", str(out), "--record", ids[f"memory.json#{name}"],
+                                  "--original", str(source)]))["verification"]
+        assert (check["value_match"], check["verified"]) == (True, True), name
+        assert "value_emptied" not in check, name
+
+
+@pytest.mark.skipif(not READERS.is_file(), reason="readers.py is not in this payload yet")
+def test_words_a_harness_element_interrupts_are_separate_excerpts_everywhere(tmp_path):
+    """inspect, select and quote --original see the same separate excerpts:
+    each verifies as itself, and no view joins them into one quote."""
+    log = tmp_path / "session.jsonl"
+    log.write_text(json.dumps({"type": "user", "uuid": "u-1", "sessionId": "s-1", "message": {
+        "role": "user", "content": "Полей огурцы.\n<system-reminder>Plan mode is on."
+                                   "</system-reminder>\nИ укроп тоже."}},
+        ensure_ascii=False) + "\n", encoding="utf-8")
+    shown = out_json(run_cli(["inspect", str(log), "--kind", "claude-code"]))
+    assert shown["locators"] == ["claude-code:s-1:u-1/p0.1", "claude-code:s-1:u-1/p0.2"]
+    assert any("interrupted by harness elements" in note for note in shown["notes"])
+    out = tmp_path / "dill.zip"
+    doc = out_json(run_cli(["select", str(out), "--original", str(log), "--kind", "claude-code",
+                            "--record", "claude-code:s-1:u-1/p0.2",
+                            "--receipt", shown["receipt"]]))
+    quote = out_json(run_cli(["quote", str(out), "--record", doc["records"][0]["id"],
+                              "--original", str(log)]))
+    assert quote["quote"] == "И укроп тоже." and quote["verification"]["verified"] is True
+
+
+def test_effective_provenance_and_shown_metadata_are_plain_rules():
+    """The provenance a row stands for, and how diagnostics show metadata."""
+    cli = _load(HELPER, "amberkeep_cli_shown_under_test")
+    effective = cli._effective_provenance
+    assert effective({"speaker": "document"}) == "source"
+    assert effective({"speaker": "document",
+                      "origin": {"provenance": "user_statement"}}) == "user_statement"
+    assert effective({"speaker": "user"}) == "user_statement"
+    assert effective({"speaker": "assistant"}) == "model_inference"
+    assert effective({"speaker": "unknown"}) is None
+    assert cli._route_shown("portable.read_portable") == "'portable.read_portable'"
+    assert cli._route_shown("readers.read_source kind=claude-code") == (
+        "'readers.read_source kind=claude-code'")
+    assert cli._route_shown("где-то ещё") == cli._route_shown({"route": "x"}) == (
+        "a parser route this CLI does not know")
+    assert cli._receipt_shown("ak1-" + "0" * 32) == "ak1-" + "0" * 32
+    assert cli._receipt_shown("заметка") == "an unrecognised receipt"
+    assert cli._digest_shown("a" * 64) == "a" * 16 + "…"
+    assert cli._digest_shown(["a"]) == "an unrecognised digest"
+    assert [cli._kind_of(value) for value in (None, True, 2, "x", [], {})] == [
+        "null", "true or false", "a number", "text", "a list", "an object"]
+    assert (cli._version_shown(2), cli._version_shown(True)) == ("2", "(true or false)")
+
+
+def test_typed_values_honest_time_bounds_and_agreeing_roles_are_plain_rules():
+    """The three rules on plain values: typed comparison, the time line of
+    stated dates, and the role/provenance pairs that may travel."""
+    cli = _load(HELPER, "amberkeep_cli_rules_under_test")
+    assert cli._same_json({"a": [1, 2.5, None, "x", False]}, {"a": [1, 2.5, None, "x", False]})
+    for left, right in ((True, 1), (1, 1.0), (False, 0), (0, None), ("1", 1),
+                        ({"a": 1}, {"a": True}), ([1, 2], [2, 1]), ({}, [])):
+        assert not cli._same_json(left, right), (left, right)
+
+    # Offsets are compared as instants, not as text; undated rows are counted.
+    bounds = cli._time_bounds([{"date": "2026-10-10T01:00:00+05:00"},
+                               {"date": "2026-10-09T21:00:00Z"}, {"date": None}, {"date": ""}])
+    assert bounds == {"first_date": "2026-10-10T01:00:00+05:00",
+                      "last_date": "2026-10-09T21:00:00Z", "dated": 2, "undated": 2,
+                      "date_order": "time"}
+    # A bare date or a local time is no instant: the order is text, and says so.
+    assert cli._time_bounds([{"date": "2026-10-09"}, {"date": "2026-10-09T21:00:00Z"}])[
+        "date_order"] == "text"
+    assert cli._time_bounds([{"date": None}]) == {"first_date": None, "last_date": None,
+                                                  "dated": 0, "undated": 1, "date_order": None}
+
+    for role, stated, carried in (("user", "", "user_statement"),
+                                  ("assistant", "", "model_inference"),
+                                  ("document", "", "source"),
+                                  ("user", "user_statement", "user_statement"),
+                                  ("assistant", "model_inference", "model_inference"),
+                                  ("document", "source", "source"),
+                                  ("document", "user_statement", "user_statement")):
+        assert cli._carried_provenance(role, stated, "row") == carried
+    # A model's inference never becomes the person's words, nor a document's.
+    for role, stated in (("user", "model_inference"), ("document", "model_inference"),
+                         ("assistant", "user_statement"), ("user", "source")):
+        with pytest.raises(cli.CommandError):
+            cli._carried_provenance(role, stated, "row")

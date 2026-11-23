@@ -582,7 +582,7 @@ print(json.dumps([payload_digest(Path(c['path']), manifest_entry=c['front'].get(
         expected = set('a2a adaptive-code-review anti-slop cache_efficiency_snapshot calendar chrome_browser '
                        'claudexor_quotas confluence context-lens duckduckgo email email-presence github '
                        'google-workspace keenable memory-atlas office_reader perplexity provider_keys slack-bridge '
-                       'table_tools telegram-bot pdf_tools word_tools'.split())
+                       'table_tools telegram-bot pdf_tools word_tools amberkeep'.split())
         self.assertEqual({r['name'] for r in official['endorsements']}, expected)
         self.assertEqual({r['name'] for r in official['endorsements'] if r.get('recommended')},
                          set('duckduckgo pdf_tools word_tools anti-slop memory-atlas chrome_browser '

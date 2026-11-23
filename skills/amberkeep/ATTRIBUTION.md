@@ -1,6 +1,6 @@
 # Attribution
 
-Amberkeep is a community skill in OuroborosHub (`owner: ouroboros-agent`, not marked Official). It stands on the public original **Amberkeep** by Эмиль Фролов and on Inna Vosko's work on carrying a person's context between assistants; the integration into Ouroboros is Ouroboros's own.
+Amberkeep is an OuroborosHub skill published by `ouroboros-agent`. It stands on the public original **Amberkeep** by Эмиль Фролов and on Inna Vosko's work on carrying a person's context between assistants; the integration into Ouroboros is Ouroboros's own.
 
 - **Эмиль Фролов** ([@emilfrolov](https://github.com/emilfrolov), [github.com/emilfrolov/amberkeep](https://github.com/emilfrolov/amberkeep)) — the original Amberkeep and its quote-to-source binding: a record's `locator`, `source_sha256` and provenance chain. That repository is MIT-licensed; its notice is reproduced unchanged below.
 - **Inna Vosko** ([@innavosko](https://github.com/innavosko)) — selection, integrity checks, reconciliation and the guided transfer workflow. Her process shaped this skill's workflow; the Portable Memory compatibility in this payload was written independently and is not a distribution of her code.

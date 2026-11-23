@@ -42,9 +42,11 @@ What this CLI keeps honest:
   source's own row order — never the order the locators were named in, and
   never a scope/date/locator re-sort.
 * Inspect → select is one bound step: the pick carries the inspect's
-  ``receipt`` — a short digest over the source's label, parser and sha256 —
-  named with ``--receipt`` or recorded in the ``--rows`` document by that
-  inspect (it catches an accidental mismatch; it is no proof). Exactly
+  ``receipt`` — a short digest over the source's label, parser, reading rules
+  (``READING_SCHEME``) and sha256 — named with ``--receipt`` or recorded in
+  the ``--rows`` document by that inspect (it catches an accidental mismatch;
+  it is no proof). A receipt or a table an inspect under other reading rules
+  wrote (0.1.0's included) asks for a fresh inspect. Exactly
   one way of picking (``--record``, ``--rows`` or ``--all``) is accepted,
   refused before anything is read. A source that moved, or one read under
   another label or parser, is a typed refusal before anything is built.
@@ -53,9 +55,17 @@ What this CLI keeps honest:
   its own chain): one picked record — the link is rewritten to its new id;
   anything else, or a name two records or two roles share, stays behind.
   A ``derived_from`` link to one of the record's own sources travels as it
-  is — unless that name is also a record the source read withheld (excluded
-  or pending): an ambiguous link stays behind. Whatever stays behind travels
-  not at all: not its target, not its basis.
+  is. A link into a record the read withholds (excluded or pending) never
+  reaches a pick: both readers leave it out and only count it, so no output
+  prints a withheld name. Whatever stays behind travels not at all: not its
+  target, not its basis, not the names of its fields.
+* A source entry is a plain citation (id, locator, observed_at) or a full
+  chain hop, which adds source_label, source_sha256 and read_via and binds
+  sha256 + parser + locator in a form ``quote --original`` can check (a
+  64-digit lowercase sha256, a route this CLI re-reads by, a locator that is
+  not blank) — checkable, never proven genuine; any other entry with hop
+  fields is a citation, and the rest is counted in the gaps, never named or
+  carried.
 * ``quote --original`` reuses the chain's own label once the bytes match,
   so a renamed copy of the same original still verifies. A structured value
   read back is a projection (``text_kind``), never verbatim speech — even a
@@ -73,41 +83,70 @@ What this CLI keeps honest:
   side; the package carries only the generic flag ``coverage.source_gaps``
   (true: part of the source was unavailable, left out or not imported;
   false: the read said it had all of it; absent: unknown), kept through
-  every re-packaging, and each record's own ``dropped_fields`` names.
+  every re-packaging, and each record's own ``dropped_fields`` names
+  (stripped from its value and its citations).
 * A carried ``decision`` is the source's own review status, verbatim —
   never this CLI's or the receiver's judgement — and re-packaging never
-  re-activates a historical or conflicting record.
+  re-activates a historical or conflicting record. A role travels only with
+  a provenance it agrees with (user · user_statement, assistant ·
+  model_inference, document · source or user_statement): a model's
+  inference never becomes the person's words, and a pair that disagrees is
+  refused, never re-derived from the role.
 * ``quote --original PATH`` is the human check: one named file, one chain
-  hop that must bind sha256 + parser + locator, and then text, role and
-  date compared one by one. ``text_match`` says the text alone;
-  ``verified`` says the whole binding held. Neither says who said it.
+  hop that must bind sha256 + parser + locator, and then text, role,
+  provenance and date compared one by one (``text_match``, ``role_match``,
+  ``provenance_match``, ``date_match``); for a structured value
+  (``text_kind: projection``) also ``value_match``, the typed-structure
+  comparison. ``text_match`` says the text alone; ``verified`` says the
+  whole binding held. Neither says who said it.
 * Records keep a stable id derived from their source locator and text —
   not from the position in the pick — and a record re-carried from a
   selection keeps the id it has, whatever else is picked; plus a content
   sha256. ``version_sha256`` digests
   what the item means, its status and its sources (text, structured value,
-  role, provenance, decision, currency, scope, the first original's locator,
-  parser and label, and the record's own source citations; not later
+  role, provenance, decision, currency, scope, date, the first original's
+  locator, parser and label, and the record's own source citations; not later
   re-packaging hops or container digests): the same ``first_locator`` with
   another version is a changed item to reconcile, never a new permission —
   and so is a scope change on unchanged text: the scope's presence
   (concrete, stated empty, or absent) digests symmetrically at write and
-  read, and a package's file name never poses as a scope.
+  read, and a package's file name never poses as a scope. The recipe is
+  reported beside it as ``version_scheme`` (``amberkeep-version/2``); a
+  binding saved without a scheme (0.1.0, no date digested) is a doubtful
+  one that the receiver checks once against the chosen source and updates in
+  place, never as a duplicate. That is the receiver's action, not an
+  automatic write by this CLI.
 * A value stays what the source stated: a structured value — an empty
   object, list or ``null`` travels as such when nothing was stripped from
   it — stays a projection through ``quote --original``, which compares it
-  as structure; an explicitly empty string value travels as the record's
-  own empty text, and no value is invented where the source stated none.
-* Writing is create-only: an existing file is never overwritten, not even
-  with the same bytes.
+  as typed structure (``true`` is not ``1``, ``1`` is not ``1.0``); an
+  explicitly empty string value travels as the record's own empty text, and
+  no value is invented where the source stated none. A collection the source
+  stated empty inside a value stays; a value the strip left with nothing the
+  source stated — on either side of ``quote --original`` — confirms no
+  projection. A selection whose quote is not the text of its value is refused.
+* Writing creates a new file only in the folder the command runs in — the
+  task's own folder when the host starts it there — named plainly or by its
+  absolute path there, and never from inside this installed skill, where a
+  new file would change the reviewed payload. A file appears under its name
+  only once complete (a hard link, so that folder's file system must support
+  one), an existing file is never replaced, not even with the same bytes,
+  and where that cannot be guaranteed nothing is written and nothing there
+  changes.
 * ``inspect`` keeps stdout bounded: an inventory, one page and the gaps by
   default; the full rows document goes to a path you name (``--rows``) or
   to stdout only when you ask (``--raw``).
-* Known typed credential *fields* are dropped before packaging; free text
-  is never filtered by keywords (a note that mentions a password stays a
-  note).
+* Every view of a record — its row, its text, a package built from it — is
+  made from one cleaned structure (``portable.clean_parts``): known typed
+  credential *fields* leave the value, source citations and links keep only
+  their shape, and a structured value's text is the canonical projection of
+  the cleaned value. Free text is never filtered by keywords (a note that
+  mentions a password stays a note). Only a value the strip itself left
+  empty is refused; a stated ``{}``, ``[]`` or ``null`` is a value.
 * A damaged or unknown package is one explicit refusal with a non-zero
-  exit — never half a success, never a crash, never a false "ok".
+  exit — never half a success, never a crash, never a false "ok". Every
+  record, a withheld one included, is checked (structure and digest) before
+  anything is shown, and a refusal never names a withheld record.
 * Building is deterministic: the same source and the same picks build
   byte-identical packages, and a package is written only after this CLI
   has read it back within its own reading limits.
@@ -124,9 +163,12 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 import sys
+import tempfile
 import zipfile
 import zlib
+from datetime import datetime
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -149,6 +191,21 @@ SPEAKER_TO_PROVENANCE = {
 }
 ROLES = tuple(SPEAKER_TO_PROVENANCE)
 PROVENANCES = ("user_statement", "source", "model_inference")
+# The role/provenance pairs a carried record may hold. A person's own words
+# are a user statement; a model's are an inference; a document may be a
+# source or retell what the person said. No other pair travels, so a model's
+# inference never becomes the person's words.
+AGREEING_PAIRS = frozenset({("user", "user_statement"), ("assistant", "model_inference"),
+                            ("document", "source"), ("document", "user_statement")})
+# What a selection's source entry may hold: a plain citation (id, locator,
+# observed_at), or a full chain hop this CLI wrote, which adds the binding of
+# its read. Only an entry whose whole binding (HOP_BINDING) is checkable
+# (_is_hop) keeps the hop fields; any other is a citation and keeps its own.
+CITATION_FIELDS = ("id", "locator", "observed_at")
+HOP_FIELDS = ("source_label", "source_sha256", "read_via")
+HOP_BINDING = ("source_sha256", "read_via", "locator")
+SELECTION_SOURCE_FIELDS = CITATION_FIELDS + HOP_FIELDS
+LINK_FIELDS = ("target", "relation", "basis")
 CARRY_DECISIONS = ("active", "historical", "aliases", "conflicts")
 NOT_CARRY_DECISIONS = ("pending", "exclude")
 ALL_DECISIONS = CARRY_DECISIONS + NOT_CARRY_DECISIONS
@@ -181,8 +238,18 @@ PAGE_MAX = 200
 # A fixed ZIP timestamp so identical inputs build identical packages.
 ZIP_DATE_TIME = (1980, 1, 1, 0, 0, 0)
 
-# What an inspect receipt digests: the read as the person confirmed it.
-RECEIPT_SCHEMA = "amberkeep-inspect-receipt/1"
+# What an inspect receipt digests: the read as the person confirmed it, with
+# the reading rules it was read by.
+RECEIPT_SCHEMA = "amberkeep-inspect-receipt/2"
+# The rules these readers interpret a source by — who spoke, what is cut, where
+# one row ends. It changes with any change to readers.py, portable.py or the
+# selection reader that can give the same bytes other rows; an inspect read
+# under other rules (0.1.0's recorded none) never confirms this read.
+READING_SCHEME = "amberkeep-reading/5"
+# The recipe of version_sha256, reported beside it. 0.1.0 reported no scheme
+# and digested no date: a version saved from it is a doubtful binding, to be
+# re-checked against the chosen source and updated in place, not duplicated.
+VERSION_SCHEME = "amberkeep-version/2"
 
 
 class CommandError(Exception):
@@ -211,8 +278,8 @@ def _portable():
     """load once: the teammate that reads a Portable Memory package."""
     if "portable" not in _TEAMED:
         portable = _load_module("portable.py", "amberkeep_portable_via_cli")
-        missing = [name for name in ("read_portable", "read_portable_resolving",
-                                     "_strip_credentials")
+        missing = [name for name in ("read_portable", "read_portable_resolving", "clean_parts",
+                                     "known_dropped")
                    if not callable(getattr(portable, name, None))]
         if missing:
             raise CommandError(
@@ -229,9 +296,29 @@ def _readers():
     return _TEAMED["readers"]
 
 
-def _strip_credentials(node, dropped: list):
-    """Drop credential-shaped fields the same way the reader drops them."""
-    return _portable()._strip_credentials(node, dropped)
+def _is_hop(entry) -> bool:
+    """A full chain hop: an entry ``quote --original`` could check at all —
+    a sha256 as this CLI writes and compares it (64 lowercase hex digits), a
+    parser route it re-reads by (a package route, or an export kind the
+    readers teammate's own ``_KINDS`` lists, which loads that teammate only
+    for such a route) and a locator that is not blank. Its shape says the
+    hop is checkable, never that it is genuine."""
+    if not isinstance(entry, dict):
+        return False
+    sha, route, locator = (entry.get(key) for key in HOP_BINDING)
+    if not (_is_hex64(sha) and sha == sha.lower() and _is_str(locator) and locator.strip()
+            and _route_known(route)):
+        return False
+    if route in ("portable.read_portable", "amberkeep.read_selection"):
+        return True
+    return route[len(READERS_VIA):] in getattr(_readers(), "_KINDS", ())
+
+
+def _clean_parts(value, sources=None, links=None, keep_link=None) -> dict:
+    """The reader's one cleaning rule, with a selection's source shape: a
+    full chain hop keeps its binding, a plain citation its own fields."""
+    return _portable().clean_parts(value, sources, links, hop_fields=HOP_FIELDS,
+                                   is_hop=_is_hop, keep_link=keep_link)
 
 
 # ------------------------------------------------------------------ helpers
@@ -240,12 +327,87 @@ def _is_str(value) -> bool:
     return isinstance(value, str)
 
 
+def _is_int(value) -> bool:
+    """A JSON integer: never true or false, never 1.0."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_hex64(value) -> bool:
+    return (_is_str(value) and len(value) == 64
+            and all(char in "0123456789abcdef" for char in value.lower()))
+
+
+def _kind_of(value) -> str:
+    """What a diagnostic may say of a metadata value it must not echo: its type."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true or false"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, str):
+        return "text"
+    return "a list" if isinstance(value, list) else "an object"
+
+
+def _version_shown(value) -> str:
+    """A schema_version as a diagnostic shows it: a plain integer, else its type."""
+    return str(value) if _is_int(value) and abs(value) < 10 ** 9 else f"({_kind_of(value)})"
+
+
+def _route_known(read_via) -> bool:
+    """Whether a parser route is one this CLI writes (kind names stay short tokens)."""
+    if read_via in ("portable.read_portable", "amberkeep.read_selection"):
+        return True
+    kind = read_via[len(READERS_VIA):] if _is_str(read_via) and read_via.startswith(
+        READERS_VIA) else ""
+    return 0 < len(kind) <= 32 and all(char.isascii() and (char.isalnum() or char == "-")
+                                       for char in kind)
+
+
+def _route_shown(read_via) -> str:
+    return repr(read_via) if _route_known(read_via) else "a parser route this CLI does not know"
+
+
+def _scheme_shown(value) -> str:
+    if (_is_str(value) and value.startswith("amberkeep-reading/")
+            and value[len("amberkeep-reading/"):].isdigit()):
+        return repr(value)
+    return "none (an earlier Amberkeep)" if value is None else "an unrecognised scheme"
+
+
+def _receipt_shown(value) -> str:
+    if (_is_str(value) and len(value) == 36 and value.startswith("ak1-")
+            and all(char in "0123456789abcdef" for char in value[4:])):
+        return value
+    return "an unrecognised receipt"
+
+
+def _digest_shown(value) -> str:
+    return f"{value[:16]}…" if _is_hex64(value) else "an unrecognised digest"
+
+
+def _same_json(left, right) -> bool:
+    """Typed JSON equality: ``true`` is not ``1``, ``1`` is not ``1.0``, and
+    an object's keys and a list's order all count."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_same_json(left[key], right[key])
+                                                   for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_same_json(a, b) for a, b in zip(left, right))
+    return left == right
+
+
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
 def _compact_json(value) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    """The canonical text of a structure: also a structured value's projection."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                      allow_nan=False)
 
 
 def _json_text(value) -> str:
@@ -285,10 +447,48 @@ def _names(items, route: str, cap: int = SAMPLE_CAP) -> str:
     return text
 
 
+def _instant(text):
+    """An ISO 8601 date-time with its offset, as a comparable instant; None for
+    anything else (a bare date, a local time, other text) — never a guess."""
+    if not _is_str(text):
+        return None
+    value = text.strip()
+    if value[-1:] in ("Z", "z"):
+        value = value[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return moment if moment.utcoffset() is not None else None
+
+
+def _time_bounds(rows: list) -> dict:
+    """The first and last date rows state, and how honest that order is:
+    ``time`` when every stated date is an instant with an offset, ``text``
+    when some are not (the order is then their text's, not a time line), and
+    how many rows state no date at all."""
+    stated = [row["date"].strip() for row in rows
+              if _is_str(row.get("date")) and row["date"].strip()]
+    bounds = {"first_date": None, "last_date": None, "dated": len(stated),
+              "undated": len(rows) - len(stated), "date_order": None}
+    if stated:
+        instants = [_instant(date) for date in stated]
+        if all(moment is not None for moment in instants):
+            ordered = [date for _moment, _index, date
+                       in sorted(zip(instants, range(len(stated)), stated))]
+            bounds["date_order"] = "time"
+        else:
+            ordered = sorted(stated)
+            bounds["date_order"] = "text"
+        bounds["first_date"], bounds["last_date"] = ordered[0], ordered[-1]
+    return bounds
+
+
 def _receipt(label: str, read_via: str, sha256: str) -> str:
-    """The inspect receipt: a short digest binding label, parser and bytes."""
-    blob = _compact_json({"schema": RECEIPT_SCHEMA, "label": label,
-                          "read_via": read_via, "sha256": sha256})
+    """The inspect receipt: a short digest binding label, parser, the reading
+    rules and the bytes."""
+    blob = _compact_json({"schema": RECEIPT_SCHEMA, "label": label, "read_via": read_via,
+                          "reading": READING_SCHEME, "sha256": sha256})
     return "ak1-" + _sha256_hex(blob.encode("utf-8"))[:32]
 
 
@@ -347,21 +547,86 @@ def _read_source_file(path: str, kind) -> bytes:
                       "share a smaller archive, or pass its chosen conversations.json alone")
 
 
-def _write_output(path: Path, blob: bytes) -> None:
-    """Create-only, atomically: an existing file is never overwritten, not even
-    identically, and a failed write leaves no half-written file behind."""
+# The installed skill's own folder: the one that holds scripts/amberkeep.py. A
+# new file there would change the payload its review judged, so a command
+# started inside it creates no output at all.
+SKILL_DIR = Path(__file__).resolve().parents[1]
+RUN_ROUTE = ("run it from the task's own folder — run_command(cwd='task_drive', cmd=['python3', "
+             f"'-B', '{Path(__file__).resolve()}', ...]) — and name a new file there, such as "
+             "carry.zip")
+
+
+def _same_folder(one: Path, other: Path) -> bool:
+    """One folder by the file system's own identity, whatever its spelling."""
     try:
-        handle = open(path, "xb")
-    except FileExistsError:
-        raise CommandError(f"{path}: already exists; this CLI never overwrites a file") from None
-    except FileNotFoundError:
-        raise CommandError(f"{path}: the parent directory does not exist") from None
-    try:
-        with handle:
-            handle.write(blob)
+        return os.path.samestat(one.stat(), other.stat())
     except OSError:
-        path.unlink(missing_ok=True)
-        raise
+        return False
+
+
+def _output_target(name: str) -> Path:
+    """Where a new output file may be created, settled before anything is read.
+
+    A plain file name in the folder this command runs in — the task's own
+    folder when the host starts it there (``run_command(cwd='task_drive')``)
+    — or that same file's absolute path; never another folder, and nothing
+    when the command runs inside the installed skill. An existing name is
+    refused. The answer is absolute, so the finished file can be handed over
+    (``outputs``, ``send_file``) without a guess.
+    """
+    try:
+        here = Path.cwd()
+    except OSError as exc:
+        raise CommandError(f"the folder this command runs in cannot be read ({exc}); {RUN_ROUTE}") from None
+    if any(_same_folder(folder, SKILL_DIR) for folder in (here, *here.parents)):
+        raise CommandError(
+            f"{name}: this command runs inside the installed skill folder {SKILL_DIR}, where "
+            f"Amberkeep creates no output (a new file there would change the reviewed skill); "
+            f"{RUN_ROUTE}")
+    given = Path(name)
+    folder = given.parent if given.is_absolute() else (here if given.parent == Path(".") else None)
+    if given.name in ("", ".", "..") or folder is None or not _same_folder(folder, here):
+        raise CommandError(
+            f"{name}: name a new file plainly in the folder this command runs in ({here}), or by "
+            f"its absolute path there; {RUN_ROUTE}")
+    target = here / given.name
+    if os.path.lexists(target):
+        raise CommandError(f"{target}: already exists; this CLI never overwrites a file")
+    return target
+
+
+def _write_output(path: Path, blob: bytes) -> None:
+    """Publish ``path`` as a new, complete file, or refuse with nothing there.
+
+    The bytes go to a private temporary file beside it (``tempfile``: owner
+    access only, kept by the published file), and only that finished file is
+    published under the name, by a hard link that fails if the name exists.
+    So the name never holds part of a file, even if the run is interrupted,
+    and an existing file is never replaced. Where the file system cannot
+    link, the command refuses rather than write the name directly. The
+    temporary file is removed either way."""
+    try:
+        handle, temp = tempfile.mkstemp(prefix=".amberkeep-", suffix=".part", dir=path.parent)
+    except FileNotFoundError:
+        raise CommandError(f"{path}: the folder does not exist; {RUN_ROUTE}") from None
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(blob)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temp, path)
+        except FileExistsError:
+            raise CommandError(f"{path}: already exists; this CLI never overwrites a file") from None
+        except (OSError, NotImplementedError) as exc:
+            raise CommandError(
+                f"{path}: this folder's file system cannot publish a finished file under a new name "
+                f"({exc}), and the name is never written in place; nothing was written") from None
+    finally:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
 
 
 def _bare_id(locator) -> str | None:
@@ -380,10 +645,7 @@ def _record_id(row: dict) -> str:
 
 def _binding_hops(row: dict) -> list:
     """The chain hops this CLI wrote: each binds sha256 + parser + locator."""
-    return [hop for hop in row.get("sources") or []
-            if isinstance(hop, dict)
-            and all(_is_str(hop.get(key)) and hop[key]
-                    for key in ("source_sha256", "read_via", "locator"))]
+    return [hop for hop in row.get("sources") or [] if _is_hop(hop)]
 
 
 def _first_locator(row: dict) -> str:
@@ -416,22 +678,23 @@ def _original_refs(item: dict, read_via: str, label: str) -> dict:
               "label": hops[0].get("source_label") or ""} if hops
              else {"locator": str(item.get("locator", "")), "read_via": read_via, "label": label})
     written = {id(hop) for hop in hops}
-    citations = [{key: entry[key] for key in ("id", "locator", "observed_at") if key in entry}
+    citations = [{key: entry[key] for key in CITATION_FIELDS if key in entry}
                  for entry in item.get("sources") or []
                  if isinstance(entry, dict) and id(entry) not in written]
     return {"first": first, "citations": citations}
 
 
 def _item_version(text: str, value, has_value: bool, role, provenance, decision,
-                  currency, refs: dict, scope) -> str:
-    """What an item means, its status and its sources, digested: text, a
+                  currency, refs: dict, scope, date) -> str:
+    """What an item claims, its status and its sources, digested: text, a
     structured value, role, provenance, decision, currency, scope (with its
-    presence: concrete, stated empty, or absent) and its original source
-    references. An unchanged re-carry keeps it; any change there is a
-    changed item to reconcile."""
-    payload = {"text": text, "role": role, "provenance": provenance or None,
-               "decision": decision or None, "currency": currency or None, "sources": refs,
-               "scope": scope}
+    presence: concrete, stated empty, or absent), the date it carries and
+    its original source references. An unchanged re-carry keeps it; any
+    change there is a changed item to reconcile."""
+    payload = {"scheme": VERSION_SCHEME, "text": text, "role": role,
+               "provenance": provenance or None, "decision": decision or None,
+               "currency": currency or None, "sources": refs, "scope": scope,
+               "date": (date.strip() if _is_str(date) else "") or None}
     if has_value and not (isinstance(value, str) and value == text):
         payload["value"] = value
     return _sha256_hex(_compact_json(payload).encode("utf-8"))
@@ -443,7 +706,7 @@ def _version_of_row(row: dict, read_via: str, label: str) -> str:
     return _item_version(str(row.get("text", "")), row.get("value"), "value" in row,
                          row.get("speaker"), origin.get("provenance"), origin.get("decision"),
                          row.get("currency"), _original_refs(row, read_via, label),
-                         _stated_scope(row))
+                         _stated_scope(row), row.get("date"))
 
 
 def _version_of_record(record: dict) -> str:
@@ -451,7 +714,7 @@ def _version_of_record(record: dict) -> str:
     return _item_version(record["quote"], record.get("value"), "value" in record,
                          record["role"], record["provenance"], record.get("decision"),
                          record.get("currency"), _original_refs(record, "", ""),
-                         record["scope"] if "scope" in record else None)
+                         record["scope"] if "scope" in record else None, record.get("date"))
 
 
 def _stable_id(locator: str, text: str) -> str:
@@ -470,18 +733,15 @@ def _selection_digest(record: dict) -> str:
 
 
 def _groups_of(rows: list) -> list:
-    """Groups by scope: counts, speakers, dates, one bounded example each."""
+    """Groups by scope: counts, speakers, dates, one bounded example each.
 
-    def scope_of(row: dict) -> str:
-        # A scope the record states is shown as stated (an empty one as
-        # "(no scope)"). Where it states none, the display groups by the
-        # row's own conversation — an export's conversation, or the package
-        # whose file name the reader put there. That fallback is for this
-        # grouping only: it is never carried as the record's area.
-        origin = row.get("origin") if isinstance(row.get("origin"), dict) else {}
-        if "scope" in origin:
-            return origin["scope"] or "(no scope)"
-        return row.get("scope") or row.get("conversation") or "(no scope)"
+    A group shows the scope as stated: a concrete one, ``""`` when stated
+    empty, ``null`` when the records state none — never a file name posing
+    as an area. An export's rows state their own conversation."""
+
+    def scope_of(row: dict):
+        scope = _stated_scope(row)
+        return (0, "") if scope is None else (1, scope)
 
     ordered = sorted(rows, key=lambda r: (scope_of(r), r.get("date") or "", str(r.get("locator"))))
     grouped, order = {}, []
@@ -494,18 +754,20 @@ def _groups_of(rows: list) -> list:
     groups = []
     for key in order:
         members = grouped[key]
-        dates = sorted({member.get("date") for member in members if member.get("date")})
+        bounds = _time_bounds(members)
         speakers: dict = {}
         for member in members:
             speaker = member.get("speaker", "")
             speakers[speaker] = speakers.get(speaker, 0) + 1
         example = members[0]
         groups.append({
-            "scope": _snippet(key),
+            "scope": _snippet(key[1]) if key[0] else None,
             "count": len(members),
             "speakers": speakers,
-            "first_date": _snippet(str(dates[0])) if dates else "",
-            "last_date": _snippet(str(dates[-1])) if dates else "",
+            "first_date": _snippet(bounds["first_date"]) if bounds["first_date"] else None,
+            "last_date": _snippet(bounds["last_date"]) if bounds["last_date"] else None,
+            "undated": bounds["undated"],
+            "date_order": bounds["date_order"],
             "example": {"locator": _snippet(str(example.get("locator", ""))),
                         "date": (_snippet(str(example["date"])) if example.get("date")
                                  else example.get("date")),
@@ -546,15 +808,15 @@ def _normalize_row(raw, index: int) -> dict:
 
     # A record's own scope travels as stated, an empty one included. A row
     # read from a package (portable or selection) whose record states none has
-    # no area: its conversation is the package's own file name, never the area
-    # to carry. Only a row from an export, whose conversation is the
-    # conversation it came from, groups by that conversation.
+    # no area (null): its conversation is the package's own file name, never
+    # the area to carry. Only a row from an export, whose conversation is the
+    # conversation it came from, takes that conversation as its area.
     if _is_str(raw.get("scope")):
         scope = raw["scope"]
     elif _is_str(origin.get("scope")):
         scope = origin["scope"]
     elif origin:
-        scope = ""
+        scope = None
     else:
         scope = conversation if _is_str(conversation) else ""
 
@@ -563,7 +825,7 @@ def _normalize_row(raw, index: int) -> dict:
         if not isinstance(links, list) or any(not isinstance(link, dict) for link in links):
             raise CommandError(f"{locator}: links is not a list of objects")
         for link in links:
-            for key in ("target", "relation", "basis"):
+            for key in LINK_FIELDS:
                 if key in link and not _is_str(link[key]):
                     raise CommandError(f"{locator}: a link has a non-text {key}")
     sources = raw.get("sources")
@@ -591,8 +853,10 @@ def _normalize_row(raw, index: int) -> dict:
     currency = pick("currency")
     if currency:
         row["currency"] = currency
+    # A stated provenance is kept as stated, known or not: select carries it
+    # only beside a role it agrees with, and never re-derives it from the role.
     provenance = pick("provenance")
-    if provenance in PROVENANCES:
+    if provenance:
         row["provenance"] = provenance
     decision = raw.get("decision")
     if decision is None:
@@ -652,7 +916,8 @@ def _read_source(path: str, kind, label=None):
             read_via, source_kind = "amberkeep.read_selection", SELECTION_FORMAT
     normalized = [_normalize_row(raw, index) for index, raw in enumerate(rows, 1)]
     source = {"path": str(Path(path)), "label": label, "sha256": sha,
-              "bytes": len(data), "read_via": read_via, "source_kind": source_kind, "ok": True,
+              "bytes": len(data), "read_via": read_via, "reading_scheme": READING_SCHEME,
+              "source_kind": source_kind, "ok": True,
               "source_gaps": source_gaps, "receipt": _receipt(label, read_via, sha)}
     return normalized, list(gaps or []), source, withheld, notes
 
@@ -663,10 +928,13 @@ def _reread_original(data: bytes, label: str, read_via: str) -> list:
         rows, _gaps = _portable().read_portable(data, label)
     elif read_via == "amberkeep.read_selection":
         rows, _gaps = _read_selection(data, label)
-    elif read_via.startswith(READERS_VIA):
-        rows, _gaps = _readers().read_source(read_via[len(READERS_VIA):], data, label)
+    elif _route_known(read_via):
+        kind, readers = read_via[len(READERS_VIA):], _readers()
+        if kind not in getattr(readers, "_KINDS", (kind,)):
+            raise CommandError("the chain records a source kind these readers do not read")
+        rows, _gaps = readers.read_source(kind, data, label)
     else:
-        raise CommandError(f"the chain records no way to re-read its original (read_via {read_via!r})")
+        raise CommandError("the chain records a parser route this CLI does not know")
     return [_normalize_row(raw, index) for index, raw in enumerate(rows, 1)]
 
 
@@ -689,8 +957,8 @@ def _sniff_format(data: bytes, label: str) -> str:
     if fmt in (PACKAGE_FORMAT, SELECTION_FORMAT):
         return fmt
     raise CommandError(
-        f"{label}: unknown package format {fmt!r}; this CLI reads Portable Memory packages "
-        f"({PACKAGE_FORMAT!r}) and Amberkeep selections ({SELECTION_FORMAT!r})")
+        f"{label}: unknown package format ({_kind_of(fmt)}); this CLI reads Portable Memory "
+        f"packages ({PACKAGE_FORMAT!r}) and Amberkeep selections ({SELECTION_FORMAT!r})")
 
 
 def _stream_member(label: str, archive: zipfile.ZipFile, name: str, on_chunk) -> int:
@@ -744,10 +1012,11 @@ def _check_manifest_inventory(label: str, manifest) -> tuple[dict, int, dict]:
     if not isinstance(manifest, dict):
         raise CommandError(f"{label}: manifest.json is not a JSON object")
     if manifest.get("format") != SELECTION_FORMAT:
-        raise CommandError(f"{label}: unknown package format {manifest.get('format')!r}")
-    if manifest.get("schema_version") != SCHEMA_VERSION:
-        raise CommandError(
-            f"{label}: unsupported manifest schema_version {manifest.get('schema_version')!r}")
+        raise CommandError(f"{label}: unknown package format ({_kind_of(manifest.get('format'))})")
+    # Typed: true and 1.0 are not the integer 1.
+    if not _is_int(manifest.get("schema_version")) or manifest["schema_version"] != SCHEMA_VERSION:
+        raise CommandError(f"{label}: unsupported manifest schema_version "
+                           f"{_version_shown(manifest.get('schema_version'))}; this CLI reads 1")
     files = manifest.get("files")
     if not isinstance(files, dict) or not files:
         raise CommandError(f"{label}: manifest.json lists no files")
@@ -757,14 +1026,19 @@ def _check_manifest_inventory(label: str, manifest) -> tuple[dict, int, dict]:
                 or not isinstance(entry, dict)):
             raise CommandError(f"{label}: manifest.json has a file entry that is not a member")
         digest, size = entry.get("sha256"), entry.get("bytes")
-        if (not (_is_str(digest) and len(digest) == 64
-                 and all(char in "0123456789abcdef" for char in digest.lower()))
-                or not (isinstance(size, int) and not isinstance(size, bool) and size >= 0)):
+        if not _is_hex64(digest) or not (_is_int(size) and size >= 0):
             raise CommandError(f"{label}: the manifest entry for {name!r} has no sha256 and byte count")
         inventory[name] = {"sha256": digest.lower(), "bytes": size}
     declared = manifest.get("record_count")
-    if not isinstance(declared, int) or isinstance(declared, bool) or declared < 0:
+    if not _is_int(declared) or declared < 0:
         raise CommandError(f"{label}: manifest.json has no record_count")
+    for key in ("decided_by", "note"):
+        if manifest.get(key) is not None and not _is_str(manifest[key]):
+            raise CommandError(f"{label}: the manifest's {key} is not text")
+    dropped = manifest.get("dropped_fields")
+    if dropped is not None and (not isinstance(dropped, list)
+                                or any(not _is_str(item) for item in dropped)):
+        raise CommandError(f"{label}: the manifest's dropped_fields is not a list of names")
     coverage = manifest.get("coverage")
     if coverage is not None and not isinstance(coverage, dict):
         raise CommandError(f"{label}: the manifest coverage is not an object")
@@ -783,19 +1057,103 @@ def _read_selection(data: bytes, label: str) -> tuple[list[dict], list[str]]:
     return rows, gaps
 
 
+def _check_selection_record(label: str, record, seen: dict) -> tuple[str, object]:
+    """One record of a selection, whatever its decision: its structure, its
+    content digest, a role and provenance that agree, and a quote that is
+    the text of its value. A refusal names a record the reader would
+    return; a pending or excluded one is described, never named."""
+    if not isinstance(record, dict):
+        raise CommandError(f"{label}: {SELECTION_NAME} holds a record that is not an object")
+    record_id = record.get("id")
+    if not _is_str(record_id) or not record_id.strip():
+        raise CommandError(f"{label}: a record has no id")
+    decision = record.get("decision")
+    if decision is not None and (not _is_str(decision) or decision not in ALL_DECISIONS):
+        raise CommandError(f"{label}: a record has an unknown decision ({_kind_of(decision)})")
+    withheld = decision in NOT_CARRY_DECISIONS
+    who = ({"exclude": "an excluded record", "pending": "a pending record"}.get(decision)
+           or f"record {record_id!r}")
+    if record_id in seen:
+        raise CommandError(f"{label}: the id {record_id!r} is listed twice"
+                           if not (withheld or seen[record_id])
+                           else f"{label}: one record id is listed twice")
+    seen[record_id] = withheld
+
+    role, provenance, quote = record.get("role"), record.get("provenance"), record.get("quote")
+    if not _is_str(role) or role not in ROLES:
+        raise CommandError(f"{label}: {who} has an unknown role ({_kind_of(role)})")
+    if not _is_str(provenance) or provenance not in PROVENANCES:
+        raise CommandError(f"{label}: {who} has an unknown provenance ({_kind_of(provenance)})")
+    if (role, provenance) not in AGREEING_PAIRS:
+        raise CommandError(
+            f"{label}: {who} holds the role {role!r} with the provenance {provenance!r}, which do "
+            "not agree; a model's inference never travels as the person's words")
+    if not _is_str(quote):
+        # An explicit empty quote travels as the record's own empty text; a
+        # missing one is refused, never invented.
+        raise CommandError(f"{label}: {who} has no quote text")
+    digest = record.get("content_sha256")
+    if not _is_hex64(digest):
+        raise CommandError(f"{label}: {who} has no content_sha256")
+    try:
+        actual = _selection_digest(record)
+    except ValueError as exc:
+        raise CommandError(f"{label}: {who} cannot be canonicalised: {exc}") from exc
+    if digest.lower() != actual:
+        raise CommandError(f"{label}: {who} does not match its content_sha256")
+    for key in ("kind", "title", "scope", "date", "currency"):
+        if key in record and not _is_str(record[key]):
+            raise CommandError(f"{label}: {who} has a non-text {key}")
+    dropped = record.get("dropped_fields")
+    if dropped is not None and (not isinstance(dropped, list)
+                                or any(not _is_str(item) for item in dropped)):
+        raise CommandError(f"{label}: {who} has a dropped_fields that is not a list of names")
+    for key, fields in (("sources", SELECTION_SOURCE_FIELDS), ("links", LINK_FIELDS)):
+        items = record.get(key)
+        if items is None:
+            continue
+        if not isinstance(items, list):
+            raise CommandError(f"{label}: {who} has a {key} that is not a list")
+        for item in items:
+            if not isinstance(item, dict):
+                raise CommandError(f"{label}: {who} has a {key} entry that is not an object")
+            for field in fields:
+                if field != "observed_at" and field in item and not _is_str(item[field]):
+                    raise CommandError(f"{label}: {who} has a {key} with a non-text {field}")
+            observed = item.get("observed_at") if key == "sources" else None
+            if observed is not None and not _is_str(observed):
+                raise CommandError(f"{label}: {who} has a source with a non-text observed_at "
+                                   "(null travels as null)")
+    if "value" in record:
+        # The quote is the text of the value: the value itself when it is
+        # text, its canonical projection when it is a structure.
+        value = record["value"]
+        if isinstance(value, str) and value != quote:
+            raise CommandError(f"{label}: {who} states a text value that is not its quote")
+        if not isinstance(value, str) and quote != _compact_json(value):
+            raise CommandError(f"{label}: {who} has a quote that is not the canonical text of "
+                               "its structured value")
+    return record_id, decision
+
+
 def _open_selection(data: bytes, label: str) -> tuple[list[dict], list[str], bool | None,
                                                       frozenset]:
     """Read an amberkeep-selection: this CLI's own output format.
 
-    Checked before anything is projected: the format and version, that the
-    manifest's inventory is exactly the archive's, every member's size and
-    sha256, each record's structure, and each record's content_sha256.
+    Checked in one pass, before anything is projected or left out: the
+    format and version, that the manifest's inventory is exactly the
+    archive's, every member's size and sha256, the record count, and every
+    record — a pending or excluded one included — for its structure, its
+    content_sha256, a role and provenance that agree, and a quote that is
+    the text of its value. Each row is then made from the record's cleaned
+    structure (``portable.clean_parts``), and a link into a withheld record
+    is left out and only counted.
     Not checked, not claimed: who said anything, that a statement is true,
     or that a record applies where it is imported.
 
     Returns rows, gap lines, whether this selection's own source was read
     with gaps — the flag a re-packaging keeps — and the names of the records
-    it withheld (for link resolution only).
+    it withheld (for link resolution only; never printed).
     """
     label = str(label)
     if not isinstance(data, (bytes, bytearray, memoryview)):
@@ -813,8 +1171,10 @@ def _open_selection(data: bytes, label: str) -> tuple[list[dict], list[str], boo
         if len(names) != len(set(names)):
             raise CommandError(f"{label}: the archive lists a member twice")
         for name in names:
-            if name.startswith("/") or "\\" in name or ".." in name.split("/"):
-                raise CommandError(f"{label}: {name!r} is not a plain relative name")
+            if name.startswith("/") or "\\" in name or any(
+                    part in ("..", "") for part in name.split("/")):
+                raise CommandError(f"{label}: the archive holds a member whose name is not a "
+                                   "plain relative name")
         if MANIFEST_NAME not in names:
             raise CommandError(f"{label}: {MANIFEST_NAME} is missing from the package")
         manifest = _zip_json(label, archive, MANIFEST_NAME)
@@ -840,179 +1200,157 @@ def _open_selection(data: bytes, label: str) -> tuple[list[dict], list[str], boo
                 raise CommandError(f"{label}: {name} does not match the sha256 in the manifest")
 
         selection = _zip_json(label, archive, SELECTION_NAME)
-        if not isinstance(selection, dict):
-            raise CommandError(f"{label}: {SELECTION_NAME} is not a JSON object")
-        if selection.get("format") != SELECTION_FORMAT:
-            raise CommandError(f"{label}: unknown selection format {selection.get('format')!r}")
-        if selection.get("schema_version") != SCHEMA_VERSION:
-            raise CommandError(
-                f"{label}: unsupported selection schema_version {selection.get('schema_version')!r}")
-        records = selection.get("records")
-        if not isinstance(records, list):
-            raise CommandError(f"{label}: {SELECTION_NAME} has no records list")
+    if not isinstance(selection, dict):
+        raise CommandError(f"{label}: {SELECTION_NAME} is not a JSON object")
+    if selection.get("format") != SELECTION_FORMAT:
+        raise CommandError(
+            f"{label}: unknown selection format ({_kind_of(selection.get('format'))})")
+    if not _is_int(selection.get("schema_version")) or selection["schema_version"] != SCHEMA_VERSION:
+        raise CommandError(f"{label}: unsupported selection schema_version "
+                           f"{_version_shown(selection.get('schema_version'))}; this CLI reads 1")
+    records = selection.get("records")
+    if not isinstance(records, list):
+        raise CommandError(f"{label}: {SELECTION_NAME} has no records list")
+    if declared != len(records):
+        raise CommandError(
+            f"{label}: the manifest counts {declared} record(s) while {SELECTION_NAME} holds "
+            f"{len(records)}; a package whose count lies is refused")
 
-        rows: list[dict] = []
-        gaps: list[str] = []
-        pending: list[str] = []
-        undecided: list[str] = []
-        excluded: list[str] = []
-        withheld: set[str] = set()
-        seen: set[str] = set()
-        for record in records:
-            if not isinstance(record, dict):
-                raise CommandError(f"{label}: {SELECTION_NAME} holds a record that is not an object")
-            record_id = record.get("id")
-            if not _is_str(record_id) or not record_id.strip():
-                raise CommandError(f"{label}: a record has no id")
-            if record_id in seen:
-                raise CommandError(f"{label}: the id {record_id!r} is listed twice")
-            seen.add(record_id)
-            decision = record.get("decision")
-            if decision is not None and not _is_str(decision):
-                raise CommandError(f"{label}: record {record_id!r} has a non-text decision")
-            if _is_str(decision) and decision not in ALL_DECISIONS:
-                raise CommandError(
-                    f"{label}: record {record_id!r} has an unknown decision {decision!r}")
-            if _is_str(decision) and decision in NOT_CARRY_DECISIONS:
-                # Nothing of a pending or excluded record is returned; its
-                # names are kept only so no link can point into it.
-                (excluded if decision == "exclude" else pending).append(record_id)
-                names = {record_id, f"{SELECTION_NAME}#{record_id}"}
-                if isinstance(record.get("sources"), list):
-                    names |= {hop["locator"] for hop in _binding_hops(record)}
-                withheld |= names | {bare for bare in map(_bare_id, list(names)) if bare}
-                continue
-            if decision is None:
-                # No review status is invented: a record without one travels
-                # as none, and re-packaging never re-activates it.
-                undecided.append(record_id)
-            role = record.get("role")
-            if role not in ROLES:
-                raise CommandError(f"{label}: record {record_id!r} has an unknown role {role!r}")
-            provenance = record.get("provenance")
-            if provenance not in PROVENANCES:
-                raise CommandError(
-                    f"{label}: record {record_id!r} has an unknown provenance {provenance!r}")
-            quote = record.get("quote")
-            if not _is_str(quote):
-                # An explicit empty quote travels as the record's own empty
-                # text; a missing one is refused, never invented.
-                raise CommandError(f"{label}: record {record_id!r} has no quote text")
-            digest = record.get("content_sha256")
-            if not (_is_str(digest) and len(digest) == 64):
-                raise CommandError(f"{label}: record {record_id!r} has no content_sha256")
-            if digest.lower() != _selection_digest(record):
-                raise CommandError(
-                    f"{label}: record {record_id!r} does not match its content_sha256")
-            for key in ("kind", "title", "scope", "date"):
-                if key in record and not _is_str(record[key]):
-                    raise CommandError(f"{label}: record {record_id!r} has a non-text {key}")
-            record_dropped = record.get("dropped_fields")
-            if record_dropped is not None and (
-                    not isinstance(record_dropped, list)
-                    or any(not _is_str(item) for item in record_dropped)):
-                raise CommandError(
-                    f"{label}: record {record_id!r} has a dropped_fields that is not a list of names")
-            for key, fields in (("sources", ("id", "locator", "source_label",
-                                             "source_sha256", "read_via")),
-                                ("links", ("target", "relation", "basis"))):
-                items = record.get(key)
-                if items is None:
-                    continue
-                if not isinstance(items, list):
-                    raise CommandError(f"{label}: record {record_id!r} has a {key} that is not a list")
-                for item in items:
-                    if not isinstance(item, dict):
-                        raise CommandError(
-                            f"{label}: record {record_id!r} has a {key} entry that is not an object")
-                    for field in fields:
-                        if field in item and not _is_str(item[field]):
-                            raise CommandError(
-                                f"{label}: record {record_id!r} has a {key} with a non-text {field}")
-                    if key == "sources":
-                        observed = item.get("observed_at")
-                        if observed is not None and not _is_str(observed):
-                            raise CommandError(
-                                f"{label}: record {record_id!r} has a source with a non-text "
-                                "observed_at (null travels as null)")
+    # One pass over every record, before anything is projected or left out.
+    seen: dict = {}
+    checked = [(record, *_check_selection_record(label, record, seen)) for record in records]
+    withheld: set[str] = set()
+    for record, record_id, decision in checked:
+        if decision in NOT_CARRY_DECISIONS:
+            # Kept only so that no link can point into it; never printed.
+            names = {record_id, f"{SELECTION_NAME}#{record_id}"}
+            names |= {hop["locator"] for hop in _binding_hops(record)}
+            withheld |= names | {bare for bare in map(_bare_id, list(names)) if bare}
 
-            date = record.get("date")
-            # A missing value is the quote; an explicit null is a value.
-            value = record["value"] if "value" in record else quote
-            origin = {
-                "package": label,
-                "kind": record.get("kind", ""),
-                "title": record.get("title", ""),
-                "provenance": provenance,
-                "decision": decision,
-            }
-            if "scope" in record:
-                # Stated scope, even an empty one; a missing scope stays missing.
-                origin["scope"] = record["scope"]
-            if not isinstance(value, str):
-                # The same seam the readers teammate marks: a structured value
-                # read back is a projection, never verbatim speech.
-                origin["text_kind"] = "projection"
-            if record_dropped:
-                # Names only: which fields this record lost before it travelled.
-                origin["dropped_fields"] = sorted(set(record_dropped))
-            row = {
-                "locator": f"{SELECTION_NAME}#{record_id}",
-                "speaker": role,
-                "text": quote,
-                "date": date.strip() if _is_str(date) and date.strip() else None,
-                "conversation": label,
-                "value": value,
-                "origin": origin,
-            }
-            if _is_str(record.get("currency")) and record["currency"]:
-                row["currency"] = record["currency"]
-            if isinstance(record.get("sources"), list) and record["sources"]:
-                row["sources"] = record["sources"]
-            if isinstance(record.get("links"), list) and record["links"]:
-                row["links"] = record["links"]
-            rows.append(row)
+    rows: list[dict] = []
+    gaps: list[str] = []
+    undecided: list[str] = []
+    emptied: list[str] = []
+    read_dropped: list[str] = []
+    pending = excluded = withheld_links = unshaped = 0
+    for record, record_id, decision in checked:
+        if decision in NOT_CARRY_DECISIONS:
+            # Nothing of a pending or excluded record is returned, its name included.
+            if decision == "exclude":
+                excluded += 1
+            else:
+                pending += 1
+            continue
+        if decision is None:
+            # No review status is invented: a record without one travels
+            # as none, and re-packaging never re-activates it.
+            undecided.append(record_id)
+        quote = record["quote"]
+        # A missing value is the quote; an explicit null is a value. The row
+        # is the record's cleaned structure, the same rule the reader uses.
+        parts = _clean_parts(record["value"] if "value" in record else quote,
+                             record.get("sources"), record.get("links"),
+                             keep_link=lambda link: link.get("target") not in withheld)
+        value, links = parts["value"], parts["links"]
+        withheld_links += parts["withheld_links"]
+        read_dropped.extend(parts["dropped_fields"])
+        unshaped += parts["unshaped_count"]
+        # Names only, and only this schema's canonical ones: a stated name
+        # that is no known credential field is not carried on.
+        record_dropped = sorted(set(_portable().known_dropped(record.get("dropped_fields")))
+                                | set(parts["dropped_fields"]))
+        origin = {
+            "package": label,
+            "kind": record.get("kind", ""),
+            "title": record.get("title", ""),
+            "provenance": record["provenance"],
+            "decision": decision,
+        }
+        if "scope" in record:
+            # Stated scope, even an empty one; a missing scope stays missing.
+            origin["scope"] = record["scope"]
+        if not isinstance(value, str):
+            # The same seam the readers teammate marks: a structured value
+            # read back is a projection, never verbatim speech.
+            origin["text_kind"] = "projection"
+        if record_dropped:
+            # Names only: which fields this record lost before it travelled.
+            origin["dropped_fields"] = record_dropped
+        if parts["value_emptied"]:
+            origin["value_emptied"] = True
+            emptied.append(record_id)
+        date = record.get("date")
+        row = {
+            "locator": f"{SELECTION_NAME}#{record_id}",
+            "speaker": record["role"],
+            # A structured value's text is the canonical projection of the
+            # cleaned value; a text value is the quote itself.
+            "text": value if isinstance(value, str) else _compact_json(value),
+            "date": date.strip() if _is_str(date) and date.strip() else None,
+            "conversation": label,
+            "value": value,
+            "origin": origin,
+        }
+        if _is_str(record.get("currency")) and record["currency"]:
+            row["currency"] = record["currency"]
+        if parts["sources"]:
+            row["sources"] = parts["sources"]
+        if links:
+            row["links"] = links
+        rows.append(row)
 
-        if declared != len(records):
-            raise CommandError(
-                f"{label}: the manifest counts {declared} record(s) while {SELECTION_NAME} holds "
-                f"{len(records)}; a package whose count lies is refused")
-        if undecided:
-            gaps.append(f"{len(undecided)} record(s) carry no review status: they travel as "
-                        f"none, never re-activated: {', '.join(undecided)}")
-        if excluded:
-            gaps.append(f"{len(excluded)} excluded record(s) were not imported: {', '.join(excluded)}")
-        if pending:
-            gaps.append(f"{len(pending)} pending record(s) were not imported: {', '.join(pending)}")
-        dropped = manifest.get("dropped_fields")
-        if isinstance(dropped, list) and dropped:
-            gaps.append("known typed credential fields were removed before packaging: "
-                        + ", ".join(sorted(set(item for item in dropped if _is_str(item)))))
-        if coverage.get("read"):
-            gaps.append(f"the selection reports {len(coverage['read'])} source(s) as read: "
-                        + ", ".join(coverage["read"]))
-        if coverage.get("unavailable"):
-            gaps.append(f"the selection could not read {len(coverage['unavailable'])} source(s): "
-                        + ", ".join(coverage["unavailable"]))
-        # True: the source read was short of its source; False: it said it
-        # read all of it; absent: unknown — as in an older selection, whose
-        # empty "unavailable" list never proved a complete source. A record
-        # this reader did not return is a known gap of its own.
-        flag = coverage.get("source_gaps")
-        if flag is True or coverage.get("unavailable") or pending or excluded:
-            source_gaps = True
-        else:
-            source_gaps = False if flag is False else None
-        if flag is True:
-            gaps.append("the sender's read of this selection's source found part of it unavailable, "
-                        "left out or not imported; the details stayed with the sender")
-        elif flag is None:
-            gaps.append("this selection does not record whether its source was read completely; "
-                        "its coverage is unknown")
-        if manifest.get("decided_by"):
-            gaps.append(f"decided_by names who picked ({manifest['decided_by']}), not the receiver's "
-                        "consent; applying this selection is the receiver's own judgment")
-        return rows, gaps, source_gaps, frozenset(withheld)
+    if undecided:
+        gaps.append(f"{len(undecided)} record(s) carry no review status: they travel as "
+                    f"none, never re-activated: {', '.join(undecided)}")
+    if excluded:
+        gaps.append(f"{excluded} excluded record(s) were not imported; nothing of them is "
+                    "returned, their names included")
+    if pending:
+        gaps.append(f"{pending} pending record(s) were not imported; nothing of them is "
+                    "returned, their names included")
+    if withheld_links:
+        gaps.append(f"{withheld_links} link(s) into records this selection withholds (pending or "
+                    "excluded) were left out whole, target and basis")
+    dropped = _portable().known_dropped(manifest.get("dropped_fields"))
+    if dropped:
+        gaps.append("known typed credential fields were removed before packaging: "
+                    + ", ".join(dropped))
+    if read_dropped:
+        gaps.append("known typed credential fields were removed while reading this selection: "
+                    + ", ".join(sorted(set(read_dropped))))
+    if emptied:
+        gaps.append(f"{len(emptied)} record(s) held only credential-shaped fields in their value, "
+                    f"so nothing of that value is carried: {', '.join(emptied)}")
+    if unshaped:
+        gaps.append(f"{unshaped} field(s) outside the shape of a citation ("
+                    + ", ".join(CITATION_FIELDS) + "), a full chain hop (adds "
+                    + ", ".join(HOP_FIELDS) + ") or a link (" + ", ".join(LINK_FIELDS)
+                    + ") were not carried; their names are not shown")
+    if coverage.get("read"):
+        gaps.append(f"the selection reports {len(coverage['read'])} source(s) as read: "
+                    + ", ".join(coverage["read"]))
+    if coverage.get("unavailable"):
+        gaps.append(f"the selection could not read {len(coverage['unavailable'])} source(s): "
+                    + ", ".join(coverage["unavailable"]))
+    # True: the source read was short of its source; False: it said it
+    # read all of it; absent: unknown — as in an older selection, whose
+    # empty "unavailable" list never proved a complete source. A record
+    # this reader did not return is a known gap of its own.
+    flag = coverage.get("source_gaps")
+    if flag is True or coverage.get("unavailable") or pending or excluded:
+        source_gaps = True
+    else:
+        source_gaps = False if flag is False else None
+    if flag is True:
+        gaps.append("the sender's read of this selection's source found part of it unavailable, "
+                    "left out or not imported; the details stayed with the sender")
+    elif flag is None:
+        gaps.append("this selection does not record whether its source was read completely; "
+                    "its coverage is unknown")
+    if manifest.get("decided_by"):
+        gaps.append(f"decided_by names who picked ({manifest['decided_by']}), not the receiver's "
+                    "consent; applying this selection is the receiver's own judgment")
+    return rows, gaps, source_gaps, frozenset(withheld)
 
 
 _READ_VIA = {PACKAGE_FORMAT: "portable.read_portable", SELECTION_FORMAT: "amberkeep.read_selection"}
@@ -1110,44 +1448,78 @@ def _confirmed_links(visible: list, chosen: list, new_ids: dict, withheld=frozen
             else:
                 dropped_targets.append(target)
                 continue
-            kept.append({key: carried[key] for key in ("target", "relation", "basis")
-                         if key in carried})
+            kept.append({key: carried[key] for key in LINK_FIELDS if key in carried})
         row["links"] = kept
     return dropped_targets
 
 
+def _carried_provenance(role: str, stated: str, where: str) -> str:
+    """The provenance a carried record takes: the one its row states, when it
+    agrees with the role; the role's own when none is stated. A pair that
+    disagrees is refused, never re-derived from the role — so a model's
+    inference never becomes the person's words."""
+    if not stated:
+        return SPEAKER_TO_PROVENANCE[role]
+    if (role, stated) not in AGREEING_PAIRS:
+        shown = repr(stated) if stated in PROVENANCES else f"({_kind_of(stated)} it does not know)"
+        raise CommandError(
+            f"{where}: its speaker {role!r} and its stated provenance {shown} do not agree; "
+            "it is not carried — re-inspect the source")
+    return stated
+
+
+def _effective_provenance(row: dict):
+    """The provenance a row stands for, by select's own rule: the one it
+    states, else the one its speaker implies (null for an unknown speaker).
+    A document and a document retelling the person are different."""
+    origin = row.get("origin") if isinstance(row.get("origin"), dict) else {}
+    for stated in (row.get("provenance"), origin.get("provenance")):
+        if _is_str(stated) and stated:
+            return stated
+    speaker = row.get("speaker")
+    return SPEAKER_TO_PROVENANCE.get(speaker) if _is_str(speaker) else None
+
+
 def _record_from_row(row: dict, source: dict, record_id: str) -> tuple[dict, list]:
     """One carried record, built straight from the fresh source read, plus the
-    names of the fields it lost (the reader's strip and this one's)."""
-    dropped: list = []
+    names of the fields it lost (the reader's strip and this one's).
+
+    Its value, sources and links are the row's cleaned structure — the
+    readers' own rule, ``portable.clean_parts`` — and its quote is the text
+    of that value: the value itself, or the canonical projection of a
+    structured one."""
     seam = row.get("origin") if isinstance(row.get("origin"), dict) else {}
-    already = seam.get("dropped_fields")
-    if isinstance(already, list):
-        dropped.extend(item for item in already if _is_str(item))
     has_value = "value" in row
-    value = _strip_credentials(row["value"] if has_value else row["text"], dropped)
-    if dropped and value in ({}, []):
+    parts = _clean_parts(row["value"] if has_value else row["text"],
+                         _sources_for_row(row, source), row.get("links") or [])
+    if seam.get("value_emptied") is True or parts["value_emptied"]:
         # Only a value a strip emptied (the reader's or this one) is refused;
         # an empty object, list or null the source itself holds travels as it is.
         raise CommandError(
             f"{row['locator']}: holds nothing but credential-shaped fields; "
             "deselect it or drop the field")
+    value = parts["value"]
+    if isinstance(value, str) and value != row["text"]:
+        raise CommandError(f"{row['locator']}: its text and its stated value disagree; "
+                           "re-inspect the source")
+    quote = value if isinstance(value, str) else _compact_json(value)
     role = row["speaker"]
-    original = row.get("provenance") or ""
-    if (original in PROVENANCES
-            and (role == "assistant") == (original == "model_inference")):
-        provenance = original
-    else:
-        provenance = SPEAKER_TO_PROVENANCE[role]
+    provenance = _carried_provenance(role, row.get("provenance") or "", row["locator"])
+    decision = row.get("decision")
+    if decision is not None and decision not in CARRY_DECISIONS:
+        # A status the readers never hand on (pending, exclude, unknown) is
+        # never dropped into "none" here: the record does not travel.
+        shown = repr(decision) if decision in ALL_DECISIONS else f"({_kind_of(decision)})"
+        raise CommandError(f"{row['locator']}: its review status {shown} does not travel")
     record = {
         "id": record_id,
         "kind": row.get("kind") or "carried",
         "title": row.get("title") or "",
         "role": role,
         "provenance": provenance,
-        "quote": row["text"],
-        "sources": _strip_credentials(_sources_for_row(row, source), dropped),
-        "links": _strip_credentials(row.get("links") or [], dropped),
+        "quote": quote,
+        "sources": parts["sources"],
+        "links": parts["links"],
     }
     scope = _stated_scope(row)
     if scope is not None:
@@ -1155,18 +1527,21 @@ def _record_from_row(row: dict, source: dict, record_id: str) -> tuple[dict, lis
         # none carries no scope at all — never the package's file name, and
         # never a scope the source did not state.
         record["scope"] = scope
-    decision = row.get("decision")
-    if _is_str(decision) and decision in CARRY_DECISIONS:
+    if decision is not None:
         # The source's own review status, verbatim; never invented here.
         record["decision"] = decision
     if row.get("date"):
         record["date"] = row["date"]
     if row.get("currency"):
         record["currency"] = row["currency"]
-    if has_value and not (isinstance(value, str) and value == row["text"]):
+    if has_value and not (isinstance(value, str) and value == quote):
         record["value"] = value
+    # What the read already stripped, by canonical name only, with what this
+    # cleaning strips; no other string from the row's metadata travels on.
+    dropped = sorted(set(_portable().known_dropped(seam.get("dropped_fields")))
+                     | set(parts["dropped_fields"]))
     if dropped:
-        record["dropped_fields"] = sorted(set(dropped))
+        record["dropped_fields"] = dropped
     record["content_sha256"] = _selection_digest(record)
     return record, dropped
 
@@ -1266,7 +1641,7 @@ def _locators_from_rows(path: str) -> tuple[list, dict]:
             or not isinstance(sources[0], dict)):
         raise CommandError(f"{path}: the rows document records no source binding from its inspect")
     binding = {}
-    for key in ("label", "sha256", "read_via", "receipt"):
+    for key in ("label", "sha256", "read_via", "receipt", "reading_scheme"):
         value = sources[0].get(key)
         if _is_str(value) and value:
             binding[key] = value
@@ -1310,12 +1685,12 @@ def _bind_to_inspect(args, source: dict, table_binding: dict | None) -> None:
         if named is not None and recorded is not None and named != recorded:
             raise CommandError(
                 f"the --receipt named is not the receipt of the --rows table "
-                f"({_line(recorded, 'the rows document')}); they come from different inspects")
+                f"({_receipt_shown(recorded)}); they come from different inspects")
         if table_binding["sha256"] != source["sha256"]:
             raise CommandError(
                 f"{args.original}: the source reads sha256 {source['sha256'][:16]}…, not the "
-                f"{table_binding['sha256'][:16]}… the inspect recorded; the source moved since "
-                "that read — re-inspect and select from the fresh read")
+                f"{_digest_shown(table_binding['sha256'])} the inspect recorded; the source "
+                "moved since that read — re-inspect and select from the fresh read")
         if table_binding["label"] != source["label"]:
             # The label is part of the read (a reader may build locators from
             # it), so a --rows pick always reads under the inspect's label.
@@ -1325,17 +1700,26 @@ def _bind_to_inspect(args, source: dict, table_binding: dict | None) -> None:
                 f"{table_binding['label']!r} as that inspect did, or re-inspect under this name")
         if table_binding["read_via"] != source["read_via"]:
             raise CommandError(
-                f"{args.original}: the source reads via {source['read_via']!r}, not the "
-                f"{table_binding['read_via']!r} the inspect recorded; pass the same "
-                "--kind and re-inspect")
+                f"{args.original}: the source reads via {source['read_via']!r}, while the inspect "
+                f"recorded {_route_shown(table_binding['read_via'])}; pass the same --kind and "
+                "re-inspect")
+        if table_binding.get("reading_scheme") != READING_SCHEME:
+            # The rows the person confirmed came from other reading rules: the
+            # same bytes may now read as other rows, other speakers.
+            raise CommandError(
+                f"{args.rows}: this table was written by an inspect under the reading rules "
+                f"{_scheme_shown(table_binding.get('reading_scheme'))}, and this Amberkeep reads "
+                f"by {READING_SCHEME!r}; the rows may now differ — re-inspect with --rows and "
+                "select from that table")
         named = named or recorded
     if named != source["receipt"]:
         raise CommandError(
             f"{args.original}: this read (label {source['label']!r}, via {source['read_via']!r}, "
-            f"sha256 {source['sha256'][:16]}…) has receipt {source['receipt']}, not the "
-            f"{_line(named, 'the inspect output')} named; the source moved, or this call reads "
-            "it under another --label or --kind than that inspect — re-inspect with the same "
-            "--label and --kind and select with the receipt it reports")
+            f"sha256 {source['sha256'][:16]}…) has receipt {source['receipt']}, not the one "
+            f"named ({_receipt_shown(named)}); the source moved, this call reads it under "
+            "another --label or --kind than that inspect, or that inspect read it by earlier "
+            "reading rules — re-inspect with the same --label and --kind and select with the "
+            "receipt it reports")
 
 
 # ----------------------------------------------------------------- commands
@@ -1346,6 +1730,8 @@ PACKAGE_ROUTE = "read PKG.zip"
 
 def cmd_inspect(args) -> dict:
     """Read exactly one named source (JSON on stdout, bounded by default)."""
+    # Where a rows document may go is settled before anything is read.
+    target = _output_target(args.rows) if args.rows else None
     rows, gaps, source, _withheld, notes = _read_source(args.file, args.kind, args.label)
     doc = {
         "kind": ROWS_KIND,
@@ -1368,8 +1754,7 @@ def cmd_inspect(args) -> dict:
         raise CommandError(f"no row {_line(args.record, 'the command line')!r} in "
                            f"{source['label']}; available: " + _names(available, INSPECT_ROUTE))
     written = None
-    if args.rows:
-        target = Path(args.rows)
+    if target is not None:
         blob = (_json_text(doc) + "\n").encode("utf-8")
         if len(blob) > MAX_ROWS_FILE_BYTES:
             # select reads a rows document only up to this bound: a document
@@ -1398,7 +1783,8 @@ def cmd_inspect(args) -> dict:
     page_rows = [{
         "locator": _line(row["locator"], INSPECT_ROUTE), "speaker": row["speaker"],
         "date": _snippet(row["date"]) if row.get("date") else row.get("date"),
-        "scope": _snippet(str(row.get("scope") or "")),
+        # As stated: concrete, "" when stated empty, null when none is stated.
+        "scope": None if _stated_scope(row) is None else _snippet(_stated_scope(row)),
         "text": _snippet(row["text"]),
     } for row in rows[offset:offset + limit]]
     locators = [row["locator"] for row in rows]
@@ -1452,6 +1838,8 @@ def cmd_select(args) -> dict:
         raise CommandError(
             "select is bound to an inspect: name the receipt the inspect reported with "
             "--receipt RECEIPT, or pass the --rows ROWS.json table that inspect wrote")
+    # Where the package may go is settled before anything is read.
+    out = _output_target(args.package)
     table_binding = None
     wanted: list = list(args.record)
     if args.rows:
@@ -1515,7 +1903,6 @@ def cmd_select(args) -> dict:
         record, record_dropped = _record_from_row(row, source, new_ids[row["locator"]])
         records.append(record)
         dropped.extend(record_dropped)
-    out = Path(args.package)
     blob = _build_selection(records, source, args.decided_by, args.note, dropped, out.name)
     _write_output(out, blob)
     excluded = sorted(set(by_locator) - chosen_locators)
@@ -1523,11 +1910,13 @@ def cmd_select(args) -> dict:
     def _summary_of(record: dict) -> dict:
         summary = {"id": record["id"], "kind": record["kind"],
                    "title": _line(record["title"], PACKAGE_ROUTE),
-                   "scope": _line(record.get("scope", ""), PACKAGE_ROUTE),
+                   "scope": _line(record["scope"], PACKAGE_ROUTE) if "scope" in record else None,
                    "role": record["role"],
                    "provenance": record["provenance"],
+                   "date": record.get("date"),
                    "first_locator": _line(_first_locator(record), PACKAGE_ROUTE),
-                   "version_sha256": _version_of_record(record)}
+                   "version_sha256": _version_of_record(record),
+                   "version_scheme": VERSION_SCHEME}
         for key in ("decision", "dropped_fields"):
             if key in record:
                 summary[key] = record[key]
@@ -1582,7 +1971,8 @@ def cmd_read(args) -> dict:
     # identity and version, to reconcile against what is already saved.
     items = [{"record": _record_id(row), "first_locator": _first_locator(row),
               "quote_sha256": _sha256_hex(str(row.get("text", "")).encode("utf-8")),
-              "version_sha256": _version_of_row(row, _READ_VIA[fmt], label)} for row in rows]
+              "version_sha256": _version_of_row(row, _READ_VIA[fmt], label),
+              "version_scheme": VERSION_SCHEME} for row in rows]
     return {"command": "read", "package": label, "rows": rows, "items": items, "gaps": gaps}
 
 
@@ -1609,7 +1999,6 @@ def cmd_quote(args) -> dict:
     row = _record_row(label, rows, args.record)
     context = max(0, min(10, args.context))
     origin = row.get("origin") if isinstance(row.get("origin"), dict) else {}
-    scope = origin.get("scope", "")
     text_kind = origin.get("text_kind") if _is_str(origin.get("text_kind")) else "verbatim"
     # The window is built strictly around the chosen record: its own scope
     # group — a missing scope is a group of its own, never the empty one,
@@ -1618,7 +2007,7 @@ def cmd_quote(args) -> dict:
     # must not scramble the sequence of messages.
     group = _stated_scope(row)
     ordered = [other for other in rows if _stated_scope(other) == group]
-    position = ordered.index(row) if row in ordered else len(ordered)
+    position = next((index for index, other in enumerate(ordered) if other is row), len(ordered))
     window = ordered[max(0, position - context):position + context + 1]
     neighbours = [{"record": _record_id(other), "locator": other.get("locator"),
                    "date": other.get("date")}
@@ -1636,6 +2025,7 @@ def cmd_quote(args) -> dict:
         # currency) — reconcile it, never reuse an earlier verdict blindly.
         "first_locator": _first_locator(row),
         "version_sha256": _version_of_row(row, _READ_VIA[fmt], label),
+        "version_scheme": VERSION_SCHEME,
         "decision": origin.get("decision"),
         "currency": row.get("currency"),
         "speaker": row.get("speaker"),
@@ -1644,7 +2034,8 @@ def cmd_quote(args) -> dict:
         "role_note": ("a sha256 binds this text to this record; it never proves who said it "
                       "or that it is true"),
         "date": row.get("date"),
-        "scope": scope,
+        # As stated: concrete, "" when stated empty, null when none is stated.
+        "scope": _stated_scope(row),
         "sources": row.get("sources", []),
         "neighbours": neighbours,
         "chain": {
@@ -1667,22 +2058,26 @@ def cmd_quote(args) -> dict:
         result["verification"] = verification
         if verification["verified"] and text_kind == "projection":
             result["evidence"] = ("a verified projection: one chain hop binds sha256 + parser + "
-                                  "locator, and the named original's structured value, role and "
-                                  "date round-trip to this record; the text is a re-serialization, "
-                                  "not a fragment of the original's wording")
+                                  "locator, and the named original's structured value, role, "
+                                  "provenance and date round-trip to this record; the text is a "
+                                  "re-serialization, not a fragment of the original's wording")
         elif verification["verified"]:
             result["evidence"] = ("a verified fragment of the named original: one chain hop "
-                                  "binds sha256 + parser + locator, and text, role and date match")
+                                  "binds sha256 + parser + locator, and text, role, provenance "
+                                  "and date match")
         else:
             result["evidence"] = ("carried inside the package; the check against the named "
                                   f"original failed: {verification['reason']}")
     return result
 
 
+def _origin_of(row: dict) -> dict:
+    return row.get("origin") if isinstance(row.get("origin"), dict) else {}
+
+
 def _text_kind_of(row: dict) -> str:
     """Verbatim text, or a projection of a structured value (null included)."""
-    origin = row.get("origin") if isinstance(row.get("origin"), dict) else {}
-    if origin.get("text_kind") == "projection":
+    if _origin_of(row).get("text_kind") == "projection":
         return "projection"
     if "value" in row and not isinstance(row["value"], str):
         return "projection"
@@ -1692,18 +2087,19 @@ def _text_kind_of(row: dict) -> str:
 def _verify_quote_against(row: dict, quote: str, text_kind: str, original_path: str) -> dict:
     """Check one quote against one named original — the file the person chose.
 
-    One chain hop must bind sha256 + parser + locator; then text, role and
-    date are compared one by one. A projection matches only a projection,
-    compared as structure (``value_match``); verbatim text only verbatim
-    text. Nothing is searched for: only this named file is opened, and every
-    check is reported.
+    One chain hop must bind sha256 + parser + locator; then text, role,
+    provenance (the one each side states, else the one its role implies,
+    as select carries it) and date are compared one by one. A projection
+    matches only a projection, compared as structure (``value_match``);
+    verbatim text only verbatim text. Nothing is searched for: only this
+    named file is opened, and every check is reported.
     """
     binding = _binding_hops(row)
     # The original is read by the same route, and under the same bound, as
     # the source it once was: a plain export at its reader's limit, an export
     # ZIP at the archive limit, a package at the package limit.
     kinds = [hop["read_via"][len(READERS_VIA):] for hop in binding
-             if hop["read_via"].startswith(READERS_VIA)]
+             if _route_known(hop["read_via"]) and hop["read_via"].startswith(READERS_VIA)]
     data = _read_source_file(original_path, kinds[0] if kinds else None)
     label = Path(original_path).name
     original_sha = _sha256_hex(data)
@@ -1711,10 +2107,12 @@ def _verify_quote_against(row: dict, quote: str, text_kind: str, original_path: 
         "original": str(Path(original_path)),
         "original_sha256": original_sha,
         "role": row.get("speaker"),
+        "provenance": _effective_provenance(row),
         "text_kind": text_kind,
         "text_match": None,
         "value_match": None,
         "role_match": None,
+        "provenance_match": None,
         "date_match": None,
         "verified": False,
         "reason": "",
@@ -1726,7 +2124,8 @@ def _verify_quote_against(row: dict, quote: str, text_kind: str, original_path: 
     for hop in binding:
         if hop["source_sha256"] != original_sha:
             continue
-        report["read_via"] = hop["read_via"]
+        # A parser route is shown only when it is one this CLI writes.
+        report["read_via"] = hop["read_via"] if _route_known(hop["read_via"]) else None
         report["locator_in_original"] = hop["locator"]
         chain_label = hop.get("source_label") if _is_str(hop.get("source_label")) else None
         if chain_label:
@@ -1747,27 +2146,45 @@ def _verify_quote_against(row: dict, quote: str, text_kind: str, original_path: 
         same_kind = original_kind == text_kind
         report.update({
             "role_in_original": original.get("speaker"),
+            "provenance_in_original": _effective_provenance(original),
             "text_kind_in_original": original_kind,
             # The same characters in another form are not the same quote.
             "text_match": same_kind and original.get("text") == quote,
             "role_match": original.get("speaker") == row.get("speaker"),
+            # document · source and document · user_statement are different claims.
+            "provenance_match": (report["provenance"] is not None
+                                 and _effective_provenance(original) == report["provenance"]),
             "date_match": (original.get("date") or "") == (row.get("date") or ""),
         })
         if text_kind == "projection":
-            # Compared as structure, with the same credential strip the
-            # carried value went through: an empty object, a list or null
-            # stays itself on both sides.
-            report["value_match"] = same_kind and (
-                _strip_credentials(original.get("value", original.get("text")), [])
-                == row.get("value"))
-        if (report["text_match"] and report["role_match"] and report["date_match"]
-                and report["value_match"] is not False):
+            # Compared as typed structure, with the same cleaning the carried
+            # value went through: an empty object, a list or null stays
+            # itself on both sides, and true is never 1, nor 1 ever 1.0. A
+            # value the strip emptied, on either side, confirms nothing: what
+            # is left of it is no longer the value either side stated.
+            cleaned = _clean_parts(original.get("value", original.get("text")))
+            sides = [side for side, emptied in (
+                ("the named original", cleaned["value_emptied"]
+                 or _origin_of(original).get("value_emptied") is True),
+                ("this record", _origin_of(row).get("value_emptied") is True)) if emptied]
+            if sides:
+                report["value_emptied"] = sides
+            report["value_match"] = (same_kind and not sides
+                                     and _same_json(cleaned["value"], row.get("value")))
+        if (report["text_match"] and report["role_match"] and report["provenance_match"]
+                and report["date_match"] and report["value_match"] is not False):
             report["verified"] = True
-            report["reason"] = ("one chain hop binds sha256 + parser + locator, and text, role "
-                                "and date match the named original; still not who said it")
+            report["reason"] = ("one chain hop binds sha256 + parser + locator, and text, role, "
+                                "provenance and date match the named original; still not who "
+                                "said it")
+        elif report.get("value_emptied"):
+            sides = " and ".join(report["value_emptied"])
+            report["reason"] = ("the chain hop binds the named original, but the credential strip "
+                                f"left nothing of the stated value on {sides}, so the projection "
+                                "is not confirmed")
         else:
             report["reason"] = ("the chain hop binds the named original, but its text, form, "
-                                "value, role or date do not fully match it")
+                                "value, role, provenance or date do not fully match it")
         return report
     report["reason"] = ("the named file's sha256 is not the original any chain hop records; "
                         "it is a different file")
@@ -1777,14 +2194,15 @@ def _verify_quote_against(row: dict, quote: str, text_kind: str, original_path: 
 def cmd_portrait(args) -> dict:
     """A quick portrait: groups, counts, dates, one bounded example each."""
     label, _fmt, rows, gaps, _size = _read_package(args.package)
-    all_dates = sorted({row.get("date") for row in rows if row.get("date")})
+    bounds = _time_bounds(rows)
     groups = _groups_of(rows)
     return {
         "command": "portrait",
         "package": label,
         "record_count": len(rows),
-        "first_date": all_dates[0] if all_dates else "",
-        "last_date": all_dates[-1] if all_dates else "",
+        # The time the rows themselves state: first and last, how many state
+        # none, and whether that order is a time line or only text order.
+        **bounds,
         "groups": groups[:GROUPS_CAP],
         "groups_total": len(groups),
         "groups_truncated": len(groups) > GROUPS_CAP,
@@ -1803,6 +2221,14 @@ def cmd_verify(args) -> dict:
     label, fmt, rows, gaps, size = _read_package(args.package)
     ids = _sample(sorted(_record_id(row) for row in rows), PACKAGE_ROUTE, LOCATOR_INDEX_CAP)
     lines = _sample(gaps, PACKAGE_ROUTE)
+    not_checked = ("who said anything; whether it is true, still current or applies here; that a "
+                   "cited source says it (quote --original checks one record against one named "
+                   "original)")
+    if fmt == PACKAGE_FORMAT:
+        # No published Portable Memory specification ships in this payload.
+        not_checked += ("; Portable Memory 0.7 beyond the contract portable.py itself states — "
+                        "a field outside it is not interpreted, and agreement with any other "
+                        "implementation is not claimed")
     return {
         "command": "verify",
         "ok": True,
@@ -1816,6 +2242,10 @@ def cmd_verify(args) -> dict:
         "gaps": lines["sample"],
         "gaps_total": lines["total"],
         "gaps_truncated": lines["truncated"],
+        "checked": ("format and version, the inventory against the archive, every member's size "
+                    "and sha256, the record count, every record's structure and every content "
+                    "digest the package carries, before anything was shown"),
+        "not_checked": not_checked,
         "full": PACKAGE_ROUTE,
     }
 
@@ -1835,7 +2265,13 @@ COMMANDS = {
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="amberkeep.py",
-        description="Carry chosen memory from one AI assistant to another.")
+        description="Carry chosen memory from one AI assistant to another.",
+        # Printed as written, so the path below is never wrapped mid-name.
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=("select and inspect --rows create a new file only in the folder they run in\n"
+                "(the task's own folder: run_command cwd='task_drive'), never inside this skill\n"
+                "and never over an existing file. Run it as python3 -B, so no cache lands here.\n"
+                f"This copy: {Path(__file__).resolve()}"))
     sub = parser.add_subparsers(dest="command", required=True)
 
     inspect_p = sub.add_parser("inspect", help="read one named source into rows")
@@ -1845,7 +2281,8 @@ def main(argv=None) -> int:
     inspect_p.add_argument("--label", default=None,
                            help="the label rows carry; defaults to the file name")
     inspect_p.add_argument("--rows", default=None, metavar="ROWS.json",
-                           help="write the full rows document here (create-only)")
+                           help="write the full rows document to this new file in the folder the "
+                                "command runs in (create-only)")
     inspect_p.add_argument("--raw", action="store_true",
                            help="print the full rows document to stdout anyway")
     inspect_p.add_argument("--record", default=None, metavar="LOCATOR",
@@ -1855,7 +2292,9 @@ def main(argv=None) -> int:
                            help=f"rows per page (default {PAGE_DEFAULT}, at most {PAGE_MAX})")
 
     select_p = sub.add_parser("select", help="build a package of only the records the owner picked")
-    select_p.add_argument("package", help="the .zip to write (create-only)")
+    select_p.add_argument("package", metavar="OUT.zip",
+                          help="the new .zip to create in the folder the command runs in "
+                               "(create-only)")
     select_p.add_argument("--original", required=True, metavar="SOURCE",
                           help="the source file to build from, named in this same call")
     select_p.add_argument("--kind", default=None,

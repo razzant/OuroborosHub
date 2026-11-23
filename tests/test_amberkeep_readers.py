@@ -1,4 +1,4 @@
-"""Synthetic unit tests for Amberkeep Community offline export readers."""
+"""Synthetic unit tests for the Amberkeep offline export readers."""
 from __future__ import annotations
 
 import io
@@ -31,6 +31,32 @@ def _zip(*members: tuple[str, bytes]) -> bytes:
         for name, payload in members:
             archive.writestr(name, payload)
     return buffer.getvalue()
+
+
+def _event(event_type: str, message: str, **extra: object) -> dict:
+    """An invented Codex ``event_msg`` record."""
+    return {"type": "event_msg", "payload": {"type": event_type, "message": message, **extra}}
+
+
+def _item(role: str, text: str, item_id: str | None = None) -> dict:
+    """An invented Codex ``response_item`` message with one text part."""
+    payload = {"type": "message", "role": role, "content": [{"type": "input_text" if role == "user" else "output_text", "text": text}]}
+    if item_id:
+        payload["id"] = item_id
+    return {"type": "response_item", "payload": payload}
+
+
+def _chatgpt_msg(node_id: str, role: str, text: str, **extra: object) -> dict:
+    return {"id": node_id, "author": {"role": role}, "content": {"content_type": "text", "parts": [text]}, **extra}
+
+
+def _chatgpt_chat(messages: list[dict], **conversation: object) -> dict:
+    """An invented ChatGPT conversation whose messages form one straight line."""
+    mapping, parent = {"root": {"id": "root", "message": None, "parent": None}}, "root"
+    for message in messages:
+        mapping[message["id"]] = {"id": message["id"], "parent": parent, "message": message}
+        parent = message["id"]
+    return {"mapping": mapping, "current_node": parent, **conversation}
 
 
 class AmberkeepReadersTests(unittest.TestCase):
@@ -128,14 +154,14 @@ class AmberkeepReadersTests(unittest.TestCase):
         for hidden in ("SECRET_THINK", "SECRET_ACC", "Alt branch"):
             self.assertNotIn(hidden, "\n".join(c_gaps))
 
-        inseparable = "<system-reminder>HOOK_NOTE</system-reminder>\nUser question with U+2028:\u2028and NEL:\x85!"
+        mixed = "<system-reminder>HOOK_NOTE</system-reminder>\nUser question with U+2028:\u2028and NEL:\x85!"
         inline_lit = "Keep inline `<system-reminder>tag</system-reminder>` as user speech."
         cc_stream = _jsonl(
             {"type": "user", "uuid": "u-iso", "sessionId": "s-1", "message": {"role": "user", "content": "<system-reminder>ONLY_REMINDER</system-reminder>"}},
             {"type": "user", "uuid": "u-meta", "sessionId": "s-1", "isMeta": True, "message": {"role": "user", "content": "meta injection"}},
             {"type": "user", "uuid": "u-cs", "sessionId": "s-1", "isCompactSummary": True, "message": {"role": "user", "content": "COMPACT_SUMMARY_SECRET"}},
             {"type": "user", "uuid": "u-tool", "sessionId": "s-1", "message": {"role": "user", "content": [{"type": "tool_result", "content": "TOOL_OUT"}]}},
-            {"type": "user", "uuid": "u-mix", "sessionId": "s-1", "message": {"role": "user", "content": inseparable}},
+            {"type": "user", "uuid": "u-mix", "sessionId": "s-1", "message": {"role": "user", "content": mixed}},
             {"type": "user", "uuid": "u-lit", "sessionId": "s-1", "message": {"role": "user", "content": [
                 {"type": "text", "text": "<system-reminder>SEP_BLOCK</system-reminder>"},
                 {"type": "text", "text": inline_lit},
@@ -147,14 +173,319 @@ class AmberkeepReadersTests(unittest.TestCase):
         )
         cc_rows, cc_gaps = read_source("claude-code", cc_stream, "/Users/private/sess.jsonl")
         self._check_rows(cc_rows)
+        # The wrapper line is cut out of the mixed turn and the person keeps the rest as typed;
+        # the quoted tag in inline code is ordinary text and stays.
         self.assertEqual(
             [(r["speaker"], r["text"], r["locator"]) for r in cc_rows],
-            [("unknown", inseparable, "claude-code:s-1:u-mix/p0"), ("user", inline_lit, "claude-code:s-1:u-lit/p1"), ("assistant", "Answer.", "claude-code:s-1:a-1/p1")],
+            [("user", mixed.split("\n", 1)[1], "claude-code:s-1:u-mix/p0"), ("user", inline_lit, "claude-code:s-1:u-lit/p1"), ("assistant", "Answer.", "claude-code:s-1:a-1/p1")],
         )
         cc_gap_blob = "\n".join(cc_gaps)
         self.assertIn("compact summary", cc_gap_blob)
-        for hidden in ("/Users/private", "COMPACT_SUMMARY_SECRET", "HIDDEN_THOUGHT", "TOOL_OUT"):
+        self.assertIn("omitted 3 wrapper/reminder block(s)", cc_gap_blob)
+        for hidden in ("/Users/private", "COMPACT_SUMMARY_SECRET", "HIDDEN_THOUGHT", "TOOL_OUT", "HOOK_NOTE"):
             self.assertNotIn(hidden, cc_gap_blob)
+
+    def test_claude_code_wrapper_elements_are_cut_by_shape_and_their_spacing_stays(self) -> None:
+        cut = readers._cc_split_wrappers
+        note = "<system-reminder>Plan mode is on.</system-reminder>"
+        slash = "<command-name>/model</command-name><command-message>model</command-message><command-args></command-args>"
+        fence = "`" * 3
+
+        def said(*excerpts: str) -> list[tuple[str, str]]:
+            return [("user", excerpt) for excerpt in excerpts]
+
+        for text, expected in (
+            (note + "\n", ([], 1)),  # a line of its own goes with its line break
+            ("Rename the note.\n" + note, (said("Rename the note."), 1)),  # on the last line, with the break before it
+            ("Rename the note.\n" + note + "\n", (said("Rename the note."), 1)),  # no trailing break is left behind
+            # Words a wrapper interrupts are separate continuous excerpts, never one splice.
+            ("Plan.\r\n" + note + "\r\nThanks.", (said("Plan.", "Thanks."), 1)), ("Plan.\r\n" + note, (said("Plan."), 1)),
+            ("Rename.\n\n" + note + "\n\nThanks, Tomas.", (said("Rename.\n", "\nThanks, Tomas."), 1)),  # the blank lines are the person's
+            ("Rename.\n<system-reminder>\nline one\nline two\n</system-reminder>\nThanks.", (said("Rename.", "Thanks."), 1)),
+            (slash, ([], 3)), (slash.replace("><", ">\n<"), ([], 3)),  # a slash command, on one line or on three
+            (note + "  Rename the note.", (said("  Rename the note."), 1)),  # on a shared line only the element goes:
+            ("Go:  " + "\n  " + note + " Rename.", (said("Go:  ", " Rename."), 1)),  # the spacing around it may be the person's
+            ("<command-name>/model</command-name> <command-args>opus</command-args>  then go on", (said("  then go on"), 2)),
+            # Where the shape cannot tell the harness from the person, no one is named: an
+            # opening tag that never closes, or a wrapper inside a fence that never closes.
+            ("Mine.\n<system-reminder>never closed\nand more text", ([("user", "Mine."), ("unknown", "<system-reminder>never closed\nand more text")], 0)),
+            ("Mine.\n<command-name>/x</command-name> <command-args>open", ([("user", "Mine."), ("unknown", "<command-args>open")], 1)),
+            ("Code:\n" + fence + "py\nx = 1\n" + note + "\ny = 2", ([("user", "Code:\n" + fence + "py\nx = 1"), ("unknown", note), ("user", "\ny = 2")], 0)),
+        ):
+            self.assertEqual(cut(text), expected, text)
+        for text in (
+            "Hello " + note + " world",  # in the middle of a line
+            "Keep `" + note + "` as typed.",  # inline code
+            "See:\n" + fence + "\n" + note + "\n" + fence + "\n~~~\n" + note + "\n~~~",  # fenced examples
+            "text\n</system-reminder>\nmore",  # no opening tag
+            "<note>keep me</note>\nbye", "<system-reminders>x</system-reminders>\nbye",  # not harness tags
+            "A\u2028" + note + "\x85B",  # U+2028 and NEL are not line breaks here
+        ):
+            pieces, count = cut(text)
+            self.assertEqual(len(pieces), 1, text)
+            self.assertEqual(pieces[0][0], "user", text)
+            self.assertIs(pieces[0][1], text)
+            self.assertEqual(count, 0, text)
+
+        # Every consumer sees the same excerpts: each is its own row, by its own locator.
+        rows, gaps = read_source("claude-code", _jsonl(
+            {"type": "user", "uuid": "u-1", "sessionId": "s-1", "message": {"role": "user", "content": "Plan.\n" + note + "\nThanks."}},
+            {"type": "user", "uuid": "u-2", "sessionId": "s-1", "message": {"role": "user", "content": "<command-args>open"}},
+        ), "s.jsonl")
+        self._check_rows(rows)
+        self.assertEqual([(r["locator"], r["speaker"], r["text"]) for r in rows], [
+            ("claude-code:s-1:u-1/p0.1", "user", "Plan."), ("claude-code:s-1:u-1/p0.2", "user", "Thanks."),
+            ("claude-code:s-1:u-2/p0", "unknown", "<command-args>open")])
+        self.assertIn("claude-code (s-1): omitted 1 wrapper/reminder block(s)", gaps)
+        self.assertTrue(any("1 user text(s) interrupted by harness elements" in n for n in gaps.notes), gaps.notes)
+        self.assertTrue(any("1 excerpt(s) cannot be told apart" in n for n in gaps.notes), gaps.notes)
+
+    def test_claude_code_replays_are_told_by_session_speaker_and_record(self) -> None:
+        def record(role: str, text: str, session: str = "s-ilse") -> dict:
+            body = [{"type": "text", "text": text}] if role == "assistant" else text
+            return {"type": role, "uuid": "x1", "sessionId": session, "message": {"role": role, "content": body}}
+
+        rows, gaps = read_source("claude-code", _jsonl(
+            record("user", "Yes."),
+            record("assistant", "Yes."),  # the same uuid and words, another speaker
+            record("user", "Yes.", "s-tomas"),  # ...another session
+            record("user", "Yes."),  # a genuine replay of the first record
+        ), "pair.jsonl")
+        self._check_rows(rows)
+        self.assertEqual([(r["conversation"], r["speaker"], r["text"]) for r in rows],
+                         [("s-ilse", "user", "Yes."), ("s-ilse", "assistant", "Yes."), ("s-tomas", "user", "Yes.")])
+        self.assertIn("claude-code (s-ilse): deduplicated 1 replayed record(s) (same session, speaker, identifier and text; each kept once)", gaps.notes)
+
+    def test_codex_service_marks_cover_the_paired_copy_and_nothing_else(self) -> None:
+        service = readers._codex_is_service
+        env = "<environment_context>\n  <cwd>/work/trailmap</cwd>\n</environment_context>"
+        agents = "# AGENTS.md instructions for /work/trailmap\n\n<INSTRUCTIONS>\nUse tabs.\n</INSTRUCTIONS>"
+        for text in (env, "  " + env + "\n", agents):
+            self.assertTrue(service(text), text)
+        for text in ("Plan the ridge hike.", "Why does <environment_context> show my cwd?", "", "  "):
+            self.assertFalse(service(text), text)
+        self.assertTrue(service("Use tabs.", "user_instructions"))  # an event that says so itself
+        self.assertFalse(service("Use tabs.", "plain") or service("", "environment_context"))
+
+        rules, brief = "Use tabs in this repo.", "Be brief."
+        rollout = _jsonl(
+            {"type": "session_meta", "payload": {"id": "cx-ilse"}},
+            _item("user", env), _event("user_message", env, kind="environment_context"),  # a wrapped block, in both forms
+            _event("user_message", rules, kind="user_instructions"), _item("user", rules),  # the mark covers its paired item
+            _item("user", rules),  # the same words again: a repeat, so the person's
+            _item("user", "Plan the ridge hike."), _event("user_message", "Plan the ridge hike.", kind="plain"),
+            _event("user_message", brief, kind="user_instructions"),  # marked, but no item follows in this turn
+            {"type": "event_msg", "payload": {"type": "task_started"}},
+            _item("user", brief),  # the same words in the next turn: the person's
+            {"type": "session_meta", "payload": {"id": "cx-tomas"}},
+            _item("user", brief),  # ...and in the next session
+        )
+        rows, gaps = read_source("codex", rollout, "ilse.jsonl")
+        self._check_rows(rows)
+        self.assertEqual(
+            [(r["conversation"], r["text"], r["locator"]) for r in rows],
+            [("cx-ilse", rules, "codex:cx-ilse:L6/p0"), ("cx-ilse", "Plan the ridge hike.", "codex:cx-ilse:L7/p0"),
+             ("cx-ilse", brief, "codex:cx-ilse:L11/p0"), ("cx-tomas", brief, "codex:cx-tomas:L13/p0")],
+        )
+        # Records, not distinct blocks: the wrapped block and the marked pair are two each, the unpaired mark one.
+        self.assertEqual(list(gaps), ["codex (cx-ilse): omitted 5 harness context record(s)"])
+        self.assertEqual(gaps.notes, ["codex (cx-ilse): deduplicated 1 mirrored duplicate record(s) (each text kept once, at its first-seen record)"])
+
+    def test_claude_code_record_type_and_message_role_must_agree(self) -> None:
+        rows, gaps = read_source("claude-code", _jsonl(
+            {"type": "user", "uuid": "u-1", "sessionId": "s-garden", "message": {"role": "user", "content": "Water the cucumbers on Wednesday."}},
+            {"type": "assistant", "uuid": "a-1", "sessionId": "s-garden", "message": {"role": "assistant", "content": [{"type": "text", "text": "Noted: Wednesday mornings."}]}},
+            {"type": "user", "uuid": "u-2", "sessionId": "s-garden", "message": {"role": "assistant", "content": "Three buckets will do."}},
+            {"type": "user", "uuid": "u-3", "sessionId": "s-garden", "message": {"content": "Thanks."}},  # no role: the type tells
+        ), "garden.jsonl")
+        self._check_rows(rows)
+        self.assertEqual([(r["locator"], r["speaker"], r["text"]) for r in rows], [
+            ("claude-code:s-garden:u-1/p0", "user", "Water the cucumbers on Wednesday."),
+            ("claude-code:s-garden:a-1/p0", "assistant", "Noted: Wednesday mornings."),
+            ("claude-code:s-garden:u-2/p0", "unknown", "Three buckets will do."),
+            ("claude-code:s-garden:u-3/p0", "user", "Thanks.")])
+        self.assertEqual(list(gaps), [])
+        self.assertTrue(any("1 record(s) whose type and message role name different speakers" in n for n in gaps.notes), gaps.notes)
+
+    def test_claude_code_nested_wrapper_elements_are_balanced(self) -> None:
+        cut = readers._cc_split_wrappers
+        nested = "<system-reminder>Outer.\n<system-reminder>Inner.</system-reminder>\nStill the harness.</system-reminder>"
+        self.assertEqual(cut("Plant garlic.\n" + nested + "\nIn October."),
+                         ([("user", "Plant garlic."), ("user", "In October.")], 1))
+        # A nested element that never balances leaves the end unknown: the rest is no one's.
+        open_end = "<system-reminder>Outer.\n<system-reminder>Inner.</system-reminder>\nmore"
+        self.assertEqual(cut("Plant garlic.\n" + open_end),
+                         ([("user", "Plant garlic."), ("unknown", open_end)], 0))
+
+    def test_codex_pairs_the_whole_item_and_keeps_only_its_visible_parts(self) -> None:
+        env = "<environment_context>\n  <cwd>/work/garden</cwd>\n</environment_context>"
+        ask = "Plan the beds for spring."
+        both = {"type": "response_item", "payload": {"type": "message", "role": "user", "id": "i1", "content": [
+            {"type": "input_text", "text": env}, {"type": "input_text", "text": ask}]}}
+        rows, gaps = read_source("codex", _jsonl(
+            {"type": "session_meta", "payload": {"id": "cx-garden"}},
+            _event("user_message", env + "\n" + ask),  # the event: the same speech, harness block included
+            both,
+            _item("assistant", "Cucumbers by the fence.", "a1"), _event("agent_message", "Cucumbers by the fence."),
+            _item("user", ask, "i2"),  # the same words again, as a new reply of the person: a repeat, kept
+        ), "garden.jsonl")
+        self._check_rows(rows)
+        self.assertEqual([(r["locator"], r["speaker"], r["text"]) for r in rows], [
+            ("codex:cx-garden:i1/p1", "user", ask),
+            ("codex:cx-garden:a1/p0", "assistant", "Cucumbers by the fence."),
+            ("codex:cx-garden:i2/p0", "user", ask)])
+        self.assertEqual(list(gaps), ["codex (cx-garden): omitted 1 harness context record(s)"])
+        self.assertEqual(gaps.notes, ["codex (cx-garden): deduplicated 2 mirrored duplicate record(s) (each text kept once, at its first-seen record)"])
+
+    def test_codex_echo_of_only_the_visible_parts_meets_its_item_once(self) -> None:
+        """Codex may echo an item by its visible parts alone, after the item or before it: the pair
+        is kept once, as the record that came first — the item's visible parts with their own
+        locators, or the event itself when it is the earlier form. A whole match wins over a
+        visible one, so a real repeat stays; an echo no item meets that holds a harness block
+        beside other words is attributed to no one."""
+        env = "<environment_context>\n  <cwd>/work/garden</cwd>\n</environment_context>"
+
+        def asked(item_id: str, *texts: str) -> dict:
+            return {"type": "response_item", "payload": {"type": "message", "role": "user", "id": item_id,
+                                                         "content": [{"type": "input_text", "text": t} for t in texts]}}
+
+        rows, gaps = read_source("codex", _jsonl(
+            {"type": "session_meta", "payload": {"id": "cx-garden"}},
+            asked("i1", env, "Plan the beds for spring.", "Start with the cucumbers."),
+            _event("user_message", "Plan the beds for spring.\nStart with the cucumbers."),  # its visible parts, after it
+            _item("assistant", "Cucumbers by the fence.", "a1"), _event("agent_message", "Cucumbers by the fence."),
+            _event("user_message", "Water on Wednesday."),  # its visible part, before it: the row stays the event's
+            asked("i2", env, "Water on Wednesday."),
+            _item("assistant", "Noted.", "a2"),
+            _event("user_message", "Mulch the rows."),  # equal to i4 whole, and to i3's visible part
+            asked("i3", env, "Mulch the rows."), asked("i4", "Mulch the rows."),
+            {"type": "event_msg", "payload": {"type": "task_started"}},
+            _event("user_message", env + "\nPlant garlic in October."),  # no item meets it
+        ), "garden.jsonl")
+        self._check_rows(rows)
+        self.assertEqual([(r["locator"], r["speaker"], r["text"]) for r in rows], [
+            ("codex:cx-garden:i1/p1", "user", "Plan the beds for spring."),
+            ("codex:cx-garden:i1/p2", "user", "Start with the cucumbers."),
+            ("codex:cx-garden:a1/p0", "assistant", "Cucumbers by the fence."),
+            ("codex:cx-garden:L6/p0", "user", "Water on Wednesday."),
+            ("codex:cx-garden:a2/p0", "assistant", "Noted."),
+            ("codex:cx-garden:L9/p0", "user", "Mulch the rows."),
+            ("codex:cx-garden:i3/p1", "user", "Mulch the rows."),
+            ("codex:cx-garden:L13/p0", "unknown", env + "\nPlant garlic in October.")])
+        self.assertEqual(list(gaps), ["codex (cx-garden): omitted 3 harness context record(s)"])
+        self.assertEqual(gaps.notes, [
+            "codex (cx-garden): deduplicated 4 mirrored duplicate record(s) (each text kept once, at its first-seen record)",
+            "codex (cx-garden): 1 text(s) hold a known harness block beside other words, with no part of the export "
+            "to separate them, and are attributed to no one (speaker unknown)"])
+
+        holds = readers._codex_holds_block
+        agents = "# AGENTS.md instructions for /work/garden\n\n<INSTRUCTIONS>\nUse tabs.\n</INSTRUCTIONS>"
+        for text in (env + "\nPlant garlic.", "Plant garlic.\n" + env, agents + "\nPlant garlic.", env):
+            self.assertTrue(holds(text), text)
+        for text in ("Plant garlic.", "Why does <environment_context> show my cwd?", "</environment_context> <environment_context>", ""):
+            self.assertFalse(holds(text), text)
+
+    def test_codex_sessions_keep_their_boundaries_and_unnamed_segments_their_own_positions(self) -> None:
+        two = (
+            _jsonl({"type": "session_meta", "payload": {"id": "cx-ilse"}}, _item("assistant", "Done.", "a1"))  # no event mirrors it
+            + b"{this line is cut\n"
+            + _jsonl(
+                {"type": "session_meta", "payload": {"id": "cx-tomas"}},
+                _event("agent_message", "Done."),  # the same words, but a reply of the next session
+                {"type": "response_item", "payload": {"type": "reasoning", "summary": []}},
+                {"type": "event_msg", "payload": {"type": "agent_reasoning", "text": "Checking the trail."}},
+            )
+        )
+        rows, gaps = read_source("codex", two, "pair.jsonl")
+        self._check_rows(rows)
+        self.assertEqual([(r["conversation"], r["text"], r["locator"]) for r in rows],
+                         [("cx-ilse", "Done.", "codex:cx-ilse:a1/p0"), ("cx-tomas", "Done.", "codex:cx-tomas:L5/p0")])
+        self.assertEqual(list(gaps), ["codex (cx-ilse): line 3: skipped malformed JSONL line", "codex (cx-tomas): omitted 2 reasoning record(s)"])
+        self.assertEqual(gaps.notes, [])
+
+        # Speech before the first header is a segment of its own, apart from a header with no identifier.
+        unnamed = _jsonl(
+            _event("user_message", "Orphan question"),
+            {"type": "session_meta", "payload": {}}, _event("user_message", "Later question"),
+            {"type": "session_meta", "payload": {}}, _event("user_message", "Third question"),
+        )
+        rows, gaps = read_source("codex", unnamed, "bare.jsonl")
+        self.assertEqual(
+            [(r["conversation"], r["text"], r["locator"]) for r in rows],
+            [("bare.jsonl:1", "Orphan question", "codex:conv-1:L1/p0"), ("bare.jsonl:2", "Later question", "codex:conv-2:L3/p0"),
+             ("bare.jsonl:3", "Third question", "codex:conv-3:L5/p0")],
+        )
+        self.assertEqual(gaps.notes, ["codex: 3 segment(s) carry no session identifier (speech before the first session header, or a header without one) "
+                                      "and are addressed by their position in this file; a re-export may number them differently"])
+        # A file of one segment keeps its old address, the file's label, and says nothing.
+        for lone, line in ((_jsonl({"type": "session_meta", "payload": {}}, _event("user_message", "Only question")), 2),
+                           (_jsonl(_event("user_message", "Only question")), 1)):
+            rows, gaps = read_source("codex", lone, "bare.jsonl")
+            self.assertEqual([(r["conversation"], r["locator"]) for r in rows], [("bare.jsonl", f"codex:bare.jsonl:L{line}/p0")])
+            self.assertEqual(gaps.notes, [])
+
+    def test_chatgpt_keeps_visible_commentary_and_names_a_conversation_only_by_its_identifier(self) -> None:
+        trail = _chatgpt_chat(
+            [
+                _chatgpt_msg("u1", "user", "Where do we start?"),
+                _chatgpt_msg("c1", "assistant", "I'll check the map first.", channel="commentary", recipient="all"),
+                _chatgpt_msg("t1", "assistant", "maps.lookup(trail)", channel="commentary", recipient="maps.lookup"),
+                _chatgpt_msg("h1", "assistant", "ANALYSIS_NOTE", channel="analysis"),
+                _chatgpt_msg("a1", "assistant", "Start at the lake gate.", channel="final"),
+            ],
+            id="cg-trail", title="Trail plan",
+        )
+        trail["mapping"]["junk"] = "not a node"
+        rows, gaps = read_source("chatgpt", json.dumps([trail]).encode("utf-8"), "conversations.json")
+        self._check_rows(rows)
+        self.assertEqual([(r["conversation"], r["text"]) for r in rows],
+                         [("cg-trail", "Where do we start?"), ("cg-trail", "I'll check the map first."), ("cg-trail", "Start at the lake gate.")])
+        self.assertEqual(sorted(gaps), ["chatgpt (cg-trail): omitted 1 malformed node(s)", "chatgpt (cg-trail): omitted 1 reasoning/analysis node(s)",
+                                        "chatgpt (cg-trail): omitted 1 tool/execution node(s)"])
+        self.assertEqual(gaps.notes, [])
+        self.assertNotIn("ANALYSIS_NOTE", "\n".join(gaps))
+
+        # Two chats that carry no identifier and share a title are two conversations.
+        chats = [_chatgpt_chat([_chatgpt_msg("u1", "user", question)], title="New chat") for question in ("First question", "Second question")]
+        rows, gaps = read_source("chatgpt", json.dumps(chats).encode("utf-8"), "conversations.json")
+        self.assertEqual([(r["conversation"], r["text"], r["locator"]) for r in rows],
+                         [("conversations.json:1", "First question", "chatgpt:conv-1:u1/p0"), ("conversations.json:2", "Second question", "chatgpt:conv-2:u1/p0")])
+        self.assertEqual(gaps.notes, ["chatgpt: 2 conversation(s) carry no identifier and are addressed by their position in this file; a re-export may number them differently"])
+
+    def test_claude_without_identifiers_is_addressed_by_position_and_accounted_for(self) -> None:
+        garden = [{"name": "Garden", "chat_messages": [{"uuid": "m1", "sender": "human", "text": text}]}
+                  for text in ("Water the beans on Monday.", "Water the beans on Tuesday.")]
+        rows, gaps = read_source("claude", json.dumps(garden).encode("utf-8"), "conversations.json")
+        self.assertEqual([(r["conversation"], r["text"], r["locator"]) for r in rows],
+                         [("conversations.json:1", "Water the beans on Monday.", "claude:conv-1:m1/p0"),
+                          ("conversations.json:2", "Water the beans on Tuesday.", "claude:conv-2:m1/p0")])
+        self.assertEqual(gaps.notes, ["claude: 2 conversation(s) carry no identifier and are addressed by their position in this file; a re-export may number them differently"])
+
+        # In a conversation linked into a tree, a message with no uuid, or a repeated one, cannot be placed: it is counted, not dropped unseen.
+        linked = [{"uuid": "cl-wren", "current_leaf_message_uuid": "m3", "chat_messages": [
+            {"uuid": "m1", "parent_message_uuid": "00000000-0000-4000-8000-000000000000", "sender": "human", "text": "Start planning."},
+            {"sender": "assistant", "text": "Here is a plan without an id."},
+            {"uuid": "m3", "parent_message_uuid": "m1", "sender": "human", "text": "Thanks."},
+            {"uuid": "m3", "parent_message_uuid": "m1", "sender": "assistant", "text": "A repeat of that identifier."},
+        ]}]
+        rows, gaps = read_source("claude", json.dumps(linked).encode("utf-8"), "conversations.json")
+        self.assertEqual([r["text"] for r in rows], ["Start planning.", "Thanks."])
+        self.assertEqual(list(gaps), ["claude (cl-wren): omitted 2 message(s) without a distinct identifier, which the conversation tree cannot place"])
+
+        # With no tree, messages are read in file order; one that names no sender is counted as such, not as non-dialogue.
+        flat = [{"uuid": "cl-flat", "chat_messages": [
+            {"sender": "human", "text": "No ids here."}, {"text": "Nobody is named for this line."}, {"sender": "system", "text": "Housekeeping."},
+        ]}]
+        rows, gaps = read_source("claude", json.dumps(flat).encode("utf-8"), "conversations.json")
+        self.assertEqual([(r["speaker"], r["text"], r["locator"]) for r in rows], [("user", "No ids here.", "claude:cl-flat:m0/p0")])
+        self.assertEqual(sorted(gaps), ["claude (cl-flat): omitted 1 message(s) with no sender", "claude (cl-flat): omitted 1 non-dialogue message(s)"])
+
+    def test_conversation_identity_helpers_never_take_a_title_for_an_identifier(self) -> None:
+        self.assertEqual(readers._conv_id(None, " ", "cg-1", "other"), "cg-1")
+        self.assertEqual(readers._conv_id(0), "0")
+        self.assertIsNone(readers._conv_id(True, "", None, ["x"]))
+        self.assertEqual(readers._conv_keys("cg-1", "export.json", 4), ("cg-1", "cg-1"))
+        self.assertEqual(readers._conv_keys(None, "export.json", 4), ("export.json:5", "conv-5"))
 
     def test_vendor_export_zip_reads_only_its_conversations_member(self) -> None:
         """An uploaded ChatGPT/Claude official export ZIP is read in memory: its one main
@@ -528,7 +859,7 @@ class AmberkeepReadersTests(unittest.TestCase):
                 ("assistant", " Second part kept whole.", "codex:cx-cut:a-last/p1"),
             ],
         )
-        self.assertIn("omitted 1 reasoning item(s)", "\n".join(gaps))
+        self.assertIn("omitted 1 reasoning record(s)", "\n".join(gaps))
         self.assertTrue(any("deduplicated 1 mirrored duplicate record(s)" in n for n in gaps.notes))
         self.assertNotIn("mirrored", "\n".join(gaps))
         for hidden in ("SECRET_PLAN", "/secret/cwd"):
@@ -616,6 +947,57 @@ class AmberkeepReadersTests(unittest.TestCase):
         self.assertTrue(any("deduplicated 3 mirrored duplicate record(s)" in n for n in gaps.notes))
         self.assertNotIn("mirrored", "\n".join(gaps))
 
+    def test_codex_a_later_second_form_leaves_every_row_already_read_as_it_was(self) -> None:
+        """A journal that later adds the other record form of speech already read starts with the
+        very rows the shorter journal gave: the event that came first stays the one row, with its
+        address, date, text (so its stable id) and no split, also when its item holds a harness
+        block beside several visible parts, which are then only the deduplicated copy. The item
+        first changes nothing either, and a real repeat no event covers stays beside the pair."""
+        env = "<environment_context>\n  <cwd>/work/garden</cwd>\n</environment_context>"
+        beds, cucumbers, water, mulch, compost = (
+            "Plan the beds for spring.", "Start with the cucumbers.", "Water on Wednesday.", "Mulch the rows.", "Then the compost.")
+
+        def at(clock: str, record: dict) -> dict:
+            return {**record, "timestamp": f"2026-11-02T10:{clock}Z"}
+
+        def asked(item_id: str, *texts: str) -> dict:
+            return {"type": "response_item", "payload": {"type": "message", "role": "user", "id": item_id,
+                                                         "content": [{"type": "input_text", "text": t} for t in texts]}}
+
+        started = {"type": "event_msg", "payload": {"type": "task_started"}}
+        journal = [
+            {"type": "session_meta", "payload": {"id": "cx-garden"}},
+            at("00:00", _event("user_message", f"{beds}\n{cucumbers}")),  # the event first, two visible parts...
+            at("00:02", asked("i1", env, beds, cucumbers)),  # ...then its item: a harness block beside them
+            at("00:05", _event("agent_message", "Cucumbers by the fence.")),
+            at("00:06", _item("assistant", "Cucumbers by the fence.", "a1")),
+            started,
+            at("01:00", _event("user_message", water)),  # the event first, one visible part
+            at("01:01", asked("i2", env, water)),
+            at("01:02", asked("i3", env, water)),  # the same words again, which no event covers: a repeat
+            started,
+            at("02:00", asked("i4", env, mulch, compost)),  # the item first, two visible parts...
+            at("02:01", _event("user_message", f"{mulch}\n{compost}")),  # ...then its event
+        ]
+
+        def read(count: int) -> tuple[list[dict], list[str]]:
+            return read_source("codex", _jsonl(*journal[:count]), "garden.jsonl")
+
+        rows, gaps = read(len(journal))
+        self._check_rows(rows)
+        self.assertEqual([(r["locator"], r["speaker"], r["text"], r["date"]) for r in rows], [
+            ("codex:cx-garden:L2/p0", "user", f"{beds}\n{cucumbers}", "2026-11-02T10:00:00Z"),
+            ("codex:cx-garden:L4/p0", "assistant", "Cucumbers by the fence.", "2026-11-02T10:00:05Z"),
+            ("codex:cx-garden:L7/p0", "user", water, "2026-11-02T10:01:00Z"),
+            ("codex:cx-garden:i3/p1", "user", water, "2026-11-02T10:01:02Z"),
+            ("codex:cx-garden:i4/p1", "user", mulch, "2026-11-02T10:02:00Z"),
+            ("codex:cx-garden:i4/p2", "user", compost, "2026-11-02T10:02:00Z")])
+        for count in range(1, len(journal)):
+            head, _head_gaps = read(count)
+            self.assertEqual(rows[:len(head)], head, f"the first {count} record(s) of the journal")
+        self.assertEqual(list(gaps), ["codex (cx-garden): omitted 4 harness context record(s)"])
+        self.assertEqual(gaps.notes, ["codex (cx-garden): deduplicated 4 mirrored duplicate record(s) (each text kept once, at its first-seen record)"])
+
     def test_codex_equal_records_of_one_form_are_never_merged(self) -> None:
         """Two equal response items with one event mirror: the event covers one
         item, the other stays as a genuine repeat, and the pair keeps the
@@ -644,7 +1026,7 @@ class AmberkeepReadersTests(unittest.TestCase):
             ],
         )
         self.assertIn("omitted 1 developer/system item(s)", "\n".join(gaps))
-        self.assertIn("omitted 1 reasoning item(s)", "\n".join(gaps))
+        self.assertIn("omitted 1 reasoning record(s)", "\n".join(gaps))
         self.assertTrue(any("deduplicated 1 mirrored duplicate record(s)" in n for n in gaps.notes))
         self.assertNotIn("mirrored", "\n".join(gaps))
         for hidden in ("Dev prompt", "SECRET_PLAN"):

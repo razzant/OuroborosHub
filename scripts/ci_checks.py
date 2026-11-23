@@ -162,7 +162,7 @@ SUITES = {
     # together, so every Amberkeep test runs in CI.
     'amberkeep': {'skills': ['amberkeep'],
                   'tests': ['tests/test_amberkeep_portable.py', 'tests/test_amberkeep_flow.py',
-                            'tests/test_amberkeep_readers.py']},
+                            'tests/test_amberkeep_readers.py', 'tests/test_amberkeep_output.py']},
     'table-tools': {'skills': ['table_tools'], 'tests': ['skills/table_tools/tests'],
                     'dependencies': ['openpyxl']},
 }
