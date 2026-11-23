@@ -124,6 +124,8 @@ SUITES = {
     'amberkeep': {'skills': ['amberkeep'],
                   'tests': ['tests/test_amberkeep_portable.py', 'tests/test_amberkeep_flow.py',
                             'tests/test_amberkeep_readers.py']},
+    'table-tools': {'skills': ['table_tools'], 'tests': ['skills/table_tools/tests'],
+                    'dependencies': ['openpyxl']},
 }
 SHARED = {'.github/workflows/catalog-check.yml', 'scripts/ci_checks.py', 'tests/test_ci_checks.py',
           'scripts/build_index.py', 'scripts/release_digest.py',
