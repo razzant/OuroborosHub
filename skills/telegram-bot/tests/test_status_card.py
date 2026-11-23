@@ -12,6 +12,7 @@ import pytest
 from types import SimpleNamespace
 
 from telegram_bot import runtime as runtime_mod
+from telegram_bot import api as api_mod
 from telegram_bot.api import TelegramApiError
 from telegram_bot.custody import CustodyStore, RECENT_PROBLEM_WINDOW_S
 from telegram_bot.events import parse_telegram_update
@@ -484,9 +485,13 @@ def test_a_new_token_during_a_backoff_or_the_no_token_pause_reads_connecting(tmp
     (TelegramApiError("getUpdates", "Unauthorized", 401), "token"),
     (TelegramApiError("getUpdates", "Conflict", 409), "telegram"),
     (TelegramApiError("getUpdates", "TimeoutError"), "network"),
+    # A token that cannot be written in a request line: no request left, so never "network" (review wave 5, item 5).
+    # Built when the test runs (the class is new in 0.13.1), so this module still imports where it does not exist.
+    (lambda: api_mod.TelegramTokenMalformed("request", "InvalidURL"), "token_format"),
     (ValueError("x"), ""),
 ])
 def test_poll_failure_sides(exc, side):
+    exc = exc() if callable(exc) else exc
     for stage in ("identity", "updates"):
         assert runtime_mod._poll_failure(exc, stage) == side
     assert runtime_mod._poll_failure(exc, "record") == "local"  # Telegram answered: whatever failed is here
@@ -715,7 +720,8 @@ def test_sends_telegram_confirmed_in_part_are_counted_as_stored_answers_read_the
 
 
 _NO_WAIT = {"count": 0, "submit": 0, "download": 0, "other": 0, "since": "", "next_attempt_at": "",
-            "last_error": "", "last_stage": "", "last_error_at": "", "last_error_newest": False}
+            "last_error": "", "last_stage": "", "last_error_at": "", "last_error_recorded": False,
+            "last_error_newest": False}
 
 
 def _hello(store, *update_ids):
@@ -857,6 +863,63 @@ def test_the_waiting_updates_error_is_the_latest_failed_attempts(tmp_path, monke
     item = summarize(_quiet(handoff_retrying=waiting))["attention"][0]
     assert item["error"] == {"text": "PresenceHostError: presence Host returned HTTP 500", "at": _iso(clock[0]),
                              "stage": "submit"}
+    store.close()
+
+
+def test_an_update_ouroboros_took_but_this_computer_failed_to_record_is_not_called_unsent(tmp_path):
+    """Astra's sequence: the Host answered with a completed turn, then a competing SQLite writer blocked
+    record_submission. The update waits again with no recorded stage; the card must not say it waits to be passed
+    to Ouroboros: whether it was handled is not confirmed here. A recorded download or handoff failure keeps its words."""
+    from telegram_bot.host import PresenceSubmission
+
+    class AcceptingHost:
+        async def submit(self, event, staged_files):
+            return PresenceSubmission(status="completed", outcome="silent", text="", turn_ref="turn-1", work_ref="",
+                                      binding_id="b" * 32)
+
+    async def run():
+        runtime = runtime_mod.TelegramTransportRuntime(state_dir=tmp_path, token_provider=lambda: "", logger=None,
+                                                       submitter=AcceptingHost())
+
+        def locked(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+        runtime.store.record_submission = locked
+        _hello(runtime.store, 97)
+        assert await runtime.process_one_inbox()
+        waiting = runtime.store.card_snapshot()["handoff_retrying"]
+        runtime.store.close()
+        return waiting
+
+    waiting = asyncio.run(run())
+    assert (waiting["count"], waiting["submit"], waiting["download"], waiting["other"]) == (1, 0, 0, 1)
+    summary = summarize(_quiet(handoff_retrying=waiting))
+    assert summary["text"] == "Connected · 1 Telegram update waits for another attempt"
+    assert summary["attention"][0]["stages"] == {"submit": 0, "download": 0, "other": 1}
+    # A recorded handoff failure keeps the specific words.
+    failed = summarize(_quiet(handoff_retrying=_retrying(1)))
+    assert failed["text"] == "Connected · 1 Telegram update waits to be passed to Ouroboros"
+
+
+def test_a_note_an_earlier_version_left_is_never_called_the_last_error(tmp_path):
+    """Astra's sequence with 0.13.0's own statements: a submission failed, then a busy Host deferred the update (which
+    gives the attempt back and replaces the error with the capacity notice), then 0.13.1 runs again. The update still
+    waits and is counted, but its note is not called the latest error: nothing shows the last attempt failed."""
+    path = tmp_path / "custody.sqlite3"
+    store = CustodyStore(path)
+    _hello(store, 95)
+    store.close()
+    event_id, later = "telegram:9:95", time.time() + 30
+    _as_0130(path, (_V0130_CLAIM_INBOX, (later + 1800, event_id)),
+             (_V0130_RELEASE_INBOX, (later, "PresenceHostError: presence Host returned HTTP 500", event_id)),
+             (_V0130_CLAIM_INBOX, (later + 1800, event_id)),
+             (_V0130_DEFER_INBOX, (later + 5, "PresenceHostHTTPError: presence Host returned HTTP 429: "
+                                               "presence_capacity_full", event_id)))
+    store = CustodyStore(path)
+    waiting = store.card_snapshot()["handoff_retrying"]
+    assert waiting["count"] == 1 and waiting["last_error_newest"] is False
+    assert waiting["last_error"].endswith("presence_capacity_full") and waiting["last_error_at"] == ""
+    item = summarize(_quiet(handoff_retrying=waiting))["attention"][0]
+    assert item["events"] == 1 and item["error"]["unrecorded"] is True and "example" not in item["error"]
     store.close()
 
 
@@ -1190,36 +1253,156 @@ def test_a_status_read_during_the_capability_check_sees_one_check_whole(tmp_path
     runtime.store.close()
 
 
-@pytest.mark.parametrize("newer_answers", ["supported", "unavailable"])
-def test_an_older_capability_check_never_overwrites_a_newer_one(tmp_path, newer_answers):
-    """Two /identity checks overlap (the poll loop and a worker): the one started later is published, whichever
-    ends last, and the record comes whole from that one check."""
-    from telegram_bot.host import PresenceHostError
+class _GatedIdentity:
+    """A Host whose /identity requests each answer when their own gate opens: with support, or by timing out."""
 
-    class Transport:
-        def __init__(self):
-            self.gates, self.calls = [asyncio.Event(), asyncio.Event()], 0
+    def __init__(self, answers):
+        self.answers, self.calls = list(answers), 0
+        self.gates = [asyncio.Event() for _ in self.answers]
 
-        async def request_json(self, method, url, **kwargs):
-            call, self.calls = self.calls, self.calls + 1
-            await self.gates[call].wait()
-            answer = (newer_answers if call == 1 else ("unavailable" if newer_answers == "supported" else "supported"))
-            if answer == "unavailable":
-                raise PresenceHostError("presence Host returned HTTP 503: busy")
-            return dict(_SUPPORTING)
+    async def request_json(self, method, url, **kwargs):
+        call, self.calls = self.calls, self.calls + 1
+        await self.gates[call].wait()
+        if self.answers[call] == "timeout":
+            raise TimeoutError()
+        return dict(_SUPPORTING)
 
+
+_REACTION = {"message": {"reaction": {"emoji": "+1"}}}
+
+
+def test_a_queued_reaction_whose_own_check_answers_yes_is_passed_on(tmp_path):
+    """Astra's order: a queued reaction starts the /identity check, the poll loop asks meanwhile, the later ask times
+    out and then the reaction's own check answers with support. One check serves both, so its answer reaches the
+    reaction (it was withheld for good when the later timeout was published over it)."""
     async def run():
-        transport = Transport()
-        host = _host_client(tmp_path, transport)
-        older = asyncio.create_task(host.discover_delivery_support())
+        transport = _GatedIdentity(["supported", "timeout"])
+        host = _host_client(tmp_path / "host", transport)
+        runtime = runtime_mod.TelegramTransportRuntime(state_dir=tmp_path, token_provider=lambda: "", logger=None,
+                                                       submitter=host)
+        reaction = asyncio.create_task(runtime._reaction_deliverable(_REACTION))
         await asyncio.sleep(0)
-        newer = asyncio.create_task(host.discover_delivery_support())
+        poll = asyncio.create_task(host.discover_delivery_support())
         await asyncio.sleep(0)
-        transport.gates[1].set()  # the newer check ends first
-        await newer
-        transport.gates[0].set()  # the older one ends last, with the other outcome
-        await older
-        assert host.delivery_reporting_status == newer_answers
-        assert host.capabilities.status == newer_answers  # the attributes read the published record
+        transport.gates[1].set()  # a second check, if one was started, times out first
+        await asyncio.sleep(0.01)
+        transport.gates[0].set()  # then the reaction's own check answers with support
+        assert await reaction is True
+        assert await poll == 1
+        assert transport.calls == 1 and host.capabilities.status == "supported"
+        runtime.store.close()
 
     asyncio.run(run())
+
+
+def test_overlapping_callers_share_one_check_and_its_whole_answer(tmp_path):
+    """Carbon's order: the earlier check answers with support, a later one would time out. Callers that arrive while
+    a check runs wait for that check: no second request, and the settled answer is never replaced by a timeout that
+    keeps the support's places, identity and wake fields beside an "unavailable" status."""
+    async def run():
+        transport = _GatedIdentity(["supported", "timeout"])
+        host = _host_client(tmp_path, transport)
+        first = asyncio.create_task(host.discover_delivery_support())
+        await asyncio.sleep(0)
+        second = asyncio.create_task(host.discover_delivery_support())
+        await asyncio.sleep(0)
+        transport.gates[0].set()
+        await asyncio.sleep(0.01)
+        transport.gates[1].set()
+        assert (await first, await second) == (1, 1)
+        record = host.capabilities
+        assert transport.calls == 1
+        assert (record.status, record.places_version, record.identity, record.wake_signals) == ("supported", 1, 1, 0)
+        assert (record.reaction_context, record.explicit_completion, record.continuation_version) == (1, 1, 2)
+        # A settled answer is kept for the client's life (SKILL.md: "keeps a Host's supported or unsupported
+        # /identity answer until it restarts"): no further request.
+        assert await host.discover_delivery_support() == 1 and transport.calls == 1
+
+    asyncio.run(run())
+
+
+def test_an_unanswered_check_is_a_fresh_record_and_the_next_ask_checks_again(tmp_path):
+    """A check that got no answer publishes a fresh "unavailable" record (nothing carried from anything earlier), and
+    the next caller asks again (the unknown-Host behaviour is kept)."""
+    from telegram_bot.host import HostCapabilities
+
+    async def run():
+        transport = _GatedIdentity(["timeout", "supported"])
+        for gate in transport.gates:
+            gate.set()
+        host = _host_client(tmp_path, transport)
+        assert await host.discover_delivery_support() == 0
+        assert host.capabilities == HostCapabilities(status="unavailable", checked_at=host.capabilities.checked_at)
+        assert host.capabilities.checked_at > 0
+        assert await host.discover_delivery_support() == 1 and transport.calls == 2
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("provider", ["empty", "raises"])
+def test_a_check_that_made_no_request_is_never_called_unanswered(tmp_path, provider):
+    """Review wave 5, 7d. Without this skill's Ouroboros access token (an empty one, or a Host that cannot issue it)
+    the bot makes no /identity request at all. Every gate acts as for an unanswered check (a send to a place is held),
+    but the route and the card say Ouroboros was not asked, never that it did not answer."""
+    from telegram_bot.host import PresenceHostClient
+
+    class Transport:
+        calls = 0
+
+        async def request_json(self, method, url, **kwargs):
+            Transport.calls += 1
+            return dict(_SUPPORTING)
+
+    def skill_token():
+        if provider == "raises":
+            raise ValueError("SkillToken cannot be empty")  # what the Host's SkillToken says for an empty token
+        return ""
+
+    host = PresenceHostClient(state_dir=tmp_path / "host", token_provider=skill_token,
+                              host_base="http://127.0.0.1:9", transport=Transport())
+    runtime = runtime_mod.TelegramTransportRuntime(state_dir=tmp_path, token_provider=lambda: "", logger=None,
+                                                   submitter=host)
+    try:
+        assert asyncio.run(host.discover_delivery_support()) == 0
+        assert asyncio.run(host.place_hold("9", "-1")) == PLACE_POLICY_UNREAD  # gated as before: held, retried
+        assert Transport.calls == 0  # nothing was asked
+        snapshot = runtime.status_snapshot({})
+        assert (snapshot["delivery_reporting"], snapshot["host_checked"]) == ("unavailable", False)
+        payload = _quiet(host_checked=False, delivery_reporting=snapshot["delivery_reporting"],
+                         host_unasked=snapshot.get("host_unasked", ""), host_checked_at=snapshot["host_checked_at"])
+        assert summarize(payload)["attention"][0]["gaps"] == ["host_unasked"]
+    finally:
+        runtime.store.close()
+
+
+@pytest.mark.parametrize("when", ["before it ran", "in flight"])
+def test_no_caller_waits_forever_on_a_cancelled_check(tmp_path, when):
+    """The shared check is cancelled (a shutdown), before its request or while it waits for the answer: every waiting
+    caller returns at once, as for an unanswered check, without inheriting the cancellation; the next caller asks
+    again. A caller cancelled while waiting does not cancel the check for the others."""
+    async def run():
+        transport = _GatedIdentity(["supported", "supported"])
+        host = _host_client(tmp_path, transport)
+        waiting = [asyncio.create_task(host.discover_delivery_support()) for _ in range(2)]
+        await asyncio.sleep(0)
+        if when == "in flight":
+            await _until(lambda: transport.calls == 1)
+        host._discovery_task.cancel()
+        results = await asyncio.wait_for(asyncio.gather(*waiting), timeout=2)
+        assert results == [0, 0] and host.capabilities.status == "unknown"
+        asked = transport.calls
+        # A cancelled waiter leaves the next check running for the other one.
+        transport.gates = [asyncio.Event() for _ in transport.answers]
+        transport.calls = 0
+        leaving = asyncio.create_task(host.discover_delivery_support())
+        staying = asyncio.create_task(host.discover_delivery_support())
+        await _until(lambda: transport.calls == 1)
+        leaving.cancel()
+        await asyncio.sleep(0)
+        transport.gates[0].set()
+        assert await asyncio.wait_for(staying, timeout=2) == 1 and leaving.cancelled()
+        assert transport.calls == 1 and host.capabilities.status == "supported" and asked == (when == "in flight")
+
+    asyncio.run(run())
+
+

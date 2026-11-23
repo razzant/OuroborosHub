@@ -14,6 +14,7 @@ import re
 import secrets
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, Iterator, List, Optional, Protocol, Sequence, Tuple
 
@@ -56,6 +57,22 @@ class TelegramApiError(RuntimeError):
         self.error_code = int(error_code or 0)
         # Telegram's ResponseParameters.retry_after with a 429: the flood wait it names, in seconds.
         self.retry_after = retry_after
+
+
+class TelegramTokenMalformed(TelegramApiError):
+    """The configured token cannot form a request line (a space, a tab, a control or a non-ASCII character), so the
+    request was refused here before any connection. Only the exception's type name is kept: its own message quotes
+    the URL, token included. Still a TelegramApiError without a code, so senders treat it as before."""
+
+
+def without_token(text: str, token: str) -> str:
+    """``text`` with the bot token, as written or URL-quoted, replaced by a fixed marker: a provider's description
+    (or a proxy in front of it) may echo the request path ``/bot<token>/<method>``."""
+    if not token:
+        return text
+    for form in {token, urllib.parse.quote(token, safe=""), urllib.parse.quote(token)}:
+        text = text.replace(form, "<token>")
+    return text
 
 
 class TelegramFileTooLarge(TelegramApiError):
@@ -528,7 +545,7 @@ class TelegramClient:
                 60.0,
                 **observed,
             )
-            return self._result(endpoint, response)
+            return self._result(endpoint, response, self._token)
 
         try:
             result = await post()
@@ -581,7 +598,7 @@ class TelegramClient:
             response = await transport_post(
                 url, {**fields, "media": json.dumps(entries, ensure_ascii=False)},
                 files, 120.0, **observed)
-            return self._result("sendMediaGroup", response)
+            return self._result("sendMediaGroup", response, self._token)
 
         try:
             result = await post(media)
@@ -629,7 +646,7 @@ class TelegramClient:
             raise
         except Exception as exc:
             raise TelegramApiError(endpoint, type(exc).__name__) from exc
-        return self._result(endpoint, response)
+        return self._result(endpoint, response, self._token)
 
     def _endpoint(self, endpoint: str) -> str:
         if not self._token:
@@ -639,7 +656,8 @@ class TelegramClient:
         return f"{self._api_server}/bot{self._token}/{endpoint}"
 
     @staticmethod
-    def _result(endpoint: str, response: Dict[str, Any]) -> Any:
+    def _result(endpoint: str, response: Dict[str, Any], token: str = "") -> Any:
+        """Telegram's result, or its refusal as a TelegramApiError whose description never carries ``token``."""
         if not isinstance(response, dict) or not response.get("ok"):
             payload = response if isinstance(response, dict) else {}
             try:
@@ -650,7 +668,7 @@ class TelegramClient:
             wait = parameters.get("retry_after")
             raise TelegramApiError(
                 endpoint,
-                str(payload.get("description") or "invalid provider response"),
+                without_token(str(payload.get("description") or "invalid provider response"), token),
                 code,
                 retry_after=float(wait) if type(wait) in (int, float) and wait >= 0 else None,
             )
@@ -676,6 +694,7 @@ def _open_json(request: urllib.request.Request, timeout_sec: float, *, strict: b
     nothing about what Telegram did, so it is an error without a code: never a refusal that permits another request.
     """
     open_request = _open_multipart if strict else urllib.request.urlopen
+    malformed = ""
     try:
         with open_request(request, timeout=timeout_sec) as response:
             data = _read_answer(response, 2 * 1024 * 1024, require_whole=strict)
@@ -697,8 +716,16 @@ def _open_json(request: urllib.request.Request, timeout_sec: float, *, strict: b
         # urllib also wraps a failure while it writes the request in URLError, and a write can break after the bytes
         # have left this machine: that says nothing about the effect.
         raise TelegramApiError("request", f"URLError ({type(exc.reason).__name__})") from exc
+    except (http.client.InvalidURL, UnicodeEncodeError) as exc:
+        # Only the URL can make this request line invalid: its fixed server and method are valid, so the token
+        # cannot be written in it. Nothing was sent; the message keeps the type name only.
+        malformed = type(exc).__name__
     except _NO_ANSWER as exc:
         raise TelegramApiError("request", type(exc).__name__) from exc
+    if malformed:
+        # Raised after the handler, so it chains nothing: InvalidURL's own message quotes the URL, token included, and
+        # every traceback printer (sys.excepthook, asyncio's "never retrieved", logging) prints a chained exception.
+        raise TelegramTokenMalformed("request", malformed)
     try:
         payload = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:

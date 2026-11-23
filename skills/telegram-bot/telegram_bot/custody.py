@@ -1462,9 +1462,12 @@ class CustodyStore:
                 "last_stage": str(newest_wait["stage"] or "") if newest_wait else "",
                 # When that attempt ended, where recorded ("" for a row whose end was not recorded).
                 "last_error_at": _timestamp(newest_wait["ended"]) if newest_wait else "",
-                # Whether that error is the latest: only when every waiting update's last attempt has a recorded end
-                # (a row 0.13.0 released after a rollback has none), or there is only one; else it is an example.
-                "last_error_newest": bool(handoff[0]) and (int(handoff[0]) == 1 or not int(handoff[5] or 0)),
+                # Whether that note's attempt has a recorded end: a row 0.13.0 released or deferred after a rollback
+                # has none, and its note may be a busy deferral's, so nothing shows that its last attempt failed.
+                "last_error_recorded": bool(newest_wait and newest_wait["ended"]),
+                # Whether that error is the latest: only when its own end is recorded and so is every other waiting
+                # update's; else it is an example (or, unrecorded itself, a note an earlier version left).
+                "last_error_newest": bool(newest_wait and newest_wait["ended"]) and not int(handoff[5] or 0),
             },
             "held_reasons": [{"reason": str(row[0])[len("Held:"):].strip(), "note": str(row[0]), "count": int(row[1]),
                               **({"kind": str(row[2])} if row[2] else {})}

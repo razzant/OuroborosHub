@@ -627,6 +627,9 @@ _TOKEN_ADVICE, _NETWORK_ADVICE = 'Check TELEGRAM_PUBLIC_BOT_TOKEN', 'network con
 
 @pytest.mark.parametrize('failure,stage,says,never,headline', [
     ('token', 'identity', _TOKEN_ADVICE, [_NETWORK_ADVICE], 'Connection error · new messages are not being received'),
+    # A token with a space or tab never left this computer: correct the token, never check the network.
+    ('token_format', 'identity', 'Correct TELEGRAM_PUBLIC_BOT_TOKEN', [_NETWORK_ADVICE, 'Telegram refused'],
+     'Connection error · new messages are not being received'),
     ('network', 'updates', 'check this computer’s network connection', [_TOKEN_ADVICE],
      'Connection error · new messages are not being received'),
     ('telegram', 'updates', 'Telegram’s own explanation', [_TOKEN_ADVICE, _NETWORK_ADVICE],
@@ -655,6 +658,54 @@ def test_the_link_item_dates_the_last_successful_answer_and_names_its_side(serve
                 expect(link).to_contain_text('Not a token or network problem')
             for words in never:
                 expect(link).not_to_contain_text(words)
+        finally:
+            browser.close()
+
+
+def test_a_check_that_made_no_request_never_says_ouroboros_did_not_answer(served):
+    """Review wave 5, 7d: without this skill's Ouroboros access token no /identity request is made. The attention line
+    and every row that depends on the check say Ouroboros was not asked, never that it did not answer."""
+    from playwright.sync_api import sync_playwright, expect
+    state, url = served
+    state['status_body'] = synthetic_status(host_checked=False, delivery_reporting='unavailable',
+                                            host_unasked='skill_token_unavailable',
+                                            host_checked_at='2026-11-22T18:00:00Z')
+    with sync_playwright() as pw:
+        browser, page, frame = open_card(pw, url)
+        try:
+            expect(frame.locator('.tc-status .tc-st-text')).to_have_text('Connected · state partly known', timeout=15000)
+            expect(frame.locator('.tc-item[data-kind=partial]')).to_contain_text(
+                'this skill’s Ouroboros access token is unavailable, so no request was made')
+            frame.locator('details.tc-det > summary').click()
+            for label in ('Delivery history', 'Reactions in Host context', 'Reaction history', 'Early answers',
+                          'Place binding'):
+                value = frame.locator('.tc-det dt', has_text=label).first.locator('xpath=following-sibling::dd[1]')
+                expect(value).to_contain_text('Ouroboros was not asked, this skill’s access token is unavailable (tried ')
+            text = frame.locator('.tc').inner_text()
+            assert 'answer the check' not in text and 'did not answer' not in text, text
+        finally:
+            browser.close()
+
+
+def test_names_from_telegram_and_ouroboros_render_as_text_never_html(served):
+    """Review wave 5, 7f: the bot's name, the identity Ouroboros sends as, a held reason and an error text are shown as
+    the characters they are; markup in them never becomes an element."""
+    from playwright.sync_api import sync_playwright, expect
+    state, url = served
+    markup = '<img src=x onerror="window.__injected=1">'
+    state['status_body'] = synthetic_status(
+        bot_label='@example' + markup, identity={'sends_as': {'id': '77', 'label': 'Example' + markup, 'kind': 'bot'}},
+        outbox_held=1, held_reasons=[{'reason': 'Paused ' + markup, 'note': 'Held: Paused ' + markup, 'count': 1}],
+        last_error='TelegramApiError: ' + markup, last_error_at='2026-11-22T18:00:00Z')
+    with sync_playwright() as pw:
+        browser, page, frame = open_card(pw, url)
+        try:
+            expect(frame.locator('.tc-item[data-kind=held]')).to_contain_text('Paused ' + markup, timeout=15000)
+            frame.locator('details.tc-det > summary').click()
+            expect(frame.locator('.tc-det')).to_contain_text('@example' + markup)
+            expect(frame.locator('.tc-det')).to_contain_text('Example' + markup)
+            assert frame.locator('.tc img').count() == 0
+            assert all(f.evaluate('window.__injected === undefined') for f in page.frames)
         finally:
             browser.close()
 
@@ -787,17 +838,97 @@ def test_held_and_capability_items_promise_no_send_the_link_cannot_make(served):
             expect(frame.locator('.tc-status .tc-st-text')).to_contain_text('Stopped · the bot is not running',
                                                                             timeout=15000)
             expect(hold).to_contain_text('Example place is paused')
-            expect(hold).to_contain_text('Nothing is sent while the bot is stopped')
+            expect(hold).to_contain_text('Nothing is retried while the bot is stopped')
             expect(hold).not_to_contain_text('sent by themselves')
             expect(reactions).to_contain_text('Update Ouroboros')
             expect(reactions).not_to_contain_text('work as usual')
             for link_facts, says in (({'runtime_state': 'waiting_for_token', 'poll_result': '', 'connect': None,
                                        'connect_unavailable': 'Bot token missing'},
-                                      'Nothing is sent until a bot token is set'),
-                                     ({}, 'Kept back until the reason clears, then sent by themselves.')):
+                                      'Without a bot token every retry uses up one of'),
+                                     ({}, 'checking the hold uses no attempt')):
                 state['status_body'] = synthetic_status(**link_facts, **held)
                 frame.locator('.tc-fresh button').click()
                 expect(hold).to_contain_text(says, timeout=15000)
                 expect(hold).to_contain_text('Example place is paused')
+        finally:
+            browser.close()
+
+
+# What the outbox worker does with a held row in each link state (runtime.process_one_outbox): with a confirmed bot the
+# place is checked again about every 5 s and a hold gives its attempt back; without a token, or when the bot cannot
+# reach Telegram, each claim uses up one of _MAX_OUTBOX_ATTEMPTS (5) and the row fails for good after the last;
+# a stopped bot runs no worker.
+_HELD_STATES = [
+    ('stopped', {'runtime_state': 'stopped'}, 'Nothing is retried while the bot is stopped'),
+    ('not_started', {'runtime_state': 'not_started'}, 'retried once it runs'),
+    ('waiting_for_token', {'runtime_state': 'waiting_for_token', 'poll_result': '', 'connect': None,
+                           'connect_unavailable': 'Bot token missing'}, 'Without a bot token every retry uses up one of'),
+    ('connecting', {'poll_result': ''}, 'a retry that cannot reach Telegram uses up one of'),
+    ('provider_error', {'runtime_state': 'provider_error', 'poll_result': 'failed', 'poll_failure': 'network'},
+     'a retry that cannot reach Telegram uses up one of'),
+    ('local_error', {'runtime_state': 'provider_error', 'poll_result': 'failed', 'poll_failure': 'local',
+                     'poll_stage': 'record'}, 'does not show whether sending works'),
+    ('connected', {}, 'checking the hold uses no attempt'),
+]
+
+
+def test_a_held_send_is_worded_from_what_the_worker_does_in_each_link_state(served):
+    """No state promises that a held send will go: each says how it is retried (and where attempts are used up) and
+    points to its receipt. Without a token a held row really uses up its attempts and fails (runtime.py), so the old
+    "then they go once the reason clears" was false."""
+    from playwright.sync_api import sync_playwright, expect
+    state, url = served
+    held = {'outbox_held': 2, 'held_reasons': [{'reason': 'Example place is paused',
+                                                 'note': 'Held: Example place is paused', 'count': 2}]}
+    state['status_body'] = synthetic_status(**_HELD_STATES[0][1], **held)
+    with sync_playwright() as pw:
+        browser, page, frame = open_card(pw, url)
+        try:
+            hold = frame.locator('.tc-item[data-kind=held]')
+            for index, (link, facts, says) in enumerate(_HELD_STATES):
+                if index:
+                    state['status_body'] = synthetic_status(**facts, **held)
+                    frame.locator('.tc-fresh button').click()
+                assert state['status_body']['link'] == link
+                expect(hold).to_contain_text(says, timeout=15000)
+                expect(hold).to_contain_text('telegram_receipt')
+                expect(hold).to_contain_text('Example place is paused')
+                text = hold.inner_text()
+                for promise in ('they go', 'it goes', 'will go', 'sent by themselves', 'sent by itself'):
+                    assert promise not in text, (link, promise)
+        finally:
+            browser.close()
+
+
+def test_waiting_updates_without_a_recorded_stage_claim_neither_failure_nor_unsent(served):
+    """An update whose last attempt left no recorded stage (an earlier version's row, or Ouroboros answered and
+    recording that here failed): the card says it waits for another attempt and that its handling is not confirmed
+    here; its note is shown as an earlier version's note, never as the last error. A recorded handoff failure keeps
+    its own words and its "Last error"."""
+    from playwright.sync_api import sync_playwright, expect
+    state, url = served
+    unknown = {'count': 1, 'submit': 0, 'download': 0, 'other': 1, 'since': '2026-11-22T18:00:00Z',
+               'next_attempt_at': '2026-11-22T18:00:30Z', 'last_stage': '', 'last_error_at': '',
+               'last_error': 'PresenceHostHTTPError: presence Host returned HTTP 429: presence_capacity_full',
+               'last_error_recorded': False, 'last_error_newest': False}
+    state['status_body'] = synthetic_status(handoff_retrying=unknown, inbox_waiting=1)
+    with sync_playwright() as pw:
+        browser, page, frame = open_card(pw, url)
+        try:
+            item = frame.locator('.tc-item[data-kind=handoff_waiting]')
+            expect(frame.locator('.tc-status .tc-st-text')).to_have_text(
+                'Connected · 1 Telegram update waits for another attempt', timeout=15000)
+            expect(item).to_contain_text('Not confirmed here whether it was handled')
+            expect(item).to_contain_text('Note left by an earlier version (not known to be a failure)')
+            for claim in ('Last error', 'to be passed to Ouroboros', 'not passed on', 'failed;'):
+                expect(item).not_to_contain_text(claim)
+            recorded = {**unknown, 'submit': 1, 'other': 0, 'last_stage': 'submit', 'last_error': 'PresenceHostError: 500',
+                        'last_error_at': '2026-11-22T18:00:00Z', 'last_error_recorded': True, 'last_error_newest': True}
+            state['status_body'] = synthetic_status(handoff_retrying=recorded, inbox_waiting=1)
+            frame.locator('.tc-fresh button').click()
+            expect(frame.locator('.tc-status .tc-st-text')).to_have_text(
+                'Connected · 1 Telegram update waits to be passed to Ouroboros', timeout=15000)
+            expect(item).to_contain_text('Passing to Ouroboros failed')
+            expect(item).to_contain_text('Last error')
         finally:
             browser.close()

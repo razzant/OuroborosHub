@@ -114,6 +114,8 @@ def _status_payload() -> Dict[str, Any]:
         "poll_stage": runtime.get("poll_stage", ""),
         "host_checked": bool(runtime.get("host_checked", False)),
         "host_checked_at": runtime.get("host_checked_at", ""),
+        # Why the last capability check made no request ("" when it made one): "skill_token_unavailable".
+        "host_unasked": runtime.get("host_unasked", ""),
         "places_version": runtime.get("places_version", 0),
         # null when the custody store was not read: unknown, never zero.
         "recent_problems": card.get("recent_problems"),

@@ -192,21 +192,31 @@ def attention_items(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
     if waiting and link in _RUNNING and not any(item["kind"] == "binding" for item in items):
         stages = {key: _int(retrying.get(key)) for key in ("submit", "download")}
         stages["other"] = max(0, waiting - stages["submit"] - stages["download"])
+        # "to be passed to Ouroboros" only when every one recorded a download or handoff failure: an update whose stage
+        # was not recorded may already be handled (Ouroboros answered, recording that here failed), so it waits for
+        # another attempt, which is all that is known of it.
+        waits = "waits" if waiting == 1 else "wait"
         handoff: Dict[str, Any] = {
             "kind": "handoff_waiting", "tone": "muted", "events": waiting, "stages": stages,
-            "headline": f"{_plural(waiting, 'Telegram update')} {'waits' if waiting == 1 else 'wait'} to be passed to Ouroboros",
+            "headline": (f"{_plural(waiting, 'Telegram update')} {waits} for another attempt" if stages["other"]
+                         else f"{_plural(waiting, 'Telegram update')} {waits} to be passed to Ouroboros"),
             "at": retrying.get("since") or None, "next_at": retrying.get("next_attempt_at") or None}
         if retrying.get("last_error"):
             handoff["error"] = {"text": str(retrying["last_error"]), "at": retrying.get("last_error_at") or None,
                                 "stage": str(retrying.get("last_stage") or "")}
-            if retrying.get("last_error_newest") is False:
+            if retrying.get("last_error_recorded") is False:
+                handoff["error"]["unrecorded"] = True  # an earlier version's note: not known to be a failure
+            elif retrying.get("last_error_newest") is False:
                 handoff["error"]["example"] = True  # which failure is the latest cannot be told: one of them
         items.append(handoff)
     if link == "connected":
         # A working link whose facts are partly unknown never reads as all clear (connecting never does anyway).
         gaps = []
         if not host_checked:
-            gaps.append("host_unanswered" if payload.get("delivery_reporting") == "unavailable" else "capabilities_unchecked")
+            # Not asked (no request was made), asked without an answer, or not asked yet.
+            gaps.append("host_unasked" if payload.get("host_unasked")
+                        else "host_unanswered" if payload.get("delivery_reporting") == "unavailable"
+                        else "capabilities_unchecked")
         if not isinstance(payload.get("recent_problems"), Mapping):
             gaps.append("no_recent_window")
         if gaps:

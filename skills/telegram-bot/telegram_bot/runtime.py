@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Seq
 
 from . import outbox_files
 from .api import (MEDIA_METHODS, TelegramClient, TelegramApiError, TelegramFileTooLarge, TelegramFileUnavailable,
-                  TelegramRequestNotSent, _split_text)
+                  TelegramRequestNotSent, TelegramTokenMalformed, _split_text)
 from .delivery import (REACTION_HISTORY_UNAVAILABLE, REACTION_REPORT_UNREADABLE, delivery_report,
                        is_reaction_report, names_message, reaction_receipt, typed_reaction_report)
 from .formatting import prepare_text, prepare_caption
@@ -117,15 +117,19 @@ POLL_STAGES = ("identity", "updates", "record")
 
 
 def _poll_failure(exc: Exception, stage: str) -> str:
-    """Which side a failed poll attempt stopped on: ``token``, ``network``, ``telegram``, ``local`` or ``""``.
+    """Which side a failed poll attempt stopped on: ``token``, ``token_format``, ``network``, ``telegram``, ``local``
+    or ``""``.
 
     ``local``: this computer failed, so neither the token nor the network is the cause: anything after Telegram's
     answer was received (``stage`` "record"), or the custody store (SQLite) at any stage, such as recording the bot
-    getMe confirmed. TelegramClient wraps every failure of its own requests in TelegramApiError; any other error
-    leaves the side unknown.
+    getMe confirmed. ``token_format``: the configured token cannot be written in a request (a space, a tab or another
+    character a token cannot have), so no request left this computer. TelegramClient wraps every failure of its own
+    requests in TelegramApiError; any other error leaves the side unknown.
     """
     if stage == "record" or isinstance(exc, sqlite3.Error):
         return "local"
+    if isinstance(exc, TelegramTokenMalformed):
+        return "token_format"
     if isinstance(exc, TelegramApiError):
         if exc.error_code in _TOKEN_REFUSED:
             return "token"
@@ -315,6 +319,8 @@ class TelegramTransportRuntime:
             "host_checked": host["status"] in {"supported", "unsupported"},
             # When that check last ended, answered or not ("" before any): its facts are a past check, not live.
             "host_checked_at": _iso(host["checked_at"] or 0.0),
+            # Why that check made no request ("" when it made one): Ouroboros was not asked, not silent.
+            "host_unasked": host["unasked"],
             "places_version": host["places_version"],
             **_poll_facts(attempt, token),
         }
@@ -1514,7 +1520,8 @@ def _host_record(submitter: Any) -> Dict[str, Any]:
             "explicit_completion": getattr(submitter, "presence_explicit_completion", 0),
             "identity": getattr(submitter, "presence_identity", 0),
             "places_version": getattr(submitter, "places_version", 0),
-            "checked_at": getattr(submitter, "identity_checked_at", 0.0)}
+            "checked_at": getattr(submitter, "identity_checked_at", 0.0),
+            "unasked": ""}
 
 
 def _confirmed(running: bool, token: str, client_token: str, bot_id: str) -> Tuple[str, str]:

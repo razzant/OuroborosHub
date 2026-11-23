@@ -582,6 +582,11 @@ var TransportKit = (function () {
             'Telegram refused the bot token, so nothing new arrives. The bot asks again by itself, at least once a minute.',
             { strong: 'Check TELEGRAM_PUBLIC_BOT_TOKEN', text: 'in Settings → Accounts and keys: it may be revoked or mistyped.' }
         ],
+        /* The token cannot be written in a request (runtime._poll_failure): nothing left this computer. */
+        token_format: [
+            'The bot token contains a space or another character a token cannot have, so no request reaches Telegram and nothing new arrives. The bot reads the token again by itself, at least once a minute.',
+            { strong: 'Correct TELEGRAM_PUBLIC_BOT_TOKEN', text: 'in Settings → Accounts and keys: paste the token exactly as BotFather gave it.' }
+        ],
         network: [
             'The bot got no answer from Telegram, so nothing new arrives. It retries by itself, at least once a minute.',
             { strong: 'If this stays,', text: 'check this computer’s network connection.' }
@@ -601,17 +606,26 @@ var TransportKit = (function () {
         updates: 'The bot failed on this computer before asking Telegram for new messages, so nothing new arrives. It retries by itself, at least once a minute.'
     };
 
-    /* Whether anything is sent or retried now depends on the link (the route's `link`): a stopped bot sends nothing, a
-     * bot without a token cannot, a failing link sends once it reaches Telegram again. */
+    /* What the outbox worker does with a held row, by the link (runtime.process_one_outbox), never a promise that it
+     * goes: with a confirmed bot the place is checked again about every 5 s and a hold uses no attempt; a claim that
+     * cannot reach Telegram (no token, the bot not confirmed or unreachable) uses up one of the row's 5 attempts and
+     * the row is not sent after the last; a stopped bot runs no worker. The receipt says what became of it. */
     function heldOutcome(link, one) {
-        var itself = one ? 'itself' : 'themselves';
-        if (link === 'stopped') return 'Nothing is sent while the bot is stopped; after it starts again, '
-            + (one ? 'it goes' : 'they go') + ' once the reason clears.';
-        if (link === 'waiting_for_token') return 'Nothing is sent until a bot token is set; then '
-            + (one ? 'it goes' : 'they go') + ' once the reason clears.';
-        if (link === 'provider_error' || link === 'local_error') return 'Kept back until the reason clears, then sent by '
-            + itself + ' once the bot reaches Telegram again.';
-        return 'Kept back until the reason clears, then sent by ' + itself + '.';
+        var waits = one ? 'it waits' : 'they wait', its = one ? 'its' : 'each item’s';
+        var receipt = one ? ' Its receipt (telegram_receipt) shows what became of it.'
+            : ' Each item’s receipt (telegram_receipt) shows what became of it.';
+        if (link === 'stopped') return 'Nothing is retried while the bot is stopped; ' + (one ? 'it stays' : 'they stay')
+            + ' in the queue.' + receipt;
+        if (link === 'not_started') return 'The bot is starting; ' + (one ? 'it is' : 'they are') + ' retried once it runs.'
+            + receipt;
+        if (link === 'waiting_for_token') return 'Without a bot token every retry uses up one of ' + its + ' 5 attempts; '
+            + 'after the last, ' + (one ? 'it is' : 'they are') + ' not sent.' + receipt;
+        if (link === 'connecting' || link === 'provider_error') return 'Retried while ' + waits + '; a retry that cannot '
+            + 'reach Telegram uses up one of ' + its + ' 5 attempts, and after the last ' + (one ? 'it is' : 'they are')
+            + ' not sent.' + receipt;
+        if (link === 'local_error') return 'Retried while ' + waits + '; checking the hold uses no attempt. The error on '
+            + 'this computer is about receiving and does not show whether sending works.' + receipt;
+        return 'Retried while ' + waits + '; checking the hold uses no attempt.' + receipt;
     }
 
     function itemFor(item, link) {
@@ -694,13 +708,21 @@ var TransportKit = (function () {
             var stages = item.stages || {}, total = count(item.events);
             var said = [[count(stages.submit), 'passing to Ouroboros failed'],
                 [count(stages.download), 'downloading an attachment from Telegram failed'],
-                // Not recorded (an older version's row): only that it was not passed on, whatever stopped it.
-                [count(stages.other), 'not passed on yet']].filter(function (pair) { return pair[0]; });
-            var why = said.length === 1 && said[0][0] === total ? said[0][1]
+                // Not recorded (an earlier version's row, or a failure here after Ouroboros answered): whether it
+                // was handled is not confirmed here.
+                [count(stages.other), 'not confirmed here whether handled']].filter(function (pair) { return pair[0]; });
+            var alone = said.length === 1 && said[0][0] === total;
+            var why = alone && said[0][1] === 'not confirmed here whether handled'
+                ? 'not confirmed here whether ' + (total === 1 ? 'it was' : 'they were') + ' handled'
+                : alone ? said[0][1]
                 : said.map(function (pair) { return pair[1] + ' (' + num(pair[0]) + ')'; }).join(', ');
             out.lines = [(why ? why.charAt(0).toUpperCase() + why.slice(1) + '; t' : 'T') + 'he bot keeps trying by itself'
                 + (item.next_at ? ', next at ' + K.clock(item.next_at) + '.' : '.')];
-            if (error) out.error = { label: error.example ? 'Example error (which failure is the latest is not recorded)' : 'Last error', text: error.text, at: error.at };
+            if (error) {
+                out.error = { label: error.unrecorded ? 'Note left by an earlier version (not known to be a failure)'
+                    : error.example ? 'Example error (which failure is the latest is not recorded)' : 'Last error',
+                    text: error.text, at: error.at };
+            }
         } else if (item.kind === 'partial') {
             out.lines = (item.gaps || []).map(function (gap) { return PARTIAL_LINES[gap]; }).filter(Boolean);
         }
@@ -716,6 +738,8 @@ var TransportKit = (function () {
 
     var PARTIAL_LINES = {
         host_unanswered: 'Ouroboros did not answer the bot’s capability check, so reactions, delivery history and the place binding are not confirmed. The bot asks again by itself.',
+        /* The route's host_unasked: no request was made, so this is never "Ouroboros did not answer". */
+        host_unasked: 'The bot could not ask Ouroboros about reactions, delivery history and the place binding: this skill’s Ouroboros access token is unavailable, so no request was made. The bot tries again by itself.',
         capabilities_unchecked: 'Ouroboros has not been asked about reactions, delivery history and the place binding yet.',
         no_recent_window: 'The custody store was not read, so recent problems are unknown.'
     };
@@ -767,10 +791,15 @@ var TransportKit = (function () {
         return data.host_checked_at ? ' (checked ' + K.clock(data.host_checked_at, now) + ')' : '';
     }
 
-    /* A capability Ouroboros has not confirmed: its check went unanswered (with when), or never ran. */
+    /* A capability Ouroboros has not confirmed: its check made no request (host_unasked), went unanswered (with
+     * when), or never ran. */
     function unconfirmed(data, now) {
-        return data.delivery_reporting === 'unavailable' ? REPORTING_WORD.unavailable + checkedAt(data, now)
-            : 'not checked yet';
+        if (data.delivery_reporting !== 'unavailable') return 'not checked yet';
+        if (data.host_unasked) {
+            return 'not known: Ouroboros was not asked, this skill’s access token is unavailable'
+                + (data.host_checked_at ? ' (tried ' + K.clock(data.host_checked_at, now) + ')' : '');
+        }
+        return REPORTING_WORD.unavailable + checkedAt(data, now);
     }
 
     function capability(value, data, now) {
@@ -977,7 +1006,8 @@ var TransportKit = (function () {
         groups.push({
             title: 'Ouroboros',
             rows: [
-                row('Delivery history', (REPORTING_WORD[data.delivery_reporting] || data.delivery_reporting)
+                row('Delivery history', data.delivery_reporting === 'unavailable' ? unconfirmed(data, now)
+                    : (REPORTING_WORD[data.delivery_reporting] || data.delivery_reporting)
                     + (data.delivery_reporting in REPORTING_WORD && data.delivery_reporting !== 'unknown' ? checkedAt(data, now) : '')),
                 row('Reactions in Host context', capability(data.reaction_context, data, now)),
                 row('Reaction history', capability(data.reaction_history, data, now)),
