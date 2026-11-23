@@ -346,7 +346,9 @@ mounts its widget through that core's real
 module bridge (`widget_module.js`), served by a test HTTP server over the skill's
 routes registered on `FakePluginAPI`, without the Host Service. A missing core fails
 those jobs; so do missing Playwright or browsers (Smart Lists: `SMART_LISTS_REQUIRE_BROWSERS`,
-set by `scripts/ci_checks.py`). For local backend-only
+set by `scripts/ci_checks.py`). The `telegram-bot` job also needs Playwright's Chromium and WebKit for
+`tests/test_telegram_bot_widget_browser.py`, which mounts the Telegram Transport card through the core's module
+bridge; without them it fails (`TRANSPORT_WIDGET_REQUIRE_BROWSERS`). For local backend-only
 calendar checks, which do not qualify its widget or sign-in return:
 
 ```bash

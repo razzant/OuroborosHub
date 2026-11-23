@@ -191,3 +191,62 @@ def test_live_hold_preserves_parts_and_resumes_once(tmp_path, monkeypatch, reaso
         assert runtime.store.delivery_receipt("stable")["state"] == "delivered"
         assert not await runtime.process_one_outbox()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("answer,kind", [
+    (PresenceHostHTTPError(404, "not connected", NOT_CONNECTED), "place_not_connected"),
+    (PresenceHostHTTPError(403, "refused", ACCESS_REFUSED), "skill_access"),
+    ({"state": "paused"}, ""),
+    (OSError("refused"), ""),
+])
+def test_a_hold_keeps_the_type_of_the_hosts_answer_through_the_outbox(tmp_path, answer, kind):
+    """The owner's move is known from the Host's answer type, never from the words it carries."""
+    async def run():
+        holder = _place_host(tmp_path, answer)
+        note = await holder.place_hold("9", "-1")
+        assert getattr(note, "kind", "") == kind
+
+        class Host(AcceptingSubmitter):
+            async def place_hold(self, account, conversation):
+                return note
+        client = RuntimeClient("token")
+        runtime = TelegramTransportRuntime(state_dir=tmp_path / "rt", token_provider=lambda: "token", logger=Logger(),
+                                           submitter=Host(), client_factory=lambda token: client)
+        runtime.store.enqueue_outbox("held", {"kind": "message", "chat_id": "-1", "text": "unchanged"})
+        assert await runtime.process_one_outbox() and not client.sent
+        reasons = runtime.store.card_snapshot()["held_reasons"]
+        assert [(reason["note"], reason.get("kind", "")) for reason in reasons] == [(str(note), kind)]
+        runtime.store.close()
+    asyncio.run(run())
+
+
+def test_what_the_worker_does_with_a_held_row_is_what_the_card_says(tmp_path, monkeypatch):
+    """The held item's wording rests on these facts of the outbox worker (pre-existing, unchanged here): with a
+    confirmed bot a hold gives its attempt back; without a token every claim uses up one of the row's five attempts
+    and after the last the row is not sent, even once a token returns."""
+    async def run():
+        clock = [1000.0]
+        monkeypatch.setattr("time.time", lambda: clock[0])
+
+        class Host(AcceptingSubmitter):
+            async def place_hold(self, account, conversation):
+                return "Held: Example place is paused"
+        token = {"value": "token"}
+        client = RuntimeClient("token")
+        runtime = TelegramTransportRuntime(state_dir=tmp_path, token_provider=lambda: token["value"], logger=Logger(),
+                                           submitter=Host(), client_factory=lambda value: client)
+        runtime.store.enqueue_outbox("held", {"kind": "message", "chat_id": "-1", "text": "unchanged"})
+        for _ in range(3):  # held with a confirmed bot: checked again, never an attempt used
+            assert await runtime.process_one_outbox()
+            clock[0] += 6
+        assert runtime.store.delivery_receipt("held")["attempts"] == 0
+        token["value"] = ""
+        for _ in range(5):  # no token: each claim uses up an attempt
+            assert await runtime.process_one_outbox()
+            clock[0] += 400
+        receipt = runtime.store.delivery_receipt("held")
+        assert receipt["state"] in {"failed", "uncertain"} and receipt["attempts"] == 5 and not client.sent
+        token["value"] = "token"
+        clock[0] += 400
+        assert not await runtime.process_one_outbox()  # nothing claims it again
+    asyncio.run(run())

@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.13.0
+version: 0.13.1
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -27,97 +27,11 @@ ui_tab:
   title: Telegram Transport
   icon: message
   render:
-    kind: declarative
-    schema_version: 1
-    components:
-    - type: markdown
-      text: "**Telegram bot.** Telegram labels this account as a bot. People reach it in a private
-        chat they opened themselves and in groups or channels it was added to; group coverage depends
-        on privacy mode and admin rights. A bot cannot start a private chat with someone who never
-        opened one. The Bot API cannot read earlier chat history: only messages that arrive while it
-        runs are received. A dedicated ordinary account is the separate Telegram participant connector."
-    - type: form
-      route: settings/save
-      method: POST
-      submit_label: Save transport settings
-      fields:
-      - name: management_group_id
-        label: Management group ID
-        type: text
-        placeholder: Optional numeric Telegram group ID
-        help: Marks this room in event facts. Work instructions stay in the place notes;
-          no owner permissions are granted.
-    - type: poll
-      route: status
-      method: GET
-      target: status
-      interval_ms: 5000
-      auto_start: true
-      max_ticks: 100
-      label: Refresh transport status
-    - type: callout
-      path: runtime_state
-      tone: info
-      target: status
-    - type: group
-      title: Provider custody
-      layout: grid
-      columns: 4
-      components:
-      - type: metric
-        label: Inbox waiting
-        path: inbox_waiting
-        target: status
-      - type: metric
-        label: Inbox leased
-        path: inbox_leased
-        target: status
-      - type: metric
-        label: Submitted
-        path: inbox_submitted
-        target: status
-      - type: metric
-        label: Inbox failed
-        path: inbox_failed
-        target: status
-      - type: metric
-        label: Outbox waiting
-        path: outbox_waiting
-        target: status
-      - type: metric
-        label: Outbox held
-        path: outbox_held
-        target: status
-      - type: metric
-        label: Delivered
-        path: outbox_delivered
-        target: status
-      - type: metric
-        label: Outbox failed
-        path: outbox_failed
-        target: status
-      - type: metric
-        label: Outbox uncertain
-        path: outbox_uncertain
-        target: status
-      - type: metric
-        label: Telegram offset
-        path: telegram_offset
-        target: status
-      target: status
-    - type: kv
-      fields:
-      - label: Bot
-        path: bot_label
-      - label: Last provider event
-        path: last_event_at
-      - label: Last delivery
-        path: last_delivery_at
-      - label: Last error
-        path: last_error
-      - label: Reactions in Host context
-        path: reaction_context
-      target: status
+    kind: module
+    entry: widget.js
+    appearance: host
+    start: auto
+    span: 1
 tools:
 - name: telegram_send
   effect: message
