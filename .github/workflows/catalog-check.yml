@@ -11,6 +11,12 @@ on:
 permissions:
   contents: read
 
+# The one razzant/ouroboros commit every hosted suite that needs a core runs against (README, Tests and widgets).
+# Declared only here (tests/test_workflows.py fails on a second pin). Move it with a PR that changes only this value:
+# this file is shared, so that PR selects every suite, and it merges when all of them pass on the new core.
+env:
+  OUROBOROS_CORE_SHA: d945f07d341d8c43b319e35af09d8fea3704f762
+
 jobs:
   catalog:
     runs-on: ubuntu-latest
@@ -35,7 +41,18 @@ jobs:
       # Sync Joi Lab Mirror publishes it from merged main before mirroring.
       - run: python scripts/build_index.py
       - run: python scripts/build_index.py --check
-      - run: >-
+      # tests/test_index.py compares every hosted release and connector with the pinned core
+      # (OUROBOROS_IDENTITY_CORE_ROOT). It imports the core's modules only, so none of its runtime is installed.
+      - name: Check out the pinned core
+        uses: actions/checkout@v4
+        with:
+          repository: razzant/ouroboros
+          ref: ${{ env.OUROBOROS_CORE_SHA }}
+          path: core
+          persist-credentials: false
+      - env:
+          OUROBOROS_IDENTITY_CORE_ROOT: ${{ github.workspace }}/core
+        run: >-
           python -B -m pytest -p no:cacheprovider -q
           tests/test_catalog.py tests/test_index.py tests/test_owner_updates.py
           tests/test_signals.py tests/test_workflows.py tests/test_ci_checks.py
@@ -45,9 +62,10 @@ jobs:
     if: needs.catalog.outputs.suites != '[]'
     # Owner Updates requires a passed job of this name in the same attempt for each suite the change selects.
     name: ${{ matrix.suite }}
-    # memory-atlas drives its card in a real host with Chromium and WebKit as macOS runs them, on the core's Python.
+    # memory-atlas drives its card in a real host with Chromium and WebKit as macOS runs them.
     runs-on: ${{ matrix.suite == 'memory-atlas' && 'macos-latest' || 'ubuntu-latest' }}
-    timeout-minutes: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence", "smart-lists"]'), matrix.suite) && 30 || 15 }}
+    # The suites that install the core's runtime and drive browsers get 30 minutes.
+    timeout-minutes: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence", "smart-lists", "telegram-user-session", "widgets"]'), matrix.suite) && 30 || 15 }}
     strategy:
       fail-fast: false
       matrix:
@@ -59,59 +77,54 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
+          # memory-atlas, calendar-skill and email-presence keep 3.10, the Python they were qualified on and still the
+          # oldest one the core runs on (apps up to 7.11.0 keep it across Update); the other suites use 3.11.
           python-version: ${{ contains(fromJSON('["memory-atlas", "calendar-skill", "email-presence"]'), matrix.suite) && '3.10' || '3.11' }}
       - run: python -m pip install PyYAML
-      # Memory Atlas reads through PluginAPI 2.1 read_memory and PR 3573's transfer-attribution contract.
-      # The pinned core supplies Playwright. Without the core, Node or a browser the suite fails; it never skips.
-      - name: Check out the pinned core for memory-atlas
-        if: matrix.suite == 'memory-atlas'
+      # Every suite whose tests use a real core (core_env in scripts/ci_checks.py) checks out that one commit,
+      # OUROBOROS_CORE_SHA above. Without it those suites fail; their real-core tests never skip. The widgets suite
+      # also reads the core's historical theme bridge with git show, so its checkout carries the history (about 130 MB).
+      - name: Check out the pinned core
+        if: contains(fromJSON('["calendar-skill", "email-presence", "freshdesk", "github", "memory-atlas", "slack-bridge", "smart-lists", "telegram-bot", "telegram-user-session", "widgets"]'), matrix.suite)
         uses: actions/checkout@v4
         with:
           repository: razzant/ouroboros
-          ref: 5c8e908d0858897ed829c921606f57477524753c
-          path: atlas-core
+          ref: ${{ env.OUROBOROS_CORE_SHA }}
+          path: core
           persist-credentials: false
-      - name: Install that core's runtime and the browsers, and name the core
-        if: matrix.suite == 'memory-atlas'
+          fetch-depth: ${{ matrix.suite == 'widgets' && '0' || '1' }}
+      # Memory Atlas starts that core's server and reads through PluginAPI 2.1 read_memory and its transfer contract.
+      # Mail and Calendar exercise its Host Service, child tool dispatcher, opaque widgets and sign-in return; provider
+      # edges remain offline fixtures. Smart Lists, the Telegram participant widget and the dashboard cards (widgets)
+      # mount through the core's module bridge; Smart Lists also checks its widget declarations with the core's
+      # validator (OUROBOROS_CORE_ROOT). They need the core's runtime (it supplies Playwright) and Chromium and WebKit;
+      # Linux runners also need the browsers' libraries.
+      - name: Install the core's runtime and the browsers, and name the core
+        if: contains(fromJSON('["calendar-skill", "email-presence", "memory-atlas", "smart-lists", "telegram-user-session", "widgets"]'), matrix.suite)
         run: |
-          python -m pip install -r atlas-core/requirements.txt
-          python -m playwright install chromium webkit
-          echo "ATLAS_CORE=$GITHUB_WORKSPACE/atlas-core" >> "$GITHUB_ENV"
-      # Mail and Calendar exercise the actual Host Service, child tool dispatcher, opaque widgets and sign-in return.
-      # Email uses PR 3538's PluginAPI 2.5 core; Calendar and Smart Lists retain their qualified core.
-      # Provider edges remain offline fixtures. Smart Lists mounts its widget through the core's module bridge.
-      - name: Check out the pinned core for mail and calendar
-        if: matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill' || matrix.suite == 'smart-lists'
-        uses: actions/checkout@v4
-        with:
-          repository: razzant/ouroboros
-          ref: ${{ matrix.suite == 'email-presence' && '04b6453ad0e5d4b6bb157b76e67ccac60fb0eff6' || '9c4411457bdb752d9379f17a97cf171a22384402' }}
-          path: mail-calendar-core
-          persist-credentials: false
-      - name: Install the mail and calendar consumer runtime
-        if: matrix.suite == 'email-presence' || matrix.suite == 'calendar-skill' || matrix.suite == 'smart-lists'
+          python -m pip install -r core/requirements.txt
+          if [ "$RUNNER_OS" = Linux ]; then
+            python -m playwright install --with-deps chromium webkit
+          else
+            python -m playwright install chromium webkit
+          fi
+          echo "ATLAS_CORE=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
+          echo "OUROBOROS_SOURCE_DIR=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
+          echo "OUROBOROS_THEME_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
+          echo "OUROBOROS_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
+      # The Presence consumers (tests/test_*_core_consumer.py) drive Slack and Telegram through the core's own Presence
+      # routes in child processes, and GitHub's owner-account contract runs through its places module. They import
+      # nothing beyond each suite's dependencies, so the checkout is all they need; scripts/ci_checks.py puts it first
+      # on the tests' PYTHONPATH and stops a bridge suite whose core does not itself provide a check its tests import
+      # (core_imports).
+      - name: Name the core for the Presence consumers and GitHub
+        if: contains(fromJSON('["freshdesk", "github", "slack-bridge", "telegram-bot", "telegram-user-session"]'), matrix.suite)
         run: |
-          python -m pip install -r mail-calendar-core/requirements.txt
-          python -m playwright install --with-deps chromium webkit
-          echo "OUROBOROS_SOURCE_DIR=$GITHUB_WORKSPACE/mail-calendar-core" >> "$GITHUB_ENV"
-          echo "OUROBOROS_THEME_CORE_ROOT=$GITHUB_WORKSPACE/mail-calendar-core" >> "$GITHUB_ENV"
-      # The Presence consumers (tests/test_*_core_consumer.py) drive Slack and Telegram through this core's own Presence
-      # routes in child processes. They import nothing beyond each suite's dependencies, so the checkout is all they
-      # need. Without it the suite fails; they never skip.
-      - name: Check out the pinned core for the Presence consumers
-        if: contains(fromJSON('["freshdesk", "slack-bridge", "telegram-bot", "telegram-user-session"]'), matrix.suite)
-        uses: actions/checkout@v4
-        with:
-          repository: razzant/ouroboros
-          ref: 9f6fe2f5f7f4d8f3e5ea58f0d04fb352181416bc
-          path: presence-core
-          persist-credentials: false
-      - name: Name that core for the Presence consumers
-        if: contains(fromJSON('["freshdesk", "slack-bridge", "telegram-bot", "telegram-user-session"]'), matrix.suite)
-        run: echo "OUROBOROS_PRESENCE_CORE_ROOT=$GITHUB_WORKSPACE/presence-core" >> "$GITHUB_ENV"
+          echo "OUROBOROS_PRESENCE_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
+          echo "OUROBOROS_IDENTITY_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
       # The Chrome adapter's tests are Node's own. They need Node and the exact npm closure skills/chrome_browser/pins.json
       # records; the version is read from that file, and the tests verify every pinned file by hash. A different closure
-      # fails them; they never skip.
+      # fails them; they never skip. memory-atlas's formatter tests (test_transfer_words.py) need Node 20 or newer too.
       - uses: actions/setup-node@v4
         if: matrix.suite == 'chrome-browser' || matrix.suite == 'memory-atlas'
         with:

@@ -607,8 +607,9 @@ CONNECTORS = sorted(directory.name for directory in (ROOT / "skills").iterdir()
 # Mirrors of the core contract, compared with a core checkout by the opt-in parity test below:
 # ouroboros/places.py WAKE_FACTS, ouroboros/extension_ui_validation.py _validate_contribution (common and
 # place keys) and ouroboros/icon_geometry.py (geometry and paint). The hub also refuses g and ellipse.
-CORE_WAKE_FACTS = ("direct_message", "group_dm", "mention", "reply_to_me", "my_thread", "signal.new_root", "new_issue",
+CORE_WAKE_FACTS = ("direct_message", "group_dm", "mention", "reply_to_me", "my_thread", "new_issue",
                    "new_pull_request", "review_requested", "assigned", "any_message", "from_bot")
+CORE_SIGNAL = re.compile(r"signal\.[a-z0-9_-]{1,40}")  # ouroboros/places.py is_wake_signal
 CORE_PLACE_KEYS = {"id", "label", "title", "icon", "order", "render",
                    "provides", "destination", "scope", "wakes", "source", "settings", "read_only", "facts"}
 ICON_GEOMETRY = {"svg": {"viewBox", "width", "height"}, "path": {"d"}, "circle": {"cx", "cy", "r"},
@@ -712,6 +713,66 @@ def assert_target_selectors(target):
         assert isinstance(argument, str) and argument.strip()
 
 
+def place_wake_facts(place):
+    """What a place may suggest as wakes, as the core decides it (extension_ui_validation._place_contribution): its own
+    declared facts when it lists `facts`, each a core fact or a labelled core fact or signal; otherwise the core's."""
+    if "facts" not in place:
+        return set(CORE_WAKE_FACTS)
+    assert isinstance(place["facts"], list), place
+    declared = []
+    for fact in place["facts"]:
+        if isinstance(fact, dict):
+            assert set(fact) == {"id", "label"}, fact
+            assert fact["id"] in CORE_WAKE_FACTS or CORE_SIGNAL.fullmatch(str(fact["id"])), fact
+            assert isinstance(fact["label"], str) and fact["label"].strip() and len(fact["label"]) <= 120, fact
+            declared.append(fact["id"])
+        else:
+            assert isinstance(fact, str) and fact in CORE_WAKE_FACTS, fact
+            declared.append(fact)
+    assert len(declared) == len(set(declared)), declared
+    return set(declared)
+
+
+def assert_place_wakes(place):
+    wakes = place["wakes"]
+    assert isinstance(wakes, list) and set(wakes) <= place_wake_facts(place), place
+    # The hub's publication convention, not the core's: the core keeps one of a repeated wake, a published place says
+    # each once.
+    assert len(wakes) == len(set(wakes)), place
+
+
+@pytest.mark.parametrize("place", [
+    {"wakes": ["direct_message", "mention"]},
+    {"facts": ["mention", {"id": "signal.new_root", "label": "New top-level post"}], "wakes": ["mention", "signal.new_root"]},
+    {"facts": [{"id": "direct_message", "label": "Mail addressed to you"}, "from_bot"], "wakes": ["direct_message"]},
+    {"facts": [], "wakes": []},
+])
+def test_place_wakes_accept_core_facts_or_the_place_s_own_declared_facts(place):
+    assert_place_wakes(place)
+
+
+@pytest.mark.parametrize("place", [
+    {"wakes": ["signal.new_root"]},                                             # a signal is declared before it wakes
+    {"facts": ["mention"], "wakes": ["mention", "direct_message"]},             # the declared facts are the whole set
+    {"facts": [{"id": "signal.New Root", "label": "x"}], "wakes": []},          # not a signal id
+    {"facts": [{"id": "signal.new_root"}], "wakes": []},                         # a signal needs its label
+    {"facts": [{"id": "signal.new_root", "label": " "}], "wakes": []},
+    {"facts": ["signal.new_root"], "wakes": []},                                 # a bare name is a core fact only
+    {"facts": ["mention", {"id": "mention", "label": "again"}], "wakes": []},    # ids are unique
+    {"facts": "mention", "wakes": []},
+])
+def test_place_wakes_reject_what_the_core_refuses(place):
+    with pytest.raises(AssertionError):
+        assert_place_wakes(place)
+
+
+def test_a_published_place_suggests_each_wake_once():
+    # The core would accept the repetition and keep one; the hub refuses it in what it publishes.
+    with pytest.raises(AssertionError):
+        assert_place_wakes({"wakes": ["mention", "mention"]})
+    assert_place_wakes({"wakes": ["mention"]})
+
+
 @pytest.mark.parametrize("target", [
     "account_id", "replyToAddress", "values.replyToAddress", "body.X-Header",
     "items.0.id", ["account_id", "values.replyToAddress"],
@@ -752,8 +813,7 @@ def test_place_contribution_meets_the_core_contract(name):
     service = place["destination"].removeprefix("vendor:")
     assert place["destination"].startswith("vendor:") and service.strip() and place["label"] == service
     assert place["scope"] == "account"
-    wakes = place["wakes"]
-    assert isinstance(wakes, list) and len(wakes) == len(set(wakes)) and set(wakes) <= set(CORE_WAKE_FACTS)
+    assert_place_wakes(place)
     assert manifest["type"] == "extension"
     assert "presence" in manifest["permissions"] and "inject_chat" not in manifest["permissions"]
     if "source" in place:

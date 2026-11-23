@@ -302,6 +302,29 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/sla
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/telegram-bot/tests
 ```
 
+Every suite whose tests use a real core (`core_env` in `scripts/ci_checks.py`: Memory Atlas,
+mail, Calendar, Smart Lists, the dashboard widgets, GitHub and the Presence consumers of
+Freshdesk, Slack and Telegram) runs against one `razzant/ouroboros` commit, `OUROBOROS_CORE_SHA`
+at the top of `.github/workflows/catalog-check.yml`, checked out once per job; the catalog job
+checks every hosted release and connector against the same commit. With one pin every seam
+between a hosted skill and the core is tested on the same reproducible core, and no suite stays
+behind on an older one; `tests/test_workflows.py` fails on a second pin in any `.yml` or `.yaml`
+workflow, whether a checkout or a run step's git command takes it. That check is a lint against an
+accidental second pin, not a boundary: a step that moves the checked-out core with a git command run
+from `working-directory: core` or after a shell `cd` is not seen by it. To move the pin, open a PR that
+changes only that value. The workflow is shared, so that PR runs every suite on the new core, and it
+merges when all of them pass. A suite that fails there is fixed in the hub when the skill or its test
+is wrong against the core's documented contract, and reported to the core when the core broke it.
+
+`scripts/ci_checks.py run <suite>` refuses a suite whose core is not named, and puts that core first
+on its tests' `PYTHONPATH`, ahead of anything inherited, so the skill tests that check their wire
+bodies with the core's own validators run them. The Slack and Telegram bridge suites also list the
+core functions those tests import (`core_imports`): a named core without one, or an import that
+resolves outside the named checkout, stops the suite instead of letting the check skip. Locally each
+variable a suite names is checked on its own, so two of them (Telegram User Session's Presence and
+theme roots, or Memory Atlas's `ATLAS_CORE` beside `ATLAS_HOST_ROOT`) can name different checkouts;
+CI names one checkout per job.
+
 The `claudexor-quotas` suite needs Node 24, pytest, Playwright and its Chromium
 and WebKit builds. `OUROBOROSHUB_NODE` selects an existing Node executable;
 `PLAYWRIGHT_BROWSERS_PATH` selects the browser cache. Run with
@@ -316,11 +339,10 @@ Set `TG_DISCOVERY_CORE`, `TG_DISCOVERY_VENV` and `PLAYWRIGHT_BROWSERS_PATH`, the
 run its `run.sh` with an evidence directory. It checks the existing Places picker
 against synthetic Bot API updates and an upgrade from 0.8, without live credentials.
 
-The selected `calendar-skill`, `email-presence` and `smart-lists` CI jobs check out
-their exact cores pinned in `catalog-check.yml` (email uses PluginAPI 2.5; Calendar
-and Smart Lists retain their prior pin), install each core's Python runtime requirements
-and Chromium/WebKit. Calendar and mail exercise the real Host Service and widget
-bridge with fake providers. Smart Lists mounts its widget through that core's real
+The selected `calendar-skill`, `email-presence` and `smart-lists` CI jobs install the
+pinned core's Python runtime requirements and Chromium/WebKit. Calendar and mail
+exercise the real Host Service and widget bridge with fake providers. Smart Lists
+mounts its widget through that core's real
 module bridge (`widget_module.js`), served by a test HTTP server over the skill's
 routes registered on `FakePluginAPI`, without the Host Service. A missing core fails
 those jobs; so do missing Playwright or browsers (Smart Lists: `SMART_LISTS_REQUIRE_BROWSERS`,
@@ -333,7 +355,7 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q skills/calenda
 ```
 
 For each complete consumer suite, use Python 3.10 with the requirements and browsers
-from that suite's pinned core. Set `OUROBOROS_SOURCE_DIR` and
+from the pinned core. Set `OUROBOROS_SOURCE_DIR` and
 `OUROBOROS_THEME_CORE_ROOT` to that checkout, then run
 `python -B scripts/ci_checks.py run email-presence` and
 `python -B scripts/ci_checks.py run calendar-skill` separately. The mail runner
@@ -361,15 +383,19 @@ suite on a dedicated test machine or VM: it starts a real core host. On that tes
 ATLAS_CORE=/path/to/ouroboros PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs tests/memory_atlas
 ```
 
+`python -B scripts/ci_checks.py run memory-atlas` takes either `ATLAS_CORE` or `ATLAS_HOST_ROOT`
+(a host already started by `realhost.py`, whose copy of its core is `repo/`).
+
 `python tests/memory_atlas/dev/realhost.py --core /path/to/ouroboros --root /tmp/<new directory>`
 starts the same host to look at and prints `READY <url>`; open `<url>/#widgets` and press Start on
 Memory Atlas.
 
 The hub tests include mocked GitHub APIs for owner authorization, signals and
 catalog-to-mirror sequencing. The release-identity test compares all hosted skills
-with the core checkout selected by `OUROBOROS_IDENTITY_CORE_ROOT`, using the test
-runner's Python with core requirements installed. Without that variable the
-cross-repository check is reported as skipped. Every hosted skill that contributes
+with the core checkout selected by `OUROBOROS_IDENTITY_CORE_ROOT`; it imports only
+core modules, which need nothing beyond PyYAML. CI's catalog job sets it to the
+pinned core. Without that variable the cross-repository check is reported as
+skipped. Every hosted skill that contributes
 a place is checked as a connector: declared tool effects, the place contract,
 wake facts, its status route and a bounded monochrome `ui/icon.svg`. The hub keeps
 a mirror of the core rules for this; the same checkout also runs every connector
@@ -379,10 +405,12 @@ Module widgets can declare `render.appearance: host` and feature-detect
 `OuroborosWidget.onTheme`. Preserve state while applying Light/Dark, unsubscribe
 on disposal, and retain a usable palette on older hosts. The real-bridge
 browser suites require a local core checkout with git history, Playwright,
-Chromium and WebKit:
+Chromium and WebKit. CI gives the `widgets`, `calendar-skill`, `smart-lists` and
+`telegram-user-session` jobs the pinned core, its runtime and both browsers; only
+the dashboard suite (`widgets`) reads the core's history:
 
 ```bash
-OUROBOROS_THEME_CORE_ROOT=/path/to/ouroboros python -m pytest -p no:cacheprovider -q tests/test_dashboard_theme_browser.py tests/test_calendar_host_browser.py tests/test_smart_lists_browser.py
+OUROBOROS_THEME_CORE_ROOT=/path/to/ouroboros python -m pytest -p no:cacheprovider -q tests/test_dashboard_theme_browser.py tests/test_calendar_host_browser.py tests/test_smart_lists_browser.py tests/test_telegram_participant_widget_browser.py
 ```
 
 These standalone invocations are local opt-ins; the selected Calendar and Smart Lists
