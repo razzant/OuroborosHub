@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/8c0f41f6edba1530b8360d064f645a51e326c00a",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/6889fcda693d6e5240b46306f1cf59dcd801175a",
   "schema_version": 1,
   "skills": [
     {
@@ -3742,8 +3742,8 @@
       "files": [
         {
           "path": "CHANGELOG.md",
-          "sha256": "193c7f355a7cf4a897fd0a6447ab26a7ce83409e917ec8f87277794eeeb85e85",
-          "size": 21383
+          "sha256": "b662df19aec11e33d3d97fa50b5ef61bc6ba90dabab015b5e493683be190ab13",
+          "size": 29172
         },
         {
           "path": "FORMATTER_PROVENANCE.md",
@@ -3757,18 +3757,18 @@
         },
         {
           "path": "README.md",
-          "sha256": "945d226f49720a0c4e657e1527dfa67ff620476a63d0004e63cde9761d679b46",
+          "sha256": "2a46917b05c4b7232e9b7058f4feb0884775cec3045f50b00751f8335a548783",
           "size": 2770
         },
         {
           "path": "SKILL.md",
-          "sha256": "1f0765a9deb222671ceec56cddb5f9d23688304236152218bdfd4a7815194735",
-          "size": 56336
+          "sha256": "5c510ad44a521085ed77529594ad826690ba2c3ff6463abcf7f5dbb8277e0555",
+          "size": 53699
         },
         {
           "path": "plugin.py",
-          "sha256": "b337645d26ca89d5b33b1c075857502fd0922547e3384e329ee6451e13a8b110",
-          "size": 25183
+          "sha256": "e00b2765c56a62d05ccf5980aac08b22448451ef761a48e95f0211eed70d349f",
+          "size": 22962
         },
         {
           "path": "telegram_bot/__init__.py",
@@ -3777,13 +3777,13 @@
         },
         {
           "path": "telegram_bot/api.py",
-          "sha256": "3859950ca558546e12182e85b1d7c90e5e21f0179108a8a69127c9ee99b23868",
-          "size": 38003
+          "sha256": "d32edc4fd834186b13dc6ba09dd24a63bbbe147142d89cce868520bac4821937",
+          "size": 39676
         },
         {
           "path": "telegram_bot/custody.py",
-          "sha256": "696b002a17424a7d87667d0e7912bff077790779176379a28f01926ec58a34b7",
-          "size": 78351
+          "sha256": "817a483b2bab3580659705f818d5ab9646259eb5887454c3e183ae3b8ded9979",
+          "size": 92804
         },
         {
           "path": "telegram_bot/delivery.py",
@@ -3807,8 +3807,8 @@
         },
         {
           "path": "telegram_bot/host.py",
-          "sha256": "d2f680c43f6a9c2c1de2654a7626c7da5765ebb3bebc682f20284ecb011df8f0",
-          "size": 21124
+          "sha256": "90e67d8dec37f0448c5237fb9c37b0200f2e7976b56b37ba18e117a1e022b201",
+          "size": 26276
         },
         {
           "path": "telegram_bot/outbox_files.py",
@@ -3817,13 +3817,18 @@
         },
         {
           "path": "telegram_bot/runtime.py",
-          "sha256": "3909f6d7a9e689ccbc13ccceadbad3082c8f5eb7f964f643489edec4cfa90c1d",
-          "size": 72337
+          "sha256": "3bc9538929293e320c4d1928e127a5cc42817575f38a2360a072543220aa547e",
+          "size": 82570
         },
         {
           "path": "telegram_bot/settings.py",
           "sha256": "fc47eaeed4cef556df7473154db51b4cbb390e9a362ed434d58f94c58b0e5cd1",
           "size": 770
+        },
+        {
+          "path": "telegram_bot/status_summary.py",
+          "sha256": "af33ed5184d778c412d81f94d3db656d10b1ff1d881390d3387efd351d0d48f8",
+          "size": 14494
         },
         {
           "path": "telegram_bot/tools.py",
@@ -3882,8 +3887,8 @@
         },
         {
           "path": "tests/test_group_discovery.py",
-          "sha256": "99b1cd45f63c1949bd6e4d65e4321e90e6c272771a44347747fc69cd91acfda3",
-          "size": 32361
+          "sha256": "10fdcbba0dbeda714ca3fa287030894929bebdd350a72f3fb1e6afecc5fe7778",
+          "size": 34092
         },
         {
           "path": "tests/test_host.py",
@@ -3917,13 +3922,13 @@
         },
         {
           "path": "tests/test_places.py",
-          "sha256": "a52ec5920c97c43a1abb2458c59a4aa19db01dbd4a6fcb909eb70a119d7dad14",
-          "size": 10238
+          "sha256": "935431bfab81b455c8a4f4d5a42983810eb18b63f354b82485f7f5ae1e69ea65",
+          "size": 13462
         },
         {
           "path": "tests/test_plugin.py",
-          "sha256": "ec51ef85e6f293ad3387ac871bea97ef98faa45587f9e82d555dfa754aeb2479",
-          "size": 10285
+          "sha256": "e4c550d99f98990e098dc44e250eb4af3c363ac3cd0431179a94e2eff7be40a9",
+          "size": 10163
         },
         {
           "path": "tests/test_presence_continuation.py",
@@ -3932,8 +3937,8 @@
         },
         {
           "path": "tests/test_reactions.py",
-          "sha256": "ae2d64fb8bbfc57c78dedf004b7f1e2ad354ccef2502dc89e621a8b8d61a12b1",
-          "size": 110467
+          "sha256": "6a524a07ebca97da65a415d008938bf37998b54626514e8e4d57f22b662e6a5c",
+          "size": 110746
         },
         {
           "path": "tests/test_retained_custody.py",
@@ -3944,6 +3949,16 @@
           "path": "tests/test_runtime.py",
           "sha256": "7944478054e85fd0bf17d0536b98bfded5fa4ed39a9400f96713c2cae5509a00",
           "size": 23682
+        },
+        {
+          "path": "tests/test_secret_text.py",
+          "sha256": "1d37a7c526cfc20f06550995daa865c4b9a44692ce1fc9dc95e3862ad57f667f",
+          "size": 15424
+        },
+        {
+          "path": "tests/test_status_card.py",
+          "sha256": "b93806a1118dc6385968d268cd1d38c24c94b086b37e74d19ad3c818da5ceee8",
+          "size": 78407
         },
         {
           "path": "tests/test_typing.py",
@@ -3966,6 +3981,11 @@
           "size": 11813
         },
         {
+          "path": "tests/test_widget_card.py",
+          "sha256": "79a4c01a4508048774cafcc40928f1399f575c7f2cbd6d4bf7f8bd108874d7d4",
+          "size": 5283
+        },
+        {
           "path": "tests/test_words.py",
           "sha256": "99bcc075ad365cf0297cfb07bb749d8c6785d81cb9485499da1cef621097b0c7",
           "size": 12054
@@ -3979,13 +3999,18 @@
           "path": "ui/icon.svg",
           "sha256": "e02f3e17024bcbb581e6293e64888aac3e3b2a675173c9187bb9f527504f7dc7",
           "size": 217
+        },
+        {
+          "path": "widget.js",
+          "sha256": "3fa18d6f771f04cfcfd6eca23f9167be0efd8de862dcae3121131102716b753b",
+          "size": 65508
         }
       ],
       "icon": "ui/icon.svg",
       "name": "telegram-bot",
       "slug": "telegram-bot",
       "type": "extension",
-      "version": "0.13.0"
+      "version": "0.13.1"
     },
     {
       "connects": [
