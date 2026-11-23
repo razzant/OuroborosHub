@@ -54,7 +54,7 @@ def test_resource_only_family_is_in_real_answer_and_dated_snapshot(tmp_path):
     assert answer["resources"]["cursor"]["accounts"] == 1
     text = qc.snapshot_text(answer)
     assert "Cursor" in text or "cursor" in text
-    assert "no quota-window reading" in text
+    assert "no quota window in this summary; resource data does not imply availability" in text
     assert "Included 0 USD" in text and "team" in text
     assert "2026-10-15T10:00:00Z" in text and "last known" in text
     assert "spending not reported" in text

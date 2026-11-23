@@ -176,11 +176,13 @@ def test_snapshot_line_names_models_and_prefixes_together_and_counts_what_it_lea
     _a, [line] = lines(limit(0.2, cid="cap", applies_to_models=["gpt-5"], applies_to_model_prefixes=["gemini-"]))
     assert "models gpt-5 and model families gemini-*" in line
     answer, [line] = lines(limit(0.2, cid="cap", applies_to_model_prefixes=["a-", "b-", "c-", "d-", "e-"]))
-    assert "a-*, b-*, c-* (+2 more" in line and answer["groups"][0]["model_prefixes"] == ["a-", "b-", "c-", "d-", "e-"]
+    assert "a-*, b-*, c-* (+2 retained in row)" in line
+    assert answer["groups"][0]["model_prefixes"] == ["a-", "b-", "c-", "d-", "e-"]
     many = [f"p{i:02d}-" for i in range(30)]
     answer, [line] = lines(limit(0.2, cid="cap", applies_to_model_prefixes=many))
     row = answer["groups"][0]
-    assert row["model_prefixes_omitted"] == 30 - quota_scope.MAX_SHOWN and "(+27 more" in line
+    assert row["model_prefixes_omitted"] == 30 - quota_scope.MAX_SHOWN
+    assert "(+21 retained in row; 6 outside summary)" in line
 
 
 def test_snapshot_line_says_an_unreadable_scope_and_a_digest_only_history_scope():

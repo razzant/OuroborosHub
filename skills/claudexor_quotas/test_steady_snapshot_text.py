@@ -1,8 +1,9 @@
-"""The snapshot text changes when a printed fact changes, not when a poll does.
+"""The snapshot text and optional details change when a printed fact changes, not when a poll does.
 
-CREATING_SKILLS "Passive context snapshots": keep changing poll timestamps out of
-`text`; the envelope dates the visible claim. Each rewrite is a new full note in
-every eligible context, so poll jitter must leave the bytes alone.
+CREATING_SKILLS "Passive context snapshots": the envelope dates the claim. On
+hosts with #2333 only one change/withdrawal notice can follow the initial text
+until rebuild; earlier hosts can show a changed text again. On either host,
+poll jitter must leave both rendered views byte-identical.
 """
 
 import quota_context as qc
@@ -32,28 +33,48 @@ def _answer(*, observed=STAMPS, state="current", remaining=14.39, pace=0.414, ho
 
 
 def test_poll_jitter_leaves_the_text_byte_identical():
-    first = qc.snapshot_text(_answer())
-    later = qc.snapshot_text(_answer(observed=("2026-10-20T20:17:39.104Z", "2026-10-20T20:17:42.917Z"),
-                                     pace=0.365, hours=156.61, reset="2026-10-20T21:59:59.596646Z",
-                                     period_end="2026-10-31T23:59:59.873Z", offer_reset="2026-10-27T06:31:56.998Z"))
-    assert first == later
-    assert "current (2 accounts)" in first, "equal current facts fold into one counted line"
+    base_ans = _answer()
+    later_ans = _answer(observed=("2026-10-20T20:17:39.104Z", "2026-10-20T20:17:42.917Z"),
+                        pace=0.365, hours=156.61, reset="2026-10-20T21:59:59.596646Z",
+                        period_end="2026-10-31T23:59:59.873Z", offer_reset="2026-10-27T06:31:56.998Z")
+    first = qc.brief_text(base_ans)
+    later = qc.brief_text(later_ans)
+    assert first == later and len(first) <= qc.BRIEF_MAX_CHARS
     assert "20:12:38" not in first and "20:17:39" not in first, "no poll time of a current reading"
-    assert "next reported reset 2026-10-20T22:00:00Z" in first
-    assert "period/reset ends 2026-11-01T00:00:00Z" in first and "reset 2026-10-27T06:31:57Z" in first
-    assert "measured pace 0.4 account-windows/h" in first and "≈156.6 account-hours" in first
+    assert "14.39 aw (15/17 measured)" in first and "pace 0.4 aw/h (14/15)" in first
+    assert "Monthly extra usage" not in first and "156.6" not in first
+    assert qc.DETAIL_READER in first and "quota_summary" in first
+
+    first_detail = qc.snapshot_text(base_ans, reserved_text=first)
+    later_detail = qc.snapshot_text(later_ans, reserved_text=later)
+    assert first_detail == later_detail and first_detail is not None
+    assert "current (2 accounts)" in first_detail, "equal current facts fold into one counted line"
+    assert "20:12:38" not in first_detail and "20:17:39" not in first_detail, "no poll time of a current reading"
+    assert "next reported reset 2026-10-20T22:00:00Z" in first_detail
+    assert "period/reset ends 2026-11-01T00:00:00Z" in first_detail and "reset 2026-10-27T06:31:57Z" in first_detail
+    assert "measured pace 0.4 account-windows/h" in first_detail and "≈156.6 account-hours" in first_detail
 
 
 def test_a_printed_fact_that_changes_still_rewrites_the_text():
-    base = qc.snapshot_text(_answer())
-    for changed in (_answer(remaining=14.09), _answer(reset="2026-10-21T03:00:00Z"),
-                    _answer(hours=146.3), _answer(pace=1.3)):
-        assert qc.snapshot_text(changed) != base
+    base_ans = _answer()
+    base = qc.brief_text(base_ans)
+    base_detail = qc.snapshot_text(base_ans, reserved_text=base)
+    for changed in (_answer(remaining=14.09), _answer(pace=1.3)):
+        short = qc.brief_text(changed)
+        assert short != base
+        assert qc.snapshot_text(changed, reserved_text=short) != base_detail
+    for detail_only in (_answer(reset="2026-10-21T03:00:00Z"), _answer(hours=146.3)):
+        short = qc.brief_text(detail_only)
+        assert short == base
+        assert qc.snapshot_text(detail_only, reserved_text=short) != base_detail
 
 
 def test_last_known_resources_keep_their_own_dates():
-    text = qc.snapshot_text(_answer(state="last_known"))
-    assert f"last known observed {STAMPS[0]}" in text and f"last known observed {STAMPS[1]}" in text
+    ans = _answer(state="last_known")
+    short = qc.brief_text(ans)
+    assert short == qc.brief_text(_answer(state="current"))
+    detail = qc.snapshot_text(ans, reserved_text=short) or ""
+    assert f"last known observed {STAMPS[0]}" in detail and f"last known observed {STAMPS[1]}" in detail
 
 
 def test_small_figures_stay_distinct_from_zero():
@@ -62,3 +83,13 @@ def test_small_figures_stay_distinct_from_zero():
     assert qc.rounded_hours(0.049) == "<0.1" and qc.rounded_hours(156.64) == "156.6"
     assert qc._second("2026-10-20T21:59:59.596646Z") == "2026-10-20T22:00:00Z"
     assert qc._second("not a time") == "not a time"
+
+
+def test_joint_details_distinguish_positive_capacity_zero_at_tool_precision_and_unknown():
+    for capacity, expect in ((0.03, "<0.1"), (0.0, "≈0.0 at tool precision"), (None, "unknown")):
+        answer = _answer()
+        answer["joint"]["claude"]["same_account_capacity"] = capacity
+        short = qc.brief_text(answer)
+        details = qc.snapshot_text(answer, reserved_text=short)
+        assert f"): {expect} from " in next(line for line in details.splitlines() if "same-account capacity" in line)
+        assert "same-account" not in short
