@@ -1,7 +1,7 @@
 {
   "description": "Official Ouroboros skills catalog.",
   "name": "OuroborosHub",
-  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/c60c7ad8bce1c0affc265790435e078743a6c3cb",
+  "raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/451416a0ab32ae4d45b70f56fa756d6cd9908f91",
   "schema_version": 1,
   "skills": [
     {
@@ -3698,28 +3698,28 @@
       "files": [
         {
           "path": "SKILL.md",
-          "sha256": "1a867118e28e4ef91b47bcbe5dab49d9cc2f7f413f5e0119d5e146d9eb9f64e3",
+          "sha256": "82322efb8f1ae3f3793dd1f15fee4d52970a628a9d3cd839e2fb9016f0908437",
           "size": 3386
         },
         {
           "path": "scripts/query_table.py",
-          "sha256": "c964908cf9441eb0e218bc54ba7a2589db268eea5e925ddf7812ac5c43e66d59",
-          "size": 10827
+          "sha256": "a759f4d7a779c37ad4e9727baf94fe82902e6e65cf5e7b91e04f36a5ab0e532d",
+          "size": 10857
         },
         {
           "path": "scripts/read_table.py",
-          "sha256": "25e4b80ed21b34b7bd22156206ac1834d4e1d03b26c12e95a0eb2b0804dddf8c",
-          "size": 3695
+          "sha256": "67822252ffdfb4a62b7e694f44ac877b4b1e19378902359fc8baf7acdd5e6f51",
+          "size": 3725
         },
         {
           "path": "scripts/table_common.py",
-          "sha256": "7e3f612f0271d17b1d6a2f5ed7fd36828f04f51f73439fef860acc4e0c7f9b1e",
-          "size": 16809
+          "sha256": "a12edfc2803f94d0618e4ada98b499f35766e857531012a6a36704e530d457d6",
+          "size": 17802
         },
         {
           "path": "tests/test_table_tools.py",
-          "sha256": "128389ea22227f24098ee7e279bfcf1bb0b3aca5ad8b41a3fe2db2816639c6d3",
-          "size": 4622
+          "sha256": "89081813303613f7b1c04ee1eacc158e5e8256da4af46c08a76ab795ea799a48",
+          "size": 9162
         }
       ],
       "install_specs": [
@@ -3731,7 +3731,7 @@
       "name": "table_tools",
       "slug": "table_tools",
       "type": "script",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "when_to_use": "The user attached a CSV or XLSX file and asks to inspect, summarize, filter, compare, group, sort, or calculate from its data."
     },
     {
