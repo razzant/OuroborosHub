@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import pathlib
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,8 +23,27 @@ _EARLY_CONTINUATION = 2
 _BUSY_RETRY_SEC = {"conversation": 1.0, "capacity": 5.0}
 # The Host did not say whether this place allows sending. The outbox counts a hold by its prefix.
 PLACE_POLICY_UNREAD = "Held: It retries by itself."
+# Why a capability check made no request (HostCapabilities.unasked): this skill's Ouroboros access token (the
+# X-Skill-Token the Host issues) could not be had, so Ouroboros was not asked, which is not "no answer".
+UNASKED_SKILL_TOKEN = "skill_token_unavailable"
 # The Host refused this skill itself (no grant, turned off, unreviewed or a stale token): only its owner can change that.
 SKILL_ACCESS_REFUSED = "Held: Check this skill's access in Skills."
+# Holds only the owner can end, by the type of the Host's answer: the skill's access was refused, or the place is not
+# connected (the Host's own words say how to connect it). The outbox keeps this kind beside the note.
+HOLD_SKILL_ACCESS = "skill_access"
+HOLD_PLACE_NOT_CONNECTED = "place_not_connected"
+OWNER_HOLD_KINDS = frozenset({HOLD_SKILL_ACCESS, HOLD_PLACE_NOT_CONNECTED})
+
+
+class HoldNote(str):
+    """A hold note (``Held: …``) that also says which Host answer produced it (``kind``, "" for an ordinary pause)."""
+
+    kind = ""
+
+    def __new__(cls, note: str, kind: str = "") -> "HoldNote":
+        value = super().__new__(cls, note)
+        value.kind = kind
+        return value
 _EVENT_KEYS = {
     "source_event_id",
     "provider",
@@ -190,6 +210,23 @@ class UrllibPresenceHostTransport:
         return result
 
 
+@dataclass(frozen=True)
+class HostCapabilities:
+    """What one completed /identity check found, with its outcome (``status``) and when it ended (``checked_at``)."""
+    status: str = "unknown"  # supported | unsupported | unavailable (no answer) | unknown (never asked)
+    delivery_version: int = 0
+    places_version: int = 0
+    wake_signals: int = 0
+    identity: int = 0
+    reaction_context: int = 0
+    explicit_completion: int = 0
+    continuation_version: int = 0
+    checked_at: float = 0.0
+    # Set when the check made no request (UNASKED_SKILL_TOKEN). Its status stays "unavailable", so every gate (place
+    # holds, reactions, reports) acts as for an unanswered check; only the words differ: Ouroboros was not asked.
+    unasked: str = ""
+
+
 class PresenceHostClient:
     """Submit provider events and poll deferred work through one Host permission."""
 
@@ -205,47 +242,88 @@ class PresenceHostClient:
         self.token_provider = token_provider
         self.host_base = str(host_base).rstrip("/")
         self.transport = transport or UrllibPresenceHostTransport()
-        self.delivery_reporting_status = "unknown"
-        self.delivery_reporting_version = 0
-        self.places_version = 0
-        self.presence_wake_signals = 0
-        self.presence_identity = 0
         self.connector_identity = {}
-        self.presence_reaction_context = 0
-        self.presence_explicit_completion = 0
-        # 2 only when ``/identity`` lists it; otherwise each turn waits for its terminal (0).
-        self.continuation_version = 0
+        # What the last completed /identity check found, published whole (HostCapabilities): a reader in another thread
+        # (the status route) takes the record once and never pairs one check's fields with another's.
+        self.capabilities = HostCapabilities()
+        # One /identity check at a time: a caller arriving while it runs (the poll loop, a worker, a reaction's gate)
+        # waits for that check and gets its answer; no second request, so no later check can be published over it.
+        self._discovery: Optional[asyncio.Future] = None
+        self._discovery_task: Optional[asyncio.Task] = None
+
+    # The record's fields under the names the transport has always read.
+    delivery_reporting_status = property(lambda self: self.capabilities.status)
+    delivery_reporting_version = property(lambda self: self.capabilities.delivery_version)
+    places_version = property(lambda self: self.capabilities.places_version)
+    presence_wake_signals = property(lambda self: self.capabilities.wake_signals)
+    presence_identity = property(lambda self: self.capabilities.identity)
+    presence_reaction_context = property(lambda self: self.capabilities.reaction_context)
+    presence_explicit_completion = property(lambda self: self.capabilities.explicit_completion)
+    # 2 only when ``/identity`` lists it; otherwise each turn waits for its terminal (0).
+    continuation_version = property(lambda self: self.capabilities.continuation_version)
+    # When the last /identity check ended (answered or not): the card words its capabilities as that past check.
+    identity_checked_at = property(lambda self: self.capabilities.checked_at)
 
     async def discover_delivery_support(self) -> int:
-        if self.delivery_reporting_status in {"supported", "unsupported"}:
-            return self.delivery_reporting_version
+        """The Host's /identity answer: once settled (supported or unsupported) it is kept for this client's life, as
+        SKILL.md says and 0.13.0 did; while unknown or unanswered, one shared check asks again."""
+        if self.capabilities.status in {"supported", "unsupported"}:
+            return self.capabilities.delivery_version
+        if self._discovery is None or self._discovery.done():
+            loop = asyncio.get_running_loop()
+            done = self._discovery = loop.create_future()
+            self._discovery_task = loop.create_task(self._check_identity(done))
+            # Also when the check is cancelled before it ever ran (its own finally then never runs).
+            self._discovery_task.add_done_callback(lambda _task: done.done() or done.set_result(None))
+        # shield: a caller cancelled while it waits leaves the check running for the others. The future is always
+        # resolved (see _check_identity), even when the check itself is cancelled, so no caller waits for ever.
+        await asyncio.shield(self._discovery)
+        return self.capabilities.delivery_version
+
+    async def _check_identity(self, done: asyncio.Future) -> None:
+        """One /identity request, published as one fresh HostCapabilities record; then ``done`` is resolved."""
+        record: Optional[HostCapabilities] = None
         try:
+            try:
+                headers = self._headers()
+            except Exception:
+                # Without this skill's token no request is made: the check was not asked (never "no answer").
+                record = HostCapabilities(status="unavailable", unasked=UNASKED_SKILL_TOKEN, checked_at=time.time())
+                return
             response = await self.transport.request_json(
-                "GET", f"{self.host_base}/identity", headers=self._headers(),
+                "GET", f"{self.host_base}/identity", headers=headers,
                 payload=None, timeout_sec=10.0,
             )
-            self.delivery_reporting_version = int(response.get("presence_delivery_version") == 1)
+            delivery_version = int(response.get("presence_delivery_version") == 1)
             version = response.get("places_version")
-            self.places_version = int(type(version) is int and version >= 1)
-            self.presence_wake_signals = int(response.get("presence_wake_signals") == 1)
-            self.presence_identity = int(response.get("presence_identity") == 1)
-            # A JSON true is not the capability; bool compares equal to 1 in Python.
-            self.presence_reaction_context = int(type(response.get("presence_reaction_context")) is int
-                                                 and response["presence_reaction_context"] == 1)
-            self.presence_explicit_completion = int(type(response.get("presence_explicit_completion")) is int
-                                                    and response["presence_explicit_completion"] == 1)
             # The scalar ``presence_continuation_version`` stays 1 for deployed consumers; the list decides.
             versions = response.get("presence_continuation_versions")
-            self.continuation_version = _EARLY_CONTINUATION if isinstance(versions, list) and any(
-                type(item) is int and item == _EARLY_CONTINUATION for item in versions) else 0
-            self.delivery_reporting_status = "supported" if self.delivery_reporting_version else "unsupported"
+            record = HostCapabilities(
+                status="supported" if delivery_version else "unsupported",
+                delivery_version=delivery_version,
+                places_version=int(type(version) is int and version >= 1),
+                wake_signals=int(response.get("presence_wake_signals") == 1),
+                identity=int(response.get("presence_identity") == 1),
+                # A JSON true is not the capability; bool compares equal to 1 in Python.
+                reaction_context=int(type(response.get("presence_reaction_context")) is int
+                                     and response["presence_reaction_context"] == 1),
+                explicit_completion=int(type(response.get("presence_explicit_completion")) is int
+                                        and response["presence_explicit_completion"] == 1),
+                continuation_version=_EARLY_CONTINUATION if isinstance(versions, list) and any(
+                    type(item) is int and item == _EARLY_CONTINUATION for item in versions) else 0,
+                checked_at=time.time())
         except (PresenceHostError, OSError, TimeoutError, asyncio.TimeoutError):
-            self.delivery_reporting_status = "unavailable"
-            self.delivery_reporting_version = 0
-            self.continuation_version = 0
-            self.presence_reaction_context = 0
-            self.presence_explicit_completion = 0
-        return self.delivery_reporting_version
+            # No answer: a fresh record, nothing carried from any earlier one; the next caller asks again.
+            record = HostCapabilities(status="unavailable", checked_at=time.time())
+        except Exception:
+            # Any other failure of this check is also no answer: callers share it, so it is never raised into them.
+            record = HostCapabilities(status="unavailable", checked_at=time.time())
+        finally:
+            # A settled answer is never replaced (none can be in flight once one is settled; this keeps it so).
+            if record is not None and self.capabilities.status not in {"supported", "unsupported"}:
+                self.capabilities = record
+            if not done.done():
+                done.set_result(None)  # also when this check was cancelled: the callers go on with what is known
 
     async def place_hold(self, account_id: str, conversation_id: str, thread_id: str = "") -> str:
         await self.discover_delivery_support()
@@ -264,9 +342,9 @@ class PresenceHostClient:
             # "Not connected" and a refused skill are the Host's answers, not an unread policy:
             # the first says what to do in its own words; the second waits for the owner, not for a retry.
             if exc.payload.get("code") == "presence_auth_blocked":
-                return SKILL_ACCESS_REFUSED
+                return HoldNote(SKILL_ACCESS_REFUSED, HOLD_SKILL_ACCESS)
             words = exc.payload.get("error") if exc.payload.get("code") == "place_not_connected" else ""
-            return f"Held: {words}" if words else PLACE_POLICY_UNREAD
+            return HoldNote(f"Held: {words}", HOLD_PLACE_NOT_CONNECTED) if words else PLACE_POLICY_UNREAD
         except (PresenceHostError, OSError, TimeoutError):
             return PLACE_POLICY_UNREAD
         state = place.get("state")
@@ -462,5 +540,6 @@ __all__ = [
     "PresenceHostTransport",
     "PresenceSubmission",
     "PresenceWorkResult",
+    "UNASKED_SKILL_TOKEN",
     "load_binding_id",
 ]

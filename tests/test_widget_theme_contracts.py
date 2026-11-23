@@ -18,6 +18,7 @@ DASHBOARDS = (
     "smart_lists",
     "calendar",
     "slack-bridge",  # transport card, module widget.js
+    "telegram-bot",  # transport card, module widget.js
 )
 # memory-atlas is an ES module entry (render.entry_type: module) that only PluginAPI 2.1 hosts load, and every one of
 # them has the theme bridge: it keeps no legacy palette and is checked by the module test below, and in a real host

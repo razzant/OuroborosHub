@@ -133,6 +133,13 @@ jobs:
         run: |
           echo "OUROBOROS_PRESENCE_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
           echo "OUROBOROS_IDENTITY_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
+      # The Telegram Transport card's browser test mounts it through the same core's module bridge in Chromium and
+      # WebKit. Without the browsers it fails (TRANSPORT_WIDGET_REQUIRE_BROWSERS in scripts/ci_checks.py); it never skips.
+      - name: Install Playwright's browsers for the Telegram Transport card
+        if: matrix.suite == 'telegram-bot'
+        run: |
+          python -m pip install 'playwright==1.62.0'
+          python -m playwright install --with-deps chromium webkit
       # The Chrome adapter's tests are Node's own. They need Node and the exact npm closure skills/chrome_browser/pins.json
       # records; the version is read from that file, and the tests verify every pinned file by hash. A different closure
       # fails them; they never skip. memory-atlas's formatter tests (test_transfer_words.py) need Node 20 or newer too.
