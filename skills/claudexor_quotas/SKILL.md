@@ -1,7 +1,7 @@
 ---
 name: claudexor_quotas
-description: "Claudexor quota dashboard and read-only quota_summary: sorted account bars, per-window and calibrated joint timelines, reported resets, measured pace, dated account resources and reversible row visibility. The optional granted context snapshot supplies the same figures at eligible host context tails; no routing, account changes or automatic provider refresh."
-version: 0.13.1
+description: "Claudexor quota dashboard and read-only quota_summary: measured reserve, reported resets, watched pace and dated resources. Eligible hosts may show a brief advisory snapshot. No automatic provider refresh or routing changes."
+version: 0.13.2
 type: extension
 runtime: python3
 entry: plugin.py
@@ -12,8 +12,8 @@ context_snapshot:
 env_from_settings: []
 when_to_use: "The owner wants quota windows, resets and remaining reserve of the authorized Claudexor accounts; or, before choosing executors, the model wants measured reserve by family and limit. Advisory only: never a dispatch guarantee or a pin change."
 model_experience:
-  what_model_sees: "One read-only quota_summary tool with a fixed schema returns reserve, coverage, resets, measured pace, joint metrics and individually dated resources. Separately, when the host grants context_snapshot, the collector publishes a deterministic local snapshot for eligible integrating contexts: the host shows its full text once, adds one outdated note when it changes or its validity ends (current figures then come from quota_summary or the host's snapshot reader), shows the current text in full again when the conversation is next rebuilt, and withdraws it when unavailable; no provider calls or dispatch authority."
-  token_effect: "Fixed tool schema/description while enabled; voluntary calls add JSON, smaller per family. The optional granted snapshot costs its full text once per context build plus at most one short outdated note until the next rebuild, however often the figures change; validity and withdrawal are honored. No automatic tool call or prompt-cache benefit is promised."
+  what_model_sees: "Where the extension is active and its tool is exposed, read-only quota_summary gives measured reserve, coverage, resets, watched pace and dated resources. Eligible host contexts can show a short snapshot with window scopes, coverage, restriction flags and watched pace. On hosts that expose the state-file reader, query_data can read the dated envelope including optional details. Neither surface grants dispatch authority."
+  token_effect: "Fixed schema when quota_summary is exposed; calls add JSON with group and row limits, not a fixed byte size. Eligible hosts show up to 900 characters of text plus the host's note frame. Older snapshot-capable hosts may show changed text again. Optional details is not injected automatically. The state file is at most 32,768 UTF-8 bytes."
 timeout_sec: 180
 contributes:
   - id: quota
@@ -31,18 +31,24 @@ ui_tab:
     entry: widget.js
     appearance: host
     start: auto
+    page: costs
 ---
 
-# Claudexor Quotas (v0.13.1)
+# Claudexor Quotas (v0.13.2)
 
 The composer quota chip opens this widget. `GET chip` uses the same passive
 cached read as `quotas?reuse=1&chart=0`; it never requests provider refresh.
-`quota_chip.py` formats the summary's tightest measured limit per family:
-average remaining share across measured accounts, never a sum across limits.
-Its text is at most 24 characters, prioritizing the lowest remaining families;
-the title lists every family and its reported next reset (or unknown), the
-reset in the time zone of the machine running the skill ("2026-10-30 23:00 JST");
-a value without a zone, or one that zone cannot hold, is shown as it was sent.
+`quota_chip.py` formats the summary's tightest measured limit per family.
+`Codex avg 35%`, for example, is the unweighted average of fresh account shares
+for that one limit, not a percentage of the combined quota. The text is at
+most 24 characters: it gives priority to the lowest remaining families and
+shortens a long family name before cutting `avg` or the number. The title
+names each family's limit and counts fresh readings among accounts known for
+it. Accounts with no reading and unknown applicability are separate; a cached
+account list is called last known, and an unavailable list gives no denominator.
+The next reported reset (or unknown) stays in the title in the skill host's
+time zone ("2026-10-30 23:00 JST"); a value without a zone, or one that zone
+cannot hold, is shown as it was sent.
 Color thresholds are display formatting only: <=10% bad, <=25% warn, otherwise
 ok. Unavailable readings show a muted “—” with the reason; unknown is not zero.
 
@@ -77,6 +83,61 @@ it (`api.get_state_dir()`):
 - `quota_collector.lock` — an empty lease file, never removed while the skill
   runs. Its OS lock serializes collector cycles across unload/reload; it holds
   no account or quota data. SQLite may also keep its standard WAL/SHM files.
+
+## What changed in 0.13.2
+
+- **Compact published context snapshot (`text`) with on-demand `details`.**
+  The collector publishes one short factual `text` (`quota_context.brief_text`,
+  at most 900 characters, independent of account count) for supporting hosts.
+  For each window it carries, it gives the family and window, explicit scope
+  (never presenting a model/prefix/kind/unreadable limit as universal), current
+  measured reserve and coverage, a marker and the measured subtotal without
+  flags when restrictions occur, measured exhaustion apart from missing readings
+  or unknown applicability, and trailing-hour watched pace and its coverage.
+  Zero unflagged reserve does not mean quota is exhausted; per-flag counts can
+  overlap. Unknown account state alone is not a hold. A cached or unknown roster
+  is named; counts concern this summary only. Joint figures, per-flag subtotals,
+  resets and resource values stay in the longer views, within their bounds. The
+  resource pointer names `quota_summary` and does not imply a request can run.
+  On hosts with the #2333 delivery bound, eligible contexts show the text once
+  per build and can add one notice of change or withdrawal until rebuild.
+  Earlier snapshot-capable hosts may show changed text again. The 900-character
+  bound is per published `text`, not a promise about what's already in the
+  conversation or which contexts receive the note.
+- **Dated details and freshness.** `context-snapshot.json` carries `schema_version`,
+  `observed_at`, `valid_until` and `text`. The previous `quota_context.snapshot_text`
+  layout (up to 12,000 characters) is kept in optional `details` under the same
+  32,768-byte UTF-8 file bound. On hosts that expose the state reader, use
+  `query_data(op="json",kind="skill_state",ids=["claudexor_quotas"],state_file="context_snapshot")`.
+  Read the whole envelope for `observed_at` and `valid_until`: successful access
+  is not proof the reading is current. If the file is expired or cannot be
+  read, ask `quota_summary` for available current readings where the extension
+  is active and the tool is exposed. Both snapshot views distinguish extra names
+  carried by a summary row from names it already omitted. The tool also caps
+  groups and rows; neither view promises every window of a family.
+  After a successful sweep the collector rewrites atomically if `text` or
+  `details` changes, or validity nears expiry or tightens. Validity is at most
+  420 seconds after the read. Reported resets of measured or competing current
+  readings, limits on counted last-known readings, known ends of holds (including
+  those from windows outside the summary), and resource/grant expiries can make
+  it shorter. Without a reported reset, the last-known age limit is its window
+  length (24 hours if unknown). The live tool still counts that dated value at
+  the exact age limit. At that instant a new file stops counting it and can
+  still publish changes for other accounts. A local age limit or end of a
+  cooldown is not a reported quota reset. A failed sweep writes nothing.
+- **Quota chip averages.** `Codex avg 35%` denotes a simple average of fresh
+  readings for one limit. The tooltip names the window, fresh coverage and
+  next reported reset; it adds duration and scope to distinguish repeated
+  limit names. The 24-character chip keeps the tightest family first. If only
+  one family fits, the others remain in the tooltip and the full widget.
+- **Costs page opt-in (`page: costs`).** The widget's `ui_tab.render`
+  declaration in `SKILL.md` and `api.register_ui_tab("quotas", ...)` in
+  `plugin.py` opt the same live widget into Dashboard › Costs. It still has its
+  home on Widgets; earlier hosts that do not recognize `page` show it only there.
+  This is placement, not a grant or a different widget. The six requested
+  permissions are unchanged, but 0.13.1 grants do not carry over to a changed
+  release digest; this release needs its own grants after acceptance, whether
+  granted explicitly or by the host's enabled auto-grant policy.
 
 ## What changed in 0.13.1
 
@@ -122,8 +183,8 @@ it (`api.get_state_dir()`):
   host process that already loaded a build that registered the catalog (0.13.0)
   keeps that entry until Ouroboros restarts; the PluginAPI offers no way to
   remove it, and this release does not reach into the host to try.
-- **Bounded context snapshot.** The whole UTF-8 JSON envelope stays within the
-  host's 32,768-byte bound and the text within 12,000 characters. Whole
+- **Bounded context snapshot.** This release capped the whole UTF-8 JSON envelope
+  at 32,768 bytes and the then single text at 12,000 characters. Whole
   lower-priority lines are dropped with an omission notice. Each limit line names
   its whole scope: models and family prefixes together, request kinds, the
   unspecified-model flag, unreadable or history-digest scope, and list remainders. Header scope and
@@ -258,9 +319,10 @@ also changes one `chip` field.
 
 ## What changed in 0.12.1
 
-- **A steady snapshot text.** The context snapshot changes only when a printed
-  fact changes. A current resource reading carries no observation time (the
-  snapshot envelope dates the text), so equal current facts fold into one
+- **A steady snapshot text.** The rendered text changes only when a printed
+  fact changes, independently of envelope validity renewal. A current resource
+  reading carries no observation time (the snapshot envelope dates the text),
+  so equal current facts fold into one
   counted line; a last-known reading keeps its date. Measured pace and the
   conditional account-hours print at one decimal like the other derived
   figures (a positive value below that resolution is never 0), and reported
@@ -325,34 +387,16 @@ also changes one `chip` field.
   row without unhiding it, so the timeline and Combined remain reachable.
   "Show all rows" undoes this family's hides only. Saves use the legacy prefs'
   frame/sequence ordering; the newest 64 hidden keys are retained.
-- **Context snapshot.** A host that bounds passive snapshots (Ouroboros #2333) shows
-  the full text once per context build; a changed text or an ended validity adds one
-  outdated note naming where the current text is read, and later changes add nothing
-  until the conversation is next rebuilt. `quota_summary` gives the current figures at
-  any moment. This version declares the `context_snapshot` permission:
-  it requires a host supporting that declaration and its grant before the whole
-  extension can be enabled. The skill remains optional; installing it does not
-  offer a separate ungranted widget-only mode. After a successful sweep the collector writes
-  `context-snapshot.json` (`schema_version`, `observed_at`, `valid_until`,
-  `text`) — the tool's own figures as one deterministic text; derived
-  figures print at one decimal (capacity and hours marked ≈), reported
-  instants to the nearest second, current readings without a poll time. An
-  unchanged text is not rewritten until its validity nears its end; a failed
-  sweep writes nothing, so the file expires. Validity is at most 420 seconds
-  after the successful read and never beyond the exact earliest reported quota
-  reset or a current resource reset/period end (no minimum lifetime or reset rounding).
-  A resource fact whose boundary passed is dated last known individually, not
-  renewed fresh and not allowed to suppress unrelated useful families. The
-  existing timestamp parser handles fractional ISO instants consistently.
-  A passed reset cannot renew a fresh claim. Stop is checked after computation
-  and before atomic publication admission. The compact text includes numeric measured pace in account-windows/h
-  with its measured cohort, coverage, and resources (last-known ones dated); a family
-  with resources but no quota window is still shown, never inferred available.
-  Positive sub-hour conditional work is not rounded to zero. The default text
-  bound is 12,000 characters, not 2,400, and since 0.13.1 the whole file also
-  stays within the host's 32,768 bytes; any omitted lines name their families
-  and point to the complete `quota_summary` answer. The snapshot and the tool
-  never add amounts across accounts, scopes or currencies (the widget's Cursor
+- **Context snapshot.** 0.11 introduced a passive snapshot behind the
+  `context_snapshot` permission. The former longer text now lives in optional
+  `details`; see "What changed in 0.13.2" for the current delivery and freshness
+  contract. Derived figures print at one decimal: small positive capacity, pace
+  and conditional hours print as `<0.1`, not zero. Capacity already rounded to
+  zero in the tool is labelled as such, not declared exhausted. Displayed
+  instants are rounded to the second, not the validity deadline. Passed resource
+  boundaries leave those rows dated last-known, not renewed as fresh. The
+  collector checks Stop before admission to the atomic write. The snapshot and
+  the tool never add amounts across accounts, scopes or currencies (the widget's Cursor
   billing-cycle plate is the one place that sums, under the limits stated in
   "What changed in 0.13.0"). Resource `unit`, `currency` and
   `decimal_places` are retained: integer `minor` values are scaled by exact
@@ -540,9 +584,12 @@ when they match JavaScript prototype names (for example `constructor`). These
 are regression-tested repairs; they do not establish the cause of a previously
 reported native desktop `Script error` whose stack was unavailable.
 
-The card declares `start: auto`: it is a cheap dashboard that starts
-when the Widgets page is shown and stops when the owner leaves it (the owner's
-per-card mode still wins). Its icon is one glyph, `◔`.
+The card declares `start: auto`: in Auto it runs while its page is shown.
+The owner's per-card mode and Stop still govern it. Its icon is one glyph, `◔`.
+
+The card opts into the Costs page (`page: costs`). A host that does not know
+that placement keeps the card on the Widgets board; the widget, its theme and
+its routes are the same either way.
 
 ## Reserve overview (quota_summary.py)
 
@@ -1090,9 +1137,13 @@ breakdowns and why pace is unknown. Since 0.7.0 each group also says
 oldest observation) with `remaining_windows_with_last_known` when any is
 carried, `unknown_accounts`, `applicability_unknown_accounts`, and a one-line
 `headline` built from the same numbers; the answer carries `cached_facets` and
-`roster` when a facet was answered from an earlier read. `remaining_windows`
-stays current readings only; with no measured account the headline leads with
-"no current reading of any of N accounts", never "0 account-windows left".
+`roster` when the list is cached or unknown. `remaining_windows` stays current
+readings only. With no measured account the headline leads with "no current
+reading of any of N accounts". A tiny measured positive rounded to zero in the
+numeric fields is printed as `<0.01` windows or `<0.1%` average in the prose
+that shows it. The headline and both snapshot texts also distinguish a tiny
+unflagged subtotal from zero; missing account state is not a proven hold.
+The numeric fields and `accounts_at_limit` are unchanged.
 `exhaust_before_reset` counts the accounts whose recent pace, continued, would
 reach the limit before their reported reset; those with no reported reset that
 would reach it are counted apart (`reach_limit_no_reported_reset`,
@@ -1106,8 +1157,8 @@ chat or writes memory.
 
 The tool's schema and description are static; tool numbers appear only in its
 result when called. Nothing calls the tool automatically or guarantees a
-prompt-cache hit. Independently, the granted `context_snapshot` contract above
-allows the host to append the collector's local text at eligible context tails.
+prompt-cache hit. The separate passive snapshot is published by the collector,
+not a tool call; see "What changed in 0.13.2" for its host and reader limits.
 
 ## What it reads
 
@@ -1347,18 +1398,26 @@ The skill declares no secrets (`env_from_settings: []`). Its permissions are
 - `route` + `widget` — the widget and its quotas, refresh, display and legacy prefs
   routes, plus its tab;
 - `tool` — the read-only `quota_summary` tool;
-- `supervised_task` — the one history collector described above;
-- `context_snapshot` — the optional reviewed declaration and separate host grant
+- `supervised_task` — the one history collector described in "History and the
+  collector (quota_history.py)";
+- `context_snapshot` — this release's reviewed declaration and hash-bound grant
   for the collector's local snapshot; not permission to refresh, route or spend.
 
 No secret key grant is required. Everything the skill writes lives in its own
 state directory: legacy `prefs.json`, row-visibility `display.json`, the dated
 `context-snapshot.json`, and the bounded history. History contains no account name,
-address, credential or raw response; the snapshot carries the tool's bounded
-resource facts, not credentials. One write happens outside it, made by the host
+address, credential or raw response; the snapshot's compact `text` and optional
+`details` field carry the tool's bounded summary and resource facts, not
+credentials. One write happens outside it, made by the host
 at the skill's request: a missing phrase reported to `POST /api/ui/i18n/missing`
 goes into the host's own translation queue (`state/i18n/<language>.pending.json`
 under the Ouroboros data directory), and the host's translator then translates it
 with the owner's light model, an accounted model call the owner pays for. With
 English or no language chosen nothing is reported.
-Enabling a reviewed skill remains the owner's action in Skills.
+
+The extension must be accepted, enabled and loaded with its required grants.
+Without the `context_snapshot` grant for this digest the extension cannot run:
+there is no widget-only or tool-only mode. On an active installation, prompt
+delivery and on-demand state reads depend on host support and eligibility;
+`quota_summary`, where exposed, does not need the state-file reader. Costs
+placement affects only where the live widget appears, not whether it can run.

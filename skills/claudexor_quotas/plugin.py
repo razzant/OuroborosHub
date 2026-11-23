@@ -1497,6 +1497,7 @@ def reserve_view(
     kind: str = "text",
     families: bool = False,
     echo: Optional[Dict[str, Any]] = None,
+    for_snapshot: bool = False,
 ) -> Dict[str, Any]:
     """The one reserve calculation the widget and the tool share. History is
     read, never written, here. ``cached``/``reads``: see build_view.
@@ -1539,11 +1540,21 @@ def reserve_view(
             norm, groups = qs.prepare(payload, now, cached)
             view = read(norm, groups, chart_calc)
             state = qs.finish(norm, groups, view, now)
+    quota_boundary = None
+    if for_snapshot:
+        # Apply the file's validity policy before projecting the same members,
+        # including history-only slots. No additional history or status read.
+        quota_boundary = min(
+            (end for group in state.groups for member in group.slots
+             if (end := member.prepare_snapshot(now)) is not None), default=None,
+        )
     out: Dict[str, Any] = {
         "summary": qs.build_summary(payload, view, now, status_read_at=status_read_at, state=state,
                                     reads=reads if reads is not None else qs.facet_reads(payload),
                                     name_accounts=name_accounts),
     }
+    if for_snapshot:
+        out["quota_boundary"] = quota_boundary
     if chart:
         out["chart"] = qs.build_chart(state, chart_calc.key if chart_calc else "", harness, horizon)
         if analytics and out["chart"] is not None:
@@ -1873,13 +1884,15 @@ def compact_analytics(found: Dict[str, Any], wanted: str = "") -> Dict[str, Any]
 def answer_of(store: Optional[quota_history.HistoryStore], effective: Optional[Dict[str, Any]],
               cached: Optional[Dict[str, float]], payload: Optional[Dict[str, Any]],
               status_read_at: Optional[float], moment: float, wanted: str = "",
-              detail: bool = False) -> Dict[str, Any]:
-    """The model tool's answer for one status read — and, byte for byte, the
-    source the context snapshot's text is built from, so the two cannot
-    disagree."""
+              detail: bool = False, *, for_snapshot: bool = False) -> Dict[str, Any]:
+    """One status read supplies the tool and the context snapshot; internal
+    publication metadata is not part of the tool's answer."""
     result = reserve_view(store, effective, status_read_at, moment, chart=False, cached=cached,
-                          reads=qs.facet_reads(payload), families=True, echo=qr.scope_echo(effective))
-    answer = qs.compact(result["summary"], wanted, detail)
+                          reads=qs.facet_reads(payload), families=True, echo=qr.scope_echo(effective),
+                          for_snapshot=for_snapshot)
+    answer = qs.compact(result["summary"], wanted, detail, for_snapshot=for_snapshot)
+    if for_snapshot:
+        answer["_quota_boundary"] = result["quota_boundary"]
     answer["joint"] = compact_analytics(result.get("analytics") or {}, wanted)
     kept = "quota" in (cached or {})
     answer["availability_scope"] = qr.scope_echo(effective)
@@ -1902,19 +1915,20 @@ def publish_snapshot(api: Any, store: Optional[quota_history.HistoryStore],
                      latest: LatestRead, *, control=None) -> str:
     """After a successful sweep the collector offers the host one complete
     snapshot (quota_context). A failed or unreadable sweep writes nothing: the
-    last file simply expires and the host says so once — no stale text is
-    ever refreshed as a measurement."""
+    last file simply expires; the collector does not renew stale text as a
+    measurement."""
     if error or not isinstance(payload, dict) or qs.facet_reads(payload)["quota"] != "ok":
         return "skipped"
     effective, cached = latest.effective(payload)
-    answer = answer_of(store, effective, cached, payload, read_at, read_at)
+    answer = answer_of(store, effective, cached, payload, read_at, read_at, for_snapshot=True)
     if control is not None:
         control.check()
-    text = quota_context.snapshot_text(answer)
-    reset = quota_context.earliest_reset(answer)
-    return quota_context.publish(Path(api.get_state_dir()), text, read_at,
-                                 qs.parse_instant(reset) if reset else None, qs.iso_exact, qs.parse_instant,
-                                 control=control)
+    text = quota_context.brief_text(answer)
+    details = quota_context.snapshot_text(answer, reserved_text=text)
+    boundaries = (qs.parse_instant(quota_context.earliest_reset(answer)), answer["_quota_boundary"])
+    boundary = min((end for end in boundaries if end is not None), default=None)
+    return quota_context.publish(Path(api.get_state_dir()), text, read_at, boundary, qs.iso_exact, qs.parse_instant,
+                                 control=control, details=details)
 
 
 def tool_answer(
@@ -2422,6 +2436,6 @@ def register(api: Any) -> None:
         icon=UI_ICON,
         render={
             "kind": "module", "entry": "widget.js", "appearance": "host",
-            "span": 2, "start": "auto",
+            "span": 2, "start": "auto", "page": "costs",
         },
     )

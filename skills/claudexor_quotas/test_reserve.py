@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 import plugin
 import quota_history
@@ -1273,6 +1274,12 @@ def test_registration_records_one_collector_and_starts_nothing(tmp_path, monkeyp
     assert not any(ch.isdigit() for ch in static)  # numbers only ever in results
     assert host.tabs["quotas"]["render"]["start"] == "auto"
     assert len(host.tabs["quotas"]["icon"]) == 1 and host.tabs["quotas"]["icon"] != "gauge"
+    # The Costs page opt-in, in the registration and in the manifest the host parses.
+    assert host.tabs["quotas"]["render"]["page"] == "costs"
+    manifest = yaml.safe_load(
+        Path(plugin.__file__).with_name("SKILL.md").read_text(encoding="utf-8").split("---", 2)[1])
+    assert manifest["ui_tab"]["render"]["page"] == "costs"
+    assert manifest["ui_tab"]["render"]["entry"] == "widget.js"
 
 
 def test_many_widget_frames_do_not_add_collectors(tmp_path, monkeypatch):

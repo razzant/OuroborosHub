@@ -325,8 +325,8 @@ variable a suite names is checked on its own, so two of them (Telegram User Sess
 theme roots, or Memory Atlas's `ATLAS_CORE` beside `ATLAS_HOST_ROOT`) can name different checkouts;
 CI names one checkout per job.
 
-The `claudexor-quotas` suite needs Node 24, pytest, Playwright and its Chromium
-and WebKit builds. `OUROBOROSHUB_NODE` selects an existing Node executable;
+The `claudexor-quotas` suite needs Node 24, pytest, PyYAML, and Playwright with its
+Chromium and WebKit builds. `OUROBOROSHUB_NODE` selects an existing Node executable;
 `PLAYWRIGHT_BROWSERS_PATH` selects the browser cache. Run with
 `QUOTAS_REQUIRE_RUNTIME=1 python -m pytest skills/claudexor_quotas` to fail on
 missing runtimes. `QUOTAS_RU_JSON` optionally supplies an installation-generated
