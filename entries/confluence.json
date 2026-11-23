@@ -7,13 +7,17 @@
   "install_specs": [
     "httpx>=0.27.0"
   ],
+  "mark": "Confluence key",
   "name": "confluence",
+  "needs": "needs a Confluence Cloud site and an API token",
   "owner": "razzant",
+  "pitch": "Search, read and edit pages",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/confluence"
   },
+  "title": "Confluence",
   "type": "extension",
   "version": "0.1.2",
   "withdrawn": null

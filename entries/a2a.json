@@ -18,13 +18,17 @@
       "package": "a2a-sdk[http-server]>=1.0.0,<2.0.0"
     }
   ],
+  "mark": "",
   "name": "a2a",
+  "needs": "",
   "owner": "razzant",
+  "pitch": "Talk with other AI agents over A2A",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/a2a"
   },
+  "title": "Agent to agent",
   "type": "extension",
   "version": "1.5.3",
   "when_to_use": "User asks to communicate with another A2A-compatible agent, discover an agent card, send an A2A message, check A2A task status, or expose this Ouroboros instance as an A2A peer.",

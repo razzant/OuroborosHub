@@ -4,14 +4,17 @@
   ],
   "description": "Token and cache dashboard with exact intraday intervals, daily Week/Month/All bars, Custom dates, weighted cache hit rate, cache writes, measurement coverage and automatic local archive indexing.",
   "digest": "7c40c757698dc208d2d9b25704d19f5ceedc82c1add8ea13fdbff0ec96067878",
+  "mark": "",
   "name": "cache_efficiency_snapshot",
+  "needs": "",
   "owner": "razzant",
+  "pitch": "Token usage and cache hit rate",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/cache_efficiency_snapshot"
   },
-  "title": "Cache Efficiency Snapshot",
+  "title": "Tokens & cache",
   "type": "extension",
   "version": "0.8.2",
   "withdrawn": null

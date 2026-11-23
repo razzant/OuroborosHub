@@ -8,13 +8,17 @@
     "httpx>=0.24.0",
     "cryptography>=41.0.0"
   ],
+  "mark": "Google access",
   "name": "google-workspace",
+  "needs": "needs Google OAuth credentials or a service account",
   "owner": "razzant",
+  "pitch": "Docs, Sheets and Drive",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/google-workspace"
   },
+  "title": "Google Workspace",
   "type": "extension",
   "version": "0.3.0",
   "withdrawn": null

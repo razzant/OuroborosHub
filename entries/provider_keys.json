@@ -4,14 +4,17 @@
   ],
   "description": "Account credit, key limits and provider-reported usage for configured provider keys.",
   "digest": "cfc5fb1f686a3b92b20739e51d44a2ff98b4c1e2098a0444c3c4584e2354c6c1",
+  "mark": "provider key",
   "name": "provider_keys",
+  "needs": "needs an API key already configured for a supported provider",
   "owner": "ouroboros-agent",
+  "pitch": "Credit and limits of your API keys",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/provider_keys"
   },
-  "title": "Provider keys",
+  "title": "Provider balances",
   "type": "extension",
   "version": "1.0.3",
   "when_to_use": "Open Widgets to compare balances and spending limits for configured API connections.",

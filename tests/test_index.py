@@ -114,6 +114,7 @@ class IndexTests(unittest.TestCase):
             {'source': {'kind': 'hosted', 'path': 'skills/another'}},
             {'source': {'kind': 'hosted', 'path': '../demo'}}, {'source': {}},
             {'title': ''}, {'title': 7}, {'title': 'Two\nlines'}, {'title': ' Padded'},
+            {'pitch': ''}, {'pitch': 7}, {'pitch': 'Two\nlines'}, {'needs': ' Padded'}, {'mark': 3},
         ]
         for changes in mutations:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -175,9 +176,14 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(entry['title'], 'Demo tools')
         builder.validate_entry(entry, {'search'})
         self.assertEqual(builder.build_catalog(self.root)['skills'][0]['title'], 'Demo tools')
-        self.write('entries/demo.json', {**entry, 'title': 'Something else'})
-        with self.assertRaisesRegex(ValueError, 'title must derive'):
-            builder.build_catalog(self.root)
+        # The entry's title is the catalog's own wording: it may differ, and a refresh keeps it.
+        worded = {**entry, 'title': 'Something else', 'pitch': 'Does a thing', 'needs': '', 'mark': ''}
+        self.write('entries/demo.json', worded)
+        builder.validate_entry(worded, {'search'})
+        self.assertEqual(builder.build_catalog(self.root)['skills'][0]['title'], 'Demo tools')
+        self.assertEqual(builder.main(['--refresh', 'demo'], root=self.root), 0)
+        self.assertEqual(builder.read_json(self.root / 'entries/demo.json')['title'], 'Something else')
+        self.assertEqual(builder.read_json(self.root / 'entries/demo.json')['pitch'], 'Does a thing')
         # An entry may omit the field; the manifest still names the v1 row.
         self.write('entries/demo.json', {k: v for k, v in entry.items() if k != 'title'})
         self.assertEqual(builder.build_catalog(self.root)['skills'][0]['title'], 'Demo tools')
@@ -185,6 +191,13 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(builder.main(['--refresh', 'demo'], root=self.root), 0)
         self.assertNotIn('title', builder.read_json(self.root / 'entries/demo.json'))
         self.assertNotIn('title', builder.build_catalog(self.root)['skills'][0])
+
+        # A valid editorial title does not make a numeric manifest title valid for v1.
+        manifest.write_text('---\nversion: v3\ntitle: 2026\n---\nBody\n', encoding='utf-8')
+        self.write('entries/demo.json', {**worded, 'version': 'v3', 'digest': payload_digest(manifest.parent)})
+        self.assertEqual(builder.load_hub(self.root)[1]['demo']['title'], 'Something else')
+        with self.assertRaisesRegex(ValueError, 'demo: v1 title: must be a non-empty string'):
+            builder.build_catalog(self.root)
 
     def test_endorsements_bind_exact_release_and_recommendations_are_boolean(self):
         endorsement = {'name': 'demo', 'digest': self.entry['digest'], 'recommended': True}
