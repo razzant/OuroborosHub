@@ -4,7 +4,7 @@
       "stars": 0
     }
   },
-  "generated_at": "2026-11-22T14:19:44.964223Z",
+  "generated_at": "2026-11-23T15:11:23.816447Z",
   "schema_version": 1,
   "skills": {
     "2gis": {
@@ -150,11 +150,6 @@
     "keenable": {
       "comments": 0,
       "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/173",
-      "votes": 0
-    },
-    "kirill-menshov-premium-black": {
-      "comments": 0,
-      "discussion_url": "https://github.com/razzant/OuroborosHub/discussions/341",
       "votes": 0
     },
     "medical-lab-analyzer": {
