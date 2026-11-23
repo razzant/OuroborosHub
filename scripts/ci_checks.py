@@ -107,8 +107,9 @@ SUITES = {
                      'dependencies': ['httpx', 'starlette', 'websockets', 'telethon>=1.45,<2', 'PySocks>=1.7.1',
                                       'playwright==1.62.0'],
                      'env': {'TRANSPORT_WIDGET_REQUIRE_BROWSERS': '1'},
-                     # The real-core voice consumer drives whisper-voice's attachment adapter.
-                     'shared': ['skills/whisper-voice/attachment_tool.py'],
+                     # The real-core voice consumer drives whisper-voice's attachment adapter; the card's browser
+                     # test answers its route lease through the shared lease host.
+                     'shared': ['skills/whisper-voice/attachment_tool.py', 'tests/widget_lease_gateway.py'],
                      'core_env': 'OUROBOROS_PRESENCE_CORE_ROOT',
                      'core_imports': ['ouroboros.places:connect_place', 'ouroboros.places:edit_place',
                                       'ouroboros.places:get_place', 'ouroboros.place_intake:decide_attention',

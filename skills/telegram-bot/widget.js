@@ -415,6 +415,15 @@ var TransportKit = (function () {
             return line;
         }
 
+        /* Replace only the freshness line; a keyboard reader on Refresh stays on the new one. */
+        function swapFresh(old) {
+            var focused = old.contains(document.activeElement);
+            var line = freshNode();
+            old.replaceWith(line);
+            var button = focused ? line.querySelector('button') : null;
+            if (button) button.focus();
+        }
+
         function paint(force) {
             if (disposed) return;
             if (!state.data) {
@@ -433,7 +442,7 @@ var TransportKit = (function () {
                     var unreadSignature = 'unread:' + state.failedAt + ':' + JSON.stringify(unread);
                     if (!force && unreadSignature === state.signature) {
                         var stale = root.querySelector('.tc-fresh');
-                        if (stale) stale.replaceWith(freshNode());
+                        if (stale) swapFresh(stale);
                         return;
                     }
                     state.signature = unreadSignature;
@@ -449,7 +458,7 @@ var TransportKit = (function () {
                 // Never rebuild under the reader's press; the next paint after they let go catches up.
                 if (state.pointerDown) state.signature = '';
                 var old = state.pointerDown ? null : root.querySelector('.tc-fresh');
-                if (old) old.replaceWith(freshNode());
+                if (old) swapFresh(old);
                 return;
             }
             state.signature = signature;
@@ -466,6 +475,7 @@ var TransportKit = (function () {
             if (disposed) return;
             if (inflight) inflight.abort();
             var controller = typeof AbortController === 'function' ? new AbortController() : null;
+            var started = Date.now();
             inflight = controller;
             state.busy = true;
             paint();
@@ -476,8 +486,17 @@ var TransportKit = (function () {
                 })
                 .then(function (data) {
                     if (disposed || inflight !== controller) return;
+                    // A status answer counts as read only when it is one: an object with the string text and tone
+                    // every transport status carries for Places. Anything else (null, [], {}) is a failed read, so
+                    // the last readable snapshot and the editor stay and the card says the read failed.
+                    if (!data || typeof data !== 'object' || Array.isArray(data)
+                        || typeof data.text !== 'string' || typeof data.tone !== 'string') {
+                        throw new Error('The status answer was not a readable status');
+                    }
                     state.data = data;
                     state.readAt = Date.now();
+                    // When the read that produced this data started: a card can tell data older than its own save.
+                    state.dataStartedAt = started;
                     state.failure = '';
                 })
                 .catch(function (error) {
@@ -589,26 +608,37 @@ var TransportKit = (function () {
         var one = count(item.messages) + count(item.events) === 1;
         var them = one ? 'it' : 'them', notRetried = one ? 'it is not retried.' : 'they are not retried.';
         if (item.kind === 'link') {
-            out.lines = ((item.detail === 'provider_error' && POLL_LINES[item.failure]) || LINK_LINES[item.detail] || []).slice();
-            if (item.detail === 'provider_error') out.atLabel = 'last answer';
+            var polled = item.detail === 'provider_error' || item.detail === 'local_error';
+            out.lines = ((polled && POLL_LINES[item.failure]) || LINK_LINES[item.detail] || []).slice();
+            if (polled) out.atLabel = 'last successful answer';
             if (error) out.error = { label: 'Last error', text: error.text, at: error.at };
         } else if (item.kind === 'connect') {
             out.lines = ['Places can\u2019t offer this bot\u2019s chats to connect right now.'];
         } else if (item.kind === 'outcome_unknown') {
             out.atLabel = 'last';
-            out.lines = [
-                'Telegram\u2019s answer to the send was lost, so nobody knows whether ' + (one ? 'it' : 'they') + ' arrived. Nothing sends ' + them + ' again by itself.',
-                PART_SENT,
-                { strong: 'Check the Telegram chat first;', text: 'then you decide whether Ouroboros sends only what is missing.' }
-            ];
+            // partial: how many of them Telegram confirmed in part (an album's incomplete answer, a long message's
+            // first parts); their answer was not lost, the rest is unknown.
+            var partial = Math.min(count(item.partial), count(item.messages));
+            out.lines = partial && partial === count(item.messages)
+                ? ['Telegram confirmed part of ' + (one ? 'it' : 'each') + ', but nobody knows whether the rest arrived. '
+                    + 'Nothing sends ' + them + ' again by itself.']
+                : ['Telegram\u2019s answer to the send was lost, so nobody knows whether ' + (one ? 'it' : 'they') + ' arrived. '
+                    + 'Nothing sends ' + them + ' again by itself.'
+                    + (partial ? ' Telegram confirmed part of ' + plural(partial, 'item') + '.' : '')];
+            out.lines.push(RECEIPT_CHECK);
             if (error) out.error = { label: 'What happened', text: error.text, at: error.at };
         } else if (item.kind === 'not_delivered') {
             out.atLabel = 'last';
-            out.lines = [
-                (one ? 'It' : 'They') + ' could not be delivered; ' + notRetried,
-                PART_SENT,
-                { strong: 'Fix the cause,', text: 'then ask Ouroboros to send only what is missing.' }
-            ];
+            var sentPart = Math.min(count(item.partial), count(item.messages));
+            out.lines = [(one ? 'It' : 'They') + ' could not be delivered; ' + notRetried];
+            if (sentPart) {
+                out.lines.push(one ? 'Telegram confirmed part of it before the failure.'
+                    : 'Telegram confirmed part of ' + plural(sentPart, 'item') + ' before the failure.');
+                out.lines.push({ strong: 'Fix the cause,', text: 'then check the receipt (telegram_receipt, confirmed_messages) '
+                    + 'and ask Ouroboros to send only what is missing.' });
+            } else {
+                out.lines.push({ strong: 'Fix the cause,', text: 'then ask Ouroboros to send ' + them + ' again if needed.' });
+            }
             if (error) out.error = { label: 'Error text', text: error.text, at: error.at };
         } else if (item.kind === 'not_handed') {
             out.atLabel = 'last';
@@ -622,7 +652,7 @@ var TransportKit = (function () {
             var reasons = (item.reasons || []).filter(function (reason) { return reason.action; })
                 .concat((item.reasons || []).filter(function (reason) { return !reason.action; }));
             reasons.slice(0, 4).forEach(function (reason) {
-                if (reason.reason) out.lines.push({ strong: reason.action ? 'Needs you:' : 'Reason:', text: heldReason(reason.reason) + (reasons.length > 1 ? ' (' + num(count(reason.count)) + ')' : '') });
+                if (reason.reason) out.lines.push({ strong: reason.action ? 'Needs you:' : 'Reason:', text: heldReason(reason) + (reasons.length > 1 ? ' (' + num(count(reason.count)) + ')' : '') });
             });
             if (reasons.length > 4) out.lines.push('…and ' + plural(reasons.length - 4, 'more reason') + ' (Details › Queues counts all held items).');
             out.lines.push('Kept back until the reason clears, then sent by ' + (one ? 'itself.' : 'themselves.'));
@@ -640,7 +670,14 @@ var TransportKit = (function () {
             ];
         } else if (item.kind === 'handoff_waiting') {
             out.atLabel = 'since';
-            out.lines = ['Passing ' + them + ' to Ouroboros failed; the bot keeps trying by itself'
+            // Where the last attempts stopped (the route's stages): only "submit" is a failed handoff to Ouroboros.
+            var stages = item.stages || {}, total = count(item.events);
+            var said = [[count(stages.submit), 'passing to Ouroboros failed'],
+                [count(stages.download), 'downloading an attachment from Telegram failed'],
+                [count(stages.other), 'the last attempt failed']].filter(function (pair) { return pair[0]; });
+            var why = said.length === 1 && said[0][0] === total ? said[0][1]
+                : said.map(function (pair) { return pair[1] + ' (' + num(pair[0]) + ')'; }).join(', ');
+            out.lines = [(why ? why.charAt(0).toUpperCase() + why.slice(1) + '; t' : 'T') + 'he bot keeps trying by itself'
                 + (item.next_at ? ', next at ' + K.clock(item.next_at) + '.' : '.')];
             if (error) out.error = { label: 'Last error', text: error.text, at: error.at };
         } else if (item.kind === 'partial') {
@@ -652,8 +689,9 @@ var TransportKit = (function () {
     }
 
     /* A long message or an album can arrive in part: what reached the chat decides what is still to send. */
-    var PART_SENT = 'Part of a long message or an album may have arrived: its receipt (telegram_receipt) lists the '
-        + 'parts Telegram confirmed (confirmed_parts).';
+    /* What reached the chat decides what is still to send: the receipt lists each part Telegram confirmed. */
+    var RECEIPT_CHECK = { strong: 'Check the Telegram chat and the receipt first:', text: 'telegram_receipt lists what Telegram '
+        + 'confirmed (confirmed_messages); only you decide whether Ouroboros sends what is missing.' };
 
     var PARTIAL_LINES = {
         host_unanswered: 'Ouroboros did not answer the bot’s capability check, so reactions, delivery history and the place binding are not confirmed. The bot asks again by itself.',
@@ -661,9 +699,10 @@ var TransportKit = (function () {
         no_recent_window: 'The custody store was not read, so recent problems are unknown.'
     };
 
-    /* The skill's own fixed refusal note still names the old Skills page; say where that is now. */
-    function heldReason(text) {
-        return text === 'Check this skill\'s access in Skills.' ? 'Ouroboros refused this skill\u2019s access; check it on Telegram Transport\u2019s card in Extensions.' : text;
+    /* The route's typed kind, never the words: a refused skill's own note still names the old Skills page. */
+    function heldReason(reason) {
+        return reason.kind === 'skill_access'
+            ? 'Ouroboros refused this skill\u2019s access; check it on Telegram Transport\u2019s card in Extensions.' : reason.reason;
     }
 
     function parts(list) { return list.filter(function (part) { return part && part.text; }); }
@@ -712,8 +751,14 @@ var TransportKit = (function () {
     }
 
     /* `known` false: the saved value is not read (yet), so the field neither shows nor claims one. */
-    function groupForm(kit, data, known) {
+    function groupForm(kit, data, known, state) {
         var current = String(data.management_group_id || '');
+        // A value this card saved stays until a status read that started after the save answers: older data (kept
+        // through a failed read, or a read already out) would show the previous value and a second Save would undo it.
+        if (form.confirmedAt && !(state && state.dataStartedAt > form.confirmedAt)) {
+            current = form.confirmedValue;
+            known = true;
+        }
         var note = known === false ? (stored.state === 'failed' ? ' · saved value not read' : ' · reading…')
             : current ? ' · ' + current : ' · not set';
         if (form.node) {
@@ -767,6 +812,8 @@ var TransportKit = (function () {
                 });
             }).then(function () {
                 form.saved = value;
+                form.confirmedValue = value;
+                form.confirmedAt = Date.now();
                 stored.value = value;
                 stored.state = 'read';
                 show(value ? 'Saved.' : 'Saved: no management group.', 'ok');
@@ -805,7 +852,7 @@ var TransportKit = (function () {
         var facts = [];
         var bot = sendsAs || (data.bot_label && !/^not (connected|configured)$/.test(data.bot_label) ? data.bot_label : '');
         // A token getMe has not confirmed yet: the label shown is the earlier bot's.
-        var unconfirmed = data.connect_unavailable === 'Bot identity is unconfirmed; check the transport status';
+        var unconfirmed = data.bot_unconfirmed === true;
         if (bot) facts.push(['Bot', bot + (unconfirmed ? ' (not confirmed for the current token)' : '')]);
         if (data.last_event_at) facts.push(['Last update', K.clock(data.last_event_at, now), K.exact(data.last_event_at)]);
         if (data.last_delivery_at) facts.push(['Last delivery', K.clock(data.last_delivery_at, now), K.exact(data.last_delivery_at)]);
@@ -842,7 +889,7 @@ var TransportKit = (function () {
             items: items,
             facts: facts,
             factsNote: !countsKnown ? '' : anyTraffic ? 'Totals since install; waiting, sending and held are the queue now.' : 'No messages received or sent yet.',
-            extra: groupForm(kit, data),
+            extra: groupForm(kit, data, true, state),
             details: { title: 'Details', groups: detailGroups(data, now) }
         };
     }
@@ -861,7 +908,7 @@ var TransportKit = (function () {
                     : RUNTIME_WORD[data.runtime_state] || data.runtime_state),
                 row('Bot', data.bot_label),
                 row('Sends as', sendsAs ? sendsAs.label + (sendsAs.id ? ' (' + sendsAs.id + ')' : '') : ''),
-                row('Last answer from Telegram', K.clock(data.provider_ok_at, now), K.exact(data.provider_ok_at)),
+                row('Last successful getUpdates answer', K.clock(data.provider_ok_at, now), K.exact(data.provider_ok_at)),
                 row('Last update', K.clock(data.last_event_at, now) || (countsKnown ? 'none yet' : '—'), K.exact(data.last_event_at)),
                 row('Last delivery', K.clock(data.last_delivery_at, now) || (countsKnown ? 'none yet' : '—'), K.exact(data.last_delivery_at)),
                 row('Telegram offset', K.known(data.telegram_offset) ? String(data.telegram_offset) : '—'),
@@ -928,7 +975,7 @@ var TransportKit = (function () {
         unread: function () {
             readStored(kit);
             return {
-                extra: groupForm(kit, { management_group_id: stored.value }, stored.state === 'read'),
+                extra: groupForm(kit, { management_group_id: stored.value }, stored.state === 'read', kit.state),
                 details: { title: 'Details', groups: [{ title: 'About a Telegram bot', rows: [], note: BOT_DIFFERENCES }] }
             };
         }

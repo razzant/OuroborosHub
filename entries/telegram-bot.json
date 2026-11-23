@@ -6,7 +6,7 @@
     "Telegram"
   ],
   "description": "Telegram bot connector for Places: private chats people open with the bot, groups and channels, with typed direct-message, mention and reply facts, optional literal word signals, durable media delivery and live place-state holds. The Bot API cannot read earlier history. Owner chat uses the built-in Telegram bridge.",
-  "digest": "1d9ec687b6d9903ef064bad0bbc2174e6e05f793457d766975e0021a0c6bd46b",
+  "digest": "f2dc52ef8e0621c48258678fcbf3b75916e35e907c478c70bc4a70de7ad3777d",
   "icon": "ui/icon.svg",
   "mark": "bot token",
   "name": "telegram-bot",

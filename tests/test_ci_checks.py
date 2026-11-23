@@ -132,7 +132,8 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(ci.selected_suites({'tests/fixtures/keenable/new.json'}), ['keenable'])
         self.assertEqual(ci.selected_suites({'tests/fixtures/dashboard_theme_responses.json'}), ['widgets'])
         # Both browser harnesses answer leases through it.
-        self.assertEqual(set(ci.selected_suites({'tests/widget_lease_gateway.py'})), {'widgets', 'telegram-user-session'})
+        self.assertEqual(set(ci.selected_suites({'tests/widget_lease_gateway.py'})),
+                         {'widgets', 'telegram-user-session', 'telegram-bot'})
         for path in ('.github/workflows/catalog-check.yml', 'scripts/ci_checks.py', 'scripts/build_index.py',
                      'scripts/release_digest.py', 'tests/test_ci_checks.py', 'tests/conftest.py'):
             with self.subTest(shared=path):

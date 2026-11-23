@@ -66,6 +66,11 @@ class PlaceHeld(RuntimeError):
     """Unsent custody waits for the current place policy, without a provider failure."""
 
 
+def _hold_kind(exc: PlaceHeld) -> str:
+    """The Host answer's type a hold came from (host.HoldNote.kind), "" for an ordinary pause."""
+    return str(getattr(exc.args[0], "kind", "") or "") if exc.args else ""
+
+
 class AlbumIncomplete(TelegramApiError):
     """Telegram accepted an album (ok) but its answer does not name one message per item: never sent again."""
 
@@ -191,6 +196,9 @@ class TelegramTransportRuntime:
         # The last COMPLETED poll attempt and the token it ran with: "ok" only once its answer was recorded. The card
         # is green only after such an answer for the token configured now; an attempt still waiting proves nothing.
         self._poll_attempt: Dict[str, Any] = {}
+        # Guards the link facts the status reads together (bot identity, its token, runtime state, poll attempt):
+        # the status route reads them off the event loop thread, so one answer never mixes two bots.
+        self._facts_lock = threading.Lock()
         # Per conversation (chat_id, topic_id): the last "typing…" sent, and the last message this process delivered.
         self._typing_sent_at: Dict[Tuple[str, str], float] = {}
         self._delivered_at: Dict[Tuple[str, str], float] = {}
@@ -248,14 +256,9 @@ class TelegramTransportRuntime:
         Local and without network. A token changed while getUpdates is held is
         another bot until getMe answers for it, so the earlier identity is not reused.
         """
-        if self._run_task is None:
-            return "", BOT_NOT_RUNNING
         token = str(self.token_provider() or "").strip()
-        if not token:
-            return "", BOT_TOKEN_MISSING
-        if token != self._client_token or not _BOT_ID.fullmatch(self._bot_id):
-            return "", BOT_UNCONFIRMED
-        return self._bot_id, ""
+        with self._facts_lock:
+            return _confirmed(self._run_task is not None, token, self._client_token, self._bot_id)
 
     def recorded_bot(self) -> str:
         """The bot getMe last confirmed for the token configured now, whichever process's runtime asked.
@@ -266,13 +269,25 @@ class TelegramTransportRuntime:
         return self.store.confirmed_account(str(self.token_provider() or "").strip())
 
     def status_snapshot(self, custody: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """The runtime's status facts. The token is read once; the bot, its state, the poll attempt and the
+        confirmed account (``confirmed_account``/``confirmed_reason``, as confirmed_bot() answers) come from one
+        consistent read of the runtime, so the route never pairs one bot's name or result with another's chats."""
         custody = self.store.status_snapshot() if custody is None else custody
+        try:
+            token = str(self.token_provider() or "").strip()
+        except Exception:
+            token = ""
+        with self._facts_lock:
+            state, label, attempt = self._runtime_state, self._bot_label, self._poll_attempt
+            account, reason = _confirmed(self._run_task is not None, token, self._client_token, self._bot_id)
+            identity = getattr(self.submitter, "connector_identity", {})
         return {
-            "runtime_state": self._runtime_state,
-            "bot_label": self._bot_label,
-            **({"identity": self.submitter.connector_identity}
-               if getattr(self.submitter, "presence_identity", 0) == 1
-               and getattr(self.submitter, "connector_identity", {}) else {}),
+            "runtime_state": state,
+            "bot_label": label,
+            "confirmed_account": account,
+            "confirmed_reason": reason,
+            **({"identity": identity}
+               if getattr(self.submitter, "presence_identity", 0) == 1 and identity else {}),
             "last_error": self._last_error,
             "delivery_reporting": getattr(self.submitter, "delivery_reporting_status", "unsupported"),
             # 2: early custody answers; 0: each turn waits for its terminal (older Host).
@@ -290,29 +305,18 @@ class TelegramTransportRuntime:
             "provider_ok_at": _iso(self._provider_ok_at),
             "host_checked": getattr(self.submitter, "delivery_reporting_status", "") in {"supported", "unsupported"},
             "places_version": getattr(self.submitter, "places_version", 0),
-            **self._poll_facts(),
+            **_poll_facts(attempt, token),
         }
 
-    def _poll_facts(self) -> Dict[str, Any]:
-        """The last completed poll attempt, only when it ran with the token configured now (local, no network).
-
-        ``poll_result`` is ``ok``, ``failed`` or ``""`` (none completed for this token yet); a failure keeps its own
-        error and side (``_poll_failure``), never another loop's newest error.
-        """
-        attempt = self._poll_attempt
-        try:
-            current = str(self.token_provider() or "").strip()
-        except Exception:
-            current = ""
-        if not attempt or not current or attempt.get("token") != current:
-            return {"poll_result": "", "poll_at": "", "poll_error": "", "poll_failure": ""}
-        return {"poll_result": attempt["result"], "poll_at": _iso(attempt["at"]),
-                "poll_error": attempt.get("error", ""), "poll_failure": attempt.get("failure", "")}
-
     def _poll_done(self, token: str, result: str, error: str = "", failure: str = "") -> None:
-        self._poll_attempt = {"token": token, "result": result, "at": time.time(), "error": error, "failure": failure}
+        with self._facts_lock:
+            if result == "failed":
+                self._runtime_state = "provider_error"
+            self._poll_attempt = {"token": token, "result": result, "at": time.time(), "error": error,
+                                  "failure": failure}
 
     async def _poll_loop(self) -> None:
+
         backoff = 2.0
         while not self._stopping:
             # The token this attempt runs with; its result counts only while that token stays configured.
@@ -355,8 +359,8 @@ class TelegramTransportRuntime:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._runtime_state = "provider_error"
                 self._last_error = _error(exc)
+                # The state and this attempt's result change together (one read of them never splits).
                 self._poll_done(token, "failed", self._last_error, _poll_failure(exc, answered))
                 self._log(
                     "warning", f"telegram-bot: provider poll failed: {self._last_error}"
@@ -370,10 +374,11 @@ class TelegramTransportRuntime:
         async with self._client_lock:
             token = str(self.token_provider() or "").strip()
             if not token:
-                self._runtime_state = "waiting_for_token"
-                self._bot_label = "not configured"
-                self._client = None
-                self._client_token = ""
+                with self._facts_lock:
+                    self._runtime_state = "waiting_for_token"
+                    self._bot_label = "not configured"
+                    self._client = None
+                    self._client_token = ""
                 return None
             if self._client is not None and token == self._client_token:
                 return self._client
@@ -391,14 +396,15 @@ class TelegramTransportRuntime:
                 self.store.record_confirmed_bot(token, bot_id)
             else:
                 self.store.forget_confirmed_bot(token)
-            self._bot_id = bot_id
             username = str(identity.get("username") or "").strip()
-            self._bot_username = username
-            self._bot_label = f"@{username}" if username else self._bot_id
-            self.submitter.connector_identity = {"sends_as": {
-                "id": self._bot_id, "label": self._bot_label, "kind": "bot"}}
-            self._client = client
-            self._client_token = token
+            with self._facts_lock:  # the new bot's id, name and token become visible together
+                self._bot_id = bot_id
+                self._bot_username = username
+                self._bot_label = f"@{username}" if username else self._bot_id
+                self.submitter.connector_identity = {"sends_as": {
+                    "id": self._bot_id, "label": self._bot_label, "kind": "bot"}}
+                self._client = client
+                self._client_token = token
             self._last_error = ""
             return client
 
@@ -421,8 +427,12 @@ class TelegramTransportRuntime:
                 self.store.mark_inbox_failed(lease.event_id, reason=REACTION_WITHHELD)
                 return True
         staged: List[pathlib.Path] = []
+        # Where this attempt stops if it fails, recorded with the row (CustodyStore.release_inbox): the status says
+        # what the update waits for, never a failed handoff when Telegram's download failed.
+        stage = "download"
         try:
             staged = await self._stage_attachments(lease)
+            stage = "submit"
             try:
                 result = await self.submitter.submit(lease.payload, staged)
             except PresenceHostHTTPError as refusal:
@@ -436,6 +446,7 @@ class TelegramTransportRuntime:
                 if not self._settle_refusal(lease, refusal):
                     raise
             else:
+                stage = ""  # Ouroboros answered; a failure from here on is this computer's
                 self.store.record_submission(
                     lease.event_id,
                     binding_id=result.binding_id,
@@ -464,6 +475,7 @@ class TelegramTransportRuntime:
                 lease.event_id,
                 reason=_error(exc),
                 retry_after_sec=max(_retry_delay(lease.attempts), wait),
+                stage=stage,
             )
             self._last_error = _error(exc)
             return True
@@ -726,7 +738,7 @@ class TelegramTransportRuntime:
             self.store.mark_delivered(lease.delivery_id, provider_receipt=receipt, attempts=calls.fence)
             return True
         except PlaceHeld as exc:
-            self.store.hold_outbox(lease.delivery_id, str(exc), attempts=calls.fence)
+            self.store.hold_outbox(lease.delivery_id, str(exc), attempts=calls.fence, kind=_hold_kind(exc))
             return True
         except asyncio.CancelledError:
             # A send call already stored as started keeps its marker, so the next claim ends the row uncertain. An
@@ -963,7 +975,7 @@ class TelegramTransportRuntime:
                 raise TelegramApiError(REACTION_METHOD, "Telegram did not confirm the reaction")
             known["_operation_result"] = result
         except PlaceHeld as exc:
-            self.store.hold_outbox(lease.delivery_id, str(exc))
+            self.store.hold_outbox(lease.delivery_id, str(exc), kind=_hold_kind(exc))
         except asyncio.CancelledError:
             self.store.release_outbox(lease.delivery_id, reason="worker_cancelled", retry_after_sec=0)
             raise
@@ -1463,6 +1475,29 @@ def _safe_filename(value: str) -> str:
 
 def _retry_delay(attempts: int) -> float:
     return min(300.0, 2.0 ** min(max(1, attempts), 8))
+
+
+def _confirmed(running: bool, token: str, client_token: str, bot_id: str) -> Tuple[str, str]:
+    """confirmed_bot()'s answer from one read of the runtime's facts and one read of the token."""
+    if not running:
+        return "", BOT_NOT_RUNNING
+    if not token:
+        return "", BOT_TOKEN_MISSING
+    if token != client_token or not _BOT_ID.fullmatch(bot_id):
+        return "", BOT_UNCONFIRMED
+    return bot_id, ""
+
+
+def _poll_facts(attempt: Dict[str, Any], token: str) -> Dict[str, Any]:
+    """The last completed poll attempt, only when it ran with the token configured now (local, no network).
+
+    ``poll_result`` is ``ok``, ``failed`` or ``""`` (none completed for this token yet); a failure keeps its own
+    error and side (``_poll_failure``), never another loop's newest error.
+    """
+    if not attempt or not token or attempt.get("token") != token:
+        return {"poll_result": "", "poll_at": "", "poll_error": "", "poll_failure": ""}
+    return {"poll_result": attempt["result"], "poll_at": _iso(attempt["at"]),
+            "poll_error": attempt.get("error", ""), "poll_failure": attempt.get("failure", "")}
 
 
 def _iso(epoch: float) -> str:

@@ -5,36 +5,47 @@
 - The Telegram Transport card on the Widgets page is rebuilt. Its first line answers whether the link works and
   whether anything needs attention: "Connected · nothing needs attention", "Starting…", "Connecting…", "Not set up ·
   the bot token is missing", "Connection error · new messages are not being received" with the time of Telegram's
-  last answer and the side the last attempt failed on (token, network, Telegram, or this computer), or "Stopped · the
-  bot is not running". It is green only after Telegram answered the last completed request for the token set now;
-  a request still out, or a token not confirmed yet, reads "Connecting…". The Places line for this connector uses
-  the same words and colour.
+  last successful answer and the side the last attempt failed on (token, network or Telegram), "Error on this
+  computer · new messages are not being processed" when Telegram answered and recording the answer failed here, or
+  "Stopped · the bot is not running". The link is judged for the token set now: it is green only after a completed
+  successful request for that token, and "Connecting…" means no request has completed for it yet (a new token reads
+  so even while the runtime still waits out an earlier token's refusal). The Places line for this connector uses the
+  same words and colour.
 - Below it, only what needs the owner now, each item saying what it means and what to do: sends that failed or
-  whose outcome is unknown, Telegram updates not passed to Ouroboros or still being retried, messages waiting for a
-  place binding, held messages with their hold reason (a reason that needs the owner first), chats Places cannot
-  offer, and reactions that need an Ouroboros update. Failed sends, unknown outcomes and updates Ouroboros refused
-  are listed while they ended within the last day; older ones stay in the totals with the date of the last one.
-  Holds, retried updates and the link are listed while they last. The latest error opens inside its item. For a
-  failed or unknown send the card points to the parts Telegram confirmed, so only what is missing is sent again.
+  whose outcome is unknown, Telegram updates not passed to Ouroboros or still being retried (saying whether passing
+  them to Ouroboros or downloading an attachment from Telegram failed), messages waiting for a place binding, held
+  messages with their hold reason, chats Places cannot offer, and reactions that need an Ouroboros update. A hold only
+  the owner can end (the skill's access was refused, or the place is not connected) leads the reasons and turns the
+  card amber. Failed sends, unknown outcomes and updates Ouroboros refused are listed while they ended within the
+  last day; older ones stay in the totals with the date of the last one. Holds, retried updates and the link are
+  listed while they last. The latest error opens inside its item. When Telegram confirmed part of a send, the card
+  says so and advises checking the chat and the receipt's `confirmed_messages` before asking Ouroboros to send only
+  what is missing; this is advice, nothing is sent again by itself.
 - Quiet totals follow: the bot, the last update and delivery, incoming and outgoing counts since install, and the
   current queue (waiting, sending, held). Counts not listed are zero.
-- The management group ID and the details are folded. The field, its hint and Save are unchanged; the card checks
-  the value by the server's rule and says "Saved." or "Not saved:" with the reason. Details keep every earlier fact:
-  the bot-account explanation word for word, the exact queue counts, the Telegram offset, the last error with when
-  and in which loop, and what Ouroboros reported.
+- The management group ID and the details are folded. The field and its hint are kept; the button now reads "Save"
+  (was "Save transport settings") and the placeholder "e.g. -1001234567890" (was "Optional numeric Telegram group
+  ID"). The card checks the value by the server's rule and says "Saved." or "Not saved:" with the reason; a saved
+  value stays shown until a newer status read confirms it. Details keep every earlier fact: the bot-account
+  explanation word for word, the exact queue counts, the Telegram offset, the last error with when and in which
+  loop, and what Ouroboros reported.
 - The card says when the status was read and refreshes every 10 seconds while the page is visible, with no limit on
-  refreshes; Refresh works at any moment. The previous card stopped silently after 100 refreshes. A failed read
-  keeps the last data, says so and offers "Try again". The status and attention repaint while the group ID field is
-  being edited, keeping its text, selection and open folds. When the status cannot be read at all, the group ID
-  field (with its saved value, read once from `settings/save`) and the bot explanation stay available.
+  refreshes; Refresh works at any moment and keeps keyboard focus. The previous card stopped silently after 100
+  refreshes. A failed read keeps the last data, says so and offers "Try again". The status and attention repaint
+  while the group ID field is being edited, keeping its text, selection and open folds. When the status cannot be
+  read at all, the group ID field (with its saved value, read once from `settings/save`) and the bot explanation stay
+  available.
 - `GET status` gains fields and changes none: `observed_at`, `last_error_at`, `last_error_source`,
   `provider_ok_at`, `poll_result`, `poll_at`, `poll_error`, `poll_failure`, `host_checked`, `places_version`,
-  `recent_problems` (null when the custody store was not read), `handoff_retrying`, `held_reasons` and `attention`.
-  Its `text` and `tone` now follow the card's first line. The custody store gains read-only `card_snapshot()` and
-  `read_status()`, which reads the totals and the card's facts in one SQLite read transaction; nothing it writes
-  changes.
-- File uploads, sending, receipts and the outbox are unchanged from 0.13.0. Rolling back to 0.13.0 restores the
-  previous card; it reads none of the new fields.
+  `bot_unconfirmed`, `recent_problems` (null when the custody store was not read), `handoff_retrying`,
+  `held_reasons` (with `kind` for a hold only the owner can end) and `attention`. Its `text` and `tone` now follow
+  the card's first line. The bot, its poll result and the chats offered come from one read of the runtime.
+- The custody store gains read-only `card_snapshot()` and `read_status()` (the totals and the card's facts in one
+  SQLite read transaction, with one shared pass over failed sends), and three additive changes, made when it opens:
+  `inbox.last_stage` (where a waiting update's last attempt stopped), `outbox.hold_kind` (the Host answer a hold
+  came from) and the index `outbox_failed_idx`. Rows written before keep empty values and read as "not recorded".
+- File uploads and sending are unchanged from 0.13.0. Rolling back to 0.13.0 restores the previous card; it reads
+  none of the new fields and ignores the new columns.
 
 ## 0.13.0
 

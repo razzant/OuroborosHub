@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping
 
-from .host import SKILL_ACCESS_REFUSED
+from .host import HOLD_SKILL_ACCESS, OWNER_HOLD_KINDS, SKILL_ACCESS_REFUSED
 from .runtime import BOT_NOT_RUNNING, BOT_TOKEN_MISSING, BOT_UNCONFIRMED
 
 TONE_RANK = {"muted": 0, "ok": 0, "warn": 1, "error": 2}
@@ -23,33 +23,46 @@ _LINK_PHRASE = {
     "not_started": ("Starting…", "muted"),
     "waiting_for_token": ("Not set up", "warn"),
     "provider_error": ("Connection error", "error"),
+    # Telegram answered, and recording the answer failed on this computer: not a connection problem.
+    "local_error": ("Error on this computer", "error"),
     "stopped": ("Stopped", "error"),
 }
 
 _RUNTIME_ITEM = {
     "waiting_for_token": ("The bot token is missing", "warn"),
     "provider_error": ("New messages are not being received", "error"),
+    "local_error": ("New messages are not being processed", "error"),
     "stopped": ("The bot is not running", "error"),
 }
 
 # States in which the runtime's workers run and retry by themselves.
-_RUNNING = frozenset({"connected", "connecting", "provider_error", "waiting_for_token"})
+_RUNNING = frozenset({"connected", "connecting", "provider_error", "local_error", "waiting_for_token"})
 
 
 def _link(payload: Mapping[str, Any]) -> str:
-    """The link's state from facts the status already holds: the runtime's state, the last completed poll attempt
-    for the token configured now (``poll_result``) and why getMe's bot is not offered (``connect_unavailable``)."""
+    """The link's state, judged for the token configured now, from facts the status already holds.
+
+    ``runtime_state`` may still describe an earlier token (a backoff after its refusal, the pause while no token was
+    set); only ``poll_result`` (the last completed attempt for the token set now) and ``connect_unavailable`` (why
+    getMe's bot is not offered, read with that same token) speak for the current one:
+    no token -> ``waiting_for_token``; a completed failure -> ``provider_error`` (``local_error`` when Telegram
+    answered and this computer failed); a completed answer for a confirmed bot -> ``connected``; nothing completed
+    yet -> ``connecting``.
+    """
     state = str(payload.get("runtime_state") or "")
-    if state not in ("polling", "provider_error"):
+    if state not in ("polling", "provider_error", "waiting_for_token"):
         return state
+    known = "connect" in payload or "connect_unavailable" in payload  # the route always says; bare facts may not
     unavailable = payload.get("connect_unavailable") if payload.get("connect") is None else None
-    if unavailable == BOT_TOKEN_MISSING:
-        return "waiting_for_token"  # the token was removed while a request was still out
+    if unavailable == BOT_TOKEN_MISSING or (state == "waiting_for_token" and not known):
+        return "waiting_for_token"
     result = payload.get("poll_result")
-    if state == "provider_error" or result == "failed":
-        return "provider_error"
-    # "polling" is set before getUpdates is sent: only a recorded answer for this token is a working link.
-    return "connected" if result == "ok" and unavailable != BOT_UNCONFIRMED else "connecting"
+    if result == "failed":  # runtime.py writes it together with runtime_state "provider_error"
+        return "local_error" if payload.get("poll_failure") == "local" else "provider_error"
+    if result == "ok" and unavailable != BOT_UNCONFIRMED:
+        return "connected"
+    # A request still out for this token, or a token set while the runtime still waits out an earlier one.
+    return "connecting"
 
 
 _PROPER_NOUNS = ("Telegram", "Ouroboros")
@@ -91,15 +104,15 @@ def attention_items(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
     if link in _RUNTIME_ITEM:
         headline, tone = _RUNTIME_ITEM[link]
         item: Dict[str, Any] = {"kind": "link", "detail": link, "tone": tone, "headline": headline}
-        if link == "provider_error":
+        if link in ("provider_error", "local_error"):
             if payload.get("provider_ok_at"):
                 item["at"] = payload["provider_ok_at"]
-            # This poll attempt's own error and side, never another loop's newer error.
-            if payload.get("poll_result") == "failed" and payload.get("poll_error"):
+            # This poll attempt's own error and side, for the token set now: never another loop's newer error,
+            # never an earlier token's.
+            if payload.get("poll_result") == "failed":
                 item["failure"] = str(payload.get("poll_failure") or "")
-                item["error"] = {"text": str(payload["poll_error"]), "at": payload.get("poll_at") or None}
-            elif payload.get("last_error_source") == "polling" and payload.get("last_error"):
-                item["error"] = {"text": str(payload["last_error"]), "at": payload.get("last_error_at") or None}
+                if payload.get("poll_error"):
+                    item["error"] = {"text": str(payload["poll_error"]), "at": payload.get("poll_at") or None}
         items.append(item)
 
     # A working link whose chats Places still cannot offer (the skill's own fixed reasons). A missing token is the
@@ -116,6 +129,8 @@ def attention_items(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
         items.append({"kind": "outcome_unknown", "tone": "warn", "messages": unknown,
                       "headline": f"Outcome unknown for {_plural(unknown, 'outgoing item')}",
                       "at": outbound.get("last_uncertain_at") or None,
+                      # Of them, how many Telegram confirmed in part (the receipt's confirmed_messages).
+                      "partial": min(unknown, _int(outbound.get("uncertain_partly_confirmed"))),
                       "error": _error_of(outbound, "uncertain", "last_uncertain_error")})
 
     failed = _int(outbound.get("failed"))
@@ -123,6 +138,7 @@ def attention_items(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
         items.append({"kind": "not_delivered", "tone": "error", "messages": failed,
                       "headline": f"{_plural(failed, 'outgoing item')} not delivered",
                       "at": outbound.get("last_failed_at") or None,
+                      "partial": min(failed, _int(outbound.get("failed_partly_confirmed"))),
                       "error": _error_of(outbound, "failed", "last_failed_error")})
 
     refused = _int(inbound.get("failed"))
@@ -134,15 +150,23 @@ def attention_items(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
     held = _int(payload.get("outbox_held"))
     if held:
         reasons = [reason for reason in payload.get("held_reasons") or [] if isinstance(reason, Mapping)]
-        # A hold waits for a condition someone chose (a paused place) or for Ouroboros to answer; only the
-        # skill's own refusal note is the owner's move.
-        owner = any(reason.get("note") == SKILL_ACCESS_REFUSED for reason in reasons)
-        # The owner's move leads the reasons, whatever its count; the rest keep the store's order (most first).
-        listed = sorted(reasons, key=lambda reason: reason.get("note") != SKILL_ACCESS_REFUSED)
+        # A hold waits for a condition someone chose (a paused place) or for Ouroboros to answer; only the Host's
+        # answers that the skill's access was refused or the place is not connected are the owner's move (their
+        # stored kind; a hold kept before 0.13.1 is known by the skill's own refusal note).
+        def kind(reason: Mapping[str, Any]) -> str:
+            stored = str(reason.get("kind") or "")
+            return stored or (HOLD_SKILL_ACCESS if reason.get("note") == SKILL_ACCESS_REFUSED else "")
+
+        def action(reason: Mapping[str, Any]) -> bool:
+            return kind(reason) in OWNER_HOLD_KINDS
+
+        owner = any(action(reason) for reason in reasons)
+        # The owner's moves lead the reasons, whatever their count; the rest keep the store's order (most first).
+        listed = sorted(reasons, key=lambda reason: not action(reason))
         items.append({"kind": "held", "tone": "warn" if owner else "muted", "messages": held,
                       "headline": f"{_plural(held, 'outgoing item')} held",
                       "reasons": [{"reason": str(reason.get("reason") or ""), "count": _int(reason.get("count")),
-                                   **({"action": True} if reason.get("note") == SKILL_ACCESS_REFUSED else {})}
+                                   **({"action": True, "kind": kind(reason)} if action(reason) else {})}
                                   for reason in listed]})
 
     host_checked = payload.get("host_checked") is True
@@ -153,17 +177,21 @@ def attention_items(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
         items.append({"kind": "reactions", "tone": "warn", "headline": "Reactions are not passed to Ouroboros",
                       "count": _int(payload.get("reactions_withheld"))})
 
-    # Updates whose handoff to Ouroboros failed and is retried by itself (custody's own rows, never the runtime's
-    # newest error): said, never amber. A busy deferral that gave its attempt back is not one of them.
+    # Updates whose last attempt failed and is retried by itself (custody's own rows, never the runtime's newest
+    # error): said, never amber. ``stages`` says where those attempts stopped (passing to Ouroboros, downloading from
+    # Telegram, not recorded); a busy deferral that gave its attempt back is not one of them.
     retrying = payload.get("handoff_retrying")
     waiting = _int(retrying.get("count")) if isinstance(retrying, Mapping) else 0
     if waiting and link in _RUNNING and not any(item["kind"] == "binding" for item in items):
+        stages = {key: _int(retrying.get(key)) for key in ("submit", "download")}
+        stages["other"] = max(0, waiting - stages["submit"] - stages["download"])
         handoff: Dict[str, Any] = {
-            "kind": "handoff_waiting", "tone": "muted", "events": waiting,
+            "kind": "handoff_waiting", "tone": "muted", "events": waiting, "stages": stages,
             "headline": f"{_plural(waiting, 'Telegram update')} {'waits' if waiting == 1 else 'wait'} to be passed to Ouroboros",
             "at": retrying.get("since") or None, "next_at": retrying.get("next_attempt_at") or None}
         if retrying.get("last_error"):
-            handoff["error"] = {"text": str(retrying["last_error"]), "at": None}
+            handoff["error"] = {"text": str(retrying["last_error"]), "at": None,
+                                "stage": str(retrying.get("last_stage") or "")}
         items.append(handoff)
     if link == "connected":
         # A working link whose facts are partly unknown never reads as all clear (connecting never does anyway).

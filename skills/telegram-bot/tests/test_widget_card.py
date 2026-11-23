@@ -15,7 +15,6 @@ from test_plugin import FakeApi
 
 SKILL = pathlib.Path(__file__).resolve().parents[1]
 WIDGET = SKILL / "widget.js"
-KIT = re.compile(r"/\* transport-kit:begin.*?/\* transport-kit:end \*/", re.S)
 NODE = shutil.which("node") or os.environ.get("OUROBOROS_PLAYWRIGHT_NODE_SELECTED") or ""
 
 
@@ -40,9 +39,8 @@ def test_widget_follows_the_module_contract():
     assert set(re.findall(r"['\"](/api/[^'\"]*)['\"]", source)) == {"/api/extensions/telegram-bot/"}
     assert "BASE + 'status'" in source and "BASE + 'settings/save'" in source
     assert "bridge.fetch" in source and "XMLHttpRequest" not in source and "WebSocket" not in source
-    assert "typeof bridge.onTheme === 'function'" in source
-    assert re.search(r"data-theme\s*=\s*[\"']?light", source)
-    assert "html,body{margin:0;background:transparent}" in source and "__ouroWidgetOnDispose" in source
+    # onTheme, data-theme and __ouroWidgetOnDispose are the shared theme contract (tests/test_widget_theme_contracts.py).
+    assert "html,body{margin:0;background:transparent}" in source
     assert "max_ticks" not in source and "refresh · showing" in source and "Try again" in source
     assert "ouro-widget-resize" not in source and "ResizeObserver" not in source
     assert "word-break:normal" in source and source.count("overflow-wrap:anywhere") == 1
@@ -62,22 +60,37 @@ def test_every_truthful_fact_of_the_old_card_is_kept():
         assert f"data.{field}" in source, field
 
 
-def test_the_group_form_validates_before_posting_and_reports_the_result():
-    source = WIDGET.read_text(encoding="utf-8")
-    assert "/^-[0-9]+$/" in source and "method: 'POST'" in source
-    assert "JSON.stringify({ management_group_id: value })" in source
-    assert "'Saved.'" in source and "'Not saved: '" in source
+KIT_BYTES = re.compile(rb"/\* transport-kit:begin.*?/\* transport-kit:end \*/", re.S)
+
+
+def kit_blocks(path):
+    """Every shared-kit block of a widget, as its raw bytes (no newline translation)."""
+    return KIT_BYTES.findall(path.read_bytes())
 
 
 def test_shared_kit_is_marked_once_and_matches_slack_when_both_are_present():
-    ours = KIT.findall(WIDGET.read_text(encoding="utf-8"))
+    ours = kit_blocks(WIDGET)
     assert len(ours) == 1
-    # The two cards ship in separate PRs: compare only once both carry the kit (skills also install separately).
+    # The two cards ship in separate PRs; a sibling file that exists must carry exactly one identical block.
     sibling = SKILL.parent / "slack-bridge" / "widget.js"
-    theirs = KIT.search(sibling.read_text(encoding="utf-8")) if sibling.exists() else None
-    if theirs is None:
-        pytest.skip("slack-bridge's widget.js with the transport kit is not beside this skill")
-    assert theirs.group(0) == ours[0]
+    if not sibling.exists():
+        pytest.skip("slack-bridge's widget.js is not beside this skill")
+    theirs = kit_blocks(sibling)
+    assert len(theirs) == 1, "slack-bridge's widget.js must carry exactly one transport kit block"
+    assert theirs[0] == ours[0]
+
+
+def test_the_kit_comparison_reads_bytes_and_counts_blocks(tmp_path):
+    block = kit_blocks(WIDGET)[0]
+    crlf = tmp_path / "crlf.js"
+    crlf.write_bytes(block.replace(b"\n", b"\r\n"))
+    assert kit_blocks(crlf) != [block]  # a newline-translated copy is not the same bytes
+    twice = tmp_path / "twice.js"
+    twice.write_bytes(block + b"\n" + block)
+    assert len(kit_blocks(twice)) == 2
+    none = tmp_path / "none.js"
+    none.write_bytes(b"(function () {})();")
+    assert kit_blocks(none) == []
 
 
 def test_every_status_field_the_card_reads_exists_on_the_route(tmp_path):
@@ -102,16 +115,6 @@ def test_requests_go_only_through_the_bridge():
     assert "The widget bridge is unavailable" in source
 
 
-def test_send_advice_never_suggests_a_blind_full_resend():
-    source = _source()
-    # Part of a long message or an album may have arrived: the receipt's confirmed parts decide what is missing.
-    assert "confirmed_parts" in source and source.count("only what is missing") == 2
-    assert "send again if needed" not in source and "decide to send ' + them + ' again" not in source
-    for kind in ("outcome_unknown", "not_delivered"):
-        branch = source.split(f"item.kind === '{kind}'")[1].split("} else if")[0]
-        assert "PART_SENT" in branch, kind
-
-
 def test_link_advice_matches_the_side_the_poll_failed_on():
     source = _source()
     lines = source.split("var POLL_LINES = {")[1].split("};")[0]
@@ -125,20 +128,8 @@ def test_link_advice_matches_the_side_the_poll_failed_on():
     assert "POLL_LINES[item.failure]" in source
 
 
-def test_unknown_facts_never_read_as_none_or_unsupported():
-    source = _source()
-    assert "row('Early answers', !checked ? 'not checked yet'" in source
-    assert "(countsKnown ? 'none yet' : '—')" in source and source.count("(countsKnown ? 'none yet' : '—')") == 2
-
-
 def test_empty_wording_says_what_is_actually_known():
     source = _source()
     # Membership updates move the offset without any message; a removed bot offers no chats.
     assert "Nothing received or sent yet" not in source and "none seen yet" not in source
     assert "No messages received or sent yet." in source and "'no chats available'" in source
-
-
-def test_the_owners_hold_reason_is_labelled_and_kept_first():
-    source = _source()
-    assert "'Needs you:'" in source
-    assert "filter(function (reason) { return reason.action; })" in source

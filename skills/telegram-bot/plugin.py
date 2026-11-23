@@ -19,7 +19,7 @@ from .telegram_bot.custody import CustodyStore
 from .telegram_bot.delivery import tool_origin
 from .telegram_bot.formatting import prepare_text
 from .telegram_bot.host import PresenceHostClient
-from .telegram_bot.runtime import BOT_NOT_RUNNING, TelegramTransportRuntime
+from .telegram_bot.runtime import BOT_NOT_RUNNING, BOT_UNCONFIRMED, TelegramTransportRuntime
 from .telegram_bot.settings import load_settings, normalize_words
 from .telegram_bot.status_summary import summarize as summarize_status
 from .telegram_bot.tools import (
@@ -68,7 +68,10 @@ def _status_payload() -> Dict[str, Any]:
     binding_id = str(_load_local_settings().get("binding_id") or "").strip()
     # Connect offers only the observed chats of the bot getMe confirmed for the current token.
     # null, never [], while that bot or its chats cannot be read.
-    account, unavailable = _RUNTIME.confirmed_bot() if _RUNTIME is not None else ("", BOT_NOT_RUNNING)
+    # The account comes from the same runtime read as the bot's name and poll result (status_snapshot), so the
+    # chats offered always belong to the bot this answer names.
+    account, unavailable = ((runtime.get("confirmed_account", ""), runtime.get("confirmed_reason", ""))
+                            if _RUNTIME is not None else ("", BOT_NOT_RUNNING))
     groups = None
     if account:
         try:
@@ -93,6 +96,9 @@ def _status_payload() -> Dict[str, Any]:
         "binding_state": "configured" if binding_id else "missing",
         "connect": groups,
         **({"connect_unavailable": unavailable} if groups is None else {}),
+        # The bot named here is not the one getMe confirmed for the token set now (yet): a flag, so readers never
+        # match the reason's words.
+        "bot_unconfirmed": unavailable == BOT_UNCONFIRMED,
         **counts,
         # Additive card facts (each tested in tests/test_status_card.py). observed_at: when this body was read.
         "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(observed)),

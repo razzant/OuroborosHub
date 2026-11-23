@@ -282,7 +282,7 @@ def test_only_the_bot_getme_confirmed_for_the_current_token_offers_its_groups(tm
             connector.token = "token-b"  # Telegram refuses getMe for it
             unconfirmed = await connector.status()
             assert unconfirmed["connect_unavailable"] == "Bot identity is unconfirmed; check the transport status"
-            assert unconfirmed["connect"] is None
+            assert unconfirmed["connect"] is None and unconfirmed["bot_unconfirmed"] is True
             # No attempt has completed for this token yet: waiting in neutral ink, neither green nor amber.
             assert (unconfirmed["text"], unconfirmed["tone"]) == ("Connecting…", "muted")
             api.open.set()

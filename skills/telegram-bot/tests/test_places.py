@@ -191,3 +191,30 @@ def test_live_hold_preserves_parts_and_resumes_once(tmp_path, monkeypatch, reaso
         assert runtime.store.delivery_receipt("stable")["state"] == "delivered"
         assert not await runtime.process_one_outbox()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("answer,kind", [
+    (PresenceHostHTTPError(404, "not connected", NOT_CONNECTED), "place_not_connected"),
+    (PresenceHostHTTPError(403, "refused", ACCESS_REFUSED), "skill_access"),
+    ({"state": "paused"}, ""),
+    (OSError("refused"), ""),
+])
+def test_a_hold_keeps_the_type_of_the_hosts_answer_through_the_outbox(tmp_path, answer, kind):
+    """The owner's move is known from the Host's answer type, never from the words it carries."""
+    async def run():
+        holder = _place_host(tmp_path, answer)
+        note = await holder.place_hold("9", "-1")
+        assert getattr(note, "kind", "") == kind
+
+        class Host(AcceptingSubmitter):
+            async def place_hold(self, account, conversation):
+                return note
+        client = RuntimeClient("token")
+        runtime = TelegramTransportRuntime(state_dir=tmp_path / "rt", token_provider=lambda: "token", logger=Logger(),
+                                           submitter=Host(), client_factory=lambda token: client)
+        runtime.store.enqueue_outbox("held", {"kind": "message", "chat_id": "-1", "text": "unchanged"})
+        assert await runtime.process_one_outbox() and not client.sent
+        reasons = runtime.store.card_snapshot()["held_reasons"]
+        assert [(reason["note"], reason.get("kind", "")) for reason in reasons] == [(str(note), kind)]
+        runtime.store.close()
+    asyncio.run(run())

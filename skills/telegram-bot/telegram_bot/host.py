@@ -24,6 +24,22 @@ _BUSY_RETRY_SEC = {"conversation": 1.0, "capacity": 5.0}
 PLACE_POLICY_UNREAD = "Held: It retries by itself."
 # The Host refused this skill itself (no grant, turned off, unreviewed or a stale token): only its owner can change that.
 SKILL_ACCESS_REFUSED = "Held: Check this skill's access in Skills."
+# Holds only the owner can end, by the type of the Host's answer: the skill's access was refused, or the place is not
+# connected (the Host's own words say how to connect it). The outbox keeps this kind beside the note.
+HOLD_SKILL_ACCESS = "skill_access"
+HOLD_PLACE_NOT_CONNECTED = "place_not_connected"
+OWNER_HOLD_KINDS = frozenset({HOLD_SKILL_ACCESS, HOLD_PLACE_NOT_CONNECTED})
+
+
+class HoldNote(str):
+    """A hold note (``Held: …``) that also says which Host answer produced it (``kind``, "" for an ordinary pause)."""
+
+    kind = ""
+
+    def __new__(cls, note: str, kind: str = "") -> "HoldNote":
+        value = super().__new__(cls, note)
+        value.kind = kind
+        return value
 _EVENT_KEYS = {
     "source_event_id",
     "provider",
@@ -264,9 +280,9 @@ class PresenceHostClient:
             # "Not connected" and a refused skill are the Host's answers, not an unread policy:
             # the first says what to do in its own words; the second waits for the owner, not for a retry.
             if exc.payload.get("code") == "presence_auth_blocked":
-                return SKILL_ACCESS_REFUSED
+                return HoldNote(SKILL_ACCESS_REFUSED, HOLD_SKILL_ACCESS)
             words = exc.payload.get("error") if exc.payload.get("code") == "place_not_connected" else ""
-            return f"Held: {words}" if words else PLACE_POLICY_UNREAD
+            return HoldNote(f"Held: {words}", HOLD_PLACE_NOT_CONNECTED) if words else PLACE_POLICY_UNREAD
         except (PresenceHostError, OSError, TimeoutError):
             return PLACE_POLICY_UNREAD
         state = place.get("state")
