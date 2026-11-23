@@ -22,12 +22,15 @@ from .telegram_bot.runtime import TelegramTransportRuntime
 from .telegram_bot.settings import load_settings, normalize_words
 from .telegram_bot.tools import (
     album_items,
+    discard_files,
+    discard_unqueued,
     frozen_caption,
     make_moderation_tool,
     make_operation_tool,
     make_react_tool,
     make_receipt_tool,
     make_typing_tool,
+    queue_file,
     upload_path,
     ALBUM_KINDS,
     MODERATION_SCHEMA,
@@ -261,6 +264,7 @@ def _make_telegram_send(api: Any):
             payload["topic_id"] = str(topic_id).strip()
         if reply_to_message_id not in (None, ""):
             payload["reply_to_message_id"] = str(reply_to_message_id).strip()
+        state_dir = pathlib.Path(api.get_state_dir())
         try:
             if selected_kind == "message":
                 if not str(text or "").strip():
@@ -268,20 +272,29 @@ def _make_telegram_send(api: Any):
                 payload["text"] = str(text)
                 payload["_rendered_chunks"] = prepare_text(str(text), markdown=markdown)
             elif selected_kind == "album":
-                payload["items"], payload["_rendered_items"] = album_items(items, str(caption or text or ""), markdown)
+                payload["items"], payload["_rendered_items"], payload["_frozen"] = album_items(
+                    items, str(caption or text or ""), markdown, state_dir)
             else:
-                payload["file_path"] = upload_path(selected_kind, file_path)
+                source = upload_path(selected_kind, file_path)
                 payload["caption"] = str(caption or text or "")
                 payload["_rendered_caption"] = frozen_caption(payload["caption"], markdown)
+                # The bytes the row sends are fixed now: a copy, sent under the file's own name.
+                kept = queue_file(selected_kind, source, state_dir)
+                payload["file_path"], payload["_frozen"] = kept["path"], [kept]
         except SendRefused as refusal:
             return refusal.answer()
         receipt = str(request_id or uuid.uuid4().hex).strip()
-        inserted = CustodyStore.shared(
-            pathlib.Path(api.get_state_dir()) / "custody.sqlite3"
-        ).enqueue_outbox(
-            f"telegram-send:{receipt}",
-            payload,
-        )
+        delivery_id, store = f"telegram-send:{receipt}", None
+        try:
+            store = CustodyStore.shared(state_dir / "custody.sqlite3")
+            inserted = store.enqueue_outbox(delivery_id, payload)
+        except BaseException:
+            # The row may be committed already: a copy goes only when no row is known to name it.
+            discard_unqueued(payload.get("_frozen") or [], state_dir, store, delivery_id)
+            raise
+        if not inserted:
+            # This request_id is already queued with the bytes it had then; this call's copy is not needed.
+            discard_files(payload.get("_frozen") or [], state_dir)
         return {
             "ok": True,
             "state": "queued" if inserted else "already_queued",
@@ -421,8 +434,10 @@ def register(api: Any) -> None:
             "text, or a file as photo, document, video, audio, voice (OGG/Opus, MP3 or M4A), animation (GIF or "
             "silent MP4) or album (2-10 items: photos with videos, or only audio, or only documents). A bot uploads "
             "at most 50 MB per file and 10 MB per photo; a larger file or a caption over 1024 characters is refused, "
-            "never cut. Standard Markdown is rendered by default; set markdown=false for literal text. text/caption "
-            "contain only display content. Pass request_id as its own argument, not XML or text inside the caption. "
+            "never cut. A file is copied when queued, and that copy is what Telegram receives; later changes to the "
+            "file are not sent. Standard Markdown is rendered by default; set markdown=false for literal text. "
+            "text/caption contain only display content. Pass request_id as its own argument, not XML or text inside "
+            "the caption. "
             "An event.message.attachments record with status too_large (a bot downloads at most 20 MiB) or failed "
             "did not reach you; it keeps file_id, file_name, file_size and a factual note. You may ask the sender to "
             "share a download link in this conversation, open to no more people than already had the file, but never "
@@ -526,7 +541,16 @@ def register(api: Any) -> None:
     api.register_tool(
         "telegram_receipt",
         make_receipt_tool(api),
-        description="Read durable delivery state, provider receipt or error for a Telegram send/moderation request.",
+        description=(
+            "Read durable delivery state, provider receipt or error for a Telegram send/moderation request. For a "
+            "file send, `transfer` is this process's newest saved observation of the upload — its phase "
+            "(connecting, uploading, awaiting_response), the file bytes written of the total (the last saved lower "
+            "bound of completed local writes; an interrupted socket write may have emitted part of an uncounted "
+            "piece). Only a saved end observation has `ended_at` and `answer`; an uncertain row can keep the last "
+            "phase and count without them. Those bytes are never proof Telegram has them; the row's state and "
+            "provider receipt decide delivery. `queued_at` says when the row was queued; re-read the same "
+            "request_id to watch an upload move."
+        ),
         schema={
             "type": "object",
             "properties": {

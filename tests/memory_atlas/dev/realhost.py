@@ -212,7 +212,9 @@ class RealHost:
         """Run producer code against this host's data root (a new record, a changed note) in a child."""
         code = ("import sys, json, pathlib; sys.path.insert(0, %r)\nroot = pathlib.Path(%r)\nids = json.loads(%r)\n"
                 % (str(self.repo), self.env["OUROBOROS_DATA_DIR"], json.dumps(self.ids))) + script
-        out = subprocess.run([self.python, "-I", "-B", "-c", code], env=self.env, capture_output=True, text=True, timeout=120)
+        # Full note bodies can exceed Linux's per-argument limit; keep the source intact on stdin.
+        out = subprocess.run([self.python, "-I", "-B", "-"], input=code,
+                             env=self.env, capture_output=True, text=True, timeout=120)
         with (self.root / "producers.log").open("a", encoding="utf-8") as log:
             log.write(script + "\n--- out\n" + out.stdout + out.stderr + "\n")
         if out.returncode:

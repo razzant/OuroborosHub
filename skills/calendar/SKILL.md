@@ -1,7 +1,7 @@
 ---
 name: calendar
 description: Единый календарь владельца — локальные календари, CalDAV (включая Яндекс) и Google с личным OAuth-клиентом; события, повторения, доступ, связанные копии, свободные окна, напоминания и виджет День/Неделя.
-version: 2.0.5
+version: 2.0.6
 type: extension
 runtime: python3
 entry: plugin.py

@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.13.0
+
+- A file or album send streams its multipart body from disk instead of reading it whole into memory. Framing and
+  each file's open size fix the request's Content-Length before any connection, and the body is written in
+  fixed-size pieces. The socket timeout applies to each body write and to inactivity while reading the reply, not
+  to the whole upload or reply. The bytes on the wire are the same 0.12.1 joined in
+  one write; a file that ends before its size stops the request mid-body, which says nothing about what Telegram
+  did.
+- While a file request runs, its outbox row keeps this process's newest observation, shown as `transfer` in
+  `telegram_receipt` (and `queued_at` says when the row was queued): `attempt`, `request` (1, or 2 for the
+  plain-caption retry), `phase` — `connecting`, `uploading` or `awaiting_response` — `file_bytes_written` of
+  `file_bytes_total` (the last saved lower bound of completed local file writes, framing not counted),
+  `started_at` and `updated_at`. The worker tries to save phase changes and the request's end at once, and progress
+  between them at most about once a second; each save keeps the row's lease. Only a saved end observation has
+  `ended_at` and `answer` (`ok`, `none`, or `refused` with Telegram's `error_code`). A row that ends `uncertain`
+  after cancellation can keep its last phase and byte count without either field. Rows with no saved observation
+  have no `transfer` field; no progress is inferred for old attempts. Re-reading `telegram_receipt` for the same `request_id`
+  during the upload and after it shows the phase, the saved bytes and the answer move. The saved bytes are local,
+  never proof that Telegram has them: an interrupted socket write may have emitted part of an uncounted piece,
+  reaching the total is not delivery, and the row's state and Telegram's answer decide as before.
+- A file send accepts only a whole Bot API answer: `ok` true to a success status, or Telegram's own error — `ok`
+  false, its `description` and an integer `error_code` equal to the status — to an error status. A gateway's HTML
+  error page, a body cut below its declared length, or a success status without an `ok` answer is no answer from
+  Telegram: it ends the row `uncertain`, never a refusal that would permit another call, where 0.12.1 could read
+  an error page as "Telegram answered no" and retry it. Multipart POSTs do not follow redirects; an HTTP 3xx
+  response leaves delivery uncertain and does not trigger another upload. Text sends, edits, reactions and
+  moderation keep their earlier handling.
+- On upgrade, a file or album attempt from an older sender without a stored result or proof that nothing was sent
+  ends `uncertain` on its next claim, without uploading again. Old refusal text cannot establish the answer to the
+  original POST; never-attempted and provably pre-call rows still send, and new verified refusals still retry.
+- Rolling back to 0.12.1 reads a file whole again into one write and leaves the transfer observations unused; rows,
+  receipts and their states are kept on rollback, but pending uploads are handled under the earlier retry rules.
+
+## 0.12.1
+
+- A send whose outcome is unknown is never made again. Before each text chunk, file or album call the outbox stores
+  in the row that the call has started, and removes that record only with Telegram's accepted message, which must
+  name its `message_id` (for an album, one per item), or its answer that it did nothing. A lost, cut or unreadable
+  answer, an `ok` that names no message, a timeout or reset while the request was written or awaited, a 5xx, a crash,
+  restart, cancel or expired lease during the call, or Telegram's yes that could not be stored now ends the row
+  `uncertain` with its confirmed parts, where 0.12.0 could send it again or record an empty answer as delivered. Its
+  later chunks are not sent and the conversation's next row proceeds. Telegram's 400, 401, 403, 404 and 429, and a
+  request that provably never left (unresolved name, refused connection, an upload that could not be built), keep the
+  bounded retry. A row its record already decides ends on its claim with no token, `getMe`, Host or place read: one
+  whose every part is confirmed finishes `delivered` from the stored receipts, as reported then, and is never ended
+  `failed` when marking it delivered fails. Each write a send attempt makes to its row names that attempt, so once
+  another claim holds the row (an overlapping reload, an expired lease) the earlier attempt changes nothing there,
+  whether it is cancelled, held, failing or late with Telegram's answer; message ids it learns late are only logged.
+  Each entry of an album answer keeps its place, so a message is reported for its own item and an entry that is not
+  one counts against completeness. Edits, reactions and moderation are unchanged.
+- `telegram_send` copies a file when it queues it, unchanged and under its own name, readable by this account only,
+  and the row sends that copy after checking its SHA-256 and size. Changing or removing the source afterwards changes
+  nothing, a repeated `request_id` keeps the first copy, and the copy stays with the row's history whatever its end.
+  `telegram_receipt` names it in `files`. A file that cannot be copied is refused as `file_copy_failed`.
+- Rows queued by 0.12.0 or earlier keep their shape. One attempted without proof that the attempt did nothing ends
+  `uncertain` on its first claim, without a call, token or Host read; one whose every part Telegram confirmed
+  finishes `delivered` from its record, where a stored answer that names no message confirms nothing: it stays in the
+  row, is shown in the receipt as `answers_without_message_id` and counts in neither `confirmed_messages` nor
+  `confirmed_parts`. A file such a row names is still read from its path at send time and claims no digest. Rolling
+  back to 0.12.0 ignores the new records: it may repeat a send this version had open and sends a queued copy by its
+  path.
+
 ## 0.12.0
 
 - A download failure no longer holds a chat indefinitely. Telegram's own words decide: "file is too big" ends a file

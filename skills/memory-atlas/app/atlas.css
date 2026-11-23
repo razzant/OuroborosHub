@@ -72,6 +72,7 @@ button { cursor: pointer; }
 .row .top .right { margin-left: auto; flex: none; }
 .row .text { margin: 3px 0 0; }
 .row .facts { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-top: 4px; }
+.row .facts > * { min-width: 0; overflow-wrap: anywhere; }
 .row .title { font-weight: 600; }
 .row[aria-current="true"], .row[aria-current="true"]:hover { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
 .row[aria-current="true"] .meta, .row[aria-current="true"] .sec { color: inherit; }
@@ -126,7 +127,7 @@ button { cursor: pointer; }
 .doc h1.mark-title { font-size: var(--type-section); letter-spacing: 0; }
 .narrow .doc h1 { font-size: var(--md-heading-major); }   /* the document-reading heading step (DESIGN §1) */
 .narrow .doc h1.mark-title { font-size: var(--type-section); }
-.byline { margin: 6px 0 0; }
+.byline { margin: 6px 0 0; overflow-wrap: anywhere; }
 .prose { margin-top: var(--space-4); font-size: var(--type-section); line-height: 1.55; }
 .prose p { margin: 0 0 12px; }
 .prose h1, .prose h2 { margin: 20px 0 8px; font-size: var(--md-heading-major); line-height: var(--line-title); font-weight: 600; }

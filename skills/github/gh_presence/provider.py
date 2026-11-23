@@ -7,15 +7,53 @@ import contextlib
 from datetime import datetime
 from urllib.parse import quote
 
-from .http import Effect, TransportError, classify, next_link, retry_at
+from .http import Effect, TransportError, classify, next_link, retry_at, transient
 from .store import digest, dump, now
 from .http import Response
 
-AUTHOR = "author { login __typename }"
-DISCUSSION = "id databaseId number title body createdAt updatedAt url locked closed " + AUTHOR
-COMMENT = "id databaseId body createdAt updatedAt url replyTo { id } " + AUTHOR
+# Actor is an interface without a numeric id; each account type carries its own databaseId.
+ACTOR = ("login __typename ... on User { databaseId } ... on Bot { databaseId } "
+         "... on Mannequin { databaseId } ... on Organization { databaseId }")
+AUTHOR = "author { " + ACTOR + " }"
+DISCUSSION = "id databaseId number title body createdAt updatedAt lastEditedAt url locked closed " + AUTHOR
+COMMENT = "id databaseId body createdAt updatedAt lastEditedAt url replyTo { id } " + AUTHOR
 PAGE = "pageInfo { hasNextPage endCursor }"
 RATE = "rateLimit { cost remaining resetAt }"
+# Who changed an object: its content edits and the timeline events of its state, assignees and reviewers, each
+# event with its own node id (one GitHub action, whatever its time or actor). GitHub lists content edits newest
+# first (SOURCES.md): ``first`` is the newest window and ``hasNextPage`` says older edits remain outside it.
+EDITS = ("lastEditedAt userContentEdits(first: 50) { pageInfo { hasNextPage } "
+         "nodes { editedAt deletedAt editor { " + ACTOR + " } } }")
+_EVENT = "id createdAt actor { " + ACTOR + " }"
+_ASSIGNEE = ("__typename ... on User { databaseId login } ... on Bot { databaseId login } "
+             "... on Mannequin { databaseId login } ... on Organization { databaseId login }")
+_REVIEWER = ("__typename ... on User { databaseId login } ... on Bot { databaseId login } "
+             "... on Mannequin { databaseId login } ... on Team { databaseId slug }")
+_ISSUE_ITEMS = ("__typename ... on AssignedEvent { " + _EVENT + " assignee { " + _ASSIGNEE + " } } "
+                "... on UnassignedEvent { " + _EVENT + " assignee { " + _ASSIGNEE + " } } "
+                "... on ClosedEvent { " + _EVENT + " stateReason } ... on ReopenedEvent { " + _EVENT + " } "
+                "... on RenamedTitleEvent { " + _EVENT + " previousTitle currentTitle } "
+                "... on LockedEvent { " + _EVENT + " } ... on UnlockedEvent { " + _EVENT + " }")
+_PR_ITEMS = (_ISSUE_ITEMS + " ... on MergedEvent { " + _EVENT + " } ... on ReadyForReviewEvent { " + _EVENT + " } "
+             "... on ConvertToDraftEvent { " + _EVENT + " } "
+             "... on ReviewRequestedEvent { " + _EVENT + " requestedReviewer { " + _REVIEWER + " } } "
+             "... on ReviewRequestRemovedEvent { " + _EVENT + " requestedReviewer { " + _REVIEWER + " } }")
+ISSUE_EVENT_TYPES = "ASSIGNED_EVENT,UNASSIGNED_EVENT,CLOSED_EVENT,REOPENED_EVENT,RENAMED_TITLE_EVENT,LOCKED_EVENT,UNLOCKED_EVENT"
+PR_EVENT_TYPES = (ISSUE_EVENT_TYPES + ",MERGED_EVENT,READY_FOR_REVIEW_EVENT,CONVERT_TO_DRAFT_EVENT,"
+                  "REVIEW_REQUESTED_EVENT,REVIEW_REQUEST_REMOVED_EVENT")
+THREAD_CHANGES = ("query($owner:String!,$name:String!,$number:Int!,$since:DateTime,$before:String){repository(owner:$owner,name:$name){"
+                  "issueOrPullRequest(number:$number){__typename "
+                  "... on Issue { " + EDITS + " issueTimeline: timelineItems(since:$since,last:100,before:$before,itemTypes:["
+                  + ISSUE_EVENT_TYPES + "]) { pageInfo { hasPreviousPage startCursor } nodes { " + _ISSUE_ITEMS + " } } } "
+                  "... on PullRequest { " + EDITS + " pullTimeline: timelineItems(since:$since,last:100,before:$before,itemTypes:["
+                  + PR_EVENT_TYPES + "]) { pageInfo { hasPreviousPage startCursor } nodes { " + _PR_ITEMS + " } } }}} " + RATE + "}")
+NODE_CHANGES = "query($id:ID!){node(id:$id){__typename ... on Comment { " + EDITS + " }} " + RATE + "}"
+
+
+def _target(value):
+    if not isinstance(value, dict):
+        return None
+    return {"typename": value.get("__typename"), "id": value.get("databaseId"), "login": value.get("login") or value.get("slug")}
 
 
 def can_close_issue(provider, repo, target, writer_id):
@@ -185,24 +223,36 @@ class GitHub:
                 raise TransportError("private_repository_not_selected")
         return repo
 
-    def actor(self, raw):
+    def actor(self, raw, *, strict=False):
+        """The numeric account of an object's author. ``strict`` (a read that decides attention): a login lookup
+        that failed transiently raises, carrying what is known meanwhile as ``exc.actor``, instead of settling unknown."""
         user = raw.get("user") or raw.get("author")
         if not user:
             return {"platform": "github", "attribution": "unknown"}
         if not isinstance(user.get("id"), int):
             login = user.get("login", "")
-            unknown = {"platform": "github", "username": login, "attribution": "unknown"}
-            if not isinstance(login, str) or not login:
-                return unknown
             actor_type = user.get("__typename") or user.get("type")
+            # A known Bot stays a bot when its number is unknown; an unknown account is never a bot.
+            bot = {"is_bot": True} if actor_type == "Bot" else {}
+            if not isinstance(login, str) or not login:
+                return {"platform": "github", "username": login, "attribution": "unknown", **bot}
             # GraphQL Bot.login is the bare slug; REST uses the [bot] account.
             # A User with that same slug is a separate numeric identity.
             lookup = login + "[bot]" if user.get("__typename") == "Bot" and not login.endswith("[bot]") else login
+            unknown = {"platform": "github", "username": lookup if bot else login, "attribution": "unknown", **bot}
+            database_id = user.get("databaseId")
+            if type(database_id) is int and database_id > 0:
+                # The primary response names the numeric account: no lossy login lookup.
+                return {"platform": "github", "platform_actor_id": str(database_id), "username": lookup,
+                        "display_name": lookup, "is_bot": actor_type == "Bot"}
             key = (actor_type, lookup.lower())
             if key not in self.users:
                 try:
                     resolved = self.get("/users/" + quote(lookup, safe="")).data
-                except TransportError:
+                except TransportError as exc:
+                    if strict and transient(exc):
+                        exc.actor = unknown
+                        raise
                     return unknown
                 if (not isinstance(resolved, dict) or type(resolved.get("id")) is not int or resolved["id"] <= 0
                         or not isinstance(resolved.get("login"), str) or resolved["login"].lower() != lookup.lower()
@@ -283,6 +333,38 @@ class GitHub:
                                                        and not r.get("in_reply_to_id") for r in inline):
                 raise TransportError("reply_target_unavailable")
         return repo, item, all_rows
+
+    def change_record(self, route, *, since=None, node=None, before=None):
+        """GitHub's own record of who changed an object: its content edits (newest 50) and, for an issue or pull
+        request, its state/assignee/reviewer timeline events since ``since`` (newest 100, or the 100 before the
+        ``before`` cursor of an earlier page). Read-only."""
+        if node:
+            item = self.graphql(NODE_CHANGES, {"id": node}).get("node")
+        else:
+            owner, name = route["repo"]["full_name"].split("/")
+            item = (self.graphql(THREAD_CHANGES, {"owner": owner, "name": name, "number": route["number"], "since": since,
+                                                  "before": before})
+                    .get("repository") or {}).get("issueOrPullRequest")
+        if not isinstance(item, dict):
+            raise TransportError("no_longer_visible")
+        edits = item.get("userContentEdits") or {}
+        timeline = item.get("issueTimeline") or item.get("pullTimeline") or {}
+        return {"typename": item.get("__typename"), "last_edited_at": item.get("lastEditedAt"),
+                "edits": [{"edited_at": e.get("editedAt"), "deleted": bool(e.get("deletedAt")), "editor": e.get("editor")}
+                          for e in edits.get("nodes") or [] if isinstance(e, dict)],
+                "edits_incomplete": bool((edits.get("pageInfo") or {}).get("hasNextPage")),
+                "events": [{"type": n["__typename"], "id": n.get("id"), "created_at": n.get("createdAt"), "actor": n.get("actor"),
+                            "assignee": _target(n.get("assignee")), "reviewer": _target(n.get("requestedReviewer")),
+                            "current_title": n.get("currentTitle"), "previous_title": n.get("previousTitle"),
+                            "state_reason": n.get("stateReason")}
+                           for n in timeline.get("nodes") or [] if isinstance(n, dict) and n.get("__typename")],
+                "events_incomplete": bool((timeline.get("pageInfo") or {}).get("hasPreviousPage")),
+                "events_cursor": (timeline.get("pageInfo") or {}).get("startCursor")}
+
+    def actor_of(self, graph_actor, *, strict=False):
+        """A GraphQL Actor (login, __typename, databaseId) as the event actor."""
+        return (self.actor({"author": graph_actor}, strict=strict) if isinstance(graph_actor, dict)
+                else {"platform": "github", "attribution": "unknown"})
 
     def discussion_all(self, spec):
         visited = set()

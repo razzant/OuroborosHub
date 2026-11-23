@@ -1,10 +1,10 @@
 ---
 name: email-presence
 description: Multi-account Gmail API, Exchange EWS and IMAP/SMTP mail tools with optional Presence intake and durable delivery.
-version: 0.10.9
+version: 0.10.11
 type: extension
 entry: plugin.py
-plugin_api: "2.0"
+plugin_api: "2.5"
 runtime: python3
 permissions: [net, read_settings, route, tool, widget, companion_process, presence]
 env_from_settings: [EMAIL_IMAP_HOST, EMAIL_IMAP_PORT, EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_USER, EMAIL_PASSWORD, EMAIL_SMTP_USER, EMAIL_SMTP_PASSWORD, EMAIL_DEFAULT_FOLDER, EMAIL_AUTH_MODE, EMAIL_OAUTH_ACCESS_TOKEN, EMAIL_OAUTH_REFRESH_TOKEN, EMAIL_OAUTH_CLIENT_ID, EMAIL_OAUTH_CLIENT_SECRET, EMAIL_IMAP_SECURITY, EMAIL_SMTP_SECURITY, EMAIL_TLS_CA, EMAIL_TLS_FINGERPRINT, GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET]
@@ -23,6 +23,11 @@ tools:
     target: [account_id,to,cc,bcc]
     conversation: conversation_id
     thread: thread_id
+    touches:
+      - {conversation: emitted_conversation_id, thread: emitted_conversation_id, effect: message}
+      - {conversation: to, effect: write, match: exact_casefold}
+      - {conversation: cc, effect: write, match: exact_casefold}
+      - {conversation: bcc, effect: write, match: exact_casefold}
     description: Queue a proactive email or threaded reply for durable delivery.
   - name: email_search
     effect: read
@@ -34,17 +39,27 @@ tools:
     description: Read an account-bound message reference or legacy UID and UIDVALIDITY without changing flags.
   - name: email_mark_read
     effect: write
-    target: [account_id,remove_labels,folder_names]
+    target: [account_id,remove_labels,folder_names,label_names]
+    touches:
+      - {conversation: message_conversation_id, thread: message_thread_id, effect: write}
     description: Mark one message read by its account-bound reference, or a legacy IMAP UID and UIDVALIDITY.
   - name: email_mailbox
     effect: write
     target: [account_id,destination,add_labels,remove_labels,label_id,label_names,folder_names]
+    touches:
+      - {conversation: message_conversation_id, thread: message_thread_id, effect: write}
+      - {conversation: draft_conversation_id, thread: message_thread_id, effect: write}
     description: List/create folders, copy/move messages and update flags.
   - name: email_draft
     effect: write
-    target: [account_id,to,cc,bcc,folder,folder_names]
+    target: [account_id,to,cc,bcc]
     conversation: conversation_id
     thread: thread_id
+    touches:
+      - {conversation: folder, effect: write, match: exact}
+      - {conversation: folder_names, effect: write, match: exact}
+      - {conversation: draft_conversation_id, thread: draft_conversation_id, effect: write, match: exact}
+      - {conversation: emitted_conversation_id, thread: emitted_conversation_id, effect: write, match: exact}
     description: Save a text draft without sending.
   - name: email_receipt
     effect: read
@@ -68,7 +83,7 @@ tools:
     description: Read supported provider settings, filters and sender configuration.
   - name: email_settings
     effect: write
-    target: [account_id,forward_to,add_labels,remove_labels,label_names]
+    target: [account_id,forward_to,add_labels,remove_labels,label_names,values.replyToAddress]
     description: Change supported provider settings; website-only operations are reported explicitly.
 ui_tab:
   tab_id: email_presence
@@ -126,7 +141,15 @@ This is argument preparation, not another human approval. `References` and a
 Place are not mandatory. A new unthreaded mail with an explicit account still
 queues in one call, and a queued request's receipt remains replayable without
 another effect. Supplied conversation fields must match the resolved RFC source,
-never a Gmail thread id. Draft attribution remains a write, not a speaking turn.
+never a Gmail thread id. Draft attribution remains a write, not a speaking turn. A reply lookup compares
+Message-ID tokens, retaining comments in existing source identities; the written
+In-Reply-To is the canonical token. Conflicting matches, including two read messages
+sharing one Message-ID, are refused until reply_folder names the folder of the one to
+answer (refused again if it holds both). When the emitted reply has a different RFC root (for example,
+a legacy multi-ID In-Reply-To), retry_arguments also exposes emitted_conversation_id.
+The historical source and emitted root are checked independently with their threads;
+new queued sends retain both bindings and delivery rechecks both. Old queue rows
+remain unchanged and delivery additionally checks their emitted scope.
 
 ## Setup
 
@@ -144,7 +167,9 @@ never a Gmail thread id. Draft attribution remains a write, not a speaking turn.
    Autodiscover settings; this form does not discover hosts or import browser
    sessions. Exchange verifies TLS with the CA bundle available to Requests in
    this installation; the form has no per-account CA or certificate-pin override.
-   Test connection reads the configured Inbox without sending mail.
+   Test connection reads the configured Inbox without sending mail. A failed IMAP
+   or SMTP test names its stage (connect, TLS or authentication) and a remedy,
+   without the server's reply text or any credential.
    The ordinary mail tools and optional intake work with the browser closed.
    After Exchange rejects a login (HTTP 401), that background connection stops
    presenting the rejected credential. Edit and save the connection to resume
@@ -173,7 +198,8 @@ never a Gmail thread id. Draft attribution remains a write, not a speaking turn.
 4. Test the configured connection. Then optionally connect its canonical account
    id as an Email Place. New Places start Silent and activation remains the
    owner's existing choice. Sending off holds every send, including direct
-   commands, while reading, drafts and organization remain available.
+   commands and one whose provider connection was opening when it changed; a
+   disconnect does the same. Reading, drafts and organization remain available.
 5. Automatic intake starts only for applicable Places. A known account without
    a Place does not create an endless Presence retry queue. Silent/Paused Places
    still reach the Host's intake decision. The first successful intake records
@@ -205,10 +231,28 @@ remain readable by explicit account_id.
   including disconnected accounts. Select account_id explicitly when more than one account
   is connected; unknown ids never fall back to a neighbor. email_receipt returns
   JSON null for a missing request, with request_id scoped to the chosen account.
-- email_search uses Gmail or Exchange query/page_token, or IMAP criteria tokens. It retrieves
+- email_search uses a Gmail or Exchange query, or IMAP criteria. It retrieves
   headers/metadata, not every matching body. Results carry an account-bound
-  message_ref; email_read accepts it, or legacy uid/uidvalidity/folder arguments.
-  IMAP Unicode operands use UTF-8 literals and folder names use modified UTF-7.
+  message_ref; email_read accepts it, or legacy uid/uidvalidity/folder arguments
+  from one search result of that folder. Before fetching, a read whose
+  UIDVALIDITY differs from the folder's is refused with the folder and both numbers.
+  To continue any provider's search, pass next_page_token back as page_token with
+  the same account, folder and query or criteria until it comes back empty.
+  IMAP criteria are raw SEARCH tokens: quote an ASCII operand containing spaces,
+  as in `["SUBJECT", "\"New sign-in\""]`. Unicode operands use UTF-8 literals, with
+  or without quotes, and folder names use modified UTF-7. An IMAP page lists
+  matches newest UID first (`order: uid_desc`), the order the folder stored them,
+  which can differ from their dates. It reports `total`, `returned` and `has_more`;
+  its token keeps the first page's highest UID, so mail arriving meanwhile is not
+  repeated or shifted, and a new search includes it. A token from another account,
+  folder, criteria or UIDVALIDITY is refused. Server-side search can miss messages,
+  so an empty or failed search does not prove that a message never arrived. One
+  server missed a Cyrillic SUBJECT search (a phrase or one word) that its ASCII
+  subject word found. Its cause remains unknown; the correct UTF-8 literal was
+  captured only on a synthetic test connection, not that live server. For a
+  non-ASCII subject or a missing document, search by FROM with SINCE/BEFORE, page
+  through every result, compare each listed message's decoded `subject` yourself,
+  read the candidates, and look in other folders where it may be filed.
   An Exchange message_ref contains a case-sensitive native item ID. Use the
   new reference returned by a move or copy when available; otherwise search
   its destination again. A local intake row number is never an EWS item ID.
@@ -221,8 +265,9 @@ remain readable by explicit account_id.
   it to Presence. email_mark_read is the separate write for Seen/UNREAD.
   Incoming address headers keep a readable `headers` view and retained MIME source.
   If Exchange specifically cannot generate MIME, GetItem may instead supply the
-  same item's native body, RFC headers and recipient/attachment metadata. The
-  result identifies this fallback, marks missing raw MIME and attachment bytes,
+  same item's native body, RFC headers and recipient/attachment metadata. Its
+  address headers are parsed before names are decoded, as in MIME, so an encoded
+  display name never adds a recipient. The result identifies this fallback, marks missing raw MIME and attachment bytes,
   and reports a missing or server-truncated body. An unrelated provider error is
   not converted into a successful read; if the alternate read fails, intake
   keeps its committed position and reports the failure.
@@ -258,10 +303,22 @@ remain readable by explicit account_id.
   lookup before the tool returns canonical arguments. Updating or deleting a label
   exposes its actual ID; a rename exposes the new name as destination as well.
   Gmail checks current custom label names alongside IDs, including rename's old
-  and new names. The move source is a removed label, trash/untrash expose TRASH,
-  and Gmail mark-read exposes its fixed removal of UNREAD. Follow returned
-  retry_arguments; label_names describes checked targets and never changes a
-  label. A matching canonical call remains one call.
+  and new names. The move source is a removed label, and Gmail mark-read exposes
+  its fixed removal of UNREAD. `label_names` adds current label IDs and names
+  (Drafts for DRAFT) not already exposed by the mutation.
+- Every message or draft mutation reads the selected item's RFC conversation now,
+  exactly as intake derives it (References, In-Reply-To, else Message-ID): Gmail
+  delete, trash/untrash, flags, labels, archive, copy, move, mark-read and
+  delete_draft; IMAP copy, move, flags and mark-read; Exchange copy, move, trash,
+  flags and mark-read. Gmail uses raw MIME; Exchange uses intake’s MIME parser and
+  its structured conversion-failure fallback. IMAP peeks at the whole header
+  section, then the full source when no root is available, preserving intake’s
+  parser boundaries and SHA-256 fallback. `message_conversation_id` (`draft_conversation_id` for
+  delete_draft) and the same root in `message_thread_id` reach the Host, so a
+  Place stored with conversation and thread holds the mutation, independently of
+  folder and label Places. Supplied values are only compared: a missing or stale
+  one returns fresh `retry_arguments`, a failed read changes nothing, and the
+  provider method, path and body stay exactly the requested change.
 - For IMAP and Exchange, folder_names identifies the actual folders changed.
   A move changes source and destination; a copy writes only the destination.
   Marking a message read or changing its flags writes its actual source folder.
@@ -273,7 +330,12 @@ remain readable by explicit account_id.
   Exchange trash moves to Deleted Items. Exchange writes check the affected folder
   identities and require read access to their metadata; ordinary message reads still work
   under the existing account and item permissions.
-  Gmail delete_draft checks both DRAFT and Drafts before deleting the selected draft.
+  Gmail delete_draft and a draft_id update read the draft message first: its current
+  labels (DRAFT, Drafts and custom names) and its RFC conversation in
+  `draft_conversation_id`. All are Host targets; unrelated destination, label_id or
+  add_labels targets are cleared, and the request stays the requested DELETE or the
+  new content. A draft_id update checks that old conversation with its thread
+  separately from the new content's conversation before saving.
   Permanent deletion by message reference checks the message's current labels too,
   including both names for Drafts and the current names of custom labels. Follow
   retry_arguments if the labels change. The usual full-mail grant is still required.
@@ -282,11 +344,32 @@ remain readable by explicit account_id.
 - For Reply All, follow retry_arguments: Mail expands the original visible
   recipients before sending or saving. You may edit the explicit To/Cc/Bcc;
   leaving reply_all false keeps that choice. A permitted group thread remains
-  permitted if a separate conversation with one recipient is paused. Bcc from
+  permitted if a separate conversation with one recipient is paused, but a Silent or
+  Paused Place of a recipient's bare address holds the whole send until that address
+  is removed or its Place changes. Bcc from
   the original message is never copied into a reply. Keep the opaque reply_all_fingerprint
   returned by a prepared send. An exact repeat works even after the source disappears;
   if you edit the recipient list, replay the explicit accepted arguments. For an older
   send without a fingerprint, use its explicit arguments or inspect email_receipt.
+  References comments, including encoded text inside them, do not supply ancestry.
+  Historical Place and queue identities stay intact; a reply may therefore check both
+  its old source scope and its actual emitted thread. A held legacy envelope is never silently corrected or resent.
+  Old Exchange structured captures with lost address or comment syntax require a
+  fresh read before a new reply; their accepted envelopes remain held for reconciliation.
+- Recipients reach the Host as bare addresses, each once across To, Cc and Bcc.
+  Named or comma-separated input returns retry_arguments with the bare lists and
+  their names in `display_names` (bare address → display name), filled for Reply
+  All from the source's From/To/Cc names. Sent and saved headers keep those names,
+  quoted commas included. display_names may only name a listed recipient and never
+  adds one. A bare call without names, or with matching display_names, queues in one
+  call. A replay of a queued request_id keeps its accepted names; different
+  display_names conflict. A name is one line of text without control characters;
+  the header encoder quotes, folds and encodes it, so there is no other length or
+  character limit. Before anything is prepared, queued or saved, the named headers
+  are written and parsed again and must read back the same name and deliver to
+  exactly the listed addresses: a name that would not (for example literal RFC 2047
+  encoded-word text) is refused, and such a name taken from a source header is left
+  out. Draft Bcc keeps its names in the saved header.
 - email_draft saves or updates a Gmail draft by draft_id, or appends an IMAP
   draft. The selected draft folder is an explicit Host target. Omit the folder
   to receive retry_arguments with the provider default (Gmail DRAFT, IMAP Drafts,
@@ -298,9 +381,18 @@ remain readable by explicit account_id.
   is still writable, and a failed policy lookup does not save anything. Search Gmail folder DRAFT to obtain stable draft ids. Sending captured
   draft content with email_send does not silently delete the original draft;
   deleting it is a separate explicit mailbox operation.
-- email_send accepts sender, To/Cc/Bcc, MIME attachments and reply-all. Read a
-  historical source first, or use reply_folder when it is outside the intake
-  folder. Reply-all excludes configured own sender addresses from its automatic additions. The same
+- email_send accepts sender, To/Cc/Bcc, MIME attachments and reply-all. Safety and
+  an owner's approval judge the whole call: subject, recipients and their names,
+  body, HTML and files; no single argument is declared as its words. With
+  `body_type: html`, body is the HTML only when html_body is empty; an explicit body
+  is always the plain alternative.
+- A reply's `reply_to_message_id` is one Message-ID (another spelling returns
+  retry_arguments). Its source must be in this mailbox for every provider: mail
+  captured or read before, else the selected folder (reply_folder) whose answer
+  carries exactly that ID. References and the conversation are the source's;
+  supplied references must match, references without a reply source are refused,
+  and the written reply headers are parsed back before queueing or saving. A
+  queued request replays unchanged. Reply-all excludes configured own sender addresses from its automatic additions. The same
   account_id/request_id returns its original receipt; changed sender/content
   conflicts. The same request_id in another explicitly selected account is a
   different operation.
@@ -337,6 +429,8 @@ remain readable by explicit account_id.
 - email_settings_read inspects supported Gmail settings; email_settings changes
   supported filters, vacation, language, IMAP/POP and existing send-as properties.
   A settings write exposes its selected account, even when it is the only mailbox.
+  A send-as `values.replyToAddress` is checked as a destination: one bare address,
+  or empty to remove Reply-To; other spellings of that field are refused.
   Before creating a filter, Mail compares the effective values.action.forward,
   addLabelIds and removeLabelIds and current custom label names with the declared
   forward_to, add_labels, remove_labels and label_names. Missing or stale targets
@@ -374,8 +468,8 @@ sent as speech. This does not claim exactly-once provider delivery after
 ambiguous network acceptance.
 Retained work carries `reply_anchor` on both released and terminal selected
 outputs, just as a continuing author does. The existing captured-message and
-same-thread checks select the recipient; absent or invalid anchors keep the
-legacy fallback. Recovering an anchor never changes an already queued receipt's
+same-thread checks select the recipient. Only absent, null or empty-object anchors
+fall back to the wake event; an explicit unusable anchor holds the output. Recovering an anchor never changes an already queued receipt's
 recipient or repeats its send.
 An invalid mailbox destination cannot turn a selected answer into a delivery.
 The transport records `invalid_recipient`, keeps observing an active author and
@@ -440,8 +534,8 @@ as `delivery_support.presence_continuation_version`.
   author covered. The reply then
   answers that stored message in the same thread: its Reply-To (or From) is the
   recipient, and its Message-ID and References thread the reply. Without an
-  anchor (promoted children, retained views, older Hosts), or when the anchor
-  is not bound, the reply answers the polled mail as before. Bound means the
+  anchor (absent, null or an empty object), the reply answers the polled mail. An
+  explicit unusable anchor queues nothing. A usable anchor means the
   message's folder, UIDVALIDITY and IMAP UID select a captured mail whose
   `source_event_id` and Message-ID are the anchor's, in the polled mail's
   thread.
@@ -494,8 +588,24 @@ mailbox is absent from To because delivery used Bcc or a mailing-list alias.
 Attachment descriptors expose filenames and MIME types. Successfully staged
 parts include immutable state paths and `content_available: true`; parts that
 exceed an inbound limit or use an unsupported MIME shape retain
-`content_available: false` plus an error descriptor. The full raw RFC822 source
-is staged as an artifact so a clipped part remains recoverable. These message
+`content_available: false` plus an error descriptor. A part with a filename or an
+attachment disposition, and every attached message or report (message/rfc822,
+delivery-status, disposition-notification, global), is an attachment rather than
+the sender's body, body_html or signal.words text. Only when a message has no
+un-named plain or HTML text of its own is a named inline plain/HTML part at its own
+level read as the body (a lone `receipt.html`); an attachment disposition or a part
+inside an attached message never is. A report or attached message has no single
+payload file and reports `unsupported_mime_type`. The files inside an attached
+message (message/rfc822, message/global) and every leaf of an attachment-marked
+multipart follow it in the list and are staged like other files. `container_index`
+links each child to its nearest carrying descriptor. That descriptor stores full
+MIME type, file name and attached mail's From/Subject once in `container`; its own
+`container_index` links outward. `depth`/`mime_part` locate the part in raw MIME.
+Metadata grows with source headers and file count, without repeating long headers
+for every child. Older retained rows keep their original `within` metadata. A blank or
+markup-only own part counts as no text. A forwarded mail's text stays out of the outer body and its sender is not
+the outer sender. The full raw RFC822 source is staged as an artifact so a clipped
+part remains recoverable. These message
 facts are retained with the inbox across restarts. Existing inbox rows keep
 their original content and receipts, with new context unavailable.
 
@@ -523,6 +633,30 @@ Hosts advertising `places_version >= 1` receive every captured email with
 observed `facts`, without a binding ID. Older hosts receive the saved
 legacy binding and event shape. Existing Message-IDs, UIDVALIDITY epochs,
 staged attachments, work references and delivery reports are preserved.
+Every queued email, the automatic reply included, retains a binding for each actual
+envelope address (To, Cc, Bcc; Reply-To or From for an automatic reply) beside its
+conversation bindings, each with the match mode it was bound with. An address is bound
+with `match=exact_casefold` under its policy key, the bare address casefolded (the
+sent envelope keeps its spelling). Only Places naming that address apply there; an
+account-wide Place stays a matter of the email's conversation, where an Active
+conversation Place keeps its exception for a paused mailbox. Connect an address Place
+with the bare address as conversation and no thread, in any letter case. Without an
+account id it restricts deliveries from every mailbox; with one, only from that
+mailbox. Two mailboxes differing only in letter case therefore share one restriction
+(mail systems usually treat them as one; this skill claims nothing about a server).
+No plus, dot or provider aliases are inferred, and existing Places are not migrated.
+An address no Place names keeps the Host's unbound snapshot, so a Place connected
+after queueing still holds the send. A new-format row with missing modes or malformed
+recipient bindings (including null) is held as corrupt, never read with legacy defaults.
+Each Presence event's `message.reply_targets` lists the automatic reply's actual
+envelope (`{conversation, effect: write, match: exact_casefold}`), so the Host reads
+those recipients' Places before Safety. The queued reply keeps the targets of the
+anchor it answers, or of the wake event this transport submitted when there is no
+anchor, and is held if they are absent, malformed or differ from its envelope. A
+reply prepared before this field existed keeps its words, stays held and is never
+resent; send it again with email_send if still needed. An anchor naming no captured
+mail of its thread queues nothing; the reply is never redirected to another message.
+Older queued mail keeps its rows and is checked for its addresses at delivery.
 The SMTP worker re-reads the place immediately before sending. Silent/Paused
 or an unavailable lookup holds the same queue item; Active resumes it without
 spending the retry budget on policy holds, and an unavailable lookup clears once
@@ -532,7 +666,14 @@ enablement, review or token), the hold lasts until its access is fixed in Skills
 `email_read` and `email_folders` are declared read, so a Silent or Advises place can read mail;
 `email_mark_read` and the mixed `email_mailbox` (it can mutate) are declared
 write. Sending is message; search, receipts and connection checks are declared
-read. To/Cc/Bcc are all destination arguments.
+read. Each affected scope is a separate `touches` group with its own thread
+(PluginAPI 2.5): email_send's primary destination is its source conversation (the
+account for a new unthreaded mail), its emitted RFC root is a message group, and
+To/Cc/Bcc are audience plus `exact_casefold` write groups. email_draft's To/Cc/Bcc
+are audience only; folder, folder names, the replaced draft's and the emitted
+conversation are `exact` write groups, and Mail's own folder lookup still holds a
+draft under an account-wide Silent/Paused Place. Mailbox writes keep folders and
+labels as destinations and pair the message's RFC root with its thread.
 
 ## Mailbox identity, settings and facts
 

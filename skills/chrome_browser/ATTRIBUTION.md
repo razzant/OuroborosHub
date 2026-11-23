@@ -12,9 +12,11 @@ extension are Microsoft's:
   They are installed from the npm registry by the host into the skill's isolated
   environment; they are not vendored here. Tarball integrity values and the sha256 of
   every file this skill loads or checks are in [`pins.json`](pins.json).
-- Playwright Extension 0.4.0 (`packages/extension` at the same commit, Chrome Web Store
-  id `mmlmfjhmonkocbjadbfplnigmagldckm`). The owner installs it; this skill does not
-  ship or modify it.
+- Playwright Extension (Chrome Web Store id `mmlmfjhmonkocbjadbfplnigmagldckm`). The
+  owner installs it; this skill does not ship or modify it. This release was tested with
+  the Web Store build 0.5.0 (its CRX and file hashes are in [`pins.json`](pins.json)); the
+  source commit of that build was not established. Earlier releases recorded 0.4.0 built
+  from `packages/extension` at the same commit as above.
 
 [`patches/playwright-core@1.65.0-alpha-2026-10-30.patch`](patches/playwright-core@1.65.0-alpha-2026-10-30.patch)
 modifies `playwright-core/lib/coreBundle.js`. It contains Microsoft's code and is

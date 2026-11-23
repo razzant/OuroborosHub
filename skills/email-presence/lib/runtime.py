@@ -11,8 +11,13 @@ from datetime import datetime, timezone
 
 from .delivery import DeliveryRejected, email_report
 from .accounts import AccountError
-from .host_adapter import HostBindingTerminalError, HostRetryError, HostTurnStatus, place_refusal_hold
-from .mime import MailAddressError, conversation_root, extract_body, mailbox_addresses
+from .host_adapter import (_BINDINGS_CORRUPT, _TARGETS_DIFFER, LEGACY_REPLY_HELD, MATCH_SCOPE, PLACE_MATCH,
+                           RECIPIENT_PLACES, HostBindingTerminalError, HostRetryError, HostTurnStatus,
+                           automatic_reply_targets, binding_modes, capture_hold, capture_recipients, match_arguments,
+                           place_refusal_hold, recipient_delivery_hold, reply_target_rows, valid_reply_targets)
+from .mime import (MailAddressError, conversation_root, emitted_conversation, envelope_groups, extract_body,
+                   reply_chain)
+from .retained import RetainedSourceError, automatic_reply_envelope
 from .settings import SENDING_OFF_HOLD, load_settings
 from .store import RequestIdConflict
 
@@ -38,6 +43,26 @@ def _retry(exc, attempts):
         backoff = min(_CAPACITY_BACKOFF_MAX_SECONDS, 2 ** min(max(attempts - 1, 0), 5))
         return note, backoff if exc.retry_after is None else max(exc.retry_after, backoff)
     return note, min(60, 2 ** min(attempts, 5))
+
+
+class ReplyAnchorUnusable(MailAddressError):
+    """A version 2 output's reply_anchor names no captured mail of its thread: nothing is queued for it."""
+
+
+def _submitted_targets_key(item):
+    return f"reply_targets:{item.provider_event_key}"
+
+
+def _target_keys(rows):
+    return [(row["conversation"], row["effect"], row["match"], row.get("thread", "")) for row in rows]
+
+
+def _automatic(item):
+    """An automatic Presence reply: its recorded origin, or (rows older than origins) its presence: request id."""
+    origin = item.reporting.get("origin")
+    if isinstance(origin, Mapping):
+        return origin.get("kind") == "automatic"
+    return item.request_id.startswith("presence:")
 
 
 def _wire_text(message):
@@ -129,24 +154,45 @@ class EmailRuntime:
     def _anchored(self, item, anchor):
         """The captured mail a version 2 ``reply_anchor`` names, else the polled mail.
 
-        Its message's folder/UIDVALIDITY/UID select one stored row, which must be that
-        exact source event and Message-ID and in the polled mail's thread (this store is
-        one mailbox). Children and older Hosts carry no anchor.
-        """
-        anchor = anchor if isinstance(anchor, Mapping) else {}
-        source = str(anchor.get("source_event_id") or "")
-        if not source or source == item.provider_event_key:
+        Its message's folder/UIDVALIDITY/UID select one stored row, which must be that exact source event and
+        Message-ID and in the polled mail's thread (this store is one mailbox). Children and older Hosts carry no
+        anchor. An anchor that names no such mail is unusable: the reply is not redirected to another message."""
+        if anchor is None or anchor == {}:
             return item
-        message = anchor.get("message") if isinstance(anchor.get("message"), Mapping) else {}
+        if (not isinstance(anchor, Mapping) or not isinstance(anchor.get("source_event_id"), str)
+                or not anchor["source_event_id"].strip() or not isinstance(anchor.get("message"), Mapping)):
+            raise ReplyAnchorUnusable("reply_anchor has no usable source_event_id and message; nothing was queued")
+        source, message = anchor["source_event_id"], anchor["message"]
+        if source == item.provider_event_key:
+            # Even the waking event must not carry contradictory identity facts. Legacy anchors can omit fields;
+            # their absent reply_targets are held separately, with the original words preserved.
+            expected = {"folder": item.folder, "uidvalidity": item.uidvalidity, "imap_uid": item.uid,
+                        "message_id": item.message_id}
+            if any(key in message and (type(message[key]) is not type(value) or message[key] != value)
+                   for key, value in expected.items()):
+                raise ReplyAnchorUnusable("reply_anchor contradicts the captured wake event; nothing was queued")
+            return item
         key = (message.get("folder"), message.get("uidvalidity"), message.get("imap_uid"))
         target = (self.store.inbox_event(*key)
                   if isinstance(key[0], str) and type(key[1]) is int and type(key[2]) is int else None)
         if (target is None or target.provider_event_key != source or target.message_id != message.get("message_id")
                 or target.thread_key != item.thread_key):
-            log.warning("Presence reply anchor %s is not a captured mail of this thread; replying to %s",
-                        source, item.provider_event_key)
-            return item
+            raise ReplyAnchorUnusable(f"reply_anchor {source} is not a captured mail of this thread; nothing was queued")
         return target
+
+    def remember_reply_targets(self, item):
+        """Record the ``reply_targets`` this transport's event for ``item`` carries, before it is submitted."""
+        self.store.put(_submitted_targets_key(item), {"reply_targets": automatic_reply_targets(item)})
+
+    def _seen_targets(self, item, anchor):
+        """The ``reply_targets`` the Host read before Safety for this output: from the selected anchor's message,
+        or (no anchor: the wake event) from the event this transport submitted. None when they were absent."""
+        anchor = anchor if isinstance(anchor, Mapping) else {}
+        if str(anchor.get("source_event_id") or ""):
+            message = anchor.get("message") if isinstance(anchor.get("message"), Mapping) else {}
+            return message["reply_targets"] if "reply_targets" in message else None
+        recorded = self.store.get(_submitted_targets_key(item))
+        return recorded.get("reply_targets") if isinstance(recorded, Mapping) else None
 
     def _reply(self, item, texts, suffix, mode=0, turn_ref="", anchor=None):
         text = "\n".join(texts).strip()
@@ -156,38 +202,64 @@ class EmailRuntime:
                 return  # The first durable output identity wins, even after the anchor changes.
             # A version 2 author output answers its last covered input: reply to that
             # captured message in the same thread. Without an anchor (children, older
-            # Hosts) or an unbound one, reply to the polled event as before. The
-            # request id stays the polled event's, so each output is queued once.
+            # Hosts), reply to the polled event as before. The request id stays the
+            # polled event's, so each output is queued once.
             target = self._anchored(item, anchor)
-            recipients = mailbox_addresses(target.context.get("reply_to") or [target.sender])
-            if not recipients:
-                raise MailAddressError("Selected reply has no mailbox recipient")
+            source, recipients = automatic_reply_envelope(target)
+            chain = reply_chain(source)
             subject = target.subject if target.subject.lower().startswith("re:") else f"Re: {target.subject}"
             client_settings = getattr(self.client, "settings", {})
             reporting = {"version": mode, "account_id": self.account,
+                         "reply_source_syntax": 1,
                          "sender": client_settings.get("EMAIL_DEFAULT_SENDER") or client_settings.get("EMAIL_USER", ""),
                          "origin": {"kind": "automatic", "task_id": turn_ref, "source_event_id": item.provider_event_key}}
             if getattr(self.client, "transport", None) == "gmail_api" and target.context.get("provider_thread_id"):
                 reporting["gmail_thread_id"] = target.context["provider_thread_id"]
-            existing = self.store.receipt(request_id)
+            # The recipients whose Places the Host read before Safety must be exactly this reply's envelope. Absent
+            # (prepared before they were checked), malformed or different targets keep the words held, never sent.
+            seen = self._seen_targets(item, anchor)
+            to = envelope_groups(recipients)[0]
             hold = ""
+            if seen is None:
+                hold = LEGACY_REPLY_HELD
+            elif not valid_reply_targets(seen):
+                hold = _TARGETS_DIFFER
+            else:
+                reporting["reply_targets"] = [dict(row) for row in seen]
+                reporting["reply_anchor_event"] = target.provider_event_key
+                if _target_keys(seen) != _target_keys(reply_target_rows(to)):
+                    hold = _TARGETS_DIFFER
             capture = getattr(self.host, "capture_binding", None)
-            if existing is not None:
-                reporting = existing["delivery_reporting"]
-            elif capture:
+            if capture:
                 # Transport failure precedes any outbox record. Let the inbox's
                 # existing retry custody replay the cached paid output, not mint
                 # an immutable unknown binding from a temporary outage.
+                modes = {}
                 facts = capture(self.account, target.thread_key, thread_id=target.thread_key, require_place=True)
                 if facts.get("supported"):
-                    reporting["place_binding"] = facts.get("binding")
+                    reporting["place_binding"], modes["place_binding"] = facts.get("binding"), MATCH_SCOPE
                     if not facts.get("allowed"):
-                        hold = place_refusal_hold(facts)
+                        hold = hold or place_refusal_hold(facts)
+                emitted = emitted_conversation(target.message_id, chain)
+                if emitted != target.thread_key:
+                    facts = capture(self.account, emitted, thread_id=emitted)
+                    if facts.get('supported'):
+                        reporting['emitted_place_binding'], modes['emitted_place_binding'] = facts.get('binding'), MATCH_SCOPE
+                        if not facts.get('allowed'):
+                            hold = hold or place_refusal_hold(facts)
+                # Each actual envelope address (Reply-To, else From) keeps its own exact binding: a Silent/Paused
+                # Place of that address holds this reply as it holds email_send.
+                reason, record = capture_recipients(self.host, self.account, to)
+                if record is not None:
+                    reporting[RECIPIENT_PLACES], modes[RECIPIENT_PLACES] = record, record["match"]
+                hold = hold or reason
+                if modes:
+                    reporting[PLACE_MATCH] = modes
             try:
                 self.store.enqueue_outbox(request_id=request_id,
                                           recipients=recipients, subject=subject,
                                           body=text, in_reply_to=target.message_id,
-                                          references=target.references or ([target.in_reply_to] if target.in_reply_to else []),
+                                          references=chain,
                                           reporting=reporting, hold_reason=hold)
             except RequestIdConflict:
                 # The first queued copy of this output identity stays authoritative.
@@ -217,6 +289,24 @@ class EmailRuntime:
             if not self.host.available:
                 self.store.retry_inbox(item.row_id, item.lease_token, "Presence binding is not configured", 30)
                 return True
+            # A retained event keeps its historical key. If old CFWS parsing selected another scope, check the
+            # actual ancestry as well before submitting it; a pause there must not create a new author turn.
+            if not item.host_reference:
+                chain = reply_chain({**item.context, 'references': item.references, 'in_reply_to': item.in_reply_to})
+                actual = emitted_conversation(item.message_id, chain)
+                if actual != item.thread_key:
+                    capture = getattr(self.host, 'capture_binding', None)
+                    reason = capture_hold(capture, self.account, actual) if capture else None
+                    if reason is None:
+                        check = getattr(self.host, 'place_hold', None)
+                        reason = check(self.account, actual, thread_id=actual) if check else None
+                    if reason:
+                        self.store.retry_inbox(item.row_id, item.lease_token, reason, 30)
+                        return True
+            if not item.host_reference:
+                # The event carries these reply_targets (email_presence_event); remembered so an output without an
+                # anchor (the wake event) is compared with what the Host actually read.
+                self.remember_reply_targets(item)
             ref = item.host_reference or await self.host.submit(item)
             observe = True
             if not item.host_reference:
@@ -284,15 +374,70 @@ class EmailRuntime:
             release(reference, self.store.active_host_references())
 
     def _delivery_hold(self, item):
+        try:
+            modes = binding_modes(item.reporting)
+        except ValueError:
+            return _BINDINGS_CORRUPT  # A recognised new-format row is never read with legacy defaults.
+        try:
+            envelope = item.envelope_recipients
+        except ValueError:
+            envelope = None  # The send itself fails on its empty envelope, as before.
+        if envelope is not None and _automatic(item):
+            # An accepted automatic reply goes out only with the recipients the Host read before Safety.
+            targets = item.reporting.get("reply_targets")
+            if not valid_reply_targets(targets):
+                return LEGACY_REPLY_HELD
+            if _target_keys(targets) != _target_keys(reply_target_rows(envelope)):
+                return _TARGETS_DIFFER
+        hold = self._conversation_hold(item, modes)
+        if hold or envelope is None:
+            return hold
+        # Every actual envelope address, including rows accepted before recipient bindings existed. An old row
+        # stays as accepted: it is checked now and held if an address Place refuses, never rebound or resent.
+        return recipient_delivery_hold(self.host, self.account, envelope, item.reporting, modes)
+
+    def _conversation_hold(self, item, modes=None):
+        try:
+            if reason := self.store.retained_outbox_hold(item):
+                return reason
+        except RetainedSourceError as exc:
+            return 'Held: ' + str(exc)
         conversation = conversation_root(references=item.references, in_reply_to=item.in_reply_to, message_id=item.message_id)
         if "place_binding" in item.reporting:
             check = getattr(self.host, "binding_hold", None)
             binding = item.reporting["place_binding"]
             conversation = binding.get("conversation_id", "") if isinstance(binding, dict) else conversation
             thread = binding.get("thread_id", "") if isinstance(binding, dict) else ""
-            return check(binding, self.account, conversation, thread_id=thread) if check else "Held: Host cannot check the original Place binding"
-        check = getattr(self.host, "place_hold", None)
-        return check(self.account, conversation) if check else ""
+            hold = (check(binding, self.account, conversation, thread_id=thread,
+                          **match_arguments(modes, "place_binding"))
+                    if check else "Held: Host cannot check the original Place binding")
+        else:
+            check = getattr(self.host, "place_hold", None)
+            hold = check(self.account, conversation, thread_id=conversation) if check else ""
+        if hold or not (item.in_reply_to or item.references):
+            return hold
+        emitted = emitted_conversation(item.in_reply_to, item.references, item.message_id)
+        if emitted == conversation:
+            return ""
+        # Old queue rows are not rewritten or rebound. Their original authority remains above; additionally check
+        # the actual emitted scope now. New rows retain both bindings, so neither disconnect is forgotten.
+        check = getattr(self.host, 'binding_hold', None)
+        if 'emitted_place_binding' in item.reporting:
+            return (check(item.reporting['emitted_place_binding'], self.account, emitted, thread_id=emitted,
+                          **match_arguments(modes, 'emitted_place_binding'))
+                    if check else 'Held: Host cannot check the emitted Place binding')
+        capture = getattr(self.host, 'capture_binding', None)
+        if capture:
+            # A transient Host failure here is an unread policy, held like binding_hold's: never a spent attempt.
+            hold = capture_hold(capture, self.account, emitted)
+            if hold is not None:
+                return hold
+        check = getattr(self.host, 'place_hold', None)
+        return check(self.account, emitted, thread_id=emitted) if check else 'Held: Host cannot check the emitted conversation'
+
+    def _sending_off(self):
+        current = self.account_loader() if self.account_loader else load_settings(self.store.state_dir)
+        return current.get("sending", "on") == "off"
 
     def process_outbox(self):
         item = self.store.claim_outbox()
@@ -300,8 +445,8 @@ class EmailRuntime:
             return False
         sending = False
         try:
-            current = self.account_loader() if self.account_loader else load_settings(self.store.state_dir)
-            if current.get("sending", "on") == "off":
+            # A disconnected account raises AccountError, held below; Sending off holds the same item.
+            if self._sending_off():
                 self.store.hold_outbox(item, SENDING_OFF_HOLD)
                 return True
             reason = self._delivery_hold(item)
@@ -325,7 +470,11 @@ class EmailRuntime:
             item = replace(item, reporting=reporting)
             delivery = getattr(self.client, "delivery", None) or self.client.smtp
             with delivery() as smtp:
-                # Policy may have changed while the provider connection opened.
+                # The account and Place policy may have changed while the provider connection opened. Nothing
+                # was submitted yet, so a hold here is certain and the same item stays queued for release.
+                if self._sending_off():
+                    self.store.hold_outbox(item, SENDING_OFF_HOLD)
+                    return True
                 reason = self._delivery_hold(item)
                 if reason:
                     self.store.hold_outbox(item, reason)

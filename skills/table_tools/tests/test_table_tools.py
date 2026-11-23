@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -133,3 +135,110 @@ def test_header_beyond_scan_budget_is_reported_as_unscanned_not_empty(capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "header_not_found_within_scan_budget"
     assert "not scanned" in payload["error"]
+
+
+# --------------------------------------------------------------------------- #
+# UTF-8 output regression (OuroborosHub issue #346)
+# --------------------------------------------------------------------------- #
+#
+# On Windows a piped child writes stdout in the host's ANSI code page, while
+# the Ouroboros host decodes it as UTF-8: Cyrillic columns became U+FFFD (or a
+# UnicodeEncodeError crash on Western locales). The tests below force the same
+# broken condition on any platform via PYTHONIOENCODING, so they fail on 0.1.0
+# and pass once the scripts pin their streams to UTF-8.
+
+_CODE_PAGES = ["cp1252", "cp1251"]
+
+
+def _run_script(script: str, csv_path: Path, args: list, encoding: str):
+    """Run an entry point in a child interpreter with a forced stdout code page.
+
+    ``PYTHONIOENCODING`` reproduces what a piped Windows child does by default
+    (the ANSI code page of the host locale) on any test platform;
+    ``PYTHONUTF8=0`` keeps a developer's UTF-8 mode from hiding the bug. The
+    state dir makes the CSV's own directory an allowed working root for the
+    child, so the temp file location is portable and locale-independent.
+    """
+    env = {
+        key: value for key, value in os.environ.items()
+        if key not in ("PYTHONIOENCODING", "PYTHONUTF8", "PYTHONLEGACYWINDOWSSTDIO")
+    }
+    env["OUROBOROS_SKILL_STATE_DIR"] = str(csv_path.parent)
+    env["PYTHONIOENCODING"] = encoding
+    env["PYTHONUTF8"] = "0"
+    return subprocess.run(
+        [sys.executable, str(SCRIPTS / script), str(csv_path), *args],
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("encoding", _CODE_PAGES)
+def test_read_table_reports_cyrillic_headers_as_utf8_json(tmp_path, encoding):
+    state = tmp_path / "state"
+    state.mkdir()
+    csv_path = state / "cars.csv"
+    rows = ["Марка,Количество,Масса_кг", "ГАЗ,3,1200.5", "УАЗ,2,1600"]
+    csv_path.write_text("\n".join(rows), encoding="utf-8")
+
+    result = _run_script("read_table.py", csv_path, [], encoding)
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    payload = json.loads(result.stdout.decode("utf-8"))
+    assert payload["status"] == "ok"
+    assert payload["columns"] == ["Марка", "Количество", "Масса_кг"]
+
+
+@pytest.mark.parametrize("encoding", _CODE_PAGES)
+def test_query_table_groups_a_cyrillic_column_as_utf8_json(tmp_path, encoding):
+    state = tmp_path / "state"
+    state.mkdir()
+    csv_path = state / "cars.csv"
+    rows = ["Марка,Количество", "ГАЗ,3", "УАЗ,2", "ГАЗ,1"]
+    csv_path.write_text("\n".join(rows), encoding="utf-8")
+
+    result = _run_script("query_table.py", csv_path,
+                         ["--group-by", "Марка", "--agg", "count"], encoding)
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    payload = json.loads(result.stdout.decode("utf-8"))
+    assert payload["status"] == "ok"
+    assert payload["group_by"] == "Марка"
+    assert [entry["group"] for entry in payload["groups"]] == ["ГАЗ", "УАЗ"]
+    assert [entry["count"] for entry in payload["groups"]] == [2, 1]
+
+
+@pytest.mark.parametrize("encoding", _CODE_PAGES)
+def test_the_dash_in_the_excluded_values_warning_survives_as_utf8(tmp_path, encoding):
+    state = tmp_path / "state"
+    state.mkdir()
+    csv_path = state / "plain.csv"
+    rows = ["Region,Revenue", "West,10", "West,oops"]
+    csv_path.write_text("\n".join(rows), encoding="utf-8")
+
+    result = _run_script("query_table.py", csv_path,
+                         ["--agg", "sum", "--on", "Revenue"], encoding)
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    payload = json.loads(result.stdout.decode("utf-8"))
+    assert payload["aggregates"]["sum"] == 10.0
+    assert "\u2014" in payload["aggregates"]["warning"]
+
+
+@pytest.mark.parametrize("script,args", [
+    ("read_table.py", ["--head", "Марка"]),
+    ("query_table.py", ["--limit", "Марка"]),
+])
+@pytest.mark.parametrize("encoding", _CODE_PAGES)
+def test_argparse_error_reports_cyrillic_on_stderr_as_utf8(tmp_path, script, args, encoding):
+    state = tmp_path / "state"
+    state.mkdir()
+    csv_path = state / "cars.csv"
+    csv_path.write_text("Марка,Количество\nГАЗ,3\n", encoding="utf-8")
+
+    result = _run_script(script, csv_path, args, encoding)
+
+    assert result.returncode == 2
+    stderr = result.stderr.decode("utf-8")
+    assert "Марка" in stderr

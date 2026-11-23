@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DownloadCapture } from './download.mjs';
 
 export const APPROVAL_TTL_MS = 15 * 60 * 1000;
 
@@ -119,8 +120,10 @@ function frameOf(request) {
 const withoutFragment = (url) => String(url).split('#')[0];
 
 export class BrowserConnection {
-  constructor({ tools, playwright, guard, config, toolList, clientName, approvalTtlMs = APPROVAL_TTL_MS }) {
+  constructor({ tools, playwright, guard, config, toolList, clientName, approvalTtlMs = APPROVAL_TTL_MS, extension = null }) {
     this._tools = tools;
+    // The extension this skill was tested with (pins.json), named the same way in browser_connect's answer.
+    this._extension = extension;
     this._playwright = playwright;
     this._guard = guard;
     this._config = config;
@@ -132,6 +135,8 @@ export class BrowserConnection {
     this._generation = 0;
     this._diagnostic = null;
     this._relay = null;
+    // The capture of a download the agent's click starts, for the current relay (download.mjs).
+    this._downloads = null;
     this._browser = null;
     this._backend = null;
     this._url = '';
@@ -191,6 +196,10 @@ export class BrowserConnection {
     return this._state === 'ready' ? this._context : null;
   }
 
+  downloads() {
+    return this._state === 'ready' ? this._downloads : null;
+  }
+
   _event(name, detail = {}) {
     this.events.push({ at: Date.now(), name, ...detail });
     if (this.events.length > 200)
@@ -228,12 +237,15 @@ export class BrowserConnection {
     this._attachRefusals = [];
     recordAttachRefusals(relay, this._attachRefusals);
     observeRelay(relay, this, generation);
+    // Before Playwright connects, so that its first Fetch.enable is recorded.
+    const downloads = new DownloadCapture(relay);
     await relay.start();
     if (!this._current(generation)) {
       relay.stop();
       return { status: 'superseded' };
     }
     this._relay = relay;
+    this._downloads = downloads;
     this._url = relay.connectPageUrl(this._clientName);
     this._state = 'pending';
     this._reason = '';
@@ -345,13 +357,14 @@ export class BrowserConnection {
   //   firstOwn   the first document's own addresses, which outlast it (requestTargets);
   //   frames     frame -> redirect chain of the document it now shows, for a document that had hops;
   //   pending    frame -> its latest navigation request (only for the commit that names no request);
+  //   navigations  how many navigations have committed in its frames (documentVersion);
   //   console, errors  how many console messages and page errors this connection has seen.
   _provenance(page) {
     let state = this._pages.get(page);
     if (state)
       return state;
     const document = { own: unique([page.url()]), addresses: new Set(unique([page.url()])), truncated: false, console: 0, errors: 0 };
-    state = { document, documents: [document], firstOwn: document.own, frames: new Map(), pending: new Map(), console: 0, errors: 0 };
+    state = { document, documents: [document], firstOwn: document.own, frames: new Map(), pending: new Map(), navigations: 0, console: 0, errors: 0 };
     this._pages.set(page, state);
     const watch = (frame) => frame._eventEmitter.on('navigated', (event) => this._onNavigated(page, state, frame, event));
     page.frames().forEach(watch);
@@ -380,7 +393,10 @@ export class BrowserConnection {
   // before it, or the document never used the network): the frame's latest navigation request counts
   // if it is for the address that committed.
   _onNavigated(page, state, frame, event) {
-    if (event.error || !event.newDocument)
+    if (event.error)
+      return;
+    state.navigations += 1;
+    if (!event.newDocument)
       return;
     const pending = state.pending.get(frame);
     state.pending.delete(frame);
@@ -454,6 +470,13 @@ export class BrowserConnection {
     return state.documents.findLast((document) => document[kind] <= counted) ?? state.documents[0];
   }
 
+  // The version of what a page shows: how many navigations this connection has seen commit in its frames, a new
+  // document and a same-document change of address alike. Two readings are equal only if none committed in between,
+  // so a page that left its document and came back to the same address does not read the same.
+  documentVersion(page) {
+    return this._provenance(page).navigations;
+  }
+
   _expire(generation) {
     if (this._current(generation) && this._state === 'pending')
       this._close(generation, 'BROWSER_APPROVAL_EXPIRED', `the owner did not approve within ${Math.round(this._approvalTtlMs / 60000)} minutes; the link no longer works`, 'approval_expired');
@@ -475,6 +498,8 @@ export class BrowserConnection {
     const backend = this._backend;
     const browser = this._browser;
     const relay = this._relay;
+    this._downloads?.dispose();
+    this._downloads = null;
     this._backend = null;
     this._browser = null;
     this._relay = null;
@@ -521,7 +546,7 @@ export class BrowserConnection {
       case 'idle':
         return 'BROWSER_NOT_CONNECTED: No Chrome tab is connected. Call browser_connect; it returns a link for the owner to approve in their own Chrome. Nothing was done.';
       case 'pending':
-        return 'BROWSER_NEEDS_APPROVAL: The owner has not approved the connection yet (the link from browser_connect, opened in a new tab of their Chrome). Nothing was done and nothing was queued; keep this task and its browser tool session alive while waiting for the owner, then call the tool again after they say they approved. If the connect page reports an unsupported protocol or version, the installed Playwright Extension is not the tested 0.4.0 (relay protocol 2); tell the owner instead of retrying.';
+        return `BROWSER_NEEDS_APPROVAL: The owner has not approved the connection yet (the link from browser_connect, opened in a new tab of their Chrome). Nothing was done and nothing was queued; keep this task and its browser tool session alive while waiting for the owner, then call the tool again after they say they approved. If the connect page reports an unsupported protocol or version, the installed Playwright Extension does not match the one this skill was tested with${this._extension ? ` (${this._extension.tested_version}, relay protocol ${this._extension.relay_protocol_version})` : ''}; tell the owner instead of retrying.`;
       case 'attaching':
         return 'BROWSER_ATTACHING: The owner approved; the connection is still being set up. Nothing was done; call the tool again in a moment.';
       default:

@@ -28,9 +28,13 @@ a source, a release digest and a withdrawal status. Optional `withdrawn_releases
 records withdrawn versions by digest. Optional `icon` names a host icon or a
 local `ui/*.svg` geometry asset. `connects` is derived from `provides: place`
 contributions in the reviewed manifest; older consumers can ignore both fields.
-Optional `title` is the human name the manifest gives a skill (for example
-`Email tools`); the canonical name stays its identity. A connector needs none:
-its place `label` already names the service.
+Optional `title` is the human name of a skill (for example `Email tools`); it is
+seeded from the manifest and may be reworded for people; the canonical name stays
+its identity. Optional `pitch` is a one-line description of what the skill does,
+`needs` says in a few words what it needs (empty when nothing) and `mark` is that
+need in two or three words (`Gemini key`); the setup wizard's Skills step in
+Ouroboros shows them when present. A connector needs no separate manifest title:
+its place `label` names the service. Its catalog entry can still supply setup wording.
 Connector marks are monochrome `currentColor` geometry: the Slack and GitHub
 marks use Lucide geometry (ISC License) and the Telegram mark uses Tabler Icons
 geometry (MIT License); product names and marks remain the property of their
@@ -121,7 +125,9 @@ identity along with code and instructions.
    included in an entry PR.
 
 `--refresh` updates only the named entry's version, raw dependency declaration,
-release digest, and manifest-derived `icon`/`connects`/`title` fields. `--digest NAME`
+release digest, and manifest-derived `icon` and `connects`. It keeps existing
+`title`, `pitch`, `needs` and `mark`, seeding `title` from the manifest only
+if absent. The v1 catalog still uses the manifest title. `--digest NAME`
 prints the digest without changing files. Neither command renews Official
 endorsements. `scripts/build_catalog.py` remains a
 compatible alias for the generator and its `--check` mode.
@@ -134,22 +140,64 @@ use it to discover updates. Run `--refresh NAME`, regenerate the catalog locally
 and run validation and the relevant skill tests. Commit the entry and payload;
 leave the generated catalog to publication if you want owner automerge.
 
-A PR is automatically merged only when it changes one existing entry (plus that
-skill's hosted files), its author is the owner recorded on main, the owner stays
-unchanged, the name has no Official endorsement, and the aggregate `checks` job
-passes. It requires catalog validation and every selected hosted suite to pass;
-unaffected suites may be skipped. The merge uses the exact validated head SHA. New names, ownership transfers,
-Official changes, workflow changes and changes outside that skill need maintainer
-review.
+**Automatic Community publication.** A PR is merged automatically only when, between
+its head and its merge base with main, it modifies one existing entry and changes
+nothing outside that entry and `skills/<name>/` (regular files only); its author is
+the owner recorded on main, the owner stays unchanged, the name has no Official
+endorsement on main, and the aggregate `checks` job passes. Independent maintainer
+review is not required on that path, and merging does not grant Official
+endorsement. New names, ownership transfers, Official changes, workflow changes and
+changes outside that skill need maintainer review. The merge is an ordinary merge
+commit at the exact validated head, so the contribution's commits, including
+intermediate ones, enter history; the checks inspect the final trees, not every
+historical commit.
 
-Validation runs on `pull_request` with read permissions and writes a small verdict
-artifact. The privileged `workflow_run` job executes helpers from main only. It
-reads the artifact as JSON, rechecks the PR, files, owner and endorsements through
-the API, and merges by SHA. It never checks out or executes PR code with its write
-token.
+Validation runs on `pull_request` with read permissions and checks out one tested
+commit, GitHub's merge of the head into main. After `checks` passes, a `receipt` job
+on a fresh runner records that run attempt's tested commit from GitHub's contexts as
+`owner-update-receipt-<run>-<attempt>`. The privileged **Owner Updates** job runs
+helpers from main only. It fetches main, `refs/pull/<n>/head` and the tested commit
+as Git objects and never checks out or executes PR files. It requires the tested
+commit to merge exactly this head into main, with the same skill files as the head
+and the same files outside `entries/`, `skills/` and `catalog.json` as current main.
+The selected entry and payload must be unchanged on main since the branch point;
+otherwise update the branch. Other skills may change on main meanwhile. That one
+attempt's own job list must show `catalog`, `checks`, `receipt` and every hosted
+suite `scripts/ci_checks.py` selects for the change as run and passed; a partial
+rerun, a superseded attempt, a moved head or a moved main refuses. Rerunning all
+jobs repeats the same tested merge. It helps after a moved main only while main
+kept the CI control files and this skill; otherwise push, use Update branch, or
+convert to Draft and back to Ready, which tests a new merge.
 
-If validation needs to be retried, rerun all jobs so the verdict and green checks
-belong to the same run attempt.
+Before merging, each merge attempt writes its own `github-actions[bot]` comment on
+the PR with this notice and an `attempting` marker naming the head and both runs,
+then rereads the PR, main and the validation run attempt and merges. Later it updates
+only that comment, so a delayed write cannot erase another attempt's record. It never
+resubmits a merge whose outcome is unknown. After merging it reads the merge commit's parents and says the
+contribution's commits were kept only once that readback succeeds; if main had
+moved, it rechecks this skill and its policy on the actual parent. Any mismatch or
+failed readback reports `merged; post-merge verification failed`, without reverting.
+
+**Hold.** Adding the `owner-update-hold` label (and converting to Draft) is an
+immediate stop request, not yet a confirmation. Run **Owner Updates** from main
+with `workflow_dispatch` and the PR number: queued with merges, it sets the label if
+needed, reads the PR open and unmerged, and records the hold in a new bot comment
+with its run. A merge job checks the label on entry and before merging; marking the
+PR Ready does not clear it. To release, remove the label, then validate again as
+above.
+
+**Unknown outcome.** While any attempt's comment shows `attempting`, or an
+owner-update bot comment is unreadable, no later merge proceeds and no hold is
+confirmed. Read back the named Owner Updates run and the PR. A Hold run dispatched
+for a merged PR records the merge as observed; nothing else is guaranteed to. If
+that merge landed after **Sync Joi Lab Mirror** had read main, run Sync from main
+with `workflow_dispatch`. To authorize a new attempt anyway, edit that attempt's
+comment: keep its text, change only `"phase":"attempting"` to
+`"phase":"acknowledged_unknown"` in the control line, and add a line
+`Maintainer acknowledgement (YYYY-MM-DD): <reason>`. This accepts the risk for a new
+merge attempt only. It does not prove the earlier request had no effect: the comment
+stays, and Hold stays unconfirmed (the label still stops new merges) until a merge
+is observed.
 
 To withdraw the entire entry from new installs, set `withdrawn` to a reason and date:
 
@@ -195,7 +243,7 @@ keeps old catalogs usable while new metadata is being published. Uncommitted
 local previews or exported trees without git history use `main`; publication
 always uses a clean checkout with full history.
 
-After a main push or an owner automerge, **Sync Joi Lab Mirror** refreshes legacy
+After a main push or any finished Owner Updates run, **Sync Joi Lab Mirror** refreshes legacy
 hosted entries, validates and regenerates the v1 catalog, publishes the generated
 commit to main, then mirrors it to `joi-lab/OuroborosHub`. It does not depend on a
 `GITHUB_TOKEN` push starting another workflow. When `CATALOG_DEPLOY_KEY` is set,
@@ -254,6 +302,29 @@ PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/sla
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs skills/telegram-bot/tests
 ```
 
+Every suite whose tests use a real core (`core_env` in `scripts/ci_checks.py`: Memory Atlas,
+mail, Calendar, Smart Lists, the dashboard widgets, GitHub, the phone line and the Presence consumers of
+Freshdesk, Slack and Telegram) runs against one `razzant/ouroboros` commit, `OUROBOROS_CORE_SHA`
+at the top of `.github/workflows/catalog-check.yml`, checked out once per job; the catalog job
+checks every hosted release and connector against the same commit. With one pin every seam
+between a hosted skill and the core is tested on the same reproducible core, and no suite stays
+behind on an older one; `tests/test_workflows.py` fails on a second pin in any `.yml` or `.yaml`
+workflow, whether a checkout or a run step's git command takes it. That check is a lint against an
+accidental second pin, not a boundary: a step that moves the checked-out core with a git command run
+from `working-directory: core` or after a shell `cd` is not seen by it. To move the pin, open a PR that
+changes only that value. The workflow is shared, so that PR runs every suite on the new core, and it
+merges when all of them pass. A suite that fails there is fixed in the hub when the skill or its test
+is wrong against the core's documented contract, and reported to the core when the core broke it.
+
+`scripts/ci_checks.py run <suite>` refuses a suite whose core is not named, and puts that core first
+on its tests' `PYTHONPATH`, ahead of anything inherited, so the skill tests that check their wire
+bodies with the core's own validators run them. The Slack and Telegram bridge suites also list the
+core functions those tests import (`core_imports`): a named core without one, or an import that
+resolves outside the named checkout, stops the suite instead of letting the check skip. Locally each
+variable a suite names is checked on its own, so two of them (Telegram User Session's Presence and
+theme roots, or Memory Atlas's `ATLAS_CORE` beside `ATLAS_HOST_ROOT`) can name different checkouts;
+CI names one checkout per job.
+
 The `claudexor-quotas` suite needs Node 24, pytest, Playwright and its Chromium
 and WebKit builds. `OUROBOROSHUB_NODE` selects an existing Node executable;
 `PLAYWRIGHT_BROWSERS_PATH` selects the browser cache. Run with
@@ -268,10 +339,14 @@ Set `TG_DISCOVERY_CORE`, `TG_DISCOVERY_VENV` and `PLAYWRIGHT_BROWSERS_PATH`, the
 run its `run.sh` with an evidence directory. It checks the existing Places picker
 against synthetic Bot API updates and an upgrade from 0.8, without live credentials.
 
-The selected `calendar-skill` and `email-presence` CI jobs check out the exact core
-pinned in `catalog-check.yml`, install its Python runtime requirements and
-Chromium/WebKit, and exercise the real Host Service and widget bridge with fake
-providers. Missing core or browsers fail those jobs. For local backend-only
+The selected `calendar-skill`, `email-presence` and `smart-lists` CI jobs install the
+pinned core's Python runtime requirements and Chromium/WebKit. Calendar and mail
+exercise the real Host Service and widget bridge with fake providers. Smart Lists
+mounts its widget through that core's real
+module bridge (`widget_module.js`), served by a test HTTP server over the skill's
+routes registered on `FakePluginAPI`, without the Host Service. A missing core fails
+those jobs; so do missing Playwright or browsers (Smart Lists: `SMART_LISTS_REQUIRE_BROWSERS`,
+set by `scripts/ci_checks.py`). For local backend-only
 calendar checks, which do not qualify its widget or sign-in return:
 
 ```bash
@@ -279,8 +354,8 @@ python -m pip install icalendar python-dateutil cryptography pytest
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q skills/calendar/tests --ignore=skills/calendar/tests/test_widget_browser.py
 ```
 
-For the complete selected consumers, use Python 3.10 with the pinned core's
-requirements and browsers installed, set `OUROBOROS_SOURCE_DIR` and
+For each complete consumer suite, use Python 3.10 with the requirements and browsers
+from the pinned core. Set `OUROBOROS_SOURCE_DIR` and
 `OUROBOROS_THEME_CORE_ROOT` to that checkout, then run
 `python -B scripts/ci_checks.py run email-presence` and
 `python -B scripts/ci_checks.py run calendar-skill` separately. The mail runner
@@ -293,25 +368,30 @@ Nothing there skips: without them, a run says what to install.
 
 Memory Atlas keeps its tests outside the payload, in `tests/memory_atlas`. Most of them start one
 isolated Ouroboros from the core checkout named by `ATLAS_CORE`, which must provide PluginAPI 2.1
-`read_memory` (`ouroboros/memory_reader.py`): they copy it into a new directory under `/tmp`, write
+`read_memory` (`ouroboros/memory_reader.py`) and the transfer contract (`source_author`, transfer metadata,
+`period_bases`); transfer tests fail preflight against an earlier core. They copy it into a new directory under `/tmp`, write
 synthetic memory there through Ouroboros's own producers, install the payload into that data root
 only and drive the card in Chromium and WebKit. The test runner's Python needs the core's runtime
-requirements, which include Playwright, and Playwright's Chromium and WebKit. Nothing in this suite
-is skipped: without `ATLAS_CORE`, a compatible core, Playwright or starlette, a run that selects
+requirements, which include Playwright, and Playwright's Chromium and WebKit. The pure formatter tests
+need Node 20 or newer on PATH (CI uses Node 24). Nothing in this suite
+is skipped: without `ATLAS_CORE`, a compatible core, Node, Playwright or starlette, a run that selects
 these tests stops before the first one and says what is missing. CI runs the whole suite on macOS
-against the `razzant/ouroboros` commit pinned in `.github/workflows/catalog-check.yml`. Locally:
+against the `razzant/ouroboros` commit pinned in `.github/workflows/catalog-check.yml`. Run the owning
+suite on a dedicated test machine or VM: it starts a real core host. On that test machine:
 
 ```bash
 ATLAS_CORE=/path/to/ouroboros PYTHONDONTWRITEBYTECODE=1 python -m pytest -p no:cacheprovider -q -rs tests/memory_atlas
 ```
+
+`python -B scripts/ci_checks.py run memory-atlas` takes either `ATLAS_CORE` or `ATLAS_HOST_ROOT`
+(a host already started by `realhost.py`, whose copy of its core is `repo/`).
 
 `python tests/memory_atlas/dev/realhost.py --core /path/to/ouroboros --root /tmp/<new directory>`
 starts the same host to look at and prints `READY <url>`; open `<url>/#widgets` and press Start on
 Memory Atlas.
 
 The `telephony` job runs the phone line's call bridge against the real live-call doors (`LiveCallHub` and
-the peer socket pump) of the core pinned for it in `catalog-check.yml` and named by `TELEPHONY_CORE_REPO`.
-That core is newer than the Presence consumers' one, which lacks `parse_presence_event` and PluginAPI 2.4.
+the peer socket pump) of the one core pinned in `catalog-check.yml`, named for it by `TELEPHONY_CORE_REPO`.
 `TELEPHONY_REQUIRE_CORE=1` turns a missing core, or a missing starlette, uvicorn or websockets, into a
 failure instead of a skip. Locally:
 
@@ -322,9 +402,10 @@ TELEPHONY_CORE_REPO=/path/to/ouroboros TELEPHONY_REQUIRE_CORE=1 PYTHONDONTWRITEB
 
 The hub tests include mocked GitHub APIs for owner authorization, signals and
 catalog-to-mirror sequencing. The release-identity test compares all hosted skills
-with the core checkout selected by `OUROBOROS_IDENTITY_CORE_ROOT`, using the test
-runner's Python with core requirements installed. Without that variable the
-cross-repository check is reported as skipped. Every hosted skill that contributes
+with the core checkout selected by `OUROBOROS_IDENTITY_CORE_ROOT`; it imports only
+core modules, which need nothing beyond PyYAML. CI's catalog job sets it to the
+pinned core. Without that variable the cross-repository check is reported as
+skipped. Every hosted skill that contributes
 a place is checked as a connector: declared tool effects, the place contract,
 wake facts, its status route and a bounded monochrome `ui/icon.svg`. The hub keeps
 a mirror of the core rules for this; the same checkout also runs every connector
@@ -334,14 +415,16 @@ Module widgets can declare `render.appearance: host` and feature-detect
 `OuroborosWidget.onTheme`. Preserve state while applying Light/Dark, unsubscribe
 on disposal, and retain a usable palette on older hosts. The real-bridge
 browser suites require a local core checkout with git history, Playwright,
-Chromium and WebKit:
+Chromium and WebKit. CI gives the `widgets`, `calendar-skill`, `smart-lists` and
+`telegram-user-session` jobs the pinned core, its runtime and both browsers; only
+the dashboard suite (`widgets`) reads the core's history:
 
 ```bash
-OUROBOROS_THEME_CORE_ROOT=/path/to/ouroboros python -m pytest -p no:cacheprovider -q tests/test_dashboard_theme_browser.py tests/test_calendar_host_browser.py tests/test_smart_lists_browser.py
+OUROBOROS_THEME_CORE_ROOT=/path/to/ouroboros python -m pytest -p no:cacheprovider -q tests/test_dashboard_theme_browser.py tests/test_calendar_host_browser.py tests/test_smart_lists_browser.py tests/test_telegram_participant_widget_browser.py
 ```
 
-These standalone invocations are local opt-ins; Calendar's selected CI job requires
-its browser suite. Smart Lists' optional manifest probe separately uses
+These standalone invocations are local opt-ins; the selected Calendar and Smart Lists
+CI jobs require their browser suites. Smart Lists' optional manifest probe separately uses
 `OUROBOROS_CORE_ROOT`. Skips in optional suites do not qualify missing consumers.
 
 ## License

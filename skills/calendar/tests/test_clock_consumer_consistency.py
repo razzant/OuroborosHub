@@ -2,6 +2,7 @@
 import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import icalendar
 import pytest
@@ -33,9 +34,11 @@ def test_exception_availability_clock_survives_actual_delivery(tmp_path, master_
     reminders.plan(ctx.store, ctx.occurrences, now=expected-timedelta(minutes=1))
     sent = []
     channel = SimpleNamespace(send=lambda key, text: (sent.append(text) or ('sent', 'synthetic')))
-    result = reminders.deliver_due(ctx.store, channel, ctx.tz, now=expected)
-    assert result['sent'] == 1 and any('Override' in text for text in sent)
-    assert reminders.deliver_due(ctx.store, channel, ctx.tz, now=expected)['sent'] == 0
+    # deliver_due re-reads each due reminder at max(now, wall clock): pin the wall clock to this fixture's instant
+    with patch.object(reminders, 'now_utc', return_value=expected):
+        result = reminders.deliver_due(ctx.store, channel, ctx.tz, now=expected)
+        assert result['sent'] == 1 and any('Override' in text for text in sent)
+        assert reminders.deliver_due(ctx.store, channel, ctx.tz, now=expected)['sent'] == 0
 
 
 @pytest.mark.parametrize('owner_zone', ['America/New_York', 'Asia/Tokyo'])

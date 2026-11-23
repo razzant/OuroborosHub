@@ -3,7 +3,8 @@
 Opt in with OUROBOROS_THEME_CORE_ROOT pointing to a core checkout containing the
 merged theme bridge and the historical ref below, then run this file explicitly.
 The host uses the real mount, document CSP, fetch relay and disposal handshake.
-Only skill API responses are synthetic. No installed runtime is read or changed.
+Only skill API responses and the host's lease answers (tests/widget_lease_gateway.py)
+are synthetic. No installed runtime is read or changed.
 OUROBOROS_THEME_EVIDENCE_DIR optionally retains screenshots.
 This harness mounts classic widget.js entries. memory-atlas is an ES module entry
 that only PluginAPI 2.1 hosts load; tests/memory_atlas checks its theme in a real host.
@@ -25,12 +26,15 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from widget_lease_gateway import LeaseGateway, controls
+
 ROOT = Path(__file__).resolve().parents[1]
 LEGACY_REF = "3e71431e4fa790d7bea6169a83ad572bf7eb6f20"
 READY = {
     "cache_efficiency_snapshot": ".kpi:nth-child(2) b",
     "claudexor_quotas": ".q-plate",
-    "context-lens": ".row",
+    # Context Lens 1.2.0 lists its requests under a disclosure that starts closed; the summary comes with the data.
+    "context-lens": '[data-focus="requests"]',
     "token-usage": ".to-total",
 }
 FOCUS = {
@@ -39,6 +43,13 @@ FOCUS = {
     "context-lens": "select",
     "token-usage": "select",
 }
+# The canvases a card draws, which a host theme must repaint: Context Lens 1.2.0 draws one, its scatter chart
+# (skills/context-lens/widget.js renderChart). A card that loses one fails, not merely skips the repaint check.
+CANVASES = {"context-lens": 1}
+# Each card's live publication as a host lists it (HOST mounts the same tab id and generation). Route leases are
+# answered as the core's controls answer them (tests/widget_lease_gateway.py), while the real module still builds the
+# frame, relays fetches and revokes the lease on disposal.
+CARDS = {skill: ("dashboard", "fixture-generation") for skill in READY}
 HOST = """<!doctype html><html><head><script src="/static/theme.js"></script>
 <style>body{margin:0}iframe{width:100%;height:850px;border:0}section{width:100%}</style>
 </head><body><section data-widget-key="qa"><div class="widgets-card-status"></div>
@@ -47,7 +58,7 @@ import {mountModuleWidget} from '/static/modules/widget_module.js';
 const p=new URLSearchParams(location.search); ouroTheme.set(p.get('theme'));
 window.handlers=new Set();
 window.disposeWidget=await mountModuleWidget(document.getElementById('mount'),
-  {skill:p.get('skill'),ws_prefix:'ext:'+p.get('skill')+':'},
+  {skill:p.get('skill'),ws_prefix:'ext:'+p.get('skill')+':',tab_id:'dashboard',generation:'fixture-generation'},
   {entry:'widget.js',height:850,appearance:'host'},null,window.handlers);
 window.ready=true;
 </script></body></html>"""
@@ -110,6 +121,7 @@ def theme_server():
         }) for i in range(12)
     ], now=now)
     unmatched = []
+    leases = LeaseGateway(CARDS)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -128,6 +140,8 @@ def theme_server():
             url = urlsplit(self.path)
             path = url.path
             query = {key: value[-1] for key, value in parse_qs(url.query).items()}
+            if controls(path):
+                return self.lease_controls(path)
             if path == "/":
                 return self.send(HOST, "text/html")
             if path.startswith("/static/"):
@@ -160,31 +174,34 @@ def theme_server():
 
         do_PUT = do_GET
 
-        def do_POST(self):
+        def lease_controls(self, path):
             # Current classic mounts request a route lease before constructing
-            # the opaque frame. This fixture supplies the host response only;
-            # the real module still owns fetch relay, CSP and lease disposal.
+            # the opaque frame. This fixture answers the lease controls as the
+            # core does (tests/widget_lease_gateway.py); the real module still
+            # owns fetch relay, CSP and lease disposal. A refused request fails
+            # the theme case it belongs to and, at the latest, the teardown.
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = self.rfile.read(length)
+            if len(payload) < length:
+                return  # the page closed while sending it (a keepalive revoke during teardown): no one to answer
+            status, answer = leases.answer(self.command, path, self.headers, payload)
+            return self.send(answer, status=status)
+
+        def do_POST(self):
             path = urlsplit(self.path).path
-            if path.startswith("/api/widgets/asset-leases"):
-                payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
-                if path == "/api/widgets/asset-leases":
-                    assert payload.get("skill") in READY and payload.get("scope") == "routes"
-                    return self.send({"token": "theme-fixture", "base_url": "/api/widget-resources/theme-fixture/",
-                                      "renew_after": 3600, "expires_in": 7200})
-                if path == "/api/widgets/asset-leases/revoke":
-                    assert payload.get("token") == "theme-fixture"
-                    return self.send({"ok": True})
-            return self.do_GET()
+            return self.lease_controls(path) if controls(path) else self.do_GET()
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield {"url": f"http://127.0.0.1:{server.server_port}", "core": core, "unmatched": unmatched}
+        yield {"url": f"http://127.0.0.1:{server.server_port}", "core": core, "unmatched": unmatched, "leases": leases}
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
+    # Every case's lease requests, the cache graph cases' included, once the server has answered its last one.
+    assert leases.refused == [], leases.refused
 
 
 @pytest.fixture(scope="module", params=["chromium", "webkit"])
@@ -211,8 +228,13 @@ def _exercise_selection(frame, skill):
         }""")
     elif skill == "context-lens":
         frame.locator('[data-focus="filter-model"]').select_option("vendor/model-a")
+        # Open Requests and select its newest request: the selection panel describes it, and its row stays marked.
+        frame.locator('[data-focus="requests"]').click()
         frame.locator(".row").first.click()
-        frame.wait_for_function('() => document.querySelectorAll("canvas").length === 2')
+        frame.wait_for_selector('[data-focus="clear-selection"]')
+        frame.wait_for_selector('.row[aria-current="true"]', state="attached")
+        # The selection rebuilds the card; its scatter chart comes back with it, the only canvas.
+        frame.wait_for_selector('canvas[data-focus="chart"]')
     elif skill == "token-usage":
         frame.locator('select[data-pref="model"]').select_option("native-test")
         frame.wait_for_function('() => !document.querySelector(".to-content").matches("[aria-busy=true]")')
@@ -259,6 +281,8 @@ def test_dashboard_theme_keeps_live_state_and_legacy_fallback(theme_server, brow
           window.qaOpen=Array.from(document.querySelectorAll('details')).map(e=>e.open);
         }""")
         before = frame.evaluate("qaCanvases.map(c=>c.toDataURL())")
+        if skill in CANVASES:
+            assert len(before) == CANVASES[skill], f"{skill} must draw {CANVASES[skill]} canvas chart(s), found {len(before)}"
         svg_colors = "qaSvg.flatMap(svg=>Array.from(svg.querySelectorAll('*')).map(node=>{const s=getComputedStyle(node);return [s.fill,s.stroke,s.color]}))"
         svg_before = frame.evaluate(svg_colors)
         page.screenshot(path=str(evidence / f"{engine}-{skill}-{legacy}-{initial}.png"))
@@ -287,6 +311,7 @@ def test_dashboard_theme_keeps_live_state_and_legacy_fallback(theme_server, brow
         assert page.evaluate("qaThemeListeners.size") == 0
         assert errors == []
         assert theme_server["unmatched"] == []
+        assert theme_server["leases"].refused == []
     finally:
         context.close()
 

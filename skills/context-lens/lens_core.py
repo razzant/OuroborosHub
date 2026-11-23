@@ -836,6 +836,8 @@ class LedgerWindow:
             "transaction_ms": None,
             "sql_steps": None,
             "metadata_read": None,
+            "journal": None,
+            "connection": None,
             "context_unread": 0,
         }
         limits = {"max_rows": self.max_records, "max_points": MAX_POINT_LIMIT,
@@ -991,6 +993,9 @@ def store_snapshot(
         "transaction_ms": facts.get("transaction_ms"),
         "sql_steps": facts.get("sql_steps"),
         "metadata_read": facts.get("metadata_read"),
+        # "wal" / "rollback", and whether core's counted_connect opened the read.
+        "journal": facts.get("journal"),
+        "connection": facts.get("connection"),
         "category_enumeration": facts.get("category_enumeration"),
         "legacy_category_coverage": facts.get("legacy_category_coverage"),
         "context_unread": unread,

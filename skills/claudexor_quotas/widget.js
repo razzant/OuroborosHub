@@ -1810,8 +1810,21 @@
         return (((account && account.quota) || {}).stale || []).filter(function (snap) { return !!(snap && snap.constraints && snap.constraints.length); });
     }
 
+    // A window tied to some models: by name, or by family prefix alone (the engine matches "gemini-" literally, every
+    // gemini-* model). Either is a model's window, never a shared one.
     function isModelWindow(view) {
-        return !!(view && view.scoped_models && view.scoped_models.length);
+        return !!(view && ((view.scoped_models && view.scoped_models.length)
+            || (view.scoped_prefixes && view.scoped_prefixes.length)));
+    }
+
+    // Whether a window speaks for its whole account in the account's verdict: the skill's own word for it
+    // (account_wide: tied to no model by name or by family prefix, governing text requests, its scope
+    // readable). A window that is not is a cap on part of the account's requests. A view without the word
+    // (an answer of an older skill) is read by its model list, as before.
+    function isAccountWindow(view) {
+        if (!view) return false;
+        if (typeof view.account_wide === 'boolean') return view.account_wide;
+        return !isModelWindow(view);
     }
 
     // A hold names a model scope only with the skill's own identity of one:
@@ -1837,30 +1850,39 @@
         return exhaustionsOf(quota).filter(function (e) { return e.live === true; });
     }
 
-    // Every model scope held now, apart from the windows: a cooldown on some
-    // models, or a model limit reported out until a reset still ahead. A
-    // live exhaustion naming no model holds nothing (the reserve counts it
+    // Every hold on part of the account now, apart from the windows: a cooldown of some models (by name or family
+    // prefix), of other request kinds only or of a scope that cannot be read (part 'requests'), or a model limit
+    // reported out until a reset still ahead. Each is tied to windows by the skill's one identity of its whole scope
+    // (scope_key), never by printed names. A live exhaustion naming no model holds nothing (the reserve counts it
     // against none) and is only disclosed.
-    function modelHolds(quota) {
-        var out = cooldownsOf(quota, 'models').map(function (c) {
-            return { kind: 'cooldown', key: c.scope_key || '', models: c.models || [],
-                     omitted: c.models_omitted || 0, until: c.until || '', note: c.until_note || '',
+    function scopeHolds(quota) {
+        var out = cooldownsOf(quota).filter(function (c) { return c.scope === 'models' || c.scope === 'requests' || isModelScope(c.scope_key); }).map(function (c) {
+            return { kind: 'cooldown', part: c.scope, key: c.scope_key || '', models: c.models || [],
+                     omitted: c.models_omitted || 0, prefixes: c.prefixes || [], prefixesOmitted: c.prefixes_omitted || 0, fields: c.scope_fields || null,
+                     until: c.until || '', note: c.until_note || '',
                      stale: !!c.freshness && c.freshness !== 'fresh' };
         });
         liveExhaustions(quota).forEach(function (e) {
-            out.push({ kind: 'limit', key: e.scope_key || '', models: e.models || [],
-                       omitted: e.models_omitted || 0, until: e.resets_at || '', note: e.reset_note || '',
+            out.push({ kind: 'limit', part: e.scope || 'models', key: e.scope_key || '', models: e.models || [],
+                       omitted: e.models_omitted || 0, prefixes: e.prefixes || [], prefixesOmitted: e.prefixes_omitted || 0,
+                       until: e.resets_at || '', note: e.reset_note || '',
                        stale: !!e.freshness && e.freshness !== 'fresh' });
         });
         return out.filter(function (h) { return isModelScope(h.key); });
     }
 
-    // The hold a model window stands under, tied by the whole scope
-    // (scope_key), never by printed names; a cooldown before a limit.
+    // The holds of some models (by name or family prefix): the ones the account's words name ("model cooldown: Opus").
+    function modelHolds(quota) {
+        return scopeHolds(quota).filter(function (h) { return h.part === 'models'; });
+    }
+
+    // The hold a window that speaks for part of the account stands under — a model's, one of other request kinds, one
+    // of a scope that cannot be read — tied by its whole scope (scope_key), never by printed names; a cooldown before a
+    // limit. A window that speaks for the whole account is held only by the account's own state.
     function scopeHoldOf(view, quota) {
         var scope = view && view.scope_key;
-        if (!isModelScope(scope) || !isModelWindow(view)) return null;
-        var mine = modelHolds(quota).filter(function (h) { return h.key === scope; });
+        if (!isModelScope(scope)) return null;
+        var mine = scopeHolds(quota).filter(function (h) { return h.key === scope; });
         return mine.filter(function (h) { return h.kind === 'cooldown'; })[0] || mine[0] || null;
     }
 
@@ -1926,7 +1948,7 @@
     // failed check. Switched off and signed out are states, not alarms.
     function isAlertAccount(account) {
         var quota = account.quota || {};
-        var cooling = liveWindows(account).some(function (c) { return !isModelWindow(c) && isCooling(c); });
+        var cooling = liveWindows(account).some(function (c) { return isAccountWindow(c) && isCooling(c); });
         return quota.state === 'exhausted' || quota.state === 'cooling' || verificationFailed(account) || cooling;
     }
 
@@ -1936,18 +1958,18 @@
 
     // The engine skips per-model caps when it decides whether an account is
     // spent, so everything that prints one number for a whole account skips
-    // them too.
+    // them too (and every other cap on part of its requests: isAccountWindow).
     function worstWindow(account) {
         var worst = null;
         liveWindows(account).forEach(function (c) {
-            if (isModelWindow(c)) return;
+            if (!isAccountWindow(c)) return;
             if (typeof c.used_pct === 'number' && (!worst || c.used_pct > worst.used_pct)) worst = c;
         });
         return worst;
     }
 
     function hasSpentModelCap(account) {
-        return liveWindows(account).some(function (c) { return isModelWindow(c) && isOut(c); });
+        return liveWindows(account).some(function (c) { return !isAccountWindow(c) && isOut(c); });
     }
 
     // The dot answers one question: can this account work right now. Green is
@@ -1959,8 +1981,8 @@
         if (!isActive(account)) return 'muted';
         var worst = worstWindow(account);
         if (!worst) return 'muted';
-        if (liveWindows(account).some(function (c) { return !isModelWindow(c) && atLimit(c); })) return 'bad';
-        if (hasSpentModelCap(account) || modelHolds(account.quota).length) return 'warn';
+        if (liveWindows(account).some(function (c) { return isAccountWindow(c) && atLimit(c); })) return 'bad';
+        if (hasSpentModelCap(account) || scopeHolds(account.quota).length) return 'warn';
         if (worst.used_pct >= 85) return 'warn';
         return 'ok';
     }
@@ -1992,12 +2014,19 @@
             var action = absenceAction(account, quota.absence);
             return { tone: 'warn', word: t('state.quota_unavailable') + (action ? ' · ' + action : '') };
         }
-        if (liveWindows(account).some(function (c) { return isModelWindow(c) && isSpent(c); })) {
-            return { tone: 'warn', word: t('state.model_at_limit') };
+        // A cap on part of the account's requests: a model's (by name or family prefix), or one of other
+        // request kinds or of an unreadable scope, said as what it is.
+        var capOut = liveWindows(account).filter(function (c) { return !isAccountWindow(c) && isOut(c); });
+        var capSpent = capOut.filter(isSpent);
+        if (capSpent.length) {
+            return { tone: 'warn', word: t(capSpent.some(isModelWindow) ? 'state.model_at_limit' : 'state.part_at_limit') };
         }
         var held = modelHoldWords(quota);
         if (held) return { tone: 'warn', word: held.text, full: held.full };
-        if (hasSpentModelCap(account)) return { tone: 'warn', word: t('state.model_held') };
+        // A cooldown of other request kinds only, or of a scope that cannot be read, holds part of the requests, never
+        // the account.
+        var partHeld = scopeHolds(quota).some(function (h) { return h.part === 'requests'; });
+        if (capOut.length || partHeld) return { tone: 'warn', word: t(capOut.some(isModelWindow) ? 'state.model_held' : 'state.part_held') };
         if (quota.state === 'not_checked') return { tone: 'muted', word: t('state.not_checked') };
         if (quota.state === 'no_fresh_window' || quota.state === 'not_current') {
             return { tone: 'muted', word: t('state.no_current') };
@@ -2020,11 +2049,11 @@
             var when = formatResetAt(h.until);
             var end = when ? ' until ' + when
                 : (h.kind === 'cooldown' ? ', ' + t(COOLDOWN_END[h.note] || COOLDOWN_END.not_reported) : '');
-            return kindWords(h) + ': ' + (modelLabel(h.models, h.omitted) || 'models not named') + end
-                + (h.stale ? ', reported by a stale reading' : '') + ' (' + scopeList(h.models, h.omitted) + ')';
+            return kindWords(h) + ': ' + (scopeName(h.models, h.omitted, h.prefixes, h.prefixesOmitted) || 'models not named') + end
+                + (h.stale ? ', reported by a stale reading' : '') + ' (' + scopeList(h.models, h.omitted, h.prefixes, h.prefixesOmitted) + ')';
         }
         if (holds.length === 1) {
-            return { text: kindLabel(holds[0]) + ': ' + (modelLabel(holds[0].models, holds[0].omitted) || t('state.models_not_named')),
+            return { text: kindLabel(holds[0]) + ': ' + (scopeName(holds[0].models, holds[0].omitted, holds[0].prefixes, holds[0].prefixesOmitted) || t('state.models_not_named')),
                      full: sentence(holds[0]) };
         }
         var kinds = {};
@@ -2166,14 +2195,33 @@
         return head + (more > 0 ? ' +' + more : '');
     }
 
-    // A scope's names in full, as far as the skill sent them.
-    function scopeList(models, omitted) {
-        var names = (models || []).join(', ') || 'no model named';
-        return omitted ? names + ' +' + omitted + ' more not listed' : names;
+    // A scope's family prefixes as the engine matches them: "gemini-*" (every model whose id starts so).
+    function prefixWords(prefixes) {
+        return (prefixes || []).map(function (p) { return String(p || '').trim(); })
+            .filter(function (p) { return !!p; }).map(function (p) { return p + '*'; });
+    }
+
+    // A scope's short name: its models (modelLabel), else its family prefixes ("gemini-*", "+N" for more).
+    function scopeName(models, omitted, prefixes, prefixesOmitted) {
+        var named = modelLabel(models, omitted);
+        var fams = prefixWords(prefixes);
+        var more = fams.length - 1 + (prefixesOmitted || 0);
+        var family = fams.length ? fams[0] + (more > 0 ? ' +' + more : '') : '';
+        return named && family ? named + '; ' + family : named || family;
+    }
+
+    // A scope's names in full, as far as the skill sent them, its family prefixes after them.
+    function scopeList(models, omitted, prefixes, prefixesOmitted) {
+        var names = (models || []).join(', ');
+        var fams = prefixWords(prefixes).join(', ');
+        if (prefixesOmitted) fams += ' +' + prefixesOmitted + ' more prefixes not listed';
+        if (!names && !fams) names = 'no model named';
+        if (omitted) names += ' +' + omitted + ' more not listed';
+        return fams ? (names ? names + '; ' : '') + fams : names;
     }
 
     function poolOf(view) {
-        if (isModelWindow(view)) return modelLabel(view.scoped_models);
+        if (isModelWindow(view)) return scopeName(view.scoped_models, 0, view.scoped_prefixes);
         var name = splitWindowName(view.label, view.window_seconds);
         return name.pool ? name.model : '';
     }
@@ -2259,7 +2307,7 @@
         var chip = el('span', 'acct-cap acct-pool'
             + (tone === 'bad' ? ' exhausted' : (tone === 'warn' ? ' held' : '')));
         chip.appendChild(el('bdi', null, pool));
-        chip.title = isModelWindow(view) ? pool + ' (' + scopeList(view.scoped_models) + ')' : pool;
+        chip.title = isModelWindow(view) ? pool + ' (' + scopeList(view.scoped_models, 0, view.scoped_prefixes) + ')' : pool;
         return chip;
     }
 
@@ -2293,7 +2341,22 @@
 
     function windowHeld(account, view) {
         var quota = (account || {}).quota;
-        return accountHeld(account) || cooldownsOf(quota, 'account').length > 0 || !!scopeHoldOf(view, quota);
+        // The account verdict describes default text, not every window.
+        if (inactiveReason(account || {}, null)) return true;
+        if (cooldownsOf(quota, 'account').some(function (c) { return !c.scope_key || c.scope_key === '-'; })) return true;
+        if (scopeHoldOf(view, quota)) return true;
+        var target = view && view.scope_fields;
+        var kinds = target && target.request_kinds;
+        if (!target) return accountHeld(account); // legacy projection
+        if ([target.models_state, target.prefixes_state, target.request_kinds_state].indexOf('unreadable') >= 0) return false;
+        kinds = kinds == null ? ['text', 'image'] : kinds;
+        return kinds.length > 0 && liveWindows(account).some(function (c) {
+            if (!isSpent(c) || isModelWindow(c) || c === view) return false;
+            var fields = c.scope_fields;
+            if (!fields) return isAccountWindow(c);
+            if ([fields.models_state, fields.prefixes_state, fields.request_kinds_state].indexOf('unreadable') >= 0) return false;
+            return fields.request_kinds == null || kinds.every(function (kind) { return fields.request_kinds.indexOf(kind) >= 0; });
+        });
     }
 
     // A moment plus how far off it is; false when the timestamp does not
@@ -2383,15 +2446,30 @@
         passed: 'cooldown.end_passed'
     };
 
-    // One sentence per cooldown: what it holds, until when (or why not known)
-    // and whether a stale reading reported it. Never "Limit reached".
+    // What a cooldown of some requests covers, in full (its hover): the request kinds its scope names, or which of its
+    // scope fields could not be read, as the skill carried them.
+    function requestScopeList(fields) {
+        fields = fields || {};
+        var parts = [];
+        if (Array.isArray(fields.request_kinds) && fields.request_kinds.length) {
+            parts.push('request kinds: ' + fields.request_kinds.join(', '));
+        }
+        [['models_state', 'models'], ['prefixes_state', 'model prefixes'], ['request_kinds_state', 'request kinds']].forEach(function (f) {
+            if (fields[f[0]] === 'unreadable') parts.push(f[1] + ' unreadable');
+        });
+        return parts.join('; ') || 'scope not stated';
+    }
+
+    // One sentence per cooldown: what it holds (the whole account, some models, or some requests), until when (or why
+    // not known) and whether a stale reading reported it. Never "Limit reached".
     function renderCooldowns(parent, quota) {
         cooldownsOf(quota).forEach(function (c) {
             var row = el('div', 'quota-cooldown');
             row.appendChild(icon('warn', 12));
             var body = el('span', 'quota-cooldown-body');
             row.appendChild(body);
-            var what = c.scope === 'models' ? (modelLabel(c.models, c.models_omitted) || t('cooldown.some_models')) : t('cooldown.whole_account');
+            var what = c.scope === 'models' ? (scopeName(c.models, c.models_omitted, c.prefixes, c.prefixes_omitted) || t('cooldown.some_models'))
+                : c.scope === 'requests' ? t('cooldown.some_requests') : t('cooldown.whole_account');
             body.appendChild(el('span', null, t('cooldown.label') + ' · ' + what));
             var said = [t('cooldown.label'), what];
             var until = el('span', 'quota-when', ' · ' + t('cooldown.until', { when: '' }));
@@ -2409,8 +2487,8 @@
                 body.appendChild(el('span', 'quota-when', ' · ' + from));
                 said.push(from);
             }
-            if (c.scope === 'models') {
-                row.title = scopeList(c.models, c.models_omitted);
+            if (c.scope === 'models' || c.scope === 'requests') {
+                row.title = c.scope === 'models' ? scopeList(c.models, c.models_omitted, c.prefixes, c.prefixes_omitted) : requestScopeList(c.scope_fields);
                 said.push(row.title);
             }
             row.setAttribute('aria-label', said.join(', '));
@@ -2437,7 +2515,7 @@
             row.appendChild(icon(live ? 'warn' : 'info', 12));
             var body = el('span', 'quota-cooldown-body');
             row.appendChild(body);
-            var what = modelLabel(e.models, e.models_omitted) || 'models not named';
+            var what = e.scope === 'requests' ? t('cooldown.some_requests') : scopeName(e.models, e.models_omitted, e.prefixes, e.prefixes_omitted) || 'models not named';
             var lead = live ? 'Model limit reached' : 'Reported model limit reached';
             body.appendChild(el('span', null, lead + ' · ' + what));
             var said = [lead, what];
@@ -2464,7 +2542,7 @@
                 body.appendChild(el('span', 'quota-when', ' · ' + from));
                 said.push(from);
             }
-            row.title = (e.constraint_id ? e.constraint_id + ': ' : '') + scopeList(e.models, e.models_omitted);
+            row.title = (e.constraint_id ? e.constraint_id + ': ' : '') + (e.scope === 'requests' ? requestScopeList(e.scope_fields) : scopeList(e.models, e.models_omitted, e.prefixes, e.prefixes_omitted));
             said.push(row.title);
             row.setAttribute('aria-label', said.join(', '));
             parent.appendChild(row);
@@ -2705,9 +2783,26 @@
     // What tells a limit apart in its family besides its length: its group's name
     // when the engine names one (short, and the same on the scope row and in the
     // graph), else its pool or its models' common stem.
+    function requestKindTag(g) {
+        var scope = g.scope;
+        if (!scope) return /~/.test(String(g.key || '').split('|').pop()) ? 'request scope unknown' : '';
+        if (scope.request_kinds_state === 'unreadable') return 'request kinds unknown';
+        var kinds = scope.request_kinds;
+        return kinds == null || (kinds.indexOf('text') >= 0 && kinds.indexOf('image') >= 0) ? ''
+            : kinds.length ? kinds.join(' + ') + ' only' : 'no request kinds';
+    }
+
     function limitTag(g) {
+        var tag = modelLimitTag(g), kind = requestKindTag(g);
+        return [tag, kind].filter(Boolean).join(' · ');
+    }
+
+    function modelLimitTag(g) {
+        if (g.scope && (g.scope.models_state === 'unreadable' || g.scope.prefixes_state === 'unreadable')) return 'model scope unknown';
         var group = groupName(g);
         if (group) return group;
+        var prefixes = ((g.scope || {}).prefixes || {});
+        if ((prefixes.names || []).length) return scopeName(g.models, g.models_omitted, prefixes.names, prefixes.omitted);
         var name = splitWindowName(g.label, g.window_seconds);
         var models = g.models || [];
         if (models.length) return (name.pool && name.model) ? name.model : (modelLabel(models, g.models_omitted) || models[0]);
@@ -2737,8 +2832,12 @@
         collide().forEach(function (g) {
             var models = g.models || [];
             var more = models.length - 1 + (g.models_omitted || 0);
-            names[g.key] = models.length
-                ? lengthName(g.window_seconds) + ' · ' + models[0] + (more ? ' +' + more : '')
+            var prefixes = ((g.scope || {}).prefixes || {});
+            var identity = models.length ? models[0] + (more ? ' +' + more : '') : '';
+            if ((prefixes.names || []).length) identity += (identity ? '; ' : '')
+                + prefixWords(prefixes.names).join(', ') + (prefixes.omitted ? ' +' + prefixes.omitted + ' more' : '');
+            names[g.key] = identity
+                ? lengthName(g.window_seconds) + ' · ' + identity + (requestKindTag(g) ? ' · ' + requestKindTag(g) : '')
                 : names[g.key] + ' · ' + String(g.label || g.meaning || '');
         });
         var counter = {};
@@ -2751,13 +2850,16 @@
 
     // The whole scope, in words: what the short name abbreviates.
     function scopeWords(g) {
-        var models = g.models || [];
+        var models = g.models || [], scope = g.scope || {}, prefixes = scope.prefixes || {};
         var omitted = g.models_omitted || 0;
-        if (!models.length && g.model_scope === 'names_unknown') {
-            return 'model-scoped: model names unavailable from the history';
-        }
-        return models.length ? (models.length + omitted === 1 ? 'model: ' : 'models: ') + models.join(', ')
+        var words = models.length ? (models.length + omitted === 1 ? 'model: ' : 'models: ') + models.join(', ')
             + (omitted ? ' +' + omitted + ' more' : '') : '';
+        if ((prefixes.names || []).length) words += (words ? '; ' : '') + 'model prefixes: '
+            + prefixWords(prefixes.names).join(', ') + (prefixes.omitted ? ' +' + prefixes.omitted + ' more' : '');
+        if (!words && g.model_scope === 'names_unknown') words = 'model-scoped: model names unavailable from the history';
+        if (scope.models_state === 'unreadable' || scope.prefixes_state === 'unreadable') words = 'model scope unknown';
+        var kind = requestKindTag(g);
+        return [words, kind ? 'requests: ' + kind : ''].filter(Boolean).join('; ');
     }
 
     function restrictionWords(g) {
@@ -3599,6 +3701,8 @@
                 if (said.length) row.appendChild(document.createTextNode(' · ' + said.join(' · ') + (kept ? ', ' + t('res.not_current') : '')));
                 (facet.rows || []).forEach(function (item) {
                     var text;
+                    // A row whose reported boundary passed is last known on its own, in a current facet too (its note says so).
+                    var old = kept || item.state === 'last_known';
                     var label = engineWord(String(item.label || ''));
                     if (name === 'balances') {
                         text = label + ': ' + (item.unlimited ? t('cycle.unlimited') : item.amount === null ? t('res.amount_unknown')
@@ -3609,8 +3713,9 @@
                             + (item.limit ? ' ' + t('res.of', { limit: moneyWords(item.limit, item) }) : '')
                             + (item.enabled === false ? ' (' + t('res.off') + ')' : '');
                     } else if (name === 'resets') {
-                        // A count is "usable now" only where the engine says so; else it is granted, not usable now or of unknown usability (never "available").
-                        text = label + ': ' + offerWords(item).v;
+                        // A count is "usable now" only where the engine says so of a current reading; a last-known one was usable
+                        // "when read"; else it is granted, not usable or of unknown usability (never "available").
+                        text = label + ': ' + offerWords(item, old).v;
                     } else {
                         text = item.code + (item.detail ? ' — ' + engineWord(String(item.detail)) : '');
                     }
@@ -4443,12 +4548,14 @@
     }
 
     // What one reset offer says: a count with unknown usability is "granted", never "available"; a reported 0 is a zero.
-    function offerWords(o) {
+    // `old`: the offer is last known (its facet or its own reading): whether it could be used is what was read then,
+    // never "now". The card and the account's details both say it in these words.
+    function offerWords(o, old) {
         var n = o.available_count;
         if (typeof n !== 'number' || !isFinite(n)) return { v: t('res.count_unknown'), cls: 'unk' };
         if (n === 0) return { v: t('card.none_zero'), cls: '' };
-        if (o.usable_now === true) return { v: t('card.offer_usable', { n: n }), cls: 'ok' };
-        if (o.usable_now === false) return { v: t('card.offer_not_usable', { n: n }), cls: '' };
+        if (o.usable_now === true) return old ? { v: t('card.offer_usable_then', { n: n }), cls: '' } : { v: t('card.offer_usable', { n: n }), cls: 'ok' };
+        if (o.usable_now === false) return { v: t(old ? 'card.offer_not_usable_then' : 'card.offer_not_usable', { n: n }), cls: '' };
         return { v: t('card.offer_unknown', { n: n }), cls: '' };
     }
 
@@ -4464,14 +4571,13 @@
                 return out;
             }
             r.rows.forEach(function (o) {
-                var w = offerWords(o);
                 var old = kept || o.state === 'last_known';
-                var exp = NaN;
-                (o.grants || []).forEach(function (gr) {
+                var w = offerWords(o, old);
+                var exp = Date.parse(o.grants_expire_at || '');
+                if (!Object.prototype.hasOwnProperty.call(o, 'grants_expire_at')) (o.grants || []).forEach(function (gr) {
                     var at = Date.parse(gr && gr.expires_at || '');
-                    if (gr && gr.available_count > 0 && isFinite(at) && at > Date.now() && !(at >= exp)) exp = at;
+                    if (gr && (gr.available_count > 0 || gr.usable_now === true) && isFinite(at) && at > Date.now() && !(at >= exp)) exp = at;
                 });
-                if (old && o.usable_now === true) w = { v: t('card.offer_usable_then', { n: o.available_count }), cls: '' };
                 var label = r.rows.length > 1 && o.label ? engineWord(String(o.label)) : t('card.bonus');
                 out.push({ k: label, v: w.v, cls: old ? 'unk' : w.cls,
                     tail: [o.reason ? String(o.reason) : '', isFinite(exp) && !old ? t('card.expires_in', { when: untilWords(exp) }) : '',
@@ -4953,7 +5059,7 @@
         // of three; a limit scoped to named models is "<model> only".
         var prefixes = (((g.scope || {}).prefixes || {}).names || []).filter(Boolean);
         var chip = el('span', 'q-scope' + (own ? ' own' : ''), !own ? t('scope.all_models')
-            : prefixes.length ? t('plate.scope_models', { scope: scope }) : t('plate.scope_only', { scope: scope }));
+            : requestKindTag(g) ? scope : prefixes.length ? t('plate.scope_models', { scope: scope }) : t('plate.scope_only', { scope: scope }));
         if (prefixes.length) chip.title = t('plate.covers', { prefixes: prefixes.map(function (x) { return String(x) + '*'; }).join(', ') }) + (scopeWords(g) ? ' · ' + scopeWords(g) : '');
         else if (scopeWords(g)) chip.title = scopeWords(g);
         head.appendChild(chip);
@@ -5457,14 +5563,18 @@
 
     // The combined view's figures, once: the figure now and whose it is, the
     // conditional hours, who is left out and why, and what the number is not.
-    function jointNote(joint) {
+    // On a kept screen (`readAt`, the answer's moment) nobody is counted now:
+    // "—" and when it was read, as its headline says it.
+    function jointNote(joint, readAt) {
         var box = el('div', 'meta-line tl-joint');
         box.setAttribute('role', 'group');
         box.setAttribute('aria-label', t('joint.aria'));
         var line = el('div', null);
-        line.appendChild(el('b', null, num(joint.figure, 2)));
-        line.appendChild(document.createTextNode(' ' + jointUnit(joint, 'now') + ' · '
-            + t('joint.counted', { known: joint.known, of: plural(joint.accounts, 'account') })));
+        // No account counted is no figure ("—", as the headline says), never an empty place or 0.
+        line.appendChild(el('b', null, num(joint.figure, 2) || '—'));
+        line.appendChild(document.createTextNode(' ' + (readAt ? jointUnitLeft(joint) + ' · '
+            + t('chart.read_at', { time: clockAt(isoOf(readAt)) }) : jointUnit(joint, 'now') + ' · '
+            + t('joint.counted', { known: joint.known, of: plural(joint.accounts, 'account') }))));
         var hours = joint.hours || {};
         if (hours.value !== null && hours.value !== undefined) {
             line.appendChild(document.createTextNode(' · ' + t('joint.hours', {
@@ -5656,7 +5766,9 @@
         var joint = shown.joint_note;
         var figure = joint.figure === null || joint.figure === undefined ? '—' : num(joint.figure, 2);
         var unit = jointUnitLeft(joint);
-        var sub = t('joint.counted', { known: joint.known, of: plural(joint.accounts, 'account') })
+        // A kept screen has no figure now and no reset ahead: "—", and the moment it was read, as its plot says it.
+        var sub = shown.kept ? t('chart.read_at', { time: clockAt(isoOf(shown.now)) })
+            : t('joint.counted', { known: joint.known, of: plural(joint.accounts, 'account') })
             + (joint.accounts > joint.known ? ' · ' + t('joint.left_out', { n: joint.accounts - joint.known }) : '');
         var next = null;
         var first = sc && (sc.schedule || [])[0];
@@ -5672,7 +5784,7 @@
             right.appendChild(el('div', 'num-strong tl-next-v', relTime(next.iso) || whenWords(next.iso)));
             right.appendChild(el('div', 'meta-num tl-sub', whenWords(next.iso) + (next.accounts > 1 ? ' · ' + plural(next.accounts, 'account') : '')));
         } else {
-            right.appendChild(el('div', 'num-strong tl-next-v dim', t('joint.none_reported')));
+            right.appendChild(el('div', 'num-strong tl-next-v dim', shown.kept ? '—' : t('joint.none_reported')));
         }
         hero.appendChild(right);
         return hero;
@@ -5719,8 +5831,8 @@
         controls.appendChild(segControl(t('chart.future'), SCENARIOS.map(function (s) {
             var said = scenarioName(s.key);
             if (s.key === 'recent_pace' && idle) {
-                return { key: s.key, name: said, idle: true, title: t('chart.pace_idle_title'),
-                         spoken: said + ' — ' + t('chart.pace_idle_title') };
+                var why = t(PACE_IDLE[paceIdleWhy(shown)].title);
+                return { key: s.key, name: said, idle: true, title: why, spoken: said + ' — ' + why };
             }
             return { key: s.key, name: said, title: t(s.key === 'no_new_use' ? 'chart.future_title_no_new_use'
                 : 'chart.future_title_recent_pace') };
@@ -5775,7 +5887,7 @@
         // Under Details: everything the calm view folds away.
         var front = [];
         if (scopeWords(g)) front.push(el('div', 'meta-line tl-scope', scopeWords(g)));
-        if (shown.joint_note) front.push(jointNote(shown.joint_note));
+        if (shown.joint_note) front.push(jointNote(shown.joint_note, shown.kept ? shown.now : null));
         var facts = timelineFacts(g, shown, sc, ctx);
         front.push(chartLegend(shown, sc, facts.lead));
         if (facts.shown.length) {
@@ -5795,12 +5907,28 @@
     }
 
     // Whether the pace line of what the plot draws is no line of its own: no
-    // account has a measured pace, so Recent pace holds every account and is
-    // the same line as No new use. Read from the scenarios drawn (the window's
-    // or Combined's), never from the mode.
+    // account runs at a measured pace, so Recent pace holds every account and
+    // is the same line as No new use. Read from the scenarios drawn (the
+    // window's or Combined's), never from the mode.
     function paceIdle(chart) {
         var pace = chart && chart.scenarios && chart.scenarios.recent_pace;
         return !!pace && pace.at_pace === 0;
+    }
+
+    // Why an idle pace line is the line of No new use, as the skill counted it
+    // (pace_held, zero_growth): a pace is measured but a limit or the request's
+    // scope holds those accounts; the measured pace shows no growth; or no
+    // account has a measured pace at all. An answer without these counts says
+    // the last.
+    var PACE_IDLE = {
+        held: { title: 'chart.pace_held_title', legend: 'chart.condition_held' },
+        zero: { title: 'chart.pace_zero_title', legend: 'chart.condition_zero' },
+        none: { title: 'chart.pace_idle_title', legend: 'chart.condition_idle' }
+    };
+
+    function paceIdleWhy(chart) {
+        var pace = (chart && chart.scenarios && chart.scenarios.recent_pace) || {};
+        return pace.pace_held ? 'held' : pace.zero_growth ? 'zero' : 'none';
     }
 
     // One short line under the plot: only what is drawn, each in a few words.
@@ -5819,7 +5947,8 @@
         if (carried) item(legendSwatch('line-carried'), t('chart.carried'));
         if (!drawn && !carried) item(null, t('chart.no_record'));
         if (sc) {
-            item(legendSwatch('line-scenario'), t(scenario === 'recent_pace' && paceIdle(chart) ? 'chart.condition_idle' : 'chart.condition',
+            item(legendSwatch('line-scenario'), t(scenario === 'recent_pace' && paceIdle(chart)
+                ? PACE_IDLE[paceIdleWhy(chart)].legend : 'chart.condition',
                 { name: scenarioName(scenario).toLowerCase() }));
             if ((sc.schedule || []).length) item(resetSwatch(), t('chart.reported_reset'));
         } else {
@@ -5903,15 +6032,16 @@
             lead = scenarioWord + (sc.accounts === 1
                 ? t('fact.held_one', { accounts: plural(sc.accounts, 'current account') })
                 : t('fact.held_many', { accounts: plural(sc.accounts, 'current account') })) + ' '
-                + (chart.scope_applies === false ? t('fact.r_scope_not')
-                    : chart.scope_applies === null ? t('fact.r_applic_unknown')
-                    : chart.held_to_other_windows ? t('fact.r_binding_unknown')
-                    : chart.mode === 'joint' ? t('fact.r_joint')
-                    : (g.recent_pace || {}).state === 'ok' ? t('fact.r_no_positive')
-                    : t('fact.r_no_pace', { why: paceStateWords(g) }));
+                + heldWhy(g, chart, sc);
         } else {
+            // The skill's own split of the accounts not drained (pace_unknown and the rest): the ones whose measured
+            // pace showed no growth are said apart from the held ones. An older answer counts them among its at_pace.
+            var counted = typeof sc.pace_unknown === 'number';
+            var zero = counted ? sc.zero_growth || 0 : 0;
+            var heldN = Math.max(0, (sc.held || 0) - zero);
             lead = scenarioWord + t(chart.pace_words ? 'fact.pace_over' : 'fact.pace_last', { at_pace: sc.at_pace,
-                accounts: sc.accounts, span: span, held: sc.held ? ', ' + t('fact.held_count', { n: sc.held }) : '' });
+                accounts: sc.accounts, span: span,
+                held: (zero ? ', ' + t('fact.zero_count', { n: zero }) : '') + (heldN ? ', ' + t('fact.held_count', { n: heldN }) : '') });
             var runs = runsOutWords(sc, ctx);
             if (runs) shown.push([runs, 'warn']);
             notes.push(t('fact.note_pace'));
@@ -5934,6 +6064,24 @@
                 : t('fact.note_norecord'));
         }
         return { lead: lead, shown: shown, notes: notes };
+    }
+
+    // Why no account is drained in the future drawn, one reason. With the skill's split (pace_held, zero_growth,
+    // pace_unknown) it says what the accounts' own paces were: measured but held, measured with no growth, or not
+    // measured; an older answer keeps the older order of reasons.
+    function heldWhy(g, chart, sc) {
+        if (chart.scope_applies === false) return t('fact.r_scope_not');
+        if (chart.scope_applies === null) return t('fact.r_applic_unknown');
+        if (typeof sc.pace_unknown === 'number') {
+            if (chart.mode === 'joint') return t(sc.zero_growth && !sc.pace_unknown ? 'fact.r_zero' : 'fact.r_joint');
+            if (sc.pace_held) return t('fact.r_pace_held');
+            if (sc.zero_growth) return t('fact.r_zero');
+            return t('fact.r_no_pace', { why: paceStateWords(g) });
+        }
+        return chart.held_to_other_windows ? t('fact.r_binding_unknown')
+            : chart.mode === 'joint' ? t('fact.r_joint')
+            : (g.recent_pace || {}).state === 'ok' ? t('fact.r_no_positive')
+            : t('fact.r_no_pace', { why: paceStateWords(g) });
     }
 
     function paceStateWords(g) {
@@ -7123,7 +7271,7 @@
         if (overview) accountLimits(box, ctx, account);
         if (!budgetOnly(account)) renderAbsence(box, account, quota.absence);
         renderCooldowns(box, quota);
-        var modelProblems = (quota.constraints || []).filter(function (c) { return isModelWindow(c) && isOut(c); });
+        var modelProblems = (quota.constraints || []).filter(function (c) { return !isAccountWindow(c) && isOut(c); });
         var named = {};
         modelProblems.forEach(function (c) { if (isSpent(c) && c.scope_key) named[c.scope_key] = true; });
         // Brief only with an overview, whose Diagnostics hold the rest; without
@@ -7724,8 +7872,23 @@
             verification: { tone: 'muted', label: /— last known$/.test(label) ? label : label + ' — last known' },
             verified_live: false,
             next_up: false,
-            quota: a.quota ? keptQuota(a.quota, nowMs) : a.quota
+            quota: a.quota ? keptQuota(a.quota, nowMs) : a.quota,
+            resources: keptResources(a.resources)
         });
+    }
+
+    // An account's resources on a kept screen, as the skill keeps a facet from an earlier read (quota_resources
+    // facet_view, kept): a current facet is last known, dated by its own observation; a facet not reported stays so,
+    // and whatever a row did not say (a count, whether it could be used) stays unsaid.
+    function keptResources(res) {
+        if (!res || typeof res !== 'object') return res;
+        var out = Object.assign({}, res);
+        ['balances', 'spending', 'resets', 'diagnostics'].forEach(function (name) {
+            var facet = res[name];
+            if (!facet || typeof facet !== 'object' || facet.state !== 'current') return;
+            out[name] = Object.assign({}, facet, { state: 'last_known', freshness: 'stale' });
+        });
+        return out;
     }
 
     // One bar of a kept screen, by the skill's own carry rule (carry_verdict).
@@ -7797,7 +7960,8 @@
 
     // The chart of a kept screen: the record stays; nothing is drawn at or
     // after its "now" — no value now, no future, no reset — and that moment is
-    // labelled by its clock time, not as now.
+    // labelled by its clock time, not as now. Both views the plot can draw are
+    // read so: the selected window and Combined (keptAnalytics).
     function keptChart(chart) {
         if (!chart || typeof chart !== 'object') return chart;
         var past = (chart.past || []).slice();
@@ -7813,8 +7977,31 @@
             recent_pace_scope: { accounts: 0, of: 0, slots: scope.slots, until: null, stops_at_reset: false, excluded: {} },
             table: (chart.table || []).filter(function (row) {
                 return row && row.observed !== undefined && row.event !== 'now';
-            })
+            }),
+            analytics: keptAnalytics(chart.analytics)
         });
+    }
+
+    // The analytics of a kept chart, read as the chart is: the selected window's coupled futures and their table go;
+    // Combined keeps its dated record (its value at the answer's "now" withdrawn, as the window's is) and its
+    // calibration, and loses its figure now, whom it counted and left out now, its conditional hours, its futures and
+    // their reset schedule. Nothing of the answer's moment is drawn as current.
+    function keptAnalytics(analytics) {
+        if (!analytics || typeof analytics !== 'object') return analytics;
+        var out = Object.assign({}, analytics);
+        var own = analytics.window;
+        if (own && typeof own === 'object') {
+            out.window = Object.assign({}, own, { scenarios: null, table: [], accounts: 0, held_to_other_windows: 0, holds: {} });
+        }
+        var joint = analytics.joint;
+        if (joint && typeof joint === 'object' && joint.available) {
+            out.joint = Object.assign({}, joint, {
+                figure: null, known: 0, unknown_reasons: {},
+                hours: Object.assign({}, joint.hours || {}, { value: null, known: 0, unknown: 0 }),
+                scenarios: null, table: [], history: keptHistory(joint.history)
+            });
+        }
+        return out;
     }
 
     function keptHistory(history) {

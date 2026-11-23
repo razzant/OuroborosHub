@@ -135,6 +135,16 @@ class Operations:
         kept = [item for item in items if receiving_refusal(current, int(item["id"]), self.account) is None]
         return kept, len(items) - len(kept)
 
+    async def checked_message(self, peer, message_id, resolved_peer, reason):
+        """A peer-local target must be the exact message requested from that peer."""
+        from telethon import utils
+        message = await self.client.get_messages(peer, ids=message_id)
+        actual_peer = getattr(message, 'peer_id', None)
+        if (getattr(message, 'id', None) != message_id or actual_peer is None
+                or str(utils.get_peer_id(actual_peer)) != resolved_peer):
+            raise ValueError(reason)
+        return message
+
     async def message_topic(self, peer, message):
         entity = await self.client.get_entity(peer)
         if not getattr(entity,'forum',False): return None
@@ -180,10 +190,8 @@ class Operations:
             if a.get('user') is not None:
                 await guard(a['resolved_user'], '', SPECS[op][0] != 'read', person=True)
         if op in TARGET_TOPIC_OPS:
-            target = await self.client.get_messages(a['peer'],ids=a['message_id'])
-            actual = getattr(target,'peer_id',None)
-            if actual is None or str(utils.get_peer_id(actual)) != a['resolved_peer']:
-                raise ValueError('message target belongs to another conversation or is unavailable')
+            target = await self.checked_message(a['peer'], a['message_id'], a['resolved_peer'],
+                'message target belongs to another conversation or is unavailable')
             actual_topic = await self.message_topic(a['peer'],target)
             if args.get('topic_id') is not None and args['topic_id'] != actual_topic:
                 raise ValueError('message target belongs to another topic')
@@ -202,9 +210,8 @@ class Operations:
             if a["topic_id"] not in topics:
                 raise ValueError("unknown topic")
         if a.get("reply_id"):
-            target = await self.client.get_messages(a["peer"], ids=a["reply_id"])
-            if target is None:
-                raise ValueError("reply target missing")
+            target = await self.checked_message(a['peer'], a['reply_id'], a['resolved_peer'],
+                'reply target unavailable or wrong peer')
             actual_topic = await self.message_topic(a['peer'],target)
             if args.get('topic_id') is not None and args['topic_id'] != actual_topic:
                 raise ValueError('reply belongs to another topic')

@@ -4,9 +4,10 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 import path from 'node:path';
 import fs from 'node:fs';
-import { socketDir } from './helpers/env.mjs';
+import { scratchDir, socketDir } from './helpers/env.mjs';
 import { startMockGuard, coreLikePolicy, OWNER_READONLY_SENTENCE } from './helpers/mock_guard.mjs';
-import { BrowserGuard, parseGuardEndpoint, takeGuardEnvironment, exchange, GUARD_MAX_LINE_BYTES, GUARD_ENV, GUARD_TOKEN_ENV } from '../../skills/chrome_browser/lib/guard.mjs';
+import { retainingIntake, sha256 } from './helpers/mock_intake.mjs';
+import { BrowserGuard, parseGuardEndpoint, takeGuardEnvironment, exchange, GUARD_MAX_LINE_BYTES, GUARD_ENV, GUARD_TOKEN_ENV, INTAKE_MAX_FILES, INTAKE_MAX_BYTES } from '../../skills/chrome_browser/lib/guard.mjs';
 
 const TOKEN = 'a'.repeat(64);
 
@@ -108,6 +109,59 @@ test('arming: only {"armed": true} arms, and only the context it was called for'
   }
 });
 
+test('capabilities: only an arming answer with capabilities.embedded_resources exactly true says the host takes binary resources', async () => {
+  const arms = async (answer) => {
+    const guard = await startMockGuard({ token: TOKEN, decide: () => answer });
+    const client = new BrowserGuard({ endpoint: parseGuardEndpoint(guard.endpoint), token: TOKEN });
+    const context = {};
+    await client.arm(context);
+    await guard.close();
+    return { armed: client.isArmed(context), embedded: client.embeddedResources(context), other: client.embeddedResources({}) };
+  };
+  assert.deepEqual(await arms({ armed: true, capabilities: { embedded_resources: true } }), { armed: true, embedded: true, other: false }, 'only for the context it was armed for');
+  // An older host's answer, and every other spelling: armed, but no binary resource is offered to the host.
+  for (const answer of [
+    { armed: true },
+    { armed: true, capabilities: {} },
+    { armed: true, capabilities: { embedded_resources: false } },
+    { armed: true, capabilities: { embedded_resources: 'true' } },
+    { armed: true, capabilities: { embedded_resources: 1 } },
+    { armed: true, capabilities: { embeddedResources: true } },
+    { armed: true, capabilities: [true] },
+    { armed: true, capabilities: 'embedded_resources' },
+    { armed: true, capabilities: null },
+    { armed: true, embedded_resources: true },
+  ])
+    assert.deepEqual(await arms(answer), { armed: true, embedded: false, other: false }, JSON.stringify(answer));
+  // A capability alone arms nothing.
+  const refusing = await startMockGuard({ token: TOKEN, decide: () => ({ armed: false, capabilities: { embedded_resources: true }, block: 'BROWSER_SESSION_CLOSED: closing' }) });
+  const client = new BrowserGuard({ endpoint: parseGuardEndpoint(refusing.endpoint), token: TOKEN });
+  const context = {};
+  await assert.rejects(client.arm(context), (error) => error.code === 'BROWSER_GUARD_NOT_ARMED');
+  assert.equal(client.embeddedResources(context), false);
+  await refusing.close();
+  // Re-arming the same context follows the latest answer.
+  const sequence = [{ armed: true, capabilities: { embedded_resources: true } }, { armed: true }];
+  const changing = await startMockGuard({ token: TOKEN, decide: () => sequence.shift() });
+  const again = new BrowserGuard({ endpoint: parseGuardEndpoint(changing.endpoint), token: TOKEN });
+  await again.arm(context);
+  assert.equal(again.embeddedResources(context), true);
+  await again.arm(context);
+  assert.equal(again.embeddedResources(context), false);
+  await changing.close();
+});
+
+test('file intake on an older host: its refusal of the unknown action is shown verbatim and no file is read', async () => {
+  // ouroboros/mcp_browser_guard.py before file intake answers any other action this way.
+  const OLDER = 'BROWSER_POLICY_UNAVAILABLE: unknown guard action';
+  const guard = await startMockGuard({ token: TOKEN, decide: (message) => ('armed' in message ? { armed: true } : message.action ? { block: OLDER } : { block: '' }) });
+  const client = new BrowserGuard({ endpoint: parseGuardEndpoint(guard.endpoint), token: TOKEN });
+  const work = scratchDir('intake-older');
+  fs.writeFileSync(path.join(work, 'report.pdf'), 'pdf');
+  assert.deepEqual(await client.intakeFiles([{ path: path.join(work, 'report.pdf') }]), { block: OLDER });
+  await guard.close();
+});
+
 test('fail closed: refused connection, silence, malformed, non-string block, oversized answer', async () => {
   const closedPort = await new Promise((resolve) => {
     const server = net.createServer();
@@ -142,4 +196,135 @@ test('Unix socket endpoint works the same way (tests only; the host uses TCP)', 
   assert.deepEqual(answer, { armed: true });
   await guard.close();
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The host's intake and the client: one decide function for both kinds of message the tests send.
+const intakeGuard = async (intake) => await startMockGuard({ token: TOKEN, decide: (message) => ('armed' in message ? { armed: true } : message.action === 'file_intake' ? intake(message) : { block: '' }) });
+
+test('file intake: the agreed wire line, and exactly the retained copies, in the order named, with their original names', async () => {
+  const work = scratchDir('intake-work');
+  const kept = scratchDir('intake-kept');
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1, 2, 3]);
+  fs.writeFileSync(path.join(work, 'photo one.png'), png);
+  fs.writeFileSync(path.join(work, 'notes.txt'), 'notes');
+  fs.writeFileSync(path.join(work, 'empty'), '');
+  const payload = scratchDir('intake-payload');
+  fs.writeFileSync(path.join(payload, 'report.txt'), 'report');
+  const intake = retainingIntake({ dir: kept, roots: { work, 'skill_payload/user_repo/report-skill': payload } });
+  const guard = await intakeGuard(intake);
+  const client = new BrowserGuard({ endpoint: parseGuardEndpoint(guard.endpoint), token: TOKEN });
+  const answer = await client.intakeFiles([{ path: path.join(work, 'photo one.png') }, { path: 'notes.txt', root: 'work' }, { path: 'empty', root: 'work' },
+    { skill_name: 'report-skill', path: 'report.txt', bucket: 'user_repo', root: 'skill_payload' }, { path: path.join(work, 'notes.txt'), root: '', bucket: '', skill_name: '' }]);
+  const photo = JSON.stringify(path.join(work, 'photo one.png'));
+  const notes = JSON.stringify(path.join(work, 'notes.txt'));
+  assert.deepEqual(guard.received.map((entry) => entry.line), [
+    `{"action":"file_intake","files":[{"path":${photo}},{"path":"notes.txt","root":"work"},{"path":"empty","root":"work"},{"path":"report.txt","root":"skill_payload","bucket":"user_repo","skill_name":"report-skill"},{"path":${notes},"root":"","bucket":"","skill_name":""}],"token":"${TOKEN}"}`,
+  ], 'one message: the paths as named, a root, bucket and skill_name only where one was given, an empty one as given');
+  assert.equal(answer.block, '');
+  assert.deepEqual(answer.files.map(({ name, size, sha256: hash }) => [name, size, hash]), [
+    ['photo one.png', png.length, sha256(png)], ['notes.txt', 5, sha256(Buffer.from('notes'))], ['empty', 0, sha256(Buffer.alloc(0))], ['report.txt', 6, sha256(Buffer.from('report'))], ['notes.txt', 5, sha256(Buffer.from('notes'))],
+  ]);
+  assert.ok(answer.files[0].buffer.equals(png) && answer.files[1].buffer.equals(Buffer.from('notes')) && answer.files[2].buffer.length === 0 && answer.files[3].buffer.equals(Buffer.from('report')));
+  assert.deepEqual(Object.keys(answer.files[0]).sort(), ['buffer', 'name', 'sha256', 'size'], 'no path leaves the client');
+  await guard.close();
+});
+
+test('file intake reads only the copy the host names, never the path the agent named', async (t) => {
+  const kept = scratchDir('intake-copy');
+  const copy = path.join(kept, 'copy-1');
+  fs.writeFileSync(copy, 'the retained bytes');
+  const named = path.join(kept, 'named.txt');
+  fs.writeFileSync(named, 'the bytes at the named path, changed after retention');
+  const guard = await intakeGuard(() => ({ block: '', files: [{ path: copy, name: 'named.txt', size: 18, sha256: sha256(Buffer.from('the retained bytes')) }] }));
+  const client = new BrowserGuard({ endpoint: parseGuardEndpoint(guard.endpoint), token: TOKEN });
+  const opened = t.mock.method(fs.promises, 'open');
+  const answer = await client.intakeFiles([{ path: named }]);
+  assert.equal(answer.block, '');
+  assert.deepEqual([answer.files[0].name, answer.files[0].buffer.toString()], ['named.txt', 'the retained bytes']);
+  assert.deepEqual(opened.mock.calls.map((call) => call.arguments[0]), [copy]);
+  await guard.close();
+});
+
+test('file intake refusals: the host\'s reason verbatim, and a request out of bounds is never sent', async () => {
+  const kept = scratchDir('intake-refused');
+  const intake = retainingIntake({ dir: kept, admit: (entry) => (entry.path.includes('secret') ? 'READ_BLOCKED: this task may not read that file' : '') });
+  const guard = await intakeGuard(intake);
+  const client = new BrowserGuard({ endpoint: parseGuardEndpoint(guard.endpoint), token: TOKEN });
+  assert.deepEqual(await client.intakeFiles([{ path: '/x/secret.txt' }]), { block: 'READ_BLOCKED: this task may not read that file' });
+  const sent = guard.received.length;
+  for (const [entries, why] of [
+    [Array.from({ length: INTAKE_MAX_FILES + 1 }, (_, index) => ({ path: `/x/${index}` })), /17 files were named; at most 16/],
+    [[], /no file was named/], [undefined, /no file was named/],
+    [[{ path: '' }], /non-empty path/], [[{ path: 'a\0b' }], /non-empty path/], [[{ path: 'a', root: 'w\0rk' }], /path or root without NUL/], [[{ path: 3 }], /non-empty path/],
+    [[{ path: 'a', root: 'skill_payload', bucket: 3 }], /must be a string/], [[{ path: 'a', root: 'skill_payload', skill_name: null }], /must be a string/], [[{ path: 'a', root: 7 }], /must be a string/],
+  ]) {
+    const refused = await client.intakeFiles(entries);
+    assert.match(refused.block, /^BROWSER_FILE_INTAKE_INVALID: /);
+    assert.match(refused.block, why);
+    assert.equal(refused.files, undefined);
+  }
+  assert.equal(guard.received.length, sent, 'nothing out of bounds reached the host');
+  await guard.close();
+});
+
+test('file intake fails closed: an answer out of the agreed form, or a copy that is not what the host stated, gives the page nothing', async (t) => {
+  const kept = scratchDir('intake-forms');
+  const bytes = Buffer.from('retained bytes');
+  const copy = path.join(kept, 'copy');
+  fs.writeFileSync(copy, bytes);
+  const good = { path: copy, name: 'a.txt', size: bytes.length, sha256: sha256(bytes) };
+  fs.symlinkSync(copy, path.join(kept, 'link'));
+  fs.mkdirSync(path.join(kept, 'folder'));
+  const protocol = [
+    { block: '' }, { block: '', files: [] }, { block: '', files: [good, good] }, { block: '', files: 'x' },
+    { block: '', files: [{ ...good, path: 'relative/copy' }] }, { block: '', files: [{ ...good, path: '' }] },
+    { block: '', files: [{ ...good, name: 'dir/a.txt' }] }, { block: '', files: [{ ...good, name: '..' }] },
+    { block: '', files: [{ ...good, name: 'a\0.txt' }] }, { block: '', files: [{ ...good, name: '' }] },
+    { block: '', files: [{ ...good, size: -1 }] }, { block: '', files: [{ ...good, size: 1.5 }] }, { block: '', files: [{ ...good, size: '14' }] },
+    { block: '', files: [{ ...good, sha256: good.sha256.toUpperCase() }] }, { block: '', files: [{ ...good, sha256: good.sha256.slice(1) }] },
+    { block: '', files: [null] }, { allow: true, files: [good] }, { block: null, files: [good] },
+  ];
+  const mismatch = [
+    [{ ...good, size: bytes.length + 1 }, /has 14 bytes, not the 15/], [{ ...good, sha256: sha256(Buffer.from('other')) }, /does not have the sha256/],
+    [{ ...good, path: path.join(kept, 'missing') }, /could not be read \(ENOENT\)/], [{ ...good, path: path.join(kept, 'folder') }, /not a regular file|could not be read/],
+    ...(process.platform === 'win32' ? [] : [[{ ...good, path: path.join(kept, 'link') }, /could not be read \(ELOOP\)/]]),
+  ];
+  let answer = null;
+  const guard = await startMockGuard({ token: TOKEN, decide: () => answer });
+  const client = new BrowserGuard({ endpoint: parseGuardEndpoint(guard.endpoint), token: TOKEN });
+  const reads = t.mock.method(fs.promises, 'open');
+  for (const form of protocol) {
+    answer = form;
+    const refused = await client.intakeFiles([{ path: '/x/a.txt' }]);
+    assert.match(refused.block, /^BROWSER_GUARD_PROTOCOL: /, JSON.stringify(form));
+    assert.equal(refused.files, undefined);
+  }
+  // A basename a host may legally have, with a backslash or a control character: not given to a page, said so by name
+  // (escaped), not blamed on the host's protocol, and no file is opened.
+  for (const [name, shown] of [['a\\b.txt', '"a\\\\b.txt"'], ['a\nb.txt', '"a\\nb.txt"'], ['tab\t.txt', '"tab\\t.txt"'], ['del\u007f.txt', '"del\u007f.txt"']]) {
+    answer = { block: '', files: [good, { ...good, name }] };
+    const refused = await client.intakeFiles([{ path: '/x/a' }, { path: '/x/b' }]);
+    assert.equal(refused.block, `BROWSER_FILE_INTAKE_NAME_UNSUPPORTED: file 2's name (${shown}) has a backslash or a control character, which this server does not give a page as a file name; the file and its name were not changed`);
+    assert.equal(refused.files, undefined, 'the first, good file is not given alone');
+  }
+  // Over the agreed total, refused before any file is opened.
+  answer = { block: '', files: [{ ...good, size: INTAKE_MAX_BYTES }, { ...good, size: 1 }] };
+  assert.match((await client.intakeFiles([{ path: '/x/a' }, { path: '/x/b' }])).block, new RegExp(`^BROWSER_GUARD_PROTOCOL: .*${INTAKE_MAX_BYTES + 1} bytes, more than the ${INTAKE_MAX_BYTES} agreed`));
+  assert.equal(reads.mock.callCount(), 0, 'no file is opened for an answer out of form');
+  for (const [file, why] of mismatch) {
+    answer = { block: '', files: [good, file] };
+    const refused = await client.intakeFiles([{ path: '/x/a' }, { path: '/x/b' }]);
+    assert.match(refused.block, /^BROWSER_FILE_INTAKE_MISMATCH: the host's retained copy of file 2 /);
+    assert.match(refused.block, why);
+    assert.equal(refused.files, undefined, 'the first, good file is not given alone');
+    assert.ok(!refused.block.includes(kept) && !refused.block.includes(TOKEN), 'no path or token in the reason');
+  }
+  // A refusal carries no files, even if the answer lists some.
+  answer = { block: 'READ_BLOCKED: no', files: [good] };
+  assert.deepEqual(await client.intakeFiles([{ path: '/x/a' }]), { block: 'READ_BLOCKED: no' });
+  await guard.close();
+  const silent = await startMockGuard({ token: TOKEN, respond: false });
+  const slow = new BrowserGuard({ endpoint: parseGuardEndpoint(silent.endpoint), token: TOKEN, timeoutMs: 300 });
+  assert.match((await slow.intakeFiles([{ path: '/x/a' }])).block, /^BROWSER_GUARD_TIMEOUT: the request guard did not answer the file intake, so no file was given to the page$/);
+  await silent.close();
 });

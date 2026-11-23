@@ -6,7 +6,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -14,7 +16,18 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .ffmpeg_bootstrap import ensure_ffmpeg
-from .api_client import OpenRouterClient, run_with_timeout
+from .api_client import (
+    DEFAULT_MAX_TOKENS,
+    VIDEO_CALL_DEADLINE,
+    VIDEO_MODEL_PROMPT_LIMIT,
+    OpenRouterClient,
+    VideoDispatchRejected,
+    VideoJobUnretrieved,
+    VideoPromptFitError,
+    fit_prompt_to_limit,
+    run_with_timeout,
+    split_protected_dialogue,
+)
 from .budget import BudgetLedger, derive_limit_usd, estimate_job_usd
 from .judges import (
     ATTRIBUTE_QUESTION_PROMPT,
@@ -29,6 +42,7 @@ from .judges import (
 )
 from .modes import mode_config
 from .models import (
+    _fields_of,
     Character,
     GenerationSettings,
     Job,
@@ -97,14 +111,15 @@ def _normalize_vlm_image_result(data: dict) -> dict:
 TIMEOUT_SCENARIO = 240
 TIMEOUT_IMAGE = 400
 TIMEOUT_MUSIC = 200
-# FINDING E (fixed): api_client.VIDEO_MAX_WAIT (1200s) is the AUTHORITATIVE
-# per-clip deadline — the provider poll loop owns giving up on a clip. This
-# outer run_with_timeout value only guards transport hangs around that loop, so
-# it MUST stay above VIDEO_MAX_WAIT plus poll/download margin; the two must
-# never be inverted again. At the old 660 the documented 20-minute bound was
-# structurally unreachable and a >11-minute clip was abandoned AFTER the ledger
-# had already charged it while the provider kept billing.
-TIMEOUT_VIDEO = 1320
+# api_client.VIDEO_CALL_DEADLINE is the AUTHORITATIVE per-clip bound: the
+# client's POST, poll and download deadlines add up to it, and the client raises
+# by itself (VideoJobUnretrieved, with the provider job id) when an accepted job
+# runs out of time. This outer run_with_timeout is only a safety net for hangs,
+# so it is DERIVED from that sum and stays above it: the outer cut must never be
+# what ends an accepted job, because it would lose the job id and invite a
+# second paid clip. Earlier fixed values (660, then 1320) were each overtaken by
+# a longer inner wait.
+TIMEOUT_VIDEO = VIDEO_CALL_DEADLINE + 60
 TIMEOUT_VERIFY = 45
 TIMEOUT_VIDEO_VERIFY = 180
 
@@ -120,8 +135,9 @@ IMAGE_GENERATION_RETRIES = 1
 # images (docs.byteplus.com, Seedance 2.0 API reference). This was 4, which
 # silently dropped the continuity frame as soon as a scene had 3 characters —
 # characters are ordered first, so the cap ate exactly the cross-scene anchor.
-# A model that accepts fewer answers 4xx, and the existing
-# _is_reference_parameter_rejection path trims and retries the same model.
+# A model that accepts fewer answers 4xx. Only the IMAGE path trims references
+# and retries the same model (_is_reference_parameter_rejection); a refused
+# video dispatch goes to the failure advisor like any other error.
 VIDEO_MAX_INPUT_REFERENCES = 9
 
 # Multi-dimensional scoring: weighted average threshold
@@ -253,7 +269,7 @@ class Pipeline:
         )
         self._emit(job)
 
-    def _charge(self, job: Job, kind: str, count: int = 1, note: str = "") -> bool:
+    def _charge(self, job: Job, kind: str, count: int = 1, note: str = ""):
         """Admit-then-charge the in-job estimated-spend ledger and refresh the
         persisted snapshot. A missing ledger (direct method calls in offline
         verification) charges nothing and admits.
@@ -263,19 +279,143 @@ class Pipeline:
         out after the limit was reached. Admission now lives HERE — the one
         seam every paid dispatch already passes through — instead of as a
         reminder at every call site. On refusal nothing is charged, the hard
-        stop is recorded once, and False is returned; callers skip the
+        stop is recorded once, and a falsy value is returned; callers skip the
         dispatch. Never raises: a raise would unwind past the assembly phase
-        in run() and destroy already-generated clips."""
+        in run() and destroy already-generated clips.
+
+        Returns a truthy RECEIPT on success (falsy on refusal), so every
+        existing `if not self._charge(...)` caller is unchanged while a video
+        dispatch can refund its exact charge when the provider proves it never
+        generated anything.
+        """
         if self.ledger is None:
-            return True
+            return {"id": 0, "kind": kind, "count": count, "usd": 0.0}
         if self.ledger.would_exceed(kind, count):
             self._refuse_paid_dispatch(job, kind, count)
-            return False
-        self.ledger.charge(kind, count, note=note)
+            return None
+        receipt = self.ledger.charge(kind, count, note=note)
         # Refreshed after EVERY charge batch so a crash leaves the real spend
         # on disk (job.progress is persisted by the on_progress callback).
         job.progress.budget = self.ledger.to_dict()
-        return True
+        return receipt
+
+    def _refund(self, job: Job, receipt, note: str = "") -> bool:
+        """Credit back one proven-ungenerated dispatch (400/422 validation
+        refusal). Idempotent by receipt id; never raises."""
+        if self.ledger is None or not receipt:
+            return False
+        try:
+            if self.ledger.refund(receipt, note=note):
+                job.progress.budget = self.ledger.to_dict()
+                return True
+        except Exception:
+            # `Pipeline` has no `self.log`; using it here turned a defensive
+            # refund-failure log into an AttributeError that aborted the whole
+            # job and masked the provider rejection underneath it.
+            logger.warning("budget refund failed for %s", note, exc_info=True)
+        return False
+
+    def _refund_if_rejected(self, job: Job, receipt, exc: BaseException) -> bool:
+        """Refund a video charge ONLY when the provider proved it generated
+        nothing: a request-validation refusal (HTTP 400/422) answered before
+        any inference. Reported from a live job: six such refusals accumulated
+        $15.90 of phantom spend against a ~$28 rail, enough to hard-stop a job.
+
+        Deliberately narrow. A timeout, a 5xx, a 429, or a poll failure may sit
+        on top of real generation, so those are NEVER refunded — over-charging
+        is a wrong number, under-charging is a broken safety rail.
+
+        `receipt` must be the charge of THIS dispatch, reset to None before it:
+        a receipt left over from an earlier, successful clip must never be
+        handed here.
+        """
+        # A client-side prompt-fit refusal never reached the network at all, so
+        # it is the STRONGEST refund case, not an exception to the rule: the
+        # charge happens before the dispatch call, and `fit_prompt_to_limit`
+        # raises inside it when the protected @ImageN lines cannot fit.
+        if isinstance(exc, VideoPromptFitError):
+            return self._refund(
+                job, receipt, note="prompt fit refused before any request was sent"
+            )
+        if not isinstance(exc, VideoDispatchRejected) or not exc.refundable:
+            return False
+        return self._refund(
+            job, receipt, note=f"provider rejected before generation (HTTP {exc.status_code})"
+        )
+
+    @staticmethod
+    def _paid_outcome_unknown(exc: BaseException, model: str) -> Optional[VideoJobUnretrieved]:
+        """The typed outcome when a paid video dispatch may have been accepted.
+
+        VideoJobUnretrieved already carries it, with or without a job id. A
+        TimeoutError reaching a dispatch site can only be the outer
+        run_with_timeout cutting a dispatch in flight, so its provider side is
+        unknown too. Anything else is an ordinary failure (None).
+        """
+        if isinstance(exc, VideoJobUnretrieved):
+            return exc
+        if isinstance(exc, TimeoutError):
+            return VideoJobUnretrieved(None, model, "dispatch", f"{type(exc).__name__}: {exc}")
+        return None
+
+    def _record_unretrieved(
+        self, job: Job, scene_index: int, attempt: str, exc: VideoJobUnretrieved,
+    ) -> None:
+        """Keep the evidence of a dispatch that was, or may have been, accepted.
+
+        Its charge stays (the provider may bill it) and no fresh paid clip is
+        started for it: the caller stops working on that scene. The provider
+        job id is kept when one came back and stays None when none did; the
+        raw reason is kept either way.
+        """
+        accepted = exc.job_id is not None
+        stats = job.progress.verification_stats
+        stats.setdefault("unretrieved_accepted_jobs", []).append({
+            "scene": scene_index, "attempt": attempt, "job_id": exc.job_id,
+            "accepted": "yes" if accepted else "unknown",
+            "model": exc.model, "stage": exc.stage, "detail": str(exc.detail)[:500],
+        })
+        reason = (
+            f"accepted_clip_unretrieved:{scene_index}" if accepted
+            else f"dispatch_outcome_unknown:{scene_index}"
+        )
+        if reason not in job.progress.partial_reasons:
+            job.progress.partial_reasons.append(reason)
+        if accepted:
+            what = (
+                f"provider job {exc.job_id} ({exc.model}) was accepted but its clip was "
+                f"not retrieved ({exc.stage}: {exc.detail})"
+            )
+        else:
+            what = (
+                f"the video dispatch to {exc.model} may have been accepted, but no job id "
+                f"came back ({exc.detail})"
+            )
+        self._warn(
+            job,
+            f"Scene {scene_index}: {what}. It may still be billed; no new paid clip was "
+            f"started for it.",
+        )
+
+    def _no_clips_error(self, job: Job) -> str:
+        """The final error when no scene has a clip, with the paid-dispatch evidence."""
+        message = "No video clips were generated successfully"
+        records = job.progress.verification_stats.get("unretrieved_accepted_jobs") or []
+        if records:
+            parts = [
+                f"scene {r.get('scene')}: job {r.get('job_id') or 'unknown (no id came back)'}"
+                f" at {r.get('stage')}"
+                for r in records[:8]
+            ]
+            message += (
+                f"; {len(records)} dispatch(es) were accepted or may have been accepted and "
+                f"may be billed, with no clip retrieved and none started again: "
+                + "; ".join(parts)
+            )
+        return message
+
+    # `_resolution_for_model` lives beside the assembly/recovery helpers below,
+    # next to `_RESOLUTION_LADDER`, so the ladder has exactly one owner.
 
     def _admit(self, job: Job, kind: str, count: int = 1) -> bool:
         """Pre-dispatch budget admission — called BEFORE every provider dispatch.
@@ -391,6 +531,14 @@ class Pipeline:
 
     # ─── Image Generation Router ───
 
+    # Provider-DOCUMENTED minimum clip length, consulted ONLY when the live
+    # capability snapshot has nothing for that model. A floor, never an
+    # allowed-list (see _clamp_duration). minimax/hailuo-3: 5s minimum,
+    # confirmed twice on 2026-08-04 (OpenRouter model page + provider FAQ).
+    _MODEL_MIN_DURATION_SEC: dict[str, int] = {
+        "minimax/hailuo-3": 5,
+    }
+
     def _clamp_duration(self, desired_sec: int, model: str) -> int:
         """Return the nearest duration the provider actually accepts for this model.
 
@@ -406,7 +554,19 @@ class Pipeline:
         """
         allowed = ((self._video_caps.get(model) or {}).get("durations")) or []
         if not allowed:
-            return min(15, max(4, desired_sec))
+            # Two DIFFERENT unknowns, and conflating them is what breaks a model
+            # whose real floor is above the global one. "Catalog unreachable"
+            # (empty snapshot) and "catalog fetched, this model absent from it"
+            # both land here, so the only safe fallback is the global range —
+            # PLUS a per-model documented MINIMUM where one is known. That map is
+            # deliberately NOT the stale allowed-list this function used to
+            # carry: a floor can only RAISE a value toward a documented-valid
+            # one, it cannot invent a duration the provider refuses (the old
+            # table clamped veo-3.1 to an invalid 5 and every request 400'd).
+            # Raising the GLOBAL floor to 5 instead would break veo-3.1, whose
+            # real set is [4, 6, 8].
+            floor = max(4, self._MODEL_MIN_DURATION_SEC.get(model, 4))
+            return min(15, max(floor, desired_sec))
         return min(allowed, key=lambda v: abs(v - desired_sec))
 
     def _effective_generate_audio(self, job: Job, model: Optional[str] = None) -> bool:
@@ -915,6 +1075,13 @@ class Pipeline:
 
     # ─── Multi-Dimensional Video Verification ───────────────────────
 
+    @staticmethod
+    def _is_multidim_score(value) -> bool:
+        """True for a real number on the 0-10 scale VLM_VERIFY_VIDEO_MULTIDIM_PROMPT asks for."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        return math.isfinite(float(value)) and 0.0 <= float(value) <= 10.0
+
     async def _verify_video_multidim(
         self, job: Job, video_path: str, scene: Scene, storyboard: Storyboard,
     ) -> dict:
@@ -996,7 +1163,36 @@ class Pipeline:
                     "suggestion": "",
                 }
 
-            scores = {k: result.get(k, 7) for k in MULTIDIM_WEIGHTS}
+            # A dimension the model did not score is NOT a 7. The old
+            # `result.get(k, 7)` default meant a valid-JSON reply with wrong or
+            # missing keys scored a weighted 7.0 — above MULTIDIM_PASS_THRESHOLD
+            # — and recorded verdict="pass" for a clip that was never scored:
+            # the same "could not check renders as checked-and-passed" shape this
+            # payload removed everywhere else (deleted verify_video_vlm, the
+            # vlm_error marker above). Incomplete scoring is INDETERMINATE, so
+            # the clip ships UNVERIFIED and says so. A number outside the
+            # prompt's 0-10 scale is no score either: 85 on a percentage reading
+            # would otherwise sail past the threshold.
+            missing = [
+                k for k in MULTIDIM_WEIGHTS
+                if not self._is_multidim_score(result.get(k))
+            ]
+            if missing:
+                self._warn(
+                    job,
+                    f"Video scene {scene.index}: verification returned no usable score for "
+                    f"{', '.join(sorted(missing))}; clip is UNVERIFIED, not passed",
+                )
+                return {
+                    "verdict": "indeterminate",
+                    "passed": False,
+                    "reason": "multidim_schema_incomplete",
+                    "scores": {},
+                    "issues": [f"unscored dimensions: {', '.join(sorted(missing))}"],
+                    "suggestion": "",
+                }
+
+            scores = {k: float(result[k]) for k in MULTIDIM_WEIGHTS}
             weighted_avg = sum(scores[k] * MULTIDIM_WEIGHTS[k] for k in scores)
             result["verdict"] = "pass" if weighted_avg >= MULTIDIM_PASS_THRESHOLD else "fail"
             result["passed"] = result["verdict"] == "pass"
@@ -1255,7 +1451,7 @@ class Pipeline:
                 self.client.chat(
                     messages=[{"role": "user", "content": prompt}],
                     model="anthropic/claude-sonnet-4.6",
-                    max_toks=1536,
+                    max_toks=DEFAULT_MAX_TOKENS,
                     temperature=0.3,
                     json_mode=True,
                 ),
@@ -1427,6 +1623,16 @@ class Pipeline:
     async def run(self, job: Job) -> Job:
         """Execute the full pipeline."""
         try:
+            # Prove liveness DURING the longest silent operation. The worker
+            # refreshes its job lease only from this progress callback, and a
+            # single video wait can run 22 minutes against a 15-minute lease TTL,
+            # so a LIVE worker's lease could expire mid-generation, another worker
+            # generation could treat the job as abandoned and the whole paid job
+            # could run twice. The client throttles these to
+            # POLL_HEARTBEAT_INTERVAL and swallows their failures; the ONLY thing
+            # this closure may do is emit progress for THIS job.
+            self.client.poll_heartbeat = lambda: self._emit(job)
+
             job.progress.message = "Resolving operator-provided ffmpeg/ffprobe..."
             job.progress.progress_pct = 1.0
             self._emit(job)
@@ -1684,9 +1890,13 @@ class Pipeline:
                 critique = str(stats.get("cross_scene_drift", ""))
                 job.progress.message = f"Identity drift detected in scene {worst_scene}. Regenerating..."
                 self._emit(job)
-                await self._regenerate_single_scene(
+                if not await self._regenerate_single_scene(
                     job, storyboard, worst_scene, critique=critique
-                )
+                ):
+                    # Nothing changed and nothing may be paid for this scene:
+                    # re-checking the same clips cannot help. The drift ships
+                    # disclosed below.
+                    break
                 regens_used += 1
                 # A gate that never inspects its own repair is not a gate. Re-run
                 # the same reviewer once and record whether the drift is actually
@@ -1759,9 +1969,16 @@ class Pipeline:
                     f"Identity panel failed scene {scene_index}. Regenerating..."
                 )
                 self._emit(job)
-                await self._regenerate_single_scene(
+                if not await self._regenerate_single_scene(
                     job, storyboard, scene_index, critique=critique
-                )
+                ):
+                    # Not regenerated (an earlier dispatch for it is unresolved),
+                    # so it ships exactly like an unrepaired panel failure.
+                    self._record_indeterminate_scene(job, scene_index)
+                    job.progress.partial_reasons.append(
+                        f"identity_panel_failed_unresolved:{scene_index}"
+                    )
+                    continue
                 regens_used += 1
                 consumed.append(scene_index)
                 stats["identity_panel_regens_used"] = regens_used
@@ -1832,7 +2049,22 @@ class Pipeline:
 
             img_lessons = [l for l in self._learned_lessons if "text" in l.lower() or "character" in l.lower()]
             vid_lessons = [l for l in self._learned_lessons if l not in img_lessons]
-            self._persist_lessons(img_lessons, vid_lessons or self._learned_lessons)
+            # Isolated on purpose: this runs AFTER final_video_url, phase=DONE and
+            # the partial/done status are already set, and `_persist_lessons`
+            # writes with an unguarded write_text. An unguarded IO failure here
+            # would propagate to the outer `except Exception`, which overwrites
+            # phase and status with ERROR — reporting a fully assembled, DELIVERED
+            # video as a failed job over a cosmetic cache write. Cross-job
+            # learning is optional; the delivered result is not.
+            try:
+                self._persist_lessons(img_lessons, vid_lessons or self._learned_lessons)
+            except Exception as exc:  # noqa: BLE001
+                self._warn(
+                    job,
+                    "Prompt-lesson persistence failed "
+                    f"({type(exc).__name__}: {exc}); the delivered video is unaffected, "
+                    "only cross-job learning was not saved",
+                )
 
             if is_partial:
                 # A partial outcome must be unmissable — never "Animation complete!".
@@ -1891,7 +2123,7 @@ class Pipeline:
                     {"role": "user", "content": prompt},
                 ],
                 model="anthropic/claude-sonnet-4.6",
-                max_toks=8192, temperature=0.8,
+                max_toks=DEFAULT_MAX_TOKENS, temperature=0.8,
                 json_mode=True,
             )
             try:
@@ -1909,10 +2141,15 @@ class Pipeline:
                 return Storyboard(
                     title=data["title"], synopsis=data["synopsis"],
                     style=data["style"], total_duration_sec=data["total_duration_sec"],
-                    characters=[Character(**c) for c in data["characters"]],
-                    locations=[Location(**loc) for loc in data["locations"]],
+                    # Field-filtered like every other construction site: a model
+                    # that volunteers one extra key raises TypeError, and each
+                    # retry of this parse is a SEPARATELY CHARGED storyboard
+                    # attempt. Missing REQUIRED keys still raise, which is the
+                    # intended retry signal; only surplus keys are tolerated.
+                    characters=[Character(**_fields_of(Character, c)) for c in data["characters"]],
+                    locations=[Location(**_fields_of(Location, loc)) for loc in data["locations"]],
                     scenes=scenes,
-                    music_cues=[MusicCue(**m) for m in data["music_cues"]],
+                    music_cues=[MusicCue(**_fields_of(MusicCue, m)) for m in data["music_cues"]],
                 )
             except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
                 last_error = e
@@ -2115,45 +2352,113 @@ class Pipeline:
         "google/veo-3.1-fast",
         "google/veo-3.1-lite",
         "minimax/hailuo-2.3",
+        # hailuo-3 must be listed here or the failure advisor physically cannot
+        # switch TO it (and, when the owner selects it, cannot switch AWAY and
+        # back). Absence from this list is not neutral: it silently removes a
+        # model from every recovery path while the UI still offers it.
+        "minimax/hailuo-3",
         "kwaivgi/kling-v3.0-pro",
         "kwaivgi/kling-v3.0-std",
         "kwaivgi/kling-video-o1",
     ]
 
-    _VIDEO_MODEL_PROMPT_LIMIT: dict[str, int] = {
-        "kwaivgi/kling-v3.0-pro": 2500,
-        "kwaivgi/kling-v3.0-std": 2500,
-        "kwaivgi/kling-video-o1": 2500,
-    }
+    # ONE prompt-limit table, owned by api_client (the module that actually
+    # enforces it at the POST). A second copy here had already drifted: it
+    # omitted minimax/hailuo-3, so an over-long H3 prompt skipped the good
+    # LLM condensation and only met the mechanical hard-fit at dispatch time.
+    _VIDEO_MODEL_PROMPT_LIMIT = VIDEO_MODEL_PROMPT_LIMIT
+
+    _REFERENCE_TOKEN_RE = re.compile(r"@Image\d+")
 
     async def _condense_prompt_for_model(self, prompt: str, model: str) -> str:
-        """Shorten *prompt* via LLM if it exceeds the model's character limit."""
+        """Shorten *prompt* via LLM if it exceeds the model's character limit.
+
+        The condensed candidate is REJECTED unless every line that names an
+        `@ImageN` token survives VERBATIM. Token presence alone is not a binding:
+        a candidate that swaps two characters' descriptions, or keeps only "use
+        @Image1 and @Image2", still names every token while the attached images
+        no longer mean who the prompt says. This is the owner's original
+        complaint reproduced through the success branch: in a live job the LLM
+        condenser dropped the reference block and the images stayed attached to
+        a prompt that no longer bound them. The POST-time fitter cannot catch
+        it, because a condensed prompt is already UNDER the limit.
+        """
         limit = self._VIDEO_MODEL_PROMPT_LIMIT.get(model)
         if not limit or len(prompt) <= limit:
             return prompt
+        required = tuple(sorted(set(self._REFERENCE_TOKEN_RE.findall(prompt))))
+        bindings = [
+            line.strip() for line in prompt.split("\n")
+            if self._REFERENCE_TOKEN_RE.search(line)
+        ]
         target = limit - 50
         logger.info(f"Prompt {len(prompt)} chars > {model} limit {limit}, condensing to ~{target}")
         req = (
             "You are a video prompt editor. Rewrite the prompt below to fit within "
             f"{target} characters. Keep ALL character visuals, camera, action, mood, "
-            "and style. Remove boilerplate/negative constraints. Return ONLY the text.\n\n"
+            "and style. Remove boilerplate/negative constraints. "
+            + (
+                "You MUST reproduce VERBATIM every line that names a reference image "
+                f"({', '.join(required)}) — those tokens bind the attached reference "
+                "images to specific characters and locations; dropping one silently "
+                "unbinds it. "
+                if required else ""
+            )
+            + "Return ONLY the text.\n\n"
             f"--- ORIGINAL ---\n{prompt}\n--- END ---"
         )
         try:
             condensed = (await run_with_timeout(
                 self.client.chat(
                     messages=[{"role": "user", "content": req}],
-                    model="google/gemini-3.5-flash", max_toks=1024, temperature=0.2,
+                    model="google/gemini-3.5-flash", max_toks=DEFAULT_MAX_TOKENS, temperature=0.2,
                 ), timeout_sec=30, description="Prompt condensation",
             )).strip()
-            if 100 < len(condensed) <= limit:
-                logger.info(f"Prompt condensed: {len(prompt)} → {len(condensed)} chars")
+            missing = [t for t in required if t not in condensed]
+            kept_lines = {line.strip() for line in condensed.split("\n")}
+            altered = [line for line in bindings if line not in kept_lines]
+            if 100 < len(condensed) <= limit and not missing and not altered:
+                logger.info(
+                    "Prompt condensed: %d → %d chars (%d reference token(s) preserved)",
+                    len(prompt), len(condensed), len(required),
+                )
                 return condensed
-            logger.warning(f"Condensation returned {len(condensed)} chars, hard-fitting")
-            return self._hard_fit_prompt(prompt, limit)
+            if missing or altered:
+                logger.warning(
+                    "Condensation changed the reference binding (dropped token(s): %s; "
+                    "%d binding line(s) not kept verbatim) — rejecting the candidate; "
+                    "the reference images would stay attached to a prompt that no "
+                    "longer binds them as written",
+                    ", ".join(missing) or "none", len(altered),
+                )
+            else:
+                logger.warning("Condensation returned %d chars, hard-fitting", len(condensed))
+            return self._fit_preserving_references(prompt, limit, required)
         except Exception as e:
             logger.warning(f"Condensation failed ({_describe_exc(e)}), hard-fitting")
+            return self._fit_preserving_references(prompt, limit, required)
+
+    def _fit_preserving_references(
+        self, prompt: str, limit: int, required: tuple[str, ...]
+    ) -> str:
+        """Mechanical fit through the SAME token-preserving fitter the POST uses.
+
+        A second, weaker hard-fit here is how the reference block could be lost on
+        the fallback path while `api_client.fit_prompt_to_limit` protected it on
+        the dispatch path. When even that fitter cannot fit the protected lines it
+        raises; we return the prompt UNCHANGED so the single fail-closed gate at
+        the POST is the one place that refuses, instead of two places guessing.
+        """
+        if not required:
             return self._hard_fit_prompt(prompt, limit)
+        try:
+            return fit_prompt_to_limit(prompt, limit, required)
+        except VideoPromptFitError:
+            logger.warning(
+                "Protected reference lines do not fit %d chars; deferring the refusal "
+                "to the dispatch gate", limit,
+            )
+            return prompt
 
     _TRUNCATION_MARKER = "\n[…prompt shortened to fit this model's character limit…]\n"
 
@@ -2167,13 +2472,10 @@ class Pipeline:
         reader of the prompt can see that material was removed.
         """
         marker = self._TRUNCATION_MARKER
-        tail = ""
-        idx = prompt.find("\n\nSPOKEN DIALOGUE")
-        if idx != -1:
-            candidate = prompt[idx:]
-            # Only protect the tail if there is still room for meaningful head content.
-            if len(candidate) + len(marker) < limit // 2:
-                tail = candidate
+        # Only protect the tail while there is still room for meaningful head
+        # content; the lessons after the dialogue are not part of it when the
+        # whole remainder does not fit (split_protected_dialogue).
+        body, tail = split_protected_dialogue(prompt, limit // 2 - len(marker))
         head_room = limit - len(marker) - len(tail)
         if head_room <= 0:
             logger.warning("Prompt limit %d too small to disclose truncation; hard slice", limit)
@@ -2183,7 +2485,7 @@ class Pipeline:
             len(prompt), head_room + len(marker) + len(tail), limit,
             "preserved" if tail else "NOT preserved",
         )
-        return prompt[:head_room] + marker + tail
+        return body[:head_room] + marker + tail
 
     async def _get_failure_advisor_recommendation(
         self, error: str, current_model: str, scene_description: str,
@@ -2210,7 +2512,7 @@ class Pipeline:
                     self.client.chat(
                         messages=[{"role": "user", "content": prompt}],
                         model=model,
-                        max_toks=384,
+                        max_toks=DEFAULT_MAX_TOKENS,
                         temperature=0.1,
                         json_mode=True,
                     ),
@@ -2346,6 +2648,9 @@ class Pipeline:
                         current_prompt += f"\n\nADDITIONAL NEGATIVE CONSTRAINTS: {neg_constraints}"
                     logger.info(f"Scene {scene.index} simplified for attempt {attempt+1}")
 
+                # Reset per attempt: the except-branch refund must see THIS
+                # dispatch's charge or nothing, never an earlier clip's receipt.
+                _clip_receipt = None
                 try:
                     final_prompt = await self._condense_prompt_for_model(
                         current_prompt, job.settings.video_model,
@@ -2354,7 +2659,9 @@ class Pipeline:
                     if not self._admit(job, "video_clip"):
                         video_path = None
                         break
-                    self._charge(job, "video_clip", note=f"scene {scene.index} attempt {attempt + 1}")
+                    _clip_receipt = self._charge(
+                        job, "video_clip", note=f"scene {scene.index} attempt {attempt + 1}"
+                    )
                     video_path = await run_with_timeout(
                         self.client.generate_video(
                             prompt=final_prompt,
@@ -2426,11 +2733,30 @@ class Pipeline:
                     error_str = str(e)
                     logger.exception("Video scene %s generation failed", scene.index)
                     self._warn(job, f"Video scene {i} failed: {_describe_exc(e)}")
+                    # A validation refusal generated nothing: give the money back.
+                    self._refund_if_rejected(job, _clip_receipt, e)
+                    _unknown = self._paid_outcome_unknown(e, job.settings.video_model)
+                    if _unknown is not None:
+                        # The provider accepted, or may have accepted, this clip;
+                        # it may exist and be billed. No advisor and no further
+                        # candidate: a fresh paid clip for the scene could pay twice.
+                        self._record_unretrieved(
+                            job, scene.index, f"candidate_{attempt + 1}", _unknown,
+                        )
+                        video_path = None
+                        break
 
                     _err_lower = error_str.lower()
                     _is_prompt_limit = any(
                         kw in _err_lower
-                        for kw in ("prompt: size must be", "prompt too long", "prompt length", "maximum prompt")
+                        for kw in (
+                            "prompt: size must be", "prompt too long", "prompt length",
+                            "maximum prompt",
+                            # minimax/hailuo-3's exact wording, which none of the
+                            # patterns above matched: "invalid params,
+                            # content[0].text too long: 8640 > 7000 characters".
+                            "text too long",
+                        )
                     )
                     if _is_prompt_limit:
                         alts = [m for m in self.AVAILABLE_VIDEO_MODELS if m != job.settings.video_model]
@@ -2462,11 +2788,21 @@ class Pipeline:
                     if action == "retry_same_model":
                         job.progress.message = f"Advisor: retrying scene {i} with {job.settings.video_model}..."
                         self._emit(job)
+                        _retry_receipt = None
                         try:
                             retry_prompt = await self._condense_prompt_for_model(
                                 current_prompt, job.settings.video_model,
                             )
-                            self._charge(job, "video_clip", note=f"scene {scene.index} advisor retry")
+                            _retry_receipt = self._charge(
+                                job, "video_clip", note=f"scene {scene.index} advisor retry"
+                            )
+                            if not _retry_receipt:
+                                # Admission ran before the awaited condensation; a
+                                # refused charge must never become an uncharged
+                                # paid dispatch.
+                                raise RuntimeError(
+                                    "budget rail refused the charge; the clip was not dispatched"
+                                )
                             video_path = await run_with_timeout(
                                 self.client.generate_video(
                                     prompt=retry_prompt,
@@ -2485,21 +2821,36 @@ class Pipeline:
                             )
                         except Exception as retry_e:
                             self._warn(job, f"Advisor retry also failed: {_describe_exc(retry_e)}")
+                            self._refund_if_rejected(job, _retry_receipt, retry_e)
+                            _unknown = self._paid_outcome_unknown(retry_e, job.settings.video_model)
+                            if _unknown is not None:
+                                self._record_unretrieved(job, scene.index, "advisor_retry", _unknown)
                             video_path = None
                     elif action == "switch_model" and suggested_model:
                         job.progress.message = f"Advisor: switching to {suggested_model} for scene {i}..."
                         self._emit(job)
+                        _switch_receipt = None
                         try:
                             switch_prompt = await self._condense_prompt_for_model(
                                 current_prompt, suggested_model,
                             )
-                            self._charge(job, "video_clip", note=f"scene {scene.index} advisor switch {suggested_model}")
+                            _switch_receipt = self._charge(
+                                job, "video_clip",
+                                note=f"scene {scene.index} advisor switch {suggested_model}",
+                            )
+                            if not _switch_receipt:
+                                raise RuntimeError(
+                                    "budget rail refused the charge; the clip was not dispatched"
+                                )
                             video_path = await run_with_timeout(
                                 self.client.generate_video(
                                     prompt=switch_prompt,
                                     filename=f"scene_{scene.index}_alt.mp4",
                                     duration=self._clamp_duration(int(scene.duration_sec), suggested_model),
-                                    resolution=job.settings.resolution,
+                                    # Duration was already re-negotiated for the new
+                                    # model; resolution was NOT, so a 2K job handed to
+                                    # veo-3.1 died on `Invalid resolution: 2k`.
+                                    resolution=self._resolution_for_model(job, suggested_model),
                                     aspect_ratio=job.settings.aspect_ratio,
                                     input_references=references if references else None,
                                     frame_images=frame_images,
@@ -2512,6 +2863,12 @@ class Pipeline:
                             )
                         except Exception as switch_e:
                             self._warn(job, f"Alternative model {suggested_model} also failed: {_describe_exc(switch_e)}")
+                            self._refund_if_rejected(job, _switch_receipt, switch_e)
+                            _unknown = self._paid_outcome_unknown(switch_e, suggested_model)
+                            if _unknown is not None:
+                                self._record_unretrieved(
+                                    job, scene.index, f"advisor_switch:{suggested_model}", _unknown,
+                                )
                             video_path = None
                     else:
                         video_path = None
@@ -2595,13 +2952,36 @@ class Pipeline:
 
     async def _regenerate_single_scene(
         self, job: Job, storyboard: Storyboard, scene_idx: int, critique: str = ""
-    ):
+    ) -> bool:
         """Regenerate a single scene that failed cross-scene identity check.
 
         `critique` is the reviewer's own drift description; it is fed back into the
         prompt because re-running an identical prompt has no reason to drift less.
+
+        Returns False, without any paid call, when an earlier dispatch for this
+        scene was accepted or may have been and its clip never arrived (the
+        `unretrieved_accepted_jobs` record): another paid clip could pay twice.
+        The scene keeps its current clip. Returns True otherwise.
         """
         scene = storyboard.scenes[scene_idx]
+        blocked = [
+            r for r in (job.progress.verification_stats.get("unretrieved_accepted_jobs") or [])
+            if isinstance(r, dict) and r.get("scene") == scene.index
+        ]
+        if blocked:
+            skipped = job.progress.verification_stats.setdefault(
+                "regeneration_skipped_unretrieved", []
+            )
+            if scene.index not in skipped:
+                skipped.append(scene.index)
+            ids = ", ".join(str(r.get("job_id") or "unknown") for r in blocked)
+            self._warn(
+                job,
+                f"Scene {scene.index} regeneration skipped: an earlier dispatch for this "
+                f"scene was accepted or may have been (job {ids}) and its clip was not "
+                f"retrieved; no new paid clip, the current clip stays.",
+            )
+            return False
         chars_identity_block = self._build_characters_identity_block(storyboard)
         self._locations_by_name = {l.name: l for l in storyboard.locations}
 
@@ -2630,6 +3010,7 @@ class Pipeline:
             continuity_note=self._identity_continuity_note(critique),
         )
 
+        _regen_receipt = None
         try:
             if job.settings.include_dialogue and scene.dialogue:
                 prompt += (
@@ -2637,11 +3018,19 @@ class Pipeline:
                     "native audio / speech — not silent mime, not subtitles):\n"
                     f"{scene.dialogue}"
                 )
-            if not self._charge(job, "video_clip", note=f"scene {scene.index} continuity regeneration"):
+            # Same LLM condensation as the main and advisor paths. Without it an
+            # over-long prompt met only the dispatch-time fit, which keeps the
+            # head and the @ImageN lines but can cut the reviewer's critique, so
+            # the paid regeneration reran an essentially unchanged prompt.
+            prompt = await self._condense_prompt_for_model(prompt, job.settings.video_model)
+            _regen_receipt = self._charge(
+                job, "video_clip", note=f"scene {scene.index} continuity regeneration"
+            )
+            if not _regen_receipt:
                 # Regeneration is an improvement pass; refusal keeps the
                 # existing clip rather than destroying a delivered scene.
                 self._warn(job, f"Scene {scene.index} continuity regeneration skipped: budget hard stop")
-                return
+                return True
             video_path = await run_with_timeout(
                 self.client.generate_video(
                     prompt=prompt,
@@ -2667,6 +3056,11 @@ class Pipeline:
         except Exception as e:
             logger.exception("Scene %s regeneration failed", scene.index)
             self._warn(job, f"Scene {scene.index} regeneration failed: {_describe_exc(e)}")
+            self._refund_if_rejected(job, _regen_receipt, e)
+            _unknown = self._paid_outcome_unknown(e, job.settings.video_model)
+            if _unknown is not None:
+                self._record_unretrieved(job, scene.index, "continuity_regen", _unknown)
+        return True
 
     # ─── Phase 4: Assembly ──────────────────────────────────────────
 
@@ -2694,13 +3088,31 @@ class Pipeline:
                 f"Final assembly is MISSING scene(s) {missing_scenes}: no video "
                 f"clip exists for them; the delivered video is shorter than requested",
             )
+            # STRUCTURAL, not just prose. A live job shipped missing_scenes=[1]
+            # with partial_reasons=[] — the warning text carried the cause while
+            # the machine-readable field said the result was whole, so every
+            # consumer that reads the structure (widget, tool result, tests)
+            # saw a clean delivery. A constant key: the indexes already live in
+            # `missing_scenes`, and the owner notification keeps only reason
+            # keys matching ^[a-z0-9_:]+$, so "missing_scenes:1,3" was dropped.
+            if "missing_scenes" not in job.progress.partial_reasons:
+                job.progress.partial_reasons.append("missing_scenes")
 
         if not clips:
-            raise RuntimeError("No video clips were generated successfully")
+            raise RuntimeError(self._no_clips_error(job))
 
         if len(clips) == 1:
             shutil.copy2(clips[0], output_path)
         else:
+            # Concat demuxer + `-c copy` never reconciles clip parameters. With
+            # mixed geometry the output changes resolution mid-stream (reproduced
+            # offline with ffmpeg 8.1), and one live job with 1080x1080 /
+            # 1440x1440 / 2560x1440 clips was reported to decode as garbage
+            # ("sps_id 32 out of range") while ffmpeg returned rc=0, so the
+            # re-encode fallback below never fired. Normalize to one
+            # geometry/audio shape FIRST; only then is stream copy sound.
+            clips = self._normalize_clips_for_concat(job, clips)
+
             concat_file = self.state_dir / "concat.txt"
             with open(concat_file, "w") as f:
                 for clip in clips:
@@ -2734,6 +3146,19 @@ class Pipeline:
             self._check_shutdown()
             await self._mix_audio(job, output_path, music_clips)
 
+        # A return code is not a playable file. Decode the FINAL artifact (after
+        # the music mix, which rewrites it) and record the verdict, so "assembled"
+        # can never again mean "ffmpeg exited 0 over an unplayable MP4".
+        decode_ok, decode_detail = self._decode_check(output_path)
+        if not decode_ok:
+            self._warn(
+                job,
+                f"Final video failed a full decode check ({decode_detail}); "
+                f"delivering it anyway — it is the only artifact — but it may not play",
+            )
+            if "final_decode_failed" not in job.progress.partial_reasons:
+                job.progress.partial_reasons.append("final_decode_failed")
+
         logger.info(f"Final video assembled: {output_path}")
         return {
             "path": str(output_path),
@@ -2741,7 +3166,206 @@ class Pipeline:
             "scenes_total": len(storyboard.scenes),
             "missing_scenes": missing_scenes,
             "transitions": "concat",
+            "decode_verified": bool(decode_ok),
+            "decode_detail": decode_detail,
         }
+
+    _RESOLUTION_LADDER = ["4K", "2K", "1080p", "720p", "480p"]
+
+    def _resolution_for_model(self, job: Job, model: str) -> str:
+        """The job's resolution reconciled against *model*'s own capabilities.
+
+        Read-only: it returns a value and never mutates `job.settings`, because a
+        one-scene recovery attempt on another model must not silently redefine the
+        resolution of every remaining scene.
+
+        Duration was already re-negotiated per model by `_clamp_duration`;
+        resolution was not, so an advisor switch carried a 2K job (H3's only
+        resolution) to google/veo-3.1 and got `Invalid resolution: 2k`
+        (INVALID_ARGUMENT) — a recovery attempt that could not possibly succeed.
+        An unknown/empty capability list keeps the requested value: absence of
+        evidence is not evidence of non-support.
+        """
+        requested = job.settings.resolution
+        supported = ((self._video_caps or {}).get(model) or {}).get("resolutions") or []
+        if not supported or requested in supported:
+            return requested
+        rank = (
+            self._RESOLUTION_LADDER.index(requested)
+            if requested in self._RESOLUTION_LADDER else 0
+        )
+        chosen = next(
+            (r for r in self._RESOLUTION_LADDER[rank:] if r in supported), None
+        ) or next((r for r in self._RESOLUTION_LADDER if r in supported), None)
+        if not chosen:
+            # Nothing in common: send the requested value and let the provider
+            # answer. Inventing a resolution the model never advertised would be
+            # a guess dressed as reconciliation.
+            self._warn(
+                job,
+                f"{model} advertises resolutions {supported}, none of them known; "
+                f"sending {requested} unchanged",
+            )
+            return requested
+        if chosen != requested:
+            self._warn(
+                job,
+                f"Recovery model {model} does not support {requested}; that attempt "
+                f"uses {chosen} (supported: {', '.join(supported)})",
+            )
+        return chosen
+
+    def _probe_video_geometry(self, clip: str) -> dict:
+        """Width/height/audio-presence of one clip. Unknown fields stay None."""
+        probe = getattr(self, "_ffprobe_path", None) or "ffprobe"
+        out = {"width": None, "height": None, "has_audio": None}
+        try:
+            proc = self._run_ffmpeg(
+                [
+                    probe, "-v", "error",
+                    "-show_entries", "stream=codec_type,width,height",
+                    "-of", "json", str(clip),
+                ],
+                timeout=30,
+                capture_stdout=True,
+            )
+            if proc.returncode != 0:
+                return out
+            streams = (json.loads(proc.stdout or "{}") or {}).get("streams") or []
+        except Exception:
+            return out
+        has_audio = False
+        for st in streams:
+            if not isinstance(st, dict):
+                continue
+            if st.get("codec_type") == "video" and out["width"] is None:
+                w, h = st.get("width"), st.get("height")
+                if isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0:
+                    out["width"], out["height"] = w, h
+            elif st.get("codec_type") == "audio":
+                has_audio = True
+        out["has_audio"] = has_audio
+        return out
+
+    def _normalize_clips_for_concat(self, job: Job, clips: list[str]) -> list[str]:
+        """Re-encode clips to ONE geometry + audio shape when they disagree.
+
+        Returns the original list when every clip already agrees (the common
+        case: one model, one resolution) so a homogeneous job pays nothing. An
+        UNKNOWN geometry counts as disagreement — guessing that an unprobeable
+        clip matches is exactly how the corrupt-concat defect stayed invisible.
+        A per-clip re-encode failure keeps that clip's ORIGINAL file rather than
+        dropping a paid scene.
+        """
+        geo = [self._probe_video_geometry(c) for c in clips]
+        sizes = {(g["width"], g["height"]) for g in geo}
+        audio_flags = {g["has_audio"] for g in geo}
+        unknown = any(g["width"] is None for g in geo)
+        if not unknown and len(sizes) == 1 and len(audio_flags) == 1:
+            return clips
+
+        widths = [g["width"] for g in geo if g["width"]]
+        heights = [g["height"] for g in geo if g["height"]]
+        target_w = max(widths) if widths else 1920
+        target_h = max(heights) if heights else 1080
+        # H.264 needs even dimensions.
+        target_w += target_w % 2
+        target_h += target_h % 2
+        self._warn(
+            job,
+            f"Clips disagree on geometry/audio ({sorted(str(s) for s in sizes)}, "
+            f"audio={sorted(str(a) for a in audio_flags)}"
+            f"{', some unprobeable' if unknown else ''}); normalizing to "
+            f"{target_w}x{target_h} before concat so the final file decodes",
+        )
+
+        norm_dir = self.state_dir / "normalized"
+        norm_dir.mkdir(parents=True, exist_ok=True)
+        out_clips: list[str] = []
+        for idx, clip in enumerate(clips):
+            self._check_shutdown()
+            # Each re-encode can take minutes; the progress write doubles as the
+            # worker's lease heartbeat, so a long assembly does not look abandoned.
+            job.progress.message = (
+                f"Normalizing clip {idx + 1}/{len(clips)} to {target_w}x{target_h} before concat..."
+            )
+            self._emit(job)
+            dest = norm_dir / f"norm_{idx:02d}.mp4"
+            vf = (
+                f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+                f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
+                f"fps=24,format=yuv420p"
+            )
+            cmd = [self._ffmpeg_path, "-y", "-i", str(clip)]
+            silent = geo[idx]["has_audio"] is False
+            if silent:
+                # Silent clip: give it a real silent track so every concat input
+                # has the same stream layout.
+                cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+            cmd += [
+                "-vf", vf,
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-c:a", "aac", "-ar", "48000", "-ac", "2",
+            ]
+            if silent:
+                # Only here: the synthetic track is endless and must stop with
+                # the picture. A clip's OWN audio is never allowed to cut its video.
+                cmd += ["-shortest"]
+            cmd += ["-movflags", "+faststart", str(dest)]
+            try:
+                proc = self._run_ffmpeg(cmd, timeout=300)
+            except Exception as exc:
+                self._warn(job, f"Normalizing clip {idx} raised {_describe_exc(exc)}; using original")
+                out_clips.append(clip)
+                continue
+            if proc.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
+                self._warn(
+                    job,
+                    f"Normalizing clip {idx} failed (rc={proc.returncode}); using original",
+                )
+                out_clips.append(clip)
+                continue
+            out_clips.append(str(dest))
+
+        # Promise one shape only after checking it. A failed re-encode keeps
+        # the paid original, and an unprobeable clip may lack the audio track
+        # the others have; stream-copy concat of such a set can still decode
+        # while changing shape mid-file, so the result is PARTIAL, not whole.
+        after = [self._probe_video_geometry(c) for c in out_clips]
+        unknown_after = any(g["width"] is None or g["has_audio"] is None for g in after)
+        if (unknown_after or len({(g["width"], g["height"]) for g in after}) != 1
+                or len({g["has_audio"] for g in after}) != 1):
+            self._warn(
+                job,
+                "Clips still disagree on geometry/audio after normalization "
+                f"({[(g['width'], g['height'], g['has_audio']) for g in after]}); "
+                "the paid originals are kept and concatenated, but the final file "
+                "may change shape mid-stream",
+            )
+            if "concat_layout_unverified" not in job.progress.partial_reasons:
+                job.progress.partial_reasons.append("concat_layout_unverified")
+        return out_clips
+
+    def _decode_check(self, video_path) -> tuple[bool, str]:
+        """Fully decode the picture of *video_path*; (ok, detail).
+
+        The corrupt-concat defect lives in the video stream, so only that is
+        decoded: a cosmetic audio decoder message must not mark a playable video
+        partial. A probe failure is NOT ok.
+        """
+        try:
+            proc = self._run_ffmpeg(
+                [
+                    self._ffmpeg_path, "-v", "error", "-xerror",
+                    "-i", str(video_path), "-map", "0:v:0", "-f", "null", "-",
+                ],
+                timeout=300,
+            )
+        except Exception as exc:
+            return False, f"decode probe raised {_describe_exc(exc)}"
+        if proc.returncode != 0:
+            return False, f"rc={proc.returncode}: {(proc.stderr or '')[-300:]}"
+        return True, "full decode clean"
 
     def _probe_audio_streams(self, video_path) -> tuple[str, str]:
         """Structural audio probe: ("present"|"absent"|"unknown", detail).
@@ -2850,7 +3474,12 @@ class Pipeline:
             "-i", str(video_path),
             "-i", str(music_merged),
             "-filter_complex",
-            "[0:a]volume=1.0[va];[1:a]volume=0.35[ma];[va][ma]amix=inputs=2:duration=first:dropout_transition=2[out]",
+            # duration=longest + apad + -shortest ends the output at the PICTURE.
+            # duration=first ended the mix with the clips' own audio, and
+            # -shortest then cut the video to it, dropping the end of the last
+            # scene whenever its native audio was shorter than its picture.
+            "[0:a]volume=1.0[va];[1:a]volume=0.35[ma];"
+            "[va][ma]amix=inputs=2:duration=longest:dropout_transition=2,apad[out]",
             "-map", "0:v", "-map", "[out]",
             "-c:v", "copy", "-c:a", "aac", "-shortest",
             str(temp_output),

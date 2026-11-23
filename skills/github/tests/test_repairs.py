@@ -338,7 +338,7 @@ class DiscoveryTests(Case):
 
     def test_removed_recipient_cannot_fetch_pending_discovery(self):
         self.provider.repository = lambda *_: self.fail("removed recipient must not fetch")
-        collector = Collector(self.store, self.provider, {**CONFIG, "repositories": []}, {})
+        collector = Collector(self.store, self.provider, {**CONFIG, "repositories": [], "notifications_user_id": 0}, {})
         with self.store.transaction() as db:
             self.store.job(db, "notifications:22:children", {"kind": "notification_discovery", "recipient": 22,
                                                            "notification": self.notification()})

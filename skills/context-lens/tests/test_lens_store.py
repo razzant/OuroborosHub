@@ -2,7 +2,9 @@
 
 Standard-library ``unittest`` only. Every store is built by ``store_fixture``
 (core schema 1, column for column) inside a fresh temporary directory; nothing
-here opens a real install's data.
+here opens a real install's data. Core's store protocol is replaced by
+``core_store_standin`` (a synthetic stand-in, never an imported Ouroboros), so a
+pass here says how the reader uses those names, not that core's helpers work.
 """
 
 from __future__ import annotations
@@ -13,17 +15,22 @@ import json
 import math
 import os
 import pathlib
+import queue
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from typing import Any, Dict, Optional
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+_TESTS = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(_TESTS))
 
+import core_store_standin as cs  # noqa: E402
 import store_fixture as sf  # noqa: E402
 
 
@@ -44,9 +51,20 @@ HOUR = 3600.0
 
 
 class StoreCase(unittest.TestCase):
+    # The core the reader resolves. By default a stand-in that answers as core
+    # does on this install's runtime: WAL may be shared, connections are counted.
+    core_options: Dict[str, Any] = {}
+
     def setUp(self) -> None:
         self.root = tempfile.mkdtemp(prefix="context-lens-store-")
         self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(setattr, lens_store, "_core_override", lens_store._CORE_UNSET)
+        self.core = cs.make_core(**self.core_options)
+        self.use_core(self.core)
+
+    def use_core(self, core) -> None:
+        """``None`` models a process without core's ``ouroboros.store``."""
+        lens_store._core_override = core
 
     def store(self, **kwargs) -> sf.Store:
         return sf.Store(self.root, **kwargs)
@@ -493,24 +511,34 @@ class TestReadOnly(StoreCase):
             seen.append((database, kwargs))
             return original(database, *args, **kwargs)
 
-        lens_store.sqlite3.connect = recording
-        try:
-            conn = lens_store.connect(store.path)
-        finally:
-            lens_store.sqlite3.connect = original
-        try:
-            uri, kwargs = seen[0]
-            self.assertTrue(uri.startswith("file:"))
-            self.assertIn("mode=ro", uri)
-            self.assertNotIn("immutable", uri)
-            self.assertNotIn("nolock", uri)
-            self.assertTrue(kwargs.get("uri"))
-            self.assertLessEqual(kwargs.get("timeout"), 1.0)
-            self.assertEqual(conn.execute("PRAGMA query_only").fetchone()[0], 1)
-            with self.assertRaises(sqlite3.Error):
-                conn.execute("INSERT INTO meta (key, value) VALUES ('x', '1')")
-        finally:
-            conn.close()
+        # Through core's counted_connect (the stand-in passes core's factory on),
+        # and the plain connection used when no core helper exists.
+        for core, counted in ((self.core, True), (None, False)):
+            seen.clear()
+            lens_store.sqlite3.connect = recording
+            try:
+                conn = lens_store.connect(store.path, core)
+            finally:
+                lens_store.sqlite3.connect = original
+            try:
+                uri, kwargs = seen[0]
+                self.assertEqual(len(seen), 1)
+                self.assertTrue(uri.startswith("file:"))
+                self.assertIn("mode=ro", uri)
+                self.assertNotIn("immutable", uri)
+                self.assertNotIn("nolock", uri)
+                self.assertTrue(kwargs.get("uri"))
+                self.assertLessEqual(kwargs.get("timeout"), 1.0)
+                self.assertEqual("factory" in kwargs, counted)
+                self.assertEqual(self.core.registry.total_open(), 1 if counted else 0)
+                self.assertEqual(conn.execute("PRAGMA query_only").fetchone()[0], 1)
+                with self.assertRaises(sqlite3.Error):
+                    conn.execute("INSERT INTO meta (key, value) VALUES ('x', '1')")
+            finally:
+                conn.close()
+        self.assertEqual(self.core.registry.total_open(), 0)
+        self.assertEqual(self.core.registry.opened, 1)
+        self.assertEqual(self.core.registry.closed, 1)
 
     def test_the_lock_is_released_before_the_read_returns(self) -> None:
         store = self.store()
@@ -588,23 +616,6 @@ class TestRefusals(StoreCase):
         store.execute("ALTER TABLE attempts DROP COLUMN late_receipt")
         self.refused("store_unsupported")
 
-    def test_a_wal_store_is_refused(self) -> None:
-        store = self.store(journal_mode="wal")
-        self.refused("store_unsupported")
-        os.remove(store.path + "-wal")
-        if os.path.exists(store.path + "-shm"):
-            os.remove(store.path + "-shm")
-        # Without the side file the mode is only visible to SQLite itself.
-        self.refused("store_unsupported")
-
-    def test_a_live_wal_file_is_refused_without_opening_the_store(self) -> None:
-        store = self.store()
-        with open(store.path + "-wal", "wb"):
-            pass
-        before = sorted(os.listdir(os.path.dirname(store.path)))
-        self.refused("store_unsupported")
-        self.assertEqual(sorted(os.listdir(os.path.dirname(store.path))), before)
-
     def test_a_corrupt_file_is_unreadable_and_left_alone(self) -> None:
         os.makedirs(os.path.join(self.root, "state"))
         path = os.path.join(self.root, "state", "usage.sqlite")
@@ -652,6 +663,499 @@ class TestRefusals(StoreCase):
             self.refused("store_replaced")
         finally:
             lens_store._identity = original
+
+
+# ---------------------------------------------------------------------------
+# The journal: WAL under core's rule, the rollback journal as before
+# ---------------------------------------------------------------------------
+
+# A writer in ANOTHER process. It attaches to a built WAL store, keeps its log
+# (wal_autocheckpoint=0), says "ready", waits for "go", commits ``batches`` x
+# ``count`` rows, then holds its connection until its stdin says so (a line or
+# EOF), or ("crash") leaves without closing, so -wal and -shm stay behind with
+# committed frames.
+WRITER = r'''
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+import store_fixture as sf
+root, finish = sys.argv[2], sys.argv[3]
+count, batches, pause = int(sys.argv[4]), int(sys.argv[5]), float(sys.argv[6])
+store = sf.Store.existing(root)
+conn = store.connect()
+assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+conn.execute("PRAGMA wal_autocheckpoint = 0")
+print("ready", flush=True)
+if sys.stdin.readline().strip() == "go":
+    now = time.time()
+    n = 0
+    for _ in range(batches):
+        conn.execute("BEGIN")
+        for _ in range(count):
+            n += 1
+            store.add("child-%06d" % n, epoch=now - 900 + n * 0.01, prompt_tokens=n, conn=conn)
+        conn.execute("COMMIT")
+        print("committed %d" % n, flush=True)
+        if pause:
+            time.sleep(pause)
+    if finish == "crash":
+        os._exit(0)
+    sys.stdin.readline()
+conn.close()
+print("closed", flush=True)
+'''
+
+
+# Every wait on the writer process ends: one line, or its exit, within this long.
+WRITER_WAIT_SEC = 60.0
+
+
+class WriterLines:
+    """The writer's stdout lines, pumped by a daemon thread so each wait has a deadline.
+
+    A writer that hangs fails the test instead of hanging it; one that exits
+    early reads as end of output (``""``), as ``readline()`` did.
+    """
+
+    def __init__(self, stream) -> None:
+        self._lines: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._thread = threading.Thread(target=self._pump, args=(stream,), daemon=True)
+        self._thread.start()
+
+    def _pump(self, stream) -> None:
+        try:
+            for line in stream:
+                self._lines.put(line)
+        except (OSError, ValueError):          # the pipe closed under the pump
+            pass
+        finally:
+            self._lines.put(None)
+
+    def next(self, timeout: float = WRITER_WAIT_SEC) -> str:
+        try:
+            line = self._lines.get(timeout=timeout)
+        except queue.Empty:
+            raise AssertionError("the writer process wrote no line within %.0f s" % timeout) from None
+        if line is None:
+            self._lines.put(None)               # every later read sees the end too
+            return ""
+        return line
+
+    def join(self, timeout: float = WRITER_WAIT_SEC) -> None:
+        self._thread.join(timeout)
+
+
+class Pinned:
+    """File digests through descriptors held open until the test ends.
+
+    Closing ANY descriptor of a file drops every POSIX lock this process holds
+    on it, so a digest taken with open()/close() would release a same-process
+    connection's locks mid-test. Each file identity is opened once and closed
+    at cleanup, after the test's own connections (cleanups run in reverse
+    order). A -shm is never opened; only its presence is stated.
+    """
+
+    def __init__(self, case: unittest.TestCase) -> None:
+        self.fds: Dict[tuple, int] = {}
+        case.addCleanup(self.close)
+
+    def _fd(self, path: str):
+        try:
+            info = os.stat(path)
+        except FileNotFoundError:
+            return None
+        key = (path, info.st_dev, info.st_ino)
+        if key not in self.fds:
+            self.fds[key] = os.open(path, cs.READ_FLAGS)
+        return self.fds[key]
+
+    def digest(self, path: str):
+        fd = self._fd(path)
+        if fd is None:
+            return None
+        size = os.fstat(fd).st_size
+        return size, hashlib.sha256(cs.read_at(fd, size, 0) if size else b"").hexdigest()
+
+    def header_versions(self, path: str):
+        """Header bytes 18-19 (2, 2 = WAL; sqlite.org/fileformat2.html)."""
+        return tuple(cs.read_at(self._fd(path), 2, 18))
+
+    def close(self) -> None:
+        for fd in self.fds.values():
+            os.close(fd)
+        self.fds.clear()
+
+
+class WalCase(StoreCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.pinned = Pinned(self)
+
+    def wal_store(self, **kwargs) -> sf.Store:
+        store = self.store(journal_mode="wal", **kwargs)
+        self.assertEqual(self.pinned.header_versions(store.path), (2, 2))
+        return store
+
+    def files(self, store: sf.Store):
+        return sorted(os.listdir(os.path.dirname(store.path)))
+
+    def same_process_writer(self, store: sf.Store) -> sqlite3.Connection:
+        """A writer in THIS process that keeps its log, and never waits on a lock."""
+        writer = sqlite3.connect(store.path, isolation_level=None, timeout=0)
+        self.addCleanup(writer.close)
+        self.assertEqual(writer.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        writer.execute("PRAGMA wal_autocheckpoint = 0")
+        return writer
+
+    def writer_process(self, finish: str = "hold", count: int = 10, batches: int = 1,
+                       pause: float = 0.0) -> subprocess.Popen:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-B", "-c", WRITER, str(_TESTS), self.root, finish,
+             str(count), str(batches), str(pause)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        lines = proc.writer_lines = WriterLines(proc.stdout)
+
+        def finish_writer() -> None:
+            try:
+                proc.stdin.close()          # EOF: a waiting or holding writer closes and leaves
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=WRITER_WAIT_SEC)
+            except subprocess.TimeoutExpired:
+                proc.kill()                 # this test's own writer, through its own handle
+                proc.wait(timeout=WRITER_WAIT_SEC)
+            lines.join()                    # its exit ends the output the pump reads
+            proc.stdout.close()
+
+        self.addCleanup(finish_writer)
+        self.assertEqual(lines.next().strip(), "ready")
+        return proc
+
+    @staticmethod
+    def go(proc: subprocess.Popen) -> None:
+        proc.stdin.write("go\n")
+        proc.stdin.flush()
+
+    def committed(self, proc: subprocess.Popen, total: int) -> None:
+        while True:
+            line = proc.writer_lines.next().strip()
+            self.assertTrue(line.startswith("committed "), line)
+            if int(line.split()[1]) == total:
+                return
+
+    def release(self, proc: subprocess.Popen) -> None:
+        proc.stdin.write("\n")
+        proc.stdin.flush()
+        self.assertEqual(proc.writer_lines.next().strip(), "closed")
+        self.assertEqual(proc.wait(timeout=WRITER_WAIT_SEC), 0)
+
+
+class TestWalStore(WalCase):
+    """A WAL store where core says this runtime may share it (the stand-in's default)."""
+
+    def test_committed_frames_still_in_the_log_are_read_and_left_alone(self) -> None:
+        store = self.wal_store()
+        store.add("checkpointed", epoch=NOW - 120, prompt_tokens=1)   # its close checkpointed it
+        db = self.pinned.digest(store.path)
+        writer = self.same_process_writer(store)
+        for index in range(3):
+            store.add("in-log-%d" % index, epoch=NOW - 60 + index, prompt_tokens=100 + index, conn=writer)
+        self.assertEqual(self.pinned.digest(store.path), db, "the three rows exist only in -wal")
+        log = self.pinned.digest(store.path + "-wal")
+        self.assertGreater(log[0], 0)
+        history = list(writer.iterdump())
+        for _ in range(3):
+            payload = self.snapshot("1h")
+            self.assertEqual([p["prompt_tokens"] for p in payload["points"]], [1, 100, 101, 102])
+        self.assertEqual((payload["source"]["journal"], payload["source"]["connection"]), ("wal", "counted"))
+        self.assertTrue(payload["horizon"]["selection_complete"])
+        self.assertEqual(self.pinned.digest(store.path), db, "no checkpoint, no content write")
+        self.assertEqual(self.pinned.digest(store.path + "-wal"), log)
+        self.assertEqual(list(writer.iterdump()), history)
+        self.assertEqual(self.core.registry.total_open(), 0)
+        self.assertNotIn("wal_file", self.core.registry.names(), "a sharing runtime needs no header read")
+        path, tier = [details for name, details in self.core.registry.calls if name == "_journal_mode"][0]
+        self.assertIsInstance(path, pathlib.Path)
+        self.assertEqual((path, tier), (pathlib.Path(store.path), "enforced"))
+
+    def test_a_writer_in_another_process_is_read_through_its_log(self) -> None:
+        store = self.wal_store()
+        proc = self.writer_process(count=25)
+        self.go(proc)
+        self.committed(proc, 25)
+        self.assertIn("usage.sqlite-wal", self.files(store))
+        db, log = self.pinned.digest(store.path), self.pinned.digest(store.path + "-wal")
+        read = self.read("1h")
+        self.assertEqual(len(read["rows"]), 25)
+        self.assertEqual(read["facts"]["journal"], "wal")
+        self.assertEqual((self.pinned.digest(store.path), self.pinned.digest(store.path + "-wal")), (db, log))
+        self.release(proc)
+        # The writer was the last connection, so its close checkpointed and
+        # removed the side files: no lock or read mark of this read survived.
+        self.assertEqual(self.files(store), ["usage.sqlite"])
+
+    def test_a_crash_left_log_is_read_and_left_in_place(self) -> None:
+        store = self.wal_store()
+        proc = self.writer_process(finish="crash", count=12)
+        self.go(proc)
+        self.committed(proc, 12)
+        self.assertEqual(proc.wait(timeout=60), 0)
+        left = ["usage.sqlite", "usage.sqlite-shm", "usage.sqlite-wal"]
+        self.assertEqual(self.files(store), left)
+        db, log = self.pinned.digest(store.path), self.pinned.digest(store.path + "-wal")
+        for _ in range(2):
+            self.assertEqual(len(self.read("1h")["rows"]), 12)
+        self.assertEqual(self.pinned.digest(store.path), db, "a read-only connection never checkpoints")
+        self.assertEqual(self.pinned.digest(store.path + "-wal"), log)
+        self.assertEqual(self.files(store), left)
+
+    def test_a_wal_header_without_side_files_gains_only_coordination_files(self) -> None:
+        store = self.wal_store()
+        store.add("a", epoch=NOW - 60, prompt_tokens=5)
+        self.assertEqual(self.files(store), ["usage.sqlite"])
+        db = self.pinned.digest(store.path)
+        self.assertEqual([row["prompt_tokens"] for row in self.read("1h")["rows"]], [5])
+        self.assertEqual(self.pinned.digest(store.path), db)
+        # SQLite's coordination files, not content: an empty log and the index.
+        self.assertEqual(self.files(store), ["usage.sqlite", "usage.sqlite-shm", "usage.sqlite-wal"])
+        self.assertEqual(os.path.getsize(store.path + "-wal"), 0)
+        # The next read-write connection treats them as usual: its last close removes both.
+        store.add("b", epoch=NOW - 30, prompt_tokens=6)
+        self.assertEqual(self.files(store), ["usage.sqlite"])
+
+    def test_one_snapshot_while_a_writer_commits_during_the_read(self) -> None:
+        store = self.wal_store()
+        store.add("before", epoch=NOW - 60, prompt_tokens=1)
+        writer = self.same_process_writer(store)
+        original = lens_store._categories
+        committed = []
+
+        def commit_meanwhile(conn, max_categories):
+            found = original(conn, max_categories)
+            store.add("meanwhile", epoch=NOW - 30, prompt_tokens=2, conn=writer)   # timeout=0
+            committed.append(True)
+            return found
+
+        lens_store._categories = commit_meanwhile
+        try:
+            read = self.read("1h")
+        finally:
+            lens_store._categories = original
+        self.assertEqual(committed, [True], "the writer committed while the read held its snapshot")
+        self.assertEqual([row["prompt_tokens"] for row in read["rows"]], [1])
+        self.assertEqual([row["prompt_tokens"] for row in self.read("1h")["rows"]], [2, 1])
+
+    def test_an_open_write_transaction_is_neither_seen_nor_waited_on(self) -> None:
+        store = self.wal_store()
+        store.add("committed", epoch=NOW - 60, prompt_tokens=1)
+        writer = self.same_process_writer(store)
+        writer.execute("BEGIN IMMEDIATE")
+        try:
+            store.add("uncommitted", epoch=NOW - 30, prompt_tokens=2, conn=writer)
+            started = time.monotonic()
+            read = self.read("1h")
+            self.assertLess(time.monotonic() - started, 1.0)
+        finally:
+            writer.execute("ROLLBACK")
+        self.assertEqual([row["prompt_tokens"] for row in read["rows"]], [1])
+
+    def test_concurrent_reads_beside_a_committing_writer_each_see_whole_commits(self) -> None:
+        store = self.wal_store()
+        proc = self.writer_process(count=5, batches=40, pause=0.005)
+        counts, errors = [], []
+
+        def reader() -> None:
+            for _ in range(12):
+                try:
+                    counts.append(len(self.read("1h")["rows"]))
+                except Exception as exc:                  # pragma: no cover - a failure to report
+                    errors.append(repr(exc))
+
+        threads = [threading.Thread(target=reader) for _ in range(8)]
+        self.go(proc)
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=120)
+        self.committed(proc, 200)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(counts), 96)
+        self.assertTrue(all(count % 5 == 0 for count in counts), sorted(set(counts)))
+        self.assertEqual(len(self.read("1h")["rows"]), 200)
+        self.assertEqual(self.core.registry.total_open(), 0)
+        self.assertEqual(self.core.registry.opened, self.core.registry.closed)
+        self.release(proc)
+
+    def test_every_validation_still_applies_to_a_wal_store(self) -> None:
+        cases = (
+            ("store_unsupported", dict(application_id=0x12345678), None),
+            ("store_name_tier", dict(application_id=sf.APPLICATION_ID_NAME, lock_tier="name"),
+             "DROP TABLE meta"),
+            ("store_unsupported", dict(schema_version=2), None),
+            ("store_unsupported", dict(lock_tier="name"), None),
+            ("store_not_ready", dict(import_status="running"), None),
+            ("store_unsupported", {}, "DROP INDEX attempts_category_time"),
+            ("store_unsupported", {}, "ALTER TABLE attempts DROP COLUMN late_receipt"),
+        )
+        for code, options, damage in cases:
+            with self.subTest(code=code, options=options, damage=damage):
+                shutil.rmtree(os.path.join(self.root, "state"), True)
+                store = self.wal_store(**options)
+                if damage:
+                    store.execute(damage)
+                opened = self.core.registry.opened
+                self.refused(code)
+                self.assertEqual(self.core.registry.opened, opened + 1, "decided inside the read")
+                self.assertEqual(self.core.registry.total_open(), 0)
+
+    def test_the_counted_connection_lives_exactly_as_long_as_the_read(self) -> None:
+        store = self.wal_store()
+        store.add("a", epoch=NOW - 60, prompt_tokens=1)
+        during = []
+        original = lens_store._validate
+
+        def observing(conn, sharing=lens_store.WAL_UNVERIFIED):
+            during.append((self.core.registry.total_open(), conn.in_transaction))
+            return original(conn, sharing)
+
+        lens_store._validate = observing
+        try:
+            self.read("1h")
+            store.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'")
+            self.refused("store_unsupported")
+        finally:
+            lens_store._validate = original
+        self.assertEqual(during, [(1, True), (1, True)])
+        self.assertEqual((self.core.registry.opened, self.core.registry.closed), (2, 2))
+        self.assertEqual(self.core.registry.total_open(), 0)
+        # No read mark outlives the read: a full checkpoint finds no reader.
+        writer = self.same_process_writer(store)
+        self.assertEqual(writer.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0], 0)
+
+
+class TestWalCompatibility(WalCase):
+    """Where core does not say WAL may be shared, a WAL store is refused, never read around."""
+
+    def test_an_incompatible_runtime_refuses_before_sqlite_opens_the_file(self) -> None:
+        core = cs.make_core(eligible=False)
+        self.use_core(core)
+        store = self.wal_store()
+        store.add("a", epoch=NOW - 60, prompt_tokens=1)
+        files, db = self.files(store), self.pinned.digest(store.path)
+        self.assertEqual(files, ["usage.sqlite"])
+        self.refused("store_wal_incompatible")
+        self.assertEqual(self.files(store), files, "no side file: SQLite never opened it")
+        self.assertEqual(self.pinned.digest(store.path), db)
+        self.assertEqual(core.registry.opened, 0)
+        self.assertIn("wal_file", core.registry.names())
+
+    def test_an_incompatible_runtime_refuses_a_live_log_and_reads_persist(self) -> None:
+        core = cs.make_core(eligible=False)
+        self.use_core(core)
+        store = self.wal_store()
+        proc = self.writer_process(count=3)
+        self.go(proc)
+        self.committed(proc, 3)
+        self.refused("store_wal_incompatible")
+        self.assertEqual(core.registry.opened, 0)
+        self.assertNotIn("wal_file", core.registry.names(), "the log beside it decided first")
+        self.release(proc)
+        # The same runtime reads core's rollback fallback (PERSIST) as before.
+        shutil.rmtree(os.path.join(self.root, "state"))
+        self.store(journal_mode="persist").add("b", epoch=NOW - 60, prompt_tokens=2)
+        read = self.read("1h")
+        self.assertEqual([row["prompt_tokens"] for row in read["rows"]], [2])
+        self.assertEqual((read["facts"]["journal"], read["facts"]["connection"]), ("rollback", "counted"))
+
+    def test_without_core_a_wal_store_is_refused(self) -> None:
+        self.use_core(None)
+        store = self.wal_store()
+        store.add("a", epoch=NOW - 60, prompt_tokens=1)
+        db = self.pinned.digest(store.path)
+        # No header read without core: SQLite opens the file, the transaction
+        # sees WAL and nothing is read; SQLite has created its side files by
+        # then (the residual SKILL.md states).
+        self.refused("store_wal_unverified")
+        self.assertEqual(self.pinned.digest(store.path), db)
+        listing = self.files(store)
+        self.assertEqual(listing, ["usage.sqlite", "usage.sqlite-shm", "usage.sqlite-wal"])
+        # With the log beside it, refused before SQLite opens anything.
+        self.refused("store_wal_unverified")
+        self.assertEqual(self.files(store), listing)
+
+    def test_a_core_missing_a_name_or_failing_its_check_is_unverified(self) -> None:
+        store = self.wal_store()
+        store.add("a", epoch=NOW - 60, prompt_tokens=1)
+        for options in (dict(policy=False), dict(counted=False), dict(policy_error=OSError("statfs")),
+                        dict(policy_error=ValueError("mountinfo"))):
+            with self.subTest(options=repr(options)):
+                core = cs.make_core(**options)
+                self.use_core(core)
+                self.refused("store_wal_unverified")
+                self.assertEqual(core.registry.opened, 0, "refused from the header, before any open")
+        # Without core's header read either, the transaction is the backstop.
+        core = cs.make_core(policy=False, header=False)
+        self.use_core(core)
+        self.refused("store_wal_unverified")
+        self.assertEqual((core.registry.opened, core.registry.total_open()), (1, 0))
+
+
+class TestRollbackJournal(StoreCase):
+    """Core's rollback fallback (PERSIST) is read exactly as 1.2.0 read it."""
+
+    def digests(self, state: str):
+        result = {}
+        for name in sorted(os.listdir(state)):
+            with open(os.path.join(state, name), "rb") as handle:   # no connection is open here
+                result[name] = hashlib.sha256(handle.read()).hexdigest()
+        return result
+
+    def test_the_persist_journal_is_read_as_before_on_every_runtime(self) -> None:
+        store = self.store(journal_mode="persist")
+        for index in range(3):
+            store.add("r%d" % index, epoch=NOW - 60 + index, prompt_tokens=index + 1)
+        state = os.path.dirname(store.path)
+        self.assertEqual(sorted(os.listdir(state)), ["usage.sqlite", "usage.sqlite-journal"],
+                         "a retained rollback journal, as core's PERSIST writers leave it")
+        before = self.digests(state)
+        answers = []
+        runtimes = (
+            (cs.make_core(), "counted", False),                # shares WAL: no header read needed
+            (cs.make_core(eligible=False), "counted", True),   # does not: header read first, rollback found
+            (cs.make_core(counted=False), "plain", True),      # cannot tell: header read first
+            (None, "plain", None),                             # no core at all
+        )
+        for core, connection, header_read in runtimes:
+            self.use_core(core)
+            payload = self.snapshot("1h")
+            self.assertEqual((payload["source"]["journal"], payload["source"]["connection"]),
+                             ("rollback", connection))
+            answers.append(payload["points"])
+            if core is not None:
+                self.assertEqual(core.registry.total_open(), 0)
+                self.assertEqual("wal_file" in core.registry.names(), header_read)
+        self.assertEqual([p["prompt_tokens"] for p in answers[0]], [1, 2, 3])
+        self.assertTrue(all(points == answers[0] for points in answers))
+        self.assertEqual(self.digests(state), before, "no byte and no file changed")
+
+    def test_a_stray_empty_log_beside_a_rollback_store(self) -> None:
+        store = self.store()
+        store.add("a", epoch=NOW - 60, prompt_tokens=1)
+        with open(store.path + "-wal", "wb"):
+            pass
+        state = os.path.dirname(store.path)
+        listing = sorted(os.listdir(state))
+        # A sharing runtime opens it: SQLite treats an empty log as absent.
+        read = self.read("1h")
+        self.assertEqual(read["facts"]["journal"], "rollback")
+        self.assertEqual(sorted(os.listdir(state)), listing, "no -shm: WAL was never entered")
+        # Elsewhere a log beside the store is refused before anything opens it, as in 1.2.0.
+        for core, code in ((cs.make_core(eligible=False), "store_wal_incompatible"), (None, "store_wal_unverified")):
+            self.use_core(core)
+            self.refused(code)
+            self.assertEqual(sorted(os.listdir(state)), listing)
+            if core is not None:
+                self.assertEqual(core.registry.opened, 0)
 
 
 if __name__ == "__main__":

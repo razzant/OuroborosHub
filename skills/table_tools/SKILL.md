@@ -1,7 +1,7 @@
 ---
 name: table_tools
 description: Inspect, filter, sort, group, and aggregate CSV and XLSX tables while reporting truncation and non-numeric values honestly.
-version: 0.1.0
+version: 0.1.1
 type: script
 runtime: python3
 permissions: [fs]

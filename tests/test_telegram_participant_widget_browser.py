@@ -22,9 +22,15 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from widget_lease_gateway import LeaseGateway, controls
+
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / 'skills' / 'telegram-user-session'
 ACCOUNT = 8667525238
+# The card's live publication as a host lists it (HOST mounts the same tab id and generation). Its route lease is
+# answered as the core's controls answer it (tests/widget_lease_gateway.py), while the real module still builds the
+# frame, relays fetches and revokes the lease on disposal.
+CARDS = {'telegram-user-session': ('participant', 'fixture-generation')}
 HOST = '''<!doctype html><html><head><script src="/static/theme.js"></script>
 <style>body{margin:0;background:#0f0f11}.widgets-frame{width:100%;height:var(--widget-frame-height,320px);border:0;display:block}</style></head>
 <body><section><div class="widgets-card-status"></div><div id="mount"></div></section>
@@ -32,7 +38,7 @@ HOST = '''<!doctype html><html><head><script src="/static/theme.js"></script>
 import {mountModuleWidget} from '/static/modules/widget_module.js';
 ouroTheme.set('dark');
 window.disposeWidget=await mountModuleWidget(document.getElementById('mount'),
- {skill:'telegram-user-session',ws_prefix:'ext:telegram-user-session:'},
+ {skill:'telegram-user-session',ws_prefix:'ext:telegram-user-session:',tab_id:'participant',generation:'fixture-generation'},
  {entry:'widget.js',appearance:'host'},null,new Set());
 window.ready=true;
 </script></body></html>'''
@@ -116,7 +122,8 @@ def widget_server():
     synthetic_state(root)
     api = API(root)
     load_plugin(api)
-    state = {'posts': [], 'errors': [], 'faults': []}
+    state = {'posts': [], 'errors': [], 'faults': [], 'disconnects': []}
+    leases = LeaseGateway(CARDS)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -125,17 +132,32 @@ def widget_server():
         def send(self, body, mime='application/json', status=200):
             if not isinstance(body, bytes):
                 body = (body if isinstance(body, str) else json.dumps(body)).encode()
-            self.send_response(status)
-            self.send_header('Content-Type', mime)
-            self.send_header('Content-Length', str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header('Content-Type', mime)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                # The browser went away with this answer in flight (a page closing as its test ends): transport, not a
+                # widget or route failure, so it is only recorded, as the Smart Lists and Calendar harnesses do.
+                state['disconnects'].append(f'{self.command} {self.path}')
+                self.close_connection = True
 
         def dispatch(self):
             url = urlsplit(self.path)
-            payload = self.rfile.read(int(self.headers.get('Content-Length', 0) or 0))
+            length = int(self.headers.get('Content-Length', 0) or 0)
+            payload = self.rfile.read(length)
+            if len(payload) < length:
+                # The page closed while sending it (a keepalive revoke as its test ends): no one is left to answer.
+                state['disconnects'].append(f'{self.command} {self.path}')
+                return
             if url.path == '/':
                 return self.send(HOST, 'text/html')
+            if controls(url.path):
+                # A refused one is recorded by the gateway and fails the teardown below.
+                status, answer = leases.answer(self.command, url.path, self.headers, payload)
+                return self.send(answer, status=status)
             if url.path == '/api/widgets/fault':
                 state['faults'].append(payload.decode('utf-8', 'replace'))
                 return self.send({'ok': True})
@@ -174,6 +196,7 @@ def widget_server():
         shutil.rmtree(root)
         assert not thread.is_alive()
         assert not state['errors'], state['errors']
+        assert not leases.refused, leases.refused
 
 
 def settle(page, frame):

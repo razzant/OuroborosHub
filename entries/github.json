@@ -6,19 +6,23 @@
     "GitHub"
   ],
   "description": "GitHub places for issues, pull requests, reviews and Discussions, with separate Notifications readers, owner questions in Main and durable reply receipts.",
-  "digest": "415da55d9d94e79be70885c5dbf3aed2d56fb69b97856cafef1044d179d5a2b7",
+  "digest": "4b5819e9fb33fd0995d8c6c978823c253e52c9df3cdd225b9577cb1a17408d36",
   "icon": "ui/icon.svg",
   "install_specs": [
     "PyJWT[crypto]>=2.13,<3"
   ],
+  "mark": "GitHub access",
   "name": "github",
+  "needs": "needs a personal access token or credentials for an installed GitHub App",
   "owner": "ouroboros-agent",
+  "pitch": "Answer issues and pull requests",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/github"
   },
+  "title": "GitHub",
   "type": "extension",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "withdrawn": null
 }

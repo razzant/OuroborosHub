@@ -61,6 +61,17 @@ class TransportError(Exception):
                                  else classify(response))
 
 
+def transient(exc):
+    """A failed read that may succeed later (a rate refusal, a server failure, a lost read, a partial GraphQL
+    page); never a definite refusal, a vanished object or a malformed shape."""
+    if not isinstance(exc, TransportError):
+        return False
+    status = getattr(exc.response, "status", None)
+    return (exc.effect == Effect.RATE_REFUSED or exc.code in ("read_unavailable", "network_outcome_unknown",
+                                                              "graphql_partial_errors")
+            or (isinstance(status, int) and (status >= 500 or status == 408)))
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None

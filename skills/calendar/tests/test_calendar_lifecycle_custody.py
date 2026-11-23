@@ -66,7 +66,9 @@ def test_date_readdress_preserves_settled_notice_over_existing_waiting_row(tmp_p
         def send(self, key, text):
             deliveries.append({'key': key, 'text': text})
             return 'sent', 'synthetic host accepted'
-    delivered = reminders.deliver_due(ctx.store, Channel(), ctx.tz, now=model.parse_stored(effective))
+    # deliver_due re-reads each due reminder at max(now, wall clock): pin the wall clock to this fixture's instant
+    with patch.object(reminders, 'now_utc', return_value=model.parse_stored(effective)):
+        delivered = reminders.deliver_due(ctx.store, Channel(), ctx.tz, now=model.parse_stored(effective))
     print('READDRESS_NOTICE', json.dumps({'already_waiting': already_waiting, 'prior_state': settled_state,
           'canonical_state': record['state'], 'remaining_exceptions': len(ctx.store.exceptions_for(master['id'])),
           'delivery_stats': delivered, 'deliveries': deliveries}, ensure_ascii=False))
@@ -94,7 +96,9 @@ def test_carry_preserves_terminal_destination_and_does_not_suppress_moved_meetin
     calls=[]
     class Channel:
         def send(self, key, text): calls.append(key); return 'sent', 'accepted'
-    reminders.deliver_due(ctx.store, Channel(), ctx.tz, now=model.parse_stored(later))
+    # deliver_due re-reads each due reminder at max(now, wall clock): pin the wall clock to this fixture's instant
+    with patch.object(reminders, 'now_utc', return_value=model.parse_stored(later)):
+        reminders.deliver_due(ctx.store, Channel(), ctx.tz, now=model.parse_stored(later))
     assert calls == [current]
 
 

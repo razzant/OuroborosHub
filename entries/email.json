@@ -4,8 +4,11 @@
   ],
   "description": "Email tools for tasks: read and send mail through IMAP/SMTP. Not a place: to let Ouroboros live in a mailbox use the Email connector (email-presence).",
   "digest": "d32c8fc9df7dc71e3aeb9f469667cf97896e64d7a3b369e62f735b8fbf72d755",
+  "mark": "mail login",
   "name": "email",
+  "needs": "needs your mail server and login",
   "owner": "razzant",
+  "pitch": "Read and send IMAP and SMTP mail",
   "schema_version": 2,
   "source": {
     "kind": "hosted",

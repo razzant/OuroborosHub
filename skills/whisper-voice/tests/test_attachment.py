@@ -31,13 +31,14 @@ def case(tmp_path, monkeypatch):
         calls.append('bind')
         return types.SimpleNamespace(target_path=fp)
     def admit(context, path, *, max_bytes):
-        assert context is ctx and path == str(fp) and max_bytes == 393216
+        assert context is ctx and path == str(fp) and max_bytes == 20 * 1024 * 1024
         calls.append('admit')
         return fp, ''
     monkeypatch.setitem(sys.modules, 'ouroboros.tool_access', types.SimpleNamespace(build_resolved_resource_binding=bind))
     monkeypatch.setitem(sys.modules, 'ouroboros.tools.media', types.SimpleNamespace(_resolve_local_file=admit))
-    def worker(state, method, path, body, mime):
+    def worker(state, method, path, body, mime, source=None):
         assert method == 'POST' and path == '/transcribe' and body == data and mime == 'audio/ogg'
+        assert source == 'attachment'  # the companion applies the attachment path's own limits
         calls.append('worker')
         return JSONResponse({'text': 'local words', 'timings': {'model_loaded': False}})
     return ctx, entry, fp, calls, worker
@@ -84,6 +85,27 @@ def test_host_denial_no_fallback(case, monkeypatch):
 
 
 def test_bounded_read_and_hash(case):
-    case[2].write_bytes(b'OggS' + b'x' * 393216)
+    limit = 20 * 1024 * 1024
+    case[2].write_bytes(b'OggS' + b'x' * limit)  # over the cap: refused whole, no worker call
     assert run(case)['ok'] is False
     assert 'worker' not in case[3]
+
+
+def test_a_recording_of_exactly_the_cap_is_accepted_and_one_byte_more_is_refused(case):
+    limit = 20 * 1024 * 1024
+    ctx, entry, fp, calls, worker = case
+    for size, accepted in ((limit, True), (limit + 1, False)):
+        data = b'OggS' + b'x' * (size - 4)
+        fp.write_bytes(data)
+        entry['sha256'] = hashlib.sha256(data).hexdigest()
+        calls.clear()
+
+        def take(state, method, path, body, mime, source=None, _data=data):
+            assert body == _data and source == 'attachment'
+            calls.append('worker')
+            return JSONResponse({'text': 'long words'})
+        result = json.loads(adapter.transcribe_attachment(ctx, 0, state_dir=fp.parent, worker=take))
+        assert result['ok'] is accepted
+        assert calls.count('worker') == (1 if accepted else 0)
+        if not accepted:
+            assert 'exceeds 20971520 bytes' in result['error']['message']

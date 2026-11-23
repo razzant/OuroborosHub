@@ -114,6 +114,7 @@ class IndexTests(unittest.TestCase):
             {'source': {'kind': 'hosted', 'path': 'skills/another'}},
             {'source': {'kind': 'hosted', 'path': '../demo'}}, {'source': {}},
             {'title': ''}, {'title': 7}, {'title': 'Two\nlines'}, {'title': ' Padded'},
+            {'pitch': ''}, {'pitch': 7}, {'pitch': 'Two\nlines'}, {'needs': ' Padded'}, {'mark': 3},
         ]
         for changes in mutations:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
@@ -175,9 +176,14 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(entry['title'], 'Demo tools')
         builder.validate_entry(entry, {'search'})
         self.assertEqual(builder.build_catalog(self.root)['skills'][0]['title'], 'Demo tools')
-        self.write('entries/demo.json', {**entry, 'title': 'Something else'})
-        with self.assertRaisesRegex(ValueError, 'title must derive'):
-            builder.build_catalog(self.root)
+        # The entry's title is the catalog's own wording: it may differ, and a refresh keeps it.
+        worded = {**entry, 'title': 'Something else', 'pitch': 'Does a thing', 'needs': '', 'mark': ''}
+        self.write('entries/demo.json', worded)
+        builder.validate_entry(worded, {'search'})
+        self.assertEqual(builder.build_catalog(self.root)['skills'][0]['title'], 'Demo tools')
+        self.assertEqual(builder.main(['--refresh', 'demo'], root=self.root), 0)
+        self.assertEqual(builder.read_json(self.root / 'entries/demo.json')['title'], 'Something else')
+        self.assertEqual(builder.read_json(self.root / 'entries/demo.json')['pitch'], 'Does a thing')
         # An entry may omit the field; the manifest still names the v1 row.
         self.write('entries/demo.json', {k: v for k, v in entry.items() if k != 'title'})
         self.assertEqual(builder.build_catalog(self.root)['skills'][0]['title'], 'Demo tools')
@@ -185,6 +191,13 @@ class IndexTests(unittest.TestCase):
         self.assertEqual(builder.main(['--refresh', 'demo'], root=self.root), 0)
         self.assertNotIn('title', builder.read_json(self.root / 'entries/demo.json'))
         self.assertNotIn('title', builder.build_catalog(self.root)['skills'][0])
+
+        # A valid editorial title does not make a numeric manifest title valid for v1.
+        manifest.write_text('---\nversion: v3\ntitle: 2026\n---\nBody\n', encoding='utf-8')
+        self.write('entries/demo.json', {**worded, 'version': 'v3', 'digest': payload_digest(manifest.parent)})
+        self.assertEqual(builder.load_hub(self.root)[1]['demo']['title'], 'Something else')
+        with self.assertRaisesRegex(ValueError, 'demo: v1 title: must be a non-empty string'):
+            builder.build_catalog(self.root)
 
     def test_endorsements_bind_exact_release_and_recommendations_are_boolean(self):
         endorsement = {'name': 'demo', 'digest': self.entry['digest'], 'recommended': True}
@@ -274,8 +287,14 @@ class IndexTests(unittest.TestCase):
                 builder.validate_entry({**self.entry, 'source': {**source, **changes}}, {'search'})
         self.write('entries/demo.json', self.entry)
         # A pointer still checks fetched bytes; its old raw payload remains a v1 row.
-        with patch.object(builder, 'source_directory', return_value=contextlib.nullcontext(self.root / 'skills/demo')):
+        local = self.root / 'skills/demo'
+        with patch.object(builder, 'source_directory', return_value=contextlib.nullcontext(local)):
             self.assertEqual(builder.build_catalog(self.root)['skills'][0]['slug'], 'demo')
+        # With the same pinned release and no local payload, only v2 lists the skill.
+        checkout = local.rename(self.root / 'checkout')
+        with patch.object(builder, 'source_directory', return_value=contextlib.nullcontext(checkout)):
+            self.assertIn('demo', builder.load_hub(self.root)[1])
+            self.assertEqual(builder.build_catalog(self.root)['skills'], [])
             self.entry['digest'] = '0' * 64
             self.write('entries/demo.json', self.entry)
             with self.assertRaisesRegex(ValueError, 'digest mismatch'):
@@ -562,14 +581,16 @@ print(json.dumps([payload_digest(Path(c['path']), manifest_entry=c['front'].get(
         self.assertEqual(len(categories), 12)
         expected = set('a2a adaptive-code-review anti-slop cache_efficiency_snapshot calendar chrome_browser '
                        'claudexor_quotas confluence context-lens duckduckgo email email-presence github '
-                       'google-workspace keenable memory-atlas office_reader perplexity slack-bridge '
+                       'google-workspace keenable memory-atlas office_reader perplexity provider_keys slack-bridge '
                        'table_tools telegram-bot pdf_tools word_tools'.split())
         self.assertEqual({r['name'] for r in official['endorsements']}, expected)
         self.assertEqual({r['name'] for r in official['endorsements'] if r.get('recommended')},
                          set('duckduckgo pdf_tools word_tools anti-slop memory-atlas chrome_browser '
                              'keenable office_reader table_tools'.split()))
         generated = builder.build_catalog(ROOT)
-        self.assertEqual({r['slug'] for r in generated['skills']}, set(entries))
+        # V1 lists locally deliverable payloads, including copies retained after a v2 change.
+        local_slugs = {p.parent.name for p in (ROOT / 'skills').glob('*/SKILL.md') if p.is_file()}
+        self.assertEqual({r['slug'] for r in generated['skills']}, local_slugs)
         for entry in entries.values():
             with builder.source_directory(ROOT, entry) as directory:
                 self.assertEqual(declaration_json(entry.get('install_specs')),
@@ -586,8 +607,9 @@ CONNECTORS = sorted(directory.name for directory in (ROOT / "skills").iterdir()
 # Mirrors of the core contract, compared with a core checkout by the opt-in parity test below:
 # ouroboros/places.py WAKE_FACTS, ouroboros/extension_ui_validation.py _validate_contribution (common and
 # place keys) and ouroboros/icon_geometry.py (geometry and paint). The hub also refuses g and ellipse.
-CORE_WAKE_FACTS = ("direct_message", "group_dm", "mention", "reply_to_me", "my_thread", "signal.new_root", "new_issue",
+CORE_WAKE_FACTS = ("direct_message", "group_dm", "mention", "reply_to_me", "my_thread", "new_issue",
                    "new_pull_request", "review_requested", "assigned", "any_message", "from_bot")
+CORE_SIGNAL = re.compile(r"signal\.[a-z0-9_-]{1,40}")  # ouroboros/places.py is_wake_signal
 CORE_PLACE_KEYS = {"id", "label", "title", "icon", "order", "render",
                    "provides", "destination", "scope", "wakes", "source", "settings", "read_only", "facts"}
 ICON_GEOMETRY = {"svg": {"viewBox", "width", "height"}, "path": {"d"}, "circle": {"cx", "cy", "r"},
@@ -683,6 +705,89 @@ def registered_routes(directory):
             if function and node.args and isinstance(node.args[0], ast.Constant)}
 
 
+def assert_target_selectors(target):
+    # Core tool_effects._argument_names accepts nonblank strings; argument_value
+    # traverses dotted mapping keys without restricting their case or spelling.
+    assert isinstance(target, (str, list))
+    for argument in ([target] if isinstance(target, str) else target):
+        assert isinstance(argument, str) and argument.strip()
+
+
+def place_wake_facts(place):
+    """What a place may suggest as wakes, as the core decides it (extension_ui_validation._place_contribution): its own
+    declared facts when it lists `facts`, each a core fact or a labelled core fact or signal; otherwise the core's."""
+    if "facts" not in place:
+        return set(CORE_WAKE_FACTS)
+    assert isinstance(place["facts"], list), place
+    declared = []
+    for fact in place["facts"]:
+        if isinstance(fact, dict):
+            assert set(fact) == {"id", "label"}, fact
+            assert fact["id"] in CORE_WAKE_FACTS or CORE_SIGNAL.fullmatch(str(fact["id"])), fact
+            assert isinstance(fact["label"], str) and fact["label"].strip() and len(fact["label"]) <= 120, fact
+            declared.append(fact["id"])
+        else:
+            assert isinstance(fact, str) and fact in CORE_WAKE_FACTS, fact
+            declared.append(fact)
+    assert len(declared) == len(set(declared)), declared
+    return set(declared)
+
+
+def assert_place_wakes(place):
+    wakes = place["wakes"]
+    assert isinstance(wakes, list) and set(wakes) <= place_wake_facts(place), place
+    # The hub's publication convention, not the core's: the core keeps one of a repeated wake, a published place says
+    # each once.
+    assert len(wakes) == len(set(wakes)), place
+
+
+@pytest.mark.parametrize("place", [
+    {"wakes": ["direct_message", "mention"]},
+    {"facts": ["mention", {"id": "signal.new_root", "label": "New top-level post"}], "wakes": ["mention", "signal.new_root"]},
+    {"facts": [{"id": "direct_message", "label": "Mail addressed to you"}, "from_bot"], "wakes": ["direct_message"]},
+    {"facts": [], "wakes": []},
+])
+def test_place_wakes_accept_core_facts_or_the_place_s_own_declared_facts(place):
+    assert_place_wakes(place)
+
+
+@pytest.mark.parametrize("place", [
+    {"wakes": ["signal.new_root"]},                                             # a signal is declared before it wakes
+    {"facts": ["mention"], "wakes": ["mention", "direct_message"]},             # the declared facts are the whole set
+    {"facts": [{"id": "signal.New Root", "label": "x"}], "wakes": []},          # not a signal id
+    {"facts": [{"id": "signal.new_root"}], "wakes": []},                         # a signal needs its label
+    {"facts": [{"id": "signal.new_root", "label": " "}], "wakes": []},
+    {"facts": ["signal.new_root"], "wakes": []},                                 # a bare name is a core fact only
+    {"facts": ["mention", {"id": "mention", "label": "again"}], "wakes": []},    # ids are unique
+    {"facts": "mention", "wakes": []},
+])
+def test_place_wakes_reject_what_the_core_refuses(place):
+    with pytest.raises(AssertionError):
+        assert_place_wakes(place)
+
+
+def test_a_published_place_suggests_each_wake_once():
+    # The core would accept the repetition and keep one; the hub refuses it in what it publishes.
+    with pytest.raises(AssertionError):
+        assert_place_wakes({"wakes": ["mention", "mention"]})
+    assert_place_wakes({"wakes": ["mention"]})
+
+
+@pytest.mark.parametrize("target", [
+    "account_id", "replyToAddress", "values.replyToAddress", "body.X-Header",
+    "items.0.id", ["account_id", "values.replyToAddress"],
+])
+def test_target_selectors_accept_core_argument_names(target):
+    assert_target_selectors(target)
+
+
+@pytest.mark.parametrize("target", [None, 7, {}, "", " \t\n", ["account_id", ""],
+                                   ["account_id", " "], ["account_id", None], [["to"]]])
+def test_target_selectors_reject_invalid_argument_names(target):
+    with pytest.raises(AssertionError):
+        assert_target_selectors(target)
+
+
 @pytest.mark.parametrize("name", CONNECTORS)
 def test_every_exported_tool_has_an_effect_and_destination(name):
     directory = ROOT / "skills" / name
@@ -694,10 +799,7 @@ def test_every_exported_tool_has_an_effect_and_destination(name):
         assert row["effect"] in {"read", "message", "gesture", "write"}
         # A gesture acts on one message: the core fills that argument from the waking event.
         assert (row["effect"] == "gesture") == bool(row.get("message")), row["name"]
-        target = row["target"]
-        assert isinstance(target, (str, list))
-        for argument in ([target] if isinstance(target, str) else target):
-            assert re.fullmatch(r"[a-z][a-z0-9_]*", argument)
+        assert_target_selectors(row["target"])
 
 
 @pytest.mark.parametrize("name", CONNECTORS)
@@ -711,8 +813,7 @@ def test_place_contribution_meets_the_core_contract(name):
     service = place["destination"].removeprefix("vendor:")
     assert place["destination"].startswith("vendor:") and service.strip() and place["label"] == service
     assert place["scope"] == "account"
-    wakes = place["wakes"]
-    assert isinstance(wakes, list) and len(wakes) == len(set(wakes)) and set(wakes) <= set(CORE_WAKE_FACTS)
+    assert_place_wakes(place)
     assert manifest["type"] == "extension"
     assert "presence" in manifest["permissions"] and "inject_chat" not in manifest["permissions"]
     if "source" in place:

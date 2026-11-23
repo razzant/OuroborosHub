@@ -142,21 +142,81 @@ class BudgetLedger:
         self.entries: list[dict] = []
         self.hard_stop_reason = ""
         self.stopped = False
+        self._next_receipt_id = 1
+        self._receipts: dict[int, dict] = {}
 
-    def charge(self, kind: str, count: int = 1, *, note: str = "") -> None:
-        """Record estimated spend. Unknown kinds charge 0.0 and are flagged
-        in the note instead of raising — a bookkeeping gap must never kill a
-        half-finished generation job."""
+    def charge(self, kind: str, count: int = 1, *, note: str = "") -> dict:
+        """Record estimated spend and RETURN a receipt.
+
+        The receipt is what makes a refund safe: a refund keyed by kind/count
+        could credit back a different dispatch's charge, or fire twice. Unknown
+        kinds charge 0.0 and are flagged in the note instead of raising — a
+        bookkeeping gap must never kill a half-finished generation job.
+        """
         unit = UNIT_COST_USD.get(kind)
         if unit is None:
             unit = 0.0
             note = f"unknown_kind {note}".strip()
-        usd = round(unit * count, 4)
-        self.spent_usd = round(self.spent_usd + usd, 4)
-        self.entries.append({"kind": kind, "count": count, "usd": usd, "note": note})
+        charged = round(unit * count, 4)
+        self.spent_usd = round(self.spent_usd + charged, 4)
+        receipt_id = self._next_receipt_id
+        self._next_receipt_id += 1
+        receipt = {
+            "id": receipt_id,
+            "kind": kind,
+            "count": count,
+            "usd": charged,
+            "refunded": False,
+        }
+        self._receipts[receipt_id] = receipt
+        self.entries.append(
+            {
+                "kind": kind,
+                "count": count,
+                "usd": charged,
+                "note": note,
+                "receipt_id": receipt_id,
+            }
+        )
         if len(self.entries) > _ENTRIES_MAX:
             # Bounded ledger: keep the most recent entries; totals stay exact.
             del self.entries[: len(self.entries) - _ENTRIES_MAX]
+        if len(self._receipts) > _ENTRIES_MAX:
+            for stale in sorted(self._receipts)[: len(self._receipts) - _ENTRIES_MAX]:
+                del self._receipts[stale]
+        return dict(receipt)
+
+    def refund(self, receipt: dict | None, *, note: str = "") -> bool:
+        """Credit back EXACTLY one recorded charge. Idempotent by receipt id.
+
+        Used only when nothing was generated: the provider refused the request
+        before starting a job (HTTP 400/422) or the request was never sent. A
+        dropped connection, 429 or 5xx is deliberately not refunded: the job may
+        have been accepted and billed, and crediting it back would under-count
+        real spend — the mirror image of the phantom charges this fixes.
+        """
+        if not receipt:
+            return False
+        try:
+            live = self._receipts.get(int(receipt.get("id", 0)))
+        except (TypeError, ValueError, AttributeError):
+            return False
+        if live is None or live["refunded"]:
+            return False
+        live["refunded"] = True
+        self.spent_usd = round(self.spent_usd - live["usd"], 4)
+        self.entries.append(
+            {
+                "kind": live["kind"],
+                "count": -live["count"],
+                "usd": -live["usd"],
+                "note": f"refund {note}".strip(),
+                "receipt_id": live["id"],
+            }
+        )
+        if len(self.entries) > _ENTRIES_MAX:
+            del self.entries[: len(self.entries) - _ENTRIES_MAX]
+        return True
 
     @property
     def remaining_usd(self) -> float:

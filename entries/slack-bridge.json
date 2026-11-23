@@ -12,13 +12,17 @@
     "httpx",
     "websockets"
   ],
+  "mark": "Slack tokens",
   "name": "slack-bridge",
+  "needs": "needs Slack bot and app tokens",
   "owner": "ouroboros-agent",
+  "pitch": "Answer Slack messages and files",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/slack-bridge"
   },
+  "title": "Slack",
   "type": "extension",
   "version": "1.12.2",
   "when_to_use": "User wants Ouroboros to receive Slack messages or files, reply in Slack conversations and threads, or send proactive Slack text messages.",

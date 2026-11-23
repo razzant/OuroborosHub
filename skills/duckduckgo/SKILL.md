@@ -1,7 +1,7 @@
 ---
 name: duckduckgo
 description: Web search via DuckDuckGo — free, no API key required. Returns titles, URLs, and snippets.
-version: 0.1.2
+version: 0.1.4
 type: extension
 runtime: python3
 entry: plugin.py

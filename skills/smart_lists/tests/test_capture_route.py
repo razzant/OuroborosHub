@@ -40,9 +40,12 @@ class CaptureTests(SkillCase):
             self.assertEqual(status, 400)
             self.assertFalse(result["ok"])
             self.assertTrue(result["error"])
+            self.assertEqual(result["code"], "invalid_input")
         self.assertEqual(self.module._service().overview()["tree"], [])
 
     def test_missing_store_is_not_silently_initialized(self):
         self.api = self.fresh_api(self.state_dir / "missing")
-        self.assertEqual(self.capture({"text": "one"})[0], 400)
+        # The refusal names its state, so the widget can explain it in the owner's words.
+        status, result = self.capture({"text": "one"})
+        self.assertEqual((status, result["code"]), (400, "store_not_initialized"))
         self.assertFalse((self.state_dir / "missing" / "store.json").exists())

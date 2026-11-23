@@ -150,6 +150,7 @@ def test_known_email_thread_is_preserved_in_intake_and_automatic_binding(tmp_pat
     assert runtime.poll() == 1
     assert provider_calls == ["INBOX"]
     item = store.claim_inbox()
+    runtime.remember_reply_targets(item)  # intake submission records the current automatic envelope
     runtime._reply(item, ("thread answer",), "thread-output")
     queued = store.receipt(f"presence:{item.provider_event_key}:thread-output")
     binding = queued["delivery_reporting"]["place_binding"]
@@ -170,6 +171,18 @@ def test_ordinary_reply_preserves_known_thread_and_rejects_an_unknown_thread(tmp
     place = places.connect_place(drive, connector="email-presence", provider="email", account_id=account["id"],
                                  conversation_id="<thread>", state="active")
     places._write(drive, place.place_id, lambda row: replace(row, thread_id="<thread>"))
+    # Replies name sources captured in this mailbox; their chains, not the caller's, decide the conversation.
+    for uid, (message_id, chain) in enumerate((("<incoming>", ["<thread>"]), ("<other>", ["<unknown-thread>"])), 1):
+        store.ingest({"folder": "INBOX", "uidvalidity": 1, "uid": uid, "message_id": message_id, "references": chain,
+                      "sender": "reader@example.invalid", "subject": "Source", "body": "source"})
+    # Negative control: before 0.10.11 an IMAP reply with caller references skipped the source lookup and queued
+    # under the caller's chain. A source this mailbox cannot verify is now refused before anything is queued.
+    monkeypatch.setattr(DeliveryClient, "find_message", lambda self, message_id, **_: None, raising=False)
+    with pytest.raises(ValueError, match="Reply source was not found"):
+        service.send(account_id=account["id"], to="reader@example.invalid", body="decoy", request_id="decoy",
+                     reply_to_message_id="<missing>", references=["<thread>"], conversation_id="<thread>",
+                     thread_id="<thread>")
+    assert store.receipt("decoy") is None
     good = service.send(account_id=account["id"], to="reader@example.invalid", body="answer", request_id="known",
                         reply_to_message_id="<incoming>", references=["<thread>"], conversation_id='<thread>', thread_id='<thread>')
     assert good["state"] != "held"
@@ -228,7 +241,10 @@ def test_capture_transport_failure_retries_paid_output_without_resubmitting_even
         db.execute("UPDATE inbox SET available_at=0")
     asyncio.run(runtime.process_inbox())
     assert store.status()["inbox"] == {"completed": 1}
-    assert len(submissions) == 1 and len(captures) == 2
+    # The event's conversation is captured twice (failure, then success); later captures are the envelope
+    # address's own scope and the non-address comparison (recipient Place bindings), never a new submission.
+    assert len(submissions) == 1 and [args[1] for args in captures[:2]] == ["<incoming>", "<incoming>"]
+    assert {args[1] for args in captures[2:]} <= {"reader@example.invalid", "email-presence:non-address-scope"}
     assert runtime.process_outbox() and len(delivery.sent) == 1
     assert not runtime.process_outbox()
     assert store.status()["outbox"] == {"completed": 1}

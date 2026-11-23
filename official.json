@@ -1,7 +1,7 @@
 {
   "endorsements": [
     {
-      "digest": "147ff878ebd6c3bbde89e05278d66348405d6c55bf2c611c77e86d00e314d2b9",
+      "digest": "aed146b7eda8d5e4e0686ae348ed750da4f4fd00879ed8dd398739fa29f2493b",
       "name": "a2a",
       "recommended": false
     },
@@ -11,27 +11,27 @@
       "recommended": false
     },
     {
-      "digest": "9618521e5113ead1a7acd79a46feb135cd1d10ca6061000c672082867ab801f1",
+      "digest": "c22d40aeb5ea6232370242584ca48a8ac069161f8b5bbed6a3f9a99d184b710b",
       "name": "anti-slop",
       "recommended": true
     },
     {
-      "digest": "a141d9a259b07207291ab3a0e593b5bf6d53eb3781e265775129d9e7eaf4bcf5",
+      "digest": "7c40c757698dc208d2d9b25704d19f5ceedc82c1add8ea13fdbff0ec96067878",
       "name": "cache_efficiency_snapshot",
       "recommended": false
     },
     {
-      "digest": "1df308334b4ff526182ccea2cdb247f787a717ab3a6b75d5c8728ce8b227507a",
+      "digest": "2379fdc2f8d454a6a278815a75d3789294051dd0c19e7b4bf7f1bd0059c0214f",
       "name": "calendar",
       "recommended": false
     },
     {
-      "digest": "ae7a52945ac21f7e245598756148b4e7b40e954b96a961209ff151f462f84b10",
+      "digest": "81f6b9aa2dc16c4e33ee54b832823202676efeff5fe14567019ed2880db5278c",
       "name": "chrome_browser",
       "recommended": true
     },
     {
-      "digest": "657f8bbddb8849cdf59c9e7a8090a30e7b30a1c9fa551a3d5fe73adc4c6c0ac7",
+      "digest": "47ee7dc9f9a64c25da3a357ae20c852efea189b93485c0a29c82aabf0730bed7",
       "name": "claudexor_quotas",
       "recommended": false
     },
@@ -41,12 +41,12 @@
       "recommended": false
     },
     {
-      "digest": "728c992edd4b22a7a7c2bf78983052274120b0e97b110ef6fbe18e024e6ad43d",
+      "digest": "c070e9dc9d7c1c7f543bb21d400425c659815a6c9256d4d222d175c8b1835136",
       "name": "context-lens",
       "recommended": false
     },
     {
-      "digest": "4f8613be4dc4bab36b9effba01748f367419f1f536a19aec5c88f9a22c2dd90e",
+      "digest": "f4cf2de55241e6c5eb969f51cadf10d914f2793b7f43d0428341d34cef4c3bd6",
       "name": "duckduckgo",
       "recommended": true
     },
@@ -56,12 +56,12 @@
       "recommended": false
     },
     {
-      "digest": "72620575d36b9ad90c8462dd6b9a427bbb6accf70f972c6a825f8aeaacff6e19",
+      "digest": "23ee0c22ae983f0473be59ebb4b98c5e01facfad4efcf5e9ba1e92e1958eada5",
       "name": "email-presence",
       "recommended": false
     },
     {
-      "digest": "415da55d9d94e79be70885c5dbf3aed2d56fb69b97856cafef1044d179d5a2b7",
+      "digest": "4b5819e9fb33fd0995d8c6c978823c253e52c9df3cdd225b9577cb1a17408d36",
       "name": "github",
       "recommended": false
     },
@@ -76,7 +76,7 @@
       "recommended": true
     },
     {
-      "digest": "02af7b5a3ded32550bb3655a33d0570bf17a1d05da6ceca7bba9d6335d3412b2",
+      "digest": "246f2c31ccbe37d30c947d082e3a3c8872ff41e495ed011594ec8f88bded7c68",
       "name": "memory-atlas",
       "recommended": true
     },
@@ -96,17 +96,22 @@
       "recommended": false
     },
     {
+      "digest": "cfc5fb1f686a3b92b20739e51d44a2ff98b4c1e2098a0444c3c4584e2354c6c1",
+      "name": "provider_keys",
+      "recommended": false
+    },
+    {
       "digest": "88ae42a8980b3ed4b28b7dde9484e14c54d8cb4aa0a7c4b08916dad56dbfc938",
       "name": "slack-bridge",
       "recommended": false
     },
     {
-      "digest": "4e24776e52cbde4fcac39f03733881019b4b09f656f4f2dc7531ad39c80a0efd",
+      "digest": "9ef02e5ae8314cea354208797f670920fc165e6226e89b8a19f265a66ac9995b",
       "name": "table_tools",
       "recommended": true
     },
     {
-      "digest": "f12cb13367b96a425895cb35998d91a5b10de29d35e52db8bc18452d52574414",
+      "digest": "ac8f2abfbf27443c87b1dbdb348e0e06065c2d5af8d5e9a578b1b3c1a737b109",
       "name": "telegram-bot",
       "recommended": false
     },

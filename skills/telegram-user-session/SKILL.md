@@ -1,7 +1,7 @@
 ---
 name: telegram-user-session
 description: Ouroboros as an independent Telegram participant through its own dedicated user account and shared Places memory.
-version: 0.4.3
+version: 0.4.5
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -149,13 +149,31 @@ Retained legacy intake follows the current Host's Presence answers. A retained t
 
 Legacy custody observation cycles through bounded batches of at most 100 events. Each cycle fixes its newest event before reading, so both older pending work and later replies receive attention even when new events keep arriving; this is fairness, not a throughput guarantee. After restart the cycle begins oldest-first. When version 2 becomes available, previously admitted version-0 work moves into this custody path after its existing binding validation, without submitting that event again or changing queued replies.
 
+## Preflight targets and diagnostics (0.4.4)
+
+Reply targets and existing-message actions check the exact message ID and resolved
+peer before topic inference. A missing target, another message or another peer is
+refused before dispatch. This keeps 0.4.2's conversation policy: ordinary reply
+chains stay in the chat's conversation; only forums supply a Host topic.
+
+Preflight receipts identify `initial_authorization`, `account_verification`,
+`operation_preparation` or `final_authorization`. Definite refusals expose only
+fixed safe reason codes; transient failures retain their exception class, never
+its text, and keep their existing queue/retry behavior. Silent/Paused work keeps
+its existing held state. No old failed or unknown intent is replayed.
+
+Offline `tests/test_preflight_targets.py` covers exact targets, ordinary replies,
+safe diagnostics and unchanged transient outcomes. Run the full hosted suite with
+`python -m unittest discover -s skills/telegram-user-session/tests -v` from the Hub
+root. These tests use a recording client and synthetic state, not live Telegram.
+
 ## Declarations for the Host (0.4.3)
 
 `tg_edit` declares `effect: message`: an edit changes words people read, so a Host judges, guards and holds it as it does `tg_send_text`. `tg_react` declares `effect: gesture` with `message: message_id`: a reaction on one message is a response, not speech. The account's own operation classes, guidance and outgoing switch are unchanged.
 
 ## Voice and audio (0.4.1)
 
-In participant mode a voice message or audio file is staged like any other media: its original bytes, unchanged and uncut, go to the Host as an ordinary attachment up to the 32 MiB capture bound (above it `media.status` is `too_large` and only the message reference goes on). Its text stays the descriptor `[Telegram voice message]` or `[Telegram audio: <title>]`, never words from the recording, and its wake facts are those of any message without text. The staged copy's suffix now follows Telegram's declared type (`.ogg`, `.mp3`, `.m4a`, …) rather than the host computer's MIME table, because the Host classifies a staged file by its bytes and recognizes some audio only with its usual suffix. This connector makes no speech-to-text claim. With the optional local `whisper-voice` skill enabled the answering model may call its `transcribe_attachment` tool with the manifest ordinal; on this path that tool currently takes Ogg, MP3 and MP4/M4A audio of at most 384 KiB and 60 seconds. Whisper also lists WebM, but the Host classifies staged WebM bytes as `video/webm` whatever the file name and the tool refuses that, so WebM from Telegram stays only a file (Telegram voice messages are Ogg). Telegram delivers far longer and larger recordings than the recognizer accepts; such a recording, like WAV, FLAC or AAC, is still staged whole, never cut, and stays only a file. Retained legacy mode still captures no media.
+In participant mode a voice message or audio file is staged like any other media: its original bytes, unchanged and uncut, go to the Host as an ordinary attachment up to the 32 MiB capture bound (above it `media.status` is `too_large` and only the message reference goes on). Its text stays the descriptor `[Telegram voice message]` or `[Telegram audio: <title>]`, never words from the recording, and its wake facts are those of any message without text. The staged copy's suffix now follows Telegram's declared type (`.ogg`, `.mp3`, `.m4a`, …) rather than the host computer's MIME table, because the Host classifies a staged file by its bytes and recognizes some audio only with its usual suffix. This connector makes no speech-to-text claim. With the optional local `whisper-voice` skill enabled the answering model may call its `transcribe_attachment` tool with the manifest ordinal; on this path that tool currently takes Ogg, MP3 and MP4/M4A audio of at most 20 MiB and 10 minutes (its tool description states the current limits). Whisper also lists WebM, but the Host classifies staged WebM bytes as `video/webm` whatever the file name and the tool refuses that, so WebM from Telegram stays only a file (Telegram voice messages are Ogg). A recording above those limits (this connector stages up to 32 MiB), like WAV, FLAC or AAC, is still staged whole, never cut; the tool refuses it with a specific error and it stays only a file. Retained legacy mode still captures no media.
 
 ## Upgrading to 0.4.2
 

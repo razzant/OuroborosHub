@@ -18,6 +18,8 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -105,6 +107,27 @@ def pytest_collection_finish(session):
             missing.append("set ATLAS_CORE to a core checkout with PluginAPI 2.1 read_memory (ouroboros/memory_reader.py)")
         elif not (Path(CORE) / "ouroboros" / "memory_reader.py").is_file():
             missing.append(f"ATLAS_CORE={CORE} has no ouroboros/memory_reader.py: name a core with PluginAPI 2.1 read_memory")
+    if any(item.path.name == "test_transfer_words.py" for item in session.items):
+        node = shutil.which("node")
+        if not node:
+            missing.append("put Node 20 or newer on PATH (test_transfer_words.py)")
+        else:
+            try:
+                version = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+                if int(version.lstrip("v").split(".")[0]) < 20:
+                    missing.append("Node 20 or newer is required, found " + version)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                missing.append("Node on PATH cannot run: " + str(exc))
+    if "transfers" in needs:
+        core = Path(os.environ["ATLAS_HOST_ROOT"]) / "repo" if os.environ.get("ATLAS_HOST_ROOT") else Path(CORE) if CORE else None
+        if core and (core / "ouroboros" / "memory_reader.py").is_file():
+            # Read source only: preflight must never import/start the core.
+            required = {"chronicle_store.py": ("source_author",), "chronicle_import.py": ("def transfer_problem(",),
+                        "memory_reader.py": ("period_bases", "TRANSFER_FACTS")}
+            for name, markers in required.items():
+                source = core / "ouroboros" / name
+                if not source.is_file() or any(marker not in source.read_text(encoding="utf-8") for marker in markers):
+                    missing.append("transfer tests need a core with source_author, transfer metadata and period_bases; incompatible " + str(source))
     if "playwright_api" in needs and not _importable("playwright.sync_api"):
         missing.append("install Playwright and its browsers (python -m pip install playwright, then"
                        " python -m playwright install chromium webkit)")
@@ -243,3 +266,26 @@ def correct_page(host, fixture: dict, page: str) -> None:
         "fix = done(store.correct(%r, 'A correction written while the list is read. ' + label, author, expected_revision=%r))\n"
         "print(fix['id'])\n" % (page, fixture["revision"][page])))
     fixture["revision"][page] = out.strip().splitlines()[-1]
+
+
+def ensure_transfers(host) -> dict:
+    """The synthetic transferred records of ``dev/transfer_fixture.py``, written into the host's data root by the core's
+    own producers in the importer's order (the legacy import first, every source's exact bytes retained, then the
+    records and a part over block/stated periods; basic ISO alone restores a historical transaction). Idempotent. Returns their ids and facts, which
+    are also put into ``host.ids``. A core that does not accept transfers raises here with its own refusal."""
+    out = host.producer("sys.path.insert(0, %r)\nimport transfer_fixture\nprint(json.dumps(transfer_fixture.write(root)))\n" % str(DEV))
+    facts = json.loads(out.strip().splitlines()[-1])
+    host.ids.update(facts)
+    return facts
+
+
+@pytest.fixture(scope="session")
+def transfers(real_host):
+    """The transfers of ``ensure_transfers``, written once for the session by the tests that name this fixture, so no
+    environment variable or seed flag decides whether they exist. A core without the transfer contract fails the
+    test with the core's own refusal (nothing is skipped): such a core cannot serve these tests."""
+    try:
+        return ensure_transfers(real_host)
+    except RuntimeError as exc:
+        pytest.fail("the core of this host does not take the synthetic transfers (it needs the transfer contract: "
+                    "metadata.transfer and the author kind source_author): " + str(exc))

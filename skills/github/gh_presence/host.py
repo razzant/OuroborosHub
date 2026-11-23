@@ -17,6 +17,28 @@ REQUIRED_FACTS = {"any_message", "from_bot", "mention", "my_thread", "reply_to_m
                   "new_pull_request", "assigned", "review_requested"}
 
 
+def wire_event(event):
+    """The host's view of an inbox event: the documented ``thread_history`` carries the thread; the complete raw
+    provider rows stay in connector custody (``github_place_status`` returns them), counted here."""
+    conversation = event.get("conversation") or {}
+    history = conversation.get("history")
+    if isinstance(conversation.get("thread_history"), dict) and isinstance(history, dict) and "rows" in history:
+        kept = {key: value for key, value in history.items() if key != "rows"}
+        event = {**event, "conversation": {**conversation, "history": {**kept, "retained_rows": len(history["rows"])}}}
+    return event
+
+
+def missing_capabilities(event, host):
+    """What an event's own form needs that the negotiated host does not advertise now: a change observation (no
+    ``any_message``) needs ``presence_change_context``, a declared signal ``presence_wake_signals``. Such an event
+    waits unchanged for a host that reads it; it is never rebuilt narrower or sent to one that cannot."""
+    facts = event.get("facts") if isinstance(event.get("facts"), list) else []
+    needed = ["presence_change_context"] if "any_message" not in facts else []
+    if any(isinstance(fact, str) and fact.startswith("signal.") for fact in facts):
+        needed.append("presence_wake_signals")
+    return [name for name in needed if not (type(host.get(name)) is int and host[name] == 1)]
+
+
 class Host:
     def __init__(self, http, store, outbox):
         self.http, self.store, self.outbox = http, store, outbox
@@ -52,9 +74,13 @@ class Host:
                                                if type(value.get(k)) is not int or value[k] != version),
                    "presence_wake_facts": sorted(REQUIRED_FACTS - wake_facts)}
         ready = not any(missing.values())
+        # presence_change_context: 1 selects change observations (empty text, a state_change description, the
+        # change's own actor); without it every observation keeps the 0.1.6 form. presence_wake_signals: 1 admits
+        # the declared signal.new_discussion fact.
         self.store.set_meta("host_capabilities", {**{k: value.get(k) for k in
                             tuple(REQUIRED_HOST_VERSIONS) +
-                            ("places_version", "presence_continuation_version", "presence_delivery_version", "presence_identity")},
+                            ("places_version", "presence_continuation_version", "presence_delivery_version", "presence_identity",
+                             "presence_change_context", "presence_wake_signals")},
                             "ready": ready, "missing": missing, "observed_at": now()})
         if not ready:
             self.store.gap("host_capabilities", "host_capability_gap", missing)
@@ -182,12 +208,25 @@ class Host:
         available = 4 - len(self.inflight)
         if available <= 0:
             return
-        for row in self.store.rows("SELECT * FROM inbox WHERE state IN ('ready','blocked') AND due<=? ORDER BY seq LIMIT ?",
-                                   (time.time(), available)):
-            event = json.loads(row["event"])
+        # An event still waiting for a decisive read keeps the later changes of its conversation behind it; a first
+        # observation (new words, a new object) and an outside notification's proven message or action are never
+        # held for another event's read.
+        for row in self.store.rows("SELECT * FROM inbox i WHERE state IN ('ready','blocked') AND due<=? AND ("
+                                   "IFNULL(json_extract(i.event,'$.message.action'),'')='observed' OR "
+                                   "IFNULL(json_extract(i.event,'$.message.discovery_only'),0)=1 OR NOT EXISTS ("
+                                   "SELECT 1 FROM inbox e WHERE e.state='enriching' AND e.seq<i.seq AND "
+                                   "json_extract(e.event,'$.conversation_key')=json_extract(i.event,'$.conversation_key'))) "
+                                   "ORDER BY seq LIMIT ?", (time.time(), available)):
+            event = wire_event(json.loads(row["event"]))
             if not event["message"].get("discovery_only") and event["message"]["reply_route"]["repo"]["id"] not in {
                     r["id"] for r in self.outbox.config["repositories"]}:
                 self.store.gap("intake:" + row["id"], "repository_removed_from_selection")
+                with self.store.transaction() as db:
+                    db.execute("UPDATE inbox SET state='blocked',due=? WHERE id=?", (time.time() + 60, row["id"]))
+                continue
+            missing = missing_capabilities(event, self.store.meta("host_capabilities", {}) or {})
+            if missing:  # a host downgrade: the observation keeps its form and waits, frozen or not
+                self.store.gap("intake:" + row["id"], "host_capability_missing", {"requires": missing})
                 with self.store.transaction() as db:
                     db.execute("UPDATE inbox SET state='blocked',due=? WHERE id=?", (time.time() + 60, row["id"]))
                 continue

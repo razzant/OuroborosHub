@@ -1,12 +1,12 @@
 ---
 name: context-lens
 description: Read-only chart of model-request input sizes from the local usage store, with honest freshness and coverage.
-version: 1.2.0
+version: 1.2.1
 type: extension
 runtime: python3
 entry: plugin.py
 plugin_api: "2.0"
-permissions: [route, widget]
+permissions: [route, widget, fs]
 timeout_sec: 60
 when_to_use: The owner wants to understand reported input sizes, their spread and which requests belong to one task.
 model_experience:
@@ -30,7 +30,8 @@ ui_tab:
 A Widgets card that answers one question about this install: **how large were
 the inputs of recent model requests, how much do they vary, and how much of the
 record does the answer actually cover?** It never calls a model, never touches
-the network, never writes anything and never shows prompt text.
+the network, never changes the usage store's content and never shows prompt
+text.
 
 ## What the card shows
 
@@ -94,20 +95,50 @@ takes a path, and none is ever sent to the browser.
 ### How the store is read (`lens_store.py`)
 
 * **Never with `open()`.** Closing any descriptor on a SQLite file drops every
-  POSIX lock the process holds on it, and this skill may share a process with
-  core's own store connections. The path is checked with `lstat` only: the data
-  directory and `state` are real directories, the store a regular file, with
-  symlinks rejected at those three checked paths (`store_not_confined` /
-  `store_not_regular`). Ancestors of the data directory are not checked. A `-wal`
-  sibling is refused before anything opens the store.
-* **Strictly read-only.** SQLite URI `mode=ro`, `PRAGMA query_only = ON`, a
+  POSIX lock the process holds on it, and this skill runs in the server process
+  beside core's own store connections and raw readers (it has no native
+  dependency, so the host does not isolate it). The path is checked with `lstat`
+  only: the data directory and `state` are real directories, the store a regular
+  file, with symlinks rejected at those three checked paths
+  (`store_not_confined` / `store_not_regular`). Ancestors of the data directory
+  are not checked.
+* **Core's connection custody.** The connection is opened through core's
+  `store.counted_connect`: it is counted on the file's inode like every core
+  store connection, so a core raw read of the same file keeps its descriptor
+  open while this read holds its locks. Without that helper (no core in the
+  process, or a core older than the inode registry) a rollback-journal store is
+  read with a plain connection, as in 1.2.0. `source.connection` says which
+  (`counted` / `plain`).
+* **Journal compatibility.** The journal is core's lifecycle choice
+  (`ouroboros/store_journal.py`): WAL where this runtime may share it, else the
+  rollback journal (PERSIST). A rollback-journal store is read as before. A WAL
+  store is read only when core's own eligibility, `store._journal_mode(path,
+  "enforced") == "WAL"` (a SQLite carrying the WAL-reset fix, the enforced tier,
+  a proven local filesystem), and `counted_connect` are both available.
+  Otherwise it is refused before SQLite opens the file, recognised from a `-wal`
+  sibling or core's header read (`store.wal_file`): `store_wal_incompatible`
+  when core says this runtime must not share it, `store_wal_unverified` when
+  that answer cannot be had.
+  `PRAGMA journal_mode` is checked again inside the transaction.
+  `source.journal` says `wal` or `rollback`.
+* **Read-only content.** SQLite URI `mode=ro`, `PRAGMA query_only = ON`, a
   0.25 s busy wait, one deferred read transaction. Never `immutable`, never
   `nolock`, never `usage_store.read()` / `hold()` / `read_usage_records()`,
-  init, migration or any write.
+  init, migration, pragma assignment, checkpoint or any write of database
+  content. A rollback-journal read creates no file. On a WAL store SQLite's own
+  coordination still writes outside that content: the read updates the
+  shared-memory index (`-shm`: its read mark, or the index rebuild after a
+  crash), and when no connection had the store open it creates an empty `-wal`
+  and a `-shm`, which stay after it closes. A read-only connection cannot
+  checkpoint, so it never moves or deletes a committed frame; core's next writer
+  treats these files as usual. Those two files, `state/usage.sqlite-wal` and
+  `state/usage.sqlite-shm`, lie outside this skill's own state directory, so the
+  manifest declares `fs` for them. The declaration covers nothing more: this
+  skill's code opens no file for writing and no route takes a path.
 * **Validated first.** `PRAGMA application_id` is checked before anything else:
   the *name* lock tier (`0x4F55534E`) is refused as `store_name_tier`, because
   every access there must run inside core's name-protocol money lock, which a
-  read-only widget cannot take. Then: rollback-journal mode, the `attempts`,
+  read-only widget cannot take. Then: the journal as above, the `attempts`,
   `summaries`, `meta` tables and the `attempts_category_time (category,
   ts_last_epoch)` index, `meta.schema_version = 1`, `meta.lock_tier =
   "enforced"`, `meta.import.status = "completed"` (`store_not_ready`), and the
@@ -131,12 +162,15 @@ takes a path, and none is ever sent to the browser.
 * **Bounds** — rows 4 000; category streams 64 (+2); metadata 16 384 chars per
   row and 8 Mi characters per read; merge 0.4 s / 40 M SQLite steps (the merge stops and
   the selection is the exact newest prefix of the enumerated streams, marked
-  partial); whole read 2 s
-  (`store_slow`). Every bound that bites is named in `horizon.partial_reasons`.
+  partial); whole-read SQL budget 2 s, checked by SQLite's progress callback
+  (`store_slow`). It is not a hard deadline for blocked I/O or a native operation
+  between callbacks. Every bound that bites is named in `horizon.partial_reasons`.
 * **Released before any projection.** The transaction ends, then metadata is
-  parsed and statistics are built. The read reports how long it held the shared
-  lock (`source.transaction_ms`). The path's identity is checked again after
-  the transaction; a store replaced meanwhile is `store_replaced`.
+  parsed and statistics are built. The read reports how long it held its
+  snapshot (`source.transaction_ms`): a shared lock that a writer's COMMIT waits
+  on under the rollback journal, a read mark under WAL, where writers do not
+  wait. The path's identity is checked again after the transaction; a store
+  replaced meanwhile is `store_replaced`.
 
 Every read is a fresh selection — there is no append order to resume from, and
 an updated row (a late receipt, a price refinement) simply moves; it is never
@@ -194,6 +228,18 @@ its URL and task-grouping purpose. With `snapshot` it answers from that snapshot
 says `snapshot_expired` (the last two are held); without it, it takes a fresh
 read and states that read's own snapshot id and anchor. A key or snapshot id
 that this skill did not mint is answered empty and never reflected.
+
+### 1.2.1 changes from 1.2.0
+
+* A WAL store, which core now selects wherever this runtime may share it, is
+  read under the journal rule above. 1.2.0 refused every WAL store, so on such
+  installs the card showed `store_unsupported` instead of a chart.
+* The connection goes through core's `counted_connect`.
+* The manifest declares `fs`, for the two WAL coordination files a read may
+  create or update beside the store (above).
+* Additions only: `source.journal`, `source.connection` and the typed refusals
+  `store_wal_incompatible` / `store_wal_unverified`. Every other field keeps its
+  meaning.
 
 ### 1.2 interface changes from 1.1.3
 
@@ -263,9 +309,31 @@ horizon. No storage, no `postMessage`, no WebSocket, no subscriptions.
   bounded snapshot; neither selection promises complete retained history.
 * Native Windows and PyWebView have not been exercised for this release.
   The SQLite file-URI spelling on Windows remains unverified.
-* The name lock tier and WAL-mode stores are refused, not read around. SQLite
-  itself would create WAL side files when opening a WAL store; the `-wal` check
-  catches a live one first, and core never runs the store in WAL mode.
+* The name lock tier is refused, not read around. This skill carries no copy of
+  core's WAL rule: without `counted_connect` and `_journal_mode` it refuses a WAL
+  store (`store_wal_unverified`) rather than guess. `_journal_mode` is
+  underscore-named in core; it is the eligibility `store_journal.py` documents
+  and calls the same way.
+* Where core's header read is unavailable, a WAL store without a `-wal` beside
+  it is recognised only inside the transaction, after SQLite opened it and
+  created its side files; nothing is read from it.
+* A WAL read holds a shared lock on the store until its connection closes; the
+  SQL progress callback checks a 2 s budget, not a hard close deadline.
+  Before Update or Rollback moves the checkout, core's handoff takes
+  the store out of WAL, and SQLite refuses that at once while another
+  connection holds such a lock; a core reader opening at that moment causes the
+  same refusal. As read in core a7f60b37 (not reproduced), that refusal is not
+  typed as core's busy answer, so it reaches the door as a raw SQLite error.
+  Core owns that handling. This skill neither delays nor retries the door, and
+  core offers no read-only way to join the handoff: `usage_store.hold()` opens
+  the store read-write, and core's per-thread connection lease would share one
+  cached connection with core's own writers.
+* Each read asks core's `_journal_mode` once. On macOS and FreeBSD, core
+  a7f60b37 defines a new ctypes type on every call, which Python 3.10 keeps for
+  the life of the process: run 1 000 times here under the app's Python 3.10.22,
+  core's function left about 7 KB in memory per call, about 0.4 MB per hour
+  while the visible card polls every 60 s. The fix belongs in core; this skill
+  keeps no cache of the answer.
 * The path checks use `lstat` and SQLite opens by name, so a symlink swapped in
   between and back by a process that can already write the data directory is
   not excluded; the post-read identity check catches a replaced store.
@@ -283,7 +351,12 @@ Standard-library `unittest` only; every fixture is written into a fresh
 temporary directory and nothing reads a real install. `tests/store_fixture.py`
 builds a store with core's schema 1 column for column and mirrors category-summary
 membership (legacy kinds do not create category summaries); it does not maintain
-accounting totals or the other summary scopes.
+accounting totals or the other summary scopes; its rollback writers use PERSIST,
+as core's do. No test imports Ouroboros: `tests/core_store_standin.py` is a
+synthetic stand-in for `counted_connect`, `_journal_mode` and `wal_file`, so
+these tests show how the reader uses those names, not that core's helpers work.
+The WAL tests read file bytes with `os.pread` where the platform has it and
+seek-and-read elsewhere, and every wait on their writer process has a deadline.
 
 * `test_lens_store.py` — selection and exact newest prefix across streams, NULL
   and empty categories, missing legacy-only named categories and scoped
@@ -294,17 +367,31 @@ accounting totals or the other summary scopes.
   UPDATE in place and a late refinement counted once, excluded kinds and
   weights; `extra` allowlisting and the SQLite-JSON vs Python fallback;
   byte-identical store and directory after reads, `mode=ro` / `query_only` /
-  never `immutable`, the lock released before return, busy writers, name tier
-  refused from the header alone, unsupported schema / tier / index / column /
-  WAL, unfinished import, corrupt file, symlinks, and a store replaced mid-read.
+  never `immutable` on both connection paths, the lock released before return,
+  busy writers, name tier refused from the header alone, unsupported schema /
+  tier / index / column, unfinished import, corrupt file, symlinks, and a store
+  replaced mid-read. WAL, with a live writer in this or another process, a
+  crash-left log and a header without side files: frames still in the log read
+  with database and log byte-identical, one snapshot while a writer commits,
+  whole commits only under concurrent reads, every validation repeated, and the
+  counted connection's lifetime with no read mark left. Refused before SQLite
+  opens the file where core says no or a core name is missing or fails; the
+  in-transaction backstop without core; PERSIST read identically on every
+  runtime; a stray empty `-wal`.
 * `test_lens_core.py` — the journal reader's original invariants (bounds,
   rotation, torn tails, descriptor confinement, fold counting, redaction,
   horizons) plus the shared projection and the trajectory route.
 * `test_plugin_routes.py` — real handlers through a fake `PluginAPI` that fails
   on any undeclared permission: registration and manifest agreement, store
   first, journal only when no store exists, no fallback over a broken store,
-  typed busy, snapshot-bound and expired trajectories, no leakage; with
-  Starlette importable, the same handlers through a real `Request`.
+  typed busy, snapshot-bound and expired trajectories, no leakage, a WAL store
+  through core's custody that gains only the two coordination files `fs`
+  declares, its refusal without core (never the journal), WAL refusal sentences
+  that stay true when SQLite has already opened the store, a held snapshot
+  unchanged by later WAL commits, an owner sentence for every typed refusal, and
+  the double's permissions equal to the manifest's, with registration using
+  only `route` and `widget`; with Starlette importable, the same handlers
+  through a real `Request`.
 * `test_widget_contract.py` — the widget source against these promises; with a
   working Node (`CONTEXT_LENS_NODE` or `node` on `PATH`) it also runs
   `node --check` and `tests/widget_smoke.cjs`, which executes the widget in a VM

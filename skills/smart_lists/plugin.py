@@ -3,8 +3,10 @@
 Agent tools and widget routes are thin adapters over ``lists_core.SmartLists``;
 both read and write the same authoritative ``store.json`` in the skill state
 directory (plus its content-free sentinel and the ``backups/`` folder that
-exports and pre-restore copies go to). The skill has no network access and no
-other side effects: nothing is purchased, ordered, scheduled or sent anywhere.
+exports and pre-restore copies go to). The widget's ``draft`` route keeps one
+unsaved card form in ``widget_draft.json`` beside them, never in the store. The
+skill has no network access and no other side effects: nothing is purchased,
+ordered, scheduled or sent anywhere.
 
 Widget forms use their own result targets, so a top-level ``error`` on refusal
 makes the form fail visibly without replacing the lists table. The poll refreshes
@@ -97,6 +99,31 @@ def _tool_json(payload: Dict[str, Any]) -> str:
             if key == "groups":
                 result["groups_truncated"] = True
             continue
+        # One card may contain 100 short references: no individual string needs
+        # shortening, but their combined JSON still exceeds the tool budget.
+        nested_arrays = []
+
+        def arrays(node: Any, path: str = "") -> None:
+            if isinstance(node, dict):
+                for field, value in node.items():
+                    child = f"{path}.{field}" if path else field
+                    if field in {"references", "tags"} and isinstance(value, list) and value:
+                        nested_arrays.append((node, field, value, child))
+                    elif isinstance(value, (dict, list)) and field not in {"result_counts", "truncated_fields"}:
+                        arrays(value, child)
+            elif isinstance(node, list):
+                for index, value in enumerate(node):
+                    arrays(value, f"{path}[{index}]")
+
+        arrays(result)
+        if nested_arrays:
+            parent, field, values, path = max(nested_arrays,
+                key=lambda item: len(json.dumps(item[2], ensure_ascii=False).encode("utf-8")))
+            count = counts.setdefault(path, {"total": len(values), "shown": len(values), "truncated": False})
+            del values[len(values) // 2:]
+            count.update(shown=len(values), truncated=True)
+            result["full_entry_reader"] = "entry(entry_id=<id>, field=<field>, offset=0); follow next_offset"
+            continue
         # A path can contain hundreds of group names. Bound scalar values too.
         strings = []
 
@@ -145,20 +172,97 @@ def tool_add(ctx: Any = None, **args: Any) -> str:
 
 
 def tool_read(ctx: Any = None, **args: Any) -> str:
-    return _run_tool(args, ("group", "status", "subtree", "limit", "offset"), lambda a: _service().read(
+    return _run_tool(args, ("group", "status", "subtree", "limit", "offset", "tags", "tag_mode", "turn", "query", "archive"), lambda a: _service().read(
         group=a.get("group", ""), status=a.get("status", "open"), subtree=a.get("subtree", True),
-        limit=a.get("limit", 100), offset=a.get("offset", 0)))
+        limit=a.get("limit", 100), offset=a.get("offset", 0), tags=a.get("tags"),
+        tag_mode=a.get("tag_mode", "all"), turn=a.get("turn", ""), query=a.get("query", ""),
+        archive=a.get("archive", "all")))
+
+
+def _render(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def tool_entry(ctx: Any = None, **args: Any) -> str:
+    """Lossless field pages; never pass a complete card through _tool_json truncation."""
+    def call(a: Dict[str, Any]) -> Dict[str, Any]:
+        field, offset = a.get("field", "overview"), a.get("offset", 0)
+        if field not in ("overview", "text", "due", "tags", "description", "note", "next_step", "capture_key", "references", "group_path"):
+            raise ListError("invalid_input", "invalid entry field")
+        if type(offset) is not int or offset < 0 or offset > lists_core.MAX_GROUPS * (lists_core.MAX_NAME_CHARS + 3):
+            raise ListError("invalid_input", "invalid entry offset")
+        read = _service().read_entry(a.get("entry_id"))
+        entry = read["entry"]
+        details = entry["details"]
+        common = {"id": entry["id"], "field": field, "revision": read["revision"]}
+        if field == "overview":
+            return {**common, "entry": {key: entry[key] for key in ("id", "stage", "status", "group_id", "source", "created_at", "updated_at", "completed_at", "archived_at", "deleted_at")},
+                    "turn": details["turn"], "due_at": (entry["due"] or {}).get("at"),
+                    "text_length": len(entry["text"]), "due_length": len((entry["due"] or {}).get("raw", "")),
+                    "tag_count": len(details["tags"]),
+                    "description_length": len(entry["description"]),
+                    "note_length": len(details["note"]), "next_step_length": len(details["next_step"]),
+                    "capture_key_length": len(details.get("capture_key", "")),
+                    "group_path_length": len(entry["group_path"]),
+                    "reference_count": len(details["references"])}
+        if field == "tags":
+            value = details["tags"]
+        elif field == "references":
+            value = details["references"]
+        elif field == "due":
+            value = (entry["due"] or {}).get("raw", "")
+        elif field in ("text", "description", "group_path"):
+            value = entry[field]
+        else:
+            value = details.get(field, "")
+        if field not in ("tags", "references"):
+            # A control character may occupy six escaped JSON bytes, so 500
+            # characters stay below the host's 15 KB result cap.
+            part = value[offset:offset + 500]
+            return {**common, "value": part, "offset": offset,
+                    "next_offset": min(len(value), offset + len(part)), "total": len(value)}
+        # Whole items, as many as fit the result's byte budget; the empty page
+        # is measured with next_offset at its widest value, the total.
+        frame = _render({"ok": True, **common, "value": [], "offset": offset,
+                         "next_offset": len(value), "total": len(value)})
+        room, part = MAX_TOOL_RESULT_BYTES - len(frame), []
+        for item in value[offset:]:
+            cost = len(_render(item)) + (1 if part else 0)
+            if part and cost > room:
+                break
+            part.append(item)
+            room -= cost
+        return {**common, "value": part, "offset": offset,
+                "next_offset": min(len(value), offset + len(part)), "total": len(value)}
+
+    try:
+        unknown = set(args) - {"entry_id", "field", "offset"}
+        if unknown:
+            raise ListError("invalid_input", f"unsupported arguments {sorted(unknown)}")
+        payload = {"ok": True, **call(args)}
+    except ListError as exc:
+        payload = {"ok": False, "error": exc.as_dict()}
+    rendered = _render(payload).decode("utf-8")
+    if len(rendered.encode("utf-8")) > MAX_TOOL_RESULT_BYTES:
+        return json.dumps({"ok": False, "error": {"code": "response_limit", "message": "entry field page exceeds tool limit"}})
+    return rendered
 
 
 def tool_update(ctx: Any = None, **args: Any) -> str:
-    return _run_tool(args, ("entry_id", "text", "due", "clear_due", "request_id"), lambda a: _service().update(
+    return _run_tool(args, ("entry_id", "text", "due", "clear_due", "request_id", "details", "stage", "description", "expected"), lambda a: _service().update(
         a.get("entry_id"), text=a.get("text"), due=a.get("due"), clear_due=a.get("clear_due", False),
-        request_id=a.get("request_id")))
+        request_id=a.get("request_id"), details=a.get("details"), stage=a.get("stage"),
+        description=a.get("description"), expected=a.get("expected")))
 
 
 def tool_complete(ctx: Any = None, **args: Any) -> str:
     return _run_tool(args, ("entry_ids", "done", "request_id"), lambda a: _service().complete(
         a.get("entry_ids"), done=a.get("done", True), request_id=a.get("request_id")))
+
+
+def tool_archive(ctx: Any = None, **args: Any) -> str:
+    return _run_tool(args, ("entry_id", "archived", "expected", "request_id"), lambda a: _service().archive(
+        a.get("entry_id"), a.get("archived"), a.get("expected"), request_id=a.get("request_id")))
 
 
 def tool_move(ctx: Any = None, **args: Any) -> str:
@@ -203,8 +307,9 @@ _ENTRY_IDS = {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxI
               "description": "Entry ids (e_...) from add/read results."}
 _REQUEST_ID = {
     "type": "string",
-    "description": "Optional idempotency key (e.g. a UUID). A retry with the same id and arguments returns the "
-                   "first result without applying the change again; the same id with different arguments is refused "
+    "description": "Idempotency key (e.g. a UUID); required where the tool lists it as required. A retry with "
+                   "the same id and arguments returns the first result without applying the change again; the same id "
+                   "with different arguments is refused "
                    "(request_conflict), and so is an id retired from the replay journal (request_expired; rarely a "
                    "new id collides with one, then nothing was applied and a new id should be used).",
 }
@@ -215,12 +320,27 @@ _DUE = {
                    "text and never interpreted. No reminder is created.",
 }
 
+_DETAILS = {
+    "type": "object", "additionalProperties": False,
+    "description": "Optional agent-maintained context, separate from the original text. On update, merge only supplied fields; [] clears tags/references and empty text clears a note/step. Capture key is creation-only. Record source evidence before marking work complete; a stopped or Done run is not completion of the obligation.",
+    "properties": {
+        "tags": {"type": "array", "items": {"type": "string", "maxLength": 60}, "maxItems": 20},
+        "turn": {"type": "string", "enum": ["unassigned", "owner", "agent", "other"], "description": "Who must take the next step, not a permanent assignee."},
+        "next_step": {"type": "string", "maxLength": 1000},
+        "note": {"type": "string", "maxLength": 1000, "description": "Current factual context or completion/cancellation evidence; not an invented status."},
+        "capture_key": {"type": "string", "maxLength": 200, "description": "Stable identity chosen for ONE obligation, not an entire thread. Reuse across digest runs; capture_exists names the existing entry, including done/trash. Never change the key to bypass that result."},
+        "references": {"type": "array", "maxItems": 100, "items": {
+            "type": "object", "additionalProperties": False, "required": ["label", "target"],
+            "properties": {"label": {"type": "string", "maxLength": 120}, "target": {"type": "string", "maxLength": 1000, "description": "Observed HTTP(S) URL, task:<id> or exact row: address. No guessed task UI URLs."}}}},
+    },
+}
+
 TOOLS = (
     (
         "add",
         tool_add,
         "Smart Lists: add entries to a list group when the owner clearly intends note capture, even without "
-        "the word 'add' (e.g. 'oat milk and AA batteries for Home / Groceries'); never capture items from passing "
+        "the word 'add' (e.g. 'oat milk and AA batteries for Home / Groceries'), or under the owner's explicit standing instruction to maintain commitments. Read SKILL.md for automatic capture; never capture items from passing "
         "conversation. Put the owner's wording for each item verbatim in text, one entry per item, keeping "
         "quantities and notes inside text. Repeated text is never merged: it is stored again and listed under "
         f"possible_duplicates (at most {lists_core.MAX_DUPLICATE_IDS} matching ids per new entry, with total and "
@@ -240,6 +360,9 @@ TOOLS = (
                         "properties": {
                             "text": {"type": "string", "description": "One item, verbatim."},
                             "due": _DUE,
+                            "details": _DETAILS,
+                            "stage": {"type": "string", "enum": list(lists_core.STAGES)},
+                            "description": {"type": "string", "maxLength": lists_core.MAX_DESCRIPTION_CHARS},
                         },
                         "required": ["text"],
                         "additionalProperties": False,
@@ -268,7 +391,12 @@ TOOLS = (
             "properties": {
                 "group": {"type": "string", "description": "Optional. " + _GROUP_REF + " Omit for all groups."},
                 "status": {"type": "string", "enum": ["open", "done", "deleted", "all"], "default": "open"},
+                "archive": {"type": "string", "enum": ["all", "active", "archived"], "default": "all"},
                 "subtree": {"type": "boolean", "default": True, "description": "Include descendant groups."},
+                "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+                "tag_mode": {"type": "string", "enum": ["all", "any"], "default": "all"},
+                "turn": {"type": "string", "enum": ["", "unassigned", "owner", "agent", "other"]},
+                "query": {"type": "string", "description": "Case-insensitive substring in text, description, next step or note."},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100},
                 "offset": {"type": "integer", "minimum": 0, "maximum": 5000, "default": 0},
             },
@@ -276,10 +404,19 @@ TOOLS = (
         },
     ),
     (
+        "entry",
+        tool_entry,
+        "Smart Lists: lossless full-card field pages. Read overview (identity, stage, timestamps and every field length), then page text, due, tags, description, note, next_step, capture_key, group_path and references by next_offset until total: text fields 500 characters a page, tags and references as many whole items as fit one result. Compare revision on every page; if it changes, restart the read. Never replace references using a shortened read result.",
+        {"type": "object", "properties": {
+            "entry_id": {"type": "string"},
+            "field": {"type": "string", "enum": ["overview", "text", "due", "tags", "description", "note", "next_step", "capture_key", "references", "group_path"], "default": "overview"},
+            "offset": {"type": "integer", "minimum": 0, "default": 0}},
+         "required": ["entry_id"], "additionalProperties": False},
+    ),
+    (
         "update",
         tool_update,
-        "Smart Lists: replace the text and/or due of one entry when the owner asks to change it. New text is "
-        "stored verbatim.",
+        "Smart Lists: update one entry's text, due or supplied details fields. With the owner's standing instruction to maintain their commitments, update next step/tags/whose turn/source references on actual evidence. Preserve original wording in text unless asked to rewrite it. Read the entry first; replace references with the complete intended list.",
         {
             "type": "object",
             "properties": {
@@ -287,6 +424,10 @@ TOOLS = (
                 "text": {"type": "string", "description": "New text, verbatim. Omit to keep."},
                 "due": _DUE,
                 "clear_due": {"type": "boolean", "default": False},
+                "details": _DETAILS,
+                "stage": {"type": "string", "enum": list(lists_core.STAGES)},
+                "description": {"type": "string", "maxLength": lists_core.MAX_DESCRIPTION_CHARS},
+                "expected": {"type": "object", "description": "Optional prior values for exactly the updated fields, as read: text, description and stage as text; due as null, the raw text or the stored {raw, at?} object (\"\" from an entry page also means unset); details.<field> as stored. A value that differs from the store is a field_conflict; a malformed one is invalid_input. Use for replacing metadata after a fresh full entry read."},
                 "request_id": _REQUEST_ID,
             },
             "required": ["entry_id"],
@@ -308,6 +449,17 @@ TOOLS = (
             "required": ["entry_ids"],
             "additionalProperties": False,
         },
+    ),
+    (
+        "archive",
+        tool_archive,
+        "Smart Lists: archive or restore one task without changing its stage or deleting it. Read entry first and pass expected.archived_at from that read; an overlapping change is refused.",
+        {"type": "object", "properties": {
+            "entry_id": {"type": "string"}, "archived": {"type": "boolean"},
+            "expected": {"type": "object", "properties": {"archived_at": {"type": ["string", "null"]}},
+                         "required": ["archived_at"], "additionalProperties": False},
+            "request_id": _REQUEST_ID},
+         "required": ["entry_id", "archived", "expected", "request_id"], "additionalProperties": False},
     ),
     (
         "move",
@@ -347,7 +499,7 @@ TOOLS = (
     (
         "select",
         tool_select,
-        "Smart Lists: read-only selection of the open entries in a group and all of its sub-groups, in tree order, "
+        "Smart Lists: read-only selection of active, non-archived open entries in a group and all of its sub-groups, in tree order, "
         "for example to prepare a shopping run. Returns at most 500 entries with total, truncated and "
         "next_offset; pass next_offset as offset to fetch the next page. "
         "It never buys, orders, reminds or changes anything.",
@@ -416,6 +568,7 @@ def _entry_rows(entries: Iterable[Dict[str, Any]], stamp: Optional[Tuple[str, st
     rows = []
     for entry in entries:
         row = {"id": entry["id"], "item": entry["text"], "group": entry["group_path"],
+               "stage": entry["stage"], "archived_at": entry.get("archived_at"),
                "due": (entry.get("due") or {}).get("raw", "")}
         if stamp:
             row[stamp[0]] = entry.get(stamp[1]) or ""
@@ -556,6 +709,7 @@ def widget_selection(group: Any) -> Dict[str, Any]:
         return {"ok": False, "error": exc.message, "warning": exc.message, "scope": "", "count": 0, "total": 0,
                 "truncated": False, "rows": []}
     rows = [{"id": entry["entry_id"], "item": entry["text"], "group": entry["group_path"],
+             "stage": entry["stage"], "archived_at": entry.get("archived_at"),
              "due": (entry.get("due") or {}).get("raw", "")} for entry in result["entries"]]
     warning = (f"Showing the first {result['count']} of {result['total']} open entries."
                if result["truncated"] else "")
@@ -598,12 +752,29 @@ def _query(request: Any, name: str) -> str:
         return ""
 
 
+def _query_tags(request: Any) -> list:
+    params = request.query_params
+    if hasattr(params, "getlist"):
+        return params.getlist("tag")
+    value = params.get("tag", [])
+    return value if isinstance(value, list) else ([value] if value else [])
+
+
 async def route_view(request: Any) -> Dict[str, Any]:
     return await asyncio.to_thread(widget_view)
 
 
 async def route_edit(request: Any) -> Dict[str, Any]:
     body = await _json_body(request)
+    if "changes" in body:
+        try:
+            result = await asyncio.to_thread(_service().edit_fields, body.get("entry_id"),
+                                             body.get("changes"), body.get("expected"),
+                                             request_id=body.get("request_id"))
+            return {"ok": True, "entry": result["entry"], "changed": result["changed"],
+                    "replayed": result.get("replayed", False)}
+        except ListError as exc:
+            return {"ok": False, "code": exc.code, "error": exc.message, "conflicts": exc.fields}
     return await asyncio.to_thread(_widget_mutation, lambda service: service.edit(
         body.get("entry_id"), text=body.get("text") or "", due=body.get("due") or "",
         clear_due=_truthy(body.get("clear_due")), status=body.get("status") or "",
@@ -678,6 +849,68 @@ def widget_today(timezone: str, offset: int = 0, group_id: str = "") -> Dict[str
             "archive_total": len(archived), "export_warning": _store_view(info)["export_warning"]}
 
 
+async def route_entry(request: Any) -> Dict[str, Any]:
+    try:
+        return {"ok": True, **await asyncio.to_thread(_service().read_entry, _query(request, "entry_id"))}
+    except ListError as exc:
+        return {"ok": False, "code": exc.code, "error": exc.message}
+
+
+async def route_archive(request: Any) -> Dict[str, Any]:
+    body = await _json_body(request)
+    try:
+        result = await asyncio.to_thread(_service().archive, body.get("entry_id"), body.get("archived"),
+                                         body.get("expected"), request_id=body.get("request_id"))
+        return {"ok": True, "entry": result["entry"], "replayed": result.get("replayed", False)}
+    except ListError as exc:
+        return {"ok": False, "code": exc.code, "error": exc.message, "conflicts": exc.fields}
+
+
+async def route_archive_view(request: Any) -> Dict[str, Any]:
+    try:
+        result = await asyncio.to_thread(_service().kanban, archive=True,
+            tags=_query_tags(request), turn=_query(request, "turn"), query=_query(request, "query"),
+            offsets={"archive": int(_query(request, "offset") or "0")},
+            limit=int(_query(request, "limit") or "100"))
+        return {"ok": True, **result}
+    except (ValueError, ListError) as exc:
+        return {"ok": False, "code": exc.code if isinstance(exc, ListError) else "invalid_input",
+                "error": exc.message if isinstance(exc, ListError) else "Invalid filter"}
+
+
+async def route_archive_dispatch(request: Any) -> Dict[str, Any]:
+    return await (route_archive(request) if request.method == "POST" else route_archive_view(request))
+
+
+async def route_draft(request: Any) -> Dict[str, Any]:
+    """The card editor's one unsaved form; it never touches the lists themselves."""
+    slot = _service().draft
+    try:
+        if request.method != "POST":
+            return {"ok": True, **await asyncio.to_thread(slot.read)}
+        body = await _json_body(request)
+        return {"ok": True, **await asyncio.to_thread(
+            slot.write, body.get("expected_revision"), body.get("write_id"), body.get("draft"),
+            replace_unreadable=body.get("replace_unreadable") is True)}
+    except lists_core.DraftConflict as exc:
+        return {"ok": False, "code": exc.code, "error": exc.message, "current": exc.current}
+    except ListError as exc:
+        return {"ok": False, "code": exc.code, "error": exc.message}
+
+
+async def route_board(request: Any) -> Dict[str, Any]:
+    try:
+        tags = _query_tags(request)
+        offsets = {stage: int(_query(request, "offset_" + stage) or "0") for stage in lists_core.STAGES}
+        result = await asyncio.to_thread(_service().kanban, tags=tags, turn=_query(request, "turn"),
+                                         query=_query(request, "query"), offsets=offsets,
+                                         limit=int(_query(request, "limit") or "100"))
+        return {"ok": True, **result}
+    except (ValueError, ListError) as exc:
+        return {"ok": False, "code": exc.code if isinstance(exc, ListError) else "invalid_input",
+                "error": exc.message if isinstance(exc, ListError) else "Invalid filter"}
+
+
 async def route_today(request: Any) -> Dict[str, Any]:
     try:
         return await asyncio.to_thread(widget_today, _query(request, "timezone"),
@@ -729,7 +962,7 @@ async def route_add(request: Any) -> Any:
         return JSONResponse({"ok": True, "notice": f"Added to {result['group']['path']}",
                              "entry_id": result["added"][0]["id"]})
     except ListError as exc:
-        return JSONResponse({"ok": False, "error": exc.message}, status_code=400)
+        return JSONResponse({"ok": False, "code": exc.code, "error": exc.message}, status_code=400)
 
 
 ROUTES = (
@@ -740,8 +973,12 @@ ROUTES = (
     ("store", route_store, ("POST",)),
     ("export", route_export, ("GET",)),
     ("today", route_today, ("GET",)),
+    ("board", route_board, ("GET",)),
+    ("entry", route_entry, ("GET",)),
+    ("archive", route_archive_dispatch, ("GET", "POST")),
     ("check", route_check, ("POST",)),
     ("add", route_add, ("POST",)),
+    ("draft", route_draft, ("GET", "POST")),
 )
 
 
@@ -750,12 +987,12 @@ EXPORT_FILENAME = "smart-lists-export.json"
 # Mirrored verbatim in SKILL.md ``ui_tab.render``; a test keeps the two equal.
 WIDGET_RENDER: Dict[str, Any] = {
     "kind": "module", "entry": "widget.js", "start": "auto", "appearance": "host",
-    "span": 2, "height": 560,
+    "span": 2, "height": 940,
 }
 
 
 def register(api: Any) -> None:
-    """PluginAPI entry point: one store, nine tools, nine routes, one widget."""
+    """PluginAPI entry point: one store, eleven tools, thirteen routes, one widget."""
     global _SERVICE
     _SERVICE = lists_core.SmartLists(Path(api.get_state_dir()))
     for name, handler, description, schema in TOOLS:
@@ -763,7 +1000,7 @@ def register(api: Any) -> None:
     for path, handler, methods in ROUTES:
         api.register_route(path, handler, methods=methods)
     api.register_ui_tab("lists", "Smart Lists", icon="📋", render=WIDGET_RENDER)
-    api.log("info", "smart_lists registered: local store, 9 tools, 9 routes, Today widget")
+    api.log("info", "smart_lists registered: local store, 11 tools, 13 routes, Kanban widget")
 
 
 __all__ = ["register"]
