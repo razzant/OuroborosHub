@@ -1,0 +1,55 @@
+diff --git a/supervisor/message_bus.py b/supervisor/message_bus.py
+index ec06cbcaf..25edadf1a 100644
+--- a/supervisor/message_bus.py
++++ b/supervisor/message_bus.py
+@@ -686,7 +686,7 @@ class LocalChatBridge:
+             "caption": str(caption or ""),
+             "image_base64": b64_str,
+             "mime": str(mime or ""),
+-            "ts": msg["ts"],
++            "ts": msg["ts"], "task_id": msg["task_id"], **{k: msg[k] for k in ("row_address",) if k in msg},
+         })
+         return True, "ok"
+ 
+@@ -749,7 +749,7 @@ class LocalChatBridge:
+             "caption": str(caption or ""),
+             "video_base64": b64_str,
+             "mime": str(mime or ""),
+-            "ts": msg["ts"],
++            "ts": msg["ts"], "task_id": msg["task_id"], **{k: msg[k] for k in ("row_address",) if k in msg},
+         })
+         return True, "ok"
+ 
+@@ -833,7 +833,7 @@ class LocalChatBridge:
+             "download_url": str(download_url or ""),
+             "download_url_compat": str(download_url_compat or ""),
+             "file_ref": dict(file_ref or {}),
+-            "ts": ts,
++            "ts": ts, "task_id": str(task_id or ""), **{k: msg[k] for k in ("row_address",) if k in msg},
+         })
+         # Persist a compact chat row (NO base64) so the delivered document is
+         # rebuilt on reload; the durable artifact download_url carries the bytes.
+@@ -884,7 +884,7 @@ class LocalChatBridge:
+             "transport": self.chat_transport(chat_id),
+             "title": safe_title,
+             "actions": validated,
+-            "ts": ts,
++            "ts": ts, "task_id": msg["task_id"], **{k: msg[k] for k in ("row_address",) if k in msg},
+         })
+         return True, "ok"
+ 
+diff --git a/tests/test_message_bus.py b/tests/test_message_bus.py
+index 9387b9abe..541eeb4f3 100644
+--- a/tests/test_message_bus.py
++++ b/tests/test_message_bus.py
+@@ -376,7 +376,9 @@ def test_send_links_broadcasts_publishes_and_persists_compact_row(monkeypatch, t
+     assert live["task_id"] == "task-links"
+     topic, payload = events[-1]
+     assert topic == event_bus.CHAT_LINKS
+-    assert set(payload) == {"chat_id", "transport", "title", "actions", "ts"}
++    # The producer's task and its stored row ride the event, so a subscriber can place it by lineage.
++    assert set(payload) == {"chat_id", "transport", "title", "actions", "ts", "task_id", "row_address"}
++    assert payload["task_id"] == "task-links" and payload["row_address"].startswith("row:")
+     assert payload["actions"] == actions
+     row = chat_rows(tmp_path)[-1]
+     assert row["type"] == "links"
