@@ -114,6 +114,21 @@ HOST_FACTS = dict(host_adapter_state='active', workspace_name='Northstar Labs', 
                   history_reporting_state='supported')
 
 
+def retrying_event(store, parse, note, index=1):
+    """An event Ouroboros has not confirmed receiving, saved for its next try."""
+    raw = {'type': 'events_api', 'envelope_id': f'env-synth-{index}', 'payload': {
+        'event_id': f'EvSYNTH{index}', 'team_id': 'T09SYNTH01', 'event': {
+            'type': 'message', 'user': 'U09SYNTH01', 'channel': 'C09SYNTH01', 'channel_type': 'channel',
+            'ts': f'170000000{index}.000100', 'event_ts': f'170000000{index}.000100', 'text': 'synthetic message'}}}
+    store.ingest_envelope(raw, parse(raw, bot_user_id='U09OUROBOT1'))
+    event = store.claim_inbox()
+    store.retry_inbox(event.row_id, event.lease_token, note, delay_seconds=30.0)
+
+
+# A token another version may have stored inside an error, as a header refusal prints it (synthetic).
+LEAKED = "Illegal header value b'Bearer xoxb-4417-SYNTHETICTOKEN\\nTAILPIECE42'"
+
+
 def seed(scenario, root):
     """Synthetic store states: healthy, recent problems with holds, refused tokens, and the degraded states."""
     sys.path.insert(0, str(ROOT / 'skills' / 'slack-bridge'))
@@ -126,6 +141,14 @@ def seed(scenario, root):
     try:
         if scenario == 'stopped':  # a clean stop after an active adapter: the daemon leaves "disconnected", no PID
             store.set_runtime(socket_state='disconnected', **{**HOST_FACTS, 'reaction_context_state': 'update_required'})
+            retrying_event(store, parse_socket_envelope, 'Presence Host returned HTTP 503')
+            return TOKENS
+        if scenario == 'token_error':  # an older record whose error text holds a token: the route cleans it
+            store.set_runtime(socket_state='error', last_socket_error='placeholder', **HOST_FACTS)
+            store.close()
+            import sqlite3
+            with sqlite3.connect(root / 'slack_bridge.sqlite3') as conn:
+                conn.execute("UPDATE runtime_state SET value_json=? WHERE key='last_socket_error'", (json.dumps(LEAKED),))
             return TOKENS
         if scenario == 'crashed':  # the companion died while its record still says connected
             store.set_runtime(socket_state='connected', companion_pid=dead_pid(), connected_at=1795381200.0, **HOST_FACTS)
@@ -133,6 +156,7 @@ def seed(scenario, root):
         if scenario == 'unknown_liveness':  # the probe is made not to answer in the fixture below
             store.set_runtime(socket_state='error', last_socket_error='ConnectError: All connection attempts failed',
                               companion_pid=os.getpid(), **HOST_FACTS)
+            retrying_event(store, parse_socket_envelope, 'Presence Host returned HTTP 503')
             return TOKENS
         if scenario == 'auth_refused':
             # What the daemon leaves after Slack refused the app token: the error, and no companion PID.
@@ -142,6 +166,12 @@ def seed(scenario, root):
         store.set_runtime(socket_state='connected', host_adapter_state='active', workspace_name='Northstar Labs',
                           companion_pid=os.getpid(), connected_at=1795381200.0, reaction_context_state='available',
                           history_reporting_state='supported')
+        if scenario == 'host_unanswered':  # the start check got a 503: what the runtime records for it
+            store.set_runtime(host_adapter_state='missing_binding_id', history_reporting_state='unavailable',
+                              reaction_context_state='update_required')
+        if scenario == 'reactions_unbound':  # Ouroboros answered: no place confirmed, reactions need an update
+            store.set_runtime(host_adapter_state='missing_binding_id', history_reporting_state='unsupported',
+                              reaction_context_state='update_required')
         if scenario in ('lost_reply', 'inbound_failed'):
             raw = {'type': 'events_api', 'envelope_id': 'env-synth-1', 'payload': {
                 'event_id': 'EvSYNTH1', 'team_id': 'T09SYNTH01', 'event': {
@@ -160,6 +190,24 @@ def seed(scenario, root):
             first = store.claim_outbox()
             store.fail_outbox(first.row_id, first.lease_token, 'msg_blocked', state='failed')
             store.hold_outbox(store.claim_outbox(), 'Held: Ops room is paused')
+        if scenario == 'mixed_1b':
+            # One message: part 1 delivered, part 2 refused. Another: part 1 refused, part 2 still waiting.
+            store.enqueue_outbox(request_id='synthetic-partly', target='C09SYNTH01', thread_ts='', chunks=('one', 'two'))
+            first = store.claim_outbox()
+            store.complete_outbox(first.row_id, first.lease_token, provider_message_ts='1700000000.000100')
+            second = store.claim_outbox()
+            store.fail_outbox(second.row_id, second.lease_token, 'msg_too_long', state='failed')
+            store.enqueue_outbox(request_id='synthetic-queued', target='C09SYNTH02', thread_ts='', chunks=('one', 'two'))
+            refused = store.claim_outbox()
+            store.fail_outbox(refused.row_id, refused.lease_token, 'channel_not_found', state='failed')
+        if scenario == 'held_old_problem':  # part 1 refused two days ago, part 2 held by a paused place
+            import sqlite3
+            store.enqueue_outbox(request_id='synthetic-old', target='C09SYNTH01', thread_ts='', chunks=('one', 'two'))
+            first = store.claim_outbox()
+            store.fail_outbox(first.row_id, first.lease_token, 'msg_blocked', state='failed')
+            store.hold_outbox(store.claim_outbox(), 'Held: Ops room is paused')
+            with sqlite3.connect(store.path) as conn:
+                conn.execute('UPDATE outbox SET updated_at=updated_at-172800 WHERE id=?', (first.row_id,))
         if scenario == 'problems':
             store.enqueue_outbox(request_id='synthetic-refused', target='C09SYNTH01', thread_ts='', chunks=('hello',))
             refused = store.claim_outbox()
@@ -398,16 +446,17 @@ DEGRADED = [
      ['unknown: the queue store could not be read'],
      ['Newest queue note', 'since install', 'Since install', 'the system did not answer', 'not checked yet',
       'Known after the bridge first signs in', 'Counts not listed are zero']),
-    ('stopped', 'Disconnected · the bridge closed its Slack connection · 1 more needs attention',
+    ('stopped', 'Disconnected · the bridge closed its Slack connection · 2 more need attention',
      ['yes, at the last check', 'skipped: this Ouroboros can’t take them, at the last check',
-      'At the bridge’s last check this Ouroboros couldn’t take Slack reactions'],
-     ['Messages work as usual']),
+      'At the bridge’s last check this Ouroboros couldn’t take Slack reactions',
+      'It is saved here and tried again when the bridge runs'],
+     ['Messages work as usual', 'keeps trying by itself']),
     ('crashed', 'Disconnected · the bridge process is not running',
      ['yes, at the last check', 'passed to Ouroboros, at the last check'], ['Messages work as usual']),
-    ('unknown_liveness', 'Connection error · the Slack connection failed · 1 more needs attention',
+    ('unknown_liveness', 'Connection error · the Slack connection failed · 2 more need attention',
      ['it is not known whether it is still trying', 'not known: the system did not answer',
-      'ConnectError: All connection attempts failed'],
-     ['at least every 30 seconds', 'tries again by itself']),
+      'ConnectError: All connection attempts failed', 'It is saved here; the next try uses the same event id'],
+     ['at least every 30 seconds', 'tries again by itself', 'keeps trying by itself', 'tried again when the bridge runs']),
     ('lost_reply', 'Connected · 1 Slack event waits for Ouroboros to confirm it',
      ['waiting for Ouroboros to confirm it received it', 'reply lost after Host recorded the turn'],
      ['has not taken', 'to be passed to Ouroboros']),
@@ -418,12 +467,35 @@ DEGRADED = [
      ['Part of it was refused and is not retried', 'send only the refused parts',
       '1 of these messages also has a part refused', '1 of the queued ones with a part not delivered or unknown'],
      ['send again if needed', 'send only what is missing']),
+    ('mixed_1b', 'Connected · 2 messages not delivered',
+     ['1 of them had a part refused, which is not retried; its other parts are still queued',
+      'For that one, fix the cause and wait until the queued parts are sent',
+      'its other parts were delivered or have an unknown outcome', 'check slack_receipt and Slack for which parts arrived'],
+     ['send again if needed', 'For the others', 'send only what is missing']),
+    ('held_old_problem', 'Connected · 1 message held',
+     ['an earlier part that was refused or ended with an unknown outcome more than a day ago',
+      'Before sending that part again'],
+     ['(listed above)']),
+    ('host_unanswered', 'Connected · Slack events are not passed to Ouroboros · 1 more needs attention',
+     ['The bridge checks again by itself with the next Slack event or send',
+      'not yet: Ouroboros didn’t answer the check; asked again with the next event or send',
+      'It is asked again with the bridge’s next Slack event or send'],
+     ['Connect Slack in Circles', 'turn Slack Bridge off and on', 'when the bridge restarts']),
+    ('reactions_unbound', 'Connected · Slack events are not passed to Ouroboros · 1 more needs attention',
+     ['can’t take Slack reactions as context, so they are skipped', 'Connect Slack in Circles'],
+     ['Messages work as usual']),
+    ('token_error', 'Connection error · the bridge stopped after an error',
+     ["Illegal header value b'Bearer [redacted]'"],
+     ['SYNTHETICTOKEN', 'TAILPIECE42', 'xoxb-4417']),
 ]
+# Details rows whose value must read exactly so (label → value).
+ROWS = {'store_unreadable': {'Link': 'unknown: the queue store could not be read',
+                             'Socket Mode': 'unknown: the queue store could not be read'}}
 
 
 @pytest.mark.parametrize('served,line,shown,absent', DEGRADED, indirect=['served'],
                          ids=[case[0] for case in DEGRADED])
-def test_each_state_says_only_what_the_store_recorded(served, line, shown, absent):
+def test_each_state_says_only_what_the_store_recorded(served, line, shown, absent, request):
     from playwright.sync_api import sync_playwright, expect
     state, url = served
     assert route_status(state, url)['text'] == line
@@ -443,6 +515,10 @@ def test_each_state_says_only_what_the_store_recorded(served, line, shown, absen
                 assert words in text, (words, text)
             for words in absent:
                 assert words not in text, (words, text)
+            for label, value in ROWS.get(request.node.callspec.id, {}).items():
+                values = inner.evaluate('''(label) => [...document.querySelectorAll('.tc-det dt')]
+                    .filter((dt) => dt.textContent === label).map((dt) => dt.nextElementSibling.textContent)''', label)
+                assert values == [value], (label, values)
             assert inner.evaluate('document.documentElement.scrollWidth <= innerWidth')
             page.evaluate('async () => { await disposeWidget(); }')
         finally:

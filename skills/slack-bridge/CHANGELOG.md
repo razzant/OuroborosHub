@@ -31,8 +31,12 @@
   failed or unknown part counts as a problem even while another of its parts still waits or is
   held; `failed_messages_still_queued` / `uncertain_messages_still_queued` and
   `outbound_messages_with_problem_parts` count those messages, so the card advises waiting for the
-  queued parts and sending only the refused ones instead of sending the message again. The 24-hour
-  window applies to each outcome's own time. Each queue in `recent_problems` also gains `last_failed_error` and `last_uncertain_error`
+  queued parts and sending only the refused ones instead of sending the message again.
+  `failed_messages_others_delivered_or_unknown` and `failed_messages_every_part_refused` class the
+  other refused messages (check `slack_receipt` and send only the refused parts, or send again),
+  `uncertain_messages_partly_delivered_none_queued` and `outbound_messages_with_recent_problem_parts`
+  keep the other advice to the messages it fits. The 24-hour window applies to each outcome's own
+  time, and an item's error and time come from the messages it counts. Each queue in `recent_problems` also gains `last_failed_error` and `last_uncertain_error`
   (its newest error of that state inside the 24-hour window), so each item carries its own error;
   `last_error` stays. `mutations_leased` counts actions in progress and `host_adapter_checked`
   says whether a companion ever recorded its view of the Host binding. All of it is read in one
@@ -47,8 +51,15 @@
 - Details no longer says Ouroboros needs an update for reactions when it simply did not answer the
   capability check. Whichever request finds the Host binding again after a failed check (an event's
   hand-off, a place check before a send, a report) records it once, so "events passed on" and the
-  Places line follow it. While the bridge is not confirmed running, the Host facts read as its last
+  Places line follow it; overlapping checks that end in either order leave what is recorded equal
+  to what the bridge knows. A check Ouroboros did not answer is not read as a missing place: the
+  card says the next event or send checks again. While the bridge is not confirmed running, the Host facts read as its last
   check, and a store that can't be read leaves every store-based row "unknown".
+- A token could reach the card through error text (an HTTP library prints the `Authorization`
+  value of a token with an illegal character); stored error text and every free-text error field
+  of `GET status`, records of older versions included, now leave without Slack token shapes, values
+  after `Bearer`/`Authorization` and the configured tokens. This covers what the card shows; the
+  earlier bridge-hardening findings stay as they were.
 - `GET status` answers with string `text` and `tone` on every path, including a queue store that
   can't be read ("Status unknown · the bridge's queue store can't be read").
 - 1.13.0 introduces the companion liveness probe (POSIX signal 0; on Windows `OpenProcess` and

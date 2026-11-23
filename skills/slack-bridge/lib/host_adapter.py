@@ -445,6 +445,10 @@ class LoopbackPresenceHostAdapter:
         # Called once whenever a discovery changes what the adapter knows (set by the runtime to record it in the
         # store), whichever caller ran the discovery: a submit, a place check or a report, not only a recheck.
         self.capabilities_listener: Callable[[], None] | None = None
+        # What the listener last published. Each completed discovery compares with it, not with the state read
+        # before its own await, so overlapping discoveries that end in either order leave the published
+        # capabilities equal to the adapter's own.
+        self._published = self._capabilities()
 
     def _capabilities(self) -> tuple[Any, ...]:
         return (self.available, self.delivery_reporting_status, self.delivery_reporting_version,
@@ -454,11 +458,12 @@ class LoopbackPresenceHostAdapter:
     async def discover_delivery_support(self) -> int:
         if self.delivery_reporting_status in {"supported", "unsupported"}:
             return self.delivery_reporting_version
-        before = self._capabilities()
         try:
             return await self._discover_delivery_support()
         finally:
-            if self.capabilities_listener is not None and self._capabilities() != before:
+            now = self._capabilities()
+            if self.capabilities_listener is not None and now != self._published:
+                self._published = now
                 self.capabilities_listener()
 
     async def _discover_delivery_support(self) -> int:

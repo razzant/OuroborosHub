@@ -607,6 +607,16 @@ var TransportKit = (function () {
             { strong: 'If this stays,', text: 'in Extensions turn Slack Bridge off and on.' }
         ]
     };
+    // Ouroboros did not answer the bridge's check of its place (the store's "unavailable"), which is not a missing
+    // place: the next event or send asks again by itself (lib/host_adapter.py), so no setup advice.
+    var HOST_UNANSWERED_LINES = [
+        'Messages from Slack are kept here and not passed on yet: when the bridge started, Ouroboros did not answer its check of the place.',
+        'The bridge checks again by itself with the next Slack event or send.'
+    ];
+    var UNKNOWN_HOST_UNANSWERED_LINES = [
+        'When the bridge last started, Ouroboros did not answer its check of the place, so messages from Slack were kept here and not passed on. The system did not answer whether the bridge’s process is still running.',
+        { strong: 'If this stays,', text: 'in Extensions turn Slack Bridge off and on.' }
+    ];
     // The system did not answer whether the bridge's process runs: the detail is the state it last recorded, so no
     // line promises what a running process does (retrying, keeping messages).
     var UNKNOWN_PROCESS_LINES = {
@@ -640,7 +650,9 @@ var TransportKit = (function () {
         var one = count(item.messages) + count(item.actions) + count(item.events) === 1;
         var them = one ? 'it' : 'them', are = one ? 'is' : 'are';
         if (item.kind === 'link') {
+            var unanswered = item.detail === 'host_adapter_inactive' && item.host_unanswered;
             out.lines = (item.auth ? AUTH_LINES
+                : unanswered ? (item.process_unknown ? UNKNOWN_HOST_UNANSWERED_LINES : HOST_UNANSWERED_LINES)
                 : (item.process_unknown && UNKNOWN_PROCESS_LINES[item.detail]) || LINK_LINES[item.detail] || []).slice();
             if (item.detail === 'host_adapter_inactive' && count(item.count)) {
                 out.lines.splice(1, 0, plural(count(item.count), 'Slack event') + ' wait here.');
@@ -652,26 +664,13 @@ var TransportKit = (function () {
                 'The bridge has no saved final result for ' + them + ', so nobody knows whether ' + (one ? 'it' : 'they') + ' took effect. Nothing repeats ' + them + ' by itself.',
                 { strong: 'Check in Slack whether ' + (one ? 'it' : 'they') + ' took effect', text: '(the message is there, the edit or deletion is done) before asking Ouroboros to repeat ' + them + '.' },
                 queuedLine(item.still_queued, 'check only after they are sent'),
-                partsLine(item.partly_delivered)
+                // Partly delivered with parts still queued: those are covered by the line above, not sent now.
+                partsLine(item.partly_delivered_none_queued !== undefined ? item.partly_delivered_none_queued : item.partly_delivered)
             ];
             if (error) out.error = { label: 'What happened' + actionWord(error.operation), text: error.text, at: error.at };
         } else if (item.kind === 'not_delivered') {
             out.atLabel = 'last';
-            // A message with a part refused while its other parts still wait, are held or are being sent: those parts
-            // go out by themselves, so "send it again" would post them twice.
-            var queued = count(item.still_queued);
-            var allQueued = queued > 0 && queued === count(item.messages) && !count(item.actions);
-            out.lines = allQueued ? [
-                one ? 'Part of it was refused and is not retried; its other parts are still queued and go out by themselves.'
-                    : 'Part of each was refused and is not retried; their other parts are still queued and go out by themselves.',
-                { strong: 'Fix the cause, wait until the queued parts are sent,', text: 'then ask Ouroboros to check slack_receipt for which parts arrived and send only the refused parts.' }
-            ] : [
-                (one ? 'It' : 'They') + ' could not be delivered and ' + (one ? 'is' : 'are') + ' not retried.',
-                queuedLine(queued, 'wait until they are sent, then ask Ouroboros to check slack_receipt for which parts arrived and send only the refused parts'),
-                { strong: queued ? 'For the others, fix the cause,' : 'Fix the cause,',
-                  text: count(item.partly_delivered) && !queued ? 'then ask Ouroboros to send only what is missing.' : 'then ask Ouroboros to send again if needed.' },
-                queued ? null : partsLine(item.partly_delivered)
-            ];
+            out.lines = notDeliveredLines(item);
             if (error) out.error = { label: 'Error text' + actionWord(error.operation), text: error.text, at: error.at };
         } else if (item.kind === 'not_handled') {
             out.atLabel = 'last';
@@ -689,14 +688,23 @@ var TransportKit = (function () {
             });
             if (reasons.length > 4) out.lines.push('…and ' + plural(reasons.length - 4, 'more reason') + '.');
             out.lines.push('Kept back until the reason clears, then sent by ' + (one ? 'itself.' : 'themselves.'));
+            // "(listed above)" only for a message whose problem part is in the window, so its item is shown.
             var mixed = count(item.with_problem_parts);
-            if (mixed) out.lines.push((mixed === 1 ? '1 of these messages also has' : num(mixed) + ' of these messages also have')
+            var recentMixed = item.with_recent_problem_parts === undefined ? mixed : Math.min(mixed, count(item.with_recent_problem_parts));
+            if (recentMixed) out.lines.push((recentMixed === 1 ? '1 of these messages also has' : num(recentMixed) + ' of these messages also have')
                 + ' a part refused or with an unknown outcome (listed above); only the held parts go out by themselves.');
+            if (mixed > recentMixed) {
+                out.lines.push((mixed - recentMixed === 1 ? '1 of these messages has' : num(mixed - recentMixed) + ' of these messages have')
+                    + ' an earlier part that was refused or ended with an unknown outcome more than a day ago; only the held parts go out by themselves.');
+                out.lines.push({ strong: 'Before sending that part again,', text: 'ask Ouroboros to check slack_receipt for which parts arrived.' });
+            }
         } else if (item.kind === 'reactions') {
             var skipped = count(item.count) ? ' (' + num(count(item.count)) + ' so far)' : '';
             out.lines = [
                 running(data)
-                    ? 'This Ouroboros can’t take Slack reactions as context, so they are skipped' + skipped + '. Messages work as usual.'
+                    ? 'This Ouroboros can’t take Slack reactions as context, so they are skipped' + skipped + '.'
+                        // Messages work only while the link is up and events are passed on.
+                        + (passedOn(data) ? ' Messages work as usual.' : '')
                     : 'At the bridge’s last check this Ouroboros couldn’t take Slack reactions as context, so they were skipped' + skipped + '.',
                 { strong: 'Update Ouroboros,', text: 'then in Extensions turn Slack Bridge off and on (that also rechecks a current one).' }
             ];
@@ -708,7 +716,13 @@ var TransportKit = (function () {
             if (error) out.error = { label: 'Error text', text: error.text };
         } else if (item.kind === 'handoff_waiting') {
             out.atLabel = 'last try';
-            out.lines = ['The bridge is waiting for Ouroboros to confirm it received ' + them + ' and keeps trying by itself, with the same event id each time.'];
+            var alive = data.link ? data.link.companion_alive : null;
+            var waiting = 'The bridge is waiting for Ouroboros to confirm it received ' + them;
+            var saved = (one ? 'It is' : 'They are') + ' saved here';
+            // Ongoing attempts belong to a process the system confirmed running.
+            out.lines = [alive === true ? waiting + ' and keeps trying by itself, with the same event id each time.'
+                : alive === false ? waiting + '. ' + saved + ' and tried again when the bridge runs, with the same event id.'
+                    : waiting + '. ' + saved + '; the next try uses the same event id.'];
             if (error) out.error = { label: 'Last error', text: error.text, at: error.at };
         } else if (item.kind === 'partial') {
             out.lines = (item.gaps || []).map(function (gap) { return PARTIAL_LINES[gap]; }).filter(Boolean);
@@ -726,6 +740,51 @@ var TransportKit = (function () {
             + ' those go out by themselves. For ' + (n === 1 ? 'it' : 'them') + ', ' + then + '.';
     }
 
+    /* Refused messages by their other parts, each class with its own advice (lib/store.py's grouped pass):
+       still queued → wait, then send only the refused parts; others delivered or unknown → check, send only the refused
+       parts; every part refused (and actions) → send again if needed. One class alone speaks of "it"/"they". */
+    function notDeliveredLines(item) {
+        var messages = count(item.messages), actions = count(item.actions), queued = count(item.still_queued);
+        var legacy = item.every_part_refused === undefined;
+        var settled = legacy ? 0 : count(item.others_settled);
+        var whole = (legacy ? Math.max(0, messages - queued - settled) : count(item.every_part_refused)) + actions;
+        var total = messages + actions;
+        var single = [queued, settled, whole].filter(function (n) { return n > 0; }).length === 1;
+        function some(n) { return n === 1 ? '1 of them' : num(n) + ' of them'; }
+        function those(n) { return n === 1 ? 'For that one, ' : 'For those ' + num(n) + ', '; }
+        function partOf(n, rest) {
+            if (single) return (total === 1 ? 'Part of it was refused and is not retried; its' : 'Part of each was refused and is not retried; their')
+                + ' other parts ' + rest;
+            return some(n) + ' had a part refused, which is not retried; ' + (n === 1 ? 'its' : 'their') + ' other parts ' + rest;
+        }
+        var lines = [];
+        if (queued) {
+            lines.push(partOf(queued, 'are still queued and go out by themselves.'));
+            lines.push({ strong: single ? 'Fix the cause, wait until the queued parts are sent,' : those(queued) + 'fix the cause and wait until the queued parts are sent,',
+                text: 'then ask Ouroboros to check slack_receipt for which parts arrived and send only the refused parts.' });
+        }
+        if (settled) {
+            lines.push(partOf(settled, 'were delivered or have an unknown outcome.'));
+            lines.push({ strong: single ? 'Fix the cause,' : those(settled) + 'fix the cause,',
+                text: 'then ask Ouroboros to check slack_receipt and Slack for which parts arrived and send only the refused parts.' });
+        }
+        if (whole) {
+            var oneWhole = (single ? total : whole) === 1;
+            lines.push((single ? (oneWhole ? 'It' : 'They') : some(whole)) + ' could not be delivered and ' + (oneWhole ? 'is' : 'are') + ' not retried.');
+            // An older payload without the classes: its partly-delivered count is the only hint (as in 1.13.0 round 6).
+            var partly = legacy && !queued ? count(item.partly_delivered) : 0;
+            lines.push({ strong: single ? 'Fix the cause,' : those(whole) + 'fix the cause,',
+                text: partly ? 'then ask Ouroboros to send only what is missing.' : 'then ask Ouroboros to send again if needed.' });
+            if (partly) lines.push(partsLine(partly));
+        }
+        return lines;
+    }
+
+    /* Messages work as usual only while the link is up and the bridge passes events on. */
+    function passedOn(data) {
+        return !!(data.link && data.link.state === 'connected' && data.host_adapter_state === 'active');
+    }
+
     /* Whether the system confirmed the bridge's process runs; otherwise Host facts are its last check. */
     function running(data) { return !!(data.link && data.link.companion_alive === true); }
     var STORE_UNKNOWN = 'unknown: the queue store could not be read';
@@ -740,7 +799,7 @@ var TransportKit = (function () {
 
     var PARTIAL_LINES = {
         process_unknown: 'The system did not answer whether the bridge’s process is running, so the link above is the last state it recorded.',
-        host_unanswered: 'Ouroboros did not answer the bridge’s capability check, so reactions and delivery history are not confirmed. It is asked again when the bridge restarts.',
+        host_unanswered: 'Ouroboros did not answer the bridge’s capability check, so reactions and delivery history are not confirmed. It is asked again with the bridge’s next Slack event or send.',
         capabilities_unchecked: 'Ouroboros has not been asked about reactions and delivery history yet.',
         no_recent_window: 'This status has no recent-problem window, so recent failures cannot be told from old ones.'
     };
@@ -900,7 +959,9 @@ var TransportKit = (function () {
             title: 'Ouroboros',
             rows: [
                 row('Events passed on', !data.host_adapter_checked ? 'not checked yet'
-                    : data.host_adapter_state === 'active' ? 'yes' + atLast : 'no' + atLast + ': no place was confirmed when the bridge started'),
+                    : data.host_adapter_state === 'active' ? 'yes' + atLast
+                    : unanswered ? 'not yet' + atLast + ': Ouroboros didn’t answer the check' + (atLast ? '' : '; asked again with the next event or send')
+                    : 'no' + atLast + ': no place was confirmed when the bridge started'),
                 row('Place binding', BINDING_WORD[data.binding_state] || data.binding_state),
                 row('Reactions', unanswered && data.reaction_context_state !== 'available' ? 'not known: Ouroboros didn’t answer'
                     : REACTION_WORD[data.reaction_context_state] ? REACTION_WORD[data.reaction_context_state]
@@ -969,7 +1030,7 @@ var TransportKit = (function () {
     function unreadableGroups(data) {
         var groups = [
             { title: 'Connection', rows: [
-                row('Link', LINK_WORD[(data.link || {}).state] || '—'),
+                row('Link', STORE_UNKNOWN),
                 row('Socket Mode', STORE_UNKNOWN),
                 row('Bridge process', STORE_UNKNOWN),
                 row('Tokens', (data.has_bot_token ? 'bot token set' : 'bot token missing') + ' · ' + (data.has_app_token ? 'app token set' : 'app token missing'))

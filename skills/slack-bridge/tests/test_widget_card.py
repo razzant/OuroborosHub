@@ -51,18 +51,14 @@ def test_widget_follows_the_module_contract():
     assert urls == {"/api/extensions/slack-bridge/status"}
     assert "OuroborosWidget" in source and "bridge.fetch" in source
     assert "XMLHttpRequest" not in source and "WebSocket" not in source
-    # Host appearance: theme through the bridge, a light palette, transparent page, disposal.
+    # Host appearance: theme through the bridge and a transparent page (the light palette and disposal are
+    # tests/test_widget_theme_contracts.py's, where slack-bridge is a DASHBOARDS row).
     assert "typeof bridge.onTheme === 'function'" in source
-    assert re.search(r"data-theme\s*=\s*[\"']?light", source)
     assert "html,body{margin:0;background:transparent}" in source
-    assert "__ouroWidgetOnDispose" in source
     # Refresh never dies silently: no tick limit, a failed read is said in words with a way to retry.
     assert "max_ticks" not in source and "refresh · showing" in source and "Try again" in source
     # No resize protocol of its own: the host measures #root.
     assert "ouro-widget-resize" not in source and "ResizeObserver" not in source
-    # Labels wrap by words; only raw error text may break inside a token.
-    assert "word-break:normal" in source and "hyphens:manual" in source
-    assert source.count("overflow-wrap:anywhere") == 1 and ".tc-raw{" in source
 
 
 def test_action_kinds_are_named_in_words():

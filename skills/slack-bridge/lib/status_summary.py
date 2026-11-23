@@ -131,6 +131,17 @@ def _state_error(part: Mapping[str, Any], state: str, count: int) -> Mapping[str
     return error if isinstance(error, Mapping) and error.get("state") == state else None
 
 
+def _item_time(part: Mapping[str, Any], state: str, count: int) -> str | None:
+    """When the newest problem the item counts happened: its own error's time, else the queue's newest time."""
+    if not count:
+        return None
+    error = part.get(f"last_{state}_error")
+    if isinstance(error, Mapping) and isinstance(error.get("at"), str) and error["at"]:
+        return str(error["at"])
+    stamp = part.get(f"last_{state}_at")
+    return stamp if isinstance(stamp, str) and stamp else None
+
+
 def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     """What needs attention now: worst tone first, then by consequence within a tone; empty when nothing does."""
     items: list[dict[str, Any]] = []
@@ -148,6 +159,9 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 item["headline"] = "Slack refused the bridge's tokens"
         if detail == "host_adapter_inactive" and _int(payload.get("inbox_pending")):
             item["count"] = _int(payload.get("inbox_pending"))
+        if detail == "host_adapter_inactive" and payload.get("history_reporting_state") == "unavailable":
+            # Ouroboros did not answer the check (not "no place"): the next event or send asks again by itself.
+            item["host_unanswered"] = True
         if link.get("companion_alive") is None and detail != "store_unreadable":
             # The probe did not answer: the detail is the state the bridge last recorded, not a running process's.
             item["process_unknown"] = True
@@ -163,8 +177,12 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "messages": _int(text.get("uncertain_messages")), "actions": _int(mutations.get("uncertain")),
             "partly_delivered": _int(text.get("uncertain_messages_partly_delivered")),
             "still_queued": _int(text.get("uncertain_messages_still_queued")),
+            # Partly delivered with nothing left queued: only those may have their missing parts sent now.
+            "partly_delivered_none_queued": _int(text.get("uncertain_messages_partly_delivered_none_queued")),
             "events": _int(inbound.get("uncertain")),
-            "at": _latest(text.get("last_uncertain_at"), mutations.get("last_uncertain_at"), inbound.get("last_uncertain_at")),
+            "at": _latest(_item_time(text, "uncertain", _int(text.get("uncertain_messages"))),
+                          _item_time(mutations, "uncertain", _int(mutations.get("uncertain"))),
+                          _item_time(inbound, "uncertain", _int(inbound.get("uncertain")))),
             "error": _newest_error(_state_error(text, "uncertain", _int(text.get("uncertain_messages"))),
                                    _state_error(mutations, "uncertain", _int(mutations.get("uncertain"))),
                                    _state_error(inbound, "uncertain", _int(inbound.get("uncertain")))),
@@ -178,7 +196,13 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "partly_delivered": _int(text.get("failed_messages_partly_delivered")),
             # Of those messages, how many still have parts waiting, held or being sent (one message, two outcomes).
             "still_queued": _int(text.get("failed_messages_still_queued")),
-            "at": _latest(text.get("last_failed_at"), mutations.get("last_failed_at")),
+            # The others by their other parts: some delivered or unknown (send only the refused parts), or every
+            # part refused (send again). Absent in an older payload; the card then reads them as before.
+            **({"others_settled": _int(text.get("failed_messages_others_delivered_or_unknown")),
+                "every_part_refused": _int(text.get("failed_messages_every_part_refused"))}
+               if "failed_messages_every_part_refused" in text else {}),
+            "at": _latest(_item_time(text, "failed", _int(text.get("failed_messages"))),
+                          _item_time(mutations, "failed", _int(mutations.get("failed")))),
             "error": _newest_error(_state_error(text, "failed", _int(text.get("failed_messages"))),
                                    _state_error(mutations, "failed", _int(mutations.get("failed")))),
         })
@@ -198,6 +222,7 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
         held_messages = _int(messages.get("held"))
         problem_parts = payload.get("outbound_messages_with_problem_parts")
         problem_parts = problem_parts if isinstance(problem_parts, Mapping) else {}
+        recent_parts = payload.get("outbound_messages_with_recent_problem_parts")
         held_actions = max(0, held - _int(chunks.get("held")))
         note = str(payload.get("last_delivery_error") or "")
         listed = [reason for reason in payload.get("held_reasons") or [] if isinstance(reason, Mapping)]
@@ -214,6 +239,10 @@ def attention_items(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "messages": held_messages, "actions": held_actions,
                 # Held messages that also have a part refused or with an unknown outcome (listed in their own item).
                 "with_problem_parts": _int(problem_parts.get("held")),
+                # Of those, the ones whose problem part is recent, so its item lists the message; older payloads
+                # without the count read every one as recent, as before.
+                "with_recent_problem_parts": (_int(recent_parts.get("held")) if isinstance(recent_parts, Mapping)
+                                              else _int(problem_parts.get("held"))),
                 "reasons": [{"reason": str(reason.get("reason") or ""), "count": _int(reason.get("count"))}
                             for reason in listed]}
         if listed:

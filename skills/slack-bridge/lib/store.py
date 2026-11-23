@@ -13,12 +13,14 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from .events import REACTION_EVENTS, ParsedEnvelope, conversation_thread, provider_facts
+from .redaction import redact
 from .slack_api import normalize_text_format
 
 
 # An inbox row kept on a Host that cannot hold it as context-only; it is never submitted later.
 REACTION_WITHHELD = "reaction_host_context_unavailable"
 RECENT_PROBLEM_WINDOW_SECONDS = 86400
+_REDACTED_RUNTIME_KEYS = frozenset({"last_socket_error", "new_root_channels_error"})
 OUTBOX_CHUNK_MAX_CHARS = 3900
 LINK_STATES = frozenset({"connected", "starting", "reconnecting", "disconnected", "not_configured", "error"})
 LINK_DETAILS = frozenset({
@@ -1080,7 +1082,7 @@ class BridgeStore:
                 """,
                 (
                     now + max(0.0, delay_seconds),
-                    str(error)[:1000],
+                    redact(error, limit=1000),
                     now,
                     row_id,
                     lease_token,
@@ -1376,7 +1378,7 @@ class BridgeStore:
             row_id, lease_token,
             ("state=?", "lease_token=''", "lease_until=0", "send_started=0", "last_error=?",
              "report_payload_json=?", "report_state=?", "result_json=?"),
-            (state, str(error)[:1000], json.dumps(report_payload, ensure_ascii=False) if report_payload else "",
+            (state, redact(error, limit=1000), json.dumps(report_payload, ensure_ascii=False) if report_payload else "",
              "pending" if report_payload else "", json.dumps(dict(result or {}), ensure_ascii=False)),
             upload_attempt=upload_attempt,
         )
@@ -1402,7 +1404,7 @@ class BridgeStore:
         with self._connect() as db:
             db.execute("""UPDATE outbox SET report_state=?,report_lease_token='',report_lease_until=0,
                           report_available_at=?,report_error=? WHERE id=? AND report_lease_token=?""",
-                       ("pending" if error else "acked", time.time() + delay, error[:1000],
+                       ("pending" if error else "acked", time.time() + delay, redact(error, limit=1000),
                         report["row_id"], report["lease_token"]))
 
     def runtime_value(self, key: str, default: Any = None) -> Any:
@@ -1475,7 +1477,7 @@ class BridgeStore:
             row_id, lease_token,
             ("state='pending'", "lease_token=''", "lease_until=0", "available_at=?", "last_error=?",
              "send_started=0", "report_payload_json=''", "report_state=''"),
-            (time.time() + max(0.0, delay_seconds), str(error)[:1000]),
+            (time.time() + max(0.0, delay_seconds), redact(error, limit=1000)),
             upload_attempt=upload_attempt,
         )
 
@@ -1490,7 +1492,7 @@ class BridgeStore:
             item.row_id, item.lease_token,
             ("state='pending'", "lease_token=''", "lease_until=0", "send_started=0", "available_at=?",
              *(() if spend_attempt else ("attempts=MAX(0,attempts-1)",)), "last_error=?"),
-            (time.time() + 5, reason),
+            (time.time() + 5, redact(reason)),
             upload_attempt=upload_attempt,
         )
 
@@ -1531,7 +1533,7 @@ class BridgeStore:
                 SET state=?, lease_token='', lease_until=0, last_error=?, updated_at=?
                 WHERE id=? AND state='leased' AND lease_token=?
                 """,
-                (state, str(error)[:1000], now, row_id, lease_token),
+                (state, redact(error, limit=1000), now, row_id, lease_token),
             )
             if updated.rowcount != 1:
                 error_type = InboxLeaseLost if table == "inbox" else OutboxLeaseLost
@@ -1541,6 +1543,9 @@ class BridgeStore:
 
     def set_runtime(self, **values: Any) -> None:
         now = time.time()
+        # Error text from exceptions (the daemon, the Socket Mode loop) is stored without credentials.
+        values = {key: redact(value) if key in _REDACTED_RUNTIME_KEYS and isinstance(value, str) else value
+                  for key, value in values.items()}
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             for key, value in values.items():
@@ -1640,7 +1645,19 @@ class BridgeStore:
                     COALESCE(SUM(CASE WHEN recent_u = 1 AND queued_n > 0 THEN 1 ELSE 0 END), 0)
                         AS recent_uncertain_queued,
                     COALESCE(SUM(CASE WHEN recent_f = 1 AND queued_n > 0 THEN 1 ELSE 0 END), 0)
-                        AS recent_failed_queued
+                        AS recent_failed_queued,
+                    COALESCE(SUM(CASE WHEN recent_f = 1 AND queued_n = 0 AND delivered_n + uncertain_n > 0
+                        THEN 1 ELSE 0 END), 0) AS recent_failed_settled,
+                    COALESCE(SUM(CASE WHEN recent_u = 1 AND queued_n = 0 AND delivered_n > 0 THEN 1 ELSE 0 END), 0)
+                        AS recent_uncertain_partly_settled,
+                    COALESCE(SUM(CASE WHEN leased_n > 0 AND recent_f + recent_u > 0 THEN 1 ELSE 0 END), 0)
+                        AS msg_leased_recent_problem,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n > 0 AND recent_f + recent_u > 0 THEN 1 ELSE 0 END), 0)
+                        AS msg_held_recent_problem,
+                    COALESCE(SUM(CASE WHEN leased_n = 0 AND held_n = 0 AND waiting_n > 0 AND recent_f + recent_u > 0
+                        THEN 1 ELSE 0 END), 0) AS msg_waiting_recent_problem,
+                    MAX(CASE WHEN recent_f = 1 THEN failed_key ELSE NULL END) AS recent_failed_key,
+                    MAX(CASE WHEN recent_u = 1 THEN uncertain_key ELSE NULL END) AS recent_uncertain_key
                 FROM (
                     SELECT *,
                         waiting_n + held_n + leased_n AS queued_n,
@@ -1657,13 +1674,27 @@ class BridgeStore:
                             SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed_n,
                             SUM(CASE WHEN state='uncertain' THEN 1 ELSE 0 END) AS uncertain_n,
                             MAX(CASE WHEN state='failed' THEN updated_at ELSE NULL END) AS last_failed_at,
-                            MAX(CASE WHEN state='uncertain' THEN updated_at ELSE NULL END) AS last_uncertain_at
+                            MAX(CASE WHEN state='uncertain' THEN updated_at ELSE NULL END) AS last_uncertain_at,
+                            -- The newest part of each outcome as one sortable key (time, then id): the item's time
+                            -- and error come from the messages it counts, not from another message's part.
+                            MAX(CASE WHEN state='failed' THEN printf('%020.6f|%012d', updated_at, id) ELSE NULL END)
+                                AS failed_key,
+                            MAX(CASE WHEN state='uncertain' THEN printf('%020.6f|%012d', updated_at, id) ELSE NULL END)
+                                AS uncertain_key
                         FROM outbox WHERE kind <> 'mutation' GROUP BY request_id
                     )
                 )
                 """,
                 {"cutoff": cutoff},
             ).fetchone()
+            # The newest refused and unknown part of the messages counted above, by primary key.
+            counted_keys = [key for key in (text_row["recent_failed_key"], text_row["recent_uncertain_key"]) if key]
+            counted_rows = {
+                int(row["id"]): row for row in db.execute(
+                    f"SELECT id, state, last_error, updated_at FROM outbox WHERE id IN ({','.join('?' * len(counted_keys))})",
+                    [int(key.split("|")[1]) for key in counted_keys],
+                ).fetchall()
+            } if counted_keys else {}
             inbox = {
                 str(row["state"]): int(row["count"])
                 for row in db.execute(
@@ -1804,6 +1835,16 @@ class BridgeStore:
                     "last_failed_error": in_window["failed"], "last_uncertain_error": in_window["uncertain"]}
 
         errors = {queue: queue_errors(queue) for queue in ("inbound", "outbound_text", "mutations")}
+        # Outbound text counts messages: a message with a recent unknown part counts as unknown, not refused, so its
+        # refused part's error must not stand for another message. Each item's error is its own messages' newest.
+        for state, key in (("failed", text_row["recent_failed_key"]), ("uncertain", text_row["recent_uncertain_key"])):
+            row = counted_rows.get(int(key.split("|")[1])) if key else None
+            note = str(row["last_error"]) if row is not None else ""
+            errors["outbound_text"][f"last_{state}_error"] = (
+                {"at": _iso_z(float(row["updated_at"])), "state": state,
+                 "text": "" if note.startswith(("Held:", "Host turn state:")) else note}
+                if row is not None else None
+            )
         direction = {"inbound": ("inbound", "event"), "outbound_text": ("outbound", "text"),
                      "mutations": ("outbound", "mutation")}
         structured_last_error = None
@@ -1878,6 +1919,14 @@ class BridgeStore:
                     "uncertain_messages_partly_delivered": int(text_row["recent_uncertain_partly"]),
                     "failed_messages_still_queued": int(text_row["recent_failed_queued"]),
                     "uncertain_messages_still_queued": int(text_row["recent_uncertain_queued"]),
+                    # Refused messages by their other parts: none queued, but some delivered or with an unknown
+                    # outcome (send only the refused parts); and every part refused (send again). With
+                    # failed_messages_still_queued they add up to failed_messages.
+                    "failed_messages_others_delivered_or_unknown": int(text_row["recent_failed_settled"]),
+                    "failed_messages_every_part_refused": int(text_row["recent_failed"]) - int(text_row["recent_failed_queued"])
+                    - int(text_row["recent_failed_settled"]),
+                    # Unknown-outcome messages partly delivered with nothing left queued.
+                    "uncertain_messages_partly_delivered_none_queued": int(text_row["recent_uncertain_partly_settled"]),
                     "last_failed_at": outbox_prob.get(("text", "failed"), (0, None))[1],
                     "last_uncertain_at": outbox_prob.get(("text", "uncertain"), (0, None))[1],
                     **errors["outbound_text"],
@@ -1912,6 +1961,12 @@ class BridgeStore:
                 "waiting": int(text_row["msg_waiting_problem"]),
                 "held": int(text_row["msg_held_problem"]),
                 "leased": int(text_row["msg_leased_problem"]),
+            },
+            # Of those, the ones whose problem part is in the recent window, so its own item lists the message.
+            "outbound_messages_with_recent_problem_parts": {
+                "waiting": int(text_row["msg_waiting_recent_problem"]),
+                "held": int(text_row["msg_held_recent_problem"]),
+                "leased": int(text_row["msg_leased_recent_problem"]),
             },
             "units": {
                 "inbox": "envelopes",

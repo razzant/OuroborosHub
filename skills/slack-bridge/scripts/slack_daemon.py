@@ -18,6 +18,7 @@ from lib.local_settings import (  # noqa: E402
     NEW_ROOT_CHANNELS, LocalSettingsError, load_local_settings, normalize_channel_ids,
 )
 from lib.presence import slack_identity  # noqa: E402
+from lib.redaction import error_text  # noqa: E402
 from lib.runtime import BridgeRuntime  # noqa: E402
 from lib.slack_api import SlackClient  # noqa: E402
 from lib.store import BridgeStore  # noqa: E402
@@ -55,7 +56,7 @@ async def _run() -> None:
             except LocalSettingsError as exc:
                 # Same contract as the extension child: unreadable settings are an
                 # explicit failure, never a silently empty configuration.
-                store.set_runtime(socket_state="error", last_socket_error=str(exc)[:500])
+                store.set_runtime(socket_state="error", last_socket_error=error_text(exc))
                 raise
             new_root_channels, channels_error = _new_root_channels(settings)
             # What this companion actually uses, for the status route.
@@ -67,7 +68,7 @@ async def _run() -> None:
                     os.environ.get("SLACK_APP_TOKEN", ""),
                 )
             except Exception as exc:
-                store.set_runtime(socket_state="error", last_socket_error=str(exc))
+                store.set_runtime(socket_state="error", last_socket_error=error_text(exc))
                 raise
 
             runtime: BridgeRuntime | None = None
@@ -125,7 +126,7 @@ async def _run() -> None:
                     stop_task.cancel()
                     await runtime_task
             except Exception as exc:
-                fatal = str(exc)[:500]
+                fatal = error_text(exc)
                 store.set_runtime(socket_state="error", last_socket_error=fatal)
                 raise
             finally:

@@ -28,6 +28,7 @@ from .lib.slack_api import (
     normalize_text_format,
     refuse_reserved_method,
 )
+from .lib.redaction import redact, redact_status
 from .lib.status_summary import summarize as summarize_status
 from .lib.store import BridgeStore, derive_link_state
 from .lib.read_tools import register_read_tools
@@ -160,6 +161,10 @@ def _make_status(api: Any):
                 "local_settings_error": settings_error,
             }
         )
+        # Every free-text error field leaves without credentials, records of an older version included.
+        secrets = (str(protected.get("SLACK_BOT_TOKEN") or ""), str(protected.get("SLACK_APP_TOKEN") or ""))
+        redact_status(payload, secrets)
+        store_error = redact(store_error, secrets)
         alive = payload["link"]["companion_alive"]
         payload["link"] = derive_link_state(payload, companion_alive=None if alive is None else bool(alive))
         if store_error:

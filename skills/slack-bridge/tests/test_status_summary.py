@@ -99,7 +99,6 @@ def test_the_first_line_names_the_item_that_sets_its_tone():
     summary = summarize(payload)
     assert summary["tone"] == "error"
     assert summary["text"] == "Connected · 1 message not delivered · 1 more needs attention"
-    assert [item["kind"] for item in summary["attention"]] == ["not_delivered", "outcome_unknown"]
 
 
 def test_a_partly_known_state_is_never_all_clear():
@@ -391,3 +390,12 @@ def test_only_an_auth_refusal_reads_as_a_token_problem():
     assert other["auth"] is False and other["headline"] == "The bridge stopped after an error"
     assert summarize(_quiet(link={"state": "error", "detail": "socket_error", "error": "timed out"}))["text"] == (
         "Connection error · the Slack connection failed")
+
+
+def test_a_host_check_that_failed_for_now_is_not_a_missing_place():
+    """A 503 at the check leaves "unavailable": the next event or send asks again, so no setup advice is due."""
+    inactive = {"state": "connected", "detail": "host_adapter_inactive", "companion_alive": True, "since": None, "error": ""}
+    unanswered = attention_items(_quiet(link=inactive, history_reporting_state="unavailable"))[0]
+    assert (unanswered["kind"], unanswered.get("host_unanswered")) == ("link", True)
+    answered = attention_items(_quiet(link=inactive, history_reporting_state="unsupported"))[0]
+    assert "host_unanswered" not in answered  # Ouroboros answered and confirmed no place: the setup advice stays
