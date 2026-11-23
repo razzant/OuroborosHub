@@ -495,6 +495,50 @@ def test_poll_failure_sides(exc, side):
         assert runtime_mod._poll_failure(sqlite3.OperationalError("database is locked"), stage) == "local"
 
 
+def test_telegrams_refusal_stays_the_outcome_when_forgetting_the_bot_meets_a_lock(tmp_path):
+    """getMe refused the token (401) and forgetting the bot confirmed for it met a SQLite lock: the poll outcome is
+    still Telegram's refusal (token), never "local", and the failed cleanup is recorded apart (the log)."""
+    class Lines:
+        def __init__(self):
+            self.lines = []
+
+        def log(self, level, message):
+            self.lines.append((level, message))
+
+    async def run():
+        logger = Lines()
+        runtime = runtime_mod.TelegramTransportRuntime(
+            state_dir=tmp_path, token_provider=lambda: "token-a", logger=logger, submitter=SimpleNamespace(),
+            client_factory=lambda value: _TokenBot(value, "token-a", asyncio.Event()))
+
+        def locked(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+        runtime.store.forget_confirmed_bot = locked
+        held = asyncio.Event()
+
+        async def hold(_seconds):
+            await held.wait()
+        runtime._pause = hold
+        loop = asyncio.create_task(runtime._poll_loop())
+        runtime._run_task = loop
+        try:
+            await _until(lambda: runtime.status_snapshot({})["poll_result"] == "failed")
+            snapshot = runtime.status_snapshot({})
+            assert (snapshot["poll_failure"], snapshot["poll_stage"]) == ("token", "identity")
+            assert "(401)" in snapshot["poll_error"] and "locked" not in snapshot["poll_error"]
+            summary = summarize(_route_payload(runtime))
+            assert summary["text"].startswith("Connection error") and summary["attention"][0]["failure"] == "token"
+            assert any("database is locked" in message for _level, message in logger.lines)
+        finally:
+            runtime._stopping = True
+            held.set()
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+            runtime.store.close()
+
+    asyncio.run(run())
+
+
 def test_a_store_failure_after_getme_confirmed_the_bot_is_named_local(tmp_path):
     """getMe answered, then recording the confirmed bot met a SQLite lock: an error on this computer, at the identity
     stage, never "Connection error" (nothing was wrong with the token or the network)."""
@@ -671,7 +715,7 @@ def test_sends_telegram_confirmed_in_part_are_counted_as_stored_answers_read_the
 
 
 _NO_WAIT = {"count": 0, "submit": 0, "download": 0, "other": 0, "since": "", "next_attempt_at": "",
-            "last_error": "", "last_stage": "", "last_error_at": ""}
+            "last_error": "", "last_stage": "", "last_error_at": "", "last_error_newest": False}
 
 
 def _hello(store, *update_ids):
@@ -813,6 +857,36 @@ def test_the_waiting_updates_error_is_the_latest_failed_attempts(tmp_path, monke
     item = summarize(_quiet(handoff_retrying=waiting))["attention"][0]
     assert item["error"] == {"text": "PresenceHostError: presence Host returned HTTP 500", "at": _iso(clock[0]),
                              "stage": "submit"}
+    store.close()
+
+
+def test_an_error_whose_recency_is_unknown_is_shown_as_an_example(tmp_path, monkeypatch):
+    """0.13.1 stamped a download failure at 08:00:00; after a rollback 0.13.0 released another update at 08:00:23
+    without a stamp. Which failure is the latest cannot be told, so the card shows the error as an example."""
+    path = tmp_path / "custody.sqlite3"
+    store = CustodyStore(path)
+    _hello(store, 91, 92)
+    stamped, later = store.claim_inbox(), store.claim_inbox()
+    clock = [1_800_000_000.0]
+    monkeypatch.setattr("telegram_bot.custody.time.time", lambda: clock[0])
+    store.release_inbox(stamped.event_id, reason="TelegramApiError: Telegram getFile failed (429)", retry_after_sec=30,
+                        stage="download")
+    _as_0130(path, (_V0130_RELEASE_INBOX, (clock[0] + 53, "PresenceHostError: HTTP 500", later.event_id)))
+    waiting = store.card_snapshot(now=clock[0] + 30)["handoff_retrying"]
+    assert waiting["count"] == 2 and waiting["last_error_newest"] is False
+    error = summarize(_quiet(handoff_retrying=waiting))["attention"][0]["error"]
+    assert error["example"] is True
+    # Once every waiting update's last attempt has a recorded end, the latest is known again.
+    store.close()
+    store = CustodyStore(path)
+    with sqlite3.connect(path) as conn:
+        conn.execute("UPDATE inbox SET available_at=0 WHERE event_id=?", (later.event_id,))
+    again = store.claim_inbox()
+    assert again.event_id == later.event_id
+    store.release_inbox(again.event_id, reason="PresenceHostError: HTTP 500", retry_after_sec=30, stage="submit")
+    waiting = store.card_snapshot(now=clock[0] + 30)["handoff_retrying"]
+    assert waiting["last_error_newest"] is True and waiting["last_error"] == "PresenceHostError: HTTP 500"
+    assert "example" not in summarize(_quiet(handoff_retrying=waiting))["attention"][0]["error"]
     store.close()
 
 
@@ -1070,3 +1144,82 @@ def test_one_route_answer_reads_the_token_and_the_bot_once(tmp_path):
     finally:
         runtime._run_task = None
         api.unload()
+
+
+# ---------- the Host's capabilities: one completed check, read whole ----------
+
+def _host_client(tmp_path, transport):
+    from telegram_bot.host import PresenceHostClient
+    return PresenceHostClient(state_dir=tmp_path, token_provider=lambda: "skill-token", host_base="http://127.0.0.1:9",
+                              transport=transport)
+
+
+_SUPPORTING = {"presence_delivery_version": 1, "places_version": 1, "presence_reaction_context": 1,
+               "presence_explicit_completion": 1, "presence_continuation_versions": [2], "presence_identity": 1}
+
+
+def _host_facts(runtime):
+    snapshot = runtime.status_snapshot({})
+    return (snapshot["host_checked"], snapshot["reaction_context"], snapshot["presence_continuation_version"],
+            bool(snapshot["host_checked_at"]))
+
+
+def test_a_status_read_during_the_capability_check_sees_one_check_whole(tmp_path):
+    """/identity completing during a status read once gave host_checked=true and the new time beside the old
+    reaction_context, and the card advised an update the Host did not need."""
+    seen = []
+
+    class Answer(dict):
+        def get(self, key, default=None):
+            if key == "presence_continuation_versions":  # the answer is being read: a status read lands here
+                seen.append(_host_facts(runtime))
+            return super().get(key, default)
+
+    class Transport:
+        async def request_json(self, method, url, **kwargs):
+            return Answer(_SUPPORTING)
+
+    host = _host_client(tmp_path / "host", Transport())
+    runtime = runtime_mod.TelegramTransportRuntime(state_dir=tmp_path, token_provider=lambda: "", logger=None,
+                                                   submitter=host)
+    before = _host_facts(runtime)
+    assert before == (False, "update_required", 0, False)
+    asyncio.run(host.discover_delivery_support())
+    assert seen == [before]  # the read inside the check saw the previous check whole
+    assert _host_facts(runtime) == (True, "available", 2, True)
+    runtime.store.close()
+
+
+@pytest.mark.parametrize("newer_answers", ["supported", "unavailable"])
+def test_an_older_capability_check_never_overwrites_a_newer_one(tmp_path, newer_answers):
+    """Two /identity checks overlap (the poll loop and a worker): the one started later is published, whichever
+    ends last, and the record comes whole from that one check."""
+    from telegram_bot.host import PresenceHostError
+
+    class Transport:
+        def __init__(self):
+            self.gates, self.calls = [asyncio.Event(), asyncio.Event()], 0
+
+        async def request_json(self, method, url, **kwargs):
+            call, self.calls = self.calls, self.calls + 1
+            await self.gates[call].wait()
+            answer = (newer_answers if call == 1 else ("unavailable" if newer_answers == "supported" else "supported"))
+            if answer == "unavailable":
+                raise PresenceHostError("presence Host returned HTTP 503: busy")
+            return dict(_SUPPORTING)
+
+    async def run():
+        transport = Transport()
+        host = _host_client(tmp_path, transport)
+        older = asyncio.create_task(host.discover_delivery_support())
+        await asyncio.sleep(0)
+        newer = asyncio.create_task(host.discover_delivery_support())
+        await asyncio.sleep(0)
+        transport.gates[1].set()  # the newer check ends first
+        await newer
+        transport.gates[0].set()  # the older one ends last, with the other outcome
+        await older
+        assert host.delivery_reporting_status == newer_answers
+        assert host.capabilities.status == newer_answers  # the attributes read the published record
+
+    asyncio.run(run())

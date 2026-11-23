@@ -1357,7 +1357,7 @@ class CustodyStore:
         Lifetime totals stay in status_snapshot(); these count only rows that ended within ``window_s``. An
         uncertain send is a failed row whose payload marks ``_terminal_outcome`` uncertain (as status_snapshot
         counts it); a withheld reaction is not an inbound failure. ``handoff_retrying`` counts waiting updates whose
-        handoff to Ouroboros was tried and failed (see _card_facts).
+        last attempt failed, by where it stopped (download, handoff, not recorded; see _INBOX_RETRYING).
         """
         with self._connect() as conn:
             return self._card_facts(conn, time.time() if now is None else float(now), window_s)
@@ -1425,7 +1425,7 @@ class CustodyStore:
         # latest failed attempt's (by when it ended; rows whose end was not recorded come after, newest update first).
         handoff = one(
             f"SELECT COUNT(*), MIN(received_at), MIN(available_at), SUM({_STAGE}='submit'), "
-            f"SUM({_STAGE}='download') FROM inbox WHERE {_INBOX_RETRYING}")
+            f"SUM({_STAGE}='download'), SUM({_STAGE_AT}=0) FROM inbox WHERE {_INBOX_RETRYING}")
         newest_wait = one(f"SELECT last_error, {_STAGE} AS stage, {_STAGE_AT} AS ended FROM inbox "
                           f"WHERE {_INBOX_RETRYING} ORDER BY ended DESC, update_id DESC LIMIT 1")
         return {
@@ -1462,6 +1462,9 @@ class CustodyStore:
                 "last_stage": str(newest_wait["stage"] or "") if newest_wait else "",
                 # When that attempt ended, where recorded ("" for a row whose end was not recorded).
                 "last_error_at": _timestamp(newest_wait["ended"]) if newest_wait else "",
+                # Whether that error is the latest: only when every waiting update's last attempt has a recorded end
+                # (a row 0.13.0 released after a rollback has none), or there is only one; else it is an example.
+                "last_error_newest": bool(handoff[0]) and (int(handoff[0]) == 1 or not int(handoff[5] or 0)),
             },
             "held_reasons": [{"reason": str(row[0])[len("Held:"):].strip(), "note": str(row[0]), "count": int(row[1]),
                               **({"kind": str(row[2])} if row[2] else {})}

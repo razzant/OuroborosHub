@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import pathlib
 import re
 import sqlite3
@@ -291,21 +292,19 @@ class TelegramTransportRuntime:
             account, reason = _confirmed(self._run_task is not None, token, self._client_token, self._bot_id)
             identity = getattr(self.submitter, "connector_identity", {})
         error_text, error_at, error_source = self._last_error_record  # one record, read once
+        host = _host_record(self.submitter)  # one completed /identity check, read once
         return {
             "runtime_state": state,
             "bot_label": label,
             "confirmed_account": account,
             "confirmed_reason": reason,
-            **({"identity": identity}
-               if getattr(self.submitter, "presence_identity", 0) == 1 and identity else {}),
+            **({"identity": identity} if host["identity"] == 1 and identity else {}),
             "last_error": error_text,
-            "delivery_reporting": getattr(self.submitter, "delivery_reporting_status", "unsupported"),
+            "delivery_reporting": host["status"] or "unsupported",
             # 2: early custody answers; 0: each turn waits for its terminal (older Host).
-            "presence_continuation_version": getattr(self.submitter, "continuation_version", 0),
-            "reaction_context": ("available" if getattr(self.submitter, "presence_reaction_context", 0) == 1
-                                 else "update_required"),
-            "reaction_history": ("available" if getattr(self.submitter, "presence_explicit_completion", 0) == 1
-                                 else "update_required"),
+            "presence_continuation_version": host["continuation_version"],
+            "reaction_context": "available" if host["reaction_context"] == 1 else "update_required",
+            "reaction_history": "available" if host["explicit_completion"] == 1 else "update_required",
             "last_event_at": custody.get("last_event_at", ""),
             "last_delivery_at": custody.get("last_delivery_at", ""),
             # Additive card facts: when the newest error was recorded and by which loop, the last getUpdates answer,
@@ -313,10 +312,10 @@ class TelegramTransportRuntime:
             "last_error_at": _iso(error_at),
             "last_error_source": error_source,
             "provider_ok_at": _iso(self._provider_ok_at),
-            "host_checked": getattr(self.submitter, "delivery_reporting_status", "") in {"supported", "unsupported"},
+            "host_checked": host["status"] in {"supported", "unsupported"},
             # When that check last ended, answered or not ("" before any): its facts are a past check, not live.
-            "host_checked_at": _iso(getattr(self.submitter, "identity_checked_at", 0.0) or 0.0),
-            "places_version": getattr(self.submitter, "places_version", 0),
+            "host_checked_at": _iso(host["checked_at"] or 0.0),
+            "places_version": host["places_version"],
             **_poll_facts(attempt, token),
         }
 
@@ -408,7 +407,13 @@ class TelegramTransportRuntime:
                 identity = await client.get_me()
             except TelegramApiError as exc:
                 if exc.error_code in _TOKEN_REFUSED:
-                    self.store.forget_confirmed_bot(token)
+                    # Telegram's refusal is this attempt's outcome. Failing to forget the bot recorded for the token
+                    # here (a locked store) is recorded apart and never replaces what Telegram said.
+                    try:
+                        self.store.forget_confirmed_bot(token)
+                    except sqlite3.Error as cleanup:
+                        self._log("warning", "telegram-bot: could not forget the bot recorded for a refused token: "
+                                  f"{_error(cleanup)}")
                 raise
             bot_id = str(identity.get("id") or "unknown")
             # Before anything in memory changes: if the store refuses, the next call asks getMe again.
@@ -1495,6 +1500,21 @@ def _safe_filename(value: str) -> str:
 
 def _retry_delay(attempts: int) -> float:
     return min(300.0, 2.0 ** min(max(1, attempts), 8))
+
+
+def _host_record(submitter: Any) -> Dict[str, Any]:
+    """The Host's capabilities as one completed /identity check published them (PresenceHostClient.capabilities, read
+    once); a submitter without that record (a test's) is read field by field, as before."""
+    record = getattr(submitter, "capabilities", None)
+    if record is not None and dataclasses.is_dataclass(record):
+        return dataclasses.asdict(record)
+    return {"status": getattr(submitter, "delivery_reporting_status", ""),  # "": never answered (not checked)
+            "continuation_version": getattr(submitter, "continuation_version", 0),
+            "reaction_context": getattr(submitter, "presence_reaction_context", 0),
+            "explicit_completion": getattr(submitter, "presence_explicit_completion", 0),
+            "identity": getattr(submitter, "presence_identity", 0),
+            "places_version": getattr(submitter, "places_version", 0),
+            "checked_at": getattr(submitter, "identity_checked_at", 0.0)}
 
 
 def _confirmed(running: bool, token: str, client_token: str, bot_id: str) -> Tuple[str, str]:

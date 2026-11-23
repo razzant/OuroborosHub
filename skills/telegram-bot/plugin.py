@@ -118,7 +118,7 @@ def _status_payload() -> Dict[str, Any]:
         # null when the custody store was not read: unknown, never zero.
         "recent_problems": card.get("recent_problems"),
         "held_reasons": card.get("held_reasons") or [],
-        # Waiting updates whose handoff to Ouroboros failed and is retried; null when the store was not read.
+        # Waiting updates whose last attempt failed, by where it stopped; null when the store was not read.
         "handoff_retrying": card.get("handoff_retrying"),
     }
 

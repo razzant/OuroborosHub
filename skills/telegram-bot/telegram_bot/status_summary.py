@@ -199,6 +199,8 @@ def attention_items(payload: Mapping[str, Any]) -> List[Dict[str, Any]]:
         if retrying.get("last_error"):
             handoff["error"] = {"text": str(retrying["last_error"]), "at": retrying.get("last_error_at") or None,
                                 "stage": str(retrying.get("last_stage") or "")}
+            if retrying.get("last_error_newest") is False:
+                handoff["error"]["example"] = True  # which failure is the latest cannot be told: one of them
         items.append(handoff)
     if link == "connected":
         # A working link whose facts are partly unknown never reads as all clear (connecting never does anyway).

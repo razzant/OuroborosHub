@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import dataclasses
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, Protocol, Sequence
 
@@ -207,6 +208,20 @@ class UrllibPresenceHostTransport:
         return result
 
 
+@dataclass(frozen=True)
+class HostCapabilities:
+    """What one completed /identity check found, with its outcome (``status``) and when it ended (``checked_at``)."""
+    status: str = "unknown"  # supported | unsupported | unavailable (no answer) | unknown (never asked)
+    delivery_version: int = 0
+    places_version: int = 0
+    wake_signals: int = 0
+    identity: int = 0
+    reaction_context: int = 0
+    explicit_completion: int = 0
+    continuation_version: int = 0
+    checked_at: float = 0.0
+
+
 class PresenceHostClient:
     """Submit provider events and poll deferred work through one Host permission."""
 
@@ -222,50 +237,64 @@ class PresenceHostClient:
         self.token_provider = token_provider
         self.host_base = str(host_base).rstrip("/")
         self.transport = transport or UrllibPresenceHostTransport()
-        self.delivery_reporting_status = "unknown"
-        self.delivery_reporting_version = 0
-        # When the last /identity check ended (answered or not): the card words its capabilities as that past check.
-        self.identity_checked_at = 0.0
-        self.places_version = 0
-        self.presence_wake_signals = 0
-        self.presence_identity = 0
         self.connector_identity = {}
-        self.presence_reaction_context = 0
-        self.presence_explicit_completion = 0
-        # 2 only when ``/identity`` lists it; otherwise each turn waits for its terminal (0).
-        self.continuation_version = 0
+        # What the last completed /identity check found, published whole (HostCapabilities): a reader in another thread
+        # (the status route) takes the record once and never pairs one check's fields with another's.
+        self.capabilities = HostCapabilities()
+        # Discoveries can overlap (the poll loop, the workers); only one started later than the published one replaces
+        # it, so an older check that ends last never overwrites a newer one.
+        self._discoveries_started = 0
+        self._discovery_published = 0
+
+    # The record's fields under the names the transport has always read.
+    delivery_reporting_status = property(lambda self: self.capabilities.status)
+    delivery_reporting_version = property(lambda self: self.capabilities.delivery_version)
+    places_version = property(lambda self: self.capabilities.places_version)
+    presence_wake_signals = property(lambda self: self.capabilities.wake_signals)
+    presence_identity = property(lambda self: self.capabilities.identity)
+    presence_reaction_context = property(lambda self: self.capabilities.reaction_context)
+    presence_explicit_completion = property(lambda self: self.capabilities.explicit_completion)
+    # 2 only when ``/identity`` lists it; otherwise each turn waits for its terminal (0).
+    continuation_version = property(lambda self: self.capabilities.continuation_version)
+    # When the last /identity check ended (answered or not): the card words its capabilities as that past check.
+    identity_checked_at = property(lambda self: self.capabilities.checked_at)
 
     async def discover_delivery_support(self) -> int:
-        if self.delivery_reporting_status in {"supported", "unsupported"}:
-            return self.delivery_reporting_version
+        if self.capabilities.status in {"supported", "unsupported"}:
+            return self.capabilities.delivery_version
+        self._discoveries_started += 1
+        started = self._discoveries_started
         try:
             response = await self.transport.request_json(
                 "GET", f"{self.host_base}/identity", headers=self._headers(),
                 payload=None, timeout_sec=10.0,
             )
-            self.delivery_reporting_version = int(response.get("presence_delivery_version") == 1)
+            delivery_version = int(response.get("presence_delivery_version") == 1)
             version = response.get("places_version")
-            self.places_version = int(type(version) is int and version >= 1)
-            self.presence_wake_signals = int(response.get("presence_wake_signals") == 1)
-            self.presence_identity = int(response.get("presence_identity") == 1)
-            # A JSON true is not the capability; bool compares equal to 1 in Python.
-            self.presence_reaction_context = int(type(response.get("presence_reaction_context")) is int
-                                                 and response["presence_reaction_context"] == 1)
-            self.presence_explicit_completion = int(type(response.get("presence_explicit_completion")) is int
-                                                    and response["presence_explicit_completion"] == 1)
             # The scalar ``presence_continuation_version`` stays 1 for deployed consumers; the list decides.
             versions = response.get("presence_continuation_versions")
-            self.continuation_version = _EARLY_CONTINUATION if isinstance(versions, list) and any(
-                type(item) is int and item == _EARLY_CONTINUATION for item in versions) else 0
-            self.delivery_reporting_status = "supported" if self.delivery_reporting_version else "unsupported"
+            record = HostCapabilities(
+                status="supported" if delivery_version else "unsupported",
+                delivery_version=delivery_version,
+                places_version=int(type(version) is int and version >= 1),
+                wake_signals=int(response.get("presence_wake_signals") == 1),
+                identity=int(response.get("presence_identity") == 1),
+                # A JSON true is not the capability; bool compares equal to 1 in Python.
+                reaction_context=int(type(response.get("presence_reaction_context")) is int
+                                     and response["presence_reaction_context"] == 1),
+                explicit_completion=int(type(response.get("presence_explicit_completion")) is int
+                                        and response["presence_explicit_completion"] == 1),
+                continuation_version=_EARLY_CONTINUATION if isinstance(versions, list) and any(
+                    type(item) is int and item == _EARLY_CONTINUATION for item in versions) else 0,
+                checked_at=time.time())
         except (PresenceHostError, OSError, TimeoutError, asyncio.TimeoutError):
-            self.delivery_reporting_status = "unavailable"
-            self.delivery_reporting_version = 0
-            self.continuation_version = 0
-            self.presence_reaction_context = 0
-            self.presence_explicit_completion = 0
-        self.identity_checked_at = time.time()
-        return self.delivery_reporting_version
+            record = dataclasses.replace(
+                self.capabilities, status="unavailable", delivery_version=0, continuation_version=0,
+                reaction_context=0, explicit_completion=0, checked_at=time.time())
+        if started > self._discovery_published:
+            self._discovery_published = started
+            self.capabilities = record
+        return self.capabilities.delivery_version
 
     async def place_hold(self, account_id: str, conversation_id: str, thread_id: str = "") -> str:
         await self.discover_delivery_support()

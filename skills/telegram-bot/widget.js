@@ -601,7 +601,20 @@ var TransportKit = (function () {
         updates: 'The bot failed on this computer before asking Telegram for new messages, so nothing new arrives. It retries by itself, at least once a minute.'
     };
 
-    function itemFor(item) {
+    /* Whether anything is sent or retried now depends on the link (the route's `link`): a stopped bot sends nothing, a
+     * bot without a token cannot, a failing link sends once it reaches Telegram again. */
+    function heldOutcome(link, one) {
+        var itself = one ? 'itself' : 'themselves';
+        if (link === 'stopped') return 'Nothing is sent while the bot is stopped; after it starts again, '
+            + (one ? 'it goes' : 'they go') + ' once the reason clears.';
+        if (link === 'waiting_for_token') return 'Nothing is sent until a bot token is set; then '
+            + (one ? 'it goes' : 'they go') + ' once the reason clears.';
+        if (link === 'provider_error' || link === 'local_error') return 'Kept back until the reason clears, then sent by '
+            + itself + ' once the bot reaches Telegram again.';
+        return 'Kept back until the reason clears, then sent by ' + itself + '.';
+    }
+
+    function itemFor(item, link) {
         var out = { kind: item.kind, detail: item.detail || '', tone: item.tone, headline: item.headline, at: item.at || null, lines: [] };
         var error = item.error && item.error.text ? item.error : null;
         var one = count(item.messages) + count(item.events) === 1;
@@ -662,7 +675,7 @@ var TransportKit = (function () {
                 if (reason.reason) out.lines.push({ strong: reason.action ? 'Needs you:' : 'Reason:', text: heldReason(reason) + (reasons.length > 1 ? ' (' + num(count(reason.count)) + ')' : '') });
             });
             if (reasons.length > 4) out.lines.push('…and ' + plural(reasons.length - 4, 'more reason') + ' (Details › Queues counts all held items).');
-            out.lines.push('Kept back until the reason clears, then sent by ' + (one ? 'itself.' : 'themselves.'));
+            out.lines.push(heldOutcome(link, one));
         } else if (item.kind === 'binding') {
             out.lines = [
                 'This Ouroboros predates Places, so incoming messages wait for a place binding'
@@ -672,7 +685,7 @@ var TransportKit = (function () {
         } else if (item.kind === 'reactions') {
             out.lines = [
                 'This Ouroboros can’t take Telegram reactions as context, so they are skipped'
-                    + (count(item.count) ? ' (' + num(count(item.count)) + ' so far)' : '') + '. Messages work as usual.',
+                    + (count(item.count) ? ' (' + num(count(item.count)) + ' so far)' : '') + '. Messages are not affected by this.',
                 { strong: 'Update Ouroboros,', text: 'then turn this skill off and on in Extensions.' }
             ];
         } else if (item.kind === 'handoff_waiting') {
@@ -687,7 +700,7 @@ var TransportKit = (function () {
                 : said.map(function (pair) { return pair[1] + ' (' + num(pair[0]) + ')'; }).join(', ');
             out.lines = [(why ? why.charAt(0).toUpperCase() + why.slice(1) + '; t' : 'T') + 'he bot keeps trying by itself'
                 + (item.next_at ? ', next at ' + K.clock(item.next_at) + '.' : '.')];
-            if (error) out.error = { label: 'Last error', text: error.text, at: error.at };
+            if (error) out.error = { label: error.example ? 'Example error (which failure is the latest is not recorded)' : 'Last error', text: error.text, at: error.at };
         } else if (item.kind === 'partial') {
             out.lines = (item.gaps || []).map(function (gap) { return PARTIAL_LINES[gap]; }).filter(Boolean);
         }
@@ -754,11 +767,14 @@ var TransportKit = (function () {
         return data.host_checked_at ? ' (checked ' + K.clock(data.host_checked_at, now) + ')' : '';
     }
 
+    /* A capability Ouroboros has not confirmed: its check went unanswered (with when), or never ran. */
+    function unconfirmed(data, now) {
+        return data.delivery_reporting === 'unavailable' ? REPORTING_WORD.unavailable + checkedAt(data, now)
+            : 'not checked yet';
+    }
+
     function capability(value, data, now) {
-        if (data.host_checked !== true) {
-            return data.delivery_reporting === 'unavailable' ? REPORTING_WORD.unavailable + checkedAt(data, now)
-                : 'not checked yet';
-        }
+        if (data.host_checked !== true) return unconfirmed(data, now);
         return (value === 'available' ? 'supported by Ouroboros' : 'needs an Ouroboros update') + checkedAt(data, now);
     }
 
@@ -884,7 +900,7 @@ var TransportKit = (function () {
 
     function toModel(data, state, kit) {
         var now = Date.now();
-        var items = (Array.isArray(data.attention) ? data.attention : []).map(itemFor);
+        var items = (Array.isArray(data.attention) ? data.attention : []).map(function (item) { return itemFor(item, data.link); });
         var recent = data.recent_problems || {};
         var outbound = recent.outbound || {}, inbound = recent.inbound || {};
         var sendsAs = data.identity && data.identity.sends_as ? data.identity.sends_as.label : '';
@@ -966,10 +982,10 @@ var TransportKit = (function () {
                 row('Reactions in Host context', capability(data.reaction_context, data, now)),
                 row('Reaction history', capability(data.reaction_history, data, now)),
                 row('Place binding', data.binding_state === 'configured' ? 'saved'
-                    : !checked ? 'none saved (not checked whether this Ouroboros needs one)'
+                    : !checked ? 'none saved; whether this Ouroboros needs one is ' + unconfirmed(data, now)
                         : (data.places_version ? 'none saved; this Ouroboros connects places itself'
                             : 'none saved; this Ouroboros needs one') + checkedAt(data, now)),
-                row('Early answers', !checked ? 'not checked yet'
+                row('Early answers', !checked ? unconfirmed(data, now)
                     : (data.presence_continuation_version === 2 ? 'supported by Ouroboros' : 'not supported: each turn waits for its end')
                         + checkedAt(data, now)),
                 row('Delivery reports', counts([[data.delivery_reports_pending, 'waiting'], [data.delivery_reports_held, 'held']]))

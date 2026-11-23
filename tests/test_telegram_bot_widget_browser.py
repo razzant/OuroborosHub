@@ -550,12 +550,16 @@ def test_degraded_states_claim_no_more_than_the_status_records(served):
                  'Connected · state partly known')
             for label in ('Delivery history', 'Reactions in Host context', 'Reaction history', 'Early answers'):
                 expect(fact(label)).to_have_text('not checked yet')
+            expect(fact('Place binding')).to_have_text('none saved; whether this Ouroboros needs one is not checked yet')
             # Ouroboros did not answer the check.
             show(synthetic_status(host_checked=False, delivery_reporting='unavailable',
                                   host_checked_at='2026-11-22T18:00:00Z', recent_problems=None),
                  'Connected · state partly known')
             expect(fact('Delivery history')).to_contain_text('not known: Ouroboros didn’t answer the check (checked ')
-            expect(fact('Reactions in Host context')).to_contain_text('not known: Ouroboros didn’t answer the check')
+            # Every row that depends on that check says it went unanswered, with when; none says "not checked yet".
+            for label in ('Reactions in Host context', 'Reaction history', 'Early answers', 'Place binding'):
+                expect(fact(label)).to_contain_text('not known: Ouroboros didn’t answer the check (checked ')
+            assert 'not checked yet' not in frame.locator('.tc-det').inner_text()
             # A fresh install: counts known and zero, no chats yet; the check is a past check, never a delivery.
             show(synthetic_status(**_ZERO_COUNTS, **_CHECKED), 'Connected · nothing needs attention')
             expect(frame.locator('.tc-note').first).to_have_text('No messages received or sent yet.')
@@ -762,5 +766,38 @@ def test_details_word_the_link_as_the_first_line_does_and_mark_the_last_confirme
                 'Error on this computer · new messages are not being processed', timeout=15000)
             expect(fact('State')).to_have_text('failing on this computer, retrying')
             expect(fact('Sends as')).to_have_text('@example_bot (9)')
+        finally:
+            browser.close()
+
+
+def test_held_and_capability_items_promise_no_send_the_link_cannot_make(served):
+    """A held send and the reactions note stay visible in every link state; what they say happens next follows the
+    route's link: nothing is sent while the bot is stopped or has no token, and no note says messages work as usual."""
+    from playwright.sync_api import sync_playwright, expect
+    state, url = served
+    held = {'outbox_held': 2, 'held_reasons': [{'reason': 'Example place is paused', 'note': 'Held: Example place is paused',
+                                                 'count': 2}],
+            'reaction_context': 'update_required', 'reactions_withheld': 3}
+    state['status_body'] = synthetic_status(runtime_state='stopped', **held)
+    with sync_playwright() as pw:
+        browser, page, frame = open_card(pw, url)
+        try:
+            hold = frame.locator('.tc-item[data-kind=held]')
+            reactions = frame.locator('.tc-item[data-kind=reactions]')
+            expect(frame.locator('.tc-status .tc-st-text')).to_contain_text('Stopped · the bot is not running',
+                                                                            timeout=15000)
+            expect(hold).to_contain_text('Example place is paused')
+            expect(hold).to_contain_text('Nothing is sent while the bot is stopped')
+            expect(hold).not_to_contain_text('sent by themselves')
+            expect(reactions).to_contain_text('Update Ouroboros')
+            expect(reactions).not_to_contain_text('work as usual')
+            for link_facts, says in (({'runtime_state': 'waiting_for_token', 'poll_result': '', 'connect': None,
+                                       'connect_unavailable': 'Bot token missing'},
+                                      'Nothing is sent until a bot token is set'),
+                                     ({}, 'Kept back until the reason clears, then sent by themselves.')):
+                state['status_body'] = synthetic_status(**link_facts, **held)
+                frame.locator('.tc-fresh button').click()
+                expect(hold).to_contain_text(says, timeout=15000)
+                expect(hold).to_contain_text('Example place is paused')
         finally:
             browser.close()

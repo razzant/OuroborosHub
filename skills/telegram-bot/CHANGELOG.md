@@ -20,7 +20,9 @@
   the owner can end (the skill's access was refused, or the place is not connected) leads the reasons and turns the
   card amber. Failed sends, unknown outcomes and updates Ouroboros refused are listed while they ended within the
   last day; older ones stay in the totals with the date of the last one. Holds, retried updates and the link are
-  listed while they last. The latest error opens inside its item (for waiting updates, the latest failed attempt's).
+  listed while they last; a held send says that nothing is sent while the bot is stopped or has no token. The latest
+  error opens inside its item (for waiting updates, the latest failed attempt's, or an example when, after a
+  rollback, which failure is the latest was not recorded).
   When Telegram confirmed part of a send the card says so; when it confirmed nothing, that delivery could not be
   established. Either way it advises checking the chat and the receipt's `confirmed_messages` before asking
   Ouroboros to send only what is missing; this is advice, nothing is sent again by itself.
@@ -32,7 +34,7 @@
   value sent when the field was changed while it was saving; a saved value stays shown until a newer status read
   confirms it. Details keep every earlier fact: the bot-account explanation word for word, the exact queue counts,
   the Telegram offset, the last error with when and in which loop, and what Ouroboros reported, now worded as the
-  check it was, with its time. Details › State words the same link judgement as the first line, and a bot named
+  check it was, with its time (an unanswered check says so on every row that depends on it). Details › State words the same link judgement as the first line, and a bot named
   while the current token's bot is not confirmed (or the bot is stopped) is marked as the last confirmed one. While
   the custody counts are unknown no row reads as zero or as a total.
 - The card says when the status was read and refreshes every 10 seconds while the page is visible, with no limit on
@@ -46,7 +48,9 @@
   `host_checked_at`, `places_version`, `bot_unconfirmed`, `link`, `recent_problems` (null when the custody store was
   not read), `handoff_retrying`, `held_reasons` (with `kind` for a hold only the owner can end) and `attention`. Its
   `text` and `tone` now follow the card's first line. The bot, its poll result and the chats offered come from one
-  read of the runtime, and the last error's text, time and loop from one record.
+  read of the runtime, the last error's text, time and loop from one record, and Ouroboros's capabilities from one
+  completed check (an older check ending later never replaces a newer one). Telegram's refusal of a token stays the
+  link's outcome even when forgetting that token's bot fails on this computer.
 - The custody store gains read-only `card_snapshot()` and `read_status()` (the totals and the card's facts in one
   SQLite read transaction, with one shared pass over failed sends; a stored answer of any shape reads as confirming
   or not, never as an error), and additive changes, made when it opens: `inbox.last_stage` (where a waiting update's
