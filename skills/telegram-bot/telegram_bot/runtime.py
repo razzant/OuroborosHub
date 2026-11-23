@@ -5,8 +5,11 @@ from __future__ import annotations
 import asyncio
 import pathlib
 import re
+import sqlite3
+import threading
 import time
 from dataclasses import replace
+from time import monotonic
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol, Sequence, Tuple
 
 from . import outbox_files
@@ -53,6 +56,10 @@ _TYPING_CAP_SECONDS = 120.0
 # names no bot (401, 404), or a flood wait (429). With a request proved never to have left (api.TelegramRequestNotSent),
 # only these let the same call be made again; any other outcome of a send call ends its row uncertain.
 _NOT_PERFORMED = frozenset({400, 401, 403, 404, 429})
+# A file request's observation (telegram_receipt's transfer) is stored at most this often while its bytes move, and at
+# once when its phase changes or it ends. Each store keeps the row's lease at least _UPLOAD_LEASE_SECONDS from then.
+_TRANSFER_RECORD_SECONDS = 1.0
+_UPLOAD_LEASE_SECONDS = 300.0
 
 
 class PlaceHeld(RuntimeError):
@@ -985,6 +992,10 @@ class _ProviderCalls:
         self.fence: Optional[int] = lease.attempts if self.recorded else None
         self.open: Optional[Dict[str, Any]] = None
 
+    def upload(self) -> Optional["_Upload"]:
+        """The observer of the file request this attempt is about to make, stored in its row (send rows only)."""
+        return _Upload(self.store, self.lease.delivery_id, self.fence) if self.fence is not None else None
+
     def checkpoint(self, payload: Dict[str, Any], *, report=None, sent=None, confirmed: Sequence[int] = ()) -> None:
         """Store the row's record (with its reports and own messages) as this attempt has it; ``confirmed`` names the
         messages Telegram just confirmed, carried by ``LeaseLost`` if the record cannot be stored."""
@@ -993,8 +1004,10 @@ class _ProviderCalls:
         if not stored and self.fence is not None:
             raise LeaseLost("this attempt no longer holds the outbox row; its record was not stored", confirmed)
 
-    async def make(self, payload: Dict[str, Any], part: int, method: str, call: Callable[[], Awaitable[Any]]) -> Any:
-        """Make one call; ``payload`` is the row's record as it stands just before it."""
+    async def make(self, payload: Dict[str, Any], part: int, method: str, call: Callable[[], Awaitable[Any]],
+                   *, upload: Optional["_Upload"] = None) -> Any:
+        """Make one call; ``payload`` is the row's record as it stands just before it. ``upload`` observes its file
+        request; however this call ends, a cancel included, a request still running in its thread stops writing."""
         if not self.recorded:
             return await call()
         marker = {"part": part, "method": method}
@@ -1009,10 +1022,86 @@ class _ProviderCalls:
                 self.checkpoint(payload)  # Telegram did nothing: the marker goes, while this attempt holds the row
                 self.open = None
             raise
+        finally:
+            if upload is not None:
+                upload.stop()
 
     def answered(self) -> None:
         """The open call's answer is stored, in the commit that also removed its marker."""
         self.open = None
+
+
+class _Upload:
+    """One send attempt's file requests as this process sees them (api.UploadProgress), kept in the row's
+    ``transfer_json`` for ``telegram_receipt``; called from the transport's thread, ``stop`` from the event loop.
+
+    Each store names the attempt (CustodyStore.record_transfer), so it also keeps the lease of an upload that moves.
+    Stopping this attempt is local and checked before the next write; another claimant is discovered only when the
+    next progress store reports that the row is no longer held, so more pieces may be written until then. After
+    the closing boundary the answer is still read, as nothing is withheld then. The newest observation stays when
+    the row ends. Its saved byte count is the last lower bound of completed local writes: an interrupted socket
+    write may have emitted part of an uncounted piece, and completed writes need not be saved yet. It is never
+    proof that Telegram has them.
+    """
+
+    def __init__(self, store: CustodyStore, delivery_id: str, attempt: int):
+        self.store, self.delivery_id, self.attempt = store, delivery_id, attempt
+        self.stopped = threading.Event()
+        self.request = 0
+        self.record: Dict[str, Any] = {}
+        self._store_attempted_at = 0.0
+
+    def stop(self) -> None:
+        self.stopped.set()
+
+    def begin(self, file_bytes_total: int) -> None:
+        self.check_active()
+        self.request += 1  # 2 is the plain-caption request after Telegram refused the first's HTML
+        now = time.time()
+        self.record = {"attempt": self.attempt, "request": self.request, "phase": "connecting",
+                       "file_bytes_written": 0, "file_bytes_total": int(file_bytes_total),
+                       "started_at": now, "updated_at": now}
+        self._store(abandon=True)
+
+    def wrote(self, file_bytes_written: int) -> None:
+        self.check_active()
+        new_phase = self.record["phase"] != "uploading"
+        if not new_phase and file_bytes_written == self.record["file_bytes_written"]:
+            return
+        self.record.update(phase="uploading", file_bytes_written=int(file_bytes_written), updated_at=time.time())
+        if new_phase or monotonic() - self._store_attempted_at >= _TRANSFER_RECORD_SECONDS:
+            self._store(abandon=True)
+
+    def sent(self) -> None:
+        if self.stopped.is_set():
+            return  # a stopped attempt's row is no longer its own to write
+        self.record.update(phase="awaiting_response", file_bytes_written=self.record["file_bytes_total"],
+                           updated_at=time.time())
+        self._store(abandon=False)
+
+    def ended(self, answer: str, error_code: int = 0) -> None:
+        if self.stopped.is_set():
+            return
+        now = time.time()
+        self.record.update(ended_at=now, answer=answer, **({"error_code": int(error_code)} if answer == "refused" else {}))
+        self._store(abandon=False)
+
+    def check_active(self) -> None:
+        if self.stopped.is_set():
+            raise LeaseLost("this attempt was stopped; its file request is abandoned before its next write")
+
+    def _store(self, *, abandon: bool) -> None:
+        try:
+            held = self.store.record_transfer(self.delivery_id, self.attempt, self.record,
+                                              lease_sec=_UPLOAD_LEASE_SECONDS)
+        except sqlite3.Error:
+            held = None  # An unavailable observation is not evidence of a lost lease.
+        finally:
+            self._store_attempted_at = monotonic()  # even a failed write is throttled
+        if abandon:
+            self.check_active()  # the async worker may have stopped while this write waited for SQLite
+        if held is False and abandon:
+            raise LeaseLost("this attempt no longer holds the outbox row; its file request is abandoned")
 
 
 def _send_method(payload: Dict[str, Any]) -> str:
@@ -1170,6 +1259,7 @@ async def _deliver(
     if before_send:
         await before_send()
     # The row's file: a copy kept when it was queued, or, for a row queued before 0.12.1, the path it named.
+    upload = calls.upload()
     result = await calls.make(payload, 0, MEDIA_METHODS[kind], lambda: client.send_media(
         kind,
         chat_id,
@@ -1177,7 +1267,8 @@ async def _deliver(
         prepared_caption=caption,
         topic_id=topic_id,
         reply_to_message_id=reply_id,
-    ))
+        progress=upload,
+    ), upload=upload)
     if not names_message(result):
         raise UnconfirmedSend(MEDIA_METHODS[kind])  # its marker stays: the row ends uncertain
     report = delivery_report(lease.delivery_id, payload, part_id=0, state="delivered", receipt=result,
@@ -1215,8 +1306,10 @@ async def _deliver_album(
         calls.checkpoint(payload)
     if before_send:
         await before_send()
+    upload = calls.upload()
     results = await calls.make(payload, 0, "sendMediaGroup", lambda: client.send_media_group(
-        chat_id, items, topic_id=topic_id, reply_to_message_id=_optional_int(payload.get("reply_to_message_id"))))
+        chat_id, items, topic_id=topic_id, reply_to_message_id=_optional_int(payload.get("reply_to_message_id")),
+        progress=upload), upload=upload)
     messages, reports, rows = [], [], []
     for index, result in enumerate(results):
         if not names_message(result):

@@ -2,7 +2,7 @@
 name: telegram-bot
 description: Durable Telegram transport for generic Ouroboros presences, with exact actor and conversation
   provenance, media staging, and provider receipts.
-version: 0.12.1
+version: 0.13.0
 type: extension
 plugin_api: '2.0'
 runtime: python3
@@ -159,7 +159,7 @@ tools:
 - name: telegram_receipt
   effect: read
   target: []
-  description: Inspect delivery state and provider receipts for a queued Telegram operation.
+  description: Inspect delivery state, provider receipts and a file send's newest transfer observation for a queued Telegram operation.
 icon: ui/icon.svg
 contributes:
   - id: place
@@ -202,6 +202,8 @@ It provides:
 - outbound text, photo, document, video, audio, voice, animation and album sends with durable receipts; a send
   whose outcome is unknown is never made again, and a file goes out as the bytes it had when queued
   ([Sending once](#sending-once-0121));
+- a live observation of each file upload's progress in the row's receipt, from connecting to Telegram's answer
+  ([File sends and transfer observations](#file-sends-and-transfer-observations-0130));
 - a namespaced `telegram_send` tool for proactive delivery to exact numeric chat,
   topic, and message ids, and `telegram_typing` for a turn's "typing…";
 - a bounded poller and fixed worker set; and
@@ -347,6 +349,43 @@ have delivered. Nothing removes these copies automatically; their size counts to
 `telegram_receipt` names them in `files` (`file_name`, `source_path`, `copy_path`, `sha256`, `size_bytes`). A file
 that cannot be copied is refused with `file_copy_failed`, and nothing is queued. Rows queued before 0.12.1 name
 only a path: [Earlier upgrades](#earlier-upgrades).
+
+## File sends and transfer observations (0.13.0)
+
+A file or album send streams its multipart body from disk instead of reading it whole into memory.
+Framing and each file's open size fix the request's `Content-Length` before any connection, and the
+body is written in fixed-size pieces. The socket timeout applies to each body write and to inactivity
+while reading the reply, not to the whole upload or reply. The bytes on the
+wire are the same 0.12.1 joined in one write; a file that ends before its size stops the request mid-body
+and says nothing about what Telegram did.
+
+While a file request runs, its row keeps this process's newest observation, shown as `transfer` in
+`telegram_receipt` and written only while this attempt holds the row: `attempt`, `request` (1, or 2
+for the plain-caption retry after Telegram refused the first request's HTML), `phase` — `connecting`,
+`uploading` or `awaiting_response` — `file_bytes_written` of `file_bytes_total` (the last saved lower
+bound of completed local file writes, framing not counted: an interrupted socket write may have emitted
+part of an uncounted piece, and completed writes may not be saved yet), `started_at` and `updated_at`.
+The worker tries to save phase changes and the request's end at once, and progress between them at most
+about once a second. Each save keeps the row's lease.
+`ended_at` and `answer` (`ok`, `none`, or `refused` with Telegram's `error_code`) appear only if the
+worker saved an end observation. A row that ends `uncertain` after cancellation can keep its last phase
+and byte count without either field. If nothing was saved there is no `transfer` field, and no progress
+is inferred for old attempts. Stopping this attempt is local and checked before the next
+piece write; displacement by another claim is known only when the next observation is saved, so a
+request already running may write further pieces until then. `queued_at` in the receipt says when the
+row was queued.
+Re-reading `telegram_receipt` for the same `request_id` during the upload and after it shows the
+phase, the saved bytes and the answer move. The saved bytes are local, never proof that Telegram has
+them: `file_bytes_written` reaching its total is not delivery — the row's state and Telegram's answer
+decide ([Sending once](#sending-once-0121)).
+
+A file send accepts only a whole Bot API answer: `ok` true to a success status, or Telegram's own
+error — `ok` false, its `description` and an integer `error_code` equal to the status — to an error
+status. A gateway's HTML error page, a body cut below its declared length, or a success status
+without an `ok` answer is no answer from Telegram: it ends the row `uncertain`, never a refusal that
+would permit another call. Multipart POSTs do not follow redirects; an HTTP 3xx response leaves
+delivery uncertain and does not trigger another upload. Text sends, edits, reactions and moderation
+keep their earlier handling.
 
 ## Connecting groups (0.9.0)
 
@@ -854,3 +893,12 @@ from the incoming message's actor. Older hosts receive no identity key.
   an attempt 0.12.0 makes after a rollback is judged the same way. 0.12.0 itself ignores the call record, so after
   a rollback it may repeat a send whose call this version had open; a file row this version queued goes out from
   its copy.
+- 0.13.0: the outbox gains a `transfer_json` column (a file request's last observation) that earlier versions ignore
+  and never write; `telegram_receipt` gains `queued_at`. Rows for which no transfer was recorded have no `transfer`
+  field, and no progress is inferred for old attempts. File bodies stream in fixed-size pieces, and a file send
+  accepts only a whole Bot API answer, so a gateway page, a cut body or a success without `ok` ends the row
+  `uncertain` where 0.12.1 could read a 400 page as "Telegram answered no" and retry it. On upgrade, an older file
+  or album attempt with neither a stored result nor proof it never sent anything ends `uncertain` without another
+  upload: the old error text alone cannot prove that Telegram refused the original POST. New verified refusals still
+  retry as usual; never-attempted and provably pre-call rows can still send. Rolling back to 0.12.1 reads a file whole
+  again, ignores the new transfer and attempt fields, and can retry pending uploads under the earlier rules.
