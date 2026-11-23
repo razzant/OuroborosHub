@@ -106,12 +106,12 @@
       "recommended": false
     },
     {
-      "digest": "4e24776e52cbde4fcac39f03733881019b4b09f656f4f2dc7531ad39c80a0efd",
+      "digest": "9ef02e5ae8314cea354208797f670920fc165e6226e89b8a19f265a66ac9995b",
       "name": "table_tools",
       "recommended": true
     },
     {
-      "digest": "d71fec0e1923b545afbf8b868418f56c20bac56c7e36dc50d7ceb972ed6b9f5b",
+      "digest": "ac8f2abfbf27443c87b1dbdb348e0e06065c2d5af8d5e9a578b1b3c1a737b109",
       "name": "telegram-bot",
       "recommended": false
     },

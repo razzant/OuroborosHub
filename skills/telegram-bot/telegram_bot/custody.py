@@ -37,8 +37,8 @@ class OutboxLease:
     # An earlier attempt may have reached Telegram: it ended with no answer (stale lease, restart or cancel), or
     # 0.9.0 made it and kept no proof that it did nothing.
     previous_unanswered: bool = False
-    # A send row (text, file or album): an earlier version, which records no call before making it, made an attempt
-    # without proof that it did nothing, so it may have reached Telegram (see claim_outbox).
+    # A send row (text, file or album): an earlier attempt left no reliable proof that it did nothing, so it may
+    # have reached Telegram (see claim_outbox).
     unrecorded_attempt: bool = False
 
 
@@ -144,6 +144,11 @@ _UNANSWERED_ATTEMPT = frozenset({"released_at_runtime_start", "worker_cancelled"
 # whether it was. Attempts past it are another version's, such as 0.9.0 or 0.12.0 after a rollback, which store none.
 REACTION_ATTEMPTS_MARKED = "_attempts_marked"
 _STAMP_PATH = "$." + REACTION_ATTEMPTS_MARKED
+# 0.12.1 also wrote the shared stamp, but could clear a file call's marker on a bare HTTP error
+# or on the answer to a different request (redirect or plain-caption retry). Only this stamp
+# accounts for file attempts made with strict replies. Keep the shared stamp for rollback readers.
+_FILE_ATTEMPTS_MARKED = "_file_attempts_marked"
+_FILE_STAMP_PATH = "$." + _FILE_ATTEMPTS_MARKED
 # A send row's record of the provider call this version is about to make: {"part", "method"}, part being the text
 # chunk's index (0 for a file or an album). It is stored before the call and removed only in the commit that records
 # Telegram's accepted message, or after Telegram answered that it did nothing. A row that still holds it may have
@@ -155,18 +160,20 @@ CALL_STARTED = "_call_started"
 _UNMARKED_NO_EFFECT = re.compile(
     r"TelegramApiError: Telegram (?:setMessageReaction failed \((?:400|401|403|404|429)\)"
     r"|(?:getMe|deleteWebhook) failed \(\w+\)): |RuntimeError: telegram token is unavailable\Z")
-# The same proof for a send row 0.12.0 or earlier attempted, in its own words: Telegram's 400, 401, 403, 404 or 429 to
-# the call, or a failure before any byte left (the token, getMe, the upload limit, or a file read while building the
-# upload, which 0.12.0 raised unconverted). Anything else is no proof: a lost answer, a 5xx, and 0.12.0's "URLError",
-# which it recorded without saying whether the request was being written.
-_UNRECORDED_SEND_NO_EFFECT = re.compile(
-    r"TelegramApiError: Telegram (?:(?:sendMessage|sendPhoto|sendDocument|sendVideo|sendAudio|sendVoice"
-    r"|sendAnimation|sendMediaGroup) failed \((?:400|401|403|404|429)\): "
-    r"|(?:getMe|deleteWebhook) failed \(\w+\): |upload failed \(transport\): )"
-    r"|RuntimeError: telegram token is unavailable\Z|(?:FileNotFoundError|IsADirectoryError|NotADirectoryError"
-    r"|PermissionError): ")
+_PREFLIGHT_NO_EFFECT = (r"TelegramApiError: Telegram (?:getMe|deleteWebhook) failed \(\w+\): "
+                        r"|RuntimeError: telegram token is unavailable\Z")
+# Keep the earlier text-send upgrade rule; file calls below require proof about the original upload.
+_UNRECORDED_TEXT_NO_EFFECT = re.compile(
+    r"TelegramApiError: Telegram (?:sendMessage failed \((?:400|401|403|404|429)\): |upload failed \(transport\): )"
+    r"|(?:FileNotFoundError|IsADirectoryError|NotADirectoryError|PermissionError): |" + _PREFLIGHT_NO_EFFECT)
+_LEGACY_FILE_PREFLIGHT_FAILURE = re.compile(
+    _PREFLIGHT_NO_EFFECT + r"|PresenceHost(?:HTTP)?Error: |ValueError: the copy of ")
+_LEGACY_FILE_BUILD_FAILURE = re.compile(
+    r"Telegram(?:ApiError|RequestNotSent): Telegram upload failed \(transport\): "
+    r"|(?:FileNotFoundError|IsADirectoryError|NotADirectoryError|PermissionError): ")
 # The rows whose calls are recorded before they are made: text, every file kind (api.MEDIA_METHODS) and albums.
-_SEND_KINDS = frozenset({"message", "photo", "document", "video", "audio", "voice", "animation", "album"})
+_FILE_SEND_KINDS = frozenset({"photo", "document", "video", "audio", "voice", "animation", "album"})
+_SEND_KINDS = _FILE_SEND_KINDS | {"message"}
 # An inbox row kept on a Host that cannot hold it as context-only; it is never submitted later.
 REACTION_WITHHELD = "reaction_host_context_unavailable"
 # The bot getMe last confirmed, for tools in processes whose runtime does not poll: "<token digest>:<bot id>".
@@ -219,6 +226,37 @@ def _unproven_earlier_attempt(payload: Dict[str, Any], attempts: int, last_error
     stamp = payload.get(REACTION_ATTEMPTS_MARKED)
     other = attempts - (stamp if type(stamp) is int else 0)
     return not 0 <= other <= 1 or (other == 1 and not no_effect.match(last_error))
+
+
+def _unproven_file_attempt(payload: Dict[str, Any], attempts: int, last_error: str) -> bool:
+    """Whether a file call could have left under an earlier reader, even without its call marker."""
+    stamp = payload.get(_FILE_ATTEMPTS_MARKED)
+    other = attempts - (stamp if type(stamp) is int else 0)
+    if other <= 0:
+        return other < 0
+    # Even the earlier runtimes persisted resolved reporting before sending. If still unresolved, no upload ran.
+    if (payload.get("_reporting") or {}).get("version") == -1:
+        return False
+    if other != 1:
+        return True  # a later preflight failure could have overwritten the only record of an earlier upload
+    if _LEGACY_FILE_PREFLIGHT_FAILURE.match(last_error):
+        return False
+    if not _LEGACY_FILE_BUILD_FAILURE.match(last_error):
+        return True  # a refusal string (even a plausible one), or a restart with no marker, is not proof
+    # A 0.12.1 body build failure only proves no POST if it could not have occurred on the plain-caption retry.
+    # The old client omitted empty captions (including their parse mode); any nonempty HTML could trigger a retry.
+    if payload.get("kind") == "album":
+        items, queued = payload.get("_rendered_items"), payload.get("items")
+        if not isinstance(items, list) or not items or not isinstance(queued, list) or len(items) != len(queued):
+            return True
+        captions = [item.get("caption") if isinstance(item, dict) else None for item in items]
+    else:
+        captions = [payload.get("_rendered_caption")]
+    return not all(
+        isinstance(caption, dict) and isinstance(caption.get("text"), str)
+        and (caption.get("parse_mode") == "" or (caption.get("parse_mode") == "HTML" and caption["text"] == ""))
+        for caption in captions
+    )
 
 
 def _remember_event(conn: sqlite3.Connection, event: TelegramEvent) -> None:
@@ -978,12 +1016,18 @@ class CustodyStore:
                     payload = {**payload, REACTION_ATTEMPTS_MARKED: row["attempts"] + 1}
                     marked = _json(payload)
             elif recorded_calls(payload) and CALL_STARTED not in payload:
-                # No call of this version is open. Its own attempts are proved by the missing marker, whatever
-                # ended them (a restart, a cancel or a stale lease included); another version's must prove no effect.
-                unrecorded = _unproven_earlier_attempt(
-                    payload, row["attempts"], row["last_error"], _UNRECORDED_SEND_NO_EFFECT)
+                # A missing marker settles only attempts whose reader used the applicable record protocol.
+                # Do not stamp an uncertain prior attempt: a crash before settlement must not authorize a retry.
+                file_send = payload.get("kind") in _FILE_SEND_KINDS
+                if file_send:
+                    unrecorded = _unproven_file_attempt(payload, row["attempts"], row["last_error"])
+                else:
+                    unrecorded = _unproven_earlier_attempt(
+                        payload, row["attempts"], row["last_error"], _UNRECORDED_TEXT_NO_EFFECT)
                 if not unrecorded:
                     payload = {**payload, REACTION_ATTEMPTS_MARKED: row["attempts"] + 1}
+                    if file_send:
+                        payload[_FILE_ATTEMPTS_MARKED] = row["attempts"] + 1
                     marked = _json(payload)
             updated = conn.execute(
                 """
@@ -1030,15 +1074,18 @@ class CustodyStore:
             return updated.rowcount == 1
 
     def hold_outbox(self, delivery_id: str, reason: str, *, attempts: Optional[int] = None) -> bool:
-        # A hold returns its attempt to the count; a reaction's stamp of that count moves with it.
+        # A hold returns its attempt to the count; stamps for that attempt move with it.
         held, args = _held_by(attempts)
         with self._connect() as conn:
             updated = conn.execute(
                 "UPDATE outbox SET state='pending',available_at=?,lease_until=0,"
-                "last_error=?,attempts=MAX(0,attempts-1),payload_json=CASE WHEN "
-                "json_extract(payload_json,?)=attempts THEN json_set(payload_json,?,MAX(0,attempts-1)) "
+                "last_error=?,attempts=MAX(0,attempts-1),payload_json=CASE "
+                "WHEN json_extract(payload_json,?)=attempts "
+                "THEN json_set(payload_json,?,MAX(0,attempts-1),?,MAX(0,attempts-1)) "
+                "WHEN json_extract(payload_json,?)=attempts THEN json_set(payload_json,?,MAX(0,attempts-1)) "
                 "ELSE payload_json END WHERE delivery_id=? AND state='leased'" + held,
-                (time.time() + 5, reason, _STAMP_PATH, _STAMP_PATH, delivery_id, *args))
+                (time.time() + 5, reason, _FILE_STAMP_PATH, _FILE_STAMP_PATH, _STAMP_PATH,
+                 _STAMP_PATH, _STAMP_PATH, delivery_id, *args))
             return updated.rowcount == 1
 
     def mark_outbox_failed(self, delivery_id: str, *, reason: str, report=None,
@@ -1077,6 +1124,21 @@ class CustodyStore:
             updated = conn.execute(
                 "UPDATE outbox SET payload_json=? WHERE delivery_id=? AND state='leased' AND attempts=?",
                 (_json(payload), delivery_id, int(attempts)),
+            )
+            return updated.rowcount == 1
+
+    def record_transfer(self, delivery_id: str, attempts: int, transfer: Dict[str, Any], *, lease_sec: float) -> bool:
+        """Keep a send attempt's newest observation of its file request, and its lease at least ``lease_sec`` more.
+
+        Only while that attempt holds the row, as start_outbox_call: once the row was released, ended or claimed again,
+        nothing changes (``False``). It is a separate column, so the row's record, answers and state never move with
+        it, and it stays as last written after the row ends, for the receipt.
+        """
+        with self._connect() as conn:
+            updated = conn.execute(
+                "UPDATE outbox SET transfer_json=?, lease_until=MAX(lease_until, ?) "
+                "WHERE delivery_id=? AND state='leased' AND attempts=?",
+                (_json(transfer), time.time() + max(0.0, lease_sec), delivery_id, int(attempts)),
             )
             return updated.rowcount == 1
 
@@ -1189,8 +1251,8 @@ class CustodyStore:
     def delivery_receipt(self, delivery_id: str) -> Dict[str, Any]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT state, attempts, delivered_at, provider_receipt_json, last_error, payload_json, reports_json "
-                "FROM outbox WHERE delivery_id=?",
+                "SELECT state, attempts, created_at, delivered_at, provider_receipt_json, last_error, payload_json, "
+                "reports_json, transfer_json FROM outbox WHERE delivery_id=?",
                 (delivery_id,),
             ).fetchone()
         if row is None:
@@ -1214,11 +1276,13 @@ class CustodyStore:
                and not any(entry["acked"] for entry in json.loads(row["reports_json"])) else {}),
             "state": "held" if row["state"] == "pending" and str(row["last_error"]).startswith("Held:") else "uncertain" if payload.get("_terminal_outcome") == "uncertain" else str(row["state"]),
             "attempts": int(row["attempts"]),
+            "queued_at": _timestamp(row["created_at"]),
             "delivered_at": _timestamp(row["delivered_at"]),
             "provider_receipt": json.loads(row["provider_receipt_json"] or "{}"),
             **({"confirmed_messages": answers[0], **({"answers_without_message_id": answers[1]} if answers[1] else {})}
                if answers is not None and row["state"] != "delivered" else {}),
             **({"files": files} if files else {}),
+            **_transfer_receipt(row["transfer_json"]),
             "error": str(row["last_error"]),
             "delivery_reporting": payload.get("_reporting", {"version": 0, "status": "legacy_unconfirmed"}),
             "history_reports": json.loads(row["reports_json"]),
@@ -1354,6 +1418,9 @@ class CustodyStore:
             if "reports_json" not in columns:
                 conn.execute("ALTER TABLE outbox ADD COLUMN reports_json TEXT NOT NULL DEFAULT '[]'")
                 conn.execute("ALTER TABLE outbox ADD COLUMN report_due_at REAL NOT NULL DEFAULT 0")
+            if "transfer_json" not in columns:
+                # A file request's last observation (record_transfer). No checkpoint or end of the row writes it.
+                conn.execute("ALTER TABLE outbox ADD COLUMN transfer_json TEXT NOT NULL DEFAULT ''")
             conn.execute("CREATE INDEX IF NOT EXISTS outbox_reports_due ON outbox(report_due_at)")
             if "host_receipt_json" not in {r[1] for r in conn.execute("PRAGMA table_info(inbox)")}:
                 conn.execute("ALTER TABLE inbox ADD COLUMN host_receipt_json TEXT NOT NULL DEFAULT ''")
@@ -1460,6 +1527,24 @@ def _timestamp(value: Any) -> str:
     if not value:
         return ""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(value)))
+
+
+# The receipt's ``transfer`` fields; updated_at marks observed progress, ended_at an observed end of the request.
+_TRANSFER_FIELDS = ("attempt", "request", "phase", "file_bytes_written", "file_bytes_total", "started_at", "updated_at",
+                    "ended_at", "answer", "error_code")
+_TRANSFER_TIMES = frozenset({"started_at", "updated_at", "ended_at"})
+
+
+def _transfer_receipt(stored: Any) -> Dict[str, Any]:
+    """``{"transfer": ...}`` when this version observed a file request of the row, else nothing: no stage is inferred."""
+    try:
+        record = json.loads(stored) if stored else None
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    return {"transfer": {key: _timestamp(record[key]) if key in _TRANSFER_TIMES else record[key]
+                         for key in _TRANSFER_FIELDS if key in record}}
 
 
 def _anchor_message_id(

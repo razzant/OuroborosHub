@@ -10,13 +10,17 @@
       "package": "python-docx"
     }
   ],
+  "mark": "",
   "name": "word_tools",
+  "needs": "",
   "owner": "kazzand",
+  "pitch": "Read Word files and write new ones",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/word_tools"
   },
+  "title": "Word documents",
   "type": "script",
   "version": "0.1.0",
   "when_to_use": "The user attached a Word document and asks to read, summarize, search, compare, or revise its contents, or asks to create a Word or DOCX file.",

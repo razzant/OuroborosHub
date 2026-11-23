@@ -11,13 +11,17 @@
   "install_specs": [
     "PyJWT[crypto]>=2.13,<3"
   ],
+  "mark": "GitHub access",
   "name": "github",
+  "needs": "needs a personal access token or credentials for an installed GitHub App",
   "owner": "ouroboros-agent",
+  "pitch": "Answer issues and pull requests",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/github"
   },
+  "title": "GitHub",
   "type": "extension",
   "version": "0.2.0",
   "withdrawn": null

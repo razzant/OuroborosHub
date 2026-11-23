@@ -541,7 +541,16 @@ def register(api: Any) -> None:
     api.register_tool(
         "telegram_receipt",
         make_receipt_tool(api),
-        description="Read durable delivery state, provider receipt or error for a Telegram send/moderation request.",
+        description=(
+            "Read durable delivery state, provider receipt or error for a Telegram send/moderation request. For a "
+            "file send, `transfer` is this process's newest saved observation of the upload — its phase "
+            "(connecting, uploading, awaiting_response), the file bytes written of the total (the last saved lower "
+            "bound of completed local writes; an interrupted socket write may have emitted part of an uncounted "
+            "piece). Only a saved end observation has `ended_at` and `answer`; an uncertain row can keep the last "
+            "phase and count without them. Those bytes are never proof Telegram has them; the row's state and "
+            "provider receipt decide delivery. `queued_at` says when the row was queued; re-read the same "
+            "request_id to watch an upload move."
+        ),
         schema={
             "type": "object",
             "properties": {

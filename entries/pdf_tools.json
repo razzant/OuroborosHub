@@ -14,13 +14,17 @@
       "package": "reportlab"
     }
   ],
+  "mark": "",
   "name": "pdf_tools",
+  "needs": "",
   "owner": "kazzand",
+  "pitch": "Read PDFs and create new ones",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/pdf_tools"
   },
+  "title": "PDF files",
   "type": "script",
   "version": "0.1.0",
   "when_to_use": "The user attached a PDF and asks to read, summarize, search, or compare it, or asks to produce or export a PDF.",

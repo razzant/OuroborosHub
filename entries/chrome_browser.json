@@ -10,14 +10,17 @@
       "package": "@playwright/mcp@0.0.84"
     }
   ],
+  "mark": "extension",
   "name": "chrome_browser",
+  "needs": "needs the Chrome extension",
   "owner": "kazzand",
+  "pitch": "Work in your signed-in Chrome",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/chrome_browser"
   },
-  "title": "Chrome (shared tab)",
+  "title": "Chrome",
   "type": "script",
   "version": "0.5.0",
   "when_to_use": "The owner wants work done in their own signed-in Chrome - in a tab they share and in background tabs for the same work - while they keep using the browser, and takes the page over by saying so when a login, a code or a decision is theirs.",

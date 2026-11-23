@@ -7,13 +7,17 @@
   "install_specs": [
     "ddgs"
   ],
+  "mark": "",
   "name": "duckduckgo",
+  "needs": "",
   "owner": "razzant",
+  "pitch": "Free search with DuckDuckGo, no key",
   "schema_version": 2,
   "source": {
     "kind": "hosted",
     "path": "skills/duckduckgo"
   },
+  "title": "Web search",
   "type": "extension",
   "version": "0.1.4",
   "when_to_use": "User asks to search the web, find information, look up facts, or research a topic — and no OpenAI key is available for web_search.",
