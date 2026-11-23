@@ -112,6 +112,17 @@ jobs:
           echo "OUROBOROS_SOURCE_DIR=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
           echo "OUROBOROS_THEME_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
           echo "OUROBOROS_CORE_ROOT=$GITHUB_WORKSPACE/core" >> "$GITHUB_ENV"
+      # The Slack Bridge card's browser test mounts it through the core's module bridge in Chromium and WebKit. Without
+      # the browsers it fails (TRANSPORT_WIDGET_REQUIRE_BROWSERS in scripts/ci_checks.py); it never skips.
+      - name: Install Playwright's browsers for the Slack Bridge card
+        if: matrix.suite == 'slack-bridge'
+        run: |
+          python -m pip install 'playwright==1.62.0'
+          if [ "$RUNNER_OS" = Linux ]; then
+            python -m playwright install --with-deps chromium webkit
+          else
+            python -m playwright install chromium webkit
+          fi
       # The Presence consumers (tests/test_*_core_consumer.py) drive Slack and Telegram through the core's own Presence
       # routes in child processes, and GitHub's owner-account contract runs through its places module. They import
       # nothing beyond each suite's dependencies, so the checkout is all they need; scripts/ci_checks.py puts it first

@@ -1,7 +1,7 @@
 ---
 name: slack-bridge
 description: Slack presence transport with durable delivery, directory discovery, provider updates, file transfer, message actions, and provider context.
-version: 1.12.2
+version: 1.13.0
 type: extension
 entry: plugin.py
 plugin_api: "2.0"
@@ -162,6 +162,16 @@ contributes:
       - from_bot
       - {id: signal.new_root, label: "New top-level post in a listed channel (connector setting)"}
     wakes: [direct_message, group_dm, mention, my_thread]
+ui_tab:
+  tab_id: slack_presence
+  title: Slack Bridge
+  icon: message
+  render:
+    kind: module
+    entry: widget.js
+    appearance: host
+    start: auto
+    span: 1
 ---
 
 # Slack Bridge
@@ -767,8 +777,9 @@ References: [conversations.list](https://docs.slack.dev/reference/methods/conver
   lease, send marker and bytes stay the same.
 - Long outbound text is split into Slack-safe chunks before it enters the
   durable outbox.
-- The Widgets tab reports connection state, queue depth, failures, and recent
-  activity without exposing tokens or message contents.
+- The Widgets card says first whether the link works and what needs attention, then
+  totals since install and folded details; it shows when the status was read and keeps
+  refreshing. It never shows tokens or message contents.
 
 Save settings before enabling the skill, or toggle it after a settings change.
 An absent settings file simply means "not configured yet". A settings file that

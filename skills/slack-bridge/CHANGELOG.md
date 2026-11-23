@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.13.0
+
+- The Widgets card is redrawn as one surface (a module `widget.js`). Its first line says whether
+  the link works and whether anything needs attention ("Connected · nothing needs attention",
+  "Connected · 3 messages not delivered"); the Places sheet shows the same words and tone. What
+  needs attention is listed below it, worst first, each with its time, what it means and what
+  to do; the raw error sits in a fold beside it. Quiet totals since install and a Details fold
+  keep every fact the old card showed. Credentials and message contents are still never shown.
+- The card shows when the status was read and keeps refreshing every 10 seconds while it is
+  visible. A failed read keeps the last data and says so with "Try again"; the old poll stopped
+  silently after about five minutes.
+- "Outcome unknown" (a send whose result was lost) is its own item and is never called a failure:
+  nothing resends it, and the owner checks the conversation before sending again. Problems are
+  attention for 24 hours; older ones stay in the totals with their date. A connected bridge whose
+  state is only partly known (Ouroboros has not answered its capability check) never reads as
+  all clear.
+- `GET status` gains additive fields: `observed_at`, `link` (`state`, `detail`, `companion_alive`,
+  `since`, `error`; never `connected` while the companion process is dead), `recent_problems`,
+  a structured `last_error` built only from failed or uncertain rows, `outbound_text_chunks`,
+  `outbound_messages` (logical messages, not 3,900-character parts), `units` and `attention`;
+  `held_reasons` (every reason holding outbound rows, with its count), `inbox_retrying` (events the
+  Host refused for now and the bridge retries, from the queue rows), and per-message
+  `failed_messages_partly_delivered` / `uncertain_messages_partly_delivered`, so the card never
+  advises sending a message again whole when its first parts already arrived. All of it is read in
+  one transaction. `text` and `tone` keep their keys; their words and tone now follow the rule
+  above. Every other existing key keeps its name and meaning.
+- Token advice appears only when Slack refused the tokens (the bridge's own refusal codes); any
+  other connection error is shown as itself. When several reasons hold messages, the one the owner
+  must act on comes first and sets the amber tone.
+- An exiting companion clears only its own PID, so it cannot erase a newer companion's; the
+  Windows process probe declares its `OpenProcess`, `GetExitCodeProcess` and `CloseHandle`
+  signatures and still never sends signal 0.
+- Residuals: a reused PID can still read as alive (there is no companion heartbeat);
+  `host_adapter_state` is written once per companion start; "waiting unusually long" is not shown
+  because status reports no age of the oldest waiting row; a hold's reason is shown only while
+  the newest stored note is that hold's; earlier review findings on bridge hardening are not
+  addressed here.
+
 ## 1.12.2
 
 - File uploads now recover by themselves before anything is shared. Each physical upload takes

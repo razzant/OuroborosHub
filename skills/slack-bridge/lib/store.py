@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sqlite3
 import threading
@@ -9,7 +10,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from .events import REACTION_EVENTS, ParsedEnvelope, conversation_thread, provider_facts
 from .slack_api import normalize_text_format
@@ -17,6 +18,30 @@ from .slack_api import normalize_text_format
 
 # An inbox row kept on a Host that cannot hold it as context-only; it is never submitted later.
 REACTION_WITHHELD = "reaction_host_context_unavailable"
+RECENT_PROBLEM_WINDOW_SECONDS = 86400
+OUTBOX_CHUNK_MAX_CHARS = 3900
+LINK_STATES = frozenset({"connected", "starting", "reconnecting", "disconnected", "not_configured", "error"})
+LINK_DETAILS = frozenset({
+    "ok",
+    "host_adapter_inactive",
+    "starting",
+    "authorized",
+    "connecting",
+    "refresh_requested",
+    "connection_closed",
+    "reconnecting",
+    "companion_not_running",
+    "disconnected",
+    "not_started",
+    "missing_tokens",
+    "missing_bot_token",
+    "missing_app_token",
+    "unreadable_settings",
+    "invalid_binding_id",
+    "corrupt_runtime_state",
+    "socket_error",
+    "companion_exited_error",
+})
 _REACTION_OPERATIONS = {"reaction_add": ("add", "new", "reactions.add"),
                         "reaction_remove": ("remove", "old", "reactions.remove")}
 
@@ -246,6 +271,192 @@ class OutboxItem:
 
 def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(float(epoch), timezone.utc).isoformat()
+
+
+def _iso_z(epoch: float) -> str:
+    dt = datetime.fromtimestamp(float(epoch), timezone.utc)
+    if dt.microsecond:
+        return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+_IS_WINDOWS = os.name == "nt"
+_WINDOWS_STILL_ACTIVE = 259
+_WINDOWS_ACCESS_DENIED = 5
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+
+def _windows_kernel32(ctypes_module: Any, wintypes_module: Any) -> Any:
+    """kernel32 with the three signatures this probe calls declared, so HANDLE is not truncated to a C int."""
+    kernel32 = ctypes_module.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes_module.DWORD, wintypes_module.BOOL, wintypes_module.DWORD)
+    kernel32.OpenProcess.restype = wintypes_module.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (wintypes_module.HANDLE, ctypes_module.POINTER(wintypes_module.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes_module.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes_module.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes_module.BOOL
+    return kernel32
+
+
+def _pid_is_alive(pid: Any) -> bool:
+    """True when ``pid`` names a live OS process; never sends signal 0 on Windows.
+
+    A PID the OS has reused for another process also reads as alive: the store keeps no heartbeat to tell them apart.
+    """
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    if _IS_WINDOWS:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = _windows_kernel32(ctypes, wintypes)
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == _WINDOWS_ACCESS_DENIED
+        try:
+            exit_code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True
+            return exit_code.value == _WINDOWS_STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def derive_link_state(payload: Mapping[str, Any], *, companion_alive: bool) -> dict[str, Any]:
+    """Derive an honest transport link summary from stored runtime facts, settings, and PID liveness.
+
+    Never reports ``connected``, ``starting``, or ``reconnecting`` when the companion process is not running.
+    ``since`` is populated only when ``state == 'connected'`` and ``connected_at`` was recorded for that session.
+    """
+    alive = bool(companion_alive)
+    binding_state = str(payload.get("binding_state") or "")
+    if binding_state == "unreadable":
+        return {
+            "state": "error",
+            "detail": "unreadable_settings",
+            "companion_alive": alive,
+            "since": None,
+            "error": str(payload.get("local_settings_error") or ""),
+        }
+    if binding_state == "invalid":
+        return {
+            "state": "error",
+            "detail": "invalid_binding_id",
+            "companion_alive": alive,
+            "since": None,
+            "error": "",
+        }
+
+    socket_state = payload.get("socket_state", "stopped")
+    last_socket_error = str(payload.get("last_socket_error") or "")
+    active_socket_states = {"connected", "starting", "authorized", "connecting", "reconnecting"}
+
+    if "has_bot_token" in payload and "has_app_token" in payload:
+        has_bot = bool(payload.get("has_bot_token"))
+        has_app = bool(payload.get("has_app_token"))
+        if (not has_bot or not has_app) and not (alive and socket_state in active_socket_states):
+            detail = (
+                "missing_tokens"
+                if not has_bot and not has_app
+                else ("missing_bot_token" if not has_bot else "missing_app_token")
+            )
+            return {
+                "state": "not_configured",
+                "detail": detail,
+                "companion_alive": alive,
+                "since": None,
+                "error": last_socket_error if socket_state == "error" else "",
+            }
+
+    if socket_state is None:
+        return {
+            "state": "error",
+            "detail": "corrupt_runtime_state",
+            "companion_alive": alive,
+            "since": None,
+            "error": "",
+        }
+
+    socket_str = str(socket_state or "stopped")
+    if socket_str == "error":
+        return {
+            "state": "error",
+            "detail": "socket_error" if alive else "companion_exited_error",
+            "companion_alive": alive,
+            "since": None,
+            "error": last_socket_error,
+        }
+
+    if not alive:
+        if socket_str == "stopped":
+            detail = "not_started"
+            err = ""
+        elif socket_str == "disconnected":
+            detail = "disconnected"
+            err = ""
+        else:
+            detail = "companion_not_running"
+            err = last_socket_error
+        return {
+            "state": "disconnected",
+            "detail": detail,
+            "companion_alive": False,
+            "since": None,
+            "error": err,
+        }
+
+    if socket_str == "connected":
+        connected_at = payload.get("connected_at")
+        since = (
+            _iso_z(float(connected_at))
+            if isinstance(connected_at, (int, float)) and not isinstance(connected_at, bool) and float(connected_at) > 0
+            else None
+        )
+        adapter_ok = str(payload.get("host_adapter_state") or "") == "active"
+        return {
+            "state": "connected",
+            "detail": "ok" if adapter_ok else "host_adapter_inactive",
+            "companion_alive": True,
+            "since": since,
+            "error": "",
+        }
+
+    if socket_str in {"starting", "authorized", "connecting"}:
+        return {
+            "state": "starting",
+            "detail": socket_str,
+            "companion_alive": True,
+            "since": None,
+            "error": "",
+        }
+
+    if socket_str == "reconnecting":
+        if last_socket_error == "refresh_requested":
+            detail = "refresh_requested"
+        elif last_socket_error.startswith("connection_closed:"):
+            detail = "connection_closed"
+        else:
+            detail = "reconnecting"
+        return {
+            "state": "reconnecting",
+            "detail": detail,
+            "companion_alive": True,
+            "since": None,
+            "error": last_socket_error,
+        }
+
+    return {
+        "state": "disconnected",
+        "detail": "not_started" if socket_str == "stopped" else "disconnected",
+        "companion_alive": True,
+        "since": None,
+        "error": "",
+    }
 
 
 def _message_revision(row: Mapping[str, Any] | sqlite3.Row) -> str:
@@ -1330,11 +1541,70 @@ class BridgeStore:
                 )
             db.commit()
 
-    def status(self) -> dict[str, Any]:
+    def clear_runtime_if_equal(self, key: str, expected: Any) -> bool:
+        """Clear ``key`` only while it still holds ``expected``; an exiting daemon never erases a newer one's PID."""
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute(
+                "UPDATE runtime_state SET value_json='null', updated_at=? WHERE key=? AND value_json=?",
+                (time.time(), str(key), json.dumps(expected, ensure_ascii=False)),
+            )
+            db.commit()
+        return cursor.rowcount == 1
+
+    def status(
+        self,
+        *,
+        now: float | None = None,
+        pid_alive: Callable[[Any], bool] | None = None,
+    ) -> dict[str, Any]:
+        observed_epoch = float(time.time() if now is None else now)
+        cutoff = observed_epoch - RECENT_PROBLEM_WINDOW_SECONDS
+        with self._connect() as db:
+            # One read transaction: every counter and recent problem below comes from the same snapshot.
+            if not db.in_transaction:
+                db.execute("BEGIN")
             runtime_rows = db.execute(
                 "SELECT key, value_json, updated_at FROM runtime_state"
             ).fetchall()
+            # Every reason holding outbound rows, with its count (the newest note alone can hide the owner's move).
+            held_reasons = [
+                {"reason": str(row[0])[len("Held:"):].strip(), "note": str(row[0]), "count": int(row[1])}
+                for row in db.execute(
+                    "SELECT last_error, COUNT(*) FROM outbox WHERE state='pending' AND last_error LIKE 'Held:%' "
+                    "GROUP BY last_error ORDER BY COUNT(*) DESC, last_error"
+                ).fetchall()
+            ]
+            # Events whose hand-off to the Host was tried and refused for now (they retry by themselves). Rows whose
+            # turn is running carry "Host turn state: ..." notes and are not counted; a first attempt not yet made is
+            # an ordinary wait.
+            retrying = db.execute(
+                "SELECT COUNT(*) FROM inbox WHERE state='pending' AND attempts>0 "
+                "AND last_error<>'' AND last_error NOT LIKE 'Host turn state:%'"
+            ).fetchone()
+            retrying_last = db.execute(
+                "SELECT last_error, updated_at FROM inbox WHERE state='pending' AND attempts>0 "
+                "AND last_error<>'' AND last_error NOT LIKE 'Host turn state:%' ORDER BY updated_at DESC, id DESC LIMIT 1"
+            ).fetchone()
+            # Terminal text messages of the recent window whose earlier parts Slack already confirmed.
+            partly = db.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN uncertain_n = 0 AND failed_n > 0 THEN 1 ELSE 0 END), 0) AS failed,
+                    COALESCE(SUM(CASE WHEN uncertain_n > 0 THEN 1 ELSE 0 END), 0) AS uncertain
+                FROM (
+                    SELECT
+                        SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed_n,
+                        SUM(CASE WHEN state='uncertain' THEN 1 ELSE 0 END) AS uncertain_n,
+                        SUM(CASE WHEN state='delivered' THEN 1 ELSE 0 END) AS delivered_n,
+                        SUM(CASE WHEN state IN ('pending', 'leased') THEN 1 ELSE 0 END) AS open_n,
+                        MAX(CASE WHEN state IN ('failed', 'uncertain') THEN updated_at ELSE NULL END) AS last_problem_at
+                    FROM outbox WHERE kind <> 'mutation' GROUP BY request_id
+                )
+                WHERE delivered_n > 0 AND open_n = 0 AND (failed_n > 0 OR uncertain_n > 0) AND last_problem_at >= ?
+                """,
+                (cutoff,),
+            ).fetchone()
             inbox = {
                 str(row["state"]): int(row["count"])
                 for row in db.execute(
@@ -1374,6 +1644,110 @@ class BridgeStore:
                 ) ORDER BY updated_at DESC LIMIT 1
                 """
             ).fetchone()
+            text_chunks_row = db.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN state='pending' AND last_error NOT LIKE 'Held:%' THEN 1 ELSE 0 END), 0) AS waiting,
+                    COALESCE(SUM(CASE WHEN state='pending' AND last_error LIKE 'Held:%' THEN 1 ELSE 0 END), 0) AS held,
+                    COALESCE(SUM(CASE WHEN state='leased' THEN 1 ELSE 0 END), 0) AS leased,
+                    COALESCE(SUM(CASE WHEN state='delivered' THEN 1 ELSE 0 END), 0) AS delivered,
+                    COALESCE(SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END), 0) AS failed,
+                    COALESCE(SUM(CASE WHEN state='uncertain' THEN 1 ELSE 0 END), 0) AS uncertain
+                FROM outbox
+                WHERE kind <> 'mutation'
+                """
+            ).fetchone()
+            logical_msg_rows = db.execute(
+                """
+                SELECT
+                    CASE
+                        WHEN leased_n > 0 THEN 'leased'
+                        WHEN pending_n > 0 AND held_n > 0 THEN 'held'
+                        WHEN pending_n > 0 THEN 'waiting'
+                        WHEN uncertain_n > 0 THEN 'uncertain'
+                        WHEN failed_n > 0 THEN 'failed'
+                        ELSE 'delivered'
+                    END AS msg_state,
+                    COUNT(*) AS total_count,
+                    COALESCE(SUM(CASE WHEN last_problem_at >= ? THEN 1 ELSE 0 END), 0) AS recent_count
+                FROM (
+                    SELECT
+                        request_id,
+                        SUM(CASE WHEN state='leased' THEN 1 ELSE 0 END) AS leased_n,
+                        SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END) AS pending_n,
+                        SUM(CASE WHEN state='pending' AND last_error LIKE 'Held:%' THEN 1 ELSE 0 END) AS held_n,
+                        SUM(CASE WHEN state='uncertain' THEN 1 ELSE 0 END) AS uncertain_n,
+                        SUM(CASE WHEN state='failed' THEN 1 ELSE 0 END) AS failed_n,
+                        MAX(CASE WHEN state IN ('failed', 'uncertain') THEN updated_at ELSE NULL END) AS last_problem_at
+                    FROM outbox
+                    WHERE kind <> 'mutation'
+                    GROUP BY request_id
+                )
+                GROUP BY msg_state
+                """,
+                (cutoff,),
+            ).fetchall()
+            inbox_problem_rows = db.execute(
+                """
+                SELECT
+                    state,
+                    COALESCE(SUM(CASE WHEN updated_at >= ? THEN 1 ELSE 0 END), 0) AS recent_count,
+                    MAX(updated_at) AS last_at
+                FROM inbox
+                WHERE state IN ('failed', 'uncertain')
+                GROUP BY state
+                """,
+                (cutoff,),
+            ).fetchall()
+            outbox_problem_rows = db.execute(
+                """
+                SELECT
+                    CASE WHEN kind='mutation' THEN 'mutation' ELSE 'text' END AS bucket,
+                    state,
+                    COALESCE(SUM(CASE WHEN updated_at >= ? THEN 1 ELSE 0 END), 0) AS recent_count,
+                    MAX(updated_at) AS last_at
+                FROM outbox
+                WHERE state IN ('failed', 'uncertain')
+                GROUP BY bucket, state
+                """,
+                (cutoff,),
+            ).fetchall()
+            inbox_real_err = db.execute(
+                """
+                SELECT id, state, last_error, updated_at
+                FROM inbox
+                WHERE state IN ('failed', 'uncertain')
+                  AND last_error NOT LIKE 'Held:%'
+                  AND last_error NOT LIKE 'Host turn state:%'
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            text_real_err = db.execute(
+                """
+                SELECT id, state, last_error, updated_at
+                FROM outbox
+                WHERE kind <> 'mutation'
+                  AND state IN ('failed', 'uncertain')
+                  AND last_error NOT LIKE 'Held:%'
+                  AND last_error NOT LIKE 'Host turn state:%'
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            mut_real_err = db.execute(
+                """
+                SELECT id, state, operation, last_error, updated_at
+                FROM outbox
+                WHERE kind = 'mutation'
+                  AND state IN ('failed', 'uncertain')
+                  AND last_error NOT LIKE 'Held:%'
+                  AND last_error NOT LIKE 'Host turn state:%'
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
         runtime: dict[str, Any] = {}
         runtime_updated_at = 0.0
         for row in runtime_rows:
@@ -1382,8 +1756,98 @@ class BridgeStore:
             except json.JSONDecodeError:
                 runtime[str(row["key"])] = None
             runtime_updated_at = max(runtime_updated_at, float(row["updated_at"]))
-        return {
-            "outbox_held": held,
+
+        logical_totals = {str(r["msg_state"]): int(r["total_count"]) for r in logical_msg_rows}
+        logical_recent = {str(r["msg_state"]): int(r["recent_count"]) for r in logical_msg_rows}
+
+        inbox_prob = {
+            str(r["state"]): (int(r["recent_count"]), _iso_z(float(r["last_at"])) if r["last_at"] is not None else None)
+            for r in inbox_problem_rows
+        }
+        outbox_prob = {
+            (str(r["bucket"]), str(r["state"])): (
+                int(r["recent_count"]),
+                _iso_z(float(r["last_at"])) if r["last_at"] is not None else None,
+            )
+            for r in outbox_problem_rows
+        }
+
+        inbound_err_obj = (
+            {
+                "at": _iso_z(float(inbox_real_err["updated_at"])),
+                "state": str(inbox_real_err["state"]),
+                "text": str(inbox_real_err["last_error"]),
+            }
+            if inbox_real_err is not None
+            else None
+        )
+        text_err_obj = (
+            {
+                "at": _iso_z(float(text_real_err["updated_at"])),
+                "state": str(text_real_err["state"]),
+                "text": str(text_real_err["last_error"]),
+            }
+            if text_real_err is not None
+            else None
+        )
+        mut_err_obj = (
+            {
+                "at": _iso_z(float(mut_real_err["updated_at"])),
+                "state": str(mut_real_err["state"]),
+                "operation": str(mut_real_err["operation"] or ""),
+                "text": str(mut_real_err["last_error"]),
+            }
+            if mut_real_err is not None
+            else None
+        )
+
+        candidates: list[tuple[tuple[float, int, int], dict[str, str]]] = []
+        if inbox_real_err is not None:
+            candidates.append(
+                (
+                    (float(inbox_real_err["updated_at"]), 1, int(inbox_real_err["id"])),
+                    {
+                        "at": _iso_z(float(inbox_real_err["updated_at"])),
+                        "direction": "inbound",
+                        "kind": "event",
+                        "operation": "",
+                        "state": str(inbox_real_err["state"]),
+                        "text": str(inbox_real_err["last_error"]),
+                    },
+                )
+            )
+        if text_real_err is not None:
+            candidates.append(
+                (
+                    (float(text_real_err["updated_at"]), 2, int(text_real_err["id"])),
+                    {
+                        "at": _iso_z(float(text_real_err["updated_at"])),
+                        "direction": "outbound",
+                        "kind": "text",
+                        "operation": "",
+                        "state": str(text_real_err["state"]),
+                        "text": str(text_real_err["last_error"]),
+                    },
+                )
+            )
+        if mut_real_err is not None:
+            candidates.append(
+                (
+                    (float(mut_real_err["updated_at"]), 3, int(mut_real_err["id"])),
+                    {
+                        "at": _iso_z(float(mut_real_err["updated_at"])),
+                        "direction": "outbound",
+                        "kind": "mutation",
+                        "operation": str(mut_real_err["operation"] or ""),
+                        "state": str(mut_real_err["state"]),
+                        "text": str(mut_real_err["last_error"]),
+                    },
+                )
+            )
+        structured_last_error = max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+        payload: dict[str, Any] = {
+            "outbox_held": int(held),
             "socket_state": "stopped",
             "host_adapter_state": "missing_binding_id",
             "reaction_context_state": "unknown",
@@ -1412,4 +1876,79 @@ class BridgeStore:
             "delivery_reports_acked": reports.get("acked", 0),
             "last_report_error": str(report_error[0]) if report_error else "",
             "last_delivery_error": str(last_error["last_error"]) if last_error else "",
+            "observed_at": _iso_z(observed_epoch),
+            "last_error": structured_last_error,
+            "held_reasons": held_reasons,
+            "inbox_retrying": {
+                "count": int(retrying[0] or 0),
+                "last_error": (
+                    {"at": _iso_z(float(retrying_last["updated_at"])), "text": str(retrying_last["last_error"])}
+                    if retrying_last is not None
+                    else None
+                ),
+            },
+            "recent_problems": {
+                "window_seconds": RECENT_PROBLEM_WINDOW_SECONDS,
+                "inbound": {
+                    "failed": inbox_prob.get("failed", (0, None))[0],
+                    "uncertain": inbox_prob.get("uncertain", (0, None))[0],
+                    "last_failed_at": inbox_prob.get("failed", (0, None))[1],
+                    "last_uncertain_at": inbox_prob.get("uncertain", (0, None))[1],
+                    "last_error": inbound_err_obj,
+                },
+                "outbound_text": {
+                    "failed": outbox_prob.get(("text", "failed"), (0, None))[0],
+                    "uncertain": outbox_prob.get(("text", "uncertain"), (0, None))[0],
+                    "failed_messages": logical_recent.get("failed", 0),
+                    "uncertain_messages": logical_recent.get("uncertain", 0),
+                    # Of those messages, how many already had earlier parts confirmed by Slack.
+                    "failed_messages_partly_delivered": int(partly["failed"] or 0),
+                    "uncertain_messages_partly_delivered": int(partly["uncertain"] or 0),
+                    "last_failed_at": outbox_prob.get(("text", "failed"), (0, None))[1],
+                    "last_uncertain_at": outbox_prob.get(("text", "uncertain"), (0, None))[1],
+                    "last_error": text_err_obj,
+                },
+                "mutations": {
+                    "failed": outbox_prob.get(("mutation", "failed"), (0, None))[0],
+                    "uncertain": outbox_prob.get(("mutation", "uncertain"), (0, None))[0],
+                    "last_failed_at": outbox_prob.get(("mutation", "failed"), (0, None))[1],
+                    "last_uncertain_at": outbox_prob.get(("mutation", "uncertain"), (0, None))[1],
+                    "last_error": mut_err_obj,
+                },
+            },
+            "outbound_text_chunks": {
+                "waiting": int(text_chunks_row["waiting"]),
+                "held": int(text_chunks_row["held"]),
+                "leased": int(text_chunks_row["leased"]),
+                "delivered": int(text_chunks_row["delivered"]),
+                "failed": int(text_chunks_row["failed"]),
+                "uncertain": int(text_chunks_row["uncertain"]),
+            },
+            "outbound_messages": {
+                "waiting": logical_totals.get("waiting", 0),
+                "held": logical_totals.get("held", 0),
+                "leased": logical_totals.get("leased", 0),
+                "delivered": logical_totals.get("delivered", 0),
+                "failed": logical_totals.get("failed", 0),
+                "uncertain": logical_totals.get("uncertain", 0),
+            },
+            "units": {
+                "inbox": "envelopes",
+                "outbox": "text_chunks_3900_chars_plus_mutations",
+                "outbox_chunk_max_chars": OUTBOX_CHUNK_MAX_CHARS,
+                "outbound_text_chunks": "text_chunks_3900_chars",
+                "outbound_messages": "logical_text_requests",
+                "mutations": "outbox_subset_operations",
+                "note": (
+                    "outbox_* counters count 3,900-char text chunks (kind='text') plus mutations "
+                    "(kind='mutation'), not logical messages, and include mutations_* and outbox_held "
+                    "as subsets. outbound_text_chunks counts 3,900-char text chunks only; "
+                    "outbound_messages counts distinct kind='text' request_ids; generic slack_api "
+                    "writes are queued as mutations."
+                ),
+            },
         }
+        check_alive = _pid_is_alive if pid_alive is None else pid_alive
+        companion_alive = bool(check_alive(payload.get("companion_pid")))
+        payload["link"] = derive_link_state(payload, companion_alive=companion_alive)
+        return payload

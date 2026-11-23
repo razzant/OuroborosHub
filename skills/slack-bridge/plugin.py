@@ -26,7 +26,8 @@ from .lib.slack_api import (
     normalize_text_format,
     refuse_reserved_method,
 )
-from .lib.store import BridgeStore
+from .lib.status_summary import summarize as summarize_status
+from .lib.store import BridgeStore, derive_link_state
 from .lib.read_tools import register_read_tools
 from .lib.tool_results import register_json_tool
 
@@ -125,9 +126,6 @@ def _make_status(api: Any):
         identity = payload.pop("connector_identity", {})
         if payload.get("presence_identity") == 1 and identity:
             payload["identity"] = identity
-        held = payload.get("outbox_held", 0)
-        payload.update(text=f"{held} held" if held else str(payload.get("socket_state") or "Not connected"),
-                       tone="warn" if held else "muted", title="Slack transport")
         protected = api.get_settings(["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"])
         settings_error = ""
         try:
@@ -153,6 +151,13 @@ def _make_status(api: Any):
                 "local_settings_error": settings_error,
             }
         )
+        payload["link"] = derive_link_state(
+            payload, companion_alive=bool(payload["link"]["companion_alive"])
+        )
+        # One rule for the Places line and the card's first line: the same words, the worst current tone.
+        summary = summarize_status(payload)
+        payload.update(text=summary["text"], tone=summary["tone"], attention=summary["attention"],
+                       title="Slack transport")
         return payload
 
     async def status(_request: Any = None) -> JSONResponse:
@@ -530,126 +535,13 @@ def register(api: Any) -> None:
         "settings/save", handler=_make_settings_save(api), methods=("GET", "POST")
     )
 
+    # The card is a module (widget.js): it shows when the status was read, keeps refreshing without a tick
+    # limit, colours by the current facts and lays out one surface; the declarative renderer cannot.
     api.register_ui_tab(
         "slack_presence",
         title="Slack Bridge",
         icon="message",
-        render={
-            "kind": "declarative",
-            "schema_version": 1,
-            "components": [
-                {
-                    "type": "markdown",
-                    "text": "### Slack presence transport\n"
-                    "Live Socket Mode health and durable inbox/outbox custody. Message "
-                    "contents and credentials are never shown here.",
-                },
-                {
-                    "type": "poll",
-                    "route": "status",
-                    "auto_start": True,
-                    "interval_ms": 3000,
-                    "target": "status",
-                    "max_ticks": 100,
-                    "label": "Refresh transport status",
-                },
-                {
-                    "type": "group",
-                    "layout": "cluster",
-                    "components": [
-                        {
-                            "type": "metric",
-                            "label": "Socket",
-                            "path": "socket_state",
-                            "target": "status",
-                        },
-                        {
-                            "type": "metric",
-                            "label": "Host adapter",
-                            "path": "host_adapter_state",
-                            "target": "status",
-                        },
-                        {
-                            "type": "metric",
-                            "label": "Workspace",
-                            "path": "workspace_name",
-                            "tone": "info",
-                            "target": "status",
-                        },
-                        {
-                            "type": "metric",
-                            "label": "Inbox pending",
-                            "path": "inbox_pending",
-                            "tone": "neutral",
-                            "target": "status",
-                        },
-                        {
-                            "type": "metric",
-                            "label": "Inbox delivered",
-                            "path": "inbox_delivered",
-                            "tone": "success",
-                            "target": "status",
-                        },
-                        {
-                            "type": "metric",
-                            "label": "Outbox pending",
-                            "path": "outbox_pending",
-                            "tone": "neutral",
-                            "target": "status",
-                        },
-                        {"type": "metric", "label": "Outbox held", "path": "outbox_held", "target": "status"},
-                        {
-                            "type": "metric",
-                            "label": "Outbox delivered",
-                            "path": "outbox_delivered",
-                            "tone": "success",
-                            "target": "status",
-                        },
-                        {
-                            "type": "metric",
-                            "label": "Inbox failed",
-                            "path": "inbox_failed",
-                            "tone": "danger",
-                            "target": "status",
-                        },
-                        {
-                            "type": "metric",
-                            "label": "Outbox failed",
-                            "path": "outbox_failed",
-                            "tone": "danger",
-                            "target": "status",
-                        },
-                        {
-                            "type": "metric",
-                            "label": "Mutations pending",
-                            "path": "mutations_pending",
-                            "tone": "neutral",
-                            "target": "status",
-                        },
-                        {
-                            "type": "metric",
-                            "label": "Mutations uncertain",
-                            "path": "mutations_uncertain",
-                            "tone": "danger",
-                            "target": "status",
-                        },
-                        {
-                            "type": "metric",
-                            "label": "Reactions in Host context",
-                            "path": "reaction_context_state",
-                            "target": "status",
-                        },
-                    ],
-                    "target": "status",
-                },
-                {
-                    "type": "json",
-                    "label": "Last delivery error",
-                    "path": "last_delivery_error",
-                    "target": "status",
-                },
-            ],
-        },
+        render={"kind": "module", "entry": "widget.js", "appearance": "host", "start": "auto", "span": 1},
     )
 
     api.register_settings_section(
